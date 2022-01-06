@@ -1,68 +1,76 @@
 use anyhow::Result;
-use clap::{App, AppSettings, Arg};
 use serde::{Deserialize, Serialize};
-use std::io::Write;
 use std::sync::Arc;
-use tokio::sync::Notify;
-use tokio::time::Duration;
+use tokio::sync::mpsc::Sender;
+use tokio::sync::Mutex;
 use webrtc::api::APIBuilder;
 use webrtc::api::API;
-use webrtc::data_channel::data_channel_message::DataChannelMessage;
-use webrtc::data_channel::data_channel_parameters::DataChannelParameters;
+use webrtc::data_channel::OnOpenHdlrFn;
 use webrtc::data_channel::RTCDataChannel;
-use webrtc::dtls_transport::dtls_parameters::DTLSParameters;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
-use webrtc::ice_transport::ice_gatherer::RTCIceGatherOptions;
-use webrtc::ice_transport::ice_gatherer::RTCIceGatherer;
-use webrtc::ice_transport::ice_parameters::RTCIceParameters;
-use webrtc::ice_transport::ice_role::RTCIceRole;
+use webrtc::ice_transport::ice_gatherer::OnLocalCandidateHdlrFn;
 use webrtc::ice_transport::ice_server::RTCIceServer;
-use webrtc::ice_transport::RTCIceTransport;
+use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::math_rand_alpha;
-use webrtc::sctp_transport::sctp_transport_capabilities::SCTPTransportCapabilities;
+use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
+use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+use webrtc::peer_connection::OnDataChannelHdlrFn;
+use webrtc::peer_connection::OnPeerConnectionStateChangeHdlrFn;
+use webrtc::peer_connection::OnSignalingStateChangeHdlrFn;
+use webrtc::peer_connection::RTCPeerConnection;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct Signal {
-    #[serde(rename = "iceCandidates")]
-    ice_candidates: Vec<RTCIceCandidate>, // `json:"iceCandidates"`
-
-    #[serde(rename = "iceParameters")]
-    ice_parameters: RTCIceParameters, // `json:"iceParameters"`
-}
-
-#[derive(Debug, Copy, Clone)]
+#[derive(Clone)]
 pub struct Peer {
-    api: API,
-    gather: Arc<RTCIceGatherer>,
-    ice: Arc<RTCIceTransport>,
-
-    // user information
-    address: String, // use as label
-    is_offering: bool,
+    conn: Arc<RTCPeerConnection>,
+    connection_state: RTCPeerConnectionState,
+    ice_candidates: Arc<Mutex<Vec<RTCIceCandidate>>>,
 }
 
 impl Peer {
-    fn new(is_offering: bool, address: String, urls: Vec<String>) -> Result<Self> {
+    pub async fn new(urls: Vec<String>) -> Result<Self> {
         let mut urls = urls;
         if urls.len() <= 0 {
             urls = vec!["stun:stun.l.google.com:19302".to_owned()];
         }
-        let ice_options = RTCIceGatherOptions {
+
+        let api = APIBuilder::new().build();
+        let config = RTCConfiguration {
             ice_servers: vec![RTCIceServer {
                 urls: urls,
                 ..Default::default()
             }],
             ..Default::default()
         };
-        api = APIBuilder::new().build();
-        gatherer = Arc::new(api.new_ice_gatherer(ice_options)?);
-        ice = Arc::new(api.new_ice_transport(Arc::clone(&gatherer)));
-        return Peer {
-            api,
-            gatherer,
-            ice,
-            address,
-            is_offering,
-        };
+        let peer_connection = Arc::new(api.new_peer_connection(config).await?);
+        let connection_state = peer_connection.connection_state();
+        Ok(Peer {
+            conn: peer_connection,
+            connection_state: connection_state,
+            ice_candidates: Arc::new(Mutex::new(vec![])),
+        })
+    }
+
+    pub async fn on_data_channel<T>(&mut self, f: OnDataChannelHdlrFn) -> Result<()>
+    where
+        T: Send,
+    {
+        self.conn
+            .on_peer_connection_state_change(Box::new(move |state: RTCPeerConnectionState| {
+                Box::pin(async {})
+            }))
+            .await;
+        Ok(())
+    }
+
+    pub async fn on_ice_candidate(&self) -> Result<()> {
+        let pending_candidates = Arc::clone(&self.ice_candidates);
+        let conn = Arc::clone(&self.conn);
+        self.conn
+            .on_ice_candidate(Box::new(move |c: Option<RTCIceCandidate>| {
+                let conn2 = conn.clone();
+                Box::pin(async {})
+            }))
+            .await;
+        Ok(())
     }
 }
