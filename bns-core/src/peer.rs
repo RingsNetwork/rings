@@ -22,7 +22,9 @@ use webrtc::peer_connection::RTCPeerConnection;
 #[derive(Clone)]
 pub struct Peer {
     conn: Arc<RTCPeerConnection>,
-    connection_state: RTCPeerConnectionState,
+    remote_session_description: Option<RTCSessionDescription>,
+    local_session_description: Option<RTCSessionDescription>,
+    connection_state: Arc<Mutex<RTCPeerConnectionState>>,
     ice_candidates: Arc<Mutex<Vec<RTCIceCandidate>>>,
 }
 
@@ -45,32 +47,61 @@ impl Peer {
         let connection_state = peer_connection.connection_state();
         Ok(Peer {
             conn: peer_connection,
-            connection_state: connection_state,
+            remote_session_description: None,
+            local_session_description: None,
+            connection_state: Arc::new(Mutex::new(connection_state)),
             ice_candidates: Arc::new(Mutex::new(vec![])),
         })
     }
 
-    pub async fn on_data_channel<T>(&mut self, f: OnDataChannelHdlrFn) -> Result<()>
-    where
-        T: Send,
-    {
+    pub async fn on_data_channel(&mut self, f: OnDataChannelHdlrFn) -> Result<()> {
         self.conn
             .on_peer_connection_state_change(Box::new(move |state: RTCPeerConnectionState| {
                 Box::pin(async {})
             }))
             .await;
+        let mut locked_connection_state = self.connection_state.lock().await;
+        (*locked_connection_state).clone_from(&self.conn.connection_state());
+        self.conn.on_data_channel(f).await;
         Ok(())
     }
 
-    pub async fn on_ice_candidate(&self) -> Result<()> {
+    pub async fn on_ice_candidate(&mut self) -> Result<()> {
         let pending_candidates = Arc::clone(&self.ice_candidates);
-        let conn = Arc::clone(&self.conn);
+        let conn = Arc::downgrade(&self.conn);
+        // add candidate to ice_canditdate
         self.conn
             .on_ice_candidate(Box::new(move |c: Option<RTCIceCandidate>| {
                 let conn2 = conn.clone();
-                Box::pin(async {})
+                let pending_candidates2 = Arc::clone(&pending_candidates);
+                Box::pin(async move {
+                    if let Some(c) = c {
+                        if let Some(pc) = conn2.upgrade() {
+                            let desc = pc.remote_description().await;
+                            if desc.is_none() {
+                                let mut cs = pending_candidates2.lock().await;
+                                cs.push(c);
+                            }
+                        }
+                    }
+                })
             }))
             .await;
         Ok(())
     }
+
+    pub async fn set_remote_description(&mut self, desc: impl Into<RTCSessionDescription>) {
+        let desc: RTCSessionDescription = desc.into();
+        self.conn.set_remote_description(desc.clone()).await;
+        self.remote_session_description = Some(desc.clone());
+    }
+
+    pub async fn set_local_description(&mut self, desc: impl Into<RTCSessionDescription>) {
+        let desc: RTCSessionDescription = desc.into();
+        self.conn.set_local_description(desc.clone()).await;
+        self.local_session_description = Some(desc.clone());
+    }
 }
+
+#[cfg(test)]
+mod test {}
