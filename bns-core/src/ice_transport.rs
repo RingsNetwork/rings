@@ -1,6 +1,8 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tokio::sync::mpsc::channel;
+use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
 use webrtc::api::APIBuilder;
@@ -19,17 +21,19 @@ use webrtc::peer_connection::OnPeerConnectionStateChangeHdlrFn;
 use webrtc::peer_connection::OnSignalingStateChangeHdlrFn;
 use webrtc::peer_connection::RTCPeerConnection;
 
-#[derive(Clone)]
-pub struct Peer {
+pub struct IceTransport {
     conn: Arc<RTCPeerConnection>,
     remote_session_description: Option<RTCSessionDescription>,
     local_session_description: Option<RTCSessionDescription>,
     connection_state: Arc<Mutex<RTCPeerConnectionState>>,
     ice_candidates: Arc<Mutex<Vec<RTCIceCandidate>>>,
+
+    candidate_tx: Sender<String>,
+    candidate_rx: Receiver<String>,
 }
 
-impl Peer {
-    pub async fn new(urls: Vec<String>) -> Result<Self> {
+impl IceTransport {
+    pub async fn new(buf_size: usize, urls: Vec<String>) -> Result<Self> {
         let mut urls = urls;
         if urls.len() <= 0 {
             urls = vec!["stun:stun.l.google.com:19302".to_owned()];
@@ -45,12 +49,16 @@ impl Peer {
         };
         let peer_connection = Arc::new(api.new_peer_connection(config).await?);
         let connection_state = peer_connection.connection_state();
-        Ok(Peer {
+        let (tx, mut rx) = channel(buf_size);
+
+        Ok(IceTransport {
             conn: peer_connection,
             remote_session_description: None,
             local_session_description: None,
             connection_state: Arc::new(Mutex::new(connection_state)),
             ice_candidates: Arc::new(Mutex::new(vec![])),
+            candidate_tx: tx,
+            candidate_rx: rx,
         })
     }
 
@@ -66,21 +74,33 @@ impl Peer {
         Ok(())
     }
 
+    pub async fn on_peer_state_change(
+        &mut self,
+        f: OnPeerConnectionStateChangeHdlrFn,
+    ) -> Result<(), ()> {
+        self.conn.on_peer_connection_state_change(f).await;
+        Ok(())
+    }
+
     pub async fn on_ice_candidate(&mut self) -> Result<()> {
         let pending_candidates = Arc::clone(&self.ice_candidates);
-        let conn = Arc::downgrade(&self.conn);
+        let conn2 = Arc::downgrade(&self.conn);
+        let send_tx = self.candidate_tx.clone();
         // add candidate to ice_canditdate
         self.conn
             .on_ice_candidate(Box::new(move |c: Option<RTCIceCandidate>| {
-                let conn2 = conn.clone();
+                let conn3 = conn2.clone();
+                let send_tx2 = send_tx.clone();
                 let pending_candidates2 = Arc::clone(&pending_candidates);
                 Box::pin(async move {
                     if let Some(c) = c {
-                        if let Some(pc) = conn2.upgrade() {
+                        if let Some(pc) = conn3.upgrade() {
                             let desc = pc.remote_description().await;
+                            let address = c.address.clone();
                             if desc.is_none() {
                                 let mut cs = pending_candidates2.lock().await;
                                 cs.push(c);
+                                send_tx2.send(address);
                             }
                         }
                     }
@@ -100,6 +120,10 @@ impl Peer {
         let desc: RTCSessionDescription = desc.into();
         self.conn.set_local_description(desc.clone()).await;
         self.local_session_description = Some(desc.clone());
+    }
+
+    pub async fn candidate(&mut self) -> Option<String> {
+        self.candidate_rx.recv().await
     }
 }
 
