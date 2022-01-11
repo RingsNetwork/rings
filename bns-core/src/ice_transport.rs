@@ -1,39 +1,30 @@
 use anyhow::Result;
 use core::future::Future;
 use core::pin::Pin;
-use serde::{Deserialize, Serialize};
-use std::borrow::Borrow;
 use std::sync::Arc;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
 use webrtc::api::APIBuilder;
-use webrtc::api::API;
-use webrtc::data_channel::OnOpenHdlrFn;
-use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
-use webrtc::ice_transport::ice_gatherer::OnLocalCandidateHdlrFn;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
-use webrtc::peer_connection::math_rand_alpha;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::OnDataChannelHdlrFn;
-use webrtc::peer_connection::OnPeerConnectionStateChangeHdlrFn;
-use webrtc::peer_connection::OnSignalingStateChangeHdlrFn;
 use webrtc::peer_connection::RTCPeerConnection;
 
 pub struct IceTransport {
-    conn: Arc<Mutex<Option<Arc<RTCPeerConnection>>>>,
-    remote_session_description: Option<RTCSessionDescription>,
-    local_session_description: Option<RTCSessionDescription>,
-    connection_state: Arc<Mutex<RTCPeerConnectionState>>,
-    ice_candidates: Arc<Mutex<Vec<RTCIceCandidate>>>,
+    pub conn: Arc<Mutex<Option<Arc<RTCPeerConnection>>>>,
+    pub remote_session_description: Option<RTCSessionDescription>,
+    pub local_session_description: Option<RTCSessionDescription>,
+    pub connection_state: Arc<Mutex<RTCPeerConnectionState>>,
+    pub ice_candidates: Arc<Mutex<Vec<RTCIceCandidate>>>,
 
-    candidate_tx: Sender<String>,
-    candidate_rx: Receiver<String>,
+    pub candidate_tx: Sender<String>,
+    pub candidate_rx: Receiver<String>,
 }
 
 impl IceTransport {
@@ -53,7 +44,7 @@ impl IceTransport {
         };
         let peer_connection = Arc::new(api.new_peer_connection(config).await?);
         let connection_state = peer_connection.connection_state();
-        let (tx, mut rx) = channel(buf_size);
+        let (tx, rx) = channel(buf_size);
 
         Ok(IceTransport {
             conn: Arc::new(Mutex::new(Some(Arc::clone(&peer_connection)))),
@@ -85,7 +76,7 @@ impl IceTransport {
 
     pub async fn set_remote_description(&self, sdp: impl Into<RTCSessionDescription>) {
         let desc = sdp.into();
-        if let Err(e) = self
+        if let Err(_) = self
             .conn
             .lock()
             .await
@@ -100,7 +91,7 @@ impl IceTransport {
 
     pub async fn set_local_description(&self, sdp: impl Into<RTCSessionDescription>) {
         let desc = sdp.into();
-        if let Err(e) = self
+        if let Err(_) = self
             .conn
             .lock()
             .await
@@ -116,7 +107,7 @@ impl IceTransport {
     pub async fn on_ice_candidate(
         &mut self,
         addr: String,
-        f: Arc<
+        callback: Arc<
             Box<
                 dyn Fn(
                         String,
@@ -129,33 +120,33 @@ impl IceTransport {
         >,
     ) {
         let addr = Arc::new(addr);
-        let pc = Arc::downgrade(&self.conn.lock().await.clone().unwrap());
-        let pending_candidates2 = Arc::clone(&self.ice_candidates);
+        let conn = self.conn.lock().await.clone().unwrap();
+        let candidates = Arc::clone(&self.ice_candidates);
         let candidate_tx = self.candidate_tx.clone();
-        let f2 = Arc::clone(&f);
+        let cb = Arc::clone(&callback);
         self.conn
             .lock()
             .await
-            .clone()
+            .to_owned()
             .unwrap()
             .on_ice_candidate(Box::new(move |c: Option<RTCIceCandidate>| {
                 println!("on ice candidate {:?}", c);
-                let pc2 = pc.clone();
-                let pending_candidates3 = Arc::clone(&pending_candidates2);
-                let addr2 = addr.clone();
+                let conn = conn.to_owned();
+                let candidates = Arc::clone(&candidates);
+                let addr = addr.to_owned();
                 let candidate_tx2 = candidate_tx.clone();
-                let f3 = Arc::clone(&f2);
+                let cb = cb.to_owned();
                 Box::pin(async move {
                     if let Some(c) = c {
-                        if let Some(pc) = pc2.upgrade() {
-                            let desc = pc.remote_description().await;
-                            if desc.is_none() {
-                                let mut cs = pending_candidates3.lock().await;
-                                cs.push(c.clone());
-                                candidate_tx2.send(c.address);
-                            } else if let Err(e) = f3(addr2.to_string(), c).await {
-                                panic!("On Ice Candidate F Failed");
-                            }
+                        let desc = conn.to_owned().remote_description().await;
+                        if desc.is_none() {
+                            let mut cs = candidates.lock().await;
+                            cs.push(c.to_owned());
+                            if let Err(_) = candidate_tx2.send(c.address).await {
+                                panic!("Failed on send");
+                            };
+                        } else if let Err(_) = cb(addr.to_string(), c).await {
+                            panic!("On Ice Candidate F Failed");
                         }
                     }
                 })
