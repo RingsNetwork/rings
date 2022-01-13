@@ -1,18 +1,13 @@
 use anyhow::Result;
-
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Client, Method, Request, Response, Server, StatusCode};
-
 use std::net::SocketAddr;
 use std::str::FromStr;
-
 use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
-
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
-
 use bns_core::ice_transport::IceTransport;
 
-async fn signal_candidate(addr: &str, c: &RTCIceCandidate) -> Result<()> {
+pub async fn signal_candidate(addr: &str, c: &RTCIceCandidate) -> Result<()> {
     let payload = c.to_json().await?.candidate;
     let req = match Request::builder()
         .method(Method::POST)
@@ -134,17 +129,18 @@ async fn remote_handler(
 async fn main() -> Result<()> {
     let server_addr = "0.0.0.0:60000";
     let remote_addr = "0.0.0.0:50000";
+
     let ice_transport = IceTransport::new().await?;
     let ice_transport_start = ice_transport.clone();
     let (candidate_tx, _candidate_rx) = tokio::sync::mpsc::channel::<RTCIceCandidate>(1);
     tokio::spawn(async move {
         let addr = SocketAddr::from_str(&server_addr).unwrap();
-        let ice_transport2 = ice_transport.clone();
+        let ice_transport = ice_transport.to_owned();
         let service = make_service_fn(move |_| {
-            let ice_transport3 = ice_transport2.clone();
+            let ice_transport = ice_transport.to_owned();
             async move {
                 Ok::<_, hyper::Error>(service_fn(move |req| {
-                    remote_handler(req, remote_addr.to_string(), ice_transport3.clone())
+                    remote_handler(req, remote_addr.to_string(), ice_transport.to_owned())
                 }))
             }
         });
