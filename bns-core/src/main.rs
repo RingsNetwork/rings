@@ -127,14 +127,14 @@ async fn remote_handler(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let server_addr = "0.0.0.0:60000";
+    let http_addr = "0.0.0.0:60000";
     let remote_addr = "0.0.0.0:50000";
 
     let ice_transport = IceTransport::new().await?;
     let ice_transport_start = ice_transport.clone();
     let (candidate_tx, _candidate_rx) = tokio::sync::mpsc::channel::<RTCIceCandidate>(1);
+
     tokio::spawn(async move {
-        let addr = SocketAddr::from_str(&server_addr).unwrap();
         let ice_transport = ice_transport.to_owned();
         let service = make_service_fn(move |_| {
             let ice_transport = ice_transport.to_owned();
@@ -144,7 +144,9 @@ async fn main() -> Result<()> {
                 }))
             }
         });
-        let server = Server::bind(&addr).serve(service);
+
+        let http_addr = SocketAddr::from_str(&http_addr).unwrap();
+        let server = Server::bind(&http_addr).serve(service);
         // Run this server for... forever!
         if let Err(e) = server.await {
             eprintln!("server error: {}", e);
