@@ -1,18 +1,21 @@
+use anyhow::anyhow;
 use anyhow::Result;
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
-use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
-use tokio::time::Duration;
 use webrtc::api::APIBuilder;
-use webrtc::data_channel::data_channel_message::DataChannelMessage;
+use webrtc::data_channel::data_channel_init::RTCDataChannelInit;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
-use webrtc::peer_connection::math_rand_alpha;
+use webrtc::peer_connection::offer_answer_options::RTCAnswerOptions;
+use webrtc::peer_connection::offer_answer_options::RTCOfferOptions;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
+use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 use webrtc::peer_connection::RTCPeerConnection;
 
@@ -39,102 +42,125 @@ impl IceTransport {
         })
     }
 
-    pub async fn start_answer(&self, candidate_tx: Sender<RTCIceCandidate>) {
-        let pc = Arc::downgrade(&self.connection.lock().await.clone().unwrap());
-        let pending_candidates2 = Arc::clone(&self.pending_candidates);
-        let candidate_tx2 = candidate_tx.clone();
-        self.connection
-            .lock()
-            .await
-            .clone()
-            .unwrap()
-            .on_ice_candidate(Box::new(move |c: Option<RTCIceCandidate>| {
-                println!("start answer candidate option: {:?}", c);
-                let pc2 = pc.clone();
-                let pending_candidates3 = Arc::clone(&pending_candidates2);
-                let candidate_tx3 = candidate_tx2.clone();
-                Box::pin(async move {
-                    if let Some(candidate) = c {
-                        if let Some(pc) = pc2.upgrade() {
-                            let desc = pc.remote_description().await;
-                            if desc.is_none() {
-                                let mut candidates = pending_candidates3.lock().await;
-                                println!("start answer candidate: {:?}", candidate);
-                                candidates.push(candidate.clone());
-                                candidate_tx3.send(candidate).await;
-                            }
-                        }
-                    }
-                })
-            }))
-            .await;
+    pub async fn get_peer_connection(&self) -> Option<Arc<RTCPeerConnection>> {
+        match self.connection.lock().await.clone() {
+            Some(peer_connection) => Some(peer_connection),
+            None => panic!("Connection Failed."),
+        }
+    }
 
-        let (done_tx, mut done_rx) = tokio::sync::mpsc::channel::<()>(1);
-        self.connection
-            .lock()
-            .await
-            .clone()
-            .unwrap()
-            .on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
-                // Failed to exit dial server
-                if s == RTCPeerConnectionState::Failed {
-                    let _ = done_tx.try_send(());
-                }
+    pub async fn get_pending_candidates(&self) -> Arc<Mutex<Vec<RTCIceCandidate>>> {
+        Arc::clone(&self.pending_candidates)
+    }
 
-                Box::pin(async {})
-            }))
-            .await;
-        // server on data_channel open
-        // or return data-channel object
-        // demo should just ping pong
-        self.connection
-            .lock()
-            .await.clone().unwrap()
-            .on_data_channel(Box::new(move |d: Arc<RTCDataChannel>| {
-                let d_label = d.label().to_owned();
-                let d_id = d.id();
-                println!("New DataChannel {} {}", d_label, d_id);
+    pub async fn get_answer(
+        &self,
+        options: Option<RTCAnswerOptions>,
+    ) -> Result<RTCSessionDescription> {
+        match self.connection.lock().await.clone() {
+            Some(peer_connection) => peer_connection
+                .create_answer(options)
+                .await
+                .map_err(|e| anyhow!(e)),
+            None => panic!("Connection Failed."),
+        }
+    }
 
-                Box::pin(async move{
-                    // Register channel opening handling
-                    let d2 =  Arc::clone(&d);
-                    let d_label2 = d_label.clone();
-                    let d_id2 = d_id;
-                    d.on_open(Box::new(move || {
-                        println!("Data channel '{}'-'{}' open. Random messages will now be sent to any connected DataChannels every 5 seconds", d_label2, d_id2);
-                        Box::pin(async move {
-                            let mut result = Result::<usize>::Ok(0);
-                            while result.is_ok() {
-                                let timeout = tokio::time::sleep(Duration::from_secs(5));
-                                tokio::pin!(timeout);
+    pub async fn get_offer(
+        &self,
+        options: Option<RTCOfferOptions>,
+    ) -> Result<RTCSessionDescription> {
+        match self.connection.lock().await.clone() {
+            Some(peer_connection) => peer_connection
+                .create_offer(options)
+                .await
+                .map_err(|e| anyhow!(e)),
+            None => panic!("Connection Failed."),
+        }
+    }
 
-                                tokio::select! {
-                                    _ = timeout.as_mut() =>{
-                                        let message = math_rand_alpha(15);
-                                        println!("Sending '{}'", message);
-                                        result = d2.send_text(message).await.map_err(Into::into);
-                                    }
-                                };
-                            }
-                        })
-                    })).await;
-
-                    // Register text message handling
-                    d.on_message(Box::new(move |msg: DataChannelMessage| {
-                        let msg_str = String::from_utf8(msg.data.to_vec()).unwrap();
-                        println!("Message from DataChannel '{}': '{}'", d_label, msg_str);
-                        Box::pin(async{})
-                    })).await;
-                })
-        })).await;
-
-        tokio::select! {
-            _ = done_rx.recv() => {
-                println!("received done signal!");
+    pub async fn get_data_channel(
+        &self,
+        label: &str,
+        options: Option<RTCDataChannelInit>,
+    ) -> Result<Arc<Mutex<Arc<RTCDataChannel>>>> {
+        match self.connection.lock().await.clone() {
+            Some(peer_connection) => {
+                let data_channel = peer_connection
+                    .create_data_channel(label, options)
+                    .await
+                    .map_err(|e| anyhow!(e))?;
+                Ok(Arc::new(Mutex::new(data_channel)))
             }
-            _ = tokio::signal::ctrl_c() => {
-                println!("");
+            None => {
+                panic!("Connection Failed.")
             }
-        };
+        }
+    }
+
+    pub async fn set_local_description<T>(&self, desc: T) -> Result<()>
+    where
+        T: Into<RTCSessionDescription>,
+    {
+        match self.connection.lock().await.clone() {
+            Some(peer_connection) => peer_connection
+                .set_local_description(desc.into())
+                .await
+                .map_err(|e| anyhow!(e)),
+            None => {
+                panic!("Connection Failed.")
+            }
+        }
+    }
+
+    pub async fn set_remote_description<T>(&self, desc: T) -> Result<()>
+    where
+        T: Into<RTCSessionDescription>,
+    {
+        match self.connection.lock().await.clone() {
+            Some(peer_connection) => peer_connection
+                .set_remote_description(desc.into())
+                .await
+                .map_err(|e| anyhow!(e)),
+            None => {
+                panic!("Connection Failed.")
+            }
+        }
+    }
+
+    pub async fn on_ice_candidate(
+        &self,
+        f: Box<
+            dyn FnMut(Option<RTCIceCandidate>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+                + Send
+                + Sync,
+        >,
+    ) -> Result<()> {
+        match self.connection.lock().await.clone() {
+            Some(peer_connection) => {
+                peer_connection.on_ice_candidate(f).await;
+            }
+            None => {
+                panic!("Connection Failed.");
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn on_peer_connection_state_change(
+        &self,
+        f: Box<
+            dyn FnMut(RTCPeerConnectionState) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+                + Send
+                + Sync,
+        >,
+    ) -> Result<()> {
+        match self.connection.lock().await.clone() {
+            Some(peer_connection) => {
+                peer_connection.on_peer_connection_state_change(f).await;
+            }
+            None => panic!("Connection Failed."),
+        }
+        Ok(())
     }
 }

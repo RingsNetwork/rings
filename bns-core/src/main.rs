@@ -1,10 +1,17 @@
+use std::net::SocketAddr;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Duration;
+
 use anyhow::Result;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Client, Method, Request, Response, Server, StatusCode};
-use std::net::SocketAddr;
-use std::str::FromStr;
+use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
+use webrtc::peer_connection::math_rand_alpha;
+use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+
 use bns_core::ice_transport::IceTransport;
 
 pub async fn signal_candidate(addr: &str, c: &RTCIceCandidate) -> Result<()> {
@@ -132,10 +139,94 @@ async fn main() -> Result<()> {
 
     let ice_transport = IceTransport::new().await?;
     let ice_transport_start = ice_transport.clone();
-    let (candidate_tx, _candidate_rx) = tokio::sync::mpsc::channel::<RTCIceCandidate>(1);
+    let peer_connection = Arc::downgrade(&ice_transport.get_peer_connection().await.unwrap());
+    let pending_candidates = ice_transport.get_pending_candidates().await;
+    let (done_tx, mut done_rx) = tokio::sync::mpsc::channel::<()>(1);
+
+    ice_transport
+        .on_ice_candidate(Box::new(move |c: Option<RTCIceCandidate>| {
+            let peer_connection = peer_connection.clone();
+            let pending_candidates = Arc::clone(&pending_candidates);
+            Box::pin(async move {
+                if let Some(candidate) = c {
+                    if let Some(peer_connection) = peer_connection.upgrade() {
+                        let desc = peer_connection.remote_description().await;
+                        if desc.is_none() {
+                            let mut candidates = pending_candidates.lock().await;
+                            println!("start answer candidate: {:?}", candidate);
+                            candidates.push(candidate.clone());
+                        }
+                    }
+                }
+            })
+        }))
+        .await;
+    ice_transport
+        .on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
+            // Failed to exit dial server
+            if s == RTCPeerConnectionState::Failed {
+                let _ = done_tx.try_send(());
+            }
+
+            Box::pin(async {})
+        }))
+        .await;
+
+    let data_channel = ice_transport.get_data_channel("data", None).await?;
+    let dc = data_channel.clone();
+
+    let d_label = data_channel.lock().await.clone().label().to_owned();
+    let d_id = data_channel.lock().await.clone().id();
+    println!("New DataChannel {} {}", d_label, d_id);
+    data_channel
+        .lock()
+        .await
+        .clone()
+        .on_open(Box::new(move || {
+            let dc = Arc::clone(&dc);
+            println!(
+                "Data channel '{}'-'{}' open. ",
+                d_label.clone(),
+                d_id.clone()
+            );
+            print!(
+                "Random messages will now be sent to any connected DataChannels every 5 seconds"
+            );
+            Box::pin(async move {
+                let mut result = Result::<usize>::Ok(0);
+                while result.is_ok() {
+                    let timeout = tokio::time::sleep(Duration::from_secs(5));
+                    tokio::pin!(timeout);
+
+                    tokio::select! {
+                        _ = timeout.as_mut() =>{
+                            let message = math_rand_alpha(15);
+                            println!("Sending '{}'", message);
+                            result = dc.lock().await.send_text(message).await.map_err(Into::into);
+                        }
+                    };
+                }
+            })
+        }))
+        .await;
+
+    let d_label = data_channel.lock().await.clone().label().to_owned();
+    data_channel
+        .lock()
+        .await
+        .on_message(Box::new(move |msg: DataChannelMessage| {
+            let msg_str = String::from_utf8(msg.data.to_vec()).unwrap();
+            println!(
+                "Message from DataChannel '{}': '{}'",
+                d_label.clone(),
+                msg_str
+            );
+            Box::pin(async {})
+        }))
+        .await;
 
     tokio::spawn(async move {
-        let ice_transport = ice_transport.to_owned();
+        let ice_transport = ice_transport.clone();
         let service = make_service_fn(move |_| {
             let ice_transport = ice_transport.to_owned();
             async move {
@@ -152,6 +243,14 @@ async fn main() -> Result<()> {
             eprintln!("server error: {}", e);
         }
     });
-    ice_transport_start.start_answer(candidate_tx).await;
+
+    tokio::select! {
+        _ = done_rx.recv() => {
+            println!("received done signal!");
+        }
+        _ = tokio::signal::ctrl_c() => {
+            println!("");
+        }
+    };
     Ok(())
 }
