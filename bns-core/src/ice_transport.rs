@@ -1,131 +1,166 @@
+use anyhow::anyhow;
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
+
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::mpsc::channel;
-use tokio::sync::mpsc::Receiver;
-use tokio::sync::mpsc::Sender;
+
 use tokio::sync::Mutex;
 use webrtc::api::APIBuilder;
-use webrtc::api::API;
-use webrtc::data_channel::OnOpenHdlrFn;
+use webrtc::data_channel::data_channel_init::RTCDataChannelInit;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
-use webrtc::ice_transport::ice_gatherer::OnLocalCandidateHdlrFn;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
-use webrtc::peer_connection::math_rand_alpha;
+use webrtc::peer_connection::offer_answer_options::RTCAnswerOptions;
+use webrtc::peer_connection::offer_answer_options::RTCOfferOptions;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
-use webrtc::peer_connection::OnDataChannelHdlrFn;
-use webrtc::peer_connection::OnPeerConnectionStateChangeHdlrFn;
-use webrtc::peer_connection::OnSignalingStateChangeHdlrFn;
+
 use webrtc::peer_connection::RTCPeerConnection;
 
+#[derive(Clone)]
 pub struct IceTransport {
-    conn: Arc<RTCPeerConnection>,
-    remote_session_description: Option<RTCSessionDescription>,
-    local_session_description: Option<RTCSessionDescription>,
-    connection_state: Arc<Mutex<RTCPeerConnectionState>>,
-    ice_candidates: Arc<Mutex<Vec<RTCIceCandidate>>>,
-
-    candidate_tx: Sender<String>,
-    candidate_rx: Receiver<String>,
+    pub connection: Arc<Mutex<Option<Arc<RTCPeerConnection>>>>,
+    pub pending_candidates: Arc<Mutex<Vec<RTCIceCandidate>>>,
 }
 
 impl IceTransport {
-    pub async fn new(buf_size: usize, urls: Vec<String>) -> Result<Self> {
-        let mut urls = urls;
-        if urls.len() <= 0 {
-            urls = vec!["stun:stun.l.google.com:19302".to_owned()];
-        }
-
-        let api = APIBuilder::new().build();
+    pub async fn new() -> Result<Self> {
         let config = RTCConfiguration {
             ice_servers: vec![RTCIceServer {
-                urls: urls,
+                urls: vec!["stun:stun.l.google.com:19302".to_owned()],
                 ..Default::default()
             }],
             ..Default::default()
         };
+        let api = APIBuilder::new().build();
         let peer_connection = Arc::new(api.new_peer_connection(config).await?);
-        let connection_state = peer_connection.connection_state();
-        let (tx, mut rx) = channel(buf_size);
-
         Ok(IceTransport {
-            conn: peer_connection,
-            remote_session_description: None,
-            local_session_description: None,
-            connection_state: Arc::new(Mutex::new(connection_state)),
-            ice_candidates: Arc::new(Mutex::new(vec![])),
-            candidate_tx: tx,
-            candidate_rx: rx,
+            connection: Arc::new(Mutex::new(Some(Arc::clone(&peer_connection)))),
+            pending_candidates: Arc::new(Mutex::new(vec![])),
         })
     }
 
-    pub async fn on_data_channel(&mut self, f: OnDataChannelHdlrFn) -> Result<()> {
-        self.conn
-            .on_peer_connection_state_change(Box::new(move |state: RTCPeerConnectionState| {
-                Box::pin(async {})
-            }))
-            .await;
-        let mut locked_connection_state = self.connection_state.lock().await;
-        (*locked_connection_state).clone_from(&self.conn.connection_state());
-        self.conn.on_data_channel(f).await;
+    pub async fn get_peer_connection(&self) -> Option<Arc<RTCPeerConnection>> {
+        match self.connection.lock().await.clone() {
+            Some(peer_connection) => Some(peer_connection),
+            None => panic!("Connection Failed."),
+        }
+    }
+
+    pub async fn get_pending_candidates(&self) -> Arc<Mutex<Vec<RTCIceCandidate>>> {
+        Arc::clone(&self.pending_candidates)
+    }
+
+    pub async fn get_answer(
+        &self,
+        options: Option<RTCAnswerOptions>,
+    ) -> Result<RTCSessionDescription> {
+        match self.connection.lock().await.clone() {
+            Some(peer_connection) => peer_connection
+                .create_answer(options)
+                .await
+                .map_err(|e| anyhow!(e)),
+            None => panic!("Connection Failed."),
+        }
+    }
+
+    pub async fn get_offer(
+        &self,
+        options: Option<RTCOfferOptions>,
+    ) -> Result<RTCSessionDescription> {
+        match self.connection.lock().await.clone() {
+            Some(peer_connection) => peer_connection
+                .create_offer(options)
+                .await
+                .map_err(|e| anyhow!(e)),
+            None => panic!("Connection Failed."),
+        }
+    }
+
+    pub async fn get_data_channel(
+        &self,
+        label: &str,
+        options: Option<RTCDataChannelInit>,
+    ) -> Result<Arc<Mutex<Arc<RTCDataChannel>>>> {
+        match self.connection.lock().await.clone() {
+            Some(peer_connection) => {
+                let data_channel = peer_connection
+                    .create_data_channel(label, options)
+                    .await
+                    .map_err(|e| anyhow!(e))?;
+                Ok(Arc::new(Mutex::new(data_channel)))
+            }
+            None => {
+                panic!("Connection Failed.")
+            }
+        }
+    }
+
+    pub async fn set_local_description<T>(&self, desc: T) -> Result<()>
+    where
+        T: Into<RTCSessionDescription>,
+    {
+        match self.connection.lock().await.clone() {
+            Some(peer_connection) => peer_connection
+                .set_local_description(desc.into())
+                .await
+                .map_err(|e| anyhow!(e)),
+            None => {
+                panic!("Connection Failed.")
+            }
+        }
+    }
+
+    pub async fn set_remote_description<T>(&self, desc: T) -> Result<()>
+    where
+        T: Into<RTCSessionDescription>,
+    {
+        match self.connection.lock().await.clone() {
+            Some(peer_connection) => peer_connection
+                .set_remote_description(desc.into())
+                .await
+                .map_err(|e| anyhow!(e)),
+            None => {
+                panic!("Connection Failed.")
+            }
+        }
+    }
+
+    pub async fn on_ice_candidate(
+        &self,
+        f: Box<
+            dyn FnMut(Option<RTCIceCandidate>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+                + Send
+                + Sync,
+        >,
+    ) -> Result<()> {
+        match self.connection.lock().await.clone() {
+            Some(peer_connection) => {
+                peer_connection.on_ice_candidate(f).await;
+            }
+            None => {
+                panic!("Connection Failed.");
+            }
+        }
         Ok(())
     }
 
-    pub async fn on_peer_state_change(
-        &mut self,
-        f: OnPeerConnectionStateChangeHdlrFn,
-    ) -> Result<(), ()> {
-        self.conn.on_peer_connection_state_change(f).await;
+    pub async fn on_peer_connection_state_change(
+        &self,
+        f: Box<
+            dyn FnMut(RTCPeerConnectionState) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+                + Send
+                + Sync,
+        >,
+    ) -> Result<()> {
+        match self.connection.lock().await.clone() {
+            Some(peer_connection) => {
+                peer_connection.on_peer_connection_state_change(f).await;
+            }
+            None => panic!("Connection Failed."),
+        }
         Ok(())
-    }
-
-    pub async fn on_ice_candidate(&mut self) -> Result<()> {
-        let pending_candidates = Arc::clone(&self.ice_candidates);
-        let conn2 = Arc::downgrade(&self.conn);
-        let send_tx = self.candidate_tx.clone();
-        // add candidate to ice_canditdate
-        self.conn
-            .on_ice_candidate(Box::new(move |c: Option<RTCIceCandidate>| {
-                let conn3 = conn2.clone();
-                let send_tx2 = send_tx.clone();
-                let pending_candidates2 = Arc::clone(&pending_candidates);
-                Box::pin(async move {
-                    if let Some(c) = c {
-                        if let Some(pc) = conn3.upgrade() {
-                            let desc = pc.remote_description().await;
-                            let address = c.address.clone();
-                            if desc.is_none() {
-                                let mut cs = pending_candidates2.lock().await;
-                                cs.push(c);
-                                send_tx2.send(address);
-                            }
-                        }
-                    }
-                })
-            }))
-            .await;
-        Ok(())
-    }
-
-    pub async fn set_remote_description(&mut self, desc: impl Into<RTCSessionDescription>) {
-        let desc: RTCSessionDescription = desc.into();
-        self.conn.set_remote_description(desc.clone()).await;
-        self.remote_session_description = Some(desc.clone());
-    }
-
-    pub async fn set_local_description(&mut self, desc: impl Into<RTCSessionDescription>) {
-        let desc: RTCSessionDescription = desc.into();
-        self.conn.set_local_description(desc.clone()).await;
-        self.local_session_description = Some(desc.clone());
-    }
-
-    pub async fn candidate(&mut self) -> Option<String> {
-        self.candidate_rx.recv().await
     }
 }
-
-#[cfg(test)]
-mod test {}
