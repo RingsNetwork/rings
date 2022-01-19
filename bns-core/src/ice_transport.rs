@@ -59,6 +59,14 @@ pub trait IceTransportImpl {
                 + Sync,
         >,
     ) -> Result<()>;
+    async fn on_data_channel(
+        &self,
+        f: Box<
+            dyn FnMut(Arc<RTCDataChannel>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+                + Send
+                + Sync,
+        >,
+    ) -> Result<()>;
 }
 
 #[async_trait]
@@ -173,6 +181,23 @@ impl IceTransportImpl for IceTransport {
         match self.connection.lock().await.clone() {
             Some(peer_connection) => {
                 peer_connection.on_peer_connection_state_change(f).await;
+            }
+            None => panic!("Connection Failed."),
+        }
+        Ok(())
+    }
+
+    async fn on_data_channel(
+        &self,
+        f: Box<
+            dyn FnMut(Arc<RTCDataChannel>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+                + Send
+                + Sync,
+        >,
+    ) -> Result<()> {
+        match self.connection.lock().await.clone() {
+            Some(peer_connection) => {
+                peer_connection.on_data_channel(f).await;
             }
             None => panic!("Connection Failed."),
         }
