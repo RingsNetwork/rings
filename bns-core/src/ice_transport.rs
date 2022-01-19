@@ -1,5 +1,6 @@
 use anyhow::anyhow;
 use anyhow::Result;
+use async_trait::async_trait;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -25,38 +26,55 @@ pub struct IceTransport {
     pub pending_candidates: Arc<Mutex<Vec<RTCIceCandidate>>>,
 }
 
-impl IceTransport {
-    pub async fn new() -> Result<Self> {
-        let config = RTCConfiguration {
-            ice_servers: vec![RTCIceServer {
-                urls: vec!["stun:stun.l.google.com:19302".to_owned()],
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let api = APIBuilder::new().build();
-        let peer_connection = Arc::new(api.new_peer_connection(config).await?);
-        Ok(IceTransport {
-            connection: Arc::new(Mutex::new(Some(Arc::clone(&peer_connection)))),
-            pending_candidates: Arc::new(Mutex::new(vec![])),
-        })
-    }
+#[async_trait]
+pub trait IceTransportImpl {
+    async fn get_peer_connection(&self) -> Option<Arc<RTCPeerConnection>>;
+    async fn get_pending_candidates(&self) -> Arc<Mutex<Vec<RTCIceCandidate>>>;
+    async fn get_answer(&self, options: Option<RTCAnswerOptions>) -> Result<RTCSessionDescription>;
+    async fn get_offer(&self, options: Option<RTCOfferOptions>) -> Result<RTCSessionDescription>;
+    async fn get_data_channel(
+        &self,
+        label: &str,
+        options: Option<RTCDataChannelInit>,
+    ) -> Result<Arc<Mutex<Arc<RTCDataChannel>>>>;
+    async fn set_local_description<T>(&self, desc: T) -> Result<()>
+    where
+        T: Into<RTCSessionDescription> + std::marker::Send;
+    async fn set_remote_description<T>(&self, desc: T) -> Result<()>
+    where
+        T: Into<RTCSessionDescription> + std::marker::Send;
+    async fn on_ice_candidate(
+        &self,
+        f: Box<
+            dyn FnMut(Option<RTCIceCandidate>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+                + Send
+                + Sync,
+        >,
+    ) -> Result<()>;
+    async fn on_peer_connection_state_change(
+        &self,
+        f: Box<
+            dyn FnMut(RTCPeerConnectionState) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+                + Send
+                + Sync,
+        >,
+    ) -> Result<()>;
+}
 
-    pub async fn get_peer_connection(&self) -> Option<Arc<RTCPeerConnection>> {
+#[async_trait]
+impl IceTransportImpl for IceTransport {
+    async fn get_peer_connection(&self) -> Option<Arc<RTCPeerConnection>> {
         match self.connection.lock().await.clone() {
             Some(peer_connection) => Some(peer_connection),
             None => panic!("Connection Failed."),
         }
     }
 
-    pub async fn get_pending_candidates(&self) -> Arc<Mutex<Vec<RTCIceCandidate>>> {
+    async fn get_pending_candidates(&self) -> Arc<Mutex<Vec<RTCIceCandidate>>> {
         Arc::clone(&self.pending_candidates)
     }
 
-    pub async fn get_answer(
-        &self,
-        options: Option<RTCAnswerOptions>,
-    ) -> Result<RTCSessionDescription> {
+    async fn get_answer(&self, options: Option<RTCAnswerOptions>) -> Result<RTCSessionDescription> {
         match self.connection.lock().await.clone() {
             Some(peer_connection) => peer_connection
                 .create_answer(options)
@@ -66,10 +84,7 @@ impl IceTransport {
         }
     }
 
-    pub async fn get_offer(
-        &self,
-        options: Option<RTCOfferOptions>,
-    ) -> Result<RTCSessionDescription> {
+    async fn get_offer(&self, options: Option<RTCOfferOptions>) -> Result<RTCSessionDescription> {
         match self.connection.lock().await.clone() {
             Some(peer_connection) => peer_connection
                 .create_offer(options)
@@ -79,7 +94,7 @@ impl IceTransport {
         }
     }
 
-    pub async fn get_data_channel(
+    async fn get_data_channel(
         &self,
         label: &str,
         options: Option<RTCDataChannelInit>,
@@ -98,9 +113,9 @@ impl IceTransport {
         }
     }
 
-    pub async fn set_local_description<T>(&self, desc: T) -> Result<()>
+    async fn set_local_description<T>(&self, desc: T) -> Result<()>
     where
-        T: Into<RTCSessionDescription>,
+        T: Into<RTCSessionDescription> + std::marker::Send,
     {
         match self.connection.lock().await.clone() {
             Some(peer_connection) => peer_connection
@@ -113,9 +128,9 @@ impl IceTransport {
         }
     }
 
-    pub async fn set_remote_description<T>(&self, desc: T) -> Result<()>
+    async fn set_remote_description<T>(&self, desc: T) -> Result<()>
     where
-        T: Into<RTCSessionDescription>,
+        T: Into<RTCSessionDescription> + std::marker::Send,
     {
         match self.connection.lock().await.clone() {
             Some(peer_connection) => peer_connection
@@ -128,7 +143,7 @@ impl IceTransport {
         }
     }
 
-    pub async fn on_ice_candidate(
+    async fn on_ice_candidate(
         &self,
         f: Box<
             dyn FnMut(Option<RTCIceCandidate>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
@@ -147,7 +162,7 @@ impl IceTransport {
         Ok(())
     }
 
-    pub async fn on_peer_connection_state_change(
+    async fn on_peer_connection_state_change(
         &self,
         f: Box<
             dyn FnMut(RTCPeerConnectionState) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
@@ -162,5 +177,23 @@ impl IceTransport {
             None => panic!("Connection Failed."),
         }
         Ok(())
+    }
+}
+
+impl IceTransport {
+    pub async fn new() -> Result<Self> {
+        let config = RTCConfiguration {
+            ice_servers: vec![RTCIceServer {
+                urls: vec!["stun:stun.l.google.com:19302".to_owned()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let api = APIBuilder::new().build();
+        let peer_connection = Arc::new(api.new_peer_connection(config).await?);
+        Ok(IceTransport {
+            connection: Arc::new(Mutex::new(Some(Arc::clone(&peer_connection)))),
+            pending_candidates: Arc::new(Mutex::new(vec![])),
+        })
     }
 }

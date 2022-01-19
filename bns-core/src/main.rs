@@ -13,6 +13,7 @@ use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 use bns_core::ice_transport::IceTransport;
+use bns_core::ice_transport::IceTransportImpl;
 
 pub async fn signal_candidate(addr: &str, c: &RTCIceCandidate) -> Result<()> {
     let payload = c.to_json().await?.candidate;
@@ -138,7 +139,6 @@ async fn main() -> Result<()> {
     let remote_addr = "0.0.0.0:50000";
 
     let ice_transport = IceTransport::new().await?;
-    let ice_transport_start = ice_transport.clone();
     let peer_connection = Arc::downgrade(&ice_transport.get_peer_connection().await.unwrap());
     let pending_candidates = ice_transport.get_pending_candidates().await;
     let (done_tx, mut done_rx) = tokio::sync::mpsc::channel::<()>(1);
@@ -160,7 +160,7 @@ async fn main() -> Result<()> {
                 }
             })
         }))
-        .await;
+        .await?;
     ice_transport
         .on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
             // Failed to exit dial server
@@ -170,7 +170,7 @@ async fn main() -> Result<()> {
 
             Box::pin(async {})
         }))
-        .await;
+        .await?;
 
     let data_channel = ice_transport.get_data_channel("data", None).await?;
     let dc = data_channel.clone();
