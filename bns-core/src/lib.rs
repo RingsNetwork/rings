@@ -1,4 +1,5 @@
 #![feature(async_closure)]
+#![feature(box_syntax)]
 
 pub mod data_channel;
 pub mod transports;
