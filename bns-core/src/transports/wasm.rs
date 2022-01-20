@@ -20,8 +20,9 @@ use crate::types::ice_transport::IceTransport;
 
 #[derive(Clone)]
 pub struct WasmTransport {
-    pub connection: Arc<Mutex<RtcPeerConnection>>,
-    pub channel: Arc<Mutex<Vec<RtcDataChannel>>>,
+    pub connection: Option<RtcPeerConnection>,
+    pub offer: Option<String>,
+    pub channel: Option<RtcDataChannel>,
 }
 
 unsafe impl Sync for WasmTransport {}
@@ -102,4 +103,37 @@ impl IceTransport for WasmTransport {
     }
 
 
+}
+
+impl WasmTransport {
+    pub fn new() -> Self {
+        let mut config = RtcConfiguration::new();
+        config.ice_servers(
+            &JsValue::from_serde(&json! {[{"urls":"stun:stun.l.google.com:19302"}]}).unwrap(),
+        );
+        return Self {
+            connection: RtcPeerConnection::new_with_configuration(&config).ok(),
+            channel: None,
+            offer: None
+        };
+    }
+
+    pub async fn setup_offer(&mut self) -> &Self {
+        if let Some(connection) = &self.connection {
+            if let Ok(offer) = JsFuture::from(connection.create_offer()).await {
+                self.offer = Reflect::get(&offer, &JsValue::from_str("sdp")).ok()
+                    .and_then(|o| o.as_string())
+                    .take();
+            }
+        }
+        return self;
+    }
+
+    pub async fn setup_channel(&mut self, name: &str) -> &Self {
+        if let Some(conn) = &self.connection {
+            let channel = conn.create_data_channel(&name);
+            self.channel = Some(channel);
+        }
+        return self;
+    }
 }
