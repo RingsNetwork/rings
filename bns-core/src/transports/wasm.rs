@@ -1,6 +1,13 @@
+use anyhow::Result;
+use async_trait::async_trait;
+use std::unimplemented;
 use js_sys::Reflect;
+use tokio::sync::Mutex;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 use serde_json::json;
-use std::rc::Rc;
+use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
@@ -8,107 +15,89 @@ use web_sys::RtcConfiguration;
 use web_sys::RtcDataChannel;
 use web_sys::{MessageEvent, RtcDataChannelEvent, RtcPeerConnection, RtcPeerConnectionIceEvent};
 use web_sys::{RtcSdpType, RtcSessionDescriptionInit};
+use crate::types::ice_transport::IceTransport;
 
 #[derive(Clone)]
-pub struct IceTransport {
-    pub offer: Option<String>,
-    pub peer: Option<RtcPeerConnection>,
-    pub channel: Option<RtcDataChannel>,
+pub struct WasmTransport {
+    pub connection: Arc<Mutex<RtcPeerConnection>>,
+    pub channel: Arc<Mutex<Vec<RtcDataChannel>>>,
 }
 
-impl IceTransport {
-    pub fn new() -> Self {
-        let mut config = RtcConfiguration::new();
-        config.ice_servers(
-            &JsValue::from_serde(&json! {[{"urls":"stun:stun.l.google.com:19302"}]}).unwrap(),
-        );
 
-        return Self {
-            offer: None,
-            peer: RtcPeerConnection::new_with_configuration(&config).ok(),
-            channel: None,
-        };
-        // let onopen_callback = Closure::wrap(Self::on_open());
+#[async_trait]
+impl IceTransport for WasmTransport {
+    type Connection = RtcPeerConnection;
+    type Candidate = String;
+    type Sdp = String;
+    type Channel = RtcDataChannel;
+    type ConnectionState = String;
 
-        // transport.peer.set_ondatachannel(Some(onopen_callback.as_ref().unchecked_ref()));
-        //            link.send_message(P2pMsg::UpdateP2p((channel, sdp, Some(peer))));
+    async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>> {
+        unimplemented!();
     }
 
-    pub async fn setup(&mut self) {
-        self.setup_channel("bns").await;
-        self.setup_offer().await;
+    async fn get_pending_candidates(&self) -> Arc<Mutex<Vec<Self::Candidate>>> {
+        unimplemented!();
     }
 
-    pub async fn setup_channel(&mut self, name: &str) -> &Self {
-        if let Some(peer) = &self.peer {
-            let channel = peer.create_data_channel(&name);
-            let onmessage_callback = Closure::wrap(Self::on_message(channel.clone()));
-            channel.set_onmessage(Some(onmessage_callback.as_ref().unchecked_ref()));
-            self.channel = Some(channel);
-        }
-        return self;
+    async fn get_answer(&self) -> Result<Self::Sdp> {
+         unimplemented!();
     }
 
-    pub async fn setup_offer(&mut self) -> &Self {
-        if let Some(peer) = &self.peer {
-            if let Ok(offer) = JsFuture::from(peer.create_offer()).await {
-                self.offer = Reflect::get(&offer, &JsValue::from_str("sdp"))
-                    .ok()
-                    .and_then(|o| o.as_string())
-                    .take();
-            }
-        }
-        return self;
+    async fn get_offer(&self) -> Result<Self::Sdp> {
+        unimplemented!();
     }
 
-    pub async fn dial(&self, offer: String) {
-        let mut offer_obj = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
-        offer_obj.sdp(&offer);
-        if let Some(peer) = &self.peer {
-            let srd_promise = peer.set_remote_description(&offer_obj);
-            match JsFuture::from(srd_promise).await {
-                _ => {}
-            }
-        }
+    async fn get_data_channel(&self, label: &str) -> Result<Arc<Mutex<Arc<Self::Channel>>>>{
+        unimplemented!();
     }
 
-    pub fn on_message(channel: RtcDataChannel) -> Box<dyn FnMut(MessageEvent)> {
-        box move |ev: MessageEvent| match ev.data().as_string() {
-            Some(message) => {
-                channel.send_with_str("Pong from pc1.dc!").unwrap();
-            }
-            None => {}
-        }
+    async fn set_local_description<T>(&self, desc: T) -> Result<()>
+    where
+        T: Into<Self::Sdp> + std::marker::Send {
+           unimplemented!();
     }
 
-    pub fn on_channel() -> Box<dyn FnMut(RtcDataChannelEvent)> {
-        box move |ev: RtcDataChannelEvent| {
-            let cnn = ev.channel();
-            match cnn.send_with_str("Greeting!") {
-                Ok(_d) => {}
-                Err(_e) => {
-                    panic!();
-                }
-            };
-        }
+    async fn set_remote_description<T>(&self, desc: T) -> Result<()>
+    where
+        T: Into<Self::Sdp> + std::marker::Send {
+          unimplemented!();
     }
 
-    pub fn on_open() -> Box<dyn FnMut(RtcDataChannelEvent)> {
-        box move |ev: RtcDataChannelEvent| {
-            let cnn = ev.channel();
-            match cnn.send_with_str("Greeting!") {
-                Ok(_d) => {}
-                Err(_e) => {
-                    panic!();
-                }
-            };
-        }
+
+    async fn on_ice_candidate(
+        &self,
+        f: Box<
+            dyn FnMut(Option<Self::Candidate>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+                + Send
+                + Sync,
+        >,
+    ) -> Result<()> {
+         unimplemented!();
     }
 
-    pub fn on_icecandidate() -> Box<dyn FnMut(RtcPeerConnectionIceEvent)> {
-        box move |ev: RtcPeerConnectionIceEvent| match ev.candidate() {
-            Some(candidate) => {}
-            None => {}
-        }
+    async fn on_peer_connection_state_change(
+        &self,
+        f: Box<
+            dyn FnMut(Self::ConnectionState) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+                + Send
+                + Sync,
+        >,
+    ) -> Result<()> {
+        unimplemented!();
+
     }
+
+    async fn on_data_channel(
+        &self,
+        f: Box<
+            dyn FnMut(Arc<Self::Channel>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+                + Send
+                + Sync,
+        >,
+    ) -> Result<()> {
+         unimplemented!();
+    }
+
+
 }

@@ -68,12 +68,11 @@ impl IceTransport for DefaultTransport {
     async fn get_data_channel(
         &self,
         label: &str,
-        options: Option<RTCDataChannelInit>,
     ) -> Result<Arc<Mutex<Arc<RTCDataChannel>>>> {
         match self.connection.lock().await.clone() {
             Some(peer_connection) => {
                 let data_channel = peer_connection
-                    .create_data_channel(label, options)
+                    .create_data_channel(label, None)
                     .await
                     .map_err(|e| anyhow!(e))?;
                 Ok(Arc::new(Mutex::new(data_channel)))

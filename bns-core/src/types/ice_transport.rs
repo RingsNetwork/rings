@@ -26,8 +26,7 @@ pub trait IceTransport {
     async fn get_data_channel(
         &self,
         label: &str,
-        options: Option<RTCDataChannelInit>,
-    ) -> Result<Arc<Mutex<Arc<RTCDataChannel>>>>;
+    ) -> Result<Arc<Mutex<Arc<Self::Channel>>>>;
 
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
     where
