@@ -5,7 +5,6 @@ use js_sys::Reflect;
 use tokio::sync::Mutex;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use serde_json::json;
 use std::sync::Arc;
 use wasm_bindgen::prelude::*;
@@ -15,6 +14,8 @@ use web_sys::RtcConfiguration;
 use web_sys::RtcDataChannel;
 use web_sys::{MessageEvent, RtcDataChannelEvent, RtcPeerConnection, RtcPeerConnectionIceEvent};
 use web_sys::{RtcSdpType, RtcSessionDescriptionInit};
+use web_sys::RtcIceCandidate;
+use web_sys::RtcSessionDescription;
 use crate::types::ice_transport::IceTransport;
 
 #[derive(Clone)]
@@ -23,12 +24,13 @@ pub struct WasmTransport {
     pub channel: Arc<Mutex<Vec<RtcDataChannel>>>,
 }
 
+unsafe impl Sync for WasmTransport {}
 
 #[async_trait]
 impl IceTransport for WasmTransport {
     type Connection = RtcPeerConnection;
-    type Candidate = String;
-    type Sdp = String;
+    type Candidate = RtcIceCandidate;
+    type Sdp = RtcSessionDescription;
     type Channel = RtcDataChannel;
     type ConnectionState = String;
 
