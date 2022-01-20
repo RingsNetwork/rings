@@ -28,25 +28,33 @@ pub struct IceTransport {
 
 #[async_trait]
 pub trait IceTransportImpl {
-    async fn get_peer_connection(&self) -> Option<Arc<RTCPeerConnection>>;
-    async fn get_pending_candidates(&self) -> Arc<Mutex<Vec<RTCIceCandidate>>>;
-    async fn get_answer(&self, options: Option<RTCAnswerOptions>) -> Result<RTCSessionDescription>;
-    async fn get_offer(&self, options: Option<RTCOfferOptions>) -> Result<RTCSessionDescription>;
+    type Connection;
+    type Candidate;
+    type Sdp;
+    type Channel;
+    type ConnectionState;
+
+    async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>>;
+    async fn get_pending_candidates(&self) -> Arc<Mutex<Vec<Self::Candidate>>>;
+    async fn get_answer(&self) -> Result<Self::Sdp>;
+    async fn get_offer(&self) -> Result<Self::Sdp>;
+
     async fn get_data_channel(
         &self,
         label: &str,
         options: Option<RTCDataChannelInit>,
     ) -> Result<Arc<Mutex<Arc<RTCDataChannel>>>>;
+
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
     where
-        T: Into<RTCSessionDescription> + std::marker::Send;
+        T: Into<Self::Sdp> + std::marker::Send;
     async fn set_remote_description<T>(&self, desc: T) -> Result<()>
     where
-        T: Into<RTCSessionDescription> + std::marker::Send;
+        T: Into<Self::Sdp> + std::marker::Send;
     async fn on_ice_candidate(
         &self,
         f: Box<
-            dyn FnMut(Option<RTCIceCandidate>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+            dyn FnMut(Option<Self::Candidate>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
                 + Send
                 + Sync,
         >,
@@ -54,7 +62,7 @@ pub trait IceTransportImpl {
     async fn on_peer_connection_state_change(
         &self,
         f: Box<
-            dyn FnMut(RTCPeerConnectionState) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+            dyn FnMut(Self::ConnectionState) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
                 + Send
                 + Sync,
         >,
@@ -62,7 +70,7 @@ pub trait IceTransportImpl {
     async fn on_data_channel(
         &self,
         f: Box<
-            dyn FnMut(Arc<RTCDataChannel>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+            dyn FnMut(Arc<Self::Channel>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
                 + Send
                 + Sync,
         >,
@@ -71,6 +79,12 @@ pub trait IceTransportImpl {
 
 #[async_trait]
 impl IceTransportImpl for IceTransport {
+    type Connection = RTCPeerConnection;
+    type Candidate = RTCIceCandidate;
+    type Sdp = RTCSessionDescription;
+    type Channel = RTCDataChannel;
+    type ConnectionState = RTCPeerConnectionState;
+
     async fn get_peer_connection(&self) -> Option<Arc<RTCPeerConnection>> {
         match self.connection.lock().await.clone() {
             Some(peer_connection) => Some(peer_connection),
@@ -82,20 +96,20 @@ impl IceTransportImpl for IceTransport {
         Arc::clone(&self.pending_candidates)
     }
 
-    async fn get_answer(&self, options: Option<RTCAnswerOptions>) -> Result<RTCSessionDescription> {
+    async fn get_answer(&self) -> Result<RTCSessionDescription> {
         match self.connection.lock().await.clone() {
             Some(peer_connection) => peer_connection
-                .create_answer(options)
+                .create_answer(None)
                 .await
                 .map_err(|e| anyhow!(e)),
             None => panic!("Connection Failed."),
         }
     }
 
-    async fn get_offer(&self, options: Option<RTCOfferOptions>) -> Result<RTCSessionDescription> {
+    async fn get_offer(&self) -> Result<RTCSessionDescription> {
         match self.connection.lock().await.clone() {
             Some(peer_connection) => peer_connection
-                .create_offer(options)
+                .create_offer(None)
                 .await
                 .map_err(|e| anyhow!(e)),
             None => panic!("Connection Failed."),
