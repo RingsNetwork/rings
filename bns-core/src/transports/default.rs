@@ -19,66 +19,20 @@ use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 use webrtc::peer_connection::RTCPeerConnection;
+use crate::types::ice_transport::IceTransport;
+
+
+
 
 #[derive(Clone)]
-pub struct IceTransport {
+pub struct DefaultTransport {
     pub connection: Arc<Mutex<Option<Arc<RTCPeerConnection>>>>,
     pub pending_candidates: Arc<Mutex<Vec<RTCIceCandidate>>>,
 }
 
-#[async_trait]
-pub trait IceTransportImpl {
-    type Connection;
-    type Candidate;
-    type Sdp;
-    type Channel;
-    type ConnectionState;
-
-    async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>>;
-    async fn get_pending_candidates(&self) -> Arc<Mutex<Vec<Self::Candidate>>>;
-    async fn get_answer(&self) -> Result<Self::Sdp>;
-    async fn get_offer(&self) -> Result<Self::Sdp>;
-
-    async fn get_data_channel(
-        &self,
-        label: &str,
-        options: Option<RTCDataChannelInit>,
-    ) -> Result<Arc<Mutex<Arc<RTCDataChannel>>>>;
-
-    async fn set_local_description<T>(&self, desc: T) -> Result<()>
-    where
-        T: Into<Self::Sdp> + std::marker::Send;
-    async fn set_remote_description<T>(&self, desc: T) -> Result<()>
-    where
-        T: Into<Self::Sdp> + std::marker::Send;
-    async fn on_ice_candidate(
-        &self,
-        f: Box<
-            dyn FnMut(Option<Self::Candidate>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
-                + Send
-                + Sync,
-        >,
-    ) -> Result<()>;
-    async fn on_peer_connection_state_change(
-        &self,
-        f: Box<
-            dyn FnMut(Self::ConnectionState) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
-                + Send
-                + Sync,
-        >,
-    ) -> Result<()>;
-    async fn on_data_channel(
-        &self,
-        f: Box<
-            dyn FnMut(Arc<Self::Channel>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
-                + Send
-                + Sync,
-        >,
-    ) -> Result<()>;
-}
 
 #[async_trait]
-impl IceTransportImpl for IceTransport {
+impl IceTransport for DefaultTransport {
     type Connection = RTCPeerConnection;
     type Candidate = RTCIceCandidate;
     type Sdp = RTCSessionDescription;
@@ -219,7 +173,7 @@ impl IceTransportImpl for IceTransport {
     }
 }
 
-impl IceTransport {
+impl DefaultTransport {
     pub async fn new() -> Result<Self> {
         let config = RTCConfiguration {
             ice_servers: vec![RTCIceServer {
@@ -230,7 +184,7 @@ impl IceTransport {
         };
         let api = APIBuilder::new().build();
         let peer_connection = Arc::new(api.new_peer_connection(config).await?);
-        Ok(IceTransport {
+        Ok(Self {
             connection: Arc::new(Mutex::new(Some(Arc::clone(&peer_connection)))),
             pending_candidates: Arc::new(Mutex::new(vec![])),
         })
