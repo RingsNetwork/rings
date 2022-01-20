@@ -13,23 +13,18 @@ use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
-use webrtc::peer_connection::offer_answer_options::RTCAnswerOptions;
-use webrtc::peer_connection::offer_answer_options::RTCOfferOptions;
+
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
-use webrtc::peer_connection::RTCPeerConnection;
 use crate::types::ice_transport::IceTransport;
-
-
-
+use webrtc::peer_connection::RTCPeerConnection;
 
 #[derive(Clone)]
 pub struct DefaultTransport {
     pub connection: Arc<Mutex<Option<Arc<RTCPeerConnection>>>>,
     pub pending_candidates: Arc<Mutex<Vec<RTCIceCandidate>>>,
 }
-
 
 #[async_trait]
 impl IceTransport for DefaultTransport {

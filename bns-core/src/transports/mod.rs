@@ -1,4 +1,4 @@
 pub mod default;
 
-#[cfg(feature="wasm")]
+#[cfg(feature = "wasm")]
 pub mod wasm;
