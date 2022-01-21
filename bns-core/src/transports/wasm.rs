@@ -1,5 +1,6 @@
 use crate::types::ice_transport::IceTransport;
 use anyhow::Result;
+use anyhow::anyhow;
 use async_trait::async_trait;
 use js_sys::Reflect;
 use serde_json::json;
@@ -22,7 +23,7 @@ use web_sys::{RtcSdpType, RtcSessionDescriptionInit};
 pub struct WasmTransport {
     pub connection: Option<Arc<RtcPeerConnection>>,
     pub offer: Option<String>,
-    pub channel: Option<RtcDataChannel>,
+    pub channel: Option<Arc<RtcDataChannel>>,
 }
 
 unsafe impl Sync for WasmTransport {}
@@ -31,7 +32,7 @@ unsafe impl Sync for WasmTransport {}
 impl IceTransport for WasmTransport {
     type Connection = RtcPeerConnection;
     type Candidate = RtcIceCandidate;
-    type Sdp = RtcSessionDescription;
+    type Sdp = String;
     type Channel = RtcDataChannel;
     type ConnectionState = String;
 
@@ -48,11 +49,17 @@ impl IceTransport for WasmTransport {
     }
 
     async fn get_offer(&self) -> Result<Self::Sdp> {
-        unimplemented!();
+        match &self.offer {
+            Some(o) => Ok(o.to_string()),
+            None => Err(anyhow!("Cannot get Offer"))
+        }
     }
 
     async fn get_data_channel(&self, label: &str) -> Result<Arc<Self::Channel>> {
-        unimplemented!();
+        match &self.channel {
+            Some(c) => Ok(c.to_owned()),
+            None => Err(anyhow!("Faied to get channel"))
+        }
     }
 
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
@@ -138,7 +145,7 @@ impl WasmTransport {
     pub async fn setup_channel(&mut self, name: &str) -> &Self {
         if let Some(conn) = &self.connection {
             let channel = conn.create_data_channel(&name);
-            self.channel = Some(channel);
+            self.channel = Some(Arc::new(channel));
         }
         return self;
     }
