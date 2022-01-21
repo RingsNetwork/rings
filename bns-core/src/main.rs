@@ -224,7 +224,7 @@ async fn main() -> Result<()> {
             }
         });
 
-        let http_addr = SocketAddr::from_str(&http_addr).unwrap();
+        let http_addr = SocketAddr::from_str(http_addr).unwrap();
         let server = Server::bind(&http_addr).serve(service);
         // Run this server for... forever!
         if let Err(e) = server.await {
