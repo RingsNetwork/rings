@@ -7,3 +7,15 @@ edition = "2021"
 members = [
     "bns-core",
 ]
+
+[dependencies]
+webrtc = { version = "0.3.3"}
+tokio = { version = "1.13.0", features = ["full"]}
+hyper = { version = "0.14.14", features = ["full"]}
+env_logger = { version = "0.9.0"}
+tokio-util = { version = "0.6.9"}
+clap = { version="2.33.3"}
+anyhow = "1.0.45"
+bns-core = {path="./bns-core"}
+serde = { version = "1.0.130", features = ["derive"] }
+serde_json = "1.0.70"
