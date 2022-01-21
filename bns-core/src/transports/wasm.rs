@@ -39,7 +39,7 @@ impl IceTransport for WasmTransport {
         return self.connection.as_ref().map(|c| Arc::clone(c));
     }
 
-    async fn get_pending_candidates(&self) -> Arc<Mutex<Vec<Self::Candidate>>> {
+    async fn get_pending_candidates(&self) -> Vec<Self::Candidate> {
         unimplemented!();
     }
 
@@ -51,7 +51,7 @@ impl IceTransport for WasmTransport {
         unimplemented!();
     }
 
-    async fn get_data_channel(&self, label: &str) -> Result<Arc<Mutex<Arc<Self::Channel>>>>{
+    async fn get_data_channel(&self, label: &str) -> Result<Arc<Self::Channel>>{
         unimplemented!();
     }
 
