@@ -1,6 +1,3 @@
-
-
-
 use bns_node::discoveries::http::remote_handler;
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -11,15 +8,12 @@ use anyhow::Result;
 use bns_core::transports::default::DefaultTransport;
 use bns_core::types::ice_transport::IceTransport;
 use hyper::service::{make_service_fn, service_fn};
-use hyper::{Server};
+use hyper::Server;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
-use webrtc::ice_transport::ice_candidate::{RTCIceCandidate};
+use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
 use webrtc::peer_connection::math_rand_alpha;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
-
-
-
 
 #[tokio::main]
 async fn main() -> Result<()> {

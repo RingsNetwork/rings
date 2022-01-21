@@ -1,6 +1,6 @@
 use crate::types::ice_transport::IceTransport;
-use anyhow::Result;
 use anyhow::anyhow;
+use anyhow::Result;
 use async_trait::async_trait;
 use js_sys::Reflect;
 use serde_json::json;
@@ -50,14 +50,14 @@ impl IceTransport for WasmTransport {
     async fn get_offer(&self) -> Result<Self::Sdp> {
         match &self.offer {
             Some(o) => Ok(o.to_string()),
-            None => Err(anyhow!("Cannot get Offer"))
+            None => Err(anyhow!("Cannot get Offer")),
         }
     }
 
     async fn get_data_channel(&self, label: &str) -> Result<Arc<Self::Channel>> {
         match &self.channel {
             Some(c) => Ok(c.to_owned()),
-            None => Err(anyhow!("Faied to get channel"))
+            None => Err(anyhow!("Faied to get channel")),
         }
     }
 
