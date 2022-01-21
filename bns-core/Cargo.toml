@@ -4,12 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = []
+default = ["webrtc", "tokio"]
 wasm = ["web-sys", "wasm-bindgen", "js-sys", "wasm-bindgen-futures"]
 
 [dependencies]
-webrtc = { version = "0.3.3"}
-tokio = { version = "1.13.0", features = ["full"] }
+webrtc = { version = "0.3.3", optional=true}
+tokio = { version = "1.13.0", features = ["full"], optional=true}
 env_logger = "0.9.0"
 clap = "2.33.3"
 hyper = { version = "0.14.14", features = ["full"] }
@@ -23,6 +23,7 @@ bytes = "1.1.0"
 lazy_static = "1.4.0"
 rand = "0.8.4"
 async-trait="0.1.52"
+
 wasm-bindgen = {version = "0.2.67", features = ["serde-serialize"], optional=true }
 wasm-bindgen-futures = {version="0.4.17", optional=true}
 js-sys = { version="0.3.44", optional=true}
