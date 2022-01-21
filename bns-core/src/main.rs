@@ -4,6 +4,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use bns_core::transports::default::DefaultTransport;
+use bns_core::types::ice_transport::IceTransport;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Client, Method, Request, Response, Server, StatusCode};
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
@@ -12,9 +14,6 @@ use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit}
 use webrtc::peer_connection::math_rand_alpha;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
-
-use bns_core::ice_transport::IceTransport;
-use bns_core::ice_transport::IceTransportImpl;
 
 pub async fn signal_candidate(addr: &str, c: &RTCIceCandidate) -> Result<()> {
     let payload = c.to_json().await?.candidate;
@@ -46,7 +45,7 @@ pub async fn signal_candidate(addr: &str, c: &RTCIceCandidate) -> Result<()> {
 async fn remote_handler(
     req: Request<Body>,
     remote_addr: String,
-    ice_transport: IceTransport,
+    ice_transport: DefaultTransport,
 ) -> Result<Response<Body>, hyper::Error> {
     let pc = ice_transport.connection.lock().await.clone().unwrap();
     match (req.method(), req.uri().path()) {
@@ -141,7 +140,7 @@ async fn main() -> Result<()> {
     let http_addr = "0.0.0.0:60000";
     let remote_addr = "0.0.0.0:50000";
 
-    let ice_transport = IceTransport::new().await?;
+    let ice_transport = DefaultTransport::new().await?;
     let peer_connection = Arc::downgrade(&ice_transport.get_peer_connection().await.unwrap());
     let pending_candidates = ice_transport.get_pending_candidates().await;
     let (done_tx, mut done_rx) = tokio::sync::mpsc::channel::<()>(1);

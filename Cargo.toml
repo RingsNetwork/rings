@@ -5,5 +5,5 @@ edition = "2021"
 
 [workspace]
 members = [
-    "bns-core"
+    "bns-core",
 ]
