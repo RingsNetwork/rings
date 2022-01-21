@@ -20,7 +20,7 @@ use crate::types::ice_transport::IceTransport;
 
 #[derive(Clone)]
 pub struct WasmTransport {
-    pub connection: Option<RtcPeerConnection>,
+    pub connection: Option<Arc<RtcPeerConnection>>,
     pub offer: Option<String>,
     pub channel: Option<RtcDataChannel>,
 }
@@ -36,7 +36,7 @@ impl IceTransport for WasmTransport {
     type ConnectionState = String;
 
     async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>> {
-        unimplemented!();
+        return self.connection.as_ref().map(|c| Arc::clone(c));
     }
 
     async fn get_pending_candidates(&self) -> Arc<Mutex<Vec<Self::Candidate>>> {
@@ -106,16 +106,22 @@ impl IceTransport for WasmTransport {
 }
 
 impl WasmTransport {
-    pub fn new() -> Self {
+    pub async fn new() -> Self {
         let mut config = RtcConfiguration::new();
         config.ice_servers(
             &JsValue::from_serde(&json! {[{"urls":"stun:stun.l.google.com:19302"}]}).unwrap(),
         );
-        return Self {
-            connection: RtcPeerConnection::new_with_configuration(&config).ok(),
+
+        let mut ins = Self {
+            connection: RtcPeerConnection::new_with_configuration(&config)
+                .ok().as_ref()
+                .map(|c| Arc::new(c.to_owned())),
             channel: None,
             offer: None
         };
+        ins.setup_offer().await;
+        ins.setup_channel("bns").await;
+        return ins;
     }
 
     pub async fn setup_offer(&mut self) -> &Self {

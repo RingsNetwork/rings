@@ -147,14 +147,14 @@ async fn main() -> Result<()> {
 
     ice_transport
         .on_ice_candidate(Box::new(move |c: Option<RTCIceCandidate>| {
-            let peer_connection = peer_connection.clone();
-            let pending_candidates = Arc::clone(&pending_candidates);
+            let peer_connection = peer_connection.to_owned();
+            let pending_candidates = pending_candidates.to_owned();
             Box::pin(async move {
                 if let Some(candidate) = c {
                     if let Some(peer_connection) = peer_connection.upgrade() {
                         let desc = peer_connection.remote_description().await;
                         if desc.is_none() {
-                            let mut candidates = pending_candidates.lock().await;
+                            let mut candidates = pending_candidates;
                             println!("start answer candidate: {:?}", candidate);
                             candidates.push(candidate.clone());
                         }

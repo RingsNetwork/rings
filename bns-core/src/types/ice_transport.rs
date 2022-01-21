@@ -19,14 +19,14 @@ pub trait IceTransport {
     type ConnectionState;
 
     async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>>;
-    async fn get_pending_candidates(&self) -> Arc<Mutex<Vec<Self::Candidate>>>;
+    async fn get_pending_candidates(&self) -> Vec<Self::Candidate>;
     async fn get_answer(&self) -> Result<Self::Sdp>;
     async fn get_offer(&self) -> Result<Self::Sdp>;
 
     async fn get_data_channel(
         &self,
         label: &str,
-    ) -> Result<Arc<Mutex<Arc<Self::Channel>>>>;
+    ) -> Result<Arc<Self::Channel>>;
 
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
     where
