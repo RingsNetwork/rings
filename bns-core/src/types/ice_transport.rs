@@ -5,11 +5,6 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use tokio::sync::Mutex;
-
-use webrtc::data_channel::data_channel_init::RTCDataChannelInit;
-use webrtc::data_channel::RTCDataChannel;
-
 #[async_trait]
 pub trait IceTransport {
     type Connection;
@@ -19,14 +14,11 @@ pub trait IceTransport {
     type ConnectionState;
 
     async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>>;
-    async fn get_pending_candidates(&self) -> Arc<Mutex<Vec<Self::Candidate>>>;
+    async fn get_pending_candidates(&self) -> Vec<Self::Candidate>;
     async fn get_answer(&self) -> Result<Self::Sdp>;
     async fn get_offer(&self) -> Result<Self::Sdp>;
 
-    async fn get_data_channel(
-        &self,
-        label: &str,
-    ) -> Result<Arc<Mutex<Arc<Self::Channel>>>>;
+    async fn get_data_channel(&self, label: &str) -> Result<Arc<Self::Channel>>;
 
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
     where

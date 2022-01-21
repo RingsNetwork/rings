@@ -1,6 +1,7 @@
 use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
+use core::ops::Deref;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -8,7 +9,7 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 use webrtc::api::APIBuilder;
-use webrtc::data_channel::data_channel_init::RTCDataChannelInit;
+
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
 use webrtc::ice_transport::ice_server::RTCIceServer;
@@ -35,18 +36,15 @@ impl IceTransport for DefaultTransport {
     type ConnectionState = RTCPeerConnectionState;
 
     async fn get_peer_connection(&self) -> Option<Arc<RTCPeerConnection>> {
-        match self.connection.lock().await.clone() {
-            Some(peer_connection) => Some(peer_connection),
-            None => panic!("Connection Failed."),
-        }
+        return self.connection.lock().await.clone();
     }
 
-    async fn get_pending_candidates(&self) -> Arc<Mutex<Vec<RTCIceCandidate>>> {
-        Arc::clone(&self.pending_candidates)
+    async fn get_pending_candidates(&self) -> Vec<RTCIceCandidate> {
+        return self.pending_candidates.lock().await.clone();
     }
 
     async fn get_answer(&self) -> Result<RTCSessionDescription> {
-        match self.connection.lock().await.clone() {
+        match self.connection.lock().await.deref() {
             Some(peer_connection) => peer_connection
                 .create_answer(None)
                 .await
@@ -56,7 +54,7 @@ impl IceTransport for DefaultTransport {
     }
 
     async fn get_offer(&self) -> Result<RTCSessionDescription> {
-        match self.connection.lock().await.clone() {
+        match self.connection.lock().await.deref() {
             Some(peer_connection) => peer_connection
                 .create_offer(None)
                 .await
@@ -65,17 +63,14 @@ impl IceTransport for DefaultTransport {
         }
     }
 
-    async fn get_data_channel(
-        &self,
-        label: &str,
-    ) -> Result<Arc<Mutex<Arc<RTCDataChannel>>>> {
+    async fn get_data_channel(&self, label: &str) -> Result<Arc<RTCDataChannel>> {
         match self.connection.lock().await.clone() {
             Some(peer_connection) => {
                 let data_channel = peer_connection
                     .create_data_channel(label, None)
                     .await
                     .map_err(|e| anyhow!(e))?;
-                Ok(Arc::new(Mutex::new(data_channel)))
+                return Ok(data_channel);
             }
             None => {
                 panic!("Connection Failed.")
