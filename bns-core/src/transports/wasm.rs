@@ -1,22 +1,22 @@
+use crate::types::ice_transport::IceTransport;
 use anyhow::Result;
 use async_trait::async_trait;
-use std::unimplemented;
 use js_sys::Reflect;
-use tokio::sync::Mutex;
+use serde_json::json;
 use std::future::Future;
 use std::pin::Pin;
-use serde_json::json;
 use std::sync::Arc;
+use std::unimplemented;
+use tokio::sync::Mutex;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::RtcConfiguration;
 use web_sys::RtcDataChannel;
-use web_sys::{MessageEvent, RtcDataChannelEvent, RtcPeerConnection, RtcPeerConnectionIceEvent};
-use web_sys::{RtcSdpType, RtcSessionDescriptionInit};
 use web_sys::RtcIceCandidate;
 use web_sys::RtcSessionDescription;
-use crate::types::ice_transport::IceTransport;
+use web_sys::{MessageEvent, RtcDataChannelEvent, RtcPeerConnection, RtcPeerConnectionIceEvent};
+use web_sys::{RtcSdpType, RtcSessionDescriptionInit};
 
 #[derive(Clone)]
 pub struct WasmTransport {
@@ -44,29 +44,30 @@ impl IceTransport for WasmTransport {
     }
 
     async fn get_answer(&self) -> Result<Self::Sdp> {
-         unimplemented!();
+        unimplemented!();
     }
 
     async fn get_offer(&self) -> Result<Self::Sdp> {
         unimplemented!();
     }
 
-    async fn get_data_channel(&self, label: &str) -> Result<Arc<Self::Channel>>{
+    async fn get_data_channel(&self, label: &str) -> Result<Arc<Self::Channel>> {
         unimplemented!();
     }
 
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
     where
-        T: Into<Self::Sdp> + std::marker::Send {
-           unimplemented!();
+        T: Into<Self::Sdp> + std::marker::Send,
+    {
+        unimplemented!();
     }
 
     async fn set_remote_description<T>(&self, desc: T) -> Result<()>
     where
-        T: Into<Self::Sdp> + std::marker::Send {
-          unimplemented!();
+        T: Into<Self::Sdp> + std::marker::Send,
+    {
+        unimplemented!();
     }
-
 
     async fn on_ice_candidate(
         &self,
@@ -76,7 +77,7 @@ impl IceTransport for WasmTransport {
                 + Sync,
         >,
     ) -> Result<()> {
-         unimplemented!();
+        unimplemented!();
     }
 
     async fn on_peer_connection_state_change(
@@ -88,7 +89,6 @@ impl IceTransport for WasmTransport {
         >,
     ) -> Result<()> {
         unimplemented!();
-
     }
 
     async fn on_data_channel(
@@ -99,10 +99,8 @@ impl IceTransport for WasmTransport {
                 + Sync,
         >,
     ) -> Result<()> {
-         unimplemented!();
+        unimplemented!();
     }
-
-
 }
 
 impl WasmTransport {
@@ -114,10 +112,11 @@ impl WasmTransport {
 
         let mut ins = Self {
             connection: RtcPeerConnection::new_with_configuration(&config)
-                .ok().as_ref()
+                .ok()
+                .as_ref()
                 .map(|c| Arc::new(c.to_owned())),
             channel: None,
-            offer: None
+            offer: None,
         };
         ins.setup_offer().await;
         ins.setup_channel("bns").await;
@@ -127,7 +126,8 @@ impl WasmTransport {
     pub async fn setup_offer(&mut self) -> &Self {
         if let Some(connection) = &self.connection {
             if let Ok(offer) = JsFuture::from(connection.create_offer()).await {
-                self.offer = Reflect::get(&offer, &JsValue::from_str("sdp")).ok()
+                self.offer = Reflect::get(&offer, &JsValue::from_str("sdp"))
+                    .ok()
                     .and_then(|o| o.as_string())
                     .take();
             }

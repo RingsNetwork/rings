@@ -23,10 +23,7 @@ pub trait IceTransport {
     async fn get_answer(&self) -> Result<Self::Sdp>;
     async fn get_offer(&self) -> Result<Self::Sdp>;
 
-    async fn get_data_channel(
-        &self,
-        label: &str,
-    ) -> Result<Arc<Self::Channel>>;
+    async fn get_data_channel(&self, label: &str) -> Result<Arc<Self::Channel>>;
 
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
     where

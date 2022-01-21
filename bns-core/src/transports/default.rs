@@ -1,7 +1,7 @@
-use core::ops::Deref;
 use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
+use core::ops::Deref;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -63,10 +63,7 @@ impl IceTransport for DefaultTransport {
         }
     }
 
-    async fn get_data_channel(
-        &self,
-        label: &str,
-    ) -> Result<Arc<RTCDataChannel>> {
+    async fn get_data_channel(&self, label: &str) -> Result<Arc<RTCDataChannel>> {
         match self.connection.lock().await.clone() {
             Some(peer_connection) => {
                 let data_channel = peer_connection
