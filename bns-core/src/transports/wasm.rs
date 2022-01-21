@@ -8,7 +8,6 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::unimplemented;
-use tokio::sync::Mutex;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
