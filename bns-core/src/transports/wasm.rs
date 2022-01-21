@@ -9,14 +9,14 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::unimplemented;
 use wasm_bindgen::prelude::*;
-use wasm_bindgen::JsCast;
+
 use wasm_bindgen_futures::JsFuture;
 use web_sys::RtcConfiguration;
 use web_sys::RtcDataChannel;
 use web_sys::RtcIceCandidate;
-use web_sys::RtcSessionDescription;
-use web_sys::{MessageEvent, RtcDataChannelEvent, RtcPeerConnection, RtcPeerConnectionIceEvent};
-use web_sys::{RtcSdpType, RtcSessionDescriptionInit};
+
+use web_sys::{RtcPeerConnection};
+
 
 #[derive(Clone)]
 pub struct WasmTransport {
@@ -54,21 +54,21 @@ impl IceTransport for WasmTransport {
         }
     }
 
-    async fn get_data_channel(&self, label: &str) -> Result<Arc<Self::Channel>> {
+    async fn get_data_channel(&self, _label: &str) -> Result<Arc<Self::Channel>> {
         match &self.channel {
             Some(c) => Ok(c.to_owned()),
             None => Err(anyhow!("Faied to get channel")),
         }
     }
 
-    async fn set_local_description<T>(&self, desc: T) -> Result<()>
+    async fn set_local_description<T>(&self, _desc: T) -> Result<()>
     where
         T: Into<Self::Sdp> + std::marker::Send,
     {
         unimplemented!();
     }
 
-    async fn set_remote_description<T>(&self, desc: T) -> Result<()>
+    async fn set_remote_description<T>(&self, _desc: T) -> Result<()>
     where
         T: Into<Self::Sdp> + std::marker::Send,
     {
@@ -77,7 +77,7 @@ impl IceTransport for WasmTransport {
 
     async fn on_ice_candidate(
         &self,
-        f: Box<
+        _f: Box<
             dyn FnMut(Option<Self::Candidate>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
                 + Send
                 + Sync,
@@ -88,7 +88,7 @@ impl IceTransport for WasmTransport {
 
     async fn on_peer_connection_state_change(
         &self,
-        f: Box<
+        _f: Box<
             dyn FnMut(Self::ConnectionState) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
                 + Send
                 + Sync,
@@ -99,7 +99,7 @@ impl IceTransport for WasmTransport {
 
     async fn on_data_channel(
         &self,
-        f: Box<
+        _f: Box<
             dyn FnMut(Arc<Self::Channel>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
                 + Send
                 + Sync,
