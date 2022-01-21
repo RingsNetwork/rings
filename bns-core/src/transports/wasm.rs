@@ -15,8 +15,7 @@ use web_sys::RtcConfiguration;
 use web_sys::RtcDataChannel;
 use web_sys::RtcIceCandidate;
 
-use web_sys::{RtcPeerConnection};
-
+use web_sys::RtcPeerConnection;
 
 #[derive(Clone)]
 pub struct WasmTransport {
