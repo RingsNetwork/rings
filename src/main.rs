@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use bns_core::transports::default::DefaultTransport;
+use bns_core::types::ice_transport::IceTransportBuilder;
 use bns_core::types::ice_transport::IceTransport;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::Server;
@@ -20,7 +21,8 @@ async fn main() -> Result<()> {
     let http_addr = "0.0.0.0:60000";
     let remote_addr = "0.0.0.0:50000";
 
-    let ice_transport = DefaultTransport::new().await?;
+    let mut ice_transport = DefaultTransport::new();
+    ice_transport.start().await?;
     let peer_connection = Arc::downgrade(&ice_transport.get_peer_connection().await.unwrap());
     let pending_candidates = ice_transport.get_pending_candidates().await;
     let (done_tx, mut done_rx) = tokio::sync::mpsc::channel::<()>(1);
