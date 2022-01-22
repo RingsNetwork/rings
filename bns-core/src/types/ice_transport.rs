@@ -13,6 +13,8 @@ pub trait IceTransport {
     type Channel;
     type ConnectionState;
 
+    fn new() -> Self;
+    async fn start(&mut self) -> Result<()>;
     async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>>;
     async fn get_pending_candidates(&self) -> Vec<Self::Candidate>;
     async fn get_answer(&self) -> Result<Self::Sdp>;
