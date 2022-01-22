@@ -19,6 +19,7 @@ use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 use crate::types::ice_transport::IceTransport;
+use crate::types::ice_transport::IceTransportBuilder;
 use webrtc::peer_connection::RTCPeerConnection;
 
 #[derive(Clone)]
@@ -27,40 +28,13 @@ pub struct DefaultTransport {
     pub pending_candidates: Arc<Mutex<Vec<RTCIceCandidate>>>,
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl IceTransport for DefaultTransport {
     type Connection = RTCPeerConnection;
     type Candidate = RTCIceCandidate;
     type Sdp = RTCSessionDescription;
     type Channel = RTCDataChannel;
     type ConnectionState = RTCPeerConnectionState;
-
-    fn new() -> Self {
-        return Self {
-            connection: Arc::new(Mutex::new(None)),
-            pending_candidates: Arc::new(Mutex::new(vec![])),
-        };
-    }
-
-    async fn start(&mut self) -> Result<()> {
-        let config = RTCConfiguration {
-            ice_servers: vec![RTCIceServer {
-                urls: vec!["stun:stun.l.google.com:19302".to_owned()],
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let api = APIBuilder::new().build();
-        match api.new_peer_connection(config).await {
-            Ok(c) => {
-                let mut conn = self.connection.lock().await;
-                *conn = Some(Arc::new(c));
-                Ok(())
-            },
-            Err(e) => Err(anyhow!(e))
-        }
-    }
-
 
     async fn get_peer_connection(&self) -> Option<Arc<RTCPeerConnection>> {
         return self.connection.lock().await.clone();
@@ -177,5 +151,36 @@ impl IceTransport for DefaultTransport {
             None => panic!("Connection Failed."),
         }
         Ok(())
+    }
+}
+
+
+#[async_trait(?Send)]
+impl IceTransportBuilder for DefaultTransport {
+
+    fn new() -> Self {
+        return Self {
+            connection: Arc::new(Mutex::new(None)),
+            pending_candidates: Arc::new(Mutex::new(vec![])),
+        };
+    }
+
+    async fn start(&mut self) -> Result<()> {
+        let config = RTCConfiguration {
+            ice_servers: vec![RTCIceServer {
+                urls: vec!["stun:stun.l.google.com:19302".to_owned()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let api = APIBuilder::new().build();
+        match api.new_peer_connection(config).await {
+            Ok(c) => {
+                let mut conn = self.connection.lock().await;
+                *conn = Some(Arc::new(c));
+                Ok(())
+            },
+            Err(e) => Err(anyhow!(e))
+        }
     }
 }

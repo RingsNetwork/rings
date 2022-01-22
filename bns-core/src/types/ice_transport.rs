@@ -5,7 +5,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-#[async_trait]
+#[async_trait(?Send)]
 pub trait IceTransport {
     type Connection;
     type Candidate;
@@ -13,8 +13,6 @@ pub trait IceTransport {
     type Channel;
     type ConnectionState;
 
-    fn new() -> Self;
-    async fn start(&mut self) -> Result<()>;
     async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>>;
     async fn get_pending_candidates(&self) -> Vec<Self::Candidate>;
     async fn get_answer(&self) -> Result<Self::Sdp>;
@@ -52,4 +50,10 @@ pub trait IceTransport {
                 + Sync,
         >,
     ) -> Result<()>;
+}
+
+#[async_trait(?Send)]
+pub trait IceTransportBuilder {
+    fn new() -> Self;
+    async fn start(&mut self) -> Result<()>;
 }
