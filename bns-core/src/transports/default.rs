@@ -2,7 +2,6 @@ use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
 
-
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -66,13 +65,11 @@ impl IceTransport for DefaultTransport {
 
     async fn get_data_channel(&self, label: &str) -> Result<Arc<RTCDataChannel>> {
         match self.get_peer_connection().await {
-            Some(peer_connection) => {
-                peer_connection
-                    .create_data_channel(label, None)
-                    .await
-                    .map_err(|e| anyhow!(e))
-            },
-            None => Err(anyhow!("cannot get data channel"))
+            Some(peer_connection) => peer_connection
+                .create_data_channel(label, None)
+                .await
+                .map_err(|e| anyhow!(e)),
+            None => Err(anyhow!("cannot get data channel")),
         }
     }
 
@@ -97,7 +94,7 @@ impl IceTransport for DefaultTransport {
             Some(peer_connection) => peer_connection
                 .set_remote_description(desc.into())
                 .await
-            .map_err(|e| anyhow!(e)),
+                .map_err(|e| anyhow!(e)),
             None => Err(anyhow!("connection is not setup")),
         }
     }
@@ -154,10 +151,8 @@ impl IceTransport for DefaultTransport {
     }
 }
 
-
 #[async_trait(?Send)]
 impl IceTransportBuilder for DefaultTransport {
-
     fn new() -> Self {
         return Self {
             connection: Arc::new(Mutex::new(None)),
@@ -179,8 +174,8 @@ impl IceTransportBuilder for DefaultTransport {
                 let mut conn = self.connection.lock().await;
                 *conn = Some(Arc::new(c));
                 Ok(())
-            },
-            Err(e) => Err(anyhow!(e))
+            }
+            Err(e) => Err(anyhow!(e)),
         }
     }
 }

@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use bns_core::transports::default::DefaultTransport;
-use bns_core::types::ice_transport::IceTransportBuilder;
 use bns_core::types::ice_transport::IceTransport;
+use bns_core::types::ice_transport::IceTransportBuilder;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::Server;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;

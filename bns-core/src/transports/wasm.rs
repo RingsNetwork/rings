@@ -18,7 +18,6 @@ use web_sys::RtcIceCandidate;
 
 use web_sys::RtcPeerConnection;
 
-
 #[derive(Clone)]
 pub struct WasmTransport {
     pub connection: Option<Arc<RtcPeerConnection>>,
@@ -112,7 +111,6 @@ impl IceTransport for WasmTransport {
 
 #[async_trait(?Send)]
 impl IceTransportBuilder for WasmTransport {
-
     fn new() -> Self {
         let mut config = RtcConfiguration::new();
         config.ice_servers(
@@ -135,7 +133,6 @@ impl IceTransportBuilder for WasmTransport {
         self.setup_channel("bns").await;
         return Ok(());
     }
-
 }
 impl WasmTransport {
     pub async fn setup_offer(&mut self) -> &Self {
