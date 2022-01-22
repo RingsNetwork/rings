@@ -27,7 +27,8 @@ pub struct WasmTransport {
 
 unsafe impl Sync for WasmTransport {}
 
-#[async_trait(?Send)]
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
 impl IceTransport for WasmTransport {
     type Connection = RtcPeerConnection;
     type Candidate = RtcIceCandidate;
@@ -109,7 +110,8 @@ impl IceTransport for WasmTransport {
     }
 }
 
-#[async_trait(?Send)]
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
 impl IceTransportBuilder for WasmTransport {
     fn new() -> Self {
         let mut config = RtcConfiguration::new();
@@ -134,6 +136,7 @@ impl IceTransportBuilder for WasmTransport {
         return Ok(());
     }
 }
+
 impl WasmTransport {
     pub async fn setup_offer(&mut self) -> &Self {
         if let Some(connection) = &self.connection {
