@@ -25,8 +25,6 @@ pub struct WasmTransport {
     pub channel: Option<Arc<RtcDataChannel>>,
 }
 
-unsafe impl Sync for WasmTransport {}
-
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl IceTransport for WasmTransport {
