@@ -154,10 +154,10 @@ impl IceTransport for DefaultTransport {
 #[async_trait(?Send)]
 impl IceTransportBuilder for DefaultTransport {
     fn new() -> Self {
-        return Self {
+        Self {
             connection: Arc::new(Mutex::new(None)),
             pending_candidates: Arc::new(Mutex::new(vec![])),
-        };
+        }
     }
 
     async fn start(&mut self) -> Result<()> {
