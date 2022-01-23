@@ -75,7 +75,7 @@ impl IceTransport for DefaultTransport {
 
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
     where
-        T: Into<RTCSessionDescription> + std::marker::Send,
+        T: Into<RTCSessionDescription>,
     {
         match self.get_peer_connection().await {
             Some(peer_connection) => peer_connection

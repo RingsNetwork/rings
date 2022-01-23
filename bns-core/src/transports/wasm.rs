@@ -61,11 +61,22 @@ impl IceTransport for WasmTransport {
         }
     }
 
-    async fn set_local_description<T>(&self, _desc: T) -> Result<()>
+    async fn set_local_description<T>(&self, desc: T) -> Result<()>
     where
-        T: Into<Self::Sdp> + std::marker::Send,
+        T: Into<Self::Sdp>,
     {
-        unimplemented!();
+        match &self.get_peer_connection().await {
+            Some(c) => {
+                let mut offer_obj = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
+                offer_obj.sdp(&desc.into().sdp());
+                let promise = c.set_local_description(&offer_obj);
+                match JsFuture::from(promise).await {
+                    Ok(_) => Ok(()),
+                    Err(_) => Err(anyhow!("Failed to set remote description"))
+                }
+            },
+            None => Err(anyhow!("Failed on getting connection"))
+        }
     }
 
     async fn set_remote_description<T>(&self, desc: T) -> Result<()>

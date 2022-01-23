@@ -22,7 +22,7 @@ pub trait IceTransport {
 
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
     where
-        T: Into<Self::Sdp> + std::marker::Send;
+        T: Into<Self::Sdp>;
     async fn set_remote_description<T>(&self, desc: T) -> Result<()>
     where
         T: Into<Self::Sdp>;
