@@ -1,4 +1,5 @@
 use crate::types::ice_transport::IceTransport;
+use crate::types::ice_transport::IceTransportBuilder;
 use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -24,9 +25,8 @@ pub struct WasmTransport {
     pub channel: Option<Arc<RtcDataChannel>>,
 }
 
-unsafe impl Sync for WasmTransport {}
-
-#[async_trait]
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
 impl IceTransport for WasmTransport {
     type Connection = RtcPeerConnection;
     type Candidate = RtcIceCandidate;
@@ -108,14 +108,16 @@ impl IceTransport for WasmTransport {
     }
 }
 
-impl WasmTransport {
-    pub async fn new() -> Self {
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl IceTransportBuilder for WasmTransport {
+    fn new() -> Self {
         let mut config = RtcConfiguration::new();
         config.ice_servers(
             &JsValue::from_serde(&json! {[{"urls":"stun:stun.l.google.com:19302"}]}).unwrap(),
         );
 
-        let mut ins = Self {
+        let ins = Self {
             connection: RtcPeerConnection::new_with_configuration(&config)
                 .ok()
                 .as_ref()
@@ -123,11 +125,17 @@ impl WasmTransport {
             channel: None,
             offer: None,
         };
-        ins.setup_offer().await;
-        ins.setup_channel("bns").await;
         return ins;
     }
 
+    async fn start(&mut self) -> Result<()> {
+        self.setup_offer().await;
+        self.setup_channel("bns").await;
+        return Ok(());
+    }
+}
+
+impl WasmTransport {
     pub async fn setup_offer(&mut self) -> &Self {
         if let Some(connection) = &self.connection {
             if let Ok(offer) = JsFuture::from(connection.create_offer()).await {

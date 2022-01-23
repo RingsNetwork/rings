@@ -5,7 +5,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-#[async_trait]
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait IceTransport {
     type Connection;
     type Candidate;
@@ -50,4 +51,11 @@ pub trait IceTransport {
                 + Sync,
         >,
     ) -> Result<()>;
+}
+
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+pub trait IceTransportBuilder {
+    fn new() -> Self;
+    async fn start(&mut self) -> Result<()>;
 }

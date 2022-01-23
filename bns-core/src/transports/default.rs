@@ -1,7 +1,6 @@
 use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
-use core::ops::Deref;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -19,6 +18,7 @@ use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 use crate::types::ice_transport::IceTransport;
+use crate::types::ice_transport::IceTransportBuilder;
 use webrtc::peer_connection::RTCPeerConnection;
 
 #[derive(Clone)]
@@ -27,7 +27,8 @@ pub struct DefaultTransport {
     pub pending_candidates: Arc<Mutex<Vec<RTCIceCandidate>>>,
 }
 
-#[async_trait]
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
 impl IceTransport for DefaultTransport {
     type Connection = RTCPeerConnection;
     type Candidate = RTCIceCandidate;
@@ -44,37 +45,32 @@ impl IceTransport for DefaultTransport {
     }
 
     async fn get_answer(&self) -> Result<RTCSessionDescription> {
-        match self.connection.lock().await.deref() {
+        match self.get_peer_connection().await {
             Some(peer_connection) => peer_connection
                 .create_answer(None)
                 .await
                 .map_err(|e| anyhow!(e)),
-            None => panic!("Connection Failed."),
+            None => Err(anyhow!("cannot get answer")),
         }
     }
 
     async fn get_offer(&self) -> Result<RTCSessionDescription> {
-        match self.connection.lock().await.deref() {
+        match self.get_peer_connection().await {
             Some(peer_connection) => peer_connection
                 .create_offer(None)
                 .await
                 .map_err(|e| anyhow!(e)),
-            None => panic!("Connection Failed."),
+            None => Err(anyhow!("cannot get offer")),
         }
     }
 
     async fn get_data_channel(&self, label: &str) -> Result<Arc<RTCDataChannel>> {
-        match self.connection.lock().await.clone() {
-            Some(peer_connection) => {
-                let data_channel = peer_connection
-                    .create_data_channel(label, None)
-                    .await
-                    .map_err(|e| anyhow!(e))?;
-                return Ok(data_channel);
-            }
-            None => {
-                panic!("Connection Failed.")
-            }
+        match self.get_peer_connection().await {
+            Some(peer_connection) => peer_connection
+                .create_data_channel(label, None)
+                .await
+                .map_err(|e| anyhow!(e)),
+            None => Err(anyhow!("cannot get data channel")),
         }
     }
 
@@ -82,14 +78,12 @@ impl IceTransport for DefaultTransport {
     where
         T: Into<RTCSessionDescription> + std::marker::Send,
     {
-        match self.connection.lock().await.clone() {
+        match self.get_peer_connection().await {
             Some(peer_connection) => peer_connection
                 .set_local_description(desc.into())
                 .await
                 .map_err(|e| anyhow!(e)),
-            None => {
-                panic!("Connection Failed.")
-            }
+            None => Err(anyhow!("cannot get local description")),
         }
     }
 
@@ -97,14 +91,12 @@ impl IceTransport for DefaultTransport {
     where
         T: Into<RTCSessionDescription> + std::marker::Send,
     {
-        match self.connection.lock().await.clone() {
+        match self.get_peer_connection().await {
             Some(peer_connection) => peer_connection
                 .set_remote_description(desc.into())
                 .await
                 .map_err(|e| anyhow!(e)),
-            None => {
-                panic!("Connection Failed.")
-            }
+            None => Err(anyhow!("connection is not setup")),
         }
     }
 
@@ -116,15 +108,13 @@ impl IceTransport for DefaultTransport {
                 + Sync,
         >,
     ) -> Result<()> {
-        match self.connection.lock().await.clone() {
+        match self.get_peer_connection().await {
             Some(peer_connection) => {
                 peer_connection.on_ice_candidate(f).await;
+                Ok(())
             }
-            None => {
-                panic!("Connection Failed.");
-            }
+            None => Err(anyhow!("connection is not setup")),
         }
-        Ok(())
     }
 
     async fn on_peer_connection_state_change(
@@ -135,7 +125,7 @@ impl IceTransport for DefaultTransport {
                 + Sync,
         >,
     ) -> Result<()> {
-        match self.connection.lock().await.clone() {
+        match self.get_peer_connection().await {
             Some(peer_connection) => {
                 peer_connection.on_peer_connection_state_change(f).await;
             }
@@ -152,7 +142,7 @@ impl IceTransport for DefaultTransport {
                 + Sync,
         >,
     ) -> Result<()> {
-        match self.connection.lock().await.clone() {
+        match self.get_peer_connection().await {
             Some(peer_connection) => {
                 peer_connection.on_data_channel(f).await;
             }
@@ -162,8 +152,17 @@ impl IceTransport for DefaultTransport {
     }
 }
 
-impl DefaultTransport {
-    pub async fn new() -> Result<Self> {
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl IceTransportBuilder for DefaultTransport {
+    fn new() -> Self {
+        Self {
+            connection: Arc::new(Mutex::new(None)),
+            pending_candidates: Arc::new(Mutex::new(vec![])),
+        }
+    }
+
+    async fn start(&mut self) -> Result<()> {
         let config = RTCConfiguration {
             ice_servers: vec![RTCIceServer {
                 urls: vec!["stun:stun.l.google.com:19302".to_owned()],
@@ -172,10 +171,13 @@ impl DefaultTransport {
             ..Default::default()
         };
         let api = APIBuilder::new().build();
-        let peer_connection = Arc::new(api.new_peer_connection(config).await?);
-        Ok(Self {
-            connection: Arc::new(Mutex::new(Some(Arc::clone(&peer_connection)))),
-            pending_candidates: Arc::new(Mutex::new(vec![])),
-        })
+        match api.new_peer_connection(config).await {
+            Ok(c) => {
+                let mut conn = self.connection.lock().await;
+                *conn = Some(Arc::new(c));
+                Ok(())
+            }
+            Err(e) => Err(anyhow!(e)),
+        }
     }
 }
