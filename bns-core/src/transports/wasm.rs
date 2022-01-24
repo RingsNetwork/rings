@@ -108,21 +108,14 @@ impl IceTransport for WasmTransport {
                 + Sync,
         >,
     ) -> Result<()> {
+        let mut x: Option<_> = Some(f);
         match &self.get_peer_connection().await {
             Some(c) => {
-                let callback =
-                    Closure::wrap(Box::new(move |ev: RtcPeerConnectionIceEvent| unsafe {
-                        let mut func: Box<
-                            dyn FnMut(
-                                    Option<Self::Candidate>,
-                                )
-                                    -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
-                                + Send
-                                + Sync,
-                        > = transmute_copy(&f);
-                        spawn_local(async move { func(ev.candidate()).await })
-                    })
-                        as Box<dyn FnMut(RtcPeerConnectionIceEvent)>);
+                let callback = Closure::wrap(Box::new(move |ev: RtcPeerConnectionIceEvent| {
+                    let mut f = x.take().unwrap();
+                    spawn_local(async move { f(ev.candidate()).await })
+                })
+                    as Box<dyn FnMut(RtcPeerConnectionIceEvent)>);
                 c.set_onicecandidate(Some(callback.as_ref().unchecked_ref()));
                 Ok(())
             }
