@@ -5,8 +5,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[async_trait(?Send)]
 pub trait IceTransport {
     type Connection;
     type Candidate;
@@ -23,10 +22,10 @@ pub trait IceTransport {
 
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
     where
-        T: Into<Self::Sdp> + std::marker::Send;
+        T: Into<Self::Sdp>;
     async fn set_remote_description<T>(&self, desc: T) -> Result<()>
     where
-        T: Into<Self::Sdp> + std::marker::Send;
+        T: Into<Self::Sdp>;
     async fn on_ice_candidate(
         &self,
         f: Box<
@@ -53,8 +52,7 @@ pub trait IceTransport {
     ) -> Result<()>;
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[async_trait(?Send)]
 pub trait IceTransportBuilder {
     fn new() -> Self;
     async fn start(&mut self) -> Result<()>;

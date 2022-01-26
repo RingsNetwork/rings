@@ -27,8 +27,7 @@ pub struct DefaultTransport {
     pub pending_candidates: Arc<Mutex<Vec<RTCIceCandidate>>>,
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[async_trait(?Send)]
 impl IceTransport for DefaultTransport {
     type Connection = RTCPeerConnection;
     type Candidate = RTCIceCandidate;
@@ -76,7 +75,7 @@ impl IceTransport for DefaultTransport {
 
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
     where
-        T: Into<RTCSessionDescription> + std::marker::Send,
+        T: Into<RTCSessionDescription>,
     {
         match self.get_peer_connection().await {
             Some(peer_connection) => peer_connection
@@ -89,7 +88,7 @@ impl IceTransport for DefaultTransport {
 
     async fn set_remote_description<T>(&self, desc: T) -> Result<()>
     where
-        T: Into<RTCSessionDescription> + std::marker::Send,
+        T: Into<RTCSessionDescription>,
     {
         match self.get_peer_connection().await {
             Some(peer_connection) => peer_connection
@@ -152,8 +151,7 @@ impl IceTransport for DefaultTransport {
     }
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[async_trait(?Send)]
 impl IceTransportBuilder for DefaultTransport {
     fn new() -> Self {
         Self {

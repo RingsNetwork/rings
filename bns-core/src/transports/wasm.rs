@@ -6,31 +6,35 @@ use async_trait::async_trait;
 use js_sys::Reflect;
 use serde_json::json;
 use std::future::Future;
+use std::mem::transmute_copy;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::unimplemented;
 use wasm_bindgen::prelude::*;
-
+use wasm_bindgen::JsCast;
+use wasm_bindgen_futures::spawn_local;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::RtcConfiguration;
 use web_sys::RtcDataChannel;
 use web_sys::RtcIceCandidate;
-
 use web_sys::RtcPeerConnection;
+use web_sys::RtcPeerConnectionIceEvent;
+use web_sys::RtcSdpType;
+use web_sys::RtcSessionDescription;
+use web_sys::RtcSessionDescriptionInit;
 
 #[derive(Clone)]
 pub struct WasmTransport {
     pub connection: Option<Arc<RtcPeerConnection>>,
-    pub offer: Option<String>,
+    pub offer: Option<RtcSessionDescription>,
     pub channel: Option<Arc<RtcDataChannel>>,
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[async_trait(?Send)]
 impl IceTransport for WasmTransport {
     type Connection = RtcPeerConnection;
     type Candidate = RtcIceCandidate;
-    type Sdp = String;
+    type Sdp = RtcSessionDescription;
     type Channel = RtcDataChannel;
     type ConnectionState = String;
 
@@ -48,7 +52,7 @@ impl IceTransport for WasmTransport {
 
     async fn get_offer(&self) -> Result<Self::Sdp> {
         match &self.offer {
-            Some(o) => Ok(o.to_string()),
+            Some(o) => Ok(o.clone()),
             None => Err(anyhow!("Cannot get Offer")),
         }
     }
@@ -60,29 +64,63 @@ impl IceTransport for WasmTransport {
         }
     }
 
-    async fn set_local_description<T>(&self, _desc: T) -> Result<()>
+    async fn set_local_description<T>(&self, desc: T) -> Result<()>
     where
-        T: Into<Self::Sdp> + std::marker::Send,
+        T: Into<Self::Sdp>,
     {
-        unimplemented!();
+        match &self.get_peer_connection().await {
+            Some(c) => {
+                let mut offer_obj = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
+                offer_obj.sdp(&desc.into().sdp());
+                let promise = c.set_local_description(&offer_obj);
+                match JsFuture::from(promise).await {
+                    Ok(_) => Ok(()),
+                    Err(_) => Err(anyhow!("Failed to set remote description")),
+                }
+            }
+            None => Err(anyhow!("Failed on getting connection")),
+        }
     }
 
-    async fn set_remote_description<T>(&self, _desc: T) -> Result<()>
+    async fn set_remote_description<T>(&self, desc: T) -> Result<()>
     where
-        T: Into<Self::Sdp> + std::marker::Send,
+        T: Into<Self::Sdp>,
     {
-        unimplemented!();
+        match &self.get_peer_connection().await {
+            Some(c) => {
+                let mut offer_obj = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
+                offer_obj.sdp(&desc.into().sdp());
+                let promise = c.set_remote_description(&offer_obj);
+                match JsFuture::from(promise).await {
+                    Ok(_) => Ok(()),
+                    Err(_) => Err(anyhow!("Failed to set remote description")),
+                }
+            }
+            None => Err(anyhow!("Failed on getting connection")),
+        }
     }
 
     async fn on_ice_candidate(
         &self,
-        _f: Box<
+        f: Box<
             dyn FnMut(Option<Self::Candidate>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
                 + Send
                 + Sync,
         >,
     ) -> Result<()> {
-        unimplemented!();
+        let mut x: Option<_> = Some(f);
+        match &self.get_peer_connection().await {
+            Some(c) => {
+                let callback = Closure::wrap(Box::new(move |ev: RtcPeerConnectionIceEvent| {
+                    let mut f = x.take().unwrap();
+                    spawn_local(async move { f(ev.candidate()).await })
+                })
+                    as Box<dyn FnMut(RtcPeerConnectionIceEvent)>);
+                c.set_onicecandidate(Some(callback.as_ref().unchecked_ref()));
+                Ok(())
+            }
+            None => Err(anyhow!("Failed on getting connection")),
+        }
     }
 
     async fn on_peer_connection_state_change(
@@ -108,8 +146,7 @@ impl IceTransport for WasmTransport {
     }
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[async_trait(?Send)]
 impl IceTransportBuilder for WasmTransport {
     fn new() -> Self {
         let mut config = RtcConfiguration::new();
@@ -141,7 +178,7 @@ impl WasmTransport {
             if let Ok(offer) = JsFuture::from(connection.create_offer()).await {
                 self.offer = Reflect::get(&offer, &JsValue::from_str("sdp"))
                     .ok()
-                    .and_then(|o| o.as_string())
+                    .and_then(|o| Some(RtcSessionDescription::from(o)))
                     .take();
             }
         }
