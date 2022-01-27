@@ -1,23 +1,25 @@
+/// ref: https://github.com/Ciantic/rust-shared-wasm-experiments/blob/master/src/lib.rs
+
 use anyhow::Result;
 use async_trait::async_trait;
-use tokio::sync::mpsc;
 use std::sync::Arc;
 use crate::types::channel::Events;
 use crate::types::channel::Channel;
+use crossbeam_channel as cbc;
 
-
-pub struct TkChannel {
-    sender: Arc<mpsc::Sender<Events>>,
-    receiver: mpsc::Receiver<Events>
+pub struct CbChannel {
+    sender: Arc<cbc::Sender<Events>>,
+    receiver: cbc::Receiver<Events>
 }
 
+
 #[async_trait(?Send)]
-impl Channel for TkChannel {
-    type Sender = Arc<mpsc::Sender<Events>>;
-    type Receiver = mpsc::Receiver<Events>;
+impl Channel for CbChannel {
+    type Sender = Arc<cbc::Sender<Events>>;
+    type Receiver = cbc::Receiver<Events>;
 
     fn new(buffer: usize) -> Self {
-        let (tx, rx) = mpsc::channel::<Events>(buffer);
+        let (tx, rx) = cbc::bounded(buffer);
         return Self {
             sender: Arc::new(tx),
             receiver: rx
@@ -29,13 +31,14 @@ impl Channel for TkChannel {
     }
 
     async fn send(&self, e: Events) -> Result<()> {
-        return Ok(self.sender.send(e).await?);
+        return Ok(self.sender.send(e)?);
     }
 
     async fn recv(&mut self) -> () {
-        while let Some(e) = self.receiver.recv().await {
+        while let Ok(e) = self.receiver.recv() {
             _ = self.handler(e);
         }
+
     }
 
     async fn handler(&self, e: Events) {
@@ -46,4 +49,5 @@ impl Channel for TkChannel {
             }
         }
     }
+
 }

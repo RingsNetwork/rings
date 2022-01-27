@@ -5,7 +5,9 @@ edition = "2021"
 
 [features]
 default = ["webrtc", "tokio", "tokio-util", "bytes"]
-wasm = ["web-sys", "wasm-bindgen", "js-sys", "wasm-bindgen-futures", "serde", "serde_json"]
+wasm = ["web-sys", "wasm-bindgen", "js-sys",
+        "wasm-bindgen-futures", "serde", "serde_json",
+	"crossbeam-channel"]
 
 [dependencies]
 webrtc = { version = "0.3.3", optional=true}
@@ -20,6 +22,7 @@ wasm-bindgen-futures = {version="0.4.17", optional=true}
 js-sys = { version="0.3.44", optional=true}
 serde = { version = "1.0.130", features = ["derive"], optional=true}
 serde_json = { version="1.0.70", optional=true}
+crossbeam-channel = {version="0.5", optional=true}
 
 
 [dependencies.web-sys]
