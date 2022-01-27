@@ -6,7 +6,6 @@ use async_trait::async_trait;
 use js_sys::Reflect;
 use serde_json::json;
 use std::future::Future;
-use std::mem::transmute_copy;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::unimplemented;
@@ -108,11 +107,11 @@ impl IceTransport for WasmTransport {
                 + Sync,
         >,
     ) -> Result<()> {
-        let mut x: Option<_> = Some(f);
+        let mut f = Some(f);
         match &self.get_peer_connection().await {
             Some(c) => {
                 let callback = Closure::wrap(Box::new(move |ev: RtcPeerConnectionIceEvent| {
-                    let mut f = x.take().unwrap();
+                    let mut f = f.take().unwrap();
                     spawn_local(async move { f(ev.candidate()).await })
                 })
                     as Box<dyn FnMut(RtcPeerConnectionIceEvent)>);

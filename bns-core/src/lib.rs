@@ -3,6 +3,6 @@
 
 #[cfg(feature = "default")]
 pub mod data_channel;
-
+pub mod channels;
 pub mod transports;
 pub mod types;
