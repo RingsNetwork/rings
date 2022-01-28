@@ -14,21 +14,20 @@ use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 
-use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
-use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
-
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportBuilder;
+use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
+use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 
 #[derive(Clone)]
 pub struct DefaultTransport {
     pub connection: Arc<Mutex<Option<Arc<RTCPeerConnection>>>>,
     pub pending_candidates: Arc<Mutex<Vec<RTCIceCandidate>>>,
+    pub channel: Arc<Mutex<Option<Arc<RTCDataChannel>>>>,
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[async_trait(?Send)]
 impl IceTransport for DefaultTransport {
     type Connection = RTCPeerConnection;
     type Candidate = RTCIceCandidate;
@@ -64,19 +63,16 @@ impl IceTransport for DefaultTransport {
         }
     }
 
-    async fn get_data_channel(&self, label: &str) -> Result<Arc<RTCDataChannel>> {
-        match self.get_peer_connection().await {
-            Some(peer_connection) => peer_connection
-                .create_data_channel(label, None)
-                .await
-                .map_err(|e| anyhow!(e)),
-            None => Err(anyhow!("cannot get data channel")),
+    async fn get_data_channel(&self) -> Result<Arc<RTCDataChannel>> {
+        match self.channel.lock().await.clone() {
+            Some(ch) => Ok(ch),
+            None => Err(anyhow!("Data channel may not exist")),
         }
     }
 
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
     where
-        T: Into<RTCSessionDescription> + std::marker::Send,
+        T: Into<RTCSessionDescription>,
     {
         match self.get_peer_connection().await {
             Some(peer_connection) => peer_connection
@@ -89,7 +85,7 @@ impl IceTransport for DefaultTransport {
 
     async fn set_remote_description<T>(&self, desc: T) -> Result<()>
     where
-        T: Into<RTCSessionDescription> + std::marker::Send,
+        T: Into<RTCSessionDescription>,
     {
         match self.get_peer_connection().await {
             Some(peer_connection) => peer_connection
@@ -152,13 +148,13 @@ impl IceTransport for DefaultTransport {
     }
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[async_trait(?Send)]
 impl IceTransportBuilder for DefaultTransport {
     fn new() -> Self {
         Self {
             connection: Arc::new(Mutex::new(None)),
             pending_candidates: Arc::new(Mutex::new(vec![])),
+            channel: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -178,6 +174,26 @@ impl IceTransportBuilder for DefaultTransport {
                 Ok(())
             }
             Err(e) => Err(anyhow!(e)),
+        }?;
+        self.setup_channel("bns").await
+    }
+}
+
+impl DefaultTransport {
+    pub async fn setup_channel(&mut self, name: &str) -> Result<()> {
+        match self.get_peer_connection().await {
+            Some(peer_connection) => {
+                let channel = peer_connection.create_data_channel(name, None).await;
+                match channel {
+                    Ok(ch) => {
+                        let mut channel = self.channel.lock().await;
+                        *channel = Some(ch);
+                        Ok(())
+                    }
+                    Err(e) => Err(anyhow!(e)),
+                }
+            }
+            None => Err(anyhow!("cannot get data channel")),
         }
     }
 }

@@ -2,12 +2,12 @@ use bns_node::discoveries::http::remote_handler;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-
 use anyhow::Result;
+use bns_core::channels::default::TkChannel;
 use bns_core::transports::default::DefaultTransport;
+use bns_core::types::channel::{Channel, Events};
 use bns_core::types::ice_transport::IceTransport;
 use bns_core::types::ice_transport::IceTransportBuilder;
-use clap::Parser;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::Server;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
@@ -15,6 +15,8 @@ use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
 use webrtc::peer_connection::math_rand_alpha;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
+use clap::Parser;
+
 
 #[derive(Parser, Debug)]
 #[clap(about, version, author)]
@@ -34,7 +36,8 @@ async fn main() -> Result<()> {
     ice_transport.start().await?;
     let peer_connection = Arc::downgrade(&ice_transport.get_peer_connection().await.unwrap());
     let pending_candidates = ice_transport.get_pending_candidates().await;
-    let (done_tx, mut done_rx) = tokio::sync::mpsc::channel::<()>(1);
+    let mut channel = TkChannel::new(1);
+    let sender = channel.sender();
 
     ice_transport
         .on_ice_candidate(Box::new(move |c: Option<RTCIceCandidate>| {
@@ -58,7 +61,7 @@ async fn main() -> Result<()> {
         .on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
             // Failed to exit dial server
             if s == RTCPeerConnectionState::Failed {
-                let _ = done_tx.try_send(());
+                let _ = sender.send(Events::ConnectFailed);
             }
 
             Box::pin(async {})
@@ -129,7 +132,7 @@ async fn main() -> Result<()> {
     });
 
     tokio::select! {
-        _ = done_rx.recv() => {
+        _ = channel.recv() => {
             println!("received done signal!");
         }
         _ = tokio::signal::ctrl_c() => {
