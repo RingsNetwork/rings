@@ -15,6 +15,7 @@ wasm = ["web-sys", "wasm-bindgen", "js-sys",
 anyhow = "1.0.45"
 async-trait="0.1.52"
 log = "0.4"
+dashmap = "4"
 
 # default
 webrtc = { version = "0.3.3", optional=true}
