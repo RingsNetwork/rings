@@ -1,10 +1,11 @@
 use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
-
+use std::ops::Deref;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::Mutex as SyncMutex;
 
 use tokio::sync::Mutex;
 use webrtc::api::APIBuilder;
@@ -13,29 +14,64 @@ use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
-
-use crate::types::ice_transport::IceTransport;
-use crate::types::ice_transport::IceTransportBuilder;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
+
+use crate::types::ice_transport::IceTransport;
+use crate::types::channel::Channel;
+use crate::channels::default::TkChannel;
 
 #[derive(Clone)]
 pub struct DefaultTransport {
     pub connection: Arc<Mutex<Option<Arc<RTCPeerConnection>>>>,
     pub pending_candidates: Arc<Mutex<Vec<RTCIceCandidate>>>,
     pub channel: Arc<Mutex<Option<Arc<RTCDataChannel>>>>,
+    pub signaler: Arc<SyncMutex<TkChannel>>
 }
 
 #[async_trait(?Send)]
-impl IceTransport for DefaultTransport {
+impl IceTransport<TkChannel>for DefaultTransport {
     type Connection = RTCPeerConnection;
     type Candidate = RTCIceCandidate;
     type Sdp = RTCSessionDescription;
     type Channel = RTCDataChannel;
     type ConnectionState = RTCPeerConnectionState;
     type Msg = DataChannelMessage;
+
+    fn new(sender: TkChannel) -> Self {
+        Self {
+            connection: Arc::new(Mutex::new(None)),
+            pending_candidates: Arc::new(Mutex::new(vec![])),
+            channel: Arc::new(Mutex::new(None)),
+            signaler: Arc::new(SyncMutex::new(sender))
+        }
+    }
+
+    fn signaler(&self) -> Arc<SyncMutex<TkChannel>> {
+        return Arc::clone(&self.signaler);
+    }
+
+    async fn start(&mut self) -> Result<()> {
+        let config = RTCConfiguration {
+            ice_servers: vec![RTCIceServer {
+                urls: vec!["stun:stun.l.google.com:19302".to_owned()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let api = APIBuilder::new().build();
+        match api.new_peer_connection(config).await {
+            Ok(c) => {
+                let mut conn = self.connection.lock().await;
+                *conn = Some(Arc::new(c));
+                Ok(())
+            }
+            Err(e) => Err(anyhow!(e)),
+        }?;
+        self.setup_channel(&"bns".to_owned()).await
+    }
 
     async fn get_peer_connection(&self) -> Option<Arc<RTCPeerConnection>> {
         return self.connection.lock().await.clone();
@@ -161,37 +197,6 @@ impl IceTransport for DefaultTransport {
             None => panic!("Connection Failed."),
         }
         Ok(())
-    }
-}
-
-#[async_trait(?Send)]
-impl IceTransportBuilder for DefaultTransport {
-    fn new() -> Self {
-        Self {
-            connection: Arc::new(Mutex::new(None)),
-            pending_candidates: Arc::new(Mutex::new(vec![])),
-            channel: Arc::new(Mutex::new(None)),
-        }
-    }
-
-    async fn start(&mut self) -> Result<()> {
-        let config = RTCConfiguration {
-            ice_servers: vec![RTCIceServer {
-                urls: vec!["stun:stun.l.google.com:19302".to_owned()],
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let api = APIBuilder::new().build();
-        match api.new_peer_connection(config).await {
-            Ok(c) => {
-                let mut conn = self.connection.lock().await;
-                *conn = Some(Arc::new(c));
-                Ok(())
-            }
-            Err(e) => Err(anyhow!(e)),
-        }?;
-        self.setup_channel("bns").await
     }
 }
 

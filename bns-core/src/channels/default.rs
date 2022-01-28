@@ -4,11 +4,13 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use std::ops::DerefMut;
 
 pub struct TkChannel {
     sender: Arc<mpsc::Sender<Events>>,
     receiver: mpsc::Receiver<Events>,
 }
+
 
 #[async_trait(?Send)]
 impl Channel for TkChannel {
@@ -42,7 +44,8 @@ impl Channel for TkChannel {
             Events::Null => (),
             Events::ConnectFailed => {
                 println!("ConnectFailed");
-            }
+            },
+            _ => ()
         }
     }
 }

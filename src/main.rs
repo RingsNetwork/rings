@@ -9,7 +9,6 @@ use bns_core::channels::default::TkChannel;
 use bns_core::transports::default::DefaultTransport;
 use bns_core::types::channel::{Channel, Events};
 use bns_core::types::ice_transport::IceTransport;
-use bns_core::types::ice_transport::IceTransportBuilder;
 
 use hyper::service::{make_service_fn, service_fn};
 use hyper::Server;
@@ -23,13 +22,12 @@ use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 async fn main() -> Result<()> {
     let http_addr = "0.0.0.0:60000";
     let remote_addr = "0.0.0.0:50000";
-
-    let mut ice_transport = DefaultTransport::new();
+    let mut ice_transport = DefaultTransport::new(TkChannel::new(1));
+    let signaler = ice_transport.signaler();
+    let sender = Arc::clone(&signaler.lock().unwrap().sender());
     ice_transport.start().await?;
     let peer_connection = Arc::downgrade(&ice_transport.get_peer_connection().await.unwrap());
     let pending_candidates = ice_transport.get_pending_candidates().await;
-    let mut channel = TkChannel::new(1);
-    let sender = channel.sender();
 
     ice_transport
         .on_ice_candidate(Box::new(move |c: Option<RTCIceCandidate>| {
@@ -118,6 +116,7 @@ async fn main() -> Result<()> {
         }
     });
 
+    let mut channel = signaler.lock().unwrap();
     tokio::select! {
         _ = channel.recv() => {
             println!("received done signal!");

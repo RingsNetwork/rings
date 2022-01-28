@@ -4,15 +4,21 @@ use async_trait::async_trait;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::Mutex as SyncMutex;
+use crate::types::channel::Channel;
 
 #[async_trait(?Send)]
-pub trait IceTransport {
+pub trait IceTransport<Ch: Channel> {
     type Connection;
     type Candidate;
     type Sdp;
     type Channel;
     type ConnectionState;
     type Msg;
+
+    fn new(signaler: Ch) -> Self;
+    fn signaler(&self) -> Arc<SyncMutex<Ch>>;
+    async fn start(&mut self) -> Result<()>;
 
     async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>>;
     async fn get_pending_candidates(&self) -> Vec<Self::Candidate>;
@@ -59,10 +65,4 @@ pub trait IceTransport {
                 + Sync,
         >,
     ) -> Result<()>;
-}
-
-#[async_trait(?Send)]
-pub trait IceTransportBuilder {
-    fn new() -> Self;
-    async fn start(&mut self) -> Result<()>;
 }
