@@ -12,13 +12,13 @@ pub trait IceTransport {
     type Sdp;
     type Channel;
     type ConnectionState;
+    type Msg;
 
     async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>>;
     async fn get_pending_candidates(&self) -> Vec<Self::Candidate>;
     async fn get_answer(&self) -> Result<Self::Sdp>;
     async fn get_offer(&self) -> Result<Self::Sdp>;
-
-    async fn get_data_channel(&self) -> Result<Arc<Self::Channel>>;
+    async fn get_data_channel(&self) -> Option<Arc<Self::Channel>>;
 
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
     where
@@ -50,6 +50,16 @@ pub trait IceTransport {
                 + Sync,
         >,
     ) -> Result<()>;
+
+    async fn on_message(
+        &self,
+        f: Box<
+            dyn FnMut(Self::Msg) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+                + Send
+                + Sync,
+        >,
+    ) -> Result<()>;
+
 }
 
 #[async_trait(?Send)]

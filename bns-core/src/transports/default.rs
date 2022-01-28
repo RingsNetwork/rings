@@ -19,6 +19,7 @@ use crate::types::ice_transport::IceTransportBuilder;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
+use webrtc::data_channel::data_channel_message::DataChannelMessage;
 
 #[derive(Clone)]
 pub struct DefaultTransport {
@@ -34,6 +35,7 @@ impl IceTransport for DefaultTransport {
     type Sdp = RTCSessionDescription;
     type Channel = RTCDataChannel;
     type ConnectionState = RTCPeerConnectionState;
+    type Msg = DataChannelMessage;
 
     async fn get_peer_connection(&self) -> Option<Arc<RTCPeerConnection>> {
         return self.connection.lock().await.clone();
@@ -63,11 +65,8 @@ impl IceTransport for DefaultTransport {
         }
     }
 
-    async fn get_data_channel(&self) -> Result<Arc<RTCDataChannel>> {
-        match self.channel.lock().await.clone() {
-            Some(ch) => Ok(ch),
-            None => Err(anyhow!("Data channel may not exist")),
-        }
+    async fn get_data_channel(&self) -> Option<Arc<RTCDataChannel>> {
+        self.channel.lock().await.clone()
     }
 
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
@@ -146,6 +145,24 @@ impl IceTransport for DefaultTransport {
         }
         Ok(())
     }
+
+    async fn on_message(
+        &self,
+        f: Box<
+            dyn FnMut(DataChannelMessage) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+                + Send
+                + Sync,
+        >,
+    ) -> Result<()> {
+        match self.get_data_channel().await {
+            Some(ch) => {
+                ch.on_message(f).await;
+            }
+            None => panic!("Connection Failed."),
+        }
+        Ok(())
+    }
+
 }
 
 #[async_trait(?Send)]

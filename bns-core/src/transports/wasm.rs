@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::unimplemented;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::spawn_local;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::RtcConfiguration;
@@ -38,6 +39,7 @@ impl IceTransport for WasmTransport {
     type Sdp = RtcSessionDescription;
     type Channel = RtcDataChannel;
     type ConnectionState = String;
+    type Msg = JsValue;
 
     async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>> {
         return self.connection.as_ref().map(|c| Arc::clone(c));
@@ -58,11 +60,8 @@ impl IceTransport for WasmTransport {
         }
     }
 
-    async fn get_data_channel(&self) -> Result<Arc<Self::Channel>> {
-        match &self.channel {
-            Some(c) => Ok(c.to_owned()),
-            None => Err(anyhow!("Faied to get channel")),
-        }
+    async fn get_data_channel(&self) -> Option<Arc<Self::Channel>> {
+        self.channel
     }
 
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
@@ -148,7 +147,7 @@ impl IceTransport for WasmTransport {
             Some(c) => {
                 let callback = Closure::wrap(Box::new(move |ev: RtcDataChannelEvent| {
                     let mut f = f.take().unwrap();
-                    spawn_local(async move { f(ev.candidate()).await })
+                    spawn_local(async move { f(ev.channel()).await })
                 })
                     as Box<dyn FnMut(RtcDataChannelEvent)>);
                 c.set_ondatachannel(Some(callback.as_ref().unchecked_ref()));
@@ -157,6 +156,31 @@ impl IceTransport for WasmTransport {
             None => Err(anyhow!("Failed on getting connection")),
         }
     }
+
+    async fn on_message(
+        &self,
+        f: Box<
+            dyn FnMut(Self::Msg) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+                + Send
+                + Sync,
+        >,
+    ) -> Result<()> {
+
+        let mut f = Some(f);
+        match &self.get_data_channel().await {
+            Some(c) => {
+                let callback = Closure::wrap(Box::new(move |ev: MessageEvent| {
+                    let mut f = f.take().unwrap();
+                    spawn_local(async move { f(ev.data()).await })
+                })
+                    as Box<dyn FnMut(MessageEvent)>);
+                c.set_onmessage(Some(callback.as_ref().unchecked_ref()));
+                Ok(())
+            }
+            None => Err(anyhow!("Failed on getting connection")),
+        }
+    }
+
 }
 
 #[async_trait(?Send)]
