@@ -21,6 +21,7 @@ use web_sys::RtcPeerConnectionIceEvent;
 use web_sys::RtcSdpType;
 use web_sys::RtcSessionDescription;
 use web_sys::RtcSessionDescriptionInit;
+use log::info;
 
 #[derive(Clone)]
 pub struct WasmTransport {
@@ -167,6 +168,7 @@ impl IceTransportBuilder for WasmTransport {
     async fn start(&mut self) -> Result<()> {
         self.setup_offer().await;
         self.setup_channel("bns").await;
+        info!("started!");
         return Ok(());
     }
 }
@@ -179,7 +181,9 @@ impl WasmTransport {
                     .ok()
                     .and_then(|o| Some(RtcSessionDescription::from(o)))
                     .take();
+                info!("{:?}", self.offer);
             }
+
         }
         return self;
     }

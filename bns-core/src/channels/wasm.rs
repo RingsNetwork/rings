@@ -6,6 +6,8 @@ use std::sync::Arc;
 use crate::types::channel::Events;
 use crate::types::channel::Channel;
 use crossbeam_channel as cbc;
+use log::info;
+
 
 pub struct CbChannel {
     sender: Arc<cbc::Sender<Events>>,
@@ -36,7 +38,7 @@ impl Channel for CbChannel {
 
     async fn recv(&mut self) -> () {
         while let Ok(e) = self.receiver.recv() {
-            _ = self.handler(e);
+            let _ = self.handler(e);
         }
 
     }
@@ -45,7 +47,7 @@ impl Channel for CbChannel {
         match e {
             Events::Null => (),
             Events::ConnectFailed => {
-                println!("ConnectFailed");
+                info!("ConnectFailed");
             }
         }
     }
