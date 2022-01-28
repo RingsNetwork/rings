@@ -59,7 +59,6 @@ pub trait IceTransport {
                 + Sync,
         >,
     ) -> Result<()>;
-
 }
 
 #[async_trait(?Send)]

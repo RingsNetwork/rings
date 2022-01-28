@@ -166,22 +166,19 @@ impl IceTransport for WasmTransport {
                 + Sync,
         >,
     ) -> Result<()> {
-
         let mut f = Some(f);
         match &self.get_data_channel().await {
             Some(c) => {
                 let callback = Closure::wrap(Box::new(move |ev: MessageEvent| {
                     let mut f = f.take().unwrap();
                     spawn_local(async move { f(ev.data()).await })
-                })
-                    as Box<dyn FnMut(MessageEvent)>);
+                }) as Box<dyn FnMut(MessageEvent)>);
                 c.set_onmessage(Some(callback.as_ref().unchecked_ref()));
                 Ok(())
             }
             None => Err(anyhow!("Failed on getting connection")),
         }
     }
-
 }
 
 #[async_trait(?Send)]

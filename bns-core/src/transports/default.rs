@@ -16,10 +16,10 @@ use webrtc::peer_connection::configuration::RTCConfiguration;
 
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportBuilder;
+use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
-use webrtc::data_channel::data_channel_message::DataChannelMessage;
 
 #[derive(Clone)]
 pub struct DefaultTransport {
@@ -162,7 +162,6 @@ impl IceTransport for DefaultTransport {
         }
         Ok(())
     }
-
 }
 
 #[async_trait(?Send)]
