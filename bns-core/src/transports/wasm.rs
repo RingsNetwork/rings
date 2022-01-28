@@ -4,6 +4,7 @@ use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
 use js_sys::Reflect;
+use log::info;
 use serde_json::json;
 use std::future::Future;
 use std::pin::Pin;
@@ -21,7 +22,6 @@ use web_sys::RtcPeerConnectionIceEvent;
 use web_sys::RtcSdpType;
 use web_sys::RtcSessionDescription;
 use web_sys::RtcSessionDescriptionInit;
-use log::info;
 
 #[derive(Clone)]
 pub struct WasmTransport {
@@ -183,7 +183,6 @@ impl WasmTransport {
                     .take();
                 info!("{:?}", self.offer);
             }
-
         }
         return self;
     }

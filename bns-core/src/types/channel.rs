@@ -4,7 +4,7 @@ use async_trait::async_trait;
 #[derive(Debug)]
 pub enum Events {
     Null,
-    ConnectFailed
+    ConnectFailed,
 }
 
 #[async_trait(?Send)]

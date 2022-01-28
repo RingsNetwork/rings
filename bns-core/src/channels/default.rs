@@ -1,14 +1,13 @@
+use crate::types::channel::Channel;
+use crate::types::channel::Events;
 use anyhow::Result;
 use async_trait::async_trait;
-use tokio::sync::mpsc;
 use std::sync::Arc;
-use crate::types::channel::Events;
-use crate::types::channel::Channel;
-
+use tokio::sync::mpsc;
 
 pub struct TkChannel {
     sender: Arc<mpsc::Sender<Events>>,
-    receiver: mpsc::Receiver<Events>
+    receiver: mpsc::Receiver<Events>,
 }
 
 #[async_trait(?Send)]
@@ -20,8 +19,8 @@ impl Channel for TkChannel {
         let (tx, rx) = mpsc::channel::<Events>(buffer);
         return Self {
             sender: Arc::new(tx),
-            receiver: rx
-        }
+            receiver: rx,
+        };
     }
 
     fn sender(&self) -> Self::Sender {
