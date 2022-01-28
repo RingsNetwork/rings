@@ -17,14 +17,14 @@ impl Channel for TkChannel {
 
     fn new(buffer: usize) -> Self {
         let (tx, rx) = mpsc::channel::<Events>(buffer);
-        return Self {
+        Self {
             sender: Arc::new(tx),
             receiver: rx,
-        };
+        }
     }
 
     fn sender(&self) -> Self::Sender {
-        return Arc::clone(&self.sender);
+        Arc::clone(&self.sender)
     }
 
     async fn send(&self, e: Events) -> Result<()> {
