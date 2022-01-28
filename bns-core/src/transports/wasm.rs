@@ -16,14 +16,13 @@ use wasm_bindgen_futures::spawn_local;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::RtcConfiguration;
 use web_sys::RtcDataChannel;
+use web_sys::RtcDataChannelEvent;
 use web_sys::RtcIceCandidate;
 use web_sys::RtcPeerConnection;
 use web_sys::RtcPeerConnectionIceEvent;
-use web_sys::RtcDataChannelEvent;
 use web_sys::RtcSdpType;
 use web_sys::RtcSessionDescription;
 use web_sys::RtcSessionDescriptionInit;
-
 
 #[derive(Clone)]
 pub struct WasmTransport {

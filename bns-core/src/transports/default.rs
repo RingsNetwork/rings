@@ -14,10 +14,10 @@ use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 
-use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
-use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportBuilder;
+use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
+use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 
 #[derive(Clone)]
@@ -66,7 +66,7 @@ impl IceTransport for DefaultTransport {
     async fn get_data_channel(&self) -> Result<Arc<RTCDataChannel>> {
         match self.channel.lock().await.clone() {
             Some(ch) => Ok(ch),
-            None => Err(anyhow!("Data channel may not exist"))
+            None => Err(anyhow!("Data channel may not exist")),
         }
     }
 
@@ -189,11 +189,11 @@ impl DefaultTransport {
                         let mut channel = self.channel.lock().await;
                         *channel = Some(ch);
                         Ok(())
-                    },
-                    Err(e) => Err(anyhow!(e))
+                    }
+                    Err(e) => Err(anyhow!(e)),
                 }
-            },
-            None => Err(anyhow!("cannot get data channel"))
+            }
+            None => Err(anyhow!("cannot get data channel")),
         }
     }
 }
