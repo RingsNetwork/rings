@@ -4,9 +4,9 @@ use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
 use js_sys::Reflect;
+use log::info;
 use serde_json::json;
 use std::future::Future;
-use std::mem::transmute_copy;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::unimplemented;
@@ -16,6 +16,7 @@ use wasm_bindgen_futures::spawn_local;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::RtcConfiguration;
 use web_sys::RtcDataChannel;
+use web_sys::RtcDataChannelEvent;
 use web_sys::RtcIceCandidate;
 use web_sys::RtcPeerConnection;
 use web_sys::RtcPeerConnectionIceEvent;
@@ -57,7 +58,7 @@ impl IceTransport for WasmTransport {
         }
     }
 
-    async fn get_data_channel(&self, _label: &str) -> Result<Arc<Self::Channel>> {
+    async fn get_data_channel(&self) -> Result<Arc<Self::Channel>> {
         match &self.channel {
             Some(c) => Ok(c.to_owned()),
             None => Err(anyhow!("Faied to get channel")),
@@ -108,11 +109,11 @@ impl IceTransport for WasmTransport {
                 + Sync,
         >,
     ) -> Result<()> {
-        let mut x: Option<_> = Some(f);
+        let mut f = Some(f);
         match &self.get_peer_connection().await {
             Some(c) => {
                 let callback = Closure::wrap(Box::new(move |ev: RtcPeerConnectionIceEvent| {
-                    let mut f = x.take().unwrap();
+                    let mut f = f.take().unwrap();
                     spawn_local(async move { f(ev.candidate()).await })
                 })
                     as Box<dyn FnMut(RtcPeerConnectionIceEvent)>);
@@ -142,7 +143,19 @@ impl IceTransport for WasmTransport {
                 + Sync,
         >,
     ) -> Result<()> {
-        unimplemented!();
+        let mut f = Some(f);
+        match &self.get_peer_connection().await {
+            Some(c) => {
+                let callback = Closure::wrap(Box::new(move |ev: RtcDataChannelEvent| {
+                    let mut f = f.take().unwrap();
+                    spawn_local(async move { f(ev.candidate()).await })
+                })
+                    as Box<dyn FnMut(RtcDataChannelEvent)>);
+                c.set_ondatachannel(Some(callback.as_ref().unchecked_ref()));
+                Ok(())
+            }
+            None => Err(anyhow!("Failed on getting connection")),
+        }
     }
 }
 
@@ -168,6 +181,7 @@ impl IceTransportBuilder for WasmTransport {
     async fn start(&mut self) -> Result<()> {
         self.setup_offer().await;
         self.setup_channel("bns").await;
+        info!("started!");
         return Ok(());
     }
 }
@@ -180,6 +194,7 @@ impl WasmTransport {
                     .ok()
                     .and_then(|o| Some(RtcSessionDescription::from(o)))
                     .take();
+                info!("{:?}", self.offer);
             }
         }
         return self;
