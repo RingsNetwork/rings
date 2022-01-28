@@ -15,6 +15,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::spawn_local;
 use wasm_bindgen_futures::JsFuture;
+use web_sys::MessageEvent;
 use web_sys::RtcConfiguration;
 use web_sys::RtcDataChannel;
 use web_sys::RtcDataChannelEvent;
@@ -61,7 +62,7 @@ impl IceTransport for WasmTransport {
     }
 
     async fn get_data_channel(&self) -> Option<Arc<Self::Channel>> {
-        self.channel
+        self.channel.as_ref().map(|c| Arc::clone(&c))
     }
 
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
@@ -136,7 +137,7 @@ impl IceTransport for WasmTransport {
 
     async fn on_data_channel(
         &self,
-        _f: Box<
+        f: Box<
             dyn FnMut(Arc<Self::Channel>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
                 + Send
                 + Sync,
@@ -147,7 +148,7 @@ impl IceTransport for WasmTransport {
             Some(c) => {
                 let callback = Closure::wrap(Box::new(move |ev: RtcDataChannelEvent| {
                     let mut f = f.take().unwrap();
-                    spawn_local(async move { f(ev.channel()).await })
+                    spawn_local(async move { f(Arc::new(ev.channel())).await })
                 })
                     as Box<dyn FnMut(RtcDataChannelEvent)>);
                 c.set_ondatachannel(Some(callback.as_ref().unchecked_ref()));

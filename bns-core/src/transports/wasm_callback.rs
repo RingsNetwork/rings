@@ -1,6 +1,3 @@
-use bns_core::transports::wasm::WasmTransport;
-use bns_core::types::ice_transport::IceTransport;
-use bns_core::types::ice_transport::IceTransportBuilder;
 use js_sys::Reflect;
 use log::info;
 use serde_json::json;
@@ -11,15 +8,10 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 use wasm_bindgen_futures::JsFuture;
-use web_sys::HtmlTextAreaElement;
-use web_sys::InputEvent;
 use web_sys::RtcConfiguration;
 use web_sys::RtcDataChannel;
 use web_sys::{MessageEvent, RtcDataChannelEvent, RtcPeerConnection, RtcPeerConnectionIceEvent};
 use web_sys::{RtcSdpType, RtcSessionDescriptionInit};
-use yew::html::Scope;
-use yew::prelude::*;
-use yew::NodeRef;
 
 struct WasmCallback {}
 
