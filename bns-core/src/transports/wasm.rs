@@ -19,12 +19,12 @@ use web_sys::RtcConfiguration;
 use web_sys::RtcDataChannel;
 use web_sys::RtcDataChannelEvent;
 use web_sys::RtcIceCandidate;
+use web_sys::RtcIceConnectionState;
 use web_sys::RtcPeerConnection;
 use web_sys::RtcPeerConnectionIceEvent;
 use web_sys::RtcSdpType;
 use web_sys::RtcSessionDescription;
 use web_sys::RtcSessionDescriptionInit;
-use web_sys::RtcIceConnectionState;
 
 #[derive(Clone)]
 pub struct WasmTransport {
@@ -59,7 +59,7 @@ impl IceTransport for WasmTransport {
                     Ok(answer) => Ok(answer.into()),
                     Err(_) => Err(anyhow!("Failed to set remote description")),
                 }
-            },
+            }
             None => Err(anyhow!("cannot get answer")),
         }
     }
@@ -148,7 +148,8 @@ impl IceTransport for WasmTransport {
                 let callback = Closure::wrap(Box::new(move |ev: RtcIceConnectionState| {
                     let mut f = f.take().unwrap();
                     spawn_local(async move { f(ev).await })
-                }) as Box<dyn FnMut(RtcIceConnectionState)>);
+                })
+                    as Box<dyn FnMut(RtcIceConnectionState)>);
                 c.set_oniceconnectionstatechange(Some(callback.as_ref().unchecked_ref()));
                 Ok(())
             }
