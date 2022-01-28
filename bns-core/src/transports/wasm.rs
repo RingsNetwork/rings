@@ -19,9 +19,11 @@ use web_sys::RtcDataChannel;
 use web_sys::RtcIceCandidate;
 use web_sys::RtcPeerConnection;
 use web_sys::RtcPeerConnectionIceEvent;
+use web_sys::RtcDataChannelEvent;
 use web_sys::RtcSdpType;
 use web_sys::RtcSessionDescription;
 use web_sys::RtcSessionDescriptionInit;
+
 
 #[derive(Clone)]
 pub struct WasmTransport {
@@ -57,7 +59,7 @@ impl IceTransport for WasmTransport {
         }
     }
 
-    async fn get_data_channel(&self, _label: &str) -> Result<Arc<Self::Channel>> {
+    async fn get_data_channel(&self) -> Result<Arc<Self::Channel>> {
         match &self.channel {
             Some(c) => Ok(c.to_owned()),
             None => Err(anyhow!("Faied to get channel")),
@@ -142,7 +144,19 @@ impl IceTransport for WasmTransport {
                 + Sync,
         >,
     ) -> Result<()> {
-        unimplemented!();
+        let mut f = Some(f);
+        match &self.get_peer_connection().await {
+            Some(c) => {
+                let callback = Closure::wrap(Box::new(move |ev: RtcDataChannelEvent| {
+                    let mut f = f.take().unwrap();
+                    spawn_local(async move { f(ev.candidate()).await })
+                })
+                    as Box<dyn FnMut(RtcDataChannelEvent)>);
+                c.set_ondatachannel(Some(callback.as_ref().unchecked_ref()));
+                Ok(())
+            }
+            None => Err(anyhow!("Failed on getting connection")),
+        }
     }
 }
 
