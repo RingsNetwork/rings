@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::Mutex as SyncMutex;
 
 use tokio::sync::Mutex;
+use tokio::time::Duration;
 use webrtc::api::APIBuilder;
 
 use webrtc::data_channel::RTCDataChannel;
@@ -18,7 +19,7 @@ use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
-
+use webrtc::peer_connection::math_rand_alpha;
 use crate::types::ice_transport::IceTransport;
 use crate::types::channel::Channel;
 use crate::types::channel::Events;
@@ -222,6 +223,15 @@ impl DefaultTransport {
 
 
 impl DefaultTransport {
+
+    pub async fn setup_callback(&self) -> Result<()> {
+        self.on_ice_candidate(self.on_ice_candidate_callback().await).await?;
+        self.on_peer_connection_state_change(self.on_peer_connection_state_change_callback().await).await?;
+        self.on_data_channel(self.on_data_channel_callback().await).await?;
+        self.on_message(self.on_message_callback().await).await?;
+        Ok(())
+    }
+
     pub async fn on_ice_candidate_callback(&self) -> Box<
             dyn FnMut(Option<<Self as IceTransport<TkChannel>>::Candidate>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
             + Send
@@ -260,6 +270,43 @@ impl DefaultTransport {
             }
             Box::pin(async move {
 
+            })
+        }
+    }
+
+    pub async fn on_data_channel_callback(&self) -> Box<
+            dyn FnMut(Arc<RTCDataChannel>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+                + Send
+                + Sync,
+        > {
+        box move |d: Arc<RTCDataChannel>| {
+            let d =  Arc::clone(&d);
+            Box::pin(async move {
+                let mut result = Result::<usize>::Ok(0);
+                while result.is_ok() {
+                    let timeout = tokio::time::sleep(Duration::from_secs(5));
+                    tokio::pin!(timeout);
+                    tokio::select! {
+                        _ = timeout.as_mut() =>{
+                            let message = math_rand_alpha(15);
+                            println!("Sending '{}'", message);
+                            result = d.send_text(message).await.map_err(Into::into);
+                        }
+                    };
+                }
+            })
+        }
+    }
+
+    pub async fn on_message_callback(&self) -> Box<
+            dyn FnMut(DataChannelMessage) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+                + Send
+                + Sync,
+        > {
+        box move |msg: DataChannelMessage| {
+            let msg_str = String::from_utf8(msg.data.to_vec()).unwrap();
+            println!("Message from DataChannel: '{}'", msg_str);
+            Box::pin(async move {
             })
         }
     }
