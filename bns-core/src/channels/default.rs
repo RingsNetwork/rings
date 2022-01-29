@@ -4,7 +4,6 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use std::ops::DerefMut;
 
 pub struct TkChannel {
     sender: Arc<mpsc::Sender<Events>>,

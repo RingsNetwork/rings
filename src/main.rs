@@ -1,15 +1,12 @@
-use bns_node::discoveries::http::remote_handler;
 use std::net::SocketAddr;
 use std::str::FromStr;
-use std::sync::Arc;
-use std::time::Duration;
-
 use anyhow::Result;
+use bns_node::discoveries::http::remote_handler;
 use bns_core::channels::default::TkChannel;
 use bns_core::transports::default::DefaultTransport;
-use bns_core::types::channel::{Channel, Events};
+use bns_core::types::channel::Channel;
 use bns_core::types::ice_transport::IceTransport;
-
+use bns_core::types::ice_transport::IceTransportCallback;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::Server;
 

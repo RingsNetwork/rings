@@ -1,12 +1,10 @@
 use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
-use std::ops::Deref;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex as SyncMutex;
-
 use tokio::sync::Mutex;
 use tokio::time::Duration;
 use webrtc::api::APIBuilder;
@@ -21,6 +19,7 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::peer_connection::math_rand_alpha;
 use crate::types::ice_transport::IceTransport;
+use crate::types::ice_transport::IceTransportCallback;
 use crate::types::channel::Channel;
 use crate::types::channel::Events;
 use crate::channels::default::TkChannel;
@@ -221,10 +220,10 @@ impl DefaultTransport {
     }
 }
 
+#[async_trait(?Send)]
+impl IceTransportCallback<TkChannel> for DefaultTransport {
 
-impl DefaultTransport {
-
-    pub async fn setup_callback(&self) -> Result<()> {
+    async fn setup_callback(&self) -> Result<()> {
         self.on_ice_candidate(self.on_ice_candidate_callback().await).await?;
         self.on_peer_connection_state_change(self.on_peer_connection_state_change_callback().await).await?;
         self.on_data_channel(self.on_data_channel_callback().await).await?;
@@ -232,7 +231,7 @@ impl DefaultTransport {
         Ok(())
     }
 
-    pub async fn on_ice_candidate_callback(&self) -> Box<
+    async fn on_ice_candidate_callback(&self) -> Box<
             dyn FnMut(Option<<Self as IceTransport<TkChannel>>::Candidate>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
             + Send
             + Sync> {
@@ -257,7 +256,7 @@ impl DefaultTransport {
         }
     }
 
-    pub async fn on_peer_connection_state_change_callback(&self) ->  Box<
+    async fn on_peer_connection_state_change_callback(&self) ->  Box<
             dyn FnMut(RTCPeerConnectionState) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
                 + Send
                 + Sync,
@@ -274,7 +273,7 @@ impl DefaultTransport {
         }
     }
 
-    pub async fn on_data_channel_callback(&self) -> Box<
+    async fn on_data_channel_callback(&self) -> Box<
             dyn FnMut(Arc<RTCDataChannel>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
                 + Send
                 + Sync,
@@ -298,7 +297,7 @@ impl DefaultTransport {
         }
     }
 
-    pub async fn on_message_callback(&self) -> Box<
+    async fn on_message_callback(&self) -> Box<
             dyn FnMut(DataChannelMessage) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
                 + Send
                 + Sync,
