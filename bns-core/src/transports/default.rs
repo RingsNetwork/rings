@@ -21,6 +21,7 @@ use webrtc::peer_connection::RTCPeerConnection;
 
 use crate::types::ice_transport::IceTransport;
 use crate::types::channel::Channel;
+use crate::types::channel::Events;
 use crate::channels::default::TkChannel;
 
 #[derive(Clone)]
@@ -215,6 +216,51 @@ impl DefaultTransport {
                 }
             }
             None => Err(anyhow!("cannot get data channel")),
+        }
+    }
+}
+
+
+impl DefaultTransport {
+    pub async fn on_ice_candidate_callback(&self) -> Box<
+            dyn FnMut(Option<<Self as IceTransport<TkChannel>>::Candidate>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+            + Send
+            + Sync> {
+        let peer_connection = Arc::downgrade(&self.get_peer_connection().await.unwrap());
+        let pending_candidates = self.get_pending_candidates().await;
+
+        box move |c: Option<<Self as IceTransport<TkChannel>>::Candidate>| {
+            let peer_connection = peer_connection.to_owned();
+            let pending_candidates = pending_candidates.to_owned();
+            Box::pin(async move {
+                if let Some(candidate) = c {
+                    if let Some(peer_connection) = peer_connection.upgrade() {
+                        let desc = peer_connection.remote_description().await;
+                        if desc.is_none() {
+                            let mut candidates = pending_candidates;
+                            println!("start answer candidate: {:?}", candidate);
+                            candidates.push(candidate.clone());
+                        }
+                    }
+                }
+            })
+        }
+    }
+
+    pub async fn on_peer_connection_state_change_callback(&self) ->  Box<
+            dyn FnMut(RTCPeerConnectionState) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+                + Send
+                + Sync,
+        > {
+        let sender = self.signaler().lock().unwrap().sender();
+        box move |s: RTCPeerConnectionState| {
+            let sender = Arc::clone(&sender);
+            if s == RTCPeerConnectionState::Failed {
+                let _ = sender.send(Events::ConnectFailed);
+            }
+            Box::pin(async move {
+
+            })
         }
     }
 }

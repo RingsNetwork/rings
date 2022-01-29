@@ -26,27 +26,14 @@ async fn main() -> Result<()> {
     let signaler = ice_transport.signaler();
     let sender = Arc::clone(&signaler.lock().unwrap().sender());
     ice_transport.start().await?;
-    let peer_connection = Arc::downgrade(&ice_transport.get_peer_connection().await.unwrap());
-    let pending_candidates = ice_transport.get_pending_candidates().await;
 
     ice_transport
-        .on_ice_candidate(Box::new(move |c: Option<RTCIceCandidate>| {
-            let peer_connection = peer_connection.to_owned();
-            let pending_candidates = pending_candidates.to_owned();
-            Box::pin(async move {
-                if let Some(candidate) = c {
-                    if let Some(peer_connection) = peer_connection.upgrade() {
-                        let desc = peer_connection.remote_description().await;
-                        if desc.is_none() {
-                            let mut candidates = pending_candidates;
-                            println!("start answer candidate: {:?}", candidate);
-                            candidates.push(candidate.clone());
-                        }
-                    }
-                }
-            })
-        }))
-        .await?;
+        .on_ice_candidate(ice_transport.on_ice_candidate_callback().await).await?;
+    ice_transport
+        .on_peer_connection_state_change(
+            ice_transport.on_peer_connection_state_change_callback().await
+        ).await?;
+
     ice_transport
         .on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
             // Failed to exit dial server
