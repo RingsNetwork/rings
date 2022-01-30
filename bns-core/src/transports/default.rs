@@ -42,12 +42,12 @@ impl IceTransport<TkChannel> for DefaultTransport {
     type ConnectionState = RTCPeerConnectionState;
     type Msg = DataChannelMessage;
 
-    fn new(sender: TkChannel) -> Self {
+    fn new(ch: TkChannel) -> Self {
         Self {
             connection: Arc::new(Mutex::new(None)),
             pending_candidates: Arc::new(Mutex::new(vec![])),
             channel: Arc::new(Mutex::new(None)),
-            signaler: Arc::new(SyncMutex::new(sender)),
+            signaler: Arc::new(SyncMutex::new(ch)),
         }
     }
 
@@ -221,7 +221,7 @@ impl DefaultTransport {
     }
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl IceTransportCallback<TkChannel> for DefaultTransport {
     async fn setup_callback(&self) -> Result<()> {
         self.on_ice_candidate(self.on_ice_candidate_callback().await)
