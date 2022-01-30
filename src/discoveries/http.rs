@@ -5,17 +5,17 @@
 /// 2. POST /sdp
 /// Which receive offer from peer and send the answer back
 
-use core::str::Utf8Error;
 use bns_core::transports::default::DefaultTransport;
-use hyper::{Body, Client, Method, Request, Response, StatusCode};
-use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
+use hyper::{Method, Request, Response, StatusCode};
+use hyper::Body;
+use webrtc::ice_transport::ice_candidate::{RTCIceCandidateInit};
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use bns_core::types::ice_transport::IceTransport;
 
 
 pub async fn sdp_handler(
     req: Request<Body>,
-    remote_addr: String,
+    _remote_addr: String,
     transport: DefaultTransport
 ) -> Result<Response<Body>, hyper::Error> {
     match (req.method(), req.uri().path()) {
@@ -26,7 +26,7 @@ pub async fn sdp_handler(
                 .status(200)
                 .body(Body::from(offer)) {
                     Ok(resp) => Ok(resp),
-                    Err(e) => panic!("Opps")
+                    Err(_) => panic!("Opps")
                 }
         },
         (&Method::POST, "/sdp") => {
@@ -40,7 +40,7 @@ pub async fn sdp_handler(
                 .status(200)
                 .body(Body::empty()) {
                     Ok(resp) => Ok(resp),
-                    Err(e) => panic!("Opps")
+                    Err(_) => panic!("Opps")
                 }
         },
         _ => {
@@ -54,7 +54,7 @@ pub async fn sdp_handler(
 
 pub async fn remote_handler(
     req: Request<Body>,
-    remote_addr: String,
+    _remote_addr: String,
     ice_transport: DefaultTransport,
 ) -> Result<Response<Body>, hyper::Error> {
     let pc = ice_transport.connection.lock().await.clone().unwrap();

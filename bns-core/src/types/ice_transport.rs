@@ -7,7 +7,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex as SyncMutex;
 
-#[async_trait(?Send)]
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait IceTransport<Ch: Channel> {
     type Connection;
     type Candidate;
@@ -28,10 +29,11 @@ pub trait IceTransport<Ch: Channel> {
 
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
     where
-        T: Into<Self::Sdp>;
+        T: Into<Self::Sdp> + Send;
+
     async fn set_remote_description<T>(&self, desc: T) -> Result<()>
     where
-        T: Into<Self::Sdp>;
+        T: Into<Self::Sdp> + Send;
     async fn on_ice_candidate(
         &self,
         f: Box<

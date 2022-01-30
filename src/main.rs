@@ -13,12 +13,12 @@ use std::net::SocketAddr;
 
 #[derive(Parser, Debug)]
 #[clap(about, version, author)]
-struct Args {
+pub struct Args {
     #[clap(long, short = 'h', default_value = "0.0.0.0:60000")]
-    http_addr: String,
+    pub http_addr: String,
 
     #[clap(long, short = 'r', default_value = "0.0.0.0:50000")]
-    remote_addr: String,
+    pub remote_addr: String,
 }
 
 #[tokio::main]

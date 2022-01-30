@@ -32,7 +32,8 @@ pub struct DefaultTransport {
     pub signaler: Arc<SyncMutex<TkChannel>>,
 }
 
-#[async_trait(?Send)]
+
+#[async_trait]
 impl IceTransport<TkChannel> for DefaultTransport {
     type Connection = RTCPeerConnection;
     type Candidate = RTCIceCandidate;
@@ -108,7 +109,7 @@ impl IceTransport<TkChannel> for DefaultTransport {
 
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
     where
-        T: Into<RTCSessionDescription>,
+        T: Into<RTCSessionDescription> + Send,
     {
         match self.get_peer_connection().await {
             Some(peer_connection) => peer_connection
@@ -121,7 +122,7 @@ impl IceTransport<TkChannel> for DefaultTransport {
 
     async fn set_remote_description<T>(&self, desc: T) -> Result<()>
     where
-        T: Into<RTCSessionDescription>,
+        T: Into<RTCSessionDescription> + Send,
     {
         match self.get_peer_connection().await {
             Some(peer_connection) => peer_connection
