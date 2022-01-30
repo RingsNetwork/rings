@@ -10,6 +10,7 @@ pub struct TkChannel {
     receiver: mpsc::Receiver<Events>,
 }
 
+
 #[async_trait(?Send)]
 impl Channel for TkChannel {
     type Sender = Arc<mpsc::Sender<Events>>;
@@ -42,7 +43,8 @@ impl Channel for TkChannel {
             Events::Null => (),
             Events::ConnectFailed => {
                 println!("ConnectFailed");
-            }
+            },
+            _ => ()
         }
     }
 }

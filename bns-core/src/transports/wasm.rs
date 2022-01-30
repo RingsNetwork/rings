@@ -1,5 +1,4 @@
 use crate::types::ice_transport::IceTransport;
-use crate::types::ice_transport::IceTransportBuilder;
 use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -42,6 +41,32 @@ impl IceTransport for WasmTransport {
     type Channel = RtcDataChannel;
     type ConnectionState = RtcIceConnectionState;
     type Msg = JsValue;
+
+    fn new() -> Self {
+        let mut config = RtcConfiguration::new();
+        config.ice_servers(
+            &JsValue::from_serde(&json! {[{"urls":"stun:stun.l.google.com:19302"}]}).unwrap(),
+        );
+
+        let ins = Self {
+            connection: RtcPeerConnection::new_with_configuration(&config)
+                .ok()
+                .as_ref()
+                .map(|c| Arc::new(c.to_owned())),
+            channel: None,
+            offer: None,
+            pending_candidates: Arc::new(vec![]),
+        };
+        return ins;
+    }
+
+    async fn start(&mut self) -> Result<()> {
+        self.setup_offer().await;
+        self.setup_channel("bns").await;
+        info!("started!");
+        return Ok(());
+    }
+
 
     async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>> {
         self.connection.as_ref().map(|c| Arc::clone(c))
@@ -200,34 +225,6 @@ impl IceTransport for WasmTransport {
             }
             None => Err(anyhow!("Failed on getting connection")),
         }
-    }
-}
-
-#[async_trait(?Send)]
-impl IceTransportBuilder for WasmTransport {
-    fn new() -> Self {
-        let mut config = RtcConfiguration::new();
-        config.ice_servers(
-            &JsValue::from_serde(&json! {[{"urls":"stun:stun.l.google.com:19302"}]}).unwrap(),
-        );
-
-        let ins = Self {
-            connection: RtcPeerConnection::new_with_configuration(&config)
-                .ok()
-                .as_ref()
-                .map(|c| Arc::new(c.to_owned())),
-            channel: None,
-            offer: None,
-            pending_candidates: Arc::new(vec![]),
-        };
-        return ins;
-    }
-
-    async fn start(&mut self) -> Result<()> {
-        self.setup_offer().await;
-        self.setup_channel("bns").await;
-        info!("started!");
-        return Ok(());
     }
 }
 

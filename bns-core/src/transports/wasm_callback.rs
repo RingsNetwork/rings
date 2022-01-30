@@ -1,56 +1,34 @@
 use log::info;
-
+use std::sync::Arc;
 use web_sys::RtcDataChannel;
 use web_sys::{MessageEvent, RtcDataChannelEvent, RtcPeerConnectionIceEvent};
+use std::future::Future;
+use std::pin::Pin;
+use crate::transports::wasm::WasmTransport;
+use crate::types::ice_transport::IceTransport;
+use crate::channels::wasm::CbChannel;
+use crate::types::channel::Channel;
+use crate::types::channel::Events;
 
-struct WasmCallback {}
+
+struct WasmCallback {
+    channel: CbChannel
+}
 
 impl WasmCallback {
-    pub fn on_message(channel: RtcDataChannel) -> Box<dyn FnMut(MessageEvent)> {
-        box move |ev: MessageEvent| match ev.data().as_string() {
-            Some(message) => {
-                info!("{:?}", message);
-                channel.send_with_str("Pong from pc1.dc!").unwrap();
-            }
-            None => {}
-        }
-    }
-
-    pub fn on_channel() -> Box<dyn FnMut(RtcDataChannelEvent)> {
-        box move |ev: RtcDataChannelEvent| {
-            let cnn = ev.channel();
-            info!("onDataChannelEvent!");
-            match cnn.send_with_str("Greeting!") {
-                Ok(_d) => {}
-                Err(_e) => {
-                    panic!();
-                }
-            };
-        }
-    }
-
-    pub fn on_open() -> Box<dyn FnMut(RtcDataChannelEvent)> {
-        box move |ev: RtcDataChannelEvent| {
-            info!("channel Open!");
-            let cnn = ev.channel();
-            match cnn.send_with_str("Greeting!") {
-                Ok(_d) => {}
-                Err(_e) => {
-                    panic!("cannot send greeting");
-                }
-            };
-        }
-    }
-
-    pub fn on_icecandidate() -> Box<dyn FnMut(RtcPeerConnectionIceEvent)> {
-        box move |ev: RtcPeerConnectionIceEvent| {
-            info!("ice candidate");
-            match ev.candidate() {
-                Some(candidate) => {
-                    info!("onicecandiate: {:#?}", candidate.candidate());
-                }
-                None => {}
-            }
+    pub async fn on_message(&self) -> Box<
+            dyn FnMut(<WasmTransport as IceTransport>::Msg) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+                + Send
+                + Sync,
+        > {
+        let sender = self.channel.sender();
+        box move |msg: <WasmTransport as IceTransport>::Msg | {
+            let sender = Arc::clone(&sender);
+            let msg = msg.as_string().unwrap().clone();
+            Box::pin(async move {
+                info!("{:?}", msg);
+                sender.send(Events::ReceiveMsg(msg)).unwrap();
+            })
         }
     }
 }

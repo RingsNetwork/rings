@@ -44,7 +44,8 @@ impl Channel for CbChannel {
             Events::Null => (),
             Events::ConnectFailed => {
                 info!("ConnectFailed");
-            }
+            },
+            _ => ()
         }
     }
 }
