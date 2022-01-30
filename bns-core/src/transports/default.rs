@@ -9,31 +9,31 @@ use tokio::sync::Mutex;
 use tokio::time::Duration;
 use webrtc::api::APIBuilder;
 
+use crate::channels::default::TkChannel;
+use crate::types::channel::Channel;
+use crate::types::channel::Events;
+use crate::types::ice_transport::IceTransport;
+use crate::types::ice_transport::IceTransportCallback;
+use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
-use webrtc::data_channel::data_channel_message::DataChannelMessage;
+use webrtc::peer_connection::math_rand_alpha;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
-use webrtc::peer_connection::math_rand_alpha;
-use crate::types::ice_transport::IceTransport;
-use crate::types::ice_transport::IceTransportCallback;
-use crate::types::channel::Channel;
-use crate::types::channel::Events;
-use crate::channels::default::TkChannel;
 
 #[derive(Clone)]
 pub struct DefaultTransport {
     pub connection: Arc<Mutex<Option<Arc<RTCPeerConnection>>>>,
     pub pending_candidates: Arc<Mutex<Vec<RTCIceCandidate>>>,
     pub channel: Arc<Mutex<Option<Arc<RTCDataChannel>>>>,
-    pub signaler: Arc<SyncMutex<TkChannel>>
+    pub signaler: Arc<SyncMutex<TkChannel>>,
 }
 
 #[async_trait(?Send)]
-impl IceTransport<TkChannel>for DefaultTransport {
+impl IceTransport<TkChannel> for DefaultTransport {
     type Connection = RTCPeerConnection;
     type Candidate = RTCIceCandidate;
     type Sdp = RTCSessionDescription;
@@ -46,7 +46,7 @@ impl IceTransport<TkChannel>for DefaultTransport {
             connection: Arc::new(Mutex::new(None)),
             pending_candidates: Arc::new(Mutex::new(vec![])),
             channel: Arc::new(Mutex::new(None)),
-            signaler: Arc::new(SyncMutex::new(sender))
+            signaler: Arc::new(SyncMutex::new(sender)),
         }
     }
 
@@ -222,19 +222,26 @@ impl DefaultTransport {
 
 #[async_trait(?Send)]
 impl IceTransportCallback<TkChannel> for DefaultTransport {
-
     async fn setup_callback(&self) -> Result<()> {
-        self.on_ice_candidate(self.on_ice_candidate_callback().await).await?;
-        self.on_peer_connection_state_change(self.on_peer_connection_state_change_callback().await).await?;
-        self.on_data_channel(self.on_data_channel_callback().await).await?;
+        self.on_ice_candidate(self.on_ice_candidate_callback().await)
+            .await?;
+        self.on_peer_connection_state_change(self.on_peer_connection_state_change_callback().await)
+            .await?;
+        self.on_data_channel(self.on_data_channel_callback().await)
+            .await?;
         self.on_message(self.on_message_callback().await).await?;
         Ok(())
     }
 
-    async fn on_ice_candidate_callback(&self) -> Box<
-            dyn FnMut(Option<<Self as IceTransport<TkChannel>>::Candidate>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+    async fn on_ice_candidate_callback(
+        &self,
+    ) -> Box<
+        dyn FnMut(
+                Option<<Self as IceTransport<TkChannel>>::Candidate>,
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
             + Send
-            + Sync> {
+            + Sync,
+    > {
         let peer_connection = Arc::downgrade(&self.get_peer_connection().await.unwrap());
         let pending_candidates = self.get_pending_candidates().await;
 
@@ -256,30 +263,32 @@ impl IceTransportCallback<TkChannel> for DefaultTransport {
         }
     }
 
-    async fn on_peer_connection_state_change_callback(&self) ->  Box<
-            dyn FnMut(RTCPeerConnectionState) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
-                + Send
-                + Sync,
-        > {
+    async fn on_peer_connection_state_change_callback(
+        &self,
+    ) -> Box<
+        dyn FnMut(RTCPeerConnectionState) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+            + Send
+            + Sync,
+    > {
         let sender = self.signaler().lock().unwrap().sender();
         box move |s: RTCPeerConnectionState| {
             let sender = Arc::clone(&sender);
             if s == RTCPeerConnectionState::Failed {
                 let _ = sender.send(Events::ConnectFailed);
             }
-            Box::pin(async move {
-
-            })
+            Box::pin(async move {})
         }
     }
 
-    async fn on_data_channel_callback(&self) -> Box<
-            dyn FnMut(Arc<RTCDataChannel>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
-                + Send
-                + Sync,
-        > {
+    async fn on_data_channel_callback(
+        &self,
+    ) -> Box<
+        dyn FnMut(Arc<RTCDataChannel>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+            + Send
+            + Sync,
+    > {
         box move |d: Arc<RTCDataChannel>| {
-            let d =  Arc::clone(&d);
+            let d = Arc::clone(&d);
             Box::pin(async move {
                 let mut result = Result::<usize>::Ok(0);
                 while result.is_ok() {
@@ -297,16 +306,17 @@ impl IceTransportCallback<TkChannel> for DefaultTransport {
         }
     }
 
-    async fn on_message_callback(&self) -> Box<
-            dyn FnMut(DataChannelMessage) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
-                + Send
-                + Sync,
-        > {
+    async fn on_message_callback(
+        &self,
+    ) -> Box<
+        dyn FnMut(DataChannelMessage) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+            + Send
+            + Sync,
+    > {
         box move |msg: DataChannelMessage| {
             let msg_str = String::from_utf8(msg.data.to_vec()).unwrap();
             println!("Message from DataChannel: '{}'", msg_str);
-            Box::pin(async move {
-            })
+            Box::pin(async move {})
         }
     }
 }
