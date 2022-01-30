@@ -31,6 +31,34 @@ use web_sys::RtcSessionDescription;
 use web_sys::RtcSessionDescriptionInit;
 
 #[derive(Clone)]
+pub struct SdpOfferStr(String);
+
+impl SdpOfferStr {
+    pub fn new(s: String) -> Self {
+        Self(s)
+    }
+
+    pub fn as_sdp(&self) -> RtcSessionDescription {
+        self.to_owned().into()
+    }
+}
+
+impl From<SdpOfferStr> for RtcSessionDescription {
+    fn from(s: SdpOfferStr) -> Self {
+        let mut offer_obj = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
+        offer_obj.sdp(&s.0);
+        RtcSessionDescription::new_with_description_init_dict(&offer_obj).unwrap()
+    }
+}
+
+impl From<SdpOfferStr> for String {
+    fn from(s: SdpOfferStr) -> Self {
+        s.0
+    }
+}
+
+
+#[derive(Clone)]
 pub struct WasmTransport {
     pub connection: Option<Arc<RtcPeerConnection>>,
     pub offer: Option<RtcSessionDescription>,
@@ -135,11 +163,20 @@ impl IceTransport<CbChannel> for WasmTransport {
         match &self.get_peer_connection().await {
             Some(c) => {
                 let mut offer_obj = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
-                offer_obj.sdp(&desc.into().sdp());
+                let sdp = &desc.into().sdp();
+                info!("{}", &sdp);
+                offer_obj.sdp(&sdp);
+                info!("3");
                 let promise = c.set_remote_description(&offer_obj);
+                info!("3");
+
                 match JsFuture::from(promise).await {
                     Ok(_) => Ok(()),
-                    Err(_) => Err(anyhow!("Failed to set remote description")),
+                    Err(e) => {
+                        info!("failed to set remote desc");
+                        info!("{:?}", e);
+                        Err(anyhow!("Failed to set remote description"))
+                    },
                 }
             }
             None => Err(anyhow!("Failed on getting connection")),
@@ -244,7 +281,7 @@ impl WasmTransport {
             if let Ok(offer) = JsFuture::from(connection.create_offer()).await {
                 self.offer = Reflect::get(&offer, &JsValue::from_str("sdp"))
                     .ok()
-                    .and_then(|o| Some(RtcSessionDescription::from(o)))
+                    .and_then(|o| Some(SdpOfferStr::new(o.as_string().unwrap()).as_sdp()))
                     .take();
                 info!("{:?}", self.offer);
             }
