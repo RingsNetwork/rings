@@ -57,7 +57,6 @@ impl From<SdpOfferStr> for String {
     }
 }
 
-
 #[derive(Clone)]
 pub struct WasmTransport {
     pub connection: Option<Arc<RtcPeerConnection>>,
@@ -176,7 +175,7 @@ impl IceTransport<CbChannel> for WasmTransport {
                         info!("failed to set remote desc");
                         info!("{:?}", e);
                         Err(anyhow!("Failed to set remote description"))
-                    },
+                    }
                 }
             }
             None => Err(anyhow!("Failed on getting connection")),
