@@ -51,7 +51,7 @@ impl IceTransport<TkChannel>for DefaultTransport {
     }
 
     fn signaler(&self) -> Arc<SyncMutex<TkChannel>> {
-        return Arc::clone(&self.signaler);
+        Arc::clone(&self.signaler)
     }
 
     async fn start(&mut self) -> Result<()> {
@@ -71,15 +71,15 @@ impl IceTransport<TkChannel>for DefaultTransport {
             }
             Err(e) => Err(anyhow!(e)),
         }?;
-        self.setup_channel(&"bns".to_owned()).await
+        self.setup_channel("bns").await
     }
 
     async fn get_peer_connection(&self) -> Option<Arc<RTCPeerConnection>> {
-        return self.connection.lock().await.clone();
+        self.connection.lock().await.clone()
     }
 
     async fn get_pending_candidates(&self) -> Vec<RTCIceCandidate> {
-        return self.pending_candidates.lock().await.clone();
+        self.pending_candidates.lock().await.clone()
     }
 
     async fn get_answer(&self) -> Result<RTCSessionDescription> {
