@@ -5,7 +5,6 @@ edition = "2021"
 
 [features]
 default = ["webrtc", "tokio", "tokio-util", "bytes"]
-
 wasm = ["web-sys", "wasm-bindgen", "js-sys",
         "wasm-bindgen-futures", "serde", "serde_json",
 	"crossbeam-channel"]

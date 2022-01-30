@@ -1,4 +1,8 @@
+use crate::channels::wasm::CbChannel;
+use crate::types::channel::Channel;
+use crate::types::channel::Events;
 use crate::types::ice_transport::IceTransport;
+use crate::types::ice_transport::IceTransportCallback;
 use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -8,6 +12,7 @@ use serde_json::json;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::Mutex;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
@@ -31,10 +36,11 @@ pub struct WasmTransport {
     pub offer: Option<RtcSessionDescription>,
     pub channel: Option<Arc<RtcDataChannel>>,
     pub pending_candidates: Arc<Vec<RtcIceCandidate>>,
+    pub signaler: Arc<Mutex<CbChannel>>,
 }
 
 #[async_trait(?Send)]
-impl IceTransport for WasmTransport {
+impl IceTransport<CbChannel> for WasmTransport {
     type Connection = RtcPeerConnection;
     type Candidate = RtcIceCandidate;
     type Sdp = RtcSessionDescription;
@@ -42,7 +48,7 @@ impl IceTransport for WasmTransport {
     type ConnectionState = RtcIceConnectionState;
     type Msg = JsValue;
 
-    fn new() -> Self {
+    fn new(ch: CbChannel) -> Self {
         let mut config = RtcConfiguration::new();
         config.ice_servers(
             &JsValue::from_serde(&json! {[{"urls":"stun:stun.l.google.com:19302"}]}).unwrap(),
@@ -56,8 +62,13 @@ impl IceTransport for WasmTransport {
             channel: None,
             offer: None,
             pending_candidates: Arc::new(vec![]),
+            signaler: Arc::new(Mutex::new(ch)),
         };
         return ins;
+    }
+
+    fn signaler(&self) -> Arc<Mutex<CbChannel>> {
+        Arc::clone(&self.signaler)
     }
 
     async fn start(&mut self) -> Result<()> {
@@ -247,5 +258,61 @@ impl WasmTransport {
             self.channel = Some(Arc::new(channel));
         }
         return self;
+    }
+}
+
+#[async_trait(?Send)]
+impl IceTransportCallback<CbChannel> for WasmTransport {
+    async fn setup_callback(&self) -> Result<()> {
+        self.on_ice_candidate(self.on_ice_candidate_callback().await)
+            .await?;
+        self.on_peer_connection_state_change(self.on_peer_connection_state_change_callback().await)
+            .await?;
+        self.on_data_channel(self.on_data_channel_callback().await)
+            .await?;
+        self.on_message(self.on_message_callback().await).await?;
+        Ok(())
+    }
+    async fn on_ice_candidate_callback(
+        &self,
+    ) -> Box<
+        dyn FnMut(Option<Self::Candidate>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+            + Send
+            + Sync,
+    > {
+        box move |_: Option<Self::Candidate>| Box::pin(async move {})
+    }
+    async fn on_peer_connection_state_change_callback(
+        &self,
+    ) -> Box<
+        dyn FnMut(Self::ConnectionState) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+            + Send
+            + Sync,
+    > {
+        box move |_: Self::ConnectionState| Box::pin(async move {})
+    }
+    async fn on_data_channel_callback(
+        &self,
+    ) -> Box<
+        dyn FnMut(Arc<Self::Channel>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+            + Send
+            + Sync,
+    > {
+        box move |_: Arc<Self::Channel>| Box::pin(async move {})
+    }
+
+    async fn on_message_callback(
+        &self,
+    ) -> Box<dyn FnMut(Self::Msg) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync>
+    {
+        let sender = self.signaler().lock().unwrap().sender();
+        box move |msg: Self::Msg| {
+            let sender = Arc::clone(&sender);
+            let msg = msg.as_string().unwrap().clone();
+            Box::pin(async move {
+                info!("{:?}", msg);
+                sender.send(Events::ReceiveMsg(msg)).unwrap();
+            })
+        }
     }
 }
