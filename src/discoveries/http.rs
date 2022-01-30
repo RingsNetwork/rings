@@ -4,45 +4,40 @@
 /// Which create offer and send back to candidated peer
 /// 2. POST /sdp
 /// Which receive offer from peer and send the answer back
-
 use bns_core::transports::default::DefaultTransport;
-use hyper::{Method, Request, Response, StatusCode};
-use hyper::Body;
-use webrtc::ice_transport::ice_candidate::{RTCIceCandidateInit};
-use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use bns_core::types::ice_transport::IceTransport;
-
+use hyper::Body;
+use hyper::{Method, Request, Response, StatusCode};
+use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
+use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 pub async fn sdp_handler(
     req: Request<Body>,
     _remote_addr: String,
-    transport: DefaultTransport
+    transport: DefaultTransport,
 ) -> Result<Response<Body>, hyper::Error> {
     match (req.method(), req.uri().path()) {
         (&Method::GET, "/sdp") => {
             // create offer and send back to candidated peer
             let offer = transport.get_offer().await.unwrap().sdp;
-            match Response::builder()
-                .status(200)
-                .body(Body::from(offer)) {
-                    Ok(resp) => Ok(resp),
-                    Err(_) => panic!("Opps")
-                }
-        },
+            match Response::builder().status(200).body(Body::from(offer)) {
+                Ok(resp) => Ok(resp),
+                Err(_) => panic!("Opps"),
+            }
+        }
         (&Method::POST, "/sdp") => {
             // create offer and send back to candidated peer
-            let sdp_str = std::str::from_utf8(
-                &hyper::body::to_bytes(req.into_body()).await.unwrap()
-            ).unwrap().to_owned();
+            let sdp_str =
+                std::str::from_utf8(&hyper::body::to_bytes(req.into_body()).await.unwrap())
+                    .unwrap()
+                    .to_owned();
             let sdp = serde_json::from_str::<RTCSessionDescription>(&sdp_str).unwrap();
             transport.set_remote_description(sdp).await.unwrap();
-            match Response::builder()
-                .status(200)
-                .body(Body::empty()) {
-                    Ok(resp) => Ok(resp),
-                    Err(_) => panic!("Opps")
-                }
-        },
+            match Response::builder().status(200).body(Body::empty()) {
+                Ok(resp) => Ok(resp),
+                Err(_) => panic!("Opps"),
+            }
+        }
         _ => {
             let mut not_found = Response::default();
             *not_found.status_mut() = StatusCode::NOT_FOUND;
@@ -50,7 +45,6 @@ pub async fn sdp_handler(
         }
     }
 }
-
 
 pub async fn remote_handler(
     req: Request<Body>,
@@ -79,7 +73,7 @@ pub async fn remote_handler(
             let mut response = Response::new(Body::empty());
             *response.status_mut() = StatusCode::OK;
             Ok(response)
-        },
+        }
         _ => {
             let mut not_found = Response::default();
             *not_found.status_mut() = StatusCode::NOT_FOUND;

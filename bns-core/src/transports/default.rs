@@ -32,7 +32,6 @@ pub struct DefaultTransport {
     pub signaler: Arc<SyncMutex<TkChannel>>,
 }
 
-
 #[async_trait]
 impl IceTransport<TkChannel> for DefaultTransport {
     type Connection = RTCPeerConnection;

@@ -1,8 +1,8 @@
-use crate::types::ice_transport::IceTransport;
-use crate::types::ice_transport::IceTransportCallback;
 use crate::channels::wasm::CbChannel;
 use crate::types::channel::Channel;
 use crate::types::channel::Events;
+use crate::types::ice_transport::IceTransport;
+use crate::types::ice_transport::IceTransportCallback;
 use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -37,7 +37,6 @@ pub struct WasmTransport {
     pub channel: Option<Arc<RtcDataChannel>>,
     pub pending_candidates: Arc<Vec<RtcIceCandidate>>,
     pub signaler: Arc<Mutex<CbChannel>>,
-
 }
 
 #[async_trait(?Send)]
@@ -63,7 +62,7 @@ impl IceTransport<CbChannel> for WasmTransport {
             channel: None,
             offer: None,
             pending_candidates: Arc::new(vec![]),
-            signaler: Arc::new(Mutex::new(ch))
+            signaler: Arc::new(Mutex::new(ch)),
         };
         return ins;
     }
@@ -280,12 +279,8 @@ impl IceTransportCallback<CbChannel> for WasmTransport {
         dyn FnMut(Option<Self::Candidate>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
             + Send
             + Sync,
-        >{
-        box move |_: Option<Self::Candidate>| {
-            Box::pin(async move {
-            })
-        }
-
+    > {
+        box move |_: Option<Self::Candidate>| Box::pin(async move {})
     }
     async fn on_peer_connection_state_change_callback(
         &self,
@@ -293,13 +288,8 @@ impl IceTransportCallback<CbChannel> for WasmTransport {
         dyn FnMut(Self::ConnectionState) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
             + Send
             + Sync,
-        > {
-        box move |_: Self::ConnectionState| {
-            Box::pin(async move {
-
-            })
-        }
-
+    > {
+        box move |_: Self::ConnectionState| Box::pin(async move {})
     }
     async fn on_data_channel_callback(
         &self,
@@ -307,23 +297,14 @@ impl IceTransportCallback<CbChannel> for WasmTransport {
         dyn FnMut(Arc<Self::Channel>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
             + Send
             + Sync,
-        > {
-        box move |_: Arc<Self::Channel>| {
-            Box::pin(async move {
-
-            })
-        }
+    > {
+        box move |_: Arc<Self::Channel>| Box::pin(async move {})
     }
 
     async fn on_message_callback(
         &self,
-    ) -> Box<
-        dyn FnMut(
-                Self::Msg,
-            ) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
-            + Send
-            + Sync,
-    > {
+    ) -> Box<dyn FnMut(Self::Msg) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync>
+    {
         let sender = self.signaler().lock().unwrap().sender();
         box move |msg: Self::Msg| {
             let sender = Arc::clone(&sender);
