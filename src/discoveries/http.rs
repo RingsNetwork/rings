@@ -13,7 +13,6 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 pub async fn sdp_handler(
     req: Request<Body>,
-    _remote_addr: String,
     transport: DefaultTransport,
 ) -> Result<Response<Body>, hyper::Error> {
     match (req.method(), req.uri().path()) {
