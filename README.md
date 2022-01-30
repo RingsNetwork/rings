@@ -1,9 +1,11 @@
-# bns-node
+bns-node
+===============
 
 [![bns-node](https://github.com/BNSnet/bns-node/actions/workflows/bns-node.yml/badge.svg)](https://github.com/BNSnet/bns-node/actions/workflows/bns-node.yml)
 
 
-ICE Scheme:
+
+### ICE Scheme:
 
 1. Peer A:
 {
@@ -22,20 +24,6 @@ ICE Scheme:
    Set receiveed answer as remote description
 }
 
-
-=================
-
-PEER A                                      PEER B
-   |                                          |
-a). create offer
-b). set it as local description
-c). send it to B
-
-                                     a). set receiveed offer as remote description
-									 b). create answer
-									 c). set it as local description
-									 d). send it to A
-set it as remote description
 
 
 
