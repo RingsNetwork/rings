@@ -6,7 +6,7 @@ pub enum Events {
     Null,
     ConnectFailed,
     SendMsg(String),
-    ReceiveMsg(String)
+    ReceiveMsg(String),
 }
 
 #[async_trait(?Send)]

@@ -67,7 +67,6 @@ impl IceTransport for WasmTransport {
         return Ok(());
     }
 
-
     async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>> {
         self.connection.as_ref().map(|c| Arc::clone(c))
     }
