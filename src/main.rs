@@ -14,7 +14,7 @@ use std::net::SocketAddr;
 #[derive(Parser, Debug)]
 #[clap(about, version, author)]
 pub struct Args {
-    #[clap(long, short = 'd', default_value = "0.0.0.0:50000")]
+    #[clap(long, short = 'd', default_value = "127.0.0.1:50000")]
     pub http_addr: String,
 }
 
