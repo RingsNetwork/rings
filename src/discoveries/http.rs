@@ -1,35 +1,56 @@
-use anyhow::Result;
+/// HTTP services for braowser based P2P initialization
+/// Two API *must* provided:
+/// 1. GET /sdp
+/// Which create offer and send back to candidated peer
+/// 2. POST /sdp
+/// Which receive offer from peer and send the answer back
+
+use core::str::Utf8Error;
 use bns_core::transports::default::DefaultTransport;
 use hyper::{Body, Client, Method, Request, Response, StatusCode};
 use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+use bns_core::types::ice_transport::IceTransport;
 
-pub async fn signal_candidate(addr: &str, c: &RTCIceCandidate) -> Result<()> {
-    let payload = c.to_json().await?.candidate;
-    let req = match Request::builder()
-        .method(Method::POST)
-        .uri(format!("http://{}/candidate", addr))
-        .header("content-type", "application/json; charset=utf-8")
-        .body(Body::from(payload))
-    {
-        Ok(req) => req,
-        Err(err) => {
-            println!("{}", err);
-            return Err(err.into());
+
+pub async fn sdp_handler(
+    req: Request<Body>,
+    remote_addr: String,
+    transport: DefaultTransport
+) -> Result<Response<Body>, hyper::Error> {
+    match (req.method(), req.uri().path()) {
+        (&Method::GET, "/sdp") => {
+            // create offer and send back to candidated peer
+            let offer = transport.get_offer().await.unwrap().sdp;
+            match Response::builder()
+                .status(200)
+                .body(Body::from(offer)) {
+                    Ok(resp) => Ok(resp),
+                    Err(e) => panic!("Opps")
+                }
+        },
+        (&Method::POST, "/sdp") => {
+            // create offer and send back to candidated peer
+            let sdp_str = std::str::from_utf8(
+                &hyper::body::to_bytes(req.into_body()).await.unwrap()
+            ).unwrap().to_owned();
+            let sdp = serde_json::from_str::<RTCSessionDescription>(&sdp_str).unwrap();
+            transport.set_remote_description(sdp).await.unwrap();
+            match Response::builder()
+                .status(200)
+                .body(Body::empty()) {
+                    Ok(resp) => Ok(resp),
+                    Err(e) => panic!("Opps")
+                }
+        },
+        _ => {
+            let mut not_found = Response::default();
+            *not_found.status_mut() = StatusCode::NOT_FOUND;
+            Ok(not_found)
         }
-    };
-
-    let _resp = match Client::new().request(req).await {
-        Ok(resp) => resp,
-        Err(err) => {
-            println!("{}", err);
-            return Err(err.into());
-        }
-    };
-    //println!("signal_candidate Response: {}", resp.status());
-
-    Ok(())
+    }
 }
+
 
 pub async fn remote_handler(
     req: Request<Body>,
@@ -58,64 +79,7 @@ pub async fn remote_handler(
             let mut response = Response::new(Body::empty());
             *response.status_mut() = StatusCode::OK;
             Ok(response)
-        }
-
-        (&Method::POST, "/sdp") => {
-            println!("remote_handler receive from /sdp");
-            // maybe can handle json decode sdp and server addr
-            let sdp_str = match std::str::from_utf8(&hyper::body::to_bytes(req.into_body()).await?)
-            {
-                Ok(s) => s.to_owned(),
-                Err(err) => panic!("{}", err),
-            };
-            let sdp = match serde_json::from_str::<RTCSessionDescription>(&sdp_str) {
-                Ok(s) => s,
-                Err(err) => panic!("{}", err),
-            };
-
-            if let Err(err) = pc.set_remote_description(sdp).await {
-                panic!("{}", err);
-            }
-
-            // Create an answer to send to the other process
-            let answer = match pc.create_answer(None).await {
-                Ok(a) => a,
-                Err(err) => panic!("{}", err),
-            };
-
-            let payload = match serde_json::to_string(&answer) {
-                Ok(p) => p,
-                Err(err) => panic!("{}", err),
-            };
-
-            let req = match Request::builder()
-                .method(Method::POST)
-                .uri(format!("http://{}/sdp", remote_addr))
-                .header("content-type", "application/json; charset=utf-8")
-                .body(Body::from(payload))
-            {
-                Ok(req) => req,
-                Err(err) => panic!("{}", err),
-            };
-
-            let _resp = match Client::new().request(req).await {
-                Ok(resp) => resp,
-                Err(err) => {
-                    println!("{}", err);
-                    return Err(err);
-                }
-            };
-
-            // Sets the LocalDescription, and starts our UDP listeners
-            if let Err(err) = pc.set_local_description(answer).await {
-                panic!("{}", err);
-            }
-
-            let mut response = Response::new(Body::empty());
-            *response.status_mut() = StatusCode::OK;
-            Ok(response)
-        }
-        // Return the 404 Not Found for other routes.
+        },
         _ => {
             let mut not_found = Response::default();
             *not_found.status_mut() = StatusCode::NOT_FOUND;

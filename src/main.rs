@@ -4,7 +4,8 @@ use bns_core::transports::default::DefaultTransport;
 use bns_core::types::channel::Channel;
 use bns_core::types::ice_transport::IceTransport;
 use bns_core::types::ice_transport::IceTransportCallback;
-use bns_node::discoveries::http::remote_handler;
+use bns_node::discoveries::http::sdp_handler;
+
 use clap::Parser;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::Server;
@@ -38,7 +39,7 @@ async fn main() -> Result<()> {
 
             async move {
                 Ok::<_, hyper::Error>(service_fn(move |req| {
-                    remote_handler(req, remote_addr.to_owned(), ice_transport.to_owned())
+                    sdp_handler(req, remote_addr.to_owned(), ice_transport.to_owned())
                 }))
             }
         });
