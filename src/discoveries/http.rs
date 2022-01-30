@@ -6,6 +6,7 @@
 /// Which receive offer from peer and send the answer back
 use bns_core::transports::default::DefaultTransport;
 use bns_core::types::ice_transport::IceTransport;
+use bns_core::encoder::{encode, decode};
 use hyper::Body;
 use hyper::{Method, Request, Response, StatusCode};
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
@@ -18,7 +19,7 @@ pub async fn sdp_handler(
     match (req.method(), req.uri().path()) {
         (&Method::GET, "/sdp") => {
             // create offer and send back to candidated peer
-            let offer = transport.get_offer().await.unwrap().sdp;
+            let offer = encode(transport.get_offer().await.unwrap().sdp);
             match Response::builder().status(200).body(Body::from(offer)) {
                 Ok(resp) => Ok(resp),
                 Err(_) => panic!("Opps"),
@@ -29,7 +30,8 @@ pub async fn sdp_handler(
             let sdp_str =
                 std::str::from_utf8(&hyper::body::to_bytes(req.into_body()).await.unwrap())
                     .unwrap()
-                    .to_owned();
+                .to_owned();
+            let sdp_str = decode(sdp_str).unwrap();
             let sdp = serde_json::from_str::<RTCSessionDescription>(&sdp_str).unwrap();
             transport.set_remote_description(sdp).await.unwrap();
             match Response::builder().status(200).body(Body::empty()) {
