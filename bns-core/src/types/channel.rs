@@ -5,6 +5,8 @@ use async_trait::async_trait;
 pub enum Events {
     Null,
     ConnectFailed,
+    SendMsg(String),
+    ReceiveMsg(String)
 }
 
 #[async_trait(?Send)]
