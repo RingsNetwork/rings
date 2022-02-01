@@ -4,8 +4,8 @@ use bns_core::channels::default::TkChannel;
 use bns_core::types::channel::Channel;
 use bns_core::types::ice_transport::IceTransport;
 
-use bns_node::discoveries::http::sdp_handler;
 use bns_core::swarm::swarm::Swarm;
+use bns_node::discoveries::http::sdp_handler;
 
 use clap::Parser;
 use hyper::service::{make_service_fn, service_fn};
@@ -31,9 +31,7 @@ async fn main() -> Result<()> {
         let service = make_service_fn(move |_| {
             let swarm = swarm.to_owned();
             async move {
-                Ok::<_, hyper::Error>(service_fn(move |req| {
-                    sdp_handler(req, swarm.to_owned())
-                }))
+                Ok::<_, hyper::Error>(service_fn(move |req| sdp_handler(req, swarm.to_owned())))
             }
         });
 

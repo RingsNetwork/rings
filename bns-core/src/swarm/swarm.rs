@@ -4,33 +4,32 @@ use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
 
 #[cfg(not(feature = "wasm"))]
-use crate::transports::default::DefaultTransport as Transport;
-#[cfg(not(feature = "wasm"))]
 use crate::channels::default::TkChannel as Channel;
+#[cfg(not(feature = "wasm"))]
+use crate::transports::default::DefaultTransport as Transport;
 
-#[cfg(feature = "wasm")]
-use crate::transports::wasm::WasmTransport as Transport;
 #[cfg(feature = "wasm")]
 use crate::channels::wasm::CbChannel as Channel;
+#[cfg(feature = "wasm")]
+use crate::transports::wasm::WasmTransport as Transport;
 
-use anyhow::Result;
 use anyhow::anyhow;
+use anyhow::Result;
+use dashmap::DashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
-use dashmap::DashMap;
 
 pub enum State {
     Anonymous,
-    Known
+    Known,
 }
-
 
 #[derive(Clone)]
 pub struct Swarm {
     pub pending: Option<Arc<Transport>>,
     pub anonymous: DashMap<String, Arc<Transport>>,
     pub table: DashMap<String, Arc<Transport>>,
-    pub signaler: Arc<Mutex<Channel>>
+    pub signaler: Arc<Mutex<Channel>>,
 }
 
 impl Swarm {
@@ -56,31 +55,34 @@ impl Swarm {
     pub async fn get_pending(&mut self) -> Option<Arc<Transport>> {
         match &self.pending {
             Some(trans) => Some(Arc::clone(&trans)),
-            None => self.new_transport().await.ok()
+            None => self.new_transport().await.ok(),
         }
     }
 
-    pub fn upgrade_pending(&mut self) -> Result<()>{
+    pub fn upgrade_pending(&mut self) -> Result<()> {
         let trans = self.pending.take();
         match &trans {
             Some(t) => {
                 let sdp = t.get_offer_str().unwrap();
                 self.register(sdp, Arc::clone(&t), State::Anonymous);
                 Ok(())
-            },
-            None => {
-                Err(anyhow!("pending transport not exiest"))
             }
+            None => Err(anyhow!("pending transport not exiest")),
         }?;
         self.pending = None;
         Ok(())
     }
 
-    pub fn register(&mut self, sdp_or_addr: String, trans: Arc<Transport>, trans_type: State) -> () {
+    pub fn register(
+        &mut self,
+        sdp_or_addr: String,
+        trans: Arc<Transport>,
+        trans_type: State,
+    ) -> () {
         match trans_type {
             State::Anonymous => {
                 self.anonymous.insert(sdp_or_addr, Arc::clone(&trans));
-            },
+            }
             State::Known => {
                 self.table.insert(sdp_or_addr, Arc::clone(&trans));
             }
@@ -89,12 +91,8 @@ impl Swarm {
 
     pub fn get_transport(&self, sdp_or_addr: String, trans_type: State) -> Option<Arc<Transport>> {
         match trans_type {
-            State::Anonymous => {
-                self.anonymous.get(&sdp_or_addr).map(|t| Arc::clone(&t))
-            },
-            State::Known => {
-                self.table.get(&sdp_or_addr).map(|t| Arc::clone(&t))
-            }
+            State::Anonymous => self.anonymous.get(&sdp_or_addr).map(|t| Arc::clone(&t)),
+            State::Known => self.table.get(&sdp_or_addr).map(|t| Arc::clone(&t)),
         }
     }
 
@@ -104,8 +102,8 @@ impl Swarm {
                 self.register(addr, Arc::clone(&trans), State::Known);
                 self.anonymous.remove(&sdp);
                 Ok(())
-            },
-            None => Err(anyhow!("Cannot get asked Anonymous Transport"))
+            }
+            None => Err(anyhow!("Cannot get asked Anonymous Transport")),
         }
     }
 

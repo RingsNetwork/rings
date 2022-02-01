@@ -1,4 +1,5 @@
-use bns_core::encoder::{decode};
+use bns_core::encoder::decode;
+use bns_core::swarm::swarm::Swarm;
 /// HTTP services for braowser based P2P initialization
 /// Two API *must* provided:
 /// 1. GET /sdp
@@ -7,16 +8,12 @@ use bns_core::encoder::{decode};
 /// Which receive offer from peer and send the answer back
 use bns_core::transports::default::DefaultTransport;
 use bns_core::types::ice_transport::IceTransport;
-use bns_core::swarm::swarm::Swarm;
 use hyper::Body;
 use hyper::{Method, Request, Response, StatusCode};
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
-pub async fn sdp_handler(
-    req: Request<Body>,
-    swarm: Swarm,
-) -> Result<Response<Body>, hyper::Error> {
+pub async fn sdp_handler(req: Request<Body>, swarm: Swarm) -> Result<Response<Body>, hyper::Error> {
     let mut swarm = swarm.to_owned();
     match (req.method(), req.uri().path()) {
         (&Method::GET, "/sdp") => {

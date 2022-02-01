@@ -31,7 +31,6 @@ pub struct DefaultTransport {
     pub channel: Arc<Mutex<Option<Arc<RTCDataChannel>>>>,
     pub signaler: Arc<SyncMutex<TkChannel>>,
     pub offer: Option<RTCSessionDescription>,
-
 }
 
 #[async_trait]
@@ -49,7 +48,7 @@ impl IceTransport<TkChannel> for DefaultTransport {
             pending_candidates: Arc::new(Mutex::new(vec![])),
             channel: Arc::new(Mutex::new(None)),
             signaler: Arc::clone(&ch),
-            offer: None
+            offer: None,
         }
     }
 
@@ -99,7 +98,7 @@ impl IceTransport<TkChannel> for DefaultTransport {
     fn get_offer(&self) -> Result<RTCSessionDescription> {
         match &self.offer {
             Some(o) => Ok(o.clone()),
-            None => Err(anyhow!("cannot get offer"))
+            None => Err(anyhow!("cannot get offer")),
         }
     }
 
@@ -227,17 +226,14 @@ impl DefaultTransport {
     pub async fn setup_offer(&mut self) -> Result<()> {
         // setup offer and set it to local description
         match self.get_peer_connection().await {
-            Some(peer_connection) => {
-                match peer_connection.create_offer(None).await {
-                    Ok(offer) => {
-                        self.offer = Some(offer.clone());
-                        self.set_local_description(offer).await?;
-                        Ok(())
-                    },
-                    Err(e) => Err(anyhow!(e))
+            Some(peer_connection) => match peer_connection.create_offer(None).await {
+                Ok(offer) => {
+                    self.offer = Some(offer.clone());
+                    self.set_local_description(offer).await?;
+                    Ok(())
                 }
-
-            }
+                Err(e) => Err(anyhow!(e)),
+            },
             None => Err(anyhow!("cannot get offer")),
         }
     }
