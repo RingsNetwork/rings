@@ -1,4 +1,4 @@
-use bns_core::encoder::{decode, encode};
+use bns_core::encoder::{decode};
 /// HTTP services for braowser based P2P initialization
 /// Two API *must* provided:
 /// 1. GET /sdp
@@ -38,7 +38,7 @@ pub async fn sdp_handler(
             let transport = swarm.get_pending().await.unwrap();
             transport.set_remote_description(sdp).await.unwrap();
             let answer = transport.get_answer().await.unwrap();
-            swarm.upgrade_pending();
+            swarm.upgrade_pending().unwrap();
             match Response::builder().status(200).body(Body::from(answer.sdp)) {
                 Ok(resp) => Ok(resp),
                 Err(_) => panic!("Opps"),

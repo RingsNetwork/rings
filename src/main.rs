@@ -1,9 +1,9 @@
 use anyhow::Result;
 use bns_core::channels::default::TkChannel;
-use bns_core::transports::default::DefaultTransport;
+
 use bns_core::types::channel::Channel;
 use bns_core::types::ice_transport::IceTransport;
-use bns_core::types::ice_transport::IceTransportCallback;
+
 use bns_node::discoveries::http::sdp_handler;
 use bns_core::swarm::swarm::Swarm;
 
@@ -22,7 +22,7 @@ pub struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let mut swarm = Swarm::new(TkChannel::new(1));
+    let swarm = Swarm::new(TkChannel::new(1));
     let signaler = swarm.signaler();
 
     tokio::spawn(async move {
