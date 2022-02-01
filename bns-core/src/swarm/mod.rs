@@ -73,12 +73,7 @@ impl Swarm {
         Ok(())
     }
 
-    pub fn register(
-        &mut self,
-        sdp_or_addr: String,
-        trans: Arc<Transport>,
-        trans_type: State,
-    ) {
+    pub fn register(&mut self, sdp_or_addr: String, trans: Arc<Transport>, trans_type: State) {
         match trans_type {
             State::Anonymous => {
                 self.anonymous.insert(sdp_or_addr, Arc::clone(&trans));
