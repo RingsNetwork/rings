@@ -2,8 +2,7 @@
 #![feature(box_syntax)]
 
 pub mod channels;
-#[cfg(feature = "default")]
-pub mod data_channel;
+pub mod encoder;
 pub mod storage;
 pub mod transports;
 pub mod types;

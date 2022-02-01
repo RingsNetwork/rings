@@ -1,3 +1,4 @@
+use bns_core::encoder::{decode, encode};
 /// HTTP services for braowser based P2P initialization
 /// Two API *must* provided:
 /// 1. GET /sdp
@@ -13,13 +14,12 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 pub async fn sdp_handler(
     req: Request<Body>,
-    _remote_addr: String,
     transport: DefaultTransport,
 ) -> Result<Response<Body>, hyper::Error> {
     match (req.method(), req.uri().path()) {
         (&Method::GET, "/sdp") => {
             // create offer and send back to candidated peer
-            let offer = transport.get_offer().await.unwrap().sdp;
+            let offer = encode(transport.get_offer().await.unwrap().sdp);
             match Response::builder().status(200).body(Body::from(offer)) {
                 Ok(resp) => Ok(resp),
                 Err(_) => panic!("Opps"),
@@ -31,6 +31,7 @@ pub async fn sdp_handler(
                 std::str::from_utf8(&hyper::body::to_bytes(req.into_body()).await.unwrap())
                     .unwrap()
                     .to_owned();
+            let sdp_str = decode(sdp_str).unwrap();
             let sdp = serde_json::from_str::<RTCSessionDescription>(&sdp_str).unwrap();
             transport.set_remote_description(sdp).await.unwrap();
             match Response::builder().status(200).body(Body::empty()) {

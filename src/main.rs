@@ -14,11 +14,8 @@ use std::net::SocketAddr;
 #[derive(Parser, Debug)]
 #[clap(about, version, author)]
 pub struct Args {
-    #[clap(long, short = 'h', default_value = "0.0.0.0:60000")]
+    #[clap(long, short = 'd', default_value = "127.0.0.1:50000")]
     pub http_addr: String,
-
-    #[clap(long, short = 'r', default_value = "0.0.0.0:50000")]
-    pub remote_addr: String,
 }
 
 #[tokio::main]
@@ -31,22 +28,19 @@ async fn main() -> Result<()> {
 
     tokio::spawn(async move {
         let ice_transport = ice_transport.clone();
-        let remote_addr = args.remote_addr.clone();
 
         let service = make_service_fn(move |_| {
             let ice_transport = ice_transport.to_owned();
-            let remote_addr = remote_addr.to_owned();
-
             async move {
                 Ok::<_, hyper::Error>(service_fn(move |req| {
-                    sdp_handler(req, remote_addr.to_owned(), ice_transport.to_owned())
+                    sdp_handler(req, ice_transport.to_owned())
                 }))
             }
         });
 
         let http_addr: SocketAddr = args.http_addr.parse().unwrap();
         let server = Server::bind(&http_addr).serve(service);
-
+        println!("Serving on {}", args.http_addr);
         // Run this server for... forever!
         if let Err(e) = server.await {
             eprintln!("server error: {}", e);
