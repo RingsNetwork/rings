@@ -23,8 +23,8 @@ use hyper::Body;
 use hyper::{Method, Request, Response, StatusCode};
 use reqwest;
 use std::collections::HashMap;
-use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
+use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 pub async fn sdp_handler(
     req: Request<Body>,
@@ -81,7 +81,7 @@ pub async fn sdp_handler(
                     .await
                     .unwrap(),
             )
-                .unwrap();
+            .unwrap();
             log::info!("{}", offer);
             let transport = swarm.get_pending().await.unwrap();
             let mut sdp = RTCSessionDescription::default();
@@ -91,7 +91,7 @@ pub async fn sdp_handler(
                 Ok(()) => {
                     let answer = transport.get_answer().await.unwrap();
                     client.post(node).body(answer.sdp).send().await.unwrap();
-                },
+                }
                 Err(e) => {
                     log::info!("Err:: {}", e);
                     log::info!("{}", offer);

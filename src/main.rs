@@ -3,11 +3,11 @@ use bns_core::channels::default::TkChannel;
 use bns_core::swarm::Swarm;
 use bns_core::types::channel::Channel;
 use bns_node::discoveries::http::sdp_handler;
+use bns_node::logger::Logger;
 use clap::Parser;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::Server;
 use std::net::SocketAddr;
-use bns_node::logger::Logger;
 
 #[derive(Parser, Debug)]
 #[clap(about, version, author)]
@@ -29,8 +29,6 @@ pub struct Args {
 
 //     fn flush(&self) {}
 // }
-
-
 
 #[tokio::main]
 async fn main() -> Result<()> {

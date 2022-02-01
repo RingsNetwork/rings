@@ -1,7 +1,6 @@
-use log::{SetLoggerError, LevelFilter};
-use log::{Record, Level, Metadata};
 use log::Log;
-
+use log::{Level, Metadata, Record};
+use log::{LevelFilter, SetLoggerError};
 
 pub struct Logger;
 
@@ -21,7 +20,6 @@ impl Log for Logger {
 
 impl Logger {
     pub fn init() -> Result<(), SetLoggerError> {
-        log::set_boxed_logger(Box::new(Logger))
-            .map(|()| log::set_max_level(LevelFilter::Info))
+        log::set_boxed_logger(Box::new(Logger)).map(|()| log::set_max_level(LevelFilter::Info))
     }
 }
