@@ -1,5 +1,5 @@
 use bns_core::encoder::decode;
-use bns_core::swarm::swarm::Swarm;
+use bns_core::swarm::Swarm;
 /// HTTP services for braowser based P2P initialization
 /// Two API *must* provided:
 /// 1. GET /sdp
