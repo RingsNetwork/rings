@@ -7,6 +7,7 @@ use clap::Parser;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::Server;
 use std::net::SocketAddr;
+use bns_node::logger::Logger;
 
 #[derive(Parser, Debug)]
 #[clap(about, version, author)]
@@ -15,8 +16,25 @@ pub struct Args {
     pub http_addr: String,
 }
 
+// impl log::Log for Logger {
+//     fn enabled(&self, metadata: &Metadata) -> bool {
+//         metadata.level() <= Level::Info
+//     }
+
+//     fn log(&self, record: &Record) {
+//         if self.enabled(record.metadata()) {
+//             println!("{} - {}", record.level(), record.args());
+//         }
+//     }
+
+//     fn flush(&self) {}
+// }
+
+
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    Logger::init()?;
     let args = Args::parse();
     let swarm = Swarm::new(TkChannel::new(1));
     let signaler = swarm.signaler();

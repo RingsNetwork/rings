@@ -24,6 +24,7 @@ use hyper::{Method, Request, Response, StatusCode};
 use reqwest;
 use std::collections::HashMap;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 
 pub async fn sdp_handler(
     req: Request<Body>,
@@ -39,7 +40,7 @@ pub async fn sdp_handler(
             match transport {
                 Some(trans) => {
                     let offer = encode(trans.get_offer_str().unwrap());
-                    return Response::builder().status(200).body(Body::from(offer));
+                    Response::builder().status(200).body(Body::from(offer))
                 }
                 None => {
                     panic!("Cannot get transport");
@@ -53,7 +54,9 @@ pub async fn sdp_handler(
                     .unwrap()
                     .to_owned();
             let sdp_str = decode(sdp_str).unwrap();
-            let sdp = serde_json::from_str::<RTCSessionDescription>(&sdp_str).unwrap();
+            let mut sdp = RTCSessionDescription::default();
+            sdp.sdp = sdp_str.to_owned();
+            sdp.sdp_type = RTCSdpType::Answer;
             let transport = swarm.get_pending().await.unwrap();
             transport.set_remote_description(sdp).await.unwrap();
             swarm.upgrade_pending().unwrap();
@@ -64,6 +67,7 @@ pub async fn sdp_handler(
         }
         (&Method::GET, "/connect") => {
             let client = reqwest::Client::new();
+            // get sdp from renote peer
             let query = req.uri().query().unwrap();
             let args = form_urlencoded::parse(query.as_bytes())
                 .into_owned()
@@ -77,16 +81,23 @@ pub async fn sdp_handler(
                     .await
                     .unwrap(),
             )
-            .unwrap();
+                .unwrap();
+            log::info!("{}", offer);
             let transport = swarm.get_pending().await.unwrap();
-            let sdp = serde_json::from_str::<RTCSessionDescription>(&offer).unwrap();
-            transport.set_remote_description(sdp).await.unwrap();
-            let answer = transport.get_answer().await.unwrap();
-            client.post(node).body(answer.sdp).send().await.unwrap();
-            match Response::builder().status(200).body(Body::empty()) {
-                Ok(resp) => Ok(resp),
-                Err(_) => panic!("Opps"),
-            }
+            let mut sdp = RTCSessionDescription::default();
+            sdp.sdp = offer.to_owned();
+            sdp.sdp_type = RTCSdpType::Answer;
+            match transport.set_remote_description(sdp).await {
+                Ok(()) => {
+                    let answer = transport.get_answer().await.unwrap();
+                    client.post(node).body(answer.sdp).send().await.unwrap();
+                },
+                Err(e) => {
+                    log::info!("Err:: {}", e);
+                    log::info!("{}", offer);
+                }
+            };
+            Response::builder().status(200).body(Body::empty())
         }
         _ => {
             let mut not_found = Response::default();
