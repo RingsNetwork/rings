@@ -7,6 +7,7 @@ use bns_core::encoder::{decode, encode};
 /// Which receive offer from peer and send the answer back
 use bns_core::transports::default::DefaultTransport;
 use bns_core::types::ice_transport::IceTransport;
+use bns_core::swarm::swarm::Swarm;
 use hyper::Body;
 use hyper::{Method, Request, Response, StatusCode};
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
@@ -14,12 +15,13 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 pub async fn sdp_handler(
     req: Request<Body>,
-    transport: DefaultTransport,
+    swarm: Swarm,
 ) -> Result<Response<Body>, hyper::Error> {
+    let mut swarm = swarm.to_owned();
     match (req.method(), req.uri().path()) {
         (&Method::GET, "/sdp") => {
             // create offer and send back to candidated peer
-            let offer = encode(transport.get_offer().await.unwrap().sdp);
+            let offer = swarm.get_pending().await.unwrap().get_offer_str().unwrap();
             match Response::builder().status(200).body(Body::from(offer)) {
                 Ok(resp) => Ok(resp),
                 Err(_) => panic!("Opps"),
@@ -33,8 +35,11 @@ pub async fn sdp_handler(
                     .to_owned();
             let sdp_str = decode(sdp_str).unwrap();
             let sdp = serde_json::from_str::<RTCSessionDescription>(&sdp_str).unwrap();
+            let transport = swarm.get_pending().await.unwrap();
             transport.set_remote_description(sdp).await.unwrap();
-            match Response::builder().status(200).body(Body::empty()) {
+            let answer = transport.get_answer().await.unwrap();
+            swarm.upgrade_pending();
+            match Response::builder().status(200).body(Body::from(answer.sdp)) {
                 Ok(resp) => Ok(resp),
                 Err(_) => panic!("Opps"),
             }

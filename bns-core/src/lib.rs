@@ -6,3 +6,4 @@ pub mod encoder;
 pub mod storage;
 pub mod transports;
 pub mod types;
+pub mod swarm;

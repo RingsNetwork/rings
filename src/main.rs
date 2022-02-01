@@ -5,6 +5,7 @@ use bns_core::types::channel::Channel;
 use bns_core::types::ice_transport::IceTransport;
 use bns_core::types::ice_transport::IceTransportCallback;
 use bns_node::discoveries::http::sdp_handler;
+use bns_core::swarm::swarm::Swarm;
 
 use clap::Parser;
 use hyper::service::{make_service_fn, service_fn};
@@ -21,19 +22,17 @@ pub struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let mut ice_transport = DefaultTransport::new(TkChannel::new(1));
-    let signaler = ice_transport.signaler();
-    ice_transport.start().await?;
-    ice_transport.setup_callback().await?;
+    let mut swarm = Swarm::new(TkChannel::new(1));
+    let signaler = swarm.signaler();
 
     tokio::spawn(async move {
-        let ice_transport = ice_transport.clone();
+        let swarm = swarm.clone();
 
         let service = make_service_fn(move |_| {
-            let ice_transport = ice_transport.to_owned();
+            let swarm = swarm.to_owned();
             async move {
                 Ok::<_, hyper::Error>(service_fn(move |req| {
-                    sdp_handler(req, ice_transport.to_owned())
+                    sdp_handler(req, swarm.to_owned())
                 }))
             }
         });

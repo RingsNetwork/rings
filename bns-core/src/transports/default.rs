@@ -30,6 +30,8 @@ pub struct DefaultTransport {
     pub pending_candidates: Arc<Mutex<Vec<RTCIceCandidate>>>,
     pub channel: Arc<Mutex<Option<Arc<RTCDataChannel>>>>,
     pub signaler: Arc<SyncMutex<TkChannel>>,
+    pub offer: Option<RTCSessionDescription>,
+
 }
 
 #[async_trait]
@@ -41,12 +43,13 @@ impl IceTransport<TkChannel> for DefaultTransport {
     type ConnectionState = RTCPeerConnectionState;
     type Msg = DataChannelMessage;
 
-    fn new(ch: TkChannel) -> Self {
+    fn new(ch: Arc<SyncMutex<TkChannel>>) -> Self {
         Self {
             connection: Arc::new(Mutex::new(None)),
             pending_candidates: Arc::new(Mutex::new(vec![])),
             channel: Arc::new(Mutex::new(None)),
-            signaler: Arc::new(SyncMutex::new(ch)),
+            signaler: Arc::clone(&ch),
+            offer: None
         }
     }
 
@@ -71,7 +74,8 @@ impl IceTransport<TkChannel> for DefaultTransport {
             }
             Err(e) => Err(anyhow!(e)),
         }?;
-        self.setup_channel("bns").await
+        self.setup_channel("bns").await?;
+        self.setup_offer().await
     }
 
     async fn get_peer_connection(&self) -> Option<Arc<RTCPeerConnection>> {
@@ -92,14 +96,15 @@ impl IceTransport<TkChannel> for DefaultTransport {
         }
     }
 
-    async fn get_offer(&self) -> Result<RTCSessionDescription> {
-        match self.get_peer_connection().await {
-            Some(peer_connection) => peer_connection
-                .create_offer(None)
-                .await
-                .map_err(|e| anyhow!(e)),
-            None => Err(anyhow!("cannot get offer")),
+    fn get_offer(&self) -> Result<RTCSessionDescription> {
+        match &self.offer {
+            Some(o) => Ok(o.clone()),
+            None => Err(anyhow!("cannot get offer"))
         }
+    }
+
+    fn get_offer_str(&self) -> Result<String> {
+        self.get_offer().map(|o| o.sdp)
     }
 
     async fn get_data_channel(&self) -> Option<Arc<RTCDataChannel>> {
@@ -216,6 +221,24 @@ impl DefaultTransport {
                 }
             }
             None => Err(anyhow!("cannot get data channel")),
+        }
+    }
+
+    pub async fn setup_offer(&mut self) -> Result<()> {
+        // setup offer and set it to local description
+        match self.get_peer_connection().await {
+            Some(peer_connection) => {
+                match peer_connection.create_offer(None).await {
+                    Ok(offer) => {
+                        self.offer = Some(offer.clone());
+                        self.set_local_description(offer).await?;
+                        Ok(())
+                    },
+                    Err(e) => Err(anyhow!(e))
+                }
+
+            }
+            None => Err(anyhow!("cannot get offer")),
         }
     }
 }

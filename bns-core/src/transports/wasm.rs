@@ -75,7 +75,7 @@ impl IceTransport<CbChannel> for WasmTransport {
     type ConnectionState = RtcIceConnectionState;
     type Msg = JsValue;
 
-    fn new(ch: CbChannel) -> Self {
+    fn new(ch: Arc<Mutex<CbChannel>>) -> Self {
         let mut config = RtcConfiguration::new();
         config.ice_servers(
             &JsValue::from_serde(&json! {[{"urls":"stun:stun.l.google.com:19302"}]}).unwrap(),
@@ -89,7 +89,7 @@ impl IceTransport<CbChannel> for WasmTransport {
             channel: None,
             offer: None,
             pending_candidates: Arc::new(vec![]),
-            signaler: Arc::new(Mutex::new(ch)),
+            signaler: Arc::clone(&ch),
         };
         return ins;
     }
@@ -126,11 +126,15 @@ impl IceTransport<CbChannel> for WasmTransport {
         }
     }
 
-    async fn get_offer(&self) -> Result<Self::Sdp> {
+    fn get_offer(&self) -> Result<Self::Sdp> {
         match &self.offer {
             Some(o) => Ok(o.clone()),
             None => Err(anyhow!("Cannot get Offer")),
         }
+    }
+
+    fn get_offer_str(&self) -> Result<String> {
+        self.get_offer().map(|o| o.sdp())
     }
 
     async fn get_data_channel(&self) -> Option<Arc<Self::Channel>> {

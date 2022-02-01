@@ -17,14 +17,15 @@ pub trait IceTransport<Ch: Channel> {
     type ConnectionState;
     type Msg;
 
-    fn new(signaler: Ch) -> Self;
+    fn new(signaler: Arc<SyncMutex<Ch>>) -> Self;
     fn signaler(&self) -> Arc<SyncMutex<Ch>>;
     async fn start(&mut self) -> Result<()>;
 
     async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>>;
     async fn get_pending_candidates(&self) -> Vec<Self::Candidate>;
     async fn get_answer(&self) -> Result<Self::Sdp>;
-    async fn get_offer(&self) -> Result<Self::Sdp>;
+    fn get_offer(&self) -> Result<Self::Sdp>;
+    fn get_offer_str(&self) -> Result<String>;
     async fn get_data_channel(&self) -> Option<Arc<Self::Channel>>;
 
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
