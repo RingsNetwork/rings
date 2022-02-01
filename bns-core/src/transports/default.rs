@@ -289,11 +289,11 @@ impl IceTransportCallback<TkChannel> for DefaultTransport {
             + Send
             + Sync,
     > {
-        let sender = self.signaler().lock().unwrap().sender();
+        let sender = self.signaler();
         box move |s: RTCPeerConnectionState| {
             let sender = Arc::clone(&sender);
             if s == RTCPeerConnectionState::Failed {
-                let _ = sender.send(Events::ConnectFailed);
+                let _ = sender.lock().unwrap().send(Events::ConnectFailed);
             }
             Box::pin(async move {})
         }
