@@ -16,20 +16,6 @@ pub struct Args {
     pub http_addr: String,
 }
 
-// impl log::Log for Logger {
-//     fn enabled(&self, metadata: &Metadata) -> bool {
-//         metadata.level() <= Level::Info
-//     }
-
-//     fn log(&self, record: &Record) {
-//         if self.enabled(record.metadata()) {
-//             println!("{} - {}", record.level(), record.args());
-//         }
-//     }
-
-//     fn flush(&self) {}
-// }
-
 #[tokio::main]
 async fn main() -> Result<()> {
     Logger::init()?;
