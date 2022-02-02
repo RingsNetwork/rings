@@ -30,21 +30,23 @@ pub struct Swarm {
     pub anonymous: DashMap<String, Arc<Transport>>,
     pub table: DashMap<String, Arc<Transport>>,
     pub signaler: Arc<Mutex<Channel>>,
+    pub stun_server: String
 }
 
 impl Swarm {
-    pub fn new(ch: Channel) -> Self {
+    pub fn new(ch: Channel, stun_server: String) -> Self {
         Self {
             pending: None,
             anonymous: DashMap::new(),
             table: DashMap::new(),
             signaler: Arc::new(Mutex::new(ch)),
+            stun_server: stun_server.to_owned()
         }
     }
 
     pub async fn new_transport(&mut self) -> Result<Arc<Transport>> {
         let mut ice_transport = Transport::new(Arc::clone(&self.signaler));
-        ice_transport.start().await?;
+        ice_transport.start(self.stun_server.to_owned()).await?;
         ice_transport.setup_callback().await?;
         // should always has offer here #WhyUnwarp
         let trans = Arc::new(ice_transport);
@@ -55,7 +57,13 @@ impl Swarm {
     pub async fn get_pending(&mut self) -> Option<Arc<Transport>> {
         match &self.pending {
             Some(trans) => Some(Arc::clone(trans)),
-            None => self.new_transport().await.ok(),
+            None => match self.new_transport().await {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    log::error!("{}", e);
+                    None
+                }
+            }
         }
     }
 

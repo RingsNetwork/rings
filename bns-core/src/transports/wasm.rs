@@ -76,16 +76,8 @@ impl IceTransport<CbChannel> for WasmTransport {
     type Msg = JsValue;
 
     fn new(ch: Arc<Mutex<CbChannel>>) -> Self {
-        let mut config = RtcConfiguration::new();
-        config.ice_servers(
-            &JsValue::from_serde(&json! {[{"urls":"stun:stun.l.google.com:19302"}]}).unwrap(),
-        );
-
         let ins = Self {
-            connection: RtcPeerConnection::new_with_configuration(&config)
-                .ok()
-                .as_ref()
-                .map(|c| Arc::new(c.to_owned())),
+            connection: None,
             channel: None,
             offer: None,
             pending_candidates: Arc::new(vec![]),
@@ -98,7 +90,15 @@ impl IceTransport<CbChannel> for WasmTransport {
         Arc::clone(&self.signaler)
     }
 
-    async fn start(&mut self) -> Result<()> {
+    async fn start(&mut self, stun_server: String) -> Result<()> {
+        let mut config = RtcConfiguration::new();
+        config.ice_servers(
+            &JsValue::from_serde(&json! {[{"urls":stun_server.to_owned()}]}).unwrap(),
+        );
+        self.connection = RtcPeerConnection::new_with_configuration(&config)
+            .ok()
+            .as_ref()
+            .map(|c| Arc::new(c.to_owned())),
         self.setup_offer().await;
         self.setup_channel("bns").await;
         info!("started!");

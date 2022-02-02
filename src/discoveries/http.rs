@@ -34,8 +34,6 @@ pub async fn sdp_handler(
     match (req.method(), req.uri().path()) {
         (&Method::GET, "/sdp") => {
             // create offer and send back to candidated peer
-            log::info!("1");
-
             let transport = swarm.get_pending().await;
             match transport {
                 Some(trans) => {
@@ -52,7 +50,7 @@ pub async fn sdp_handler(
             let sdp_str =
                 std::str::from_utf8(&hyper::body::to_bytes(req.into_body()).await.unwrap())
                     .unwrap()
-                    .to_owned();
+                .to_owned();
             let sdp_str = decode(sdp_str).unwrap();
             let mut sdp = RTCSessionDescription::default();
             sdp.sdp = sdp_str.to_owned();
@@ -67,7 +65,7 @@ pub async fn sdp_handler(
         }
         (&Method::GET, "/connect") => {
             let client = reqwest::Client::new();
-            // get sdp from renote peer
+            // get sdp offer from renote peer
             let query = req.uri().query().unwrap();
             let args = form_urlencoded::parse(query.as_bytes())
                 .into_owned()
@@ -87,10 +85,11 @@ pub async fn sdp_handler(
             let mut sdp = RTCSessionDescription::default();
             sdp.sdp = offer.to_owned();
             sdp.sdp_type = RTCSdpType::Answer;
+            // set sdp and remote desc, and set out local to remote
             match transport.set_remote_description(sdp).await {
                 Ok(()) => {
-                    let answer = transport.get_answer().await.unwrap();
-                    client.post(node).body(answer.sdp).send().await.unwrap();
+                    let answer = transport.get_offer_str().unwrap();
+                    client.post(node).body(encode(answer)).send().await.unwrap();
                 }
                 Err(e) => {
                     log::info!("Err:: {}", e);

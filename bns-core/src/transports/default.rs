@@ -56,10 +56,10 @@ impl IceTransport<TkChannel> for DefaultTransport {
         Arc::clone(&self.signaler)
     }
 
-    async fn start(&mut self) -> Result<()> {
+    async fn start(&mut self, stun_addr: String) -> Result<()> {
         let config = RTCConfiguration {
             ice_servers: vec![RTCIceServer {
-                urls: vec!["stun:stun.l.google.com:19302".to_owned()],
+                urls: vec![stun_addr.to_owned()],
                 ..Default::default()
             }],
             ..Default::default()
@@ -114,11 +114,21 @@ impl IceTransport<TkChannel> for DefaultTransport {
     where
         T: Into<RTCSessionDescription> + Send,
     {
+        let offer = desc.into();
+        log::info!("try set_local_descrition as: {:?}", offer.clone());
+
         match self.get_peer_connection().await {
-            Some(peer_connection) => peer_connection
-                .set_local_description(desc.into())
-                .await
-                .map_err(|e| anyhow!(e)),
+            Some(peer_connection) => {
+                match peer_connection
+                    .set_local_description(offer)
+                    .await {
+                        Ok(()) => Ok(()),
+                        Err(e) => {
+                            log::error!("failed on set local description");
+                            Err(anyhow!(e))
+                        }
+                    }
+            },
             None => Err(anyhow!("cannot get local description")),
         }
     }
@@ -127,11 +137,16 @@ impl IceTransport<TkChannel> for DefaultTransport {
     where
         T: Into<RTCSessionDescription> + Send,
     {
+        let answer = desc.into();
+        log::info!("try set_remote_descrition as: {:?}", answer.clone());
         match self.get_peer_connection().await {
             Some(peer_connection) => peer_connection
-                .set_remote_description(desc.into())
+                .set_remote_description(answer)
                 .await
-                .map_err(|e| anyhow!(e)),
+                .map_err(|e| {
+                    log::error!("failed on set remote description");
+                    anyhow!(e)
+                }),
             None => Err(anyhow!("connection is not setup")),
         }
     }
@@ -165,7 +180,9 @@ impl IceTransport<TkChannel> for DefaultTransport {
             Some(peer_connection) => {
                 peer_connection.on_peer_connection_state_change(f).await;
             }
-            None => panic!("Connection Failed."),
+            None => {
+                log::error!("cannot get connection");
+            }
         }
         Ok(())
     }
@@ -182,7 +199,9 @@ impl IceTransport<TkChannel> for DefaultTransport {
             Some(peer_connection) => {
                 peer_connection.on_data_channel(f).await;
             }
-            None => panic!("Connection Failed."),
+            None => {
+                log::error!("cannot get connection");
+            },
         }
         Ok(())
     }
@@ -199,7 +218,9 @@ impl IceTransport<TkChannel> for DefaultTransport {
             Some(ch) => {
                 ch.on_message(f).await;
             }
-            None => panic!("Connection Failed."),
+            None => {
+                log::error!("cannot get data channel");
+            },
         }
         Ok(())
     }
@@ -216,10 +237,16 @@ impl DefaultTransport {
                         *channel = Some(ch);
                         Ok(())
                     }
-                    Err(e) => Err(anyhow!(e)),
+                    Err(e) => {
+                        log::error!("{}: Failed on setup channel", e);
+                        Err(anyhow!(e))
+                    },
                 }
             }
-            None => Err(anyhow!("cannot get data channel")),
+            None => {
+                log::error!("cannot get peer connection");
+                Err(anyhow!("cannot get peer connection"))
+            }
         }
     }
 
@@ -232,9 +259,15 @@ impl DefaultTransport {
                     self.set_local_description(offer).await?;
                     Ok(())
                 }
-                Err(e) => Err(anyhow!(e)),
+                Err(e) => {
+                    log::error!("{}", e);
+                    Err(anyhow!(e))
+                },
             },
-            None => Err(anyhow!("cannot get offer")),
+            None => {
+                log::error!("setup_offer:: Cannot create offer");
+                Err(anyhow!("cannot get offer"))
+            }
         }
     }
 }
