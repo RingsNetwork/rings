@@ -34,13 +34,13 @@ pub struct Swarm {
 }
 
 impl Swarm {
-    pub fn new(ch: Channel, stun_server: String) -> Self {
+    pub fn new(ch: Channel, stun: String) -> Self {
         Self {
             pending: None,
             anonymous: DashMap::new(),
             table: DashMap::new(),
             signaler: Arc::new(Mutex::new(ch)),
-            stun_server: stun_server.to_owned(),
+            stun_server: stun,
         }
     }
 
