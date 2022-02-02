@@ -1,13 +1,13 @@
+use core::str::FromStr;
 use log::Log;
 use log::{Level, Metadata, Record};
 use log::{LevelFilter, SetLoggerError};
-
 
 pub struct Logger;
 
 impl Log for Logger {
     fn enabled(&self, metadata: &Metadata) -> bool {
-        metadata.level() <= Level::Info
+        metadata.level() <= Level::Trace
     }
 
     fn log(&self, record: &Record) {
@@ -20,7 +20,8 @@ impl Log for Logger {
 }
 
 impl Logger {
-    pub fn init() -> Result<(), SetLoggerError> {
-        log::set_boxed_logger(Box::new(Logger)).map(|()| log::set_max_level(LevelFilter::Info))
+    pub fn init(level: String) -> Result<(), SetLoggerError> {
+        log::set_boxed_logger(Box::new(Logger))
+            .map(|()| log::set_max_level(LevelFilter::from_str(&level).unwrap()))
     }
 }

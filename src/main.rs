@@ -17,13 +17,15 @@ pub struct Args {
     #[clap(long, short = 'd', default_value = "127.0.0.1:50000")]
     pub http_addr: String,
     #[clap(long, short = 's', default_value = "stun:stun.l.google.com:19302")]
-    pub stun_server: String
+    pub stun_server: String,
+    #[clap(long, short = 'v', default_value = "Info")]
+    pub log_level: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    Logger::init()?;
     let args = Args::parse();
+    Logger::init(args.log_level)?;
     let swarm = Arc::new(Mutex::new(Swarm::new(TkChannel::new(1), args.stun_server)));
     let signaler = swarm.lock().await.signaler();
 
@@ -39,20 +41,20 @@ async fn main() -> Result<()> {
 
         let http_addr: SocketAddr = args.http_addr.parse().unwrap();
         let server = Server::bind(&http_addr).serve(service);
-        println!("Serving on {}", args.http_addr);
+        log::info!("Serving on {}", args.http_addr);
         // Run this server for... forever!
         if let Err(e) = server.await {
-            eprintln!("server error: {}", e);
+            log::error!("server error: {}", e);
         }
     });
 
     let mut channel = signaler.lock().unwrap();
     tokio::select! {
         _ = channel.recv() => {
-            println!("received done signal!");
+            log::info!("received done signal!");
         }
         _ = tokio::signal::ctrl_c() => {
-            println!("");
+            log::info!("Stopped");
         }
     };
     Ok(())

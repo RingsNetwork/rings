@@ -7,7 +7,7 @@ use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
 use js_sys::Reflect;
-use log::info;
+use log::debug;
 use serde_json::json;
 use std::future::Future;
 use std::pin::Pin;
@@ -92,16 +92,15 @@ impl IceTransport<CbChannel> for WasmTransport {
 
     async fn start(&mut self, stun_server: String) -> Result<()> {
         let mut config = RtcConfiguration::new();
-        config.ice_servers(
-            &JsValue::from_serde(&json! {[{"urls":stun_server.to_owned()}]}).unwrap(),
-        );
+        config
+            .ice_servers(&JsValue::from_serde(&json! {[{"urls":stun_server.to_owned()}]}).unwrap());
         self.connection = RtcPeerConnection::new_with_configuration(&config)
             .ok()
             .as_ref()
-            .map(|c| Arc::new(c.to_owned())),
+            .map(|c| Arc::new(c.to_owned()));
         self.setup_offer().await;
         self.setup_channel("bns").await;
-        info!("started!");
+        debug!("started!");
         return Ok(());
     }
 
@@ -167,17 +166,17 @@ impl IceTransport<CbChannel> for WasmTransport {
             Some(c) => {
                 let mut offer_obj = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
                 let sdp = &desc.into().sdp();
-                info!("{}", &sdp);
+                debug!("{}", &sdp);
                 offer_obj.sdp(&sdp);
-                info!("3");
+                debug!("3");
                 let promise = c.set_remote_description(&offer_obj);
-                info!("3");
+                debug!("3");
 
                 match JsFuture::from(promise).await {
                     Ok(_) => Ok(()),
                     Err(e) => {
-                        info!("failed to set remote desc");
-                        info!("{:?}", e);
+                        debug!("failed to set remote desc");
+                        debug!("{:?}", e);
                         Err(anyhow!("Failed to set remote description"))
                     }
                 }
@@ -286,7 +285,7 @@ impl WasmTransport {
                     .ok()
                     .and_then(|o| Some(SdpOfferStr::new(o.as_string().unwrap()).as_sdp()))
                     .take();
-                info!("{:?}", self.offer);
+                debug!("{:?}", self.offer);
             }
         }
         return self;
@@ -350,7 +349,7 @@ impl IceTransportCallback<CbChannel> for WasmTransport {
             let sender = Arc::clone(&sender);
             let msg = msg.as_string().unwrap().clone();
             Box::pin(async move {
-                info!("{:?}", msg);
+                debug!("{:?}", msg);
                 sender.send(Events::ReceiveMsg(msg)).unwrap();
             })
         }

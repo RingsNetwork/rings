@@ -115,19 +115,15 @@ impl IceTransport<TkChannel> for DefaultTransport {
         T: Into<RTCSessionDescription> + Send,
     {
         let offer = desc.into();
-        log::info!("try set_local_descrition as: {:?}", offer.clone());
+        log::debug!("try set_local_descrition as: {:?}", offer.clone());
 
         match self.get_peer_connection().await {
-            Some(peer_connection) => {
-                match peer_connection
-                    .set_local_description(offer)
-                    .await {
-                        Ok(()) => Ok(()),
-                        Err(e) => {
-                            log::error!("failed on set local description");
-                            Err(anyhow!(e))
-                        }
-                    }
+            Some(peer_connection) => match peer_connection.set_local_description(offer).await {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    log::error!("failed on set local description");
+                    Err(anyhow!(e))
+                }
             },
             None => Err(anyhow!("cannot get local description")),
         }
@@ -138,7 +134,7 @@ impl IceTransport<TkChannel> for DefaultTransport {
         T: Into<RTCSessionDescription> + Send,
     {
         let answer = desc.into();
-        log::info!("try set_remote_descrition as: {:?}", answer.clone());
+        log::debug!("try set_remote_descrition as: {:?}", answer.clone());
         match self.get_peer_connection().await {
             Some(peer_connection) => peer_connection
                 .set_remote_description(answer)
@@ -197,12 +193,12 @@ impl IceTransport<TkChannel> for DefaultTransport {
     ) -> Result<()> {
         match self.get_peer_connection().await {
             Some(peer_connection) => {
-                log::info!("register data channel callback");
+                log::debug!("register data channel callback");
                 peer_connection.on_data_channel(f).await;
             }
             None => {
                 log::error!("cannot get connection");
-            },
+            }
         }
         Ok(())
     }
@@ -217,12 +213,12 @@ impl IceTransport<TkChannel> for DefaultTransport {
     ) -> Result<()> {
         match self.get_data_channel().await {
             Some(ch) => {
-                log::info!("setting on message callback");
+                log::debug!("setting on message callback");
                 ch.on_message(f).await;
             }
             None => {
                 log::error!("cannot get data channel");
-            },
+            }
         }
         Ok(())
     }
@@ -242,7 +238,7 @@ impl DefaultTransport {
                     Err(e) => {
                         log::error!("{}: Failed on setup channel", e);
                         Err(anyhow!(e))
-                    },
+                    }
                 }
             }
             None => {
@@ -265,11 +261,11 @@ impl DefaultTransport {
                         self.set_local_description(offer).await?;
                         let _ = gather_complete.recv().await;
                         Ok(())
-                    },
+                    }
                     Err(e) => {
                         log::error!("{}", e);
                         Err(anyhow!(e))
-                    },
+                    }
                 }
             }
             None => {
@@ -310,13 +306,13 @@ impl IceTransportCallback<TkChannel> for DefaultTransport {
             let pending_candidates = pending_candidates.to_owned();
             Box::pin(async move {
                 if let Some(candidate) = c {
-                    log::info!("start answer candidate: {:?}", candidate);
+                    log::debug!("start answer candidate: {:?}", candidate);
                     let desc = peer_connection.remote_description().await;
                     if desc.is_none() {
                         let mut candidates = pending_candidates;
                         candidates.push(candidate.clone());
                     } else {
-                        log::info!("desc existed");
+                        log::debug!("desc existed");
                     }
                 }
             })
@@ -336,7 +332,7 @@ impl IceTransportCallback<TkChannel> for DefaultTransport {
             if s == RTCPeerConnectionState::Failed {
                 let _ = sender.lock().unwrap().send(Events::ConnectFailed);
             }
-            log::info!("peer connection state changes {:?}", s);
+            log::debug!("peer connection state changes {:?}", s);
             Box::pin(async move {})
         }
     }
@@ -351,7 +347,7 @@ impl IceTransportCallback<TkChannel> for DefaultTransport {
         box move |d: Arc<RTCDataChannel>| {
             let d = Arc::clone(&d);
             Box::pin(async move {
-                log::info!("created data channel");
+                log::debug!("created data channel");
                 let mut result = Result::<usize>::Ok(0);
                 while result.is_ok() {
                     let timeout = tokio::time::sleep(Duration::from_secs(5));
@@ -377,7 +373,7 @@ impl IceTransportCallback<TkChannel> for DefaultTransport {
     > {
         box move |msg: DataChannelMessage| {
             let msg_str = String::from_utf8(msg.data.to_vec()).unwrap();
-            log::info!("Message from DataChannel: '{}'", msg_str);
+            log::debug!("Message from DataChannel: '{}'", msg_str);
             Box::pin(async move {})
         }
     }

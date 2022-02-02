@@ -30,7 +30,7 @@ pub struct Swarm {
     pub anonymous: DashMap<String, Arc<Transport>>,
     pub table: DashMap<String, Arc<Transport>>,
     pub signaler: Arc<Mutex<Channel>>,
-    pub stun_server: String
+    pub stun_server: String,
 }
 
 impl Swarm {
@@ -40,7 +40,7 @@ impl Swarm {
             anonymous: DashMap::new(),
             table: DashMap::new(),
             signaler: Arc::new(Mutex::new(ch)),
-            stun_server: stun_server.to_owned()
+            stun_server: stun_server.to_owned(),
         }
     }
 
@@ -58,7 +58,7 @@ impl Swarm {
             Some(trans) => {
                 log::info!("Pending transport exists");
                 Some(Arc::clone(trans))
-            },
+            }
             None => {
                 log::info!("Pending transport not exists, creating new");
                 match self.new_transport().await {
@@ -66,7 +66,7 @@ impl Swarm {
                         self.pending = Some(Arc::clone(&t));
                         log::info!("assigning new transport");
                         Some(t)
-                    },
+                    }
                     Err(e) => {
                         log::error!("{}", e);
                         None

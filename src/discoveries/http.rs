@@ -23,19 +23,19 @@ use hyper::Body;
 use hyper::{Method, Request, Response, StatusCode};
 use reqwest;
 use std::collections::HashMap;
-use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
-use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
+use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 pub async fn sdp_handler(
     req: Request<Body>,
-    swarm: Arc<Mutex<Swarm>>
+    swarm: Arc<Mutex<Swarm>>,
 ) -> Result<Response<Body>, hyper::http::Error> {
     let mut swarm = swarm.lock().await;
     match (req.method(), req.uri().path()) {
         (&Method::GET, "/sdp") => {
-            log::info!("receive request to GET /sdp");
+            log::debug!("receive request to GET /sdp");
             // create offer and send back to candidated peer
             let transport = swarm.get_pending().await;
             match transport {
@@ -49,12 +49,12 @@ pub async fn sdp_handler(
             }
         }
         (&Method::POST, "/sdp") => {
-            log::info!("receive request to POST /sdp");
+            log::debug!("receive request to POST /sdp");
             // receive answer and send answer back to candidated peer
             let sdp_str =
                 std::str::from_utf8(&hyper::body::to_bytes(req.into_body()).await.unwrap())
                     .unwrap()
-                .to_owned();
+                    .to_owned();
             let sdp_str = decode(sdp_str).unwrap();
             let mut sdp = RTCSessionDescription::default();
             sdp.sdp = sdp_str.to_owned();
@@ -69,7 +69,7 @@ pub async fn sdp_handler(
             }
         }
         (&Method::GET, "/connect") => {
-            log::info!("receive request to GET /connect");
+            log::debug!("receive request to GET /connect");
             let client = reqwest::Client::new();
             // get sdp offer from renote peer
             let query = req.uri().query().unwrap();
@@ -86,7 +86,7 @@ pub async fn sdp_handler(
                     .unwrap(),
             )
             .unwrap();
-            log::info!("{}", offer);
+            log::debug!("{}", offer);
             let transport = swarm.get_pending().await.unwrap();
             let mut sdp = RTCSessionDescription::default();
             sdp.sdp = offer.to_owned();
@@ -98,8 +98,8 @@ pub async fn sdp_handler(
                     client.post(node).body(encode(answer)).send().await.unwrap();
                 }
                 Err(e) => {
-                    log::info!("Err:: {}", e);
-                    log::info!("{}", offer);
+                    log::debug!("Err:: {}", e);
+                    log::debug!("{}", offer);
                 }
             };
             Response::builder().status(200).body(Body::empty())
