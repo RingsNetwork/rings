@@ -25,12 +25,14 @@ use reqwest;
 use std::collections::HashMap;
 use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 pub async fn sdp_handler(
     req: Request<Body>,
-    swarm: Swarm,
+    swarm: Arc<Mutex<Swarm>>
 ) -> Result<Response<Body>, hyper::http::Error> {
-    let mut swarm = swarm.to_owned();
+    let mut swarm = swarm.lock().await;
     match (req.method(), req.uri().path()) {
         (&Method::GET, "/sdp") => {
             log::info!("receive request to GET /sdp");

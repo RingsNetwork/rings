@@ -8,6 +8,8 @@ use clap::Parser;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::Server;
 use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 #[derive(Parser, Debug)]
 #[clap(about, version, author)]
@@ -22,14 +24,14 @@ pub struct Args {
 async fn main() -> Result<()> {
     Logger::init()?;
     let args = Args::parse();
-    let swarm = Swarm::new(TkChannel::new(1), args.stun_server);
-    let signaler = swarm.signaler();
+    let swarm = Arc::new(Mutex::new(Swarm::new(TkChannel::new(1), args.stun_server)));
+    let signaler = swarm.lock().await.signaler();
 
     tokio::spawn(async move {
-        let swarm = swarm.clone();
+        let swarm = Arc::clone(&swarm);
 
         let service = make_service_fn(move |_| {
-            let swarm = swarm.to_owned();
+            let swarm = Arc::clone(&swarm);
             async move {
                 Ok::<_, hyper::Error>(service_fn(move |req| sdp_handler(req, swarm.to_owned())))
             }

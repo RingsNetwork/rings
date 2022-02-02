@@ -50,7 +50,6 @@ impl Swarm {
         ice_transport.setup_callback().await?;
         // should always has offer here #WhyUnwarp
         let trans = Arc::new(ice_transport);
-        self.pending = Some(Arc::clone(&trans));
         Ok(Arc::clone(&trans))
     }
 
@@ -64,8 +63,8 @@ impl Swarm {
                 log::info!("Pending transport not exists, creating new");
                 match self.new_transport().await {
                     Ok(t) => {
-                        log::info!("assigning new transport");
                         self.pending = Some(Arc::clone(&t));
+                        log::info!("assigning new transport");
                         Some(t)
                     },
                     Err(e) => {

@@ -2,6 +2,7 @@ use log::Log;
 use log::{Level, Metadata, Record};
 use log::{LevelFilter, SetLoggerError};
 
+
 pub struct Logger;
 
 impl Log for Logger {
