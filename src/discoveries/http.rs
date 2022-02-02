@@ -17,7 +17,7 @@ use bns_core::swarm::Swarm;
 
 /// SDP Forward Scheme:
 /// Server A -> Requset offer from Server B, and set it as remote_descriton
-/// Server A -> Create answer and send it to Server B
+/// Server A -> sent local_desc as answer to Server B
 use bns_core::types::ice_transport::IceTransport;
 use hyper::Body;
 use hyper::{Method, Request, Response, StatusCode};
