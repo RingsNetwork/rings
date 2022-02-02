@@ -33,6 +33,7 @@ pub async fn sdp_handler(
     let mut swarm = swarm.to_owned();
     match (req.method(), req.uri().path()) {
         (&Method::GET, "/sdp") => {
+            log::info!("receive request to GET /sdp");
             // create offer and send back to candidated peer
             let transport = swarm.get_pending().await;
             match transport {
@@ -46,6 +47,7 @@ pub async fn sdp_handler(
             }
         }
         (&Method::POST, "/sdp") => {
+            log::info!("receive request to POST /sdp");
             // receive answer and send answer back to candidated peer
             let sdp_str =
                 std::str::from_utf8(&hyper::body::to_bytes(req.into_body()).await.unwrap())
@@ -56,6 +58,7 @@ pub async fn sdp_handler(
             sdp.sdp = sdp_str.to_owned();
             sdp.sdp_type = RTCSdpType::Answer;
             let transport = swarm.get_pending().await.unwrap();
+            // set answer to remote_desc
             transport.set_remote_description(sdp).await.unwrap();
             swarm.upgrade_pending().unwrap();
             match Response::builder().status(200).body(Body::empty()) {
@@ -64,6 +67,7 @@ pub async fn sdp_handler(
             }
         }
         (&Method::GET, "/connect") => {
+            log::info!("receive request to GET /connect");
             let client = reqwest::Client::new();
             // get sdp offer from renote peer
             let query = req.uri().query().unwrap();

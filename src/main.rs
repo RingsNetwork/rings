@@ -14,7 +14,7 @@ use std::net::SocketAddr;
 pub struct Args {
     #[clap(long, short = 'd', default_value = "127.0.0.1:50000")]
     pub http_addr: String,
-    #[clap(long, short = 's', default_value = "stun:stun.engineeredarts.co.uk:3478")]
+    #[clap(long, short = 's', default_value = "stun:stun.l.google.com:19302")]
     pub stun_server: String
 }
 

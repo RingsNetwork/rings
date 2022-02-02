@@ -20,7 +20,6 @@ pub trait IceTransport<Ch: Channel> {
     fn new(signaler: Arc<SyncMutex<Ch>>) -> Self;
     fn signaler(&self) -> Arc<SyncMutex<Ch>>;
     async fn start(&mut self, stun_server: String) -> Result<()>;
-
     async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>>;
     async fn get_pending_candidates(&self) -> Vec<Self::Candidate>;
     async fn get_answer(&self) -> Result<Self::Sdp>;

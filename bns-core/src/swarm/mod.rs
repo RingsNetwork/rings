@@ -56,12 +56,22 @@ impl Swarm {
 
     pub async fn get_pending(&mut self) -> Option<Arc<Transport>> {
         match &self.pending {
-            Some(trans) => Some(Arc::clone(trans)),
-            None => match self.new_transport().await {
-                Ok(t) => Some(t),
-                Err(e) => {
-                    log::error!("{}", e);
-                    None
+            Some(trans) => {
+                log::info!("Pending transport exists");
+                Some(Arc::clone(trans))
+            },
+            None => {
+                log::info!("Pending transport not exists, creating new");
+                match self.new_transport().await {
+                    Ok(t) => {
+                        log::info!("assigning new transport");
+                        self.pending = Some(Arc::clone(&t));
+                        Some(t)
+                    },
+                    Err(e) => {
+                        log::error!("{}", e);
+                        None
+                    }
                 }
             }
         }
@@ -77,6 +87,7 @@ impl Swarm {
             }
             None => Err(anyhow!("pending transport not exiest")),
         }?;
+        log::info!("set pending transport to None");
         self.pending = None;
         Ok(())
     }

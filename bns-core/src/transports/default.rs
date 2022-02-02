@@ -197,6 +197,7 @@ impl IceTransport<TkChannel> for DefaultTransport {
     ) -> Result<()> {
         match self.get_peer_connection().await {
             Some(peer_connection) => {
+                log::info!("register data channel callback");
                 peer_connection.on_data_channel(f).await;
             }
             None => {
@@ -216,6 +217,7 @@ impl IceTransport<TkChannel> for DefaultTransport {
     ) -> Result<()> {
         match self.get_data_channel().await {
             Some(ch) => {
+                log::info!("setting on message callback");
                 ch.on_message(f).await;
             }
             None => {
@@ -253,17 +255,23 @@ impl DefaultTransport {
     pub async fn setup_offer(&mut self) -> Result<()> {
         // setup offer and set it to local description
         match self.get_peer_connection().await {
-            Some(peer_connection) => match peer_connection.create_offer(None).await {
-                Ok(offer) => {
-                    self.offer = Some(offer.clone());
-                    self.set_local_description(offer).await?;
-                    Ok(())
+            Some(peer_connection) => {
+                // Create channel that is blocked until ICE Gathering is complete
+                // ref: https://github.com/webrtc-rs/examples/blob/5a0e2861c66a45fca93aadf9e70a5b045b26dc9e/examples/data-channels-create/data-channels-create.rs#L159
+                let mut gather_complete = peer_connection.gathering_complete_promise().await;
+                match peer_connection.create_offer(None).await {
+                    Ok(offer) => {
+                        self.offer = Some(offer.clone());
+                        self.set_local_description(offer).await?;
+                        let _ = gather_complete.recv().await;
+                        Ok(())
+                    },
+                    Err(e) => {
+                        log::error!("{}", e);
+                        Err(anyhow!(e))
+                    },
                 }
-                Err(e) => {
-                    log::error!("{}", e);
-                    Err(anyhow!(e))
-                },
-            },
+            }
             None => {
                 log::error!("setup_offer:: Cannot create offer");
                 Err(anyhow!("cannot get offer"))
@@ -294,7 +302,7 @@ impl IceTransportCallback<TkChannel> for DefaultTransport {
             + Send
             + Sync,
     > {
-        let peer_connection = Arc::downgrade(&self.get_peer_connection().await.unwrap());
+        let peer_connection = self.get_peer_connection().await.unwrap();
         let pending_candidates = self.get_pending_candidates().await;
 
         box move |c: Option<<Self as IceTransport<TkChannel>>::Candidate>| {
@@ -302,13 +310,13 @@ impl IceTransportCallback<TkChannel> for DefaultTransport {
             let pending_candidates = pending_candidates.to_owned();
             Box::pin(async move {
                 if let Some(candidate) = c {
-                    if let Some(peer_connection) = peer_connection.upgrade() {
-                        let desc = peer_connection.remote_description().await;
-                        if desc.is_none() {
-                            let mut candidates = pending_candidates;
-                            println!("start answer candidate: {:?}", candidate);
-                            candidates.push(candidate.clone());
-                        }
+                    log::info!("start answer candidate: {:?}", candidate);
+                    let desc = peer_connection.remote_description().await;
+                    if desc.is_none() {
+                        let mut candidates = pending_candidates;
+                        candidates.push(candidate.clone());
+                    } else {
+                        log::info!("desc existed");
                     }
                 }
             })
@@ -328,6 +336,7 @@ impl IceTransportCallback<TkChannel> for DefaultTransport {
             if s == RTCPeerConnectionState::Failed {
                 let _ = sender.lock().unwrap().send(Events::ConnectFailed);
             }
+            log::info!("peer connection state changes {:?}", s);
             Box::pin(async move {})
         }
     }
@@ -342,6 +351,7 @@ impl IceTransportCallback<TkChannel> for DefaultTransport {
         box move |d: Arc<RTCDataChannel>| {
             let d = Arc::clone(&d);
             Box::pin(async move {
+                log::info!("created data channel");
                 let mut result = Result::<usize>::Ok(0);
                 while result.is_ok() {
                     let timeout = tokio::time::sleep(Duration::from_secs(5));
@@ -367,7 +377,7 @@ impl IceTransportCallback<TkChannel> for DefaultTransport {
     > {
         box move |msg: DataChannelMessage| {
             let msg_str = String::from_utf8(msg.data.to_vec()).unwrap();
-            println!("Message from DataChannel: '{}'", msg_str);
+            log::info!("Message from DataChannel: '{}'", msg_str);
             Box::pin(async move {})
         }
     }
