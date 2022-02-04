@@ -47,8 +47,22 @@ impl Swarm {
     pub async fn new_transport(&mut self) -> Result<Arc<Transport>> {
         let mut ice_transport = Transport::new(Arc::clone(&self.signaler));
         ice_transport.start(self.stun_server.to_owned()).await?;
-        ice_transport.setup_callback().await?;
-        // should always has offer here #WhyUnwarp
+        ice_transport
+            .on_ice_candidate(ice_transport.on_ice_candidate_callback().await)
+            .await?;
+        ice_transport
+            .on_peer_connection_state_change(
+                ice_transport
+                    .on_peer_connection_state_change_callback()
+                    .await,
+            )
+            .await?;
+        ice_transport
+            .on_data_channel(ice_transport.on_data_channel_callback().await)
+            .await?;
+        ice_transport
+            .on_message(ice_transport.on_message_callback().await)
+            .await?;
         let trans = Arc::new(ice_transport);
         Ok(Arc::clone(&trans))
     }
@@ -76,11 +90,11 @@ impl Swarm {
         }
     }
 
-    pub fn upgrade_pending(&mut self) -> Result<()> {
+    pub async fn upgrade_pending(&mut self) -> Result<()> {
         let trans = self.pending.take();
         match &trans {
             Some(t) => {
-                let sdp = t.get_offer_str().unwrap();
+                let sdp = t.get_local_description_str().await.unwrap();
                 self.register(sdp, Arc::clone(t), State::Anonymous);
                 Ok(())
             }

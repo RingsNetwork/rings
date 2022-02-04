@@ -10,13 +10,14 @@ use tokio::time::Duration;
 use webrtc::api::APIBuilder;
 
 use crate::channels::default::TkChannel;
+use crate::http::send_candidate;
 use crate::types::channel::Channel;
 use crate::types::channel::Events;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
-use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
+use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::math_rand_alpha;
@@ -30,7 +31,7 @@ pub struct DefaultTransport {
     pub pending_candidates: Arc<Mutex<Vec<RTCIceCandidate>>>,
     pub channel: Arc<Mutex<Option<Arc<RTCDataChannel>>>>,
     pub signaler: Arc<SyncMutex<TkChannel>>,
-    pub offer: Option<RTCSessionDescription>,
+    pub remote_servers: Arc<Mutex<Vec<String>>>,
 }
 
 #[async_trait]
@@ -48,7 +49,7 @@ impl IceTransport<TkChannel> for DefaultTransport {
             pending_candidates: Arc::new(Mutex::new(vec![])),
             channel: Arc::new(Mutex::new(None)),
             signaler: Arc::clone(&ch),
-            offer: None,
+            remote_servers: Arc::new(Mutex::new(vec![])),
         }
     }
 
@@ -73,8 +74,8 @@ impl IceTransport<TkChannel> for DefaultTransport {
             }
             Err(e) => Err(anyhow!(e)),
         }?;
-        self.setup_channel("bns").await?;
-        self.setup_offer().await
+        self.setup_channel("bns").await
+        //self.setup_offer().await?;
     }
 
     async fn get_peer_connection(&self) -> Option<Arc<RTCPeerConnection>> {
@@ -95,19 +96,45 @@ impl IceTransport<TkChannel> for DefaultTransport {
         }
     }
 
-    fn get_offer(&self) -> Result<RTCSessionDescription> {
-        match &self.offer {
-            Some(o) => Ok(o.clone()),
-            None => Err(anyhow!("cannot get offer")),
+    async fn get_offer(&self) -> Result<RTCSessionDescription> {
+        match self.get_peer_connection().await {
+            Some(peer_connection) => peer_connection
+                .create_offer(None)
+                .await
+                .map_err(|e| anyhow!(e)),
+            None => Err(anyhow!("cannot get answer")),
         }
     }
 
-    fn get_offer_str(&self) -> Result<String> {
-        self.get_offer().map(|o| o.sdp)
+    async fn get_local_description_str(&self) -> Result<String> {
+        match self.get_peer_connection().await {
+            Some(peer_connection) => {
+                let desc = peer_connection
+                    .local_description()
+                    .await
+                    .map(|l| l.sdp)
+                    .unwrap();
+                Ok(desc)
+            }
+            None => Err(anyhow!("cannot get local descrition")),
+        }
     }
 
     async fn get_data_channel(&self) -> Option<Arc<RTCDataChannel>> {
         self.channel.lock().await.clone()
+    }
+
+    async fn add_ice_candidate(&self, candidate: String) -> Result<()> {
+        match self.get_peer_connection().await {
+            Some(peer_connection) => peer_connection
+                .add_ice_candidate(RTCIceCandidateInit {
+                    candidate,
+                    ..Default::default()
+                })
+                .await
+                .map_err(|e| anyhow!(e)),
+            None => Err(anyhow!("cannot add ice candidate")),
+        }
     }
 
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
@@ -225,6 +252,12 @@ impl IceTransport<TkChannel> for DefaultTransport {
 }
 
 impl DefaultTransport {
+    pub async fn add_remote_server(&self, host_and_ip: &str) -> Result<()> {
+        let mut remotes = self.remote_servers.lock().await.clone();
+        remotes.push(host_and_ip.to_owned());
+        Ok(())
+    }
+
     pub async fn setup_channel(&mut self, name: &str) -> Result<()> {
         match self.get_peer_connection().await {
             Some(peer_connection) => {
@@ -257,7 +290,6 @@ impl DefaultTransport {
                 let mut gather_complete = peer_connection.gathering_complete_promise().await;
                 match peer_connection.create_offer(None).await {
                     Ok(offer) => {
-                        self.offer = Some(offer.clone());
                         self.set_local_description(offer).await?;
                         let _ = gather_complete.recv().await;
                         Ok(())
@@ -278,17 +310,6 @@ impl DefaultTransport {
 
 #[async_trait]
 impl IceTransportCallback<TkChannel> for DefaultTransport {
-    async fn setup_callback(&self) -> Result<()> {
-        self.on_ice_candidate(self.on_ice_candidate_callback().await)
-            .await?;
-        self.on_peer_connection_state_change(self.on_peer_connection_state_change_callback().await)
-            .await?;
-        self.on_data_channel(self.on_data_channel_callback().await)
-            .await?;
-        self.on_message(self.on_message_callback().await).await?;
-        Ok(())
-    }
-
     async fn on_ice_candidate_callback(
         &self,
     ) -> Box<
@@ -300,10 +321,12 @@ impl IceTransportCallback<TkChannel> for DefaultTransport {
     > {
         let peer_connection = self.get_peer_connection().await.unwrap();
         let pending_candidates = self.get_pending_candidates().await;
+        let remote_servers = self.remote_servers.lock().await.clone();
 
         box move |c: Option<<Self as IceTransport<TkChannel>>::Candidate>| {
             let peer_connection = peer_connection.to_owned();
             let pending_candidates = pending_candidates.to_owned();
+            let remote_servers = remote_servers.to_owned();
             Box::pin(async move {
                 if let Some(candidate) = c {
                     log::debug!("start answer candidate: {:?}", candidate);
@@ -312,6 +335,11 @@ impl IceTransportCallback<TkChannel> for DefaultTransport {
                         let mut candidates = pending_candidates;
                         candidates.push(candidate.clone());
                     } else {
+                        for remote_server in remote_servers {
+                            send_candidate(&remote_server, &candidate.clone())
+                                .await
+                                .unwrap();
+                        }
                         log::debug!("desc existed");
                     }
                 }

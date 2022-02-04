@@ -31,11 +31,14 @@ async fn main() -> Result<()> {
 
     tokio::spawn(async move {
         let swarm = Arc::clone(&swarm);
-
+        let http_addr = args.http_addr.clone();
         let service = make_service_fn(move |_| {
             let swarm = Arc::clone(&swarm);
+            let http_addr = http_addr.clone();
             async move {
-                Ok::<_, hyper::Error>(service_fn(move |req| sdp_handler(req, swarm.to_owned())))
+                Ok::<_, hyper::Error>(service_fn(move |req| {
+                    sdp_handler(req, http_addr.clone(), swarm.to_owned())
+                }))
             }
         });
 

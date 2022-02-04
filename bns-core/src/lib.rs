@@ -3,6 +3,7 @@
 
 pub mod channels;
 pub mod encoder;
+pub mod http;
 pub mod storage;
 pub mod swarm;
 pub mod transports;

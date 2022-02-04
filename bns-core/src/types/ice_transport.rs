@@ -23,9 +23,10 @@ pub trait IceTransport<Ch: Channel> {
     async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>>;
     async fn get_pending_candidates(&self) -> Vec<Self::Candidate>;
     async fn get_answer(&self) -> Result<Self::Sdp>;
-    fn get_offer(&self) -> Result<Self::Sdp>;
-    fn get_offer_str(&self) -> Result<String>;
+    async fn get_offer(&self) -> Result<Self::Sdp>;
+    async fn get_local_description_str(&self) -> Result<String>;
     async fn get_data_channel(&self) -> Option<Arc<Self::Channel>>;
+    async fn add_ice_candidate(&self, candidate: String) -> Result<()>;
 
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
     where
@@ -72,7 +73,6 @@ pub trait IceTransport<Ch: Channel> {
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait IceTransportCallback<Ch: Channel>: IceTransport<Ch> {
-    async fn setup_callback(&self) -> Result<()>;
     async fn on_ice_candidate_callback(
         &self,
     ) -> Box<
