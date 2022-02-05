@@ -20,7 +20,6 @@ use wasm_bindgen_futures::spawn_local;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::MessageEvent;
 use web_sys::RtcConfiguration;
-use web_sys::RtcConfiguration;
 use web_sys::RtcDataChannel;
 use web_sys::RtcDataChannelEvent;
 use web_sys::RtcIceCandidate;
@@ -124,7 +123,7 @@ impl IceTransport<CbChannel> for WasmTransport {
         }
     }
 
-    fn get_offer(&self) -> Result<Self::Sdp> {
+    async fn get_offer(&self) -> Result<Self::Sdp> {
         match self.get_peer_connection().await {
             Some(c) => {
                 let promise = c.create_offer();
@@ -137,14 +136,10 @@ impl IceTransport<CbChannel> for WasmTransport {
         }
     }
 
-    fn get_local_description_str(&self) -> Result<String> {
+    async fn get_local_description_str(&self) -> Result<String> {
         match self.get_peer_connection().await {
             Some(peer_connection) => {
-                let desc = peer_connection
-                    .local_description()
-                    .await
-                    .map(|l| l.sdp)
-                    .unwrap();
+                let desc = peer_connection.local_description().unwrap().sdp();
                 Ok(desc)
             }
             None => Err(anyhow!("cannot get local descrition")),

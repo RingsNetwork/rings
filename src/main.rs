@@ -1,8 +1,8 @@
 use anyhow::Result;
 use bns_core::channels::default::TkChannel;
+use bns_core::discoveries::http::sdp_handler;
 use bns_core::swarm::Swarm;
 use bns_core::types::channel::Channel;
-use bns_node::discoveries::http::sdp_handler;
 use bns_node::logger::Logger;
 use clap::Parser;
 use hyper::service::{make_service_fn, service_fn};
@@ -20,12 +20,14 @@ pub struct Args {
     pub stun_server: String,
     #[clap(long, short = 'v', default_value = "Info")]
     pub log_level: String,
+    #[clap(long, short = 't', default_value = "offer")]
+    pub types: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    Logger::init(args.log_level)?;
+    //Logger::init(args.log_level)?;
     let swarm = Arc::new(Mutex::new(Swarm::new(TkChannel::new(1), args.stun_server)));
     let signaler = swarm.lock().await.signaler();
 

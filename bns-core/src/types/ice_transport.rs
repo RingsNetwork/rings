@@ -73,6 +73,7 @@ pub trait IceTransport<Ch: Channel> {
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait IceTransportCallback<Ch: Channel>: IceTransport<Ch> {
+    async fn setup_callback(&self) -> Result<()>;
     async fn on_ice_candidate_callback(
         &self,
     ) -> Box<

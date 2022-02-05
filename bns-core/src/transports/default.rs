@@ -10,7 +10,7 @@ use tokio::time::Duration;
 use webrtc::api::APIBuilder;
 
 use crate::channels::default::TkChannel;
-use crate::http::send_candidate;
+use crate::discoveries::http::send_candidate;
 use crate::types::channel::Channel;
 use crate::types::channel::Events;
 use crate::types::ice_transport::IceTransport;
@@ -310,6 +310,17 @@ impl DefaultTransport {
 
 #[async_trait]
 impl IceTransportCallback<TkChannel> for DefaultTransport {
+    async fn setup_callback(&self) -> Result<()> {
+        self.on_ice_candidate(self.on_ice_candidate_callback().await)
+            .await?;
+        self.on_peer_connection_state_change(self.on_peer_connection_state_change_callback().await)
+            .await?;
+        self.on_data_channel(self.on_data_channel_callback().await)
+            .await?;
+        self.on_message(self.on_message_callback().await).await?;
+        Ok(())
+    }
+
     async fn on_ice_candidate_callback(
         &self,
     ) -> Box<
@@ -329,13 +340,14 @@ impl IceTransportCallback<TkChannel> for DefaultTransport {
             let remote_servers = remote_servers.to_owned();
             Box::pin(async move {
                 if let Some(candidate) = c {
-                    log::debug!("start answer candidate: {:?}", candidate);
                     let desc = peer_connection.remote_description().await;
                     if desc.is_none() {
+                        println!("Push into candidate, {:?}", remote_servers.len());
                         let mut candidates = pending_candidates;
                         candidates.push(candidate.clone());
                     } else {
                         for remote_server in remote_servers {
+                            log::info!("server: {}", remote_server);
                             send_candidate(&remote_server, &candidate.clone())
                                 .await
                                 .unwrap();

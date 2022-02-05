@@ -9,17 +9,14 @@ members = [
 ]
 
 [dependencies]
-lazy_static = "1.4.0"
-webrtc = { version = "0.3.3"}
-tokio = { version = "1.13.0", features = ["full"]}
-hyper = { version = "0.14.14", features = ["full"]}
-env_logger = { version = "0.9.0"}
-tokio-util = { version = "0.6.9"}
-clap = { version="3", features = ["derive"]}
 anyhow = "1.0.45"
-bns-core = {path="./bns-core"}
-serde = { version = "1.0.130", features = ["derive"] }
-serde_json = "1.0.70"
-reqwest = { version = "0.11", features = ["json"] }
-form_urlencoded = "1.0.1"
+clap = { version="3", features = ["derive"]}
+env_logger = { version = "0.9.0"}
+hyper = { version = "0.14.14", features = ["full"]}
+toml = "0.5.8"
 log = "0.4"
+
+tokio = { version = "1.13.0", features = ["full"]}
+tokio-util = { version = "0.6.9"}
+
+bns-core = {path="./bns-core"}
