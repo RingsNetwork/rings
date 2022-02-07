@@ -28,6 +28,7 @@ serde_json = { version="1.0.70"}
 # tokio
 tokio = { version = "1.13.0", features = ["full"], optional=true}
 tokio-util = { version = "0.6.9", optional=true}
+futures = "0.3.21"
 
 # default
 webrtc = { version = "0.3.3", optional=true}

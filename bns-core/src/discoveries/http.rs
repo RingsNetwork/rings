@@ -1,22 +1,6 @@
 use crate::swarm::Swarm;
 use crate::types::ice_transport::IceTransport;
-/// HTTP services for braowser based P2P initialization
-/// Two API *must* provided:
-/// 1. GET /sdp
-/// Which create offer and send back to candidated peer
-/// 2. POST /sdp
-/// Which receive offer from peer and send the answer back
-/// 2. Get /connect/{url}
-/// Which request offer from peer and sand the answer back
-
-/// SDP Scheme:
-/// Browser -> Get offer from server
-/// Server -> Send Offer and set it as local_description (implemented in transport)
-/// Browser -> Send answer back to server, Server set it to remote description
-
-/// SDP Forward Scheme:
-/// Server A -> Requset offer from Server B, and set it as remote_descriton
-/// Server A -> sent local_desc as answer to Server B
+use crate::encoder::{decode, encode};
 use anyhow;
 use hyper::Body;
 use hyper::{Client, Method, Request, Response, StatusCode};
@@ -26,7 +10,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
+use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+use serde::Serialize;
+use serde::Deserialize;
+use futures::future::join_all;
 
 pub async fn send_candidate(addr: &str, candidate: &RTCIceCandidate) -> anyhow::Result<()> {
     let payload = candidate.to_json().await?.candidate;
@@ -40,6 +28,58 @@ pub async fn send_candidate(addr: &str, candidate: &RTCIceCandidate) -> anyhow::
     Client::new().request(req).await.unwrap();
     Ok(())
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Sdp {
+    pub sdp: String,
+    pub candidates: Vec<RTCIceCandidateInit>
+}
+
+
+
+pub async fn sdp_handler2(
+    req: Request<Body>,
+    swarm: Arc<Mutex<Swarm>>
+) -> Result<Response<Body>, hyper::http::Error> {
+    let mut swarm = swarm.lock().await;
+    match (req.method(), req.uri().path()) {
+        (&Method::POST, "/offer") => {
+            // receive json!({offer: encode(offer), ice_tranport: [ice_transport]})
+            let data: Sdp = serde_json::from_slice(&hyper::body::to_bytes(req).await.unwrap()).unwrap();
+            let sdp_str = decode(data.sdp).unwrap();
+            let remote_candidates = data.candidates;
+            let offer = serde_json::from_str::<RTCSessionDescription>(&sdp_str).unwrap();
+            let transport = swarm.get_pending().await.unwrap();
+            let local_candidates_json = join_all(
+                transport.get_pending_candidates().await.iter().map(
+                    async move |c| c.clone().to_json().await.unwrap()
+                )
+            ).await;
+
+            let resp = Sdp {
+                sdp: encode(transport.get_answer().await.unwrap().sdp),
+                candidates: local_candidates_json
+            };
+
+            for c in remote_candidates {
+                match transport.add_ice_candidate(c.clone().candidate).await {
+                    _ => ()
+                };
+            }
+            transport.set_remote_description(offer).await.unwrap();
+            match Response::builder().status(200).body(Body::from(serde_json::to_string(&resp).unwrap())) {
+                Ok(r) => Ok(r),
+                Err(_) => panic!("Opps, Response Failed"),
+            }
+        },
+        _ => {
+            let mut not_found = Response::default();
+            *not_found.status_mut() = StatusCode::NOT_FOUND;
+            Ok(not_found)
+        }
+    }
+}
+
 
 pub async fn sdp_handler(
     req: Request<Body>,

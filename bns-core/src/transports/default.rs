@@ -63,6 +63,7 @@ impl IceTransport<TkChannel> for DefaultTransport {
                 urls: vec![stun_addr.to_owned()],
                 ..Default::default()
             }],
+            ice_candidate_pool_size: 10,
             ..Default::default()
         };
         let api = APIBuilder::new().build();
@@ -345,15 +346,16 @@ impl IceTransportCallback<TkChannel> for DefaultTransport {
                         println!("Push into candidate, {:?}", remote_servers.len());
                         let mut candidates = pending_candidates;
                         candidates.push(candidate.clone());
-                    } else {
-                        for remote_server in remote_servers {
-                            log::info!("server: {}", remote_server);
-                            send_candidate(&remote_server, &candidate.clone())
-                                .await
-                                .unwrap();
-                        }
-                        log::debug!("desc existed");
                     }
+                    // } else {
+                    //     for remote_server in remote_servers {
+                    //         log::info!("server: {}", remote_server);
+                    //         send_candidate(&remote_server, &candidate.clone())
+                    //             .await
+                    //             .unwrap();
+                    //     }
+                    //     log::debug!("desc existed");
+                    // }
                 }
             })
         }
