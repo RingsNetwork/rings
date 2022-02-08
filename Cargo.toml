@@ -15,7 +15,8 @@ env_logger = { version = "0.9.0"}
 hyper = { version = "0.14.14", features = ["full"]}
 toml = "0.5.8"
 log = "0.4"
-
+serde_derive = "1.0.136"
+serde = "1.0.136"
 tokio = { version = "1.13.0", features = ["full"]}
 tokio-util = { version = "0.6.9"}
 

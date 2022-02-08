@@ -1,11 +1,12 @@
+use serde_derive::Deserialize;
 use std::fs::File;
 use std::io::prelude::*;
 use toml;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
-    pub answer: HostConfig,
-    pub offer: HostConfig,
+    pub swarm: HostConfig,
+    pub node: HostConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]

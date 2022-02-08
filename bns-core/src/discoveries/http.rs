@@ -20,8 +20,7 @@ use crate::types::ice_transport::IceTransport;
 use anyhow;
 use hyper::Body;
 use hyper::{Client, Method, Request, Response, StatusCode};
-use reqwest;
-use serde_json;
+use serde_json::{self, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -49,7 +48,7 @@ pub async fn sdp_handler(
     let mut swarm = swarm.lock().await;
     match (req.method(), req.uri().path()) {
         (&Method::POST, "/offer") => {
-            log::info!("receive request to POST /offer");
+            println!("receive request to POST /offer");
             // receive answer and send answer back to candidated peer
             let args: HashMap<String, String> =
                 serde_json::from_slice(&hyper::body::to_bytes(req).await.unwrap()).unwrap();
@@ -63,15 +62,20 @@ pub async fn sdp_handler(
             // create answer and send
             let answer = transport.get_answer().await.unwrap();
             println!("Local Answer: {:?}", answer);
-            let client = reqwest::Client::new();
             let mut payload = HashMap::new();
             payload.insert("answer", serde_json::to_string(&answer).unwrap());
             payload.insert("host_and_ip", http_addr);
-
+            let payload = json!(payload);
             let node = format!("http://{}/answer", addr.clone());
             println!("/offer node: {:?}", node);
             println!("/offer payload: {:?}", payload);
-            match client.post(node.to_owned()).json(&payload).send().await {
+            let req = Request::builder()
+                .method(Method::POST)
+                .uri(node.to_owned())
+                .header("content-type", "application/json; charset=utf-8")
+                .body(Body::from(serde_json::to_string(&payload).unwrap()))
+                .unwrap();
+            match Client::new().request(req).await {
                 Ok(_) => println!("Successful send"),
                 Err(e) => panic!("Opps, Send Answer Failed with {:?}", e),
             };
@@ -88,7 +92,7 @@ pub async fn sdp_handler(
             }
         }
         (&Method::POST, "/answer") => {
-            log::info!("receive request to POST /answer");
+            println!("receive request to POST /answer");
             // receive answer and send answer back to candidated peer
             let args: HashMap<String, String> =
                 serde_json::from_slice(&hyper::body::to_bytes(req).await.unwrap()).unwrap();
@@ -106,35 +110,8 @@ pub async fn sdp_handler(
                 Err(_) => panic!("Opps, Response Failed"),
             }
         }
-        (&Method::POST, "/connect") => {
-            log::info!("receive request to POST /connect");
-            let client = reqwest::Client::new();
-            // get sdp offer from renote peer
-            let args: HashMap<String, String> =
-                serde_json::from_slice(&hyper::body::to_bytes(req).await.unwrap()).unwrap();
-            let node = args.get("node").unwrap();
-            //let uri = hyper::Uri::from_str(&node.clone()).unwrap();
-            //let host_and_ip = format!("{}:{}", uri.host().unwrap(), uri.port().unwrap());
-            let transport = swarm.get_pending().await.unwrap();
-            let offer = transport.get_offer().await.unwrap();
-            println!("Local Offer: {:?}", offer);
-            transport
-                .set_local_description(offer.clone())
-                .await
-                .unwrap();
-            let mut payload = HashMap::new();
-            payload.insert("offer", serde_json::to_string(&offer).unwrap());
-            payload.insert("host_and_ip", http_addr);
-            println!("/connect node: {:?}", node);
-            println!("/connect payload: {:?}", payload);
-            match client.post(node.to_owned()).json(&payload).send().await {
-                Ok(_) => println!("Successful Send Offer"),
-                Err(e) => panic!("Opps, Sending Offer Failed with {:?}", e),
-            };
-            Response::builder().status(200).body(Body::empty())
-        }
         (&Method::POST, "/candidate") => {
-            log::info!("remote_handler receive from /candidate");
+            println!("remote_handler receive from /candidate");
             let candidate =
                 std::str::from_utf8(&hyper::body::to_bytes(req.into_body()).await.unwrap())
                     .unwrap()
@@ -151,4 +128,32 @@ pub async fn sdp_handler(
             Ok(not_found)
         }
     }
+}
+
+pub async fn sync_offer_to_swarm(swarm: Arc<Mutex<Swarm>>, swarm_addr: String, local_addr: String) {
+    let mut swarm = swarm.lock().await;
+    // get sdp offer from renote peer
+    let node = format!("http://{}/offer", swarm_addr);
+    println!("Send to {}", node);
+    let transport = swarm.get_pending().await.unwrap();
+    let offer = transport.get_offer().await.unwrap();
+    println!("Local Offer: {:?}", offer);
+    transport
+        .set_local_description(offer.clone())
+        .await
+        .unwrap();
+    let mut payload = HashMap::new();
+    payload.insert("offer", serde_json::to_string(&offer).unwrap());
+    payload.insert("host_and_ip", local_addr);
+    let payload = json!(payload);
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(node.to_owned())
+        .header("content-type", "application/json; charset=utf-8")
+        .body(Body::from(serde_json::to_string(&payload).unwrap()))
+        .unwrap();
+    match Client::new().request(req).await {
+        Ok(_) => println!("Successful Send Offer"),
+        Err(e) => panic!("Opps, Sending Offer Failed with {:?}", e),
+    };
 }

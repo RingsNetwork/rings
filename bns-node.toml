@@ -1,7 +1,7 @@
-[answer]
+[node]
 addr = "127.0.0.1"
 port = 50000
 
-[offer]
+[swarm]
 addr = "127.0.0.1"
 port = 50001
