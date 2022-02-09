@@ -16,7 +16,7 @@ use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
-use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
+use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::math_rand_alpha;
@@ -30,7 +30,6 @@ pub struct DefaultTransport {
     pub pending_candidates: Arc<Mutex<Vec<RTCIceCandidate>>>,
     pub channel: Arc<Mutex<Option<Arc<RTCDataChannel>>>>,
     pub signaler: Arc<SyncMutex<TkChannel>>,
-    pub offer: Option<RTCSessionDescription>,
 }
 
 #[async_trait]
@@ -48,7 +47,6 @@ impl IceTransport<TkChannel> for DefaultTransport {
             pending_candidates: Arc::new(Mutex::new(vec![])),
             channel: Arc::new(Mutex::new(None)),
             signaler: Arc::clone(&ch),
-            offer: None,
         }
     }
 
@@ -74,9 +72,8 @@ impl IceTransport<TkChannel> for DefaultTransport {
             Err(e) => Err(anyhow!(e)),
         }?;
 
-        // callback
-        //self.on_ice_candidate(self.on_ice_candidate_callback().await)
-        //.await?;
+        self.on_ice_candidate(self.on_ice_candidate_callback().await)
+            .await?;
         self.on_peer_connection_state_change(self.on_peer_connection_state_change_callback().await)
             .await?;
         self.on_data_channel(self.on_data_channel_callback().await)
@@ -128,6 +125,20 @@ impl IceTransport<TkChannel> for DefaultTransport {
 
     async fn get_data_channel(&self) -> Option<Arc<RTCDataChannel>> {
         self.channel.lock().await.clone()
+    }
+
+    async fn add_ice_candidate(&self, candidate: String) -> Result<()> {
+        println!("Add Ice Candidate");
+        match self.get_peer_connection().await {
+            Some(peer_connection) => peer_connection
+                .add_ice_candidate(RTCIceCandidateInit {
+                    candidate,
+                    ..Default::default()
+                })
+                .await
+                .map_err(|e| anyhow!(e)),
+            None => Err(anyhow!("cannot add ice candidate")),
+        }
     }
 
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
@@ -223,9 +234,51 @@ impl IceTransport<TkChannel> for DefaultTransport {
         }
         Ok(())
     }
+
+    async fn on_open(
+        &self,
+        f: Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync>,
+    ) -> Result<()> {
+        match self.get_data_channel().await {
+            Some(ch) => {
+                ch.on_open(f).await;
+            }
+            None => panic!("Connection Failed."),
+        }
+        Ok(())
+    }
 }
 
 impl DefaultTransport {
+    pub async fn start_node(&mut self) -> Result<RTCSessionDescription> {
+        let config = RTCConfiguration {
+            ice_servers: vec![RTCIceServer {
+                urls: vec!["stun:stun.l.google.com:19302".to_owned()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let api = APIBuilder::new().build();
+        match api.new_peer_connection(config).await {
+            Ok(c) => {
+                let mut conn = self.connection.lock().await;
+                *conn = Some(Arc::new(c));
+                Ok(())
+            }
+            Err(e) => Err(anyhow!(e)),
+        }?;
+        self.on_ice_candidate(self.on_ice_candidate_callback().await)
+            .await?;
+        self.on_peer_connection_state_change(self.on_peer_connection_state_change_callback().await)
+            .await?;
+        self.setup_channel("bns").await?;
+        let offer = self.get_offer().await?;
+        self.set_local_description(offer.clone()).await?;
+        self.on_open(self.on_open_callback().await).await?;
+        self.on_message(self.on_message_callback().await).await?;
+        Ok(offer)
+    }
+
     pub async fn setup_channel(&mut self, name: &str) -> Result<()> {
         match self.get_peer_connection().await {
             Some(peer_connection) => {
@@ -246,14 +299,7 @@ impl DefaultTransport {
     pub async fn setup_offer(&mut self) -> Result<()> {
         // setup offer and set it to local description
         match self.get_peer_connection().await {
-            Some(peer_connection) => match peer_connection.create_offer(None).await {
-                Ok(offer) => {
-                    self.offer = Some(offer.clone());
-                    self.set_local_description(offer).await?;
-                    Ok(())
-                }
-                Err(e) => Err(anyhow!(e)),
-            },
+            Some(_) => Ok(()),
             None => Err(anyhow!("cannot get offer")),
         }
     }
@@ -275,7 +321,7 @@ impl IceTransportCallback<TkChannel> for DefaultTransport {
 
         box move |c: Option<<Self as IceTransport<TkChannel>>::Candidate>| {
             let peer_connection = peer_connection.clone();
-            let pending_candidates = Arc::clone(&self.pending_candidates);
+            let pending_candidates = Arc::clone(&pending_candidates);
             Box::pin(async move {
                 if let Some(candidate) = c {
                     if let Some(peer_connection) = peer_connection.upgrade() {
@@ -284,6 +330,7 @@ impl IceTransportCallback<TkChannel> for DefaultTransport {
                             let mut candidates = pending_candidates.lock().await;
                             println!("start answer candidate: {:?}", candidate);
                             candidates.push(candidate.clone());
+                            println!("Candidates Number: {:?}", candidates.len());
                         }
                     }
                 }
@@ -335,6 +382,13 @@ impl IceTransportCallback<TkChannel> for DefaultTransport {
                     })
                 }))
                 .await;
+
+                d.on_message(Box::new(move |msg: DataChannelMessage| {
+                    let msg_str = String::from_utf8(msg.data.to_vec()).unwrap();
+                    println!("Message from DataChannel: '{}'", msg_str);
+                    Box::pin(async move {})
+                }))
+                .await;
             })
         }
     }
@@ -350,6 +404,30 @@ impl IceTransportCallback<TkChannel> for DefaultTransport {
             let msg_str = String::from_utf8(msg.data.to_vec()).unwrap();
             println!("Message from DataChannel: '{}'", msg_str);
             Box::pin(async move {})
+        }
+    }
+
+    async fn on_open_callback(
+        &self,
+    ) -> Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync> {
+        let channel = self.get_data_channel().await.unwrap();
+        box move || {
+            let channel = Arc::clone(&channel);
+            Box::pin(async move {
+                let channel = Arc::clone(&channel);
+                let mut result = Result::<usize>::Ok(0);
+                while result.is_ok() {
+                    let timeout = tokio::time::sleep(Duration::from_secs(5));
+                    tokio::pin!(timeout);
+                    tokio::select! {
+                        _ = timeout.as_mut() =>{
+                            let message = math_rand_alpha(15);
+                            println!("Sending '{}'", message);
+                            result = channel.send_text(message).await.map_err(Into::into);
+                        }
+                    };
+                }
+            })
         }
     }
 }

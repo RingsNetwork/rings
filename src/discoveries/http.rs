@@ -1,7 +1,3 @@
-use crate::encoder::decode;
-use crate::encoder::encode;
-use crate::swarm::Swarm;
-use crate::types::ice_transport::IceTransport;
 /// HTTP services for braowser based P2P initialization
 /// Two API *must* provided:
 /// 1. GET /sdp
@@ -19,19 +15,15 @@ use crate::types::ice_transport::IceTransport;
 /// SDP Forward Scheme:
 /// Server A -> Requset offer from Server B, and set it as remote_descriton
 /// Server A -> sent local_desc as answer to Server B
-use anyhow;
+use bns_core::swarm::Swarm;
+use bns_core::types::ice_transport::IceTransport;
 use futures::future::join_all;
 use hyper::Body;
-use hyper::{Client, Method, Request, Response, StatusCode};
+use hyper::{Method, Request, Response, StatusCode};
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::{self, json};
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
+use serde_json;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
-use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -68,6 +60,7 @@ pub async fn sdp_handler(
                     .map(async move |c| c.clone().to_json().await.unwrap()),
             )
             .await;
+            println!("SDP Handler local_description: {:?}", local_candidates_json);
             for c in data.candidates {
                 transport
                     .add_ice_candidate(c.candidate.clone())

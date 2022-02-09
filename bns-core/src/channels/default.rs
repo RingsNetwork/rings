@@ -31,9 +31,9 @@ impl Channel for TkChannel {
         return Ok(self.sender.send(e).await?);
     }
 
-    async fn recv(&mut self) -> () {
+    async fn recv(&mut self) {
         while let Some(e) = self.receiver.recv().await {
-            _ = self.handler(e);
+            _ = self.handler(e).await;
         }
     }
 

@@ -1,7 +1,6 @@
 /// Swarm is transport management
 ///
 use crate::types::ice_transport::IceTransport;
-use crate::types::ice_transport::IceTransportCallback;
 
 #[cfg(not(feature = "wasm"))]
 use crate::channels::default::TkChannel as Channel;

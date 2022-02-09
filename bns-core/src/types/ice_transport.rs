@@ -31,7 +31,7 @@ pub trait IceTransport<Ch: Channel> {
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
     where
         T: Into<Self::Sdp> + Send;
-
+    async fn add_ice_candidate(&self, candidate: String) -> Result<()>;
     async fn set_remote_description<T>(&self, desc: T) -> Result<()>
     where
         T: Into<Self::Sdp> + Send;
@@ -68,6 +68,11 @@ pub trait IceTransport<Ch: Channel> {
                 + Sync,
         >,
     ) -> Result<()>;
+
+    async fn on_open(
+        &self,
+        f: Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync>,
+    ) -> Result<()>;
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
@@ -97,4 +102,7 @@ pub trait IceTransportCallback<Ch: Channel>: IceTransport<Ch> {
     async fn on_message_callback(
         &self,
     ) -> Box<dyn FnMut(Self::Msg) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync>;
+    async fn on_open_callback(
+        &self,
+    ) -> Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync>;
 }
