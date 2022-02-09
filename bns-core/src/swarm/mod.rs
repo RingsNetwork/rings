@@ -45,7 +45,6 @@ impl Swarm {
     pub async fn new_transport(&mut self) -> Result<Arc<Transport>> {
         let mut ice_transport = Transport::new(Arc::clone(&self.signaler));
         ice_transport.start().await?;
-        ice_transport.setup_callback().await?;
         // should always has offer here #WhyUnwarp
         let trans = Arc::new(ice_transport);
         self.pending = Some(Arc::clone(&trans));
@@ -59,11 +58,11 @@ impl Swarm {
         }
     }
 
-    pub fn upgrade_pending(&mut self) -> Result<()> {
+    pub async fn upgrade_pending(&mut self) -> Result<()> {
         let trans = self.pending.take();
         match &trans {
             Some(t) => {
-                let sdp = t.get_offer_str().unwrap();
+                let sdp = t.get_local_description_str().await.unwrap();
                 self.register(sdp, Arc::clone(t), State::Anonymous);
                 Ok(())
             }

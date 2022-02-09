@@ -29,11 +29,13 @@ async fn main() -> Result<()> {
         let service = make_service_fn(move |_| {
             let swarm = swarm.to_owned();
             async move {
-                Ok::<_, hyper::Error>(service_fn(move |req| sdp_handler(req, swarm.to_owned())))
+                Ok::<_, hyper::Error>(service_fn(move |req| {
+                    sdp_handler(req, args.http_addr.clone(), swarm.to_owned())
+                }))
             }
         });
 
-        let http_addr: SocketAddr = args.http_addr.parse().unwrap();
+        let http_addr: SocketAddr = args.http_addr.clone().parse().unwrap();
         let server = Server::bind(&http_addr).serve(service);
         println!("Serving on {}", args.http_addr);
         // Run this server for... forever!

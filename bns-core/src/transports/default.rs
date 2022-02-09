@@ -73,8 +73,15 @@ impl IceTransport<TkChannel> for DefaultTransport {
             }
             Err(e) => Err(anyhow!(e)),
         }?;
-        self.setup_channel("bns").await?;
-        self.setup_offer().await
+
+        // callback
+        //self.on_ice_candidate(self.on_ice_candidate_callback().await)
+        //.await?;
+        self.on_peer_connection_state_change(self.on_peer_connection_state_change_callback().await)
+            .await?;
+        self.on_data_channel(self.on_data_channel_callback().await)
+            .await?;
+        Ok(())
     }
 
     async fn get_peer_connection(&self) -> Option<Arc<RTCPeerConnection>> {
@@ -95,15 +102,28 @@ impl IceTransport<TkChannel> for DefaultTransport {
         }
     }
 
-    fn get_offer(&self) -> Result<RTCSessionDescription> {
-        match &self.offer {
-            Some(o) => Ok(o.clone()),
+    async fn get_offer(&self) -> Result<RTCSessionDescription> {
+        match self.get_peer_connection().await {
+            Some(peer_connection) => peer_connection
+                .create_offer(None)
+                .await
+                .map_err(|e| anyhow!(e)),
             None => Err(anyhow!("cannot get offer")),
         }
     }
 
-    fn get_offer_str(&self) -> Result<String> {
-        self.get_offer().map(|o| o.sdp)
+    async fn get_local_description_str(&self) -> Result<String> {
+        match self.get_peer_connection().await {
+            Some(peer_connection) => {
+                let desc = peer_connection
+                    .local_description()
+                    .await
+                    .map(|l| l.sdp)
+                    .unwrap();
+                Ok(desc)
+            }
+            None => Err(anyhow!("cannot get local descrition")),
+        }
     }
 
     async fn get_data_channel(&self) -> Option<Arc<RTCDataChannel>> {
@@ -241,17 +261,6 @@ impl DefaultTransport {
 
 #[async_trait]
 impl IceTransportCallback<TkChannel> for DefaultTransport {
-    async fn setup_callback(&self) -> Result<()> {
-        self.on_ice_candidate(self.on_ice_candidate_callback().await)
-            .await?;
-        self.on_peer_connection_state_change(self.on_peer_connection_state_change_callback().await)
-            .await?;
-        self.on_data_channel(self.on_data_channel_callback().await)
-            .await?;
-        self.on_message(self.on_message_callback().await).await?;
-        Ok(())
-    }
-
     async fn on_ice_candidate_callback(
         &self,
     ) -> Box<
@@ -261,18 +270,18 @@ impl IceTransportCallback<TkChannel> for DefaultTransport {
             + Send
             + Sync,
     > {
-        let peer_connection = Arc::downgrade(&self.get_peer_connection().await.unwrap());
-        let pending_candidates = self.get_pending_candidates().await;
+        let peer_connection = Arc::downgrade(&self.connection.lock().await.clone().unwrap());
+        let pending_candidates = Arc::clone(&self.pending_candidates);
 
         box move |c: Option<<Self as IceTransport<TkChannel>>::Candidate>| {
-            let peer_connection = peer_connection.to_owned();
-            let pending_candidates = pending_candidates.to_owned();
+            let peer_connection = peer_connection.clone();
+            let pending_candidates = Arc::clone(&self.pending_candidates);
             Box::pin(async move {
                 if let Some(candidate) = c {
                     if let Some(peer_connection) = peer_connection.upgrade() {
                         let desc = peer_connection.remote_description().await;
                         if desc.is_none() {
-                            let mut candidates = pending_candidates;
+                            let mut candidates = pending_candidates.lock().await;
                             println!("start answer candidate: {:?}", candidate);
                             candidates.push(candidate.clone());
                         }
@@ -307,20 +316,25 @@ impl IceTransportCallback<TkChannel> for DefaultTransport {
             + Sync,
     > {
         box move |d: Arc<RTCDataChannel>| {
-            let d = Arc::clone(&d);
+            let recv = Arc::clone(&d);
             Box::pin(async move {
-                let mut result = Result::<usize>::Ok(0);
-                while result.is_ok() {
-                    let timeout = tokio::time::sleep(Duration::from_secs(5));
-                    tokio::pin!(timeout);
-                    tokio::select! {
-                        _ = timeout.as_mut() =>{
-                            let message = math_rand_alpha(15);
-                            println!("Sending '{}'", message);
-                            result = d.send_text(message).await.map_err(Into::into);
+                d.on_open(Box::new(move || {
+                    Box::pin(async move {
+                        let mut result = Result::<usize>::Ok(0);
+                        while result.is_ok() {
+                            let timeout = tokio::time::sleep(Duration::from_secs(5));
+                            tokio::pin!(timeout);
+                            tokio::select! {
+                                _ = timeout.as_mut() =>{
+                                    let message = math_rand_alpha(15);
+                                    println!("Sending '{}'", message);
+                                    result = recv.send_text(message).await.map_err(Into::into);
+                                }
+                            };
                         }
-                    };
-                }
+                    })
+                }))
+                .await;
             })
         }
     }
