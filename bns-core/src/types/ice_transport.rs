@@ -6,6 +6,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex as SyncMutex;
+use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
@@ -19,7 +20,8 @@ pub trait IceTransport<Ch: Channel> {
 
     fn new(signaler: Arc<SyncMutex<Ch>>) -> Self;
     fn signaler(&self) -> Arc<SyncMutex<Ch>>;
-    async fn start(&mut self) -> Result<()>;
+    async fn run_as_swarm(&mut self) -> Result<()>;
+    async fn run_as_node(&mut self) -> Result<RTCSessionDescription>;
 
     async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>>;
     async fn get_pending_candidates(&self) -> Vec<Self::Candidate>;

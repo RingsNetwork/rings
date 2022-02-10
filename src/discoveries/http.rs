@@ -15,16 +15,17 @@
 /// SDP Forward Scheme:
 /// Server A -> Requset offer from Server B, and set it as remote_descriton
 /// Server A -> sent local_desc as answer to Server B
-use bns_core::swarm::Swarm;
-use bns_core::types::ice_transport::IceTransport;
 use futures::future::join_all;
-use hyper::Body;
-use hyper::{Method, Request, Response, StatusCode};
+use hyper::{Body, Client, Method, Request, Response, StatusCode};
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+
+use bns_core::swarm::Swarm;
+use bns_core::transports::default::DefaultTransport;
+use bns_core::types::ice_transport::IceTransport;
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct Payload {
@@ -60,13 +61,13 @@ pub async fn sdp_handler(
                     .map(async move |c| c.clone().to_json().await.unwrap()),
             )
             .await;
-            println!("SDP Handler local_description: {:?}", local_candidates_json);
             for c in data.candidates {
                 transport
                     .add_ice_candidate(c.candidate.clone())
                     .await
                     .unwrap();
             }
+            swarm.upgrade_pending().await.unwrap();
             let resp = Payload {
                 sdp: serde_json::to_string(&answer).unwrap(),
                 host: host.clone(),
@@ -77,7 +78,7 @@ pub async fn sdp_handler(
                 .body(Body::from(serde_json::to_string(&resp).unwrap()))
             {
                 Ok(r) => {
-                    println!("Ok Response, {:?}", r);
+                    log::debug!("Ok Response, {:?}", r);
                     Ok(r)
                 }
                 Err(_) => panic!("Opps, Response Failed"),
@@ -89,4 +90,43 @@ pub async fn sdp_handler(
             Ok(not_found)
         }
     }
+}
+
+pub async fn send_to_swarm(transport: &mut DefaultTransport, localhost: &str, swarmhost: &str) {
+    let offer = transport.run_as_node().await.unwrap();
+    let node = format!("http://{}/offer", swarmhost);
+    let local_candidates_json = join_all(
+        transport
+            .get_pending_candidates()
+            .await
+            .iter()
+            .map(async move |c| c.clone().to_json().await.unwrap()),
+    )
+    .await;
+    let payload = Payload {
+        sdp: serde_json::to_string(&offer).unwrap(),
+        host: localhost.to_owned(),
+        candidates: local_candidates_json,
+    };
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(node.to_owned())
+        .header("content-type", "application/json; charset=utf-8")
+        .body(Body::from(serde_json::to_string(&payload).unwrap()))
+        .unwrap();
+    match Client::new().request(req).await {
+        Ok(resp) => {
+            let data: Payload =
+                serde_json::from_slice(&hyper::body::to_bytes(resp).await.unwrap()).unwrap();
+            let answer = serde_json::from_str::<RTCSessionDescription>(&data.sdp).unwrap();
+            transport.set_remote_description(answer).await.unwrap();
+            for c in data.candidates {
+                transport
+                    .add_ice_candidate(c.candidate.clone())
+                    .await
+                    .unwrap();
+            }
+        }
+        Err(e) => panic!("Opps, Sending Offer Failed with {:?}", e),
+    };
 }

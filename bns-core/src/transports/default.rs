@@ -54,12 +54,13 @@ impl IceTransport<TkChannel> for DefaultTransport {
         Arc::clone(&self.signaler)
     }
 
-    async fn start(&mut self) -> Result<()> {
+    async fn run_as_swarm(&mut self) -> Result<()> {
         let config = RTCConfiguration {
             ice_servers: vec![RTCIceServer {
                 urls: vec!["stun:stun.l.google.com:19302".to_owned()],
                 ..Default::default()
             }],
+            ice_candidate_pool_size: 100,
             ..Default::default()
         };
         let api = APIBuilder::new().build();
@@ -79,6 +80,35 @@ impl IceTransport<TkChannel> for DefaultTransport {
         self.on_data_channel(self.on_data_channel_callback().await)
             .await?;
         Ok(())
+    }
+
+    async fn run_as_node(&mut self) -> Result<RTCSessionDescription> {
+        let config = RTCConfiguration {
+            ice_servers: vec![RTCIceServer {
+                urls: vec!["stun:stun.l.google.com:19302".to_owned()],
+                ..Default::default()
+            }],
+            ice_candidate_pool_size: 100,
+            ..Default::default()
+        };
+        let api = APIBuilder::new().build();
+        match api.new_peer_connection(config).await {
+            Ok(c) => {
+                let mut conn = self.connection.lock().await;
+                *conn = Some(Arc::new(c));
+                Ok(())
+            }
+            Err(e) => Err(anyhow!(e)),
+        }?;
+        self.on_ice_candidate(self.on_ice_candidate_callback().await)
+            .await?;
+        self.on_peer_connection_state_change(self.on_peer_connection_state_change_callback().await)
+            .await?;
+        self.setup_channel("bns").await?;
+        self.on_open(self.on_open_callback().await).await?;
+        self.on_message(self.on_message_callback().await).await?;
+        let offer = self.get_offer().await?;
+        Ok(offer)
     }
 
     async fn get_peer_connection(&self) -> Option<Arc<RTCPeerConnection>> {
@@ -101,10 +131,20 @@ impl IceTransport<TkChannel> for DefaultTransport {
 
     async fn get_offer(&self) -> Result<RTCSessionDescription> {
         match self.get_peer_connection().await {
-            Some(peer_connection) => peer_connection
-                .create_offer(None)
-                .await
-                .map_err(|e| anyhow!(e)),
+            Some(peer_connection) => {
+                let mut gather_complete = peer_connection.gathering_complete_promise().await;
+                match peer_connection.create_offer(None).await {
+                    Ok(offer) => {
+                        self.set_local_description(offer.clone()).await?;
+                        let _ = gather_complete.recv().await;
+                        Ok(offer)
+                    }
+                    Err(e) => {
+                        log::error!("{}", e);
+                        Err(anyhow!(e))
+                    }
+                }
+            }
             None => Err(anyhow!("cannot get offer")),
         }
     }
@@ -128,7 +168,6 @@ impl IceTransport<TkChannel> for DefaultTransport {
     }
 
     async fn add_ice_candidate(&self, candidate: String) -> Result<()> {
-        println!("Add Ice Candidate");
         match self.get_peer_connection().await {
             Some(peer_connection) => peer_connection
                 .add_ice_candidate(RTCIceCandidateInit {
@@ -250,35 +289,6 @@ impl IceTransport<TkChannel> for DefaultTransport {
 }
 
 impl DefaultTransport {
-    pub async fn start_node(&mut self) -> Result<RTCSessionDescription> {
-        let config = RTCConfiguration {
-            ice_servers: vec![RTCIceServer {
-                urls: vec!["stun:stun.l.google.com:19302".to_owned()],
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let api = APIBuilder::new().build();
-        match api.new_peer_connection(config).await {
-            Ok(c) => {
-                let mut conn = self.connection.lock().await;
-                *conn = Some(Arc::new(c));
-                Ok(())
-            }
-            Err(e) => Err(anyhow!(e)),
-        }?;
-        self.on_ice_candidate(self.on_ice_candidate_callback().await)
-            .await?;
-        self.on_peer_connection_state_change(self.on_peer_connection_state_change_callback().await)
-            .await?;
-        self.setup_channel("bns").await?;
-        let offer = self.get_offer().await?;
-        self.set_local_description(offer.clone()).await?;
-        self.on_open(self.on_open_callback().await).await?;
-        self.on_message(self.on_message_callback().await).await?;
-        Ok(offer)
-    }
-
     pub async fn setup_channel(&mut self, name: &str) -> Result<()> {
         match self.get_peer_connection().await {
             Some(peer_connection) => {
@@ -293,14 +303,6 @@ impl DefaultTransport {
                 }
             }
             None => Err(anyhow!("cannot get data channel")),
-        }
-    }
-
-    pub async fn setup_offer(&mut self) -> Result<()> {
-        // setup offer and set it to local description
-        match self.get_peer_connection().await {
-            Some(_) => Ok(()),
-            None => Err(anyhow!("cannot get offer")),
         }
     }
 }
@@ -328,7 +330,6 @@ impl IceTransportCallback<TkChannel> for DefaultTransport {
                         let desc = peer_connection.remote_description().await;
                         if desc.is_none() {
                             let mut candidates = pending_candidates.lock().await;
-                            println!("start answer candidate: {:?}", candidate);
                             candidates.push(candidate.clone());
                             println!("Candidates Number: {:?}", candidates.len());
                         }

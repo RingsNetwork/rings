@@ -6,16 +6,15 @@ use bns_core::transports::default::DefaultTransport;
 use bns_core::types::channel::Channel;
 use bns_core::types::ice_transport::IceTransport;
 use bns_node::config::read_config;
-use bns_node::discoveries::http::{sdp_handler, Payload};
+use bns_node::discoveries::http::sdp_handler;
+use bns_node::discoveries::http::send_to_swarm;
 use bns_node::logger::Logger;
 use clap::Parser;
-use futures::future::join_all;
 use hyper::service::{make_service_fn, service_fn};
-use hyper::{Body, Client, Method, Request, Server};
+use hyper::Server;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::Mutex;
-use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 #[derive(Parser, Debug)]
 #[clap(about, version, author)]
@@ -24,22 +23,24 @@ pub struct Args {
     pub http_addr: String,
     #[clap(long, short = 't', default_value = "swarm")]
     pub types: String,
+    #[clap(long, short = 'f', default_value = "bns-node.toml")]
+    pub config_filename: String,
 }
 
-async fn start_swarm(host: &str) {
+async fn run_as_swarm(localhost: &str) {
     let swarm = Swarm::new(TkChannel::new(1));
     let signaler = swarm.signaler();
-    let host = host.to_owned();
+    let localhost = localhost.to_owned();
 
     tokio::spawn(async move {
         let swarm = swarm.clone();
-        let http_addr = host.clone();
+        let http_addr = localhost.clone();
         let service = make_service_fn(move |_| {
             let swarm = swarm.to_owned();
-            let host = host.clone();
+            let localhost = localhost.clone();
             async move {
                 Ok::<_, hyper::Error>(service_fn(move |req| {
-                    sdp_handler(req, host.clone(), swarm.to_owned())
+                    sdp_handler(req, localhost.clone(), swarm.to_owned())
                 }))
             }
         });
@@ -64,58 +65,11 @@ async fn start_swarm(host: &str) {
     };
 }
 
-async fn start_node(host: &str) {
+async fn run_as_node(localhost: &str, config_filename: &str) {
     let mut transport = DefaultTransport::new(Arc::new(Mutex::new(TkChannel::new(1))));
-    let offer = transport.start_node().await.unwrap();
-    let config = read_config("bns-node.toml");
-    let swarm_host = format!("{}:{}", config.swarm.addr, config.swarm.port);
-
-    println!("1 {:?}", transport.get_pending_candidates().await);
-
-    let node = format!("http://{}/offer", swarm_host);
-    println!("2 {:?}", transport.get_pending_candidates().await);
-    let mut req = Request::builder()
-        .method(Method::POST)
-        .uri(node.to_owned())
-        .header("content-type", "application/json; charset=utf-8")
-        .body(Body::empty())
-        //.body(Body::from(serde_json::to_string(&req).unwrap()))
-        .unwrap();
-    println!("3 {:?}", transport.get_pending_candidates().await);
-
-    let local_candidates_json = join_all(
-        transport
-            .get_pending_candidates()
-            .await
-            .iter()
-            .map(async move |c| c.clone().to_json().await.unwrap()),
-    )
-    .await;
-    let payload = Payload {
-        sdp: serde_json::to_string(&offer).unwrap(),
-        host: swarm_host.clone(),
-        candidates: local_candidates_json,
-    };
-
-    println!("4 {:?}", transport.get_pending_candidates().await);
-    match Client::new().request(req).await {
-        Ok(resp) => {
-            println!("Successful Send Offer");
-            println!("Response: {:?}", resp);
-            let data: Payload =
-                serde_json::from_slice(&hyper::body::to_bytes(resp).await.unwrap()).unwrap();
-            let answer = serde_json::from_str::<RTCSessionDescription>(&data.sdp).unwrap();
-            transport.set_remote_description(answer).await.unwrap();
-            for c in data.candidates {
-                transport
-                    .add_ice_candidate(c.candidate.clone())
-                    .await
-                    .unwrap();
-            }
-        }
-        Err(e) => panic!("Opps, Sending Offer Failed with {:?}", e),
-    };
-
+    let config = read_config(config_filename);
+    let swarmhost = format!("{}:{}", config.swarm.addr, config.swarm.port);
+    send_to_swarm(&mut transport, localhost, &swarmhost).await;
     let mut channel = transport.signaler.lock().unwrap();
     tokio::select! {
         _ = channel.recv() => {
@@ -132,9 +86,9 @@ async fn main() -> Result<()> {
     Logger::init()?;
     let args = Args::parse();
     if args.types == "swarm" {
-        start_swarm(&args.http_addr).await;
+        run_as_swarm(&args.http_addr).await;
     } else {
-        start_node(&args.http_addr).await;
+        run_as_node(&args.http_addr, &args.config_filename).await;
     }
     Ok(())
 }
