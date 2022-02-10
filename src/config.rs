@@ -21,6 +21,5 @@ pub fn read_config(filename: &str) -> Config {
     config_file
         .read_to_string(&mut toml_str)
         .expect("Failure while reading config file");
-    let config: Config = toml::from_str(&toml_str).unwrap();
-    return config;
+    toml::from_str(&toml_str).unwrap()
 }
