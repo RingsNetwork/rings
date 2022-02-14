@@ -28,6 +28,9 @@ pub struct Args {
     #[clap(long, short = 'f', default_value = "bns-node.toml")]
     pub config_filename: String,
 
+    #[clap(long, short = 'l', default_value = "Info")]
+    pub log_level: String,
+
     #[clap(
         long = "eth",
         short = 'e',
@@ -53,7 +56,7 @@ async fn run_as_swarm(localhost: &str) {
             let localhost = localhost.clone();
             async move {
                 Ok::<_, hyper::Error>(service_fn(move |req| {
-                    sdp_handler(req, localhost.clone(), swarm.to_owned())
+                    sdp_handler(req, swarm.to_owned())
                 }))
             }
         });
@@ -78,30 +81,10 @@ async fn run_as_swarm(localhost: &str) {
     };
 }
 
-async fn run_as_node(localhost: &str, config_filename: &str) {
-    let mut transport = DefaultTransport::new(Arc::new(Mutex::new(TkChannel::new(1))));
-    let config = read_config(config_filename);
-    let swarmhost = format!("{}:{}", config.swarm.addr, config.swarm.port);
-    send_to_swarm(&mut transport, localhost, &swarmhost).await;
-    let mut channel = transport.signaler.lock().unwrap();
-    tokio::select! {
-        _ = channel.recv() => {
-            println!("received done signal!");
-        }
-        _ = tokio::signal::ctrl_c() => {
-            println!("");
-        }
-    };
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
-    Logger::init()?;
     let args = Args::parse();
-    if args.types == "swarm" {
-        run_as_swarm(&args.http_addr).await;
-    } else {
-        run_as_node(&args.http_addr, &args.config_filename).await;
-    }
+    Logger::init(args.log_level)?;
+    run_as_swarm(&args.http_addr).await;
     Ok(())
 }

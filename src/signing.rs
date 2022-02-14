@@ -1,7 +1,33 @@
+use serde::Deserialize;
+use serde::Serialize;
 use web3::signing::{keccak256, recover, Key};
 use web3::types::{Address, Bytes, SignedData, H256};
+use anyhow::Result;
 
-pub fn sign<M>(message: M, key: impl Key) -> SignedData
+#[derive(Deserialize, Serialize, Debug)]
+pub struct SigMsg<T>
+{
+    pub data: T,
+    pub sig: SignedData
+}
+
+impl <T> SigMsg<T> {
+    fn sign(msg: T, key: impl Key) -> Result<Self> {
+        let data = serde_json::to_string(&msg)?.as_bytes();
+        let sig = sign(data, key);
+        Ok(Self {
+            data: msg,
+            sig: sig
+        })
+    }
+
+    fn verify(&self, addr: Address) -> bool {
+        verify(self.data, addr)
+    }
+}
+
+
+pub fn sign<M>(message: M, key: impl Key) -> Result<SignedData>
 where
     M: AsRef<[u8]>,
 {
@@ -9,12 +35,10 @@ where
     let message_hash: H256 = keccak256(message).into();
 
     let signature = key
-        .sign_message(message_hash.as_bytes())
-        .expect("hash is non-zero 32-bytes; qed");
+        .sign_message(message_hash.as_bytes())?;
     let v = signature
         .v
-        .try_into()
-        .expect("signature recovery in electrum notation always fits in a u8");
+        .try_into()?;
 
     let signature_bytes = Bytes({
         let mut bytes = Vec::with_capacity(65);
@@ -27,14 +51,14 @@ where
     // We perform this allocation only after all previous fallible actions have completed successfully.
     let message = message.to_owned();
 
-    SignedData {
+    Ok(SignedData {
         message,
         message_hash,
         v,
         r: signature.r,
         s: signature.s,
         signature: signature_bytes,
-    }
+    })
 }
 
 pub fn verify<M, S>(message: M, address: Address, signature: S) -> bool
