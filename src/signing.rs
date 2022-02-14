@@ -8,21 +8,25 @@ use anyhow::Result;
 pub struct SigMsg<T>
 {
     pub data: T,
-    pub sig: SignedData
+    pub addr: Address,
+    pub sig: Vec<u8>
 }
 
-impl <T> SigMsg<T> {
-    fn sign(msg: T, key: impl Key) -> Result<Self> {
-        let data = serde_json::to_string(&msg)?.as_bytes();
-        let sig = sign(data, key);
+impl <T: Serialize> SigMsg<T> {
+    pub fn new(msg: T, key: impl Key) -> Result<Self> {
+        let data = serde_json::to_string(&msg)?;
+        let sig = sign(data.as_bytes(), key)?;
         Ok(Self {
             data: msg,
-            sig: sig
+            sig: sig.signature.0,
+            addr: key.address()
         })
     }
 
-    fn verify(&self, addr: Address) -> bool {
-        verify(self.data, addr)
+    pub fn verify(&self) -> Result<bool> {
+        let data = serde_json::to_string(&self.data)?;
+        let ret = verify(data.as_bytes(), self.addr, self.sig);
+        Ok(ret)
     }
 }
 
@@ -103,7 +107,7 @@ mod tests {
         // Ensure that the address belongs to the key.
         assert_eq!(address, get_key_address(&key));
 
-        let sig = sign(message, &key);
+        let sig = sign(message, &key).unwrap();
 
         // Verify message signature by address.
         assert!(verify(message, address, sig.signature.0));

@@ -17,36 +17,38 @@ use web3::signing::Key;
 use hyper::http::Error;
 use anyhow::anyhow;
 use crate::signing::verify;
-
+use crate::signing::SigMsg;
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct TricklePayload {
     pub sdp: String,
     pub candidates: Vec<RTCIceCandidateInit>,
-    pub address: Address,
-}
-
-#[derive(Deserialize, Serialize, Debug)]
-pub struct SigMsg<'a, T>
-{
-    pub data: T,
-    pub sig: SignedData
 }
 
 
-
-
-async fn handle_sdp(swarm: Swarm, req: Request<Body>, key: Key) -> anyhow::Result<TricklePayload> {
+async fn handle_sdp(
+    swarm: Swarm,
+    req: Request<Body>,
+    key: impl Key
+) -> anyhow::Result<String> {
+    let mut swarm = swarm.to_owned();
     let transport = swarm.get_pending().await
-        .ok_or("cannot get transaction").map_err(Into::into)?;
-    let data: TricklePayload = serde_json::from_slice(
+        .ok_or("cannot get transaction").map_err(|e| anyhow!(e))?;
+    let data: SigMsg<TricklePayload> = serde_json::from_slice(
         decode(
             String::from_utf8(
-                hyper::body::to_bytes(req).await.map_err(Into::into)?.to_vec()
-            ).map_err(Into::into)?
-        ).map_err(Into::into)?.as_bytes()
-    ).map_err(Into::into)?;
-    let offer = serde_json::from_str::<RTCSessionDescription>(&data.sdp)?;
+                hyper::body::to_bytes(req).await?.to_vec()
+            )?
+        ).map_err(|e| anyhow!(e))?.as_bytes()
+    ).map_err(|e| anyhow!(e))?;
+    match data.verify() {
+        Ok(true) => (),
+        _ => {
+            return Err(anyhow!("failed on verify message sigature"));
+        }
+    }
+
+    let offer = serde_json::from_str::<RTCSessionDescription>(&data.data.sdp)?;
     transport.set_remote_description(offer).await?;
     let answer = transport.get_answer().await?;
     transport.set_local_description(answer.clone()).await?;
@@ -57,13 +59,50 @@ async fn handle_sdp(swarm: Swarm, req: Request<Body>, key: Key) -> anyhow::Resul
             .iter()
             .map(async move |c| c.clone().to_json().await.unwrap()),
     ).await;
-    for c in data.candidates {
+    for c in data.data.candidates {
         transport
             .add_ice_candidate(c.candidate.clone())
             .await
             .unwrap();
     }
     swarm.upgrade_pending().await?;
+
+    let data = TricklePayload {
+        sdp: serde_json::to_string(&answer).unwrap(),
+        candidates: local_candidates_json,
+    };
+    let resp = SigMsg::new(data, key)?;
+    Ok(serde_json::to_string(&resp)?)
+}
+
+pub async fn discoveries_services(
+    req: Request<Body>,
+    swarm: Swarm,
+    key: impl Key
+) -> Result<Response<Body>, Error> {
+    match (req.method(), req.uri().path()) {
+        (&Method::POST, "/offer") => {
+            match handle_sdp(swarm, req, key).await {
+                Ok(resp) => {
+                    Response::builder()
+                        .status(200)
+                        .body(Body::from(resp))
+                },
+                Err(_) => {
+                    Response::builder()
+                        .status(500)
+                        .body(Body::from("internal error".to_string()))
+                }
+            }
+        },
+        _ => {
+            let mut not_found = Response::default();
+            *not_found.status_mut() = StatusCode::NOT_FOUND;
+            Ok(not_found)
+        }
+
+    }
+
 }
 
 // pub async fn sdp_handler(
