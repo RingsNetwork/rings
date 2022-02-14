@@ -21,10 +21,23 @@ use std::sync::Mutex;
 pub struct Args {
     #[clap(long, short = 'd', default_value = "127.0.0.1:50000")]
     pub http_addr: String,
+
     #[clap(long, short = 't', default_value = "swarm")]
     pub types: String,
+
     #[clap(long, short = 'f', default_value = "bns-node.toml")]
     pub config_filename: String,
+
+    #[clap(
+        long = "eth",
+        short = 'e',
+        default_value = "http://127.0.0.1:8545",
+        env
+    )]
+    pub eth_endpoint: String,
+
+    #[clap(long = "key", short = 'w', env)]
+    pub eth_key: String,
 }
 
 async fn run_as_swarm(localhost: &str) {
