@@ -104,6 +104,10 @@ impl IceTransport<TkChannel> for DefaultTransport {
         }
     }
 
+    async fn get_answer_str(&self) -> Result<String> {
+        Ok(self.get_answer().await?.sdp)
+    }
+
     async fn get_offer(&self) -> Result<Self::Sdp> {
         match self.get_peer_connection().await {
             Some(peer_connection) => {
@@ -113,6 +117,10 @@ impl IceTransport<TkChannel> for DefaultTransport {
             }
             None => Err(anyhow!("cannot get local descrition")),
         }
+    }
+
+    async fn get_offer_str(&self) -> Result<String> {
+        Ok(self.get_offer().await?.sdp)
     }
 
     async fn get_data_channel(&self) -> Option<Arc<RTCDataChannel>> {

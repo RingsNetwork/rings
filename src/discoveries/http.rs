@@ -36,23 +36,16 @@ async fn ser_pending_candidate(t: &DefaultTransport) -> Vec<RTCIceCandidateInit>
     ).await
 }
 
-
-async fn handle_sdp(
-    swarm: Swarm,
-    req: Request<Body>,
-    key: impl Key
-) -> anyhow::Result<String> {
+async fn handshake(swarm: Swarm, key: impl key, data: vec[u8]) -> Result<String> {
     let mut swarm = swarm.to_owned();
     let transport = swarm.get_pending().await
         .ok_or("cannot get transaction").map_err(|e| anyhow!(e))?;
     let data: SigMsg<TricklePayload> = serde_json::from_slice(
         decode(
-            String::from_utf8(
-                hyper::body::to_bytes(req).await?.to_vec()
-            )?
+            String::from_utf8(data)?
         ).map_err(|e| anyhow!(e))?.as_bytes()
     ).map_err(|e| anyhow!(e))?;
-    match data.verify() {
+        match data.verify() {
         Ok(true) => (),
         _ => {
             return Err(anyhow!("failed on verify message sigature"));
@@ -62,7 +55,6 @@ async fn handle_sdp(
     let offer = serde_json::from_str::<RTCSessionDescription>(&data.data.sdp)?;
     transport.set_remote_description(offer).await?;
     let answer = transport.get_answer().await?;
-    transport.set_local_description(answer.clone()).await?;
     let local_candidates_json = ser_pending_candidate(&transport).await;
     for c in data.data.candidates {
         transport
@@ -78,6 +70,17 @@ async fn handle_sdp(
     };
     let resp = SigMsg::new(data, key)?;
     Ok(serde_json::to_string(&resp)?)
+
+
+}
+
+async fn handle_sdp(
+    swarm: Swarm,
+    req: Request<Body>,
+    key: impl Key
+) -> anyhow::Result<String> {
+    let data = hyper::body::to_bytes(req).await?.to_vec();
+    handshake(swarm, key, data)
 }
 
 pub async fn discoveries_services(
@@ -121,9 +124,16 @@ pub async fn connect(
         .into_owned()
         .collect::<HashMap<String, String>>();
     let mut swarm = swarm.to_owned();
-    let mut swarm = swarm.to_owned();
+
     let transport = swarm.get_pending().await
         .ok_or("cannot get transaction").map_err(|e| anyhow!(e))?;
-    let offer = transport.get_offer();
+    let offer = transport.get_offer_str();
+    let data = TricklePayload {
+        sdp: serde_json::to_string(&answer).unwrap(),
+        candidates: ser_pending_candidate(&transport).await
+    };
+    let msg = SigMsg::new(data, key)?;
+    let req = encode(serde_json::to_string(&msg)?);
+    let resp = client.post(node).body(&req).send().await?;
 
 }

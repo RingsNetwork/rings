@@ -61,7 +61,7 @@ impl Swarm {
         let trans = self.pending.take();
         match &trans {
             Some(t) => {
-                let sdp = t.get_local_description_str().await.unwrap();
+                let sdp = t.get_offer_str().await.unwrap();
                 self.register(sdp, Arc::clone(t), State::Anonymous);
                 Ok(())
             }
