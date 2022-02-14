@@ -13,12 +13,10 @@ use bns_core::types::ice_transport::IceTransport;
 use web3::types::Address;
 use web3::types::SignedData;
 use web3::signing::Key;
-
 use hyper::http::Error;
 use anyhow::anyhow;
 use std::collections::HashMap;
 use crate::signing::SigMsg;
-
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct TricklePayload {
@@ -35,6 +33,7 @@ async fn ser_pending_candidate(t: &DefaultTransport) -> Vec<RTCIceCandidateInit>
             .map(async move |c| c.clone().to_json().await.unwrap()),
     ).await
 }
+
 
 async fn handshake(swarm: Swarm, key: impl Key, data: Vec<u8>) -> anyhow::Result<String> {
     let mut swarm = swarm.to_owned();
@@ -134,6 +133,5 @@ pub async fn connect(
     };
     let msg = SigMsg::new(data, key)?;
     let req = encode(serde_json::to_string(&msg)?);
-    let resp = client.post(node).body(req).send().await?;
-
+    let resp = client.post(node).body(req).send().await?.text().await?.as_bytes();
 }
