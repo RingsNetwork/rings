@@ -6,6 +6,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex as SyncMutex;
+use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
@@ -19,19 +20,20 @@ pub trait IceTransport<Ch: Channel> {
 
     fn new(signaler: Arc<SyncMutex<Ch>>) -> Self;
     fn signaler(&self) -> Arc<SyncMutex<Ch>>;
-    async fn start(&mut self) -> Result<()>;
+    async fn run_as_swarm(&mut self) -> Result<()>;
+    async fn run_as_node(&mut self) -> Result<RTCSessionDescription>;
 
     async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>>;
     async fn get_pending_candidates(&self) -> Vec<Self::Candidate>;
     async fn get_answer(&self) -> Result<Self::Sdp>;
-    fn get_offer(&self) -> Result<Self::Sdp>;
-    fn get_offer_str(&self) -> Result<String>;
+    async fn get_offer(&self) -> Result<Self::Sdp>;
+    async fn get_local_description_str(&self) -> Result<String>;
     async fn get_data_channel(&self) -> Option<Arc<Self::Channel>>;
 
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
     where
         T: Into<Self::Sdp> + Send;
-
+    async fn add_ice_candidate(&self, candidate: String) -> Result<()>;
     async fn set_remote_description<T>(&self, desc: T) -> Result<()>
     where
         T: Into<Self::Sdp> + Send;
@@ -68,12 +70,16 @@ pub trait IceTransport<Ch: Channel> {
                 + Sync,
         >,
     ) -> Result<()>;
+
+    async fn on_open(
+        &self,
+        f: Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync>,
+    ) -> Result<()>;
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait IceTransportCallback<Ch: Channel>: IceTransport<Ch> {
-    async fn setup_callback(&self) -> Result<()>;
     async fn on_ice_candidate_callback(
         &self,
     ) -> Box<
@@ -98,4 +104,7 @@ pub trait IceTransportCallback<Ch: Channel>: IceTransport<Ch> {
     async fn on_message_callback(
         &self,
     ) -> Box<dyn FnMut(Self::Msg) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync>;
+    async fn on_open_callback(
+        &self,
+    ) -> Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync>;
 }

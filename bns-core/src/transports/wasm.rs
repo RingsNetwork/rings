@@ -303,16 +303,6 @@ impl WasmTransport {
 
 #[async_trait(?Send)]
 impl IceTransportCallback<CbChannel> for WasmTransport {
-    async fn setup_callback(&self) -> Result<()> {
-        self.on_ice_candidate(self.on_ice_candidate_callback().await)
-            .await?;
-        self.on_peer_connection_state_change(self.on_peer_connection_state_change_callback().await)
-            .await?;
-        self.on_data_channel(self.on_data_channel_callback().await)
-            .await?;
-        self.on_message(self.on_message_callback().await).await?;
-        Ok(())
-    }
     async fn on_ice_candidate_callback(
         &self,
     ) -> Box<
