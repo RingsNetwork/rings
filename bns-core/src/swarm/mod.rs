@@ -43,7 +43,7 @@ impl Swarm {
 
     pub async fn new_transport(&mut self) -> Result<Arc<Transport>> {
         let mut ice_transport = Transport::new(Arc::clone(&self.signaler));
-        ice_transport.run_as_swarm().await?;
+        ice_transport.start().await?;
         // should always has offer here #WhyUnwarp
         let trans = Arc::new(ice_transport);
         self.pending = Some(Arc::clone(&trans));

@@ -54,7 +54,7 @@ impl IceTransport<TkChannel> for DefaultTransport {
         Arc::clone(&self.signaler)
     }
 
-    async fn run_as_swarm(&mut self) -> Result<()> {
+    async fn start(&mut self) -> Result<()> {
         let config = RTCConfiguration {
             ice_servers: vec![RTCIceServer {
                 urls: vec!["stun:stun.l.google.com:19302".to_owned()],
@@ -79,36 +79,11 @@ impl IceTransport<TkChannel> for DefaultTransport {
             .await?;
         self.on_data_channel(self.on_data_channel_callback().await)
             .await?;
-        Ok(())
-    }
-
-    async fn run_as_node(&mut self) -> Result<RTCSessionDescription> {
-        let config = RTCConfiguration {
-            ice_servers: vec![RTCIceServer {
-                urls: vec!["stun:stun.l.google.com:19302".to_owned()],
-                ..Default::default()
-            }],
-            ice_candidate_pool_size: 100,
-            ..Default::default()
-        };
-        let api = APIBuilder::new().build();
-        match api.new_peer_connection(config).await {
-            Ok(c) => {
-                let mut conn = self.connection.lock().await;
-                *conn = Some(Arc::new(c));
-                Ok(())
-            }
-            Err(e) => Err(anyhow!(e)),
-        }?;
-        self.on_ice_candidate(self.on_ice_candidate_callback().await)
-            .await?;
-        self.on_peer_connection_state_change(self.on_peer_connection_state_change_callback().await)
-            .await?;
-        self.setup_channel("bns").await?;
         self.on_open(self.on_open_callback().await).await?;
         self.on_message(self.on_message_callback().await).await?;
-        let offer = self.get_offer().await?;
-        Ok(offer)
+        self.setup_channel("bns").await?;
+        self.setup_offer().await?;
+        Ok(())
     }
 
     async fn get_peer_connection(&self) -> Option<Arc<RTCPeerConnection>> {
@@ -129,35 +104,12 @@ impl IceTransport<TkChannel> for DefaultTransport {
         }
     }
 
-    async fn get_offer(&self) -> Result<RTCSessionDescription> {
+    async fn get_offer(&self) -> Result<Self::Sdp> {
         match self.get_peer_connection().await {
             Some(peer_connection) => {
-                let mut gather_complete = peer_connection.gathering_complete_promise().await;
-                match peer_connection.create_offer(None).await {
-                    Ok(offer) => {
-                        self.set_local_description(offer.clone()).await?;
-                        let _ = gather_complete.recv().await;
-                        Ok(offer)
-                    }
-                    Err(e) => {
-                        log::error!("{}", e);
-                        Err(anyhow!(e))
-                    }
-                }
-            }
-            None => Err(anyhow!("cannot get offer")),
-        }
-    }
-
-    async fn get_local_description_str(&self) -> Result<String> {
-        match self.get_peer_connection().await {
-            Some(peer_connection) => {
-                let desc = peer_connection
+                peer_connection
                     .local_description()
-                    .await
-                    .map(|l| l.sdp)
-                    .unwrap();
-                Ok(desc)
+                    .await.ok_or("cannot get local_description").map_err(|e| anyhow!(e))
             }
             None => Err(anyhow!("cannot get local descrition")),
         }
@@ -305,6 +257,27 @@ impl DefaultTransport {
             None => Err(anyhow!("cannot get data channel")),
         }
     }
+    async fn setup_offer(&self) -> Result<RTCSessionDescription> {
+        match self.get_peer_connection().await {
+            Some(peer_connection) => {
+                let mut gather_complete = peer_connection.gathering_complete_promise().await;
+                match peer_connection.create_offer(None).await {
+                    Ok(offer) => {
+                        self.set_local_description(offer.clone()).await?;
+                        let _ = gather_complete.recv().await;
+                        Ok(offer)
+                    }
+                    Err(e) => {
+                        log::error!("{}", e);
+                        Err(anyhow!(e))
+                    }
+                }
+            }
+            None => Err(anyhow!("cannot get offer")),
+        }
+    }
+
+
 }
 
 #[async_trait]
