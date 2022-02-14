@@ -36,7 +36,7 @@ async fn ser_pending_candidate(t: &DefaultTransport) -> Vec<RTCIceCandidateInit>
     ).await
 }
 
-async fn handshake(swarm: Swarm, key: impl key, data: vec[u8]) -> Result<String> {
+async fn handshake(swarm: Swarm, key: impl Key, data: Vec<u8>) -> anyhow::Result<String> {
     let mut swarm = swarm.to_owned();
     let transport = swarm.get_pending().await
         .ok_or("cannot get transaction").map_err(|e| anyhow!(e))?;
@@ -80,7 +80,7 @@ async fn handle_sdp(
     key: impl Key
 ) -> anyhow::Result<String> {
     let data = hyper::body::to_bytes(req).await?.to_vec();
-    handshake(swarm, key, data)
+    handshake(swarm, key, data).await
 }
 
 pub async fn discoveries_services(
@@ -123,17 +123,17 @@ pub async fn connect(
     let args = form_urlencoded::parse(query.as_bytes())
         .into_owned()
         .collect::<HashMap<String, String>>();
+    let node = args.get("node").ok_or("should include node params").map_err(|e| anyhow!(e))?;
     let mut swarm = swarm.to_owned();
 
     let transport = swarm.get_pending().await
         .ok_or("cannot get transaction").map_err(|e| anyhow!(e))?;
-    let offer = transport.get_offer_str();
     let data = TricklePayload {
-        sdp: serde_json::to_string(&answer).unwrap(),
+        sdp: transport.get_offer_str().await?,
         candidates: ser_pending_candidate(&transport).await
     };
     let msg = SigMsg::new(data, key)?;
     let req = encode(serde_json::to_string(&msg)?);
-    let resp = client.post(node).body(&req).send().await?;
+    let resp = client.post(node).body(req).send().await?;
 
 }
