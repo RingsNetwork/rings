@@ -26,3 +26,8 @@ log = "0.4"
 futures = "0.3.21"
 web3 = { version = "0.18.0", features = ["signing"] }
 secp256k1 = "0.21"
+libsecp256k1 = "0.7"
+ecies = "0.2"
+
+[dev-dependencies]
+hex-literal = "0.3"

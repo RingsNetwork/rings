@@ -60,6 +60,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ecies::{decrypt, encrypt};
+    use hex_literal::hex;
+    use libsecp256k1::{PublicKey, SecretKey as PrivateKey};
     use secp256k1::SecretKey;
     use std::str::FromStr;
 
@@ -83,5 +86,22 @@ mod tests {
 
         // Verify message signature by address.
         assert!(verify(message, address, sig.signature.0));
+    }
+
+    #[test]
+    fn encrypt_decrypt() {
+        let message = "Hello, world!";
+
+        let priv_key = PrivateKey::parse(&hex!(
+            "46886194468bb6e0faa36c12cebb6f0ca104ddbc8ec9d39246d718eba6e22d67"
+        ))
+        .unwrap();
+
+        let pub_key = PublicKey::from_secret_key(&priv_key);
+
+        let cipher = encrypt(&pub_key.serialize(), message.as_bytes()).unwrap();
+        let plain = decrypt(&priv_key.serialize(), &cipher).unwrap();
+
+        assert_eq!(message.as_bytes(), plain);
     }
 }
