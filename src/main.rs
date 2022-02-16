@@ -2,19 +2,17 @@
 use anyhow::Result;
 use bns_core::channels::default::TkChannel;
 use bns_core::swarm::Swarm;
-use bns_core::transports::default::DefaultTransport;
 use bns_core::types::channel::Channel;
-use bns_core::types::ice_transport::IceTransport;
-use bns_node::config::read_config;
-use bns_node::discoveries::http::sdp_handler;
-use bns_node::discoveries::http::send_to_swarm;
+//use bns_node::config::read_config;
+use bns_node::discoveries::http::discoveries_services;
 use bns_node::logger::Logger;
 use clap::Parser;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::Server;
 use std::net::SocketAddr;
-use std::sync::Arc;
-use std::sync::Mutex;
+use secp256k1::SecretKey;
+use std::str::FromStr;
+
 
 #[derive(Parser, Debug)]
 #[clap(about, version, author)]
@@ -39,11 +37,11 @@ pub struct Args {
     )]
     pub eth_endpoint: String,
 
-    #[clap(long = "key", short = 'w', env)]
+    #[clap(long = "key", short = 'k', env)]
     pub eth_key: String,
 }
 
-async fn run_as_swarm(localhost: &str) {
+async fn run(localhost: &str, key: SecretKey) {
     let swarm = Swarm::new(TkChannel::new(1));
     let signaler = swarm.signaler();
     let localhost = localhost.to_owned();
@@ -53,10 +51,9 @@ async fn run_as_swarm(localhost: &str) {
         let http_addr = localhost.clone();
         let service = make_service_fn(move |_| {
             let swarm = swarm.to_owned();
-            let localhost = localhost.clone();
             async move {
                 Ok::<_, hyper::Error>(service_fn(move |req| {
-                    sdp_handler(req, swarm.to_owned())
+                    discoveries_services(req, swarm.to_owned(), key)
                 }))
             }
         });
@@ -85,6 +82,7 @@ async fn run_as_swarm(localhost: &str) {
 async fn main() -> Result<()> {
     let args = Args::parse();
     Logger::init(args.log_level)?;
-    run_as_swarm(&args.http_addr).await;
+    let key = SecretKey::from_str(&args.eth_key)?;
+    run(&args.http_addr, key).await;
     Ok(())
 }

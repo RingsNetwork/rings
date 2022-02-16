@@ -2,6 +2,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use web3::signing::{keccak256, recover, Key};
 use web3::types::{Address, Bytes, SignedData, H256};
+use secp256k1::SecretKey;
 use anyhow::Result;
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -13,19 +14,19 @@ pub struct SigMsg<T>
 }
 
 impl <T: Serialize> SigMsg<T> {
-    pub fn new(msg: T, key: impl Key) -> Result<Self> {
+    pub fn new(msg: T, key: SecretKey) -> Result<Self> {
         let data = serde_json::to_string(&msg)?;
-        let sig = sign(data.as_bytes(), key)?;
+        let sig = sign(data.as_bytes(), &key)?;
         Ok(Self {
             data: msg,
             sig: sig.signature.0,
-            addr: key.address()
+            addr: (&key).address()
         })
     }
 
     pub fn verify(&self) -> Result<bool> {
         let data = serde_json::to_string(&self.data)?;
-        let ret = verify(data.as_bytes(), self.addr, self.sig);
+        let ret = verify(data.as_bytes(), self.addr, self.sig.clone());
         Ok(ret)
     }
 }

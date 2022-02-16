@@ -6,7 +6,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex as SyncMutex;
-use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+use secp256k1::SecretKey;
+
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
@@ -107,4 +108,12 @@ pub trait IceTransportCallback<Ch: Channel>: IceTransport<Ch> {
     async fn on_open_callback(
         &self,
     ) -> Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync>;
+}
+
+
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+pub trait IceTrickleScheme<Ch: Channel>: IceTransport<Ch> {
+    async fn prepare_local_info(&self, key: SecretKey) -> Result<String>;
+    async fn register_remote_info(&self, data: String) -> Result<()>;
 }

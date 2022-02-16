@@ -1,5 +1,9 @@
+use serde::Deserialize;
+use serde::Serialize;
+use serde_json;
 use anyhow::anyhow;
 use anyhow::Result;
+use futures::future::join_all;
 use async_trait::async_trait;
 use std::future::Future;
 use std::pin::Pin;
@@ -8,12 +12,14 @@ use std::sync::Mutex as SyncMutex;
 use tokio::sync::Mutex;
 use tokio::time::Duration;
 use webrtc::api::APIBuilder;
-
+use crate::encoder::{encode, decode};
 use crate::channels::default::TkChannel;
 use crate::types::channel::Channel;
 use crate::types::channel::Events;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
+use crate::types::ice_transport::IceTrickleScheme;
+use crate::signing::SigMsg;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
@@ -23,6 +29,9 @@ use webrtc::peer_connection::math_rand_alpha;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
+use secp256k1::SecretKey;
+
+
 
 #[derive(Clone)]
 pub struct DefaultTransport {
@@ -410,6 +419,55 @@ impl IceTransportCallback<TkChannel> for DefaultTransport {
                     };
                 }
             })
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct TricklePayload {
+    pub sdp: String,
+    pub candidates: Vec<RTCIceCandidateInit>,
+}
+
+#[async_trait]
+impl IceTrickleScheme<TkChannel> for DefaultTransport {
+    async fn prepare_local_info(&self, key: SecretKey) -> anyhow::Result<String> {
+        let sdp = self.get_answer().await?;
+        let local_candidates_json = join_all(
+            self
+                .get_pending_candidates()
+                .await
+                .iter()
+                .map(async move |c| c.clone().to_json().await.unwrap()),
+        ).await;
+        let data = TricklePayload {
+            sdp: serde_json::to_string(&sdp).unwrap(),
+            candidates: local_candidates_json,
+        };
+        let resp = SigMsg::new(data, key)?;
+        Ok(encode(serde_json::to_string(&resp)?))
+    }
+
+    async fn register_remote_info(&self, data: String) -> anyhow::Result<()> {
+        let data: SigMsg<TricklePayload> = serde_json::from_slice(
+            decode(data).map_err(|e| anyhow!(e))?.as_bytes()
+        ).map_err(|e| anyhow!(e))?;
+
+        match data.verify() {
+            Ok(true) => {
+                let sdp = serde_json::from_str::<RTCSessionDescription>(&data.data.sdp)?;
+                self.set_remote_description(sdp).await?;
+                for c in data.data.candidates {
+                    self
+                        .add_ice_candidate(c.candidate.clone())
+                        .await
+                        .unwrap();
+                }
+                Ok(())
+            },
+            _ => {
+                return Err(anyhow!("failed on verify message sigature"));
+            }
         }
     }
 }
