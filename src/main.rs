@@ -26,8 +26,11 @@ pub struct Args {
     #[clap(long, short = 'f', default_value = "bns-node.toml")]
     pub config_filename: String,
 
-    #[clap(long, short = 'l', default_value = "Info")]
+    #[clap(long, short = 'v', default_value = "Info")]
     pub log_level: String,
+
+   #[clap(long, short = 's', default_value = "stun:stun.l.google.com:19302")]
+    pub stun_server: String,
 
     #[clap(
         long = "eth",
@@ -41,8 +44,8 @@ pub struct Args {
     pub eth_key: String,
 }
 
-async fn run(localhost: &str, key: SecretKey) {
-    let swarm = Swarm::new(TkChannel::new(1));
+async fn run(localhost: &str, key: SecretKey, stun: &str) {
+    let swarm = Swarm::new(TkChannel::new(1), stun.to_string());
     let signaler = swarm.signaler();
     let localhost = localhost.to_owned();
 
@@ -83,6 +86,6 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     Logger::init(args.log_level)?;
     let key = SecretKey::from_str(&args.eth_key)?;
-    run(&args.http_addr, key).await;
+    run(&args.http_addr, key, &args.stun_server).await;
     Ok(())
 }

@@ -63,10 +63,10 @@ impl IceTransport<TkChannel> for DefaultTransport {
         Arc::clone(&self.signaler)
     }
 
-    async fn start(&mut self) -> Result<()> {
+    async fn start(&mut self, stun: String) -> Result<()> {
         let config = RTCConfiguration {
             ice_servers: vec![RTCIceServer {
-                urls: vec!["stun:stun.l.google.com:19302".to_owned()],
+                urls: vec![stun.to_owned()],
                 ..Default::default()
             }],
             ice_candidate_pool_size: 100,
@@ -81,7 +81,7 @@ impl IceTransport<TkChannel> for DefaultTransport {
             }
             Err(e) => Err(anyhow!(e)),
         }?;
-
+        self.setup_channel("bns").await?;
         self.on_ice_candidate(self.on_ice_candidate_callback().await)
             .await?;
         self.on_peer_connection_state_change(self.on_peer_connection_state_change_callback().await)
@@ -90,7 +90,6 @@ impl IceTransport<TkChannel> for DefaultTransport {
             .await?;
         self.on_open(self.on_open_callback().await).await?;
         self.on_message(self.on_message_callback().await).await?;
-        self.setup_channel("bns").await?;
         self.setup_offer().await?;
         Ok(())
     }

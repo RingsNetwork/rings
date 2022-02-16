@@ -29,21 +29,23 @@ pub struct Swarm {
     pub anonymous: DashMap<String, Arc<Transport>>,
     pub table: DashMap<String, Arc<Transport>>,
     pub signaler: Arc<Mutex<Channel>>,
+    pub stun_server: String
 }
 
 impl Swarm {
-    pub fn new(ch: Channel) -> Self {
+    pub fn new(ch: Channel, stun: String) -> Self {
         Self {
             pending: None,
             anonymous: DashMap::new(),
             table: DashMap::new(),
             signaler: Arc::new(Mutex::new(ch)),
+            stun_server: stun
         }
     }
 
     pub async fn new_transport(&mut self) -> Result<Arc<Transport>> {
         let mut ice_transport = Transport::new(Arc::clone(&self.signaler));
-        ice_transport.start().await?;
+        ice_transport.start(self.stun_server.clone()).await?;
         // should always has offer here #WhyUnwarp
         let trans = Arc::new(ice_transport);
         self.pending = Some(Arc::clone(&trans));
