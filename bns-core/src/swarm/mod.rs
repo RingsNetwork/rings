@@ -59,6 +59,10 @@ impl Swarm {
         }
     }
 
+    pub async fn drop_pending(&mut self) {
+        self.pending = None;
+    }
+
     pub async fn upgrade_pending(&mut self) -> Result<()> {
         let trans = self.pending.take();
         match &trans {

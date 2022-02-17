@@ -76,7 +76,7 @@ async fn run(localhost: &str, key: SecretKey, stun: &str) {
             println!("received done signal!");
         }
         _ = tokio::signal::ctrl_c() => {
-            println!("");
+            println!("quit");
         }
     };
 }

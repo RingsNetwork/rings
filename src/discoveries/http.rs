@@ -45,6 +45,7 @@ pub async fn trickle_forward(
     let transport = swarm.get_pending().await
         .ok_or("cannot get transaction").map_err(|e| anyhow!(e))?;
     let req = transport.prepare_local_info(key).await?;
+    log::trace!("sending info to {:?}", &node);
     let resp = client.post(node).body(req).send().await?.text().await?;
     let _ = transport.register_remote_info(String::from_utf8(resp.as_bytes().to_vec())?).await?;
     Ok("ok".to_string())
@@ -57,14 +58,17 @@ pub async fn discoveries_services(
     key: SecretKey
 ) -> Result<Response<Body>, Error> {
     match (req.method(), req.uri().path()) {
-        (&Method::POST, "/offer") => {
-            match trickle_scheme_handler(swarm, req, key).await {
+        (&Method::POST, "/sdp") => {
+            match trickle_scheme_handler(swarm.to_owned(), req, key).await {
                 Ok(resp) => {
                     Response::builder()
                         .status(200)
                         .body(Body::from(resp))
                 },
-                Err(_) => {
+                Err(e) => {
+                    log::error!("{:?}", e);
+                    let mut swarm = swarm.to_owned();
+                    swarm.drop_pending().await;
                     Response::builder()
                         .status(500)
                         .body(Body::from("internal error".to_string()))
@@ -72,13 +76,16 @@ pub async fn discoveries_services(
             }
         },
         (&Method::GET, "/connect") => {
-            match trickle_forward(swarm, req, key).await {
+            match trickle_forward(swarm.to_owned(), req, key).await {
                  Ok(resp) => {
                     Response::builder()
                         .status(200)
                         .body(Body::from(resp))
                 },
-                Err(_) => {
+                Err(e) => {
+                    log::error!("{:?}", e);
+                    let mut swarm = swarm.to_owned();
+                    swarm.drop_pending().await;
                     Response::builder()
                         .status(500)
                         .body(Body::from("internal error".to_string()))

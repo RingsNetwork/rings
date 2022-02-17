@@ -30,7 +30,7 @@ use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 use secp256k1::SecretKey;
-
+use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 
 
 #[derive(Clone)]
@@ -431,7 +431,9 @@ pub struct TricklePayload {
 #[async_trait]
 impl IceTrickleScheme<TkChannel> for DefaultTransport {
     async fn prepare_local_info(&self, key: SecretKey) -> anyhow::Result<String> {
-        let sdp = self.get_answer().await?;
+        log::trace!("prepare local info: Strate");
+
+        let sdp = self.get_offer().await?;
         let local_candidates_json = join_all(
             self
                 .get_pending_candidates()
@@ -448,14 +450,18 @@ impl IceTrickleScheme<TkChannel> for DefaultTransport {
     }
 
     async fn register_remote_info(&self, data: String) -> anyhow::Result<()> {
+        log::trace!("register remote info");
         let data: SigMsg<TricklePayload> = serde_json::from_slice(
             decode(data).map_err(|e| anyhow!(e))?.as_bytes()
         ).map_err(|e| anyhow!(e))?;
 
         match data.verify() {
             Ok(true) => {
-                let sdp = serde_json::from_str::<RTCSessionDescription>(&data.data.sdp)?;
+                let mut sdp = serde_json::from_str::<RTCSessionDescription>(&data.data.sdp)?;
+                sdp.sdp_type = RTCSdpType::Answer;
+                log::trace!("setting remote sdp: {:?}", sdp);
                 self.set_remote_description(sdp).await?;
+                log::trace!("setting remote candidate");
                 for c in data.data.candidates {
                     self
                         .add_ice_candidate(c.candidate.clone())
@@ -465,6 +471,7 @@ impl IceTrickleScheme<TkChannel> for DefaultTransport {
                 Ok(())
             },
             _ => {
+                log::error!("cannot verify message sig");
                 return Err(anyhow!("failed on verify message sigature"));
             }
         }
