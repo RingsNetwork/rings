@@ -90,7 +90,6 @@ impl IceTransport<TkChannel> for DefaultTransport {
             .await?;
         self.on_open(self.on_open_callback().await).await?;
         self.on_message(self.on_message_callback().await).await?;
-        self.setup_offer().await?;
         Ok(())
     }
 
@@ -99,15 +98,19 @@ impl IceTransport<TkChannel> for DefaultTransport {
     }
 
     async fn get_pending_candidates(&self) -> Vec<RTCIceCandidate> {
-        self.pending_candidates.lock().await.clone()
+        self.pending_candidates.lock().await.to_vec()
     }
 
     async fn get_answer(&self) -> Result<RTCSessionDescription> {
         match self.get_peer_connection().await {
-            Some(peer_connection) => peer_connection
-                .create_answer(None)
-                .await
-                .map_err(|e| anyhow!(e)),
+            Some(peer_connection) => {
+                // wait gather candidates
+                let mut gather_complete = peer_connection.gathering_complete_promise().await;
+                let answer = peer_connection.create_answer(None).await?;
+                self.set_local_description(answer.to_owned()).await?;
+                let _ = gather_complete.recv().await;
+                Ok(answer)
+            },
             None => Err(anyhow!("cannot get answer")),
         }
     }
@@ -116,14 +119,24 @@ impl IceTransport<TkChannel> for DefaultTransport {
         Ok(self.get_answer().await?.sdp)
     }
 
-    async fn get_offer(&self) -> Result<Self::Sdp> {
+    async fn get_offer(&self) -> Result<RTCSessionDescription> {
         match self.get_peer_connection().await {
             Some(peer_connection) => {
-                peer_connection
-                    .local_description()
-                    .await.ok_or("cannot get local_description").map_err(|e| anyhow!(e))
+                // wait gather candidates
+                let mut gather_complete = peer_connection.gathering_complete_promise().await;
+                match peer_connection.create_offer(None).await {
+                    Ok(offer) => {
+                        self.set_local_description(offer.to_owned()).await?;
+                        let _ = gather_complete.recv().await;
+                        Ok(offer)
+                    }
+                    Err(e) => {
+                        log::error!("{}", e);
+                        Err(anyhow!(e))
+                    }
+                }
             }
-            None => Err(anyhow!("cannot get local descrition")),
+            None => Err(anyhow!("cannot get offer")),
         }
     }
 
@@ -273,27 +286,6 @@ impl DefaultTransport {
             None => Err(anyhow!("cannot get data channel")),
         }
     }
-    async fn setup_offer(&self) -> Result<RTCSessionDescription> {
-        match self.get_peer_connection().await {
-            Some(peer_connection) => {
-                let mut gather_complete = peer_connection.gathering_complete_promise().await;
-                match peer_connection.create_offer(None).await {
-                    Ok(offer) => {
-                        self.set_local_description(offer.clone()).await?;
-                        let _ = gather_complete.recv().await;
-                        Ok(offer)
-                    }
-                    Err(e) => {
-                        log::error!("{}", e);
-                        Err(anyhow!(e))
-                    }
-                }
-            }
-            None => Err(anyhow!("cannot get offer")),
-        }
-    }
-
-
 }
 
 #[async_trait]
@@ -467,6 +459,7 @@ impl IceTrickleScheme<TkChannel> for DefaultTransport {
             sdp: serde_json::to_string(&sdp).unwrap(),
             candidates: local_candidates_json,
         };
+        log::trace!("prepared hanshake info :{:?}", data);
         let resp = SigMsg::new(data, key)?;
         Ok(encode(serde_json::to_string(&resp)?))
     }
@@ -475,16 +468,16 @@ impl IceTrickleScheme<TkChannel> for DefaultTransport {
         let data: SigMsg<TricklePayload> = serde_json::from_slice(
             decode(data).map_err(|e| anyhow!(e))?.as_bytes()
         ).map_err(|e| anyhow!(e))?;
-        log::trace!("register remote info {:?}", data);
+        log::trace!("register remote info: {:?}", data);
 
         match data.verify() {
             Ok(true) => {
-                let mut sdp = serde_json::from_str::<RTCSessionDescription>(&data.data.sdp)?;
-                sdp.sdp_type = RTCSdpType::Answer;
+                let sdp = serde_json::from_str::<RTCSessionDescription>(&data.data.sdp)?;
                 log::trace!("setting remote sdp: {:?}", sdp);
                 self.set_remote_description(sdp).await?;
                 log::trace!("setting remote candidate");
                 for c in data.data.candidates {
+                    log::trace!("add candiates: {:?}", c);
                     self
                         .add_ice_candidate(c.candidate.clone())
                         .await

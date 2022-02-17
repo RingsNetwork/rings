@@ -18,7 +18,7 @@ async fn handshake(swarm: Swarm, key: SecretKey, data: Vec<u8>) -> anyhow::Resul
     ).await;
     match registered {
         Ok(_) => {
-            let resp = transport.get_handshake_info(key, RTCSdpType::Offer).await;
+            let resp = transport.get_handshake_info(key, RTCSdpType::Answer).await;
             match resp {
                 Ok(info) => {
                     swarm.upgrade_pending().await?;
@@ -67,13 +67,13 @@ pub async fn trickle_forward(
         .collect::<HashMap<String, String>>();
     let node = args.get("node").ok_or("should include node params").map_err(|e| anyhow!(e))?;
     let mut swarm = swarm.to_owned();
-
     let transport = swarm.get_pending().await
         .ok_or("cannot get transaction").map_err(|e| anyhow!(e))?;
     let req = transport.get_handshake_info(key, RTCSdpType::Offer).await?;
-    log::trace!("sending info {:?} to {:?}", req.to_owned(), &node);
+    log::debug!("sending offer and candidate {:?} to {:?}", req.to_owned(), &node);
     match client.post(node).body(req).send().await?.text().await {
         Ok(resp) => {
+            log::debug!("get answer and candidate from remote");
             let _ = transport.register_remote_info(String::from_utf8(resp.as_bytes().to_vec())?).await?;
             Ok("ok".to_string())
         },
