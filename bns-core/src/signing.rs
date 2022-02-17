@@ -1,20 +1,44 @@
+use anyhow::Result;
+use secp256k1::SecretKey;
+use serde::Deserialize;
+use serde::Serialize;
 use web3::signing::{keccak256, recover, Key};
 use web3::types::{Address, Bytes, SignedData, H256};
 
-pub fn sign<M>(message: M, key: impl Key) -> SignedData
+#[derive(Deserialize, Serialize, Debug)]
+pub struct SigMsg<T> {
+    pub data: T,
+    pub addr: Address,
+    pub sig: Vec<u8>,
+}
+
+impl<T: Serialize> SigMsg<T> {
+    pub fn new(msg: T, key: SecretKey) -> Result<Self> {
+        let data = serde_json::to_string(&msg)?;
+        let sig = sign(data.as_bytes(), &key)?;
+        Ok(Self {
+            data: msg,
+            sig: sig.signature.0,
+            addr: (&key).address(),
+        })
+    }
+
+    pub fn verify(&self) -> Result<bool> {
+        let data = serde_json::to_string(&self.data)?;
+        let ret = verify(data.as_bytes(), self.addr, self.sig.clone());
+        Ok(ret)
+    }
+}
+
+pub fn sign<M>(message: M, key: impl Key) -> Result<SignedData>
 where
     M: AsRef<[u8]>,
 {
     let message = message.as_ref();
     let message_hash: H256 = keccak256(message).into();
 
-    let signature = key
-        .sign_message(message_hash.as_bytes())
-        .expect("hash is non-zero 32-bytes; qed");
-    let v = signature
-        .v
-        .try_into()
-        .expect("signature recovery in electrum notation always fits in a u8");
+    let signature = key.sign_message(message_hash.as_bytes())?;
+    let v = signature.v.try_into()?;
 
     let signature_bytes = Bytes({
         let mut bytes = Vec::with_capacity(65);
@@ -27,14 +51,14 @@ where
     // We perform this allocation only after all previous fallible actions have completed successfully.
     let message = message.to_owned();
 
-    SignedData {
+    Ok(SignedData {
         message,
         message_hash,
         v,
         r: signature.r,
         s: signature.s,
         signature: signature_bytes,
-    }
+    })
 }
 
 pub fn verify<M, S>(message: M, address: Address, signature: S) -> bool
@@ -79,7 +103,7 @@ mod tests {
         // Ensure that the address belongs to the key.
         assert_eq!(address, get_key_address(&key));
 
-        let sig = sign(message, &key);
+        let sig = sign(message, &key).unwrap();
 
         // Verify message signature by address.
         assert!(verify(message, address, sig.signature.0));

@@ -2,11 +2,11 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::types::channel::Channel;
+use secp256k1::SecretKey;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex as SyncMutex;
-use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
@@ -20,14 +20,14 @@ pub trait IceTransport<Ch: Channel> {
 
     fn new(signaler: Arc<SyncMutex<Ch>>) -> Self;
     fn signaler(&self) -> Arc<SyncMutex<Ch>>;
-    async fn run_as_swarm(&mut self) -> Result<()>;
-    async fn run_as_node(&mut self) -> Result<RTCSessionDescription>;
+    async fn start(&mut self, stun_addr: String) -> Result<()>;
 
     async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>>;
     async fn get_pending_candidates(&self) -> Vec<Self::Candidate>;
     async fn get_answer(&self) -> Result<Self::Sdp>;
     async fn get_offer(&self) -> Result<Self::Sdp>;
-    async fn get_local_description_str(&self) -> Result<String>;
+    async fn get_answer_str(&self) -> Result<String>;
+    async fn get_offer_str(&self) -> Result<String>;
     async fn get_data_channel(&self) -> Option<Arc<Self::Channel>>;
 
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
@@ -107,4 +107,12 @@ pub trait IceTransportCallback<Ch: Channel>: IceTransport<Ch> {
     async fn on_open_callback(
         &self,
     ) -> Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync>;
+}
+
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+pub trait IceTrickleScheme<Ch: Channel>: IceTransport<Ch> {
+    type SdpType;
+    async fn get_handshake_info(&self, key: SecretKey, kind: Self::SdpType) -> Result<String>;
+    async fn register_remote_info(&self, data: String) -> Result<()>;
 }

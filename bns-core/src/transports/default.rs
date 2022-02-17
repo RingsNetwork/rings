@@ -1,6 +1,19 @@
+use crate::channels::default::TkChannel;
+use crate::encoder::{decode, encode};
+use crate::signing::SigMsg;
+use crate::types::channel::Channel;
+use crate::types::channel::Events;
+use crate::types::ice_transport::IceTransport;
+use crate::types::ice_transport::IceTransportCallback;
+use crate::types::ice_transport::IceTrickleScheme;
 use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
+use futures::future::join_all;
+use secp256k1::SecretKey;
+use serde::Deserialize;
+use serde::Serialize;
+use serde_json;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -8,12 +21,6 @@ use std::sync::Mutex as SyncMutex;
 use tokio::sync::Mutex;
 use tokio::time::Duration;
 use webrtc::api::APIBuilder;
-
-use crate::channels::default::TkChannel;
-use crate::types::channel::Channel;
-use crate::types::channel::Events;
-use crate::types::ice_transport::IceTransport;
-use crate::types::ice_transport::IceTransportCallback;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
@@ -21,6 +28,7 @@ use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::math_rand_alpha;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
+use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 
@@ -54,10 +62,10 @@ impl IceTransport<TkChannel> for DefaultTransport {
         Arc::clone(&self.signaler)
     }
 
-    async fn run_as_swarm(&mut self) -> Result<()> {
+    async fn start(&mut self, stun: String) -> Result<()> {
         let config = RTCConfiguration {
             ice_servers: vec![RTCIceServer {
-                urls: vec!["stun:stun.l.google.com:19302".to_owned()],
+                urls: vec![stun.to_owned()],
                 ..Default::default()
             }],
             ice_candidate_pool_size: 100,
@@ -72,43 +80,16 @@ impl IceTransport<TkChannel> for DefaultTransport {
             }
             Err(e) => Err(anyhow!(e)),
         }?;
-
+        self.setup_channel("bns").await?;
         self.on_ice_candidate(self.on_ice_candidate_callback().await)
             .await?;
         self.on_peer_connection_state_change(self.on_peer_connection_state_change_callback().await)
             .await?;
         self.on_data_channel(self.on_data_channel_callback().await)
             .await?;
-        Ok(())
-    }
-
-    async fn run_as_node(&mut self) -> Result<RTCSessionDescription> {
-        let config = RTCConfiguration {
-            ice_servers: vec![RTCIceServer {
-                urls: vec!["stun:stun.l.google.com:19302".to_owned()],
-                ..Default::default()
-            }],
-            ice_candidate_pool_size: 100,
-            ..Default::default()
-        };
-        let api = APIBuilder::new().build();
-        match api.new_peer_connection(config).await {
-            Ok(c) => {
-                let mut conn = self.connection.lock().await;
-                *conn = Some(Arc::new(c));
-                Ok(())
-            }
-            Err(e) => Err(anyhow!(e)),
-        }?;
-        self.on_ice_candidate(self.on_ice_candidate_callback().await)
-            .await?;
-        self.on_peer_connection_state_change(self.on_peer_connection_state_change_callback().await)
-            .await?;
-        self.setup_channel("bns").await?;
         self.on_open(self.on_open_callback().await).await?;
         self.on_message(self.on_message_callback().await).await?;
-        let offer = self.get_offer().await?;
-        Ok(offer)
+        Ok(())
     }
 
     async fn get_peer_connection(&self) -> Option<Arc<RTCPeerConnection>> {
@@ -116,26 +97,35 @@ impl IceTransport<TkChannel> for DefaultTransport {
     }
 
     async fn get_pending_candidates(&self) -> Vec<RTCIceCandidate> {
-        self.pending_candidates.lock().await.clone()
+        self.pending_candidates.lock().await.to_vec()
     }
 
     async fn get_answer(&self) -> Result<RTCSessionDescription> {
         match self.get_peer_connection().await {
-            Some(peer_connection) => peer_connection
-                .create_answer(None)
-                .await
-                .map_err(|e| anyhow!(e)),
+            Some(peer_connection) => {
+                // wait gather candidates
+                let mut gather_complete = peer_connection.gathering_complete_promise().await;
+                let answer = peer_connection.create_answer(None).await?;
+                self.set_local_description(answer.to_owned()).await?;
+                let _ = gather_complete.recv().await;
+                Ok(answer)
+            }
             None => Err(anyhow!("cannot get answer")),
         }
+    }
+
+    async fn get_answer_str(&self) -> Result<String> {
+        Ok(self.get_answer().await?.sdp)
     }
 
     async fn get_offer(&self) -> Result<RTCSessionDescription> {
         match self.get_peer_connection().await {
             Some(peer_connection) => {
+                // wait gather candidates
                 let mut gather_complete = peer_connection.gathering_complete_promise().await;
                 match peer_connection.create_offer(None).await {
                     Ok(offer) => {
-                        self.set_local_description(offer.clone()).await?;
+                        self.set_local_description(offer.to_owned()).await?;
                         let _ = gather_complete.recv().await;
                         Ok(offer)
                     }
@@ -149,18 +139,8 @@ impl IceTransport<TkChannel> for DefaultTransport {
         }
     }
 
-    async fn get_local_description_str(&self) -> Result<String> {
-        match self.get_peer_connection().await {
-            Some(peer_connection) => {
-                let desc = peer_connection
-                    .local_description()
-                    .await
-                    .map(|l| l.sdp)
-                    .unwrap();
-                Ok(desc)
-            }
-            None => Err(anyhow!("cannot get local descrition")),
-        }
+    async fn get_offer_str(&self) -> Result<String> {
+        Ok(self.get_offer().await?.sdp)
     }
 
     async fn get_data_channel(&self) -> Option<Arc<RTCDataChannel>> {
@@ -352,7 +332,9 @@ impl IceTransportCallback<TkChannel> for DefaultTransport {
             if s == RTCPeerConnectionState::Failed {
                 let _ = sender.lock().unwrap().send(Events::ConnectFailed);
             }
-            Box::pin(async move {})
+            Box::pin(async move {
+                log::debug!("Connect State changed to {:?}", s);
+            })
         }
     }
 
@@ -429,6 +411,73 @@ impl IceTransportCallback<TkChannel> for DefaultTransport {
                     };
                 }
             })
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct TricklePayload {
+    pub sdp: String,
+    pub candidates: Vec<RTCIceCandidateInit>,
+}
+
+#[async_trait]
+impl IceTrickleScheme<TkChannel> for DefaultTransport {
+    // https://datatracker.ietf.org/doc/html/rfc5245
+    // 1. Send (SdpOffer, IceCandidates) to remote
+    // 2. Recv (SdpAnswer, IceCandidate) From Remote
+
+    type SdpType = RTCSdpType;
+
+    async fn get_handshake_info(&self, key: SecretKey, kind: RTCSdpType) -> Result<String> {
+        log::trace!("prepareing handshake info {:?}", kind);
+        let sdp = match kind {
+            RTCSdpType::Answer => self.get_answer().await?,
+            RTCSdpType::Offer => self.get_offer().await?,
+            kind => {
+                let mut sdp = self.get_offer().await?;
+                sdp.sdp_type = kind;
+                sdp
+            }
+        };
+        let local_candidates_json = join_all(
+            self.get_pending_candidates()
+                .await
+                .iter()
+                .map(async move |c| c.clone().to_json().await.unwrap()),
+        )
+        .await;
+        let data = TricklePayload {
+            sdp: serde_json::to_string(&sdp).unwrap(),
+            candidates: local_candidates_json,
+        };
+        log::trace!("prepared hanshake info :{:?}", data);
+        let resp = SigMsg::new(data, key)?;
+        Ok(encode(serde_json::to_string(&resp)?))
+    }
+
+    async fn register_remote_info(&self, data: String) -> anyhow::Result<()> {
+        let data: SigMsg<TricklePayload> =
+            serde_json::from_slice(decode(data).map_err(|e| anyhow!(e))?.as_bytes())
+                .map_err(|e| anyhow!(e))?;
+        log::trace!("register remote info: {:?}", data);
+
+        match data.verify() {
+            Ok(true) => {
+                let sdp = serde_json::from_str::<RTCSessionDescription>(&data.data.sdp)?;
+                log::trace!("setting remote sdp: {:?}", sdp);
+                self.set_remote_description(sdp).await?;
+                log::trace!("setting remote candidate");
+                for c in data.data.candidates {
+                    log::trace!("add candiates: {:?}", c);
+                    self.add_ice_candidate(c.candidate.clone()).await.unwrap();
+                }
+                Ok(())
+            }
+            _ => {
+                log::error!("cannot verify message sig");
+                return Err(anyhow!("failed on verify message sigature"));
+            }
         }
     }
 }
