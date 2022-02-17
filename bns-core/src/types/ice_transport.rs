@@ -114,6 +114,7 @@ pub trait IceTransportCallback<Ch: Channel>: IceTransport<Ch> {
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait IceTrickleScheme<Ch: Channel>: IceTransport<Ch> {
-    async fn prepare_local_info(&self, key: SecretKey) -> Result<String>;
+    type SdpType;
+    async fn get_handshake_info(&self, key: SecretKey, kind: Self::SdpType) -> Result<String>;
     async fn register_remote_info(&self, data: String) -> Result<()>;
 }

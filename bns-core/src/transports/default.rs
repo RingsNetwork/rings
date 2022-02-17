@@ -341,7 +341,10 @@ impl IceTransportCallback<TkChannel> for DefaultTransport {
             if s == RTCPeerConnectionState::Failed {
                 let _ = sender.lock().unwrap().send(Events::ConnectFailed);
             }
-            Box::pin(async move {})
+            Box::pin(async move {
+                log::debug!("Connect State changed to {:?}", s);
+
+            })
         }
     }
 
@@ -430,10 +433,29 @@ pub struct TricklePayload {
 
 #[async_trait]
 impl IceTrickleScheme<TkChannel> for DefaultTransport {
-    async fn prepare_local_info(&self, key: SecretKey) -> anyhow::Result<String> {
-        log::trace!("prepare local info: Strate");
+    // https://datatracker.ietf.org/doc/html/rfc5245
+    // 1. Send (SdpOffer, IceCandidates) to remote
+    // 2. Recv (SdpAnswer, IceCandidate) From Remote
+    // 3. Set (SdpAnser)
 
-        let sdp = self.get_offer().await?;
+    type SdpType = RTCSdpType;
+
+    async fn get_handshake_info(&self, key: SecretKey, kind: RTCSdpType) -> Result<String>{
+        log::trace!("prepareing handshake info {:?}", kind);
+        let sdp = match kind {
+            RTCSdpType::Answer => {
+                self.get_answer().await?
+            },
+            RTCSdpType::Offer => {
+                self.get_offer().await?
+            },
+            kind => {
+                let mut sdp = self.get_offer().await?;
+                sdp.sdp_type = kind;
+                sdp
+            }
+
+        };
         let local_candidates_json = join_all(
             self
                 .get_pending_candidates()
@@ -450,10 +472,10 @@ impl IceTrickleScheme<TkChannel> for DefaultTransport {
     }
 
     async fn register_remote_info(&self, data: String) -> anyhow::Result<()> {
-        log::trace!("register remote info");
         let data: SigMsg<TricklePayload> = serde_json::from_slice(
             decode(data).map_err(|e| anyhow!(e))?.as_bytes()
         ).map_err(|e| anyhow!(e))?;
+        log::trace!("register remote info {:?}", data);
 
         match data.verify() {
             Ok(true) => {
@@ -468,7 +490,7 @@ impl IceTrickleScheme<TkChannel> for DefaultTransport {
                         .await
                         .unwrap();
                 }
-                Ok(())
+               Ok(())
             },
             _ => {
                 log::error!("cannot verify message sig");

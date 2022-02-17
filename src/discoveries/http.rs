@@ -5,18 +5,36 @@ use hyper::http::Error;
 use anyhow::anyhow;
 use std::collections::HashMap;
 use secp256k1::SecretKey;
+use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 
 
 async fn handshake(swarm: Swarm, key: SecretKey, data: Vec<u8>) -> anyhow::Result<String> {
+    // get offer from remote and send answer back
     let mut swarm = swarm.to_owned();
     let transport = swarm.get_pending().await
         .ok_or("cannot get transaction").map_err(|e| anyhow!(e))?;
-    let resp = transport.prepare_local_info(key).await;
-    let _ = transport.register_remote_info(
+    let registered = transport.register_remote_info(
         String::from_utf8(data)?
     ).await;
-    swarm.upgrade_pending().await?;
-    resp
+    match registered {
+        Ok(_) => {
+            let resp = transport.get_handshake_info(key, RTCSdpType::Offer).await;
+            match resp {
+                Ok(info) => {
+                    swarm.upgrade_pending().await?;
+                    anyhow::Result::Ok(info)
+                },
+                Err(e) => {
+                    log::error!("failed to get handshake info: {:?}", e);
+                    anyhow::Result::Err(e)
+                }
+            }
+        },
+        Err(e) => {
+            log::error!("failed to register {:?}", e);
+            Err(anyhow!(e))
+        }
+    }
 }
 
 pub async fn trickle_scheme_handler(
@@ -24,8 +42,15 @@ pub async fn trickle_scheme_handler(
     req: Request<Body>,
     key: SecretKey
 ) -> anyhow::Result<String> {
-    let data = hyper::body::to_bytes(req).await?.to_vec();
-    handshake(swarm, key, data).await
+    match hyper::body::to_bytes(req).await {
+        Ok(data) => {
+            handshake(swarm, key, data.to_vec()).await
+        },
+        Err(e) => {
+            log::error!("someting wrong {:?}", e);
+            anyhow::Result::Err(anyhow!(e))
+        }
+    }
 }
 
 
@@ -34,6 +59,7 @@ pub async fn trickle_forward(
     req: Request<Body>,
     key: SecretKey
 ) -> anyhow::Result<String> {
+    // request remote offer and sand answer to remote
     let client = reqwest::Client::new();
     let query = req.uri().query().ok_or("cannot get query").map_err(|e| anyhow!(e))?;
     let args = form_urlencoded::parse(query.as_bytes())
@@ -44,13 +70,19 @@ pub async fn trickle_forward(
 
     let transport = swarm.get_pending().await
         .ok_or("cannot get transaction").map_err(|e| anyhow!(e))?;
-    let req = transport.prepare_local_info(key).await?;
-    log::trace!("sending info to {:?}", &node);
-    let resp = client.post(node).body(req).send().await?.text().await?;
-    let _ = transport.register_remote_info(String::from_utf8(resp.as_bytes().to_vec())?).await?;
-    Ok("ok".to_string())
+    let req = transport.get_handshake_info(key, RTCSdpType::Offer).await?;
+    log::trace!("sending info {:?} to {:?}", req.to_owned(), &node);
+    match client.post(node).body(req).send().await?.text().await {
+        Ok(resp) => {
+            let _ = transport.register_remote_info(String::from_utf8(resp.as_bytes().to_vec())?).await?;
+            Ok("ok".to_string())
+        },
+        Err(e) => {
+            log::error!("someting wrong {:?}", e);
+            anyhow::Result::Err(anyhow!(e))
+        }
+    }
 }
-
 
 pub async fn discoveries_services(
     req: Request<Body>,
@@ -59,6 +91,7 @@ pub async fn discoveries_services(
 ) -> Result<Response<Body>, Error> {
     match (req.method(), req.uri().path()) {
         (&Method::POST, "/sdp") => {
+            log::info!("incoming req {:?}", req);
             match trickle_scheme_handler(swarm.to_owned(), req, key).await {
                 Ok(resp) => {
                     Response::builder()
@@ -66,7 +99,7 @@ pub async fn discoveries_services(
                         .body(Body::from(resp))
                 },
                 Err(e) => {
-                    log::error!("{:?}", e);
+                    log::error!("failed to handle trickle scheme: {:?}", e);
                     let mut swarm = swarm.to_owned();
                     swarm.drop_pending().await;
                     Response::builder()
@@ -83,7 +116,7 @@ pub async fn discoveries_services(
                         .body(Body::from(resp))
                 },
                 Err(e) => {
-                    log::error!("{:?}", e);
+                    log::error!("failed to trickle forward {:?}", e);
                     let mut swarm = swarm.to_owned();
                     swarm.drop_pending().await;
                     Response::builder()
