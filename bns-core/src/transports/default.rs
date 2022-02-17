@@ -426,7 +426,6 @@ impl IceTrickleScheme<TkChannel> for DefaultTransport {
     // https://datatracker.ietf.org/doc/html/rfc5245
     // 1. Send (SdpOffer, IceCandidates) to remote
     // 2. Recv (SdpAnswer, IceCandidate) From Remote
-    // 3. Set (SdpAnser)
 
     type SdpType = RTCSdpType;
 
