@@ -29,7 +29,7 @@ pub struct Swarm {
     pub anonymous: DashMap<String, Arc<Transport>>,
     pub table: DashMap<String, Arc<Transport>>,
     pub signaler: Arc<Mutex<Channel>>,
-    pub stun_server: String
+    pub stun_server: String,
 }
 
 impl Swarm {
@@ -39,7 +39,7 @@ impl Swarm {
             anonymous: DashMap::new(),
             table: DashMap::new(),
             signaler: Arc::new(Mutex::new(ch)),
-            stun_server: stun
+            stun_server: stun,
         }
     }
 

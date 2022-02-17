@@ -1,10 +1,19 @@
+use crate::channels::default::TkChannel;
+use crate::encoder::{decode, encode};
+use crate::signing::SigMsg;
+use crate::types::channel::Channel;
+use crate::types::channel::Events;
+use crate::types::ice_transport::IceTransport;
+use crate::types::ice_transport::IceTransportCallback;
+use crate::types::ice_transport::IceTrickleScheme;
+use anyhow::anyhow;
+use anyhow::Result;
+use async_trait::async_trait;
+use futures::future::join_all;
+use secp256k1::SecretKey;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json;
-use anyhow::anyhow;
-use anyhow::Result;
-use futures::future::join_all;
-use async_trait::async_trait;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -12,14 +21,6 @@ use std::sync::Mutex as SyncMutex;
 use tokio::sync::Mutex;
 use tokio::time::Duration;
 use webrtc::api::APIBuilder;
-use crate::encoder::{encode, decode};
-use crate::channels::default::TkChannel;
-use crate::types::channel::Channel;
-use crate::types::channel::Events;
-use crate::types::ice_transport::IceTransport;
-use crate::types::ice_transport::IceTransportCallback;
-use crate::types::ice_transport::IceTrickleScheme;
-use crate::signing::SigMsg;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
@@ -27,11 +28,9 @@ use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::math_rand_alpha;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
+use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
-use secp256k1::SecretKey;
-use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
-
 
 #[derive(Clone)]
 pub struct DefaultTransport {
@@ -110,7 +109,7 @@ impl IceTransport<TkChannel> for DefaultTransport {
                 self.set_local_description(answer.to_owned()).await?;
                 let _ = gather_complete.recv().await;
                 Ok(answer)
-            },
+            }
             None => Err(anyhow!("cannot get answer")),
         }
     }
@@ -335,7 +334,6 @@ impl IceTransportCallback<TkChannel> for DefaultTransport {
             }
             Box::pin(async move {
                 log::debug!("Connect State changed to {:?}", s);
-
             })
         }
     }
@@ -432,29 +430,24 @@ impl IceTrickleScheme<TkChannel> for DefaultTransport {
 
     type SdpType = RTCSdpType;
 
-    async fn get_handshake_info(&self, key: SecretKey, kind: RTCSdpType) -> Result<String>{
+    async fn get_handshake_info(&self, key: SecretKey, kind: RTCSdpType) -> Result<String> {
         log::trace!("prepareing handshake info {:?}", kind);
         let sdp = match kind {
-            RTCSdpType::Answer => {
-                self.get_answer().await?
-            },
-            RTCSdpType::Offer => {
-                self.get_offer().await?
-            },
+            RTCSdpType::Answer => self.get_answer().await?,
+            RTCSdpType::Offer => self.get_offer().await?,
             kind => {
                 let mut sdp = self.get_offer().await?;
                 sdp.sdp_type = kind;
                 sdp
             }
-
         };
         let local_candidates_json = join_all(
-            self
-                .get_pending_candidates()
+            self.get_pending_candidates()
                 .await
                 .iter()
                 .map(async move |c| c.clone().to_json().await.unwrap()),
-        ).await;
+        )
+        .await;
         let data = TricklePayload {
             sdp: serde_json::to_string(&sdp).unwrap(),
             candidates: local_candidates_json,
@@ -465,9 +458,9 @@ impl IceTrickleScheme<TkChannel> for DefaultTransport {
     }
 
     async fn register_remote_info(&self, data: String) -> anyhow::Result<()> {
-        let data: SigMsg<TricklePayload> = serde_json::from_slice(
-            decode(data).map_err(|e| anyhow!(e))?.as_bytes()
-        ).map_err(|e| anyhow!(e))?;
+        let data: SigMsg<TricklePayload> =
+            serde_json::from_slice(decode(data).map_err(|e| anyhow!(e))?.as_bytes())
+                .map_err(|e| anyhow!(e))?;
         log::trace!("register remote info: {:?}", data);
 
         match data.verify() {
@@ -478,13 +471,10 @@ impl IceTrickleScheme<TkChannel> for DefaultTransport {
                 log::trace!("setting remote candidate");
                 for c in data.data.candidates {
                     log::trace!("add candiates: {:?}", c);
-                    self
-                        .add_ice_candidate(c.candidate.clone())
-                        .await
-                        .unwrap();
+                    self.add_ice_candidate(c.candidate.clone()).await.unwrap();
                 }
-               Ok(())
-            },
+                Ok(())
+            }
             _ => {
                 log::error!("cannot verify message sig");
                 return Err(anyhow!("failed on verify message sigature"));

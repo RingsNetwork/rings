@@ -1,7 +1,7 @@
-use std::str::FromStr;
 use log::Log;
 use log::{Level, Metadata, Record};
 use log::{LevelFilter, SetLoggerError};
+use std::str::FromStr;
 
 pub struct Logger;
 

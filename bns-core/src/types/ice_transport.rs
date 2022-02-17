@@ -2,12 +2,11 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::types::channel::Channel;
+use secp256k1::SecretKey;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex as SyncMutex;
-use secp256k1::SecretKey;
-
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
@@ -109,7 +108,6 @@ pub trait IceTransportCallback<Ch: Channel>: IceTransport<Ch> {
         &self,
     ) -> Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync>;
 }
-
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]

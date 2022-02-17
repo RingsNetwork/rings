@@ -9,10 +9,9 @@ use bns_node::logger::Logger;
 use clap::Parser;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::Server;
-use std::net::SocketAddr;
 use secp256k1::SecretKey;
+use std::net::SocketAddr;
 use std::str::FromStr;
-
 
 #[derive(Parser, Debug)]
 #[clap(about, version, author)]
@@ -29,7 +28,7 @@ pub struct Args {
     #[clap(long, short = 'v', default_value = "Info")]
     pub log_level: String,
 
-   #[clap(long, short = 's', default_value = "stun:stun.l.google.com:19302")]
+    #[clap(long, short = 's', default_value = "stun:stun.l.google.com:19302")]
     pub stun_server: String,
 
     #[clap(

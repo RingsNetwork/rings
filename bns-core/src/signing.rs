@@ -1,26 +1,25 @@
+use anyhow::Result;
+use secp256k1::SecretKey;
 use serde::Deserialize;
 use serde::Serialize;
 use web3::signing::{keccak256, recover, Key};
 use web3::types::{Address, Bytes, SignedData, H256};
-use secp256k1::SecretKey;
-use anyhow::Result;
 
 #[derive(Deserialize, Serialize, Debug)]
-pub struct SigMsg<T>
-{
+pub struct SigMsg<T> {
     pub data: T,
     pub addr: Address,
-    pub sig: Vec<u8>
+    pub sig: Vec<u8>,
 }
 
-impl <T: Serialize> SigMsg<T> {
+impl<T: Serialize> SigMsg<T> {
     pub fn new(msg: T, key: SecretKey) -> Result<Self> {
         let data = serde_json::to_string(&msg)?;
         let sig = sign(data.as_bytes(), &key)?;
         Ok(Self {
             data: msg,
             sig: sig.signature.0,
-            addr: (&key).address()
+            addr: (&key).address(),
         })
     }
 
@@ -31,7 +30,6 @@ impl <T: Serialize> SigMsg<T> {
     }
 }
 
-
 pub fn sign<M>(message: M, key: impl Key) -> Result<SignedData>
 where
     M: AsRef<[u8]>,
@@ -39,11 +37,8 @@ where
     let message = message.as_ref();
     let message_hash: H256 = keccak256(message).into();
 
-    let signature = key
-        .sign_message(message_hash.as_bytes())?;
-    let v = signature
-        .v
-        .try_into()?;
+    let signature = key.sign_message(message_hash.as_bytes())?;
+    let v = signature.v.try_into()?;
 
     let signature_bytes = Bytes({
         let mut bytes = Vec::with_capacity(65);
