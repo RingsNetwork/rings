@@ -1,13 +1,11 @@
 use crate::types::channel::Channel;
 use crate::types::channel::Events;
 use anyhow::Result;
-use async_trait::async_trait;
-use std::sync::Arc;
 use async_channel as ac;
 use async_channel::Receiver;
 use async_channel::Sender;
-
-
+use async_trait::async_trait;
+use std::sync::Arc;
 
 pub struct AcChannel {
     sender: Arc<Sender<Events>>,
