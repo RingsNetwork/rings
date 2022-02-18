@@ -19,14 +19,14 @@ impl Channel for CbChannel {
 
     fn new(buffer: usize) -> Self {
         let (tx, rx) = cbc::bounded(buffer);
-        return Self {
+        Self {
             sender: Arc::new(tx),
             receiver: Arc::new(rx),
-        };
+        }
     }
 
     fn sender(&self) -> Self::Sender {
-        return Arc::clone(&self.sender);
+        Arc::clone(&self.sender)
     }
 
     fn receiver(&self) -> Self::Receiver {
@@ -34,7 +34,7 @@ impl Channel for CbChannel {
     }
 
     async fn send(&self, e: Events) -> Result<()> {
-        return Ok(self.sender.send(e)?);
+        Ok(self.sender.send(e)?)
     }
 
     async fn recv(&self) {

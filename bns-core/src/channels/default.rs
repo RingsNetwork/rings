@@ -21,14 +21,14 @@ impl Channel for AcChannel {
 
     fn new(buffer: usize) -> Self {
         let (tx, rx) = ac::bounded(buffer);
-        return Self {
+        Self {
             sender: Arc::new(tx),
             receiver: Arc::new(rx),
-        };
+        }
     }
 
     fn sender(&self) -> Self::Sender {
-        return Arc::clone(&self.sender);
+        Arc::clone(&self.sender)
     }
 
     fn receiver(&self) -> Self::Receiver {
@@ -36,7 +36,7 @@ impl Channel for AcChannel {
     }
 
     async fn send(&self, e: Events) -> Result<()> {
-        return Ok(self.sender.send(e).await?);
+        Ok(self.sender.send(e).await?)
     }
 
     async fn recv(&self) {
