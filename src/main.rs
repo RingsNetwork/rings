@@ -12,15 +12,13 @@ use hyper::Server;
 use secp256k1::SecretKey;
 use std::net::SocketAddr;
 use std::str::FromStr;
+use std::sync::{Arc, Mutex};
 
 #[derive(Parser, Debug)]
 #[clap(about, version, author)]
 pub struct Args {
     #[clap(long, short = 'd', default_value = "127.0.0.1:50000")]
     pub http_addr: String,
-
-    #[clap(long, short = 't', default_value = "swarm")]
-    pub types: String,
 
     #[clap(long, short = 'f', default_value = "bns-node.toml")]
     pub config_filename: String,
@@ -44,7 +42,10 @@ pub struct Args {
 }
 
 async fn run(localhost: &str, key: SecretKey, stun: &str) {
-    let swarm = Swarm::new(TkChannel::new(1), stun.to_string());
+    let swarm = Swarm::new(
+        Arc::new(TkChannel::new(1)),
+        stun.to_string()
+    );
     let signaler = swarm.signaler();
     let localhost = localhost.to_owned();
 
@@ -69,9 +70,8 @@ async fn run(localhost: &str, key: SecretKey, stun: &str) {
         }
     });
 
-    let mut channel = signaler.lock().unwrap();
     tokio::select! {
-        _ = channel.recv() => {
+        _ = signaler.recv() => {
             println!("received done signal!");
         }
         _ = tokio::signal::ctrl_c() => {

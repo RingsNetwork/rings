@@ -17,7 +17,6 @@ use serde_json;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::Mutex as SyncMutex;
 use tokio::sync::Mutex;
 use tokio::time::Duration;
 use webrtc::api::APIBuilder;
@@ -37,7 +36,7 @@ pub struct DefaultTransport {
     pub connection: Arc<Mutex<Option<Arc<RTCPeerConnection>>>>,
     pub pending_candidates: Arc<Mutex<Vec<RTCIceCandidate>>>,
     pub channel: Arc<Mutex<Option<Arc<RTCDataChannel>>>>,
-    pub signaler: Arc<SyncMutex<TkChannel>>,
+    pub signaler: Arc<TkChannel>,
 }
 
 #[async_trait]
@@ -49,7 +48,7 @@ impl IceTransport<TkChannel> for DefaultTransport {
     type ConnectionState = RTCPeerConnectionState;
     type Msg = DataChannelMessage;
 
-    fn new(ch: Arc<SyncMutex<TkChannel>>) -> Self {
+    fn new(ch: Arc<TkChannel>) -> Self {
         Self {
             connection: Arc::new(Mutex::new(None)),
             pending_candidates: Arc::new(Mutex::new(vec![])),
@@ -58,7 +57,7 @@ impl IceTransport<TkChannel> for DefaultTransport {
         }
     }
 
-    fn signaler(&self) -> Arc<SyncMutex<TkChannel>> {
+    fn signaler(&self) -> Arc<TkChannel> {
         Arc::clone(&self.signaler)
     }
 
@@ -326,11 +325,11 @@ impl IceTransportCallback<TkChannel> for DefaultTransport {
             + Send
             + Sync,
     > {
-        let sender = self.signaler();
+        let sender = self.signaler().sender();
         box move |s: RTCPeerConnectionState| {
             let sender = Arc::clone(&sender);
             if s == RTCPeerConnectionState::Failed {
-                let _ = sender.lock().unwrap().send(Events::ConnectFailed);
+                let _ = sender.send(Events::ConnectFailed);
             }
             Box::pin(async move {
                 log::debug!("Connect State changed to {:?}", s);

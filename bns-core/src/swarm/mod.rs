@@ -28,17 +28,17 @@ pub struct Swarm {
     pub pending: Option<Arc<Transport>>,
     pub anonymous: DashMap<String, Arc<Transport>>,
     pub table: DashMap<String, Arc<Transport>>,
-    pub signaler: Arc<Mutex<Channel>>,
+    pub signaler: Arc<Channel>,
     pub stun_server: String,
 }
 
 impl Swarm {
-    pub fn new(ch: Channel, stun: String) -> Self {
+    pub fn new(ch: Arc<Channel>, stun: String) -> Self {
         Self {
             pending: None,
             anonymous: DashMap::new(),
             table: DashMap::new(),
-            signaler: Arc::new(Mutex::new(ch)),
+            signaler: Arc::clone(&ch),
             stun_server: stun,
         }
     }
@@ -106,7 +106,7 @@ impl Swarm {
         }
     }
 
-    pub fn signaler(&self) -> Arc<Mutex<Channel>> {
+    pub fn signaler(&self) -> Arc<Channel> {
         Arc::clone(&self.signaler)
     }
 }

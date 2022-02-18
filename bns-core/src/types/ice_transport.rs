@@ -18,8 +18,8 @@ pub trait IceTransport<Ch: Channel> {
     type ConnectionState;
     type Msg;
 
-    fn new(signaler: Arc<SyncMutex<Ch>>) -> Self;
-    fn signaler(&self) -> Arc<SyncMutex<Ch>>;
+    fn new(signaler: Arc<Ch>) -> Self;
+    fn signaler(&self) -> Arc<Ch>;
     async fn start(&mut self, stun_addr: String) -> Result<()>;
 
     async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>>;
