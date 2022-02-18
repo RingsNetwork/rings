@@ -101,7 +101,7 @@ impl<T: Serialize> SigMsg<T> {
 
     pub fn verify(&self) -> Result<bool> {
         let data = serde_json::to_string(&self.data)?;
-        
+
         verify(&data, self.addr, self.sig.clone())
     }
 }
