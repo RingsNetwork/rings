@@ -23,6 +23,7 @@ use web_sys::RtcConfiguration;
 use web_sys::RtcDataChannel;
 use web_sys::RtcDataChannelEvent;
 use web_sys::RtcIceCandidate;
+use web_sys::RtcIceCandidateInit;
 use web_sys::RtcIceConnectionState;
 use web_sys::RtcPeerConnection;
 use web_sys::RtcPeerConnectionIceEvent;
@@ -60,9 +61,8 @@ impl From<SdpOfferStr> for String {
 #[derive(Clone)]
 pub struct WasmTransport {
     pub connection: Option<Arc<RtcPeerConnection>>,
-    pub offer: Option<RtcSessionDescription>,
-    pub channel: Option<Arc<RtcDataChannel>>,
     pub pending_candidates: Arc<Vec<RtcIceCandidate>>,
+    pub channel: Option<Arc<RtcDataChannel>>,
     pub signaler: Arc<Mutex<CbChannel>>,
 }
 
@@ -76,32 +76,29 @@ impl IceTransport<CbChannel> for WasmTransport {
     type Msg = JsValue;
 
     fn new(ch: Arc<Mutex<CbChannel>>) -> Self {
-        let mut config = RtcConfiguration::new();
-        config.ice_servers(
-            &JsValue::from_serde(&json! {[{"urls":"stun:stun.l.google.com:19302"}]}).unwrap(),
-        );
-
-        let ins = Self {
-            connection: RtcPeerConnection::new_with_configuration(&config)
-                .ok()
-                .as_ref()
-                .map(|c| Arc::new(c.to_owned())),
-            channel: None,
-            offer: None,
+        Self {
+            connection: None,
             pending_candidates: Arc::new(vec![]),
-            signaler: Arc::clone(&ch),
-        };
-        return ins;
+            channel: None,
+            signaler: Arc::clone(&ch)
+        }
     }
 
     fn signaler(&self) -> Arc<Mutex<CbChannel>> {
         Arc::clone(&self.signaler)
     }
 
-    async fn start(&mut self) -> Result<()> {
-        self.setup_offer().await;
+    async fn start(&mut self, stun: String) -> Result<()> {
+        let mut config = RtcConfiguration::new();
+        config.ice_servers(
+            &JsValue::from_serde(&json! {[{"urls": stun}]}).unwrap(),
+        );
+
+        self.connection = RtcPeerConnection::new_with_configuration(&config)
+            .ok()
+            .as_ref()
+            .map(|c| Arc::new(c.to_owned()));
         self.setup_channel("bns").await;
-        info!("started!");
         return Ok(());
     }
 
@@ -119,22 +116,32 @@ impl IceTransport<CbChannel> for WasmTransport {
                 let promise = c.create_answer();
                 match JsFuture::from(promise).await {
                     Ok(answer) => Ok(answer.into()),
-                    Err(_) => Err(anyhow!("Failed to set remote description")),
+                    Err(_) => Err(anyhow!("Failed to get answer")),
                 }
             }
-            None => Err(anyhow!("cannot get answer")),
+            None => Err(anyhow!("cannot get connection")),
         }
     }
 
-    fn get_offer(&self) -> Result<Self::Sdp> {
-        match &self.offer {
-            Some(o) => Ok(o.clone()),
-            None => Err(anyhow!("Cannot get Offer")),
+    async fn get_offer(&self) -> Result<Self::Sdp> {
+        match self.get_peer_connection().await {
+            Some(c) => {
+                let promise = c.create_offer();
+                match JsFuture::from(promise).await {
+                    Ok(offer) => Ok(offer.into()),
+                    Err(_) => Err(anyhow!("cannot get offer")),
+                }
+            }
+            None => Err(anyhow!("cannot get connection")),
         }
     }
 
-    fn get_offer_str(&self) -> Result<String> {
-        self.get_offer().map(|o| o.sdp())
+    async fn get_offer_str(&self) -> Result<String> {
+        Ok(self.get_offer().await?.sdp())
+    }
+
+    async fn get_answer_str(&self) -> Result<String> {
+        Ok(self.get_answer().await?.sdp())
     }
 
     async fn get_data_channel(&self) -> Option<Arc<Self::Channel>> {
@@ -184,6 +191,24 @@ impl IceTransport<CbChannel> for WasmTransport {
             }
             None => Err(anyhow!("Failed on getting connection")),
         }
+    }
+
+    async fn add_ice_candidate(&self, candidate: String) -> Result<()> {
+        match &self.get_peer_connection().await {
+            Some(c) => {
+                let cand = RtcIceCandidateInit::new(&candidate);
+                let promise = c.add_ice_candidate_with_opt_rtc_ice_candidate_init(Some(&cand));
+                match JsFuture::from(promise).await {
+                    Ok(_) => Ok(()),
+                    Err(_) => {
+                        log::error!("failed to add ice candate");
+                        Err(anyhow!("Failed to add ice candidate"))
+                    },
+                }
+            },
+            None => Err(anyhow!("Failed on getting connection")),
+        }
+
     }
 
     async fn on_ice_candidate(
@@ -276,22 +301,26 @@ impl IceTransport<CbChannel> for WasmTransport {
             None => Err(anyhow!("Failed on getting connection")),
         }
     }
+
+    async fn on_open(
+        &self,
+        f: Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync>,
+    ) -> Result<()> {
+         match &self.get_data_channel().await {
+            Some(c) => {
+                let callback = Closure::once(Box::new(move || {
+                    spawn_local(async move { f().await })
+                }) as Box<dyn FnOnce()>);
+                c.set_onopen(Some(callback.as_ref().unchecked_ref()));
+                Ok(())
+            }
+            None => Err(anyhow!("Failed on getting connection")),
+        }
+    }
+
 }
 
 impl WasmTransport {
-    pub async fn setup_offer(&mut self) -> &Self {
-        if let Some(connection) = &self.connection {
-            if let Ok(offer) = JsFuture::from(connection.create_offer()).await {
-                self.offer = Reflect::get(&offer, &JsValue::from_str("sdp"))
-                    .ok()
-                    .and_then(|o| Some(SdpOfferStr::new(o.as_string().unwrap()).as_sdp()))
-                    .take();
-                info!("{:?}", self.offer);
-            }
-        }
-        return self;
-    }
-
     pub async fn setup_channel(&mut self, name: &str) -> &Self {
         if let Some(conn) = &self.connection {
             let channel = conn.create_data_channel(&name);
@@ -344,5 +373,15 @@ impl IceTransportCallback<CbChannel> for WasmTransport {
                 sender.send(Events::ReceiveMsg(msg)).unwrap();
             })
         }
+    }
+
+    async fn on_open_callback(
+         &self,
+    ) -> Box<
+        dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+            + Send
+            + Sync,
+    > {
+        box move || Box::pin(async move {})
     }
 }
