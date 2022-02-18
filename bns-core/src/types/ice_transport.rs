@@ -1,12 +1,10 @@
+use crate::signing::SecretKey;
+use crate::types::channel::Channel;
 use anyhow::Result;
 use async_trait::async_trait;
-
-use crate::types::channel::Channel;
-use secp256k1::SecretKey;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::Mutex as SyncMutex;
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
@@ -18,8 +16,8 @@ pub trait IceTransport<Ch: Channel> {
     type ConnectionState;
     type Msg;
 
-    fn new(signaler: Arc<SyncMutex<Ch>>) -> Self;
-    fn signaler(&self) -> Arc<SyncMutex<Ch>>;
+    fn new(signaler: Arc<Ch>) -> Self;
+    fn signaler(&self) -> Arc<Ch>;
     async fn start(&mut self, stun_addr: String) -> Result<()>;
 
     async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>>;

@@ -1,5 +1,6 @@
-use crate::channels::default::TkChannel;
+use crate::channels::default::AcChannel;
 use crate::encoder::{decode, encode};
+use crate::signing::SecretKey;
 use crate::signing::SigMsg;
 use crate::types::channel::Channel;
 use crate::types::channel::Events;
@@ -10,14 +11,12 @@ use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::future::join_all;
-use secp256k1::SecretKey;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::Mutex as SyncMutex;
 use tokio::sync::Mutex;
 use tokio::time::Duration;
 use webrtc::api::APIBuilder;
@@ -37,11 +36,11 @@ pub struct DefaultTransport {
     pub connection: Arc<Mutex<Option<Arc<RTCPeerConnection>>>>,
     pub pending_candidates: Arc<Mutex<Vec<RTCIceCandidate>>>,
     pub channel: Arc<Mutex<Option<Arc<RTCDataChannel>>>>,
-    pub signaler: Arc<SyncMutex<TkChannel>>,
+    pub signaler: Arc<AcChannel>,
 }
 
 #[async_trait]
-impl IceTransport<TkChannel> for DefaultTransport {
+impl IceTransport<AcChannel> for DefaultTransport {
     type Connection = RTCPeerConnection;
     type Candidate = RTCIceCandidate;
     type Sdp = RTCSessionDescription;
@@ -49,7 +48,7 @@ impl IceTransport<TkChannel> for DefaultTransport {
     type ConnectionState = RTCPeerConnectionState;
     type Msg = DataChannelMessage;
 
-    fn new(ch: Arc<SyncMutex<TkChannel>>) -> Self {
+    fn new(ch: Arc<AcChannel>) -> Self {
         Self {
             connection: Arc::new(Mutex::new(None)),
             pending_candidates: Arc::new(Mutex::new(vec![])),
@@ -58,7 +57,7 @@ impl IceTransport<TkChannel> for DefaultTransport {
         }
     }
 
-    fn signaler(&self) -> Arc<SyncMutex<TkChannel>> {
+    fn signaler(&self) -> Arc<AcChannel> {
         Arc::clone(&self.signaler)
     }
 
@@ -288,12 +287,12 @@ impl DefaultTransport {
 }
 
 #[async_trait]
-impl IceTransportCallback<TkChannel> for DefaultTransport {
+impl IceTransportCallback<AcChannel> for DefaultTransport {
     async fn on_ice_candidate_callback(
         &self,
     ) -> Box<
         dyn FnMut(
-                Option<<Self as IceTransport<TkChannel>>::Candidate>,
+                Option<<Self as IceTransport<AcChannel>>::Candidate>,
             ) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
             + Send
             + Sync,
@@ -301,7 +300,7 @@ impl IceTransportCallback<TkChannel> for DefaultTransport {
         let peer_connection = Arc::downgrade(&self.connection.lock().await.clone().unwrap());
         let pending_candidates = Arc::clone(&self.pending_candidates);
 
-        box move |c: Option<<Self as IceTransport<TkChannel>>::Candidate>| {
+        box move |c: Option<<Self as IceTransport<AcChannel>>::Candidate>| {
             let peer_connection = peer_connection.clone();
             let pending_candidates = Arc::clone(&pending_candidates);
             Box::pin(async move {
@@ -326,11 +325,11 @@ impl IceTransportCallback<TkChannel> for DefaultTransport {
             + Send
             + Sync,
     > {
-        let sender = self.signaler();
+        let sender = self.signaler().sender();
         box move |s: RTCPeerConnectionState| {
             let sender = Arc::clone(&sender);
             if s == RTCPeerConnectionState::Failed {
-                let _ = sender.lock().unwrap().send(Events::ConnectFailed);
+                let _ = sender.send(Events::ConnectFailed);
             }
             Box::pin(async move {
                 log::debug!("Connect State changed to {:?}", s);
@@ -422,7 +421,7 @@ pub struct TricklePayload {
 }
 
 #[async_trait]
-impl IceTrickleScheme<TkChannel> for DefaultTransport {
+impl IceTrickleScheme<AcChannel> for DefaultTransport {
     // https://datatracker.ietf.org/doc/html/rfc5245
     // 1. Send (SdpOffer, IceCandidates) to remote
     // 2. Recv (SdpAnswer, IceCandidate) From Remote

@@ -1,26 +1,24 @@
 #![feature(async_closure)]
 use anyhow::Result;
-use bns_core::channels::default::TkChannel;
+use bns_core::channels::default::AcChannel;
 use bns_core::swarm::Swarm;
 use bns_core::types::channel::Channel;
 //use bns_node::config::read_config;
+use bns_core::signing::SecretKey;
 use bns_node::discoveries::http::discoveries_services;
 use bns_node::logger::Logger;
 use clap::Parser;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::Server;
-use secp256k1::SecretKey;
 use std::net::SocketAddr;
-use std::str::FromStr;
+
+use std::sync::Arc;
 
 #[derive(Parser, Debug)]
 #[clap(about, version, author)]
 pub struct Args {
     #[clap(long, short = 'd', default_value = "127.0.0.1:50000")]
     pub http_addr: String,
-
-    #[clap(long, short = 't', default_value = "swarm")]
-    pub types: String,
 
     #[clap(long, short = 'f', default_value = "bns-node.toml")]
     pub config_filename: String,
@@ -44,7 +42,7 @@ pub struct Args {
 }
 
 async fn run(localhost: &str, key: SecretKey, stun: &str) {
-    let swarm = Swarm::new(TkChannel::new(1), stun.to_string());
+    let swarm = Swarm::new(Arc::new(AcChannel::new(1)), stun.to_string());
     let signaler = swarm.signaler();
     let localhost = localhost.to_owned();
 
@@ -69,9 +67,8 @@ async fn run(localhost: &str, key: SecretKey, stun: &str) {
         }
     });
 
-    let mut channel = signaler.lock().unwrap();
     tokio::select! {
-        _ = channel.recv() => {
+        _ = signaler.recv() => {
             println!("received done signal!");
         }
         _ = tokio::signal::ctrl_c() => {
@@ -84,7 +81,7 @@ async fn run(localhost: &str, key: SecretKey, stun: &str) {
 async fn main() -> Result<()> {
     let args = Args::parse();
     Logger::init(args.log_level)?;
-    let key = SecretKey::from_str(&args.eth_key)?;
+    let key = SecretKey::try_from(args.eth_key.as_str())?;
     run(&args.http_addr, key, &args.stun_server).await;
     Ok(())
 }
