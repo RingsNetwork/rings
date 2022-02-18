@@ -80,7 +80,7 @@ impl IceTransport<CbChannel> for WasmTransport {
             connection: None,
             pending_candidates: Arc::new(vec![]),
             channel: None,
-            signaler: Arc::clone(&ch)
+            signaler: Arc::clone(&ch),
         }
     }
 
@@ -90,9 +90,7 @@ impl IceTransport<CbChannel> for WasmTransport {
 
     async fn start(&mut self, stun: String) -> Result<()> {
         let mut config = RtcConfiguration::new();
-        config.ice_servers(
-            &JsValue::from_serde(&json! {[{"urls": stun}]}).unwrap(),
-        );
+        config.ice_servers(&JsValue::from_serde(&json! {[{"urls": stun}]}).unwrap());
 
         self.connection = RtcPeerConnection::new_with_configuration(&config)
             .ok()
@@ -203,12 +201,11 @@ impl IceTransport<CbChannel> for WasmTransport {
                     Err(_) => {
                         log::error!("failed to add ice candate");
                         Err(anyhow!("Failed to add ice candidate"))
-                    },
+                    }
                 }
-            },
+            }
             None => Err(anyhow!("Failed on getting connection")),
         }
-
     }
 
     async fn on_ice_candidate(
@@ -306,18 +303,17 @@ impl IceTransport<CbChannel> for WasmTransport {
         &self,
         f: Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync>,
     ) -> Result<()> {
-         match &self.get_data_channel().await {
+        match &self.get_data_channel().await {
             Some(c) => {
-                let callback = Closure::once(Box::new(move || {
-                    spawn_local(async move { f().await })
-                }) as Box<dyn FnOnce()>);
+                let callback =
+                    Closure::once(Box::new(move || spawn_local(async move { f().await }))
+                        as Box<dyn FnOnce()>);
                 c.set_onopen(Some(callback.as_ref().unchecked_ref()));
                 Ok(())
             }
             None => Err(anyhow!("Failed on getting connection")),
         }
     }
-
 }
 
 impl WasmTransport {
@@ -376,12 +372,8 @@ impl IceTransportCallback<CbChannel> for WasmTransport {
     }
 
     async fn on_open_callback(
-         &self,
-    ) -> Box<
-        dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
-            + Send
-            + Sync,
-    > {
+        &self,
+    ) -> Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync> {
         box move || Box::pin(async move {})
     }
 }
