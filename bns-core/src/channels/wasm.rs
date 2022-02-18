@@ -6,7 +6,6 @@ use async_trait::async_trait;
 use crossbeam_channel as cbc;
 use log::info;
 use std::sync::Arc;
-use std::sync::Mutex;
 
 pub struct CbChannel {
     sender: Arc<cbc::Sender<Events>>,
