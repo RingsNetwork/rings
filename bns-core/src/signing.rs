@@ -94,7 +94,7 @@ pub struct SigMsg<T> {
 impl<T: Serialize> SigMsg<T> {
     pub fn new(msg: T, key: SecretKey) -> Result<Self> {
         let data = serde_json::to_string(&msg)?;
-        let sig = sign(data.as_bytes().try_into()?, key.to_owned().into())?;
+        let sig = sign(&data, key.to_owned().into())?;
         Ok(Self {
             data: msg,
             sig: sig.signature.0,
@@ -104,15 +104,15 @@ impl<T: Serialize> SigMsg<T> {
 
     pub fn verify(&self) -> Result<bool> {
         let data = serde_json::to_string(&self.data)?;
-        let ret = verify(data.as_bytes().try_into()?, self.addr, self.sig.clone());
+        let ret = verify(&data, self.addr, self.sig.clone());
         ret
     }
 }
 
-pub fn sign(message: &[u8;32], key: SecretKey) -> Result<SignedData>
+pub fn sign(message: &str, key: SecretKey) -> Result<SignedData>
 where
 {
-    let message_hash: H256 = keccak256(message).into();
+    let message_hash: H256 = keccak256(&message.as_bytes()).into();
 
     let (signature, recover_id) = key.sign(message_hash.as_bytes().try_into()?);
 
@@ -137,7 +137,7 @@ where
     })
 }
 
-pub fn verify<S>(message: &[u8; 32], address: Address, signature: S) -> Result<bool>
+pub fn verify<S>(message: &str, address: Address, signature: S) -> Result<bool>
 where
     S: AsRef<[u8]>,
 {
@@ -150,7 +150,7 @@ where
     let r_s_signature: [u8;64] = sig_ref[..64].try_into()?;
     let recovery_id: u8 = sig_ref[64];
 
-    let message_hash: [u8;32] = keccak256(message.as_ref()).into();
+    let message_hash: [u8;32] = keccak256(message.as_bytes()).into();
 
     let pubkey = recover(
         &libsecp256k1::Message::parse(&message_hash),
@@ -172,18 +172,19 @@ mod tests {
     #[test]
     fn sign_then_verify() {
         let message = "Hello, world!";
-        let address = Address::from_str("0x01E29630AF0bAC5f3f28B97040b4f59ab47584F7").unwrap();
+        // key generate from https://www.ethereumaddressgenerator.com/
+        let address = Address::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
 
         let key =
-            SecretKey::try_from("0000000000000000000000000000000000000000000000000000000000000001")
+            SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0")
                 .unwrap();
 
         // Ensure that the address belongs to the key.
         assert_eq!(address, get_key_address(key));
 
-        let sig = sign(message.as_bytes().try_into().unwrap(), key).unwrap();
+        let sig = sign(message, key).unwrap();
 
         // Verify message signature by address.
-        assert!(verify(message.as_bytes().try_into().unwrap(), address, sig.signature.0).unwrap());
+        assert!(verify(message, address, sig.signature.0).unwrap());
     }
 }
