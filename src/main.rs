@@ -9,7 +9,7 @@ use bns_node::logger::Logger;
 use clap::Parser;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::Server;
-use secp256k1::SecretKey;
+use bns_core::signing::SecretKey;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -81,7 +81,7 @@ async fn run(localhost: &str, key: SecretKey, stun: &str) {
 async fn main() -> Result<()> {
     let args = Args::parse();
     Logger::init(args.log_level)?;
-    let key = SecretKey::from_str(&args.eth_key)?;
+    let key = SecretKey::try_from(args.eth_key.as_str())?;
     run(&args.http_addr, key, &args.stun_server).await;
     Ok(())
 }

@@ -1,8 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
-
 use crate::types::channel::Channel;
-use secp256k1::SecretKey;
+use crate::signing::SecretKey;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;

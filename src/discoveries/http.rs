@@ -3,7 +3,7 @@ use bns_core::swarm::Swarm;
 use bns_core::types::ice_transport::IceTrickleScheme;
 use hyper::http::Error;
 use hyper::{Body, Method, Request, Response, StatusCode};
-use secp256k1::SecretKey;
+use bns_core::signing::SecretKey;
 use std::collections::HashMap;
 use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 
