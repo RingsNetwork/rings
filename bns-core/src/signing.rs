@@ -62,7 +62,7 @@ pub(self) fn public_key_address(public_key: &PublicKey) -> Address {
 }
 
 pub(self) fn secret_key_address(secret_key: &SecretKey) -> Address {
-    let public_key = libsecp256k1::PublicKey::from_secret_key(&secret_key);
+    let public_key = libsecp256k1::PublicKey::from_secret_key(secret_key);
     public_key_address(&public_key.into())
 }
 
@@ -91,7 +91,7 @@ pub struct SigMsg<T> {
 impl<T: Serialize> SigMsg<T> {
     pub fn new(msg: T, key: SecretKey) -> Result<Self> {
         let data = serde_json::to_string(&msg)?;
-        let sig = sign(&data, key.to_owned().into())?;
+        let sig = sign(&data, key.to_owned())?;
         Ok(Self {
             data: msg,
             sig: sig.signature.0,
@@ -101,15 +101,15 @@ impl<T: Serialize> SigMsg<T> {
 
     pub fn verify(&self) -> Result<bool> {
         let data = serde_json::to_string(&self.data)?;
-        let ret = verify(&data, self.addr, self.sig.clone());
-        ret
+        
+        verify(&data, self.addr, self.sig.clone())
     }
 }
 
 pub fn sign(message: &str, key: SecretKey) -> Result<SignedData>
 where
 {
-    let message_hash: H256 = keccak256(&message.as_bytes()).into();
+    let message_hash: H256 = keccak256(message.as_bytes()).into();
 
     let (signature, recover_id) = key.sign(message_hash.as_bytes().try_into()?);
 
@@ -126,7 +126,7 @@ where
 
     Ok(SignedData {
         message: message.into(),
-        message_hash: message_hash.into(),
+        message_hash,
         v: recover_id.into(),
         r: signature.r.b32().into(),
         s: signature.s.b32().into(),
@@ -147,7 +147,7 @@ where
     let r_s_signature: [u8; 64] = sig_ref[..64].try_into()?;
     let recovery_id: u8 = sig_ref[64];
 
-    let message_hash: [u8; 32] = keccak256(message.as_bytes()).into();
+    let message_hash: [u8; 32] = keccak256(message.as_bytes());
 
     let pubkey = recover(
         &libsecp256k1::Message::parse(&message_hash),
