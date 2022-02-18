@@ -1,14 +1,13 @@
 use anyhow::anyhow;
 use anyhow::Result;
+use hex;
 use libsecp256k1::recover;
 use serde::Deserialize;
 use serde::Serialize;
-use web3::signing::{keccak256};
-use web3::types::{Address, Bytes, SignedData, H256};
-use std::ops::Deref;
 use std::convert::TryFrom;
-use hex;
-
+use std::ops::Deref;
+use web3::signing::keccak256;
+use web3::types::{Address, Bytes, SignedData, H256};
 
 // ref https://docs.rs/web3/0.18.0/src/web3/signing.rs.html#69
 
@@ -41,10 +40,10 @@ impl TryFrom<&str> for SecretKey {
     type Error = anyhow::Error;
     fn try_from(s: &str) -> Result<Self> {
         let key = hex::decode(s)?;
-        let key_arr: [u8;32] = key.as_slice().try_into()?;
+        let key_arr: [u8; 32] = key.as_slice().try_into()?;
         match libsecp256k1::SecretKey::parse(&key_arr) {
             Ok(key) => Ok(key.into()),
-            Err(e) => Err(anyhow!(e))
+            Err(e) => Err(anyhow!(e)),
         }
     }
 }
@@ -67,12 +66,11 @@ pub(self) fn secret_key_address(secret_key: &SecretKey) -> Address {
     public_key_address(&public_key.into())
 }
 
-
 impl SecretKey {
     pub fn address(&self) -> Address {
         secret_key_address(self)
     }
-    pub fn sign(&self, msg: [u8;32]) -> (libsecp256k1::Signature, libsecp256k1::RecoveryId) {
+    pub fn sign(&self, msg: [u8; 32]) -> (libsecp256k1::Signature, libsecp256k1::RecoveryId) {
         libsecp256k1::sign(&libsecp256k1::Message::parse(&msg), self.deref())
     }
 }
@@ -82,7 +80,6 @@ impl PublicKey {
         public_key_address(self)
     }
 }
-
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct SigMsg<T> {
@@ -147,15 +144,15 @@ where
         return Err(anyhow!("invalid sig"));
     }
 
-    let r_s_signature: [u8;64] = sig_ref[..64].try_into()?;
+    let r_s_signature: [u8; 64] = sig_ref[..64].try_into()?;
     let recovery_id: u8 = sig_ref[64];
 
-    let message_hash: [u8;32] = keccak256(message.as_bytes()).into();
+    let message_hash: [u8; 32] = keccak256(message.as_bytes()).into();
 
     let pubkey = recover(
         &libsecp256k1::Message::parse(&message_hash),
         &libsecp256k1::Signature::parse_standard(&r_s_signature)?,
-        &libsecp256k1::RecoveryId::parse(recovery_id)?
+        &libsecp256k1::RecoveryId::parse(recovery_id)?,
     )?;
     Ok(PublicKey::from(pubkey).address() == address)
 }
