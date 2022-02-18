@@ -39,13 +39,11 @@ impl Channel for TkChannel {
     async fn recv(&self) {
         let receiver = self.receiver.lock();
         match receiver {
-            Ok(mut recv) => {
-                match recv.recv().await {
-                    Some(e) => {
-                        _ = self.handler(e).await;
-                    },
-                    None => ()
+            Ok(mut recv) => match recv.recv().await {
+                Some(e) => {
+                    _ = self.handler(e).await;
                 }
+                None => (),
             },
             Err(e) => {
                 log::error!("cannot lock channel mutex {:?}", e);

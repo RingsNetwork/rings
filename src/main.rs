@@ -12,7 +12,7 @@ use hyper::Server;
 use secp256k1::SecretKey;
 use std::net::SocketAddr;
 use std::str::FromStr;
-use std::sync::{Arc};
+use std::sync::Arc;
 
 #[derive(Parser, Debug)]
 #[clap(about, version, author)]
@@ -42,10 +42,7 @@ pub struct Args {
 }
 
 async fn run(localhost: &str, key: SecretKey, stun: &str) {
-    let swarm = Swarm::new(
-        Arc::new(TkChannel::new(1)),
-        stun.to_string()
-    );
+    let swarm = Swarm::new(Arc::new(TkChannel::new(1)), stun.to_string());
     let signaler = swarm.signaler();
     let localhost = localhost.to_owned();
 

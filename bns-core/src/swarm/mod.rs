@@ -17,7 +17,6 @@ use anyhow::Result;
 use dashmap::DashMap;
 use std::sync::Arc;
 
-
 pub enum State {
     Anonymous,
     Known,
