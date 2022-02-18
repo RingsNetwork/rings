@@ -12,7 +12,7 @@ use hyper::Server;
 use secp256k1::SecretKey;
 use std::net::SocketAddr;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc};
 
 #[derive(Parser, Debug)]
 #[clap(about, version, author)]
