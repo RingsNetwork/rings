@@ -63,7 +63,7 @@ pub struct WasmTransport {
     pub connection: Option<Arc<RtcPeerConnection>>,
     pub pending_candidates: Arc<Vec<RtcIceCandidate>>,
     pub channel: Option<Arc<RtcDataChannel>>,
-    pub signaler: Arc<Mutex<CbChannel>>,
+    pub signaler: Arc<CbChannel>,
 }
 
 #[async_trait(?Send)]
@@ -75,7 +75,7 @@ impl IceTransport<CbChannel> for WasmTransport {
     type ConnectionState = RtcIceConnectionState;
     type Msg = JsValue;
 
-    fn new(ch: Arc<Mutex<CbChannel>>) -> Self {
+    fn new(ch: Arc<CbChannel>) -> Self {
         Self {
             connection: None,
             pending_candidates: Arc::new(vec![]),
@@ -84,7 +84,7 @@ impl IceTransport<CbChannel> for WasmTransport {
         }
     }
 
-    fn signaler(&self) -> Arc<Mutex<CbChannel>> {
+    fn signaler(&self) -> Arc<CbChannel> {
         Arc::clone(&self.signaler)
     }
 
@@ -360,7 +360,7 @@ impl IceTransportCallback<CbChannel> for WasmTransport {
         &self,
     ) -> Box<dyn FnMut(Self::Msg) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync>
     {
-        let sender = self.signaler().lock().unwrap().sender();
+        let sender = self.signaler().sender();
         box move |msg: Self::Msg| {
             let sender = Arc::clone(&sender);
             let msg = msg.as_string().unwrap().clone();
