@@ -3,7 +3,7 @@
 use crate::types::ice_transport::IceTransport;
 
 #[cfg(not(feature = "wasm"))]
-use crate::channels::default::TkChannel as Channel;
+use crate::channels::default::AcChannel as Channel;
 #[cfg(not(feature = "wasm"))]
 use crate::transports::default::DefaultTransport as Transport;
 

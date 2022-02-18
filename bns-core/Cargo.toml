@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["webrtc", "tokio", "tokio-util", "bytes"]
+default = ["webrtc", "tokio", "tokio-util", "bytes", "async-channel"]
 wasm = ["web-sys", "wasm-bindgen", "js-sys",
         "wasm-bindgen-futures",
 	"crossbeam-channel"]
@@ -21,13 +21,14 @@ web3 = { version = "0.18.0", features = ["signing"] }
 secp256k1 = "0.21"
 serde_json = { version="1.0.70"}
 serde = { version = "1.0.130", features = ["derive"]}
+futures = "0.3.21"
 
 # default
 webrtc = { version = "0.3.3", optional=true}
 tokio = { version = "1.13.0", features = ["full"], optional=true}
 tokio-util = { version = "0.6.9", optional=true}
 bytes = { version="1.1.0", optional=true}
-futures = "0.3.21"
+async-channel = {version="1.6.1", optional=true}
 
 # wasm
 wasm-bindgen = {version = "0.2.67", features = ["serde-serialize"], optional=true }

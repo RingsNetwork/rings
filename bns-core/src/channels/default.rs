@@ -3,29 +3,32 @@ use crate::types::channel::Events;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
-use std::sync::Mutex;
-use tokio::sync::mpsc;
+use async_channel as ac;
+use async_channel::Receiver;
+use async_channel::Sender;
 
-pub struct TkChannel {
-    sender: Arc<mpsc::Sender<Events>>,
-    receiver: Arc<Mutex<mpsc::Receiver<Events>>>,
+
+
+pub struct AcChannel {
+    sender: Arc<Sender<Events>>,
+    receiver: Arc<Receiver<Events>>,
 }
 
 #[async_trait(?Send)]
-impl Channel for TkChannel {
-    type Sender = Arc<mpsc::Sender<Events>>;
-    type Receiver = Arc<Mutex<mpsc::Receiver<Events>>>;
+impl Channel for AcChannel {
+    type Sender = Arc<Sender<Events>>;
+    type Receiver = Arc<Receiver<Events>>;
 
     fn new(buffer: usize) -> Self {
-        let (tx, rx) = mpsc::channel::<Events>(buffer);
-        Self {
+        let (tx, rx) = ac::bounded(buffer);
+        return Self {
             sender: Arc::new(tx),
-            receiver: Arc::new(Mutex::new(rx)),
-        }
+            receiver: Arc::new(rx),
+        };
     }
 
     fn sender(&self) -> Self::Sender {
-        Arc::clone(&self.sender)
+        return Arc::clone(&self.sender);
     }
 
     fn receiver(&self) -> Self::Receiver {
@@ -37,16 +40,12 @@ impl Channel for TkChannel {
     }
 
     async fn recv(&self) {
-        let receiver = self.receiver.lock();
-        match receiver {
-            Ok(mut recv) => match recv.recv().await {
-                Some(e) => {
-                    _ = self.handler(e).await;
-                }
-                None => (),
-            },
+        match self.receiver().recv().await {
+            Ok(e) => {
+                _ = self.handler(e).await;
+            }
             Err(e) => {
-                log::error!("cannot lock channel mutex {:?}", e);
+                log::error!("failed on recv: {:?}", e);
             }
         }
     }
@@ -54,7 +53,7 @@ impl Channel for TkChannel {
         match e {
             Events::Null => (),
             Events::ConnectFailed => {
-                println!("ConnectFailed");
+                log::info!("ConnectFailed");
             }
             _ => (),
         }
