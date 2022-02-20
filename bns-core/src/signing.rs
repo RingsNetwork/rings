@@ -128,7 +128,7 @@ where
 {
     type Error = anyhow::Error;
     fn try_from(s: SigMsg<T>) -> Result<Self> {
-        Ok(serde_json::to_string(&s)?.try_into()?)
+        serde_json::to_string(&s)?.try_into()
     }
 }
 

@@ -45,6 +45,6 @@ impl TryFrom<&str> for Encoded {
 impl TryFrom<Encoded> for String {
     type Error = anyhow::Error;
     fn try_from(s: Encoded) -> Result<Self> {
-        Ok(decode(s.deref().to_owned())?)
+        decode(s.deref().to_owned())
     }
 }
