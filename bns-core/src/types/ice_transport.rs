@@ -1,3 +1,4 @@
+use crate::encoder::Encoded;
 use crate::signing::SecretKey;
 use crate::types::channel::Channel;
 use anyhow::Result;
@@ -111,6 +112,6 @@ pub trait IceTransportCallback<Ch: Channel>: IceTransport<Ch> {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait IceTrickleScheme<Ch: Channel>: IceTransport<Ch> {
     type SdpType;
-    async fn get_handshake_info(&self, key: SecretKey, kind: Self::SdpType) -> Result<String>;
-    async fn register_remote_info(&self, data: String) -> Result<()>;
+    async fn get_handshake_info(&self, key: SecretKey, kind: Self::SdpType) -> Result<Encoded>;
+    async fn register_remote_info(&self, data: Encoded) -> Result<()>;
 }

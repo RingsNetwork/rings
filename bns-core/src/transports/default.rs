@@ -1,5 +1,5 @@
 use crate::channels::default::AcChannel;
-use crate::encoder::{decode, encode};
+use crate::encoder::Encoded;
 use crate::signing::SecretKey;
 use crate::signing::SigMsg;
 use crate::types::channel::Channel;
@@ -428,7 +428,7 @@ impl IceTrickleScheme<AcChannel> for DefaultTransport {
 
     type SdpType = RTCSdpType;
 
-    async fn get_handshake_info(&self, key: SecretKey, kind: RTCSdpType) -> Result<String> {
+    async fn get_handshake_info(&self, key: SecretKey, kind: RTCSdpType) -> Result<Encoded> {
         log::trace!("prepareing handshake info {:?}", kind);
         let sdp = match kind {
             RTCSdpType::Answer => self.get_answer().await?,
@@ -452,13 +452,11 @@ impl IceTrickleScheme<AcChannel> for DefaultTransport {
         };
         log::trace!("prepared hanshake info :{:?}", data);
         let resp = SigMsg::new(data, key)?;
-        Ok(encode(serde_json::to_string(&resp)?))
+        Ok(resp.try_into()?)
     }
 
-    async fn register_remote_info(&self, data: String) -> anyhow::Result<()> {
-        let data: SigMsg<TricklePayload> =
-            serde_json::from_slice(decode(data).map_err(|e| anyhow!(e))?.as_bytes())
-                .map_err(|e| anyhow!(e))?;
+    async fn register_remote_info(&self, data: Encoded) -> anyhow::Result<()> {
+        let data: SigMsg<TricklePayload> = data.try_into()?;
         log::trace!("register remote info: {:?}", data);
 
         match data.verify() {

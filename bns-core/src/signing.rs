@@ -1,7 +1,9 @@
+use crate::encoder::Encoded;
 use anyhow::anyhow;
 use anyhow::Result;
 use hex;
 use libsecp256k1::recover;
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
 use std::convert::TryFrom;
@@ -88,7 +90,10 @@ pub struct SigMsg<T> {
     pub sig: Vec<u8>,
 }
 
-impl<T: Serialize> SigMsg<T> {
+impl<T> SigMsg<T>
+where
+    T: Serialize + DeserializeOwned,
+{
     pub fn new(msg: T, key: SecretKey) -> Result<Self> {
         let data = serde_json::to_string(&msg)?;
         let sig = sign(&data, key.to_owned())?;
@@ -101,8 +106,29 @@ impl<T: Serialize> SigMsg<T> {
 
     pub fn verify(&self) -> Result<bool> {
         let data = serde_json::to_string(&self.data)?;
-
         verify(&data, self.addr, self.sig.clone())
+    }
+}
+
+impl<T> TryFrom<Encoded> for SigMsg<T>
+where
+    T: Serialize + DeserializeOwned,
+{
+    type Error = anyhow::Error;
+    fn try_from(s: Encoded) -> Result<Self> {
+        let decoded: String = s.try_into()?;
+        let data: SigMsg<T> = serde_json::from_slice(decoded.as_bytes()).map_err(|e| anyhow!(e))?;
+        Ok(data)
+    }
+}
+
+impl<T> TryFrom<SigMsg<T>> for Encoded
+where
+    T: Serialize + DeserializeOwned,
+{
+    type Error = anyhow::Error;
+    fn try_from(s: SigMsg<T>) -> Result<Self> {
+        serde_json::to_string(&s)?.try_into()
     }
 }
 
