@@ -5,8 +5,8 @@ use bns_core::types::ice_transport::IceTrickleScheme;
 use hyper::http::Error;
 use hyper::{Body, Method, Request, Response, StatusCode};
 use std::collections::HashMap;
-use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 use std::convert::TryInto;
+use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 
 async fn handshake(swarm: Swarm, key: SecretKey, data: Vec<u8>) -> anyhow::Result<String> {
     // get offer from remote and send answer back
@@ -85,7 +85,14 @@ pub async fn trickle_forward(
         req.to_owned(),
         &node
     );
-    match client.post(node).body(TryInto::<String>::try_into(req)?).send().await?.text().await {
+    match client
+        .post(node)
+        .body(TryInto::<String>::try_into(req)?)
+        .send()
+        .await?
+        .text()
+        .await
+    {
         Ok(resp) => {
             log::debug!("get answer and candidate from remote");
             let _ = transport

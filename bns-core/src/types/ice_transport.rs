@@ -1,12 +1,11 @@
+use crate::encoder::Encoded;
 use crate::signing::SecretKey;
 use crate::types::channel::Channel;
-use crate::encoder::Encoded;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]

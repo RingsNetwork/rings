@@ -1,15 +1,15 @@
+use crate::encoder::Encoded;
 use anyhow::anyhow;
 use anyhow::Result;
 use hex;
 use libsecp256k1::recover;
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::Deserialize;
 use serde::Serialize;
 use std::convert::TryFrom;
 use std::ops::Deref;
 use web3::signing::keccak256;
 use web3::types::{Address, Bytes, SignedData, H256};
-use crate::encoder::Encoded;
 
 // ref https://docs.rs/web3/0.18.0/src/web3/signing.rs.html#69
 
@@ -91,7 +91,8 @@ pub struct SigMsg<T> {
 }
 
 impl<T> SigMsg<T>
-    where T: Serialize + DeserializeOwned
+where
+    T: Serialize + DeserializeOwned,
 {
     pub fn new(msg: T, key: SecretKey) -> Result<Self> {
         let data = serde_json::to_string(&msg)?;
@@ -110,19 +111,20 @@ impl<T> SigMsg<T>
 }
 
 impl<T> TryFrom<Encoded> for SigMsg<T>
-    where T: Serialize + DeserializeOwned
+where
+    T: Serialize + DeserializeOwned,
 {
     type Error = anyhow::Error;
-    fn try_from(s: Encoded) -> Result<Self>{
+    fn try_from(s: Encoded) -> Result<Self> {
         let decoded: String = s.try_into()?;
-        let data: SigMsg<T> = serde_json::from_slice(decoded.as_bytes())
-            .map_err(|e| anyhow!(e))?;
+        let data: SigMsg<T> = serde_json::from_slice(decoded.as_bytes()).map_err(|e| anyhow!(e))?;
         Ok(data)
     }
 }
 
 impl<T> TryFrom<SigMsg<T>> for Encoded
-    where T: Serialize + DeserializeOwned
+where
+    T: Serialize + DeserializeOwned,
 {
     type Error = anyhow::Error;
     fn try_from(s: SigMsg<T>) -> Result<Self> {
