@@ -6,6 +6,7 @@ use hyper::http::Error;
 use hyper::{Body, Method, Request, Response, StatusCode};
 use std::collections::HashMap;
 use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
+use std::convert::TryInto;
 
 async fn handshake(swarm: Swarm, key: SecretKey, data: Vec<u8>) -> anyhow::Result<String> {
     // get offer from remote and send answer back
@@ -16,7 +17,7 @@ async fn handshake(swarm: Swarm, key: SecretKey, data: Vec<u8>) -> anyhow::Resul
         .ok_or("cannot get transaction")
         .map_err(|e| anyhow!(e))?;
     let registered = transport
-        .register_remote_info(String::from_utf8(data)?)
+        .register_remote_info(String::from_utf8(data)?.try_into()?)
         .await;
     match registered {
         Ok(_) => {
@@ -24,7 +25,7 @@ async fn handshake(swarm: Swarm, key: SecretKey, data: Vec<u8>) -> anyhow::Resul
             match resp {
                 Ok(info) => {
                     swarm.upgrade_pending().await?;
-                    anyhow::Result::Ok(info)
+                    anyhow::Result::Ok(info.try_into()?)
                 }
                 Err(e) => {
                     log::error!("failed to get handshake info: {:?}", e);
@@ -84,11 +85,11 @@ pub async fn trickle_forward(
         req.to_owned(),
         &node
     );
-    match client.post(node).body(req).send().await?.text().await {
+    match client.post(node).body(TryInto::<String>::try_into(req)?).send().await?.text().await {
         Ok(resp) => {
             log::debug!("get answer and candidate from remote");
             let _ = transport
-                .register_remote_info(String::from_utf8(resp.as_bytes().to_vec())?)
+                .register_remote_info(String::from_utf8(resp.as_bytes().to_vec())?.try_into()?)
                 .await?;
             Ok("ok".to_string())
         }
