@@ -1,12 +1,19 @@
 use crate::channels::wasm::CbChannel;
+use crate::encoder::Encoded;
+use crate::signing::SecretKey;
+use crate::signing::SigMsg;
 use crate::types::channel::Channel;
 use crate::types::channel::Events;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
+use crate::types::ice_transport::IceTrickleScheme;
 use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
 use log::info;
+use serde::Deserialize;
+use serde::Serialize;
+use serde_json;
 use serde_json::json;
 use std::future::Future;
 use std::pin::Pin;
@@ -30,29 +37,33 @@ use web_sys::RtcSessionDescription;
 use web_sys::RtcSessionDescriptionInit;
 
 #[derive(Clone)]
-pub struct SdpOfferStr(String);
+pub struct SdpString(String);
 
-impl SdpOfferStr {
-    pub fn new(s: String) -> Self {
+impl TryFrom<JsValue> for SdpString {
+    type Error = anyhow::Error;
+    fn try_from(s: JsValue) -> Result<Self> {
+        match s.as_string() {
+            Some(v) => Ok(Self(v)),
+            None => Err(anyhow!("cannot cover {:?} to string", s)),
+        }
+    }
+}
+
+impl From<String> for SdpString {
+    fn from(s: String) -> Self {
         Self(s)
     }
+}
 
-    pub fn as_sdp(&self) -> RtcSessionDescription {
-        self.to_owned().into()
+impl From<RtcSessionDescription> for SdpString {
+    fn from(sdp: RtcSessionDescription) -> Self {
+        Self(sdp.to_string().into())
     }
 }
 
-impl From<SdpOfferStr> for RtcSessionDescription {
-    fn from(s: SdpOfferStr) -> Self {
-        let mut offer_obj = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
-        offer_obj.sdp(&s.0);
-        RtcSessionDescription::new_with_description_init_dict(&offer_obj).unwrap()
-    }
-}
-
-impl From<SdpOfferStr> for String {
-    fn from(s: SdpOfferStr) -> Self {
-        s.0
+impl From<SdpString> for RtcSessionDescription {
+    fn from(s: SdpString) -> Self {
+        JsValue::from_str(&s.0).into()
     }
 }
 
@@ -111,7 +122,11 @@ impl IceTransport<CbChannel> for WasmTransport {
             Some(c) => {
                 let promise = c.create_answer();
                 match JsFuture::from(promise).await {
-                    Ok(answer) => Ok(answer.into()),
+                    Ok(answer) => {
+                        self.set_local_description(SdpString::try_from(answer.to_owned())?)
+                            .await?;
+                        Ok(answer.into())
+                    }
                     Err(_) => Err(anyhow!("Failed to get answer")),
                 }
             }
@@ -124,7 +139,11 @@ impl IceTransport<CbChannel> for WasmTransport {
             Some(c) => {
                 let promise = c.create_offer();
                 match JsFuture::from(promise).await {
-                    Ok(offer) => Ok(offer.into()),
+                    Ok(offer) => {
+                        self.set_local_description(SdpString::try_from(offer.to_owned())?)
+                            .await?;
+                        Ok(offer.into())
+                    }
                     Err(_) => Err(anyhow!("cannot get offer")),
                 }
             }
@@ -150,8 +169,9 @@ impl IceTransport<CbChannel> for WasmTransport {
     {
         match &self.get_peer_connection().await {
             Some(c) => {
-                let mut offer_obj = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
-                offer_obj.sdp(&desc.into().sdp());
+                let sdp: Self::Sdp = desc.into();
+                let mut offer_obj = RtcSessionDescriptionInit::new(sdp.type_());
+                offer_obj.sdp(&sdp.sdp());
                 let promise = c.set_local_description(&offer_obj);
                 match JsFuture::from(promise).await {
                     Ok(_) => Ok(()),
@@ -168,13 +188,11 @@ impl IceTransport<CbChannel> for WasmTransport {
     {
         match &self.get_peer_connection().await {
             Some(c) => {
-                let mut offer_obj = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
-                let sdp = &desc.into().sdp();
-                info!("{}", &sdp);
+                let sdp: Self::Sdp = desc.into();
+                let mut offer_obj = RtcSessionDescriptionInit::new(sdp.type_());
+                let sdp = &sdp.sdp();
                 offer_obj.sdp(&sdp);
-                info!("3");
                 let promise = c.set_remote_description(&offer_obj);
-                info!("3");
 
                 match JsFuture::from(promise).await {
                     Ok(_) => Ok(()),
@@ -373,5 +391,67 @@ impl IceTransportCallback<CbChannel> for WasmTransport {
         &self,
     ) -> Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync> {
         box move || Box::pin(async move {})
+    }
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct TricklePayload {
+    pub sdp: String,
+    pub candidates: Vec<String>,
+}
+
+#[async_trait(?Send)]
+impl IceTrickleScheme<CbChannel> for WasmTransport {
+    // https://datatracker.ietf.org/doc/html/rfc5245
+    // 1. Send (SdpOffer, IceCandidates) to remote
+    // 2. Recv (SdpAnswer, IceCandidate) From Remote
+
+    type SdpType = RtcSdpType;
+
+    async fn get_handshake_info(&self, key: SecretKey, kind: Self::SdpType) -> Result<Encoded> {
+        log::trace!("prepareing handshake info {:?}", kind);
+        let sdp = match kind {
+            RtcSdpType::Answer => self.get_answer().await?,
+            RtcSdpType::Offer => self.get_offer().await?,
+            _ => {
+                return Err(anyhow!("unsupport sdp type"));
+            }
+        };
+        let local_candidates_json: Vec<String> = self
+            .get_pending_candidates()
+            .await
+            .iter()
+            .map(|c| c.clone().to_string().into())
+            .collect();
+        let data = TricklePayload {
+            sdp: sdp.to_string().into(),
+            candidates: local_candidates_json,
+        };
+        log::trace!("prepared hanshake info :{:?}", data);
+        let resp = SigMsg::new(data, key)?;
+        Ok(resp.try_into()?)
+    }
+
+    async fn register_remote_info(&self, data: Encoded) -> anyhow::Result<()> {
+        let data: SigMsg<TricklePayload> = data.try_into()?;
+        log::trace!("register remote info: {:?}", data);
+
+        match data.verify() {
+            Ok(true) => {
+                let sdp: SdpString = data.data.sdp.into();
+                self.set_remote_description(SdpString::try_from(sdp.to_owned())?)
+                    .await?;
+                log::trace!("setting remote candidate");
+                for c in data.data.candidates {
+                    log::trace!("add candiates: {:?}", c);
+                    self.add_ice_candidate(c.to_owned()).await?;
+                }
+                Ok(())
+            }
+            _ => {
+                log::error!("cannot verify message sig");
+                return Err(anyhow!("failed on verify message sigature"));
+            }
+        }
     }
 }
