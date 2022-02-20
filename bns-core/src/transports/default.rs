@@ -452,7 +452,7 @@ impl IceTrickleScheme<AcChannel> for DefaultTransport {
         };
         log::trace!("prepared hanshake info :{:?}", data);
         let resp = SigMsg::new(data, key)?;
-        Ok(encode(serde_json::to_string(&resp)?))
+        Ok(encode(serde_json::to_string(&resp)?)?)
     }
 
     async fn register_remote_info(&self, data: String) -> anyhow::Result<()> {

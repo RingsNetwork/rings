@@ -15,7 +15,6 @@ anyhow = "1.0.45"
 async-trait="0.1.52"
 log = "0.4"
 dashmap = "4"
-base64 = "0.13.0"
 hex = "0.4.3"
 
 libsecp256k1 = "0.7.0"
@@ -35,7 +34,7 @@ wasm-bindgen = {version = "0.2.67", features = ["serde-serialize"], optional=tru
 wasm-bindgen-futures = {version="0.4.17", optional=true}
 js-sys = { version="0.3.44", optional=true}
 crossbeam-channel = {version="0.5", optional=true}
-
+base58-monero = { version = "0.3", default-features = false, features=["check"] }
 
 [dependencies.web-sys]
 version = "0.3.44"
