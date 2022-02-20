@@ -297,7 +297,7 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
             + Send
             + Sync,
     > {
-        let peer_connection = Arc::downgrade(&self.connection.lock().await.clone().unwrap());
+        let peer_connection = self.get_peer_connection().await;
         let pending_candidates = Arc::clone(&self.pending_candidates);
 
         box move |c: Option<<Self as IceTransport<AcChannel>>::Candidate>| {
@@ -305,7 +305,7 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
             let pending_candidates = Arc::clone(&pending_candidates);
             Box::pin(async move {
                 if let Some(candidate) = c {
-                    if let Some(peer_connection) = peer_connection.upgrade() {
+                    if let Some(peer_connection) = peer_connection {
                         let desc = peer_connection.remote_description().await;
                         if desc.is_none() {
                             let mut candidates = pending_candidates.lock().await;
@@ -467,7 +467,7 @@ impl IceTrickleScheme<AcChannel> for DefaultTransport {
                 log::trace!("setting remote candidate");
                 for c in data.data.candidates {
                     log::trace!("add candiates: {:?}", c);
-                    self.add_ice_candidate(c.candidate.clone()).await.unwrap();
+                    self.add_ice_candidate(c.candidate.clone()).await?;
                 }
                 Ok(())
             }
