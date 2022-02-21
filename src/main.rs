@@ -36,12 +36,10 @@ pub struct Args {
 
 async fn run(http_addr: String, key: SecretKey, stun: &str) {
     let swarm = Arc::new(Swarm::new(Arc::new(AcChannel::new(1)), stun.to_string()));
-    let signaler = swarm.signaler();
-
-    tokio::spawn(async move { run_service(http_addr, Arc::clone(&swarm), key).await });
-
+    let swarm_clone = Arc::clone(&swarm);
+    tokio::spawn(async move { run_service(http_addr, swarm, key).await });
     tokio::select! {
-        _ = signaler.recv() => {
+        _ = swarm_clone.event_handler() => {
             println!("received done signal!");
         }
         _ = tokio::signal::ctrl_c() => {

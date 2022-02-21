@@ -18,8 +18,6 @@ pub trait Channel {
     fn new(buffer: usize) -> Self;
     fn sender(&self) -> Self::Sender;
     fn receiver(&self) -> Self::Receiver;
-
     async fn send(&self, e: Events) -> Result<()>;
-    async fn recv(&self) -> ();
-    async fn handler(&self, e: Events) -> ();
+    async fn recv(&self) -> Result<Events>;
 }

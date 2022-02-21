@@ -38,22 +38,6 @@ impl Channel for CbChannel {
     }
 
     async fn recv(&self) {
-        match self.receiver().recv() {
-            Ok(e) => {
-                _ = self.handler(e).await;
-            }
-            Err(e) => {
-                log::error!("failed on recv: {:?}", e);
-            }
-        }
-    }
-    async fn handler(&self, e: Events) {
-        match e {
-            Events::Null => (),
-            Events::ConnectFailed => {
-                info!("ConnectFailed");
-            }
-            _ => (),
-        }
+        self.receiver().recv().map_err(|e| anyhow:anyhow!(e))
     }
 }

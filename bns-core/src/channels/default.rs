@@ -37,23 +37,7 @@ impl Channel for AcChannel {
         Ok(self.sender.send(e).await?)
     }
 
-    async fn recv(&self) {
-        match self.receiver().recv().await {
-            Ok(e) => {
-                _ = self.handler(e).await;
-            }
-            Err(e) => {
-                log::error!("failed on recv: {:?}", e);
-            }
-        }
-    }
-    async fn handler(&self, e: Events) {
-        match e {
-            Events::Null => (),
-            Events::ConnectFailed => {
-                log::info!("ConnectFailed");
-            }
-            _ => (),
-        }
+    async fn recv(&self) -> Result<Events> {
+        self.receiver().recv().await.map_err(|e| anyhow::anyhow!(e))
     }
 }

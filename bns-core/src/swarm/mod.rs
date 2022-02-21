@@ -12,6 +12,8 @@ use crate::channels::wasm::CbChannel as Channel;
 #[cfg(feature = "wasm")]
 use crate::transports::wasm::WasmTransport as Transport;
 
+use crate::types::channel::Channel as ChannelTrait;
+
 use anyhow::Result;
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -54,5 +56,15 @@ impl Swarm {
 
     pub fn signaler(&self) -> Arc<Channel> {
         Arc::clone(&self.signaler)
+    }
+
+    pub async fn event_handler(&self) {
+        loop {
+            match self.signaler.recv().await {
+                x => {
+                    log::debug!("{:?}", x)
+                }
+            }
+        }
     }
 }
