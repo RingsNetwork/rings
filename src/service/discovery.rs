@@ -5,8 +5,8 @@ use bns_core::signing::SecretKey;
 use bns_core::swarm::Swarm;
 use bns_core::types::ice_transport::IceTrickleScheme;
 use std::collections::HashMap;
-use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 use std::sync::Arc;
+use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 
 pub async fn handshake_handler(
     RawBody(body): RawBody,
@@ -44,9 +44,7 @@ pub async fn connect_handler(
 async fn handshake(swarm: Arc<Swarm>, key: SecretKey, data: Vec<u8>) -> anyhow::Result<String> {
     // get offer from remote and send answer back
 
-    let transport = swarm
-        .new_transport()
-        .await?;
+    let transport = swarm.new_transport().await?;
 
     let registered_addr = transport
         .register_remote_info(String::from_utf8(data)?.try_into()?)
@@ -82,9 +80,7 @@ pub async fn trickle_forward(
 
     let client = reqwest::Client::new();
 
-    let transport = swarm
-        .new_transport()
-        .await?;
+    let transport = swarm.new_transport().await?;
 
     let req = transport.get_handshake_info(key, RTCSdpType::Offer).await?;
 

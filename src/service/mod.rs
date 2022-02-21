@@ -2,13 +2,13 @@ mod discovery;
 mod http_error;
 mod observer;
 
-use std::sync::Arc;
 use axum::{
     routing::{get, post},
     AddExtensionLayer, Router, Server,
 };
 use bns_core::signing::SecretKey;
 use bns_core::swarm::Swarm;
+use std::sync::Arc;
 
 pub async fn run_service(addr: String, swarm: Arc<Swarm>, key: SecretKey) {
     let binding_addr = addr.parse().unwrap();

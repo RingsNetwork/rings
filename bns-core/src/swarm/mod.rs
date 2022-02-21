@@ -12,10 +12,10 @@ use crate::channels::wasm::CbChannel as Channel;
 #[cfg(feature = "wasm")]
 use crate::transports::wasm::WasmTransport as Transport;
 
-use web3::types::Address;
 use anyhow::Result;
 use dashmap::DashMap;
 use std::sync::Arc;
+use web3::types::Address;
 
 pub enum State {
     Anonymous,
