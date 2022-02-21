@@ -7,6 +7,7 @@ use crate::types::channel::Events;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
 use crate::types::ice_transport::IceTrickleScheme;
+use web3::types::Address;
 use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -432,7 +433,7 @@ impl IceTrickleScheme<CbChannel> for WasmTransport {
         Ok(resp.try_into()?)
     }
 
-    async fn register_remote_info(&self, data: Encoded) -> anyhow::Result<()> {
+    async fn register_remote_info(&self, data: Encoded) -> anyhow::Result<Address> {
         let data: SigMsg<TricklePayload> = data.try_into()?;
         log::trace!("register remote info: {:?}", data);
 
@@ -446,7 +447,7 @@ impl IceTrickleScheme<CbChannel> for WasmTransport {
                     log::trace!("add candiates: {:?}", c);
                     self.add_ice_candidate(c.to_owned()).await?;
                 }
-                Ok(())
+                Ok(data.addr)
             }
             _ => {
                 log::error!("cannot verify message sig");

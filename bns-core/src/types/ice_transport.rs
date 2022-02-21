@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use web3::types::Address;
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
@@ -113,5 +114,5 @@ pub trait IceTransportCallback<Ch: Channel>: IceTransport<Ch> {
 pub trait IceTrickleScheme<Ch: Channel>: IceTransport<Ch> {
     type SdpType;
     async fn get_handshake_info(&self, key: SecretKey, kind: Self::SdpType) -> Result<Encoded>;
-    async fn register_remote_info(&self, data: Encoded) -> Result<()>;
+    async fn register_remote_info(&self, data: Encoded) -> Result<Address>;
 }

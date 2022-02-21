@@ -19,6 +19,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::Duration;
+use web3::types::Address;
 use webrtc::api::APIBuilder;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
@@ -455,7 +456,7 @@ impl IceTrickleScheme<AcChannel> for DefaultTransport {
         Ok(resp.try_into()?)
     }
 
-    async fn register_remote_info(&self, data: Encoded) -> anyhow::Result<()> {
+    async fn register_remote_info(&self, data: Encoded) -> anyhow::Result<Address> {
         let data: SigMsg<TricklePayload> = data.try_into()?;
         log::trace!("register remote info: {:?}", data);
 
@@ -469,7 +470,7 @@ impl IceTrickleScheme<AcChannel> for DefaultTransport {
                     log::trace!("add candiates: {:?}", c);
                     self.add_ice_candidate(c.candidate.clone()).await?;
                 }
-                Ok(())
+                Ok(data.addr)
             }
             _ => {
                 log::error!("cannot verify message sig");

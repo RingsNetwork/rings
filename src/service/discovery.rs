@@ -6,24 +6,20 @@ use bns_core::swarm::Swarm;
 use bns_core::types::ice_transport::IceTrickleScheme;
 use std::collections::HashMap;
 use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
+use std::sync::Arc;
 
 pub async fn handshake_handler(
     RawBody(body): RawBody,
-    Extension(swarm): Extension<Swarm>,
+    Extension(swarm): Extension<Arc<Swarm>>,
     Extension(key): Extension<SecretKey>,
 ) -> Result<String, HttpError> {
     log::info!("Incoming body: {:?}", body);
 
     let payload = hyper::body::to_bytes(body).await?;
-
-    match handshake(&mut swarm.clone(), key, payload.to_vec()).await {
+    match handshake(swarm, key, payload.to_vec()).await {
         Ok(data) => Ok(data),
         Err(e) => {
             log::error!("failed to handle trickle scheme: {:?}", e);
-
-            let mut swarm = swarm.to_owned();
-            swarm.drop_pending().await;
-
             Err(HttpError::Internal)
         }
     }
@@ -31,43 +27,37 @@ pub async fn handshake_handler(
 
 pub async fn connect_handler(
     Query(params): Query<HashMap<String, String>>,
-    Extension(swarm): Extension<Swarm>,
+    Extension(swarm): Extension<Arc<Swarm>>,
     Extension(key): Extension<SecretKey>,
 ) -> Result<String, HttpError> {
     let node = params.get("node").ok_or(HttpError::BadRequest)?;
 
-    match trickle_forward(&mut swarm.clone(), key, node.into()).await {
+    match trickle_forward(swarm, key, node.into()).await {
         Ok(resp) => Ok(resp),
         Err(e) => {
             log::error!("failed to trickle forward {:?}", e);
-
-            let mut swarm = swarm.to_owned();
-            swarm.drop_pending().await;
-
             Err(HttpError::Internal)
         }
     }
 }
 
-async fn handshake(swarm: &mut Swarm, key: SecretKey, data: Vec<u8>) -> anyhow::Result<String> {
+async fn handshake(swarm: Arc<Swarm>, key: SecretKey, data: Vec<u8>) -> anyhow::Result<String> {
     // get offer from remote and send answer back
 
     let transport = swarm
-        .get_pending()
-        .await
-        .ok_or("cannot get transaction")
-        .map_err(|e| anyhow!(e))?;
+        .new_transport()
+        .await?;
 
-    let registered = transport
+    let registered_addr = transport
         .register_remote_info(String::from_utf8(data)?.try_into()?)
         .await;
 
-    match registered {
-        Ok(_) => {
+    match registered_addr {
+        Ok(addr) => {
             let resp = transport.get_handshake_info(key, RTCSdpType::Answer).await;
             match resp {
                 Ok(info) => {
-                    swarm.upgrade_pending().await?;
+                    swarm.register(addr, Arc::clone(&transport));
                     anyhow::Result::Ok(info.try_into()?)
                 }
                 Err(e) => {
@@ -84,20 +74,17 @@ async fn handshake(swarm: &mut Swarm, key: SecretKey, data: Vec<u8>) -> anyhow::
 }
 
 pub async fn trickle_forward(
-    swarm: &mut Swarm,
+    swarm: Arc<Swarm>,
     key: SecretKey,
     node: String,
 ) -> anyhow::Result<String> {
     // request remote offer and sand answer to remote
 
     let client = reqwest::Client::new();
-    let mut swarm = swarm.to_owned();
 
     let transport = swarm
-        .get_pending()
-        .await
-        .ok_or("cannot get transaction")
-        .map_err(|e| anyhow!(e))?;
+        .new_transport()
+        .await?;
 
     let req = transport.get_handshake_info(key, RTCSdpType::Offer).await?;
 
@@ -117,9 +104,10 @@ pub async fn trickle_forward(
     {
         Ok(resp) => {
             log::debug!("get answer and candidate from remote");
-            let _ = transport
+            let addr = transport
                 .register_remote_info(String::from_utf8(resp.as_bytes().to_vec())?.try_into()?)
                 .await?;
+            swarm.register(addr, Arc::clone(&transport));
             Ok("ok".to_string())
         }
         Err(e) => {
