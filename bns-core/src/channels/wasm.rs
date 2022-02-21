@@ -4,7 +4,6 @@ use crate::types::channel::Events;
 use anyhow::Result;
 use async_trait::async_trait;
 use crossbeam_channel as cbc;
-use log::info;
 use std::sync::Arc;
 
 pub struct CbChannel {
@@ -37,7 +36,7 @@ impl Channel for CbChannel {
         Ok(self.sender.send(e)?)
     }
 
-    async fn recv(&self) {
-        self.receiver().recv().map_err(|e| anyhow:anyhow!(e))
+    async fn recv(&self) -> Result<Events> {
+        self.receiver().recv().map_err(|e| anyhow::anyhow!(e))
     }
 }
