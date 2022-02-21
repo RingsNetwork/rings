@@ -15,7 +15,6 @@ use crate::transports::wasm::WasmTransport as Transport;
 use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::Events;
 
-
 use anyhow::Result;
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -67,7 +66,7 @@ impl Swarm {
                     Events::ReceiveMsg(m) => {
                         let m = String::from_utf8(m).unwrap();
                         log::debug!("Receive Msg {}", m);
-                    },
+                    }
                     x => {
                         log::debug!("Receive {:?}", x)
                     }
