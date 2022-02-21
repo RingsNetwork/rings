@@ -13,6 +13,8 @@ use crate::channels::wasm::CbChannel as Channel;
 use crate::transports::wasm::WasmTransport as Transport;
 
 use crate::types::channel::Channel as ChannelTrait;
+use crate::types::channel::Events;
+
 
 use anyhow::Result;
 use dashmap::DashMap;
@@ -61,8 +63,17 @@ impl Swarm {
     pub async fn event_handler(&self) {
         loop {
             match self.signaler.recv().await {
-                x => {
-                    log::debug!("{:?}", x)
+                Ok(ev) => match ev {
+                    Events::ReceiveMsg(m) => {
+                        let m = String::from_utf8(m).unwrap();
+                        log::debug!("Receive Msg {}", m);
+                    },
+                    x => {
+                        log::debug!("Receive {:?}", x)
+                    }
+                },
+                Err(e) => {
+                    log::error!("failed on handle event {:?}", e)
                 }
             }
         }
