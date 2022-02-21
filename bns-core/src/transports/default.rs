@@ -388,7 +388,11 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
             log::debug!("Message from DataChannel: '{:?}'", msg);
             let signaler = Arc::clone(&signaler);
             Box::pin(async move {
-                if signaler.send(Events::ReceiveMsg(msg.data.to_vec())).await.is_err() {
+                if signaler
+                    .send(Events::ReceiveMsg(msg.data.to_vec()))
+                    .await
+                    .is_err()
+                {
                     log::error!("Failed on handle msg")
                 };
             })

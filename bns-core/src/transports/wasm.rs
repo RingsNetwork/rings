@@ -383,7 +383,9 @@ impl IceTransportCallback<CbChannel> for WasmTransport {
             let msg = msg.as_string().unwrap().clone();
             Box::pin(async move {
                 info!("{:?}", msg);
-                sender.send(Events::ReceiveMsg(msg)).unwrap();
+                sender
+                    .send(Events::ReceiveMsg(msg.as_bytes().to_vec()))
+                    .unwrap();
             })
         }
     }
