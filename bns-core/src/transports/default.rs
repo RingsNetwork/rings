@@ -382,11 +382,19 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
         dyn FnMut(DataChannelMessage) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
             + Send
             + Sync,
-    > {
+        > {
+        let signaler = self.signaler();
         box move |msg: DataChannelMessage| {
-            let msg_str = String::from_utf8(msg.data.to_vec()).unwrap();
-            println!("Message from DataChannel: '{}'", msg_str);
-            Box::pin(async move {})
+            log::debug!("Message from DataChannel: '{:?}'", msg);
+            let signaler = Arc::clone(&signaler);
+            Box::pin(async move {
+                match signaler.send(Events::ReceiveMsg(msg.data.to_vec())).await {
+                    Err(_) => {
+                        log::error!("Failed on handle msg")
+                    },
+                    _ => ()
+                };
+            })
         }
     }
 

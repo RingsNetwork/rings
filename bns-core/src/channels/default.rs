@@ -12,7 +12,7 @@ pub struct AcChannel {
     receiver: Arc<Receiver<Events>>,
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Channel for AcChannel {
     type Sender = Arc<Sender<Events>>;
     type Receiver = Arc<Receiver<Events>>;

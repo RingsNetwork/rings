@@ -5,11 +5,12 @@ use async_trait::async_trait;
 pub enum Events {
     Null,
     ConnectFailed,
-    SendMsg(String),
-    ReceiveMsg(String),
+    SendMsg(Vec<u8>),
+    ReceiveMsg(Vec<u8>),
 }
 
-#[async_trait(?Send)]
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait Channel {
     type Sender;
     type Receiver;
