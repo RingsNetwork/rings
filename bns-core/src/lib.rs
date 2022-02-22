@@ -2,6 +2,8 @@
 #![feature(box_syntax)]
 
 pub mod channels;
+pub mod dht;
+pub mod did;
 pub mod encoder;
 pub mod signing;
 pub mod storage;

@@ -16,6 +16,7 @@ async-trait="0.1.52"
 log = "0.4"
 dashmap = "4"
 hex = "0.4.3"
+num-bigint = "0.3.1"
 
 libsecp256k1 = "0.7.0"
 serde_json = { version="1.0.70"}
