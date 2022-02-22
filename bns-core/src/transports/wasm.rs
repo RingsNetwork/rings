@@ -23,6 +23,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::spawn_local;
 use wasm_bindgen_futures::JsFuture;
+use web3::types::Address;
 use web_sys::MessageEvent;
 use web_sys::RtcConfiguration;
 use web_sys::RtcDataChannel;
@@ -378,11 +379,13 @@ impl IceTransportCallback<CbChannel> for WasmTransport {
     {
         let sender = self.signaler().sender();
         box move |msg: Self::Msg| {
-            let sender = Arc::clone(&sender);
+            let sender = sender.clone();
             let msg = msg.as_string().unwrap().clone();
             Box::pin(async move {
                 info!("{:?}", msg);
-                sender.send(Events::ReceiveMsg(msg)).unwrap();
+                sender
+                    .send(Events::ReceiveMsg(msg.as_bytes().to_vec()))
+                    .unwrap();
             })
         }
     }
@@ -432,7 +435,7 @@ impl IceTrickleScheme<CbChannel> for WasmTransport {
         Ok(resp.try_into()?)
     }
 
-    async fn register_remote_info(&self, data: Encoded) -> anyhow::Result<()> {
+    async fn register_remote_info(&self, data: Encoded) -> anyhow::Result<Address> {
         let data: SigMsg<TricklePayload> = data.try_into()?;
         log::trace!("register remote info: {:?}", data);
 
@@ -446,7 +449,7 @@ impl IceTrickleScheme<CbChannel> for WasmTransport {
                     log::trace!("add candiates: {:?}", c);
                     self.add_ice_candidate(c.to_owned()).await?;
                 }
-                Ok(())
+                Ok(data.addr)
             }
             _ => {
                 log::error!("cannot verify message sig");

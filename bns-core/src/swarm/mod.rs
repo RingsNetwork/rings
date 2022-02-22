@@ -12,21 +12,21 @@ use crate::channels::wasm::CbChannel as Channel;
 #[cfg(feature = "wasm")]
 use crate::transports::wasm::WasmTransport as Transport;
 
-use anyhow::anyhow;
+use crate::types::channel::Channel as ChannelTrait;
+use crate::types::channel::Events;
+
 use anyhow::Result;
 use dashmap::DashMap;
 use std::sync::Arc;
+use web3::types::Address;
 
 pub enum State {
     Anonymous,
     Known,
 }
 
-#[derive(Clone)]
 pub struct Swarm {
-    pub pending: Option<Arc<Transport>>,
-    pub anonymous: DashMap<String, Arc<Transport>>,
-    pub table: DashMap<String, Arc<Transport>>,
+    pub table: DashMap<Address, Arc<Transport>>,
     pub signaler: Arc<Channel>,
     pub stun_server: String,
 }
@@ -34,78 +34,47 @@ pub struct Swarm {
 impl Swarm {
     pub fn new(ch: Arc<Channel>, stun: String) -> Self {
         Self {
-            pending: None,
-            anonymous: DashMap::new(),
             table: DashMap::new(),
             signaler: Arc::clone(&ch),
             stun_server: stun,
         }
     }
 
-    pub async fn new_transport(&mut self) -> Result<Arc<Transport>> {
+    pub async fn new_transport(&self) -> Result<Arc<Transport>> {
         let mut ice_transport = Transport::new(Arc::clone(&self.signaler));
         ice_transport.start(self.stun_server.clone()).await?;
-        // should always has offer here #WhyUnwarp
         let trans = Arc::new(ice_transport);
-        self.pending = Some(Arc::clone(&trans));
         Ok(Arc::clone(&trans))
     }
 
-    pub async fn get_pending(&mut self) -> Option<Arc<Transport>> {
-        match &self.pending {
-            Some(trans) => Some(Arc::clone(trans)),
-            None => self.new_transport().await.ok(),
-        }
+    pub fn register(&self, addr: Address, trans: Arc<Transport>) {
+        self.table.insert(addr, Arc::clone(&trans));
     }
 
-    pub async fn drop_pending(&mut self) {
-        self.pending = None;
-    }
-
-    pub async fn upgrade_pending(&mut self) -> Result<()> {
-        let trans = self.pending.take();
-        match &trans {
-            Some(t) => {
-                let sdp = t.get_offer_str().await.unwrap();
-                self.register(sdp, Arc::clone(t), State::Anonymous);
-                Ok(())
-            }
-            None => Err(anyhow!("pending transport not exiest")),
-        }?;
-        self.pending = None;
-        Ok(())
-    }
-
-    pub fn register(&mut self, sdp_or_addr: String, trans: Arc<Transport>, trans_type: State) {
-        match trans_type {
-            State::Anonymous => {
-                self.anonymous.insert(sdp_or_addr, Arc::clone(&trans));
-            }
-            State::Known => {
-                self.table.insert(sdp_or_addr, Arc::clone(&trans));
-            }
-        }
-    }
-
-    pub fn get_transport(&self, sdp_or_addr: String, trans_type: State) -> Option<Arc<Transport>> {
-        match trans_type {
-            State::Anonymous => self.anonymous.get(&sdp_or_addr).map(|t| Arc::clone(&t)),
-            State::Known => self.table.get(&sdp_or_addr).map(|t| Arc::clone(&t)),
-        }
-    }
-
-    pub fn upgrade_anonymous(&mut self, sdp: String, addr: String) -> Result<()> {
-        match self.get_transport(sdp.to_owned(), State::Anonymous) {
-            Some(trans) => {
-                self.register(addr, Arc::clone(&trans), State::Known);
-                self.anonymous.remove(&sdp);
-                Ok(())
-            }
-            None => Err(anyhow!("Cannot get asked Anonymous Transport")),
-        }
+    pub fn get_transport(&self, addr: Address) -> Option<Arc<Transport>> {
+        self.table.get(&addr).map(|t| Arc::clone(&t))
     }
 
     pub fn signaler(&self) -> Arc<Channel> {
         Arc::clone(&self.signaler)
+    }
+
+    pub async fn event_handler(&self) {
+        loop {
+            match self.signaler.recv().await {
+                Ok(ev) => match ev {
+                    Events::ReceiveMsg(m) => {
+                        let m = String::from_utf8(m).unwrap();
+                        log::debug!("Receive Msg {}", m);
+                    }
+                    x => {
+                        log::debug!("Receive {:?}", x)
+                    }
+                },
+                Err(e) => {
+                    log::error!("failed on handle event {:?}", e)
+                }
+            }
+        }
     }
 }

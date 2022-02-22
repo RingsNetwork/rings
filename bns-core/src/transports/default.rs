@@ -19,6 +19,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::Duration;
+use web3::types::Address;
 use webrtc::api::APIBuilder;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
@@ -327,7 +328,6 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
     > {
         let sender = self.signaler().sender();
         box move |s: RTCPeerConnectionState| {
-            let sender = Arc::clone(&sender);
             if s == RTCPeerConnectionState::Failed {
                 let _ = sender.send(Events::ConnectFailed);
             }
@@ -382,10 +382,19 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
             + Send
             + Sync,
     > {
+        let signaler = self.signaler();
         box move |msg: DataChannelMessage| {
-            let msg_str = String::from_utf8(msg.data.to_vec()).unwrap();
-            println!("Message from DataChannel: '{}'", msg_str);
-            Box::pin(async move {})
+            log::debug!("Message from DataChannel: '{:?}'", msg);
+            let signaler = Arc::clone(&signaler);
+            Box::pin(async move {
+                if signaler
+                    .send(Events::ReceiveMsg(msg.data.to_vec()))
+                    .await
+                    .is_err()
+                {
+                    log::error!("Failed on handle msg")
+                };
+            })
         }
     }
 
@@ -455,7 +464,7 @@ impl IceTrickleScheme<AcChannel> for DefaultTransport {
         Ok(resp.try_into()?)
     }
 
-    async fn register_remote_info(&self, data: Encoded) -> anyhow::Result<()> {
+    async fn register_remote_info(&self, data: Encoded) -> anyhow::Result<Address> {
         let data: SigMsg<TricklePayload> = data.try_into()?;
         log::trace!("register remote info: {:?}", data);
 
@@ -469,7 +478,7 @@ impl IceTrickleScheme<AcChannel> for DefaultTransport {
                     log::trace!("add candiates: {:?}", c);
                     self.add_ice_candidate(c.candidate.clone()).await?;
                 }
-                Ok(())
+                Ok(data.addr)
             }
             _ => {
                 log::error!("cannot verify message sig");
