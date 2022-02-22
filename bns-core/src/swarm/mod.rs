@@ -1,5 +1,6 @@
 /// Swarm is transport management
 ///
+use crate::storage::{MemStorage, Storage};
 use crate::types::ice_transport::IceTransport;
 
 #[cfg(not(feature = "wasm"))]
@@ -16,7 +17,6 @@ use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::Events;
 
 use anyhow::Result;
-use dashmap::DashMap;
 use std::sync::Arc;
 use web3::types::Address;
 
@@ -26,7 +26,7 @@ pub enum State {
 }
 
 pub struct Swarm {
-    pub table: DashMap<Address, Arc<Transport>>,
+    pub table: MemStorage<Address, Arc<Transport>>,
     pub signaler: Arc<Channel>,
     pub stun_server: String,
 }
@@ -34,7 +34,7 @@ pub struct Swarm {
 impl Swarm {
     pub fn new(ch: Arc<Channel>, stun: String) -> Self {
         Self {
-            table: DashMap::new(),
+            table: MemStorage::new(),
             signaler: Arc::clone(&ch),
             stun_server: stun,
         }
@@ -48,11 +48,11 @@ impl Swarm {
     }
 
     pub fn register(&self, addr: Address, trans: Arc<Transport>) {
-        self.table.insert(addr, Arc::clone(&trans));
+        self.table.set(addr, trans);
     }
 
     pub fn get_transport(&self, addr: Address) -> Option<Arc<Transport>> {
-        self.table.get(&addr).map(|t| Arc::clone(&t))
+        self.table.get(addr)
     }
 
     pub fn signaler(&self) -> Arc<Channel> {
