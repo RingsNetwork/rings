@@ -5,32 +5,31 @@ use async_channel as ac;
 use async_channel::Receiver;
 use async_channel::Sender;
 use async_trait::async_trait;
-use std::sync::Arc;
 
 pub struct AcChannel {
-    sender: Arc<Sender<Events>>,
-    receiver: Arc<Receiver<Events>>,
+    sender: Sender<Events>,
+    receiver: Receiver<Events>,
 }
 
 #[async_trait]
 impl Channel for AcChannel {
-    type Sender = Arc<Sender<Events>>;
-    type Receiver = Arc<Receiver<Events>>;
+    type Sender = Sender<Events>;
+    type Receiver = Receiver<Events>;
 
     fn new(buffer: usize) -> Self {
         let (tx, rx) = ac::bounded(buffer);
         Self {
-            sender: Arc::new(tx),
-            receiver: Arc::new(rx),
+            sender: tx,
+            receiver: rx,
         }
     }
 
     fn sender(&self) -> Self::Sender {
-        Arc::clone(&self.sender)
+        self.sender.clone()
     }
 
     fn receiver(&self) -> Self::Receiver {
-        Arc::clone(&self.receiver)
+        self.receiver.clone()
     }
 
     async fn send(&self, e: Events) -> Result<()> {

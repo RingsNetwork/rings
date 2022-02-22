@@ -328,7 +328,6 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
     > {
         let sender = self.signaler().sender();
         box move |s: RTCPeerConnectionState| {
-            let sender = Arc::clone(&sender);
             if s == RTCPeerConnectionState::Failed {
                 let _ = sender.send(Events::ConnectFailed);
             }
