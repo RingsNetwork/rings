@@ -1,23 +1,35 @@
 use crate::storage::Storage;
 use dashmap::DashMap;
+use std::hash::Hash;
 
-#[derive(Clone, Debug, Default)]
-pub struct MemStorage {
-    table: DashMap<String, String>,
+#[derive(Clone, Debug)]
+pub struct MemStorage<K, V>
+where
+    K: Clone + Eq + Hash,
+    V: Clone,
+{
+    table: DashMap<K, V>,
 }
 
-impl MemStorage {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
+impl<K, V> Storage for MemStorage<K, V>
+where
+    K: Clone + Eq + Hash,
+    V: Clone,
+{
+    type K = K;
+    type V = V;
 
-impl Storage for MemStorage {
-    fn get(&self, addr: &str) -> Option<String> {
-        self.table.get(addr).map(|v| v.value().clone())
+    fn new() -> Self {
+        Self {
+            table: DashMap::new(),
+        }
     }
 
-    fn set(&self, addr: &str, value: String) -> Option<String> {
-        self.table.insert(addr.to_string(), value)
+    fn get(&self, addr: K) -> Option<V> {
+        self.table.get(&addr).map(|v| v.value().clone())
+    }
+
+    fn set(&self, addr: K, value: V) -> Option<V> {
+        self.table.insert(addr, value)
     }
 }
