@@ -4,32 +4,31 @@ use crate::types::channel::Events;
 use anyhow::Result;
 use async_trait::async_trait;
 use crossbeam_channel as cbc;
-use std::sync::Arc;
 
 pub struct CbChannel {
-    sender: Arc<cbc::Sender<Events>>,
-    receiver: Arc<cbc::Receiver<Events>>,
+    sender: cbc::Sender<Events>,
+    receiver: cbc::Receiver<Events>,
 }
 
 #[async_trait(?Send)]
 impl Channel for CbChannel {
-    type Sender = Arc<cbc::Sender<Events>>;
-    type Receiver = Arc<cbc::Receiver<Events>>;
+    type Sender = cbc::Sender<Events>;
+    type Receiver = cbc::Receiver<Events>;
 
     fn new(buffer: usize) -> Self {
         let (tx, rx) = cbc::bounded(buffer);
         Self {
-            sender: Arc::new(tx),
-            receiver: Arc::new(rx),
+            sender: tx,
+            receiver: rx,
         }
     }
 
     fn sender(&self) -> Self::Sender {
-        Arc::clone(&self.sender)
+        self.sender.clone()
     }
 
     fn receiver(&self) -> Self::Receiver {
-        Arc::clone(&self.receiver)
+        self.receiver.clone()
     }
 
     async fn send(&self, e: Events) -> Result<()> {

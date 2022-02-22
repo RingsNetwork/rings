@@ -379,7 +379,7 @@ impl IceTransportCallback<CbChannel> for WasmTransport {
     {
         let sender = self.signaler().sender();
         box move |msg: Self::Msg| {
-            let sender = Arc::clone(&sender);
+            let sender = sender.clone();
             let msg = msg.as_string().unwrap().clone();
             Box::pin(async move {
                 info!("{:?}", msg);
