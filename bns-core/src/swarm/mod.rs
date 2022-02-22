@@ -32,7 +32,7 @@ impl Swarm {
             signaler: Arc::clone(&ch),
             stun_server: stun,
             dht: Chord::new(addr.into()),
-            address: addr.clone(),
+            address: addr,
         }
     }
 

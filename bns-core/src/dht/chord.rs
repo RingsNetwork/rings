@@ -1,11 +1,11 @@
 use crate::did::Did;
-use anyhow::anyhow;
-use anyhow::Result;
 use num_bigint::BigUint;
+use anyhow::Result;
+use anyhow::anyhow;
 
 pub enum FoundRes {
     Found(Did),
-    ToFind(Did),
+    ToFind(Did)
 }
 
 #[derive(Clone)]
@@ -16,7 +16,7 @@ pub struct Chord {
     pub successor: Option<Did>,
     // The previous node on the identiﬁer circle
     pub predecessor: Option<Did>,
-    pub id: Did,
+    pub id: Did
 }
 
 impl Chord {
@@ -26,7 +26,7 @@ impl Chord {
             predecessor: None,
             // for Eth idess, it's 160
             finger: vec![None; 160],
-            id: id,
+            id: id
         }
     }
 
@@ -41,16 +41,11 @@ impl Chord {
     }
 
     pub fn cloest_precding_node(&self, id: Did) -> Result<Did> {
-        for i in 160..1 {
-            match self.finger[i] {
-                Some(t) => {
-                    if t > self.id && t < id {
-                        return Ok(t.into());
-                    } else {
-                        ()
-                    }
+        for i in (1 .. 160).rev() {
+            if let Some(t) = self.finger[i] {
+                if t > self.id && t < id {
+                    return Ok(t.into());
                 }
-                None => (),
             }
         }
         Err(anyhow!("cannot find cloest precding node"))
@@ -64,11 +59,12 @@ impl Chord {
                 } else {
                     match self.cloest_precding_node(id) {
                         Ok(n) => Ok(FoundRes::ToFind(n)),
-                        Err(e) => Err(anyhow!(e)),
+                        Err(e) => Err(anyhow!(e))
                     }
+
                 }
-            }
-            None => Err(anyhow!("successor not found")),
+            },
+            None => Err(anyhow!("successor not found"))
         }
     }
 }
