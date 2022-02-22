@@ -35,7 +35,7 @@ pub struct Args {
 }
 
 async fn run(http_addr: String, key: SecretKey, stun: &str) {
-    let swarm = Arc::new(Swarm::new(Arc::new(AcChannel::new(1)), stun.to_string()));
+    let swarm = Arc::new(Swarm::new(Arc::new(AcChannel::new(1)), stun.to_string(), key.address()));
     let swarm_clone = Arc::clone(&swarm);
     tokio::spawn(async move { run_service(http_addr, swarm, key).await });
     tokio::select! {

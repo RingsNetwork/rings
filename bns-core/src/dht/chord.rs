@@ -26,7 +26,7 @@ impl Chord {
             predecessor: None,
             // for Eth idess, it's 160
             finger: vec![None; 160],
-            id: id
+            id
         }
     }
 
@@ -34,7 +34,7 @@ impl Chord {
         for k in 0u32..160u32 {
             let n: BigUint = self.id.into();
             if (n + BigUint::from(2u16).pow(k - 1)) % BigUint::from(2u16).pow(160) <= id.into() {
-                self.finger[k as usize] = Some(id.clone())
+                self.finger[k as usize] = Some(id)
             }
         }
         self.successor = self.finger[0];
@@ -44,7 +44,7 @@ impl Chord {
         for i in (1 .. 160).rev() {
             if let Some(t) = self.finger[i] {
                 if t > self.id && t < id {
-                    return Ok(t.into());
+                    return Ok(t);
                 }
             }
         }
