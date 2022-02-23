@@ -58,12 +58,11 @@ impl Chord {
                             self.finger[k as usize] = Some(id);
                             // if id is more close to successor
                         }
-                    },
+                    }
                     None => {
                         self.finger[k as usize] = Some(id);
                     }
                 }
-
             }
         }
         if (id - self.id) < (id - self.successor) || self.id == self.successor {
@@ -191,7 +190,6 @@ mod tests {
         assert_eq!(node_a.successor, a);
         assert_eq!(node_b.successor, b);
         assert_eq!(node_c.successor, c);
-
 
         assert!(a < b && b < c);
         node_a.join(b).unwrap();

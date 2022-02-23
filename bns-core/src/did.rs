@@ -1,15 +1,12 @@
 /// Did is a finate Ring R(P) where P = 2^160
-
-
 use num_bigint::BigUint;
+use std::cmp::{Eq, PartialEq};
 use std::ops::Deref;
+use std::ops::Neg;
+use std::ops::{Add, Sub};
 use std::str::FromStr;
 use web3::types::Address;
 use web3::types::H160;
-use std::ops::Neg;
-use std::ops::{Add, Sub};
-use std::cmp::{Eq, PartialEq};
-
 
 #[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd, Debug)]
 pub struct Did(Address);
@@ -62,8 +59,6 @@ impl Neg for Did {
     }
 }
 
-
-
 impl Add for Did {
     type Output = Self;
     fn add(self, rhs: Self) -> Self {
@@ -77,7 +72,6 @@ impl Sub for Did {
         self + (-rhs)
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -98,6 +92,5 @@ mod tests {
         let a = Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
         assert_eq!(-a + a, zero);
         assert_eq!(-(-a), a);
-
     }
 }
