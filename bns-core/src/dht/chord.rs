@@ -221,18 +221,8 @@ mod tests {
 
         node_c.join(a).unwrap();
         node_b.join(c).unwrap();
-        assert_eq!(node_c.successor, c, "{:?}", node_c.successor);
+        assert_eq!(node_c.successor, a, "{:?}", node_c.successor);
         assert!(!node_c.finger.contains(&Some(a)), "{:?}", node_c.finger);
         assert!(!node_c.finger.contains(&Some(b)))
-    }
-
-    #[test]
-    fn test_chord_stable() {
-        let a = Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
-        let b = Did::from_str("0x999999cf1046e68e36E1aA2E0E07105eDDD1f08E").unwrap();
-        let c = Did::from_str("0xc0ffee254729296a45a3885639AC7E10F9d54979").unwrap();
-
-        let mut node_c = Chord::new(c);
-        assert_eq!(node_c.successor, c);
     }
 }
