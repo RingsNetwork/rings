@@ -67,6 +67,9 @@ impl Chord {
             }
         }
         if (id - self.id) < (id - self.successor) || self.id == self.successor {
+            // 1) id should follows self.id
+            // 2) #fff should follow #001 because id space is a Finate Ring
+            // 3) #001 - #fff = #001 + -(#fff) = #001
             self.successor = id;
         }
 
@@ -142,7 +145,7 @@ impl Chord {
         }
     }
 
-    pub fn cloest_precding_node(&self, id: Did) -> Result<Did> {
+    pub fn closest_precding_node(&self, id: Did) -> Result<Did> {
         for i in (1..160).rev() {
             if let Some(v) = self.finger[i] {
                 if v > self.id && v < id {
@@ -162,7 +165,7 @@ impl Chord {
         } else {
             // n = closest preceding node(id);
             // return n.ﬁnd_successor(id);
-            match self.cloest_precding_node(id) {
+            match self.closest_precding_node(id) {
                 Ok(n) => Ok(ChordAction::FindSuccessor((n, id))),
                 Err(e) => Err(anyhow!(e)),
             }
