@@ -3,6 +3,10 @@ use std::ops::Deref;
 use std::str::FromStr;
 use web3::types::Address;
 use web3::types::H160;
+use std::ops::Neg;
+use std::ops::{Add, Sub};
+use std::cmp::{Eq, PartialEq};
+
 
 #[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd, Debug)]
 pub struct Did(Address);
@@ -20,14 +24,15 @@ impl From<Did> for BigUint {
     }
 }
 
-impl TryFrom<BigUint> for Did {
-    type Error = anyhow::Error;
-    fn try_from(a: BigUint) -> anyhow::Result<Self> {
-        let va: [u8; 20] = a
-            .to_bytes_be()
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("Failed to cover BigUint to H160"))?;
-        Ok(Self(H160(va)))
+impl From<BigUint> for Did {
+    fn from(a: BigUint) -> Self {
+        let ff = a % (BigUint::from(2u16).pow(160));
+        println!("fuck {:?}", ff.to_bytes_be());
+        let mut va: Vec<u8> = ff.to_bytes_be();
+        let mut res = vec![0u8; 20 - va.len()];
+        res.append(&mut va);
+        assert_eq!(res.len(), 20, "{:?}", res);
+        Self(H160::from_slice(&res))
     }
 }
 
@@ -44,6 +49,33 @@ impl FromStr for Did {
     }
 }
 
+// impl Finate Ring For Dig
+
+impl Neg for Did {
+    type Output = Self;
+    fn neg(self) -> Self {
+        let ret = BigUint::from(2u16).pow(160) - BigUint::from(self);
+        ret.into()
+    }
+}
+
+
+
+impl Add for Did {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self {
+        ((BigUint::from(self) + BigUint::from(rhs)) % (BigUint::from(2u16).pow(160))).into()
+    }
+}
+
+impl Sub for Did {
+    type Output = Self;
+    fn sub(self, rhs: Self) -> Self {
+        self + (-rhs)
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -55,5 +87,14 @@ mod tests {
         let b = Did::from_str("0x999999cf1046e68e36E1aA2E0E07105eDDD1f08E").unwrap();
         let c = Did::from_str("0xc0ffee254729296a45a3885639AC7E10F9d54979").unwrap();
         assert!(c > b && b > a);
+    }
+
+    #[test]
+    fn test_finate_ring_neg() {
+        let zero = Did::from_str("0x0000000000000000000000000000000000000000").unwrap();
+        let a = Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
+        assert_eq!(-a + a, zero);
+        assert_eq!(-(-a), a);
+
     }
 }

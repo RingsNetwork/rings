@@ -22,7 +22,7 @@ pub enum ChordAction {
 pub struct Chord {
     // ﬁrst node on circle that succeeds (n + 2 ^(k-1) ) mod 2^m , 1 <= k<= m
     // for index start with 0, it should be (n+2^k) mod 2^m
-    pub finger: Vec<Did>,
+    pub finger: Vec<Option<Did>>,
     // The next node on the identiﬁer circle; ﬁnger[1].node
     pub successor: Did,
     // The previous node on the identiﬁer circle
@@ -38,24 +38,39 @@ impl Chord {
             successor: id,
             predecessor: None,
             // for Eth idess, it's 160
-            finger: vec![id; 160],
+            finger: vec![None; 160],
             id,
             fix_finger_index: 0,
         }
     }
 
     // join a Chord ring containing node id .
-    pub fn join(&mut self, id: Did) -> ChordAction {
-        for k in 0u32..160u32 {
+    pub fn join(&mut self, id: Did) -> Result<ChordAction> {
+        for k in (0u32..160u32).rev() {
             let n: BigUint = self.id.into();
             // (n + 2^k) % 2^m >= n
-            let delta = (n + BigUint::from(2u16).pow(k)) % BigUint::from(2u16).pow(160);
-            if delta <= id.into() && delta > self.finger[k as usize].into() {
-                self.finger[k as usize] = id;
+            // pos >= id
+            let pos = (n + BigUint::from(2u16).pow(k)) % BigUint::from(2u16).pow(160);
+            if pos <= id.into() {
+                match self.finger[k as usize] {
+                    Some(v) => {
+                        if pos >= v.into() {
+                            self.finger[k as usize] = Some(id);
+                            // if id is more close to successor
+                        }
+                    },
+                    None => {
+                        self.finger[k as usize] = Some(id);
+                    }
+                }
+
             }
         }
-        self.successor = self.finger[0];
-        ChordAction::FindSuccessor((self.successor, id))
+        if (id - self.id) < (id - self.successor) || self.id == self.successor {
+            self.successor = id;
+        }
+
+        Ok(ChordAction::FindSuccessor((self.successor, self.id)))
     }
 
     // called periodically. veriﬁes n’s immediate
@@ -104,7 +119,7 @@ impl Chord {
         match self.find_successor(Did::try_from(did)?) {
             Ok(res) => match res {
                 ChordAction::Some(v) => {
-                    self.finger[self.fix_finger_index as usize] = v;
+                    self.finger[self.fix_finger_index as usize] = Some(v);
                     Ok(ChordAction::None)
                 }
                 ChordAction::FindSuccessor((a, b)) => Ok(ChordAction::FindSuccessorAndAddToFinger(
@@ -129,9 +144,11 @@ impl Chord {
 
     pub fn cloest_precding_node(&self, id: Did) -> Result<Did> {
         for i in (1..160).rev() {
-            if self.finger[i] > self.id && self.finger[i] < id {
-                // check a recorded did x in (self.id, target_id)
-                return Ok(self.finger[i]);
+            if let Some(v) = self.finger[i] {
+                if v > self.id && v < id {
+                    // check a recorded did x in (self.id, target_id)
+                    return Ok(v);
+                }
             }
         }
         Err(anyhow!("cannot find cloest precding node"))
@@ -159,26 +176,41 @@ mod tests {
     use std::str::FromStr;
 
     #[test]
-    fn test_chord() {
-        let a = Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
-        let b = Did::from_str("0x999999cf1046e68e36E1aA2E0E07105eDDD1f08E").unwrap();
-        let c = Did::from_str("0xc0ffee254729296a45a3885639AC7E10F9d54979").unwrap();
+    fn test_chord_join() {
+        let a = Did::from_str("0xaaE807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
+        let b = Did::from_str("0xbb9999cf1046e68e36E1aA2E0E07105eDDD1f08E").unwrap();
+        let c = Did::from_str("0xccffee254729296a45a3885639AC7E10F9d54979").unwrap();
 
         let mut node_a = Chord::new(a);
         let mut node_b = Chord::new(b);
-        let _node_c = Chord::new(c);
+        let mut node_c = Chord::new(c);
+
+        assert_eq!(node_a.successor, a);
+        assert_eq!(node_b.successor, b);
+        assert_eq!(node_c.successor, c);
+
 
         assert!(a < b && b < c);
-        node_a.join(b);
-        assert_eq!(node_a.successor, b);
+        node_a.join(b).unwrap();
+        // if self.id < id && id <= self.successor
+        assert_eq!(node_a.successor, b, "{:?}", node_a.finger);
         assert_eq!(node_a.find_successor(b).unwrap(), ChordAction::Some(b));
         assert_eq!(
             node_a.find_successor(c).unwrap(),
             ChordAction::FindSuccessor((b, c))
         );
-        node_a.join(c);
+        node_a.join(c).unwrap();
         assert_eq!(node_a.successor, b, "{:?}", node_a.finger);
-        node_b.join(c);
+        assert!(!node_a.finger.contains(&Some(a)));
+        assert!(node_a.finger.contains(&Some(b)));
+        assert!(node_a.finger.contains(&Some(c)), "{:?}", node_a.finger);
+
+        node_b.join(c).unwrap();
+        let _ = node_b.join(a);
+        assert!(!node_b.finger.contains(&Some(a)));
+        assert!(!node_b.finger.contains(&Some(b)));
+        assert!(node_b.finger.contains(&Some(c)));
+
         // because a < b < c
         // c not in (a, successor)
         // go find cloest_precding_node which id in (a, c)
@@ -186,5 +218,21 @@ mod tests {
             node_a.find_successor(c).unwrap(),
             ChordAction::FindSuccessor((b, c))
         );
+
+        node_c.join(a).unwrap();
+        node_b.join(c).unwrap();
+        assert_eq!(node_c.successor, c, "{:?}", node_c.successor);
+        assert!(!node_c.finger.contains(&Some(a)), "{:?}", node_c.finger);
+        assert!(!node_c.finger.contains(&Some(b)))
+    }
+
+    #[test]
+    fn test_chord_stable() {
+        let a = Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
+        let b = Did::from_str("0x999999cf1046e68e36E1aA2E0E07105eDDD1f08E").unwrap();
+        let c = Did::from_str("0xc0ffee254729296a45a3885639AC7E10F9d54979").unwrap();
+
+        let mut node_c = Chord::new(c);
+        assert_eq!(node_c.successor, c);
     }
 }
