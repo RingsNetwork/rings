@@ -220,9 +220,9 @@ mod tests {
         );
 
         node_c.join(a).unwrap();
-        node_b.join(c).unwrap();
+        node_c.join(b).unwrap();
         assert_eq!(node_c.successor, a, "{:?}", node_c.successor);
-        assert!(!node_c.finger.contains(&Some(a)), "{:?}", node_c.finger);
+        assert!(node_c.finger.contains(&Some(a)), "{:?}", node_c.finger);
         assert!(!node_c.finger.contains(&Some(b)))
     }
 }
