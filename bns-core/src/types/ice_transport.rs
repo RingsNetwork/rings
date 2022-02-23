@@ -1,5 +1,5 @@
+use crate::ecc::SecretKey;
 use crate::encoder::Encoded;
-use crate::signing::SecretKey;
 use crate::types::channel::Channel;
 use anyhow::Result;
 use async_trait::async_trait;
