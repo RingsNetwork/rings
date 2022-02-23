@@ -92,3 +92,34 @@ fn get_epoch_ms() -> u128 {
         .unwrap()
         .as_millis()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Deserialize, Serialize)]
+    struct TestData {
+        a: String,
+        b: i64,
+        c: f64,
+        d: bool,
+    }
+
+    #[test]
+    fn new_then_verify() {
+        let key =
+            SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0")
+                .unwrap();
+
+        let test_data = TestData {
+            a: "hello".to_string(),
+            b: 111,
+            c: 2.33,
+            d: true,
+        };
+
+        let signed_msg = SignedMsg::new(test_data, &key, None).unwrap();
+
+        assert!(signed_msg.verify());
+    }
+}
