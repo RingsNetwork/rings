@@ -50,10 +50,8 @@ impl Chord {
             let n: BigUint = self.id.into();
             // (n + 2^k) % 2^m >= n
             let delta = (n + BigUint::from(2u16).pow(k)) % BigUint::from(2u16).pow(160);
-            if delta <= id.into() {
-                if delta > self.finger[k as usize].into() {
-                    self.finger[k as usize] = id;
-                }
+            if delta <= id.into() && delta > self.finger[k as usize].into() {
+                self.finger[k as usize] = id;
             }
         }
         self.successor = self.finger[0];
@@ -168,7 +166,7 @@ mod tests {
 
         let mut node_a = Chord::new(a);
         let mut node_b = Chord::new(b);
-        let mut node_c = Chord::new(c);
+        let _node_c = Chord::new(c);
 
         assert!(a < b && b < c);
         node_a.join(b);

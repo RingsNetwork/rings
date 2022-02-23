@@ -40,7 +40,7 @@ impl From<Address> for Did {
 impl FromStr for Did {
     type Err = anyhow::Error;
     fn from_str(s: &str) -> anyhow::Result<Self> {
-        Ok(Self(Address::from_str(&s)?.into()))
+        Ok(Self(Address::from_str(s)?))
     }
 }
 
