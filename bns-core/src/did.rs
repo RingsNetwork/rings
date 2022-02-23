@@ -2,6 +2,7 @@ use num_bigint::BigUint;
 use std::ops::Deref;
 use std::str::FromStr;
 use web3::types::Address;
+use web3::types::H160;
 
 #[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd, Debug)]
 pub struct Did(Address);
@@ -16,6 +17,17 @@ impl Deref for Did {
 impl From<Did> for BigUint {
     fn from(did: Did) -> BigUint {
         BigUint::from_bytes_be(did.as_bytes())
+    }
+}
+
+impl TryFrom<BigUint> for Did {
+    type Error = anyhow::Error;
+    fn try_from(a: BigUint) -> anyhow::Result<Self> {
+        let va: [u8; 20] = a
+            .to_bytes_be()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("Failed to cover BigUint to H160"))?;
+        Ok(Self(H160(va)))
     }
 }
 
