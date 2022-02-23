@@ -56,7 +56,7 @@ impl Chord {
             let pos = self.id + Did::from(BigUint::from(2u16).pow(k));
             // pos less than id or id is on another side of ring
             if pos <= id || pos >= -id {
-                println!("{:?}", Did::from(pos.clone()));
+                println!("{:?}", pos);
                 match self.finger[k as usize] {
                     Some(v) => {
                         // for a existed value v

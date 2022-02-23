@@ -1,7 +1,7 @@
 #![feature(async_closure)]
 use anyhow::Result;
 use bns_core::channels::default::AcChannel;
-use bns_core::signing::SecretKey;
+use bns_core::ecc::SecretKey;
 use bns_core::swarm::Swarm;
 use bns_core::types::channel::Channel;
 use bns_node::logger::Logger;

@@ -1,7 +1,7 @@
 use crate::channels::wasm::CbChannel;
+use crate::ecc::SecretKey;
 use crate::encoder::Encoded;
-use crate::signing::SecretKey;
-use crate::signing::SigMsg;
+use crate::msg::SignedMsg;
 use crate::types::channel::Channel;
 use crate::types::channel::Events;
 use crate::types::ice_transport::IceTransport;
@@ -431,16 +431,16 @@ impl IceTrickleScheme<CbChannel> for WasmTransport {
             candidates: local_candidates_json,
         };
         log::trace!("prepared hanshake info :{:?}", data);
-        let resp = SigMsg::new(data, key)?;
+        let resp = SignedMsg::new(data, &key, None)?;
         Ok(resp.try_into()?)
     }
 
     async fn register_remote_info(&self, data: Encoded) -> anyhow::Result<Address> {
-        let data: SigMsg<TricklePayload> = data.try_into()?;
+        let data: SignedMsg<TricklePayload> = data.try_into()?;
         log::trace!("register remote info: {:?}", data);
 
         match data.verify() {
-            Ok(true) => {
+            true => {
                 let sdp: SdpString = data.data.sdp.into();
                 self.set_remote_description(SdpString::try_from(sdp.to_owned())?)
                     .await?;

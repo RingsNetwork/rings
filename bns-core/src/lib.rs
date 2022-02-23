@@ -4,8 +4,9 @@
 pub mod channels;
 pub mod dht;
 pub mod did;
+pub mod ecc;
 pub mod encoder;
-pub mod signing;
+pub mod msg;
 pub mod storage;
 pub mod swarm;
 pub mod transports;
