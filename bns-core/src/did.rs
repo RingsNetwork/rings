@@ -27,7 +27,6 @@ impl From<Did> for BigUint {
 impl From<BigUint> for Did {
     fn from(a: BigUint) -> Self {
         let ff = a % (BigUint::from(2u16).pow(160));
-        println!("fuck {:?}", ff.to_bytes_be());
         let mut va: Vec<u8> = ff.to_bytes_be();
         let mut res = vec![0u8; 20 - va.len()];
         res.append(&mut va);

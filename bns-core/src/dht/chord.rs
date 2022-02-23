@@ -45,16 +45,23 @@ impl Chord {
     }
 
     // join a Chord ring containing node id .
-    pub fn join(&mut self, id: Did) -> Result<ChordAction> {
-        for k in (0u32..160u32).rev() {
-            let n: BigUint = self.id.into();
+    pub fn join(&mut self, id: Did) -> ChordAction {
+        if id == self.id {
+            return ChordAction::None;
+        }
+        for k in 0u32..160u32 {
             // (n + 2^k) % 2^m >= n
             // pos >= id
-            let pos = (n + BigUint::from(2u16).pow(k)) % BigUint::from(2u16).pow(160);
-            if pos <= id.into() {
+            // from n to n + 2^160
+            let pos = self.id + Did::from(BigUint::from(2u16).pow(k));
+            // pos less than id or id is on another side of ring
+            if pos <= id || pos >= -id {
+                println!("{:?}", Did::from(pos.clone()));
                 match self.finger[k as usize] {
                     Some(v) => {
-                        if pos >= v.into() {
+                        // for a existed value v
+                        // if id < v, then it's more close to this range
+                        if id < v || id > -v {
                             self.finger[k as usize] = Some(id);
                             // if id is more close to successor
                         }
@@ -72,7 +79,7 @@ impl Chord {
             self.successor = id;
         }
 
-        Ok(ChordAction::FindSuccessor((self.successor, self.id)))
+        ChordAction::FindSuccessor((self.successor, self.id))
     }
 
     // called periodically. veriﬁes n’s immediate
@@ -178,52 +185,75 @@ mod tests {
     use std::str::FromStr;
 
     #[test]
-    fn test_chord_join() {
-        let a = Did::from_str("0xaaE807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
-        let b = Did::from_str("0xbb9999cf1046e68e36E1aA2E0E07105eDDD1f08E").unwrap();
+    fn test_chord_finger() {
+        let a = Did::from_str("0x00E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
+        let b = Did::from_str("0x119999cf1046e68e36E1aA2E0E07105eDDD1f08E").unwrap();
         let c = Did::from_str("0xccffee254729296a45a3885639AC7E10F9d54979").unwrap();
-
-        let mut node_a = Chord::new(a);
-        let mut node_b = Chord::new(b);
-        let mut node_c = Chord::new(c);
-
-        assert_eq!(node_a.successor, a);
-        assert_eq!(node_b.successor, b);
-        assert_eq!(node_c.successor, c);
+        let d = Did::from_str("0xffffee254729296a45a3885639AC7E10F9d54979").unwrap();
 
         assert!(a < b && b < c);
-        node_a.join(b).unwrap();
-        // if self.id < id && id <= self.successor
-        assert_eq!(node_a.successor, b, "{:?}", node_a.finger);
-        assert_eq!(node_a.find_successor(b).unwrap(), ChordAction::Some(b));
-        assert_eq!(
-            node_a.find_successor(c).unwrap(),
-            ChordAction::FindSuccessor((b, c))
-        );
-        node_a.join(c).unwrap();
-        assert_eq!(node_a.successor, b, "{:?}", node_a.finger);
-        assert!(!node_a.finger.contains(&Some(a)));
+        // distence between (a, d) is less than (b, d)
+        assert!((a - d) < (b-d));
+
+        let mut node_a = Chord::new(a);
+        assert_eq!(node_a.successor, a);
+
+        // for increase seq join
+        node_a.join(a);
+        // Node A wont add self to finder
+        assert_eq!(node_a.finger, [None; 160]);
+        node_a.join(b);
+        // b is very far away from a
+        // a.finger should store did as range
+        // [(a, a+2), (a+2, a+4), (a+4, a+8), ..., (a+2^159, a + 2^160)]
+        // b is in range(a+2^156, a+2^157)
+        assert!(BigUint::from(b) > BigUint::from(2u16).pow(156));
+        assert!(BigUint::from(b) < BigUint::from(2u16).pow(157));
+        // Node A's finter should be [None, .., B]
         assert!(node_a.finger.contains(&Some(b)));
+        assert!(node_a.finger.contains(&None));
+
+        // Node A starts to query node b for it's successor
+        assert_eq!(node_a.join(b), ChordAction::FindSuccessor((b, a)));
+        assert_eq!(node_a.successor, b);
+        // Node A keep querying node b for it's successor
+        assert_eq!(node_a.join(c), ChordAction::FindSuccessor((b, a)));
+        // Node A's finter should be [None, ..B, C]
         assert!(node_a.finger.contains(&Some(c)), "{:?}", node_a.finger);
+        // c is in range(a+2^159, a+2^160)
+        assert!(BigUint::from(c) > BigUint::from(2u16).pow(159));
+        assert!(BigUint::from(c) < BigUint::from(2u16).pow(160));
 
-        node_b.join(c).unwrap();
-        let _ = node_b.join(a);
-        assert!(!node_b.finger.contains(&Some(a)));
-        assert!(!node_b.finger.contains(&Some(b)));
-        assert!(node_b.finger.contains(&Some(c)));
+        assert_eq!(node_a.finger[159], Some(c));
+        assert_eq!(node_a.finger[158], Some(c));
+        assert_eq!(node_a.finger[155], Some(b));
+        assert_eq!(node_a.finger[156], Some(b));
 
-        // because a < b < c
-        // c not in (a, successor)
-        // go find cloest_precding_node which id in (a, c)
-        assert_eq!(
-            node_a.find_successor(c).unwrap(),
-            ChordAction::FindSuccessor((b, c))
-        );
+        assert_eq!(node_a.successor, b);
+        // Node A will query c to find d
+        assert_eq!(node_a.find_successor(d).unwrap(), ChordAction::FindSuccessor((c, d)));
+        assert_eq!(node_a.find_successor(c).unwrap(), ChordAction::FindSuccessor((b, c)));
 
-        node_c.join(a).unwrap();
-        node_c.join(b).unwrap();
-        assert_eq!(node_c.successor, a, "{:?}", node_c.successor);
-        assert!(node_c.finger.contains(&Some(a)), "{:?}", node_c.finger);
-        assert!(!node_c.finger.contains(&Some(b)))
+        // for decrease seq join
+        let mut node_d = Chord::new(d);
+        assert_eq!(node_d.join(c), ChordAction::FindSuccessor((c, d)));
+        assert_eq!(node_d.join(b), ChordAction::FindSuccessor((b, d)));
+        assert_eq!(node_d.join(a), ChordAction::FindSuccessor((a, d)));
+
+        // for over half ring join
+        let mut node_d = Chord::new(d);
+        assert_eq!(node_d.successor, d);
+        assert_eq!(node_d.join(a), ChordAction::FindSuccessor((a, d)));
+        // for a ring a, a is over 2^152 far away from d
+        assert!(d + Did::from(BigUint::from(2u16).pow(152)) > a);
+        assert!(d + Did::from(BigUint::from(2u16).pow(151)) < a);
+        assert!(node_d.finger.contains(&Some(a)));
+        assert_eq!(node_d.finger[151], Some(a));
+        assert_eq!(node_d.finger[152], None);
+        assert_eq!(node_d.finger[0], Some(a));
+        // when b insearted a is still more close to d
+        assert_eq!(node_d.join(b), ChordAction::FindSuccessor((a, d)));
+        assert!(d + Did::from(BigUint::from(2u16).pow(159)) > b);
+        assert_eq!(node_d.successor, a);
     }
 }
