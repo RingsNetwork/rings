@@ -193,7 +193,7 @@ mod tests {
 
         assert!(a < b && b < c);
         // distence between (a, d) is less than (b, d)
-        assert!((a - d) < (b-d));
+        assert!((a - d) < (b - d));
 
         let mut node_a = Chord::new(a);
         assert_eq!(node_a.successor, a);
@@ -231,8 +231,14 @@ mod tests {
 
         assert_eq!(node_a.successor, b);
         // Node A will query c to find d
-        assert_eq!(node_a.find_successor(d).unwrap(), ChordAction::FindSuccessor((c, d)));
-        assert_eq!(node_a.find_successor(c).unwrap(), ChordAction::FindSuccessor((b, c)));
+        assert_eq!(
+            node_a.find_successor(d).unwrap(),
+            ChordAction::FindSuccessor((c, d))
+        );
+        assert_eq!(
+            node_a.find_successor(c).unwrap(),
+            ChordAction::FindSuccessor((b, c))
+        );
 
         // for decrease seq join
         let mut node_d = Chord::new(d);
