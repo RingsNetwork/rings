@@ -1,7 +1,7 @@
 use crate::service::http_error::HttpError;
 use anyhow::anyhow;
 use axum::extract::{Extension, Query, RawBody};
-use bns_core::signing::SecretKey;
+use bns_core::ecc::SecretKey;
 use bns_core::swarm::Swarm;
 use bns_core::types::ice_transport::IceTrickleScheme;
 use std::collections::HashMap;

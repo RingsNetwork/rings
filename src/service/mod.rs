@@ -6,7 +6,7 @@ use axum::{
     routing::{get, post},
     AddExtensionLayer, Router, Server,
 };
-use bns_core::signing::SecretKey;
+use bns_core::ecc::SecretKey;
 use bns_core::swarm::Swarm;
 use std::sync::Arc;
 
