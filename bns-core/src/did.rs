@@ -1,3 +1,6 @@
+/// Did is a finate Ring R(P) where P = 2^160
+
+
 use num_bigint::BigUint;
 use std::ops::Deref;
 use std::str::FromStr;
