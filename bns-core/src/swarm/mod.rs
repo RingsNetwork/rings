@@ -1,42 +1,38 @@
+#[cfg(not(feature = "wasm"))]
+use crate::channels::default::AcChannel as Channel;
+#[cfg(feature = "wasm")]
+use crate::channels::wasm::CbChannel as Channel;
+use crate::dht::chord::Chord;
 /// Swarm is transport management
 ///
 use crate::storage::{MemStorage, Storage};
-use crate::types::ice_transport::IceTransport;
-
-#[cfg(not(feature = "wasm"))]
-use crate::channels::default::AcChannel as Channel;
 #[cfg(not(feature = "wasm"))]
 use crate::transports::default::DefaultTransport as Transport;
-
-#[cfg(feature = "wasm")]
-use crate::channels::wasm::CbChannel as Channel;
 #[cfg(feature = "wasm")]
 use crate::transports::wasm::WasmTransport as Transport;
-
 use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::Events;
-
+use crate::types::ice_transport::IceTransport;
 use anyhow::Result;
 use std::sync::Arc;
 use web3::types::Address;
-
-pub enum State {
-    Anonymous,
-    Known,
-}
 
 pub struct Swarm {
     pub table: MemStorage<Address, Arc<Transport>>,
     pub signaler: Arc<Channel>,
     pub stun_server: String,
+    pub dht: Chord,
+    pub address: Address,
 }
 
 impl Swarm {
-    pub fn new(ch: Arc<Channel>, stun: String) -> Self {
+    pub fn new(ch: Arc<Channel>, stun: String, addr: Address) -> Self {
         Self {
             table: MemStorage::new(),
             signaler: Arc::clone(&ch),
             stun_server: stun,
+            dht: Chord::new(addr.into()),
+            address: addr,
         }
     }
 

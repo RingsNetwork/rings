@@ -37,7 +37,7 @@ use web_sys::RtcSdpType;
 use web_sys::RtcSessionDescription;
 use web_sys::RtcSessionDescriptionInit;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SdpString(String);
 
 impl TryFrom<JsValue> for SdpString {
