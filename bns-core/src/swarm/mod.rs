@@ -43,8 +43,14 @@ impl Swarm {
         Ok(Arc::clone(&trans))
     }
 
-    pub fn register(&self, addr: Address, trans: Arc<Transport>) {
-        self.table.set(addr, trans);
+    pub async fn register(&self, addr: Address, trans: Arc<Transport>) {
+        let prev_trans = self.table.set(addr, trans);
+
+        if let Some(trans) = prev_trans {
+            if let Err(e) = trans.close().await {
+                log::error!("failed to close previous while registering {:?}", e)
+            }
+        }
     }
 
     pub fn get_transport(&self, addr: Address) -> Option<Arc<Transport>> {
