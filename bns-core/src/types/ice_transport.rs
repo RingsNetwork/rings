@@ -15,13 +15,14 @@ pub trait IceTransport<Ch: Channel> {
     type Candidate;
     type Sdp;
     type DataChannel;
-    type ConnectionState;
+    type IceConnectionState;
     type Msg;
 
     fn new(signaler: Arc<Ch>) -> Self;
     fn signaler(&self) -> Arc<Ch>;
     async fn start(&mut self, stun_addr: String) -> Result<()>;
     async fn close(&self) -> Result<()>;
+    async fn ice_connection_state(&self) -> Option<Self::IceConnectionState>;
 
     async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>>;
     async fn get_pending_candidates(&self) -> Vec<Self::Candidate>;
@@ -38,6 +39,13 @@ pub trait IceTransport<Ch: Channel> {
     async fn set_remote_description<T>(&self, desc: T) -> Result<()>
     where
         T: Into<Self::Sdp> + Send;
+}
+
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+pub trait IceTransportCallback<Ch: Channel>: IceTransport<Ch> {
+    type ConnectionState;
+
     async fn on_ice_candidate(
         &self,
         f: Box<
@@ -62,11 +70,6 @@ pub trait IceTransport<Ch: Channel> {
                 + Sync,
         >,
     ) -> Result<()>;
-}
-
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
-pub trait IceTransportCallback<Ch: Channel>: IceTransport<Ch> {
     async fn on_ice_candidate_callback(
         &self,
     ) -> Box<

@@ -79,7 +79,7 @@ impl IceTransport<CbChannel> for WasmTransport {
     type Candidate = RtcIceCandidate;
     type Sdp = RtcSessionDescription;
     type DataChannel = RtcDataChannel;
-    type ConnectionState = RtcIceConnectionState;
+    type IceConnectionState = RtcIceConnectionState;
     type Msg = JsValue;
 
     fn new(ch: Arc<CbChannel>) -> Self {
@@ -112,6 +112,12 @@ impl IceTransport<CbChannel> for WasmTransport {
             pc.close()
         }
         Ok(())
+    }
+
+    async fn ice_connection_state(&self) -> Option<Self::IceConnectionState> {
+        self.get_peer_connection()
+            .await
+            .map(|pc| pc.ice_connection_state())
     }
 
     async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>> {
@@ -228,6 +234,24 @@ impl IceTransport<CbChannel> for WasmTransport {
             None => Err(anyhow!("Failed on getting connection")),
         }
     }
+}
+
+impl WasmTransport {
+    pub async fn setup_channel(&mut self, name: &str) -> &Self {
+        if let Some(conn) = &self.connection {
+            let channel = conn.create_data_channel(&name);
+            self.channel = Some(Arc::new(channel));
+        }
+        return self;
+    }
+}
+
+#[async_trait(?Send)]
+impl IceTransportCallback<CbChannel> for WasmTransport {
+    // TODO: This is a wrong implementation.
+    // Callback `on_peer_connection_state_change_callback` should use RtcPeerConnectionState.
+    // See also implementation in default.
+    type ConnectionState = RtcIceConnectionState;
 
     async fn on_ice_candidate(
         &self,
@@ -297,20 +321,7 @@ impl IceTransport<CbChannel> for WasmTransport {
             None => Err(anyhow!("Failed on getting connection")),
         }
     }
-}
 
-impl WasmTransport {
-    pub async fn setup_channel(&mut self, name: &str) -> &Self {
-        if let Some(conn) = &self.connection {
-            let channel = conn.create_data_channel(&name);
-            self.channel = Some(Arc::new(channel));
-        }
-        return self;
-    }
-}
-
-#[async_trait(?Send)]
-impl IceTransportCallback<CbChannel> for WasmTransport {
     async fn on_ice_candidate_callback(
         &self,
     ) -> Box<

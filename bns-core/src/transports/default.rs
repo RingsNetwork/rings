@@ -22,6 +22,7 @@ use webrtc::api::APIBuilder;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
+use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 use webrtc::ice_transport::ice_gatherer::OnLocalCandidateHdlrFn;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
@@ -47,7 +48,7 @@ impl IceTransport<AcChannel> for DefaultTransport {
     type Candidate = RTCIceCandidate;
     type Sdp = RTCSessionDescription;
     type DataChannel = RTCDataChannel;
-    type ConnectionState = RTCPeerConnectionState;
+    type IceConnectionState = RTCIceConnectionState;
     type Msg = DataChannelMessage;
 
     fn new(ch: Arc<AcChannel>) -> Self {
@@ -100,6 +101,12 @@ impl IceTransport<AcChannel> for DefaultTransport {
         }
 
         Ok(())
+    }
+
+    async fn ice_connection_state(&self) -> Option<Self::IceConnectionState> {
+        self.get_peer_connection()
+            .await
+            .map(|pc| pc.ice_connection_state())
     }
 
     async fn get_peer_connection(&self) -> Option<Arc<RTCPeerConnection>> {
@@ -195,6 +202,30 @@ impl IceTransport<AcChannel> for DefaultTransport {
             None => Err(anyhow!("connection is not setup")),
         }
     }
+}
+
+impl DefaultTransport {
+    pub async fn setup_channel(&mut self, name: &str) -> Result<()> {
+        match self.get_peer_connection().await {
+            Some(peer_connection) => {
+                let channel = peer_connection.create_data_channel(name, None).await;
+                match channel {
+                    Ok(ch) => {
+                        let mut channel = self.data_channel.lock().await;
+                        *channel = Some(ch);
+                        Ok(())
+                    }
+                    Err(e) => Err(anyhow!(e)),
+                }
+            }
+            None => Err(anyhow!("cannot get data channel")),
+        }
+    }
+}
+
+#[async_trait]
+impl IceTransportCallback<AcChannel> for DefaultTransport {
+    type ConnectionState = RTCPeerConnectionState;
 
     async fn on_ice_candidate(&self, f: OnLocalCandidateHdlrFn) -> Result<()> {
         match self.get_peer_connection().await {
@@ -228,29 +259,7 @@ impl IceTransport<AcChannel> for DefaultTransport {
         }
         Ok(())
     }
-}
 
-impl DefaultTransport {
-    pub async fn setup_channel(&mut self, name: &str) -> Result<()> {
-        match self.get_peer_connection().await {
-            Some(peer_connection) => {
-                let channel = peer_connection.create_data_channel(name, None).await;
-                match channel {
-                    Ok(ch) => {
-                        let mut channel = self.data_channel.lock().await;
-                        *channel = Some(ch);
-                        Ok(())
-                    }
-                    Err(e) => Err(anyhow!(e)),
-                }
-            }
-            None => Err(anyhow!("cannot get data channel")),
-        }
-    }
-}
-
-#[async_trait]
-impl IceTransportCallback<AcChannel> for DefaultTransport {
     async fn on_ice_candidate_callback(&self) -> OnLocalCandidateHdlrFn {
         let peer_connection = self.get_peer_connection().await;
         let pending_candidates = Arc::clone(&self.pending_candidates);
