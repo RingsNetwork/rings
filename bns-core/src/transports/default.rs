@@ -23,15 +23,12 @@ use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
 use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
-use webrtc::ice_transport::ice_gatherer::OnLocalCandidateHdlrFn;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::math_rand_alpha;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
-use webrtc::peer_connection::OnDataChannelHdlrFn;
-use webrtc::peer_connection::OnPeerConnectionStateChangeHdlrFn;
 use webrtc::peer_connection::RTCPeerConnection;
 
 #[derive(Clone)]
@@ -49,6 +46,7 @@ impl IceTransport<AcChannel> for DefaultTransport {
     type Sdp = RTCSessionDescription;
     type DataChannel = RTCDataChannel;
     type IceConnectionState = RTCIceConnectionState;
+    type ConnectionState = RTCPeerConnectionState;
     type Msg = DataChannelMessage;
 
     fn new(ch: Arc<AcChannel>) -> Self {
@@ -225,9 +223,7 @@ impl DefaultTransport {
 
 #[async_trait]
 impl IceTransportCallback<AcChannel> for DefaultTransport {
-    type ConnectionState = RTCPeerConnectionState;
-
-    async fn on_ice_candidate(&self, f: OnLocalCandidateHdlrFn) -> Result<()> {
+    async fn on_ice_candidate(&self, f: Self::OnLocalCandidateHdlrFn) -> Result<()> {
         match self.get_peer_connection().await {
             Some(peer_connection) => {
                 peer_connection.on_ice_candidate(f).await;
@@ -239,7 +235,7 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
 
     async fn on_peer_connection_state_change(
         &self,
-        f: OnPeerConnectionStateChangeHdlrFn,
+        f: Self::OnPeerConnectionStateChangeHdlrFn,
     ) -> Result<()> {
         match self.get_peer_connection().await {
             Some(peer_connection) => {
@@ -250,7 +246,7 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
         Ok(())
     }
 
-    async fn on_data_channel(&self, f: OnDataChannelHdlrFn) -> Result<()> {
+    async fn on_data_channel(&self, f: Self::OnDataChannelHdlrFn) -> Result<()> {
         match self.get_peer_connection().await {
             Some(peer_connection) => {
                 peer_connection.on_data_channel(f).await;
@@ -260,7 +256,7 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
         Ok(())
     }
 
-    async fn on_ice_candidate_callback(&self) -> OnLocalCandidateHdlrFn {
+    async fn on_ice_candidate_callback(&self) -> Self::OnLocalCandidateHdlrFn {
         let peer_connection = self.get_peer_connection().await;
         let pending_candidates = Arc::clone(&self.pending_candidates);
 
@@ -282,7 +278,9 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
         }
     }
 
-    async fn on_peer_connection_state_change_callback(&self) -> OnPeerConnectionStateChangeHdlrFn {
+    async fn on_peer_connection_state_change_callback(
+        &self,
+    ) -> Self::OnPeerConnectionStateChangeHdlrFn {
         let sender = self.signaler().sender();
         box move |s: RTCPeerConnectionState| {
             if s == RTCPeerConnectionState::Failed {
@@ -294,7 +292,7 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
         }
     }
 
-    async fn on_data_channel_callback(&self) -> OnDataChannelHdlrFn {
+    async fn on_data_channel_callback(&self) -> Self::OnDataChannelHdlrFn {
         let channel = self.get_data_channel().await.unwrap();
         let signaler = self.signaler();
 

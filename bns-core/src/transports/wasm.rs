@@ -13,8 +13,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json;
 use serde_json::json;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -81,6 +79,11 @@ impl IceTransport<CbChannel> for WasmTransport {
     type DataChannel = RtcDataChannel;
     type IceConnectionState = RtcIceConnectionState;
     type Msg = JsValue;
+
+    // TODO: This is a wrong type define.
+    // Callback `on_peer_connection_state_change_callback` should use RtcPeerConnectionState.
+    // See also implementation in default.
+    type ConnectionState = RtcIceConnectionState;
 
     fn new(ch: Arc<CbChannel>) -> Self {
         Self {
@@ -248,19 +251,7 @@ impl WasmTransport {
 
 #[async_trait(?Send)]
 impl IceTransportCallback<CbChannel> for WasmTransport {
-    // TODO: This is a wrong implementation.
-    // Callback `on_peer_connection_state_change_callback` should use RtcPeerConnectionState.
-    // See also implementation in default.
-    type ConnectionState = RtcIceConnectionState;
-
-    async fn on_ice_candidate(
-        &self,
-        f: Box<
-            dyn FnMut(Option<Self::Candidate>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
-                + Send
-                + Sync,
-        >,
-    ) -> Result<()> {
+    async fn on_ice_candidate(&self, f: Self::OnLocalCandidateHdlrFn) -> Result<()> {
         let mut f = Some(f);
         match &self.get_peer_connection().await {
             Some(c) => {
@@ -278,11 +269,7 @@ impl IceTransportCallback<CbChannel> for WasmTransport {
 
     async fn on_peer_connection_state_change(
         &self,
-        f: Box<
-            dyn FnMut(Self::ConnectionState) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
-                + Send
-                + Sync,
-        >,
+        f: Self::OnPeerConnectionStateChangeHdlrFn,
     ) -> Result<()> {
         let mut f = Some(f);
         match &self.get_peer_connection().await {
@@ -299,14 +286,7 @@ impl IceTransportCallback<CbChannel> for WasmTransport {
         }
     }
 
-    async fn on_data_channel(
-        &self,
-        f: Box<
-            dyn FnMut(Arc<Self::DataChannel>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
-                + Send
-                + Sync,
-        >,
-    ) -> Result<()> {
+    async fn on_data_channel(&self, f: Self::OnDataChannelHdlrFn) -> Result<()> {
         let mut f = Some(f);
         match &self.get_peer_connection().await {
             Some(c) => {
@@ -322,31 +302,15 @@ impl IceTransportCallback<CbChannel> for WasmTransport {
         }
     }
 
-    async fn on_ice_candidate_callback(
-        &self,
-    ) -> Box<
-        dyn FnMut(Option<Self::Candidate>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
-            + Send
-            + Sync,
-    > {
+    async fn on_ice_candidate_callback(&self) -> Self::OnLocalCandidateHdlrFn {
         box move |_: Option<Self::Candidate>| Box::pin(async move {})
     }
     async fn on_peer_connection_state_change_callback(
         &self,
-    ) -> Box<
-        dyn FnMut(Self::ConnectionState) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
-            + Send
-            + Sync,
-    > {
+    ) -> Self::OnPeerConnectionStateChangeHdlrFn {
         box move |_: Self::ConnectionState| Box::pin(async move {})
     }
-    async fn on_data_channel_callback(
-        &self,
-    ) -> Box<
-        dyn FnMut(Arc<Self::DataChannel>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
-            + Send
-            + Sync,
-    > {
+    async fn on_data_channel_callback(&self) -> Self::OnDataChannelHdlrFn {
         box move |_: Arc<Self::DataChannel>| Box::pin(async move {})
     }
 }
