@@ -1,3 +1,4 @@
+#![feature(associated_type_defaults)]
 #![feature(async_closure)]
 #![feature(box_syntax)]
 

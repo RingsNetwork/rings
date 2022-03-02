@@ -3,8 +3,9 @@ mod http_error;
 mod observer;
 
 use axum::{
+    extract::Extension,
     routing::{get, post},
-    AddExtensionLayer, Router, Server,
+    Router, Server,
 };
 use bns_core::ecc::SecretKey;
 use bns_core::swarm::Swarm;
@@ -13,8 +14,8 @@ use std::sync::Arc;
 pub async fn run_service(addr: String, swarm: Arc<Swarm>, key: SecretKey) {
     let binding_addr = addr.parse().unwrap();
 
-    let swarm_layer = AddExtensionLayer::new(swarm);
-    let key_layer = AddExtensionLayer::new(key);
+    let swarm_layer = Extension(swarm);
+    let key_layer = Extension(key);
 
     let app = Router::new()
         .route(

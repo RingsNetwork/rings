@@ -26,29 +26,35 @@ pub struct Swarm {
 }
 
 impl Swarm {
-    pub fn new(ch: Arc<Channel>, stun: String, addr: Address) -> Self {
+    pub fn new(ch: Arc<Channel>, stun: String, address: Address) -> Self {
         Self {
             table: MemStorage::new(),
             signaler: Arc::clone(&ch),
             stun_server: stun,
-            dht: Chord::new(addr.into()),
-            address: addr,
+            dht: Chord::new(address.into()),
+            address,
         }
     }
 
     pub async fn new_transport(&self) -> Result<Arc<Transport>> {
-        let mut ice_transport = Transport::new(Arc::clone(&self.signaler));
+        let mut ice_transport = Transport::new(self.signaler());
         ice_transport.start(self.stun_server.clone()).await?;
         let trans = Arc::new(ice_transport);
         Ok(Arc::clone(&trans))
     }
 
-    pub fn register(&self, addr: Address, trans: Arc<Transport>) {
-        self.table.set(addr, trans);
+    pub async fn register(&self, address: Address, trans: Arc<Transport>) {
+        let prev_trans = self.table.set(address, trans);
+
+        if let Some(trans) = prev_trans {
+            if let Err(e) = trans.close().await {
+                log::error!("failed to close previous while registering {:?}", e)
+            }
+        }
     }
 
-    pub fn get_transport(&self, addr: Address) -> Option<Arc<Transport>> {
-        self.table.get(addr)
+    pub fn get_transport(&self, address: Address) -> Option<Arc<Transport>> {
+        self.table.get(address)
     }
 
     pub fn signaler(&self) -> Arc<Channel> {
@@ -73,4 +79,91 @@ impl Swarm {
             }
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+    use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
+    use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
+
+    fn new_swarm(addr: &str) -> Swarm {
+        let ch = Arc::new(Channel::new(1));
+        let stun = String::from("stun:stun.l.google.com:19302");
+        let address = Address::from_str(addr).unwrap();
+
+        Swarm::new(ch, stun, address)
+    }
+
+    #[tokio::test]
+    async fn swarm_new_transport() {
+        let swarm = new_swarm("0x1111111111111111111111111111111111111111");
+
+        let transport = swarm.new_transport().await.unwrap();
+        assert_eq!(
+            transport.ice_connection_state().await.unwrap(),
+            RTCIceConnectionState::New
+        );
+    }
+
+    #[tokio::test]
+    async fn test_swarm_register_and_get() {
+        let swarm1 = new_swarm("0x1111111111111111111111111111111111111111");
+        let swarm2 = new_swarm("0x2222222222222222222222222222222222222222");
+
+        assert!(swarm1.get_transport(swarm2.address).is_none());
+
+        let transport0 = swarm1.new_transport().await.unwrap();
+        let transport1 = transport0.clone();
+
+        swarm1.register(swarm2.address, transport1).await;
+
+        let transport2 = swarm1.get_transport(swarm2.address).unwrap();
+
+        assert!(Arc::ptr_eq(&transport0, &transport2));
+    }
+
+    #[tokio::test]
+    async fn test_swarm_will_close_previous_transport() {
+        let swarm1 = new_swarm("0x1111111111111111111111111111111111111111");
+        let swarm2 = new_swarm("0x2222222222222222222222222222222222222222");
+
+        assert!(swarm1.get_transport(swarm2.address).is_none());
+
+        let transport1 = swarm1.new_transport().await.unwrap();
+        let transport2 = swarm1.new_transport().await.unwrap();
+
+        swarm1.register(swarm2.address, transport1.clone()).await;
+        swarm1.register(swarm2.address, transport2.clone()).await;
+
+        assert_eq!(
+            transport1.ice_connection_state().await.unwrap(),
+            RTCIceConnectionState::New
+        );
+        assert_eq!(
+            transport1
+                .get_peer_connection()
+                .await
+                .unwrap()
+                .connection_state(),
+            RTCPeerConnectionState::Closed
+        );
+
+        assert_eq!(
+            transport2.ice_connection_state().await.unwrap(),
+            RTCIceConnectionState::New
+        );
+        assert_eq!(
+            transport2
+                .get_peer_connection()
+                .await
+                .unwrap()
+                .connection_state(),
+            RTCPeerConnectionState::New
+        );
+    }
+
+    #[tokio::test]
+    async fn test_swarm_event_handler() {}
 }

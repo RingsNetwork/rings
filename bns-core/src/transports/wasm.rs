@@ -2,8 +2,6 @@ use crate::channels::wasm::CbChannel;
 use crate::ecc::SecretKey;
 use crate::encoder::Encoded;
 use crate::msg::SignedMsg;
-use crate::types::channel::Channel;
-use crate::types::channel::Events;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
 use crate::types::ice_transport::IceTrickleScheme;
@@ -15,8 +13,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json;
 use serde_json::json;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -24,7 +20,6 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::spawn_local;
 use wasm_bindgen_futures::JsFuture;
 use web3::types::Address;
-use web_sys::MessageEvent;
 use web_sys::RtcConfiguration;
 use web_sys::RtcDataChannel;
 use web_sys::RtcDataChannelEvent;
@@ -81,9 +76,14 @@ impl IceTransport<CbChannel> for WasmTransport {
     type Connection = RtcPeerConnection;
     type Candidate = RtcIceCandidate;
     type Sdp = RtcSessionDescription;
-    type Channel = RtcDataChannel;
-    type ConnectionState = RtcIceConnectionState;
+    type DataChannel = RtcDataChannel;
+    type IceConnectionState = RtcIceConnectionState;
     type Msg = JsValue;
+
+    // TODO: This is a wrong type define.
+    // Callback `on_peer_connection_state_change_callback` should use RtcPeerConnectionState.
+    // See also implementation in default.
+    type ConnectionState = RtcIceConnectionState;
 
     fn new(ch: Arc<CbChannel>) -> Self {
         Self {
@@ -108,6 +108,19 @@ impl IceTransport<CbChannel> for WasmTransport {
             .map(|c| Arc::new(c.to_owned()));
         self.setup_channel("bns").await;
         return Ok(());
+    }
+
+    async fn close(&self) -> Result<()> {
+        if let Some(pc) = self.get_peer_connection().await {
+            pc.close()
+        }
+        Ok(())
+    }
+
+    async fn ice_connection_state(&self) -> Option<Self::IceConnectionState> {
+        self.get_peer_connection()
+            .await
+            .map(|pc| pc.ice_connection_state())
     }
 
     async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>> {
@@ -160,7 +173,7 @@ impl IceTransport<CbChannel> for WasmTransport {
         Ok(self.get_answer().await?.sdp())
     }
 
-    async fn get_data_channel(&self) -> Option<Arc<Self::Channel>> {
+    async fn get_data_channel(&self) -> Option<Arc<Self::DataChannel>> {
         self.channel.as_ref().map(|c| Arc::clone(&c))
     }
 
@@ -224,15 +237,21 @@ impl IceTransport<CbChannel> for WasmTransport {
             None => Err(anyhow!("Failed on getting connection")),
         }
     }
+}
 
-    async fn on_ice_candidate(
-        &self,
-        f: Box<
-            dyn FnMut(Option<Self::Candidate>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
-                + Send
-                + Sync,
-        >,
-    ) -> Result<()> {
+impl WasmTransport {
+    pub async fn setup_channel(&mut self, name: &str) -> &Self {
+        if let Some(conn) = &self.connection {
+            let channel = conn.create_data_channel(&name);
+            self.channel = Some(Arc::new(channel));
+        }
+        return self;
+    }
+}
+
+#[async_trait(?Send)]
+impl IceTransportCallback<CbChannel> for WasmTransport {
+    async fn on_ice_candidate(&self, f: Self::OnLocalCandidateHdlrFn) -> Result<()> {
         let mut f = Some(f);
         match &self.get_peer_connection().await {
             Some(c) => {
@@ -250,11 +269,7 @@ impl IceTransport<CbChannel> for WasmTransport {
 
     async fn on_peer_connection_state_change(
         &self,
-        f: Box<
-            dyn FnMut(Self::ConnectionState) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
-                + Send
-                + Sync,
-        >,
+        f: Self::OnPeerConnectionStateChangeHdlrFn,
     ) -> Result<()> {
         let mut f = Some(f);
         match &self.get_peer_connection().await {
@@ -271,14 +286,7 @@ impl IceTransport<CbChannel> for WasmTransport {
         }
     }
 
-    async fn on_data_channel(
-        &self,
-        f: Box<
-            dyn FnMut(Arc<Self::Channel>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
-                + Send
-                + Sync,
-        >,
-    ) -> Result<()> {
+    async fn on_data_channel(&self, f: Self::OnDataChannelHdlrFn) -> Result<()> {
         let mut f = Some(f);
         match &self.get_peer_connection().await {
             Some(c) => {
@@ -294,106 +302,16 @@ impl IceTransport<CbChannel> for WasmTransport {
         }
     }
 
-    async fn on_message(
-        &self,
-        f: Box<
-            dyn FnMut(Self::Msg) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
-                + Send
-                + Sync,
-        >,
-    ) -> Result<()> {
-        let mut f = Some(f);
-        match &self.get_data_channel().await {
-            Some(c) => {
-                let callback = Closure::wrap(Box::new(move |ev: MessageEvent| {
-                    let mut f = f.take().unwrap();
-                    spawn_local(async move { f(ev.data()).await })
-                }) as Box<dyn FnMut(MessageEvent)>);
-                c.set_onmessage(Some(callback.as_ref().unchecked_ref()));
-                Ok(())
-            }
-            None => Err(anyhow!("Failed on getting connection")),
-        }
-    }
-
-    async fn on_open(
-        &self,
-        f: Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync>,
-    ) -> Result<()> {
-        match &self.get_data_channel().await {
-            Some(c) => {
-                let callback =
-                    Closure::once(Box::new(move || spawn_local(async move { f().await }))
-                        as Box<dyn FnOnce()>);
-                c.set_onopen(Some(callback.as_ref().unchecked_ref()));
-                Ok(())
-            }
-            None => Err(anyhow!("Failed on getting connection")),
-        }
-    }
-}
-
-impl WasmTransport {
-    pub async fn setup_channel(&mut self, name: &str) -> &Self {
-        if let Some(conn) = &self.connection {
-            let channel = conn.create_data_channel(&name);
-            self.channel = Some(Arc::new(channel));
-        }
-        return self;
-    }
-}
-
-#[async_trait(?Send)]
-impl IceTransportCallback<CbChannel> for WasmTransport {
-    async fn on_ice_candidate_callback(
-        &self,
-    ) -> Box<
-        dyn FnMut(Option<Self::Candidate>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
-            + Send
-            + Sync,
-    > {
+    async fn on_ice_candidate_callback(&self) -> Self::OnLocalCandidateHdlrFn {
         box move |_: Option<Self::Candidate>| Box::pin(async move {})
     }
     async fn on_peer_connection_state_change_callback(
         &self,
-    ) -> Box<
-        dyn FnMut(Self::ConnectionState) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
-            + Send
-            + Sync,
-    > {
+    ) -> Self::OnPeerConnectionStateChangeHdlrFn {
         box move |_: Self::ConnectionState| Box::pin(async move {})
     }
-    async fn on_data_channel_callback(
-        &self,
-    ) -> Box<
-        dyn FnMut(Arc<Self::Channel>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
-            + Send
-            + Sync,
-    > {
-        box move |_: Arc<Self::Channel>| Box::pin(async move {})
-    }
-
-    async fn on_message_callback(
-        &self,
-    ) -> Box<dyn FnMut(Self::Msg) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync>
-    {
-        let sender = self.signaler().sender();
-        box move |msg: Self::Msg| {
-            let sender = sender.clone();
-            let msg = msg.as_string().unwrap().clone();
-            Box::pin(async move {
-                info!("{:?}", msg);
-                sender
-                    .send(Events::ReceiveMsg(msg.as_bytes().to_vec()))
-                    .unwrap();
-            })
-        }
-    }
-
-    async fn on_open_callback(
-        &self,
-    ) -> Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync> {
-        box move || Box::pin(async move {})
+    async fn on_data_channel_callback(&self) -> Self::OnDataChannelHdlrFn {
+        box move |_: Arc<Self::DataChannel>| Box::pin(async move {})
     }
 }
 
