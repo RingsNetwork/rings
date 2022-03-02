@@ -324,7 +324,6 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
             let channel = Arc::clone(&channel);
             let on_open_signaler = Arc::clone(&signaler);
             let on_message_signaler = Arc::clone(&signaler);
-            let on_open_procedures = Arc::clone(&procedures);
             let on_message_procedures = Arc::clone(&procedures);
             Box::pin(async move {
                 d.on_open(Box::new(move || {
@@ -338,7 +337,7 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
                 d.on_message(Box::new(move |msg: DataChannelMessage| {
                     log::debug!("Message from DataChannel: '{:?}'", msg);
                     let signaler = Arc::clone(&on_message_signaler);
-                    let procedures = Arc::clone(&on_open_procedures);
+                    let procedures = Arc::clone(&on_message_procedures);
                     Box::pin(async move {
                         if signaler
                             .send(Events::ReceiveMsg(msg.data.to_vec()))

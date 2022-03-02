@@ -1,6 +1,9 @@
 #![feature(associated_type_defaults)]
 #![feature(async_closure)]
 #![feature(box_syntax)]
+#![allow(dead_code)]
+#![allow(unused_must_use)]
+#![allow(unused_variables)]
 
 pub mod channels;
 pub mod dht;

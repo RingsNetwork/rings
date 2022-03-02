@@ -1,8 +1,6 @@
 use crate::channels::default::AcChannel;
 use crate::dht::chord::Chord;
 use crate::dht::chord::ChordAction;
-use crate::types::channel::Events;
-use serde_json;
 use std::sync::{Arc, Mutex as StdMutex};
 use webrtc::data_channel::RTCDataChannel;
 
@@ -12,7 +10,7 @@ pub struct Procedures {
 }
 
 impl Procedures {
-    pub fn new(buffer: usize, routing: Chord) -> Self {
+    pub fn new(routing: Chord) -> Self {
         Self {
             routing: Arc::new(StdMutex::new(routing)),
         }
