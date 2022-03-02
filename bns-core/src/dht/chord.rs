@@ -1,6 +1,6 @@
 /// implementation of CHORD DHT
 /// ref: https://pdos.csail.mit.edu/papers/ton:chord/paper-ton.pdf
-/// With high probability, the number of nodes that must be contacted to ﬁnd a successor in an N-node network is O(log N).
+/// With high probability, the number of nodes that must be contacted to find a successor in an N-node network is O(log N).
 use crate::did::Did;
 use anyhow::anyhow;
 use anyhow::Result;
@@ -20,12 +20,12 @@ pub enum ChordAction {
 
 #[derive(Clone, Debug)]
 pub struct Chord {
-    // ﬁrst node on circle that succeeds (n + 2 ^(k-1) ) mod 2^m , 1 <= k<= m
+    // first node on circle that succeeds (n + 2 ^(k-1) ) mod 2^m , 1 <= k<= m
     // for index start with 0, it should be (n+2^k) mod 2^m
     pub finger: Vec<Option<Did>>,
-    // The next node on the identiﬁer circle; ﬁnger[1].node
+    // The next node on the identifier circle; finger[1].node
     pub successor: Did,
-    // The previous node on the identiﬁer circle
+    // The previous node on the identifier circle
     pub predecessor: Option<Did>,
     pub id: Did,
     pub fix_finger_index: u8,
@@ -82,7 +82,7 @@ impl Chord {
         ChordAction::FindSuccessor((self.successor, self.id))
     }
 
-    // called periodically. veriﬁes n’s immediate
+    // called periodically. verifies n’s immediate
     // successor, and tells the successor about n.
     pub fn stablilize(&mut self) -> ChordAction {
         // x = successor:predecessor;
@@ -110,14 +110,14 @@ impl Chord {
         }
     }
 
-    // called periodically. refreshes ﬁnger table entries.
-    // next stores the index of the next ﬁnger to ﬁx.
+    // called periodically. refreshes finger table entries.
+    // next stores the index of the next finger to fix.
     pub fn fix_fingers(&mut self) -> Result<ChordAction> {
         // next = next + 1;
         //if (next > m) next = 1;
-        // finger[next] = ﬁnd_successor(n + 2^(next-1) );
+        // finger[next] = find_successor(n + 2^(next-1) );
         // for index start with 0
-        // finger[next] = ﬁnd_successor(n + 2^(next) );
+        // finger[next] = find_successor(n + 2^(next) );
         self.fix_finger_index += 1;
         if self.fix_finger_index >= 160 {
             self.fix_finger_index = 0;
@@ -170,7 +170,7 @@ impl Chord {
             Ok(ChordAction::Some(id))
         } else {
             // n = closest preceding node(id);
-            // return n.ﬁnd_successor(id);
+            // return n.find_successor(id);
             match self.closest_precding_node(id) {
                 Ok(n) => Ok(ChordAction::FindSuccessor((n, id))),
                 Err(e) => Err(anyhow!(e)),
