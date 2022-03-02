@@ -11,7 +11,6 @@ wasm = [
   "js-sys",
   "wasm-bindgen-futures",
   "crossbeam-channel",
-  "instant"
 ]
 
 [dependencies]
@@ -29,7 +28,7 @@ libsecp256k1 = "0.7.0"
 serde_json = { version = "1.0.70" }
 serde = { version = "1.0.130", features = ["derive"] }
 futures = { version = "0.3.21", optional = true }
-instant = { version = "0.1", features = [ "wasm-bindgen", "inaccurate" ], optional=true}
+instant = { version = "0.1", features = [ "wasm-bindgen", "inaccurate" ]}
 
 # default
 webrtc = { version = "0.3.3", optional = true }
