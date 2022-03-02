@@ -1,4 +1,5 @@
 use crate::channels::wasm::CbChannel;
+use crate::dht::message::Procedures;
 use crate::ecc::SecretKey;
 use crate::encoder::Encoded;
 use crate::msg::SignedMsg;
@@ -114,6 +115,7 @@ pub struct WasmTransport {
     pub pending_candidates: Arc<Vec<RtcIceCandidate>>,
     pub channel: Option<Arc<RtcDataChannel>>,
     pub signaler: Arc<CbChannel>,
+    pub procedures: Arc<Procedures>,
 }
 
 #[async_trait(?Send)]
@@ -130,12 +132,13 @@ impl IceTransport<CbChannel> for WasmTransport {
     // See also implementation in default.
     type ConnectionState = RtcIceConnectionState;
 
-    fn new(ch: Arc<CbChannel>) -> Self {
+    fn new(ch: Arc<CbChannel>, proc: Arc<Procedures>) -> Self {
         Self {
             connection: None,
             pending_candidates: Arc::new(vec![]),
             channel: None,
             signaler: Arc::clone(&ch),
+            procedures: Arc::clone(&proc),
         }
     }
 
