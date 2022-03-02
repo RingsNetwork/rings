@@ -86,11 +86,16 @@ where
 }
 
 fn get_epoch_ms() -> u128 {
-    use std::time::SystemTime;
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_millis()
+    if cfg!(feature="wasm") {
+        // If you call std::time::Instant::now() on a WASM platform, it will panic.
+        unsafe { instant::now().to_int_unchecked() }
+    } else {
+        use std::time::SystemTime;
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    }
 }
 
 #[cfg(test)]

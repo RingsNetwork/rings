@@ -11,6 +11,7 @@ wasm = [
   "js-sys",
   "wasm-bindgen-futures",
   "crossbeam-channel",
+  "instant"
 ]
 
 [dependencies]
@@ -21,11 +22,14 @@ log = "0.4"
 dashmap = "4"
 hex = "0.4.3"
 num-bigint = "0.3.1"
-
+rand = { version="0.8.5", features= ["getrandom"]}
+rand_core = { version="0.6.3", features=["getrandom"]}
+rand_hc = "0.3.1"
 libsecp256k1 = "0.7.0"
 serde_json = { version = "1.0.70" }
 serde = { version = "1.0.130", features = ["derive"] }
 futures = { version = "0.3.21", optional = true }
+instant = { version = "0.1", features = [ "wasm-bindgen", "inaccurate" ], optional=true}
 
 # default
 webrtc = { version = "0.3.3", optional = true }

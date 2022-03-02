@@ -37,36 +37,90 @@ use web_sys::RtcSdpType;
 use web_sys::RtcSessionDescription;
 use web_sys::RtcSessionDescriptionInit;
 
-#[derive(Clone, Debug)]
-pub struct SdpString(String);
 
-impl TryFrom<JsValue> for SdpString {
-    type Error = anyhow::Error;
-    fn try_from(s: JsValue) -> Result<Self> {
-        match s.as_string() {
-            Some(v) => Ok(Self(v)),
-            None => Err(anyhow!("cannot cover {:?} to string", s)),
+#[derive(Clone, Deserialize, Serialize, Debug)]
+pub enum SdpType {
+    Offer,
+    Pranswer,
+    Answer,
+    Rollback
+}
+
+impl From<SdpType> for web_sys::RtcSdpType {
+    fn from(s: SdpType) -> Self {
+        match s {
+            SdpType:: Offer => RtcSdpType::Offer,
+            SdpType:: Pranswer => RtcSdpType::Pranswer,
+            SdpType:: Answer => RtcSdpType::Answer,
+            SdpType:: Rollback => RtcSdpType::Rollback,
         }
     }
 }
 
-impl From<String> for SdpString {
-    fn from(s: String) -> Self {
-        Self(s)
+impl From<web_sys::RtcSdpType> for SdpType {
+    fn from(s: web_sys::RtcSdpType) -> Self {
+        match s {
+            RtcSdpType:: Offer => SdpType::Offer,
+            RtcSdpType:: Pranswer => SdpType::Pranswer,
+            RtcSdpType:: Answer => SdpType::Answer,
+            RtcSdpType:: Rollback => SdpType::Rollback,
+            _ => SdpType::Offer
+        }
     }
 }
 
-impl From<RtcSessionDescription> for SdpString {
+
+#[derive(Clone, Deserialize, Serialize, Debug)]
+pub struct RtcSessionDescriptionWrapper {
+    pub sdp: String,
+    #[serde(rename="type")]
+    pub type_: SdpType
+
+}
+
+impl From<JsValue> for RtcSessionDescriptionWrapper {
+    fn from(s: JsValue) -> Self {
+        let sdp = web_sys::RtcSessionDescription::from(s);
+        sdp.into()
+    }
+}
+
+
+impl From<web_sys::RtcSessionDescription> for RtcSessionDescriptionWrapper {
     fn from(sdp: RtcSessionDescription) -> Self {
-        Self(sdp.to_string().into())
+        Self {
+            sdp: sdp.sdp(),
+            type_: sdp.type_().into()
+        }
     }
 }
 
-impl From<SdpString> for RtcSessionDescription {
-    fn from(s: SdpString) -> Self {
-        JsValue::from_str(&s.0).into()
+impl TryFrom<String> for RtcSessionDescriptionWrapper {
+    type Error = anyhow::Error;
+    fn try_from(s: String) -> Result<Self> {
+        serde_json::from_str::<RtcSessionDescriptionWrapper>(&s).map_err(|e| anyhow!(e))
     }
 }
+
+impl From<RtcSessionDescriptionWrapper> for web_sys::RtcSessionDescriptionInit {
+    fn from(s: RtcSessionDescriptionWrapper) -> Self {
+        let mut sdp = web_sys::RtcSessionDescriptionInit::new(s.type_.into());
+        sdp.sdp(&s.sdp).clone()
+    }
+}
+
+// may cause panic here; fix later
+impl From<RtcSessionDescriptionWrapper> for web_sys::RtcSessionDescription {
+    fn from(s: RtcSessionDescriptionWrapper) -> Self {
+        let sdp: web_sys::RtcSessionDescriptionInit = s.into();
+        RtcSessionDescription::new_with_description_init_dict(
+               &sdp
+        ).unwrap()
+    }
+}
+
+
+
 
 #[derive(Clone)]
 pub struct WasmTransport {
@@ -124,7 +178,7 @@ impl IceTransport<CbChannel> for WasmTransport {
                 let promise = c.create_answer();
                 match JsFuture::from(promise).await {
                     Ok(answer) => {
-                        self.set_local_description(SdpString::try_from(answer.to_owned())?)
+                        self.set_local_description(RtcSessionDescriptionWrapper::from(answer.to_owned()))
                             .await?;
                         Ok(answer.into())
                     }
@@ -141,7 +195,7 @@ impl IceTransport<CbChannel> for WasmTransport {
                 let promise = c.create_offer();
                 match JsFuture::from(promise).await {
                     Ok(offer) => {
-                        self.set_local_description(SdpString::try_from(offer.to_owned())?)
+                        self.set_local_description(RtcSessionDescriptionWrapper::from(offer.to_owned()))
                             .await?;
                         Ok(offer.into())
                     }
@@ -420,14 +474,18 @@ impl IceTrickleScheme<CbChannel> for WasmTransport {
                 return Err(anyhow!("unsupport sdp type"));
             }
         };
+        log::trace!("got sdp");
         let local_candidates_json: Vec<String> = self
             .get_pending_candidates()
             .await
             .iter()
             .map(|c| c.clone().to_string().into())
             .collect();
+        log::trace!("got local candid");
+        let sdp_str = sdp.to_string();
+        log::trace!("get sdp {:?}", sdp_str);
         let data = TricklePayload {
-            sdp: sdp.to_string().into(),
+            sdp: sdp_str.into(),
             candidates: local_candidates_json,
         };
         log::trace!("prepared hanshake info :{:?}", data);
@@ -441,8 +499,8 @@ impl IceTrickleScheme<CbChannel> for WasmTransport {
 
         match data.verify() {
             true => {
-                let sdp: SdpString = data.data.sdp.into();
-                self.set_remote_description(SdpString::try_from(sdp.to_owned())?)
+                let sdp: RtcSessionDescriptionWrapper = data.data.sdp.try_into()?;
+                self.set_remote_description(sdp.to_owned())
                     .await?;
                 log::trace!("setting remote candidate");
                 for c in data.data.candidates {
