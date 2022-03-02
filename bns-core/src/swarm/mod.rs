@@ -55,7 +55,7 @@ impl Swarm {
     }
 
     pub async fn new_transport(&self) -> Result<Arc<Transport>> {
-        let mut ice_transport = Transport::new(self.signaler());
+        let mut ice_transport = Transport::new(self.signaler(), Arc::clone(&self.procedures));
         ice_transport.start(self.stun_server.clone()).await?;
         let trans = Arc::new(ice_transport);
         Ok(Arc::clone(&trans))
@@ -100,6 +100,16 @@ impl Swarm {
 
     pub async fn event_handler(&self) {
         loop {
+            let mut routing = self.procedures.routing.lock().unwrap();
+            let (current, successor) = (routing.id, routing.successor);
+            // notify predecessor
+            if let Some(x) = routing.predecessor {
+                if x > current && x < successor {
+                    let message: Events =
+                        Events::from_action(ChordAction::Notify((current, successor)));
+                    self.signaler.send(message).await;
+                }
+            }
             match self.signaler.recv().await {
                 Ok(ev) => match ev {
                     Events::ReceiveMsg(msg) => {
@@ -121,7 +131,19 @@ impl Swarm {
                     }
                 },
                 Err(e) => {
-                    log::error!("failed on handle event {:?}", e)
+                    log::error!("failed on handle rece event {:?}", e);
+                }
+                _ => {
+                    log::info!("other situation not implement");
+                }
+            };
+            match routing.fix_fingers() {
+                Ok(action) => {
+                    let message = Events::from_action(action);
+                    self.signaler.send(message).await;
+                }
+                Err(_) => {
+                    log::error!("failed on fix fingers");
                 }
             }
         }

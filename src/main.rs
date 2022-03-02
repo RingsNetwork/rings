@@ -43,7 +43,7 @@ async fn run(http_addr: String, key: SecretKey, stun: &str) {
     let swarm_clone = Arc::clone(&swarm);
     tokio::spawn(async move { run_service(http_addr, swarm, key).await });
     tokio::select! {
-        _ = swarm_clone.event_handler() => {
+        _ = swarm_clone.stabilize() => {
             println!("received done signal!");
         }
         _ = tokio::signal::ctrl_c() => {
