@@ -2,12 +2,12 @@ use anyhow::anyhow;
 use anyhow::Result;
 use hex;
 use libsecp256k1::recover;
+use rand::SeedableRng;
+use rand_hc::Hc128Rng;
 use std::convert::TryFrom;
 use std::ops::Deref;
 use web3::signing::keccak256;
 use web3::types::Address;
-use rand_hc::Hc128Rng;
-use rand::SeedableRng;
 
 // ref https://docs.rs/web3/0.18.0/src/web3/signing.rs.html#69
 

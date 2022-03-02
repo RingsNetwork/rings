@@ -86,7 +86,7 @@ where
 }
 
 fn get_epoch_ms() -> u128 {
-    if cfg!(feature="wasm") {
+    if cfg!(feature = "wasm") {
         // If you call std::time::Instant::now() on a WASM platform, it will panic.
         unsafe { instant::now().to_int_unchecked() }
     } else {

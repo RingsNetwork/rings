@@ -32,22 +32,21 @@ use web_sys::RtcSdpType;
 use web_sys::RtcSessionDescription;
 use web_sys::RtcSessionDescriptionInit;
 
-
 #[derive(Clone, Deserialize, Serialize, Debug)]
 pub enum SdpType {
     Offer,
     Pranswer,
     Answer,
-    Rollback
+    Rollback,
 }
 
 impl From<SdpType> for web_sys::RtcSdpType {
     fn from(s: SdpType) -> Self {
         match s {
-            SdpType:: Offer => RtcSdpType::Offer,
-            SdpType:: Pranswer => RtcSdpType::Pranswer,
-            SdpType:: Answer => RtcSdpType::Answer,
-            SdpType:: Rollback => RtcSdpType::Rollback,
+            SdpType::Offer => RtcSdpType::Offer,
+            SdpType::Pranswer => RtcSdpType::Pranswer,
+            SdpType::Answer => RtcSdpType::Answer,
+            SdpType::Rollback => RtcSdpType::Rollback,
         }
     }
 }
@@ -55,22 +54,20 @@ impl From<SdpType> for web_sys::RtcSdpType {
 impl From<web_sys::RtcSdpType> for SdpType {
     fn from(s: web_sys::RtcSdpType) -> Self {
         match s {
-            RtcSdpType:: Offer => SdpType::Offer,
-            RtcSdpType:: Pranswer => SdpType::Pranswer,
-            RtcSdpType:: Answer => SdpType::Answer,
-            RtcSdpType:: Rollback => SdpType::Rollback,
-            _ => SdpType::Offer
+            RtcSdpType::Offer => SdpType::Offer,
+            RtcSdpType::Pranswer => SdpType::Pranswer,
+            RtcSdpType::Answer => SdpType::Answer,
+            RtcSdpType::Rollback => SdpType::Rollback,
+            _ => SdpType::Offer,
         }
     }
 }
 
-
 #[derive(Clone, Deserialize, Serialize, Debug)]
 pub struct RtcSessionDescriptionWrapper {
     pub sdp: String,
-    #[serde(rename="type")]
-    pub type_: SdpType
-
+    #[serde(rename = "type")]
+    pub type_: SdpType,
 }
 
 impl From<JsValue> for RtcSessionDescriptionWrapper {
@@ -80,12 +77,11 @@ impl From<JsValue> for RtcSessionDescriptionWrapper {
     }
 }
 
-
 impl From<web_sys::RtcSessionDescription> for RtcSessionDescriptionWrapper {
     fn from(sdp: RtcSessionDescription) -> Self {
         Self {
             sdp: sdp.sdp(),
-            type_: sdp.type_().into()
+            type_: sdp.type_().into(),
         }
     }
 }
@@ -108,14 +104,9 @@ impl From<RtcSessionDescriptionWrapper> for web_sys::RtcSessionDescriptionInit {
 impl From<RtcSessionDescriptionWrapper> for web_sys::RtcSessionDescription {
     fn from(s: RtcSessionDescriptionWrapper) -> Self {
         let sdp: web_sys::RtcSessionDescriptionInit = s.into();
-        RtcSessionDescription::new_with_description_init_dict(
-               &sdp
-        ).unwrap()
+        RtcSessionDescription::new_with_description_init_dict(&sdp).unwrap()
     }
 }
-
-
-
 
 #[derive(Clone)]
 pub struct WasmTransport {
@@ -191,8 +182,10 @@ impl IceTransport<CbChannel> for WasmTransport {
                 let promise = c.create_answer();
                 match JsFuture::from(promise).await {
                     Ok(answer) => {
-                        self.set_local_description(RtcSessionDescriptionWrapper::from(answer.to_owned()))
-                            .await?;
+                        self.set_local_description(RtcSessionDescriptionWrapper::from(
+                            answer.to_owned(),
+                        ))
+                        .await?;
                         Ok(answer.into())
                     }
                     Err(_) => Err(anyhow!("Failed to get answer")),
@@ -208,8 +201,10 @@ impl IceTransport<CbChannel> for WasmTransport {
                 let promise = c.create_offer();
                 match JsFuture::from(promise).await {
                     Ok(offer) => {
-                        self.set_local_description(RtcSessionDescriptionWrapper::from(offer.to_owned()))
-                            .await?;
+                        self.set_local_description(RtcSessionDescriptionWrapper::from(
+                            offer.to_owned(),
+                        ))
+                        .await?;
                         Ok(offer.into())
                     }
                     Err(_) => Err(anyhow!("cannot get offer")),
@@ -418,8 +413,7 @@ impl IceTrickleScheme<CbChannel> for WasmTransport {
         match data.verify() {
             true => {
                 let sdp: RtcSessionDescriptionWrapper = data.data.sdp.try_into()?;
-                self.set_remote_description(sdp.to_owned())
-                    .await?;
+                self.set_remote_description(sdp.to_owned()).await?;
                 log::trace!("setting remote candidate");
                 for c in data.data.candidates {
                     log::trace!("add candiates: {:?}", c);
