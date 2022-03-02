@@ -14,8 +14,6 @@ use futures::future::join_all;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::Duration;
@@ -24,6 +22,7 @@ use webrtc::api::APIBuilder;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
+use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::math_rand_alpha;
@@ -36,7 +35,7 @@ use webrtc::peer_connection::RTCPeerConnection;
 pub struct DefaultTransport {
     pub connection: Arc<Mutex<Option<Arc<RTCPeerConnection>>>>,
     pub pending_candidates: Arc<Mutex<Vec<RTCIceCandidate>>>,
-    pub channel: Arc<Mutex<Option<Arc<RTCDataChannel>>>>,
+    pub data_channel: Arc<Mutex<Option<Arc<RTCDataChannel>>>>,
     pub signaler: Arc<AcChannel>,
 }
 
@@ -45,7 +44,8 @@ impl IceTransport<AcChannel> for DefaultTransport {
     type Connection = RTCPeerConnection;
     type Candidate = RTCIceCandidate;
     type Sdp = RTCSessionDescription;
-    type Channel = RTCDataChannel;
+    type DataChannel = RTCDataChannel;
+    type IceConnectionState = RTCIceConnectionState;
     type ConnectionState = RTCPeerConnectionState;
     type Msg = DataChannelMessage;
 
@@ -53,7 +53,7 @@ impl IceTransport<AcChannel> for DefaultTransport {
         Self {
             connection: Arc::new(Mutex::new(None)),
             pending_candidates: Arc::new(Mutex::new(vec![])),
-            channel: Arc::new(Mutex::new(None)),
+            data_channel: Arc::new(Mutex::new(None)),
             signaler: Arc::clone(&ch),
         }
     }
@@ -71,6 +71,7 @@ impl IceTransport<AcChannel> for DefaultTransport {
             ice_candidate_pool_size: 100,
             ..Default::default()
         };
+
         let api = APIBuilder::new().build();
         match api.new_peer_connection(config).await {
             Ok(c) => {
@@ -80,6 +81,7 @@ impl IceTransport<AcChannel> for DefaultTransport {
             }
             Err(e) => Err(anyhow!(e)),
         }?;
+
         self.setup_channel("bns").await?;
         self.on_ice_candidate(self.on_ice_candidate_callback().await)
             .await?;
@@ -87,9 +89,22 @@ impl IceTransport<AcChannel> for DefaultTransport {
             .await?;
         self.on_data_channel(self.on_data_channel_callback().await)
             .await?;
-        self.on_open(self.on_open_callback().await).await?;
-        self.on_message(self.on_message_callback().await).await?;
+
         Ok(())
+    }
+
+    async fn close(&self) -> Result<()> {
+        if let Some(pc) = self.get_peer_connection().await {
+            pc.close().await?;
+        }
+
+        Ok(())
+    }
+
+    async fn ice_connection_state(&self) -> Option<Self::IceConnectionState> {
+        self.get_peer_connection()
+            .await
+            .map(|pc| pc.ice_connection_state())
     }
 
     async fn get_peer_connection(&self) -> Option<Arc<RTCPeerConnection>> {
@@ -144,7 +159,7 @@ impl IceTransport<AcChannel> for DefaultTransport {
     }
 
     async fn get_data_channel(&self) -> Option<Arc<RTCDataChannel>> {
-        self.channel.lock().await.clone()
+        self.data_channel.lock().await.clone()
     }
 
     async fn add_ice_candidate(&self, candidate: String) -> Result<()> {
@@ -185,87 +200,6 @@ impl IceTransport<AcChannel> for DefaultTransport {
             None => Err(anyhow!("connection is not setup")),
         }
     }
-
-    async fn on_ice_candidate(
-        &self,
-        f: Box<
-            dyn FnMut(Option<RTCIceCandidate>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
-                + Send
-                + Sync,
-        >,
-    ) -> Result<()> {
-        match self.get_peer_connection().await {
-            Some(peer_connection) => {
-                peer_connection.on_ice_candidate(f).await;
-                Ok(())
-            }
-            None => Err(anyhow!("connection is not setup")),
-        }
-    }
-
-    async fn on_peer_connection_state_change(
-        &self,
-        f: Box<
-            dyn FnMut(RTCPeerConnectionState) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
-                + Send
-                + Sync,
-        >,
-    ) -> Result<()> {
-        match self.get_peer_connection().await {
-            Some(peer_connection) => {
-                peer_connection.on_peer_connection_state_change(f).await;
-            }
-            None => panic!("Connection Failed."),
-        }
-        Ok(())
-    }
-
-    async fn on_data_channel(
-        &self,
-        f: Box<
-            dyn FnMut(Arc<RTCDataChannel>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
-                + Send
-                + Sync,
-        >,
-    ) -> Result<()> {
-        match self.get_peer_connection().await {
-            Some(peer_connection) => {
-                peer_connection.on_data_channel(f).await;
-            }
-            None => panic!("Connection Failed."),
-        }
-        Ok(())
-    }
-
-    async fn on_message(
-        &self,
-        f: Box<
-            dyn FnMut(DataChannelMessage) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
-                + Send
-                + Sync,
-        >,
-    ) -> Result<()> {
-        match self.get_data_channel().await {
-            Some(ch) => {
-                ch.on_message(f).await;
-            }
-            None => panic!("Connection Failed."),
-        }
-        Ok(())
-    }
-
-    async fn on_open(
-        &self,
-        f: Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync>,
-    ) -> Result<()> {
-        match self.get_data_channel().await {
-            Some(ch) => {
-                ch.on_open(f).await;
-            }
-            None => panic!("Connection Failed."),
-        }
-        Ok(())
-    }
 }
 
 impl DefaultTransport {
@@ -275,7 +209,7 @@ impl DefaultTransport {
                 let channel = peer_connection.create_data_channel(name, None).await;
                 match channel {
                     Ok(ch) => {
-                        let mut channel = self.channel.lock().await;
+                        let mut channel = self.data_channel.lock().await;
                         *channel = Some(ch);
                         Ok(())
                     }
@@ -289,15 +223,40 @@ impl DefaultTransport {
 
 #[async_trait]
 impl IceTransportCallback<AcChannel> for DefaultTransport {
-    async fn on_ice_candidate_callback(
+    async fn on_ice_candidate(&self, f: Self::OnLocalCandidateHdlrFn) -> Result<()> {
+        match self.get_peer_connection().await {
+            Some(peer_connection) => {
+                peer_connection.on_ice_candidate(f).await;
+                Ok(())
+            }
+            None => Err(anyhow!("connection is not setup")),
+        }
+    }
+
+    async fn on_peer_connection_state_change(
         &self,
-    ) -> Box<
-        dyn FnMut(
-                Option<<Self as IceTransport<AcChannel>>::Candidate>,
-            ) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
-            + Send
-            + Sync,
-    > {
+        f: Self::OnPeerConnectionStateChangeHdlrFn,
+    ) -> Result<()> {
+        match self.get_peer_connection().await {
+            Some(peer_connection) => {
+                peer_connection.on_peer_connection_state_change(f).await;
+            }
+            None => panic!("Connection Failed."),
+        }
+        Ok(())
+    }
+
+    async fn on_data_channel(&self, f: Self::OnDataChannelHdlrFn) -> Result<()> {
+        match self.get_peer_connection().await {
+            Some(peer_connection) => {
+                peer_connection.on_data_channel(f).await;
+            }
+            None => panic!("Connection Failed."),
+        }
+        Ok(())
+    }
+
+    async fn on_ice_candidate_callback(&self) -> Self::OnLocalCandidateHdlrFn {
         let peer_connection = self.get_peer_connection().await;
         let pending_candidates = Arc::clone(&self.pending_candidates);
 
@@ -321,11 +280,7 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
 
     async fn on_peer_connection_state_change_callback(
         &self,
-    ) -> Box<
-        dyn FnMut(RTCPeerConnectionState) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
-            + Send
-            + Sync,
-    > {
+    ) -> Self::OnPeerConnectionStateChangeHdlrFn {
         let sender = self.signaler().sender();
         box move |s: RTCPeerConnectionState| {
             if s == RTCPeerConnectionState::Failed {
@@ -337,18 +292,19 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
         }
     }
 
-    async fn on_data_channel_callback(
-        &self,
-    ) -> Box<
-        dyn FnMut(Arc<RTCDataChannel>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
-            + Send
-            + Sync,
-    > {
+    async fn on_data_channel_callback(&self) -> Self::OnDataChannelHdlrFn {
+        let channel = self.get_data_channel().await.unwrap();
+        let signaler = self.signaler();
+
         box move |d: Arc<RTCDataChannel>| {
-            let recv = Arc::clone(&d);
+            let channel = Arc::clone(&channel);
+            let signaler = Arc::clone(&signaler);
+
             Box::pin(async move {
                 d.on_open(Box::new(move || {
+                    let channel = Arc::clone(&channel);
                     Box::pin(async move {
+                        let channel = Arc::clone(&channel);
                         let mut result = Result::<usize>::Ok(0);
                         while result.is_ok() {
                             let timeout = tokio::time::sleep(Duration::from_secs(5));
@@ -357,7 +313,7 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
                                 _ = timeout.as_mut() =>{
                                     let message = math_rand_alpha(15);
                                     println!("Sending '{}'", message);
-                                    result = recv.send_text(message).await.map_err(Into::into);
+                                    result = channel.send_text(message).await.map_err(Into::into);
                                 }
                             };
                         }
@@ -366,58 +322,19 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
                 .await;
 
                 d.on_message(Box::new(move |msg: DataChannelMessage| {
-                    let msg_str = String::from_utf8(msg.data.to_vec()).unwrap();
-                    println!("Message from DataChannel: '{}'", msg_str);
-                    Box::pin(async move {})
+                    log::debug!("Message from DataChannel: '{:?}'", msg);
+                    let signaler = Arc::clone(&signaler);
+                    Box::pin(async move {
+                        if signaler
+                            .send(Events::ReceiveMsg(msg.data.to_vec()))
+                            .await
+                            .is_err()
+                        {
+                            log::error!("Failed on handle msg")
+                        };
+                    })
                 }))
                 .await;
-            })
-        }
-    }
-
-    async fn on_message_callback(
-        &self,
-    ) -> Box<
-        dyn FnMut(DataChannelMessage) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
-            + Send
-            + Sync,
-    > {
-        let signaler = self.signaler();
-        box move |msg: DataChannelMessage| {
-            log::debug!("Message from DataChannel: '{:?}'", msg);
-            let signaler = Arc::clone(&signaler);
-            Box::pin(async move {
-                if signaler
-                    .send(Events::ReceiveMsg(msg.data.to_vec()))
-                    .await
-                    .is_err()
-                {
-                    log::error!("Failed on handle msg")
-                };
-            })
-        }
-    }
-
-    async fn on_open_callback(
-        &self,
-    ) -> Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync> {
-        let channel = self.get_data_channel().await.unwrap();
-        box move || {
-            let channel = Arc::clone(&channel);
-            Box::pin(async move {
-                let channel = Arc::clone(&channel);
-                let mut result = Result::<usize>::Ok(0);
-                while result.is_ok() {
-                    let timeout = tokio::time::sleep(Duration::from_secs(5));
-                    tokio::pin!(timeout);
-                    tokio::select! {
-                        _ = timeout.as_mut() =>{
-                            let message = math_rand_alpha(15);
-                            println!("Sending '{}'", message);
-                            result = channel.send_text(message).await.map_err(Into::into);
-                        }
-                    };
-                }
             })
         }
     }
