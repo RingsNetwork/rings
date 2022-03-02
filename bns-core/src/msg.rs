@@ -1,8 +1,8 @@
 use crate::ecc::{sign, verify, SecretKey};
 use crate::encoder::Encoded;
-use chrono::Utc;
 use anyhow::anyhow;
 use anyhow::Result;
+use chrono::Utc;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
