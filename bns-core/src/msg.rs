@@ -1,5 +1,6 @@
 use crate::ecc::{sign, verify, SecretKey};
 use crate::encoder::Encoded;
+use chrono::Utc;
 use anyhow::anyhow;
 use anyhow::Result;
 use serde::de::DeserializeOwned;
@@ -86,16 +87,7 @@ where
 }
 
 fn get_epoch_ms() -> u128 {
-    if cfg!(feature = "wasm") {
-        // If you call std::time::Instant::now() on a WASM platform, it will panic.
-        unsafe { instant::now().to_int_unchecked() }
-    } else {
-        use std::time::SystemTime;
-        SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_millis()
-    }
+    Utc::now().timestamp_millis() as u128
 }
 
 #[cfg(test)]
