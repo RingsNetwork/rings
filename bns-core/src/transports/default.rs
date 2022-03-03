@@ -340,7 +340,8 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
                             Events::ReceiveMsg(msg.data.to_vec()),
                             channel,
                             signaler,
-                        );
+                        )
+                        .await;
                     })
                 }))
                 .await;

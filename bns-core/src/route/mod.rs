@@ -15,21 +15,21 @@ use std::sync::Arc;
 pub mod handler;
 pub mod message;
 
-pub type RequestId = u128;
+pub type RequestID = u128;
 
 pub struct Routing {
     pub current: Did,
     pub successor: Did,
     pub predecessor: Option<Did>,
     pub fix_finger_index: u8,
-    records: DashMap<RequestId, Message>,
+    records: DashMap<RequestID, Message>,
     signaler: Arc<Channel>,
     finger_tables: Vec<Option<Did>>,
 }
 
 impl Routing {
     pub fn new(ch: Arc<Channel>, current: Did) -> Self {
-        return Self {
+        Self {
             current,
             signaler: ch,
             predecessor: None,
@@ -37,7 +37,7 @@ impl Routing {
             finger_tables: vec![],
             records: DashMap::new(),
             fix_finger_index: 0,
-        };
+        }
     }
 
     fn join_successor(&mut self, successor: Did) -> ChordAction {
@@ -81,14 +81,14 @@ impl Routing {
     pub async fn notify_predecessor(&mut self) {
         if let Some(predecessor) = self.predecessor {
             let mut rng = rand::thread_rng();
-            let requestId: RequestId = rng.gen();
+            let request_id: RequestID = rng.gen();
             if predecessor > self.current && predecessor < self.successor {
                 let message = Message::from(PredecessorNotify {
-                    requestId: requestId,
-                    current: self.current.clone(),
-                    successor: self.successor.clone(),
+                    request_id: request_id,
+                    current: self.current,
+                    successor: self.successor,
                 });
-                self.records.insert(requestId, message.clone());
+                self.records.insert(request_id, message.clone());
                 match Events::try_from(message) {
                     Ok(event) => self.signaler.send(event).await.unwrap(),
                     Err(e) => {

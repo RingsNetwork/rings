@@ -28,7 +28,7 @@ fn genterate_event_data(msg_type: [u8; 2], mut message: Vec<u8>) -> Vec<u8> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PredecessorNotify {
-    pub requestId: u128,
+    pub request_id: u128,
     pub current: Did,
     pub successor: Did,
 }
