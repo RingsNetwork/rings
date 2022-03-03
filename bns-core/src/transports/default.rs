@@ -16,7 +16,7 @@ use serde::Serialize;
 use serde_json;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tokio::time::Duration;
+
 use web3::types::Address;
 use webrtc::api::APIBuilder;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
@@ -25,7 +25,7 @@ use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit}
 use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
-use webrtc::peer_connection::math_rand_alpha;
+
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
@@ -323,7 +323,7 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
 
             Box::pin(async move {
                 d.on_open(Box::new(move || {
-                    let channel = Arc::clone(&channel);
+                    let _channel = Arc::clone(&channel);
                     Box::pin(async move {
                         // do nothing here
                     })

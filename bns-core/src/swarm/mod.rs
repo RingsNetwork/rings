@@ -49,6 +49,10 @@ impl Swarm {
         }
     }
 
+    pub fn address(&self) -> Address {
+        self.key.address()
+    }
+
     pub async fn new_transport(&self) -> Result<Arc<Transport>> {
         let mut ice_transport = Transport::new(self.signaler());
         ice_transport.start(self.stun_server.clone()).await?;
@@ -96,7 +100,7 @@ impl Swarm {
                                     let _ = self.message_handler(m.to_owned().data).await;
                                 }
                             }
-                            Err(e) => {
+                            Err(_e) => {
                                 log::error!("cant handle Msg {:?}", msg);
                             }
                         }
@@ -158,14 +162,14 @@ mod tests {
         let swarm1 = new_swarm("0x1111111111111111111111111111111111111111");
         let swarm2 = new_swarm("0x2222222222222222222222222222222222222222");
 
-        assert!(swarm1.get_transport(swarm2.address).is_none());
+        assert!(swarm1.get_transport(swarm2.address()).is_none());
 
         let transport0 = swarm1.new_transport().await.unwrap();
         let transport1 = transport0.clone();
 
-        swarm1.register(swarm2.address, transport1).await;
+        swarm1.register(swarm2.address(), transport1).await;
 
-        let transport2 = swarm1.get_transport(swarm2.address).unwrap();
+        let transport2 = swarm1.get_transport(swarm2.address()).unwrap();
 
         assert!(Arc::ptr_eq(&transport0, &transport2));
     }
@@ -175,13 +179,13 @@ mod tests {
         let swarm1 = new_swarm("0x1111111111111111111111111111111111111111");
         let swarm2 = new_swarm("0x2222222222222222222222222222222222222222");
 
-        assert!(swarm1.get_transport(swarm2.address).is_none());
+        assert!(swarm1.get_transport(swarm2.address()).is_none());
 
         let transport1 = swarm1.new_transport().await.unwrap();
         let transport2 = swarm1.new_transport().await.unwrap();
 
-        swarm1.register(swarm2.address, transport1.clone()).await;
-        swarm1.register(swarm2.address, transport2.clone()).await;
+        swarm1.register(swarm2.address(), transport1.clone()).await;
+        swarm1.register(swarm2.address(), transport2.clone()).await;
 
         assert_eq!(
             transport1.ice_connection_state().await.unwrap(),
