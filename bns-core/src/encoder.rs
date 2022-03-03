@@ -1,6 +1,8 @@
 use anyhow::anyhow;
 use anyhow::Result;
 use base58_monero as b58m;
+use serde::Deserialize;
+use serde::Serialize;
 use std::convert::TryFrom;
 use std::ops::Deref;
 
@@ -18,7 +20,7 @@ fn decode(s: String) -> Result<String> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct Encoded(String);
 
 impl Deref for Encoded {

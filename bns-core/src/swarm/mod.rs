@@ -6,6 +6,7 @@ use crate::dht::chord::Chord;
 use crate::dht::chord::ChordAction;
 use crate::dht::chord::RemoteAction;
 use crate::ecc::SecretKey;
+use crate::encoder::Encoded;
 use crate::msg::SignedMsg;
 /// Swarm is transport management
 ///
@@ -25,11 +26,34 @@ use serde::Serialize;
 use std::sync::Arc;
 use web3::types::Address;
 
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct DHTResponse {
+    act: RemoteAction,
+    req_sig: Vec<u8>,
+    sdp: Option<Encoded>,
+}
+
+impl DHTResponse {
+    pub fn new<F>(msg: SignedMsg<F>, act: RemoteAction) -> Self {
+        Self {
+            act,
+            req_sig: msg.sig,
+            sdp: None,
+        }
+    }
+
+    pub fn with_sdp(&mut self, sdp: Encoded) -> &Self {
+        self.sdp = Some(sdp);
+        &*self
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type", content = "data")]
 pub enum Message {
     CustomMessage(String),
     DHTMessage(RemoteAction),
+    DHTResponse(DHTResponse),
 }
 
 pub struct Swarm {
@@ -113,7 +137,7 @@ impl Swarm {
                                 if m.is_expired() || !m.verify() {
                                     log::error!("cannot verify msg or it's expired: {:?}", m);
                                 } else {
-                                    let _ = self.message_handler(m.to_owned().data).await;
+                                    let _ = self.message_handler(m.to_owned()).await;
                                 }
                             }
                             Err(_e) => {
@@ -132,17 +156,99 @@ impl Swarm {
         }
     }
 
-    pub async fn message_handler(&self, msg: Message) {
-        match msg {
+    pub async fn message_handler(&self, msg: SignedMsg<Message>) {
+        match msg.data.to_owned() {
             Message::CustomMessage(m) => {
                 log::info!("got Msg {:?}", m);
             }
             Message::DHTMessage(action) => match action {
-                RemoteAction::FindSuccessor(_) => {}
-                RemoteAction::Notify(_) => {}
-                RemoteAction::FindSuccessorAndAddToFinger((_, _)) => {}
+                RemoteAction::FindSuccessor(id) => {
+                    let dht = self.dht.lock().await;
+                    match dht.find_successor(id) {
+                        Ok(ChordAction::Some(p)) => {
+                            let resp = DHTResponse::new(msg, RemoteAction::FindSuccessor(p));
+                            if let Ok(msg) =
+                                SignedMsg::new(Message::DHTResponse(resp), &self.key, None)
+                            {
+                                // should handle return
+                                if let Err(e) = self.send_message_without_dht(msg.addr, msg).await {
+                                    log::error!("{:?}", e);
+                                }
+                            }
+                        }
+                        Ok(ChordAction::RemoteAction((addr, act))) => {
+                            if let Ok(msg) =
+                                SignedMsg::new(Message::DHTMessage(act), &self.key, None)
+                            {
+                                // should handle return
+                                if let Err(e) =
+                                    self.send_message_without_dht(addr.into(), msg).await
+                                {
+                                    log::error!("{:?}", e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            log::error!("{:?}", e);
+                        }
+                        Ok(_) => {}
+                    }
+                }
+                RemoteAction::Notify(did) => {
+                    let mut dht = self.dht.lock().await;
+                    dht.notify(did);
+                }
+                RemoteAction::FindSuccessorForFix(did) => {
+                    let dht = self.dht.lock().await;
+                    match dht.find_successor(did) {
+                        Ok(ChordAction::Some(p)) => {
+                            let resp = DHTResponse::new(msg, RemoteAction::FindSuccessorForFix(p));
+                            if let Ok(msg) =
+                                SignedMsg::new(Message::DHTResponse(resp), &self.key, None)
+                            {
+                                // should handle return
+                                if let Err(e) = self.send_message_without_dht(msg.addr, msg).await {
+                                    log::error!("{:?}", e);
+                                }
+                            }
+                        }
+                        Ok(ChordAction::RemoteAction((addr, RemoteAction::FindSuccessor(did)))) => {
+                            if let Ok(msg) = SignedMsg::new(
+                                Message::DHTMessage(RemoteAction::FindSuccessorForFix(did)),
+                                &self.key,
+                                None,
+                            ) {
+                                // should handle return
+                                if let Err(e) =
+                                    self.send_message_without_dht(addr.into(), msg).await
+                                {
+                                    log::error!("{:?}", e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            log::error!("{:?}", e);
+                        }
+                        Ok(_) => {}
+                    }
+                }
                 RemoteAction::CheckPredecessor => {}
             },
+            Message::DHTResponse(act) => {
+                match act.act {
+                    RemoteAction::FindSuccessor(did) => {
+                        // should create a handshake to that did
+                        let mut dht = self.dht.lock().await;
+                        dht.successor = did;
+                    }
+                    RemoteAction::FindSuccessorForFix(did) => {
+                        let mut dht = self.dht.lock().await;
+                        let index = dht.fix_finger_index;
+                        dht.finger[index as usize] = Some(did)
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 }

@@ -15,7 +15,7 @@ pub enum RemoteAction {
     FindSuccessor(Did),
     // ask Did_a to notify(did_b)
     Notify(Did),
-    FindSuccessorAndAddToFinger((u8, Did)),
+    FindSuccessorForFix(Did),
     CheckPredecessor,
 }
 
@@ -137,12 +137,9 @@ impl Chord {
                     self.finger[self.fix_finger_index as usize] = Some(v);
                     Ok(ChordAction::None)
                 }
-                ChordAction::RemoteAction((a, RemoteAction::FindSuccessor(b))) => {
-                    Ok(ChordAction::RemoteAction((
-                        a,
-                        RemoteAction::FindSuccessorAndAddToFinger((self.fix_finger_index, b)),
-                    )))
-                }
+                ChordAction::RemoteAction((a, RemoteAction::FindSuccessor(b))) => Ok(
+                    ChordAction::RemoteAction((a, RemoteAction::FindSuccessorForFix(b))),
+                ),
                 _ => {
                     log::error!("Invalid Chord Action");
                     Err(anyhow!("Invalid Chord Action"))
