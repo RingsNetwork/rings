@@ -25,7 +25,7 @@ use std::sync::Arc;
 use web3::types::Address;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(tag = "type")]
+#[serde(tag = "type", content = "data")]
 pub enum Message {
     CustomMessage(String),
     DHTMessage(RemoteAction),
@@ -61,22 +61,22 @@ impl Swarm {
         Ok(Arc::clone(&trans))
     }
 
-    pub async fn register(&self, address: Address, trans: Arc<Transport>) -> Result<()> {
+    pub async fn register(&self, address: Address, trans: Arc<Transport>) {
         let prev_trans = self.table.set(address, trans);
-        let mut dht = self.dht.lock().await;
-        if let ChordAction::RemoteAction((addr, act)) = (*dht).join(address.into()) {
-            let msg = SignedMsg::new(Message::DHTMessage(act), &self.key, None)?;
-            // should handle return
-            self.send_message_without_dht(addr.into(), msg)
-                .await
-                .unwrap();
-        }
         if let Some(trans) = prev_trans {
             if let Err(e) = trans.close().await {
                 log::error!("failed to close previous while registering {:?}", e);
             }
         }
-        Ok(())
+        let mut dht = self.dht.lock().await;
+        if let ChordAction::RemoteAction((addr, act)) = (*dht).join(address.into()) {
+            if let Ok(msg) = SignedMsg::new(Message::DHTMessage(act), &self.key, None) {
+                // should handle return
+                if let Err(e) = self.send_message_without_dht(addr.into(), msg).await {
+                    log::error!("{:?}", e);
+                }
+            }
+        }
     }
 
     pub fn get_transport(&self, address: Address) -> Option<Arc<Transport>> {
@@ -176,7 +176,7 @@ mod tests {
         let transport0 = swarm1.new_transport().await.unwrap();
         let transport1 = transport0.clone();
 
-        swarm1.register(swarm2.address(), transport1).await.unwrap();
+        swarm1.register(swarm2.address(), transport1).await;
 
         let transport2 = swarm1.get_transport(swarm2.address()).unwrap();
 
@@ -193,14 +193,8 @@ mod tests {
         let transport1 = swarm1.new_transport().await.unwrap();
         let transport2 = swarm1.new_transport().await.unwrap();
 
-        swarm1
-            .register(swarm2.address(), transport1.clone())
-            .await
-            .unwrap();
-        swarm1
-            .register(swarm2.address(), transport2.clone())
-            .await
-            .unwrap();
+        swarm1.register(swarm2.address(), transport1.clone()).await;
+        swarm1.register(swarm2.address(), transport2.clone()).await;
 
         assert_eq!(
             transport1.ice_connection_state().await.unwrap(),

@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", content = "data")]
 pub enum RemoteAction {
     // Ask did__a to find did_b
     FindSuccessor(Did),
@@ -64,7 +64,6 @@ impl Chord {
             let pos = self.id + Did::from(BigUint::from(2u16).pow(k));
             // pos less than id or id is on another side of ring
             if pos <= id || pos >= -id {
-                println!("{:?}", pos);
                 match self.finger[k as usize] {
                     Some(v) => {
                         // for a existed value v
@@ -243,7 +242,6 @@ mod tests {
         assert!(BigUint::from(c) > BigUint::from(2u16).pow(159));
         assert!(BigUint::from(c) < BigUint::from(2u16).pow(160));
 
-        assert_eq!(node_a.finger[159], Some(c));
         assert_eq!(node_a.finger[158], Some(c));
         assert_eq!(node_a.finger[155], Some(b));
         assert_eq!(node_a.finger[156], Some(b));
