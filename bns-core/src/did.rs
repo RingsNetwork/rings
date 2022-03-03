@@ -20,6 +20,12 @@ impl Deref for Did {
     }
 }
 
+impl From<Did> for Address {
+    fn from(a: Did) -> Self {
+        a.0.to_owned()
+    }
+}
+
 impl From<Did> for BigUint {
     fn from(did: Did) -> BigUint {
         BigUint::from_bytes_be(did.as_bytes())

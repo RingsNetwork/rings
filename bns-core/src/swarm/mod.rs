@@ -4,6 +4,7 @@ use crate::channels::default::AcChannel as Channel;
 use crate::channels::wasm::CbChannel as Channel;
 use crate::dht::chord::Chord;
 use crate::dht::chord::RemoteAction;
+use crate::dht::chord::ChordAction;
 use crate::ecc::SecretKey;
 use crate::msg::SignedMsg;
 /// Swarm is transport management
@@ -20,8 +21,8 @@ use anyhow::Result;
 use serde::Deserialize;
 use serde::Serialize;
 use std::sync::Arc;
-use std::sync::Mutex;
 use web3::types::Address;
+use futures::lock::Mutex;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
@@ -34,7 +35,7 @@ pub struct Swarm {
     pub table: MemStorage<Address, Arc<Transport>>,
     pub signaler: Arc<Channel>,
     pub stun_server: String,
-    pub dht: Mutex<Chord>,
+    pub dht: Arc<Mutex<Chord>>,
     pub key: SecretKey,
 }
 
@@ -44,7 +45,7 @@ impl Swarm {
             table: MemStorage::<Address, Arc<Transport>>::new(),
             signaler: Arc::clone(&ch),
             stun_server: stun,
-            dht: Mutex::new(Chord::new(key.address().into())),
+            dht: Arc::new(Mutex::new(Chord::new(key.address().into()))),
             key,
         }
     }
@@ -60,14 +61,20 @@ impl Swarm {
         Ok(Arc::clone(&trans))
     }
 
-    pub async fn register(&self, address: Address, trans: Arc<Transport>) {
+    pub async fn register(&self, address: Address, trans: Arc<Transport>) -> Result<()> {
         let prev_trans = self.table.set(address, trans);
-
+        let mut dht = self.dht.lock().await;
+        if let Ok(ChordAction::RemoteAction((addr, act))) = (*dht).join(address.into()) {
+            let msg = SignedMsg::new(Message::DHTMessage(act), &self.key, None)?;
+            // should handle return
+            self.send_message_without_dht(addr.into(), msg).await.unwrap();
+        }
         if let Some(trans) = prev_trans {
             if let Err(e) = trans.close().await {
-                log::error!("failed to close previous while registering {:?}", e)
+                log::error!("failed to close previous while registering {:?}", e);
             }
         }
+        Ok(())
     }
 
     pub fn get_transport(&self, address: Address) -> Option<Arc<Transport>> {
@@ -124,10 +131,10 @@ impl Swarm {
                 log::info!("got Msg {:?}", m);
             }
             Message::DHTMessage(action) => match action {
-                RemoteAction::FindSuccessor((_did, _value)) => {}
-                RemoteAction::Notify((_did, _value)) => {}
-                RemoteAction::FindSuccessorAndAddToFinger((_index, _did, _value)) => {}
-                RemoteAction::CheckPredecessor(_did) => {}
+                RemoteAction::FindSuccessor(_) => {}
+                RemoteAction::Notify(_) => {}
+                RemoteAction::FindSuccessorAndAddToFinger((_, _)) => {}
+                RemoteAction::CheckPredecessor => {}
             },
         }
     }
