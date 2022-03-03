@@ -7,7 +7,6 @@ use crate::dht::chord::RemoteAction;
 use crate::ecc::SecretKey;
 use crate::msg::SignedMsg;
 /// Swarm is transport management
-///
 use crate::storage::{MemStorage, Storage};
 #[cfg(not(feature = "wasm"))]
 use crate::transports::default::DefaultTransport as Transport;

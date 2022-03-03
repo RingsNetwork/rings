@@ -2,6 +2,7 @@
 use crate::channels::default::AcChannel as Channel;
 #[cfg(feature = "wasm")]
 use crate::channels::wasm::CbChannel as Channel;
+use crate::route::routing;
 use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::Events;
 use std::sync::Arc;

@@ -8,47 +8,62 @@ use crate::route::message::{Message, PredecessorNotify};
 use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::Events;
 use dashmap::DashMap;
+use lazy_static::lazy_static;
 use num_bigint::BigUint;
 use rand::Rng;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 pub mod handler;
 pub mod message;
 
 pub type RequestID = u128;
 
+lazy_static! {
+    pub(crate) static ref routing: Mutex<Routing> = Mutex::new(Routing::new());
+}
+
 pub struct Routing {
-    pub current: Did,
-    pub successor: Did,
+    pub current: Option<Did>,
+    pub successor: Option<Did>,
     pub predecessor: Option<Did>,
     pub fix_finger_index: u8,
     records: DashMap<RequestID, Message>,
-    signaler: Arc<Channel>,
     finger_tables: Vec<Option<Did>>,
 }
 
 impl Routing {
-    pub fn new(ch: Arc<Channel>, current: Did) -> Self {
+    pub fn new() -> Self {
         Self {
-            current,
-            signaler: ch,
+            current: None,
             predecessor: None,
-            successor: current,
+            successor: None,
             finger_tables: vec![],
             records: DashMap::new(),
             fix_finger_index: 0,
         }
     }
 
-    fn join_successor(&mut self, successor: Did) -> ChordAction {
-        if successor == self.current {
+    pub fn set_current(&mut self, current: Did) {
+        self.current = Some(current);
+    }
+
+    pub fn set_successor(&mut self, successor: Did) {
+        self.successor = Some(successor);
+    }
+
+    pub fn join_successor(&mut self, successor: Did) -> ChordAction {
+        let current = self.current.unwrap();
+        if Some(successor) == self.current {
+            return ChordAction::None;
+        } else if self.current.is_none() && self.successor.is_none() {
             return ChordAction::None;
         }
         for k in 0u32..160u32 {
             // (n + 2^k) % 2^m >= n
             // pos >= id
             // from n to n + 2^160
-            let pos = self.current + Did::from(BigUint::from(2u16).pow(k));
+            let pos = current + Did::from(BigUint::from(2u16).pow(k));
             // pos less than id or id is on another side of ring
             if pos <= successor || pos >= -successor {
                 match self.finger_tables[k as usize] {
@@ -66,31 +81,33 @@ impl Routing {
                 }
             }
         }
-        if (successor - self.current) < (successor - self.successor)
-            || self.current == self.successor
-        {
+        if (successor - current) < (successor - successor) || self.current == self.successor {
             // 1) id should follows self.current
             // 2) #fff should follow #001 because id space is a Finate Ring
             // 3) #001 - #fff = #001 + -(#fff) = #001
-            self.successor = successor;
+            self.set_successor(successor);
         }
-
-        ChordAction::FindSuccessor((self.successor, self.current))
+        if self.successor.is_none() {
+            ChordAction::None;
+        }
+        ChordAction::FindSuccessor((self.successor.unwrap(), self.current.unwrap()))
     }
 
-    pub async fn notify_predecessor(&mut self) {
+    pub async fn notify_predecessor(&mut self, signaler: Arc<Channel>) {
+        let current = self.current.unwrap();
+        let successor = self.successor.unwrap();
         if let Some(predecessor) = self.predecessor {
             let mut rng = rand::thread_rng();
             let request_id: RequestID = rng.gen();
-            if predecessor > self.current && predecessor < self.successor {
+            if predecessor > current && predecessor < successor {
                 let message = Message::from(PredecessorNotify {
                     request_id: request_id,
-                    current: self.current,
-                    successor: self.successor,
+                    current: current,
+                    successor: successor,
                 });
                 self.records.insert(request_id, message.clone());
                 match Events::try_from(message) {
-                    Ok(event) => self.signaler.send(event).await.unwrap(),
+                    Ok(event) => signaler.send(event).await.unwrap(),
                     Err(e) => {
                         log::error!("Generate events from message `PredecessorNotify` failed");
                     }
