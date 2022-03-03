@@ -37,7 +37,7 @@ impl Chord {
         Self {
             successor: id,
             predecessor: None,
-            // for Eth idess, it's 160
+            // for Eth address, it's 160
             finger: vec![None; 160],
             id,
             fix_finger_index: 0,
@@ -151,8 +151,8 @@ impl Chord {
         }
     }
 
-    pub fn closest_precding_node(&self, id: Did) -> Result<Did> {
-        for i in (1..160).rev() {
+    pub fn closest_preceding_node(&self, id: Did) -> Result<Did> {
+        for i in (0..159).rev() {
             if let Some(v) = self.finger[i] {
                 if v > self.id && v < id {
                     // check a recorded did x in (self.id, target_id)
@@ -160,7 +160,7 @@ impl Chord {
                 }
             }
         }
-        Err(anyhow!("cannot find cloest precding node"))
+        Err(anyhow!("cannot find cloest preceding node"))
     }
 
     // Fig.5 n.find_successor(id)
@@ -171,7 +171,7 @@ impl Chord {
         } else {
             // n = closest preceding node(id);
             // return n.find_successor(id);
-            match self.closest_precding_node(id) {
+            match self.closest_preceding_node(id) {
                 Ok(n) => Ok(ChordAction::FindSuccessor((n, id))),
                 Err(e) => Err(anyhow!(e)),
             }
