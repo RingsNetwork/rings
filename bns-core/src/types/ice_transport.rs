@@ -7,6 +7,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use web3::types::Address;
+use serde::Serialize;
 
 type Fut = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
@@ -34,6 +35,7 @@ pub trait IceTransport<Ch: Channel> {
     async fn get_answer_str(&self) -> Result<String>;
     async fn get_offer_str(&self) -> Result<String>;
     async fn get_data_channel(&self) -> Option<Arc<Self::DataChannel>>;
+    async fn send_message<T>(&self, msg: T) -> Result<()> where T: Serialize + Send;
 
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
     where

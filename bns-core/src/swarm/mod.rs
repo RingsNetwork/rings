@@ -13,26 +13,38 @@ use crate::transports::wasm::WasmTransport as Transport;
 use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::Events;
 use crate::types::ice_transport::IceTransport;
+use crate::msg::SignedMsg;
+use crate::ecc::SecretKey;
 use anyhow::Result;
 use std::sync::Arc;
 use web3::types::Address;
+use serde::Deserialize;
+use serde::Serialize;
+
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum Message {
+    CustomMessage { value: String },
+    DHTMessage
+}
 
 pub struct Swarm {
     pub table: MemStorage<Address, Arc<Transport>>,
     pub signaler: Arc<Channel>,
     pub stun_server: String,
     pub dht: Chord,
-    pub address: Address,
+    pub key: SecretKey,
 }
 
 impl Swarm {
-    pub fn new(ch: Arc<Channel>, stun: String, address: Address) -> Self {
+    pub fn new(ch: Arc<Channel>, stun: String, key: SecretKey) -> Self {
         Self {
-            table: MemStorage::new(),
+            table: MemStorage::<Address, Arc<Transport>>::new(),
             signaler: Arc::clone(&ch),
             stun_server: stun,
-            dht: Chord::new(address.into()),
-            address,
+            dht: Chord::new(key.address().into()),
+            key,
         }
     }
 
@@ -59,6 +71,10 @@ impl Swarm {
 
     pub fn signaler(&self) -> Arc<Channel> {
         Arc::clone(&self.signaler)
+    }
+
+    pub fn send_message(&self, address: Address, msg: SignedMsg<Message>) -> Result<()> {
+        Ok(())
     }
 
     pub async fn event_handler(&self) {

@@ -162,6 +162,27 @@ impl IceTransport<AcChannel> for DefaultTransport {
         self.data_channel.lock().await.clone()
     }
 
+    async fn send_message<T>(&self, msg: T) -> Result<()>
+        where T: Serialize + Send
+    {
+        let data = serde_json::to_string(&msg)?;
+        match self.get_data_channel().await {
+            Some(cnn) => {
+                match cnn.send_text(data.to_owned()).await {
+                    Ok(s) => {
+                        if !s == data.to_owned().len() {
+                            Err(anyhow!("msg is not complete, {:?}!= {:?}", s, data.len()))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                    Err(e) => Err(anyhow!(e))
+                }
+            },
+            None => Err(anyhow!("data channel may not ready"))
+        }
+    }
+
     async fn add_ice_candidate(&self, candidate: String) -> Result<()> {
         match self.get_peer_connection().await {
             Some(peer_connection) => peer_connection
@@ -304,19 +325,7 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
                 d.on_open(Box::new(move || {
                     let channel = Arc::clone(&channel);
                     Box::pin(async move {
-                        let channel = Arc::clone(&channel);
-                        let mut result = Result::<usize>::Ok(0);
-                        while result.is_ok() {
-                            let timeout = tokio::time::sleep(Duration::from_secs(5));
-                            tokio::pin!(timeout);
-                            tokio::select! {
-                                _ = timeout.as_mut() =>{
-                                    let message = math_rand_alpha(15);
-                                    println!("Sending '{}'", message);
-                                    result = channel.send_text(message).await.map_err(Into::into);
-                                }
-                            };
-                        }
+                        // do nothing here
                     })
                 }))
                 .await;
