@@ -1,5 +1,7 @@
 /// Did is a finate Ring R(P) where P = 2^160
 use num_bigint::BigUint;
+use serde::Deserialize;
+use serde::Serialize;
 use std::cmp::{Eq, PartialEq};
 use std::ops::Deref;
 use std::ops::Neg;
@@ -8,13 +10,19 @@ use std::str::FromStr;
 use web3::types::Address;
 use web3::types::H160;
 
-#[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd, Debug)]
+#[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd, Debug, Serialize, Deserialize)]
 pub struct Did(Address);
 
 impl Deref for Did {
     type Target = Address;
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+
+impl From<Did> for Address {
+    fn from(a: Did) -> Self {
+        a.0.to_owned()
     }
 }
 

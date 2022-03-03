@@ -16,7 +16,7 @@ use serde::Serialize;
 use serde_json;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tokio::time::Duration;
+
 use web3::types::Address;
 use webrtc::api::APIBuilder;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
@@ -25,7 +25,7 @@ use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit}
 use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
-use webrtc::peer_connection::math_rand_alpha;
+
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
@@ -160,6 +160,26 @@ impl IceTransport<AcChannel> for DefaultTransport {
 
     async fn get_data_channel(&self) -> Option<Arc<RTCDataChannel>> {
         self.data_channel.lock().await.clone()
+    }
+
+    async fn send_message<T>(&self, msg: T) -> Result<()>
+    where
+        T: Serialize + Send,
+    {
+        let data = serde_json::to_string(&msg)?;
+        match self.get_data_channel().await {
+            Some(cnn) => match cnn.send_text(data.to_owned()).await {
+                Ok(s) => {
+                    if !s == data.to_owned().len() {
+                        Err(anyhow!("msg is not complete, {:?}!= {:?}", s, data.len()))
+                    } else {
+                        Ok(())
+                    }
+                }
+                Err(e) => Err(anyhow!(e)),
+            },
+            None => Err(anyhow!("data channel may not ready")),
+        }
     }
 
     async fn add_ice_candidate(&self, candidate: String) -> Result<()> {
@@ -302,21 +322,9 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
 
             Box::pin(async move {
                 d.on_open(Box::new(move || {
-                    let channel = Arc::clone(&channel);
+                    let _channel = Arc::clone(&channel);
                     Box::pin(async move {
-                        let channel = Arc::clone(&channel);
-                        let mut result = Result::<usize>::Ok(0);
-                        while result.is_ok() {
-                            let timeout = tokio::time::sleep(Duration::from_secs(5));
-                            tokio::pin!(timeout);
-                            tokio::select! {
-                                _ = timeout.as_mut() =>{
-                                    let message = math_rand_alpha(15);
-                                    println!("Sending '{}'", message);
-                                    result = channel.send_text(message).await.map_err(Into::into);
-                                }
-                            };
-                        }
+                        // do nothing here
                     })
                 }))
                 .await;

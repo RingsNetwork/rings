@@ -3,6 +3,10 @@ use crate::channels::default::AcChannel as Channel;
 #[cfg(feature = "wasm")]
 use crate::channels::wasm::CbChannel as Channel;
 use crate::dht::chord::Chord;
+use crate::dht::chord::ChordAction;
+use crate::dht::chord::RemoteAction;
+use crate::ecc::SecretKey;
+use crate::msg::SignedMsg;
 /// Swarm is transport management
 ///
 use crate::storage::{MemStorage, Storage};
@@ -14,26 +18,40 @@ use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::Events;
 use crate::types::ice_transport::IceTransport;
 use anyhow::Result;
+use futures::lock::Mutex;
+use serde::Deserialize;
+use serde::Serialize;
 use std::sync::Arc;
 use web3::types::Address;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "type", content = "data")]
+pub enum Message {
+    CustomMessage(String),
+    DHTMessage(RemoteAction),
+}
 
 pub struct Swarm {
     pub table: MemStorage<Address, Arc<Transport>>,
     pub signaler: Arc<Channel>,
     pub stun_server: String,
-    pub dht: Chord,
-    pub address: Address,
+    pub dht: Arc<Mutex<Chord>>,
+    pub key: SecretKey,
 }
 
 impl Swarm {
-    pub fn new(ch: Arc<Channel>, stun: String, address: Address) -> Self {
+    pub fn new(ch: Arc<Channel>, stun: String, key: SecretKey) -> Self {
         Self {
-            table: MemStorage::new(),
+            table: MemStorage::<Address, Arc<Transport>>::new(),
             signaler: Arc::clone(&ch),
             stun_server: stun,
-            dht: Chord::new(address.into()),
-            address,
+            dht: Arc::new(Mutex::new(Chord::new(key.address().into()))),
+            key,
         }
+    }
+
+    pub fn address(&self) -> Address {
+        self.key.address()
     }
 
     pub async fn new_transport(&self) -> Result<Arc<Transport>> {
@@ -45,10 +63,18 @@ impl Swarm {
 
     pub async fn register(&self, address: Address, trans: Arc<Transport>) {
         let prev_trans = self.table.set(address, trans);
-
         if let Some(trans) = prev_trans {
             if let Err(e) = trans.close().await {
-                log::error!("failed to close previous while registering {:?}", e)
+                log::error!("failed to close previous while registering {:?}", e);
+            }
+        }
+        let mut dht = self.dht.lock().await;
+        if let ChordAction::RemoteAction((addr, act)) = (*dht).join(address.into()) {
+            if let Ok(msg) = SignedMsg::new(Message::DHTMessage(act), &self.key, None) {
+                // should handle return
+                if let Err(e) = self.send_message_without_dht(addr.into(), msg).await {
+                    log::error!("{:?}", e);
+                }
             }
         }
     }
@@ -61,13 +87,34 @@ impl Swarm {
         Arc::clone(&self.signaler)
     }
 
+    pub async fn send_message_without_dht(
+        &self,
+        address: Address,
+        msg: SignedMsg<Message>,
+    ) -> Result<()> {
+        match self.get_transport(address) {
+            Some(trans) => Ok(trans.send_message(msg).await?),
+            None => Err(anyhow::anyhow!("cannot seek address in swarm table")),
+        }
+    }
+
     pub async fn event_handler(&self) {
         loop {
             match self.signaler.recv().await {
                 Ok(ev) => match ev {
-                    Events::ReceiveMsg(m) => {
-                        let m = String::from_utf8(m).unwrap();
-                        log::debug!("Receive Msg {}", m);
+                    Events::ReceiveMsg(msg) => {
+                        match serde_json::from_slice::<SignedMsg<Message>>(&msg) {
+                            Ok(m) => {
+                                if m.is_expired() || !m.verify() {
+                                    log::error!("cannot verify msg or it's expired: {:?}", m);
+                                } else {
+                                    let _ = self.message_handler(m.to_owned().data).await;
+                                }
+                            }
+                            Err(_e) => {
+                                log::error!("cant handle Msg {:?}", msg);
+                            }
+                        }
                     }
                     x => {
                         log::debug!("Receive {:?}", x)
@@ -79,26 +126,38 @@ impl Swarm {
             }
         }
     }
+
+    pub async fn message_handler(&self, msg: Message) {
+        match msg {
+            Message::CustomMessage(m) => {
+                log::info!("got Msg {:?}", m);
+            }
+            Message::DHTMessage(action) => match action {
+                RemoteAction::FindSuccessor(_) => {}
+                RemoteAction::Notify(_) => {}
+                RemoteAction::FindSuccessorAndAddToFinger((_, _)) => {}
+                RemoteAction::CheckPredecessor => {}
+            },
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::str::FromStr;
+
     use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
     use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 
-    fn new_swarm(addr: &str) -> Swarm {
+    fn new_swarm() -> Swarm {
         let ch = Arc::new(Channel::new(1));
         let stun = String::from("stun:stun.l.google.com:19302");
-        let address = Address::from_str(addr).unwrap();
-
-        Swarm::new(ch, stun, address)
+        Swarm::new(ch, stun, SecretKey::random())
     }
 
     #[tokio::test]
     async fn swarm_new_transport() {
-        let swarm = new_swarm("0x1111111111111111111111111111111111111111");
+        let swarm = new_swarm();
 
         let transport = swarm.new_transport().await.unwrap();
         assert_eq!(
@@ -109,33 +168,33 @@ mod tests {
 
     #[tokio::test]
     async fn test_swarm_register_and_get() {
-        let swarm1 = new_swarm("0x1111111111111111111111111111111111111111");
-        let swarm2 = new_swarm("0x2222222222222222222222222222222222222222");
+        let swarm1 = new_swarm();
+        let swarm2 = new_swarm();
 
-        assert!(swarm1.get_transport(swarm2.address).is_none());
+        assert!(swarm1.get_transport(swarm2.address()).is_none());
 
         let transport0 = swarm1.new_transport().await.unwrap();
         let transport1 = transport0.clone();
 
-        swarm1.register(swarm2.address, transport1).await;
+        swarm1.register(swarm2.address(), transport1).await;
 
-        let transport2 = swarm1.get_transport(swarm2.address).unwrap();
+        let transport2 = swarm1.get_transport(swarm2.address()).unwrap();
 
         assert!(Arc::ptr_eq(&transport0, &transport2));
     }
 
     #[tokio::test]
     async fn test_swarm_will_close_previous_transport() {
-        let swarm1 = new_swarm("0x1111111111111111111111111111111111111111");
-        let swarm2 = new_swarm("0x2222222222222222222222222222222222222222");
+        let swarm1 = new_swarm();
+        let swarm2 = new_swarm();
 
-        assert!(swarm1.get_transport(swarm2.address).is_none());
+        assert!(swarm1.get_transport(swarm2.address()).is_none());
 
         let transport1 = swarm1.new_transport().await.unwrap();
         let transport2 = swarm1.new_transport().await.unwrap();
 
-        swarm1.register(swarm2.address, transport1.clone()).await;
-        swarm1.register(swarm2.address, transport2.clone()).await;
+        swarm1.register(swarm2.address(), transport1.clone()).await;
+        swarm1.register(swarm2.address(), transport2.clone()).await;
 
         assert_eq!(
             transport1.ice_connection_state().await.unwrap(),

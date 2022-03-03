@@ -11,7 +11,7 @@ use web3::types::Address;
 
 const DEFAULT_TTL_MS: usize = 60 * 1000;
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct SignedMsg<T> {
     pub data: T,
     pub ttl_ms: usize,
