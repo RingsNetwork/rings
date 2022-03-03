@@ -5,6 +5,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use crossbeam_channel as cbc;
 
+#[derive(Clone, Debug)]
 pub struct CbChannel {
     sender: cbc::Sender<Events>,
     receiver: cbc::Receiver<Events>,

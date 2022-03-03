@@ -2,6 +2,7 @@ use crate::ecc::{sign, verify, SecretKey};
 use crate::encoder::Encoded;
 use anyhow::anyhow;
 use anyhow::Result;
+use chrono::Utc;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
@@ -86,11 +87,7 @@ where
 }
 
 fn get_epoch_ms() -> u128 {
-    use std::time::SystemTime;
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_millis()
+    Utc::now().timestamp_millis() as u128
 }
 
 #[cfg(test)]

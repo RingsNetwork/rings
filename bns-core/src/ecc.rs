@@ -2,6 +2,8 @@ use anyhow::anyhow;
 use anyhow::Result;
 use hex;
 use libsecp256k1::recover;
+use rand::SeedableRng;
+use rand_hc::Hc128Rng;
 use std::convert::TryFrom;
 use std::ops::Deref;
 use web3::signing::keccak256;
@@ -68,6 +70,11 @@ fn secret_key_address(secret_key: &SecretKey) -> Address {
 }
 
 impl SecretKey {
+    pub fn random() -> Self {
+        let mut rng = Hc128Rng::from_entropy();
+        Self(libsecp256k1::SecretKey::random(&mut rng))
+    }
+
     pub fn address(&self) -> Address {
         secret_key_address(self)
     }
