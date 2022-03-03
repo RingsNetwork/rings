@@ -154,20 +154,6 @@ impl IceTransport<AcChannel> for DefaultTransport {
         }
     }
 
-    async fn send_message<T>(&self, msg: T) -> Result<()>
-    where
-        T: Serialize + Send,
-    {
-        let data: Vec<u8> = serde_json::to_vec(&msg)?;
-        match self.get_data_channel().await {
-            Some(dc) => {
-                dc.send(&data.into()).await.map_err(|e| anyhow!("{:?}", e));
-                Ok(())
-            }
-            None => Err(anyhow!("data channel may not ready")),
-        }
-    }
-
     async fn get_offer_str(&self) -> Result<String> {
         Ok(self.get_offer().await?.sdp)
     }
@@ -331,10 +317,9 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
         let signaler = self.signaler();
 
         box move |d: Arc<RTCDataChannel>| {
-            let on_open_channel = Arc::clone(&channel);
-            let on_messsage_channel = Arc::clone(&channel);
-            let on_open_signaler = Arc::clone(&signaler);
-            let on_message_signaler = Arc::clone(&signaler);
+            let channel = Arc::clone(&channel);
+            let signaler = Arc::clone(&signaler);
+
             Box::pin(async move {
                 d.on_open(Box::new(move || {
                     let _channel = Arc::clone(&channel);
@@ -344,8 +329,6 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
                 }))
                 .await;
 
-            Box::pin(async move {
-                d.on_open(Box::new(move || Box::pin(async move {}))).await;
                 d.on_message(Box::new(move |msg: DataChannelMessage| {
                     log::debug!("Message from DataChannel: '{:?}'", msg);
                     let signaler = Arc::clone(&signaler);

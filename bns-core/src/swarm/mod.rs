@@ -2,17 +2,10 @@
 use crate::channels::default::AcChannel as Channel;
 #[cfg(feature = "wasm")]
 use crate::channels::wasm::CbChannel as Channel;
-<<<<<<< HEAD
 use crate::dht::chord::ChordAction;
 use crate::dht::chord::RemoteAction;
 use crate::ecc::SecretKey;
 use crate::msg::SignedMsg;
-=======
-use crate::dht::chord::Chord as DHT;
-use crate::dht::chord::ChordAction;
-use crate::dht::chord::ChordMessage;
-use crate::did::Did;
->>>>>>> 1da5e36 (update chord)
 /// Swarm is transport management
 use crate::storage::{MemStorage, Storage};
 #[cfg(not(feature = "wasm"))]
@@ -48,7 +41,6 @@ impl Swarm {
         Self {
             table: MemStorage::<Address, Arc<Transport>>::new(),
             signaler: Arc::clone(&ch),
-            dht: Arc::new(Mutex::new(DHT::new(address.into()))),
             stun_server: stun,
             dht: Arc::new(Mutex::new(Chord::new(key.address().into()))),
             key,
@@ -142,15 +134,6 @@ impl Swarm {
                     log::info!("other situation not implement");
                 }
             };
-            //match routing.fix_fingers() {
-            //Ok(action) => {
-            //let message = Events::from_action(action);
-            //self.signaler.send(message).await;
-            //}
-            //Err(_) => {
-            //log::error!("failed on fix fingers");
-            //}
-            //}
         }
     }
 
@@ -165,6 +148,14 @@ impl Swarm {
                 RemoteAction::FindSuccessorAndAddToFinger((_, _)) => {}
                 RemoteAction::CheckPredecessor => {}
             },
+        }
+    }
+
+    pub async stabilize(&self) {
+        let mut chord = self.dht.lock().unwrap();
+        let (current, successor) = (chord.id, chord.successor);
+        match self.get_transport(successor.into()) {
+
         }
     }
 }
