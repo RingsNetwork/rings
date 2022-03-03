@@ -5,9 +5,12 @@ use crate::channels::wasm::CbChannel as Channel;
 use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::Events;
 use std::sync::Arc;
-use webrtc::data_channel::RTCDataChannel;
+#[cfg(feature = "wasm")]
+use web_sys::RtcDataChannel as DataChannel;
+#[cfg(not(feature = "wasm"))]
+use webrtc::data_channel::RTCDataChannel as DataChannel;
 
-pub async fn handle_send_msg(event: Events, channle: Arc<RTCDataChannel>, signaler: Arc<Channel>) {
+pub async fn handle_send_msg(event: Events, channle: Arc<DataChannel>, signaler: Arc<Channel>) {
     log::debug!("Event: {:?}", event);
     match event {
         Events::SendMsg(msg) => {}
@@ -17,7 +20,7 @@ pub async fn handle_send_msg(event: Events, channle: Arc<RTCDataChannel>, signal
     }
 }
 
-pub async fn handle_recv_msg(event: Events, channle: Arc<RTCDataChannel>, signaler: Arc<Channel>) {
+pub async fn handle_recv_msg(event: Events, channle: Arc<DataChannel>, signaler: Arc<Channel>) {
     log::debug!("Event: {:?}", event);
     match event {
         Events::ReceiveMsg(msg) => {}
