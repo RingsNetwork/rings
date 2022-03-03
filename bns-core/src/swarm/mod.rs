@@ -20,6 +20,7 @@ use anyhow::Result;
 use serde::Deserialize;
 use serde::Serialize;
 use std::sync::Arc;
+use std::sync::Mutex;
 use web3::types::Address;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -33,7 +34,7 @@ pub struct Swarm {
     pub table: MemStorage<Address, Arc<Transport>>,
     pub signaler: Arc<Channel>,
     pub stun_server: String,
-    pub dht: Chord,
+    pub dht: Mutex<Chord>,
     pub key: SecretKey,
 }
 
@@ -43,7 +44,7 @@ impl Swarm {
             table: MemStorage::<Address, Arc<Transport>>::new(),
             signaler: Arc::clone(&ch),
             stun_server: stun,
-            dht: Chord::new(key.address().into()),
+            dht: Mutex::new(Chord::new(key.address().into())),
             key,
         }
     }
@@ -123,7 +124,15 @@ impl Swarm {
                 log::info!("got Msg {:?}", m);
             }
             Message::DHTMessage(action) => match action {
-                _ => (),
+                RemoteAction::FindSuccessor((_did, _value)) => {
+                },
+                RemoteAction::Notify((_did, _value)) => {
+                },
+                RemoteAction::FindSuccessorAndAddToFinger((_index, _did, _value)) => {
+                },
+                RemoteAction::CheckPredecessor(_did) => {
+
+                }
             },
         }
     }
