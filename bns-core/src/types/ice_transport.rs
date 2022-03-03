@@ -1,4 +1,3 @@
-use crate::dht::message::Procedures;
 use crate::ecc::SecretKey;
 use crate::encoder::Encoded;
 use crate::types::channel::Channel;
@@ -23,7 +22,7 @@ pub trait IceTransport<Ch: Channel> {
     type ConnectionState;
     type Msg;
 
-    fn new(signaler: Arc<Ch>, procedures: Arc<Procedures>) -> Self;
+    fn new(signaler: Arc<Ch>) -> Self;
     fn signaler(&self) -> Arc<Ch>;
     async fn start(&mut self, stun_addr: String) -> Result<()>;
     async fn close(&self) -> Result<()>;

@@ -1,5 +1,4 @@
 use crate::channels::default::AcChannel;
-use crate::dht::message::Procedures;
 use crate::ecc::SecretKey;
 use crate::encoder::Encoded;
 use crate::msg::SignedMsg;
@@ -38,7 +37,6 @@ pub struct DefaultTransport {
     pub pending_candidates: Arc<Mutex<Vec<RTCIceCandidate>>>,
     pub data_channel: Arc<Mutex<Option<Arc<RTCDataChannel>>>>,
     pub signaler: Arc<AcChannel>,
-    pub procedures: Arc<Procedures>,
 }
 
 #[async_trait]
@@ -51,13 +49,12 @@ impl IceTransport<AcChannel> for DefaultTransport {
     type ConnectionState = RTCPeerConnectionState;
     type Msg = DataChannelMessage;
 
-    fn new(ch: Arc<AcChannel>, proc: Arc<Procedures>) -> Self {
+    fn new(ch: Arc<AcChannel>) -> Self {
         Self {
             connection: Arc::new(Mutex::new(None)),
             pending_candidates: Arc::new(Mutex::new(vec![])),
             data_channel: Arc::new(Mutex::new(None)),
             signaler: Arc::clone(&ch),
-            procedures: Arc::clone(&proc),
         }
     }
 
@@ -318,13 +315,11 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
     async fn on_data_channel_callback(&self) -> Self::OnDataChannelHdlrFn {
         let channel = self.get_data_channel().await.unwrap();
         let signaler = self.signaler();
-        let procedures = Arc::clone(&self.procedures);
 
         box move |d: Arc<RTCDataChannel>| {
             let channel = Arc::clone(&channel);
             let on_open_signaler = Arc::clone(&signaler);
             let on_message_signaler = Arc::clone(&signaler);
-            let on_message_procedures = Arc::clone(&procedures);
             Box::pin(async move {
                 d.on_open(Box::new(move || {
                     let _channel = Arc::clone(&channel);
@@ -337,7 +332,6 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
                 d.on_message(Box::new(move |msg: DataChannelMessage| {
                     log::debug!("Message from DataChannel: '{:?}'", msg);
                     let signaler = Arc::clone(&on_message_signaler);
-                    let procedures = Arc::clone(&on_message_procedures);
                     Box::pin(async move {
                         if signaler
                             .send(Events::ReceiveMsg(msg.data.to_vec()))

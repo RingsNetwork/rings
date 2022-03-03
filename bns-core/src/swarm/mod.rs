@@ -2,7 +2,6 @@
 use crate::channels::default::AcChannel as Channel;
 #[cfg(feature = "wasm")]
 use crate::channels::wasm::CbChannel as Channel;
-use crate::dht::chord::Chord;
 use crate::dht::chord::ChordAction;
 use crate::dht::chord::RemoteAction;
 use crate::ecc::SecretKey;
@@ -55,7 +54,7 @@ impl Swarm {
     }
 
     pub async fn new_transport(&self) -> Result<Arc<Transport>> {
-        let mut ice_transport = Transport::new(self.signaler(), Arc::clone(&self.procedures));
+        let mut ice_transport = Transport::new(self.signaler());
         ice_transport.start(self.stun_server.clone()).await?;
         let trans = Arc::new(ice_transport);
         Ok(Arc::clone(&trans))
@@ -100,13 +99,13 @@ impl Swarm {
 
     pub async fn event_handler(&self) {
         loop {
-            let mut routing = self.procedures.routing.lock().unwrap();
-            let (current, successor) = (routing.id, routing.successor);
+            let mut routing = self.routing.lock().unwrap();
+            let (current, successor) = (routing.current, routing.successor);
             // notify predecessor
             if let Some(x) = routing.predecessor {
                 if x > current && x < successor {
                     let message: Events =
-                        Events::from_action(ChordAction::Notify((current, successor)));
+                        Events::try_from(ChordAction::Notify((current, successor))).unwrap();
                     self.signaler.send(message).await;
                 }
             }
@@ -137,15 +136,15 @@ impl Swarm {
                     log::info!("other situation not implement");
                 }
             };
-            match routing.fix_fingers() {
-                Ok(action) => {
-                    let message = Events::from_action(action);
-                    self.signaler.send(message).await;
-                }
-                Err(_) => {
-                    log::error!("failed on fix fingers");
-                }
-            }
+            //match routing.fix_fingers() {
+            //Ok(action) => {
+            //let message = Events::from_action(action);
+            //self.signaler.send(message).await;
+            //}
+            //Err(_) => {
+            //log::error!("failed on fix fingers");
+            //}
+            //}
         }
     }
 
