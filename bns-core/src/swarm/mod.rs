@@ -4,6 +4,8 @@ use crate::channels::default::AcChannel as Channel;
 use crate::channels::wasm::CbChannel as Channel;
 use crate::dht::chord::Chord;
 use crate::dht::chord::RemoteAction;
+use crate::ecc::SecretKey;
+use crate::msg::SignedMsg;
 /// Swarm is transport management
 ///
 use crate::storage::{MemStorage, Storage};
@@ -14,20 +16,17 @@ use crate::transports::wasm::WasmTransport as Transport;
 use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::Events;
 use crate::types::ice_transport::IceTransport;
-use crate::msg::SignedMsg;
-use crate::ecc::SecretKey;
 use anyhow::Result;
-use std::sync::Arc;
-use web3::types::Address;
 use serde::Deserialize;
 use serde::Serialize;
-
+use std::sync::Arc;
+use web3::types::Address;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
 pub enum Message {
     CustomMessage(String),
-    DHTMessage(RemoteAction)
+    DHTMessage(RemoteAction),
 }
 
 pub struct Swarm {
@@ -78,12 +77,14 @@ impl Swarm {
         Arc::clone(&self.signaler)
     }
 
-    pub async fn send_message_without_dht(&self, address: Address, msg: SignedMsg<Message>) -> Result<()> {
+    pub async fn send_message_without_dht(
+        &self,
+        address: Address,
+        msg: SignedMsg<Message>,
+    ) -> Result<()> {
         match self.get_transport(address) {
-            Some(trans) => {
-                Ok(trans.send_message(msg).await?)
-            },
-            None => Err(anyhow::anyhow!("cannot seek address in swarm table"))
+            Some(trans) => Ok(trans.send_message(msg).await?),
+            None => Err(anyhow::anyhow!("cannot seek address in swarm table")),
         }
     }
 
@@ -120,21 +121,18 @@ impl Swarm {
         match msg {
             Message::CustomMessage(m) => {
                 log::info!("got Msg {:?}", m);
-            },
-            Message::DHTMessage(action) => {
-                match action {
-                    _ => ()
-                }
             }
+            Message::DHTMessage(action) => match action {
+                _ => (),
+            },
         }
-
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::str::FromStr;
+
     use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
     use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 

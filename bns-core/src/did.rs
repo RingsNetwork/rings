@@ -1,5 +1,7 @@
 /// Did is a finate Ring R(P) where P = 2^160
 use num_bigint::BigUint;
+use serde::Deserialize;
+use serde::Serialize;
 use std::cmp::{Eq, PartialEq};
 use std::ops::Deref;
 use std::ops::Neg;
@@ -7,8 +9,6 @@ use std::ops::{Add, Sub};
 use std::str::FromStr;
 use web3::types::Address;
 use web3::types::H160;
-use serde::Deserialize;
-use serde::Serialize;
 
 #[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd, Debug, Serialize, Deserialize)]
 pub struct Did(Address);

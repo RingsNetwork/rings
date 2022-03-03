@@ -163,23 +163,22 @@ impl IceTransport<AcChannel> for DefaultTransport {
     }
 
     async fn send_message<T>(&self, msg: T) -> Result<()>
-        where T: Serialize + Send
+    where
+        T: Serialize + Send,
     {
         let data = serde_json::to_string(&msg)?;
         match self.get_data_channel().await {
-            Some(cnn) => {
-                match cnn.send_text(data.to_owned()).await {
-                    Ok(s) => {
-                        if !s == data.to_owned().len() {
-                            Err(anyhow!("msg is not complete, {:?}!= {:?}", s, data.len()))
-                        } else {
-                            Ok(())
-                        }
-                    },
-                    Err(e) => Err(anyhow!(e))
+            Some(cnn) => match cnn.send_text(data.to_owned()).await {
+                Ok(s) => {
+                    if !s == data.to_owned().len() {
+                        Err(anyhow!("msg is not complete, {:?}!= {:?}", s, data.len()))
+                    } else {
+                        Ok(())
+                    }
                 }
+                Err(e) => Err(anyhow!(e)),
             },
-            None => Err(anyhow!("data channel may not ready"))
+            None => Err(anyhow!("data channel may not ready")),
         }
     }
 

@@ -227,18 +227,15 @@ impl IceTransport<CbChannel> for WasmTransport {
     }
 
     async fn send_message<T>(&self, msg: T) -> Result<()>
-        where T: Serialize + Send
+    where
+        T: Serialize + Send,
     {
         let data = serde_json::to_string(&msg)?;
         match self.get_data_channel().await {
-            Some(cnn) => {
-                cnn.send_with_str(&data).map_err(|e| anyhow!("{:?}", e))
-            },
-            None => Err(anyhow!("data channel may not ready"))
+            Some(cnn) => cnn.send_with_str(&data).map_err(|e| anyhow!("{:?}", e)),
+            None => Err(anyhow!("data channel may not ready")),
         }
     }
-
-
 
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
     where
