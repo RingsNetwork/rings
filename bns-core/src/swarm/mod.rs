@@ -124,15 +124,10 @@ impl Swarm {
                 log::info!("got Msg {:?}", m);
             }
             Message::DHTMessage(action) => match action {
-                RemoteAction::FindSuccessor((_did, _value)) => {
-                },
-                RemoteAction::Notify((_did, _value)) => {
-                },
-                RemoteAction::FindSuccessorAndAddToFinger((_index, _did, _value)) => {
-                },
-                RemoteAction::CheckPredecessor(_did) => {
-
-                }
+                RemoteAction::FindSuccessor((_did, _value)) => {}
+                RemoteAction::Notify((_did, _value)) => {}
+                RemoteAction::FindSuccessorAndAddToFinger((_index, _did, _value)) => {}
+                RemoteAction::CheckPredecessor(_did) => {}
             },
         }
     }
