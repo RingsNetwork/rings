@@ -2,19 +2,25 @@
 use crate::channels::default::AcChannel as Channel;
 #[cfg(feature = "wasm")]
 use crate::channels::wasm::CbChannel as Channel;
+use crate::dht::chord::Chord;
 use crate::dht::chord::ChordAction;
 use crate::dht::chord::RemoteAction;
+use crate::did::Did;
 use crate::ecc::SecretKey;
 use crate::msg::SignedMsg;
 /// Swarm is transport management
+///
 use crate::storage::{MemStorage, Storage};
 #[cfg(not(feature = "wasm"))]
 use crate::transports::default::DefaultTransport as Transport;
 #[cfg(feature = "wasm")]
 use crate::transports::wasm::WasmTransport as Transport;
+use crate::types::channel::Channel as ChannelTrait;
+use crate::types::channel::Events;
 use crate::types::ice_transport::IceTransport;
 use anyhow::Result;
 use futures::lock::Mutex;
+use num_bigint::BigUint;
 use serde::Deserialize;
 use serde::Serialize;
 use std::sync::Arc;
@@ -24,13 +30,12 @@ use web3::types::Address;
 #[serde(tag = "type", content = "data")]
 pub enum Message {
     CustomMessage(String),
-    DHTMessage(RemoteAction),
+    DHTMessage(ChordAction),
 }
 
 pub struct Swarm {
     pub table: MemStorage<Address, Arc<Transport>>,
     pub signaler: Arc<Channel>,
-    pub dht: Arc<Mutex<DHT>>,
     pub stun_server: String,
     pub dht: Arc<Mutex<Chord>>,
     pub key: SecretKey,
@@ -66,12 +71,13 @@ impl Swarm {
             }
         }
         let mut dht = self.dht.lock().await;
-        if let ChordAction::RemoteAction((addr, act)) = (*dht).join(address.into()) {
-            if let Ok(msg) = SignedMsg::new(Message::DHTMessage(act), &self.key, None) {
-                // should handle return
-                if let Err(e) = self.send_message_without_dht(addr.into(), msg).await {
-                    log::error!("{:?}", e);
-                }
+        if let Ok(msg) = SignedMsg::new(
+            Message::DHTMessage(dht.join(address.into())),
+            &self.key,
+            None,
+        ) {
+            if let Err(e) = self.send_message_without_dht(address.into(), msg).await {
+                log::error!("{:?}", e);
             }
         }
     }
@@ -97,16 +103,6 @@ impl Swarm {
 
     pub async fn event_handler(&self) {
         loop {
-            let mut routing = self.routing.lock().unwrap();
-            let (current, successor) = (routing.current, routing.successor);
-            // notify predecessor
-            if let Some(x) = routing.predecessor {
-                if x > current && x < successor {
-                    let message: Events =
-                        Events::try_from(ChordAction::Notify((current, successor))).unwrap();
-                    self.signaler.send(message).await;
-                }
-            }
             match self.signaler.recv().await {
                 Ok(ev) => match ev {
                     Events::ReceiveMsg(msg) => {
@@ -130,9 +126,6 @@ impl Swarm {
                 Err(e) => {
                     log::error!("failed on handle rece event {:?}", e);
                 }
-                _ => {
-                    log::info!("other situation not implement");
-                }
             };
         }
     }
@@ -143,19 +136,142 @@ impl Swarm {
                 log::info!("got Msg {:?}", m);
             }
             Message::DHTMessage(action) => match action {
-                RemoteAction::FindSuccessor(_) => {}
-                RemoteAction::Notify(_) => {}
-                RemoteAction::FindSuccessorAndAddToFinger((_, _)) => {}
-                RemoteAction::CheckPredecessor => {}
+                ChordAction::RemoteAction((
+                    remote,
+                    RemoteAction::FindSuccessorAndAddToFinger((idx, successor)),
+                )) => {
+                    let chord = self.dht.lock().await;
+                    let (next, successor) = {
+                        match chord.find_successor(successor) {
+                            Ok(action) => match action {
+                                ChordAction::Some(id) => (id, id),
+                                ChordAction::RemoteAction((
+                                    _next,
+                                    RemoteAction::FindSuccessor(_next_id),
+                                )) => (_next, _next_id),
+                                _ => {
+                                    panic!("not implement other situations");
+                                }
+                            },
+                            Err(e) => {
+                                panic!("find successor failed, {:?}", e);
+                            }
+                        }
+                    };
+                    if next != successor {
+                        // TODO refine more than one hop find successor
+                    } else {
+                        let action = ChordAction::RemoteAction((
+                            self.address().into(),
+                            RemoteAction::FoundSuccessorAndAddToFinger((idx, successor)),
+                        ));
+                        let message = SignedMsg::new(action, &self.key, None).unwrap();
+                        match self.get_transport(remote.into()) {
+                            Some(trans) => {
+                                trans.send_message(message).await.unwrap();
+                            }
+                            None => {
+                                panic!("cannot seek address in swarm table");
+                            }
+                        }
+                    }
+                }
+                ChordAction::RemoteAction((remote, RemoteAction::Notify(predecessor))) => {
+                    let mut chord = self.dht.lock().await;
+                    if let Some(x) = chord.predecessor {
+                        // if predecessor is close than old predecessor then update
+                        // or predecessor point to current identifier
+                        // update predecessor to input predecessor
+                        if predecessor > x && predecessor > chord.id || x == chord.id {
+                            chord.predecessor = Some(x);
+                        }
+                        if chord.successor == chord.id {
+                            chord.successor = predecessor;
+                        }
+                        let action = ChordAction::RemoteAction((
+                            self.address().into(),
+                            RemoteAction::FindPredecessor(predecessor),
+                        ));
+                        let message = SignedMsg::new(action, &self.key, None).unwrap();
+                        match self.get_transport(remote.into()) {
+                            Some(trans) => {
+                                trans.send_message(message).await.unwrap();
+                            }
+                            None => {
+                                log::error!("cannot seek address in swarm table");
+                            }
+                        };
+                    }
+                }
+                ChordAction::RemoteAction((remote, RemoteAction::FindPredecessor(predecessor))) => {
+                    log::info!("Remote {:?} find predecessor and update", remote);
+                    let mut chord = self.dht.lock().await;
+                    // if successor: predecessor is between (id, successor]
+                    // then update local successor
+                    chord.successor = predecessor;
+                }
+                ChordAction::RemoteAction((
+                    _,
+                    RemoteAction::FoundSuccessorAndAddToFinger((idx, successor)),
+                )) => {
+                    log::info!("Update Finger table");
+                    let mut chord = self.dht.lock().await;
+                    chord.finger[idx] = Some(successor);
+                }
+                _ => {}
             },
         }
     }
 
-    pub async stabilize(&self) {
-        let mut chord = self.dht.lock().unwrap();
+    pub async fn stabilize(&self) {
+        let mut chord = self.dht.lock().await;
         let (current, successor) = (chord.id, chord.successor);
+        let action = ChordAction::RemoteAction((current, RemoteAction::Notify(current)));
+        let message = SignedMsg::new(action, &self.key, None).unwrap();
         match self.get_transport(successor.into()) {
-
+            Some(trans) => {
+                trans.send_message(message).await.unwrap();
+            }
+            None => {
+                panic!("cannot seek address in swarm table");
+            }
+        }
+        // fix fingers
+        chord.fix_finger_index += 1;
+        if chord.fix_finger_index >= 159 {
+            chord.fix_finger_index = 0;
+        }
+        let peer: BigUint = BigUint::from(chord.id)
+            + BigUint::from(2u16).pow(chord.fix_finger_index as u32) % BigUint::from(2u16).pow(160);
+        let peer: Did = peer.into();
+        let (remote, successor): (Did, Did) = {
+            match chord.find_successor(peer) {
+                Ok(action) => match action {
+                    ChordAction::Some(id) => (id, id),
+                    ChordAction::RemoteAction((remote, RemoteAction::FindSuccessor(id))) => {
+                        (remote, id)
+                    }
+                    _ => {
+                        panic!("Not implement situation");
+                    }
+                },
+                Err(e) => {
+                    panic!("find peer {:?} successor failed, {:?}", peer, e);
+                }
+            }
+        };
+        if remote != successor {
+            let action =
+                ChordAction::RemoteAction((current, RemoteAction::FindSuccessor(successor)));
+            let message = SignedMsg::new(action, &self.key, None).unwrap();
+            match self.get_transport(remote.into()) {
+                Some(trans) => {
+                    trans.send_message(message).await.unwrap();
+                }
+                None => {
+                    panic!("cannot seek address in swarm table")
+                }
+            }
         }
     }
 }

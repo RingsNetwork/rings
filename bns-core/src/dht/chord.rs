@@ -2,7 +2,6 @@
 /// ref: https://pdos.csail.mit.edu/papers/ton:chord/paper-ton.pdf
 /// With high probability, the number of nodes that must be contacted to find a successor in an N-node network is O(log N).
 use crate::did::Did;
-use crate::types::channel::Events;
 use anyhow::anyhow;
 use anyhow::Result;
 use num_bigint::BigUint;
@@ -16,8 +15,11 @@ pub enum RemoteAction {
     FindSuccessor(Did),
     // ask Did_a to notify(did_b)
     Notify(Did),
-    FindSuccessorAndAddToFinger((u8, Did)),
+    FindSuccessorAndAddToFinger((usize, Did)),
     CheckPredecessor,
+
+    FindPredecessor(Did),
+    FoundSuccessorAndAddToFinger((usize, Did)),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -25,41 +27,6 @@ pub enum ChordAction {
     None,
     Some(Did),
     RemoteAction((Did, RemoteAction)),
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct ChordMessage {
-    pub types: String, // SendMsg or ReceiveMsg
-    pub action: ChordAction,
-}
-
-impl PartialEq for ChordMessage {
-    fn eq(&self, others: &Self) -> bool {
-        if self.types != others.types {
-            return false;
-        } else {
-            if self.action != others.action {
-                return false;
-            }
-        }
-        return true;
-    }
-}
-
-impl TryFrom<Events> for ChordAction {
-    type Error = anyhow::Error;
-
-    fn try_from(event: Events) -> Result<ChordAction> {
-        match event {
-            Events::SendMsg(msg) | Events::ReceiveMsg(msg) => {
-                let message: ChordMessage = serde_json::from_slice(&msg).map_err(|e| anyhow!(e))?;
-                Ok(message.action)
-            }
-            Events::Null | Events::ConnectFailed => {
-                panic!("Internal Failed {:?}", event);
-            }
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -72,7 +39,7 @@ pub struct Chord {
     // The previous node on the identifier circle
     pub predecessor: Option<Did>,
     pub id: Did,
-    pub fix_finger_index: u8,
+    pub fix_finger_index: usize,
 }
 
 impl Chord {
@@ -165,7 +132,7 @@ impl Chord {
             self.fix_finger_index = 0;
         }
         let did: BigUint = (BigUint::from(self.id)
-            + BigUint::from(2u16).pow(self.fix_finger_index.into()))
+            + BigUint::from(2u16).pow(self.fix_finger_index as u32))
             % BigUint::from(2u16).pow(160);
         match self.find_successor(Did::try_from(did)?) {
             Ok(res) => match res {
