@@ -138,17 +138,15 @@ mod tests {
     use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
     use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 
-    fn new_swarm(addr: &str) -> Swarm {
+    fn new_swarm() -> Swarm {
         let ch = Arc::new(Channel::new(1));
         let stun = String::from("stun:stun.l.google.com:19302");
-        let address = Address::from_str(addr).unwrap();
-
-        Swarm::new(ch, stun, address)
+        Swarm::new(ch, stun, SecretKey::random())
     }
 
     #[tokio::test]
     async fn swarm_new_transport() {
-        let swarm = new_swarm("0x1111111111111111111111111111111111111111");
+        let swarm = new_swarm();
 
         let transport = swarm.new_transport().await.unwrap();
         assert_eq!(
@@ -159,8 +157,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_swarm_register_and_get() {
-        let swarm1 = new_swarm("0x1111111111111111111111111111111111111111");
-        let swarm2 = new_swarm("0x2222222222222222222222222222222222222222");
+        let swarm1 = new_swarm();
+        let swarm2 = new_swarm();
 
         assert!(swarm1.get_transport(swarm2.address()).is_none());
 
@@ -176,8 +174,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_swarm_will_close_previous_transport() {
-        let swarm1 = new_swarm("0x1111111111111111111111111111111111111111");
-        let swarm2 = new_swarm("0x2222222222222222222222222222222222222222");
+        let swarm1 = new_swarm();
+        let swarm2 = new_swarm();
 
         assert!(swarm1.get_transport(swarm2.address()).is_none());
 

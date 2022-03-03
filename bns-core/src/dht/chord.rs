@@ -229,7 +229,7 @@ mod tests {
         assert_eq!(node_a.join(b), ChordAction::RemoteAction(RemoteAction::FindSuccessor((b, a))));
         assert_eq!(node_a.successor, b);
         // Node A keep querying node b for it's successor
-        assert_eq!(node_a.join(c), ChordAction::FindSuccessor((b, a)));
+        assert_eq!(node_a.join(c), ChordAction::RemoteAction(RemoteAction::FindSuccessor((b, a))));
         // Node A's finter should be [None, ..B, C]
         assert!(node_a.finger.contains(&Some(c)), "{:?}", node_a.finger);
         // c is in range(a+2^159, a+2^160)
@@ -245,23 +245,23 @@ mod tests {
         // Node A will query c to find d
         assert_eq!(
             node_a.find_successor(d).unwrap(),
-            ChordAction::FindSuccessor((c, d))
+            ChordAction::RemoteAction(RemoteAction::FindSuccessor((c, d)))
         );
         assert_eq!(
             node_a.find_successor(c).unwrap(),
-            ChordAction::FindSuccessor((b, c))
+            ChordAction::RemoteAction(RemoteAction::FindSuccessor((b, c)))
         );
 
         // for decrease seq join
         let mut node_d = Chord::new(d);
-        assert_eq!(node_d.join(c), ChordAction::RemoteAction(RemoteAction(FindSuccessor((c, d)))));
+        assert_eq!(node_d.join(c), ChordAction::RemoteAction(RemoteAction::FindSuccessor((c, d))));
         assert_eq!(node_d.join(b), ChordAction::RemoteAction(RemoteAction::FindSuccessor((b, d))));
         assert_eq!(node_d.join(a), ChordAction::RemoteAction(RemoteAction::FindSuccessor((a, d))));
 
         // for over half ring join
         let mut node_d = Chord::new(d);
         assert_eq!(node_d.successor, d);
-        assert_eq!(node_d.join(a), ChordAction::RemoteACtion(RemoteAction(FindSuccessor((a, d)))));
+        assert_eq!(node_d.join(a), ChordAction::RemoteAction(RemoteAction::FindSuccessor((a, d))));
         // for a ring a, a is over 2^152 far away from d
         assert!(d + Did::from(BigUint::from(2u16).pow(152)) > a);
         assert!(d + Did::from(BigUint::from(2u16).pow(151)) < a);
@@ -270,7 +270,7 @@ mod tests {
         assert_eq!(node_d.finger[152], None);
         assert_eq!(node_d.finger[0], Some(a));
         // when b insearted a is still more close to d
-        assert_eq!(node_d.join(b), ChordAction::RemoteAction(RemoteAction(FindSuccessor((a, d)))));
+        assert_eq!(node_d.join(b), ChordAction::RemoteAction(RemoteAction::FindSuccessor((a, d))));
         assert!(d + Did::from(BigUint::from(2u16).pow(159)) > b);
         assert_eq!(node_d.successor, a);
     }
