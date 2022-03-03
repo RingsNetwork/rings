@@ -7,8 +7,10 @@ use std::ops::{Add, Sub};
 use std::str::FromStr;
 use web3::types::Address;
 use web3::types::H160;
+use serde::Deserialize;
+use serde::Serialize;
 
-#[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd, Debug)]
+#[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd, Debug, Serialize, Deserialize)]
 pub struct Did(Address);
 
 impl Deref for Did {

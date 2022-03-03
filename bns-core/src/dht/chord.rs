@@ -5,17 +5,28 @@ use crate::did::Did;
 use anyhow::anyhow;
 use anyhow::Result;
 use num_bigint::BigUint;
+use serde::Deserialize;
+use serde::Serialize;
 
-#[derive(Clone, Debug, PartialEq)]
-pub enum ChordAction {
-    None,
-    Some(Did),
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum RemoteAction {
     // Ask did__a to find did_b
     FindSuccessor((Did, Did)),
     // ask Did_a to notify(did_b)
     Notify((Did, Did)),
     FindSuccessorAndAddToFinger((u8, Did, Did)),
     CheckPredecessor(Did),
+}
+
+
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ChordAction {
+    None,
+    Some(Did),
+    RemoteAction(RemoteAction)
 }
 
 #[derive(Clone, Debug)]
@@ -78,8 +89,7 @@ impl Chord {
             // 3) #001 - #fff = #001 + -(#fff) = #001
             self.successor = id;
         }
-
-        ChordAction::FindSuccessor((self.successor, self.id))
+        ChordAction::RemoteAction(RemoteAction::FindSuccessor((self.successor, self.id)))
     }
 
     // called periodically. verifies n’s immediate
@@ -90,7 +100,7 @@ impl Chord {
         if let Some(x) = self.predecessor {
             if x > self.id && x < self.successor {
                 self.successor = x;
-                return ChordAction::Notify((x, self.id));
+                return ChordAction::RemoteAction(RemoteAction::Notify((x, self.id)));
                 // successor.notify(n)
             }
         }
@@ -131,9 +141,11 @@ impl Chord {
                     self.finger[self.fix_finger_index as usize] = Some(v);
                     Ok(ChordAction::None)
                 }
-                ChordAction::FindSuccessor((a, b)) => Ok(ChordAction::FindSuccessorAndAddToFinger(
-                    (self.fix_finger_index, a, b),
-                )),
+                ChordAction::RemoteAction(RemoteAction::FindSuccessor((a, b))) => {
+                    Ok(ChordAction::RemoteAction(RemoteAction::FindSuccessorAndAddToFinger(
+                        (self.fix_finger_index, a, b),
+                    )))
+                },
                 _ => {
                     log::error!("Invalid Chord Action");
                     Err(anyhow!("Invalid Chord Action"))
@@ -146,7 +158,7 @@ impl Chord {
     // called periodically. checks whether predecessor has failed.
     pub fn check_predecessor(&self) -> ChordAction {
         match self.predecessor {
-            Some(p) => ChordAction::CheckPredecessor(p),
+            Some(p) => ChordAction::RemoteAction(RemoteAction::CheckPredecessor(p)),
             None => ChordAction::None,
         }
     }
@@ -172,7 +184,7 @@ impl Chord {
             // n = closest preceding node(id);
             // return n.find_successor(id);
             match self.closest_preceding_node(id) {
-                Ok(n) => Ok(ChordAction::FindSuccessor((n, id))),
+                Ok(n) => Ok(ChordAction::RemoteAction(RemoteAction::FindSuccessor((n, id)))),
                 Err(e) => Err(anyhow!(e)),
             }
         }
@@ -214,7 +226,7 @@ mod tests {
         assert!(node_a.finger.contains(&None));
 
         // Node A starts to query node b for it's successor
-        assert_eq!(node_a.join(b), ChordAction::FindSuccessor((b, a)));
+        assert_eq!(node_a.join(b), ChordAction::RemoteAction(RemoteAction::FindSuccessor((b, a))));
         assert_eq!(node_a.successor, b);
         // Node A keep querying node b for it's successor
         assert_eq!(node_a.join(c), ChordAction::FindSuccessor((b, a)));
@@ -242,14 +254,14 @@ mod tests {
 
         // for decrease seq join
         let mut node_d = Chord::new(d);
-        assert_eq!(node_d.join(c), ChordAction::FindSuccessor((c, d)));
-        assert_eq!(node_d.join(b), ChordAction::FindSuccessor((b, d)));
-        assert_eq!(node_d.join(a), ChordAction::FindSuccessor((a, d)));
+        assert_eq!(node_d.join(c), ChordAction::RemoteAction(RemoteAction(FindSuccessor((c, d)))));
+        assert_eq!(node_d.join(b), ChordAction::RemoteAction(RemoteAction::FindSuccessor((b, d))));
+        assert_eq!(node_d.join(a), ChordAction::RemoteAction(RemoteAction::FindSuccessor((a, d))));
 
         // for over half ring join
         let mut node_d = Chord::new(d);
         assert_eq!(node_d.successor, d);
-        assert_eq!(node_d.join(a), ChordAction::FindSuccessor((a, d)));
+        assert_eq!(node_d.join(a), ChordAction::RemoteACtion(RemoteAction(FindSuccessor((a, d)))));
         // for a ring a, a is over 2^152 far away from d
         assert!(d + Did::from(BigUint::from(2u16).pow(152)) > a);
         assert!(d + Did::from(BigUint::from(2u16).pow(151)) < a);
@@ -258,7 +270,7 @@ mod tests {
         assert_eq!(node_d.finger[152], None);
         assert_eq!(node_d.finger[0], Some(a));
         // when b insearted a is still more close to d
-        assert_eq!(node_d.join(b), ChordAction::FindSuccessor((a, d)));
+        assert_eq!(node_d.join(b), ChordAction::RemoteAction(RemoteAction(FindSuccessor((a, d)))));
         assert!(d + Did::from(BigUint::from(2u16).pow(159)) > b);
         assert_eq!(node_d.successor, a);
     }

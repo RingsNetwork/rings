@@ -3,6 +3,7 @@ use crate::channels::default::AcChannel as Channel;
 #[cfg(feature = "wasm")]
 use crate::channels::wasm::CbChannel as Channel;
 use crate::dht::chord::Chord;
+use crate::dht::chord::RemoteAction;
 /// Swarm is transport management
 ///
 use crate::storage::{MemStorage, Storage};
@@ -22,11 +23,11 @@ use serde::Deserialize;
 use serde::Serialize;
 
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
 pub enum Message {
-    CustomMessage { value: String },
-    DHTMessage
+    CustomMessage(String),
+    DHTMessage(RemoteAction)
 }
 
 pub struct Swarm {
@@ -73,17 +74,32 @@ impl Swarm {
         Arc::clone(&self.signaler)
     }
 
-    pub fn send_message(&self, address: Address, msg: SignedMsg<Message>) -> Result<()> {
-        Ok(())
+    pub async fn send_message_without_dht(&self, address: Address, msg: SignedMsg<Message>) -> Result<()> {
+        match self.get_transport(address) {
+            Some(trans) => {
+                Ok(trans.send_message(msg).await?)
+            },
+            None => Err(anyhow::anyhow!("cannot seek address in swarm table"))
+        }
     }
 
     pub async fn event_handler(&self) {
         loop {
             match self.signaler.recv().await {
                 Ok(ev) => match ev {
-                    Events::ReceiveMsg(m) => {
-                        let m = String::from_utf8(m).unwrap();
-                        log::debug!("Receive Msg {}", m);
+                    Events::ReceiveMsg(msg) => {
+                        match serde_json::from_slice::<SignedMsg<Message>>(&msg) {
+                            Ok(m) => {
+                                if m.is_expired() || !m.verify() {
+                                    log::error!("cannot verify msg or it's expired: {:?}", m);
+                                } else {
+                                    let _ = self.message_handler(m.to_owned().data).await;
+                                }
+                            }
+                            Err(e) => {
+                                log::error!("cant handle Msg {:?}", msg);
+                            }
+                        }
                     }
                     x => {
                         log::debug!("Receive {:?}", x)
@@ -94,6 +110,20 @@ impl Swarm {
                 }
             }
         }
+    }
+
+    pub async fn message_handler(&self, msg: Message) {
+        match msg {
+            Message::CustomMessage(m) => {
+                log::info!("got Msg {:?}", m);
+            },
+            Message::DHTMessage(action) => {
+                match action {
+                    _ => ()
+                }
+            }
+        }
+
     }
 }
 
