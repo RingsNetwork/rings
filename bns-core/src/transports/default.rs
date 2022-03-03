@@ -2,6 +2,7 @@ use crate::channels::default::AcChannel;
 use crate::ecc::SecretKey;
 use crate::encoder::Encoded;
 use crate::msg::SignedMsg;
+use crate::route::handler as MsgHandler;
 use crate::types::channel::Channel;
 use crate::types::channel::Events;
 use crate::types::ice_transport::IceTransport;
@@ -317,7 +318,8 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
         let signaler = self.signaler();
 
         box move |d: Arc<RTCDataChannel>| {
-            let channel = Arc::clone(&channel);
+            let on_open_channel = Arc::clone(&channel);
+            let on_messsage_channel = Arc::clone(&channel);
             let on_open_signaler = Arc::clone(&signaler);
             let on_message_signaler = Arc::clone(&signaler);
             Box::pin(async move {
@@ -332,14 +334,13 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
                 d.on_message(Box::new(move |msg: DataChannelMessage| {
                     log::debug!("Message from DataChannel: '{:?}'", msg);
                     let signaler = Arc::clone(&on_message_signaler);
+                    let channel = Arc::clone(&on_messsage_channel);
                     Box::pin(async move {
-                        if signaler
-                            .send(Events::ReceiveMsg(msg.data.to_vec()))
-                            .await
-                            .is_err()
-                        {
-                            log::error!("Failed on handle msg")
-                        };
+                        MsgHandler::handle_recv_msg(
+                            Events::ReceiveMsg(msg.data.to_vec()),
+                            channel,
+                            signaler,
+                        );
                     })
                 }))
                 .await;

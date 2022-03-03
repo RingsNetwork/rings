@@ -13,7 +13,6 @@ use crate::storage::{MemStorage, Storage};
 use crate::transports::default::DefaultTransport as Transport;
 #[cfg(feature = "wasm")]
 use crate::transports::wasm::WasmTransport as Transport;
-use crate::types::channel::Channel as ChannelTrait;
 use crate::types::ice_transport::IceTransport;
 use anyhow::Result;
 use futures::lock::Mutex;

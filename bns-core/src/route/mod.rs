@@ -4,19 +4,25 @@ use crate::channels::default::AcChannel as Channel;
 use crate::channels::wasm::CbChannel as Channel;
 use crate::dht::chord::ChordAction;
 use crate::did::Did;
-use crate::route::message::Message;
+use crate::route::message::{Message, PredecessorNotify};
+use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::Events;
+use dashmap::DashMap;
 use num_bigint::BigUint;
+use rand::Rng;
 use std::sync::Arc;
 
 pub mod handler;
 pub mod message;
+
+pub type RequestId = u128;
 
 pub struct Routing {
     pub current: Did,
     pub successor: Did,
     pub predecessor: Option<Did>,
     pub fix_finger_index: u8,
+    records: DashMap<RequestId, Message>,
     signaler: Arc<Channel>,
     finger_tables: Vec<Option<Did>>,
 }
@@ -29,6 +35,7 @@ impl Routing {
             predecessor: None,
             successor: current,
             finger_tables: vec![],
+            records: DashMap::new(),
             fix_finger_index: 0,
         };
     }
@@ -71,5 +78,24 @@ impl Routing {
         ChordAction::FindSuccessor((self.successor, self.current))
     }
 
-    pub fn notify_predecessor(&mut self) {}
+    pub async fn notify_predecessor(&mut self) {
+        if let Some(predecessor) = self.predecessor {
+            let mut rng = rand::thread_rng();
+            let requestId: RequestId = rng.gen();
+            if predecessor > self.current && predecessor < self.successor {
+                let message = Message::from(PredecessorNotify {
+                    requestId: requestId,
+                    current: self.current.clone(),
+                    successor: self.successor.clone(),
+                });
+                self.records.insert(requestId, message.clone());
+                match Events::try_from(message) {
+                    Ok(event) => self.signaler.send(event).await.unwrap(),
+                    Err(e) => {
+                        log::error!("Generate events from message `PredecessorNotify` failed");
+                    }
+                }
+            }
+        }
+    }
 }
