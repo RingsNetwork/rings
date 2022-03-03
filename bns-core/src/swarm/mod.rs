@@ -46,6 +46,7 @@
 
 /// `record`: record self.id to relay chain.
 /// `prev`: pop and get previous hop for msg routing back
+#[cfg(not(feature = "wasm"))]
 use crate::channels::default::AcChannel as Channel;
 #[cfg(feature = "wasm")]
 use crate::channels::wasm::CbChannel as Channel;
