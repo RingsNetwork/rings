@@ -1,4 +1,51 @@
-#[cfg(not(feature = "wasm"))]
+/// Swarm is transport management
+///
+
+/// Once a Peer receive a `DHTMessage`, it can cause two situations:
+
+/// 1. Found some did, and return with `DHTResponse`.
+
+/// ```
+/// #[derive(Deserialize, Serialize, Debug, Clone)]
+/// pub struct DHTResponse {
+///     act: RemoteAction,
+///     req_sig: Vec<u8>,
+///     sdp: Option<Encoded>,
+/// }
+/// ```
+
+/// DHT response is for handling `ResponseMsg` From DHT Peer. It simply wrapped a `DHTAction` with addition info
+/// such as `req_sig` and `sdp` for transactions management and handshake connection.
+
+/// 3. Not Found, continue to send `DHTRelayMessage` to next peer.
+
+/// ```
+/// #[derive(Deserialize, Serialize, Debug, Clone)]
+/// pub struct DHTRelayMessage {
+///     act: RemoteAction,
+///     req_sig: Vec<u8>,
+///     from: vec<Address>
+/// }
+
+/// #[derive(Deserialize, Serialize, Debug, Clone)]
+/// pub struct DHTRelayResponse {
+///     act: DHTResponse,
+///     from: Vec<Address>
+/// }
+/// ```
+
+/// Consider Peer A send `DHTRelayMessage` `msg_a` with push `self.id` to `msg_a`.from to B,
+/// then B send `DHTRelayMessage` `msg_b` to C and C got some value, it's returning
+/// `ResponseMsg<RelayMsg>` resp_c to B
+
+/// Once B received resp_c, B should send `ResponseMsg<RelayMsg>` to resp_c.act.from[-1],
+/// Once B received resp_c, B should send `ResponseMsg<RelayMsg>` to resp_c.act.from[-2],
+/// Once B received resp_c, B should send `ResponseMsg<RelayMsg>` to resp_c.act.from[-3],
+
+/// So `DHTRelayMessage` has two associated method:
+
+/// `record`: record self.id to relay chain.
+/// `prev`: pop and get previous hop for msg routing back
 use crate::channels::default::AcChannel as Channel;
 #[cfg(feature = "wasm")]
 use crate::channels::wasm::CbChannel as Channel;
@@ -8,8 +55,6 @@ use crate::dht::chord::RemoteAction;
 use crate::ecc::SecretKey;
 use crate::encoder::Encoded;
 use crate::msg::SignedMsg;
-/// Swarm is transport management
-///
 use crate::storage::{MemStorage, Storage};
 #[cfg(not(feature = "wasm"))]
 use crate::transports::default::DefaultTransport as Transport;
@@ -33,6 +78,37 @@ pub struct DHTResponse {
     sdp: Option<Encoded>,
 }
 
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct DHTRelayResponse {
+    act: DHTResponse,
+    from: Vec<Address>,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct DHTRelayMessage {
+    act: RemoteAction,
+    req_sig: Vec<u8>,
+    from: Vec<Address>,
+}
+
+impl DHTRelayMessage {
+    pub fn new<F>(msg: SignedMsg<F>, act: RemoteAction) -> Self {
+        Self {
+            act,
+            req_sig: msg.sig,
+            from: Vec::new(),
+        }
+    }
+
+    pub fn record(&mut self, did: Address) {
+        self.from.push(did);
+    }
+
+    pub fn prev(&mut self) -> Option<Address> {
+        self.from.pop()
+    }
+}
+
 impl DHTResponse {
     pub fn new<F>(msg: SignedMsg<F>, act: RemoteAction) -> Self {
         Self {
@@ -42,9 +118,8 @@ impl DHTResponse {
         }
     }
 
-    pub fn with_sdp(&mut self, sdp: Encoded) -> &Self {
+    pub fn with_sdp(&mut self, sdp: Encoded) {
         self.sdp = Some(sdp);
-        &*self
     }
 }
 
@@ -53,7 +128,9 @@ impl DHTResponse {
 pub enum Message {
     CustomMessage(String),
     DHTMessage(RemoteAction),
+    DHTRelayMessage(DHTRelayMessage),
     DHTResponse(DHTResponse),
+    DHTRelayResponse(DHTRelayResponse),
 }
 
 pub struct Swarm {
@@ -156,86 +233,69 @@ impl Swarm {
         }
     }
 
-    pub async fn message_handler(&self, msg: SignedMsg<Message>) {
-        match msg.data.to_owned() {
+    pub async fn dht_action_handler(
+        &self,
+        msg: SignedMsg<Message>,
+        action: RemoteAction,
+    ) -> Option<(Address, Message)> {
+        let msg_addr = msg.addr;
+        match action {
+            RemoteAction::FindSuccessor(id) => {
+                let dht = self.dht.lock().await;
+                match dht.find_successor(id) {
+                    Ok(ChordAction::Some(p)) => {
+                        let resp = DHTResponse::new(msg, RemoteAction::FindSuccessor(p));
+                        Some((msg_addr, Message::DHTResponse(resp)))
+                    }
+                    Ok(ChordAction::RemoteAction((addr, act))) => {
+                        let mut relay_msg = DHTRelayMessage::new(msg, act);
+                        relay_msg.record(self.key.address());
+                        Some((addr.into(), Message::DHTRelayMessage(relay_msg)))
+                    }
+                    _ => None,
+                }
+            }
+            RemoteAction::Notify(did) => {
+                let mut dht = self.dht.lock().await;
+                dht.notify(did);
+                None
+            }
+            RemoteAction::FindSuccessorForFix(did) => {
+                let dht = self.dht.lock().await;
+                match dht.find_successor(did) {
+                    Ok(ChordAction::Some(p)) => {
+                        let resp = DHTResponse::new(msg, RemoteAction::FindSuccessorForFix(p));
+                        Some((msg_addr, Message::DHTResponse(resp)))
+                    }
+                    Ok(ChordAction::RemoteAction((addr, RemoteAction::FindSuccessor(did)))) => {
+                        let mut relay_msg =
+                            DHTRelayMessage::new(msg, RemoteAction::FindSuccessorForFix(did));
+                        relay_msg.record(self.key.address());
+                        Some((addr.into(), Message::DHTRelayMessage(relay_msg)))
+                    }
+                    _ => None,
+                }
+            }
+            RemoteAction::CheckPredecessor => None,
+        }
+    }
+
+    pub async fn message_handler(&self, message: SignedMsg<Message>) {
+        match message.data.to_owned() {
             Message::CustomMessage(m) => {
                 log::info!("got Msg {:?}", m);
             }
-            Message::DHTMessage(action) => match action {
-                RemoteAction::FindSuccessor(id) => {
-                    let dht = self.dht.lock().await;
-                    match dht.find_successor(id) {
-                        Ok(ChordAction::Some(p)) => {
-                            let resp = DHTResponse::new(msg, RemoteAction::FindSuccessor(p));
-                            if let Ok(msg) =
-                                SignedMsg::new(Message::DHTResponse(resp), &self.key, None)
-                            {
-                                // should handle return
-                                if let Err(e) = self.send_message_without_dht(msg.addr, msg).await {
-                                    log::error!("{:?}", e);
-                                }
-                            }
-                        }
-                        Ok(ChordAction::RemoteAction((addr, act))) => {
-                            if let Ok(msg) =
-                                SignedMsg::new(Message::DHTMessage(act), &self.key, None)
-                            {
-                                // should handle return
-                                if let Err(e) =
-                                    self.send_message_without_dht(addr.into(), msg).await
-                                {
-                                    log::error!("{:?}", e);
-                                }
-                            }
-                        }
-                        Err(e) => {
+            Message::DHTMessage(action) => {
+                if let Some((addr, msg)) = self.dht_action_handler(message, action).await {
+                    if let Ok(m) = SignedMsg::new(msg, &self.key, None) {
+                        if let Err(e) = self.send_message_without_dht(addr, m).await {
                             log::error!("{:?}", e);
                         }
-                        Ok(_) => {}
                     }
                 }
-                RemoteAction::Notify(did) => {
-                    let mut dht = self.dht.lock().await;
-                    dht.notify(did);
-                }
-                RemoteAction::FindSuccessorForFix(did) => {
-                    let dht = self.dht.lock().await;
-                    match dht.find_successor(did) {
-                        Ok(ChordAction::Some(p)) => {
-                            let resp = DHTResponse::new(msg, RemoteAction::FindSuccessorForFix(p));
-                            if let Ok(msg) =
-                                SignedMsg::new(Message::DHTResponse(resp), &self.key, None)
-                            {
-                                // should handle return
-                                if let Err(e) = self.send_message_without_dht(msg.addr, msg).await {
-                                    log::error!("{:?}", e);
-                                }
-                            }
-                        }
-                        Ok(ChordAction::RemoteAction((addr, RemoteAction::FindSuccessor(did)))) => {
-                            if let Ok(msg) = SignedMsg::new(
-                                Message::DHTMessage(RemoteAction::FindSuccessorForFix(did)),
-                                &self.key,
-                                None,
-                            ) {
-                                // should handle return
-                                if let Err(e) =
-                                    self.send_message_without_dht(addr.into(), msg).await
-                                {
-                                    log::error!("{:?}", e);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            log::error!("{:?}", e);
-                        }
-                        Ok(_) => {}
-                    }
-                }
-                RemoteAction::CheckPredecessor => {}
-            },
-            Message::DHTResponse(act) => {
-                match act.act {
+            }
+            Message::DHTResponse(action) => {
+                match action.act {
                     RemoteAction::FindSuccessor(did) => {
                         // should create a handshake to that did
                         let mut dht = self.dht.lock().await;
@@ -247,6 +307,64 @@ impl Swarm {
                         dht.finger[index as usize] = Some(did)
                     }
                     _ => {}
+                }
+            }
+            Message::DHTRelayMessage(action) => {
+                if let Some((addr, msg)) = self.dht_action_handler(message, action.act).await {
+                    let msg = msg.clone();
+                    let mut addr = addr;
+
+                    let modified = match msg {
+                        Message::DHTRelayMessage(ref m) => {
+                            let mut m = m.clone();
+                            m.from = action.from;
+                            m.record(self.address());
+                            Message::DHTRelayMessage(m)
+                        }
+                        Message::DHTResponse(ref m) => {
+                            // [origin, next]
+                            if action.from.len() > 1 {
+                                let mut from = action.from.clone();
+                                addr = from.pop().unwrap();
+                                let m = DHTRelayResponse {
+                                    act: m.clone(),
+                                    from,
+                                };
+                                Message::DHTRelayResponse(m)
+                            } else {
+                                msg.clone()
+                            }
+                        }
+                        _ => {
+                            log::error!("should not happen here");
+                            msg.clone()
+                        }
+                    };
+                    if let Ok(m) = SignedMsg::new(modified, &self.key, None) {
+                        if let Err(e) = self.send_message_without_dht(addr, m).await {
+                            log::error!("{:?}", e);
+                        }
+                    }
+                }
+            }
+            Message::DHTRelayResponse(action) => {
+                if action.from.len() > 1 {
+                    let mut act = action.clone();
+                    let addr = act.from.pop().unwrap();
+                    let msg = Message::DHTRelayResponse(act);
+                    if let Ok(m) = SignedMsg::new(msg, &self.key, None) {
+                        if let Err(e) = self.send_message_without_dht(addr, m).await {
+                            log::error!("{:?}", e);
+                        }
+                    }
+                } else {
+                    let msg = Message::DHTResponse(action.act.clone());
+                    let addr = action.from[0];
+                    if let Ok(m) = SignedMsg::new(msg, &self.key, None) {
+                        if let Err(e) = self.send_message_without_dht(addr, m).await {
+                            log::error!("{:?}", e);
+                        }
+                    }
                 }
             }
         }
