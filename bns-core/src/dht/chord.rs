@@ -2,6 +2,7 @@
 /// ref: https://pdos.csail.mit.edu/papers/ton:chord/paper-ton.pdf
 /// With high probability, the number of nodes that must be contacted to find a successor in an N-node network is O(log N).
 use crate::did::Did;
+use crate::types::channel::Events;
 use anyhow::anyhow;
 use anyhow::Result;
 use num_bigint::BigUint;
@@ -24,6 +25,41 @@ pub enum ChordAction {
     None,
     Some(Did),
     RemoteAction((Did, RemoteAction)),
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ChordMessage {
+    pub types: String, // SendMsg or ReceiveMsg
+    pub action: ChordAction,
+}
+
+impl PartialEq for ChordMessage {
+    fn eq(&self, others: &Self) -> bool {
+        if self.types != others.types {
+            return false;
+        } else {
+            if self.action != others.action {
+                return false;
+            }
+        }
+        return true;
+    }
+}
+
+impl TryFrom<Events> for ChordAction {
+    type Error = anyhow::Error;
+
+    fn try_from(event: Events) -> Result<ChordAction> {
+        match event {
+            Events::SendMsg(msg) | Events::ReceiveMsg(msg) => {
+                let message: ChordMessage = serde_json::from_slice(&msg).map_err(|e| anyhow!(e))?;
+                Ok(message.action)
+            }
+            Events::Null | Events::ConnectFailed => {
+                panic!("Internal Failed {:?}", event);
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -90,7 +126,7 @@ impl Chord {
 
     // called periodically. verifies n’s immediate
     // successor, and tells the successor about n.
-    pub fn stablilize(&mut self) -> ChordAction {
+    pub fn stabilize(&mut self) -> ChordAction {
         // x = successor:predecessor;
         // if (x in (n, successor)) { successor = x; successor:notify(n); }
         if let Some(x) = self.predecessor {

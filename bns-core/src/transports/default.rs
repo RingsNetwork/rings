@@ -2,7 +2,6 @@ use crate::channels::default::AcChannel;
 use crate::ecc::SecretKey;
 use crate::encoder::Encoded;
 use crate::msg::SignedMsg;
-use crate::route::handler as MsgHandler;
 use crate::types::channel::Channel;
 use crate::types::channel::Events;
 use crate::types::ice_transport::IceTransport;
@@ -152,6 +151,20 @@ impl IceTransport<AcChannel> for DefaultTransport {
                 }
             }
             None => Err(anyhow!("cannot get offer")),
+        }
+    }
+
+    async fn send_message<T>(&self, msg: T) -> Result<()>
+    where
+        T: Serialize + Send,
+    {
+        let data: Vec<u8> = serde_json::to_vec(&msg)?;
+        match self.get_data_channel().await {
+            Some(dc) => {
+                dc.send(&data.into()).await.map_err(|e| anyhow!("{:?}", e));
+                Ok(())
+            }
+            None => Err(anyhow!("data channel may not ready")),
         }
     }
 
@@ -331,17 +344,19 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
                 }))
                 .await;
 
+            Box::pin(async move {
+                d.on_open(Box::new(move || Box::pin(async move {}))).await;
                 d.on_message(Box::new(move |msg: DataChannelMessage| {
                     log::debug!("Message from DataChannel: '{:?}'", msg);
-                    let signaler = Arc::clone(&on_message_signaler);
-                    let channel = Arc::clone(&on_messsage_channel);
+                    let signaler = Arc::clone(&signaler);
                     Box::pin(async move {
-                        MsgHandler::handle_recv_msg(
-                            Events::ReceiveMsg(msg.data.to_vec()),
-                            channel,
-                            signaler,
-                        )
-                        .await;
+                        if signaler
+                            .send(Events::ReceiveMsg(msg.data.to_vec()))
+                            .await
+                            .is_err()
+                        {
+                            log::error!("Failed on handle msg")
+                        };
                     })
                 }))
                 .await;

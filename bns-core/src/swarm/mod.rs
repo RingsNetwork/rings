@@ -2,10 +2,17 @@
 use crate::channels::default::AcChannel as Channel;
 #[cfg(feature = "wasm")]
 use crate::channels::wasm::CbChannel as Channel;
+<<<<<<< HEAD
 use crate::dht::chord::ChordAction;
 use crate::dht::chord::RemoteAction;
 use crate::ecc::SecretKey;
 use crate::msg::SignedMsg;
+=======
+use crate::dht::chord::Chord as DHT;
+use crate::dht::chord::ChordAction;
+use crate::dht::chord::ChordMessage;
+use crate::did::Did;
+>>>>>>> 1da5e36 (update chord)
 /// Swarm is transport management
 use crate::storage::{MemStorage, Storage};
 #[cfg(not(feature = "wasm"))]
@@ -30,6 +37,7 @@ pub enum Message {
 pub struct Swarm {
     pub table: MemStorage<Address, Arc<Transport>>,
     pub signaler: Arc<Channel>,
+    pub dht: Arc<Mutex<DHT>>,
     pub stun_server: String,
     pub dht: Arc<Mutex<Chord>>,
     pub key: SecretKey,
@@ -40,6 +48,7 @@ impl Swarm {
         Self {
             table: MemStorage::<Address, Arc<Transport>>::new(),
             signaler: Arc::clone(&ch),
+            dht: Arc::new(Mutex::new(DHT::new(address.into()))),
             stun_server: stun,
             dht: Arc::new(Mutex::new(Chord::new(key.address().into()))),
             key,

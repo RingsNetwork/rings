@@ -49,6 +49,12 @@ impl From<Address> for Did {
     }
 }
 
+impl From<Did> for Address {
+    fn from(did: Did) -> Address {
+        did.0
+    }
+}
+
 impl FromStr for Did {
     type Err = anyhow::Error;
     fn from_str(s: &str) -> anyhow::Result<Self> {

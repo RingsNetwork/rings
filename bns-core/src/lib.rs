@@ -8,7 +8,7 @@ pub mod did;
 pub mod ecc;
 pub mod encoder;
 pub mod msg;
-pub mod route;
+//pub mod route;
 pub mod storage;
 pub mod swarm;
 pub mod transports;
