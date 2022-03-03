@@ -1,4 +1,7 @@
+#[cfg(not(feature = "wasm"))]
 use crate::channels::default::AcChannel as Channel;
+#[cfg(feature = "wasm")]
+use crate::channels::wasm::CbChannel as Channel;
 use crate::dht::chord::ChordAction;
 use crate::did::Did;
 use crate::route::message::Message;

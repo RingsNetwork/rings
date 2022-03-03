@@ -7,7 +7,7 @@ use std::convert::TryFrom;
 
 const PREDECESSOR_NOTIFY: [u8; 2] = [105, 31];
 
-fn match_messsage_route(msg_type: [u8; 2], message: &[u8]) -> Result<Message> {
+fn generate_message(msg_type: [u8; 2], message: &[u8]) -> Result<Message> {
     match msg_type {
         PREDECESSOR_NOTIFY => {
             let m: PredecessorNotify = serde_json::from_slice(message).map_err(|e| anyhow!(e))?;
@@ -53,7 +53,7 @@ impl TryFrom<Events> for Message {
         match event {
             Events::SendMsg(send_msg) => {
                 let buf: [u8; 2] = [send_msg[0], send_msg[1]];
-                match_messsage_route(buf, &send_msg[2..])
+                generate_message(buf, &send_msg[2..])
             }
             _ => {
                 panic!("Not implement other situtations");
