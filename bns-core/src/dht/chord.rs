@@ -53,9 +53,9 @@ impl Chord {
     }
 
     // join a Chord ring containing node id .
-    pub fn join(&mut self, id: Did) -> Result<ChordAction> {
+    pub fn join(&mut self, id: Did) -> ChordAction {
         if id == self.id {
-            return Ok(ChordAction::None);
+            return ChordAction::None;
         }
         for k in 0u32..159u32 {
             // (n + 2^k) % 2^m >= n
@@ -86,9 +86,7 @@ impl Chord {
             // 3) #001 - #fff = #001 + -(#fff) = #001
             self.successor = id;
         }
-        Ok(ChordAction::RemoteAction(
-            (self.successor, RemoteAction::FindSuccessor(self.id))
-        ))
+        ChordAction::RemoteAction((self.successor, RemoteAction::FindSuccessor(self.id)))
     }
 
     // called periodically. verifies n’s immediate
@@ -99,9 +97,7 @@ impl Chord {
         if let Some(x) = self.predecessor {
             if x > self.id && x < self.successor {
                 self.successor = x;
-                return ChordAction::RemoteAction(
-                    (x, RemoteAction::Notify(self.id))
-                );
+                return ChordAction::RemoteAction((x, RemoteAction::Notify(self.id)));
                 // successor.notify(n)
             }
         }
@@ -143,9 +139,10 @@ impl Chord {
                     Ok(ChordAction::None)
                 }
                 ChordAction::RemoteAction((a, RemoteAction::FindSuccessor(b))) => {
-                    Ok(ChordAction::RemoteAction(
-                        (a, RemoteAction::FindSuccessorAndAddToFinger((self.fix_finger_index, b))),
-                    ))
+                    Ok(ChordAction::RemoteAction((
+                        a,
+                        RemoteAction::FindSuccessorAndAddToFinger((self.fix_finger_index, b)),
+                    )))
                 }
                 _ => {
                     log::error!("Invalid Chord Action");
@@ -185,9 +182,10 @@ impl Chord {
             // n = closest preceding node(id);
             // return n.find_successor(id);
             match self.closest_preceding_node(id) {
-                Ok(n) => Ok(ChordAction::RemoteAction(
-                    (n, RemoteAction::FindSuccessor(id))
-                )),
+                Ok(n) => Ok(ChordAction::RemoteAction((
+                    n,
+                    RemoteAction::FindSuccessor(id),
+                ))),
                 Err(e) => Err(anyhow!(e)),
             }
         }

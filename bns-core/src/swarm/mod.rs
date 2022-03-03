@@ -3,8 +3,8 @@ use crate::channels::default::AcChannel as Channel;
 #[cfg(feature = "wasm")]
 use crate::channels::wasm::CbChannel as Channel;
 use crate::dht::chord::Chord;
-use crate::dht::chord::RemoteAction;
 use crate::dht::chord::ChordAction;
+use crate::dht::chord::RemoteAction;
 use crate::ecc::SecretKey;
 use crate::msg::SignedMsg;
 /// Swarm is transport management
@@ -18,11 +18,11 @@ use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::Events;
 use crate::types::ice_transport::IceTransport;
 use anyhow::Result;
+use futures::lock::Mutex;
 use serde::Deserialize;
 use serde::Serialize;
 use std::sync::Arc;
 use web3::types::Address;
-use futures::lock::Mutex;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
@@ -64,10 +64,12 @@ impl Swarm {
     pub async fn register(&self, address: Address, trans: Arc<Transport>) -> Result<()> {
         let prev_trans = self.table.set(address, trans);
         let mut dht = self.dht.lock().await;
-        if let Ok(ChordAction::RemoteAction((addr, act))) = (*dht).join(address.into()) {
+        if let ChordAction::RemoteAction((addr, act)) = (*dht).join(address.into()) {
             let msg = SignedMsg::new(Message::DHTMessage(act), &self.key, None)?;
             // should handle return
-            self.send_message_without_dht(addr.into(), msg).await.unwrap();
+            self.send_message_without_dht(addr.into(), msg)
+                .await
+                .unwrap();
         }
         if let Some(trans) = prev_trans {
             if let Err(e) = trans.close().await {
@@ -174,7 +176,7 @@ mod tests {
         let transport0 = swarm1.new_transport().await.unwrap();
         let transport1 = transport0.clone();
 
-        swarm1.register(swarm2.address(), transport1).await;
+        swarm1.register(swarm2.address(), transport1).await.unwrap();
 
         let transport2 = swarm1.get_transport(swarm2.address()).unwrap();
 
@@ -191,8 +193,14 @@ mod tests {
         let transport1 = swarm1.new_transport().await.unwrap();
         let transport2 = swarm1.new_transport().await.unwrap();
 
-        swarm1.register(swarm2.address(), transport1.clone()).await;
-        swarm1.register(swarm2.address(), transport2.clone()).await;
+        swarm1
+            .register(swarm2.address(), transport1.clone())
+            .await
+            .unwrap();
+        swarm1
+            .register(swarm2.address(), transport2.clone())
+            .await
+            .unwrap();
 
         assert_eq!(
             transport1.ice_connection_state().await.unwrap(),
