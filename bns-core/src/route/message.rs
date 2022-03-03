@@ -52,9 +52,7 @@ impl TryFrom<Events> for Message {
     fn try_from(event: Events) -> Result<Message> {
         match event {
             Events::SendMsg(send_msg) => {
-                let mut buf: [u8; 2] = [0; 2];
-                buf[0] = send_msg[0];
-                buf[1] = send_msg[1];
+                let buf: [u8; 2] = [send_msg[0], send_msg[1]];
                 match_messsage_route(buf, &send_msg[2..])
             }
             _ => {
