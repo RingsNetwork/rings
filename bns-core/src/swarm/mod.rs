@@ -5,21 +5,21 @@
 
 /// 1. Found some did, and return with `DHTResponse`.
 
-/// ```
+///
 /// #[derive(Deserialize, Serialize, Debug, Clone)]
 /// pub struct DHTResponse {
 ///     act: RemoteAction,
 ///     req_sig: Vec<u8>,
 ///     sdp: Option<Encoded>,
 /// }
-/// ```
+///
 
 /// DHT response is for handling `ResponseMsg` From DHT Peer. It simply wrapped a `DHTAction` with addition info
 /// such as `req_sig` and `sdp` for transactions management and handshake connection.
 
 /// 3. Not Found, continue to send `DHTRelayMessage` to next peer.
 
-/// ```
+///
 /// #[derive(Deserialize, Serialize, Debug, Clone)]
 /// pub struct DHTRelayMessage {
 ///     act: RemoteAction,
@@ -32,7 +32,7 @@
 ///     act: DHTResponse,
 ///     from: Vec<Address>
 /// }
-/// ```
+///
 
 /// Consider Peer A send `DHTRelayMessage` `msg_a` with push `self.id` to `msg_a`.from to B,
 /// then B send `DHTRelayMessage` `msg_b` to C and C got some value, it's returning
