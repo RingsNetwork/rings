@@ -69,10 +69,72 @@ bns-node
 
 ```
 
+* Channel
+
+In the WebRTC framework, communication between the parties consists of media (for example, audio and video) and non-media data.
+
+Non-media data is handled by using the Stream Control Transmission Protocol (SCTP) [RFC4960] encapsulated in DTLS.
+
+```
+                               +----------+
+                               |   SCTP   |
+                               +----------+
+                               |   DTLS   |
+                               +----------+
+                               | ICE/UDP  |
+                               +----------+
+
+```
+
+The encapsulation of SCTP over DTLS (see [RFC8261]) over ICE/UDP (see [RFC8445]) provides a NAT traversal solution together with confidentiality, source authentication, and integrity-protected transfers.
+
+
+ The layering of protocols for WebRTC is shown as:
+
+```
+                                 +------+------+------+
+                                 | DCEP | UTF-8|Binary|
+                                 |      | Data | Data |
+                                 +------+------+------+
+                                 |        SCTP        |
+                   +----------------------------------+
+                   | STUN | SRTP |        DTLS        |
+                   +----------------------------------+
+                   |                ICE               |
+                   +----------------------------------+
+                   | UDP1 | UDP2 | UDP3 | ...         |
+                   +----------------------------------+
+```
+
+This stack (especially in contrast to DTLS over SCTP [RFC6083] and in combination with SCTP over UDP [RFC6951]) has been chosen for the following reasons:
+
+   *  supports the transmission of arbitrarily large user messages;
+
+   *  shares the DTLS connection with the SRTP media channels of the
+      PeerConnection; and
+
+   *  provides privacy for the SCTP control information.
+
+   Referring to the protocol stack shown in Figure 2:
+
+   *  the usage of DTLS 1.0 over UDP is specified in [RFC4347];
+
+   *  the usage of DTLS 1.2 over UDP in specified in [RFC6347];
+
+   *  the usage of DTLS 1.3 over UDP is specified in an upcoming
+      document [TLS-DTLS13]; and
+
+   *  the usage of SCTP on top of DTLS is specified in [RFC8261].
+
+
+Data channels can be opened by using negotiation within the SCTP association (called in-band negotiation) or out-of-band negotiation.
+
 ### Ref:
 
-1. https://mac-blog.org.ua/webrtc-one-to-one-without-signaling-server
+1. https://datatracker.ietf.org/doc/html/rfc5245
 
-2. https://datatracker.ietf.org/doc/html/rfc5245
+2. https://datatracker.ietf.org/doc/html/draft-ietf-rtcweb-ip-handling-01
 
-3. https://datatracker.ietf.org/doc/html/draft-ietf-rtcweb-ip-handling-01
+3. https://datatracker.ietf.org/doc/html/rfc8831
+
+4. https://datatracker.ietf.org/doc/html/rfc8832
