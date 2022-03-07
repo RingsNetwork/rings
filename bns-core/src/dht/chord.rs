@@ -1,7 +1,7 @@
 /// implementation of CHORD DHT
 /// ref: https://pdos.csail.mit.edu/papers/ton:chord/paper-ton.pdf
 /// With high probability, the number of nodes that must be contacted to find a successor in an N-node network is O(log N).
-use crate::did::Did;
+use crate::dht::Did;
 use anyhow::anyhow;
 use anyhow::Result;
 use num_bigint::BigUint;
@@ -11,7 +11,7 @@ use serde::Serialize;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum RemoteAction {
-    // Ask did__a to find did_b
+    // Ask did_a to find did_b
     FindSuccessor(Did),
     // ask Did_a to notify(did_b)
     Notify(Did),
@@ -55,6 +55,7 @@ impl Chord {
     // join a Chord ring containing node id .
     pub fn join(&mut self, id: Did) -> ChordAction {
         if id == self.id {
+            // TODO: Do we allow multiple chord instances of the same node id?
             return ChordAction::None;
         }
         for k in 0u32..159u32 {

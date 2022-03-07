@@ -1,10 +1,10 @@
 use crate::channels::default::AcChannel;
 use crate::ecc::SecretKey;
-use crate::encoder::Encoded;
-use crate::msg::SignedMsg;
+use crate::message::Encoded;
+use crate::message::MessagePayload;
 use crate::transports::default::IceCandidateSerializer;
 use crate::types::channel::Channel;
-use crate::types::channel::Events;
+use crate::types::channel::Event;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
 use crate::types::ice_transport::IceTrickleScheme;
@@ -293,7 +293,7 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
         let sender = self.signaler().sender();
         box move |s: RTCPeerConnectionState| {
             if s == RTCPeerConnectionState::Failed {
-                let _ = sender.send(Events::ConnectFailed);
+                let _ = sender.send(Event::ConnectFailed);
             }
             Box::pin(async move {
                 log::debug!("Connect State changed to {:?}", s);
@@ -302,28 +302,18 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
     }
 
     async fn on_data_channel(&self) -> Self::OnDataChannelHdlrFn {
-        let channel = self.get_data_channel().await.unwrap();
         let signaler = self.signaler();
 
         box move |d: Arc<RTCDataChannel>| {
-            let channel = Arc::clone(&channel);
             let signaler = Arc::clone(&signaler);
 
             Box::pin(async move {
-                d.on_open(Box::new(move || {
-                    let _channel = Arc::clone(&channel);
-                    Box::pin(async move {
-                        // do nothing here
-                    })
-                }))
-                .await;
-
                 d.on_message(Box::new(move |msg: DataChannelMessage| {
                     log::debug!("Message from DataChannel: '{:?}'", msg);
                     let signaler = Arc::clone(&signaler);
                     Box::pin(async move {
                         if signaler
-                            .send(Events::ReceiveMsg(msg.data.to_vec()))
+                            .send(Event::ReceiveMsg(msg.data.to_vec()))
                             .await
                             .is_err()
                         {
@@ -374,12 +364,12 @@ impl IceTrickleScheme<AcChannel> for DefaultTransport {
             candidates: local_candidates_json,
         };
         log::trace!("prepared hanshake info :{:?}", data);
-        let resp = SignedMsg::new(data, &key, None)?;
+        let resp = MessagePayload::new(data, &key, None)?;
         Ok(resp.try_into()?)
     }
 
     async fn register_remote_info(&self, data: Encoded) -> anyhow::Result<Address> {
-        let data: SignedMsg<TricklePayload> = data.try_into()?;
+        let data: MessagePayload<TricklePayload> = data.try_into()?;
         log::trace!("register remote info: {:?}", data);
 
         match data.verify() {

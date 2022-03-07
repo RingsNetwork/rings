@@ -21,14 +21,20 @@ log = "0.4"
 dashmap = "4"
 hex = "0.4.3"
 num-bigint = "0.3.1"
-rand = { version="0.8.5", features= ["getrandom"]}
-rand_core = { version="0.6.3", features=["getrandom"]}
+rand = { version = "0.8.5", features = ["getrandom"] }
+rand_core = { version = "0.6.3", features = ["getrandom"] }
 rand_hc = "0.3.1"
 libsecp256k1 = "0.7.0"
 serde_json = { version = "1.0.70" }
 serde = { version = "1.0.130", features = ["derive"] }
 futures = { version = "0.3.21" }
 chrono = { version = "0.4.19", features = ["wasmbind"] }
+base58-monero = { version = "0.3", default-features = false, features = ["check"] }
+async-stream = "0.3.2"
+futures-core = "0.3.21"
+futures-util = "0.3.21"
+uuid = "0.8.2"
+
 
 # default
 webrtc = { version = "0.3.3", optional = true }
@@ -42,7 +48,6 @@ wasm-bindgen = { version = "0.2.67", features = ["serde-serialize"], optional = 
 wasm-bindgen-futures = { version = "0.4.17", optional = true }
 js-sys = { version = "0.3.44", optional = true }
 crossbeam-channel = { version = "0.5", optional = true }
-base58-monero = { version = "0.3", default-features = false, features = ["check"] }
 
 [dependencies.web-sys]
 version = "0.3.9"

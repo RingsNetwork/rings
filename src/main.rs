@@ -1,7 +1,9 @@
 #![feature(async_closure)]
 use anyhow::Result;
 use bns_core::channels::default::AcChannel;
+use bns_core::dht::Chord;
 use bns_core::ecc::SecretKey;
+use bns_core::message::handler::MessageHandler;
 use bns_core::swarm::Swarm;
 use bns_core::types::channel::Channel;
 use bns_node::logger::Logger;
@@ -35,17 +37,21 @@ pub struct Args {
 }
 
 async fn run(http_addr: String, key: SecretKey, stun: &str) {
+    let dht = Arc::new(Chord::new(key.address().into()));
     let swarm = Arc::new(Swarm::new(
         Arc::new(AcChannel::new(1)),
         stun.to_string(),
         key,
     ));
-    let swarm_clone = Arc::clone(&swarm);
-    tokio::spawn(async move { run_service(http_addr, swarm, key).await });
+
+    let message_handler = MessageHandler::new(dht, swarm.clone());
+    tokio::spawn(async move { message_handler.listen().await });
+
+    let swarm_clone = swarm.clone();
+    tokio::spawn(async move { run_service(http_addr, swarm_clone, key).await });
+
+    // TODO: A shutdown handler should be here
     tokio::select! {
-        _ = swarm_clone.event_handler() => {
-            println!("received done signal!");
-        }
         _ = tokio::signal::ctrl_c() => {
             println!("quit");
         }
