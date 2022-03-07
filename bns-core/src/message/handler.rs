@@ -1,5 +1,5 @@
-use crate::dht::{Chord, ChordAction};
 use crate::message::*;
+use crate::routing::Chord;
 use crate::swarm::Swarm;
 use crate::types::ice_transport::IceTrickleScheme;
 use anyhow::anyhow;
@@ -15,13 +15,13 @@ use web_sys::RtcSdpType as RTCSdpType;
 use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 
 pub struct MessageHandler {
-    dht: Arc<Chord>,
+    routing: Arc<Chord>,
     swarm: Arc<Swarm>,
 }
 
 impl MessageHandler {
-    pub fn new(dht: Arc<Chord>, swarm: Arc<Swarm>) -> Self {
-        Self { dht, swarm }
+    pub fn new(routing: Arc<Chord>, swarm: Arc<Swarm>) -> Self {
+        Self { routing, swarm }
     }
 
     pub async fn send_message(&self, address: &Address, message: Message) -> Result<()> {
@@ -31,7 +31,7 @@ impl MessageHandler {
     }
 
     pub async fn handle_message(&self, message: &Message, prev: &Did) -> Result<()> {
-        let current = &self.dht.id;
+        let current = &self.routing.id;
 
         match message {
             Message::ConnectNode(msrp, msg) => {

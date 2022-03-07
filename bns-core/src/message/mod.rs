@@ -9,7 +9,7 @@ pub use payload::MessagePayload;
 mod msrp;
 pub use msrp::{MsrpReport, MsrpSend};
 
-use crate::dht::Did;
+use crate::routing::Did;
 use serde::Deserialize;
 use serde::Serialize;
 

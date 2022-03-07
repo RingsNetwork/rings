@@ -1,4 +1,4 @@
-use crate::ecc::{recover, sign, verify, PublicKey, SecretKey};
+use crate::ecc::{sign, verify, SecretKey};
 use crate::message::Encoded;
 use anyhow::anyhow;
 use anyhow::Result;

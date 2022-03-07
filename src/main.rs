@@ -4,6 +4,7 @@ use bns_core::channels::default::AcChannel;
 use bns_core::dht::Chord;
 use bns_core::ecc::SecretKey;
 use bns_core::message::handler::MessageHandler;
+use bns_core::routing::Chord;
 use bns_core::swarm::Swarm;
 use bns_core::types::channel::Channel;
 use bns_node::logger::Logger;
@@ -37,14 +38,14 @@ pub struct Args {
 }
 
 async fn run(http_addr: String, key: SecretKey, stun: &str) {
-    let dht = Arc::new(Chord::new(key.address().into()));
+    let routing = Arc::new(Chord::new(key.address().into()));
     let swarm = Arc::new(Swarm::new(
         Arc::new(AcChannel::new(1)),
         stun.to_string(),
         key,
     ));
 
-    let message_handler = MessageHandler::new(dht, swarm.clone());
+    let message_handler = MessageHandler::new(routing, swarm.clone());
     tokio::spawn(async move { message_handler.listen().await });
 
     let swarm_clone = swarm.clone();

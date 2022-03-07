@@ -1,7 +1,7 @@
 /// implementation of CHORD DHT
 /// ref: https://pdos.csail.mit.edu/papers/ton:chord/paper-ton.pdf
 /// With high probability, the number of nodes that must be contacted to find a successor in an N-node network is O(log N).
-use crate::dht::Did;
+use crate::routing::Did;
 use anyhow::anyhow;
 use anyhow::Result;
 use num_bigint::BigUint;
