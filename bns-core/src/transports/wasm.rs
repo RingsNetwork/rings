@@ -123,21 +123,6 @@ pub struct WasmTransport {
     pub signaler: Arc<CbChannel>,
 }
 
-pub struct UnsafeSend<T> {
-    inner: T,
-}
-
-unsafe impl<T> Send for UnsafeSend<T> {}
-
-impl<T> UnsafeSend<T> {
-    pub unsafe fn new(t: T) -> Self {
-        Self { inner: t }
-    }
-    pub fn into_inner(self) -> T {
-        self.inner
-    }
-}
-
 #[async_trait(?Send)]
 impl IceTransport<CbChannel> for WasmTransport {
     type Connection = RtcPeerConnection;
