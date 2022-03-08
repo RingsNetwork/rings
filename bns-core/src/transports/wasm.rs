@@ -13,8 +13,12 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json;
 use serde_json::json;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::task::Context;
+use std::task::Poll;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
@@ -27,6 +31,7 @@ use web_sys::RtcDataChannelEvent;
 use web_sys::RtcIceCandidate;
 use web_sys::RtcIceCandidateInit;
 use web_sys::RtcIceConnectionState;
+use web_sys::RtcIceGatheringState;
 use web_sys::RtcPeerConnection;
 use web_sys::RtcPeerConnectionIceEvent;
 use web_sys::RtcSdpType;
@@ -203,6 +208,8 @@ impl IceTransport<CbChannel> for WasmTransport {
                             answer.to_owned(),
                         ))
                         .await?;
+                        let promise = self.gather_complete_promise().await?;
+                        promise.await;
                         Ok(answer.into())
                     }
                     Err(_) => Err(anyhow!("Failed to get answer")),
@@ -222,6 +229,8 @@ impl IceTransport<CbChannel> for WasmTransport {
                             offer.to_owned(),
                         ))
                         .await?;
+                        let promise = self.gather_complete_promise().await?;
+                        promise.await;
                         Ok(offer.into())
                     }
                     Err(_) => Err(anyhow!("cannot get offer")),
@@ -333,13 +342,13 @@ impl IceTransportCallback<CbChannel> for WasmTransport {
     type OnDataChannelHdlrFn = Box<dyn FnMut(RtcDataChannelEvent) -> ()>;
 
     async fn apply_callback(&self) -> Result<&Self> {
-        let on_ice_candidate_callback = Closure::wrap(self.on_data_channel().await);
-        let on_peer_connection_state_change_callback =
-            Closure::wrap(self.on_peer_connection_state_change().await);
-        let on_data_channel_callback = Closure::wrap(self.on_data_channel().await);
-
         match &self.get_peer_connection().await {
             Some(c) => {
+                let on_ice_candidate_callback = Closure::wrap(self.on_ice_candidate().await);
+                let on_peer_connection_state_change_callback =
+                    Closure::wrap(self.on_peer_connection_state_change().await);
+                let on_data_channel_callback = Closure::wrap(self.on_data_channel().await);
+
                 c.set_onicecandidate(Some(on_ice_candidate_callback.as_ref().unchecked_ref()));
                 c.set_oniceconnectionstatechange(Some(
                     on_peer_connection_state_change_callback
@@ -347,15 +356,23 @@ impl IceTransportCallback<CbChannel> for WasmTransport {
                         .unchecked_ref(),
                 ));
                 c.set_ondatachannel(Some(on_data_channel_callback.as_ref().unchecked_ref()));
+                on_ice_candidate_callback.forget();
+                on_peer_connection_state_change_callback.forget();
+                on_data_channel_callback.forget();
                 Ok(self)
             }
-            None => Err(anyhow!("Failed on getting connection")),
+            None => {
+                log::error!("cannot get connection");
+                Err(anyhow!("Failed on getting connection"))
+            }
         }
     }
     async fn on_ice_candidate(&self) -> Self::OnLocalCandidateHdlrFn {
         let peer_connection = self.get_peer_connection().await;
         let pending_candidates = Arc::clone(&self.pending_candidates);
+        log::info!("binding ice candidate callback");
         box move |ev: RtcPeerConnectionIceEvent| {
+            log::info!("ice_Candidate {:?}", ev);
             let mut candidates = pending_candidates.lock().unwrap();
             let peer_connection = peer_connection.clone();
             if let Some(candidate) = ev.candidate() {
@@ -402,9 +419,12 @@ impl IceTrickleScheme<CbChannel> for WasmTransport {
             .get_pending_candidates()
             .await
             .iter()
-            .map(|c| c.clone().to_string().into())
+            .map(|c| {
+                js_sys::JSON::stringify(&c.clone().to_json())
+                    .unwrap()
+                    .into()
+            })
             .collect();
-        log::trace!("got local candid");
         let data = TricklePayload {
             sdp: serde_json::to_string(&RtcSessionDescriptionWrapper::from(sdp))?,
             candidates: local_candidates_json,
@@ -433,6 +453,63 @@ impl IceTrickleScheme<CbChannel> for WasmTransport {
                 log::error!("cannot verify message sig");
                 return Err(anyhow!("failed on verify message sigature"));
             }
+        }
+    }
+}
+
+pub struct State {
+    completed: bool,
+    waker: Option<std::task::Waker>,
+}
+
+pub struct GatherPromise(Arc<Mutex<State>>);
+
+impl Future for GatherPromise {
+    type Output = ();
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut state = self.0.lock().unwrap();
+        if state.completed {
+            Poll::Ready(())
+        } else {
+            state.waker = Some(cx.waker().clone());
+            Poll::Pending
+        }
+    }
+}
+
+impl WasmTransport {
+    async fn gather_complete_promise(&self) -> Result<GatherPromise> {
+        let callback = Closure::wrap(Box::new(move |s: RtcIceGatheringState| match s {
+            RtcIceGatheringState::Complete => {}
+            _ => {}
+        }) as Box<dyn FnMut(web_sys::RtcIceGatheringState)>);
+        match self.get_peer_connection().await {
+            Some(conn) => {
+                let state = Arc::new(Mutex::new(State {
+                    completed: false,
+                    waker: None,
+                }));
+                let promise = GatherPromise(Arc::clone(&state));
+                let conn_clone = Arc::clone(&conn);
+                let callback =
+                    Closure::wrap(Box::new(move || match conn_clone.ice_gathering_state() {
+                        RtcIceGatheringState::Complete => {
+                            let state = Arc::clone(&state);
+                            let mut s = state.lock().unwrap();
+                            if let Some(w) = s.waker.take() {
+                                w.wake();
+                                s.completed = true;
+                            }
+                        }
+                        x => {
+                            log::trace!("gather status: {:?}", x)
+                        }
+                    }) as Box<dyn FnMut()>);
+                conn.set_onicegatheringstatechange(Some(callback.as_ref().unchecked_ref()));
+                callback.forget();
+                Ok(promise)
+            }
+            None => Err(anyhow!("cannot get connection")),
         }
     }
 }
