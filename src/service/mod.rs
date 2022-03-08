@@ -9,7 +9,10 @@ use axum::{
 };
 use bns_core::ecc::SecretKey;
 use bns_core::swarm::Swarm;
+use http::header::HeaderName;
+use http::header::HeaderValue;
 use std::sync::Arc;
+use tower_http::set_header::SetResponseHeaderLayer;
 
 pub async fn run_service(addr: String, swarm: Arc<Swarm>, key: SecretKey) {
     let binding_addr = addr.parse().unwrap();
@@ -22,7 +25,11 @@ pub async fn run_service(addr: String, swarm: Arc<Swarm>, key: SecretKey) {
             "/sdp",
             post(discovery::handshake_handler)
                 .layer(&swarm_layer)
-                .layer(&key_layer),
+                .layer(&key_layer)
+                .layer(SetResponseHeaderLayer::overriding(
+                    HeaderName::from_static("access-control-allow-header"),
+                    HeaderValue::from_static("*"),
+                )),
         )
         .route(
             "/connect",

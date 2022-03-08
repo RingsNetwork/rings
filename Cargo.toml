@@ -13,6 +13,8 @@ tokio = { version = "1.13.0", features = ["full"] }
 hyper = { version = "0.14.14", features = ["full"] }
 env_logger = { version = "0.9.0" }
 tokio-util = { version = "0.6.9" }
+tower-http = { version="0.2.4", features = ["set-header"]}
+http = "0.2.6"
 clap = { version = "3", features = ["derive", "env"] }
 anyhow = "1.0.45"
 bns-core = { path = "./bns-core" }
