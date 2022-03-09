@@ -1,3 +1,5 @@
+use super::helper::RtcSessionDescriptionWrapper;
+use crate::transports::helper::IceCandidateSerializer;
 use crate::channels::wasm::CbChannel;
 use crate::ecc::SecretKey;
 use crate::encoder::Encoded;
@@ -37,83 +39,6 @@ use web_sys::RtcPeerConnectionIceEvent;
 use web_sys::RtcSdpType;
 use web_sys::RtcSessionDescription;
 use web_sys::RtcSessionDescriptionInit;
-
-#[derive(Clone, Deserialize, Serialize, Debug)]
-#[serde(rename_all = "lowercase")]
-pub enum SdpType {
-    Offer,
-    Pranswer,
-    Answer,
-    Rollback,
-}
-
-impl From<SdpType> for web_sys::RtcSdpType {
-    fn from(s: SdpType) -> Self {
-        match s {
-            SdpType::Offer => RtcSdpType::Offer,
-            SdpType::Pranswer => RtcSdpType::Pranswer,
-            SdpType::Answer => RtcSdpType::Answer,
-            SdpType::Rollback => RtcSdpType::Rollback,
-        }
-    }
-}
-
-impl From<web_sys::RtcSdpType> for SdpType {
-    fn from(s: web_sys::RtcSdpType) -> Self {
-        match s {
-            RtcSdpType::Offer => SdpType::Offer,
-            RtcSdpType::Pranswer => SdpType::Pranswer,
-            RtcSdpType::Answer => SdpType::Answer,
-            RtcSdpType::Rollback => SdpType::Rollback,
-            _ => SdpType::Offer,
-        }
-    }
-}
-
-#[derive(Clone, Deserialize, Serialize, Debug)]
-pub struct RtcSessionDescriptionWrapper {
-    pub sdp: String,
-    #[serde(rename = "type")]
-    pub type_: SdpType,
-}
-
-impl From<JsValue> for RtcSessionDescriptionWrapper {
-    fn from(s: JsValue) -> Self {
-        let sdp = web_sys::RtcSessionDescription::from(s);
-        sdp.into()
-    }
-}
-
-impl From<web_sys::RtcSessionDescription> for RtcSessionDescriptionWrapper {
-    fn from(sdp: RtcSessionDescription) -> Self {
-        Self {
-            sdp: sdp.sdp(),
-            type_: sdp.type_().into(),
-        }
-    }
-}
-
-impl TryFrom<String> for RtcSessionDescriptionWrapper {
-    type Error = anyhow::Error;
-    fn try_from(s: String) -> Result<Self> {
-        serde_json::from_str::<RtcSessionDescriptionWrapper>(&s).map_err(|e| anyhow!(e))
-    }
-}
-
-impl From<RtcSessionDescriptionWrapper> for web_sys::RtcSessionDescriptionInit {
-    fn from(s: RtcSessionDescriptionWrapper) -> Self {
-        let mut sdp = web_sys::RtcSessionDescriptionInit::new(s.type_.into());
-        sdp.sdp(&s.sdp).clone()
-    }
-}
-
-// may cause panic here; fix later
-impl From<RtcSessionDescriptionWrapper> for web_sys::RtcSessionDescription {
-    fn from(s: RtcSessionDescriptionWrapper) -> Self {
-        let sdp: web_sys::RtcSessionDescriptionInit = s.into();
-        RtcSessionDescription::new_with_description_init_dict(&sdp).unwrap()
-    }
-}
 
 #[derive(Clone)]
 pub struct WasmTransport {
@@ -380,8 +305,10 @@ impl IceTransportCallback<CbChannel> for WasmTransport {
 #[derive(Deserialize, Serialize, Debug)]
 pub struct TricklePayload {
     pub sdp: String,
-    pub candidates: Vec<String>,
+    pub candidates: Vec<IceCandidateSerializer>,
 }
+
+
 
 #[async_trait(?Send)]
 impl IceTrickleScheme<CbChannel> for WasmTransport {
@@ -400,14 +327,12 @@ impl IceTrickleScheme<CbChannel> for WasmTransport {
                 return Err(anyhow!("unsupport sdp type"));
             }
         };
-        let local_candidates_json: Vec<String> = self
+        let local_candidates_json: Vec<IceCandidateSerializer> = self
             .get_pending_candidates()
             .await
             .iter()
             .map(|c| {
-                js_sys::JSON::stringify(&c.clone().to_json())
-                    .unwrap()
-                    .into()
+                c.clone().to_json().into_serde::<IceCandidateSerializer>().unwrap()
             })
             .collect();
         let data = TricklePayload {
@@ -430,7 +355,7 @@ impl IceTrickleScheme<CbChannel> for WasmTransport {
                 log::trace!("setting remote candidate");
                 for c in data.data.candidates {
                     log::trace!("add candiates: {:?}", c);
-                    self.add_ice_candidate(c.to_owned()).await?;
+                    self.add_ice_candidate(c.candidate.to_owned()).await?;
                 }
                 Ok(data.addr)
             }

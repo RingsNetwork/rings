@@ -7,6 +7,7 @@ use crate::types::channel::Events;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
 use crate::types::ice_transport::IceTrickleScheme;
+use crate::transports::default::IceCandidateSerializer;
 use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -339,7 +340,7 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
 #[derive(Deserialize, Serialize, Debug)]
 pub struct TricklePayload {
     pub sdp: String,
-    pub candidates: Vec<RTCIceCandidateInit>,
+    pub candidates: Vec<IceCandidateSerializer>,
 }
 
 #[async_trait]
@@ -365,7 +366,7 @@ impl IceTrickleScheme<AcChannel> for DefaultTransport {
             self.get_pending_candidates()
                 .await
                 .iter()
-                .map(async move |c| c.clone().to_json().await.unwrap()),
+                .map(async move |c| c.clone().to_json().await.unwrap().into()),
         )
         .await;
         let data = TricklePayload {

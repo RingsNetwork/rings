@@ -27,7 +27,7 @@ pub async fn run_service(addr: String, swarm: Arc<Swarm>, key: SecretKey) {
                 .layer(&swarm_layer)
                 .layer(&key_layer)
                 .layer(SetResponseHeaderLayer::overriding(
-                    HeaderName::from_static("access-control-allow-header"),
+                    HeaderName::from_static("access-control-allow-origin"),
                     HeaderValue::from_static("*"),
                 )),
         )

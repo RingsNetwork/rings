@@ -78,7 +78,7 @@ impl Swarm {
             if let Ok(msg) = SignedMsg::new(Message::DHTMessage(act), &self.key, None) {
                 // should handle return
                 if let Err(e) = self.send_message_without_dht(addr.into(), msg).await {
-                    log::error!("{:?}", e);
+                    log::error!("failed on register: {:?}", e);
                 }
             }
         }
