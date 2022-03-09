@@ -45,7 +45,7 @@ crossbeam-channel = { version = "0.5", optional = true }
 base58-monero = { version = "0.3", default-features = false, features = ["check"] }
 
 [dependencies.web-sys]
-version = "0.3.44"
+version = "0.3.9"
 optional = true
 features = [
   "MessageEvent",
@@ -61,6 +61,7 @@ features = [
   "RtcDataChannelEvent",
   "RtcConfiguration",
   "RtcIceConnectionState",
+  "RtcIceGatheringState"
 ]
 
 [target.'cfg(target_family="wasm")'.dependencies]

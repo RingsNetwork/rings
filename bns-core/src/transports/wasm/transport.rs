@@ -1,7 +1,9 @@
+use super::helper::RtcSessionDescriptionWrapper;
 use crate::channels::wasm::CbChannel;
 use crate::ecc::SecretKey;
 use crate::encoder::Encoded;
 use crate::msg::SignedMsg;
+use crate::transports::helper::IceCandidateSerializer;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
 use crate::types::ice_transport::IceTrickleScheme;
@@ -13,7 +15,12 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json;
 use serde_json::json;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::task::Context;
+use std::task::Poll;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
@@ -26,92 +33,17 @@ use web_sys::RtcDataChannelEvent;
 use web_sys::RtcIceCandidate;
 use web_sys::RtcIceCandidateInit;
 use web_sys::RtcIceConnectionState;
+use web_sys::RtcIceGatheringState;
 use web_sys::RtcPeerConnection;
 use web_sys::RtcPeerConnectionIceEvent;
 use web_sys::RtcSdpType;
 use web_sys::RtcSessionDescription;
 use web_sys::RtcSessionDescriptionInit;
 
-#[derive(Clone, Deserialize, Serialize, Debug)]
-pub enum SdpType {
-    Offer,
-    Pranswer,
-    Answer,
-    Rollback,
-}
-
-impl From<SdpType> for web_sys::RtcSdpType {
-    fn from(s: SdpType) -> Self {
-        match s {
-            SdpType::Offer => RtcSdpType::Offer,
-            SdpType::Pranswer => RtcSdpType::Pranswer,
-            SdpType::Answer => RtcSdpType::Answer,
-            SdpType::Rollback => RtcSdpType::Rollback,
-        }
-    }
-}
-
-impl From<web_sys::RtcSdpType> for SdpType {
-    fn from(s: web_sys::RtcSdpType) -> Self {
-        match s {
-            RtcSdpType::Offer => SdpType::Offer,
-            RtcSdpType::Pranswer => SdpType::Pranswer,
-            RtcSdpType::Answer => SdpType::Answer,
-            RtcSdpType::Rollback => SdpType::Rollback,
-            _ => SdpType::Offer,
-        }
-    }
-}
-
-#[derive(Clone, Deserialize, Serialize, Debug)]
-pub struct RtcSessionDescriptionWrapper {
-    pub sdp: String,
-    #[serde(rename = "type")]
-    pub type_: SdpType,
-}
-
-impl From<JsValue> for RtcSessionDescriptionWrapper {
-    fn from(s: JsValue) -> Self {
-        let sdp = web_sys::RtcSessionDescription::from(s);
-        sdp.into()
-    }
-}
-
-impl From<web_sys::RtcSessionDescription> for RtcSessionDescriptionWrapper {
-    fn from(sdp: RtcSessionDescription) -> Self {
-        Self {
-            sdp: sdp.sdp(),
-            type_: sdp.type_().into(),
-        }
-    }
-}
-
-impl TryFrom<String> for RtcSessionDescriptionWrapper {
-    type Error = anyhow::Error;
-    fn try_from(s: String) -> Result<Self> {
-        serde_json::from_str::<RtcSessionDescriptionWrapper>(&s).map_err(|e| anyhow!(e))
-    }
-}
-
-impl From<RtcSessionDescriptionWrapper> for web_sys::RtcSessionDescriptionInit {
-    fn from(s: RtcSessionDescriptionWrapper) -> Self {
-        let mut sdp = web_sys::RtcSessionDescriptionInit::new(s.type_.into());
-        sdp.sdp(&s.sdp).clone()
-    }
-}
-
-// may cause panic here; fix later
-impl From<RtcSessionDescriptionWrapper> for web_sys::RtcSessionDescription {
-    fn from(s: RtcSessionDescriptionWrapper) -> Self {
-        let sdp: web_sys::RtcSessionDescriptionInit = s.into();
-        RtcSessionDescription::new_with_description_init_dict(&sdp).unwrap()
-    }
-}
-
 #[derive(Clone)]
 pub struct WasmTransport {
     pub connection: Option<Arc<RtcPeerConnection>>,
-    pub pending_candidates: Arc<Vec<RtcIceCandidate>>,
+    pub pending_candidates: Arc<Mutex<Vec<RtcIceCandidate>>>,
     pub channel: Option<Arc<RtcDataChannel>>,
     pub signaler: Arc<CbChannel>,
 }
@@ -133,7 +65,7 @@ impl IceTransport<CbChannel> for WasmTransport {
     fn new(ch: Arc<CbChannel>) -> Self {
         Self {
             connection: None,
-            pending_candidates: Arc::new(vec![]),
+            pending_candidates: Arc::new(Mutex::new(vec![])),
             channel: None,
             signaler: Arc::clone(&ch),
         }
@@ -143,7 +75,7 @@ impl IceTransport<CbChannel> for WasmTransport {
         Arc::clone(&self.signaler)
     }
 
-    async fn start(&mut self, stun: String) -> Result<()> {
+    async fn start(&mut self, stun: String) -> Result<&Self> {
         let mut config = RtcConfiguration::new();
         config.ice_servers(&JsValue::from_serde(&json! {[{"urls": stun}]}).unwrap());
 
@@ -152,7 +84,7 @@ impl IceTransport<CbChannel> for WasmTransport {
             .as_ref()
             .map(|c| Arc::new(c.to_owned()));
         self.setup_channel("bns").await;
-        return Ok(());
+        return Ok(self);
     }
 
     async fn close(&self) -> Result<()> {
@@ -173,7 +105,7 @@ impl IceTransport<CbChannel> for WasmTransport {
     }
 
     async fn get_pending_candidates(&self) -> Vec<Self::Candidate> {
-        self.pending_candidates.to_vec()
+        self.pending_candidates.lock().unwrap().to_vec()
     }
 
     async fn get_answer(&self) -> Result<Self::Sdp> {
@@ -186,6 +118,8 @@ impl IceTransport<CbChannel> for WasmTransport {
                             answer.to_owned(),
                         ))
                         .await?;
+                        let promise = self.gather_complete_promise().await?;
+                        promise.await;
                         Ok(answer.into())
                     }
                     Err(_) => Err(anyhow!("Failed to get answer")),
@@ -205,6 +139,8 @@ impl IceTransport<CbChannel> for WasmTransport {
                             offer.to_owned(),
                         ))
                         .await?;
+                        let promise = self.gather_complete_promise().await?;
+                        promise.await;
                         Ok(offer.into())
                     }
                     Err(_) => Err(anyhow!("cannot get offer")),
@@ -311,74 +247,65 @@ impl WasmTransport {
 
 #[async_trait(?Send)]
 impl IceTransportCallback<CbChannel> for WasmTransport {
-    async fn on_ice_candidate(&self, f: Self::OnLocalCandidateHdlrFn) -> Result<()> {
-        let mut f = Some(f);
+    type OnLocalCandidateHdlrFn = Box<dyn FnMut(RtcPeerConnectionIceEvent) -> ()>;
+    type OnPeerConnectionStateChangeHdlrFn = Box<dyn FnMut(RtcIceConnectionState) -> ()>;
+    type OnDataChannelHdlrFn = Box<dyn FnMut(RtcDataChannelEvent) -> ()>;
+
+    async fn apply_callback(&self) -> Result<&Self> {
         match &self.get_peer_connection().await {
             Some(c) => {
-                let callback = Closure::wrap(Box::new(move |ev: RtcPeerConnectionIceEvent| {
-                    let mut f = f.take().unwrap();
-                    spawn_local(async move { f(ev.candidate()).await })
-                })
-                    as Box<dyn FnMut(RtcPeerConnectionIceEvent)>);
-                c.set_onicecandidate(Some(callback.as_ref().unchecked_ref()));
-                Ok(())
+                let on_ice_candidate_callback = Closure::wrap(self.on_ice_candidate().await);
+                let on_peer_connection_state_change_callback =
+                    Closure::wrap(self.on_peer_connection_state_change().await);
+                let on_data_channel_callback = Closure::wrap(self.on_data_channel().await);
+
+                c.set_onicecandidate(Some(on_ice_candidate_callback.as_ref().unchecked_ref()));
+                c.set_oniceconnectionstatechange(Some(
+                    on_peer_connection_state_change_callback
+                        .as_ref()
+                        .unchecked_ref(),
+                ));
+                c.set_ondatachannel(Some(on_data_channel_callback.as_ref().unchecked_ref()));
+                on_ice_candidate_callback.forget();
+                on_peer_connection_state_change_callback.forget();
+                on_data_channel_callback.forget();
+                Ok(self)
             }
-            None => Err(anyhow!("Failed on getting connection")),
+            None => {
+                log::error!("cannot get connection");
+                Err(anyhow!("Failed on getting connection"))
+            }
+        }
+    }
+    async fn on_ice_candidate(&self) -> Self::OnLocalCandidateHdlrFn {
+        let peer_connection = self.get_peer_connection().await;
+        let pending_candidates = Arc::clone(&self.pending_candidates);
+        log::info!("binding ice candidate callback");
+        box move |ev: RtcPeerConnectionIceEvent| {
+            log::info!("ice_Candidate {:?}", ev);
+            let mut candidates = pending_candidates.lock().unwrap();
+            let peer_connection = peer_connection.clone();
+            if let Some(candidate) = ev.candidate() {
+                if let Some(peer_connection) = peer_connection {
+                    candidates.push(candidate.clone());
+                    println!("Candidates Number: {:?}", candidates.len());
+                }
+            }
         }
     }
 
-    async fn on_peer_connection_state_change(
-        &self,
-        f: Self::OnPeerConnectionStateChangeHdlrFn,
-    ) -> Result<()> {
-        let mut f = Some(f);
-        match &self.get_peer_connection().await {
-            Some(c) => {
-                let callback = Closure::wrap(Box::new(move |ev: RtcIceConnectionState| {
-                    let mut f = f.take().unwrap();
-                    spawn_local(async move { f(ev).await })
-                })
-                    as Box<dyn FnMut(RtcIceConnectionState)>);
-                c.set_oniceconnectionstatechange(Some(callback.as_ref().unchecked_ref()));
-                Ok(())
-            }
-            None => Err(anyhow!("Failed on getting connection")),
-        }
+    async fn on_peer_connection_state_change(&self) -> Self::OnPeerConnectionStateChangeHdlrFn {
+        box move |_: RtcIceConnectionState| {}
     }
-
-    async fn on_data_channel(&self, f: Self::OnDataChannelHdlrFn) -> Result<()> {
-        let mut f = Some(f);
-        match &self.get_peer_connection().await {
-            Some(c) => {
-                let callback = Closure::wrap(Box::new(move |ev: RtcDataChannelEvent| {
-                    let mut f = f.take().unwrap();
-                    spawn_local(async move { f(Arc::new(ev.channel())).await })
-                })
-                    as Box<dyn FnMut(RtcDataChannelEvent)>);
-                c.set_ondatachannel(Some(callback.as_ref().unchecked_ref()));
-                Ok(())
-            }
-            None => Err(anyhow!("Failed on getting connection")),
-        }
-    }
-
-    async fn on_ice_candidate_callback(&self) -> Self::OnLocalCandidateHdlrFn {
-        box move |_: Option<Self::Candidate>| Box::pin(async move {})
-    }
-    async fn on_peer_connection_state_change_callback(
-        &self,
-    ) -> Self::OnPeerConnectionStateChangeHdlrFn {
-        box move |_: Self::ConnectionState| Box::pin(async move {})
-    }
-    async fn on_data_channel_callback(&self) -> Self::OnDataChannelHdlrFn {
-        box move |_: Arc<Self::DataChannel>| Box::pin(async move {})
+    async fn on_data_channel(&self) -> Self::OnDataChannelHdlrFn {
+        box move |_: RtcDataChannelEvent| {}
     }
 }
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct TricklePayload {
     pub sdp: String,
-    pub candidates: Vec<String>,
+    pub candidates: Vec<IceCandidateSerializer>,
 }
 
 #[async_trait(?Send)]
@@ -398,18 +325,19 @@ impl IceTrickleScheme<CbChannel> for WasmTransport {
                 return Err(anyhow!("unsupport sdp type"));
             }
         };
-        log::trace!("got sdp");
-        let local_candidates_json: Vec<String> = self
+        let local_candidates_json: Vec<IceCandidateSerializer> = self
             .get_pending_candidates()
             .await
             .iter()
-            .map(|c| c.clone().to_string().into())
+            .map(|c| {
+                c.clone()
+                    .to_json()
+                    .into_serde::<IceCandidateSerializer>()
+                    .unwrap()
+            })
             .collect();
-        log::trace!("got local candid");
-        let sdp_str = sdp.to_string();
-        log::trace!("get sdp {:?}", sdp_str);
         let data = TricklePayload {
-            sdp: sdp_str.into(),
+            sdp: serde_json::to_string(&RtcSessionDescriptionWrapper::from(sdp))?,
             candidates: local_candidates_json,
         };
         log::trace!("prepared hanshake info :{:?}", data);
@@ -428,7 +356,7 @@ impl IceTrickleScheme<CbChannel> for WasmTransport {
                 log::trace!("setting remote candidate");
                 for c in data.data.candidates {
                     log::trace!("add candiates: {:?}", c);
-                    self.add_ice_candidate(c.to_owned()).await?;
+                    self.add_ice_candidate(c.candidate.to_owned()).await?;
                 }
                 Ok(data.addr)
             }
@@ -436,6 +364,63 @@ impl IceTrickleScheme<CbChannel> for WasmTransport {
                 log::error!("cannot verify message sig");
                 return Err(anyhow!("failed on verify message sigature"));
             }
+        }
+    }
+}
+
+pub struct State {
+    completed: bool,
+    waker: Option<std::task::Waker>,
+}
+
+pub struct GatherPromise(Arc<Mutex<State>>);
+
+impl Future for GatherPromise {
+    type Output = ();
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut state = self.0.lock().unwrap();
+        if state.completed {
+            Poll::Ready(())
+        } else {
+            state.waker = Some(cx.waker().clone());
+            Poll::Pending
+        }
+    }
+}
+
+impl WasmTransport {
+    async fn gather_complete_promise(&self) -> Result<GatherPromise> {
+        let callback = Closure::wrap(Box::new(move |s: RtcIceGatheringState| match s {
+            RtcIceGatheringState::Complete => {}
+            _ => {}
+        }) as Box<dyn FnMut(web_sys::RtcIceGatheringState)>);
+        match self.get_peer_connection().await {
+            Some(conn) => {
+                let state = Arc::new(Mutex::new(State {
+                    completed: false,
+                    waker: None,
+                }));
+                let promise = GatherPromise(Arc::clone(&state));
+                let conn_clone = Arc::clone(&conn);
+                let callback =
+                    Closure::wrap(Box::new(move || match conn_clone.ice_gathering_state() {
+                        RtcIceGatheringState::Complete => {
+                            let state = Arc::clone(&state);
+                            let mut s = state.lock().unwrap();
+                            if let Some(w) = s.waker.take() {
+                                w.wake();
+                                s.completed = true;
+                            }
+                        }
+                        x => {
+                            log::trace!("gather status: {:?}", x)
+                        }
+                    }) as Box<dyn FnMut()>);
+                conn.set_onicegatheringstatechange(Some(callback.as_ref().unchecked_ref()));
+                callback.forget();
+                Ok(promise)
+            }
+            None => Err(anyhow!("cannot get connection")),
         }
     }
 }

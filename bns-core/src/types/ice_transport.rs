@@ -4,12 +4,8 @@ use crate::types::channel::Channel;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Serialize;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use web3::types::Address;
-
-type Fut = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
@@ -24,7 +20,7 @@ pub trait IceTransport<Ch: Channel> {
 
     fn new(signaler: Arc<Ch>) -> Self;
     fn signaler(&self) -> Arc<Ch>;
-    async fn start(&mut self, stun_addr: String) -> Result<()>;
+    async fn start(&mut self, stun_addr: String) -> Result<&Self>;
     async fn close(&self) -> Result<()>;
     async fn ice_connection_state(&self) -> Option<Self::IceConnectionState>;
 
@@ -51,23 +47,13 @@ pub trait IceTransport<Ch: Channel> {
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait IceTransportCallback<Ch: Channel>: IceTransport<Ch> {
-    type OnLocalCandidateHdlrFn = Box<dyn FnMut(Option<Self::Candidate>) -> Fut + Send + Sync>;
-    type OnPeerConnectionStateChangeHdlrFn =
-        Box<dyn FnMut(Self::ConnectionState) -> Fut + Send + Sync>;
-    type OnDataChannelHdlrFn = Box<dyn FnMut(Arc<Self::DataChannel>) -> Fut + Send + Sync>;
-
-    async fn on_ice_candidate(&self, f: Self::OnLocalCandidateHdlrFn) -> Result<()>;
-    async fn on_peer_connection_state_change(
-        &self,
-        f: Self::OnPeerConnectionStateChangeHdlrFn,
-    ) -> Result<()>;
-    async fn on_data_channel(&self, f: Self::OnDataChannelHdlrFn) -> Result<()>;
-
-    async fn on_ice_candidate_callback(&self) -> Self::OnLocalCandidateHdlrFn;
-    async fn on_peer_connection_state_change_callback(
-        &self,
-    ) -> Self::OnPeerConnectionStateChangeHdlrFn;
-    async fn on_data_channel_callback(&self) -> Self::OnDataChannelHdlrFn;
+    type OnLocalCandidateHdlrFn;
+    type OnPeerConnectionStateChangeHdlrFn;
+    type OnDataChannelHdlrFn;
+    async fn apply_callback(&self) -> Result<&Self>;
+    async fn on_ice_candidate(&self) -> Self::OnLocalCandidateHdlrFn;
+    async fn on_peer_connection_state_change(&self) -> Self::OnPeerConnectionStateChangeHdlrFn;
+    async fn on_data_channel(&self) -> Self::OnDataChannelHdlrFn;
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]

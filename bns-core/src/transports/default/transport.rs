@@ -2,6 +2,7 @@ use crate::channels::default::AcChannel;
 use crate::ecc::SecretKey;
 use crate::encoder::Encoded;
 use crate::msg::SignedMsg;
+use crate::transports::default::IceCandidateSerializer;
 use crate::types::channel::Channel;
 use crate::types::channel::Events;
 use crate::types::ice_transport::IceTransport;
@@ -14,6 +15,8 @@ use futures::future::join_all;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -30,6 +33,8 @@ use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
+
+type Fut = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
 #[derive(Clone)]
 pub struct DefaultTransport {
@@ -62,7 +67,7 @@ impl IceTransport<AcChannel> for DefaultTransport {
         Arc::clone(&self.signaler)
     }
 
-    async fn start(&mut self, stun: String) -> Result<()> {
+    async fn start(&mut self, stun: String) -> Result<&Self> {
         let config = RTCConfiguration {
             ice_servers: vec![RTCIceServer {
                 urls: vec![stun.to_owned()],
@@ -83,14 +88,7 @@ impl IceTransport<AcChannel> for DefaultTransport {
         }?;
 
         self.setup_channel("bns").await?;
-        self.on_ice_candidate(self.on_ice_candidate_callback().await)
-            .await?;
-        self.on_peer_connection_state_change(self.on_peer_connection_state_change_callback().await)
-            .await?;
-        self.on_data_channel(self.on_data_channel_callback().await)
-            .await?;
-
-        Ok(())
+        Ok(self)
     }
 
     async fn close(&self) -> Result<()> {
@@ -243,40 +241,33 @@ impl DefaultTransport {
 
 #[async_trait]
 impl IceTransportCallback<AcChannel> for DefaultTransport {
-    async fn on_ice_candidate(&self, f: Self::OnLocalCandidateHdlrFn) -> Result<()> {
+    type OnLocalCandidateHdlrFn = Box<dyn FnMut(Option<Self::Candidate>) -> Fut + Send + Sync>;
+    type OnPeerConnectionStateChangeHdlrFn =
+        Box<dyn FnMut(Self::ConnectionState) -> Fut + Send + Sync>;
+    type OnDataChannelHdlrFn = Box<dyn FnMut(Arc<Self::DataChannel>) -> Fut + Send + Sync>;
+
+    async fn apply_callback(&self) -> Result<&Self> {
+        let on_ice_candidate_callback = self.on_ice_candidate().await;
+        let on_peer_connection_state_change_callback = self.on_peer_connection_state_change().await;
+        let on_data_channel_callback = self.on_data_channel().await;
         match self.get_peer_connection().await {
             Some(peer_connection) => {
-                peer_connection.on_ice_candidate(f).await;
-                Ok(())
+                peer_connection
+                    .on_ice_candidate(on_ice_candidate_callback)
+                    .await;
+                peer_connection
+                    .on_peer_connection_state_change(on_peer_connection_state_change_callback)
+                    .await;
+                peer_connection
+                    .on_data_channel(on_data_channel_callback)
+                    .await;
+                Ok(self)
             }
             None => Err(anyhow!("connection is not setup")),
         }
     }
 
-    async fn on_peer_connection_state_change(
-        &self,
-        f: Self::OnPeerConnectionStateChangeHdlrFn,
-    ) -> Result<()> {
-        match self.get_peer_connection().await {
-            Some(peer_connection) => {
-                peer_connection.on_peer_connection_state_change(f).await;
-            }
-            None => panic!("Connection Failed."),
-        }
-        Ok(())
-    }
-
-    async fn on_data_channel(&self, f: Self::OnDataChannelHdlrFn) -> Result<()> {
-        match self.get_peer_connection().await {
-            Some(peer_connection) => {
-                peer_connection.on_data_channel(f).await;
-            }
-            None => panic!("Connection Failed."),
-        }
-        Ok(())
-    }
-
-    async fn on_ice_candidate_callback(&self) -> Self::OnLocalCandidateHdlrFn {
+    async fn on_ice_candidate(&self) -> Self::OnLocalCandidateHdlrFn {
         let peer_connection = self.get_peer_connection().await;
         let pending_candidates = Arc::clone(&self.pending_candidates);
 
@@ -298,9 +289,7 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
         }
     }
 
-    async fn on_peer_connection_state_change_callback(
-        &self,
-    ) -> Self::OnPeerConnectionStateChangeHdlrFn {
+    async fn on_peer_connection_state_change(&self) -> Self::OnPeerConnectionStateChangeHdlrFn {
         let sender = self.signaler().sender();
         box move |s: RTCPeerConnectionState| {
             if s == RTCPeerConnectionState::Failed {
@@ -312,7 +301,7 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
         }
     }
 
-    async fn on_data_channel_callback(&self) -> Self::OnDataChannelHdlrFn {
+    async fn on_data_channel(&self) -> Self::OnDataChannelHdlrFn {
         let channel = self.get_data_channel().await.unwrap();
         let signaler = self.signaler();
 
@@ -351,7 +340,7 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
 #[derive(Deserialize, Serialize, Debug)]
 pub struct TricklePayload {
     pub sdp: String,
-    pub candidates: Vec<RTCIceCandidateInit>,
+    pub candidates: Vec<IceCandidateSerializer>,
 }
 
 #[async_trait]
@@ -377,7 +366,7 @@ impl IceTrickleScheme<AcChannel> for DefaultTransport {
             self.get_pending_candidates()
                 .await
                 .iter()
-                .map(async move |c| c.clone().to_json().await.unwrap()),
+                .map(async move |c| c.clone().to_json().await.unwrap().into()),
         )
         .await;
         let data = TricklePayload {

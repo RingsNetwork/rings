@@ -17,6 +17,7 @@ use crate::transports::wasm::WasmTransport as Transport;
 use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::Events;
 use crate::types::ice_transport::IceTransport;
+use crate::types::ice_transport::IceTransportCallback;
 use anyhow::Result;
 use futures::lock::Mutex;
 use serde::Deserialize;
@@ -56,7 +57,11 @@ impl Swarm {
 
     pub async fn new_transport(&self) -> Result<Arc<Transport>> {
         let mut ice_transport = Transport::new(self.signaler());
-        ice_transport.start(self.stun_server.clone()).await?;
+        ice_transport
+            .start(self.stun_server.clone())
+            .await?
+            .apply_callback()
+            .await?;
         let trans = Arc::new(ice_transport);
         Ok(Arc::clone(&trans))
     }
@@ -73,7 +78,7 @@ impl Swarm {
             if let Ok(msg) = SignedMsg::new(Message::DHTMessage(act), &self.key, None) {
                 // should handle return
                 if let Err(e) = self.send_message_without_dht(addr.into(), msg).await {
-                    log::error!("{:?}", e);
+                    log::error!("failed on register: {:?}", e);
                 }
             }
         }
