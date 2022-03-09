@@ -1,9 +1,9 @@
 use super::helper::RtcSessionDescriptionWrapper;
-use crate::transports::helper::IceCandidateSerializer;
 use crate::channels::wasm::CbChannel;
 use crate::ecc::SecretKey;
 use crate::encoder::Encoded;
 use crate::msg::SignedMsg;
+use crate::transports::helper::IceCandidateSerializer;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
 use crate::types::ice_transport::IceTrickleScheme;
@@ -308,8 +308,6 @@ pub struct TricklePayload {
     pub candidates: Vec<IceCandidateSerializer>,
 }
 
-
-
 #[async_trait(?Send)]
 impl IceTrickleScheme<CbChannel> for WasmTransport {
     // https://datatracker.ietf.org/doc/html/rfc5245
@@ -332,7 +330,10 @@ impl IceTrickleScheme<CbChannel> for WasmTransport {
             .await
             .iter()
             .map(|c| {
-                c.clone().to_json().into_serde::<IceCandidateSerializer>().unwrap()
+                c.clone()
+                    .to_json()
+                    .into_serde::<IceCandidateSerializer>()
+                    .unwrap()
             })
             .collect();
         let data = TricklePayload {
