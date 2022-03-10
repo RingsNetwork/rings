@@ -1,7 +1,6 @@
 use anyhow::anyhow;
 use anyhow::Result;
 use hex;
-use libsecp256k1::recover;
 use rand::SeedableRng;
 use rand_hc::Hc128Rng;
 use std::convert::TryFrom;
@@ -115,19 +114,25 @@ where
     }
 }
 
-fn do_verify(message: &str, address: &Address, sig_bytes: &SigBytes) -> Result<bool> {
+pub fn recover<S>(message: &str, signature: S) -> Result<PublicKey>
+where
+    S: AsRef<[u8]>,
+{
+    let sig_bytes: SigBytes = signature.as_ref().try_into()?;
     let r_s_signature: [u8; 64] = sig_bytes[..64].try_into()?;
     let recovery_id: u8 = sig_bytes[64];
-
     let message_hash: [u8; 32] = keccak256(message.as_bytes());
-
-    let pubkey = recover(
+    Ok(libsecp256k1::recover(
         &libsecp256k1::Message::parse(&message_hash),
         &libsecp256k1::Signature::parse_standard(&r_s_signature)?,
         &libsecp256k1::RecoveryId::parse(recovery_id)?,
-    )?;
+    )?
+    .into())
+}
 
-    Ok(&PublicKey::from(pubkey).address() == address)
+fn do_verify(message: &str, address: &Address, sig_bytes: &SigBytes) -> Result<bool> {
+    let pubkey = recover(message, &sig_bytes)?;
+    Ok(&pubkey.address() == address)
 }
 
 #[cfg(test)]
@@ -139,18 +144,19 @@ mod tests {
     fn sign_then_verify() {
         let message = "Hello, world!";
         // key generate from https://www.ethereumaddressgenerator.com/
-        let address = Address::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
+        let address = &Address::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
 
-        let key =
-            SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0")
-                .unwrap();
+        let key = &SecretKey::try_from(
+            "65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0",
+        )
+        .unwrap();
 
         // Ensure that the address belongs to the key.
-        assert_eq!(address, key.address());
+        assert_eq!(address, &key.address());
 
-        let sig = sign(message, &key);
+        let sig = sign(message, key);
 
         // Verify message signature by address.
-        assert!(verify(message, &address, sig));
+        assert!(verify(message, address, sig));
     }
 }

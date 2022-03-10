@@ -1,4 +1,4 @@
-use crate::ecc::{sign, verify, SecretKey};
+use crate::ecc::{recover, sign, verify, PublicKey, SecretKey};
 use crate::encoder::Encoded;
 use anyhow::anyhow;
 use anyhow::Result;
@@ -54,6 +54,11 @@ where
         } else {
             false
         }
+    }
+
+    pub fn pubkey(&self) -> Result<PublicKey> {
+        let msg = Self::pack_msg(&self.data, self.ts_ms, self.ttl_ms)?;
+        recover(&msg, self.sig.clone())
     }
 
     pub fn pack_msg(data: &T, ts_ms: u128, ttl_ms: usize) -> Result<String> {
