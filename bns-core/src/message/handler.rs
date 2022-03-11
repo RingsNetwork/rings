@@ -4,6 +4,7 @@ use crate::swarm::Swarm;
 use crate::types::ice_transport::IceTrickleScheme;
 use anyhow::anyhow;
 use anyhow::Result;
+use futures::lock::Mutex;
 use futures_util::pin_mut;
 use futures_util::stream::StreamExt;
 use std::sync::Arc;
@@ -15,12 +16,12 @@ use web_sys::RtcSdpType as RTCSdpType;
 use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 
 pub struct MessageHandler {
-    routing: Arc<Chord>,
-    swarm: Arc<Swarm>,
+    routing: Arc<Mutex<Chord>>,
+    swarm: Arc<Mutex<Swarm>>,
 }
 
 impl MessageHandler {
-    pub fn new(routing: Arc<Chord>, swarm: Arc<Swarm>) -> Self {
+    pub fn new(routing: Arc<Mutex<Chord>>, swarm: Arc<Swarm>) -> Self {
         Self { routing, swarm }
     }
 
@@ -31,7 +32,7 @@ impl MessageHandler {
     }
 
     pub async fn handle_message(&self, message: &Message, prev: &Did) -> Result<()> {
-        let current = &self.routing.id;
+        let current = &self.routing.lock().await.id;
 
         match message {
             Message::ConnectNode(msrp, msg) => {
@@ -43,6 +44,28 @@ impl MessageHandler {
             }
             Message::ConnectNodeResponse(msrp, msg) => {
                 self.handle_connect_node_response(msrp.record(prev, current)?, msg)
+                    .await
+            }
+            Message::NotifyPredecessor(msrp, msg) => {
+                self.handle_notify_predecessor(msrp.record(prev), msg).await
+            }
+            Message::NotifyPredecessorResponse(msrp, msg) => {
+                self.handle_notify_predecessor_response(msrp.record(prev, current)?, msg)
+                    .await
+            }
+            Message::FindSuccessor(msrp, msg) => {
+                self.handle_find_successor(msrp.record(prev), msg).await
+            }
+            Message::FindSuccessorResponse(msrp, msg) => {
+                self.handle_find_successor_response(msrp.record(prev, current)?, msg)
+                    .await
+            }
+            Message::FindSuccessorAndAddToFinger(msrp, msg) => {
+                self.handle_find_successor_add_finger(msrp.record(prev), msg)
+                    .await
+            }
+            Message::FindSuccessorAndAddToFingerResponse(msrp, msg) => {
+                self.handle_find_success_add_finger_response(msrp.record(prev, current)?, msg)
                     .await
             }
             _ => Err(anyhow!("Unsupported message type")),
@@ -156,6 +179,53 @@ impl MessageHandler {
                     .map(|_| ())
             }
         }
+    }
+
+    async fn handle_notify_predecessor(
+        &self,
+        msrp: MsrpSend,
+        msg: &NotifyPredecessor,
+    ) -> Result<()> {
+        let mut chord = self.routing.lock().await;
+        chord.notify(msg.predecessor);
+        let mut report: MsrpReport = msrp.into();
+        let prev = report.to_path.pop();
+        let response = NotifyPredecessorResponse {
+            predecessor: msg.predecessor.clone(),
+        };
+        let message = Message::NotifyPredecessorResponse(report, response);
+        self.send_message(&(prev.unwrap().into()), message);
+        Ok(())
+    }
+
+    async fn handle_notify_predecessor_response(
+        &self,
+        msrp: MsrpReport,
+        msg: &NotifyPredecessorResponse,
+    ) -> Result<()> {
+        let remote = msrp.from_path[msrp.from_path.len() - 1];
+        log::info!("Remote {:?} find predecessor and update", remote);
+        let mut chord = self.routing.lock().await;
+        // if successor: predecessor is between (id, successor]
+        // then update local successor
+        chord.successor = msg.predecessor;
+        Ok(())
+    }
+
+    async fn handle_find_successor(&self, msrp: MsrpSend, msg: &FindSuccessor) -> Result<()> {
+        let mut chord = self.routing.lock().await;
+        match chord.find_successor(msg.id) {
+            Ok()
+        }
+        Ok(())
+    }
+
+    async fn handle_find_successor_response(
+        &self,
+        msrp: MsrpReport,
+        msg: &FindSuccessorResponse,
+    ) -> Result<()> {
+        Ok(())
     }
 
     pub async fn listen(&self) {

@@ -39,11 +39,25 @@ pub struct FindSuccessor {
 #[derive(Debug, PartialEq, Deserialize, Serialize, Clone)]
 pub struct FindSuccessorResponse;
 
-#[derive(Debug, PartialEq, Deserialize, Serialize, Clone)]
-pub struct NotifyPredecessor;
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
+pub struct NotifyPredecessor {
+    pub predecessor: Did,
+}
 
-#[derive(Debug, PartialEq, Deserialize, Serialize, Clone)]
-pub struct NotifyPredecessorResponse;
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
+pub struct NotifyPredecessorResponse {
+    pub predecessor: Did,
+}
+
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
+pub struct FindSuccessorAndAddToFinger {
+    pub successor: Did,
+}
+
+pub struct FindSuccessorAndAddToFingerResponse {
+    pub successor: Did,
+    pub finger_idx: u8,
+}
 
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub enum Message {
@@ -52,6 +66,8 @@ pub enum Message {
     ConnectNodeResponse(MsrpReport, ConnectNodeResponse),
     FindSuccessor(MsrpSend, FindSuccessor),
     FindSuccessorResponse(MsrpReport, FindSuccessorResponse),
+    FindSuccessorAndAddToFinger(MsrpSend, FindSuccessorAndAddToFinger),
+    FindSuccessorAndAddToFingerResponse(MsrpReport, FindSuccessorAndAddToFinger),
     NotifyPredecessor(MsrpSend, NotifyPredecessor),
     NotifyPredecessorResponse(MsrpReport, NotifyPredecessorResponse),
 }
