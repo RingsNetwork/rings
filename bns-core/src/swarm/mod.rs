@@ -10,6 +10,7 @@ use crate::types::ice_transport::IceTransportCallback;
 use anyhow::anyhow;
 use anyhow::Result;
 use async_stream::stream;
+use futures::lock::Mutex;
 use futures_core::Stream;
 use std::sync::Arc;
 use web3::types::Address;
@@ -105,7 +106,10 @@ impl Swarm {
         }
     }
 
-    pub fn iter_messages(self: Arc<Self>) -> impl Stream<Item = MessagePayload<Message>> {
+    pub fn iter_messages<'a, 'b>(&'a self) -> impl Stream<Item = MessagePayload<Message>> + 'b
+    where
+        'a: 'b,
+    {
         stream! {
             loop {
                 let ev = self.signaler().recv().await;

@@ -4,13 +4,14 @@ use axum::extract::{Extension, Query, RawBody};
 use bns_core::ecc::SecretKey;
 use bns_core::swarm::Swarm;
 use bns_core::types::ice_transport::IceTrickleScheme;
+use futures::lock::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
 use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 
 pub async fn handshake_handler(
     RawBody(body): RawBody,
-    Extension(swarm): Extension<Arc<Swarm>>,
+    Extension(swarm): Extension<Arc<Mutex<Swarm>>>,
     Extension(key): Extension<SecretKey>,
 ) -> Result<String, HttpError> {
     log::info!("Incoming body: {:?}", body);
@@ -27,7 +28,7 @@ pub async fn handshake_handler(
 
 pub async fn connect_handler(
     Query(params): Query<HashMap<String, String>>,
-    Extension(swarm): Extension<Arc<Swarm>>,
+    Extension(swarm): Extension<Arc<Mutex<Swarm>>>,
     Extension(key): Extension<SecretKey>,
 ) -> Result<String, HttpError> {
     let node = params.get("node").ok_or(HttpError::BadRequest)?;
@@ -41,9 +42,14 @@ pub async fn connect_handler(
     }
 }
 
-async fn handshake(swarm: Arc<Swarm>, key: SecretKey, data: Vec<u8>) -> anyhow::Result<String> {
+async fn handshake(
+    swarm: Arc<Mutex<Swarm>>,
+    key: SecretKey,
+    data: Vec<u8>,
+) -> anyhow::Result<String> {
     // get offer from remote and send answer back
 
+    let swarm = swarm.lock().await;
     let transport = swarm.new_transport().await?;
 
     let registered_addr = transport
@@ -72,18 +78,15 @@ async fn handshake(swarm: Arc<Swarm>, key: SecretKey, data: Vec<u8>) -> anyhow::
 }
 
 pub async fn trickle_forward(
-    swarm: Arc<Swarm>,
+    swarm: Arc<Mutex<Swarm>>,
     key: SecretKey,
     node: String,
 ) -> anyhow::Result<String> {
     // request remote offer and sand answer to remote
-
+    let swarm = swarm.lock().await;
     let client = reqwest::Client::new();
-
     let transport = swarm.new_transport().await?;
-
     let req = transport.get_handshake_info(key, RTCSdpType::Offer).await?;
-
     log::debug!(
         "sending offer and candidate {:?} to {:?}",
         req.to_owned(),

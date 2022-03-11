@@ -10,9 +10,8 @@ use bns_core::types::channel::Channel;
 use bns_node::logger::Logger;
 use bns_node::service::run_service;
 use clap::Parser;
-
+use futures::lock::Mutex;
 use std::sync::Arc;
-use std::sync::Mutex;
 
 #[derive(Parser, Debug)]
 #[clap(about, version, author)]
@@ -40,11 +39,11 @@ pub struct Args {
 
 async fn run(http_addr: String, key: SecretKey, stun: &str) {
     let routing = Arc::new(Mutex::new(Chord::new(key.address().into())));
-    let swarm = Arc::new(Swarm::new(
+    let swarm = Arc::new(Mutex::new(Swarm::new(
         Arc::new(AcChannel::new(1)),
         stun.to_string(),
         key,
-    ));
+    )));
 
     let message_handler = MessageHandler::new(routing, swarm.clone());
     tokio::spawn(async move { message_handler.listen().await });

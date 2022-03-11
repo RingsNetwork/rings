@@ -9,12 +9,13 @@ use axum::{
 };
 use bns_core::ecc::SecretKey;
 use bns_core::swarm::Swarm;
+use futures::lock::Mutex;
 use http::header::HeaderName;
 use http::header::HeaderValue;
 use std::sync::Arc;
 use tower_http::set_header::SetResponseHeaderLayer;
 
-pub async fn run_service(addr: String, swarm: Arc<Swarm>, key: SecretKey) {
+pub async fn run_service(addr: String, swarm: Arc<Mutex<Swarm>>, key: SecretKey) {
     let binding_addr = addr.parse().unwrap();
 
     let swarm_layer = Extension(swarm);
