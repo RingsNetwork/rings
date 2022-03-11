@@ -1,8 +1,8 @@
 use super::helper::RtcSessionDescriptionWrapper;
 use crate::channels::wasm::CbChannel;
 use crate::ecc::SecretKey;
-use crate::encoder::Encoded;
-use crate::msg::SignedMsg;
+use crate::message::Encoded;
+use crate::message::MessagePayload;
 use crate::transports::helper::IceCandidateSerializer;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
@@ -341,12 +341,12 @@ impl IceTrickleScheme<CbChannel> for WasmTransport {
             candidates: local_candidates_json,
         };
         log::trace!("prepared hanshake info :{:?}", data);
-        let resp = SignedMsg::new(data, &key, None)?;
+        let resp = MessagePayload::new(data, &key, None)?;
         Ok(resp.try_into()?)
     }
 
     async fn register_remote_info(&self, data: Encoded) -> anyhow::Result<Address> {
-        let data: SignedMsg<TricklePayload> = data.try_into()?;
+        let data: MessagePayload<TricklePayload> = data.try_into()?;
         log::trace!("register remote info: {:?}", data);
 
         match data.verify() {

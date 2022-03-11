@@ -1,5 +1,5 @@
 use crate::ecc::{recover, sign, verify, PublicKey, SecretKey};
-use crate::encoder::Encoded;
+use crate::message::Encoded;
 use anyhow::anyhow;
 use anyhow::Result;
 use chrono::Utc;
@@ -12,7 +12,7 @@ use web3::types::Address;
 const DEFAULT_TTL_MS: usize = 60 * 1000;
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
-pub struct SignedMsg<T> {
+pub struct MessagePayload<T> {
     pub data: T,
     pub ttl_ms: usize,
     pub ts_ms: u128,
@@ -21,7 +21,7 @@ pub struct SignedMsg<T> {
     pub sig: Vec<u8>,
 }
 
-impl<T> SignedMsg<T>
+impl<T> MessagePayload<T>
 where
     T: Serialize + DeserializeOwned,
 {
@@ -68,25 +68,25 @@ where
     }
 }
 
-impl<T> TryFrom<Encoded> for SignedMsg<T>
+impl<T> TryFrom<Encoded> for MessagePayload<T>
 where
     T: Serialize + DeserializeOwned,
 {
     type Error = anyhow::Error;
     fn try_from(s: Encoded) -> Result<Self> {
         let decoded: String = s.try_into()?;
-        let data: SignedMsg<T> =
+        let data: MessagePayload<T> =
             serde_json::from_slice(decoded.as_bytes()).map_err(|e| anyhow!(e))?;
         Ok(data)
     }
 }
 
-impl<T> TryFrom<SignedMsg<T>> for Encoded
+impl<T> TryFrom<MessagePayload<T>> for Encoded
 where
     T: Serialize + DeserializeOwned,
 {
     type Error = anyhow::Error;
-    fn try_from(s: SignedMsg<T>) -> Result<Self> {
+    fn try_from(s: MessagePayload<T>) -> Result<Self> {
         serde_json::to_string(&s)?.try_into()
     }
 }
@@ -120,8 +120,8 @@ mod tests {
             d: true,
         };
 
-        let signed_msg = SignedMsg::new(test_data, &key, None).unwrap();
+        let payload = MessagePayload::new(test_data, &key, None).unwrap();
 
-        assert!(signed_msg.verify());
+        assert!(payload.verify());
     }
 }

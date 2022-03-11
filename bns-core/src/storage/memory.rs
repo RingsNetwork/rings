@@ -25,11 +25,19 @@ where
         }
     }
 
-    fn get(&self, addr: K) -> Option<V> {
-        self.table.get(&addr).map(|v| v.value().clone())
+    fn get(&self, addr: &K) -> Option<V> {
+        self.table.get(addr).map(|v| v.value().clone())
     }
 
-    fn set(&self, addr: K, value: V) -> Option<V> {
-        self.table.insert(addr, value)
+    fn set(&self, addr: &K, value: V) -> Option<V> {
+        self.table.insert(addr.clone(), value)
+    }
+
+    fn get_or_set(&self, addr: &Self::K, default: Self::V) -> Self::V {
+        self.table
+            .entry(addr.clone())
+            .or_insert(default)
+            .value()
+            .clone()
     }
 }

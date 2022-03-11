@@ -56,7 +56,7 @@ impl FromStr for Did {
     }
 }
 
-// impl Finate Ring For Dig
+// impl Finate Ring For Did
 
 impl Neg for Did {
     type Output = Self;

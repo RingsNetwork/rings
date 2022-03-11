@@ -55,7 +55,7 @@ async fn handshake(swarm: Arc<Swarm>, key: SecretKey, data: Vec<u8>) -> anyhow::
             let resp = transport.get_handshake_info(key, RTCSdpType::Answer).await;
             match resp {
                 Ok(info) => {
-                    swarm.register(addr, Arc::clone(&transport)).await;
+                    swarm.register(&addr, Arc::clone(&transport)).await;
                     anyhow::Result::Ok(info.try_into()?)
                 }
                 Err(e) => {
@@ -103,7 +103,7 @@ pub async fn trickle_forward(
             let addr = transport
                 .register_remote_info(String::from_utf8(resp.as_bytes().to_vec())?.try_into()?)
                 .await?;
-            swarm.register(addr, Arc::clone(&transport)).await;
+            swarm.register(&addr, Arc::clone(&transport)).await;
             Ok("ok".to_string())
         }
         Err(e) => {
