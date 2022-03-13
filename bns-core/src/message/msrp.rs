@@ -47,14 +47,14 @@ impl MessageRelay {
     pub fn find_prev(&self) -> Option<Did> {
         match self.protocol {
             RelayProtocol::SEND => {
-                if self.from_path.len() > 0 {
+                if !self.from_path.is_empty() {
                     Some(self.from_path[self.from_path.len() - 1])
                 } else {
                     None
                 }
             }
             RelayProtocol::REPORT => {
-                if self.to_path.len() > 0 {
+                if !self.to_path.is_empty() {
                     Some(self.to_path[self.to_path.len() - 1])
                 } else {
                     None
@@ -70,7 +70,7 @@ impl MessageRelay {
                 self.to_path.push_back(next);
                 self.from_path.push_back(current);
             }
-            _ => {}
+            RelayProtocol::REPORT => unimplemented!(),
         };
     }
 
@@ -86,7 +86,7 @@ impl MessageRelay {
 
     #[inline]
     pub fn remove_to_path(&mut self) -> Option<Did> {
-        if self.to_path.len() > 0 {
+        if !self.to_path.is_empty() {
             self.to_path.pop_back()
         } else {
             None
@@ -95,14 +95,14 @@ impl MessageRelay {
 
     #[inline]
     pub fn remove_from_path(&mut self) -> Option<Did> {
-        if self.from_path.len() > 0 {
+        if !self.from_path.is_empty() {
             self.from_path.pop_back()
         } else {
             None
         }
     }
 
-    pub fn new(
+    pub fn new_with_path(
         tx_id: String,
         message_id: String,
         to_path: VecDeque<Did>,
@@ -118,7 +118,7 @@ impl MessageRelay {
         }
     }
 
-    pub fn new2(
+    pub fn new_with_node(
         tx_id: String,
         message_id: String,
         next: Did,
@@ -145,20 +145,38 @@ impl MessageRelay {
         prev_node: Did,
         next_node: Did,
     ) -> Self {
-        let mut from_path = relay.from_path.clone();
-        let mut to_path = relay.to_path.clone();
-        from_path.push_back(prev_node);
-        to_path.push_back(next_node);
-        MessageRelay::new(tx_id, message_id, from_path, to_path, RelayProtocol::SEND)
+        match relay.protocol {
+            RelayProtocol::SEND => {
+                let mut from_path = relay.from_path.clone();
+                let mut to_path = relay.to_path.clone();
+                from_path.push_back(prev_node);
+                to_path.push_back(next_node);
+                MessageRelay::new_with_path(
+                    tx_id,
+                    message_id,
+                    from_path,
+                    to_path,
+                    RelayProtocol::SEND,
+                )
+            }
+            RelayProtocol::REPORT => {
+                unimplemented!()
+            }
+        }
     }
 
     pub fn get_report_relay(relay: &MessageRelay, tx_id: String, message_id: String) -> Self {
-        MessageRelay::new(
-            tx_id,
-            message_id,
-            relay.from_path.clone(),
-            relay.to_path.clone(),
-            RelayProtocol::REPORT,
-        )
+        match relay.protocol {
+            RelayProtocol::REPORT => MessageRelay::new_with_path(
+                tx_id,
+                message_id,
+                relay.from_path.clone(),
+                relay.to_path.clone(),
+                RelayProtocol::REPORT,
+            ),
+            RelayProtocol::SEND => {
+                unimplemented!();
+            }
+        }
     }
 }

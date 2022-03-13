@@ -55,6 +55,7 @@ pub struct NotifiedPredecessor {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum Message {
+    None,
     ConnectNode(MessageRelay, ConnectNode),
     AlreadyConnected(MessageRelay, AlreadyConnected),
     ConnectedNode(MessageRelay, ConnectedNode),

@@ -116,8 +116,8 @@ impl MessageHandler {
 
     async fn handle_already_connected(
         &self,
-        relay: &MessageRelay,
-        msg: &AlreadyConnected,
+        _relay: &MessageRelay,
+        _msg: &AlreadyConnected,
     ) -> Result<()> {
         match msrp.to_path.last() {
             Some(prev_node) => {
@@ -168,21 +168,16 @@ impl MessageHandler {
     ) -> Result<()> {
         let mut chord = self.routing.lock().await;
         chord.notify(msg.predecessor);
-        let prev = relay.to_path[relay.to_path.len() - 1];
-        let report = MessageRelay::new(
-            relay.tx_id.clone(),
-            relay.message_id.clone(),
-            relay.to_path.clone(),
-            relay.from_path.clone(),
-            RelayProtocol::REPORT,
-        );
+        let prev = relay.find_prev();
+        let report =
+            MessageRelay::get_report_relay(relay, relay.tx_id.clone(), relay.message_id.clone());
         let message = Message::NotifiedPredecessor(
             report,
             NotifiedPredecessor {
-                predecessor: chord.predecessor.clone().unwrap(),
+                predecessor: chord.predecessor.unwrap(),
             },
         );
-        self.send_message(&(prev.into()), message).await
+        self.send_message(&(prev.unwrap().into()), message).await
     }
 
     async fn handle_notified_predecessor(
@@ -253,7 +248,7 @@ impl MessageHandler {
         let mut relay = relay.clone();
         assert_eq!(Some(current), relay.remove_to_path());
         relay.remove_from_path();
-        if relay.to_path.len() > 0 {
+        if !relay.to_path.is_empty() {
             let prev = relay.find_prev();
             let report = MessageRelay::get_report_relay(
                 &relay,
@@ -263,7 +258,7 @@ impl MessageHandler {
             let message = Message::FoundSuccessor(report, msg.clone());
             self.send_message(&prev.unwrap().into(), message).await
         } else {
-            if msg.for_fix == true {
+            if msg.for_fix {
                 let fix_finger_index = chord.fix_finger_index;
                 chord.finger[fix_finger_index as usize] = Some(msg.successor);
             } else {
@@ -302,8 +297,13 @@ impl MessageHandler {
             let mut from_path = VecDeque::new();
             to_path.push_back(successor);
             from_path.push_back(current);
-            let relay =
-                MessageRelay::new(tx_id, message_id, to_path, from_path, RelayProtocol::SEND);
+            let relay = MessageRelay::new_with_path(
+                tx_id,
+                message_id,
+                to_path,
+                from_path,
+                RelayProtocol::SEND,
+            );
             let message = Message::NotifyPredecessor(
                 relay,
                 NotifyPredecessor {
@@ -324,7 +324,7 @@ impl MessageHandler {
                     )) => {
                         let tx_id = String::from("");
                         let message_id = String::from("");
-                        let relay = MessageRelay::new2(
+                        let relay = MessageRelay::new_with_node(
                             tx_id,
                             message_id,
                             next,
