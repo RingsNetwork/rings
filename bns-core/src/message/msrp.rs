@@ -1,6 +1,4 @@
 use crate::message::Did;
-use anyhow::anyhow;
-use anyhow::Result;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::VecDeque;
@@ -47,10 +45,21 @@ pub struct MessageRelay {
 impl MessageRelay {
     #[inline]
     pub fn find_prev(&self) -> Option<Did> {
-        if self.from_path.len() > 0 {
-            Some(self.from_path[self.from_path.len() - 1])
-        } else {
-            None
+        match self.protocol {
+            RelayProtocol::SEND => {
+                if self.from_path.len() > 0 {
+                    Some(self.from_path[self.from_path.len() - 1])
+                } else {
+                    None
+                }
+            }
+            RelayProtocol::REPORT => {
+                if self.to_path.len() > 0 {
+                    Some(self.to_path[self.to_path.len() - 1])
+                } else {
+                    None
+                }
+            }
         }
     }
 
@@ -65,6 +74,34 @@ impl MessageRelay {
         };
     }
 
+    #[inline]
+    pub fn add_to_path(&mut self, node: Did) {
+        self.to_path.push_back(node);
+    }
+
+    #[inline]
+    pub fn add_from_path(&mut self, node: Did) {
+        self.from_path.push_back(node);
+    }
+
+    #[inline]
+    pub fn remove_to_path(&mut self) -> Option<Did> {
+        if self.to_path.len() > 0 {
+            self.to_path.pop_back()
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub fn remove_from_path(&mut self) -> Option<Did> {
+        if self.from_path.len() > 0 {
+            self.from_path.pop_back()
+        } else {
+            None
+        }
+    }
+
     pub fn new(
         tx_id: String,
         message_id: String,
@@ -72,12 +109,56 @@ impl MessageRelay {
         from_path: VecDeque<Did>,
         protocol: RelayProtocol,
     ) -> Self {
-        return Self {
+        Self {
             tx_id,
             message_id,
             to_path,
             from_path,
             protocol,
-        };
+        }
+    }
+
+    pub fn new2(
+        tx_id: String,
+        message_id: String,
+        next: Did,
+        current: Did,
+        protocol: RelayProtocol,
+    ) -> Self {
+        let mut to_path = VecDeque::new();
+        let mut from_path = VecDeque::new();
+        to_path.push_back(next);
+        from_path.push_back(current);
+        Self {
+            tx_id,
+            message_id,
+            to_path,
+            from_path,
+            protocol,
+        }
+    }
+
+    pub fn get_send_relay(
+        relay: &MessageRelay,
+        tx_id: String,
+        message_id: String,
+        prev_node: Did,
+        next_node: Did,
+    ) -> Self {
+        let mut from_path = relay.from_path.clone();
+        let mut to_path = relay.to_path.clone();
+        from_path.push_back(prev_node);
+        to_path.push_back(next_node);
+        MessageRelay::new(tx_id, message_id, from_path, to_path, RelayProtocol::SEND)
+    }
+
+    pub fn get_report_relay(relay: &MessageRelay, tx_id: String, message_id: String) -> Self {
+        MessageRelay::new(
+            tx_id,
+            message_id,
+            relay.from_path.clone(),
+            relay.to_path.clone(),
+            RelayProtocol::REPORT,
+        )
     }
 }

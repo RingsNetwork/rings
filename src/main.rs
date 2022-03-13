@@ -1,7 +1,6 @@
 #![feature(async_closure)]
 use anyhow::Result;
 use bns_core::channels::default::AcChannel;
-use bns_core::dht::Chord;
 use bns_core::ecc::SecretKey;
 use bns_core::message::handler::MessageHandler;
 use bns_core::routing::Chord;
@@ -45,8 +44,10 @@ async fn run(http_addr: String, key: SecretKey, stun: &str) {
         key,
     )));
 
-    let message_handler = MessageHandler::new(routing, swarm.clone());
-    tokio::spawn(async move { message_handler.listen().await });
+    let listen_event = MessageHandler::new(routing.clone(), swarm.clone());
+    let stabilize_event = MessageHandler::new(routing.clone(), swarm.clone());
+    tokio::spawn(async move { listen_event.listen().await });
+    tokio::spawn(async move { stabilize_event.stabilize().await });
 
     let swarm_clone = swarm.clone();
     tokio::spawn(async move { run_service(http_addr, swarm_clone, key).await });

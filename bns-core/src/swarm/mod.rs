@@ -10,7 +10,6 @@ use crate::types::ice_transport::IceTransportCallback;
 use anyhow::anyhow;
 use anyhow::Result;
 use async_stream::stream;
-use futures::lock::Mutex;
 use futures_core::Stream;
 use std::sync::Arc;
 use web3::types::Address;

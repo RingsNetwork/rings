@@ -34,11 +34,13 @@ pub struct ConnectNodeResponse {
 #[derive(Debug, PartialEq, Deserialize, Serialize, Clone)]
 pub struct FindSuccessor {
     id: Did,
+    for_fix: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FoundSuccessor {
-    id: Did,
+    successor: Did,
+    for_fix: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -52,24 +54,12 @@ pub struct NotifiedPredecessor {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct FindSuccessorForFix {
-    pub successor: Did,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct FoundSuccessorForFix {
-    pub successor: Did,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum Message {
     ConnectNode(MessageRelay, ConnectNode),
     AlreadyConnected(MessageRelay, AlreadyConnected),
     ConnectedNode(MessageRelay, ConnectedNode),
     FindSuccessor(MessageRelay, FindSuccessor),
     FoundSuccessor(MessageRelay, FoundSuccessor),
-    FindSuccessorForFix(MessageRelay, FindSuccessorForFix),
-    FoundSuccessorForFix(MessageRelay, FoundSuccessorForFix),
     NotifyPredecessor(MessageRelay, NotifyPredecessor),
     NotifiedPredecessor(MessageRelay, NotifiedPredecessor),
 }
