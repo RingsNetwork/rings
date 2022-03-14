@@ -4,11 +4,6 @@ use anyhow::Result;
 use serde::Deserialize;
 use serde::Serialize;
 
-pub enum Msrp {
-    MsrpSend(MsrpSend),
-    MsrpReport(MsrpReport),
-}
-
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct MsrpSend {
     pub transaction_id: String,
@@ -22,12 +17,12 @@ pub struct MsrpReport {
     pub to_path: Vec<Did>,
 }
 
-impl From<MsrpSend> for MsrpReport {
-    fn from(send: MsrpSend) -> Self {
+impl From<&MsrpSend> for MsrpReport {
+    fn from(send: &MsrpSend) -> Self {
         Self {
-            transaction_id: send.transaction_id,
+            transaction_id: send.transaction_id.clone(),
             from_path: Vec::new(),
-            to_path: send.from_path,
+            to_path: send.from_path.clone(),
         }
     }
 }
