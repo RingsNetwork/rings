@@ -183,11 +183,11 @@ impl MessageHandler {
         let mut chord = self.dht.lock().await;
         chord.notify(msg.predecessor);
         let mut relay = relay.clone();
-        relay.push_prev(prev);
+        relay.push_prev(chord.id, *prev);
         let message = Message::NotifiedPredecessor(NotifiedPredecessor {
             predecessor: chord.predecessor.unwrap(),
         });
-        self.send_message(&(prev.clone().into()), message, MessageRelayMethod::REPORT)
+        self.send_message(&(*prev).into(), message, MessageRelayMethod::REPORT)
             .await
     }
 
@@ -213,7 +213,7 @@ impl MessageHandler {
     ) -> Result<()> {
         let chord = self.dht.lock().await;
         let mut relay = relay.clone();
-        relay.push_prev(prev);
+        relay.push_prev(chord.id, *prev);
         match chord.find_successor(msg.id) {
             Ok(action) => match action {
                 ChordAction::Some(id) => {
@@ -221,7 +221,7 @@ impl MessageHandler {
                         successor: id,
                         for_fix: msg.for_fix,
                     });
-                    self.send_message(&prev.clone().into(), message, MessageRelayMethod::REPORT)
+                    self.send_message(&(*prev).into(), message, MessageRelayMethod::REPORT)
                         .await
                 }
                 ChordAction::RemoteAction((next, RemoteAction::FindSuccessor(id))) => {
@@ -252,7 +252,7 @@ impl MessageHandler {
         relay.remove_from_path();
         if !relay.to_path.is_empty() {
             let message = Message::FoundSuccessor(msg.clone());
-            self.send_message(&prev.clone().into(), message, MessageRelayMethod::REPORT)
+            self.send_message(&(*prev).into(), message, MessageRelayMethod::REPORT)
                 .await
         } else {
             if msg.for_fix {

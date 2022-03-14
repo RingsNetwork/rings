@@ -76,7 +76,7 @@ pub struct NotifiedPredecessor {
 // }
 pub trait MessageSessionRelayProtocol {
     fn find_prev(&self) -> Option<Did>;
-    fn push_prev(&mut self, prev: &Did);
+    fn push_prev(&mut self, current: Did, prev: Did);
     fn next_hop(&mut self, current: Did, next: Did);
     fn add_to_path(&mut self, node: Did);
     fn add_from_path(&mut self, node: Did);
@@ -106,10 +106,16 @@ impl MessageSessionRelayProtocol for MessageRelay<Message> {
     }
 
     #[inline]
-    fn push_prev(&mut self, prev: &Did) {
+    fn push_prev(&mut self, current: Did, prev: Did) {
         match self.method {
-            MessageRelayMethod::SEND => {}
-            MessageRelayMethod::REPORT => {}
+            MessageRelayMethod::SEND => {
+                self.from_path.push_back(prev);
+            }
+            MessageRelayMethod::REPORT => {
+                assert_eq!(self.to_path.pop_back(), Some(current));
+                self.to_path.pop_back();
+                self.from_path.push_back(prev);
+            }
         }
     }
 
