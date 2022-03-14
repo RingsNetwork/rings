@@ -1,8 +1,8 @@
+use crate::dht::{Chord, ChordAction, RemoteAction};
 use crate::message::{
     AlreadyConnected, ConnectNode, ConnectedNode, FindSuccessor, FoundSuccessor, Message,
     MessagePayload, MessageRelay, NotifiedPredecessor, NotifyPredecessor, RelayProtocol,
 };
-use crate::routing::{Chord, ChordAction, RemoteAction};
 use crate::swarm::Swarm;
 use crate::types::ice_transport::IceTrickleScheme;
 use anyhow::anyhow;
@@ -20,13 +20,13 @@ use web_sys::RtcSdpType as RTCSdpType;
 use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 
 pub struct MessageHandler {
-    routing: Arc<Mutex<Chord>>,
+    dht: Arc<Mutex<Chord>>,
     swarm: Arc<Mutex<Swarm>>,
 }
 
 impl MessageHandler {
-    pub fn new(routing: Arc<Mutex<Chord>>, swarm: Arc<Mutex<Swarm>>) -> Self {
-        Self { routing, swarm }
+    pub fn new(dht: Arc<Mutex<Chord>>, swarm: Arc<Mutex<Swarm>>) -> Self {
+        Self { dht, swarm }
     }
 
     pub async fn send_message(&self, address: &Address, message: Message) -> Result<()> {
@@ -166,7 +166,7 @@ impl MessageHandler {
         relay: &MessageRelay,
         msg: &NotifyPredecessor,
     ) -> Result<()> {
-        let mut chord = self.routing.lock().await;
+        let mut chord = self.dht.lock().await;
         chord.notify(msg.predecessor);
         let prev = relay.find_prev();
         let report =
@@ -185,7 +185,7 @@ impl MessageHandler {
         relay: &MessageRelay,
         msg: &NotifiedPredecessor,
     ) -> Result<()> {
-        let mut chord = self.routing.lock().await;
+        let mut chord = self.dht.lock().await;
         assert_eq!(relay.protocol, RelayProtocol::REPORT);
         assert_eq!(relay.to_path[relay.to_path.len() - 1], chord.id);
         // if successor: predecessor is between (id, successor]
@@ -195,7 +195,7 @@ impl MessageHandler {
     }
 
     async fn handle_find_successor(&self, relay: &MessageRelay, msg: &FindSuccessor) -> Result<()> {
-        let chord = self.routing.lock().await;
+        let chord = self.dht.lock().await;
         match chord.find_successor(msg.id) {
             Ok(action) => match action {
                 ChordAction::Some(id) => {
@@ -242,7 +242,7 @@ impl MessageHandler {
         relay: &MessageRelay,
         msg: &FoundSuccessor,
     ) -> Result<()> {
-        let mut chord = self.routing.lock().await;
+        let mut chord = self.dht.lock().await;
         let current = chord.id;
         assert_eq!(relay.protocol, RelayProtocol::REPORT);
         let mut relay = relay.clone();
@@ -289,7 +289,7 @@ impl MessageHandler {
 
     pub async fn stabilize(&self) {
         loop {
-            let mut chord = self.routing.lock().await;
+            let mut chord = self.dht.lock().await;
             let (current, successor) = (chord.id, chord.successor);
             let tx_id = String::from("");
             let message_id = String::from("");
