@@ -1,7 +1,7 @@
 /// Swarm is transport management
 use crate::ecc::SecretKey;
 use crate::message::Message;
-use crate::message::MessagePayload;
+use crate::message::MessageRelay;
 use crate::storage::{MemStorage, Storage};
 use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::Event;
@@ -83,7 +83,7 @@ impl Swarm {
     pub async fn send_message(
         &self,
         address: &Address,
-        payload: MessagePayload<Message>,
+        payload: MessageRelay<Message>,
     ) -> Result<()> {
         match self.get_transport(address) {
             Some(trans) => Ok(trans.send_message(payload).await?),
@@ -91,21 +91,21 @@ impl Swarm {
         }
     }
 
-    fn load_message(ev: Result<Event>) -> Result<MessagePayload<Message>> {
+    fn load_message(ev: Result<Event>) -> Result<MessageRelay<Message>> {
         // TODO: How to deal with events that is not message? Use mpmc?
 
         let ev = ev?;
 
         match ev {
             Event::ReceiveMsg(msg) => {
-                let payload = serde_json::from_slice::<MessagePayload<Message>>(&msg)?;
+                let payload = serde_json::from_slice::<MessageRelay<Message>>(&msg)?;
                 Ok(payload)
             }
             x => Err(anyhow!(format!("Receive {:?}", x))),
         }
     }
 
-    pub fn iter_messages<'a, 'b>(&'a self) -> impl Stream<Item = MessagePayload<Message>> + 'b
+    pub fn iter_messages<'a, 'b>(&'a self) -> impl Stream<Item = MessageRelay<Message>> + 'b
     where
         'a: 'b,
     {

@@ -1,7 +1,8 @@
 use crate::channels::default::AcChannel;
 use crate::ecc::SecretKey;
 use crate::message::Encoded;
-use crate::message::MessagePayload;
+use crate::message::MessageRelay;
+use crate::message::MessageRelayMethod;
 use crate::transports::default::IceCandidateSerializer;
 use crate::types::channel::Channel;
 use crate::types::channel::Event;
@@ -365,12 +366,12 @@ impl IceTrickleScheme<AcChannel> for DefaultTransport {
             candidates: local_candidates_json,
         };
         log::trace!("prepared hanshake info :{:?}", data);
-        let resp = MessagePayload::new(data, &key, None)?;
+        let resp = MessageRelay::new(data, &key, None, MessageRelayMethod::SEND)?;
         Ok(resp.try_into()?)
     }
 
     async fn register_remote_info(&self, data: Encoded) -> anyhow::Result<Address> {
-        let data: MessagePayload<TricklePayload> = data.try_into()?;
+        let data: MessageRelay<TricklePayload> = data.try_into()?;
         log::trace!("register remote info: {:?}", data);
 
         match data.verify() {

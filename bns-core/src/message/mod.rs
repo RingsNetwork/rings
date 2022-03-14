@@ -4,10 +4,8 @@ mod encoder;
 pub use encoder::Encoded;
 
 mod payload;
-pub use payload::MessagePayload;
-
-mod msrp;
-pub use msrp::{MessageRelay, RelayProtocol};
+pub use payload::MessageRelay;
+pub use payload::MessageRelayMethod;
 
 use crate::dht::Did;
 use serde::Deserialize;
@@ -56,11 +54,11 @@ pub struct NotifiedPredecessor {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum Message {
     None,
-    ConnectNode(MessageRelay, ConnectNode),
-    AlreadyConnected(MessageRelay, AlreadyConnected),
-    ConnectedNode(MessageRelay, ConnectedNode),
-    FindSuccessor(MessageRelay, FindSuccessor),
-    FoundSuccessor(MessageRelay, FoundSuccessor),
-    NotifyPredecessor(MessageRelay, NotifyPredecessor),
-    NotifiedPredecessor(MessageRelay, NotifiedPredecessor),
+    ConnectNode(ConnectNode),
+    AlreadyConnected(AlreadyConnected),
+    ConnectedNode(ConnectedNode),
+    FindSuccessor(FindSuccessor),
+    FoundSuccessor(FoundSuccessor),
+    NotifyPredecessor(NotifyPredecessor),
+    NotifiedPredecessor(NotifiedPredecessor),
 }

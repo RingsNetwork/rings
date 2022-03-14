@@ -64,6 +64,14 @@ impl MessageRelay {
     }
 
     #[inline]
+    pub fn push_prev(&mut self, prev: &Did) {
+        match self.protocol {
+            RelayProtocol::SEND => {}
+            RelayProtocol::REPORT => {}
+        }
+    }
+
+    #[inline]
     pub fn next_hop(&mut self, current: Did, next: Did) {
         match self.protocol {
             RelayProtocol::SEND => {

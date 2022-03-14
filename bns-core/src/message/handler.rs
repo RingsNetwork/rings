@@ -1,7 +1,7 @@
-use crate::dht::{Chord, ChordAction, RemoteAction};
+use crate::dht::{Chord, ChordAction, Did, RemoteAction};
 use crate::message::{
     AlreadyConnected, ConnectNode, ConnectedNode, FindSuccessor, FoundSuccessor, Message,
-    MessagePayload, MessageRelay, NotifiedPredecessor, NotifyPredecessor, RelayProtocol,
+    MessageRelay, MessageRelayMethod, NotifiedPredecessor, NotifyPredecessor,
 };
 use crate::swarm::Swarm;
 use crate::types::ice_transport::IceTrickleScheme;
@@ -29,24 +29,34 @@ impl MessageHandler {
         Self { dht, swarm }
     }
 
-    pub async fn send_message(&self, address: &Address, message: Message) -> Result<()> {
+    pub async fn send_message(
+        &self,
+        address: &Address,
+        message: Message,
+        method: MessageRelayMethod,
+    ) -> Result<()> {
         // TODO: diff ttl for each message?
         let swarm = self.swarm.lock().await;
-        let payload = MessagePayload::new(message, &swarm.key, None)?;
+        let payload = MessageRelay::new(message, &swarm.key, None, method)?;
         swarm.send_message(address, payload).await
     }
 
-    pub async fn handle_message(&self, message: &Message) -> Result<()> {
+    pub async fn handle_message_relay(&self, relay: &MessageRelay, prev: &Did) -> Result<()> {
         match message {
-            Message::ConnectNode(msrp, msg) => {
-                self.handle_connect_node(&msrp.record(prev), msg).await
-            Message::FindSuccessor(relay, msg) => self.handle_find_successor(relay, msg).await,
-            Message::FoundSuccessor(relay, msg) => self.handle_found_successor(relay, msg).await,
+            Message::ConnectNode(msg) => self.handle_connect_node(relay, prev, msg).await,
+            Message::ConnectedNode(msg) => self.handle_connected_node(prev, msg).await,
+            Message::AlreadyConnected(msg) => self.handle_already_connected(relay, prev, msg).await,
+            Message::FindSuccessor(relay, msg) => {
+                self.handle_find_successor(relay, prev, msg).await
+            }
+            Message::FoundSuccessor(relay, msg) => {
+                self.handle_found_successor(relay, prev, msg).await
+            }
             Message::NotifyPredecessor(relay, msg) => {
-                self.handle_notify_predecessor(relay, msg).await
+                self.handle_notify_predecessor(relay, prev, msg).await
             }
             Message::NotifiedPredecessor(relay, msg) => {
-                self.handle_notified_predecessor(relay, msg).await
+                self.handle_notified_predecessor(relay, prev, msg).await
             }
             _ => Err(anyhow!("Unsupported message type")),
         }
@@ -117,6 +127,7 @@ impl MessageHandler {
     async fn handle_already_connected(
         &self,
         _relay: &MessageRelay,
+        _prev: &Did,
         _msg: &AlreadyConnected,
     ) -> Result<()> {
         match msrp.to_path.last() {
@@ -164,44 +175,52 @@ impl MessageHandler {
     async fn handle_notify_predecessor(
         &self,
         relay: &MessageRelay,
+        prev: &Did,
         msg: &NotifyPredecessor,
     ) -> Result<()> {
         let mut chord = self.dht.lock().await;
         chord.notify(msg.predecessor);
-        let prev = relay.find_prev();
+        let mut relay = relay.clone();
+        relay.push_prev(prev);
         let report =
-            MessageRelay::get_report_relay(relay, relay.tx_id.clone(), relay.message_id.clone());
+            MessageRelay::get_report_relay(&relay, relay.tx_id.clone(), relay.message_id.clone());
         let message = Message::NotifiedPredecessor(
             report,
             NotifiedPredecessor {
                 predecessor: chord.predecessor.unwrap(),
             },
         );
-        self.send_message(&(prev.unwrap().into()), message).await
+        self.send_message(&(prev.clone().into()), message).await
     }
 
     async fn handle_notified_predecessor(
         &self,
         relay: &MessageRelay,
+        _prev: &Did,
         msg: &NotifiedPredecessor,
     ) -> Result<()> {
         let mut chord = self.dht.lock().await;
         assert_eq!(relay.protocol, RelayProtocol::REPORT);
-        assert_eq!(relay.to_path[relay.to_path.len() - 1], chord.id);
         // if successor: predecessor is between (id, successor]
         // then update local successor
         chord.successor = msg.predecessor;
         Ok(())
     }
 
-    async fn handle_find_successor(&self, relay: &MessageRelay, msg: &FindSuccessor) -> Result<()> {
+    async fn handle_find_successor(
+        &self,
+        relay: &MessageRelay,
+        prev: &Did,
+        msg: &FindSuccessor,
+    ) -> Result<()> {
         let chord = self.dht.lock().await;
+        let mut relay = relay.clone();
+        relay.push_prev(prev);
         match chord.find_successor(msg.id) {
             Ok(action) => match action {
                 ChordAction::Some(id) => {
-                    let prev = relay.find_prev();
                     let report = MessageRelay::get_report_relay(
-                        relay,
+                        &relay,
                         relay.tx_id.clone(),
                         relay.message_id.clone(),
                     );
@@ -212,11 +231,11 @@ impl MessageHandler {
                             for_fix: msg.for_fix,
                         },
                     );
-                    self.send_message(&prev.unwrap().into(), message).await
+                    self.send_message(&prev.clone().into(), message).await
                 }
                 ChordAction::RemoteAction((next, RemoteAction::FindSuccessor(id))) => {
                     let send = MessageRelay::get_send_relay(
-                        relay,
+                        &relay,
                         relay.tx_id.clone(),
                         relay.message_id.clone(),
                         chord.id,
@@ -240,6 +259,7 @@ impl MessageHandler {
     async fn handle_found_successor(
         &self,
         relay: &MessageRelay,
+        prev: &Did,
         msg: &FoundSuccessor,
     ) -> Result<()> {
         let mut chord = self.dht.lock().await;
@@ -280,7 +300,7 @@ impl MessageHandler {
                 continue;
             }
 
-            if let Err(e) = self.handle_message(&payload.data).await {
+            if let Err(e) = self.handle_payload(&payload, &payload.addr.into()).await {
                 log::error!("Error in handle_message: {}", e);
                 continue;
             }
