@@ -12,11 +12,10 @@ use web3::types::Address;
 
 const DEFAULT_TTL_MS: usize = 60 * 1000;
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, PartialEq, Debug, Clone)]
 pub enum MessageRelayMethod {
     SEND,
     REPORT,
-    AUTH,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
