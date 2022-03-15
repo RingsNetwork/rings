@@ -48,10 +48,7 @@ where
 
         let msg = Self::pack_msg(&data, ts_ms, ttl_ms)?;
         let sig = sign(&msg, key).into();
-        let tx_id = match std::str::from_utf8(&sign(&msg, key)) {
-            Ok(v) => v.to_owned(),
-            Err(_) => panic!("sign message cannot convert to string"),
-        };
+        let tx_id = msg.clone();
 
         let addr = key.address().to_owned();
         let to_path = VecDeque::new();
