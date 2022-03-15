@@ -48,7 +48,7 @@ where
 
         let msg = Self::pack_msg(&data, ts_ms, ttl_ms)?;
         let sig = sign(&msg, key).into();
-        let tx_id = msg.clone();
+        let tx_id = msg;
 
         let addr = key.address().to_owned();
         let to_path = VecDeque::new();
