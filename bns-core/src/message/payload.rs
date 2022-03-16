@@ -41,6 +41,8 @@ where
         data: T,
         key: &SecretKey,
         ttl_ms: Option<usize>,
+        to_path: Option<VecDeque<Did>>,
+        from_path: Option<VecDeque<Did>>,
         method: MessageRelayMethod,
     ) -> Result<Self> {
         let ts_ms = get_epoch_ms();
@@ -51,8 +53,8 @@ where
         let tx_id = msg;
 
         let addr = key.address().to_owned();
-        let to_path = VecDeque::new();
-        let from_path = VecDeque::new();
+        let to_path = to_path.unwrap_or_default();
+        let from_path = from_path.unwrap_or_default();
 
         Ok(Self {
             data,
@@ -144,7 +146,8 @@ mod tests {
             d: true,
         };
 
-        let payload = MessageRelay::new(test_data, &key, None, MessageRelayMethod::SEND).unwrap();
+        let payload =
+            MessageRelay::new(test_data, &key, None, None, None, MessageRelayMethod::SEND).unwrap();
 
         assert!(payload.verify());
     }

@@ -24,7 +24,7 @@ pub struct AlreadyConnected {
 }
 
 #[derive(Debug, PartialEq, Deserialize, Serialize, Clone)]
-pub struct ConnectNodeResponse {
+pub struct ConnectedNode {
     pub answer_id: Did,
     pub handshake_info: String,
 }
@@ -90,14 +90,14 @@ impl MessageSessionRelayProtocol for MessageRelay<Message> {
         match self.method {
             MessageRelayMethod::SEND => {
                 if !self.from_path.is_empty() {
-                    Some(self.from_path[self.from_path.len() - 1])
+                    self.from_path.back().cloned()
                 } else {
                     None
                 }
             }
             MessageRelayMethod::REPORT => {
                 if !self.to_path.is_empty() {
-                    Some(self.to_path[self.to_path.len() - 1])
+                    self.to_path.back().cloned()
                 } else {
                     None
                 }

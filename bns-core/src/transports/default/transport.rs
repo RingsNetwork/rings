@@ -366,7 +366,7 @@ impl IceTrickleScheme<AcChannel> for DefaultTransport {
             candidates: local_candidates_json,
         };
         log::trace!("prepared hanshake info :{:?}", data);
-        let resp = MessageRelay::new(data, &key, None, MessageRelayMethod::SEND)?;
+        let resp = MessageRelay::new(data, &key, None, None, None, MessageRelayMethod::SEND)?;
         Ok(resp.try_into()?)
     }
 
