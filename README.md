@@ -106,28 +106,40 @@ The encapsulation of SCTP over DTLS (see [RFC8261]) over ICE/UDP (see [RFC8445])
                    +----------------------------------+
 ```
 
-This stack (especially in contrast to DTLS over SCTP [RFC6083] and in combination with SCTP over UDP [RFC6951]) has been chosen for the following reasons:
 
-   *  supports the transmission of arbitrarily large user messages;
-
-   *  shares the DTLS connection with the SRTP media channels of the
-      PeerConnection; and
-
-   *  provides privacy for the SCTP control information.
-
-   Referring to the protocol stack shown in Figure 2:
-
-   *  the usage of DTLS 1.0 over UDP is specified in [RFC4347];
-
-   *  the usage of DTLS 1.2 over UDP in specified in [RFC6347];
-
-   *  the usage of DTLS 1.3 over UDP is specified in an upcoming
-      document [TLS-DTLS13]; and
-
-   *  the usage of SCTP on top of DTLS is specified in [RFC8261].
+### Architecture
 
 
-Data channels can be opened by using negotiation within the SCTP association (called in-band negotiation) or out-of-band negotiation.
+```
+					  +-----------------------------------------------------------------------------------------+
+					  |                                         BNS                                             |
+					  +-----------------------------------------------------------------------------------------+
+					  |   Encrypted IM / Secret Sharing Storage / Distributed Content / Secret Data Exchange    |
+					  +-----------------------------------------------------------------------------------------+
+					  |                  SSSS                  |  Perdson Commitment/zkPod/ Secret Sharing      |
+					  +-----------------------------------------------------------------------------------------+
+		              |                     |       dDNS       |                 Sigma Protocol                 |
+					  +      K-V Storage    +------------------+------------------------------------------------+
+					  |                     |  Peer LOOKUP     |          MSRP        |  End-to-End Encryption  |
+				      +----------------------------------------+------------------------------------------------+
+					  |            Peer-to-Peer Network        |                                                |
+                      |----------------------------------------+               DID / Resource ID                |
+					  |                 Chord DHT              |                                                |
+					  +----------------------------------------+------------------------------------------------+
+					  |                Trickle SDP             |        ECIES          | Persistence Storage    |
+                      +----------------------------------------+-----------------------+------------------------+
+					  |            STUN  | SDP  | ICE          |  Crosschain Binding   | Smart Contract Binding |
+                      +----------------------------------------+------------------------------------------------+
+					  |             SCTP | UDP | TCP           |             Finate Pubkey Group                |
+                      +----------------------------------------+------------------------------------------------+
+	                  |   WASM Runtime    |                    |                                                |
+                      +-------------------|  Operation System  |                   ECDSA                        |
+					  |     Browser       |                    |                                                |
+                      +-----------------------------------------------------------------------------------------+
+
+```
+
+
 
 ### Ref:
 
