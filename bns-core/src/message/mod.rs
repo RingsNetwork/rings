@@ -33,14 +33,14 @@ pub struct ConnectedNode {
 
 #[derive(Debug, PartialEq, Deserialize, Serialize, Clone)]
 pub struct FindSuccessor {
-    id: Did,
-    for_fix: bool,
+    pub id: Did,
+    pub for_fix: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FoundSuccessor {
-    successor: Did,
-    for_fix: bool,
+    pub successor: Did,
+    pub for_fix: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
