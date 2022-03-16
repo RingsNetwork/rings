@@ -7,6 +7,7 @@ use bns_core::message::handler::MessageHandler;
 use bns_core::swarm::Swarm;
 use bns_node::logger::Logger;
 use bns_node::service::run_service;
+use bns_node::service::Stabilization;
 use clap::Parser;
 use futures::lock::Mutex;
 use std::sync::Arc;
