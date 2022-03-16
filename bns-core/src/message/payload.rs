@@ -54,7 +54,7 @@ where
 
         let msg = Self::pack_msg(&data, ts_ms, ttl_ms)?;
         let sig = sign(&msg, key).into();
-        let tx_id = encrypt_with_sha1(msg.clone());
+        let tx_id = encrypt_with_sha1(&msg);
 
         let addr = key.address().to_owned();
         let to_path = to_path.unwrap_or_default();
