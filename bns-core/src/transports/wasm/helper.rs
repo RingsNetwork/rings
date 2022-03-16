@@ -6,7 +6,6 @@ use serde_json;
 use wasm_bindgen::JsValue;
 use web_sys::RtcSdpType;
 use web_sys::RtcSessionDescription;
-use web_sys::RtcSessionDescriptionInit;
 
 #[derive(Clone, Deserialize, Serialize, Debug)]
 #[serde(rename_all = "lowercase")]

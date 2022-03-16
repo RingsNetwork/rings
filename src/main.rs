@@ -9,7 +9,7 @@ use bns_core::types::channel::Channel;
 use bns_node::logger::Logger;
 use bns_node::service::run_service;
 use clap::Parser;
-
+use futures::lock::Mutex;
 use std::sync::Arc;
 
 #[derive(Parser, Debug)]
@@ -37,15 +37,17 @@ pub struct Args {
 }
 
 async fn run(http_addr: String, key: SecretKey, stun: &str) {
-    let dht = Arc::new(Chord::new(key.address().into()));
-    let swarm = Arc::new(Swarm::new(
+    let dht = Arc::new(Mutex::new(Chord::new(key.address().into())));
+    let swarm = Arc::new(Mutex::new(Swarm::new(
         Arc::new(AcChannel::new(1)),
         stun.to_string(),
         key,
-    ));
+    )));
 
-    let message_handler = MessageHandler::new(dht, swarm.clone());
-    tokio::spawn(async move { message_handler.listen().await });
+    let listen_event = MessageHandler::new(dht.clone(), swarm.clone());
+    //let stabilize_event = MessageHandler::new(dht.clone(), swarm.clone());
+    tokio::spawn(async move { listen_event.listen().await });
+    //tokio::spawn(async move { stabilize_event.stabilize().await });
 
     let swarm_clone = swarm.clone();
     tokio::spawn(async move { run_service(http_addr, swarm_clone, key).await });

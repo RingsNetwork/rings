@@ -2,7 +2,8 @@ use super::helper::RtcSessionDescriptionWrapper;
 use crate::channels::wasm::CbChannel;
 use crate::ecc::SecretKey;
 use crate::message::Encoded;
-use crate::message::MessagePayload;
+use crate::message::MessageRelay;
+use crate::message::MessageRelayMethod;
 use crate::transports::helper::IceCandidateSerializer;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
@@ -24,7 +25,6 @@ use std::task::Poll;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
-use wasm_bindgen_futures::spawn_local;
 use wasm_bindgen_futures::JsFuture;
 use web3::types::Address;
 use web_sys::RtcConfiguration;
@@ -286,7 +286,7 @@ impl IceTransportCallback<CbChannel> for WasmTransport {
             let mut candidates = pending_candidates.lock().unwrap();
             let peer_connection = peer_connection.clone();
             if let Some(candidate) = ev.candidate() {
-                if let Some(peer_connection) = peer_connection {
+                if let Some(_) = peer_connection {
                     candidates.push(candidate.clone());
                     println!("Candidates Number: {:?}", candidates.len());
                 }
@@ -341,12 +341,12 @@ impl IceTrickleScheme<CbChannel> for WasmTransport {
             candidates: local_candidates_json,
         };
         log::trace!("prepared hanshake info :{:?}", data);
-        let resp = MessagePayload::new(data, &key, None)?;
+        let resp = MessageRelay::new(data, &key, None, None, None, MessageRelayMethod::SEND)?;
         Ok(resp.try_into()?)
     }
 
     async fn register_remote_info(&self, data: Encoded) -> anyhow::Result<Address> {
-        let data: MessagePayload<TricklePayload> = data.try_into()?;
+        let data: MessageRelay<TricklePayload> = data.try_into()?;
         log::trace!("register remote info: {:?}", data);
 
         match data.verify() {
@@ -367,7 +367,7 @@ impl IceTrickleScheme<CbChannel> for WasmTransport {
         }
     }
 
-    async fn wait_for_connected(&self, times: usize, interval_secs: u64) -> anyhow::Result<()> {
+    async fn wait_for_connected(&self, _times: usize, _interval_secs: u64) -> anyhow::Result<()> {
         // TODO: help wanted not sure how to implement this
         // See also in default implementation
         Ok(())
@@ -396,10 +396,6 @@ impl Future for GatherPromise {
 
 impl WasmTransport {
     async fn gather_complete_promise(&self) -> Result<GatherPromise> {
-        let callback = Closure::wrap(Box::new(move |s: RtcIceGatheringState| match s {
-            RtcIceGatheringState::Complete => {}
-            _ => {}
-        }) as Box<dyn FnMut(web_sys::RtcIceGatheringState)>);
         match self.get_peer_connection().await {
             Some(conn) => {
                 let state = Arc::new(Mutex::new(State {

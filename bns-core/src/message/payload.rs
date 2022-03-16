@@ -1,45 +1,71 @@
 use crate::ecc::{recover, sign, verify, PublicKey, SecretKey};
-use crate::message::Encoded;
+use crate::message::{Did, Encoded};
 use anyhow::anyhow;
 use anyhow::Result;
 use chrono::Utc;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
+use std::collections::VecDeque;
 use std::convert::TryFrom;
 use web3::types::Address;
 
 const DEFAULT_TTL_MS: usize = 60 * 1000;
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
-pub struct MessagePayload<T> {
-    pub data: T,
-    pub ttl_ms: usize,
-    pub ts_ms: u128,
-
-    pub addr: Address,
-    pub sig: Vec<u8>,
+#[derive(Deserialize, Serialize, PartialEq, Debug, Clone)]
+pub enum MessageRelayMethod {
+    SEND,
+    REPORT,
 }
 
-impl<T> MessagePayload<T>
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct MessageRelay<T> {
+    pub data: T,
+    pub tx_id: String,
+    pub ttl_ms: usize,
+    pub ts_ms: u128,
+    pub to_path: VecDeque<Did>,
+    pub from_path: VecDeque<Did>,
+    pub addr: Address,
+    pub sig: Vec<u8>,
+    pub method: MessageRelayMethod,
+}
+
+pub trait MessageSessionRelay {}
+
+impl<T> MessageRelay<T>
 where
     T: Serialize + DeserializeOwned,
 {
-    pub fn new(data: T, key: &SecretKey, ttl_ms: Option<usize>) -> Result<Self> {
+    pub fn new(
+        data: T,
+        key: &SecretKey,
+        ttl_ms: Option<usize>,
+        to_path: Option<VecDeque<Did>>,
+        from_path: Option<VecDeque<Did>>,
+        method: MessageRelayMethod,
+    ) -> Result<Self> {
         let ts_ms = get_epoch_ms();
         let ttl_ms = ttl_ms.unwrap_or(DEFAULT_TTL_MS);
 
         let msg = Self::pack_msg(&data, ts_ms, ttl_ms)?;
         let sig = sign(&msg, key).into();
+        let tx_id = String::from("");
 
         let addr = key.address().to_owned();
+        let to_path = to_path.unwrap_or_default();
+        let from_path = from_path.unwrap_or_default();
 
         Ok(Self {
             data,
             addr,
+            tx_id,
             sig,
+            to_path,
+            from_path,
             ttl_ms,
             ts_ms,
+            method,
         })
     }
 
@@ -68,25 +94,25 @@ where
     }
 }
 
-impl<T> TryFrom<Encoded> for MessagePayload<T>
+impl<T> TryFrom<Encoded> for MessageRelay<T>
 where
     T: Serialize + DeserializeOwned,
 {
     type Error = anyhow::Error;
     fn try_from(s: Encoded) -> Result<Self> {
         let decoded: String = s.try_into()?;
-        let data: MessagePayload<T> =
+        let data: MessageRelay<T> =
             serde_json::from_slice(decoded.as_bytes()).map_err(|e| anyhow!(e))?;
         Ok(data)
     }
 }
 
-impl<T> TryFrom<MessagePayload<T>> for Encoded
+impl<T> TryFrom<MessageRelay<T>> for Encoded
 where
     T: Serialize + DeserializeOwned,
 {
     type Error = anyhow::Error;
-    fn try_from(s: MessagePayload<T>) -> Result<Self> {
+    fn try_from(s: MessageRelay<T>) -> Result<Self> {
         serde_json::to_string(&s)?.try_into()
     }
 }
@@ -120,7 +146,8 @@ mod tests {
             d: true,
         };
 
-        let payload = MessagePayload::new(test_data, &key, None).unwrap();
+        let payload =
+            MessageRelay::new(test_data, &key, None, None, None, MessageRelayMethod::SEND).unwrap();
 
         assert!(payload.verify());
     }
