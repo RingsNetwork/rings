@@ -366,6 +366,12 @@ impl IceTrickleScheme<CbChannel> for WasmTransport {
             }
         }
     }
+
+    async fn wait_for_connected(&self, times: usize, interval_secs: u64) -> anyhow::Result<()> {
+        // TODO: help wanted not sure how to implement this
+        // See also in default implementation
+        Ok(())
+    }
 }
 
 pub struct State {

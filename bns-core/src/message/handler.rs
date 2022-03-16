@@ -1,12 +1,18 @@
-use crate::dht::Chord;
+use crate::dht::{Chord, ChordAction};
 use crate::message::*;
 use crate::swarm::Swarm;
+use crate::types::ice_transport::IceTrickleScheme;
 use anyhow::anyhow;
 use anyhow::Result;
 use futures_util::pin_mut;
 use futures_util::stream::StreamExt;
 use std::sync::Arc;
 use web3::types::Address;
+
+#[cfg(feature = "wasm")]
+use web_sys::RtcSdpType as RTCSdpType;
+#[cfg(not(feature = "wasm"))]
+use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 
 pub struct MessageHandler {
     dht: Arc<Chord>,
@@ -19,7 +25,7 @@ impl MessageHandler {
     }
 
     pub async fn send_message(&self, address: &Address, message: Message) -> Result<()> {
-        // TODO: diff ttl for each message?
+        // TODO: Diff ttl for each message?
         let payload = MessagePayload::new(message, &self.swarm.key, None)?;
         self.swarm.send_message(address, payload).await
     }
@@ -29,7 +35,7 @@ impl MessageHandler {
 
         match message {
             Message::ConnectNode(msrp, msg) => {
-                self.handle_connect_node(msrp.record(prev), msg).await
+                self.handle_connect_node(&msrp.record(prev), msg).await
             }
             Message::AlreadyConnected(msrp, msg) => {
                 self.handle_already_connected(msrp.record(prev, current)?, msg)
@@ -43,25 +49,113 @@ impl MessageHandler {
         }
     }
 
-    async fn handle_connect_node(&self, _msrp: MsrpSend, _msg: &ConnectNode) -> Result<()> {
-        // TODO: How to verify necessity based on Chord to decrease connections but make sure availablitity.
-        Ok(())
+    async fn handle_connect_node(&self, msrp: &MsrpSend, msg: &ConnectNode) -> Result<()> {
+        // TODO: Verify necessity based on Chord to decrease connections but make sure availablitity.
+
+        if self.dht.id != msg.target_id {
+            let next_node = match self.dht.find_successor(msg.target_id)? {
+                ChordAction::Some(node) => Some(node),
+                ChordAction::RemoteAction(node, _) => Some(node),
+                _ => None,
+            }
+            .ok_or_else(|| anyhow!("Cannot find next node by dht"))?;
+
+            return self
+                .send_message(&next_node, Message::ConnectNode(msrp.clone(), msg.clone()))
+                .await;
+        }
+
+        let prev_node = msrp
+            .from_path
+            .last()
+            .ok_or_else(|| anyhow!("Cannot get node"))?;
+        let answer_id = self.dht.id;
+
+        match self.swarm.get_transport(&msg.sender_id) {
+            None => {
+                let trans = self.swarm.new_transport().await?;
+                trans
+                    .register_remote_info(msg.handshake_info.clone().try_into()?)
+                    .await?;
+
+                let handshake_info = trans
+                    .get_handshake_info(self.swarm.key, RTCSdpType::Answer)
+                    .await?
+                    .to_string();
+
+                self.send_message(
+                    prev_node,
+                    Message::ConnectNodeResponse(
+                        msrp.into(),
+                        ConnectNodeResponse {
+                            answer_id,
+                            handshake_info,
+                        },
+                    ),
+                )
+                .await?;
+
+                trans.wait_for_connected(20, 3).await?;
+                self.swarm.get_or_register(&msg.sender_id, trans);
+
+                Ok(())
+            }
+
+            _ => {
+                self.send_message(
+                    prev_node,
+                    Message::AlreadyConnected(msrp.into(), AlreadyConnected { answer_id }),
+                )
+                .await
+            }
+        }
     }
 
     async fn handle_already_connected(
         &self,
-        _msrp: MsrpReport,
-        _msg: &AlreadyConnected,
+        msrp: MsrpReport,
+        msg: &AlreadyConnected,
     ) -> Result<()> {
-        Ok(())
+        match msrp.to_path.last() {
+            Some(prev_node) => {
+                self.send_message(
+                    prev_node,
+                    Message::AlreadyConnected(msrp.clone(), msg.clone()),
+                )
+                .await
+            }
+            None => self
+                .swarm
+                .get_transport(&msg.answer_id)
+                .map(|_| ())
+                .ok_or_else(|| anyhow!("Receive AlreadyConnected but cannot get transport")),
+        }
     }
 
     async fn handle_connect_node_response(
         &self,
-        _msrp: MsrpReport,
-        _msg: &ConnectNodeResponse,
+        msrp: MsrpReport,
+        msg: &ConnectNodeResponse,
     ) -> Result<()> {
-        Ok(())
+        match msrp.to_path.last() {
+            Some(prev_node) => {
+                self.send_message(
+                    prev_node,
+                    Message::ConnectNodeResponse(msrp.clone(), msg.clone()),
+                )
+                .await
+            }
+            None => {
+                let trans = self.swarm.get_transport(&msg.answer_id).ok_or_else(|| {
+                    anyhow!("Cannot get trans while handle connect node response")
+                })?;
+
+                trans
+                    .register_remote_info(msg.handshake_info.clone().try_into()?)
+                    .await
+                    .map(|_| ())
+            }
+        }
     }
 
     pub async fn listen(&self) {

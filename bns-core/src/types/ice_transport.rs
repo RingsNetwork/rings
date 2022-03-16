@@ -62,4 +62,5 @@ pub trait IceTrickleScheme<Ch: Channel>: IceTransport<Ch> {
     type SdpType;
     async fn get_handshake_info(&self, key: SecretKey, kind: Self::SdpType) -> Result<Encoded>;
     async fn register_remote_info(&self, data: Encoded) -> Result<Address>;
+    async fn wait_for_connected(&self, times: usize, interval_secs: u64) -> Result<()>;
 }

@@ -19,6 +19,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio::time;
 
 use web3::types::Address;
 use webrtc::api::APIBuilder;
@@ -389,5 +390,20 @@ impl IceTrickleScheme<AcChannel> for DefaultTransport {
                 return Err(anyhow!("failed on verify message sigature"));
             }
         }
+    }
+
+    async fn wait_for_connected(&self, times: usize, interval_secs: u64) -> anyhow::Result<()> {
+        let mut interval = time::interval(time::Duration::from_secs(interval_secs));
+
+        for _ in 1..times {
+            if let Some(peer_connection) = self.get_peer_connection().await {
+                if peer_connection.connection_state() == RTCPeerConnectionState::Connected {
+                    return Ok(());
+                }
+            };
+            interval.tick().await;
+        }
+
+        Err(anyhow!("Not connected in time"))
     }
 }
