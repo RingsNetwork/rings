@@ -50,7 +50,7 @@ where
 
         let msg = Self::pack_msg(&data, ts_ms, ttl_ms)?;
         let sig = sign(&msg, key).into();
-        let tx_id = msg;
+        let tx_id = String::from("");
 
         let addr = key.address().to_owned();
         let to_path = to_path.unwrap_or_default();
