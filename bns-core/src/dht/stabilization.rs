@@ -7,29 +7,28 @@ use std::sync::Arc;
 
 pub struct Stabilization {
     chord: Arc<Mutex<Chord>>,
-    swarm: Arc<Mutex<Swarm>>,
+    swarm: Arc<Swarm>,
 }
 
 impl Stabilization {
-    pub fn new(chord: Arc<Mutex<Chord>>, swarm: Arc<Mutex<Swarm>>) -> Self {
+    pub fn new(chord: Arc<Mutex<Chord>>, swarm: Arc<Swarm>) -> Self {
         Self { chord, swarm }
     }
 
     pub async fn stabilize(&self) -> Result<()> {
-        let swarm = self.swarm.lock().await;
         loop {
             let mut chord = self.chord.lock().await;
             let message = MessageRelay::new(
                 Message::NotifyPredecessor(NotifyPredecessor {
                     predecessor: chord.id,
                 }),
-                &swarm.key,
+                &self.swarm.key,
                 None,
                 None,
                 None,
                 MessageRelayMethod::SEND,
             )?;
-            swarm.send_message(&chord.id.into(), message).await?;
+            self.swarm.send_message(&chord.id.into(), message).await?;
             // fix fingers
             match chord.fix_fingers() {
                 Ok(action) => match action {
@@ -45,13 +44,13 @@ impl Stabilization {
                                 id: current,
                                 for_fix: true,
                             }),
-                            &swarm.key,
+                            &self.swarm.key,
                             None,
                             None,
                             None,
                             MessageRelayMethod::SEND,
                         )?;
-                        swarm.send_message(&next.into(), message).await?;
+                        self.swarm.send_message(&next.into(), message).await?;
                     }
                     _ => {
                         log::error!("Invalid Chord Action");
