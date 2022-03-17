@@ -32,11 +32,11 @@ pub struct Swarm {
 }
 
 impl Swarm {
-    pub fn new(ch: Arc<Channel>, stun: String, key: SecretKey) -> Self {
+    pub fn new(ch: Arc<Channel>, stun: &str, key: SecretKey) -> Self {
         Self {
             table: MemStorage::<Address, Arc<Transport>>::new(),
             signaler: Arc::clone(&ch),
-            stun_server: stun,
+            stun_server: stun.into(),
             key,
         }
     }
@@ -48,7 +48,7 @@ impl Swarm {
     pub async fn new_transport(&self) -> Result<Arc<Transport>> {
         let mut ice_transport = Transport::new(self.signaler());
         ice_transport
-            .start(self.stun_server.clone())
+            .start(self.stun_server.as_str())
             .await?
             .apply_callback()
             .await?;
@@ -124,17 +124,16 @@ impl Swarm {
 mod tests {
     use super::*;
     use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
-    use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 
     fn new_swarm() -> Swarm {
         let ch = Arc::new(Channel::new(1));
-        let stun = String::from("stun:stun.l.google.com:19302");
+        let stun = "stun:stun.l.google.com:19302";
         let key = SecretKey::random();
         Swarm::new(ch, stun, key)
     }
 
     #[tokio::test]
-    async fn swarm_new_transport() {
+    async fn swarm_new_transport() -> Result<()> {
         let swarm = new_swarm();
 
         let transport = swarm.new_transport().await.unwrap();
@@ -142,10 +141,12 @@ mod tests {
             transport.ice_connection_state().await.unwrap(),
             RTCIceConnectionState::New
         );
+
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_swarm_register_and_get() {
+    async fn test_swarm_register_and_get() -> Result<()> {
         let swarm1 = new_swarm();
         let swarm2 = new_swarm();
 
@@ -159,10 +160,12 @@ mod tests {
         let transport2 = swarm1.get_transport(&swarm2.address()).unwrap();
 
         assert!(Arc::ptr_eq(&transport0, &transport2));
+
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_swarm_will_close_previous_transport() {
+    async fn test_swarm_will_close_previous_transport() -> Result<()> {
         let swarm1 = new_swarm();
         let swarm2 = new_swarm();
 
@@ -178,29 +181,17 @@ mod tests {
             transport1.ice_connection_state().await.unwrap(),
             RTCIceConnectionState::New
         );
-        assert_eq!(
-            transport1
-                .get_peer_connection()
-                .await
-                .unwrap()
-                .connection_state(),
-            RTCPeerConnectionState::Closed
-        );
 
         assert_eq!(
             transport2.ice_connection_state().await.unwrap(),
             RTCIceConnectionState::New
         );
-        assert_eq!(
-            transport2
-                .get_peer_connection()
-                .await
-                .unwrap()
-                .connection_state(),
-            RTCPeerConnectionState::New
-        );
+
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_swarm_event_handler() {}
+    async fn test_swarm_event_handler() -> Result<()> {
+        Ok(())
+    }
 }

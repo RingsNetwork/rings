@@ -15,12 +15,11 @@ pub trait IceTransport<Ch: Channel> {
     type Sdp;
     type DataChannel;
     type IceConnectionState;
-    type ConnectionState;
     type Msg;
 
     fn new(signaler: Arc<Ch>) -> Self;
     fn signaler(&self) -> Arc<Ch>;
-    async fn start(&mut self, stun_addr: String) -> Result<&Self>;
+    async fn start(&mut self, stun_addr: &str) -> Result<&Self>;
     async fn close(&self) -> Result<()>;
     async fn ice_connection_state(&self) -> Option<Self::IceConnectionState>;
 
