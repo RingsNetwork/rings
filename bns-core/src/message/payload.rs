@@ -1,4 +1,4 @@
-use crate::ecc::{parse_to_string_with_sha1, recover, sign, verify, PublicKey, SecretKey};
+use crate::ecc::{recover, sign, verify, HashStr, PublicKey, SecretKey};
 use crate::err::{Error, Result};
 use crate::message::{Did, Encoded};
 use chrono::Utc;
@@ -25,7 +25,7 @@ pub enum MessageRelayMethod {
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct MessageRelay<T> {
     pub data: T,
-    pub tx_id: String,
+    pub tx_id: HashStr,
     pub ttl_ms: usize,
     pub ts_ms: u128,
     pub to_path: VecDeque<Did>,
@@ -54,7 +54,7 @@ where
 
         let msg = Self::pack_msg(&data, ts_ms, ttl_ms)?;
         let sig = sign(&msg, key).into();
-        let tx_id = parse_to_string_with_sha1(&msg);
+        let tx_id = msg.into();
 
         let addr = key.address().to_owned();
         let to_path = to_path.unwrap_or_default();
