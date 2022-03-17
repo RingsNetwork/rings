@@ -95,6 +95,13 @@ impl IceTransport<CbChannel> for WasmTransport {
             .map(|pc| pc.ice_connection_state())
     }
 
+    async fn is_connected(&self) -> bool {
+        self.ice_connection_state()
+            .await
+            .map(|s| s == RtcIceConnectionState::Connected)
+            .unwrap_or(false)
+    }
+
     async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>> {
         self.connection.as_ref().map(|c| Arc::clone(c))
     }

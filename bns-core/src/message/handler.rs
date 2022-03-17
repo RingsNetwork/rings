@@ -121,7 +121,7 @@ impl MessageHandler {
                 .await?;
 
                 trans.wait_for_connected(20, 3).await?;
-                self.swarm.get_or_register(&msg.sender_id, trans);
+                self.swarm.get_or_register(&msg.sender_id, trans).await?;
 
                 Ok(())
             }

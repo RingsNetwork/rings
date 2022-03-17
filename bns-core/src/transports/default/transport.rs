@@ -106,6 +106,13 @@ impl IceTransport<AcChannel> for DefaultTransport {
             .map(|pc| pc.ice_connection_state())
     }
 
+    async fn is_connected(&self) -> bool {
+        self.ice_connection_state()
+            .await
+            .map(|s| s == RTCIceConnectionState::Connected)
+            .unwrap_or(false)
+    }
+
     async fn get_peer_connection(&self) -> Option<Arc<RTCPeerConnection>> {
         self.connection.lock().await.clone()
     }
@@ -407,7 +414,7 @@ impl IceTrickleScheme<AcChannel> for DefaultTransport {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::DefaultTransport as Transport;
     use super::*;
     use crate::channels::default::AcChannel as Channel;
@@ -421,7 +428,10 @@ mod tests {
         Ok(trans)
     }
 
-    async fn establish_connection(transport1: Transport, transport2: Transport) -> Result<()> {
+    pub async fn establish_connection(
+        transport1: &Transport,
+        transport2: &Transport,
+    ) -> Result<()> {
         assert_eq!(
             transport1.ice_connection_state().await,
             Some(RTCIceConnectionState::New)
@@ -497,7 +507,7 @@ mod tests {
         let transport1 = prepare_transport().await?;
         let transport2 = prepare_transport().await?;
 
-        establish_connection(transport1, transport2).await?;
+        establish_connection(&transport1, &transport2).await?;
 
         Ok(())
     }

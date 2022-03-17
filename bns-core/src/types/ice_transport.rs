@@ -22,6 +22,7 @@ pub trait IceTransport<Ch: Channel> {
     async fn start(&mut self, stun_addr: &str) -> Result<&Self>;
     async fn close(&self) -> Result<()>;
     async fn ice_connection_state(&self) -> Option<Self::IceConnectionState>;
+    async fn is_connected(&self) -> bool;
 
     async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>>;
     async fn get_pending_candidates(&self) -> Vec<Self::Candidate>;
