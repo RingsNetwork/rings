@@ -1,12 +1,12 @@
 #![feature(async_closure)]
 use anyhow::Result;
 use bns_core::dht::Chord;
+use bns_core::dht::Stabilization;
 use bns_core::ecc::SecretKey;
 use bns_core::message::handler::MessageHandler;
 use bns_core::swarm::Swarm;
 use bns_node::logger::Logger;
 use bns_node::service::run_service;
-use bns_node::service::Stabilization;
 use clap::Parser;
 use futures::lock::Mutex;
 use std::sync::Arc;
