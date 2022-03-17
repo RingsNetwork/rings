@@ -22,11 +22,11 @@ use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 
 pub struct MessageHandler {
     dht: Arc<Mutex<Chord>>,
-    swarm: Arc<Mutex<Swarm>>,
+    swarm: Arc<Swarm>,
 }
 
 impl MessageHandler {
-    pub fn new(dht: Arc<Mutex<Chord>>, swarm: Arc<Mutex<Swarm>>) -> Self {
+    pub fn new(dht: Arc<Mutex<Chord>>, swarm: Arc<Swarm>) -> Self {
         Self { dht, swarm }
     }
 
@@ -39,9 +39,9 @@ impl MessageHandler {
         message: Message,
     ) -> Result<()> {
         // TODO: diff ttl for each message?
-        let swarm = self.swarm.lock().await;
-        let payload = MessageRelay::new(message, &swarm.key, None, to_path, from_path, method)?;
-        swarm.send_message(address, payload).await
+        let payload =
+            MessageRelay::new(message, &self.swarm.key, None, to_path, from_path, method)?;
+        self.swarm.send_message(address, payload).await
     }
 
     pub async fn handle_message_relay(
@@ -96,16 +96,15 @@ impl MessageHandler {
                 )
                 .await;
         }
-        let swarm = self.swarm.lock().await;
-        match swarm.get_transport(&msg.sender_id) {
+        match self.swarm.get_transport(&msg.sender_id) {
             None => {
-                let trans = swarm.new_transport().await?;
+                let trans = self.swarm.new_transport().await?;
                 trans
                     .register_remote_info(msg.handshake_info.clone().try_into()?)
                     .await?;
 
                 let handshake_info = trans
-                    .get_handshake_info(swarm.key, RTCSdpType::Answer)
+                    .get_handshake_info(self.swarm.key, RTCSdpType::Answer)
                     .await?
                     .to_string();
 
@@ -122,7 +121,7 @@ impl MessageHandler {
                 .await?;
 
                 trans.wait_for_connected(20, 3).await?;
-                swarm.get_or_register(&msg.sender_id, trans);
+                self.swarm.get_or_register(&msg.sender_id, trans);
 
                 Ok(())
             }
@@ -162,8 +161,6 @@ impl MessageHandler {
             }
             None => self
                 .swarm
-                .lock()
-                .await
                 .get_transport(&msg.answer_id)
                 .map(|_| ())
                 .ok_or_else(|| anyhow!("Receive AlreadyConnected but cannot get transport")),
@@ -191,14 +188,9 @@ impl MessageHandler {
                 .await
             }
             None => {
-                let trans = self
-                    .swarm
-                    .lock()
-                    .await
-                    .get_transport(&msg.answer_id)
-                    .ok_or_else(|| {
-                        anyhow!("Cannot get trans while handle connect node response")
-                    })?;
+                let trans = self.swarm.get_transport(&msg.answer_id).ok_or_else(|| {
+                    anyhow!("Cannot get trans while handle connect node response")
+                })?;
 
                 trans
                     .register_remote_info(msg.handshake_info.clone().try_into()?)
@@ -319,8 +311,7 @@ impl MessageHandler {
     }
 
     pub async fn listen(&self) {
-        let swarm = self.swarm.lock().await;
-        let relay_messages = swarm.iter_messages();
+        let relay_messages = self.swarm.iter_messages();
 
         pin_mut!(relay_messages);
 
