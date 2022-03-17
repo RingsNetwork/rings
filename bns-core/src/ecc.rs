@@ -3,8 +3,8 @@ use rand::SeedableRng;
 use rand_hc::Hc128Rng;
 use sha1::{Digest, Sha1};
 use std::convert::TryFrom;
+use std::fmt::Write;
 use std::ops::Deref;
-use std::{fmt::Write, num::ParseIntError};
 use web3::signing::keccak256;
 use web3::types::Address;
 
@@ -160,7 +160,7 @@ fn do_verify(message: &str, address: &Address, sig_bytes: &SigBytes) -> Result<b
     Ok(&pubkey.address() == address)
 }
 
-pub fn encrypt_with_sha1(inputs: &str) -> String {
+pub fn parse_to_string_with_sha1(inputs: &str) -> String {
     let mut hasher = Sha1::new();
     hasher.update(inputs.as_bytes());
     let bytes = hasher.finalize();
@@ -169,13 +169,6 @@ pub fn encrypt_with_sha1(inputs: &str) -> String {
         write!(&mut ret, "{:02x}", b).unwrap();
     }
     ret
-}
-
-pub fn decrypt_with_sha1(inputs: &str) -> Result<Vec<u8>, ParseIntError> {
-    (0..inputs.len())
-        .step_by(2)
-        .map(|idx| u8::from_str_radix(&inputs[idx..idx + 2], 16))
-        .collect()
 }
 
 #[cfg(test)]
@@ -201,5 +194,19 @@ mod tests {
 
         // Verify message signature by address.
         assert!(verify(message, address, sig));
+    }
+
+    #[test]
+    fn test_parse_to_string_with_sha10x00() {
+        let s = parse_to_string_with_sha1(
+            "65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0",
+        );
+        assert_eq!(s.len(), 40);
+    }
+
+    #[test]
+    fn test_parse_to_string_with_sha10x01() {
+        let s = parse_to_string_with_sha1("hello");
+        assert_eq!(s.len(), 40);
     }
 }

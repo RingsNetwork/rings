@@ -1,4 +1,4 @@
-use crate::ecc::{encrypt_with_sha1, recover, sign, verify, PublicKey, SecretKey};
+use crate::ecc::{parse_to_string_with_sha1, recover, sign, verify, PublicKey, SecretKey};
 use crate::err::{Error, Result};
 use crate::message::{Did, Encoded};
 use chrono::Utc;
@@ -54,7 +54,7 @@ where
 
         let msg = Self::pack_msg(&data, ts_ms, ttl_ms)?;
         let sig = sign(&msg, key).into();
-        let tx_id = encrypt_with_sha1(&msg);
+        let tx_id = parse_to_string_with_sha1(&msg);
 
         let addr = key.address().to_owned();
         let to_path = to_path.unwrap_or_default();
