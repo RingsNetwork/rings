@@ -1,12 +1,12 @@
 use hex;
-use sha1::{Sha1, Digest};
 use rand::SeedableRng;
 use rand_hc::Hc128Rng;
+use sha1::{Digest, Sha1};
 use std::convert::TryFrom;
 use std::ops::Deref;
+use std::{fmt::Write, num::ParseIntError};
 use web3::signing::keccak256;
 use web3::types::Address;
-use std::{fmt::Write, num::ParseIntError};
 
 use crate::err::{Error, Result};
 
@@ -160,8 +160,7 @@ fn do_verify(message: &str, address: &Address, sig_bytes: &SigBytes) -> Result<b
     Ok(&pubkey.address() == address)
 }
 
-pub fn encrypt_with_sha1(inputs: &str) -> String
-{
+pub fn encrypt_with_sha1(inputs: &str) -> String {
     let mut hasher = Sha1::new();
     hasher.update(inputs.as_bytes());
     let bytes = hasher.finalize();
@@ -172,8 +171,7 @@ pub fn encrypt_with_sha1(inputs: &str) -> String
     ret
 }
 
-pub fn decrypt_with_sha1(inputs: &str) -> Result<Vec<u8>, ParseIntError>
-{
+pub fn decrypt_with_sha1(inputs: &str) -> Result<Vec<u8>, ParseIntError> {
     (0..inputs.len())
         .step_by(2)
         .map(|idx| u8::from_str_radix(&inputs[idx..idx + 2], 16))
