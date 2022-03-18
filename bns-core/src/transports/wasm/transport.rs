@@ -261,11 +261,6 @@ impl IceTransportCallback<CbChannel> for WasmTransport {
                 let on_data_channel_callback = Closure::wrap(self.on_data_channel().await);
 
                 c.set_onicecandidate(Some(on_ice_candidate_callback.as_ref().unchecked_ref()));
-                // c.set_oniceconnectionstatechange(Some(
-                //     on_peer_connection_state_change_callback
-                //         .as_ref()
-                //         .unchecked_ref(),
-                // ));
                 c.set_ondatachannel(Some(on_data_channel_callback.as_ref().unchecked_ref()));
                 on_ice_candidate_callback.forget();
                 //on_peer_connection_state_change_callback.forget();
