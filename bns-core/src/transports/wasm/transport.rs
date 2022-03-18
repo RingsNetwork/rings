@@ -57,11 +57,6 @@ impl IceTransport<CbChannel> for WasmTransport {
     type IceConnectionState = RtcIceConnectionState;
     type Msg = JsValue;
 
-    // TODO: This is a wrong type define.
-    // Callback `on_peer_connection_state_change_callback` should use RtcPeerConnectionState.
-    // See also implementation in default.
-    type ConnectionState = RtcIceConnectionState;
-
     fn new(ch: Arc<CbChannel>) -> Self {
         Self {
             connection: None,
@@ -75,7 +70,7 @@ impl IceTransport<CbChannel> for WasmTransport {
         Arc::clone(&self.signaler)
     }
 
-    async fn start(&mut self, stun: String) -> Result<&Self> {
+    async fn start(&mut self, stun: &str) -> Result<&Self> {
         let mut config = RtcConfiguration::new();
         config.ice_servers(&JsValue::from_serde(&json! {[{"urls": stun}]}).unwrap());
 
@@ -98,6 +93,13 @@ impl IceTransport<CbChannel> for WasmTransport {
         self.get_peer_connection()
             .await
             .map(|pc| pc.ice_connection_state())
+    }
+
+    async fn is_connected(&self) -> bool {
+        self.ice_connection_state()
+            .await
+            .map(|s| s == RtcIceConnectionState::Connected)
+            .unwrap_or(false)
     }
 
     async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>> {

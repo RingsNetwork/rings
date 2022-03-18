@@ -53,7 +53,6 @@ impl IceTransport<AcChannel> for DefaultTransport {
     type Sdp = RTCSessionDescription;
     type DataChannel = RTCDataChannel;
     type IceConnectionState = RTCIceConnectionState;
-    type ConnectionState = RTCPeerConnectionState;
     type Msg = DataChannelMessage;
 
     fn new(ch: Arc<AcChannel>) -> Self {
@@ -69,10 +68,10 @@ impl IceTransport<AcChannel> for DefaultTransport {
         Arc::clone(&self.signaler)
     }
 
-    async fn start(&mut self, stun: String) -> Result<&Self> {
+    async fn start(&mut self, stun: &str) -> Result<&Self> {
         let config = RTCConfiguration {
             ice_servers: vec![RTCIceServer {
-                urls: vec![stun.to_owned()],
+                urls: vec![stun.into()],
                 ..Default::default()
             }],
             ice_candidate_pool_size: 100,
@@ -105,6 +104,13 @@ impl IceTransport<AcChannel> for DefaultTransport {
         self.get_peer_connection()
             .await
             .map(|pc| pc.ice_connection_state())
+    }
+
+    async fn is_connected(&self) -> bool {
+        self.ice_connection_state()
+            .await
+            .map(|s| s == RTCIceConnectionState::Connected)
+            .unwrap_or(false)
     }
 
     async fn get_peer_connection(&self) -> Option<Arc<RTCPeerConnection>> {
@@ -245,7 +251,7 @@ impl DefaultTransport {
 impl IceTransportCallback<AcChannel> for DefaultTransport {
     type OnLocalCandidateHdlrFn = Box<dyn FnMut(Option<Self::Candidate>) -> Fut + Send + Sync>;
     type OnPeerConnectionStateChangeHdlrFn =
-        Box<dyn FnMut(Self::ConnectionState) -> Fut + Send + Sync>;
+        Box<dyn FnMut(RTCPeerConnectionState) -> Fut + Send + Sync>;
     type OnDataChannelHdlrFn = Box<dyn FnMut(Arc<Self::DataChannel>) -> Fut + Send + Sync>;
 
     async fn apply_callback(&self) -> Result<&Self> {
@@ -397,14 +403,112 @@ impl IceTrickleScheme<AcChannel> for DefaultTransport {
         let mut interval = time::interval(time::Duration::from_secs(interval_secs));
 
         for _ in 1..times {
-            if let Some(peer_connection) = self.get_peer_connection().await {
-                if peer_connection.connection_state() == RTCPeerConnectionState::Connected {
-                    return Ok(());
-                }
+            if self.is_connected().await {
+                return Ok(());
             };
             interval.tick().await;
         }
 
         Err(anyhow!("Not connected in time"))
+    }
+}
+
+#[cfg(test)]
+pub mod tests {
+    use super::DefaultTransport as Transport;
+    use super::*;
+    use crate::channels::default::AcChannel as Channel;
+    use crate::types::channel::Channel as ChannelTrait;
+
+    async fn prepare_transport() -> Result<Transport> {
+        let ch = Arc::new(Channel::new(1));
+        let mut trans = Transport::new(ch);
+        let stun = "stun:stun.l.google.com:19302";
+        trans.start(stun).await?.apply_callback().await?;
+        Ok(trans)
+    }
+
+    pub async fn establish_connection(
+        transport1: &Transport,
+        transport2: &Transport,
+    ) -> Result<()> {
+        assert_eq!(
+            transport1.ice_connection_state().await,
+            Some(RTCIceConnectionState::New)
+        );
+        assert_eq!(
+            transport2.ice_connection_state().await,
+            Some(RTCIceConnectionState::New)
+        );
+
+        // Generate key pairs for signing and verification
+        let key1 = SecretKey::random();
+        let key2 = SecretKey::random();
+
+        // Peer 1 try to connect peer 2
+        let handshake_info1 = transport1
+            .get_handshake_info(key1, RTCSdpType::Offer)
+            .await?;
+        assert_eq!(
+            transport1.ice_connection_state().await,
+            Some(RTCIceConnectionState::New)
+        );
+        assert_eq!(
+            transport2.ice_connection_state().await,
+            Some(RTCIceConnectionState::New)
+        );
+
+        // Peer 2 got offer then register
+        let addr1 = transport2.register_remote_info(handshake_info1).await?;
+        assert_eq!(addr1, key1.address());
+        assert_eq!(
+            transport1.ice_connection_state().await,
+            Some(RTCIceConnectionState::New)
+        );
+        assert_eq!(
+            transport2.ice_connection_state().await,
+            Some(RTCIceConnectionState::New)
+        );
+
+        // Peer 2 create answer
+        let handshake_info2 = transport2
+            .get_handshake_info(key2, RTCSdpType::Answer)
+            .await?;
+        assert_eq!(
+            transport1.ice_connection_state().await,
+            Some(RTCIceConnectionState::New)
+        );
+        assert_eq!(
+            transport2.ice_connection_state().await,
+            Some(RTCIceConnectionState::Checking)
+        );
+
+        // Peer 1 got answer then register
+        let addr2 = transport1.register_remote_info(handshake_info2).await?;
+        assert_eq!(addr2, key2.address());
+
+        transport1.wait_for_connected(5, 3).await?;
+        transport2.wait_for_connected(5, 3).await?;
+
+        assert_eq!(
+            transport1.ice_connection_state().await,
+            Some(RTCIceConnectionState::Connected)
+        );
+        assert_eq!(
+            transport2.ice_connection_state().await,
+            Some(RTCIceConnectionState::Connected)
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_ice_connection_establish() -> Result<()> {
+        let transport1 = prepare_transport().await?;
+        let transport2 = prepare_transport().await?;
+
+        establish_connection(&transport1, &transport2).await?;
+
+        Ok(())
     }
 }

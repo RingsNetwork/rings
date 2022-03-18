@@ -38,11 +38,7 @@ pub struct Args {
 
 async fn run(http_addr: String, key: SecretKey, stun: &str) {
     let dht = Arc::new(Mutex::new(Chord::new(key.address().into())));
-    let swarm = Arc::new(Swarm::new(
-        Arc::new(AcChannel::new(1)),
-        stun.to_string(),
-        key,
-    ));
+    let swarm = Arc::new(Swarm::new(Arc::new(AcChannel::new(1)), stun, key));
 
     let listen_event = MessageHandler::new(dht.clone(), swarm.clone());
     //let stabilize_event = MessageHandler::new(dht.clone(), swarm.clone());
@@ -67,7 +63,7 @@ async fn main() -> Result<()> {
 
     let key = SecretKey::try_from(args.eth_key.as_str())?;
 
-    run(args.http_addr, key, &args.stun_server).await;
+    run(args.http_addr, key, args.stun_server.as_str()).await;
 
     Ok(())
 }

@@ -1,4 +1,4 @@
-mod transport;
+pub mod transport;
 
 use super::helper::IceCandidateSerializer;
 pub use transport::DefaultTransport;
