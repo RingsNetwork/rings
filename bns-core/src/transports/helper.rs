@@ -44,7 +44,7 @@ impl Future for Promise {
         if state.completed {
             return match &state.successed {
                 Some(true) => Poll::Ready(Ok(())),
-                _ => Poll::Ready(Err(anyhow!("connect failed"))),
+                _ => Poll::Ready(Err(anyhow!("failed on promise"))),
             };
         } else {
             state.waker = Some(cx.waker().clone());
