@@ -5,6 +5,8 @@ use crate::message::Encoded;
 use crate::message::MessageRelay;
 use crate::message::MessageRelayMethod;
 use crate::transports::helper::IceCandidateSerializer;
+use crate::transports::helper::Promise;
+use crate::transports::helper::State;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
 use crate::types::ice_transport::IceTrickleScheme;
@@ -121,7 +123,7 @@ impl IceTransport<CbChannel> for WasmTransport {
                         ))
                         .await?;
                         let promise = self.gather_complete_promise().await?;
-                        promise.await;
+                        promise.await?;
                         Ok(answer.into())
                     }
                     Err(_) => Err(anyhow!("Failed to get answer")),
@@ -142,7 +144,7 @@ impl IceTransport<CbChannel> for WasmTransport {
                         ))
                         .await?;
                         let promise = self.gather_complete_promise().await?;
-                        promise.await;
+                        promise.await?;
                         Ok(offer.into())
                     }
                     Err(_) => Err(anyhow!("cannot get offer")),
@@ -250,26 +252,23 @@ impl WasmTransport {
 #[async_trait(?Send)]
 impl IceTransportCallback<CbChannel> for WasmTransport {
     type OnLocalCandidateHdlrFn = Box<dyn FnMut(RtcPeerConnectionIceEvent) -> ()>;
-    type OnPeerConnectionStateChangeHdlrFn = Box<dyn FnMut(RtcIceConnectionState) -> ()>;
     type OnDataChannelHdlrFn = Box<dyn FnMut(RtcDataChannelEvent) -> ()>;
 
     async fn apply_callback(&self) -> Result<&Self> {
         match &self.get_peer_connection().await {
             Some(c) => {
                 let on_ice_candidate_callback = Closure::wrap(self.on_ice_candidate().await);
-                let on_peer_connection_state_change_callback =
-                    Closure::wrap(self.on_peer_connection_state_change().await);
                 let on_data_channel_callback = Closure::wrap(self.on_data_channel().await);
 
                 c.set_onicecandidate(Some(on_ice_candidate_callback.as_ref().unchecked_ref()));
-                c.set_oniceconnectionstatechange(Some(
-                    on_peer_connection_state_change_callback
-                        .as_ref()
-                        .unchecked_ref(),
-                ));
+                // c.set_oniceconnectionstatechange(Some(
+                //     on_peer_connection_state_change_callback
+                //         .as_ref()
+                //         .unchecked_ref(),
+                // ));
                 c.set_ondatachannel(Some(on_data_channel_callback.as_ref().unchecked_ref()));
                 on_ice_candidate_callback.forget();
-                on_peer_connection_state_change_callback.forget();
+                //on_peer_connection_state_change_callback.forget();
                 on_data_channel_callback.forget();
                 Ok(self)
             }
@@ -296,9 +295,6 @@ impl IceTransportCallback<CbChannel> for WasmTransport {
         }
     }
 
-    async fn on_peer_connection_state_change(&self) -> Self::OnPeerConnectionStateChangeHdlrFn {
-        box move |_: RtcIceConnectionState| {}
-    }
     async fn on_data_channel(&self) -> Self::OnDataChannelHdlrFn {
         box move |_: RtcDataChannelEvent| {}
     }
@@ -369,42 +365,18 @@ impl IceTrickleScheme<CbChannel> for WasmTransport {
         }
     }
 
-    async fn wait_for_connected(&self, _times: usize, _interval_secs: u64) -> anyhow::Result<()> {
-        // TODO: help wanted not sure how to implement this
-        // See also in default implementation
-        Ok(())
-    }
-}
-
-pub struct State {
-    completed: bool,
-    waker: Option<std::task::Waker>,
-}
-
-pub struct GatherPromise(Arc<Mutex<State>>);
-
-impl Future for GatherPromise {
-    type Output = ();
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut state = self.0.lock().unwrap();
-        if state.completed {
-            Poll::Ready(())
-        } else {
-            state.waker = Some(cx.waker().clone());
-            Poll::Pending
-        }
+    async fn wait_for_connected(&self) -> anyhow::Result<()> {
+        let promise = self.connect_success_promise().await?;
+        promise.await
     }
 }
 
 impl WasmTransport {
-    async fn gather_complete_promise(&self) -> Result<GatherPromise> {
+    pub async fn gather_complete_promise(&self) -> Result<Promise> {
         match self.get_peer_connection().await {
             Some(conn) => {
-                let state = Arc::new(Mutex::new(State {
-                    completed: false,
-                    waker: None,
-                }));
-                let promise = GatherPromise(Arc::clone(&state));
+                let state = Arc::new(Mutex::new(State::default()));
+                let promise = Promise(Arc::clone(&state));
                 let conn_clone = Arc::clone(&conn);
                 let callback =
                     Closure::wrap(Box::new(move || match conn_clone.ice_gathering_state() {
@@ -414,6 +386,7 @@ impl WasmTransport {
                             if let Some(w) = s.waker.take() {
                                 w.wake();
                                 s.completed = true;
+                                s.successed = Some(true);
                             }
                         }
                         x => {
@@ -421,6 +394,41 @@ impl WasmTransport {
                         }
                     }) as Box<dyn FnMut()>);
                 conn.set_onicegatheringstatechange(Some(callback.as_ref().unchecked_ref()));
+                callback.forget();
+                Ok(promise)
+            }
+            None => Err(anyhow!("cannot get connection")),
+        }
+    }
+
+    pub async fn connect_success_promise(&self) -> Result<Promise> {
+        match self.get_peer_connection().await {
+            Some(conn) => {
+                let state = Arc::new(Mutex::new(State::default()));
+                let promise = Promise(Arc::clone(&state));
+                let callback = Closure::wrap(Box::new(move |st: RtcIceConnectionState| match st {
+                    RtcIceConnectionState::Connected => {
+                        let mut s = state.lock().unwrap();
+                        if let Some(w) = s.waker.take() {
+                            w.wake();
+                            s.completed = true;
+                            s.successed = Some(true);
+                        }
+                    }
+                    RtcIceConnectionState::Failed => {
+                        let mut s = state.lock().unwrap();
+                        if let Some(w) = s.waker.take() {
+                            w.wake();
+                            s.completed = true;
+                            s.successed = Some(false);
+                        }
+                    }
+                    _ => {
+                        log::trace!("Connect State changed to {:?}", st);
+                    }
+                })
+                    as Box<dyn FnMut(RtcIceConnectionState)>);
+                conn.set_oniceconnectionstatechange(Some(callback.as_ref().unchecked_ref()));
                 callback.forget();
                 Ok(promise)
             }

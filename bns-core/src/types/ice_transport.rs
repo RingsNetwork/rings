@@ -48,11 +48,9 @@ pub trait IceTransport<Ch: Channel> {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait IceTransportCallback<Ch: Channel>: IceTransport<Ch> {
     type OnLocalCandidateHdlrFn;
-    type OnPeerConnectionStateChangeHdlrFn;
     type OnDataChannelHdlrFn;
     async fn apply_callback(&self) -> Result<&Self>;
     async fn on_ice_candidate(&self) -> Self::OnLocalCandidateHdlrFn;
-    async fn on_peer_connection_state_change(&self) -> Self::OnPeerConnectionStateChangeHdlrFn;
     async fn on_data_channel(&self) -> Self::OnDataChannelHdlrFn;
 }
 
@@ -62,5 +60,5 @@ pub trait IceTrickleScheme<Ch: Channel>: IceTransport<Ch> {
     type SdpType;
     async fn get_handshake_info(&self, key: SecretKey, kind: Self::SdpType) -> Result<Encoded>;
     async fn register_remote_info(&self, data: Encoded) -> Result<Address>;
-    async fn wait_for_connected(&self, times: usize, interval_secs: u64) -> Result<()>;
+    async fn wait_for_connected(&self) -> Result<()>;
 }
