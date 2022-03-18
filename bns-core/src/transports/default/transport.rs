@@ -4,6 +4,8 @@ use crate::message::Encoded;
 use crate::message::MessageRelay;
 use crate::message::MessageRelayMethod;
 use crate::transports::default::IceCandidateSerializer;
+use crate::transports::helper::Promise;
+use crate::transports::helper::State;
 use crate::types::channel::Channel;
 use crate::types::channel::Event;
 use crate::types::ice_transport::IceTransport;
@@ -20,7 +22,6 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tokio::time;
 
 use web3::types::Address;
 use webrtc::api::APIBuilder;
@@ -250,21 +251,15 @@ impl DefaultTransport {
 #[async_trait]
 impl IceTransportCallback<AcChannel> for DefaultTransport {
     type OnLocalCandidateHdlrFn = Box<dyn FnMut(Option<Self::Candidate>) -> Fut + Send + Sync>;
-    type OnPeerConnectionStateChangeHdlrFn =
-        Box<dyn FnMut(RTCPeerConnectionState) -> Fut + Send + Sync>;
     type OnDataChannelHdlrFn = Box<dyn FnMut(Arc<Self::DataChannel>) -> Fut + Send + Sync>;
 
     async fn apply_callback(&self) -> Result<&Self> {
         let on_ice_candidate_callback = self.on_ice_candidate().await;
-        let on_peer_connection_state_change_callback = self.on_peer_connection_state_change().await;
         let on_data_channel_callback = self.on_data_channel().await;
         match self.get_peer_connection().await {
             Some(peer_connection) => {
                 peer_connection
                     .on_ice_candidate(on_ice_candidate_callback)
-                    .await;
-                peer_connection
-                    .on_peer_connection_state_change(on_peer_connection_state_change_callback)
                     .await;
                 peer_connection
                     .on_data_channel(on_data_channel_callback)
@@ -293,18 +288,6 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
                         }
                     }
                 }
-            })
-        }
-    }
-
-    async fn on_peer_connection_state_change(&self) -> Self::OnPeerConnectionStateChangeHdlrFn {
-        let sender = self.signaler().sender();
-        box move |s: RTCPeerConnectionState| {
-            if s == RTCPeerConnectionState::Failed {
-                let _ = sender.send(Event::ConnectFailed);
-            }
-            Box::pin(async move {
-                log::debug!("Connect State changed to {:?}", s);
             })
         }
     }
@@ -399,17 +382,50 @@ impl IceTrickleScheme<AcChannel> for DefaultTransport {
         }
     }
 
-    async fn wait_for_connected(&self, times: usize, interval_secs: u64) -> anyhow::Result<()> {
-        let mut interval = time::interval(time::Duration::from_secs(interval_secs));
+    async fn wait_for_connected(&self) -> anyhow::Result<()> {
+        let promise = self.connect_success_promise().await?;
+        promise.await
+    }
+}
 
-        for _ in 1..times {
-            if self.is_connected().await {
-                return Ok(());
-            };
-            interval.tick().await;
+impl DefaultTransport {
+    pub async fn connect_success_promise(&self) -> Result<Promise> {
+        match self.get_peer_connection().await {
+            Some(peer_connection) => {
+                let state = Arc::new(std::sync::Mutex::new(State::default()));
+                let promise = Promise(Arc::clone(&state));
+                peer_connection
+                    .on_peer_connection_state_change(box move |st| {
+                        let state = Arc::clone(&state);
+                        Box::pin(async move {
+                            match st {
+                                RTCPeerConnectionState::Connected => {
+                                    let mut s = state.lock().unwrap();
+                                    if let Some(w) = s.waker.take() {
+                                        w.wake();
+                                        s.completed = true;
+                                        s.successed = Some(true);
+                                    }
+                                }
+                                RTCPeerConnectionState::Failed => {
+                                    let mut s = state.lock().unwrap();
+                                    if let Some(w) = s.waker.take() {
+                                        w.wake();
+                                        s.completed = true;
+                                        s.successed = Some(false);
+                                    }
+                                }
+                                _ => {
+                                    log::trace!("Connect State changed to {:?}", st);
+                                }
+                            }
+                        })
+                    })
+                    .await;
+                Ok(promise)
+            }
+            None => Err(anyhow!("cannot get connection")),
         }
-
-        Err(anyhow!("Not connected in time"))
     }
 }
 
@@ -486,10 +502,10 @@ pub mod tests {
         // Peer 1 got answer then register
         let addr2 = transport1.register_remote_info(handshake_info2).await?;
         assert_eq!(addr2, key2.address());
-
-        transport1.wait_for_connected(5, 3).await?;
-        transport2.wait_for_connected(5, 3).await?;
-
+        let promise_1 = transport1.connect_success_promise().await?;
+        let promise_2 = transport2.connect_success_promise().await?;
+        promise_1.await?;
+        promise_2.await?;
         assert_eq!(
             transport1.ice_connection_state().await,
             Some(RTCIceConnectionState::Connected)
