@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Event {
     ConnectFailed,
     ReceiveMsg(Vec<u8>),
