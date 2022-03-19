@@ -5,8 +5,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 //use crossbeam_channel as cbc;
 use futures::channel::mpsc;
-use futures::SinkExt;
 use futures::lock::Mutex;
+use futures::SinkExt;
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -44,13 +44,9 @@ impl Channel for CbChannel {
     async fn recv(&self) -> Result<Event> {
         let mut receiver = self.receiver.lock().await;
         match receiver.try_next() {
-            Ok(Some(e)) => {
-                Ok(e)
-            },
-            Ok(None) => {
-                Err(anyhow::anyhow!("received empty msg"))
-            },
-            Err(e) => Err(anyhow::anyhow!(e))
+            Ok(Some(e)) => Ok(e),
+            Ok(None) => Err(anyhow::anyhow!("received empty msg")),
+            Err(e) => Err(anyhow::anyhow!(e)),
         }
     }
 }
