@@ -269,6 +269,70 @@ impl MessageHandler {
         prev: &Did,
         msg: &FindSuccessor,
     ) -> Result<()> {
+        /*
+         * A -> B For Example
+         * B handle_find_successor then push_prev
+         * now relay have paths follow:
+         * {
+         *     from_path: [A],
+         *     to_path: []
+         *     method: SEND
+         * }
+         * if found successor, then report back to A with new relay
+         * which have paths follow:
+         * {
+         *     to_path: [A],
+         *     from_path: [],
+         *     method: REPORT
+         * }
+         * when A got report and handle_found_successor, after push_prev
+         * that relay have paths follow:
+         * {
+         *     from_path: [B],
+         *     to_path: []
+         *     method: REPORT
+         * }
+         * because to_path.pop_back() assert_eq to current Did
+         * then fix finger as request
+         *
+         * otherwise, B -> C
+         * and then C get relay and push_prev, relay has paths follow:
+         * {
+         *     from_path: [A, B],
+         *     to_path: [],
+         *     method: SEND
+         * }
+         * if C found successor lucky, report to B, relay has paths follow:
+         * {
+         *     from_path: [],
+         *     to_path: [A, B],
+         *     method: REPORT
+         * }
+         * if B get message and handle_found_successor, after push_prev, relay has paths follow:
+         * {
+         *     from_path: [C],
+         *     to_path: [A],
+         *     method: REPORT
+         * }
+         * because to_path.pop_back() assert_eq to current Did
+         * so B has been pop out of to_path
+         *
+         * if found to_path still have elements, recursivly report backward
+         * now relay has path follow:
+         * {
+         *     to_path: [A],
+         *     from_path: [C],
+         *     method: REPORT
+         * }
+         * finally, relay handle_found_successor after push_prev, relay has paths follow:
+         * {
+         *     from_path: [C, B],
+         *     to_path: []
+         * }
+         * because to_path.pop_back() assert_eq to current Did
+         * A pop from to_path, and check to_path is empty
+         * so update fix_finger_table with fix_finger_index
+         */
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
         relay.push_prev(dht.id, *prev);

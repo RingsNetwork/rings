@@ -28,7 +28,11 @@ impl Stabilization {
                 None,
                 MessageRelayMethod::SEND,
             )?;
-            self.swarm.send_message(&chord.id.into(), message).await?;
+            if chord.id != chord.successor {
+                self.swarm
+                    .send_message(&chord.successor.into(), message)
+                    .await?;
+            }
             // fix fingers
             match chord.fix_fingers() {
                 Ok(action) => match action {
