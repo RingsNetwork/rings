@@ -4,6 +4,7 @@ use crate::swarm::Swarm;
 use anyhow::Result;
 use futures::lock::Mutex;
 use std::sync::Arc;
+use tokio::time::{sleep, Duration};
 
 pub struct Stabilization {
     chord: Arc<Mutex<Chord>>,
@@ -60,7 +61,10 @@ impl Stabilization {
                         log::error!("Invalid Chord Action");
                     }
                 },
-                Err(e) => log::error!("{:?}", e),
+                Err(e) => {
+                    log::error!("{:?}", e);
+                    sleep(Duration::from_millis(1000 * 60 * 5)).await;
+                }
             }
         }
     }
