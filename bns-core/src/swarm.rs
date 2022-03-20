@@ -7,6 +7,7 @@ use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::Event;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
+use crate::types::ice_transport::IceTrickleScheme;
 use anyhow::anyhow;
 use anyhow::Result;
 use async_stream::stream;
@@ -56,6 +57,7 @@ impl Swarm {
     }
 
     pub async fn register(&self, address: &Address, trans: Arc<Transport>) -> Result<()> {
+        trans.wait_for_connected().await?;
         if !trans.is_connected().await {
             return Err(anyhow!("transport is not connected"));
         }

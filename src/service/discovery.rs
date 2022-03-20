@@ -45,11 +45,9 @@ async fn handshake(swarm: Arc<Swarm>, key: SecretKey, data: Vec<u8>) -> anyhow::
     // get offer from remote and send answer back
 
     let transport = swarm.new_transport().await?;
-
     let registered_addr = transport
         .register_remote_info(String::from_utf8(data)?.try_into()?)
         .await;
-
     match registered_addr {
         Ok(addr) => {
             let resp = transport.get_handshake_info(key, RTCSdpType::Answer).await;

@@ -1,5 +1,6 @@
 use crate::channels::default::AcChannel;
 use crate::ecc::SecretKey;
+
 use crate::message::Encoded;
 use crate::message::MessageRelay;
 use crate::message::MessageRelayMethod;
@@ -32,7 +33,6 @@ use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 
-use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
@@ -394,34 +394,46 @@ impl DefaultTransport {
             Some(peer_connection) => {
                 let state = Arc::new(std::sync::Mutex::new(State::default()));
                 let promise = Promise(Arc::clone(&state));
+                let state_cloned = Arc::clone(&state);
                 peer_connection
-                    .on_peer_connection_state_change(box move |st| {
-                        let state = Arc::clone(&state);
+                    .on_ice_connection_state_change(box move |st| {
+                        log::debug!("Promise:: Connect State changed to {:?}", st);
+                        let state = Arc::clone(&state_cloned);
                         Box::pin(async move {
                             match st {
-                                RTCPeerConnectionState::Connected => {
+                                RTCIceConnectionState::Connected => {
                                     let mut s = state.lock().unwrap();
                                     if let Some(w) = s.waker.take() {
-                                        w.wake();
                                         s.completed = true;
                                         s.successed = Some(true);
+                                        w.wake();
                                     }
                                 }
-                                RTCPeerConnectionState::Failed => {
+                                RTCIceConnectionState::Failed => {
                                     let mut s = state.lock().unwrap();
                                     if let Some(w) = s.waker.take() {
-                                        w.wake();
                                         s.completed = true;
                                         s.successed = Some(false);
+                                        w.wake();
                                     }
                                 }
                                 _ => {
-                                    log::trace!("Connect State changed to {:?}", st);
+                                    log::debug!("Promise:: Connect State changed to {:?}", st);
                                 }
                             }
                         })
                     })
                     .await;
+                let current_state = peer_connection.ice_connection_state();
+                if RTCIceConnectionState::Connected == current_state {
+                    let mut s = state.lock().unwrap();
+                    if let Some(w) = s.waker.take() {
+                        s.completed = true;
+                        s.successed = Some(true);
+                        std::sync::Mutex::unlock(s);
+                        w.wake();
+                    }
+                };
                 Ok(promise)
             }
             None => Err(anyhow!("cannot get connection")),
