@@ -5,7 +5,7 @@ use crate::message::MessageRelay;
 use crate::message::MessageRelayMethod;
 use crate::transports::default::IceCandidateSerializer;
 use crate::transports::helper::Promise;
-use crate::transports::helper::State;
+
 use crate::types::channel::Channel;
 use crate::types::channel::Event;
 use crate::types::ice_transport::IceTransport;
@@ -392,8 +392,9 @@ impl DefaultTransport {
     pub async fn connect_success_promise(&self) -> Result<Promise> {
         match self.get_peer_connection().await {
             Some(peer_connection) => {
-                let state = Arc::new(std::sync::Mutex::new(State::default()));
-                let promise = Promise(Arc::clone(&state));
+                let promise = Promise::default();
+                let state = Arc::clone(&promise.state());
+                let state_clone = Arc::clone(&state);
                 peer_connection
                     .on_peer_connection_state_change(box move |st| {
                         let state = Arc::clone(&state);
@@ -402,17 +403,17 @@ impl DefaultTransport {
                                 RTCPeerConnectionState::Connected => {
                                     let mut s = state.lock().unwrap();
                                     if let Some(w) = s.waker.take() {
-                                        w.wake();
                                         s.completed = true;
                                         s.successed = Some(true);
+                                        w.wake();
                                     }
                                 }
                                 RTCPeerConnectionState::Failed => {
                                     let mut s = state.lock().unwrap();
                                     if let Some(w) = s.waker.take() {
-                                        w.wake();
                                         s.completed = true;
                                         s.successed = Some(false);
+                                        w.wake();
                                     }
                                 }
                                 _ => {
@@ -422,6 +423,15 @@ impl DefaultTransport {
                         })
                     })
                     .await;
+                let current_state = peer_connection.connection_state();
+                if RTCPeerConnectionState::Connected == current_state {
+                    let mut s = state_clone.lock().unwrap();
+                    if let Some(w) = s.waker.take() {
+                        s.completed = true;
+                        s.successed = Some(true);
+                        w.wake();
+                    }
+                };
                 Ok(promise)
             }
             None => Err(anyhow!("cannot get connection")),
