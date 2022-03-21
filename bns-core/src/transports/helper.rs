@@ -34,7 +34,14 @@ pub struct State {
     pub waker: Option<std::task::Waker>,
 }
 
+#[derive(Default)]
 pub struct Promise(pub Arc<Mutex<State>>);
+
+impl Promise {
+    pub fn state(&self) -> Arc<Mutex<State>> {
+        Arc::clone(&self.0)
+    }
+}
 
 impl Future for Promise {
     type Output = Result<()>;

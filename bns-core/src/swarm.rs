@@ -55,11 +55,10 @@ impl Swarm {
         Ok(Arc::new(ice_transport))
     }
 
+    /// register to swarm table
+    /// should not wait connection statues here
+    /// a connection `Promise` may cause deadlock of both end
     pub async fn register(&self, address: &Address, trans: Arc<Transport>) -> Result<()> {
-        if !trans.is_connected().await {
-            return Err(anyhow!("transport is not connected"));
-        }
-
         let prev_trans = self.table.set(address, trans);
         if let Some(trans) = prev_trans {
             if let Err(e) = trans.close().await {
@@ -169,14 +168,14 @@ mod tests {
         let transport2 = swarm2.new_transport().await.unwrap();
 
         // Cannot register if not connected
-        assert!(swarm1
-            .register(&swarm2.address(), transport1.clone())
-            .await
-            .is_err());
-        assert!(swarm2
-            .register(&swarm1.address(), transport2.clone())
-            .await
-            .is_err());
+        // assert!(swarm1
+        //     .register(&swarm2.address(), transport1.clone())
+        //     .await
+        //     .is_err());
+        // assert!(swarm2
+        //     .register(&swarm1.address(), transport2.clone())
+        //     .await
+        //     .is_err());
 
         establish_connection(&transport1, &transport2).await?;
 
