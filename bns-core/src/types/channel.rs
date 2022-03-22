@@ -5,6 +5,8 @@ use async_trait::async_trait;
 pub enum Event {
     ConnectFailed,
     ReceiveMsg(Vec<u8>),
+    // support None type of a non-async channel
+    None
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]

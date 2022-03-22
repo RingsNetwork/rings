@@ -45,7 +45,7 @@ impl Channel for CbChannel {
         let mut receiver = self.receiver.lock().await;
         match receiver.try_next() {
             Ok(Some(e)) => Ok(e),
-            Ok(None) => Err(anyhow::anyhow!("received empty msg")),
+            Ok(None) => Ok(Event::None),
             Err(e) => Err(anyhow::anyhow!(e)),
         }
     }

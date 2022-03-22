@@ -100,7 +100,7 @@ impl Swarm {
         }
     }
 
-    fn load_message(ev: Result<Event>) -> Result<MessageRelay<Message>> {
+    fn load_message(ev: Result<Event>) -> Result<Option<MessageRelay<Message>>> {
         // TODO: How to deal with events that is not message? Use mpmc?
 
         let ev = ev?;
@@ -108,9 +108,23 @@ impl Swarm {
         match ev {
             Event::ReceiveMsg(msg) => {
                 let payload = serde_json::from_slice::<MessageRelay<Message>>(&msg)?;
-                Ok(payload)
-            }
+                Ok(Some(payload))
+            },
+            Event::None => {
+                Ok(None)
+            },
             x => Err(anyhow!(format!("Receive {:?}", x))),
+        }
+    }
+
+    /// This method is required because web-sys components is not `Send`
+    /// which means an async loop cannot running concurrency.
+    pub async fn poll_message(&self) -> Option<MessageRelay<Message>> {
+        let ev = self.signaler().recv().await;
+        match Self::load_message(ev) {
+            Ok(Some(msg)) => Some(msg),
+            Ok(None) => None,
+            Err(_) => None
         }
     }
 
@@ -121,7 +135,7 @@ impl Swarm {
         stream! {
             loop {
                 let ev = self.signaler().recv().await;
-                if let Ok(msg) = Self::load_message(ev) {
+                if let Ok(Some(msg)) = Self::load_message(ev) {
                     yield msg
                 }
             }
