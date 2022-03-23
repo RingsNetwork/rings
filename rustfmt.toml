@@ -1,0 +1,5 @@
+tab_spaces = 4
+format_code_in_doc_comments = true
+wrap_comments = false
+format_strings = false
+hard_tabs = false
