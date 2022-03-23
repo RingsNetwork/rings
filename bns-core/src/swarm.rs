@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use futures_core::Stream;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::Mutex;
 use web3::types::Address;
 
 #[cfg(not(feature = "wasm"))]
@@ -28,6 +29,7 @@ use crate::transports::wasm::WasmTransport as Transport;
 
 pub struct Swarm {
     table: MemStorage<Address, Arc<Transport>>,
+    pending: Arc<Mutex<Vec<Arc<Transport>>>>,
     transport_event_channel: Channel<Event>,
     ice_server: String,
     pub key: SecretKey,
@@ -59,6 +61,7 @@ impl Swarm {
             transport_event_channel: Channel::new(1),
             ice_server: ice_server.into(),
             key,
+            pending: Arc::new(Mutex::new(vec![])),
         }
     }
 
@@ -134,6 +137,28 @@ impl Swarm {
                 }
             }
         }
+    }
+
+    pub fn push_pending_transport(&self, transport: &Arc<Transport>) -> anyhow::Result<()> {
+        let mut pending = self
+            .pending
+            .try_lock()
+            .map_err(|_| anyhow::anyhow!("call lock() failed"))?;
+        pending.push(transport.to_owned());
+        Ok(())
+    }
+
+    pub fn pop_pending_transport(&self, transport: Arc<Transport>) -> anyhow::Result<()> {
+        let mut pending = self
+            .pending
+            .try_lock()
+            .map_err(|_| anyhow::anyhow!("lock fail"))?;
+        let index = pending
+            .iter()
+            .position(|x| x.eq(&transport))
+            .ok_or_else(|| anyhow::anyhow!("transport not found"))?;
+        pending.remove(index);
+        Ok(())
     }
 }
 

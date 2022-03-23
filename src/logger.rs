@@ -1,7 +1,6 @@
 use log::Log;
 use log::{Level, Metadata, Record};
 use log::{LevelFilter, SetLoggerError};
-use std::str::FromStr;
 
 pub struct Logger;
 
@@ -20,8 +19,7 @@ impl Log for Logger {
 }
 
 impl Logger {
-    pub fn init(level: String) -> Result<(), SetLoggerError> {
-        log::set_boxed_logger(Box::new(Logger))
-            .map(|()| log::set_max_level(LevelFilter::from_str(&level).unwrap()))
+    pub fn init(level: LevelFilter) -> Result<(), SetLoggerError> {
+        log::set_boxed_logger(Box::new(Logger)).map(|()| log::set_max_level(level))
     }
 }

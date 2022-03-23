@@ -1,4 +1,4 @@
-use crate::service::http_error::HttpError;
+use super::{http_error::HttpError, result::HttpResult};
 use anyhow::anyhow;
 use axum::extract::{Extension, Query, RawBody};
 use bns_core::ecc::SecretKey;
@@ -12,7 +12,7 @@ pub async fn handshake_handler(
     RawBody(body): RawBody,
     Extension(swarm): Extension<Arc<Swarm>>,
     Extension(key): Extension<SecretKey>,
-) -> Result<String, HttpError> {
+) -> HttpResult<String> {
     log::info!("Incoming body: {:?}", body);
 
     let payload = hyper::body::to_bytes(body).await?;
@@ -29,7 +29,7 @@ pub async fn connect_handler(
     Query(params): Query<HashMap<String, String>>,
     Extension(swarm): Extension<Arc<Swarm>>,
     Extension(key): Extension<SecretKey>,
-) -> Result<String, HttpError> {
+) -> HttpResult<String> {
     let node = params.get("node").ok_or(HttpError::BadRequest)?;
 
     match trickle_forward(swarm, key, node.into()).await {

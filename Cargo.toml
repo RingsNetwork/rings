@@ -11,9 +11,12 @@ lazy_static = "1.4.0"
 webrtc = { version = "0.3.3" }
 tokio = { version = "1.13.0", features = ["full"] }
 hyper = { version = "0.14.14", features = ["full"] }
+tonic = { version = "0.6.2", features = ["tls", "tls-roots", "prost", "compression"] }
 env_logger = { version = "0.9.0" }
 tokio-util = { version = "0.6.9" }
+tower = { version = "0.4.12", features = ["full"] }
 tower-http = { version="0.2.4", features = ["set-header"]}
+prost = "0.9.0"
 http = "0.2.6"
 clap = { version = "3", features = ["derive", "env"] }
 anyhow = "1.0.45"
@@ -28,3 +31,14 @@ futures = "0.3.21"
 web3 = { version = "0.18.0" }
 secp256k1 = "0.21"
 axum = "0.4.7"
+dotenv = "0.15.0"
+pin-project = "1"
+base64 = "0.13.0"
+arrayref = "0.3.6"
+
+[[bin]]
+name = "bns-node"
+path = "bin/main.rs"
+
+[build-dependencies]
+tonic-build = { version = "0.6.2", features = ["prost", "compression"] }

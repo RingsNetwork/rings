@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package grpc;
+
+service Grpc{
+  rpc Grpc (GrpcRequest) returns (GrpcResponse) {}
+}
+
+message GrpcRequest {
+  string version = 1;
+  uint32 id = 2;
+  string method = 3;
+  repeated bytes params = 4;
+}
+
+message GrpcResponse {
+  string version = 1;
+  uint32 id = 2;
+  string result = 3;
+}
