@@ -7,12 +7,15 @@ use crate::message::MessageRelayMethod;
 use crate::transports::helper::IceCandidateSerializer;
 use crate::transports::helper::Promise;
 use crate::transports::helper::State;
+use crate::types::channel::Event;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
 use crate::types::ice_transport::IceTrickleScheme;
 use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
+use futures::channel::mpsc;
+use futures::lock::Mutex as FuturesMutex;
 use log::info;
 use serde::Deserialize;
 use serde::Serialize;
@@ -42,16 +45,18 @@ use web_sys::RtcSdpType;
 use web_sys::RtcSessionDescription;
 use web_sys::RtcSessionDescriptionInit;
 
+type EventSender = Arc<FuturesMutex<mpsc::Sender<Event>>>;
+
 #[derive(Clone)]
 pub struct WasmTransport {
-    pub connection: Option<Arc<RtcPeerConnection>>,
-    pub pending_candidates: Arc<Mutex<Vec<RtcIceCandidate>>>,
-    pub channel: Option<Arc<RtcDataChannel>>,
-    pub signaler: Arc<CbChannel>,
+    connection: Option<Arc<RtcPeerConnection>>,
+    pending_candidates: Arc<Mutex<Vec<RtcIceCandidate>>>,
+    channel: Option<Arc<RtcDataChannel>>,
+    event_sender: EventSender,
 }
 
 #[async_trait(?Send)]
-impl IceTransport<CbChannel> for WasmTransport {
+impl IceTransport<CbChannel<Event>> for WasmTransport {
     type Connection = RtcPeerConnection;
     type Candidate = RtcIceCandidate;
     type Sdp = RtcSessionDescription;
@@ -59,17 +64,13 @@ impl IceTransport<CbChannel> for WasmTransport {
     type IceConnectionState = RtcIceConnectionState;
     type Msg = JsValue;
 
-    fn new(ch: Arc<CbChannel>) -> Self {
+    fn new(event_sender: EventSender) -> Self {
         Self {
             connection: None,
             pending_candidates: Arc::new(Mutex::new(vec![])),
             channel: None,
-            signaler: Arc::clone(&ch),
+            event_sender,
         }
-    }
-
-    fn signaler(&self) -> Arc<CbChannel> {
-        Arc::clone(&self.signaler)
     }
 
     async fn start(&mut self, stun: &str) -> Result<&Self> {
@@ -250,7 +251,7 @@ impl WasmTransport {
 }
 
 #[async_trait(?Send)]
-impl IceTransportCallback<CbChannel> for WasmTransport {
+impl IceTransportCallback<CbChannel<Event>> for WasmTransport {
     type OnLocalCandidateHdlrFn = Box<dyn FnMut(RtcPeerConnectionIceEvent) -> ()>;
     type OnDataChannelHdlrFn = Box<dyn FnMut(RtcDataChannelEvent) -> ()>;
 
@@ -302,7 +303,7 @@ pub struct TricklePayload {
 }
 
 #[async_trait(?Send)]
-impl IceTrickleScheme<CbChannel> for WasmTransport {
+impl IceTrickleScheme<CbChannel<Event>> for WasmTransport {
     // https://datatracker.ietf.org/doc/html/rfc5245
     // 1. Send (SdpOffer, IceCandidates) to remote
     // 2. Recv (SdpAnswer, IceCandidate) From Remote

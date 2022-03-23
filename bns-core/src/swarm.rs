@@ -10,32 +10,47 @@ use crate::types::ice_transport::IceTransportCallback;
 use anyhow::anyhow;
 use anyhow::Result;
 use async_stream::stream;
+use async_trait::async_trait;
 use futures_core::Stream;
 use std::sync::Arc;
 use web3::types::Address;
 
 #[cfg(not(feature = "wasm"))]
-use crate::channels::default::AcChannel as Channel;
+use crate::channels::default::{recv, AcChannel as Channel};
 #[cfg(feature = "wasm")]
-use crate::channels::wasm::CbChannel as Channel;
+use crate::channels::wasm::{recv, CbChannel as Channel};
 
 #[cfg(not(feature = "wasm"))]
 use crate::transports::default::DefaultTransport as Transport;
 #[cfg(feature = "wasm")]
 use crate::transports::wasm::WasmTransport as Transport;
 
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+pub trait TransportManager {
+    type Transport;
+    async fn new_transport(&self) -> Result<Self::Transport>;
+    async fn register(&self, address: &Address, trans: Self::Transport) -> Result<()>;
+    fn get_transport(&self, address: &Address) -> Option<Self::Transport>;
+    async fn get_or_register(
+        &self,
+        address: &Address,
+        default: Self::Transport,
+    ) -> Result<Self::Transport>;
+}
+
 pub struct Swarm {
-    pub table: MemStorage<Address, Arc<Transport>>,
-    pub signaler: Arc<Channel>,
-    pub stun_server: String,
+    table: MemStorage<Address, Arc<Transport>>,
+    transport_event_channel: Channel<Event>,
+    stun_server: String,
     pub key: SecretKey,
 }
 
 impl Swarm {
-    pub fn new(ch: Arc<Channel>, stun: &str, key: SecretKey) -> Self {
+    pub fn new(stun: &str, key: SecretKey) -> Self {
         Self {
             table: MemStorage::<Address, Arc<Transport>>::new(),
-            signaler: Arc::clone(&ch),
+            transport_event_channel: Channel::new(1),
             stun_server: stun.into(),
             key,
         }
@@ -43,50 +58,6 @@ impl Swarm {
 
     pub fn address(&self) -> Address {
         self.key.address()
-    }
-
-    pub async fn new_transport(&self) -> Result<Arc<Transport>> {
-        let mut ice_transport = Transport::new(self.signaler());
-        ice_transport
-            .start(self.stun_server.as_str())
-            .await?
-            .apply_callback()
-            .await?;
-        Ok(Arc::new(ice_transport))
-    }
-
-    /// register to swarm table
-    /// should not wait connection statues here
-    /// a connection `Promise` may cause deadlock of both end
-    pub async fn register(&self, address: &Address, trans: Arc<Transport>) -> Result<()> {
-        let prev_trans = self.table.set(address, trans);
-        if let Some(trans) = prev_trans {
-            if let Err(e) = trans.close().await {
-                log::error!("failed to close previous while registering {:?}", e);
-            }
-        }
-
-        Ok(())
-    }
-
-    pub fn get_transport(&self, address: &Address) -> Option<Arc<Transport>> {
-        self.table.get(address)
-    }
-
-    pub async fn get_or_register(
-        &self,
-        address: &Address,
-        default: Arc<Transport>,
-    ) -> Result<Arc<Transport>> {
-        if !default.is_connected().await {
-            return Err(anyhow!("default transport is not connected"));
-        }
-
-        Ok(self.table.get_or_set(address, default))
-    }
-
-    pub fn signaler(&self) -> Arc<Channel> {
-        Arc::clone(&self.signaler)
     }
 
     pub async fn send_message(
@@ -119,13 +90,63 @@ impl Swarm {
         'a: 'b,
     {
         stream! {
+            let receiver = &self.transport_event_channel.receiver();
             loop {
-                let ev = self.signaler().recv().await;
+                let ev = recv(receiver).await;
                 if let Ok(msg) = Self::load_message(ev) {
                     yield msg
                 }
             }
         }
+    }
+}
+
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl TransportManager for Swarm {
+    type Transport = Arc<Transport>;
+
+    async fn new_transport(&self) -> Result<Self::Transport> {
+        let event_sender = self.transport_event_channel.sender();
+        let mut ice_transport = Transport::new(event_sender);
+
+        ice_transport
+            .start(self.stun_server.as_str())
+            .await?
+            .apply_callback()
+            .await?;
+
+        Ok(Arc::new(ice_transport))
+    }
+
+    /// register to swarm table
+    /// should not wait connection statues here
+    /// a connection `Promise` may cause deadlock of both end
+    async fn register(&self, address: &Address, trans: Self::Transport) -> Result<()> {
+        let prev_trans = self.table.set(address, trans);
+        if let Some(trans) = prev_trans {
+            if let Err(e) = trans.close().await {
+                log::error!("failed to close previous while registering {:?}", e);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn get_transport(&self, address: &Address) -> Option<Self::Transport> {
+        self.table.get(address)
+    }
+
+    async fn get_or_register(
+        &self,
+        address: &Address,
+        default: Self::Transport,
+    ) -> Result<Self::Transport> {
+        if !default.is_connected().await {
+            return Err(anyhow!("default transport is not connected"));
+        }
+
+        Ok(self.table.get_or_set(address, default))
     }
 }
 
@@ -137,10 +158,9 @@ mod tests {
     use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 
     fn new_swarm() -> Swarm {
-        let ch = Arc::new(Channel::new(1));
         let stun = "stun:stun.l.google.com:19302";
         let key = SecretKey::random();
-        Swarm::new(ch, stun, key)
+        Swarm::new(stun, key)
     }
 
     #[tokio::test]

@@ -1,11 +1,9 @@
 #![feature(async_closure)]
 use anyhow::Result;
-use bns_core::channels::default::AcChannel;
 use bns_core::dht::Chord;
 use bns_core::ecc::SecretKey;
 use bns_core::message::handler::MessageHandler;
 use bns_core::swarm::Swarm;
-use bns_core::types::channel::Channel;
 use bns_node::logger::Logger;
 use bns_node::service::run_service;
 use clap::Parser;
@@ -38,7 +36,7 @@ pub struct Args {
 
 async fn run(http_addr: String, key: SecretKey, stun: &str) {
     let dht = Arc::new(Mutex::new(Chord::new(key.address().into())));
-    let swarm = Arc::new(Swarm::new(Arc::new(AcChannel::new(1)), stun, key));
+    let swarm = Arc::new(Swarm::new(stun, key));
 
     let listen_event = MessageHandler::new(dht.clone(), swarm.clone());
     //let stabilize_event = MessageHandler::new(dht.clone(), swarm.clone());

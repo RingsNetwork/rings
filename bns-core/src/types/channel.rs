@@ -1,4 +1,3 @@
-use anyhow::Result;
 use async_trait::async_trait;
 
 #[derive(Debug, Clone)]
@@ -16,6 +15,4 @@ pub trait Channel {
     fn new(buffer: usize) -> Self;
     fn sender(&self) -> Self::Sender;
     fn receiver(&self) -> Self::Receiver;
-    async fn send(&self, e: Event) -> Result<()>;
-    async fn recv(&self) -> Result<Event>;
 }

@@ -38,17 +38,18 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 
 type Fut = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+type EventSender = <AcChannel<Event> as Channel>::Sender;
 
 #[derive(Clone)]
 pub struct DefaultTransport {
-    pub connection: Arc<Mutex<Option<Arc<RTCPeerConnection>>>>,
-    pub pending_candidates: Arc<Mutex<Vec<RTCIceCandidate>>>,
-    pub data_channel: Arc<Mutex<Option<Arc<RTCDataChannel>>>>,
-    pub signaler: Arc<AcChannel>,
+    connection: Arc<Mutex<Option<Arc<RTCPeerConnection>>>>,
+    pending_candidates: Arc<Mutex<Vec<RTCIceCandidate>>>,
+    data_channel: Arc<Mutex<Option<Arc<RTCDataChannel>>>>,
+    event_sender: EventSender,
 }
 
 #[async_trait]
-impl IceTransport<AcChannel> for DefaultTransport {
+impl IceTransport<AcChannel<Event>> for DefaultTransport {
     type Connection = RTCPeerConnection;
     type Candidate = RTCIceCandidate;
     type Sdp = RTCSessionDescription;
@@ -56,17 +57,13 @@ impl IceTransport<AcChannel> for DefaultTransport {
     type IceConnectionState = RTCIceConnectionState;
     type Msg = DataChannelMessage;
 
-    fn new(ch: Arc<AcChannel>) -> Self {
+    fn new(event_sender: EventSender) -> Self {
         Self {
             connection: Arc::new(Mutex::new(None)),
             pending_candidates: Arc::new(Mutex::new(vec![])),
             data_channel: Arc::new(Mutex::new(None)),
-            signaler: Arc::clone(&ch),
+            event_sender,
         }
-    }
-
-    fn signaler(&self) -> Arc<AcChannel> {
-        Arc::clone(&self.signaler)
     }
 
     async fn start(&mut self, stun: &str) -> Result<&Self> {
@@ -249,7 +246,7 @@ impl DefaultTransport {
 }
 
 #[async_trait]
-impl IceTransportCallback<AcChannel> for DefaultTransport {
+impl IceTransportCallback<AcChannel<Event>> for DefaultTransport {
     type OnLocalCandidateHdlrFn = Box<dyn FnMut(Option<Self::Candidate>) -> Fut + Send + Sync>;
     type OnDataChannelHdlrFn = Box<dyn FnMut(Arc<Self::DataChannel>) -> Fut + Send + Sync>;
 
@@ -274,7 +271,7 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
         let peer_connection = self.get_peer_connection().await;
         let pending_candidates = Arc::clone(&self.pending_candidates);
 
-        box move |c: Option<<Self as IceTransport<AcChannel>>::Candidate>| {
+        box move |c: Option<<Self as IceTransport<AcChannel<Event>>>::Candidate>| {
             let peer_connection = peer_connection.clone();
             let pending_candidates = Arc::clone(&pending_candidates);
             Box::pin(async move {
@@ -293,17 +290,17 @@ impl IceTransportCallback<AcChannel> for DefaultTransport {
     }
 
     async fn on_data_channel(&self) -> Self::OnDataChannelHdlrFn {
-        let signaler = self.signaler();
+        let event_sender1 = self.event_sender.clone();
 
         box move |d: Arc<RTCDataChannel>| {
-            let signaler = Arc::clone(&signaler);
+            let event_sender2 = event_sender1.clone();
 
             Box::pin(async move {
                 d.on_message(Box::new(move |msg: DataChannelMessage| {
                     log::debug!("Message from DataChannel: '{:?}'", msg);
-                    let signaler = Arc::clone(&signaler);
+                    let event_sender = event_sender2.clone();
                     Box::pin(async move {
-                        if signaler
+                        if event_sender
                             .send(Event::ReceiveMsg(msg.data.to_vec()))
                             .await
                             .is_err()
@@ -325,7 +322,7 @@ pub struct TricklePayload {
 }
 
 #[async_trait]
-impl IceTrickleScheme<AcChannel> for DefaultTransport {
+impl IceTrickleScheme<AcChannel<Event>> for DefaultTransport {
     // https://datatracker.ietf.org/doc/html/rfc5245
     // 1. Send (SdpOffer, IceCandidates) to remote
     // 2. Recv (SdpAnswer, IceCandidate) From Remote
@@ -443,12 +440,10 @@ impl DefaultTransport {
 pub mod tests {
     use super::DefaultTransport as Transport;
     use super::*;
-    use crate::channels::default::AcChannel as Channel;
-    use crate::types::channel::Channel as ChannelTrait;
 
     async fn prepare_transport() -> Result<Transport> {
-        let ch = Arc::new(Channel::new(1));
-        let mut trans = Transport::new(ch);
+        let ch = Arc::new(AcChannel::new(1));
+        let mut trans = Transport::new(ch.sender());
         let stun = "stun:stun.l.google.com:19302";
         trans.start(stun).await?.apply_callback().await?;
         Ok(trans)

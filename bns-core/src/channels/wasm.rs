@@ -1,24 +1,25 @@
 use crate::types::channel::Channel;
-use crate::types::channel::Event;
 /// ref: https://github.com/Ciantic/rust-shared-wasm-experiments/blob/master/src/lib.rs
-use anyhow::Result;
 use async_trait::async_trait;
 //use crossbeam_channel as cbc;
+use anyhow::Result;
 use futures::channel::mpsc;
 use futures::lock::Mutex;
-use futures::SinkExt;
 use std::sync::Arc;
 
+type Sender<T> = Arc<Mutex<mpsc::Sender<T>>>;
+type Receiver<T> = Arc<Mutex<mpsc::Receiver<T>>>;
+
 #[derive(Debug)]
-pub struct CbChannel {
-    sender: Arc<Mutex<mpsc::Sender<Event>>>,
-    receiver: Arc<Mutex<mpsc::Receiver<Event>>>,
+pub struct CbChannel<T> {
+    sender: Sender<T>,
+    receiver: Receiver<T>,
 }
 
 #[async_trait(?Send)]
-impl Channel for CbChannel {
-    type Sender = Arc<Mutex<mpsc::Sender<Event>>>;
-    type Receiver = Arc<Mutex<mpsc::Receiver<Event>>>;
+impl<T> Channel for CbChannel<T> {
+    type Sender = Sender<T>;
+    type Receiver = Receiver<T>;
 
     fn new(buffer: usize) -> Self {
         let (tx, rx) = mpsc::channel(buffer);
@@ -35,18 +36,13 @@ impl Channel for CbChannel {
     fn receiver(&self) -> Self::Receiver {
         self.receiver.clone()
     }
+}
 
-    async fn send(&self, e: Event) -> Result<()> {
-        let mut sender = self.sender.lock().await;
-        Ok(sender.send(e).await?)
-    }
-
-    async fn recv(&self) -> Result<Event> {
-        let mut receiver = self.receiver.lock().await;
-        match receiver.try_next() {
-            Ok(Some(e)) => Ok(e),
-            Ok(None) => Err(anyhow::anyhow!("received empty msg")),
-            Err(e) => Err(anyhow::anyhow!(e)),
-        }
+pub async fn recv<T>(receiver: &Mutex<mpsc::Receiver<T>>) -> Result<T> {
+    let mut receiver = receiver.lock().await;
+    match receiver.try_next() {
+        Ok(Some(e)) => Ok(e),
+        Ok(None) => Err(anyhow::anyhow!("received empty msg")),
+        Err(e) => Err(anyhow::anyhow!(e)),
     }
 }
