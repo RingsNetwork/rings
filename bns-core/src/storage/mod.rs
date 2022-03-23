@@ -13,6 +13,10 @@ pub trait Storage {
     fn get(&self, addr: &Self::K) -> Option<Self::V>;
     fn set(&self, addr: &Self::K, value: Self::V) -> Option<Self::V>;
     fn get_or_set(&self, addr: &Self::K, default: Self::V) -> Self::V;
+    fn keys(&self) -> Vec<Self::K>;
+    fn values(&self) -> Vec<Self::V>;
+    fn items(&self) -> Vec<(Self::K, Self::V)>;
+    fn remove(&self, addr: &Self::K) -> Option<(Self::K, Self::V)>;
 }
 
 #[cfg(test)]

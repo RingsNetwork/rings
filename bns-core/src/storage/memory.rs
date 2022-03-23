@@ -40,4 +40,27 @@ where
             .value()
             .clone()
     }
+
+    fn keys(&self) -> Vec<Self::K> {
+        self.table.clone().into_iter().map(|(k, _v)| k).collect()
+    }
+
+    fn values(&self) -> Vec<Self::V> {
+        self.table.clone().into_iter().map(|(_k, v)| v).collect()
+    }
+
+    fn items(&self) -> Vec<(Self::K, Self::V)> {
+        self.table
+            .clone()
+            .into_iter()
+            .map(|(k, v)| (k, v))
+            .collect()
+    }
+
+    fn remove(&self, addr: &Self::K) -> Option<(Self::K, Self::V)> {
+        match self.get(addr) {
+            Some(_) => self.table.remove(addr),
+            None => None,
+        }
+    }
 }

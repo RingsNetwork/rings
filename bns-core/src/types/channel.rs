@@ -1,10 +1,21 @@
 use anyhow::Result;
+use serde::Deserialize;
+use serde::Serialize;
 use async_trait::async_trait;
+use web3::types::Address;
 
 #[derive(Debug)]
 pub enum Event {
     ConnectFailed,
-    ReceiveMsg(Vec<u8>),
+    DirectMessage(ChannelMessage),
+    WrapperMessage(Vec<u8>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ChannelMessage {
+    Ping(Address),
+    Pong(Address),
+    OtherChannelMessage
 }
 
 #[async_trait]

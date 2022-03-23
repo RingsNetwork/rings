@@ -20,6 +20,7 @@ use serde::Serialize;
 use serde_json;
 use std::future::Future;
 use std::pin::Pin;
+use bytes::Bytes;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use web3::types::Address;
@@ -164,12 +165,34 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
     where
         T: Serialize + Send,
     {
-        let data = serde_json::to_string(&msg)?;
+        let data: Vec<u8> = serde_json::to_vec(&msg)?;
+        let size = data.len();
         match self.get_data_channel().await {
-            Some(cnn) => match cnn.send_text(data.to_owned()).await {
+            Some(cnn) => match cnn.send(&Bytes::from(data)).await {
                 Ok(s) => {
-                    if !s == data.to_owned().len() {
-                        Err(anyhow!("msg is not complete, {:?}!= {:?}", s, data.len()))
+                    if !s == size {
+                        Err(anyhow!("msg is not complete, {:?}!= {:?}", s, size))
+                    } else {
+                        Ok(())
+                    }
+                }
+                Err(e) => Err(anyhow!(e)),
+            },
+            None => Err(anyhow!("data channel may not ready")),
+        }
+    }
+
+    async fn send_message_with_str<T>(&self, msg: T) -> Result<()>
+    where
+        T: Serialize + Send,
+    {
+        let data: String = serde_json::to_string(&msg)?;
+        let size = data.len();
+        match self.get_data_channel().await {
+            Some(cnn) => match cnn.send_text(data).await {
+                Ok(s) => {
+                    if !s == size {
+                        Err(anyhow!("msg is not complete, {:?}!= {:?}", s, size))
                     } else {
                         Ok(())
                     }

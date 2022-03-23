@@ -53,6 +53,9 @@ pub trait IceTransport<E: Send, Ch: Channel<E>> {
     async fn send_message<T>(&self, msg: T) -> Result<()>
     where
         T: Serialize + Send;
+    async fn send_message_with_str<T>(&self, msg: T) -> Result<()>
+    where
+        T: Serialize + Send;
 
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
     where
