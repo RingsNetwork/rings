@@ -122,11 +122,8 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
     async fn get_answer(&self) -> Result<RTCSessionDescription> {
         match self.get_peer_connection().await {
             Some(peer_connection) => {
-                // wait gather candidates
-                let mut gather_complete = peer_connection.gathering_complete_promise().await;
                 let answer = peer_connection.create_answer(None).await?;
                 self.set_local_description(answer.to_owned()).await?;
-                let _ = gather_complete.recv().await;
                 Ok(answer)
             }
             None => Err(anyhow!("cannot get answer")),

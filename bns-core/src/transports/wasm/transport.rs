@@ -122,8 +122,6 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
                             answer.to_owned(),
                         ))
                         .await?;
-                        let promise = self.gather_complete_promise().await?;
-                        promise.await?;
                         Ok(answer.into())
                     }
                     Err(_) => Err(anyhow!("Failed to get answer")),
@@ -225,6 +223,7 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
         match &self.get_peer_connection().await {
             Some(c) => {
                 let cand = RtcIceCandidateInit::new(&candidate);
+                log::debug!("got candidate {:?}", &candidate);
                 let promise = c.add_ice_candidate_with_opt_rtc_ice_candidate_init(Some(&cand));
                 match JsFuture::from(promise).await {
                     Ok(_) => Ok(()),
@@ -278,7 +277,7 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
         let pending_candidates = Arc::clone(&self.pending_candidates);
         log::info!("binding ice candidate callback");
         box move |ev: RtcPeerConnectionIceEvent| {
-            log::info!("ice_Candidate {:?}", ev);
+            log::info!("ice_Candidate {:?}", ev.candidate());
             let mut candidates = pending_candidates.lock().unwrap();
             let peer_connection = peer_connection.clone();
             if let Some(candidate) = ev.candidate() {
@@ -320,7 +319,7 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct TricklePayload {
     pub sdp: String,
     pub candidates: Vec<IceCandidateSerializer>,
@@ -365,7 +364,7 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
 
     async fn register_remote_info(&self, data: Encoded) -> anyhow::Result<Address> {
         let data: MessageRelay<TricklePayload> = data.try_into()?;
-        log::trace!("register remote info: {:?}", data);
+        log::debug!("register remote info: {:?}", &data);
 
         match data.verify() {
             true => {
@@ -373,7 +372,7 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
                 self.set_remote_description(sdp.to_owned()).await?;
                 log::trace!("setting remote candidate");
                 for c in data.data.candidates {
-                    log::trace!("add candiates: {:?}", c);
+                    log::debug!("add remote candiates: {:?}", c);
                     self.add_ice_candidate(c.candidate.to_owned()).await?;
                 }
                 Ok(data.addr)
