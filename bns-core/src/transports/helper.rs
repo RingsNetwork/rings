@@ -24,7 +24,7 @@ pub struct IceCandidateSerializer {
     pub candidate: String,
     pub sdp_mid: String,
     pub sdp_m_line_index: u16,
-    pub username_fragment: String,
+    pub username_fragment: Option<String>,
 }
 
 #[derive(Default)]

@@ -10,7 +10,7 @@ impl From<RTCIceCandidateInit> for IceCandidateSerializer {
             candidate: cand.candidate.clone(),
             sdp_mid: cand.sdp_mid.clone(),
             sdp_m_line_index: cand.sdp_mline_index,
-            username_fragment: cand.username_fragment,
+            username_fragment: Some(cand.username_fragment),
         }
     }
 }
@@ -21,7 +21,7 @@ impl From<IceCandidateSerializer> for RTCIceCandidateInit {
             candidate: cand.candidate.clone(),
             sdp_mid: cand.sdp_mid.clone(),
             sdp_mline_index: cand.sdp_m_line_index,
-            username_fragment: cand.username_fragment,
+            username_fragment: cand.username_fragment.unwrap(),
         }
     }
 }
