@@ -9,7 +9,7 @@ use web3::types::Address;
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-pub trait IceTransport<Ch: Channel> {
+pub trait IceTransport<E: Send, Ch: Channel<E>> {
     type Connection;
     type Candidate;
     type Sdp;
@@ -45,7 +45,7 @@ pub trait IceTransport<Ch: Channel> {
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-pub trait IceTransportCallback<Ch: Channel>: IceTransport<Ch> {
+pub trait IceTransportCallback<E: Send, Ch: Channel<E>>: IceTransport<E, Ch> {
     type OnLocalCandidateHdlrFn;
     type OnDataChannelHdlrFn;
     async fn apply_callback(&self) -> Result<&Self>;
@@ -55,7 +55,7 @@ pub trait IceTransportCallback<Ch: Channel>: IceTransport<Ch> {
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-pub trait IceTrickleScheme<Ch: Channel>: IceTransport<Ch> {
+pub trait IceTrickleScheme<E: Send, Ch: Channel<E>>: IceTransport<E, Ch> {
     type SdpType;
     async fn get_handshake_info(&self, key: SecretKey, kind: Self::SdpType) -> Result<Encoded>;
     async fn register_remote_info(&self, data: Encoded) -> Result<Address>;

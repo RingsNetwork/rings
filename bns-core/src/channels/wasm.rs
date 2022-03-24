@@ -16,8 +16,8 @@ pub struct CbChannel<T> {
     receiver: Receiver<T>,
 }
 
-#[async_trait(?Send)]
-impl<T> Channel for CbChannel<T> {
+#[async_trait]
+impl<T: Send> Channel<T> for CbChannel<T> {
     type Sender = Sender<T>;
     type Receiver = Receiver<T>;
 
@@ -36,13 +36,21 @@ impl<T> Channel for CbChannel<T> {
     fn receiver(&self) -> Self::Receiver {
         self.receiver.clone()
     }
-}
 
-pub async fn recv<T>(receiver: &Mutex<mpsc::Receiver<T>>) -> Result<T> {
-    let mut receiver = receiver.lock().await;
-    match receiver.try_next() {
-        Ok(Some(e)) => Ok(e),
-        Ok(None) => Err(anyhow::anyhow!("received empty msg")),
-        Err(e) => Err(anyhow::anyhow!(e)),
+    async fn send(sender: &Self::Sender, msg: T) -> Result<()> {
+        let mut sender = sender.lock().await;
+        match sender.try_send(msg) {
+            Ok(()) => Ok(()),
+            Err(_) => Err(anyhow::anyhow!("failed on sending message")),
+        }
+    }
+
+    async fn recv(receiver: &Self::Receiver) -> Result<Option<T>> {
+        let mut receiver = receiver.lock().await;
+        match receiver.try_next() {
+            Err(e) => Err(anyhow::anyhow!(e)),
+            Ok(Some(x)) => Ok(Some(x)),
+            Ok(None) => Ok(None),
+        }
     }
 }
