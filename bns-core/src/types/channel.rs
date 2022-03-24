@@ -1,7 +1,7 @@
 use anyhow::Result;
+use async_trait::async_trait;
 use serde::Deserialize;
 use serde::Serialize;
-use async_trait::async_trait;
 use web3::types::Address;
 
 #[derive(Debug)]
@@ -15,7 +15,7 @@ pub enum Event {
 pub enum ChannelMessage {
     Ping(Address),
     Pong(Address),
-    OtherChannelMessage
+    OtherChannelMessage,
 }
 
 #[async_trait]

@@ -15,6 +15,9 @@ use crate::types::ice_transport::IceTrickleScheme;
 use crate::types::ice_transport::IceTransport;
 use crate::types::channel::Event;
 use crate::types::channel::ChannelMessage;
+use crate::types::channel::Event;
+use crate::types::ice_transport::IceTransport;
+use crate::types::ice_transport::IceTrickleScheme;
 use anyhow::anyhow;
 use anyhow::Result;
 use futures::lock::Mutex;
@@ -334,32 +337,28 @@ impl MessageHandler {
                         log::error!("Error in handle_message: {}", e);
                     }
                 }
-                Event::DirectMessage(msg) => {
-                    match msg {
-                        ChannelMessage::Ping(addr) => {
-                            match self.swarm.get_transport(&addr) {
-                                Some(trans) => {
-                                    let channel_message = ChannelMessage::Pong(self.swarm.address());
-                                    match trans.send_message_with_str(channel_message).await {
-                                        Ok(_) => {
-                                            log::info!("Send direct message success");
-                                        }
-                                        Err(e) => {
-                                            log::error!("Failed to send direct message, {:?}", e);
-                                            self.swarm.table.remove(&addr);
-                                        }
-                                    }
+                Event::DirectMessage(msg) => match msg {
+                    ChannelMessage::Ping(addr) => match self.swarm.get_transport(&addr) {
+                        Some(trans) => {
+                            let channel_message = ChannelMessage::Pong(self.swarm.address());
+                            match trans.send_message_with_str(channel_message).await {
+                                Ok(_) => {
+                                    log::info!("Send direct message success");
                                 }
-                                None => {
-                                    log::error!("Cannot find transports from {:?}", addr);
+                                Err(e) => {
+                                    log::error!("Failed to send direct message, {:?}", e);
+                                    self.swarm.table.remove(&addr);
                                 }
                             }
                         }
-                        _ => {
-                            log::debug!("OtherDirectMessage")
+                        None => {
+                            log::error!("Cannot find transports from {:?}", addr);
                         }
+                    },
+                    _ => {
+                        log::debug!("OtherDirectMessage")
                     }
-                }
+                },
                 _ => {
                     log::error!("ConnectFailed");
                 }
@@ -374,7 +373,8 @@ impl MessageHandler {
         while let Some(message) = iter_messages.next().await {
             match message {
                 Event::WrapperMessage(msg) => {
-                   let relay_message = serde_json::from_slice::<MessageRelay<Message>>(&msg).unwrap();
+                    let relay_message =
+                        serde_json::from_slice::<MessageRelay<Message>>(&msg).unwrap();
                     if relay_message.is_expired() || !relay_message.verify() {
                         log::error!("Cannot verify msg or it's expired: {:?}", relay_message);
                     }
@@ -386,32 +386,28 @@ impl MessageHandler {
                         log::error!("Error in handle_message: {}", e);
                     }
                 }
-                Event::DirectMessage(msg) => {
-                    match msg {
-                        ChannelMessage::Ping(addr) => {
-                            match self.swarm.get_transport(&addr) {
-                                Some(trans) => {
-                                    let channel_message = ChannelMessage::Pong(self.swarm.address());
-                                    match trans.send_message_with_str(channel_message).await {
-                                        Ok(_) => {
-                                            log::info!("Send direct message success");
-                                        }
-                                        Err(e) => {
-                                            log::error!("Failed to send direct message, {:?}", e);
-                                            self.swarm.table.remove(&addr);
-                                        }
-                                    }
+                Event::DirectMessage(msg) => match msg {
+                    ChannelMessage::Ping(addr) => match self.swarm.get_transport(&addr) {
+                        Some(trans) => {
+                            let channel_message = ChannelMessage::Pong(self.swarm.address());
+                            match trans.send_message_with_str(channel_message).await {
+                                Ok(_) => {
+                                    log::info!("Send direct message success");
                                 }
-                                None => {
-                                    log::error!("Cannot find transports from {:?}", addr);
+                                Err(e) => {
+                                    log::error!("Failed to send direct message, {:?}", e);
+                                    self.swarm.table.remove(&addr);
                                 }
                             }
                         }
-                        _ => {
-                            log::debug!("OtherDirectMessage")
+                        None => {
+                            log::error!("Cannot find transports from {:?}", addr);
                         }
+                    },
+                    _ => {
+                        log::debug!("OtherDirectMessage")
                     }
-                }
+                },
                 _ => {
                     log::error!("ConnectFailed");
                 }
