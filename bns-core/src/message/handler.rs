@@ -4,7 +4,7 @@ use crate::message::{
     MessageRelay, MessageRelayMethod, MessageSessionRelayProtocol, NotifiedPredecessor,
     NotifyPredecessor,
 };
-use crate::swarm::Swarm;
+use crate::swarm::{Swarm, TransportManager};
 use crate::types::ice_transport::IceTrickleScheme;
 use anyhow::anyhow;
 use anyhow::Result;

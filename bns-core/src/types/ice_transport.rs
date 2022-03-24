@@ -17,8 +17,7 @@ pub trait IceTransport<Ch: Channel> {
     type IceConnectionState;
     type Msg;
 
-    fn new(signaler: Arc<Ch>) -> Self;
-    fn signaler(&self) -> Arc<Ch>;
+    fn new(event_sender: Ch::Sender) -> Self;
     async fn start(&mut self, stun_addr: &str) -> Result<&Self>;
     async fn close(&self) -> Result<()>;
     async fn ice_connection_state(&self) -> Option<Self::IceConnectionState>;
