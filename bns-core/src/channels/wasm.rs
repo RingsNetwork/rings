@@ -41,7 +41,7 @@ impl<T: Send> Channel<T> for CbChannel<T> {
         let mut sender = sender.lock().await;
         match sender.try_send(msg) {
             Ok(()) => Ok(()),
-            Err(_) => Err(anyhow::anyhow!("failed on sending message"))
+            Err(_) => Err(anyhow::anyhow!("failed on sending message")),
         }
     }
 
@@ -50,7 +50,7 @@ impl<T: Send> Channel<T> for CbChannel<T> {
         match receiver.try_next() {
             Err(e) => Err(anyhow::anyhow!(e)),
             Ok(Some(x)) => Ok(Some(x)),
-            Ok(None) => Ok(None)
+            Ok(None) => Ok(None),
         }
     }
 }

@@ -7,6 +7,7 @@ use crate::message::MessageRelayMethod;
 use crate::transports::helper::IceCandidateSerializer;
 use crate::transports::helper::Promise;
 use crate::transports::helper::State;
+use crate::types::channel::Channel;
 use crate::types::channel::Event;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
@@ -26,9 +27,10 @@ use std::sync::Mutex;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
-use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_futures::spawn_local;
+use wasm_bindgen_futures::JsFuture;
 use web3::types::Address;
+use web_sys::MessageEvent;
 use web_sys::RtcConfiguration;
 use web_sys::RtcDataChannel;
 use web_sys::RtcDataChannelEvent;
@@ -41,8 +43,6 @@ use web_sys::RtcPeerConnectionIceEvent;
 use web_sys::RtcSdpType;
 use web_sys::RtcSessionDescription;
 use web_sys::RtcSessionDescriptionInit;
-use web_sys::MessageEvent;
-use crate::types::channel::Channel;
 
 type EventSender = Arc<FuturesMutex<mpsc::Sender<Event>>>;
 
@@ -295,24 +295,25 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
         box move |ev: RtcDataChannelEvent| {
             let event_sender = Arc::clone(&event_sender);
             let ch = ev.channel();
-            let on_message_cb = Closure::wrap((box move |ev: MessageEvent| {
-                let event_sender = Arc::clone(&event_sender);
-                match ev.data().as_string() {
-                    Some(msg) => {
-                        spawn_local(
-                            async move {
-                                let event_sender = Arc::clone(&event_sender);
-                                if CbChannel::send(&event_sender, Event::ReceiveMsg(msg.into_bytes())).await.is_err() {
-                                    log::error!("Failed on handle msg");
-                                }
+            let on_message_cb = Closure::wrap(
+                (box move |ev: MessageEvent| {
+                    let event_sender = Arc::clone(&event_sender);
+                    match ev.data().as_string() {
+                        Some(msg) => spawn_local(async move {
+                            let event_sender = Arc::clone(&event_sender);
+                            if CbChannel::send(&event_sender, Event::ReceiveMsg(msg.into_bytes()))
+                                .await
+                                .is_err()
+                            {
+                                log::error!("Failed on handle msg");
                             }
-                        )
+                        }),
+                        None => {
+                            log::error!("Failed on handle msg");
+                        }
                     }
-                    None => {
-                        log::error!("Failed on handle msg");
-                    }
-                }
-            }) as Box<dyn FnMut(MessageEvent)>);
+                }) as Box<dyn FnMut(MessageEvent)>,
+            );
             ch.set_onmessage(Some(on_message_cb.as_ref().unchecked_ref()));
             on_message_cb.forget();
         }

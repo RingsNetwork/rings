@@ -34,14 +34,14 @@ impl<T: Send> Channel<T> for AcChannel<T> {
     async fn send(sender: &Self::Sender, msg: T) -> Result<()> {
         match sender.send(msg).await {
             Ok(_) => Ok(()),
-            Err(_) => Err(anyhow::anyhow!("failed on sending message"))
+            Err(_) => Err(anyhow::anyhow!("failed on sending message")),
         }
     }
 
     async fn recv(receiver: &Self::Receiver) -> Result<Option<T>> {
         match receiver.recv().await {
             Ok(v) => Ok(Some(v)),
-            Err(e) => Err(anyhow::anyhow!(e))
+            Err(e) => Err(anyhow::anyhow!(e)),
         }
     }
 }

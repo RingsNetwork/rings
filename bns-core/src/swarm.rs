@@ -80,10 +80,8 @@ impl Swarm {
             Some(Event::ReceiveMsg(msg)) => {
                 let payload = serde_json::from_slice::<MessageRelay<Message>>(&msg)?;
                 Ok(Some(payload))
-            },
-            None => {
-                Ok(None)
             }
+            None => Ok(None),
             x => Err(anyhow!(format!("Receive {:?}", x))),
         }
     }
@@ -96,10 +94,9 @@ impl Swarm {
         match Self::load_message(ev) {
             Ok(Some(msg)) => Some(msg),
             Ok(None) => None,
-            Err(_) => None
+            Err(_) => None,
         }
     }
-
 
     pub fn iter_messages<'a, 'b>(&'a self) -> impl Stream<Item = MessageRelay<Message>> + 'b
     where
