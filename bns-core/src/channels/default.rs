@@ -11,7 +11,7 @@ pub struct AcChannel<T> {
 }
 
 #[async_trait]
-impl<T> Channel for AcChannel<T> {
+impl<T: Send> Channel<T> for AcChannel<T> {
     type Sender = Sender<T>;
     type Receiver = Receiver<T>;
 
@@ -30,8 +30,18 @@ impl<T> Channel for AcChannel<T> {
     fn receiver(&self) -> Self::Receiver {
         self.receiver.clone()
     }
-}
 
-pub async fn recv<T>(receiver: &Receiver<T>) -> Result<T> {
-    receiver.recv().await.map_err(|e| anyhow::anyhow!(e))
+    async fn send(sender: &Self::Sender, msg: T) -> Result<()> {
+        match sender.send(msg).await {
+            Ok(_) => Ok(()),
+            Err(_) => Err(anyhow::anyhow!("failed on sending message"))
+        }
+    }
+
+    async fn recv(receiver: &Self::Receiver) -> Result<Option<T>> {
+        match receiver.recv().await {
+            Ok(v) => Ok(Some(v)),
+            Err(e) => Err(anyhow::anyhow!(e))
+        }
+    }
 }

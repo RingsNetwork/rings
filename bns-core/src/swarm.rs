@@ -16,9 +16,9 @@ use std::sync::Arc;
 use web3::types::Address;
 
 #[cfg(not(feature = "wasm"))]
-use crate::channels::default::{recv, AcChannel as Channel};
+use crate::channels::default::AcChannel as Channel;
 #[cfg(feature = "wasm")]
-use crate::channels::wasm::{recv, CbChannel as Channel};
+use crate::channels::wasm::CbChannel as Channel;
 
 #[cfg(not(feature = "wasm"))]
 use crate::transports::default::DefaultTransport as Transport;
@@ -71,19 +71,35 @@ impl Swarm {
         }
     }
 
-    fn load_message(ev: Result<Event>) -> Result<MessageRelay<Message>> {
+    fn load_message(ev: Result<Option<Event>>) -> Result<Option<MessageRelay<Message>>> {
         // TODO: How to deal with events that is not message? Use mpmc?
 
         let ev = ev?;
 
         match ev {
-            Event::ReceiveMsg(msg) => {
+            Some(Event::ReceiveMsg(msg)) => {
                 let payload = serde_json::from_slice::<MessageRelay<Message>>(&msg)?;
-                Ok(payload)
+                Ok(Some(payload))
+            },
+            None => {
+                Ok(None)
             }
             x => Err(anyhow!(format!("Receive {:?}", x))),
         }
     }
+
+    /// This method is required because web-sys components is not `Send`
+    /// which means an async loop cannot running concurrency.
+    pub async fn poll_message(&self) -> Option<MessageRelay<Message>> {
+        let receiver = &self.transport_event_channel.receiver();
+        let ev = Channel::recv(receiver).await;
+        match Self::load_message(ev) {
+            Ok(Some(msg)) => Some(msg),
+            Ok(None) => None,
+            Err(_) => None
+        }
+    }
+
 
     pub fn iter_messages<'a, 'b>(&'a self) -> impl Stream<Item = MessageRelay<Message>> + 'b
     where
@@ -92,8 +108,8 @@ impl Swarm {
         stream! {
             let receiver = &self.transport_event_channel.receiver();
             loop {
-                let ev = recv(receiver).await;
-                if let Ok(msg) = Self::load_message(ev) {
+                let ev = Channel::recv(receiver).await;
+                if let Ok(Some(msg)) = Self::load_message(ev) {
                     yield msg
                 }
             }

@@ -38,7 +38,7 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 
 type Fut = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
-type EventSender = <AcChannel<Event> as Channel>::Sender;
+type EventSender = <AcChannel<Event> as Channel<Event>>::Sender;
 
 #[derive(Clone)]
 pub struct DefaultTransport {
@@ -49,7 +49,7 @@ pub struct DefaultTransport {
 }
 
 #[async_trait]
-impl IceTransport<AcChannel<Event>> for DefaultTransport {
+impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
     type Connection = RTCPeerConnection;
     type Candidate = RTCIceCandidate;
     type Sdp = RTCSessionDescription;
@@ -246,7 +246,7 @@ impl DefaultTransport {
 }
 
 #[async_trait]
-impl IceTransportCallback<AcChannel<Event>> for DefaultTransport {
+impl IceTransportCallback<Event, AcChannel<Event>> for DefaultTransport {
     type OnLocalCandidateHdlrFn = Box<dyn FnMut(Option<Self::Candidate>) -> Fut + Send + Sync>;
     type OnDataChannelHdlrFn = Box<dyn FnMut(Arc<Self::DataChannel>) -> Fut + Send + Sync>;
 
@@ -271,7 +271,7 @@ impl IceTransportCallback<AcChannel<Event>> for DefaultTransport {
         let peer_connection = self.get_peer_connection().await;
         let pending_candidates = Arc::clone(&self.pending_candidates);
 
-        box move |c: Option<<Self as IceTransport<AcChannel<Event>>>::Candidate>| {
+        box move |c: Option<<Self as IceTransport<Event, AcChannel<Event>>>::Candidate>| {
             let peer_connection = peer_connection.clone();
             let pending_candidates = Arc::clone(&pending_candidates);
             Box::pin(async move {
@@ -290,15 +290,15 @@ impl IceTransportCallback<AcChannel<Event>> for DefaultTransport {
     }
 
     async fn on_data_channel(&self) -> Self::OnDataChannelHdlrFn {
-        let event_sender1 = self.event_sender.clone();
+        let event_sender = self.event_sender.clone();
 
         box move |d: Arc<RTCDataChannel>| {
-            let event_sender2 = event_sender1.clone();
+            let event_sender = event_sender.clone();
 
             Box::pin(async move {
                 d.on_message(Box::new(move |msg: DataChannelMessage| {
                     log::debug!("Message from DataChannel: '{:?}'", msg);
-                    let event_sender = event_sender2.clone();
+                    let event_sender = event_sender.clone();
                     Box::pin(async move {
                         if event_sender
                             .send(Event::ReceiveMsg(msg.data.to_vec()))
@@ -322,7 +322,7 @@ pub struct TricklePayload {
 }
 
 #[async_trait]
-impl IceTrickleScheme<AcChannel<Event>> for DefaultTransport {
+impl IceTrickleScheme<Event, AcChannel<Event>> for DefaultTransport {
     // https://datatracker.ietf.org/doc/html/rfc5245
     // 1. Send (SdpOffer, IceCandidates) to remote
     // 2. Recv (SdpAnswer, IceCandidate) From Remote

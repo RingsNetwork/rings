@@ -27,6 +27,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
+use wasm_bindgen_futures::spawn_local;
 use web3::types::Address;
 use web_sys::RtcConfiguration;
 use web_sys::RtcDataChannel;
@@ -40,6 +41,8 @@ use web_sys::RtcPeerConnectionIceEvent;
 use web_sys::RtcSdpType;
 use web_sys::RtcSessionDescription;
 use web_sys::RtcSessionDescriptionInit;
+use web_sys::MessageEvent;
+use crate::types::channel::Channel;
 
 type EventSender = Arc<FuturesMutex<mpsc::Sender<Event>>>;
 
@@ -52,7 +55,7 @@ pub struct WasmTransport {
 }
 
 #[async_trait(?Send)]
-impl IceTransport<CbChannel<Event>> for WasmTransport {
+impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
     type Connection = RtcPeerConnection;
     type Candidate = RtcIceCandidate;
     type Sdp = RtcSessionDescription;
@@ -247,7 +250,7 @@ impl WasmTransport {
 }
 
 #[async_trait(?Send)]
-impl IceTransportCallback<CbChannel<Event>> for WasmTransport {
+impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
     type OnLocalCandidateHdlrFn = Box<dyn FnMut(RtcPeerConnectionIceEvent) -> ()>;
     type OnDataChannelHdlrFn = Box<dyn FnMut(RtcDataChannelEvent) -> ()>;
 
@@ -288,7 +291,31 @@ impl IceTransportCallback<CbChannel<Event>> for WasmTransport {
     }
 
     async fn on_data_channel(&self) -> Self::OnDataChannelHdlrFn {
-        box move |_: RtcDataChannelEvent| {}
+        let event_sender = self.event_sender.clone();
+        box move |ev: RtcDataChannelEvent| {
+            let event_sender = Arc::clone(&event_sender);
+            let ch = ev.channel();
+            let on_message_cb = Closure::wrap((box move |ev: MessageEvent| {
+                let event_sender = Arc::clone(&event_sender);
+                match ev.data().as_string() {
+                    Some(msg) => {
+                        spawn_local(
+                            async move {
+                                let event_sender = Arc::clone(&event_sender);
+                                if CbChannel::send(&event_sender, Event::ReceiveMsg(msg.into_bytes())).await.is_err() {
+                                    log::error!("Failed on handle msg");
+                                }
+                            }
+                        )
+                    }
+                    None => {
+                        log::error!("Failed on handle msg");
+                    }
+                }
+            }) as Box<dyn FnMut(MessageEvent)>);
+            ch.set_onmessage(Some(on_message_cb.as_ref().unchecked_ref()));
+            on_message_cb.forget();
+        }
     }
 }
 
@@ -299,7 +326,7 @@ pub struct TricklePayload {
 }
 
 #[async_trait(?Send)]
-impl IceTrickleScheme<CbChannel<Event>> for WasmTransport {
+impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
     // https://datatracker.ietf.org/doc/html/rfc5245
     // 1. Send (SdpOffer, IceCandidates) to remote
     // 2. Recv (SdpAnswer, IceCandidate) From Remote
