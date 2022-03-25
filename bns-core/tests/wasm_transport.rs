@@ -1,21 +1,20 @@
 #[cfg(feature = "wasm")]
 #[cfg(test)]
 pub mod test {
-    use wasm_bindgen_test::*;
-    use bns_core::transports::wasm::WasmTransport as Transport;
-    use bns_core::types::ice_transport::IceTransport;
-    use bns_core::types::ice_transport::IceTrickleScheme;
-    use bns_core::types::ice_transport::IceTransportCallback;
-    use bns_core::types::channel::Channel;
+    use anyhow::Result;
     use bns_core::channels::wasm::CbChannel;
     use bns_core::ecc::SecretKey;
-    use anyhow::Result;
+    use bns_core::transports::wasm::WasmTransport as Transport;
+    use bns_core::types::channel::Channel;
+    use bns_core::types::ice_transport::IceTransport;
+    use bns_core::types::ice_transport::IceTransportCallback;
+    use bns_core::types::ice_transport::IceTrickleScheme;
     use std::sync::Arc;
-    use web_sys::RtcSdpType;
     use wasm_bindgen_test::wasm_bindgen_test_configure;
+    use wasm_bindgen_test::*;
+    use web_sys::RtcSdpType;
 
     wasm_bindgen_test_configure!(run_in_browser);
-
 
     async fn prepare_transport() -> Result<Transport> {
         let ch = Arc::new(CbChannel::new(1));
@@ -24,7 +23,6 @@ pub mod test {
         trans.start(stun).await?.apply_callback().await?;
         Ok(trans)
     }
-
 
     #[wasm_bindgen_test]
     async fn new_transport() {
@@ -63,6 +61,8 @@ pub mod test {
         let transport1 = prepare_transport().await.unwrap();
         let transport2 = prepare_transport().await.unwrap();
 
-        establish_connection(&transport1, &transport2).await.unwrap();
+        establish_connection(&transport1, &transport2)
+            .await
+            .unwrap();
     }
 }
