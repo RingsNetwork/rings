@@ -10,7 +10,6 @@ wasm = [
   "wasm-bindgen",
   "js-sys",
   "wasm-bindgen-futures",
-  "crossbeam-channel",
 ]
 
 [dependencies]
@@ -44,13 +43,12 @@ bytes = { version = "1.1.0", optional = true }
 async-channel = { version = "1.6.1", optional = true }
 
 # wasm
-wasm-bindgen = { version = "0.2.67", features = ["serde-serialize"], optional = true }
-wasm-bindgen-futures = { version = "0.4.17", optional = true }
-js-sys = { version = "0.3.44", optional = true }
-crossbeam-channel = { version = "0.5", optional = true }
+wasm-bindgen = { version = "0.2.79", features = ["serde-serialize"], optional = true }
+wasm-bindgen-futures = { version = "0.4.29", optional = true }
+js-sys = { version = "0.3.56", optional = true }
 
 [dependencies.web-sys]
-version = "0.3.9"
+version = "0.3.56"
 optional = true
 features = [
   "MessageEvent",
@@ -74,3 +72,8 @@ web3 = { package = "web3", version = "0.18.0", features = ["wasm"], default-feat
 
 [target.'cfg(not(target_family="wasm"))'.dependencies]
 web3 = { package = "web3", version = "0.18.0" }
+
+
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3.0"

@@ -121,7 +121,9 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
                         self.set_local_description(RtcSessionDescriptionWrapper::from(
                             answer.to_owned(),
                         ))
-                        .await?;
+                            .await?;
+                        let promise = self.gather_complete_promise().await?;
+                        promise.await?;
                         Ok(answer.into())
                     }
                     Err(_) => Err(anyhow!("Failed to get answer")),
