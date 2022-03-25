@@ -7,10 +7,10 @@ use crate::transports::helper::Promise;
 
 use crate::types::channel::Channel;
 use crate::types::channel::Event;
+use crate::types::ice_transport::IceCandidate;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
 use crate::types::ice_transport::IceTrickleScheme;
-use crate::types::ice_transport::IceCandidate;
 
 use anyhow::anyhow;
 use anyhow::Result;
@@ -28,7 +28,7 @@ use web3::types::Address;
 use webrtc::api::APIBuilder;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
-use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
+use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
 use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;

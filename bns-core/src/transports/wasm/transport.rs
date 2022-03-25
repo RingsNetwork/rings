@@ -8,10 +8,10 @@ use crate::transports::helper::Promise;
 use crate::transports::helper::State;
 use crate::types::channel::Channel;
 use crate::types::channel::Event;
+use crate::types::ice_transport::IceCandidate;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
 use crate::types::ice_transport::IceTrickleScheme;
-use crate::types::ice_transport::IceCandidate;
 use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -120,7 +120,7 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
                         self.set_local_description(RtcSessionDescriptionWrapper::from(
                             answer.to_owned(),
                         ))
-                            .await?;
+                        .await?;
                         let promise = self.gather_complete_promise().await?;
                         promise.await?;
                         Ok(answer.into())
@@ -230,7 +230,11 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
                     Ok(_) => Ok(()),
                     Err(e) => {
                         log::error!("failed to add ice candate");
-                        Err(anyhow!("Failed to add ice candidate:: {:?}, Error:: {:?}", &candidate, &e))
+                        Err(anyhow!(
+                            "Failed to add ice candidate:: {:?}, Error:: {:?}",
+                            &candidate,
+                            &e
+                        ))
                     }
                 }
             }
@@ -347,12 +351,7 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
             .get_pending_candidates()
             .await
             .iter()
-            .map(|c| {
-                c.clone()
-                    .to_json()
-                    .into_serde::<IceCandidate>()
-                    .unwrap()
-            })
+            .map(|c| c.clone().to_json().into_serde::<IceCandidate>().unwrap())
             .collect();
         let data = TricklePayload {
             sdp: serde_json::to_string(&RtcSessionDescriptionWrapper::from(sdp))?,
