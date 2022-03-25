@@ -4,8 +4,28 @@ use crate::types::channel::Channel;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Serialize;
+use serde::Deserialize;
 use std::sync::Arc;
 use web3::types::Address;
+
+
+/// Struct From [webrtc-rs](https://docs.rs/webrtc/latest/webrtc/ice_transport/ice_candidate/struct.RTCIceCandidateInit.html)
+/// For [RFC Std](https://w3c.github.io/webrtc-pc/#dom-rtcicecandidate-tojson), ICE Candidate should be camelCase
+/// dictionary RTCIceCandidateInit {
+///  DOMString candidate = "";
+///  DOMString? sdpMid = null;
+///  unsigned short? sdpMLineIndex = null;
+///  DOMString? usernameFragment = null;
+/// };
+
+#[derive(Deserialize, Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct IceCandidate {
+    pub candidate: String,
+    pub sdp_mid: Option<String>,
+    pub sdp_m_line_index: Option<u16>,
+    pub username_fragment: Option<String>,
+}
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
@@ -37,7 +57,7 @@ pub trait IceTransport<E: Send, Ch: Channel<E>> {
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
     where
         T: Into<Self::Sdp> + Send;
-    async fn add_ice_candidate(&self, candidate: String) -> Result<()>;
+    async fn add_ice_candidate(&self, candidate: IceCandidate) -> Result<()>;
     async fn set_remote_description<T>(&self, desc: T) -> Result<()>
     where
         T: Into<Self::Sdp> + Send;

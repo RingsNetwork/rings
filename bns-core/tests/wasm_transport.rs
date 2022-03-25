@@ -13,14 +13,6 @@ use wasm_bindgen_test::wasm_bindgen_test_configure;
 
 wasm_bindgen_test_configure!(run_in_browser);
 
-#[wasm_bindgen_test]
-async fn new_transport() {
-    let ch = Arc::new(CbChannel::new(1));
-    let mut trans = Transport::new(ch.sender());
-    let stun = "stun:stun.l.google.com:19302";
-    trans.start(stun).await.unwrap();
-    trans.apply_callback().await.unwrap();
-}
 
 async fn prepare_transport() -> Result<Transport> {
     let ch = Arc::new(CbChannel::new(1));
@@ -28,6 +20,12 @@ async fn prepare_transport() -> Result<Transport> {
     let stun = "stun:stun.l.google.com:19302";
     trans.start(stun).await?.apply_callback().await?;
     Ok(trans)
+}
+
+
+#[wasm_bindgen_test]
+async fn new_transport() {
+    prepare_transport().await.unwrap();
 }
 
 pub async fn establish_connection(
@@ -54,10 +52,6 @@ pub async fn establish_connection(
     // Peer 1 got answer then register
     let addr2 = transport1.register_remote_info(handshake_info2).await?;
     assert_eq!(addr2, key2.address());
-    let promise_1 = transport1.connect_success_promise().await?;
-    let promise_2 = transport2.connect_success_promise().await?;
-    promise_1.await?;
-    promise_2.await?;
     Ok(())
 }
 
