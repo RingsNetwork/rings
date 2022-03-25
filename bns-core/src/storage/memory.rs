@@ -37,6 +37,10 @@ where
         self.table.len()
     }
 
+    fn is_empty(&self) -> bool {
+        self.table.len() == 0
+    }
+
     fn get_or_set(&self, addr: &Self::K, default: Self::V) -> Self::V {
         self.table
             .entry(addr.clone())

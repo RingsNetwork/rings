@@ -170,7 +170,7 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
     where
         T: Serialize + Send,
     {
-        let data = serde_json::to_vec(&msg)?;
+        let data = serde_json::to_string(&msg)?;
         match self.get_data_channel().await {
             Some(cnn) => cnn.send_with_str(&data).map_err(|e| anyhow!("{:?}", e)),
             None => Err(anyhow!("data channel may not ready")),

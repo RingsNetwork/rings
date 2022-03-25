@@ -10,13 +10,23 @@ use anyhow::Result;
 use web3::types::Address;
 
 use std::sync::Arc;
-use tokio::sync::mpsc::{channel};
-use tokio::task::JoinHandle;
-use tokio::time;
+#[cfg(feature = "wasm")]
+use std::{
+    thread::{JoinHandle, spawn},
+    sync::mpsc::{channel, Sender, Receiver},
+    time
+};
+#[cfg(not(feature = "wasm"))]
+use tokio::{
+    sync::mpsc::{channel, Sender, Receiver},
+    task::{JoinHandle, spawn},
+    time
+};
 
 pub struct Heartbeat {
     swarm: Arc<Swarm>,
 }
+
 
 impl Heartbeat {
     pub fn new(swarm: Arc<Swarm>) -> Self {
@@ -56,7 +66,7 @@ impl Heartbeat {
                 }
             })
             .into_iter()
-            .map(tokio::task::spawn)
+            .map(spawn)
             .collect();
         futures::future::join_all(tasks).await;
         while let Some((address, signal)) = rx.recv().await {
@@ -69,7 +79,7 @@ impl Heartbeat {
 
     pub async fn run(&self){
         loop {
-            if !(self.swarm.get_transport_numbers() > 0) {
+            if self.swarm.get_transport_numbers() == 0 {
                 time::sleep(time::Duration::from_secs(20)).await;
             } else {
                 let items = self.swarm.get_transports();
