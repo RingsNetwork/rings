@@ -75,7 +75,6 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
     async fn start(&mut self, stun: &str) -> Result<&Self> {
         let mut config = RtcConfiguration::new();
         config.ice_servers(&JsValue::from_serde(&json! {[{"urls": stun}]}).unwrap());
-
         self.connection = RtcPeerConnection::new_with_configuration(&config)
             .ok()
             .as_ref()
