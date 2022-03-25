@@ -163,6 +163,7 @@ impl TransportManager for Swarm {
     }
 }
 
+#[cfg(not(feature = "wasm"))]
 #[cfg(test)]
 mod tests {
     use super::*;

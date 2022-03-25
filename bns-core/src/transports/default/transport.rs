@@ -3,14 +3,15 @@ use crate::ecc::SecretKey;
 use crate::message::Encoded;
 use crate::message::MessageRelay;
 use crate::message::MessageRelayMethod;
-use crate::transports::default::IceCandidateSerializer;
 use crate::transports::helper::Promise;
 
 use crate::types::channel::Channel;
 use crate::types::channel::Event;
+use crate::types::ice_transport::IceCandidate;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
 use crate::types::ice_transport::IceTrickleScheme;
+
 use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -27,7 +28,7 @@ use web3::types::Address;
 use webrtc::api::APIBuilder;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
-use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
+use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
 use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
@@ -122,7 +123,6 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
     async fn get_answer(&self) -> Result<RTCSessionDescription> {
         match self.get_peer_connection().await {
             Some(peer_connection) => {
-                // wait gather candidates
                 let mut gather_complete = peer_connection.gathering_complete_promise().await;
                 let answer = peer_connection.create_answer(None).await?;
                 self.set_local_description(answer.to_owned()).await?;
@@ -186,13 +186,10 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
         }
     }
 
-    async fn add_ice_candidate(&self, candidate: String) -> Result<()> {
+    async fn add_ice_candidate(&self, candidate: IceCandidate) -> Result<()> {
         match self.get_peer_connection().await {
             Some(peer_connection) => peer_connection
-                .add_ice_candidate(RTCIceCandidateInit {
-                    candidate,
-                    ..Default::default()
-                })
+                .add_ice_candidate(candidate.into())
                 .await
                 .map_err(|e| anyhow!(e)),
             None => Err(anyhow!("cannot add ice candidate")),
@@ -318,7 +315,7 @@ impl IceTransportCallback<Event, AcChannel<Event>> for DefaultTransport {
 #[derive(Deserialize, Serialize, Debug)]
 pub struct TricklePayload {
     pub sdp: String,
-    pub candidates: Vec<IceCandidateSerializer>,
+    pub candidates: Vec<IceCandidate>,
 }
 
 #[async_trait]
@@ -368,7 +365,7 @@ impl IceTrickleScheme<Event, AcChannel<Event>> for DefaultTransport {
                 log::trace!("setting remote candidate");
                 for c in data.data.candidates {
                     log::trace!("add candiates: {:?}", c);
-                    self.add_ice_candidate(c.candidate.clone()).await?;
+                    self.add_ice_candidate(c.clone()).await?;
                 }
                 Ok(data.addr)
             }
