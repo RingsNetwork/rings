@@ -33,6 +33,10 @@ where
         self.table.insert(addr.clone(), value)
     }
 
+    fn len(&self) -> usize {
+        self.table.len()
+    }
+
     fn get_or_set(&self, addr: &Self::K, default: Self::V) -> Self::V {
         self.table
             .entry(addr.clone())

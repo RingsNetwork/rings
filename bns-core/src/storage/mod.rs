@@ -10,6 +10,7 @@ pub trait Storage {
     type V;
 
     fn new() -> Self;
+    fn len(&self) -> usize;
     fn get(&self, addr: &Self::K) -> Option<Self::V>;
     fn set(&self, addr: &Self::K, value: Self::V) -> Option<Self::V>;
     fn get_or_set(&self, addr: &Self::K, default: Self::V) -> Self::V;

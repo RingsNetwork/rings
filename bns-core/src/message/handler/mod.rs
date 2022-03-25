@@ -12,12 +12,6 @@ use crate::message::{
 };
 use crate::swarm::{Swarm, TransportManager};
 use crate::types::ice_transport::IceTrickleScheme;
-use crate::types::ice_transport::IceTransport;
-use crate::types::channel::Event;
-use crate::types::channel::ChannelMessage;
-use crate::types::channel::Event;
-use crate::types::ice_transport::IceTransport;
-use crate::types::ice_transport::IceTrickleScheme;
 use anyhow::anyhow;
 use anyhow::Result;
 use futures::lock::Mutex;
@@ -75,6 +69,8 @@ impl MessageHandler {
             Message::NotifiedPredecessor(ref msg) => {
                 self.handle_notified_predecessor(relay, prev, msg).await
             }
+            Message::Ping => self.handle_ping(relay, prev).await,
+            Message::Pong => self.handle_pong(relay, prev).await,
             _ => Err(anyhow!("Unsupported message type")),
         }
     }
@@ -322,6 +318,25 @@ impl MessageHandler {
         }
     }
 
+    pub async fn handle_ping(&self, relay: &MessageRelay<Message>, prev: &Did) -> Result<()> {
+        let mut relay = relay.clone();
+        relay.push_prev(self.swarm.address().into(), *prev);
+        self.send_message(
+            &(*prev).into(),
+            Some(relay.to_path),
+            Some(relay.from_path),
+            MessageRelayMethod::REPORT,
+            Message::Pong,
+        )
+        .await
+    }
+
+    pub async fn handle_pong(&self, relay: &MessageRelay<Message>, prev: &Did) -> Result<()> {
+        let mut relay = relay.clone();
+        relay.push_prev(self.swarm.address().into(), *prev);
+        Ok(())
+    }
+
     /// This method is required because web-sys components is not `Send`
     /// which means a listening loop cannot running concurrency.
     pub async fn listen_once(&self) {
@@ -330,38 +345,11 @@ impl MessageHandler {
                 log::error!("Cannot verify msg or it's expired: {:?}", relay_message);
             }
 
-                    if let Err(e) = self
-                        .handle_message_relay(&relay_message, &relay_message.addr.into())
-                        .await
-                    {
-                        log::error!("Error in handle_message: {}", e);
-                    }
-                }
-                Event::DirectMessage(msg) => match msg {
-                    ChannelMessage::Ping(addr) => match self.swarm.get_transport(&addr) {
-                        Some(trans) => {
-                            let channel_message = ChannelMessage::Pong(self.swarm.address());
-                            match trans.send_message_with_str(channel_message).await {
-                                Ok(_) => {
-                                    log::info!("Send direct message success");
-                                }
-                                Err(e) => {
-                                    log::error!("Failed to send direct message, {:?}", e);
-                                    self.swarm.table.remove(&addr);
-                                }
-                            }
-                        }
-                        None => {
-                            log::error!("Cannot find transports from {:?}", addr);
-                        }
-                    },
-                    _ => {
-                        log::debug!("OtherDirectMessage")
-                    }
-                },
-                _ => {
-                    log::error!("ConnectFailed");
-                }
+            if let Err(e) = self
+                .handle_message_relay(&relay_message, &relay_message.addr.into())
+                .await
+            {
+                log::error!("Error in handle_message: {}", e);
             }
         }
     }
@@ -370,47 +358,16 @@ impl MessageHandler {
         let iter_messages = self.swarm.iter_messages();
         pin_mut!(iter_messages);
 
-        while let Some(message) = iter_messages.next().await {
-            match message {
-                Event::WrapperMessage(msg) => {
-                    let relay_message =
-                        serde_json::from_slice::<MessageRelay<Message>>(&msg).unwrap();
-                    if relay_message.is_expired() || !relay_message.verify() {
-                        log::error!("Cannot verify msg or it's expired: {:?}", relay_message);
-                    }
+        while let Some(relay_message) = iter_messages.next().await {
+            if relay_message.is_expired() || !relay_message.verify() {
+                log::error!("Cannot verify msg or it's expired: {:?}", relay_message);
+            }
 
-                    if let Err(e) = self
-                        .handle_message_relay(&relay_message, &relay_message.addr.into())
-                        .await
-                    {
-                        log::error!("Error in handle_message: {}", e);
-                    }
-                }
-                Event::DirectMessage(msg) => match msg {
-                    ChannelMessage::Ping(addr) => match self.swarm.get_transport(&addr) {
-                        Some(trans) => {
-                            let channel_message = ChannelMessage::Pong(self.swarm.address());
-                            match trans.send_message_with_str(channel_message).await {
-                                Ok(_) => {
-                                    log::info!("Send direct message success");
-                                }
-                                Err(e) => {
-                                    log::error!("Failed to send direct message, {:?}", e);
-                                    self.swarm.table.remove(&addr);
-                                }
-                            }
-                        }
-                        None => {
-                            log::error!("Cannot find transports from {:?}", addr);
-                        }
-                    },
-                    _ => {
-                        log::debug!("OtherDirectMessage")
-                    }
-                },
-                _ => {
-                    log::error!("ConnectFailed");
-                }
+            if let Err(e) = self
+                .handle_message_relay(&relay_message, &relay_message.addr.into())
+                .await
+            {
+                log::error!("Error in handle_message: {}", e);
             }
         }
     }

@@ -15,7 +15,6 @@ use crate::types::ice_transport::IceTrickleScheme;
 use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
-use bytes::Bytes;
 use futures::future::join_all;
 use serde::Serialize;
 use serde_json;
@@ -162,27 +161,6 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
     }
 
     async fn send_message<T>(&self, msg: T) -> Result<()>
-    where
-        T: Serialize + Send,
-    {
-        let data: Vec<u8> = serde_json::to_vec(&msg)?;
-        let size = data.len();
-        match self.get_data_channel().await {
-            Some(cnn) => match cnn.send(&Bytes::from(data)).await {
-                Ok(s) => {
-                    if !s == size {
-                        Err(anyhow!("msg is not complete, {:?}!= {:?}", s, size))
-                    } else {
-                        Ok(())
-                    }
-                }
-                Err(e) => Err(anyhow!(e)),
-            },
-            None => Err(anyhow!("data channel may not ready")),
-        }
-    }
-
-    async fn send_message_with_str<T>(&self, msg: T) -> Result<()>
     where
         T: Serialize + Send,
     {

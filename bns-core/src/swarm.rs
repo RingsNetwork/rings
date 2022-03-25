@@ -31,9 +31,13 @@ use crate::transports::wasm::WasmTransport as Transport;
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait TransportManager {
     type Transport;
+    fn get_transports(&self) -> Vec<(Address, Self::Transport)>;
+    fn get_addresses(&self) -> Vec<Address>;
+    fn get_transport(&self, address: &Address) -> Option<Self::Transport>;
+    fn remove_transport(&self, address: &Address) -> Option<(Address, Self::Transport)>;
+    fn get_transport_numbers(&self) -> usize;
     async fn new_transport(&self) -> Result<Self::Transport>;
     async fn register(&self, address: &Address, trans: Self::Transport) -> Result<()>;
-    fn get_transport(&self, address: &Address) -> Option<Self::Transport>;
     async fn get_or_register(
         &self,
         address: &Address,
@@ -150,6 +154,22 @@ impl TransportManager for Swarm {
 
     fn get_transport(&self, address: &Address) -> Option<Self::Transport> {
         self.table.get(address)
+    }
+
+    fn remove_transport(&self, address: &Address) -> Option<(Address, Self::Transport)> {
+        self.table.remove(address)
+    }
+
+    fn get_transport_numbers(&self) -> usize {
+        self.table.len()
+    }
+
+    fn get_addresses(&self) -> Vec<Address> {
+        self.table.keys()
+    }
+
+    fn get_transports(&self) -> Vec<(Address, Self::Transport)> {
+        self.table.items()
     }
 
     async fn get_or_register(

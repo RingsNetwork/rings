@@ -7,6 +7,9 @@ mod payload;
 pub use payload::MessageRelay;
 pub use payload::MessageRelayMethod;
 
+mod heartbeat;
+pub use heartbeat::Heartbeat;
+
 use crate::dht::Did;
 use serde::Deserialize;
 use serde::Serialize;
@@ -162,6 +165,8 @@ impl MessageSessionRelayProtocol for MessageRelay<Message> {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum Message {
     None,
+    Ping,
+    Pong,
     ConnectNode(ConnectNode),
     AlreadyConnected(AlreadyConnected),
     ConnectedNode(ConnectedNode),
