@@ -45,17 +45,16 @@ async fn handshake(swarm: Arc<Swarm>, key: SecretKey, data: Vec<u8>) -> anyhow::
     // get offer from remote and send answer back
 
     let transport = swarm.new_transport().await?;
-
-    let registered_addr = transport
+    match transport
         .register_remote_info(String::from_utf8(data)?.try_into()?)
-        .await;
-
-    match registered_addr {
-        Ok(addr) => {
+        .await
+    {
+        Ok((addr, sdp)) => {
             let resp = transport.get_handshake_info(key, RTCSdpType::Answer).await;
             match resp {
                 Ok(info) => {
                     swarm.register(&addr, Arc::clone(&transport)).await?;
+                    swarm.set_local_description(sdp, addr);
                     anyhow::Result::Ok(info.try_into()?)
                 }
                 Err(e) => {
@@ -96,9 +95,10 @@ pub async fn trickle_forward(
     {
         Ok(resp) => {
             log::debug!("get answer and candidate from remote");
-            let addr = transport
+            let (addr, sdp) = transport
                 .register_remote_info(String::from_utf8(resp.as_bytes().to_vec())?.try_into()?)
                 .await?;
+            swarm.set_local_description(sdp, addr);
             swarm.register(&addr, Arc::clone(&transport)).await?;
             Ok("ok".to_string())
         }

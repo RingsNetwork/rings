@@ -1,7 +1,6 @@
 /// Swarm is transport management
 use crate::ecc::SecretKey;
-use crate::message::Message;
-use crate::message::MessageRelay;
+use crate::message::{self, Message, MessageRelay, MessageRelayMethod};
 use crate::storage::{MemStorage, Storage};
 use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::Event;
@@ -12,6 +11,7 @@ use anyhow::anyhow;
 use anyhow::Result;
 use async_stream::stream;
 use async_trait::async_trait;
+use dashmap::DashMap;
 use futures_core::Stream;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -46,7 +46,8 @@ pub trait TransportManager {
 }
 
 pub struct Swarm {
-    table: MemStorage<Address, Arc<Transport>>,
+    transports: MemStorage<Address, Arc<Transport>>,
+    descriptions: DashMap<String, Address>,
     transport_event_channel: Channel<Event>,
     ice_server: String,
     pub key: SecretKey,
@@ -55,10 +56,26 @@ pub struct Swarm {
 impl Swarm {
     pub fn new(ice_server: &str, key: SecretKey) -> Self {
         Self {
-            table: MemStorage::<Address, Arc<Transport>>::new(),
+            transports: MemStorage::<Address, Arc<Transport>>::new(),
+            descriptions: DashMap::new(),
             transport_event_channel: Channel::new(1),
             ice_server: ice_server.into(),
             key,
+        }
+    }
+
+    pub fn set_local_description(&self, description: String, address: Address) {
+        self.descriptions.insert(description, address);
+    }
+
+    pub fn get_local_address(&self, description: &str) -> Option<Address> {
+        self.descriptions.get(description).map(|v| *v.value())
+    }
+
+    pub fn remove_local_address(&self, description: &str) -> Option<(String, Address)> {
+        match self.get_local_address(description) {
+            Some(_) => self.descriptions.remove(description),
+            None => None,
         }
     }
 
@@ -77,15 +94,35 @@ impl Swarm {
         }
     }
 
-    fn load_message(ev: Result<Option<Event>>) -> Result<Option<MessageRelay<Message>>> {
+    fn load_message(&self, ev: Result<Option<Event>>) -> Result<Option<MessageRelay<Message>>> {
         // TODO: How to deal with events that is not message? Use mpmc?
 
         let ev = ev?;
 
         match ev {
-            Some(Event::ReceiveMsg(msg)) => {
+            Some(Event::DataChannelMessage(msg)) => {
                 let payload = serde_json::from_slice::<MessageRelay<Message>>(&msg)?;
                 Ok(Some(payload))
+            }
+            Some(Event::RegisterTransport(sdp)) => {
+                let address = self.get_local_address(&sdp).unwrap();
+                match self.get_transport(&address) {
+                    Some(_) => {
+                        let payload = MessageRelay::new(
+                            Message::JoinDHT(message::JoinDHT { id: address.into() }),
+                            &self.key,
+                            None,
+                            None,
+                            None,
+                            MessageRelayMethod::None,
+                        )?;
+                        Ok(Some(payload))
+                    }
+                    None => Err(anyhow!(format!(
+                        "Cannot get transport from address {:?}",
+                        address
+                    ))),
+                }
             }
             None => Ok(None),
             x => Err(anyhow!(format!("Receive {:?}", x))),
@@ -97,7 +134,7 @@ impl Swarm {
     pub async fn poll_message(&self) -> Option<MessageRelay<Message>> {
         let receiver = &self.transport_event_channel.receiver();
         let ev = Channel::recv(receiver).await;
-        match Self::load_message(ev) {
+        match self.load_message(ev) {
             Ok(Some(msg)) => Some(msg),
             Ok(None) => None,
             Err(_) => None,
@@ -112,7 +149,7 @@ impl Swarm {
             let receiver = &self.transport_event_channel.receiver();
             loop {
                 let ev = Channel::recv(receiver).await;
-                if let Ok(Some(msg)) = Self::load_message(ev) {
+                if let Ok(Some(msg)) = self.load_message(ev) {
                     yield msg
                 }
             }
@@ -142,7 +179,7 @@ impl TransportManager for Swarm {
     /// should not wait connection statues here
     /// a connection `Promise` may cause deadlock of both end
     async fn register(&self, address: &Address, trans: Self::Transport) -> Result<()> {
-        let prev_trans = self.table.set(address, trans);
+        let prev_trans = self.transports.set(address, trans);
         if let Some(trans) = prev_trans {
             if let Err(e) = trans.close().await {
                 log::error!("failed to close previous while registering {:?}", e);
@@ -153,23 +190,23 @@ impl TransportManager for Swarm {
     }
 
     fn get_transport(&self, address: &Address) -> Option<Self::Transport> {
-        self.table.get(address)
+        self.transports.get(address)
     }
 
     fn remove_transport(&self, address: &Address) -> Option<(Address, Self::Transport)> {
-        self.table.remove(address)
+        self.transports.remove(address)
     }
 
     fn get_transport_numbers(&self) -> usize {
-        self.table.len()
+        self.transports.len()
     }
 
     fn get_addresses(&self) -> Vec<Address> {
-        self.table.keys()
+        self.transports.keys()
     }
 
     fn get_transports(&self) -> Vec<(Address, Self::Transport)> {
-        self.table.items()
+        self.transports.items()
     }
 
     async fn get_or_register(
@@ -181,7 +218,7 @@ impl TransportManager for Swarm {
             return Err(anyhow!("default transport is not connected"));
         }
 
-        Ok(self.table.get_or_set(address, default))
+        Ok(self.transports.get_or_set(address, default))
     }
 }
 

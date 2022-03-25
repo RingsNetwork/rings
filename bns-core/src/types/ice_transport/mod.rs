@@ -67,7 +67,9 @@ pub trait IceTransport<E: Send, Ch: Channel<E>> {
 pub trait IceTransportCallback<E: Send, Ch: Channel<E>>: IceTransport<E, Ch> {
     type OnLocalCandidateHdlrFn;
     type OnDataChannelHdlrFn;
+    type OnIceConnectionStateChangeHdlrFn;
     async fn apply_callback(&self) -> Result<&Self>;
+    async fn on_ice_connection_state_change(&self) -> Self::OnIceConnectionStateChangeHdlrFn;
     async fn on_ice_candidate(&self) -> Self::OnLocalCandidateHdlrFn;
     async fn on_data_channel(&self) -> Self::OnDataChannelHdlrFn;
 }
@@ -77,6 +79,6 @@ pub trait IceTransportCallback<E: Send, Ch: Channel<E>>: IceTransport<E, Ch> {
 pub trait IceTrickleScheme<E: Send, Ch: Channel<E>>: IceTransport<E, Ch> {
     type SdpType;
     async fn get_handshake_info(&self, key: SecretKey, kind: Self::SdpType) -> Result<Encoded>;
-    async fn register_remote_info(&self, data: Encoded) -> Result<Address>;
+    async fn register_remote_info(&self, data: Encoded) -> Result<(Address, String)>;
     async fn wait_for_connected(&self) -> Result<()>;
 }

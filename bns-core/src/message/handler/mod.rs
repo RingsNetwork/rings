@@ -8,7 +8,7 @@ use crate::dht::{Chord, ChordAction, ChordRemoteAction, Did};
 use crate::message::{
     AlreadyConnected, ConnectNode, ConnectedNode, FindSuccessor, FoundSuccessor, Message,
     MessageRelay, MessageRelayMethod, MessageSessionRelayProtocol, NotifiedPredecessor,
-    NotifyPredecessor,
+    NotifyPredecessor,JoinDHT
 };
 use crate::swarm::{Swarm, TransportManager};
 use crate::types::ice_transport::IceTrickleScheme;
@@ -56,6 +56,7 @@ impl MessageHandler {
         prev: &Did,
     ) -> Result<()> {
         match relay.data {
+            Message::JoinDHT(ref msg) => self.handle_join(relay, msg).await,
             Message::ConnectNode(ref msg) => self.handle_connect_node(relay, prev, msg).await,
             Message::ConnectedNode(ref msg) => self.handle_connected_node(relay, prev, msg).await,
             Message::AlreadyConnected(ref msg) => {
@@ -69,9 +70,37 @@ impl MessageHandler {
             Message::NotifiedPredecessor(ref msg) => {
                 self.handle_notified_predecessor(relay, prev, msg).await
             }
-            Message::Ping => self.handle_ping(relay, prev).await,
-            Message::Pong => self.handle_pong(relay, prev).await,
             _ => Err(anyhow!("Unsupported message type")),
+        }
+    }
+
+    async fn handle_join(
+        &self,
+        relay: &MessageRelay<Message>,
+        msg: &JoinDHT
+    ) -> Result<()>
+    {
+        let mut dht = self.dht.lock().await;
+        let relay = relay.clone();
+        match dht.join(msg.id) {
+            ChordAction::None => {
+                log::debug!("Opps, {:?} is same as current", msg.id);
+                Ok(())
+            },
+            ChordAction::RemoteAction(next, ChordRemoteAction::FindSuccessor(id)) => {
+                self.send_message(
+                    &next.into(),
+                    Some(relay.to_path),
+                    Some(relay.from_path),
+                    MessageRelayMethod::SEND,
+                    Message::FindSuccessor(FindSuccessor {
+                        id,
+                        for_fix: false,
+                    }),
+                )
+                .await
+            },
+            _ => unreachable!()
         }
     }
 
@@ -316,25 +345,6 @@ impl MessageHandler {
             }
             Ok(())
         }
-    }
-
-    pub async fn handle_ping(&self, relay: &MessageRelay<Message>, prev: &Did) -> Result<()> {
-        let mut relay = relay.clone();
-        relay.push_prev(self.swarm.address().into(), *prev);
-        self.send_message(
-            &(*prev).into(),
-            Some(relay.to_path),
-            Some(relay.from_path),
-            MessageRelayMethod::REPORT,
-            Message::Pong,
-        )
-        .await
-    }
-
-    pub async fn handle_pong(&self, relay: &MessageRelay<Message>, prev: &Did) -> Result<()> {
-        let mut relay = relay.clone();
-        relay.push_prev(self.swarm.address().into(), *prev);
-        Ok(())
     }
 
     /// This method is required because web-sys components is not `Send`

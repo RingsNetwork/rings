@@ -4,7 +4,8 @@ use async_trait::async_trait;
 #[derive(Debug)]
 pub enum Event {
     ConnectFailed,
-    ReceiveMsg(Vec<u8>),
+    DataChannelMessage(Vec<u8>),
+    RegisterTransport(String),
 }
 
 #[async_trait]

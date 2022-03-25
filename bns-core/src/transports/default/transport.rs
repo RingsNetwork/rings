@@ -241,10 +241,13 @@ impl DefaultTransport {
 impl IceTransportCallback<Event, AcChannel<Event>> for DefaultTransport {
     type OnLocalCandidateHdlrFn = Box<dyn FnMut(Option<Self::Candidate>) -> Fut + Send + Sync>;
     type OnDataChannelHdlrFn = Box<dyn FnMut(Arc<Self::DataChannel>) -> Fut + Send + Sync>;
+    type OnIceConnectionStateChangeHdlrFn =
+        Box<(dyn FnMut(RTCIceConnectionState) -> Fut + Sync + Send + 'static)>;
 
     async fn apply_callback(&self) -> Result<&Self> {
         let on_ice_candidate_callback = self.on_ice_candidate().await;
         let on_data_channel_callback = self.on_data_channel().await;
+        let on_ice_connection_state_change_callback = self.on_ice_connection_state_change().await;
         match self.get_peer_connection().await {
             Some(peer_connection) => {
                 peer_connection
@@ -253,9 +256,39 @@ impl IceTransportCallback<Event, AcChannel<Event>> for DefaultTransport {
                 peer_connection
                     .on_data_channel(on_data_channel_callback)
                     .await;
+                peer_connection
+                    .on_ice_connection_state_change(on_ice_connection_state_change_callback)
+                    .await;
                 Ok(self)
             }
             None => Err(anyhow!("connection is not setup")),
+        }
+    }
+
+    async fn on_ice_connection_state_change(&self) -> Self::OnIceConnectionStateChangeHdlrFn {
+        let peer_connection = self.get_peer_connection().await;
+        let event_sender = self.event_sender.clone();
+        box move |cs: Self::IceConnectionState| {
+            let peer_connection = peer_connection.clone();
+            let event_sender = event_sender.clone();
+            Box::pin(async move {
+                let remote_description =
+                    peer_connection.unwrap().remote_description().await.unwrap();
+                match cs {
+                    Self::IceConnectionState::Connected => {
+                        if event_sender
+                            .send(Event::RegisterTransport(remote_description.sdp))
+                            .await
+                            .is_err()
+                        {
+                            log::error!("Failed when send RegisterTransport");
+                        }
+                    }
+                    _ => {
+                        log::debug!("IceTransport state change {:?}", cs);
+                    }
+                }
+            })
         }
     }
 
@@ -293,7 +326,7 @@ impl IceTransportCallback<Event, AcChannel<Event>> for DefaultTransport {
                     let event_sender = event_sender.clone();
                     Box::pin(async move {
                         if event_sender
-                            .send(Event::ReceiveMsg(msg.data.to_vec()))
+                            .send(Event::DataChannelMessage(msg.data.to_vec()))
                             .await
                             .is_err()
                         {
@@ -342,7 +375,7 @@ impl IceTrickleScheme<Event, AcChannel<Event>> for DefaultTransport {
         Ok(resp.try_into()?)
     }
 
-    async fn register_remote_info(&self, data: Encoded) -> anyhow::Result<Address> {
+    async fn register_remote_info(&self, data: Encoded) -> anyhow::Result<(Address, String)> {
         let data: MessageRelay<TricklePayload> = data.try_into()?;
         log::trace!("register remote info: {:?}", data);
 
@@ -356,7 +389,7 @@ impl IceTrickleScheme<Event, AcChannel<Event>> for DefaultTransport {
                     log::trace!("add candiates: {:?}", c);
                     self.add_ice_candidate(c.clone()).await?;
                 }
-                Ok(data.addr)
+                Ok((data.addr, data.data.sdp))
             }
             _ => {
                 log::error!("cannot verify message sig");

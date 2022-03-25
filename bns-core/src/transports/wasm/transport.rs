@@ -33,6 +33,7 @@ use web_sys::MessageEvent;
 use web_sys::RtcConfiguration;
 use web_sys::RtcDataChannel;
 use web_sys::RtcDataChannelEvent;
+use web_sys::RtcLifecycleEvent;
 use web_sys::RtcIceCandidate;
 use web_sys::RtcIceCandidateInit;
 use web_sys::RtcIceConnectionState;
@@ -258,17 +259,19 @@ impl WasmTransport {
 impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
     type OnLocalCandidateHdlrFn = Box<dyn FnMut(RtcPeerConnectionIceEvent) -> ()>;
     type OnDataChannelHdlrFn = Box<dyn FnMut(RtcDataChannelEvent) -> ()>;
+    type OnIceConnectionStateChangeHdlrFn = Box<dyn FnMut(RtcLifecycleEvent) -> ()>;
 
     async fn apply_callback(&self) -> Result<&Self> {
         match &self.get_peer_connection().await {
             Some(c) => {
                 let on_ice_candidate_callback = Closure::wrap(self.on_ice_candidate().await);
                 let on_data_channel_callback = Closure::wrap(self.on_data_channel().await);
+                let on_ice_connection_state_change_callback = Closure::wrap(self.on_ice_connection_state_change().await);
 
                 c.set_onicecandidate(Some(on_ice_candidate_callback.as_ref().unchecked_ref()));
                 c.set_ondatachannel(Some(on_data_channel_callback.as_ref().unchecked_ref()));
                 on_ice_candidate_callback.forget();
-                //on_peer_connection_state_change_callback.forget();
+                on_peer_connection_state_change_callback.forget();
                 on_data_channel_callback.forget();
                 Ok(self)
             }
@@ -278,6 +281,17 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
             }
         }
     }
+
+    async fn on_ice_connection_state_change(&self) -> Self::OnIceConnectionStateChangeHdlrFn
+    {
+        let peer_connection = self.get_peer_connection().await;
+        let event_sender = self.event_sender.clone();
+        box move |ev: RtcLifecycleEvent| {
+            let peer_connection = peer_connection.clone();
+            let event_sender = Arc::clone(&event_sender);
+        }
+    }
+
     async fn on_ice_candidate(&self) -> Self::OnLocalCandidateHdlrFn {
         let peer_connection = self.get_peer_connection().await;
         let pending_candidates = Arc::clone(&self.pending_candidates);
@@ -306,9 +320,12 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
                     match ev.data().as_string() {
                         Some(msg) => spawn_local(async move {
                             let event_sender = Arc::clone(&event_sender);
-                            if CbChannel::send(&event_sender, Event::ReceiveMsg(msg.into_bytes()))
-                                .await
-                                .is_err()
+                            if CbChannel::send(
+                                &event_sender,
+                                Event::DataChannelMessage(msg.into_bytes()),
+                            )
+                            .await
+                            .is_err()
                             {
                                 log::error!("Failed on handle msg");
                             }
@@ -357,7 +374,7 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
         Ok(resp.try_into()?)
     }
 
-    async fn register_remote_info(&self, data: Encoded) -> anyhow::Result<Address> {
+    async fn register_remote_info(&self, data: Encoded) -> anyhow::Result<(Address, String)> {
         let data: MessageRelay<TricklePayload> = data.try_into()?;
         log::debug!("register remote info: {:?}", &data);
 
@@ -370,7 +387,7 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
                     log::debug!("add remote candiates: {:?}", c);
                     self.add_ice_candidate(c.clone()).await?;
                 }
-                Ok(data.addr)
+                Ok((data.addr, data.data.sdp))
             }
             _ => {
                 log::error!("cannot verify message sig");
