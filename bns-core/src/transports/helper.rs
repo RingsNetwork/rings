@@ -6,6 +6,9 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::task::Context;
 use std::task::Poll;
+use serde::Serialize;
+use serde::Deserialize;
+use crate::types::ice_transport::IceCandidate;
 
 #[derive(Default)]
 pub struct State {
@@ -13,6 +16,13 @@ pub struct State {
     pub successed: Option<bool>,
     pub waker: Option<std::task::Waker>,
 }
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct TricklePayload {
+    pub sdp: String,
+    pub candidates: Vec<IceCandidate>,
+}
+
 
 #[derive(Default)]
 pub struct Promise(pub Arc<Mutex<State>>);

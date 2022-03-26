@@ -4,26 +4,23 @@ use crate::message::Encoded;
 use crate::message::MessageRelay;
 use crate::message::MessageRelayMethod;
 use crate::transports::helper::Promise;
-
+use crate::transports::helper::TricklePayload;
 use crate::types::channel::Channel;
 use crate::types::channel::Event;
 use crate::types::ice_transport::IceCandidate;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
 use crate::types::ice_transport::IceTrickleScheme;
-
 use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::future::join_all;
-use serde::Deserialize;
 use serde::Serialize;
 use serde_json;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-
 use web3::types::Address;
 use webrtc::api::APIBuilder;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
@@ -310,12 +307,6 @@ impl IceTransportCallback<Event, AcChannel<Event>> for DefaultTransport {
             })
         }
     }
-}
-
-#[derive(Deserialize, Serialize, Debug)]
-pub struct TricklePayload {
-    pub sdp: String,
-    pub candidates: Vec<IceCandidate>,
 }
 
 #[async_trait]
