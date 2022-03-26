@@ -1,5 +1,8 @@
+use crate::types::ice_transport::IceCandidate;
 use anyhow::anyhow;
 use anyhow::Result;
+use serde::Deserialize;
+use serde::Serialize;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -12,6 +15,12 @@ pub struct State {
     pub completed: bool,
     pub successed: Option<bool>,
     pub waker: Option<std::task::Waker>,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct TricklePayload {
+    pub sdp: String,
+    pub candidates: Vec<IceCandidate>,
 }
 
 #[derive(Default)]

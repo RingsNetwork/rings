@@ -1,3 +1,9 @@
+#[cfg(not(feature = "wasm"))]
+mod default;
+
+#[cfg(feature = "wasm")]
+mod wasm;
+
 use crate::dht::{Chord, ChordAction, ChordRemoteAction, Did};
 use crate::message::{
     AlreadyConnected, ConnectNode, ConnectedNode, FindSuccessor, FoundSuccessor, Message,

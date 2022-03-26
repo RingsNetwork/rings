@@ -5,7 +5,7 @@ use crate::message::Encoded;
 use crate::message::MessageRelay;
 use crate::message::MessageRelayMethod;
 use crate::transports::helper::Promise;
-use crate::transports::helper::State;
+use crate::transports::helper::TricklePayload;
 use crate::types::channel::Channel;
 use crate::types::channel::Event;
 use crate::types::ice_transport::IceCandidate;
@@ -18,7 +18,6 @@ use async_trait::async_trait;
 use futures::channel::mpsc;
 use futures::lock::Mutex as FuturesMutex;
 use log::info;
-use serde::Deserialize;
 use serde::Serialize;
 use serde_json;
 use serde_json::json;
@@ -324,12 +323,6 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
-pub struct TricklePayload {
-    pub sdp: String,
-    pub candidates: Vec<IceCandidate>,
-}
-
 #[async_trait(?Send)]
 impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
     // https://datatracker.ietf.org/doc/html/rfc5245
@@ -394,8 +387,8 @@ impl WasmTransport {
     pub async fn gather_complete_promise(&self) -> Result<Promise> {
         match self.get_peer_connection().await {
             Some(conn) => {
-                let state = Arc::new(Mutex::new(State::default()));
-                let promise = Promise(Arc::clone(&state));
+                let promise = Promise::default();
+                let state = Arc::clone(&promise.state());
                 let conn_clone = Arc::clone(&conn);
                 let callback =
                     Closure::wrap(Box::new(move || match conn_clone.ice_gathering_state() {
@@ -423,8 +416,8 @@ impl WasmTransport {
     pub async fn connect_success_promise(&self) -> Result<Promise> {
         match self.get_peer_connection().await {
             Some(conn) => {
-                let state = Arc::new(Mutex::new(State::default()));
-                let promise = Promise(Arc::clone(&state));
+                let promise = Promise::default();
+                let state = Arc::clone(&promise.state());
                 let callback = Closure::wrap(Box::new(move |st: RtcIceConnectionState| match st {
                     RtcIceConnectionState::Connected => {
                         let mut s = state.lock().unwrap();

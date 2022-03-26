@@ -51,6 +51,7 @@ js-sys = { version = "0.3.56", optional = true }
 version = "0.3.56"
 optional = true
 features = [
+  "Window",
   "MessageEvent",
   "RtcPeerConnection",
   "RtcSignalingState",
