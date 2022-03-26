@@ -1,3 +1,0 @@
-[alias]
-wasm = "build -p bns-core --target=wasm32-unknown-unknown --features wasm --no-default-features"
-test_wasm = "test -p bns-core --target=wasm32-unknown-unknown --features wasm --no-default-features"
