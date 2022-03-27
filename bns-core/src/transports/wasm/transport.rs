@@ -33,12 +33,12 @@ use web_sys::MessageEvent;
 use web_sys::RtcConfiguration;
 use web_sys::RtcDataChannel;
 use web_sys::RtcDataChannelEvent;
-use web_sys::RtcLifecycleEvent;
 use web_sys::RtcIceCandidate;
 use web_sys::RtcIceCandidateInit;
 use web_sys::RtcIceConnectionState;
 use web_sys::RtcIceGatheringState;
 use web_sys::RtcIceServer;
+use web_sys::RtcLifecycleEvent;
 use web_sys::RtcPeerConnection;
 use web_sys::RtcPeerConnectionIceEvent;
 use web_sys::RtcSdpType;
@@ -266,12 +266,18 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
             Some(c) => {
                 let on_ice_candidate_callback = Closure::wrap(self.on_ice_candidate().await);
                 let on_data_channel_callback = Closure::wrap(self.on_data_channel().await);
-                let on_ice_connection_state_change_callback = Closure::wrap(self.on_ice_connection_state_change().await);
+                let on_ice_connection_state_change_callback =
+                    Closure::wrap(self.on_ice_connection_state_change().await);
 
                 c.set_onicecandidate(Some(on_ice_candidate_callback.as_ref().unchecked_ref()));
                 c.set_ondatachannel(Some(on_data_channel_callback.as_ref().unchecked_ref()));
+                c.set_onicegatheringstatechange(Some(
+                    on_ice_connection_state_change_callback
+                        .as_ref()
+                        .unchecked_ref(),
+                ));
                 on_ice_candidate_callback.forget();
-                on_peer_connection_state_change_callback.forget();
+                on_ice_connection_state_change_callback.forget();
                 on_data_channel_callback.forget();
                 Ok(self)
             }
@@ -282,13 +288,35 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
         }
     }
 
-    async fn on_ice_connection_state_change(&self) -> Self::OnIceConnectionStateChangeHdlrFn
-    {
+    async fn on_ice_connection_state_change(&self) -> Self::OnIceConnectionStateChangeHdlrFn {
         let peer_connection = self.get_peer_connection().await;
         let event_sender = self.event_sender.clone();
         box move |ev: RtcLifecycleEvent| {
-            let peer_connection = peer_connection.clone();
+            let mut peer_connection = peer_connection.clone();
             let event_sender = Arc::clone(&event_sender);
+            match ev {
+                RtcLifecycleEvent::Iceconnectionstatechange => {
+                    let peer_connection = peer_connection.take().unwrap();
+                    let ice_connection_state = peer_connection.ice_connection_state();
+                    let mut remote_description = peer_connection.remote_description();
+                    spawn_local(async move {
+                        let event_sender = Arc::clone(&event_sender);
+                        if ice_connection_state == RtcIceConnectionState::Connected {
+                            let remote_description = remote_description.take().unwrap();
+                            if CbChannel::send(
+                                &event_sender,
+                                Event::RegisterTransport(remote_description.sdp()),
+                            )
+                            .await
+                            .is_err()
+                            {
+                                log::error!("Failed when send RegisterTransport");
+                            }
+                        }
+                    })
+                }
+                _ => unreachable!(),
+            }
         }
     }
 
@@ -380,6 +408,7 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
 
         match data.verify() {
             true => {
+                let sdp_str = data.data.sdp.clone();
                 let sdp: RtcSessionDescriptionWrapper = data.data.sdp.try_into()?;
                 self.set_remote_description(sdp.to_owned()).await?;
                 log::trace!("setting remote candidate");
@@ -387,7 +416,7 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
                     log::debug!("add remote candiates: {:?}", c);
                     self.add_ice_candidate(c.clone()).await?;
                 }
-                Ok((data.addr, data.data.sdp))
+                Ok((data.addr, sdp_str))
             }
             _ => {
                 log::error!("cannot verify message sig");

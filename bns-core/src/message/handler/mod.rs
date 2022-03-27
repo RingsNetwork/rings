@@ -6,9 +6,9 @@ mod wasm;
 
 use crate::dht::{Chord, ChordAction, ChordRemoteAction, Did};
 use crate::message::{
-    AlreadyConnected, ConnectNode, ConnectedNode, FindSuccessor, FoundSuccessor, Message,
+    AlreadyConnected, ConnectNode, ConnectedNode, FindSuccessor, FoundSuccessor, JoinDHT, Message,
     MessageRelay, MessageRelayMethod, MessageSessionRelayProtocol, NotifiedPredecessor,
-    NotifyPredecessor,JoinDHT
+    NotifyPredecessor,
 };
 use crate::swarm::{Swarm, TransportManager};
 use crate::types::ice_transport::IceTrickleScheme;
@@ -74,33 +74,25 @@ impl MessageHandler {
         }
     }
 
-    async fn handle_join(
-        &self,
-        relay: &MessageRelay<Message>,
-        msg: &JoinDHT
-    ) -> Result<()>
-    {
+    async fn handle_join(&self, relay: &MessageRelay<Message>, msg: &JoinDHT) -> Result<()> {
         let mut dht = self.dht.lock().await;
         let relay = relay.clone();
         match dht.join(msg.id) {
             ChordAction::None => {
                 log::debug!("Opps, {:?} is same as current", msg.id);
                 Ok(())
-            },
+            }
             ChordAction::RemoteAction(next, ChordRemoteAction::FindSuccessor(id)) => {
                 self.send_message(
                     &next.into(),
                     Some(relay.to_path),
                     Some(relay.from_path),
                     MessageRelayMethod::SEND,
-                    Message::FindSuccessor(FindSuccessor {
-                        id,
-                        for_fix: false,
-                    }),
+                    Message::FindSuccessor(FindSuccessor { id, for_fix: false }),
                 )
                 .await
-            },
-            _ => unreachable!()
+            }
+            _ => unreachable!(),
         }
     }
 
