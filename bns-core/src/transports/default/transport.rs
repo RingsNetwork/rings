@@ -502,7 +502,7 @@ pub mod tests {
         );
 
         // Peer 2 got offer then register
-        let addr1 = transport2.register_remote_info(handshake_info1).await?;
+        let (addr1, _sdp1) = transport2.register_remote_info(handshake_info1).await?;
         assert_eq!(addr1, key1.address());
         assert_eq!(
             transport1.ice_connection_state().await,
@@ -527,7 +527,7 @@ pub mod tests {
         );
 
         // Peer 1 got answer then register
-        let addr2 = transport1.register_remote_info(handshake_info2).await?;
+        let (addr2, _sdp2) = transport1.register_remote_info(handshake_info2).await?;
         assert_eq!(addr2, key2.address());
         let promise_1 = transport1.connect_success_promise().await?;
         let promise_2 = transport2.connect_success_promise().await?;
