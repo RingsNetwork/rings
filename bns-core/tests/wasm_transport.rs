@@ -22,7 +22,8 @@ pub mod test {
         let ch = Arc::new(CbChannel::new(1));
         let mut trans = Transport::new(ch.sender());
         let stun = IceServer::from_str("stun://stun.l.google.com:19302").unwrap();
-        trans.start(&stun).await?.apply_callback().await?;
+        trans.start(&stun).await.unwrap();
+        trans.apply_callback().await.unwrap();
         Ok(trans)
     }
 
