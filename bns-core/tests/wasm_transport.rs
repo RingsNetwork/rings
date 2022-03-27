@@ -6,12 +6,12 @@ pub mod test {
     use bns_core::ecc::SecretKey;
     use bns_core::transports::wasm::WasmTransport as Transport;
     use bns_core::types::channel::Channel;
+    use bns_core::types::transport::IceServer;
     use bns_core::types::transport::IceTransport;
     use bns_core::types::transport::IceTransportCallback;
     use bns_core::types::transport::IceTrickleScheme;
-    use bns_core::types::transport::IceServer;
-    use std::sync::Arc;
     use std::str::FromStr;
+    use std::sync::Arc;
     use wasm_bindgen_test::wasm_bindgen_test_configure;
     use wasm_bindgen_test::*;
     use web_sys::RtcSdpType;

@@ -9,10 +9,10 @@ use crate::transports::helper::TricklePayload;
 use crate::types::channel::Channel;
 use crate::types::channel::Event;
 use crate::types::ice_transport::IceCandidate;
+use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
 use crate::types::ice_transport::IceTrickleScheme;
-use crate::types::ice_transport::IceServer;
 use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -37,12 +37,12 @@ use web_sys::RtcIceCandidate;
 use web_sys::RtcIceCandidateInit;
 use web_sys::RtcIceConnectionState;
 use web_sys::RtcIceGatheringState;
+use web_sys::RtcIceServer;
 use web_sys::RtcPeerConnection;
 use web_sys::RtcPeerConnectionIceEvent;
 use web_sys::RtcSdpType;
 use web_sys::RtcSessionDescription;
 use web_sys::RtcSessionDescriptionInit;
-use web_sys::RtcIceServer;
 
 type EventSender = Arc<FuturesMutex<mpsc::Sender<Event>>>;
 
