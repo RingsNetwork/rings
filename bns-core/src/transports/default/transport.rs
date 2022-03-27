@@ -16,8 +16,8 @@ use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::future::join_all;
-use serde_json;
 use serde::Serialize;
+use serde_json;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -221,7 +221,6 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
 }
 
 impl DefaultTransport {
-
     pub async fn setup_channel(&mut self, name: &str) -> Result<()> {
         match self.get_peer_connection().await {
             Some(peer_connection) => {
