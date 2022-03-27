@@ -24,7 +24,7 @@ pub struct IceServer {
 impl Default for IceServer {
     fn default() -> Self {
         Self {
-            urls: ["stun:stun.l.google.com:19302".to_string()].to_vec(),
+            urls: ["stun://stun.l.google.com:19302".to_string()].to_vec(),
             username: String::default(),
             credential: String::default(),
             credential_type: IceCredentialType::default(),
