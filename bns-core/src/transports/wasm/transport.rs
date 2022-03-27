@@ -42,6 +42,7 @@ use web_sys::RtcPeerConnectionIceEvent;
 use web_sys::RtcSdpType;
 use web_sys::RtcSessionDescription;
 use web_sys::RtcSessionDescriptionInit;
+use web_sys::RtcIceServer;
 
 type EventSender = Arc<FuturesMutex<mpsc::Sender<Event>>>;
 
@@ -73,7 +74,8 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
 
     async fn start(&mut self, ice_server: &IceServer) -> Result<&Self> {
         let mut config = RtcConfiguration::new();
-        config.ice_servers(&ice_server.clone().into());
+        let ice_servers: js_sys::Array = js_sys::Array::of1(&ice_server.clone().into());
+        config.ice_servers(&ice_servers.into());
         self.connection = RtcPeerConnection::new_with_configuration(&config)
             .ok()
             .as_ref()

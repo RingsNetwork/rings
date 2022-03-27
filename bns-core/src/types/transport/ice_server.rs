@@ -109,9 +109,9 @@ mod wasm {
     }
 
     impl From<IceServer> for JsValue {
-        fn from(s: IceServer) -> Self {
-            let ice_server: RtcIceServer = s.into();
-            ice_server.into()
+        fn from(a: IceServer) -> Self {
+            let ret: RtcIceServer = a.into();
+            ret.into()
         }
     }
 }
