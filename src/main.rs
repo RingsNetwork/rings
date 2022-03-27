@@ -19,7 +19,7 @@ pub struct Args {
     #[clap(long, short = 'v', default_value = "Info")]
     pub log_level: String,
 
-    #[clap(long, short = 's', default_value = "stun:stun.l.google.com:19302")]
+    #[clap(long, short = 's', default_value = "stun://stun.l.google.com:19302")]
     pub stun_server: String,
 
     #[clap(

@@ -5,6 +5,7 @@ use crate::message::MessageRelay;
 use crate::storage::{MemStorage, Storage};
 use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::Event;
+use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
 use anyhow::anyhow;
@@ -12,6 +13,7 @@ use anyhow::Result;
 use async_stream::stream;
 use async_trait::async_trait;
 use futures_core::Stream;
+use std::str::FromStr;
 use std::sync::Arc;
 use web3::types::Address;
 
@@ -42,16 +44,16 @@ pub trait TransportManager {
 pub struct Swarm {
     table: MemStorage<Address, Arc<Transport>>,
     transport_event_channel: Channel<Event>,
-    stun_server: String,
+    ice_server: String,
     pub key: SecretKey,
 }
 
 impl Swarm {
-    pub fn new(stun: &str, key: SecretKey) -> Self {
+    pub fn new(ice_server: &str, key: SecretKey) -> Self {
         Self {
             table: MemStorage::<Address, Arc<Transport>>::new(),
             transport_event_channel: Channel::new(1),
-            stun_server: stun.into(),
+            ice_server: ice_server.into(),
             key,
         }
     }
@@ -124,7 +126,7 @@ impl TransportManager for Swarm {
         let mut ice_transport = Transport::new(event_sender);
 
         ice_transport
-            .start(self.stun_server.as_str())
+            .start(&IceServer::from_str(&self.ice_server)?)
             .await?
             .apply_callback()
             .await?;
@@ -172,7 +174,7 @@ mod tests {
     use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 
     fn new_swarm() -> Swarm {
-        let stun = "stun:stun.l.google.com:19302";
+        let stun = "stun://stun.l.google.com:19302";
         let key = SecretKey::random();
         Swarm::new(stun, key)
     }

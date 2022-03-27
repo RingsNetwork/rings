@@ -1,3 +1,5 @@
+pub mod ice_server;
+pub use self::ice_server::IceServer;
 use crate::ecc::SecretKey;
 use crate::message::Encoded;
 use crate::types::channel::Channel;
@@ -16,7 +18,6 @@ use web3::types::Address;
 ///  unsigned short? sdpMLineIndex = null;
 ///  DOMString? usernameFragment = null;
 /// };
-
 #[derive(Deserialize, Serialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct IceCandidate {
@@ -37,7 +38,7 @@ pub trait IceTransport<E: Send, Ch: Channel<E>> {
     type Msg;
 
     fn new(event_sender: Ch::Sender) -> Self;
-    async fn start(&mut self, stun_addr: &str) -> Result<&Self>;
+    async fn start(&mut self, addr: &IceServer) -> Result<&Self>;
     async fn close(&self) -> Result<()>;
     async fn ice_connection_state(&self) -> Option<Self::IceConnectionState>;
     async fn is_connected(&self) -> bool;

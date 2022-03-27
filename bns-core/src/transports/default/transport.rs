@@ -8,6 +8,7 @@ use crate::transports::helper::TricklePayload;
 use crate::types::channel::Channel;
 use crate::types::channel::Event;
 use crate::types::ice_transport::IceCandidate;
+use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
 use crate::types::ice_transport::IceTrickleScheme;
@@ -27,7 +28,6 @@ use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
 use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
-use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
@@ -64,12 +64,9 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
         }
     }
 
-    async fn start(&mut self, stun: &str) -> Result<&Self> {
+    async fn start(&mut self, ice_server: &IceServer) -> Result<&Self> {
         let config = RTCConfiguration {
-            ice_servers: vec![RTCIceServer {
-                urls: vec![stun.into()],
-                ..Default::default()
-            }],
+            ice_servers: vec![ice_server.clone().into()],
             ice_candidate_pool_size: 100,
             ..Default::default()
         };
@@ -428,12 +425,15 @@ impl DefaultTransport {
 pub mod tests {
     use super::DefaultTransport as Transport;
     use super::*;
+    use crate::types::ice_transport::IceServer;
+    use std::str::FromStr;
 
     async fn prepare_transport() -> Result<Transport> {
         let ch = Arc::new(AcChannel::new(1));
         let mut trans = Transport::new(ch.sender());
-        let stun = "stun:stun.l.google.com:19302";
-        trans.start(stun).await?.apply_callback().await?;
+
+        let stun = IceServer::from_str("stun://stun.l.google.com:19302").unwrap();
+        trans.start(&stun).await?.apply_callback().await?;
         Ok(trans)
     }
 

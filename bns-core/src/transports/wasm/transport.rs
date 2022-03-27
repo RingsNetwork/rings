@@ -9,6 +9,7 @@ use crate::transports::helper::TricklePayload;
 use crate::types::channel::Channel;
 use crate::types::channel::Event;
 use crate::types::ice_transport::IceCandidate;
+use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
 use crate::types::ice_transport::IceTrickleScheme;
@@ -20,7 +21,6 @@ use futures::lock::Mutex as FuturesMutex;
 use log::info;
 use serde::Serialize;
 use serde_json;
-use serde_json::json;
 use std::sync::Arc;
 use std::sync::Mutex;
 use wasm_bindgen::prelude::*;
@@ -37,6 +37,7 @@ use web_sys::RtcIceCandidate;
 use web_sys::RtcIceCandidateInit;
 use web_sys::RtcIceConnectionState;
 use web_sys::RtcIceGatheringState;
+use web_sys::RtcIceServer;
 use web_sys::RtcPeerConnection;
 use web_sys::RtcPeerConnectionIceEvent;
 use web_sys::RtcSdpType;
@@ -71,9 +72,10 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
         }
     }
 
-    async fn start(&mut self, stun: &str) -> Result<&Self> {
+    async fn start(&mut self, ice_server: &IceServer) -> Result<&Self> {
         let mut config = RtcConfiguration::new();
-        config.ice_servers(&JsValue::from_serde(&json! {[{"urls": stun}]}).unwrap());
+        let ice_servers: js_sys::Array = js_sys::Array::of1(&ice_server.clone().into());
+        config.ice_servers(&ice_servers.into());
         self.connection = RtcPeerConnection::new_with_configuration(&config)
             .ok()
             .as_ref()
