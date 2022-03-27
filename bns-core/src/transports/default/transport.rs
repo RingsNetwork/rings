@@ -7,11 +7,11 @@ use crate::transports::helper::Promise;
 use crate::transports::helper::TricklePayload;
 use crate::types::channel::Channel;
 use crate::types::channel::Event;
-use crate::types::transport::IceCandidate;
-use crate::types::transport::IceServer;
-use crate::types::transport::IceTransport;
-use crate::types::transport::IceTransportCallback;
-use crate::types::transport::IceTrickleScheme;
+use crate::types::ice_transport::IceCandidate;
+use crate::types::ice_transport::IceServer;
+use crate::types::ice_transport::IceTransport;
+use crate::types::ice_transport::IceTransportCallback;
+use crate::types::ice_transport::IceTrickleScheme;
 use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -425,7 +425,7 @@ impl DefaultTransport {
 pub mod tests {
     use super::DefaultTransport as Transport;
     use super::*;
-    use crate::types::transport::IceServer;
+    use crate::types::ice_transport::IceServer;
     use std::str::FromStr;
 
     async fn prepare_transport() -> Result<Transport> {

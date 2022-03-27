@@ -1,6 +1,6 @@
 pub mod transport;
 
-use crate::types::transport::IceCandidate;
+use crate::types::ice_transport::IceCandidate;
 pub use transport::DefaultTransport;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 

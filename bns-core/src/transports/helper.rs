@@ -1,4 +1,4 @@
-use crate::types::transport::IceCandidate;
+use crate::types::ice_transport::IceCandidate;
 use anyhow::anyhow;
 use anyhow::Result;
 use serde::Deserialize;

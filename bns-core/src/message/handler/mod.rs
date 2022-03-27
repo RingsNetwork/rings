@@ -11,7 +11,7 @@ use crate::message::{
     NotifyPredecessor,
 };
 use crate::swarm::{Swarm, TransportManager};
-use crate::types::transport::IceTrickleScheme;
+use crate::types::ice_transport::IceTrickleScheme;
 use anyhow::anyhow;
 use anyhow::Result;
 use futures::lock::Mutex;
