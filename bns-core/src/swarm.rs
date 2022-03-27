@@ -113,12 +113,8 @@ impl Swarm {
     /// which means an async loop cannot running concurrency.
     pub async fn poll_message(&self) -> Option<MessageRelay<Message>> {
         let receiver = &self.transport_event_channel.receiver();
-        let ev = Channel::recv(receiver).await;
-        match self.load_message(ev) {
-            Ok(Some(msg)) => Some(msg),
-            Ok(None) => None,
-            Err(_) => None,
-        }
+        let ev = Channel::recv(receiver).await.ok()??;
+        ev.try_into().ok()
     }
 
     pub fn iter_messages<'a, 'b>(&'a self) -> impl Stream<Item = MessageRelay<Message>> + 'b
@@ -128,9 +124,10 @@ impl Swarm {
         stream! {
             let receiver = &self.transport_event_channel.receiver();
             loop {
-                let ev = Channel::recv(receiver).await;
-                if let Ok(Some(msg)) = self.load_message(ev) {
-                    yield msg
+                if let Ok(Some(ev)) = Channel::recv(receiver).await {
+                    if let Ok(msg) = ev.try_into() {
+                        yield msg;
+                    }
                 }
             }
         }
@@ -203,7 +200,7 @@ impl TransportManager for Swarm {
 
 #[cfg(not(feature = "wasm"))]
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use crate::transports::default::transport::tests::establish_connection;
     use tokio::time;
@@ -216,7 +213,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn swarm_new_transport() -> Result<()> {
+    async fn test_swarm_new_transport() -> Result<()> {
         let swarm = new_swarm();
         let transport = swarm.new_transport().await.unwrap();
         assert_eq!(

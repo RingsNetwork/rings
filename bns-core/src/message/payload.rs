@@ -1,5 +1,6 @@
-use crate::ecc::{recover, sign, verify, PublicKey, SecretKey};
+use crate::ecc::{sign, verify, SecretKey};
 use crate::message::{Did, Encoded};
+use crate::types::channel::Event;
 use anyhow::anyhow;
 use anyhow::Result;
 use chrono::Utc;
@@ -31,8 +32,6 @@ pub struct MessageRelay<T> {
     pub sig: Vec<u8>,
     pub method: MessageRelayMethod,
 }
-
-pub trait MessageSessionRelay {}
 
 impl<T> MessageRelay<T>
 where
@@ -83,11 +82,6 @@ where
         }
     }
 
-    pub fn pubkey(&self) -> Result<PublicKey> {
-        let msg = Self::pack_msg(&self.data, self.ts_ms, self.ttl_ms)?;
-        recover(&msg, self.sig.clone())
-    }
-
     pub fn pack_msg(data: &T, ts_ms: u128, ttl_ms: usize) -> Result<String> {
         let mut msg = serde_json::to_string(data)?;
         msg.push_str(&format!("\n{}\n{}", ts_ms, ttl_ms));
@@ -115,6 +109,22 @@ where
     type Error = anyhow::Error;
     fn try_from(s: MessageRelay<T>) -> Result<Self> {
         serde_json::to_string(&s)?.try_into()
+    }
+}
+
+impl<T> TryFrom<Event> for MessageRelay<T>
+where
+    T: Serialize + DeserializeOwned,
+{
+    type Error = anyhow::Error;
+    fn try_from(ev: Event) -> Result<Self> {
+        match ev {
+            Event::ReceiveMsg(msg) => {
+                let payload = serde_json::from_slice::<MessageRelay<T>>(&msg)?;
+                Ok(payload)
+            }
+            x => Err(anyhow!(format!("Receive {:?}", x))),
+        }
     }
 }
 
