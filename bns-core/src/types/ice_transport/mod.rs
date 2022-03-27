@@ -79,6 +79,6 @@ pub trait IceTransportCallback<E: Send, Ch: Channel<E>>: IceTransport<E, Ch> {
 pub trait IceTrickleScheme<E: Send, Ch: Channel<E>>: IceTransport<E, Ch> {
     type SdpType;
     async fn get_handshake_info(&self, key: SecretKey, kind: Self::SdpType) -> Result<Encoded>;
-    async fn register_remote_info(&self, data: Encoded) -> Result<(Address, String)>;
+    async fn register_remote_info(&self, data: Encoded) -> Result<Address>;
     async fn wait_for_connected(&self) -> Result<()>;
 }

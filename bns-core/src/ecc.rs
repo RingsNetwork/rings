@@ -44,6 +44,12 @@ impl From<libsecp256k1::PublicKey> for PublicKey {
     }
 }
 
+impl From<SecretKey> for PublicKey {
+    fn from(secret_key: SecretKey) -> Self {
+        libsecp256k1::PublicKey::from_secret_key(&secret_key.0).into()
+    }
+}
+
 impl TryFrom<&str> for SecretKey {
     type Error = anyhow::Error;
     fn try_from(s: &str) -> Result<Self> {

@@ -16,8 +16,8 @@ use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::future::join_all;
-use serde::Serialize;
 use serde_json;
+use serde::Serialize;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -44,6 +44,7 @@ pub struct DefaultTransport {
     pending_candidates: Arc<Mutex<Vec<RTCIceCandidate>>>,
     data_channel: Arc<Mutex<Option<Arc<RTCDataChannel>>>>,
     event_sender: EventSender,
+    local_address: Address,
 }
 
 #[async_trait]
@@ -55,11 +56,12 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
     type IceConnectionState = RTCIceConnectionState;
     type Msg = DataChannelMessage;
 
-    fn new(event_sender: EventSender) -> Self {
+    fn new(event_sender: EventSender, local_address: Address) -> Self {
         Self {
             connection: Arc::new(Mutex::new(None)),
             pending_candidates: Arc::new(Mutex::new(vec![])),
             data_channel: Arc::new(Mutex::new(None)),
+            local_address,
             event_sender,
         }
     }
@@ -219,6 +221,7 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
 }
 
 impl DefaultTransport {
+
     pub async fn setup_channel(&mut self, name: &str) -> Result<()> {
         match self.get_peer_connection().await {
             Some(peer_connection) => {
@@ -266,18 +269,16 @@ impl IceTransportCallback<Event, AcChannel<Event>> for DefaultTransport {
     }
 
     async fn on_ice_connection_state_change(&self) -> Self::OnIceConnectionStateChangeHdlrFn {
-        let peer_connection = self.get_peer_connection().await;
         let event_sender = self.event_sender.clone();
+        let local_address = self.local_address;
         box move |cs: Self::IceConnectionState| {
-            let peer_connection = peer_connection.clone();
             let event_sender = event_sender.clone();
+            let local_address = local_address;
             Box::pin(async move {
-                let remote_description =
-                    peer_connection.unwrap().remote_description().await.unwrap();
                 match cs {
                     Self::IceConnectionState::Connected => {
                         if event_sender
-                            .send(Event::RegisterTransport(remote_description.sdp))
+                            .send(Event::RegisterTransport(local_address))
                             .await
                             .is_err()
                         {
@@ -375,7 +376,7 @@ impl IceTrickleScheme<Event, AcChannel<Event>> for DefaultTransport {
         Ok(resp.try_into()?)
     }
 
-    async fn register_remote_info(&self, data: Encoded) -> anyhow::Result<(Address, String)> {
+    async fn register_remote_info(&self, data: Encoded) -> anyhow::Result<Address> {
         let data: MessageRelay<TricklePayload> = data.try_into()?;
         log::trace!("register remote info: {:?}", data);
 
@@ -389,7 +390,7 @@ impl IceTrickleScheme<Event, AcChannel<Event>> for DefaultTransport {
                     log::trace!("add candiates: {:?}", c);
                     self.add_ice_candidate(c.clone()).await?;
                 }
-                Ok((data.addr, data.data.sdp))
+                Ok(data.addr)
             }
             _ => {
                 log::error!("cannot verify message sig");
@@ -502,7 +503,7 @@ pub mod tests {
         );
 
         // Peer 2 got offer then register
-        let (addr1, _sdp1) = transport2.register_remote_info(handshake_info1).await?;
+        let addr1 = transport2.register_remote_info(handshake_info1).await?;
         assert_eq!(addr1, key1.address());
         assert_eq!(
             transport1.ice_connection_state().await,
@@ -527,7 +528,7 @@ pub mod tests {
         );
 
         // Peer 1 got answer then register
-        let (addr2, _sdp2) = transport1.register_remote_info(handshake_info2).await?;
+        let addr2 = transport1.register_remote_info(handshake_info2).await?;
         assert_eq!(addr2, key2.address());
         let promise_1 = transport1.connect_success_promise().await?;
         let promise_2 = transport2.connect_success_promise().await?;

@@ -53,6 +53,7 @@ pub struct WasmTransport {
     pending_candidates: Arc<Mutex<Vec<RtcIceCandidate>>>,
     channel: Option<Arc<RtcDataChannel>>,
     event_sender: EventSender,
+    local_address: Address,
 }
 
 #[async_trait(?Send)]
@@ -64,11 +65,12 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
     type IceConnectionState = RtcIceConnectionState;
     type Msg = JsValue;
 
-    fn new(event_sender: EventSender) -> Self {
+    fn new(event_sender: EventSender, local_address: Address) -> Self {
         Self {
             connection: None,
             pending_candidates: Arc::new(Mutex::new(vec![])),
             channel: None,
+            local_address,
             event_sender,
         }
     }
@@ -289,8 +291,9 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
     }
 
     async fn on_ice_connection_state_change(&self) -> Self::OnIceConnectionStateChangeHdlrFn {
-        let peer_connection = self.get_peer_connection().await;
         let event_sender = self.event_sender.clone();
+        let peer_connection = self.get_peer_connection().await;
+        let local_address = self.local_address;
         box move |ev: RtcLifecycleEvent| {
             let mut peer_connection = peer_connection.clone();
             let event_sender = Arc::clone(&event_sender);
@@ -298,14 +301,12 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
                 RtcLifecycleEvent::Iceconnectionstatechange => {
                     let peer_connection = peer_connection.take().unwrap();
                     let ice_connection_state = peer_connection.ice_connection_state();
-                    let mut remote_description = peer_connection.remote_description();
                     spawn_local(async move {
                         let event_sender = Arc::clone(&event_sender);
                         if ice_connection_state == RtcIceConnectionState::Connected {
-                            let remote_description = remote_description.take().unwrap();
                             if CbChannel::send(
                                 &event_sender,
-                                Event::RegisterTransport(remote_description.sdp()),
+                                Event::RegisterTransport(local_address),
                             )
                             .await
                             .is_err()
@@ -402,13 +403,12 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
         Ok(resp.try_into()?)
     }
 
-    async fn register_remote_info(&self, data: Encoded) -> anyhow::Result<(Address, String)> {
+    async fn register_remote_info(&self, data: Encoded) -> anyhow::Result<Address> {
         let data: MessageRelay<TricklePayload> = data.try_into()?;
         log::debug!("register remote info: {:?}", &data);
 
         match data.verify() {
             true => {
-                let sdp_str = data.data.sdp.clone();
                 let sdp: RtcSessionDescriptionWrapper = data.data.sdp.try_into()?;
                 self.set_remote_description(sdp.to_owned()).await?;
                 log::trace!("setting remote candidate");
@@ -416,7 +416,7 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
                     log::debug!("add remote candiates: {:?}", c);
                     self.add_ice_candidate(c.clone()).await?;
                 }
-                Ok((data.addr, sdp_str))
+                Ok(data.addr)
             }
             _ => {
                 log::error!("cannot verify message sig");

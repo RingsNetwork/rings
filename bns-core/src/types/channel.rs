@@ -1,11 +1,12 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use web3::types::Address;
 
 #[derive(Debug)]
 pub enum Event {
     ConnectFailed,
     DataChannelMessage(Vec<u8>),
-    RegisterTransport(String),
+    RegisterTransport(Address),
 }
 
 #[async_trait]
