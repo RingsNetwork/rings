@@ -8,10 +8,10 @@ use crate::transports::helper::TricklePayload;
 use crate::types::channel::Channel;
 use crate::types::channel::Event;
 use crate::types::transport::IceCandidate;
+use crate::types::transport::IceServer;
 use crate::types::transport::IceTransport;
 use crate::types::transport::IceTransportCallback;
 use crate::types::transport::IceTrickleScheme;
-use crate::types::transport::IceServer;
 use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -425,12 +425,15 @@ impl DefaultTransport {
 pub mod tests {
     use super::DefaultTransport as Transport;
     use super::*;
+    use crate::types::transport::IceServer;
+    use std::str::FromStr;
 
     async fn prepare_transport() -> Result<Transport> {
         let ch = Arc::new(AcChannel::new(1));
         let mut trans = Transport::new(ch.sender());
-        let stun = "stun:stun.l.google.com:19302";
-        trans.start(stun).await?.apply_callback().await?;
+
+        let stun = IceServer::from_str("stun://stun.l.google.com:19302").unwrap();
+        trans.start(&stun).await?.apply_callback().await?;
         Ok(trans)
     }
 

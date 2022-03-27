@@ -1,3 +1,3 @@
 pub mod channel;
-pub mod transport;
 pub mod message;
+pub mod transport;

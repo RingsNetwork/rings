@@ -9,7 +9,9 @@ pub mod test {
     use bns_core::types::transport::IceTransport;
     use bns_core::types::transport::IceTransportCallback;
     use bns_core::types::transport::IceTrickleScheme;
+    use bns_core::types::transport::IceServer;
     use std::sync::Arc;
+    use std::str::FromStr;
     use wasm_bindgen_test::wasm_bindgen_test_configure;
     use wasm_bindgen_test::*;
     use web_sys::RtcSdpType;
@@ -19,8 +21,8 @@ pub mod test {
     async fn prepare_transport() -> Result<Transport> {
         let ch = Arc::new(CbChannel::new(1));
         let mut trans = Transport::new(ch.sender());
-        let stun = "stun:stun.l.google.com:19302";
-        trans.start(stun).await?.apply_callback().await?;
+        let stun = IceServer::from_str("stun://stun.l.google.com:19302").unwrap();
+        trans.start(&stun).await?.apply_callback().await?;
         Ok(trans)
     }
 

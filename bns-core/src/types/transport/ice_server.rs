@@ -1,9 +1,9 @@
+use anyhow::anyhow;
+use anyhow::Result;
 use serde::Deserialize;
 use serde::Serialize;
-use anyhow::Result;
-use anyhow::anyhow;
-use url::Url;
 use std::str::FromStr;
+use url::Url;
 
 #[derive(Deserialize, Serialize, Debug, Clone, Default, PartialEq)]
 pub enum IceCredentialType {
@@ -21,7 +21,6 @@ pub struct IceServer {
     pub credential_type: IceCredentialType,
 }
 
-
 impl Default for IceServer {
     fn default() -> Self {
         Self {
@@ -32,7 +31,6 @@ impl Default for IceServer {
         }
     }
 }
-
 
 /// [stun|turn]://[username]:[password]@[url]
 /// For current implementation all type is `password` as default
@@ -51,32 +49,33 @@ impl FromStr for IceServer {
             return Err(anyhow!("url do not has a host"));
         }
         let username = parsed.username();
-        let password = parsed.password().unwrap_or_else(|| "");
+        let password = parsed.password().unwrap_or("");
         // must have host
         let host = parsed.host_str().unwrap();
         // parse port as `:<port>`
-        let port = parsed.port().map(|p| format!(":{}", p)).unwrap_or_else(|| "".to_string());
+        let port = parsed
+            .port()
+            .map(|p| format!(":{}", p))
+            .unwrap_or_else(|| "".to_string());
         let path = parsed.path();
         let url = format!("{}:{}{}{}", scheme, host, port, path);
         Ok(Self {
             urls: vec![url],
             username: username.to_string(),
             credential: password.to_string(),
-            credential_type: IceCredentialType::default()
+            credential_type: IceCredentialType::default(),
         })
-
     }
 }
 
-#[cfg(feature="wasm")]
+#[cfg(feature = "wasm")]
 mod wasm {
-    use web_sys::RtcIceServer;
-    use web_sys::RtcIceCredentialType;
+    use super::IceCredentialType;
+    use super::IceServer;
     use js_sys::Array;
     use wasm_bindgen::JsValue;
-    use super::IceServer;
-    use super::IceCredentialType;
-
+    use web_sys::RtcIceCredentialType;
+    use web_sys::RtcIceServer;
 
     // set default to password
     impl From<IceCredentialType> for RtcIceCredentialType {
@@ -111,16 +110,14 @@ mod wasm {
             ice_server.into()
         }
     }
-
 }
 
-
-#[cfg(not(feature="wasm"))]
+#[cfg(not(feature = "wasm"))]
 mod default {
-    use webrtc::ice_transport::ice_server::RTCIceServer;
-    use webrtc::ice_transport::ice_credential_type::RTCIceCredentialType;
-    use super::IceServer;
     use super::IceCredentialType;
+    use super::IceServer;
+    use webrtc::ice_transport::ice_credential_type::RTCIceCredentialType;
+    use webrtc::ice_transport::ice_server::RTCIceServer;
 
     impl From<IceCredentialType> for RTCIceCredentialType {
         fn from(s: IceCredentialType) -> Self {
@@ -138,11 +135,10 @@ mod default {
                 urls: s.urls,
                 username: s.username,
                 credential: s.credential,
-                credential_type: s.credential_type.into()
+                credential_type: s.credential_type.into(),
             }
         }
     }
-
 }
 
 #[cfg(test)]
@@ -162,7 +158,6 @@ mod test {
         let ret_c = IceServer::from_str(c).unwrap();
         let ret_d = IceServer::from_str(d).unwrap();
         let ret_e = IceServer::from_str(e);
-
 
         assert_eq!(ret_a.urls[0], "stun:stun.l.google.com:19302".to_string());
         assert_eq!(ret_a.credential, "bar".to_string());

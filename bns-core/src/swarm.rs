@@ -5,15 +5,15 @@ use crate::message::MessageRelay;
 use crate::storage::{MemStorage, Storage};
 use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::Event;
+use crate::types::transport::IceServer;
 use crate::types::transport::IceTransport;
 use crate::types::transport::IceTransportCallback;
-use crate::types::transport::IceServer;
-use std::str::FromStr;
 use anyhow::anyhow;
 use anyhow::Result;
 use async_stream::stream;
 use async_trait::async_trait;
 use futures_core::Stream;
+use std::str::FromStr;
 use std::sync::Arc;
 use web3::types::Address;
 
@@ -174,7 +174,7 @@ mod tests {
     use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 
     fn new_swarm() -> Swarm {
-        let stun = "stun:stun.l.google.com:19302";
+        let stun = "stun://stun.l.google.com:19302";
         let key = SecretKey::random();
         Swarm::new(stun, key)
     }
