@@ -1,6 +1,6 @@
 mod helper;
 mod transport;
-use crate::types::ice_transport::IceCandidate;
+use crate::types::transport::IceCandidate;
 pub use transport::WasmTransport;
 use web_sys::RtcIceCandidateInit;
 

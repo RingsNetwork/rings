@@ -7,10 +7,11 @@ use crate::transports::helper::Promise;
 use crate::transports::helper::TricklePayload;
 use crate::types::channel::Channel;
 use crate::types::channel::Event;
-use crate::types::ice_transport::IceCandidate;
-use crate::types::ice_transport::IceTransport;
-use crate::types::ice_transport::IceTransportCallback;
-use crate::types::ice_transport::IceTrickleScheme;
+use crate::types::transport::IceCandidate;
+use crate::types::transport::IceTransport;
+use crate::types::transport::IceTransportCallback;
+use crate::types::transport::IceTrickleScheme;
+use crate::types::transport::IceServer;
 use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -27,7 +28,6 @@ use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
 use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
-use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
@@ -64,12 +64,9 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
         }
     }
 
-    async fn start(&mut self, stun: &str) -> Result<&Self> {
+    async fn start(&mut self, ice_server: &IceServer) -> Result<&Self> {
         let config = RTCConfiguration {
-            ice_servers: vec![RTCIceServer {
-                urls: vec![stun.into()],
-                ..Default::default()
-            }],
+            ice_servers: vec![ice_server.clone().into()],
             ice_candidate_pool_size: 100,
             ..Default::default()
         };

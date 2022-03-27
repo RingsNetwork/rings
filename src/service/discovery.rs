@@ -3,7 +3,7 @@ use anyhow::anyhow;
 use axum::extract::{Extension, Query, RawBody};
 use bns_core::ecc::SecretKey;
 use bns_core::swarm::{Swarm, TransportManager};
-use bns_core::types::ice_transport::IceTrickleScheme;
+use bns_core::types::transport::IceTrickleScheme;
 use std::collections::HashMap;
 use std::sync::Arc;
 use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;

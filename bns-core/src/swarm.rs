@@ -5,8 +5,10 @@ use crate::message::MessageRelay;
 use crate::storage::{MemStorage, Storage};
 use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::Event;
-use crate::types::ice_transport::IceTransport;
-use crate::types::ice_transport::IceTransportCallback;
+use crate::types::transport::IceTransport;
+use crate::types::transport::IceTransportCallback;
+use crate::types::transport::IceServer;
+use std::str::FromStr;
 use anyhow::anyhow;
 use anyhow::Result;
 use async_stream::stream;
@@ -42,16 +44,16 @@ pub trait TransportManager {
 pub struct Swarm {
     table: MemStorage<Address, Arc<Transport>>,
     transport_event_channel: Channel<Event>,
-    stun_server: String,
+    ice_server: String,
     pub key: SecretKey,
 }
 
 impl Swarm {
-    pub fn new(stun: &str, key: SecretKey) -> Self {
+    pub fn new(ice_server: &str, key: SecretKey) -> Self {
         Self {
             table: MemStorage::<Address, Arc<Transport>>::new(),
             transport_event_channel: Channel::new(1),
-            stun_server: stun.into(),
+            ice_server: ice_server.into(),
             key,
         }
     }
@@ -124,7 +126,7 @@ impl TransportManager for Swarm {
         let mut ice_transport = Transport::new(event_sender);
 
         ice_transport
-            .start(self.stun_server.as_str())
+            .start(&IceServer::from_str(&self.ice_server)?)
             .await?
             .apply_callback()
             .await?;

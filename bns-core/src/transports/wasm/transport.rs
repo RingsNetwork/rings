@@ -8,10 +8,11 @@ use crate::transports::helper::Promise;
 use crate::transports::helper::TricklePayload;
 use crate::types::channel::Channel;
 use crate::types::channel::Event;
-use crate::types::ice_transport::IceCandidate;
-use crate::types::ice_transport::IceTransport;
-use crate::types::ice_transport::IceTransportCallback;
-use crate::types::ice_transport::IceTrickleScheme;
+use crate::types::transport::IceCandidate;
+use crate::types::transport::IceTransport;
+use crate::types::transport::IceTransportCallback;
+use crate::types::transport::IceTrickleScheme;
+use crate::types::transport::IceServer;
 use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -20,7 +21,6 @@ use futures::lock::Mutex as FuturesMutex;
 use log::info;
 use serde::Serialize;
 use serde_json;
-use serde_json::json;
 use std::sync::Arc;
 use std::sync::Mutex;
 use wasm_bindgen::prelude::*;
@@ -71,9 +71,9 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
         }
     }
 
-    async fn start(&mut self, stun: &str) -> Result<&Self> {
+    async fn start(&mut self, ice_server: &IceServer) -> Result<&Self> {
         let mut config = RtcConfiguration::new();
-        config.ice_servers(&JsValue::from_serde(&json! {[{"urls": stun}]}).unwrap());
+        config.ice_servers(&ice_server.clone().into());
         self.connection = RtcPeerConnection::new_with_configuration(&config)
             .ok()
             .as_ref()
