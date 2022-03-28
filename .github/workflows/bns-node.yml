@@ -23,11 +23,12 @@ jobs:
       - uses: jetli/wasm-bindgen-action@v0.1.0
         with:
           version: "0.2.79"
-      - uses: GabrielBB/xvfb-action@v1
       - name: Build
         run: cargo build -p bns-core --target=wasm32-unknown-unknown --features wasm --no-default-features
       - name: Run tests
-        run: cargo test -p bns-core --target=wasm32-unknown-unknown --features wasm --no-default-features
+        uses: GabrielBB/xvfb-action@v1
+        with:
+          run: cargo test -p bns-core --target=wasm32-unknown-unknown --features wasm --no-default-features
   build:
     name: Build and test
     strategy:
