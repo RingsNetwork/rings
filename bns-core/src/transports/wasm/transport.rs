@@ -412,10 +412,14 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
 
         match data.verify() {
             true => {
+                if let Ok(public_key) = data.pubkey() {
+                    let mut pk = self.public_key.write().unwrap();
+                    *pk = Some(public_key);
+                };
                 let sdp: RtcSessionDescriptionWrapper = data.data.sdp.try_into()?;
                 self.set_remote_description(sdp.to_owned()).await?;
                 log::trace!("setting remote candidate");
-                for c in data.data.candidates {
+                for c in &data.data.candidates {
                     log::debug!("add remote candiates: {:?}", c);
                     self.add_ice_candidate(c.clone()).await?;
                 }

@@ -390,8 +390,7 @@ impl IceTrickleScheme<Event, AcChannel<Event>> for DefaultTransport {
                     log::trace!("add candiates: {:?}", c);
                     self.add_ice_candidate(c.clone()).await?;
                 }
-                let public_key = data.pubkey();
-                if let Ok(public_key) = public_key {
+                if let Ok(public_key) = data.pubkey() {
                     let mut pk = self.public_key.write().await;
                     *pk = Some(public_key);
                 };
