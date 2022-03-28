@@ -216,7 +216,10 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
                 let promise = c.set_remote_description(&offer_obj);
 
                 match JsFuture::from(promise).await {
-                    Ok(_) => Ok(()),
+                    Ok(_) => {
+                        log::debug!("set remote sdp successed");
+                        Ok(())
+                    },
                     Err(e) => {
                         info!("failed to set remote desc");
                         info!("{:?}", e);
@@ -387,7 +390,6 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
     type SdpType = RtcSdpType;
 
     async fn get_handshake_info(&self, key: SecretKey, kind: Self::SdpType) -> Result<Encoded> {
-        log::trace!("prepareing handshake info {:?}", kind);
         let sdp = match kind {
             RtcSdpType::Answer => self.get_answer().await?,
             RtcSdpType::Offer => self.get_offer().await?,
@@ -405,7 +407,7 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
             sdp: serde_json::to_string(&RtcSessionDescriptionWrapper::from(sdp))?,
             candidates: local_candidates_json,
         };
-        log::trace!("prepared hanshake info :{:?}", data);
+        log::debug!("prepared hanshake info :{:?}", data);
         let resp = MessageRelay::new(data, &key, None, None, None, MessageRelayMethod::SEND)?;
         Ok(resp.try_into()?)
     }
@@ -422,7 +424,6 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
                 };
                 let sdp: RtcSessionDescriptionWrapper = data.data.sdp.try_into()?;
                 self.set_remote_description(sdp.to_owned()).await?;
-                log::trace!("setting remote candidate");
                 for c in &data.data.candidates {
                     log::debug!("add remote candiates: {:?}", c);
                     self.add_ice_candidate(c.clone()).await?;

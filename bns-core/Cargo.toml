@@ -81,3 +81,4 @@ web3 = { package = "web3", version = "0.18.0" }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.0"
+console_log = { version = "0.2", features = ["color"] }
