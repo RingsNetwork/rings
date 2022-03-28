@@ -50,7 +50,7 @@ pub trait TransportManager {
     fn get_transport(&self, address: &Address) -> Option<Self::TransportStorage>;
     fn remove_transport(&self, address: &Address) -> Option<(Address, Self::TransportStorage)>;
     fn get_transport_numbers(&self) -> usize;
-    async fn new_transport(&self, public_key: PublicKey) -> Result<Self::Transport>;
+    async fn new_transport(&self) -> Result<Self::Transport>;
     async fn register(&self, address: &Address, trans: Self::Transport) -> Result<()>;
     async fn get_or_register(
         &self,
@@ -158,9 +158,9 @@ impl TransportManager for Swarm {
     type Transport = Arc<Transport>;
     type TransportStorage = TransportStorage;
 
-    async fn new_transport(&self, public_key: PublicKey) -> Result<Self::Transport> {
+    async fn new_transport(&self) -> Result<Self::Transport> {
         let event_sender = self.transport_event_channel.sender();
-        let mut ice_transport = Transport::new(event_sender, public_key.address());
+        let mut ice_transport = Transport::new(event_sender);
 
         ice_transport
             .start(&IceServer::from_str(&self.ice_server)?)
@@ -242,8 +242,7 @@ mod tests {
     #[tokio::test]
     async fn swarm_new_transport() -> Result<()> {
         let swarm = new_swarm();
-        let public_key: PublicKey = SecretKey::random().into();
-        let transport = swarm.new_transport(public_key).await.unwrap();
+        let transport = swarm.new_transport().await.unwrap();
         assert_eq!(
             transport.ice_connection_state().await.unwrap(),
             RTCIceConnectionState::New
@@ -256,14 +255,12 @@ mod tests {
     async fn test_swarm_register_and_get() -> Result<()> {
         let swarm1 = new_swarm();
         let swarm2 = new_swarm();
-        let public_key1: PublicKey = SecretKey::random().into();
-        let public_key2: PublicKey = SecretKey::random().into();
 
         assert!(swarm1.get_transport(&swarm2.address()).is_none());
         assert!(swarm2.get_transport(&swarm1.address()).is_none());
 
-        let transport1 = swarm1.new_transport(public_key1).await.unwrap();
-        let transport2 = swarm2.new_transport(public_key2).await.unwrap();
+        let transport1 = swarm1.new_transport().await.unwrap();
+        let transport2 = swarm2.new_transport().await.unwrap();
 
         // Cannot register if not connected
         // assert!(swarm1
@@ -299,18 +296,14 @@ mod tests {
     async fn test_swarm_will_close_previous_transport() -> Result<()> {
         let swarm1 = new_swarm();
         let swarm2 = new_swarm();
-        let public_key1: PublicKey = SecretKey::random().into();
-        let public_key2: PublicKey = SecretKey::random().into();
-        let public_key3: PublicKey = SecretKey::random().into();
-        let public_key4: PublicKey = SecretKey::random().into();
 
         assert!(swarm1.get_transport(&swarm2.address()).is_none());
 
-        let transport0 = swarm1.new_transport(public_key1).await.unwrap();
-        let transport1 = swarm1.new_transport(public_key2).await.unwrap();
+        let transport0 = swarm1.new_transport().await.unwrap();
+        let transport1 = swarm1.new_transport().await.unwrap();
 
-        let transport_2_to_0 = swarm2.new_transport(public_key3).await.unwrap();
-        let transport_2_to_1 = swarm2.new_transport(public_key4).await.unwrap();
+        let transport_2_to_0 = swarm2.new_transport().await.unwrap();
+        let transport_2_to_1 = swarm2.new_transport().await.unwrap();
 
         establish_connection(&transport0, &transport_2_to_0).await?;
         establish_connection(&transport1, &transport_2_to_1).await?;

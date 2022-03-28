@@ -44,7 +44,7 @@ pub async fn connect_handler(
 async fn handshake(swarm: Arc<Swarm>, key: SecretKey, data: Vec<u8>) -> anyhow::Result<String> {
     // get offer from remote and send answer back
 
-    let transport = swarm.new_transport(key.into()).await?;
+    let transport = swarm.new_transport().await?;
     match transport
         .register_remote_info(String::from_utf8(data)?.try_into()?)
         .await
@@ -76,7 +76,7 @@ pub async fn trickle_forward(
 ) -> anyhow::Result<String> {
     // request remote offer and sand answer to remote
     let client = reqwest::Client::new();
-    let transport = swarm.new_transport(key.into()).await?;
+    let transport = swarm.new_transport().await?;
     let req = transport.get_handshake_info(key, RTCSdpType::Offer).await?;
     log::debug!(
         "sending offer and candidate {:?} to {:?}",

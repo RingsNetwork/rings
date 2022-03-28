@@ -127,7 +127,7 @@ impl MessageHandler {
         }
         match self.swarm.get_transport(&msg.sender_id) {
             None => {
-                let trans = self.swarm.new_transport(self.swarm.key.into()).await?;
+                let trans = self.swarm.new_transport().await?;
                 trans
                     .register_remote_info(msg.handshake_info.clone().try_into()?)
                     .await?;

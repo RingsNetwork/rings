@@ -23,6 +23,7 @@ use serde::Serialize;
 use serde_json;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::RwLock;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
@@ -53,7 +54,7 @@ pub struct WasmTransport {
     pending_candidates: Arc<Mutex<Vec<RtcIceCandidate>>>,
     channel: Option<Arc<RtcDataChannel>>,
     event_sender: EventSender,
-    local_address: Address,
+    local_address: Arc<RwLock<Option<Address>>>,
 }
 
 #[async_trait(?Send)]
@@ -65,12 +66,12 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
     type IceConnectionState = RtcIceConnectionState;
     type Msg = JsValue;
 
-    fn new(event_sender: EventSender, local_address: Address) -> Self {
+    fn new(event_sender: EventSender) -> Self {
         Self {
             connection: None,
             pending_candidates: Arc::new(Mutex::new(vec![])),
             channel: None,
-            local_address,
+            local_address: Arc::new(RwLock::new(None)),
             event_sender,
         }
     }
@@ -293,16 +294,18 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
     async fn on_ice_connection_state_change(&self) -> Self::OnIceConnectionStateChangeHdlrFn {
         let event_sender = self.event_sender.clone();
         let peer_connection = self.get_peer_connection().await;
-        let local_address = self.local_address;
+        let local_address = Arc::clone(&self.local_address);
         box move |ev: RtcLifecycleEvent| {
             let mut peer_connection = peer_connection.clone();
             let event_sender = Arc::clone(&event_sender);
+            let local_address = Arc::clone(&local_address);
             match ev {
                 RtcLifecycleEvent::Iceconnectionstatechange => {
                     let peer_connection = peer_connection.take().unwrap();
                     let ice_connection_state = peer_connection.ice_connection_state();
                     spawn_local(async move {
                         let event_sender = Arc::clone(&event_sender);
+                        let local_address: Address = (*local_address.read().unwrap()).unwrap();
                         if ice_connection_state == RtcIceConnectionState::Connected {
                             if CbChannel::send(
                                 &event_sender,
