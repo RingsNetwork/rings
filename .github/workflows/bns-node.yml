@@ -12,7 +12,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
+  build_wasm:
     name: Build and test for wasm
     strategy:
       matrix:
@@ -27,7 +27,6 @@ jobs:
         run: cargo build -p bns-core --target=wasm32-unknown-unknown --features wasm --no-default-features
       - name: Run tests
         run: cargo test -p bns-core --target=wasm32-unknown-unknown --features wasm --no-default-features
-
   build:
     name: Build and test
     strategy:
