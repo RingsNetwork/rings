@@ -20,7 +20,7 @@ pub struct Args {
     pub log_level: String,
 
     #[clap(long, short = 's', default_value = "stun://stun.l.google.com:19302")]
-    pub stun_server: String,
+    pub ice_server: String,
 
     #[clap(
         long = "eth",
@@ -59,7 +59,7 @@ async fn main() -> Result<()> {
 
     let key = SecretKey::try_from(args.eth_key.as_str())?;
 
-    run(args.http_addr, key, args.stun_server.as_str()).await;
+    run(args.http_addr, key, args.ice_server.as_str()).await;
 
     Ok(())
 }

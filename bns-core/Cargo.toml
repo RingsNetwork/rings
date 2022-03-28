@@ -31,7 +31,6 @@ chrono = { version = "0.4.19", features = ["wasmbind"] }
 base58-monero = { version = "0.3", default-features = false, features = ["check"] }
 async-stream = "0.3.2"
 futures-core = "0.3.21"
-futures-util = "0.3.21"
 uuid = "0.8.2"
 url = { version = "2", features = ["serde"] }
 
@@ -73,11 +72,14 @@ features = [
 
 [target.'cfg(target_family="wasm")'.dependencies]
 web3 = { package = "web3", version = "0.18.0", features = ["wasm"], default-features = false }
+futures-util = {package="futures-util", version="0.3.21", default-features=false}
+
 
 [target.'cfg(not(target_family="wasm"))'.dependencies]
 web3 = { package = "web3", version = "0.18.0" }
-
+futures-util = {package="futures-util", version="0.3.21"}
 
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.0"
+console_log = { version = "0.2", features = ["color"] }

@@ -79,6 +79,17 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
         let mut config = RtcConfiguration::new();
         let ice_servers: js_sys::Array = js_sys::Array::of1(&ice_server.clone().into());
         config.ice_servers(&ice_servers.into());
+        // hack here
+        let r = js_sys::Reflect::set(
+            &config,
+            &JsValue::from("iceCandidatePoolSize"),
+            &JsValue::from(10),
+        );
+        debug_assert!(
+            r.is_ok(),
+            "setting properties should never fail on our dictionary objects"
+        );
+
         self.connection = RtcPeerConnection::new_with_configuration(&config)
             .ok()
             .as_ref()
@@ -112,7 +123,7 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
     }
 
     async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>> {
-        self.connection.as_ref().map(|c| Arc::clone(c))
+        self.connection.as_ref().map(Arc::clone)
     }
 
     async fn get_pending_candidates(&self) -> Vec<Self::Candidate> {
@@ -170,7 +181,7 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
     }
 
     async fn get_data_channel(&self) -> Option<Arc<Self::DataChannel>> {
-        self.channel.as_ref().map(|c| Arc::clone(&c))
+        self.channel.as_ref().map(Arc::clone)
     }
 
     async fn send_message<T>(&self, msg: T) -> Result<()>
@@ -212,11 +223,14 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
                 let sdp: Self::Sdp = desc.into();
                 let mut offer_obj = RtcSessionDescriptionInit::new(sdp.type_());
                 let sdp = &sdp.sdp();
-                offer_obj.sdp(&sdp);
+                offer_obj.sdp(sdp);
                 let promise = c.set_remote_description(&offer_obj);
 
                 match JsFuture::from(promise).await {
-                    Ok(_) => Ok(()),
+                    Ok(_) => {
+                        log::debug!("set remote sdp successed");
+                        Ok(())
+                    }
                     Err(e) => {
                         info!("failed to set remote desc");
                         info!("{:?}", e);
@@ -254,18 +268,18 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
 impl WasmTransport {
     pub async fn setup_channel(&mut self, name: &str) -> &Self {
         if let Some(conn) = &self.connection {
-            let channel = conn.create_data_channel(&name);
+            let channel = conn.create_data_channel(name);
             self.channel = Some(Arc::new(channel));
         }
-        return self;
+        self
     }
 }
 
 #[async_trait(?Send)]
 impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
-    type OnLocalCandidateHdlrFn = Box<dyn FnMut(RtcPeerConnectionIceEvent) -> ()>;
-    type OnDataChannelHdlrFn = Box<dyn FnMut(RtcDataChannelEvent) -> ()>;
-    type OnIceConnectionStateChangeHdlrFn = Box<dyn FnMut(RtcLifecycleEvent) -> ()>;
+    type OnLocalCandidateHdlrFn = Box<dyn FnMut(RtcPeerConnectionIceEvent)>;
+    type OnDataChannelHdlrFn = Box<dyn FnMut(RtcDataChannelEvent)>;
+    type OnIceConnectionStateChangeHdlrFn = Box<dyn FnMut(RtcLifecycleEvent)>;
 
     async fn apply_callback(&self) -> Result<&Self> {
         match &self.get_peer_connection().await {
@@ -310,16 +324,15 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
                         let event_sender = Arc::clone(&event_sender);
                         let local_address: Address =
                             (*public_key.read().unwrap()).unwrap().address();
-                        if ice_connection_state == RtcIceConnectionState::Connected {
-                            if CbChannel::send(
+                        if ice_connection_state == RtcIceConnectionState::Connected
+                            && CbChannel::send(
                                 &event_sender,
                                 Event::RegisterTransport(local_address),
                             )
                             .await
                             .is_err()
-                            {
-                                log::error!("Failed when send RegisterTransport");
-                            }
+                        {
+                            log::error!("Failed when send RegisterTransport");
                         }
                     })
                 }
@@ -337,8 +350,8 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
             let mut candidates = pending_candidates.lock().unwrap();
             let peer_connection = peer_connection.clone();
             if let Some(candidate) = ev.candidate() {
-                if let Some(_) = peer_connection {
-                    candidates.push(candidate.clone());
+                if peer_connection.is_some() {
+                    candidates.push(candidate);
                     println!("Candidates Number: {:?}", candidates.len());
                 }
             }
@@ -387,7 +400,6 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
     type SdpType = RtcSdpType;
 
     async fn get_handshake_info(&self, key: SecretKey, kind: Self::SdpType) -> Result<Encoded> {
-        log::trace!("prepareing handshake info {:?}", kind);
         let sdp = match kind {
             RtcSdpType::Answer => self.get_answer().await?,
             RtcSdpType::Offer => self.get_offer().await?,
@@ -405,7 +417,7 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
             sdp: serde_json::to_string(&RtcSessionDescriptionWrapper::from(sdp))?,
             candidates: local_candidates_json,
         };
-        log::trace!("prepared hanshake info :{:?}", data);
+        log::debug!("prepared hanshake info :{:?}", data);
         let resp = MessageRelay::new(data, &key, None, None, None, MessageRelayMethod::SEND)?;
         Ok(resp.try_into()?)
     }
@@ -422,7 +434,6 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
                 };
                 let sdp: RtcSessionDescriptionWrapper = data.data.sdp.try_into()?;
                 self.set_remote_description(sdp.to_owned()).await?;
-                log::trace!("setting remote candidate");
                 for c in &data.data.candidates {
                     log::debug!("add remote candiates: {:?}", c);
                     self.add_ice_candidate(c.clone()).await?;
