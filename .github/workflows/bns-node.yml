@@ -28,7 +28,8 @@ jobs:
       - name: Run tests
         uses: GabrielBB/xvfb-action@v1
         with:
-          run: cargo test -p bns-core --target=wasm32-unknown-unknown --features wasm --no-default-features
+          working-directory: ./bns-core
+          run: cargo test --target=wasm32-unknown-unknown --features wasm --no-default-features
   build:
     name: Build and test
     strategy:
