@@ -59,6 +59,11 @@ jobs:
         with:
           command: clippy
           args: --all --tests -- -D warnings
+      - name: Run clippy for wasm
+        uses: actions-rs/cargo@v1
+        with:
+          command: clippy
+          args: -p bns-core --features wasm --no-deps --no-default-features --target=wasm32-unknown-unknown --tests -- -D warnings
       - name: Check formating
         uses: actions-rs/cargo@v1
         with:
