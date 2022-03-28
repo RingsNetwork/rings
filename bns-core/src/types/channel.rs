@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use web3::types::Address;
 use serde::Serialize;
+use web3::types::Address;
 
 #[derive(Debug, PartialEq, Serialize, Clone)]
 pub enum Event {

@@ -83,7 +83,7 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
         let r = js_sys::Reflect::set(
             &config,
             &JsValue::from("iceCandidatePoolSize"),
-            &JsValue::from(10)
+            &JsValue::from(10),
         );
         debug_assert!(
             r.is_ok(),
@@ -230,7 +230,7 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
                     Ok(_) => {
                         log::debug!("set remote sdp successed");
                         Ok(())
-                    },
+                    }
                     Err(e) => {
                         info!("failed to set remote desc");
                         info!("{:?}", e);

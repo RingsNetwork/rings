@@ -1,26 +1,25 @@
 #[cfg(feature = "wasm")]
 #[cfg(test)]
 pub mod test {
-    use log::Level;
     use anyhow::Result;
     use bns_core::channels::wasm::CbChannel;
     use bns_core::ecc::SecretKey;
+    use bns_core::poll;
     use bns_core::transports::wasm::WasmTransport as Transport;
     use bns_core::types::channel::Channel;
+    use bns_core::types::channel::Event;
     use bns_core::types::ice_transport::IceServer;
     use bns_core::types::ice_transport::IceTransport;
     use bns_core::types::ice_transport::IceTransportCallback;
     use bns_core::types::ice_transport::IceTrickleScheme;
-    use bns_core::types::channel::Event;
-    use bns_core::poll;
+    use log::Level;
     use std::str::FromStr;
     use std::sync::Arc;
     use wasm_bindgen_futures::spawn_local;
     use wasm_bindgen_test::wasm_bindgen_test_configure;
     use wasm_bindgen_test::*;
-    use web_sys::RtcSdpType;
     use web_sys::RtcIceConnectionState;
-
+    use web_sys::RtcSdpType;
 
     wasm_bindgen_test_configure!(run_in_browser);
 
@@ -28,11 +27,10 @@ pub mod test {
         console_log::init_with_level(Level::Debug).expect("error initializing log");
     }
 
-    async fn prepare_transport(channel: Option<Arc<CbChannel<Event>>>) -> Result<Transport>
-    {
+    async fn prepare_transport(channel: Option<Arc<CbChannel<Event>>>) -> Result<Transport> {
         let ch = match channel {
             Some(c) => Arc::clone(&c),
-            None => Arc::new(<CbChannel<Event> as Channel<Event>>::new(1))
+            None => Arc::new(<CbChannel<Event> as Channel<Event>>::new(1)),
         };
         let mut trans = Transport::new(ch.sender());
         let stun = IceServer::from_str("stun://stun.l.google.com:19302").unwrap();
@@ -52,7 +50,8 @@ pub mod test {
         // Peer 1 try to connect peer 2
         let handshake_info1 = transport1
             .get_handshake_info(key1, RtcSdpType::Offer)
-            .await.unwrap();
+            .await
+            .unwrap();
 
         assert_eq!(
             transport1.ice_connection_state().await,
@@ -80,7 +79,8 @@ pub mod test {
         // Peer 2 create answer
         let handshake_info2 = transport2
             .get_handshake_info(key2, RtcSdpType::Answer)
-            .await.unwrap();
+            .await
+            .unwrap();
 
         assert_eq!(
             transport1.ice_connection_state().await,
@@ -92,7 +92,10 @@ pub mod test {
         );
 
         // Peer 1 got answer then register
-        let addr2 = transport1.register_remote_info(handshake_info2).await.unwrap();
+        let addr2 = transport1
+            .register_remote_info(handshake_info2)
+            .await
+            .unwrap();
         // assert_eq!(
         //     transport1.ice_connection_state().await,
         //     Some(RtcIceConnectionState::Checking)

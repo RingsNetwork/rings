@@ -2,8 +2,8 @@ mod helper;
 mod transport;
 use crate::types::ice_transport::IceCandidate;
 pub use transport::WasmTransport;
-use web_sys::RtcIceCandidateInit;
 use wasm_bindgen::JsValue;
+use web_sys::RtcIceCandidateInit;
 
 impl From<IceCandidate> for RtcIceCandidateInit {
     fn from(cand: IceCandidate) -> Self {
@@ -17,7 +17,7 @@ impl From<IceCandidate> for RtcIceCandidateInit {
             let r = js_sys::Reflect::set(
                 &ret,
                 &JsValue::from("UsernameFragment"),
-                &JsValue::from(&ufrag)
+                &JsValue::from(&ufrag),
             );
             debug_assert!(
                 r.is_ok(),
