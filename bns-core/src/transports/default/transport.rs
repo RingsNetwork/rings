@@ -1,5 +1,5 @@
 use crate::channels::default::AcChannel;
-use crate::ecc::SecretKey;
+use crate::ecc::{PublicKey, SecretKey};
 use crate::message::Encoded;
 use crate::message::MessageRelay;
 use crate::message::MessageRelayMethod;
@@ -22,6 +22,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use web3::types::Address;
 use webrtc::api::APIBuilder;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
@@ -44,6 +45,7 @@ pub struct DefaultTransport {
     pending_candidates: Arc<Mutex<Vec<RTCIceCandidate>>>,
     data_channel: Arc<Mutex<Option<Arc<RTCDataChannel>>>>,
     event_sender: EventSender,
+    public_key: Arc<RwLock<Option<PublicKey>>>,
 }
 
 #[async_trait]
@@ -60,6 +62,7 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
             connection: Arc::new(Mutex::new(None)),
             pending_candidates: Arc::new(Mutex::new(vec![])),
             data_channel: Arc::new(Mutex::new(None)),
+            public_key: Arc::new(RwLock::new(None)),
             event_sender,
         }
     }
@@ -104,6 +107,10 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
             .await
             .map(|s| s == RTCIceConnectionState::Connected)
             .unwrap_or(false)
+    }
+
+    async fn pubkey(&self) -> PublicKey {
+        self.public_key.read().await.unwrap()
     }
 
     async fn get_peer_connection(&self) -> Option<Arc<RTCPeerConnection>> {
@@ -164,12 +171,13 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
     where
         T: Serialize + Send,
     {
-        let data = serde_json::to_string(&msg)?;
+        let data: String = serde_json::to_string(&msg)?;
+        let size = data.len();
         match self.get_data_channel().await {
-            Some(cnn) => match cnn.send_text(data.to_owned()).await {
+            Some(cnn) => match cnn.send_text(data).await {
                 Ok(s) => {
-                    if !s == data.to_owned().len() {
-                        Err(anyhow!("msg is not complete, {:?}!= {:?}", s, data.len()))
+                    if !s == size {
+                        Err(anyhow!("msg is not complete, {:?}!= {:?}", s, size))
                     } else {
                         Ok(())
                     }
@@ -240,10 +248,13 @@ impl DefaultTransport {
 impl IceTransportCallback<Event, AcChannel<Event>> for DefaultTransport {
     type OnLocalCandidateHdlrFn = Box<dyn FnMut(Option<Self::Candidate>) -> Fut + Send + Sync>;
     type OnDataChannelHdlrFn = Box<dyn FnMut(Arc<Self::DataChannel>) -> Fut + Send + Sync>;
+    type OnIceConnectionStateChangeHdlrFn =
+        Box<(dyn FnMut(RTCIceConnectionState) -> Fut + Sync + Send + 'static)>;
 
     async fn apply_callback(&self) -> Result<&Self> {
         let on_ice_candidate_callback = self.on_ice_candidate().await;
         let on_data_channel_callback = self.on_data_channel().await;
+        let on_ice_connection_state_change_callback = self.on_ice_connection_state_change().await;
         match self.get_peer_connection().await {
             Some(peer_connection) => {
                 peer_connection
@@ -252,9 +263,38 @@ impl IceTransportCallback<Event, AcChannel<Event>> for DefaultTransport {
                 peer_connection
                     .on_data_channel(on_data_channel_callback)
                     .await;
+                peer_connection
+                    .on_ice_connection_state_change(on_ice_connection_state_change_callback)
+                    .await;
                 Ok(self)
             }
             None => Err(anyhow!("connection is not setup")),
+        }
+    }
+
+    async fn on_ice_connection_state_change(&self) -> Self::OnIceConnectionStateChangeHdlrFn {
+        let event_sender = self.event_sender.clone();
+        let public_key = Arc::clone(&self.public_key);
+        box move |cs: Self::IceConnectionState| {
+            let event_sender = event_sender.clone();
+            let public_key = Arc::clone(&public_key);
+            Box::pin(async move {
+                match cs {
+                    Self::IceConnectionState::Connected => {
+                        let local_address: Address = public_key.read().await.unwrap().address();
+                        if event_sender
+                            .send(Event::RegisterTransport(local_address))
+                            .await
+                            .is_err()
+                        {
+                            log::error!("Failed when send RegisterTransport");
+                        }
+                    }
+                    _ => {
+                        log::debug!("IceTransport state change {:?}", cs);
+                    }
+                }
+            })
         }
     }
 
@@ -292,7 +332,7 @@ impl IceTransportCallback<Event, AcChannel<Event>> for DefaultTransport {
                     let event_sender = event_sender.clone();
                     Box::pin(async move {
                         if event_sender
-                            .send(Event::ReceiveMsg(msg.data.to_vec()))
+                            .send(Event::DataChannelMessage(msg.data.to_vec()))
                             .await
                             .is_err()
                         {
@@ -344,17 +384,20 @@ impl IceTrickleScheme<Event, AcChannel<Event>> for DefaultTransport {
     async fn register_remote_info(&self, data: Encoded) -> anyhow::Result<Address> {
         let data: MessageRelay<TricklePayload> = data.try_into()?;
         log::trace!("register remote info: {:?}", data);
-
         match data.verify() {
             true => {
                 let sdp = serde_json::from_str::<RTCSessionDescription>(&data.data.sdp)?;
                 log::trace!("setting remote sdp: {:?}", sdp);
                 self.set_remote_description(sdp).await?;
                 log::trace!("setting remote candidate");
-                for c in data.data.candidates {
+                for c in &data.data.candidates {
                     log::trace!("add candiates: {:?}", c);
                     self.add_ice_candidate(c.clone()).await?;
                 }
+                if let Ok(public_key) = data.pubkey() {
+                    let mut pk = self.public_key.write().await;
+                    *pk = Some(public_key);
+                };
                 Ok(data.addr)
             }
             _ => {

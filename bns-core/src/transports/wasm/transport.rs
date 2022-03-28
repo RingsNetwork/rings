@@ -1,6 +1,6 @@
 use super::helper::RtcSessionDescriptionWrapper;
 use crate::channels::wasm::CbChannel;
-use crate::ecc::SecretKey;
+use crate::ecc::{PublicKey, SecretKey};
 use crate::message::Encoded;
 use crate::message::MessageRelay;
 use crate::message::MessageRelayMethod;
@@ -23,6 +23,7 @@ use serde::Serialize;
 use serde_json;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::RwLock;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
@@ -37,6 +38,7 @@ use web_sys::RtcIceCandidate;
 use web_sys::RtcIceCandidateInit;
 use web_sys::RtcIceConnectionState;
 use web_sys::RtcIceGatheringState;
+use web_sys::RtcLifecycleEvent;
 use web_sys::RtcPeerConnection;
 use web_sys::RtcPeerConnectionIceEvent;
 use web_sys::RtcSdpType;
@@ -51,6 +53,7 @@ pub struct WasmTransport {
     pending_candidates: Arc<Mutex<Vec<RtcIceCandidate>>>,
     channel: Option<Arc<RtcDataChannel>>,
     event_sender: EventSender,
+    public_key: Arc<RwLock<Option<PublicKey>>>,
 }
 
 #[async_trait(?Send)]
@@ -67,6 +70,7 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
             connection: None,
             pending_candidates: Arc::new(Mutex::new(vec![])),
             channel: None,
+            public_key: Arc::new(RwLock::new(None)),
             event_sender,
         }
     }
@@ -88,6 +92,10 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
             pc.close()
         }
         Ok(())
+    }
+
+    async fn pubkey(&self) -> PublicKey {
+        self.public_key.read().unwrap().unwrap()
     }
 
     async fn ice_connection_state(&self) -> Option<Self::IceConnectionState> {
@@ -257,17 +265,25 @@ impl WasmTransport {
 impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
     type OnLocalCandidateHdlrFn = Box<dyn FnMut(RtcPeerConnectionIceEvent) -> ()>;
     type OnDataChannelHdlrFn = Box<dyn FnMut(RtcDataChannelEvent) -> ()>;
+    type OnIceConnectionStateChangeHdlrFn = Box<dyn FnMut(RtcLifecycleEvent) -> ()>;
 
     async fn apply_callback(&self) -> Result<&Self> {
         match &self.get_peer_connection().await {
             Some(c) => {
                 let on_ice_candidate_callback = Closure::wrap(self.on_ice_candidate().await);
                 let on_data_channel_callback = Closure::wrap(self.on_data_channel().await);
+                let on_ice_connection_state_change_callback =
+                    Closure::wrap(self.on_ice_connection_state_change().await);
 
                 c.set_onicecandidate(Some(on_ice_candidate_callback.as_ref().unchecked_ref()));
                 c.set_ondatachannel(Some(on_data_channel_callback.as_ref().unchecked_ref()));
+                c.set_onicegatheringstatechange(Some(
+                    on_ice_connection_state_change_callback
+                        .as_ref()
+                        .unchecked_ref(),
+                ));
                 on_ice_candidate_callback.forget();
-                //on_peer_connection_state_change_callback.forget();
+                on_ice_connection_state_change_callback.forget();
                 on_data_channel_callback.forget();
                 Ok(self)
             }
@@ -277,6 +293,41 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
             }
         }
     }
+
+    async fn on_ice_connection_state_change(&self) -> Self::OnIceConnectionStateChangeHdlrFn {
+        let event_sender = self.event_sender.clone();
+        let peer_connection = self.get_peer_connection().await;
+        let public_key = Arc::clone(&self.public_key);
+        box move |ev: RtcLifecycleEvent| {
+            let mut peer_connection = peer_connection.clone();
+            let event_sender = Arc::clone(&event_sender);
+            let public_key = Arc::clone(&public_key);
+            match ev {
+                RtcLifecycleEvent::Iceconnectionstatechange => {
+                    let peer_connection = peer_connection.take().unwrap();
+                    let ice_connection_state = peer_connection.ice_connection_state();
+                    spawn_local(async move {
+                        let event_sender = Arc::clone(&event_sender);
+                        let local_address: Address =
+                            (*public_key.read().unwrap()).unwrap().address();
+                        if ice_connection_state == RtcIceConnectionState::Connected {
+                            if CbChannel::send(
+                                &event_sender,
+                                Event::RegisterTransport(local_address),
+                            )
+                            .await
+                            .is_err()
+                            {
+                                log::error!("Failed when send RegisterTransport");
+                            }
+                        }
+                    })
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
     async fn on_ice_candidate(&self) -> Self::OnLocalCandidateHdlrFn {
         let peer_connection = self.get_peer_connection().await;
         let pending_candidates = Arc::clone(&self.pending_candidates);
@@ -305,9 +356,12 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
                     match ev.data().as_string() {
                         Some(msg) => spawn_local(async move {
                             let event_sender = Arc::clone(&event_sender);
-                            if CbChannel::send(&event_sender, Event::ReceiveMsg(msg.into_bytes()))
-                                .await
-                                .is_err()
+                            if CbChannel::send(
+                                &event_sender,
+                                Event::DataChannelMessage(msg.into_bytes()),
+                            )
+                            .await
+                            .is_err()
                             {
                                 log::error!("Failed on handle msg");
                             }
@@ -362,10 +416,14 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
 
         match data.verify() {
             true => {
+                if let Ok(public_key) = data.pubkey() {
+                    let mut pk = self.public_key.write().unwrap();
+                    *pk = Some(public_key);
+                };
                 let sdp: RtcSessionDescriptionWrapper = data.data.sdp.try_into()?;
                 self.set_remote_description(sdp.to_owned()).await?;
                 log::trace!("setting remote candidate");
-                for c in data.data.candidates {
+                for c in &data.data.candidates {
                     log::debug!("add remote candiates: {:?}", c);
                     self.add_ice_candidate(c.clone()).await?;
                 }

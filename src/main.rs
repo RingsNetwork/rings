@@ -39,9 +39,7 @@ async fn run(http_addr: String, key: SecretKey, stun: &str) {
     let swarm = Arc::new(Swarm::new(stun, key));
 
     let listen_event = MessageHandler::new(dht.clone(), swarm.clone());
-    //let stabilize_event = MessageHandler::new(dht.clone(), swarm.clone());
     tokio::spawn(async move { listen_event.listen().await });
-    //tokio::spawn(async move { stabilize_event.stabilize().await });
 
     let swarm_clone = swarm.clone();
     tokio::spawn(async move { run_service(http_addr, swarm_clone, key).await });

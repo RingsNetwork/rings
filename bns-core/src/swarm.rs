@@ -1,7 +1,6 @@
 /// Swarm is transport management
 use crate::ecc::SecretKey;
-use crate::message::Message;
-use crate::message::MessageRelay;
+use crate::message::{self, Message, MessageRelay, MessageRelayMethod};
 use crate::storage::{MemStorage, Storage};
 use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::Event;
@@ -27,25 +26,30 @@ use crate::transports::default::DefaultTransport as Transport;
 #[cfg(feature = "wasm")]
 use crate::transports::wasm::WasmTransport as Transport;
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
-pub trait TransportManager {
-    type Transport;
-    async fn new_transport(&self) -> Result<Self::Transport>;
-    async fn register(&self, address: &Address, trans: Self::Transport) -> Result<()>;
-    fn get_transport(&self, address: &Address) -> Option<Self::Transport>;
-    async fn get_or_register(
-        &self,
-        address: &Address,
-        default: Self::Transport,
-    ) -> Result<Self::Transport>;
-}
-
 pub struct Swarm {
     table: MemStorage<Address, Arc<Transport>>,
     transport_event_channel: Channel<Event>,
     ice_server: String,
     pub key: SecretKey,
+}
+
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+pub trait TransportManager {
+    type Transport;
+
+    fn get_transports(&self) -> Vec<(Address, Self::Transport)>;
+    fn get_addresses(&self) -> Vec<Address>;
+    fn get_transport(&self, address: &Address) -> Option<Self::Transport>;
+    fn remove_transport(&self, address: &Address) -> Option<(Address, Self::Transport)>;
+    fn get_transport_numbers(&self) -> usize;
+    async fn new_transport(&self) -> Result<Self::Transport>;
+    async fn register(&self, address: &Address, trans: Self::Transport) -> Result<()>;
+    async fn get_or_register(
+        &self,
+        address: &Address,
+        default: Self::Transport,
+    ) -> Result<Self::Transport>;
 }
 
 impl Swarm {
@@ -68,21 +72,38 @@ impl Swarm {
         payload: MessageRelay<Message>,
     ) -> Result<()> {
         match self.get_transport(address) {
-            Some(trans) => Ok(trans.send_message(payload).await?),
+            Some(transport) => Ok(transport.send_message(payload).await?),
             None => Err(anyhow!("cannot seek address in swarm table")),
         }
     }
 
-    fn load_message(ev: Result<Option<Event>>) -> Result<Option<MessageRelay<Message>>> {
+    fn load_message(&self, ev: Result<Option<Event>>) -> Result<Option<MessageRelay<Message>>> {
         // TODO: How to deal with events that is not message? Use mpmc?
 
         let ev = ev?;
 
         match ev {
-            Some(Event::ReceiveMsg(msg)) => {
+            Some(Event::DataChannelMessage(msg)) => {
                 let payload = serde_json::from_slice::<MessageRelay<Message>>(&msg)?;
                 Ok(Some(payload))
             }
+            Some(Event::RegisterTransport(address)) => match self.get_transport(&address) {
+                Some(_) => {
+                    let payload = MessageRelay::new(
+                        Message::JoinDHT(message::JoinDHT { id: address.into() }),
+                        &self.key,
+                        None,
+                        None,
+                        None,
+                        MessageRelayMethod::None,
+                    )?;
+                    Ok(Some(payload))
+                }
+                None => Err(anyhow!(format!(
+                    "Cannot get transport from address {:?}",
+                    address
+                ))),
+            },
             None => Ok(None),
             x => Err(anyhow!(format!("Receive {:?}", x))),
         }
@@ -93,7 +114,7 @@ impl Swarm {
     pub async fn poll_message(&self) -> Option<MessageRelay<Message>> {
         let receiver = &self.transport_event_channel.receiver();
         let ev = Channel::recv(receiver).await;
-        match Self::load_message(ev) {
+        match self.load_message(ev) {
             Ok(Some(msg)) => Some(msg),
             Ok(None) => None,
             Err(_) => None,
@@ -108,7 +129,7 @@ impl Swarm {
             let receiver = &self.transport_event_channel.receiver();
             loop {
                 let ev = Channel::recv(receiver).await;
-                if let Ok(Some(msg)) = Self::load_message(ev) {
+                if let Ok(Some(msg)) = self.load_message(ev) {
                     yield msg
                 }
             }
@@ -138,9 +159,9 @@ impl TransportManager for Swarm {
     /// should not wait connection statues here
     /// a connection `Promise` may cause deadlock of both end
     async fn register(&self, address: &Address, trans: Self::Transport) -> Result<()> {
-        let prev_trans = self.table.set(address, trans);
-        if let Some(trans) = prev_trans {
-            if let Err(e) = trans.close().await {
+        let prev_transport = self.table.set(address, trans);
+        if let Some(transport) = prev_transport {
+            if let Err(e) = transport.close().await {
                 log::error!("failed to close previous while registering {:?}", e);
             }
         }
@@ -152,6 +173,22 @@ impl TransportManager for Swarm {
         self.table.get(address)
     }
 
+    fn remove_transport(&self, address: &Address) -> Option<(Address, Self::Transport)> {
+        self.table.remove(address)
+    }
+
+    fn get_transport_numbers(&self) -> usize {
+        self.table.len()
+    }
+
+    fn get_addresses(&self) -> Vec<Address> {
+        self.table.keys()
+    }
+
+    fn get_transports(&self) -> Vec<(Address, Self::Transport)> {
+        self.table.items()
+    }
+
     async fn get_or_register(
         &self,
         address: &Address,
@@ -160,7 +197,6 @@ impl TransportManager for Swarm {
         if !default.is_connected().await {
             return Err(anyhow!("default transport is not connected"));
         }
-
         Ok(self.table.get_or_set(address, default))
     }
 }
@@ -182,7 +218,6 @@ mod tests {
     #[tokio::test]
     async fn swarm_new_transport() -> Result<()> {
         let swarm = new_swarm();
-
         let transport = swarm.new_transport().await.unwrap();
         assert_eq!(
             transport.ice_connection_state().await.unwrap(),

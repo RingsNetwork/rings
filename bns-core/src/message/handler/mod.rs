@@ -6,7 +6,7 @@ mod wasm;
 
 use crate::dht::{Chord, ChordAction, ChordRemoteAction, Did};
 use crate::message::{
-    AlreadyConnected, ConnectNode, ConnectedNode, FindSuccessor, FoundSuccessor, Message,
+    AlreadyConnected, ConnectNode, ConnectedNode, FindSuccessor, FoundSuccessor, JoinDHT, Message,
     MessageRelay, MessageRelayMethod, MessageSessionRelayProtocol, NotifiedPredecessor,
     NotifyPredecessor,
 };
@@ -56,6 +56,7 @@ impl MessageHandler {
         prev: &Did,
     ) -> Result<()> {
         match relay.data {
+            Message::JoinDHT(ref msg) => self.handle_join(relay, msg).await,
             Message::ConnectNode(ref msg) => self.handle_connect_node(relay, prev, msg).await,
             Message::ConnectedNode(ref msg) => self.handle_connected_node(relay, prev, msg).await,
             Message::AlreadyConnected(ref msg) => {
@@ -70,6 +71,28 @@ impl MessageHandler {
                 self.handle_notified_predecessor(relay, prev, msg).await
             }
             _ => Err(anyhow!("Unsupported message type")),
+        }
+    }
+
+    async fn handle_join(&self, relay: &MessageRelay<Message>, msg: &JoinDHT) -> Result<()> {
+        let mut dht = self.dht.lock().await;
+        let relay = relay.clone();
+        match dht.join(msg.id) {
+            ChordAction::None => {
+                log::debug!("Opps, {:?} is same as current", msg.id);
+                Ok(())
+            }
+            ChordAction::RemoteAction(next, ChordRemoteAction::FindSuccessor(id)) => {
+                self.send_message(
+                    &next.into(),
+                    Some(relay.to_path),
+                    Some(relay.from_path),
+                    MessageRelayMethod::SEND,
+                    Message::FindSuccessor(FindSuccessor { id, for_fix: false }),
+                )
+                .await
+            }
+            _ => unreachable!(),
         }
     }
 
@@ -194,11 +217,11 @@ impl MessageHandler {
                 .await
             }
             None => {
-                let trans = self.swarm.get_transport(&msg.answer_id).ok_or_else(|| {
+                let transport = self.swarm.get_transport(&msg.answer_id).ok_or_else(|| {
                     anyhow!("Cannot get trans while handle connect node response")
                 })?;
 
-                trans
+                transport
                     .register_remote_info(msg.handshake_info.clone().try_into()?)
                     .await
                     .map(|_| ())
@@ -334,14 +357,12 @@ impl MessageHandler {
     }
 
     pub async fn listen(&self) {
-        let relay_messages = self.swarm.iter_messages();
+        let iter_messages = self.swarm.iter_messages();
+        pin_mut!(iter_messages);
 
-        pin_mut!(relay_messages);
-
-        while let Some(relay_message) = relay_messages.next().await {
+        while let Some(relay_message) = iter_messages.next().await {
             if relay_message.is_expired() || !relay_message.verify() {
                 log::error!("Cannot verify msg or it's expired: {:?}", relay_message);
-                continue;
             }
 
             if let Err(e) = self
@@ -349,7 +370,6 @@ impl MessageHandler {
                 .await
             {
                 log::error!("Error in handle_message: {}", e);
-                continue;
             }
         }
     }

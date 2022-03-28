@@ -1,6 +1,6 @@
 pub mod ice_server;
 pub use self::ice_server::IceServer;
-use crate::ecc::SecretKey;
+use crate::ecc::{PublicKey, SecretKey};
 use crate::message::Encoded;
 use crate::types::channel::Channel;
 use anyhow::Result;
@@ -42,6 +42,7 @@ pub trait IceTransport<E: Send, Ch: Channel<E>> {
     async fn close(&self) -> Result<()>;
     async fn ice_connection_state(&self) -> Option<Self::IceConnectionState>;
     async fn is_connected(&self) -> bool;
+    async fn pubkey(&self) -> PublicKey;
 
     async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>>;
     async fn get_pending_candidates(&self) -> Vec<Self::Candidate>;
@@ -53,7 +54,6 @@ pub trait IceTransport<E: Send, Ch: Channel<E>> {
     async fn send_message<T>(&self, msg: T) -> Result<()>
     where
         T: Serialize + Send;
-
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
     where
         T: Into<Self::Sdp> + Send;
@@ -68,7 +68,9 @@ pub trait IceTransport<E: Send, Ch: Channel<E>> {
 pub trait IceTransportCallback<E: Send, Ch: Channel<E>>: IceTransport<E, Ch> {
     type OnLocalCandidateHdlrFn;
     type OnDataChannelHdlrFn;
+    type OnIceConnectionStateChangeHdlrFn;
     async fn apply_callback(&self) -> Result<&Self>;
+    async fn on_ice_connection_state_change(&self) -> Self::OnIceConnectionStateChangeHdlrFn;
     async fn on_ice_candidate(&self) -> Self::OnLocalCandidateHdlrFn;
     async fn on_data_channel(&self) -> Self::OnDataChannelHdlrFn;
 }
