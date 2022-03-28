@@ -114,6 +114,10 @@ impl Swarm {
             }
         }
     }
+
+    pub fn iter_transport(&self) -> dashmap::iter::Iter<Address, Arc<Transport>> {
+        self.table.iter()
+    }
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
@@ -282,6 +286,27 @@ mod tests {
 
     #[tokio::test]
     async fn test_swarm_event_handler() -> Result<()> {
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_swarm_transport_iter() -> Result<()> {
+        let swarm1 = new_swarm();
+        let swarm2 = new_swarm();
+        let swarm3 = new_swarm();
+
+        let iter_transport = swarm1.iter_transport();
+        assert_eq!(iter_transport.count(), 0);
+
+        let transport_2 = swarm2.new_transport().await.unwrap();
+        let transport_3 = swarm3.new_transport().await.unwrap();
+
+        swarm1.register(&swarm2.address(), transport_2).await?;
+        let iter_transport = swarm1.iter_transport();
+        assert_eq!(iter_transport.count(), 1);
+        swarm1.register(&swarm3.address(), transport_3).await?;
+        let iter_transport = swarm1.iter_transport();
+        assert_eq!(iter_transport.count(), 2);
         Ok(())
     }
 }

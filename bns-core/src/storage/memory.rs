@@ -41,3 +41,13 @@ where
             .clone()
     }
 }
+
+impl<K, V> MemStorage<K, V>
+where
+    K: Clone + Eq + Hash,
+    V: Clone,
+{
+    pub fn iter(&self) -> dashmap::iter::Iter<K, V> {
+        self.table.iter()
+    }
+}
