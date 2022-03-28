@@ -67,7 +67,7 @@ features = [
   "RtcConfiguration",
   "RtcIceConnectionState",
   "RtcIceGatheringState",
-  "RtcIceCredentialType"
+  "RtcIceCredentialType",
   "RtcLifecycleEvent",
 ]
 

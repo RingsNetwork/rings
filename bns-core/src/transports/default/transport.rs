@@ -1,5 +1,5 @@
 use crate::channels::default::AcChannel;
-use crate::ecc::SecretKey;
+use crate::ecc::{PublicKey, SecretKey};
 use crate::message::Encoded;
 use crate::message::MessageRelay;
 use crate::message::MessageRelayMethod;
@@ -45,7 +45,7 @@ pub struct DefaultTransport {
     pending_candidates: Arc<Mutex<Vec<RTCIceCandidate>>>,
     data_channel: Arc<Mutex<Option<Arc<RTCDataChannel>>>>,
     event_sender: EventSender,
-    local_address: Arc<RwLock<Option<Address>>>,
+    public_key: Arc<RwLock<Option<PublicKey>>>,
 }
 
 #[async_trait]
@@ -62,7 +62,7 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
             connection: Arc::new(Mutex::new(None)),
             pending_candidates: Arc::new(Mutex::new(vec![])),
             data_channel: Arc::new(Mutex::new(None)),
-            local_address: Arc::new(RwLock::new(None)),
+            public_key: Arc::new(RwLock::new(None)),
             event_sender,
         }
     }
@@ -270,14 +270,14 @@ impl IceTransportCallback<Event, AcChannel<Event>> for DefaultTransport {
 
     async fn on_ice_connection_state_change(&self) -> Self::OnIceConnectionStateChangeHdlrFn {
         let event_sender = self.event_sender.clone();
-        let local_address = Arc::clone(&self.local_address);
+        let public_key = Arc::clone(&self.public_key);
         box move |cs: Self::IceConnectionState| {
             let event_sender = event_sender.clone();
-            let local_address = Arc::clone(&local_address);
+            let public_key = Arc::clone(&public_key);
             Box::pin(async move {
                 match cs {
                     Self::IceConnectionState::Connected => {
-                        let local_address: Address = local_address.read().await.unwrap();
+                        let local_address: Address = public_key.read().await.unwrap().address();
                         if event_sender
                             .send(Event::RegisterTransport(local_address))
                             .await
@@ -386,14 +386,15 @@ impl IceTrickleScheme<Event, AcChannel<Event>> for DefaultTransport {
                 log::trace!("setting remote sdp: {:?}", sdp);
                 self.set_remote_description(sdp).await?;
                 log::trace!("setting remote candidate");
-                for c in data.data.candidates {
+                for c in &data.data.candidates {
                     log::trace!("add candiates: {:?}", c);
                     self.add_ice_candidate(c.clone()).await?;
                 }
-                {
-                    let mut local_address = self.local_address.write().await;
-                    *local_address = Some(data.addr.into());
-                }
+                let public_key = data.pubkey();
+                if let Ok(public_key) = public_key {
+                    let mut pk = self.public_key.write().await;
+                    *pk = Some(public_key);
+                };
                 Ok(data.addr)
             }
             _ => {

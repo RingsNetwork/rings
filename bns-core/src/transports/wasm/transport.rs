@@ -1,6 +1,6 @@
 use super::helper::RtcSessionDescriptionWrapper;
 use crate::channels::wasm::CbChannel;
-use crate::ecc::SecretKey;
+use crate::ecc::{PublicKey, SecretKey};
 use crate::message::Encoded;
 use crate::message::MessageRelay;
 use crate::message::MessageRelayMethod;
@@ -38,7 +38,6 @@ use web_sys::RtcIceCandidate;
 use web_sys::RtcIceCandidateInit;
 use web_sys::RtcIceConnectionState;
 use web_sys::RtcIceGatheringState;
-use web_sys::RtcIceServer;
 use web_sys::RtcLifecycleEvent;
 use web_sys::RtcPeerConnection;
 use web_sys::RtcPeerConnectionIceEvent;
@@ -54,7 +53,7 @@ pub struct WasmTransport {
     pending_candidates: Arc<Mutex<Vec<RtcIceCandidate>>>,
     channel: Option<Arc<RtcDataChannel>>,
     event_sender: EventSender,
-    local_address: Arc<RwLock<Option<Address>>>,
+    public_key: Arc<RwLock<Option<PublicKey>>>,
 }
 
 #[async_trait(?Send)]
@@ -71,7 +70,7 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
             connection: None,
             pending_candidates: Arc::new(Mutex::new(vec![])),
             channel: None,
-            local_address: Arc::new(RwLock::new(None)),
+            public_key: Arc::new(RwLock::new(None)),
             event_sender,
         }
     }
@@ -294,18 +293,19 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
     async fn on_ice_connection_state_change(&self) -> Self::OnIceConnectionStateChangeHdlrFn {
         let event_sender = self.event_sender.clone();
         let peer_connection = self.get_peer_connection().await;
-        let local_address = Arc::clone(&self.local_address);
+        let public_key = Arc::clone(&self.public_key);
         box move |ev: RtcLifecycleEvent| {
             let mut peer_connection = peer_connection.clone();
             let event_sender = Arc::clone(&event_sender);
-            let local_address = Arc::clone(&local_address);
+            let public_key = Arc::clone(&public_key);
             match ev {
                 RtcLifecycleEvent::Iceconnectionstatechange => {
                     let peer_connection = peer_connection.take().unwrap();
                     let ice_connection_state = peer_connection.ice_connection_state();
                     spawn_local(async move {
                         let event_sender = Arc::clone(&event_sender);
-                        let local_address: Address = (*local_address.read().unwrap()).unwrap();
+                        let local_address: Address =
+                            (*public_key.read().unwrap()).unwrap().address();
                         if ice_connection_state == RtcIceConnectionState::Connected {
                             if CbChannel::send(
                                 &event_sender,

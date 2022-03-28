@@ -1,5 +1,5 @@
 /// Swarm is transport management
-use crate::ecc::{PublicKey, SecretKey};
+use crate::ecc::SecretKey;
 use crate::message::{self, Message, MessageRelay, MessageRelayMethod};
 use crate::storage::{MemStorage, Storage};
 use crate::types::channel::Channel as ChannelTrait;
@@ -26,16 +26,10 @@ use crate::transports::default::DefaultTransport as Transport;
 #[cfg(feature = "wasm")]
 use crate::transports::wasm::WasmTransport as Transport;
 
-#[derive(Clone)]
-pub struct TransportStorage {
-    pub transport: Arc<Transport>,
-    pub public_key: PublicKey,
-}
-
 pub struct Swarm {
-    table: MemStorage<Address, TransportStorage>,
+    table: MemStorage<Address, Arc<Transport>>,
     transport_event_channel: Channel<Event>,
-    stun_server: String,
+    ice_server: String,
     pub key: SecretKey,
 }
 
@@ -43,12 +37,11 @@ pub struct Swarm {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait TransportManager {
     type Transport;
-    type TransportStorage;
 
-    fn get_transports(&self) -> Vec<(Address, Self::TransportStorage)>;
+    fn get_transports(&self) -> Vec<(Address, Self::Transport)>;
     fn get_addresses(&self) -> Vec<Address>;
-    fn get_transport(&self, address: &Address) -> Option<Self::TransportStorage>;
-    fn remove_transport(&self, address: &Address) -> Option<(Address, Self::TransportStorage)>;
+    fn get_transport(&self, address: &Address) -> Option<Self::Transport>;
+    fn remove_transport(&self, address: &Address) -> Option<(Address, Self::Transport)>;
     fn get_transport_numbers(&self) -> usize;
     async fn new_transport(&self) -> Result<Self::Transport>;
     async fn register(&self, address: &Address, trans: Self::Transport) -> Result<()>;
@@ -59,18 +52,10 @@ pub trait TransportManager {
     ) -> Result<Self::Transport>;
 }
 
-pub struct Swarm {
-    transports: MemStorage<Address, Arc<Transport>>,
-    descriptions: DashMap<String, Address>,
-    transport_event_channel: Channel<Event>,
-    ice_server: String,
-    pub key: SecretKey,
-}
-
 impl Swarm {
     pub fn new(ice_server: &str, key: SecretKey) -> Self {
         Self {
-            table: MemStorage::<Address, TransportStorage>::new(),
+            table: MemStorage::<Address, Arc<Transport>>::new(),
             transport_event_channel: Channel::new(1),
             ice_server: ice_server.into(),
             key,
@@ -87,7 +72,7 @@ impl Swarm {
         payload: MessageRelay<Message>,
     ) -> Result<()> {
         match self.get_transport(address) {
-            Some(storage) => Ok(storage.transport.send_message(payload).await?),
+            Some(transport) => Ok(transport.send_message(payload).await?),
             None => Err(anyhow!("cannot seek address in swarm table")),
         }
     }
@@ -156,7 +141,6 @@ impl Swarm {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl TransportManager for Swarm {
     type Transport = Arc<Transport>;
-    type TransportStorage = TransportStorage;
 
     async fn new_transport(&self) -> Result<Self::Transport> {
         let event_sender = self.transport_event_channel.sender();
@@ -175,13 +159,9 @@ impl TransportManager for Swarm {
     /// should not wait connection statues here
     /// a connection `Promise` may cause deadlock of both end
     async fn register(&self, address: &Address, trans: Self::Transport) -> Result<()> {
-        let storage = TransportStorage {
-            transport: trans,
-            public_key: self.key.into(),
-        };
-        let prev_storage = self.table.set(address, storage);
-        if let Some(storage) = prev_storage {
-            if let Err(e) = storage.transport.close().await {
+        let prev_transport = self.table.set(address, trans);
+        if let Some(transport) = prev_transport {
+            if let Err(e) = transport.close().await {
                 log::error!("failed to close previous while registering {:?}", e);
             }
         }
@@ -189,11 +169,11 @@ impl TransportManager for Swarm {
         Ok(())
     }
 
-    fn get_transport(&self, address: &Address) -> Option<Self::TransportStorage> {
+    fn get_transport(&self, address: &Address) -> Option<Self::Transport> {
         self.table.get(address)
     }
 
-    fn remove_transport(&self, address: &Address) -> Option<(Address, Self::TransportStorage)> {
+    fn remove_transport(&self, address: &Address) -> Option<(Address, Self::Transport)> {
         self.table.remove(address)
     }
 
@@ -205,7 +185,7 @@ impl TransportManager for Swarm {
         self.table.keys()
     }
 
-    fn get_transports(&self) -> Vec<(Address, Self::TransportStorage)> {
+    fn get_transports(&self) -> Vec<(Address, Self::Transport)> {
         self.table.items()
     }
 
@@ -213,15 +193,11 @@ impl TransportManager for Swarm {
         &self,
         address: &Address,
         default: Self::Transport,
-    ) -> Result<Self::TransportStorage> {
+    ) -> Result<Self::Transport> {
         if !default.is_connected().await {
             return Err(anyhow!("default transport is not connected"));
         }
-        let storage = TransportStorage {
-            transport: default,
-            public_key: self.key.into(),
-        };
-        Ok(self.table.get_or_set(address, storage))
+        Ok(self.table.get_or_set(address, default))
     }
 }
 
@@ -286,8 +262,8 @@ mod tests {
         let transport_1_to_2 = swarm1.get_transport(&swarm2.address()).unwrap();
         let transport_2_to_1 = swarm2.get_transport(&swarm1.address()).unwrap();
 
-        assert!(Arc::ptr_eq(&transport_1_to_2.transport, &transport1));
-        assert!(Arc::ptr_eq(&transport_2_to_1.transport, &transport2));
+        assert!(Arc::ptr_eq(&transport_1_to_2, &transport1));
+        assert!(Arc::ptr_eq(&transport_2_to_1, &transport2));
 
         Ok(())
     }

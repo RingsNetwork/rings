@@ -217,12 +217,11 @@ impl MessageHandler {
                 .await
             }
             None => {
-                let storage = self.swarm.get_transport(&msg.answer_id).ok_or_else(|| {
+                let transport = self.swarm.get_transport(&msg.answer_id).ok_or_else(|| {
                     anyhow!("Cannot get trans while handle connect node response")
                 })?;
 
-                storage
-                    .transport
+                transport
                     .register_remote_info(msg.handshake_info.clone().try_into()?)
                     .await
                     .map(|_| ())
