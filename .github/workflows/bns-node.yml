@@ -13,6 +13,22 @@ env:
 
 jobs:
   build:
+    name: Build and test for wasm
+    strategy:
+      matrix:
+        os: ['ubuntu-latest', 'macos-latest', 'windows-latest']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v2
+      - uses: jetli/wasm-bindgen-action@v0.1.0
+        with:
+          version: "0.2.79"
+      - name: Build
+        run: cargo build -p bns-core --target=wasm32-unknown-unknown --features wasm --no-default-features
+      - name: Run tests
+        run: cargo test -p bns-core --target=wasm32-unknown-unknown --features wasm --no-default-features
+
+  build:
     name: Build and test
     strategy:
       matrix:
@@ -22,8 +38,6 @@ jobs:
       - uses: actions/checkout@v2
       - name: Build
         run: cargo build --all --verbose
-      - name: Build for wasm
-        run: cargo build -p bns-core --target=wasm32-unknown-unknown --features wasm --no-default-features
       - name: Run tests
         run: cargo test --all --verbose
 
