@@ -1,6 +1,6 @@
 pub mod ice_server;
 pub use self::ice_server::IceServer;
-use crate::ecc::SecretKey;
+use crate::ecc::{SecretKey, PublicKey};
 use crate::message::Encoded;
 use crate::types::channel::Channel;
 use anyhow::Result;
@@ -42,6 +42,7 @@ pub trait IceTransport<E: Send, Ch: Channel<E>> {
     async fn close(&self) -> Result<()>;
     async fn ice_connection_state(&self) -> Option<Self::IceConnectionState>;
     async fn is_connected(&self) -> bool;
+    async fn pubkey(&self) -> PublicKey;
 
     async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>>;
     async fn get_pending_candidates(&self) -> Vec<Self::Candidate>;

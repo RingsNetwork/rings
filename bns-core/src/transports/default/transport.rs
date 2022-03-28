@@ -109,6 +109,10 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
             .unwrap_or(false)
     }
 
+    async fn pubkey(&self) -> PublicKey {
+        self.public_key.read().await.unwrap()
+    }
+
     async fn get_peer_connection(&self) -> Option<Arc<RTCPeerConnection>> {
         self.connection.lock().await.clone()
     }

@@ -94,6 +94,10 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
         Ok(())
     }
 
+    async fn pubkey(&self) -> PublicKey {
+        self.public_key.read().unwrap().unwrap()
+    }
+
     async fn ice_connection_state(&self) -> Option<Self::IceConnectionState> {
         self.get_peer_connection()
             .await
