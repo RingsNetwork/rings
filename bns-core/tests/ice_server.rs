@@ -1,7 +1,7 @@
 #[cfg(feature = "wasm")]
 #[cfg(test)]
 pub mod test {
-    use bns_core::types::transport::ice_server::IceServer;
+    use bns_core::types::ice_transport::ice_server::IceServer;
     use js_sys::Array;
     use js_sys::Reflect;
     use std::str::FromStr;
