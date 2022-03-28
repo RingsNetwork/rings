@@ -123,7 +123,7 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
     }
 
     async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>> {
-        self.connection.as_ref().map(|c| Arc::clone(c))
+        self.connection.as_ref().map(Arc::clone)
     }
 
     async fn get_pending_candidates(&self) -> Vec<Self::Candidate> {
@@ -181,7 +181,7 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
     }
 
     async fn get_data_channel(&self) -> Option<Arc<Self::DataChannel>> {
-        self.channel.as_ref().map(|c| Arc::clone(&c))
+        self.channel.as_ref().map(Arc::clone)
     }
 
     async fn send_message<T>(&self, msg: T) -> Result<()>
@@ -223,7 +223,7 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
                 let sdp: Self::Sdp = desc.into();
                 let mut offer_obj = RtcSessionDescriptionInit::new(sdp.type_());
                 let sdp = &sdp.sdp();
-                offer_obj.sdp(&sdp);
+                offer_obj.sdp(sdp);
                 let promise = c.set_remote_description(&offer_obj);
 
                 match JsFuture::from(promise).await {
@@ -268,18 +268,18 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
 impl WasmTransport {
     pub async fn setup_channel(&mut self, name: &str) -> &Self {
         if let Some(conn) = &self.connection {
-            let channel = conn.create_data_channel(&name);
+            let channel = conn.create_data_channel(name);
             self.channel = Some(Arc::new(channel));
         }
-        return self;
+        self
     }
 }
 
 #[async_trait(?Send)]
 impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
-    type OnLocalCandidateHdlrFn = Box<dyn FnMut(RtcPeerConnectionIceEvent) -> ()>;
-    type OnDataChannelHdlrFn = Box<dyn FnMut(RtcDataChannelEvent) -> ()>;
-    type OnIceConnectionStateChangeHdlrFn = Box<dyn FnMut(RtcLifecycleEvent) -> ()>;
+    type OnLocalCandidateHdlrFn = Box<dyn FnMut(RtcPeerConnectionIceEvent)>;
+    type OnDataChannelHdlrFn = Box<dyn FnMut(RtcDataChannelEvent)>;
+    type OnIceConnectionStateChangeHdlrFn = Box<dyn FnMut(RtcLifecycleEvent)>;
 
     async fn apply_callback(&self) -> Result<&Self> {
         match &self.get_peer_connection().await {
@@ -324,16 +324,15 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
                         let event_sender = Arc::clone(&event_sender);
                         let local_address: Address =
                             (*public_key.read().unwrap()).unwrap().address();
-                        if ice_connection_state == RtcIceConnectionState::Connected {
-                            if CbChannel::send(
+                        if ice_connection_state == RtcIceConnectionState::Connected
+                            && CbChannel::send(
                                 &event_sender,
                                 Event::RegisterTransport(local_address),
                             )
                             .await
                             .is_err()
-                            {
-                                log::error!("Failed when send RegisterTransport");
-                            }
+                        {
+                            log::error!("Failed when send RegisterTransport");
                         }
                     })
                 }
@@ -351,8 +350,8 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
             let mut candidates = pending_candidates.lock().unwrap();
             let peer_connection = peer_connection.clone();
             if let Some(candidate) = ev.candidate() {
-                if let Some(_) = peer_connection {
-                    candidates.push(candidate.clone());
+                if peer_connection.is_some() {
+                    candidates.push(candidate);
                     println!("Candidates Number: {:?}", candidates.len());
                 }
             }

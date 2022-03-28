@@ -4,7 +4,7 @@ pub mod test {
     use anyhow::Result;
     use bns_core::channels::wasm::CbChannel;
     use bns_core::ecc::SecretKey;
-    use bns_core::poll;
+
     use bns_core::transports::wasm::WasmTransport as Transport;
     use bns_core::types::channel::Channel;
     use bns_core::types::channel::Event;
@@ -15,7 +15,7 @@ pub mod test {
     use log::Level;
     use std::str::FromStr;
     use std::sync::Arc;
-    use wasm_bindgen_futures::spawn_local;
+
     use wasm_bindgen_test::wasm_bindgen_test_configure;
     use wasm_bindgen_test::*;
     use web_sys::RtcIceConnectionState;

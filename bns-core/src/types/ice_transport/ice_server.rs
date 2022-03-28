@@ -96,10 +96,10 @@ mod wasm {
                 let url = JsValue::from_str(&u);
                 urls.push(&url);
             }
-            if s.username != "" {
+            if !s.username.is_empty() {
                 ret.username(&s.username);
             }
-            if s.credential != "" {
+            if !s.credential.is_empty() {
                 ret.credential(&s.credential);
             }
             ret.credential_type(s.credential_type.into());
