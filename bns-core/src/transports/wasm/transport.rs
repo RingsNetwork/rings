@@ -79,6 +79,17 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
         let mut config = RtcConfiguration::new();
         let ice_servers: js_sys::Array = js_sys::Array::of1(&ice_server.clone().into());
         config.ice_servers(&ice_servers.into());
+        // hack here
+        let r = js_sys::Reflect::set(
+            &config,
+            &JsValue::from("iceCandidatePoolSize"),
+            &JsValue::from(10)
+        );
+        debug_assert!(
+            r.is_ok(),
+            "setting properties should never fail on our dictionary objects"
+        );
+
         self.connection = RtcPeerConnection::new_with_configuration(&config)
             .ok()
             .as_ref()
