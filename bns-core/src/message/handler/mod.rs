@@ -1,22 +1,15 @@
-#[cfg(not(feature = "wasm"))]
-mod default;
-
-#[cfg(feature = "wasm")]
-mod wasm;
-
 use crate::dht::{Chord, ChordAction, ChordRemoteAction, Did};
 use crate::message::{
     AlreadyConnected, ConnectNode, ConnectedNode, FindSuccessor, FoundSuccessor, JoinDHT, Message,
     MessageRelay, MessageRelayMethod, MessageSessionRelayProtocol, NotifiedPredecessor,
     NotifyPredecessor,
 };
-use crate::swarm::{Swarm, TransportManager};
+use crate::swarm::Swarm;
 use crate::types::ice_transport::IceTrickleScheme;
+use crate::types::message::TransportManager;
 use anyhow::anyhow;
 use anyhow::Result;
 use futures::lock::Mutex;
-use futures_util::pin_mut;
-use futures_util::stream::StreamExt;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use web3::types::Address;
@@ -336,41 +329,6 @@ impl MessageHandler {
                 dht.successor = msg.successor;
             }
             Ok(())
-        }
-    }
-
-    /// This method is required because web-sys components is not `Send`
-    /// which means a listening loop cannot running concurrency.
-    pub async fn listen_once(&self) {
-        if let Some(relay_message) = self.swarm.poll_message().await {
-            if relay_message.is_expired() || !relay_message.verify() {
-                log::error!("Cannot verify msg or it's expired: {:?}", relay_message);
-            }
-
-            if let Err(e) = self
-                .handle_message_relay(&relay_message, &relay_message.addr.into())
-                .await
-            {
-                log::error!("Error in handle_message: {}", e);
-            }
-        }
-    }
-
-    pub async fn listen(&self) {
-        let iter_messages = self.swarm.iter_messages();
-        pin_mut!(iter_messages);
-
-        while let Some(relay_message) = iter_messages.next().await {
-            if relay_message.is_expired() || !relay_message.verify() {
-                log::error!("Cannot verify msg or it's expired: {:?}", relay_message);
-            }
-
-            if let Err(e) = self
-                .handle_message_relay(&relay_message, &relay_message.addr.into())
-                .await
-            {
-                log::error!("Error in handle_message: {}", e);
-            }
         }
     }
 }

@@ -7,19 +7,17 @@ use crate::types::channel::Event;
 use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
+use crate::types::message::TransportManager;
 use anyhow::anyhow;
 use anyhow::Result;
-use async_stream::stream;
 use async_trait::async_trait;
-use futures_core::Stream;
-use std::str::FromStr;
 use std::sync::Arc;
 use web3::types::Address;
 
 #[cfg(not(feature = "wasm"))]
 use crate::channels::default::AcChannel as Channel;
 #[cfg(feature = "wasm")]
-use crate::channels::wasm::CbChannel as Channel;
+use crate::channels::wasm::{CbChannel as Channel, Receiver, Sender};
 
 #[cfg(not(feature = "wasm"))]
 use crate::transports::default::DefaultTransport as Transport;
@@ -31,25 +29,6 @@ pub struct Swarm {
     transport_event_channel: Channel<Event>,
     ice_server: String,
     pub key: SecretKey,
-}
-
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
-pub trait TransportManager {
-    type Transport;
-
-    fn get_transports(&self) -> Vec<(Address, Self::Transport)>;
-    fn get_addresses(&self) -> Vec<Address>;
-    fn get_transport(&self, address: &Address) -> Option<Self::Transport>;
-    fn remove_transport(&self, address: &Address) -> Option<(Address, Self::Transport)>;
-    fn get_transport_numbers(&self) -> usize;
-    async fn new_transport(&self) -> Result<Self::Transport>;
-    async fn register(&self, address: &Address, trans: Self::Transport) -> Result<()>;
-    async fn get_or_register(
-        &self,
-        address: &Address,
-        default: Self::Transport,
-    ) -> Result<Self::Transport>;
 }
 
 impl Swarm {
@@ -116,30 +95,14 @@ impl Swarm {
         let ev = Channel::recv(receiver).await.ok()??;
         ev.try_into().ok()
     }
-
-    pub fn iter_messages<'a, 'b>(&'a self) -> impl Stream<Item = MessageRelay<Message>> + 'b
-    where
-        'a: 'b,
-    {
-        stream! {
-            let receiver = &self.transport_event_channel.receiver();
-            loop {
-                if let Ok(Some(ev)) = Channel::recv(receiver).await {
-                    if let Ok(msg) = ev.try_into() {
-                        yield msg;
-                    }
-                }
-            }
-        }
-    }
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-impl TransportManager for Swarm {
-    type Transport = Arc<Transport>;
+impl TransportManager<Event, Channel<Event>> for Swarm {
+    type Transport = Transport;
 
-    async fn new_transport(&self) -> Result<Self::Transport> {
+    async fn new_transport(&self) -> Result<Arc<Transport>> {
         let event_sender = self.transport_event_channel.sender();
         let mut ice_transport = Transport::new(event_sender);
 
@@ -155,10 +118,10 @@ impl TransportManager for Swarm {
     /// register to swarm table
     /// should not wait connection statues here
     /// a connection `Promise` may cause deadlock of both end
-    async fn register(&self, address: &Address, trans: Self::Transport) -> Result<()> {
+    async fn register(&self, address: &Address, trans: Arc<Transport>) -> Result<()> {
         let prev_transport = self.table.set(address, trans);
-        if let Some(transport) = prev_transport {
-            if let Err(e) = transport.close().await {
+        if let Some(trans) = prev_transport {
+            if let Err(e) = trans.close().await {
                 log::error!("failed to close previous while registering {:?}", e);
             }
         }
@@ -166,7 +129,7 @@ impl TransportManager for Swarm {
         Ok(())
     }
 
-    fn get_transport(&self, address: &Address) -> Option<Self::Transport> {
+    fn get_transport(&self, address: &Address) -> Option<Arc<Transport>> {
         self.table.get(address)
     }
 
@@ -189,8 +152,8 @@ impl TransportManager for Swarm {
     async fn get_or_register(
         &self,
         address: &Address,
-        default: Self::Transport,
-    ) -> Result<Self::Transport> {
+        default: Arc<Transport>,
+    ) -> Result<Arc<Transport>> {
         if !default.is_connected().await {
             return Err(anyhow!("default transport is not connected"));
         }

@@ -2,13 +2,13 @@ mod helper;
 
 use super::MessageHandler;
 use crate::poll;
-use crate::types::message::MessageListener;
+use crate::types::message::MessageIO;
 use async_trait::async_trait;
 use std::sync::Arc;
 use wasm_bindgen_futures::spawn_local;
 
 #[async_trait(?Send)]
-impl MessageListener for MessageHandler {
+impl MessageIO for MessageHandler {
     async fn listen(&'static self) {
         let msg_handler = Arc::new(self);
         let handler = Arc::clone(&msg_handler);

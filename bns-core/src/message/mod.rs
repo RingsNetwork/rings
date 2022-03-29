@@ -1,4 +1,5 @@
 pub mod handler;
+pub mod hub;
 
 mod encoder;
 pub use encoder::Encoded;
