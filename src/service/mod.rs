@@ -1,9 +1,12 @@
+mod backgrounds;
 mod discovery;
 mod http_error;
 mod is_turn;
 mod result;
 mod stabilization;
 pub use stabilization::Stabilization;
+
+pub use backgrounds::run_stabilize;
 
 use axum::{
     extract::Extension,

@@ -4,67 +4,75 @@ use crate::swarm::Swarm;
 use anyhow::Result;
 use futures::lock::Mutex;
 use std::sync::Arc;
-use tokio::time::{sleep, Duration};
 
 pub struct Stabilization {
     chord: Arc<Mutex<Chord>>,
     swarm: Arc<Swarm>,
+    timeout: usize,
 }
 
 impl Stabilization {
-    pub fn new(chord: Arc<Mutex<Chord>>, swarm: Arc<Swarm>) -> Self {
-        Self { chord, swarm }
+    pub fn new(chord: Arc<Mutex<Chord>>, swarm: Arc<Swarm>, timeout: usize) -> Self {
+        Self {
+            chord,
+            swarm,
+            timeout,
+        }
+    }
+
+    pub fn get_timeout(&self) -> usize {
+        self.timeout
     }
 
     pub async fn stabilize(&self) -> Result<()> {
-        loop {
-            let mut chord = self.chord.lock().await;
-            let message = MessageRelay::new(
-                Message::NotifyPredecessor(NotifyPredecessor {
-                    predecessor: chord.id,
-                }),
-                &self.swarm.key,
-                None,
-                None,
-                None,
-                MessageRelayMethod::SEND,
-            )?;
-            if chord.id != chord.successor {
-                self.swarm
-                    .send_message(&chord.successor.into(), message)
-                    .await?;
-            }
-            // fix fingers
-            match chord.fix_fingers() {
-                Ok(action) => match action {
-                    ChordAction::None => {
-                        log::info!("wait to next round");
-                    }
-                    ChordAction::RemoteAction(
-                        next,
-                        ChordRemoteAction::FindSuccessorForFix(current),
-                    ) => {
-                        let message = MessageRelay::new(
-                            Message::FindSuccessor(FindSuccessor {
-                                id: current,
-                                for_fix: true,
-                            }),
-                            &self.swarm.key,
-                            None,
-                            None,
-                            None,
-                            MessageRelayMethod::SEND,
-                        )?;
-                        self.swarm.send_message(&next.into(), message).await?;
-                    }
-                    _ => {
-                        log::error!("Invalid Chord Action");
-                    }
-                },
-                Err(e) => {
-                    log::error!("{:?}", e);
-                    sleep(Duration::from_millis(1000 * 60 * 5)).await;
+        let mut chord = self.chord.lock().await;
+        let message = MessageRelay::new(
+            Message::NotifyPredecessor(NotifyPredecessor {
+                predecessor: chord.id,
+            }),
+            &self.swarm.key,
+            None,
+            None,
+            None,
+            MessageRelayMethod::SEND,
+        )?;
+        if chord.id != chord.successor {
+            self.swarm
+                .send_message(&chord.successor.into(), message)
+                .await?;
+        }
+        // fix fingers
+        match chord.fix_fingers() {
+            Ok(action) => match action {
+                ChordAction::None => {
+                    log::info!("wait to next round");
+                    Ok(())
                 }
+                ChordAction::RemoteAction(
+                    next,
+                    ChordRemoteAction::FindSuccessorForFix(current),
+                ) => {
+                    let message = MessageRelay::new(
+                        Message::FindSuccessor(FindSuccessor {
+                            id: current,
+                            for_fix: true,
+                        }),
+                        &self.swarm.key,
+                        None,
+                        None,
+                        None,
+                        MessageRelayMethod::SEND,
+                    )?;
+                    self.swarm.send_message(&next.into(), message).await
+                }
+                _ => {
+                    log::error!("Invalid Chord Action");
+                    unreachable!();
+                }
+            },
+            Err(e) => {
+                log::error!("{:?}", e);
+                Err(e)
             }
         }
     }

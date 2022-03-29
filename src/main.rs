@@ -7,6 +7,7 @@ use bns_core::message::handler::MessageHandler;
 use bns_core::swarm::Swarm;
 use bns_node::logger::Logger;
 use bns_node::service::run_service;
+use bns_node::service::run_stabilize;
 use clap::Parser;
 use futures::lock::Mutex;
 use std::sync::Arc;
@@ -33,16 +34,19 @@ pub struct Args {
 
     #[clap(long = "key", short = 'k', env)]
     pub eth_key: String,
+
+    #[clap(long = "stabilize_timeout", short = 't', default_value = "15")]
+    pub stabilize_timeout: String,
 }
 
-async fn run(http_addr: String, key: SecretKey, stun: &str) {
+async fn run(http_addr: String, key: SecretKey, stun: &str, timeout: usize) {
     let dht = Arc::new(Mutex::new(Chord::new(key.address().into())));
     let swarm = Arc::new(Swarm::new(stun, key));
 
     let listen_event = MessageHandler::new(dht.clone(), swarm.clone());
-    let stabilize_event = Stabilization::new(dht.clone(), swarm.clone());
+    let stabilization = Stabilization::new(Arc::clone(&dht), Arc::clone(&swarm), timeout);
     tokio::spawn(async move { listen_event.listen().await });
-    tokio::spawn(async move { stabilize_event.stabilize().await });
+    tokio::spawn(async move { run_stabilize(stabilization).await });
 
     let swarm_clone = swarm.clone();
     tokio::spawn(async move { run_service(http_addr, swarm_clone, key).await });
@@ -62,7 +66,13 @@ async fn main() -> Result<()> {
 
     let key = SecretKey::try_from(args.eth_key.as_str())?;
 
-    run(args.http_addr, key, args.ice_server.as_str()).await;
+    run(
+        args.http_addr,
+        key,
+        args.ice_server.as_str(),
+        args.stabilize_timeout.parse::<usize>().unwrap(),
+    )
+    .await;
 
     Ok(())
 }
