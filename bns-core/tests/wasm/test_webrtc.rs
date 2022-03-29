@@ -8,14 +8,13 @@ pub mod test {
     use wasm_bindgen::prelude::*;
     use wasm_bindgen::JsCast;
     use wasm_bindgen_futures::JsFuture;
-    use web_sys::{
-        MessageEvent, RtcDataChannelEvent, RtcPeerConnection, RtcPeerConnectionIceEvent, RtcSdpType,
-        RtcSessionDescriptionInit,
-    };
     use wasm_bindgen_test::wasm_bindgen_test;
     use wasm_bindgen_test::wasm_bindgen_test_configure;
+    use web_sys::{
+        MessageEvent, RtcDataChannelEvent, RtcPeerConnection, RtcPeerConnectionIceEvent,
+        RtcSdpType, RtcSessionDescriptionInit,
+    };
     wasm_bindgen_test_configure!(run_in_browser);
-
 
     macro_rules! console_log {
         ($($t:tt)*) => (log(&format_args!($($t)*).to_string()))
@@ -85,7 +84,8 @@ pub mod test {
             onmessage_callback.forget();
 
             dc2.send_with_str("Ping from pc2.dc!").unwrap();
-        }) as Box<dyn FnMut(RtcDataChannelEvent)>);
+        })
+            as Box<dyn FnMut(RtcDataChannelEvent)>);
         pc2.set_ondatachannel(Some(ondatachannel_callback.as_ref().unchecked_ref()));
         ondatachannel_callback.forget();
 
@@ -94,32 +94,32 @@ pub mod test {
          *
          */
         let pc2_clone = pc2.clone();
-        let onicecandidate_callback1 =
-            Closure::wrap(
-                Box::new(move |ev: RtcPeerConnectionIceEvent| match ev.candidate() {
-                    Some(candidate) => {
-                        console_log!("pc1.onicecandidate: {:#?}", candidate.candidate());
-                        let _ =
-                            pc2_clone.add_ice_candidate_with_opt_rtc_ice_candidate(Some(&candidate));
-                    }
-                    None => {}
-                }) as Box<dyn FnMut(RtcPeerConnectionIceEvent)>,
-            );
+        let onicecandidate_callback1 = Closure::wrap(Box::new(
+            move |ev: RtcPeerConnectionIceEvent| match ev.candidate() {
+                Some(candidate) => {
+                    console_log!("pc1.onicecandidate: {:#?}", candidate.candidate());
+                    let _ =
+                        pc2_clone.add_ice_candidate_with_opt_rtc_ice_candidate(Some(&candidate));
+                }
+                None => {}
+            },
+        )
+            as Box<dyn FnMut(RtcPeerConnectionIceEvent)>);
         pc1.set_onicecandidate(Some(onicecandidate_callback1.as_ref().unchecked_ref()));
         onicecandidate_callback1.forget();
 
         let pc1_clone = pc1.clone();
-        let onicecandidate_callback2 =
-            Closure::wrap(
-                Box::new(move |ev: RtcPeerConnectionIceEvent| match ev.candidate() {
-                    Some(candidate) => {
-                        console_log!("pc2.onicecandidate: {:#?}", candidate.candidate());
-                        let _ =
-                            pc1_clone.add_ice_candidate_with_opt_rtc_ice_candidate(Some(&candidate));
-                    }
-                    None => {}
-                }) as Box<dyn FnMut(RtcPeerConnectionIceEvent)>,
-            );
+        let onicecandidate_callback2 = Closure::wrap(Box::new(
+            move |ev: RtcPeerConnectionIceEvent| match ev.candidate() {
+                Some(candidate) => {
+                    console_log!("pc2.onicecandidate: {:#?}", candidate.candidate());
+                    let _ =
+                        pc1_clone.add_ice_candidate_with_opt_rtc_ice_candidate(Some(&candidate));
+                }
+                None => {}
+            },
+        )
+            as Box<dyn FnMut(RtcPeerConnectionIceEvent)>);
         pc2.set_onicecandidate(Some(onicecandidate_callback2.as_ref().unchecked_ref()));
         onicecandidate_callback2.forget();
 
@@ -128,7 +128,8 @@ pub mod test {
          *
          */
         let offer = JsFuture::from(pc1.create_offer()).await.unwrap();
-        let offer_sdp = Reflect::get(&offer, &JsValue::from_str("sdp")).unwrap()
+        let offer_sdp = Reflect::get(&offer, &JsValue::from_str("sdp"))
+            .unwrap()
             .as_string()
             .unwrap();
         console_log!("pc1: offer {:?}", offer_sdp);
@@ -151,7 +152,8 @@ pub mod test {
         console_log!("pc2: state {:?}", pc2.signaling_state());
 
         let answer = JsFuture::from(pc2.create_answer()).await.unwrap();
-        let answer_sdp = Reflect::get(&answer, &JsValue::from_str("sdp")).unwrap()
+        let answer_sdp = Reflect::get(&answer, &JsValue::from_str("sdp"))
+            .unwrap()
             .as_string()
             .unwrap();
         console_log!("pc2: answer {:?}", answer_sdp);
