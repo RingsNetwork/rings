@@ -49,7 +49,7 @@ type EventSender = Arc<FuturesMutex<mpsc::Sender<Event>>>;
 
 #[derive(Clone)]
 pub struct WasmTransport {
-    id: uuid::Uuid,
+    pub id: uuid::Uuid,
     connection: Option<Arc<RtcPeerConnection>>,
     pending_candidates: Arc<Mutex<Vec<RtcIceCandidate>>>,
     channel: Option<Arc<RtcDataChannel>>,

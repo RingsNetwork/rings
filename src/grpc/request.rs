@@ -11,6 +11,7 @@ pub enum RpcMethod {
     ConnectWithHandshakeInfo,
     SendTo,
     Disconnect,
+    AllowConnect,
 }
 
 impl RpcMethod {
@@ -33,6 +34,7 @@ impl ToString for RpcMethod {
             RpcMethod::ConnectWithHandshakeInfo => "connectWithHandshakeInfo",
             RpcMethod::SendTo => "sendTo",
             RpcMethod::Disconnect => "disconnect",
+            RpcMethod::AllowConnect => "allowConnect",
         }
         .to_owned()
     }
@@ -49,6 +51,7 @@ impl TryFrom<&str> for RpcMethod {
             "connectWithHandshakeInfo" => Self::ConnectWithHandshakeInfo,
             "sendTo" => Self::SendTo,
             "disconnect" => Self::Disconnect,
+            "allowConnect" => Self::AllowConnect,
             _ => return Err(anyhow::anyhow!("Invalid method: {}", value)),
         })
     }
@@ -98,14 +101,12 @@ impl tonic::IntoRequest<GrpcRequest> for ConnectWithUrl {
 #[derive(Debug, Clone)]
 pub struct ConnectWithHandshakeInfo {
     pub handshake_info: String,
-    pub force_new_transport: bool,
 }
 
 impl ConnectWithHandshakeInfo {
-    pub fn new(handshake_info: &str, force_new_transport: bool) -> Self {
+    pub fn new(handshake_info: &str) -> Self {
         Self {
             handshake_info: handshake_info.to_owned(),
-            force_new_transport,
         }
     }
 }
@@ -114,23 +115,21 @@ impl TryFrom<&tonic::Request<GrpcRequest>> for ConnectWithHandshakeInfo {
     type Error = anyhow::Error;
 
     fn try_from(value: &tonic::Request<GrpcRequest>) -> Result<Self, Self::Error> {
-        if value.get_ref().params.len() != 2 {
+        if value.get_ref().params.len() != 1 {
             return Err(anyhow::anyhow!("InvalidArgument"));
         }
-        let [hs_info_arr, force_new_transport_arr] = array_ref![value.get_ref().params, 0, 2];
+        let [hs_info_arr] = array_ref![value.get_ref().params, 0, 1];
         Ok(ConnectWithHandshakeInfo {
             handshake_info: String::from_utf8(hs_info_arr.to_owned())?,
-            force_new_transport: force_new_transport_arr[0] == 1,
         })
     }
 }
 
 impl tonic::IntoRequest<GrpcRequest> for ConnectWithHandshakeInfo {
     fn into_request(self) -> tonic::Request<GrpcRequest> {
-        tonic::Request::new(RpcMethod::ConnectWithHandshakeInfo.build_request(&[
-            self.handshake_info.as_bytes(),
-            &[if self.force_new_transport { 1 } else { 0 }],
-        ]))
+        tonic::Request::new(
+            RpcMethod::ConnectWithHandshakeInfo.build_request(&[self.handshake_info.as_bytes()]),
+        )
     }
 }
 
@@ -233,5 +232,44 @@ impl TryFrom<&tonic::Request<GrpcRequest>> for Disconnect {
 impl tonic::IntoRequest<GrpcRequest> for Disconnect {
     fn into_request(self) -> tonic::Request<GrpcRequest> {
         tonic::Request::new(RpcMethod::Disconnect.build_request(&[self.address.as_bytes()]))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct AllowConnect {
+    pub transport_id: String,
+    pub handshake_info: String,
+}
+
+impl AllowConnect {
+    pub fn new(transport_id: &str, handshake_info: &str) -> Self {
+        Self {
+            transport_id: transport_id.to_owned(),
+            handshake_info: handshake_info.to_owned(),
+        }
+    }
+}
+
+impl TryFrom<&tonic::Request<GrpcRequest>> for AllowConnect {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &tonic::Request<GrpcRequest>) -> Result<Self, Self::Error> {
+        if value.get_ref().params.len() < 2 {
+            return Err(anyhow::anyhow!("InvalidArgument"));
+        }
+        let [transport_id, handshake_info] = array_ref![value.get_ref().params, 0, 2];
+        Ok(Self {
+            transport_id: String::from_utf8(transport_id.to_vec())?,
+            handshake_info: String::from_utf8(handshake_info.to_vec())?,
+        })
+    }
+}
+
+impl tonic::IntoRequest<GrpcRequest> for AllowConnect {
+    fn into_request(self) -> tonic::Request<GrpcRequest> {
+        tonic::Request::new(
+            RpcMethod::AllowConnect
+                .build_request(&[self.transport_id.as_bytes(), self.handshake_info.as_bytes()]),
+        )
     }
 }

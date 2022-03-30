@@ -4,17 +4,20 @@ use bns_core::dht::Chord;
 use bns_core::ecc::SecretKey;
 use bns_core::message::handler::MessageHandler;
 use bns_core::swarm::Swarm;
-use bns_node::grpc::{
-    grpc_client::GrpcClient,
-    request::{
-        ConnectWithHandshakeInfo, ConnectWithUrl, Disconnect, GenerateHandshakeInfo, ListPeers,
-        SendTo,
-    },
-    response::Peer,
-};
 use bns_node::logger::Logger;
 use bns_node::service::run_service;
-use clap::{ArgEnum, Args, Parser, Subcommand};
+use bns_node::{
+    grpc::{
+        grpc_client::GrpcClient,
+        request::{
+            AllowConnect, ConnectWithHandshakeInfo, ConnectWithUrl, Disconnect,
+            GenerateHandshakeInfo, ListPeers, SendTo,
+        },
+        response::{Peer, TransportAndHsInfo},
+    },
+    logger::LogLevel,
+};
+use clap::{Args, Parser, Subcommand};
 use futures::lock::Mutex;
 use std::sync::Arc;
 
@@ -28,42 +31,18 @@ struct Cli {
     command: Command,
 }
 
-#[derive(ArgEnum, Debug, Clone)]
-#[clap(rename_all = "kebab-case")]
-enum LogLevel {
-    Off,
-    Debug,
-    Info,
-    Warn,
-    Error,
-    Trace,
-}
-
-impl From<LogLevel> for log::LevelFilter {
-    fn from(val: LogLevel) -> Self {
-        match val {
-            LogLevel::Off => log::LevelFilter::Off,
-            LogLevel::Debug => log::LevelFilter::Debug,
-            LogLevel::Info => log::LevelFilter::Info,
-            LogLevel::Warn => log::LevelFilter::Warn,
-            LogLevel::Error => log::LevelFilter::Error,
-            LogLevel::Trace => log::LevelFilter::Trace,
-        }
-    }
-}
-
 #[derive(Subcommand, Debug)]
 #[clap(rename_all = "kebab-case")]
 enum Command {
     #[clap(about = "daemon")]
-    Daemon(Daemon),
+    Run(Daemon),
     Connect(ConnectArgs),
     #[clap(subcommand)]
     Sdp(SdpCommand),
     #[clap(subcommand)]
     Peer(PeerCommand),
-    NewSecretKey,
     Send(Send),
+    NewSecretKey,
 }
 
 #[derive(Args, Debug)]
@@ -124,6 +103,8 @@ enum SdpCommand {
     Gen(SdpGen),
     #[clap(about = "Connect to a peer.")]
     Connect(SdpConnect),
+    #[clap(about = "Allow remote peer connect.")]
+    AllowConnect(SdpAllowConnect),
 }
 
 #[derive(Args, Debug)]
@@ -149,14 +130,18 @@ struct SdpConnect {
 
     #[clap(about)]
     handshake_info: String,
+}
 
-    #[clap(
-        short = 'f',
-        long = "force",
-        parse(from_flag),
-        help = "Force start a new transport to connect peer."
-    )]
-    force_new_transport: bool,
+#[derive(Args, Debug)]
+struct SdpAllowConnect {
+    #[clap(flatten)]
+    client_args: ClientArgs,
+
+    #[clap(help = "transport_id of pending transport.")]
+    transport_id: String,
+
+    #[clap(help = "handshake_info from remote.")]
+    handshake_info: String,
 }
 
 #[derive(Subcommand, Debug)]
@@ -232,24 +217,40 @@ impl Client {
         Ok(())
     }
 
-    async fn connect_with_handshake_info(
-        &mut self,
-        handshake_info: &str,
-        new_transport: bool,
-    ) -> anyhow::Result<()> {
+    async fn connect_with_handshake_info(&mut self, handshake_info: &str) -> anyhow::Result<()> {
         let resp = self
             .client
-            .grpc(ConnectWithHandshakeInfo::new(handshake_info, new_transport))
+            .grpc(ConnectWithHandshakeInfo::new(handshake_info))
             .await?;
-        let result = resp.get_ref().as_text_result()?;
-        println!("Succussful, {}", result);
+        let info: TransportAndHsInfo = resp.get_ref().as_json_result()?;
+        println!(
+            "Succussful!\ntransport_id: {}\nhandeshake_info: {}",
+            info.transport_id, info.handshake_info
+        );
         Ok(())
     }
 
     async fn generate_handshake_info(&mut self) -> anyhow::Result<()> {
         let resp = self.client.grpc(GenerateHandshakeInfo::default()).await?;
-        let hs_info = resp.get_ref().as_text_result()?;
-        println!("Succussful, Your new handshake info: {}", hs_info);
+        let info: TransportAndHsInfo = resp.get_ref().as_json_result()?;
+        println!(
+            "Succussful!\ntransport_id: {}\nhandeshake_info: {}",
+            info.transport_id, info.handshake_info
+        );
+        Ok(())
+    }
+
+    async fn allow_connect(
+        &mut self,
+        transport_id: &str,
+        handshake_info: &str,
+    ) -> anyhow::Result<()> {
+        let resp = self
+            .client
+            .grpc(AllowConnect::new(transport_id, handshake_info))
+            .await?;
+        let peer: Peer = resp.get_ref().as_json_result()?;
+        println!("Succussful, {}", peer.transport_id);
         Ok(())
     }
 
@@ -289,7 +290,7 @@ async fn main() -> Result<()> {
     Logger::init(cli.log_level.into())?;
 
     if let Err(e) = match cli.command {
-        Command::Daemon(args) => {
+        Command::Run(args) => {
             daemon_run(args.http_addr, &args.eth_key, args.ice_server.as_str()).await
         }
         Command::Connect(args) => {
@@ -304,7 +305,14 @@ async fn main() -> Result<()> {
         Command::Sdp(SdpCommand::Connect(args)) => {
             let mut client = args.client_args.new_client()?;
             client
-                .connect_with_handshake_info(args.handshake_info.as_str(), args.force_new_transport)
+                .connect_with_handshake_info(args.handshake_info.as_str())
+                .await?;
+            Ok(())
+        }
+        Command::Sdp(SdpCommand::AllowConnect(args)) => {
+            let mut client = args.client_args.new_client()?;
+            client
+                .allow_connect(args.transport_id.as_str(), args.handshake_info.as_str())
                 .await?;
             Ok(())
         }

@@ -148,17 +148,36 @@ impl Swarm {
         Ok(())
     }
 
-    pub fn pop_pending_transport(&self, transport: Arc<Transport>) -> anyhow::Result<()> {
+    pub fn pop_pending_transport(&self, transport_id: uuid::Uuid) -> anyhow::Result<()> {
         let mut pending = self
             .pending
             .try_lock()
             .map_err(|_| anyhow::anyhow!("lock fail"))?;
         let index = pending
             .iter()
-            .position(|x| x.eq(&transport))
+            .position(|x| x.id.eq(&transport_id))
             .ok_or_else(|| anyhow::anyhow!("transport not found"))?;
         pending.remove(index);
         Ok(())
+    }
+
+    pub async fn pending_transports(&self) -> anyhow::Result<()> {
+        let pending = self
+            .pending
+            .try_lock()
+            .map_err(|_| anyhow::anyhow!("lock fail"))?;
+        for item in pending.iter() {
+            log::debug!("id: {}, pubkey: {:?}", item.id, item.pubkey().await);
+        }
+        Ok(())
+    }
+
+    pub fn find_pending_transport(&self, id: uuid::Uuid) -> anyhow::Result<Option<Arc<Transport>>> {
+        let pending = self
+            .pending
+            .try_lock()
+            .map_err(|_| anyhow::anyhow!("lock fail"))?;
+        Ok(pending.iter().find(|x| x.id.eq(&id)).cloned())
     }
 }
 
