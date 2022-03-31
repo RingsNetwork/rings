@@ -1,6 +1,7 @@
 use super::helper::RtcSessionDescriptionWrapper;
 use crate::channels::wasm::CbChannel;
 use crate::ecc::{PublicKey, SecretKey};
+use crate::err::{Error, Result};
 use crate::message::Encoded;
 use crate::message::MessageRelay;
 use crate::message::MessageRelayMethod;
@@ -13,8 +14,6 @@ use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
 use crate::types::ice_transport::IceTrickleScheme;
-use anyhow::anyhow;
-use anyhow::Result;
 use async_trait::async_trait;
 use futures::channel::mpsc;
 use futures::lock::Mutex as FuturesMutex;
@@ -152,10 +151,13 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
                         promise.await?;
                         Ok(answer.into())
                     }
-                    Err(_) => Err(anyhow!("Failed to get answer")),
+                    Err(e) => Err(Error::RTCPeerConnectionCreateAnswerFailed(format!(
+                        "{:?}",
+                        e
+                    ))),
                 }
             }
-            None => Err(anyhow!("cannot get connection")),
+            None => Err(Error::RTCPeerConnectionNotEstablish),
         }
     }
 
@@ -173,10 +175,13 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
                         promise.await?;
                         Ok(offer.into())
                     }
-                    Err(_) => Err(anyhow!("cannot get offer")),
+                    Err(e) => Err(Error::RTCPeerConnectionCreateOfferFailed(format!(
+                        "{:?}",
+                        e
+                    ))),
                 }
             }
-            None => Err(anyhow!("cannot get connection")),
+            None => Err(Error::RTCPeerConnectionNotEstablish),
         }
     }
 
@@ -196,10 +201,12 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
     where
         T: Serialize + Send,
     {
-        let data = serde_json::to_string(&msg)?;
+        let data = serde_json::to_string(&msg).map_err(|e| Error::Serialize(Arc::new(e)))?;
         match self.get_data_channel().await {
-            Some(cnn) => cnn.send_with_str(&data).map_err(|e| anyhow!("{:?}", e)),
-            None => Err(anyhow!("data channel may not ready")),
+            Some(cnn) => cnn
+                .send_with_str(&data)
+                .map_err(|e| Error::RTCDataChannelSendTextFailed(format!("{:?}", e))),
+            None => Err(Error::RTCDataChannelNotReady),
         }
     }
 
@@ -215,10 +222,13 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
                 let promise = c.set_local_description(&offer_obj);
                 match JsFuture::from(promise).await {
                     Ok(_) => Ok(()),
-                    Err(_) => Err(anyhow!("Failed to set remote description")),
+                    Err(e) => Err(Error::RTCPeerConnectionSetLocalDescFailed(format!(
+                        "{:?}",
+                        e
+                    ))),
                 }
             }
-            None => Err(anyhow!("Failed on getting connection")),
+            None => Err(Error::RTCPeerConnectionNotEstablish),
         }
     }
 
@@ -242,11 +252,14 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
                     Err(e) => {
                         info!("failed to set remote desc");
                         info!("{:?}", e);
-                        Err(anyhow!("Failed to set remote description"))
+                        Err(Error::RTCPeerConnectionSetRemoteDescFailed(format!(
+                            "{:?}",
+                            e
+                        )))
                     }
                 }
             }
-            None => Err(anyhow!("Failed on getting connection")),
+            None => Err(Error::RTCPeerConnectionNotEstablish),
         }
     }
 
@@ -260,15 +273,14 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
                     Ok(_) => Ok(()),
                     Err(e) => {
                         log::error!("failed to add ice candate");
-                        Err(anyhow!(
-                            "Failed to add ice candidate:: {:?}, Error:: {:?}",
-                            &candidate,
-                            &e
-                        ))
+                        Err(Error::RTCPeerConnectionAddIceCandidateError(format!(
+                            "{:?}",
+                            e
+                        )))
                     }
                 }
             }
-            None => Err(anyhow!("Failed on getting connection")),
+            None => Err(Error::RTCPeerConnectionNotEstablish),
         }
     }
 }
@@ -311,7 +323,7 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
             }
             None => {
                 log::error!("cannot get connection");
-                Err(anyhow!("Failed on getting connection"))
+                Err(Error::RTCPeerConnectionNotEstablish)
             }
         }
     }
@@ -412,7 +424,7 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
             RtcSdpType::Answer => self.get_answer().await?,
             RtcSdpType::Offer => self.get_offer().await?,
             _ => {
-                return Err(anyhow!("unsupport sdp type"));
+                return Err(Error::RTCSdpTypeNotMatch);
             }
         };
         let local_candidates_json: Vec<IceCandidate> = self
@@ -422,7 +434,8 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
             .map(|c| c.clone().to_json().into_serde::<IceCandidate>().unwrap())
             .collect();
         let data = TricklePayload {
-            sdp: serde_json::to_string(&RtcSessionDescriptionWrapper::from(sdp))?,
+            sdp: serde_json::to_string(&RtcSessionDescriptionWrapper::from(sdp))
+                .map_err(|e| Error::Deserialize(Arc::new(e)))?,
             candidates: local_candidates_json,
         };
         log::debug!("prepared hanshake info :{:?}", data);
@@ -430,7 +443,7 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
         Ok(resp.try_into()?)
     }
 
-    async fn register_remote_info(&self, data: Encoded) -> anyhow::Result<Address> {
+    async fn register_remote_info(&self, data: Encoded) -> Result<Address> {
         let data: MessageRelay<TricklePayload> = data.try_into()?;
         log::debug!("register remote info: {:?}", &data);
 
@@ -450,12 +463,12 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
             }
             _ => {
                 log::error!("cannot verify message sig");
-                return Err(anyhow!("failed on verify message sigature"));
+                return Err(Error::VerifySignatureFailed);
             }
         }
     }
 
-    async fn wait_for_connected(&self) -> anyhow::Result<()> {
+    async fn wait_for_connected(&self) -> Result<()> {
         let promise = self.connect_success_promise().await?;
         promise.await
     }
@@ -487,7 +500,7 @@ impl WasmTransport {
                 callback.forget();
                 Ok(promise)
             }
-            None => Err(anyhow!("cannot get connection")),
+            None => Err(Error::RTCPeerConnectionNotEstablish),
         }
     }
 
@@ -522,7 +535,7 @@ impl WasmTransport {
                 callback.forget();
                 Ok(promise)
             }
-            None => Err(anyhow!("cannot get connection")),
+            None => Err(Error::RTCPeerConnectionNotEstablish),
         }
     }
 }

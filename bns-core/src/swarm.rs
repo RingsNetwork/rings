@@ -1,5 +1,6 @@
 /// Swarm is transport management
 use crate::ecc::SecretKey;
+use crate::err::{Error, Result};
 use crate::message::{self, Message, MessageRelay, MessageRelayMethod};
 use crate::storage::{MemStorage, Storage};
 use crate::types::channel::Channel as ChannelTrait;
@@ -7,8 +8,6 @@ use crate::types::channel::Event;
 use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
-use anyhow::anyhow;
-use anyhow::Result;
 use async_stream::stream;
 use async_trait::async_trait;
 use futures_core::Stream;
@@ -76,7 +75,7 @@ impl Swarm {
     ) -> Result<()> {
         match self.get_transport(address) {
             Some(transport) => Ok(transport.send_message(payload).await?),
-            None => Err(anyhow!("cannot seek address in swarm table")),
+            None => Err(Error::SwarmMissAddressInTable),
         }
     }
 
@@ -87,7 +86,8 @@ impl Swarm {
 
         match ev {
             Some(Event::DataChannelMessage(msg)) => {
-                let payload = serde_json::from_slice::<MessageRelay<Message>>(&msg)?;
+                let payload = serde_json::from_slice::<MessageRelay<Message>>(&msg)
+                    .map_err(|e| Error::Deserialize(Arc::new(e)))?;
                 Ok(Some(payload))
             }
             Some(Event::RegisterTransport(address)) => match self.get_transport(&address) {
@@ -102,13 +102,10 @@ impl Swarm {
                     )?;
                     Ok(Some(payload))
                 }
-                None => Err(anyhow!(format!(
-                    "Cannot get transport from address {:?}",
-                    address
-                ))),
+                None => Err(Error::SwarmMissTransport(address)),
             },
             None => Ok(None),
-            x => Err(anyhow!(format!("Receive {:?}", x))),
+            x => Err(Error::SwarmLoadMessageRecvFailed(format!("{:?}", x))),
         }
     }
 
@@ -239,7 +236,7 @@ impl TransportManager for Swarm {
         default: Self::Transport,
     ) -> Result<Self::Transport> {
         if !default.is_connected().await {
-            return Err(anyhow!("default transport is not connected"));
+            return Err(Error::SwarmDefaultTransportNotConnected);
         }
         Ok(self.table.get_or_set(address, default))
     }

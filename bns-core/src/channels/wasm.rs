@@ -1,8 +1,7 @@
+use crate::err::{Error, Result};
 use crate::types::channel::Channel;
 /// ref: https://github.com/Ciantic/rust-shared-wasm-experiments/blob/master/src/lib.rs
 use async_trait::async_trait;
-//use crossbeam_channel as cbc;
-use anyhow::Result;
 use futures::channel::mpsc;
 use futures::lock::Mutex;
 use std::sync::Arc;
@@ -41,14 +40,14 @@ impl<T: Send> Channel<T> for CbChannel<T> {
         let mut sender = sender.lock().await;
         match sender.try_send(msg) {
             Ok(()) => Ok(()),
-            Err(_) => Err(anyhow::anyhow!("failed on sending message")),
+            Err(_) => Err(Error::ChannelSendMessageFailed),
         }
     }
 
     async fn recv(receiver: &Self::Receiver) -> Result<Option<T>> {
         let mut receiver = receiver.lock().await;
         match receiver.try_next() {
-            Err(e) => Err(anyhow::anyhow!(e)),
+            Err(_) => Err(Error::ChannelRecvMessageFailed),
             Ok(Some(x)) => Ok(Some(x)),
             Ok(None) => Ok(None),
         }

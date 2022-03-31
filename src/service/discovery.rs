@@ -58,7 +58,7 @@ async fn handshake(swarm: Arc<Swarm>, key: SecretKey, data: Vec<u8>) -> anyhow::
                 }
                 Err(e) => {
                     log::error!("failed to get handshake info: {:?}", e);
-                    anyhow::Result::Err(e)
+                    Err(anyhow!(e))
                 }
             }
         }

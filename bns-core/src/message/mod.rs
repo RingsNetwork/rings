@@ -179,3 +179,9 @@ pub enum Message {
     NotifyPredecessor(NotifyPredecessor),
     NotifiedPredecessor(NotifiedPredecessor),
 }
+
+impl std::fmt::Display for Message {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}

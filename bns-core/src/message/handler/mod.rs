@@ -5,6 +5,7 @@ mod default;
 mod wasm;
 
 use crate::dht::{Chord, ChordAction, ChordRemoteAction, Did};
+use crate::err::{Error, Result};
 use crate::message::{
     AlreadyConnected, ConnectNode, ConnectedNode, FindSuccessor, FoundSuccessor, JoinDHT, Message,
     MessageRelay, MessageRelayMethod, MessageSessionRelayProtocol, NotifiedPredecessor,
@@ -12,8 +13,6 @@ use crate::message::{
 };
 use crate::swarm::{Swarm, TransportManager};
 use crate::types::ice_transport::IceTrickleScheme;
-use anyhow::anyhow;
-use anyhow::Result;
 use futures::lock::Mutex;
 use futures_util::pin_mut;
 use futures_util::stream::StreamExt;
@@ -55,7 +54,7 @@ impl MessageHandler {
         relay: &MessageRelay<Message>,
         prev: &Did,
     ) -> Result<()> {
-        match relay.data {
+        match &relay.data {
             Message::JoinDHT(ref msg) => self.handle_join(relay, msg).await,
             Message::ConnectNode(ref msg) => self.handle_connect_node(relay, prev, msg).await,
             Message::ConnectedNode(ref msg) => self.handle_connected_node(relay, prev, msg).await,
@@ -70,7 +69,10 @@ impl MessageHandler {
             Message::NotifiedPredecessor(ref msg) => {
                 self.handle_notified_predecessor(relay, prev, msg).await
             }
-            _ => Err(anyhow!("Unsupported message type")),
+            x => Err(Error::MessageHandlerUnsupportMessageType(format!(
+                "{:?}",
+                x
+            ))),
         }
     }
 
@@ -114,7 +116,7 @@ impl MessageHandler {
                 ChordAction::RemoteAction(node, _) => Some(node),
                 _ => None,
             }
-            .ok_or_else(|| anyhow!("Cannot find next node by dht"))?;
+            .ok_or(Error::MessageHandlerMissNextNode)?;
             return self
                 .send_message(
                     &next_node,
@@ -192,7 +194,7 @@ impl MessageHandler {
                 .swarm
                 .get_transport(&msg.answer_id)
                 .map(|_| ())
-                .ok_or_else(|| anyhow!("Receive AlreadyConnected but cannot get transport")),
+                .ok_or(Error::MessageHandlerMissTransportAlreadyConnected),
         }
     }
 
@@ -217,9 +219,10 @@ impl MessageHandler {
                 .await
             }
             None => {
-                let transport = self.swarm.get_transport(&msg.answer_id).ok_or_else(|| {
-                    anyhow!("Cannot get trans while handle connect node response")
-                })?;
+                let transport = self
+                    .swarm
+                    .get_transport(&msg.answer_id)
+                    .ok_or(Error::MessageHandlerMissTransportConnectedNode)?;
 
                 transport
                     .register_remote_info(msg.handshake_info.clone().try_into()?)

@@ -1,5 +1,4 @@
-use anyhow::anyhow;
-use anyhow::Result;
+use crate::err::{Error, Result};
 use serde::Deserialize;
 use serde::Serialize;
 use std::str::FromStr;
@@ -38,15 +37,15 @@ impl Default for IceServer {
 ///      turn://ethereum.org:9090
 ///      turn://ryan@ethereum.org:9090/nginx/v2
 impl FromStr for IceServer {
-    type Err = anyhow::Error;
+    type Err = Error;
     fn from_str(s: &str) -> Result<Self> {
         let parsed = Url::parse(s)?;
         let scheme = parsed.scheme();
         if !(["turn", "stun"].contains(&scheme)) {
-            return Err(anyhow!("scheme {:?} is not supported", scheme));
+            return Err(Error::IceServerSchemeNotSupport(scheme.into()));
         }
         if !parsed.has_host() {
-            return Err(anyhow!("url do not has a host"));
+            return Err(Error::IceServerURLMissHost);
         }
         let username = parsed.username();
         let password = parsed.password().unwrap_or("");

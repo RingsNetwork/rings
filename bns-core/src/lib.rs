@@ -6,6 +6,7 @@
 pub mod channels;
 pub mod dht;
 pub mod ecc;
+pub mod err;
 pub mod message;
 pub mod storage;
 pub mod swarm;

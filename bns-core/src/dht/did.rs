@@ -1,4 +1,5 @@
 /// Did is a finate Ring R(P) where P = 2^160
+use crate::err::{Error, Result};
 use num_bigint::BigUint;
 use serde::Deserialize;
 use serde::Serialize;
@@ -50,9 +51,11 @@ impl From<Address> for Did {
 }
 
 impl FromStr for Did {
-    type Err = anyhow::Error;
-    fn from_str(s: &str) -> anyhow::Result<Self> {
-        Ok(Self(Address::from_str(s)?))
+    type Err = Error;
+    fn from_str(s: &str) -> Result<Self> {
+        Ok(Self(
+            Address::from_str(s).map_err(|_| Error::BadCHexInCache)?,
+        ))
     }
 }
 

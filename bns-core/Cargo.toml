@@ -14,7 +14,6 @@ wasm = [
 
 [dependencies]
 # global
-anyhow = "1.0.45"
 async-trait = "0.1.52"
 log = "0.4"
 dashmap = "4"
@@ -32,6 +31,7 @@ base58-monero = { version = "0.3", default-features = false, features = ["check"
 async-stream = "0.3.2"
 futures-core = "0.3.21"
 url = { version = "2", features = ["serde"] }
+thiserror = "1"
 
 # default
 webrtc = { version = "0.3.3", optional = true }

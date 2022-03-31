@@ -1,5 +1,5 @@
+use crate::err::{Error, Result};
 use crate::types::channel::Channel;
-use anyhow::Result;
 use async_channel as ac;
 use async_channel::Receiver;
 use async_channel::Sender;
@@ -34,14 +34,14 @@ impl<T: Send> Channel<T> for AcChannel<T> {
     async fn send(sender: &Self::Sender, msg: T) -> Result<()> {
         match sender.send(msg).await {
             Ok(_) => Ok(()),
-            Err(_) => Err(anyhow::anyhow!("failed on sending message")),
+            Err(_) => Err(Error::ChannelSendMessageFailed),
         }
     }
 
     async fn recv(receiver: &Self::Receiver) -> Result<Option<T>> {
         match receiver.recv().await {
             Ok(v) => Ok(Some(v)),
-            Err(e) => Err(anyhow::anyhow!(e)),
+            Err(_) => Err(Error::ChannelRecvMessageFailed),
         }
     }
 }
