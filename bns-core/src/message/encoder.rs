@@ -20,7 +20,7 @@ fn decode(s: String) -> Result<String> {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Encoded(String);
 
 impl Deref for Encoded {
@@ -48,5 +48,17 @@ impl TryFrom<Encoded> for String {
     type Error = anyhow::Error;
     fn try_from(s: Encoded) -> Result<Self> {
         decode(s.deref().to_owned())
+    }
+}
+
+impl ToString for Encoded {
+    fn to_string(&self) -> String {
+        self.deref().to_owned()
+    }
+}
+
+impl Encoded {
+    pub fn from_encoded_str(str: &str) -> Self {
+        Self(str.to_owned())
     }
 }

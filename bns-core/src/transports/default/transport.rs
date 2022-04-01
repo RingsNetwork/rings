@@ -41,11 +41,24 @@ type EventSender = <AcChannel<Event> as Channel<Event>>::Sender;
 
 #[derive(Clone)]
 pub struct DefaultTransport {
+    pub id: uuid::Uuid,
     connection: Arc<Mutex<Option<Arc<RTCPeerConnection>>>>,
     pending_candidates: Arc<Mutex<Vec<RTCIceCandidate>>>,
     data_channel: Arc<Mutex<Option<Arc<RTCDataChannel>>>>,
     event_sender: EventSender,
     public_key: Arc<RwLock<Option<PublicKey>>>,
+}
+
+impl PartialEq for DefaultTransport {
+    fn eq(&self, other: &Self) -> bool {
+        self.id.eq(&other.id)
+    }
+}
+
+impl Drop for DefaultTransport {
+    fn drop(&mut self) {
+        log::debug!("transport dropped: {}", self.id);
+    }
 }
 
 #[async_trait]
@@ -59,6 +72,7 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
 
     fn new(event_sender: EventSender) -> Self {
         Self {
+            id: uuid::Uuid::new_v4(),
             connection: Arc::new(Mutex::new(None)),
             pending_candidates: Arc::new(Mutex::new(vec![])),
             data_channel: Arc::new(Mutex::new(None)),

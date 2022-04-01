@@ -49,11 +49,18 @@ type EventSender = Arc<FuturesMutex<mpsc::Sender<Event>>>;
 
 #[derive(Clone)]
 pub struct WasmTransport {
+    pub id: uuid::Uuid,
     connection: Option<Arc<RtcPeerConnection>>,
     pending_candidates: Arc<Mutex<Vec<RtcIceCandidate>>>,
     channel: Option<Arc<RtcDataChannel>>,
     event_sender: EventSender,
     public_key: Arc<RwLock<Option<PublicKey>>>,
+}
+
+impl PartialEq for WasmTransport {
+    fn eq(&self, other: &Self) -> bool {
+        self.id.eq(&other.id)
+    }
 }
 
 #[async_trait(?Send)]
@@ -67,6 +74,7 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
 
     fn new(event_sender: EventSender) -> Self {
         Self {
+            id: uuid::Uuid::new_v4(),
             connection: None,
             pending_candidates: Arc::new(Mutex::new(vec![])),
             channel: None,

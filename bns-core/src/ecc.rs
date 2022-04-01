@@ -62,6 +62,20 @@ impl TryFrom<&str> for SecretKey {
     }
 }
 
+impl std::str::FromStr for SecretKey {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::try_from(s)
+    }
+}
+
+impl ToString for SecretKey {
+    fn to_string(&self) -> String {
+        hex::encode(self.serialize())
+    }
+}
+
 fn public_key_address(public_key: &PublicKey) -> Address {
     let public_key = public_key.serialize();
     debug_assert_eq!(public_key[0], 0x04);
