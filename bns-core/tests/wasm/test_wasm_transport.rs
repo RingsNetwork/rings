@@ -1,9 +1,9 @@
 #[cfg(feature = "wasm")]
 #[cfg(test)]
 pub mod test {
-    use anyhow::Result;
     use bns_core::channels::wasm::CbChannel;
     use bns_core::ecc::SecretKey;
+    use bns_core::err::Result;
 
     use bns_core::transports::wasm::WasmTransport as Transport;
     use bns_core::types::channel::Channel;
