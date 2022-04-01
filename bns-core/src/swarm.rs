@@ -136,44 +136,44 @@ impl Swarm {
         }
     }
 
-    pub fn push_pending_transport(&self, transport: &Arc<Transport>) -> anyhow::Result<()> {
+    pub fn push_pending_transport(&self, transport: &Arc<Transport>) -> Result<()> {
         let mut pending = self
             .pending
             .try_lock()
-            .map_err(|_| anyhow::anyhow!("call lock() failed"))?;
+            .map_err(|_| Error::SwarmPendingTransTryLockFailed)?;
         pending.push(transport.to_owned());
         Ok(())
     }
 
-    pub fn pop_pending_transport(&self, transport_id: uuid::Uuid) -> anyhow::Result<()> {
+    pub fn pop_pending_transport(&self, transport_id: uuid::Uuid) -> Result<()> {
         let mut pending = self
             .pending
             .try_lock()
-            .map_err(|_| anyhow::anyhow!("lock fail"))?;
+            .map_err(|_| Error::SwarmPendingTransTryLockFailed)?;
         let index = pending
             .iter()
             .position(|x| x.id.eq(&transport_id))
-            .ok_or_else(|| anyhow::anyhow!("transport not found"))?;
+            .ok_or(Error::SwarmPendingTransNotFound)?;
         pending.remove(index);
         Ok(())
     }
 
-    pub async fn pending_transports(&self) -> anyhow::Result<()> {
+    pub async fn pending_transports(&self) -> Result<()> {
         let pending = self
             .pending
             .try_lock()
-            .map_err(|_| anyhow::anyhow!("lock fail"))?;
+            .map_err(|_| Error::SwarmPendingTransTryLockFailed)?;
         for item in pending.iter() {
             log::debug!("id: {}, pubkey: {:?}", item.id, item.pubkey().await);
         }
         Ok(())
     }
 
-    pub fn find_pending_transport(&self, id: uuid::Uuid) -> anyhow::Result<Option<Arc<Transport>>> {
+    pub fn find_pending_transport(&self, id: uuid::Uuid) -> Result<Option<Arc<Transport>>> {
         let pending = self
             .pending
             .try_lock()
-            .map_err(|_| anyhow::anyhow!("lock fail"))?;
+            .map_err(|_| Error::SwarmPendingTransTryLockFailed)?;
         Ok(pending.iter().find(|x| x.id.eq(&id)).cloned())
     }
 }

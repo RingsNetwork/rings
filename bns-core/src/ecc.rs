@@ -63,9 +63,9 @@ impl TryFrom<&str> for SecretKey {
 }
 
 impl std::str::FromStr for SecretKey {
-    type Err = anyhow::Error;
+    type Err = Error;
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+    fn from_str(s: &str) -> Result<Self> {
         Self::try_from(s)
     }
 }

@@ -94,6 +94,12 @@ pub enum Error {
     #[error("Default transport is not connected")]
     SwarmDefaultTransportNotConnected,
 
+    #[error("call lock() failed")]
+    SwarmPendingTransTryLockFailed,
+
+    #[error("transport not found")]
+    SwarmPendingTransNotFound,
+
     #[cfg(not(feature = "wasm"))]
     #[error("RTC new peer connection failed")]
     RTCPeerConnectionCreateFailed(#[source] std::sync::Arc<webrtc::Error>),
