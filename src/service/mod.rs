@@ -1,5 +1,6 @@
 mod discovery;
 mod http_error;
+mod is_turn;
 mod observer;
 mod result;
 
@@ -23,6 +24,8 @@ use hyper::HeaderMap;
 use hyper::{body::HttpBody, Body, Request, Response};
 use pin_project::pin_project;
 use tower::Service;
+
+pub use is_turn::run_udp_turn;
 
 pub async fn run_service(addr: String, swarm: Arc<Swarm>, key: SecretKey) -> anyhow::Result<()> {
     let binding_addr = addr.parse().unwrap();

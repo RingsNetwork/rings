@@ -2,7 +2,7 @@ use bns_core::message::handler::MessageHandler;
 use bns_core::swarm::Swarm;
 use bns_core::{dht::Chord, ecc::SecretKey};
 use bns_node::logger::{LogLevel, Logger};
-use bns_node::service::run_service;
+use bns_node::service::{run_service, run_udp_turn};
 use clap::{Args, Parser, Subcommand};
 use daemonize::Daemonize;
 use futures::lock::Mutex;
@@ -23,6 +23,7 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Command {
     Run(RunArgs),
+    RunTurn(TurnArgs),
     Shutdown(ShutdownArgs),
 }
 
@@ -52,6 +53,43 @@ struct RunArgs {
     pub user: String,
 
     #[clap(long, default_value = "daemon")]
+    pub group: String,
+
+    #[clap(long, short = 'w', default_value = "/")]
+    pub work_dir: String,
+}
+
+#[derive(Args, Debug)]
+struct TurnArgs {
+    /// STUN server address.
+    #[clap(long, default_value = "3478")]
+    pub port: String,
+
+    /// STUN publicip.
+    #[clap(long, default_value = "127.0.0.1")]
+    pub public_ip: String,
+
+    /// Username.
+    #[clap(long, default_value = "bns")]
+    pub username: String,
+
+    /// Password.
+    #[clap(long, default_value = "password")]
+    pub password: String,
+
+    /// Realm.
+    /// REALM
+    /// The REALM attribute is present in Shared Secret Requests and Shared
+    /// Secret Responses. It contains text which meets the grammar for
+    /// "realm" as described in RFC 3261, and will thus contain a quoted
+    /// string (including the quotes).
+    #[clap(long, default_value = "bns")]
+    pub realm: String,
+
+    #[clap(long, short = 'p', default_value = "/tmp/bns-is.pid")]
+    pub pid_file: String,
+
+    #[clap(long, default_value = "bns-is-daemon")]
     pub group: String,
 
     #[clap(long, short = 'w', default_value = "/")]
@@ -101,6 +139,37 @@ fn run_daemon(args: &RunArgs) {
     });
 }
 
+fn run_turn_on_daemon(args: &TurnArgs) {
+    let stdout = File::create("/tmp/bns-is/access.log").unwrap();
+    let stderr = File::create("/tmp/bns-is/error.log").unwrap();
+
+    let daemonize = Daemonize::new()
+        .pid_file(args.pid_file.as_str())
+        .chown_pid_file(true)
+        .working_directory(args.work_dir.as_str())
+        .user(args.username.as_str())
+        .group(args.group.as_str())
+        .stdout(stdout)
+        .stderr(stderr);
+    if let Err(e) = daemonize.start() {
+        panic!("{}", e);
+    }
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        if let Err(e) = run_udp_turn(
+            &args.public_ip,
+            &args.port,
+            &args.username,
+            &args.password,
+            &args.realm,
+        )
+        .await
+        {
+            panic!("{}", e);
+        }
+    });
+}
+
 fn shutdown_daemon(args: &ShutdownArgs) -> anyhow::Result<()> {
     let pid: i32 = fs::read_to_string(args.pid_file.as_str())?.parse()?;
     unsafe {
@@ -118,6 +187,9 @@ fn main() {
     match cli.command {
         Command::Run(args) => {
             run_daemon(&args);
+        }
+        Command::RunTurn(args) => {
+            run_turn_on_daemon(&args);
         }
         Command::Shutdown(args) => {
             if let Err(e) = shutdown_daemon(&args) {
