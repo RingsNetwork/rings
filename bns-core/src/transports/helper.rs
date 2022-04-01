@@ -1,6 +1,5 @@
+use crate::err::{Error, Result};
 use crate::types::ice_transport::IceCandidate;
-use anyhow::anyhow;
-use anyhow::Result;
 use serde::Deserialize;
 use serde::Serialize;
 use std::future::Future;
@@ -37,10 +36,10 @@ impl Future for Promise {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut state = self.0.lock().unwrap();
         if state.completed {
-            return match &state.successed {
+            match &state.successed {
                 Some(true) => Poll::Ready(Ok(())),
-                _ => Poll::Ready(Err(anyhow!("failed on promise"))),
-            };
+                _ => Poll::Ready(Err(Error::PromiseStateFailed)),
+            }
         } else {
             state.waker = Some(cx.waker().clone());
             Poll::Pending

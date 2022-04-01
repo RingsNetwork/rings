@@ -1,5 +1,6 @@
 /// Swarm is transport management
 use crate::ecc::SecretKey;
+use crate::err::{Error, Result};
 use crate::message::{self, Message, MessageRelay, MessageRelayMethod};
 use crate::storage::{MemStorage, Storage};
 use crate::types::channel::Channel as ChannelTrait;
@@ -7,8 +8,6 @@ use crate::types::channel::Event;
 use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
-use anyhow::anyhow;
-use anyhow::Result;
 use async_stream::stream;
 use async_trait::async_trait;
 use futures_core::Stream;
@@ -76,7 +75,7 @@ impl Swarm {
     ) -> Result<()> {
         match self.get_transport(address) {
             Some(transport) => Ok(transport.send_message(payload).await?),
-            None => Err(anyhow!("cannot seek address in swarm table")),
+            None => Err(Error::SwarmMissAddressInTable),
         }
     }
 
@@ -87,7 +86,8 @@ impl Swarm {
 
         match ev {
             Some(Event::DataChannelMessage(msg)) => {
-                let payload = serde_json::from_slice::<MessageRelay<Message>>(&msg)?;
+                let payload = serde_json::from_slice::<MessageRelay<Message>>(&msg)
+                    .map_err(|e| Error::Deserialize(Arc::new(e)))?;
                 Ok(Some(payload))
             }
             Some(Event::RegisterTransport(address)) => match self.get_transport(&address) {
@@ -102,13 +102,10 @@ impl Swarm {
                     )?;
                     Ok(Some(payload))
                 }
-                None => Err(anyhow!(format!(
-                    "Cannot get transport from address {:?}",
-                    address
-                ))),
+                None => Err(Error::SwarmMissTransport(address)),
             },
             None => Ok(None),
-            x => Err(anyhow!(format!("Receive {:?}", x))),
+            x => Err(Error::SwarmLoadMessageRecvFailed(format!("{:?}", x))),
         }
     }
 
@@ -139,44 +136,44 @@ impl Swarm {
         }
     }
 
-    pub fn push_pending_transport(&self, transport: &Arc<Transport>) -> anyhow::Result<()> {
+    pub fn push_pending_transport(&self, transport: &Arc<Transport>) -> Result<()> {
         let mut pending = self
             .pending
             .try_lock()
-            .map_err(|_| anyhow::anyhow!("call lock() failed"))?;
+            .map_err(|_| Error::SwarmPendingTransTryLockFailed)?;
         pending.push(transport.to_owned());
         Ok(())
     }
 
-    pub fn pop_pending_transport(&self, transport_id: uuid::Uuid) -> anyhow::Result<()> {
+    pub fn pop_pending_transport(&self, transport_id: uuid::Uuid) -> Result<()> {
         let mut pending = self
             .pending
             .try_lock()
-            .map_err(|_| anyhow::anyhow!("lock fail"))?;
+            .map_err(|_| Error::SwarmPendingTransTryLockFailed)?;
         let index = pending
             .iter()
             .position(|x| x.id.eq(&transport_id))
-            .ok_or_else(|| anyhow::anyhow!("transport not found"))?;
+            .ok_or(Error::SwarmPendingTransNotFound)?;
         pending.remove(index);
         Ok(())
     }
 
-    pub async fn pending_transports(&self) -> anyhow::Result<()> {
+    pub async fn pending_transports(&self) -> Result<()> {
         let pending = self
             .pending
             .try_lock()
-            .map_err(|_| anyhow::anyhow!("lock fail"))?;
+            .map_err(|_| Error::SwarmPendingTransTryLockFailed)?;
         for item in pending.iter() {
             log::debug!("id: {}, pubkey: {:?}", item.id, item.pubkey().await);
         }
         Ok(())
     }
 
-    pub fn find_pending_transport(&self, id: uuid::Uuid) -> anyhow::Result<Option<Arc<Transport>>> {
+    pub fn find_pending_transport(&self, id: uuid::Uuid) -> Result<Option<Arc<Transport>>> {
         let pending = self
             .pending
             .try_lock()
-            .map_err(|_| anyhow::anyhow!("lock fail"))?;
+            .map_err(|_| Error::SwarmPendingTransTryLockFailed)?;
         Ok(pending.iter().find(|x| x.id.eq(&id)).cloned())
     }
 }
@@ -239,7 +236,7 @@ impl TransportManager for Swarm {
         default: Self::Transport,
     ) -> Result<Self::Transport> {
         if !default.is_connected().await {
-            return Err(anyhow!("default transport is not connected"));
+            return Err(Error::SwarmDefaultTransportNotConnected);
         }
         Ok(self.table.get_or_set(address, default))
     }

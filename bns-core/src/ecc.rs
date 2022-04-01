@@ -1,5 +1,3 @@
-use anyhow::anyhow;
-use anyhow::Result;
 use hex;
 use rand::SeedableRng;
 use rand_hc::Hc128Rng;
@@ -7,6 +5,8 @@ use std::convert::TryFrom;
 use std::ops::Deref;
 use web3::signing::keccak256;
 use web3::types::Address;
+
+use crate::err::{Error, Result};
 
 // ref https://docs.rs/web3/0.18.0/src/web3/signing.rs.html#69
 
@@ -51,21 +51,21 @@ impl From<SecretKey> for PublicKey {
 }
 
 impl TryFrom<&str> for SecretKey {
-    type Error = anyhow::Error;
+    type Error = Error;
     fn try_from(s: &str) -> Result<Self> {
         let key = hex::decode(s)?;
         let key_arr: [u8; 32] = key.as_slice().try_into()?;
         match libsecp256k1::SecretKey::parse(&key_arr) {
             Ok(key) => Ok(key.into()),
-            Err(e) => Err(anyhow!(e)),
+            Err(e) => Err(Error::Libsecp256k1SecretKeyParse(format!("{e}"))),
         }
     }
 }
 
 impl std::str::FromStr for SecretKey {
-    type Err = anyhow::Error;
+    type Err = Error;
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+    fn from_str(s: &str) -> Result<Self> {
         Self::try_from(s)
     }
 }
@@ -144,9 +144,12 @@ where
     let message_hash: [u8; 32] = keccak256(message.as_bytes());
     Ok(libsecp256k1::recover(
         &libsecp256k1::Message::parse(&message_hash),
-        &libsecp256k1::Signature::parse_standard(&r_s_signature)?,
-        &libsecp256k1::RecoveryId::parse(recovery_id)?,
-    )?
+        &libsecp256k1::Signature::parse_standard(&r_s_signature)
+            .map_err(|e| Error::Libsecp256k1SignatureParseStandard(e.to_string()))?,
+        &libsecp256k1::RecoveryId::parse(recovery_id)
+            .map_err(|e| Error::Libsecp256k1RecoverIdParse(e.to_string()))?,
+    )
+    .map_err(|_| Error::Libsecp256k1Recover)?
     .into())
 }
 

@@ -1,13 +1,13 @@
 use crate::ecc::{recover, sign, verify, PublicKey, SecretKey};
+use crate::err::{Error, Result};
 use crate::message::{Did, Encoded};
-use anyhow::anyhow;
-use anyhow::Result;
 use chrono::Utc;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::convert::TryFrom;
+use std::sync::Arc;
 use web3::types::Address;
 
 const DEFAULT_TTL_MS: usize = 60 * 1000;
@@ -89,7 +89,7 @@ where
     }
 
     pub fn pack_msg(data: &T, ts_ms: u128, ttl_ms: usize) -> Result<String> {
-        let mut msg = serde_json::to_string(data)?;
+        let mut msg = serde_json::to_string(data).map_err(|_| Error::SerializeToString)?;
         msg.push_str(&format!("\n{}\n{}", ts_ms, ttl_ms));
         Ok(msg)
     }
@@ -99,11 +99,11 @@ impl<T> TryFrom<Encoded> for MessageRelay<T>
 where
     T: Serialize + DeserializeOwned,
 {
-    type Error = anyhow::Error;
+    type Error = Error;
     fn try_from(s: Encoded) -> Result<Self> {
         let decoded: String = s.try_into()?;
-        let data: MessageRelay<T> =
-            serde_json::from_slice(decoded.as_bytes()).map_err(|e| anyhow!(e))?;
+        let data: MessageRelay<T> = serde_json::from_slice(decoded.as_bytes())
+            .map_err(|e| Error::Deserialize(Arc::new(e)))?;
         Ok(data)
     }
 }
@@ -112,9 +112,11 @@ impl<T> TryFrom<MessageRelay<T>> for Encoded
 where
     T: Serialize + DeserializeOwned,
 {
-    type Error = anyhow::Error;
+    type Error = Error;
     fn try_from(s: MessageRelay<T>) -> Result<Self> {
-        serde_json::to_string(&s)?.try_into()
+        serde_json::to_string(&s)
+            .map_err(|_| Error::SerializeToString)?
+            .try_into()
     }
 }
 

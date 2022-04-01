@@ -2,8 +2,7 @@
 /// ref: https://pdos.csail.mit.edu/papers/ton:chord/paper-ton.pdf
 /// With high probability, the number of nodes that must be contacted to find a successor in an N-node network is O(log N).
 use crate::dht::Did;
-use anyhow::anyhow;
-use anyhow::Result;
+use crate::err::{Error, Result};
 use num_bigint::BigUint;
 use serde::Deserialize;
 use serde::Serialize;
@@ -132,7 +131,7 @@ impl Chord {
         let did: BigUint = (BigUint::from(self.id)
             + BigUint::from(2u16).pow(self.fix_finger_index.into()))
             % BigUint::from(2u16).pow(160);
-        match self.find_successor(Did::try_from(did)?) {
+        match self.find_successor(did.into()) {
             Ok(res) => match res {
                 ChordAction::Some(v) => {
                     self.finger[self.fix_finger_index as usize] = Some(v);
@@ -143,10 +142,10 @@ impl Chord {
                 ),
                 _ => {
                     log::error!("Invalid Chord Action");
-                    Err(anyhow!("Invalid Chord Action"))
+                    Err(Error::ChordInvalidAction)
                 }
             },
-            Err(e) => Err(anyhow!(e)),
+            Err(e) => Err(Error::ChordFindSuccessor(e.to_string())),
         }
     }
 
@@ -167,7 +166,7 @@ impl Chord {
                 }
             }
         }
-        Err(anyhow!("cannot find cloest preceding node"))
+        Err(Error::ChordNotFindCloestNode)
     }
 
     // Fig.5 n.find_successor(id)
@@ -183,7 +182,7 @@ impl Chord {
                     n,
                     RemoteAction::FindSuccessor(id),
                 )),
-                Err(e) => Err(anyhow!(e)),
+                Err(e) => Err(e),
             }
         }
     }

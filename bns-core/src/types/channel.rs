@@ -1,4 +1,4 @@
-use anyhow::Result;
+use crate::err::Result;
 use async_trait::async_trait;
 use serde::Serialize;
 use web3::types::Address;
