@@ -13,15 +13,15 @@ use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
 use crate::types::ice_transport::IceTrickleScheme;
+use async_lock::RwLock as AsyncRwLock;
 use async_trait::async_trait;
 use futures::future::join_all;
+use futures::lock::Mutex as FuturesMutex;
 use serde::Serialize;
 use serde_json;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::Mutex;
-use tokio::sync::RwLock;
 use web3::types::Address;
 use webrtc::api::APIBuilder;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
@@ -41,11 +41,11 @@ type EventSender = <AcChannel<Event> as Channel<Event>>::Sender;
 #[derive(Clone)]
 pub struct DefaultTransport {
     pub id: uuid::Uuid,
-    connection: Arc<Mutex<Option<Arc<RTCPeerConnection>>>>,
-    pending_candidates: Arc<Mutex<Vec<RTCIceCandidate>>>,
-    data_channel: Arc<Mutex<Option<Arc<RTCDataChannel>>>>,
+    connection: Arc<FuturesMutex<Option<Arc<RTCPeerConnection>>>>,
+    pending_candidates: Arc<FuturesMutex<Vec<RTCIceCandidate>>>,
+    data_channel: Arc<FuturesMutex<Option<Arc<RTCDataChannel>>>>,
     event_sender: EventSender,
-    public_key: Arc<RwLock<Option<PublicKey>>>,
+    public_key: Arc<AsyncRwLock<Option<PublicKey>>>,
 }
 
 impl PartialEq for DefaultTransport {
@@ -72,10 +72,10 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
     fn new(event_sender: EventSender) -> Self {
         Self {
             id: uuid::Uuid::new_v4(),
-            connection: Arc::new(Mutex::new(None)),
-            pending_candidates: Arc::new(Mutex::new(vec![])),
-            data_channel: Arc::new(Mutex::new(None)),
-            public_key: Arc::new(RwLock::new(None)),
+            connection: Arc::new(FuturesMutex::new(None)),
+            pending_candidates: Arc::new(FuturesMutex::new(vec![])),
+            data_channel: Arc::new(FuturesMutex::new(None)),
+            public_key: Arc::new(AsyncRwLock::new(None)),
             event_sender,
         }
     }
