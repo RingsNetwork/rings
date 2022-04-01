@@ -18,7 +18,7 @@ use super::{
     grpc_client::GrpcClient,
     grpc_server::Grpc,
     request::{
-        AllowConnect, ConnectWithHandshakeInfo, ConnectWithUrl, Disconnect, ListPeers, RpcMethod,
+        AcceptAnswer, ConnectWithHandshakeInfo, ConnectWithUrl, Disconnect, ListPeers, RpcMethod,
         SendTo, DEFAULT_VERSION,
     },
     GrpcRequest, GrpcResponse,
@@ -70,7 +70,7 @@ impl Grpc for BnsGrpc {
                 })?;
                 self.list_peers(&params).await
             }
-            RpcMethod::GenHandshakeInfo => self.new_transport().await,
+            RpcMethod::CreateOffer => self.create_offer().await,
             RpcMethod::ConnectWithHandshakeInfo => {
                 let params =
                     ConnectWithHandshakeInfo::try_from(&request).map_err(|e: anyhow::Error| {
@@ -90,12 +90,11 @@ impl Grpc for BnsGrpc {
                 })?;
                 self.send_to(&params).await
             }
-            RpcMethod::AllowConnect => {
-                log::debug!("allow_connect");
-                let params = AllowConnect::try_from(&request).map_err(|e: anyhow::Error| {
+            RpcMethod::AcceptAnswer => {
+                let params = AcceptAnswer::try_from(&request).map_err(|e: anyhow::Error| {
                     tonic::Status::new(tonic::Code::InvalidArgument, e.to_string())
                 })?;
-                self.allow_connect(&params).await
+                self.accept_answer(&params).await
             }
         }
         .map_err(|e| tonic::Status::new(tonic::Code::Internal, format!("{}", e)))?;
@@ -109,7 +108,7 @@ impl Grpc for BnsGrpc {
 }
 
 impl BnsGrpc {
-    pub async fn new_transport(&self) -> anyhow::Result<Vec<u8>> {
+    pub async fn create_offer(&self) -> anyhow::Result<Vec<u8>> {
         let transport = self.swarm.new_transport().await?;
         let id = transport.id;
         let task = async move {
@@ -118,7 +117,6 @@ impl BnsGrpc {
                 .await
                 .map_err(|e| anyhow::anyhow!(e))?
                 .to_string();
-            log::debug!("new transport created. handshake_info: {}", hs_info);
             self.swarm.push_pending_transport(&transport)?;
             Ok(hs_info)
         };
@@ -216,10 +214,10 @@ impl BnsGrpc {
         Ok(hs_info)
     }
 
-    async fn allow_connect(&self, params: &AllowConnect) -> anyhow::Result<Vec<u8>> {
+    async fn accept_answer(&self, params: &AcceptAnswer) -> anyhow::Result<Vec<u8>> {
         let hs_info = Encoded::from_encoded_str(params.handshake_info.as_str());
         log::debug!(
-            "allow_connect/hs_info: {:?}, uuid: {}",
+            "accept_answer/hs_info: {:?}, uuid: {}",
             hs_info,
             params.transport_id
         );

@@ -10,8 +10,8 @@ use bns_node::{
     grpc::{
         grpc_client::GrpcClient,
         request::{
-            AllowConnect, ConnectWithHandshakeInfo, ConnectWithUrl, Disconnect,
-            GenerateHandshakeInfo, ListPeers, SendTo,
+            AcceptAnswer, ConnectWithHandshakeInfo, ConnectWithUrl, CreateOffer, Disconnect,
+            ListPeers, SendTo,
         },
         response::{Peer, TransportAndHsInfo},
     },
@@ -99,17 +99,17 @@ struct ConnectArgs {
 #[derive(Subcommand, Debug)]
 #[clap(rename_all = "kebab-case")]
 enum SdpCommand {
-    #[clap(about = "Generate transport and wait for connection.")]
-    Gen(SdpGen),
+    #[clap()]
+    Offer(SdpOffer),
     #[clap(about = "Connect to a peer.")]
     Connect(SdpConnect),
-    #[clap(about = "Allow remote peer connect.")]
-    AllowConnect(SdpAllowConnect),
+    #[clap(about)]
+    AcceptAnswer(SdpAcceptAnswer),
 }
 
 #[derive(Args, Debug)]
 #[clap(about)]
-struct SdpGen {
+struct SdpOffer {
     #[clap(long = "key", short = 'k', env)]
     pub eth_key: SecretKey,
     #[clap(
@@ -133,7 +133,7 @@ struct SdpConnect {
 }
 
 #[derive(Args, Debug)]
-struct SdpAllowConnect {
+struct SdpAcceptAnswer {
     #[clap(flatten)]
     client_args: ClientArgs,
 
@@ -230,8 +230,8 @@ impl Client {
         Ok(())
     }
 
-    async fn generate_handshake_info(&mut self) -> anyhow::Result<()> {
-        let resp = self.client.grpc(GenerateHandshakeInfo::default()).await?;
+    async fn create_offer(&mut self) -> anyhow::Result<()> {
+        let resp = self.client.grpc(CreateOffer::default()).await?;
         let info: TransportAndHsInfo = resp.get_ref().as_json_result()?;
         println!(
             "Succussful!\ntransport_id: {}\nhandeshake_info: {}",
@@ -240,17 +240,17 @@ impl Client {
         Ok(())
     }
 
-    async fn allow_connect(
+    async fn accept_answer(
         &mut self,
         transport_id: &str,
         handshake_info: &str,
     ) -> anyhow::Result<()> {
         let resp = self
             .client
-            .grpc(AllowConnect::new(transport_id, handshake_info))
+            .grpc(AcceptAnswer::new(transport_id, handshake_info))
             .await?;
         let peer: Peer = resp.get_ref().as_json_result()?;
-        println!("Succussful, {}", peer.transport_id);
+        println!("Succussful, transport_id: {}", peer.transport_id);
         Ok(())
     }
 
@@ -298,9 +298,9 @@ async fn main() -> Result<()> {
             client.connect_with_url(args.peer_url.as_str()).await?;
             Ok(())
         }
-        Command::Sdp(SdpCommand::Gen(args)) => {
+        Command::Sdp(SdpCommand::Offer(args)) => {
             let mut client = args.client_args.new_client()?;
-            client.generate_handshake_info().await
+            client.create_offer().await
         }
         Command::Sdp(SdpCommand::Connect(args)) => {
             let mut client = args.client_args.new_client()?;
@@ -309,10 +309,10 @@ async fn main() -> Result<()> {
                 .await?;
             Ok(())
         }
-        Command::Sdp(SdpCommand::AllowConnect(args)) => {
+        Command::Sdp(SdpCommand::AcceptAnswer(args)) => {
             let mut client = args.client_args.new_client()?;
             client
-                .allow_connect(args.transport_id.as_str(), args.handshake_info.as_str())
+                .accept_answer(args.transport_id.as_str(), args.handshake_info.as_str())
                 .await?;
             Ok(())
         }

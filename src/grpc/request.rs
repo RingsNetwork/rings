@@ -7,11 +7,11 @@ pub const DEFAULT_VERSION: &str = "2.0";
 pub enum RpcMethod {
     ConnectWithUrl,
     ListPeers,
-    GenHandshakeInfo,
+    CreateOffer,
     ConnectWithHandshakeInfo,
     SendTo,
     Disconnect,
-    AllowConnect,
+    AcceptAnswer,
 }
 
 impl RpcMethod {
@@ -30,11 +30,11 @@ impl ToString for RpcMethod {
         match self {
             RpcMethod::ConnectWithUrl => "connectWithUrl",
             RpcMethod::ListPeers => "listPeers",
-            RpcMethod::GenHandshakeInfo => "genHandshakeInfo",
+            RpcMethod::CreateOffer => "createOffer",
             RpcMethod::ConnectWithHandshakeInfo => "connectWithHandshakeInfo",
             RpcMethod::SendTo => "sendTo",
             RpcMethod::Disconnect => "disconnect",
-            RpcMethod::AllowConnect => "allowConnect",
+            RpcMethod::AcceptAnswer => "acceptAnswer",
         }
         .to_owned()
     }
@@ -47,11 +47,11 @@ impl TryFrom<&str> for RpcMethod {
         Ok(match value {
             "connectWithUrl" => Self::ConnectWithUrl,
             "listPeers" => Self::ListPeers,
-            "genHandshakeInfo" => Self::GenHandshakeInfo,
+            "createOffer" => Self::CreateOffer,
             "connectWithHandshakeInfo" => Self::ConnectWithHandshakeInfo,
             "sendTo" => Self::SendTo,
             "disconnect" => Self::Disconnect,
-            "allowConnect" => Self::AllowConnect,
+            "acceptAnswer" => Self::AcceptAnswer,
             _ => return Err(anyhow::anyhow!("Invalid method: {}", value)),
         })
     }
@@ -134,11 +134,11 @@ impl tonic::IntoRequest<GrpcRequest> for ConnectWithHandshakeInfo {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct GenerateHandshakeInfo {}
+pub struct CreateOffer {}
 
-impl tonic::IntoRequest<GrpcRequest> for GenerateHandshakeInfo {
+impl tonic::IntoRequest<GrpcRequest> for CreateOffer {
     fn into_request(self) -> tonic::Request<GrpcRequest> {
-        tonic::Request::new(RpcMethod::GenHandshakeInfo.build_request(&[]))
+        tonic::Request::new(RpcMethod::CreateOffer.build_request(&[]))
     }
 }
 
@@ -236,12 +236,12 @@ impl tonic::IntoRequest<GrpcRequest> for Disconnect {
 }
 
 #[derive(Clone, Debug)]
-pub struct AllowConnect {
+pub struct AcceptAnswer {
     pub transport_id: String,
     pub handshake_info: String,
 }
 
-impl AllowConnect {
+impl AcceptAnswer {
     pub fn new(transport_id: &str, handshake_info: &str) -> Self {
         Self {
             transport_id: transport_id.to_owned(),
@@ -250,7 +250,7 @@ impl AllowConnect {
     }
 }
 
-impl TryFrom<&tonic::Request<GrpcRequest>> for AllowConnect {
+impl TryFrom<&tonic::Request<GrpcRequest>> for AcceptAnswer {
     type Error = anyhow::Error;
 
     fn try_from(value: &tonic::Request<GrpcRequest>) -> Result<Self, Self::Error> {
@@ -265,10 +265,10 @@ impl TryFrom<&tonic::Request<GrpcRequest>> for AllowConnect {
     }
 }
 
-impl tonic::IntoRequest<GrpcRequest> for AllowConnect {
+impl tonic::IntoRequest<GrpcRequest> for AcceptAnswer {
     fn into_request(self) -> tonic::Request<GrpcRequest> {
         tonic::Request::new(
-            RpcMethod::AllowConnect
+            RpcMethod::AcceptAnswer
                 .build_request(&[self.transport_id.as_bytes(), self.handshake_info.as_bytes()]),
         )
     }
