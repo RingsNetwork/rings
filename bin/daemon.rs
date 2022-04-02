@@ -22,7 +22,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    Run(RunArgs),
+    Run(Box<RunArgs>),
     Shutdown(ShutdownArgs),
 }
 
@@ -83,7 +83,7 @@ struct RunArgs {
     pub realm: String,
 
     #[clap(long)]
-    pub disable_turn: bool
+    pub disable_turn: bool,
 }
 
 #[derive(Args, Debug)]
@@ -92,43 +92,29 @@ struct ShutdownArgs {
     pub pid_file: String,
 }
 
-async fn run_jobs(
-    http_addr: String,
-    key: &SecretKey,
-    stun: &str,
-    public_ip: &str,
-    turn_port: &str,
-    username: &str,
-    password: &str,
-    realm: &str,
-    disable_turn: bool
-) -> anyhow::Result<()> {
+async fn run_jobs(args: &RunArgs) -> anyhow::Result<()> {
+    let key: &SecretKey = &args.eth_key;
     let dht = Arc::new(Mutex::new(Chord::new(key.address().into())));
-    let swarm = Arc::new(Swarm::new(stun, key.to_owned()));
+    let swarm = Arc::new(Swarm::new(&args.ice_server, key.to_owned()));
 
     let listen_event = MessageHandler::new(dht.clone(), swarm.clone());
     let swarm_clone = swarm.clone();
     let key = key.to_owned();
-    if disable_turn {
-        let (_, _) = futures::join!(
-            async {
-                listen_event.listen().await
-            },
-            async {
-                run_service(http_addr.to_owned(), swarm_clone, key).await
-            },
-        );
+    let http_addr = args.http_addr.to_owned();
+    if args.disable_turn {
+        let (_, _) = futures::join!(async { listen_event.listen().await }, async {
+            run_service(http_addr.to_owned(), swarm_clone, key).await
+        },);
     } else {
+        let public_ip: &str = &args.public_ip;
+        let turn_port: &str = &args.public_ip;
+        let username: &str = &args.username;
+        let password: &str = &args.password;
+        let realm: &str = &args.realm;
         let (_, _, _) = futures::join!(
-            async {
-                listen_event.listen().await
-            },
-            async {
-                run_service(http_addr.to_owned(), swarm_clone, key).await
-            },
-            async {
-                run_udp_turn(public_ip, turn_port, username, password, realm).await
-            }
+            async { listen_event.listen().await },
+            async { run_service(http_addr.to_owned(), swarm_clone, key).await },
+            async { run_udp_turn(public_ip, turn_port, username, password, realm).await }
         );
     }
     Ok(())
@@ -151,18 +137,7 @@ fn run_daemon(args: &RunArgs) {
     }
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        if let Err(e) = run_jobs(
-            args.http_addr.to_owned(),
-            &args.eth_key,
-            &args.ice_server,
-            &args.public_ip,
-            &args.turn_port,
-            &args.username,
-            &args.password,
-            &args.realm,
-            args.disable_turn
-        ).await
-        {
+        if let Err(e) = run_jobs(args).await {
             panic!("{}", e);
         }
     });
