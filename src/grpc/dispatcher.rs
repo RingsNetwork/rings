@@ -111,18 +111,22 @@ impl BnsGrpc {
     pub async fn create_offer(&self) -> anyhow::Result<Vec<u8>> {
         let transport = self.swarm.new_transport().await?;
         let id = transport.id;
+        let transport_cloned = transport.clone();
         let task = async move {
-            let hs_info = transport
+            let hs_info = transport_cloned
                 .get_handshake_info(self.key, RTCSdpType::Offer)
                 .await
                 .map_err(|e| anyhow::anyhow!(e))?
                 .to_string();
-            self.swarm.push_pending_transport(&transport)?;
+            self.swarm.push_pending_transport(&transport_cloned)?;
             Ok(hs_info)
         };
         let hs_info = match task.await {
             Ok(hs_info) => TransportAndHsInfo::new(id.to_string().as_str(), hs_info.as_str()),
-            Err(e) => return Err(e),
+            Err(e) => {
+                transport.close().await.ok();
+                return Err(e);
+            }
         };
         hs_info.to_json_vec()
     }

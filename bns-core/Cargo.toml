@@ -28,6 +28,7 @@ async-lock = "2.5.0"
 futures-core = "0.3.21"
 url = { version = "2", features = ["serde"] }
 thiserror = "1"
+flate2 = { version = "1.0.22" }
 
 # default
 webrtc = { version = "0.3.3", optional = true }
