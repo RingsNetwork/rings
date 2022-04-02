@@ -358,22 +358,4 @@ impl MessageHandler {
             }
         }
     }
-
-    pub async fn listen(&self) {
-        let iter_messages = self.swarm.iter_messages();
-        pin_mut!(iter_messages);
-
-        while let Some(relay_message) = iter_messages.next().await {
-            if relay_message.is_expired() || !relay_message.verify() {
-                log::error!("Cannot verify msg or it's expired: {:?}", relay_message);
-            }
-
-            if let Err(e) = self
-                .handle_message_relay(&relay_message, &relay_message.addr.into())
-                .await
-            {
-                log::error!("Error in handle_message: {}", e);
-            }
-        }
-    }
 }

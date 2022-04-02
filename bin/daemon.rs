@@ -1,4 +1,5 @@
 use bns_core::message::handler::MessageHandler;
+use bns_core::types::message::MessageListener;
 use bns_core::swarm::Swarm;
 use bns_core::{dht::Chord, ecc::SecretKey};
 use bns_node::logger::{LogLevel, Logger};
