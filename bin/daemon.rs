@@ -23,7 +23,6 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Command {
     Run(RunArgs),
-    RunTurn(TurnArgs),
     Shutdown(ShutdownArgs),
 }
 
@@ -57,13 +56,10 @@ struct RunArgs {
 
     #[clap(long, short = 'w', default_value = "/")]
     pub work_dir: String,
-}
 
-#[derive(Args, Debug)]
-struct TurnArgs {
     /// STUN server address.
     #[clap(long, default_value = "3478")]
-    pub port: String,
+    pub turn_port: String,
 
     /// STUN publicip.
     #[clap(long, default_value = "127.0.0.1")]
@@ -86,14 +82,8 @@ struct TurnArgs {
     #[clap(long, default_value = "bns")]
     pub realm: String,
 
-    #[clap(long, short = 'p', default_value = "/tmp/bns-is.pid")]
-    pub pid_file: String,
-
-    #[clap(long, default_value = "bns-is-daemon")]
-    pub group: String,
-
-    #[clap(long, short = 'w', default_value = "/")]
-    pub work_dir: String,
+    #[clap(long)]
+    pub disable_turn: bool
 }
 
 #[derive(Args, Debug)]
@@ -102,17 +92,45 @@ struct ShutdownArgs {
     pub pid_file: String,
 }
 
-async fn run_jobs(http_addr: String, key: &SecretKey, stun: &str) -> anyhow::Result<()> {
+async fn run_jobs(
+    http_addr: String,
+    key: &SecretKey,
+    stun: &str,
+    public_ip: &str,
+    turn_port: &str,
+    username: &str,
+    password: &str,
+    realm: &str,
+    disable_turn: bool
+) -> anyhow::Result<()> {
     let dht = Arc::new(Mutex::new(Chord::new(key.address().into())));
     let swarm = Arc::new(Swarm::new(stun, key.to_owned()));
 
     let listen_event = MessageHandler::new(dht.clone(), swarm.clone());
     let swarm_clone = swarm.clone();
     let key = key.to_owned();
-
-    let (_, _) = futures::join!(async { listen_event.listen().await }, async {
-        run_service(http_addr.to_owned(), swarm_clone, key).await
-    },);
+    if disable_turn {
+        let (_, _) = futures::join!(
+            async {
+                listen_event.listen().await
+            },
+            async {
+                run_service(http_addr.to_owned(), swarm_clone, key).await
+            },
+        );
+    } else {
+        let (_, _, _) = futures::join!(
+            async {
+                listen_event.listen().await
+            },
+            async {
+                run_service(http_addr.to_owned(), swarm_clone, key).await
+            },
+            async {
+                run_udp_turn(public_ip, turn_port, username, password, realm).await
+            }
+        );
+    }
     Ok(())
 }
 
@@ -133,37 +151,17 @@ fn run_daemon(args: &RunArgs) {
     }
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        if let Err(e) = run_jobs(args.http_addr.to_owned(), &args.eth_key, &args.ice_server).await {
-            panic!("{}", e);
-        }
-    });
-}
-
-fn run_turn_on_daemon(args: &TurnArgs) {
-    let stdout = File::create("/tmp/bns-is/access.log").unwrap();
-    let stderr = File::create("/tmp/bns-is/error.log").unwrap();
-
-    let daemonize = Daemonize::new()
-        .pid_file(args.pid_file.as_str())
-        .chown_pid_file(true)
-        .working_directory(args.work_dir.as_str())
-        .user(args.username.as_str())
-        .group(args.group.as_str())
-        .stdout(stdout)
-        .stderr(stderr);
-    if let Err(e) = daemonize.start() {
-        panic!("{}", e);
-    }
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        if let Err(e) = run_udp_turn(
+        if let Err(e) = run_jobs(
+            args.http_addr.to_owned(),
+            &args.eth_key,
+            &args.ice_server,
             &args.public_ip,
-            &args.port,
+            &args.turn_port,
             &args.username,
             &args.password,
             &args.realm,
-        )
-        .await
+            args.disable_turn
+        ).await
         {
             panic!("{}", e);
         }
@@ -187,9 +185,6 @@ fn main() {
     match cli.command {
         Command::Run(args) => {
             run_daemon(&args);
-        }
-        Command::RunTurn(args) => {
-            run_turn_on_daemon(&args);
         }
         Command::Shutdown(args) => {
             if let Err(e) = shutdown_daemon(&args) {
