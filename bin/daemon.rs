@@ -2,7 +2,7 @@ use bns_core::message::handler::MessageHandler;
 use bns_core::swarm::Swarm;
 use bns_core::{dht::Chord, ecc::SecretKey};
 use bns_node::logger::{LogLevel, Logger};
-use bns_node::service::run_service;
+use bns_node::service::{run_service, run_udp_turn};
 use clap::{Args, Parser, Subcommand};
 use daemonize::Daemonize;
 use futures::lock::Mutex;
@@ -22,7 +22,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    Run(RunArgs),
+    Run(Box<RunArgs>),
     Shutdown(ShutdownArgs),
 }
 
@@ -56,6 +56,34 @@ struct RunArgs {
 
     #[clap(long, short = 'w', default_value = "/")]
     pub work_dir: String,
+
+    /// STUN server address.
+    #[clap(long, default_value = "3478")]
+    pub turn_port: String,
+
+    /// STUN publicip.
+    #[clap(long, default_value = "127.0.0.1")]
+    pub public_ip: String,
+
+    /// Username.
+    #[clap(long, default_value = "bns")]
+    pub username: String,
+
+    /// Password.
+    #[clap(long, default_value = "password")]
+    pub password: String,
+
+    /// Realm.
+    /// REALM
+    /// The REALM attribute is present in Shared Secret Requests and Shared
+    /// Secret Responses. It contains text which meets the grammar for
+    /// "realm" as described in RFC 3261, and will thus contain a quoted
+    /// string (including the quotes).
+    #[clap(long, default_value = "bns")]
+    pub realm: String,
+
+    #[clap(long)]
+    pub disable_turn: bool,
 }
 
 #[derive(Args, Debug)]
@@ -64,17 +92,31 @@ struct ShutdownArgs {
     pub pid_file: String,
 }
 
-async fn run_jobs(http_addr: String, key: &SecretKey, stun: &str) -> anyhow::Result<()> {
+async fn run_jobs(args: &RunArgs) -> anyhow::Result<()> {
+    let key: &SecretKey = &args.eth_key;
     let dht = Arc::new(Mutex::new(Chord::new(key.address().into())));
-    let swarm = Arc::new(Swarm::new(stun, key.to_owned()));
+    let swarm = Arc::new(Swarm::new(&args.ice_server, key.to_owned()));
 
     let listen_event = MessageHandler::new(dht.clone(), swarm.clone());
     let swarm_clone = swarm.clone();
     let key = key.to_owned();
-
-    let (_, _) = futures::join!(async { listen_event.listen().await }, async {
-        run_service(http_addr.to_owned(), swarm_clone, key).await
-    },);
+    let http_addr = args.http_addr.to_owned();
+    if args.disable_turn {
+        let (_, _) = futures::join!(async { listen_event.listen().await }, async {
+            run_service(http_addr.to_owned(), swarm_clone, key).await
+        },);
+    } else {
+        let public_ip: &str = &args.public_ip;
+        let turn_port: &str = &args.public_ip;
+        let username: &str = &args.username;
+        let password: &str = &args.password;
+        let realm: &str = &args.realm;
+        let (_, _, _) = futures::join!(
+            async { listen_event.listen().await },
+            async { run_service(http_addr.to_owned(), swarm_clone, key).await },
+            async { run_udp_turn(public_ip, turn_port, username, password, realm).await }
+        );
+    }
     Ok(())
 }
 
@@ -95,7 +137,7 @@ fn run_daemon(args: &RunArgs) {
     }
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        if let Err(e) = run_jobs(args.http_addr.to_owned(), &args.eth_key, &args.ice_server).await {
+        if let Err(e) = run_jobs(args).await {
             panic!("{}", e);
         }
     });

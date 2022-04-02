@@ -40,6 +40,11 @@ uuid = { version = "0.8.2", features = ["v4"]}
 daemonize = "0.4.1"
 libc = "0.2.121"
 
+# turn server dependencies
+turn = "0.5.4"
+rusturn = "0.0.4"
+util = { package = "webrtc-util", version = "0.5.3", default-features = false, features = ["conn", "vnet"] }
+
 [[bin]]
 name = "bns-node"
 path = "bin/main.rs"
