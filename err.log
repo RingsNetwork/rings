@@ -1,2 +1,0 @@
-thread 'main' panicked at 'Failed to chown the pid file', bin/daemon.rs:80:9
-note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

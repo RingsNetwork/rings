@@ -25,3 +25,4 @@ Cargo.lock
 # Local environment configuration
 .envrc
 .env
+*.log
