@@ -12,3 +12,4 @@ pub mod storage;
 pub mod swarm;
 pub mod transports;
 pub mod types;
+pub mod macros;
