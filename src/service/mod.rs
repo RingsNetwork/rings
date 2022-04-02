@@ -3,10 +3,6 @@ mod discovery;
 mod http_error;
 mod is_turn;
 mod result;
-mod stabilization;
-pub use stabilization::Stabilization;
-
-pub use backgrounds::run_stabilize;
 
 use axum::{
     extract::Extension,
@@ -29,6 +25,7 @@ use hyper::{body::HttpBody, Body, Request, Response};
 use pin_project::pin_project;
 use tower::Service;
 
+pub use backgrounds::run_stabilize;
 pub use is_turn::run_udp_turn;
 
 pub async fn run_service(addr: String, swarm: Arc<Swarm>, key: SecretKey) -> anyhow::Result<()> {

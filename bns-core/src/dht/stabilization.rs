@@ -1,7 +1,7 @@
 use crate::dht::{Chord, ChordAction, ChordRemoteAction};
+use crate::err::Result;
 use crate::message::{FindSuccessor, Message, MessageRelay, MessageRelayMethod, NotifyPredecessor};
 use crate::swarm::Swarm;
-use anyhow::Result;
 use futures::lock::Mutex;
 use std::sync::Arc;
 

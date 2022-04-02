@@ -1,6 +1,6 @@
 use bns_core::dht::Stabilization;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use tokio::time::Duration;
 
 pub async fn run_stabilize(stabilization: Stabilization) {
@@ -11,7 +11,7 @@ pub async fn run_stabilize(stabilization: Stabilization) {
         tokio::pin!(timeout);
         tokio::select! {
             _ = timeout.as_mut() => {
-                result = stabilization.stabilize().await;
+                result = stabilization.stabilize().await.map_err(|e| anyhow!("{:?}", e));
             }
         }
     }
