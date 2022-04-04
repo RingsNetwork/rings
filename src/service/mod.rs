@@ -1,7 +1,6 @@
 mod discovery;
 mod http_error;
 mod is_turn;
-mod observer;
 mod result;
 
 use axum::{
