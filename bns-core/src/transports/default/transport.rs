@@ -94,7 +94,7 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
                 *conn = Some(Arc::new(c));
                 Ok(())
             }
-            Err(e) => Err(Error::RTCPeerConnectionCreateFailed(Arc::new(e))),
+            Err(e) => Err(Error::RTCPeerConnectionCreateFailed(e)),
         }?;
 
         self.setup_channel("bns").await?;
@@ -105,7 +105,7 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
         if let Some(pc) = self.get_peer_connection().await {
             pc.close()
                 .await
-                .map_err(|e| Error::RTCPeerConnectionCloseFailed(Arc::new(e)))?;
+                .map_err(Error::RTCPeerConnectionCloseFailed)?;
         }
 
         Ok(())
@@ -143,7 +143,7 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
                 let answer = peer_connection
                     .create_answer(None)
                     .await
-                    .map_err(|e| Error::RTCPeerConnectionCreateAnswerFailed(Arc::new(e)))?;
+                    .map_err(Error::RTCPeerConnectionCreateAnswerFailed)?;
                 self.set_local_description(answer.to_owned()).await?;
                 let _ = gather_complete.recv().await;
                 Ok(answer)
@@ -169,7 +169,7 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
                     }
                     Err(e) => {
                         log::error!("{}", e);
-                        Err(Error::RTCPeerConnectionCreateOfferFailed(Arc::new(e)))
+                        Err(Error::RTCPeerConnectionCreateOfferFailed(e))
                     }
                 }
             }
@@ -189,8 +189,7 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
     where
         T: Serialize + Send,
     {
-        let data: String =
-            serde_json::to_string(&msg).map_err(|e| Error::Serialize(Arc::new(e)))?;
+        let data: String = serde_json::to_string(&msg).map_err(Error::Serialize)?;
         let size = data.len();
         match self.get_data_channel().await {
             Some(cnn) => match cnn.send_text(data).await {
@@ -201,7 +200,7 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
                         Ok(())
                     }
                 }
-                Err(e) => Err(Error::RTCDataChannelSendTextFailed(Arc::new(e))),
+                Err(e) => Err(Error::RTCDataChannelSendTextFailed(e)),
             },
             None => Err(Error::RTCDataChannelNotReady),
         }
@@ -212,7 +211,7 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
             Some(peer_connection) => peer_connection
                 .add_ice_candidate(candidate.into())
                 .await
-                .map_err(|e| Error::RTCPeerConnectionAddIceCandidateError(Arc::new(e))),
+                .map_err(Error::RTCPeerConnectionAddIceCandidateError),
             None => Err(Error::RTCPeerConnectionNotEstablish),
         }
     }
@@ -225,7 +224,7 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
             Some(peer_connection) => peer_connection
                 .set_local_description(desc.into())
                 .await
-                .map_err(|e| Error::RTCPeerConnectionSetLocalDescFailed(Arc::new(e))),
+                .map_err(Error::RTCPeerConnectionSetLocalDescFailed),
             None => Err(Error::RTCPeerConnectionNotEstablish),
         }
     }
@@ -238,7 +237,7 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
             Some(peer_connection) => peer_connection
                 .set_remote_description(desc.into())
                 .await
-                .map_err(|e| Error::RTCPeerConnectionSetRemoteDescFailed(Arc::new(e))),
+                .map_err(Error::RTCPeerConnectionSetRemoteDescFailed),
             None => Err(Error::RTCPeerConnectionNotEstablish),
         }
     }
@@ -406,7 +405,7 @@ impl IceTrickleScheme<Event, AcChannel<Event>> for DefaultTransport {
         match data.verify() {
             true => {
                 let sdp = serde_json::from_str::<RTCSessionDescription>(&data.data.sdp)
-                    .map_err(|e| Error::Deserialize(Arc::new(e)))?;
+                    .map_err(Error::Deserialize)?;
                 log::trace!("setting remote sdp: {:?}", sdp);
                 self.set_remote_description(sdp).await?;
                 log::trace!("setting remote candidate");

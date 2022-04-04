@@ -2,7 +2,6 @@ use crate::err::{Error, Result};
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json;
-use std::sync::Arc;
 use wasm_bindgen::JsValue;
 use web_sys::RtcSdpType;
 use web_sys::RtcSessionDescription;
@@ -65,8 +64,7 @@ impl From<web_sys::RtcSessionDescription> for RtcSessionDescriptionWrapper {
 impl TryFrom<String> for RtcSessionDescriptionWrapper {
     type Error = Error;
     fn try_from(s: String) -> Result<Self> {
-        serde_json::from_str::<RtcSessionDescriptionWrapper>(&s)
-            .map_err(|e| Error::Serialize(Arc::new(e)))
+        serde_json::from_str::<RtcSessionDescriptionWrapper>(&s).map_err(Error::Serialize)
     }
 }
 
