@@ -7,7 +7,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::convert::TryFrom;
-use std::sync::Arc;
 use web3::types::Address;
 
 const DEFAULT_TTL_MS: usize = 60 * 1000;
@@ -102,8 +101,8 @@ where
     type Error = Error;
     fn try_from(s: Encoded) -> Result<Self> {
         let decoded: String = s.try_into()?;
-        let data: MessageRelay<T> = serde_json::from_slice(decoded.as_bytes())
-            .map_err(|e| Error::Deserialize(Arc::new(e)))?;
+        let data: MessageRelay<T> =
+            serde_json::from_slice(decoded.as_bytes()).map_err(Error::Deserialize)?;
         Ok(data)
     }
 }

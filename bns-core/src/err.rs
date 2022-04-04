@@ -1,4 +1,4 @@
-#[derive(thiserror::Error, Debug, Clone)]
+#[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
     #[error("Encode a byte vector into a base58-check string, adds 4 bytes checksum")]
@@ -26,10 +26,10 @@ pub enum Error {
     SerializeToString,
 
     #[error("JSON serialization error")]
-    Serialize(#[source] std::sync::Arc<serde_json::Error>),
+    Serialize(#[source] serde_json::Error),
 
     #[error("JSON serialization error")]
-    Deserialize(#[source] std::sync::Arc<serde_json::Error>),
+    Deserialize(#[source] serde_json::Error),
 
     #[error("Failed on verify message signature")]
     VerifySignatureFailed,
@@ -102,14 +102,14 @@ pub enum Error {
 
     #[cfg(not(feature = "wasm"))]
     #[error("RTC new peer connection failed")]
-    RTCPeerConnectionCreateFailed(#[source] std::sync::Arc<webrtc::Error>),
+    RTCPeerConnectionCreateFailed(#[source] webrtc::Error),
 
     #[error("RTC peer_connection not establish")]
     RTCPeerConnectionNotEstablish,
 
     #[cfg(not(feature = "wasm"))]
     #[error("RTC peer_connection fail to create offer")]
-    RTCPeerConnectionCreateOfferFailed(#[source] std::sync::Arc<webrtc::Error>),
+    RTCPeerConnectionCreateOfferFailed(#[source] webrtc::Error),
 
     #[cfg(feature = "wasm")]
     #[error("RTC peer_connection fail to create offer")]
@@ -117,7 +117,7 @@ pub enum Error {
 
     #[cfg(not(feature = "wasm"))]
     #[error("RTC peer_connection fail to create answer")]
-    RTCPeerConnectionCreateAnswerFailed(#[source] std::sync::Arc<webrtc::Error>),
+    RTCPeerConnectionCreateAnswerFailed(#[source] webrtc::Error),
 
     #[cfg(feature = "wasm")]
     #[error("RTC peer_connection fail to create answer")]
@@ -128,7 +128,7 @@ pub enum Error {
 
     #[cfg(not(feature = "wasm"))]
     #[error("DataChannel send text message failed")]
-    RTCDataChannelSendTextFailed(#[source] std::sync::Arc<webrtc::Error>),
+    RTCDataChannelSendTextFailed(#[source] webrtc::Error),
 
     #[cfg(feature = "wasm")]
     #[error("DataChannel send text message failed")]
@@ -139,7 +139,7 @@ pub enum Error {
 
     #[cfg(not(feature = "wasm"))]
     #[error("RTC peer_connection add ice candidate error")]
-    RTCPeerConnectionAddIceCandidateError(#[source] std::sync::Arc<webrtc::Error>),
+    RTCPeerConnectionAddIceCandidateError(#[source] webrtc::Error),
 
     #[cfg(feature = "wasm")]
     #[error("RTC peer_connection add ice candidate error")]
@@ -147,7 +147,7 @@ pub enum Error {
 
     #[cfg(not(feature = "wasm"))]
     #[error("RTC peer_connection set local description failed")]
-    RTCPeerConnectionSetLocalDescFailed(#[source] std::sync::Arc<webrtc::Error>),
+    RTCPeerConnectionSetLocalDescFailed(#[source] webrtc::Error),
 
     #[cfg(feature = "wasm")]
     #[error("RTC peer_connection set local description failed")]
@@ -155,7 +155,7 @@ pub enum Error {
 
     #[cfg(not(feature = "wasm"))]
     #[error("RTC peer_connection set remote description failed")]
-    RTCPeerConnectionSetRemoteDescFailed(#[source] std::sync::Arc<webrtc::Error>),
+    RTCPeerConnectionSetRemoteDescFailed(#[source] webrtc::Error),
 
     #[cfg(feature = "wasm")]
     #[error("RTC peer_connection set remote description failed")]
@@ -163,7 +163,7 @@ pub enum Error {
 
     #[cfg(not(feature = "wasm"))]
     #[error("RTC peer_connection failed to close it")]
-    RTCPeerConnectionCloseFailed(#[source] std::sync::Arc<webrtc::Error>),
+    RTCPeerConnectionCloseFailed(#[source] webrtc::Error),
 
     #[error("RTC unsupport sdp type")]
     RTCSdpTypeNotMatch,

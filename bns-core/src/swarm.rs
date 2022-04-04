@@ -80,14 +80,12 @@ impl Swarm {
     }
 
     fn load_message(&self, ev: Result<Option<Event>>) -> Result<Option<MessageRelay<Message>>> {
-        // TODO: How to deal with events that is not message? Use mpmc?
-
         let ev = ev?;
 
         match ev {
             Some(Event::DataChannelMessage(msg)) => {
                 let payload = serde_json::from_slice::<MessageRelay<Message>>(&msg)
-                    .map_err(|e| Error::Deserialize(Arc::new(e)))?;
+                    .map_err(Error::Deserialize)?;
                 Ok(Some(payload))
             }
             Some(Event::RegisterTransport(address)) => match self.get_transport(&address) {

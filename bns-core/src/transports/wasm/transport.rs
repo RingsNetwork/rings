@@ -201,7 +201,7 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
     where
         T: Serialize + Send,
     {
-        let data = serde_json::to_string(&msg).map_err(|e| Error::Serialize(Arc::new(e)))?;
+        let data = serde_json::to_string(&msg).map_err(Error::Serialize)?;
         match self.get_data_channel().await {
             Some(cnn) => cnn
                 .send_with_str(&data)
@@ -435,7 +435,7 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
             .collect();
         let data = TricklePayload {
             sdp: serde_json::to_string(&RtcSessionDescriptionWrapper::from(sdp))
-                .map_err(|e| Error::Deserialize(Arc::new(e)))?,
+                .map_err(Error::Deserialize)?,
             candidates: local_candidates_json,
         };
         log::debug!("prepared hanshake info :{:?}", data);
