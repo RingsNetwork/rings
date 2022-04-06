@@ -28,11 +28,17 @@ pub enum Error {
     #[error("JSON serialization error")]
     Serialize(#[source] serde_json::Error),
 
-    #[error("JSON serialization error")]
+    #[error("JSON deserialization error")]
     Deserialize(#[source] serde_json::Error),
 
     #[error("Failed on verify message signature")]
     VerifySignatureFailed,
+
+    #[error("Gzip encode error.")]
+    GzipEncode,
+
+    #[error("Gzip decode error.")]
+    GzipDecode,
 
     #[error("Failed on promise, state not successed")]
     PromiseStateFailed,

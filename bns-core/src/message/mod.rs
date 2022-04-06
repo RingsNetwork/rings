@@ -1,7 +1,9 @@
 pub mod handler;
 
 mod encoder;
+pub use encoder::Decoder;
 pub use encoder::Encoded;
+pub use encoder::Encoder;
 
 mod payload;
 pub use payload::MessageRelay;

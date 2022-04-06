@@ -2,6 +2,7 @@ use super::{http_error::HttpError, result::HttpResult};
 use anyhow::anyhow;
 use axum::extract::{Extension, Query, RawBody};
 use bns_core::ecc::SecretKey;
+use bns_core::message::Encoded;
 use bns_core::swarm::{Swarm, TransportManager};
 use bns_core::types::ice_transport::IceTrickleScheme;
 use std::collections::HashMap;
@@ -46,7 +47,7 @@ async fn handshake(swarm: Arc<Swarm>, key: SecretKey, data: Vec<u8>) -> anyhow::
 
     let transport = swarm.new_transport().await?;
     match transport
-        .register_remote_info(String::from_utf8(data)?.try_into()?)
+        .register_remote_info(Encoded::from_encoded_str(String::from_utf8(data)?.as_str()))
         .await
     {
         Ok(addr) => {
@@ -54,7 +55,7 @@ async fn handshake(swarm: Arc<Swarm>, key: SecretKey, data: Vec<u8>) -> anyhow::
             match resp {
                 Ok(info) => {
                     swarm.register(&addr, Arc::clone(&transport)).await?;
-                    anyhow::Result::Ok(info.try_into()?)
+                    anyhow::Result::Ok(info.to_string())
                 }
                 Err(e) => {
                     log::error!("failed to get handshake info: {:?}", e);
@@ -86,7 +87,7 @@ pub async fn trickle_forward(
 
     match client
         .post(node)
-        .body(TryInto::<String>::try_into(req)?)
+        .body(req.to_string())
         .send()
         .await?
         .text()
@@ -95,7 +96,7 @@ pub async fn trickle_forward(
         Ok(resp) => {
             log::debug!("get answer and candidate from remote");
             let addr = transport
-                .register_remote_info(String::from_utf8(resp.as_bytes().to_vec())?.try_into()?)
+                .register_remote_info(Encoded::from_encoded_str(&resp))
                 .await?;
             swarm.register(&addr, Arc::clone(&transport)).await?;
             Ok("ok".to_string())

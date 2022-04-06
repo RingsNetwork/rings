@@ -1,9 +1,9 @@
 use crate::channels::default::AcChannel;
 use crate::ecc::{PublicKey, SecretKey};
 use crate::err::{Error, Result};
-use crate::message::Encoded;
 use crate::message::MessageRelay;
 use crate::message::MessageRelayMethod;
+use crate::message::{Encoded, Encoder};
 use crate::transports::helper::Promise;
 use crate::transports::helper::TricklePayload;
 use crate::types::channel::Channel;
@@ -15,9 +15,9 @@ use crate::types::ice_transport::IceTransportCallback;
 use crate::types::ice_transport::IceTrickleScheme;
 use async_lock::RwLock as AsyncRwLock;
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures::future::join_all;
 use futures::lock::Mutex as FuturesMutex;
-use serde::Serialize;
 use serde_json;
 use std::future::Future;
 use std::pin::Pin;
@@ -185,14 +185,10 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
         self.data_channel.lock().await.clone()
     }
 
-    async fn send_message<T>(&self, msg: T) -> Result<()>
-    where
-        T: Serialize + Send,
-    {
-        let data: String = serde_json::to_string(&msg).map_err(Error::Serialize)?;
-        let size = data.len();
+    async fn send_message(&self, msg: &[u8]) -> Result<()> {
+        let size = msg.len();
         match self.get_data_channel().await {
-            Some(cnn) => match cnn.send_text(data).await {
+            Some(cnn) => match cnn.send(&Bytes::from(msg.to_vec())).await {
                 Ok(s) => {
                     if !s == size {
                         Err(Error::RTCDataChannelMessageIncomplete(s, size))
@@ -396,11 +392,11 @@ impl IceTrickleScheme<Event, AcChannel<Event>> for DefaultTransport {
         };
         log::trace!("prepared hanshake info :{:?}", data);
         let resp = MessageRelay::new(data, &key, None, None, None, MessageRelayMethod::SEND)?;
-        Ok(resp.try_into()?)
+        Ok(resp.gzip(9)?.encode()?)
     }
 
     async fn register_remote_info(&self, data: Encoded) -> Result<Address> {
-        let data: MessageRelay<TricklePayload> = data.try_into()?;
+        let data: MessageRelay<TricklePayload> = data.decode()?;
         log::trace!("register remote info: {:?}", data);
         match data.verify() {
             true => {
