@@ -17,6 +17,8 @@ use web_sys::RtcSdpType as RTCSdpType;
 #[cfg(not(feature = "wasm"))]
 use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 
+use super::Encoded;
+
 pub struct MessageHandler {
     dht: Arc<Mutex<Chord>>,
     swarm: Arc<Swarm>,
@@ -123,7 +125,7 @@ impl MessageHandler {
             None => {
                 let trans = self.swarm.new_transport().await?;
                 trans
-                    .register_remote_info(msg.handshake_info.clone().try_into()?)
+                    .register_remote_info(Encoded::from_encoded_str(&msg.handshake_info))
                     .await?;
 
                 let handshake_info = trans
@@ -215,9 +217,8 @@ impl MessageHandler {
                     .swarm
                     .get_transport(&msg.answer_id)
                     .ok_or(Error::MessageHandlerMissTransportConnectedNode)?;
-
                 transport
-                    .register_remote_info(msg.handshake_info.clone().try_into()?)
+                    .register_remote_info(Encoded::from_encoded_str(&msg.handshake_info.clone()))
                     .await
                     .map(|_| ())
             }

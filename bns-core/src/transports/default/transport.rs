@@ -1,9 +1,9 @@
 use crate::channels::default::AcChannel;
 use crate::ecc::{PublicKey, SecretKey};
 use crate::err::{Error, Result};
-use crate::message::Encoded;
 use crate::message::MessageRelay;
 use crate::message::MessageRelayMethod;
+use crate::message::{Encoded, Encoder};
 use crate::transports::helper::Promise;
 use crate::transports::helper::TricklePayload;
 use crate::types::channel::Channel;
@@ -15,9 +15,9 @@ use crate::types::ice_transport::IceTransportCallback;
 use crate::types::ice_transport::IceTrickleScheme;
 use async_lock::RwLock as AsyncRwLock;
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures::future::join_all;
 use futures::lock::Mutex as FuturesMutex;
-use serde::Serialize;
 use serde_json;
 use std::future::Future;
 use std::pin::Pin;
@@ -94,7 +94,7 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
                 *conn = Some(Arc::new(c));
                 Ok(())
             }
-            Err(e) => Err(Error::RTCPeerConnectionCreateFailed(Arc::new(e))),
+            Err(e) => Err(Error::RTCPeerConnectionCreateFailed(e)),
         }?;
 
         self.setup_channel("bns").await?;
@@ -105,7 +105,7 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
         if let Some(pc) = self.get_peer_connection().await {
             pc.close()
                 .await
-                .map_err(|e| Error::RTCPeerConnectionCloseFailed(Arc::new(e)))?;
+                .map_err(Error::RTCPeerConnectionCloseFailed)?;
         }
 
         Ok(())
@@ -143,7 +143,7 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
                 let answer = peer_connection
                     .create_answer(None)
                     .await
-                    .map_err(|e| Error::RTCPeerConnectionCreateAnswerFailed(Arc::new(e)))?;
+                    .map_err(Error::RTCPeerConnectionCreateAnswerFailed)?;
                 self.set_local_description(answer.to_owned()).await?;
                 let _ = gather_complete.recv().await;
                 Ok(answer)
@@ -169,7 +169,7 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
                     }
                     Err(e) => {
                         log::error!("{}", e);
-                        Err(Error::RTCPeerConnectionCreateOfferFailed(Arc::new(e)))
+                        Err(Error::RTCPeerConnectionCreateOfferFailed(e))
                     }
                 }
             }
@@ -185,15 +185,10 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
         self.data_channel.lock().await.clone()
     }
 
-    async fn send_message<T>(&self, msg: T) -> Result<()>
-    where
-        T: Serialize + Send,
-    {
-        let data: String =
-            serde_json::to_string(&msg).map_err(|e| Error::Serialize(Arc::new(e)))?;
-        let size = data.len();
+    async fn send_message(&self, msg: &[u8]) -> Result<()> {
+        let size = msg.len();
         match self.get_data_channel().await {
-            Some(cnn) => match cnn.send_text(data).await {
+            Some(cnn) => match cnn.send(&Bytes::from(msg.to_vec())).await {
                 Ok(s) => {
                     if !s == size {
                         Err(Error::RTCDataChannelMessageIncomplete(s, size))
@@ -201,7 +196,7 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
                         Ok(())
                     }
                 }
-                Err(e) => Err(Error::RTCDataChannelSendTextFailed(Arc::new(e))),
+                Err(e) => Err(Error::RTCDataChannelSendTextFailed(e)),
             },
             None => Err(Error::RTCDataChannelNotReady),
         }
@@ -212,7 +207,7 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
             Some(peer_connection) => peer_connection
                 .add_ice_candidate(candidate.into())
                 .await
-                .map_err(|e| Error::RTCPeerConnectionAddIceCandidateError(Arc::new(e))),
+                .map_err(Error::RTCPeerConnectionAddIceCandidateError),
             None => Err(Error::RTCPeerConnectionNotEstablish),
         }
     }
@@ -225,7 +220,7 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
             Some(peer_connection) => peer_connection
                 .set_local_description(desc.into())
                 .await
-                .map_err(|e| Error::RTCPeerConnectionSetLocalDescFailed(Arc::new(e))),
+                .map_err(Error::RTCPeerConnectionSetLocalDescFailed),
             None => Err(Error::RTCPeerConnectionNotEstablish),
         }
     }
@@ -238,7 +233,7 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
             Some(peer_connection) => peer_connection
                 .set_remote_description(desc.into())
                 .await
-                .map_err(|e| Error::RTCPeerConnectionSetRemoteDescFailed(Arc::new(e))),
+                .map_err(Error::RTCPeerConnectionSetRemoteDescFailed),
             None => Err(Error::RTCPeerConnectionNotEstablish),
         }
     }
@@ -397,16 +392,16 @@ impl IceTrickleScheme<Event, AcChannel<Event>> for DefaultTransport {
         };
         log::trace!("prepared hanshake info :{:?}", data);
         let resp = MessageRelay::new(data, &key, None, None, None, MessageRelayMethod::SEND)?;
-        Ok(resp.try_into()?)
+        Ok(resp.gzip(9)?.encode()?)
     }
 
     async fn register_remote_info(&self, data: Encoded) -> Result<Address> {
-        let data: MessageRelay<TricklePayload> = data.try_into()?;
+        let data: MessageRelay<TricklePayload> = data.decode()?;
         log::trace!("register remote info: {:?}", data);
         match data.verify() {
             true => {
                 let sdp = serde_json::from_str::<RTCSessionDescription>(&data.data.sdp)
-                    .map_err(|e| Error::Deserialize(Arc::new(e)))?;
+                    .map_err(Error::Deserialize)?;
                 log::trace!("setting remote sdp: {:?}", sdp);
                 self.set_remote_description(sdp).await?;
                 log::trace!("setting remote candidate");

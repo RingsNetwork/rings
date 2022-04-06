@@ -188,9 +188,11 @@ async fn daemon_run(http_addr: String, key: &SecretKey, stun: &str) -> anyhow::R
     let swarm_clone = swarm.clone();
     let key = key.to_owned();
 
-    let (_, _) = futures::join!(async { listen_event.listen().await }, async {
-        run_service(http_addr.to_owned(), swarm_clone, key).await
-    },);
+    let (_, _) = futures::join!(
+        listen_event.listen(),
+        run_service(http_addr.to_owned(), swarm_clone, key)
+    );
+
     Ok(())
 }
 

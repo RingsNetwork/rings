@@ -2,9 +2,9 @@ use super::helper::RtcSessionDescriptionWrapper;
 use crate::channels::wasm::CbChannel;
 use crate::ecc::{PublicKey, SecretKey};
 use crate::err::{Error, Result};
-use crate::message::Encoded;
 use crate::message::MessageRelay;
 use crate::message::MessageRelayMethod;
+use crate::message::{Encoded, Encoder};
 use crate::transports::helper::Promise;
 use crate::transports::helper::TricklePayload;
 use crate::types::channel::Channel;
@@ -18,8 +18,6 @@ use async_trait::async_trait;
 use futures::channel::mpsc;
 use futures::lock::Mutex as FuturesMutex;
 use log::info;
-use serde::Serialize;
-use serde_json;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
@@ -197,14 +195,10 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
         self.channel.as_ref().map(Arc::clone)
     }
 
-    async fn send_message<T>(&self, msg: T) -> Result<()>
-    where
-        T: Serialize + Send,
-    {
-        let data = serde_json::to_string(&msg).map_err(|e| Error::Serialize(Arc::new(e)))?;
+    async fn send_message(&self, msg: &[u8]) -> Result<()> {
         match self.get_data_channel().await {
             Some(cnn) => cnn
-                .send_with_str(&data)
+                .send_with_u8_array(msg)
                 .map_err(|e| Error::RTCDataChannelSendTextFailed(format!("{:?}", e))),
             None => Err(Error::RTCDataChannelNotReady),
         }
@@ -435,16 +429,16 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
             .collect();
         let data = TricklePayload {
             sdp: serde_json::to_string(&RtcSessionDescriptionWrapper::from(sdp))
-                .map_err(|e| Error::Deserialize(Arc::new(e)))?,
+                .map_err(Error::Deserialize)?,
             candidates: local_candidates_json,
         };
         log::debug!("prepared hanshake info :{:?}", data);
         let resp = MessageRelay::new(data, &key, None, None, None, MessageRelayMethod::SEND)?;
-        Ok(resp.try_into()?)
+        Ok(resp.gzip(9)?.encode()?)
     }
 
     async fn register_remote_info(&self, data: Encoded) -> Result<Address> {
-        let data: MessageRelay<TricklePayload> = data.try_into()?;
+        let data: MessageRelay<TricklePayload> = data.decode()?;
         log::debug!("register remote info: {:?}", &data);
 
         match data.verify() {

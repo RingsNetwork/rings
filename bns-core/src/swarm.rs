@@ -73,21 +73,18 @@ impl Swarm {
         address: &Address,
         payload: MessageRelay<Message>,
     ) -> Result<()> {
-        match self.get_transport(address) {
-            Some(transport) => Ok(transport.send_message(payload).await?),
-            None => Err(Error::SwarmMissAddressInTable),
-        }
+        let transport = self
+            .get_transport(address)
+            .ok_or(Error::SwarmMissAddressInTable)?;
+        transport.send_message(&payload.gzip(9)?).await
     }
 
     fn load_message(&self, ev: Result<Option<Event>>) -> Result<Option<MessageRelay<Message>>> {
-        // TODO: How to deal with events that is not message? Use mpmc?
-
         let ev = ev?;
 
         match ev {
             Some(Event::DataChannelMessage(msg)) => {
-                let payload = serde_json::from_slice::<MessageRelay<Message>>(&msg)
-                    .map_err(|e| Error::Deserialize(Arc::new(e)))?;
+                let payload = MessageRelay::from_gzipped(&msg)?;
                 Ok(Some(payload))
             }
             Some(Event::RegisterTransport(address)) => match self.get_transport(&address) {
