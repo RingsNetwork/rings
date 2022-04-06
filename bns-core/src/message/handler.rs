@@ -1,9 +1,3 @@
-#[cfg(not(feature = "wasm"))]
-mod default;
-
-#[cfg(feature = "wasm")]
-mod wasm;
-
 use crate::dht::{Chord, ChordAction, ChordRemoteAction, Did};
 use crate::err::{Error, Result};
 use crate::message::{
@@ -14,8 +8,6 @@ use crate::message::{
 use crate::swarm::{Swarm, TransportManager};
 use crate::types::ice_transport::IceTrickleScheme;
 use futures::lock::Mutex;
-use futures_util::pin_mut;
-use futures_util::stream::StreamExt;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use web3::types::Address;
@@ -359,22 +351,65 @@ impl MessageHandler {
             }
         }
     }
+}
 
-    pub async fn listen(&self) {
-        let iter_messages = self.swarm.iter_messages();
-        pin_mut!(iter_messages);
+#[cfg(not(feature = "wasm"))]
+mod listener {
+    use super::MessageHandler;
+    use crate::types::message::MessageListener;
+    use async_trait::async_trait;
 
-        while let Some(relay_message) = iter_messages.next().await {
-            if relay_message.is_expired() || !relay_message.verify() {
-                log::error!("Cannot verify msg or it's expired: {:?}", relay_message);
+    use futures_util::pin_mut;
+    use futures_util::stream::StreamExt;
+
+    #[async_trait]
+    impl MessageListener for MessageHandler {
+        async fn listen(self) {
+            let relay_messages = self.swarm.iter_messages();
+
+            pin_mut!(relay_messages);
+
+            while let Some(relay_message) = relay_messages.next().await {
+                if relay_message.is_expired() || !relay_message.verify() {
+                    log::error!("Cannot verify msg or it's expired: {:?}", relay_message);
+                    continue;
+                }
+
+                if let Err(e) = self
+                    .handle_message_relay(&relay_message, &relay_message.addr.into())
+                    .await
+                {
+                    log::error!("Error in handle_message: {}", e);
+                    continue;
+                }
             }
+        }
+    }
+}
 
-            if let Err(e) = self
-                .handle_message_relay(&relay_message, &relay_message.addr.into())
-                .await
-            {
-                log::error!("Error in handle_message: {}", e);
-            }
+#[cfg(feature = "wasm")]
+mod listener {
+
+    use super::MessageHandler;
+    use crate::poll;
+    use crate::types::message::MessageListener;
+    use async_trait::async_trait;
+    use std::sync::Arc;
+    use wasm_bindgen_futures::spawn_local;
+
+    #[async_trait(?Send)]
+    impl MessageListener for MessageHandler {
+        async fn listen(self) {
+            let msg_handler = Arc::new(self);
+            let handler = Arc::clone(&msg_handler);
+            let func = move || {
+                let handler = Arc::clone(&handler);
+
+                spawn_local(Box::pin(async move {
+                    handler.listen_once().await;
+                }));
+            };
+            poll!(func, 200);
         }
     }
 }
