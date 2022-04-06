@@ -358,13 +358,14 @@ mod listener {
     use super::MessageHandler;
     use crate::types::message::MessageListener;
     use async_trait::async_trait;
+    use std::sync::Arc;
 
     use futures_util::pin_mut;
     use futures_util::stream::StreamExt;
 
     #[async_trait]
     impl MessageListener for MessageHandler {
-        async fn listen(self) {
+        async fn listen(self: Arc<Self>) {
             let relay_messages = self.swarm.iter_messages();
 
             pin_mut!(relay_messages);
@@ -395,16 +396,15 @@ mod listener {
     use crate::types::message::MessageListener;
     use async_trait::async_trait;
     use std::sync::Arc;
+    use wasm_bindgen::UnwrapThrowExt;
     use wasm_bindgen_futures::spawn_local;
 
     #[async_trait(?Send)]
     impl MessageListener for MessageHandler {
-        async fn listen(self) {
-            let msg_handler = Arc::new(self);
-            let handler = Arc::clone(&msg_handler);
-            let func = move || {
-                let handler = Arc::clone(&handler);
-
+        async fn listen(self: Arc<Self>) {
+            let mut handler = Some(Arc::clone(&self));
+            let mut func = move || {
+                let handler = Arc::clone(&handler.take().unwrap_throw());
                 spawn_local(Box::pin(async move {
                     handler.listen_once().await;
                 }));
