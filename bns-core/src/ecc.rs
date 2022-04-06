@@ -22,7 +22,7 @@ pub struct SecretKey(libsecp256k1::SecretKey);
 #[derive(Copy, Clone, Debug)]
 pub struct PublicKey(libsecp256k1::PublicKey);
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone, Eq, PartialEq)]
 pub struct HashStr(String);
 
 impl HashStr {
