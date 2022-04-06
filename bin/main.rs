@@ -3,8 +3,8 @@ use anyhow::Result;
 use bns_core::dht::Chord;
 use bns_core::ecc::SecretKey;
 use bns_core::message::handler::MessageHandler;
-use bns_core::types::message::MessageListener;
 use bns_core::swarm::Swarm;
+use bns_core::types::message::MessageListener;
 use bns_node::logger::Logger;
 use bns_node::service::run_service;
 use bns_node::{
