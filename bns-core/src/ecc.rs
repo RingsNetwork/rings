@@ -57,7 +57,7 @@ impl TryFrom<&str> for SecretKey {
         let key_arr: [u8; 32] = key.as_slice().try_into()?;
         match libsecp256k1::SecretKey::parse(&key_arr) {
             Ok(key) => Ok(key.into()),
-            Err(e) => Err(Error::Libsecp256k1SecretKeyParse(format!("{e}"))),
+            Err(e) => Err(Error::Libsecp256k1SecretKeyParse(format!("{:?}", e))),
         }
     }
 }
