@@ -103,7 +103,7 @@ async fn run_jobs(args: &RunArgs) -> anyhow::Result<()> {
     let key = key.to_owned();
     let http_addr = args.http_addr.to_owned();
     if args.disable_turn {
-        let (_, _) = futures::join!(async { listen_event.listen().await }, async {
+        let (_, _) = futures::join!(async { Arc::new(listen_event).listen().await }, async {
             run_service(http_addr.to_owned(), swarm_clone, key).await
         },);
     } else {
@@ -113,7 +113,7 @@ async fn run_jobs(args: &RunArgs) -> anyhow::Result<()> {
         let password: &str = &args.password;
         let realm: &str = &args.realm;
         let (_, _, _) = futures::join!(
-            async { listen_event.listen().await },
+            async { Arc::new(listen_event).listen().await },
             async { run_service(http_addr.to_owned(), swarm_clone, key).await },
             async { run_udp_turn(public_ip, turn_port, username, password, realm).await }
         );
