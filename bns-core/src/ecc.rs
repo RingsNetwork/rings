@@ -1,7 +1,11 @@
 use hex;
 use rand::SeedableRng;
 use rand_hc::Hc128Rng;
+use serde::Deserialize;
+use serde::Serialize;
+use sha1::{Digest, Sha1};
 use std::convert::TryFrom;
+use std::fmt::Write;
 use std::ops::Deref;
 use web3::signing::keccak256;
 use web3::types::Address;
@@ -17,6 +21,15 @@ pub type SigBytes = [u8; 65];
 pub struct SecretKey(libsecp256k1::SecretKey);
 #[derive(Copy, Clone, Debug)]
 pub struct PublicKey(libsecp256k1::PublicKey);
+
+#[derive(Deserialize, Serialize, Debug, Clone, Eq, PartialEq)]
+pub struct HashStr(String);
+
+impl HashStr {
+    pub fn new<T: Into<String>>(s: T) -> Self {
+        HashStr(s.into())
+    }
+}
 
 impl Deref for SecretKey {
     type Target = libsecp256k1::SecretKey;
@@ -47,6 +60,23 @@ impl From<libsecp256k1::PublicKey> for PublicKey {
 impl From<SecretKey> for PublicKey {
     fn from(secret_key: SecretKey) -> Self {
         libsecp256k1::PublicKey::from_secret_key(&secret_key.0).into()
+    }
+}
+
+impl<T> From<T> for HashStr
+where
+    T: Into<String>,
+{
+    fn from(s: T) -> Self {
+        let inputs = s.into();
+        let mut hasher = Sha1::new();
+        hasher.update(&inputs.as_bytes());
+        let bytes = hasher.finalize();
+        let mut ret = String::with_capacity(bytes.len() * 2);
+        for &b in &bytes {
+            write!(&mut ret, "{:02x}", b).unwrap();
+        }
+        HashStr(ret)
     }
 }
 
@@ -181,5 +211,19 @@ mod tests {
 
         // Verify message signature by address.
         assert!(verify(message, address, sig));
+    }
+
+    #[test]
+    fn test_parse_to_string_with_sha10x00() {
+        let s = "65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0";
+        let t: HashStr = s.into();
+        assert_eq!(t.0.len(), 40);
+    }
+
+    #[test]
+    fn test_parse_to_string_with_sha10x01() {
+        let s = "hello";
+        let t: HashStr = s.into();
+        assert_eq!(t.0.len(), 40);
     }
 }

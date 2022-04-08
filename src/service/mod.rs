@@ -1,3 +1,4 @@
+mod backgrounds;
 mod discovery;
 mod http_error;
 mod is_turn;
@@ -24,6 +25,8 @@ pub use is_turn::run_udp_turn;
 
 use crate::service::processor::Processor;
 
+pub use backgrounds::run_stabilize;
+pub use is_turn::run_udp_turn;
 use self::{http_error::HttpError, result::HttpResult};
 
 pub async fn run_service(addr: String, swarm: Arc<Swarm>, key: SecretKey) -> anyhow::Result<()> {
