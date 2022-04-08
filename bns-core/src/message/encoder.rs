@@ -1,10 +1,9 @@
+use crate::err::Error;
+use crate::err::Result;
 use base58_monero as b58m;
 use serde::Deserialize;
 use serde::Serialize;
 use std::ops::Deref;
-
-use crate::err::Error;
-use crate::err::Result;
 
 pub trait Encoder {
     fn encode(&self) -> Result<Encoded>;
@@ -70,6 +69,18 @@ impl Decoder for Vec<u8> {
 impl ToString for Encoded {
     fn to_string(&self) -> String {
         self.deref().to_owned()
+    }
+}
+
+impl From<String> for Encoded {
+    fn from(v: String) -> Self {
+        Self(v)
+    }
+}
+
+impl From<&str> for Encoded {
+    fn from(v: &str) -> Self {
+        Self(v.to_owned())
     }
 }
 
