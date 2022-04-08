@@ -17,8 +17,6 @@ use web_sys::RtcSdpType as RTCSdpType;
 #[cfg(not(feature = "wasm"))]
 use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 
-use super::Encoded;
-
 pub struct MessageHandler {
     dht: Arc<Mutex<Chord>>,
     swarm: Arc<Swarm>,
@@ -125,7 +123,7 @@ impl MessageHandler {
             None => {
                 let trans = self.swarm.new_transport().await?;
                 trans
-                    .register_remote_info(Encoded::from_encoded_str(&msg.handshake_info))
+                    .register_remote_info(msg.handshake_info.to_owned().into())
                     .await?;
 
                 let handshake_info = trans
@@ -218,7 +216,7 @@ impl MessageHandler {
                     .get_transport(&msg.answer_id)
                     .ok_or(Error::MessageHandlerMissTransportConnectedNode)?;
                 transport
-                    .register_remote_info(Encoded::from_encoded_str(&msg.handshake_info.clone()))
+                    .register_remote_info(msg.handshake_info.clone().into())
                     .await
                     .map(|_| ())
             }
@@ -422,13 +420,14 @@ mod listener {
     use super::MessageHandler;
     use crate::types::message::MessageListener;
     use async_trait::async_trait;
+    use std::sync::Arc;
 
     use futures_util::pin_mut;
     use futures_util::stream::StreamExt;
 
     #[async_trait]
     impl MessageListener for MessageHandler {
-        async fn listen(self) {
+        async fn listen(self: Arc<Self>) {
             let relay_messages = self.swarm.iter_messages();
 
             pin_mut!(relay_messages);
@@ -459,16 +458,15 @@ mod listener {
     use crate::types::message::MessageListener;
     use async_trait::async_trait;
     use std::sync::Arc;
+    use wasm_bindgen::UnwrapThrowExt;
     use wasm_bindgen_futures::spawn_local;
 
     #[async_trait(?Send)]
     impl MessageListener for MessageHandler {
-        async fn listen(self) {
-            let msg_handler = Arc::new(self);
-            let handler = Arc::clone(&msg_handler);
-            let func = move || {
-                let handler = Arc::clone(&handler);
-
+        async fn listen(self: Arc<Self>) {
+            let mut handler = Some(Arc::clone(&self));
+            let mut func = move || {
+                let handler = Arc::clone(&handler.take().unwrap_throw());
                 spawn_local(Box::pin(async move {
                     handler.listen_once().await;
                 }));

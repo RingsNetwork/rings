@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
+use crate::error::{Error, Result};
 use bns_core::transports::default::DefaultTransport;
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use web3::types::H160;
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -11,8 +13,16 @@ pub struct Peer {
 }
 
 impl Peer {
-    pub fn to_json_vec(&self) -> anyhow::Result<Vec<u8>> {
-        serde_json::to_vec(self).map_err(|e| anyhow::anyhow!("json_err: {}", e))
+    pub fn to_json_vec(&self) -> Result<Vec<u8>> {
+        serde_json::to_vec(self).map_err(|_| Error::JsonSerializeError)
+    }
+
+    pub fn to_json_obj(&self) -> Result<JsonValue> {
+        serde_json::to_value(self).map_err(|_| Error::JsonSerializeError)
+    }
+
+    pub fn base64_encode(&self) -> Result<String> {
+        Ok(base64::encode(self.to_json_vec()?))
     }
 }
 
@@ -35,19 +45,27 @@ impl From<&(H160, Arc<DefaultTransport>)> for Peer {
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
-pub struct TransportAndHsInfo {
+pub struct TransportAndIce {
     pub transport_id: String,
-    pub handshake_info: String,
+    pub ice: String,
 }
 
-impl TransportAndHsInfo {
-    pub fn new(transport_id: &str, handshake_info: &str) -> Self {
+impl TransportAndIce {
+    pub fn new(transport_id: &str, ice: &str) -> Self {
         Self {
             transport_id: transport_id.to_owned(),
-            handshake_info: handshake_info.to_owned(),
+            ice: ice.to_owned(),
         }
     }
-    pub fn to_json_vec(&self) -> anyhow::Result<Vec<u8>> {
-        serde_json::to_vec(self).map_err(|e| e.into())
+    pub fn to_json_vec(&self) -> Result<Vec<u8>> {
+        serde_json::to_vec(self).map_err(|_| Error::JsonSerializeError)
+    }
+
+    pub fn to_json_obj(&self) -> Result<JsonValue> {
+        serde_json::to_value(self).map_err(|_| Error::JsonSerializeError)
+    }
+
+    pub fn base64_encode(&self) -> Result<String> {
+        Ok(base64::encode(self.to_json_vec()?))
     }
 }
