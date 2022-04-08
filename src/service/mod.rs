@@ -7,6 +7,9 @@ pub mod processor;
 pub mod request;
 pub mod response;
 mod result;
+use self::{http_error::HttpError, processor::Processor, result::HttpResult};
+pub use backgrounds::run_stabilize;
+pub use is_turn::run_udp_turn;
 
 use axum::{
     extract::Extension,
@@ -14,20 +17,13 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use bns_core::ecc::SecretKey;
-use bns_core::swarm::Swarm;
 use http::header::{self, HeaderName, HeaderValue};
 use jsonrpc_core::MetaIoHandler;
 use std::sync::Arc;
 use tower_http::set_header::SetResponseHeaderLayer;
-//use crate::grpc::{self, grpc_server::GrpcServer};
-pub use is_turn::run_udp_turn;
 
-use crate::service::processor::Processor;
-
-pub use backgrounds::run_stabilize;
-pub use is_turn::run_udp_turn;
-use self::{http_error::HttpError, result::HttpResult};
+use bns_core::ecc::SecretKey;
+use bns_core::swarm::Swarm;
 
 pub async fn run_service(addr: String, swarm: Arc<Swarm>, key: SecretKey) -> anyhow::Result<()> {
     let binding_addr = addr.parse().unwrap();
