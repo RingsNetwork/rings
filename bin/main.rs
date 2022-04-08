@@ -5,21 +5,16 @@ use bns_core::ecc::SecretKey;
 use bns_core::message::handler::MessageHandler;
 use bns_core::swarm::Swarm;
 use bns_core::types::message::MessageListener;
+use bns_node::logger::LogLevel;
 use bns_node::logger::Logger;
-use bns_node::service::run_service;
-use bns_node::{
-    grpc::{
-        grpc_client::GrpcClient,
-        request::{
-            AcceptAnswer, ConnectWithHandshakeInfo, ConnectWithUrl, CreateOffer, Disconnect,
-            ListPeers, SendTo,
-        },
-        response::{Peer, TransportAndHsInfo},
-    },
-    logger::LogLevel,
-};
+use bns_node::service::response::Peer;
+use bns_node::service::{request::Method, response::TransportAndIce, run_service};
 use clap::{Args, Parser, Subcommand};
 use futures::lock::Mutex;
+use jsonrpc_core::Params;
+use jsonrpc_core::Value;
+use jsonrpc_core_client::RawClient;
+use serde_json::json;
 use std::sync::Arc;
 
 #[derive(Parser, Debug)]
@@ -82,8 +77,12 @@ struct ClientArgs {
 }
 
 impl ClientArgs {
-    fn new_client(&self) -> anyhow::Result<Client> {
-        Client::new(self.endpoint_url.as_str())
+    async fn new_client(&self) -> anyhow::Result<Client> {
+        Ok(Client {
+            client: jsonrpc_core_client::transports::http::connect(self.endpoint_url.as_str())
+                .await
+                .map_err(|e| anyhow::anyhow!("jsonrpc client error: {}.", e))?,
+        })
     }
 }
 
@@ -93,7 +92,7 @@ struct ConnectArgs {
     #[clap(flatten)]
     client_args: ClientArgs,
 
-    #[clap(help = "Connect peer with peer_url")]
+    #[clap(help = "Connect peer via peer_url")]
     peer_url: String,
 }
 
@@ -102,8 +101,8 @@ struct ConnectArgs {
 enum SdpCommand {
     #[clap()]
     Offer(SdpOffer),
-    #[clap(about = "Connect to a peer.")]
-    Connect(SdpConnect),
+    #[clap(about)]
+    Answer(SdpAnswer),
     #[clap(about)]
     AcceptAnswer(SdpAcceptAnswer),
 }
@@ -125,12 +124,12 @@ struct SdpOffer {
 }
 
 #[derive(Args, Debug)]
-struct SdpConnect {
+struct SdpAnswer {
     #[clap(flatten)]
     client_args: ClientArgs,
 
     #[clap(about)]
-    handshake_info: String,
+    ice: String,
 }
 
 #[derive(Args, Debug)]
@@ -141,8 +140,8 @@ struct SdpAcceptAnswer {
     #[clap(help = "transport_id of pending transport.")]
     transport_id: String,
 
-    #[clap(help = "handshake_info from remote.")]
-    handshake_info: String,
+    #[clap(help = "ice from remote.")]
+    ice: String,
 }
 
 #[derive(Subcommand, Debug)]
@@ -196,91 +195,102 @@ async fn daemon_run(http_addr: String, key: &SecretKey, stun: &str) -> anyhow::R
     Ok(())
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct Client {
-    client: GrpcClient<tonic::transport::Channel>,
+    client: RawClient,
 }
 
 impl Client {
-    fn new(endpoint: &str) -> anyhow::Result<Self> {
-        log::debug!("endpoint_url: {}", endpoint);
-        let channel =
-            tonic::transport::Channel::builder(endpoint.parse::<tonic::transport::Uri>()?);
-        let client = GrpcClient::new(channel.connect_lazy())
-            .send_gzip()
-            .accept_gzip();
-        Ok(Self { client })
-    }
+    async fn connect_peer_via_http(&mut self, http_url: &str) -> anyhow::Result<()> {
+        let resp = self
+            .client
+            .call_method(
+                Method::ConnectPeerViaHttp.as_str(),
+                Params::Array(vec![Value::String(http_url.to_owned())]),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    async fn connect_with_url(&mut self, url: &str) -> anyhow::Result<()> {
-        let resp = self.client.grpc(ConnectWithUrl::new(url)).await?;
-        log::debug!("resp: {:?}", resp.get_ref());
-        let sdp = resp.get_ref().as_text_result()?;
-        println!("Succeed, Your sdp: {}", sdp);
+        log::debug!("resp: {:?}", resp);
+        let transport_id = resp
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Unexpect response"))?;
+        println!("Succeed, Your transport_id: {}", transport_id);
         Ok(())
     }
 
-    async fn connect_with_handshake_info(&mut self, handshake_info: &str) -> anyhow::Result<()> {
+    async fn connect_peer_via_ice(&mut self, ice_info: &str) -> anyhow::Result<()> {
         let resp = self
             .client
-            .grpc(ConnectWithHandshakeInfo::new(handshake_info))
-            .await?;
-        let info: TransportAndHsInfo = resp.get_ref().as_json_result()?;
+            .call_method(
+                Method::ConnectPeerViaIce.as_str(),
+                Params::Array(vec![Value::String(ice_info.to_owned())]),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let info: TransportAndIce =
+            serde_json::from_value(resp).map_err(|e| anyhow::anyhow!("{}", e))?;
+
         println!(
-            "Succussful!\ntransport_id: {}\nhandeshake_info: {}",
-            info.transport_id, info.handshake_info
+            "Succussful!\ntransport_id: {}\nice: {}",
+            info.transport_id, info.ice,
         );
         Ok(())
     }
 
     async fn create_offer(&mut self) -> anyhow::Result<()> {
-        let resp = self.client.grpc(CreateOffer::default()).await?;
-        let info: TransportAndHsInfo = resp.get_ref().as_json_result()?;
+        let resp = self
+            .client
+            .call_method(Method::CreateOffer.as_str(), Params::Array(vec![]))
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let info: TransportAndIce =
+            serde_json::from_value(resp).map_err(|e| anyhow::anyhow!("{}", e))?;
         println!(
-            "Succussful!\ntransport_id: {}\nhandeshake_info: {}",
-            info.transport_id, info.handshake_info
+            "Succussful!\ntransport_id: {}\nice: {}",
+            info.transport_id, info.ice
         );
         Ok(())
     }
 
-    async fn accept_answer(
-        &mut self,
-        transport_id: &str,
-        handshake_info: &str,
-    ) -> anyhow::Result<()> {
+    async fn accept_answer(&mut self, transport_id: &str, ice: &str) -> anyhow::Result<()> {
         let resp = self
             .client
-            .grpc(AcceptAnswer::new(transport_id, handshake_info))
-            .await?;
-        let peer: Peer = resp.get_ref().as_json_result()?;
+            .call_method(
+                Method::AcceptAnswer.as_str(),
+                Params::Array(vec![json!(transport_id), json!(ice)]),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let peer: Peer = serde_json::from_value(resp).map_err(|e| anyhow::anyhow!("{}", e))?;
         println!("Succussful, transport_id: {}", peer.transport_id);
         Ok(())
     }
 
-    async fn list_peers(&mut self, all: bool) -> anyhow::Result<()> {
-        let resp = self.client.grpc(ListPeers::new(all)).await?;
-        let resp: Vec<Peer> = resp.get_ref().as_json_result()?;
+    async fn list_peers(&mut self, _all: bool) -> anyhow::Result<()> {
+        let resp = self
+            .client
+            .call_method(Method::ListPeers.as_str(), Params::Array(vec![]))
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let peers: Vec<Peer> =
+            serde_json::from_value(resp).map_err(|e| anyhow::anyhow!("{}", e))?;
         println!("Succussful");
         println!("Address, TransportId");
-        resp.iter().for_each(|item| {
+        peers.iter().for_each(|item| {
             println!("{}, {}", item.address, item.transport_id);
         });
         Ok(())
     }
 
-    async fn send_to(&mut self, to_address: &str, text: &str) -> anyhow::Result<()> {
-        let resp = self.client.grpc(SendTo::new(to_address, text)).await?;
-        let resp = resp.get_ref().as_text_result()?;
-        println!("Succussful, {}", resp);
-        Ok(())
-    }
-
     async fn disconnect(&mut self, address: &str) -> anyhow::Result<()> {
         self.client
-            .grpc(Disconnect {
-                address: address.to_owned(),
-            })
-            .await?;
+            .call_method(
+                Method::Disconnect.as_str(),
+                Params::Array(vec![json!(address)]),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
         println!("Done.");
         Ok(())
     }
@@ -297,48 +307,58 @@ async fn main() -> Result<()> {
             daemon_run(args.http_addr, &args.eth_key, args.ice_server.as_str()).await
         }
         Command::Connect(args) => {
-            let mut client = args.client_args.new_client()?;
-            client.connect_with_url(args.peer_url.as_str()).await?;
+            args.client_args
+                .new_client()
+                .await?
+                .connect_peer_via_http(args.peer_url.as_str())
+                .await?;
             Ok(())
         }
         Command::Sdp(SdpCommand::Offer(args)) => {
-            let mut client = args.client_args.new_client()?;
-            client.create_offer().await
+            args.client_args.new_client().await?.create_offer().await?;
+            Ok(())
         }
-        Command::Sdp(SdpCommand::Connect(args)) => {
-            let mut client = args.client_args.new_client()?;
-            client
-                .connect_with_handshake_info(args.handshake_info.as_str())
+        Command::Sdp(SdpCommand::Answer(args)) => {
+            args.client_args
+                .new_client()
+                .await?
+                .connect_peer_via_ice(args.ice.as_str())
                 .await?;
             Ok(())
         }
         Command::Sdp(SdpCommand::AcceptAnswer(args)) => {
-            let mut client = args.client_args.new_client()?;
-            client
-                .accept_answer(args.transport_id.as_str(), args.handshake_info.as_str())
+            args.client_args
+                .new_client()
+                .await?
+                .accept_answer(args.transport_id.as_str(), args.ice.as_str())
                 .await?;
             Ok(())
         }
         Command::Peer(PeerCommand::List(args)) => {
-            let mut client = args.client_args.new_client()?;
-            client.list_peers(args.all).await
+            args.client_args
+                .new_client()
+                .await?
+                .list_peers(args.all)
+                .await?;
+            Ok(())
         }
         Command::Peer(PeerCommand::Disconnect(args)) => {
-            let mut client = args.client_args.new_client()?;
-            client.disconnect(args.address.as_str()).await
+            args.client_args
+                .new_client()
+                .await?
+                .disconnect(args.address.as_str())
+                .await?;
+            Ok(())
         }
-        Command::Send(args) => {
-            let mut client = args.client_args.new_client()?;
-            client
-                .send_to(args.to_address.as_str(), args.text.as_str())
-                .await
+        Command::Send(_args) => {
+            println!("send command does not support.");
+            Ok(())
         }
         Command::NewSecretKey => {
             println!("New secretKey: {}", SecretKey::random().to_string());
             Ok(())
         }
     } {
-        //log::error!("{}", e);
         return Err(e);
     }
     Ok(())
