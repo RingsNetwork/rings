@@ -253,7 +253,11 @@ pub mod test {
         handler1.listen_once().await;
         assert_eq!(dht1.lock().await.successor, key2.address().into());
 
-        println!("swarm1: {:?}, swarm2: {:?}", swarm1.address(), swarm2.address());
+        println!(
+            "swarm1: {:?}, swarm2: {:?}",
+            swarm1.address(),
+            swarm2.address()
+        );
         handler2
             .send_message(
                 &swarm1.address(),

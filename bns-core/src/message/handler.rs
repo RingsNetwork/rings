@@ -247,9 +247,7 @@ impl MessageHandler {
             Some(relay.from_path),
             Some(relay.to_path),
             MessageRelayMethod::REPORT,
-            Message::NotifiedPredecessor(NotifiedPredecessor {
-                id: dht.id,
-            }),
+            Message::NotifiedPredecessor(NotifiedPredecessor { id: dht.id }),
         )
         .await
     }
@@ -343,7 +341,10 @@ impl MessageHandler {
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
         relay.push_prev(dht.id, *prev);
-        println!("current: {:?}, prev: {:?}, find_successor: {:?}", dht.id, prev, msg.id);
+        println!(
+            "current: {:?}, prev: {:?}, find_successor: {:?}",
+            dht.id, prev, msg.id
+        );
         match dht.find_successor(msg.id) {
             Ok(action) => match action {
                 ChordAction::Some(id) => {

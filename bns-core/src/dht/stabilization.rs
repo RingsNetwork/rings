@@ -27,9 +27,7 @@ impl Stabilization {
     pub async fn stabilize(&self) -> Result<()> {
         let mut chord = self.chord.lock().await;
         let message = MessageRelay::new(
-            Message::NotifyPredecessor(NotifyPredecessor {
-                id: chord.id,
-            }),
+            Message::NotifyPredecessor(NotifyPredecessor { id: chord.id }),
             &self.swarm.key,
             None,
             None,
