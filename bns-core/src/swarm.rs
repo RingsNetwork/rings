@@ -29,8 +29,8 @@ use crate::transports::wasm::WasmTransport as Transport;
 pub struct Swarm {
     table: MemStorage<Address, Arc<Transport>>,
     pending: Arc<Mutex<Vec<Arc<Transport>>>>,
-    transport_event_channel: Channel<Event>,
     ice_server: String,
+    transport_event_channel: Channel<Event>,
     pub key: SecretKey,
 }
 

@@ -47,7 +47,7 @@ impl MessageHandler {
         prev: &Did,
     ) -> Result<()> {
         match &relay.data {
-            Message::JoinDHT(ref msg) => self.handle_join(relay, msg).await,
+            Message::JoinDHT(ref msg) => self.handle_join(relay, prev, msg).await,
             Message::ConnectNode(ref msg) => self.handle_connect_node(relay, prev, msg).await,
             Message::ConnectedNode(ref msg) => self.handle_connected_node(relay, prev, msg).await,
             Message::AlreadyConnected(ref msg) => {
@@ -68,7 +68,12 @@ impl MessageHandler {
         }
     }
 
-    async fn handle_join(&self, relay: &MessageRelay<Message>, msg: &JoinDHT) -> Result<()> {
+    async fn handle_join(
+        &self,
+        relay: &MessageRelay<Message>,
+        prev: &Did,
+        msg: &JoinDHT,
+    ) -> Result<()> {
         let mut dht = self.dht.lock().await;
         let relay = relay.clone();
         match dht.join(msg.id) {
@@ -77,14 +82,18 @@ impl MessageHandler {
                 Ok(())
             }
             ChordAction::RemoteAction(next, ChordRemoteAction::FindSuccessor(id)) => {
-                self.send_message(
-                    &next.into(),
-                    Some(relay.to_path),
-                    Some(relay.from_path),
-                    MessageRelayMethod::SEND,
-                    Message::FindSuccessor(FindSuccessor { id, for_fix: false }),
-                )
-                .await
+                if next != *prev {
+                    self.send_message(
+                        &next.into(),
+                        Some(relay.to_path),
+                        Some(relay.from_path),
+                        MessageRelayMethod::SEND,
+                        Message::FindSuccessor(FindSuccessor { id, for_fix: false }),
+                    )
+                    .await
+                } else {
+                    Ok(())
+                }
             }
             _ => unreachable!(),
         }
@@ -232,15 +241,13 @@ impl MessageHandler {
         let mut dht = self.dht.lock().await;
         let mut relay = relay.clone();
         relay.push_prev(dht.id, *prev);
-        dht.notify(msg.predecessor);
+        dht.notify(msg.id);
         self.send_message(
             &(*prev).into(),
             Some(relay.from_path),
             Some(relay.to_path),
             MessageRelayMethod::REPORT,
-            Message::NotifiedPredecessor(NotifiedPredecessor {
-                predecessor: dht.predecessor.unwrap(),
-            }),
+            Message::NotifiedPredecessor(NotifiedPredecessor { id: dht.id }),
         )
         .await
     }
@@ -257,7 +264,7 @@ impl MessageHandler {
         assert_eq!(relay.method, MessageRelayMethod::REPORT);
         // if successor: predecessor is between (id, successor]
         // then update local successor
-        dht.successor = msg.predecessor;
+        dht.successor = msg.id;
         Ok(())
     }
 
@@ -334,6 +341,10 @@ impl MessageHandler {
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
         relay.push_prev(dht.id, *prev);
+        println!(
+            "current: {:?}, prev: {:?}, find_successor: {:?}",
+            dht.id, prev, msg.id
+        );
         match dht.find_successor(msg.id) {
             Ok(action) => match action {
                 ChordAction::Some(id) => {
@@ -343,7 +354,7 @@ impl MessageHandler {
                         Some(relay.to_path),
                         MessageRelayMethod::REPORT,
                         Message::FoundSuccessor(FoundSuccessor {
-                            successor: id,
+                            id,
                             for_fix: msg.for_fix,
                         }),
                     )
@@ -362,7 +373,7 @@ impl MessageHandler {
                     )
                     .await
                 }
-                _ => panic!(""),
+                _action => panic!("{:?}", _action),
             },
             Err(e) => panic!("{:?}", e),
         }
@@ -389,9 +400,9 @@ impl MessageHandler {
         } else {
             if msg.for_fix {
                 let fix_finger_index = dht.fix_finger_index;
-                dht.finger[fix_finger_index as usize] = Some(msg.successor);
+                dht.finger[fix_finger_index as usize] = Some(msg.id);
             } else {
-                dht.successor = msg.successor;
+                dht.successor = msg.id;
             }
             Ok(())
         }

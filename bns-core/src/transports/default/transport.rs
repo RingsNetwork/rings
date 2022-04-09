@@ -25,6 +25,7 @@ use std::sync::Arc;
 use web3::types::Address;
 use webrtc::api::APIBuilder;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
+use webrtc::data_channel::data_channel_state::RTCDataChannelState;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
 use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
@@ -196,7 +197,13 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
                         Ok(())
                     }
                 }
-                Err(e) => Err(Error::RTCDataChannelSendTextFailed(e)),
+                Err(e) => {
+                    if cnn.ready_state() != RTCDataChannelState::Open {
+                        Err(Error::RTCDataChannelStateNotOpen)
+                    } else {
+                        Err(Error::RTCDataChannelSendTextFailed(e))
+                    }
+                }
             },
             None => Err(Error::RTCDataChannelNotReady),
         }
@@ -339,7 +346,6 @@ impl IceTransportCallback<Event, AcChannel<Event>> for DefaultTransport {
 
         box move |d: Arc<RTCDataChannel>| {
             let event_sender = event_sender.clone();
-
             Box::pin(async move {
                 d.on_message(Box::new(move |msg: DataChannelMessage| {
                     log::debug!("Message from DataChannel: '{:?}'", msg);
@@ -429,6 +435,35 @@ impl IceTrickleScheme<Event, AcChannel<Event>> for DefaultTransport {
 }
 
 impl DefaultTransport {
+    pub async fn wait_for_data_channel_open(&self) -> Result<()> {
+        match self.get_data_channel().await {
+            Some(dc) => {
+                if dc.ready_state() == RTCDataChannelState::Open {
+                    Ok(())
+                } else {
+                    let promise = Promise::default();
+                    let state = Arc::clone(&promise.state());
+                    dc.on_open(box move || {
+                        let state = Arc::clone(&state);
+                        Box::pin(async move {
+                            let mut s = state.lock().unwrap();
+                            if let Some(w) = s.waker.take() {
+                                s.completed = true;
+                                s.successed = Some(true);
+                                w.wake();
+                            }
+                        })
+                    })
+                    .await;
+                    promise.await
+                }
+            }
+            None => {
+                panic!("{:?}", Error::RTCDataChannelNotReady);
+            }
+        }
+    }
+
     pub async fn connect_success_promise(&self) -> Result<Promise> {
         match self.get_peer_connection().await {
             Some(peer_connection) => {

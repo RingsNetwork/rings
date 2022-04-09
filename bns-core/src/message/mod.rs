@@ -39,18 +39,18 @@ pub struct FindSuccessor {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FoundSuccessor {
-    pub successor: Did,
+    pub id: Did,
     pub for_fix: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NotifyPredecessor {
-    pub predecessor: Did,
+    pub id: Did,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NotifiedPredecessor {
-    pub predecessor: Did,
+    pub id: Did,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

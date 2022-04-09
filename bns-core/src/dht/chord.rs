@@ -61,14 +61,16 @@ impl Chord {
             // (n + 2^k) % 2^m >= n
             // pos >= id
             // from n to n + 2^160
-            let pos = self.id + Did::from(BigUint::from(2u16).pow(k));
+            let pos = Did::from(BigUint::from(2u16).pow(k));
+
             // pos less than id or id is on another side of ring
-            if pos <= id || pos >= -id {
+            if pos <= id - self.id {
                 match self.finger[k as usize] {
                     Some(v) => {
                         // for a existed value v
-                        // if id < v, then it's more close to this range
-                        if id < v || id > -v {
+                        // if id is more close to self.id than v
+                        if id - self.id < v - self.id {
+                            //                        if id < v || id > -v {
                             self.finger[k as usize] = Some(id);
                             // if id is more close to successor
                         }
@@ -94,7 +96,7 @@ impl Chord {
         // x = successor:predecessor;
         // if (x in (n, successor)) { successor = x; successor:notify(n); }
         if let Some(x) = self.predecessor {
-            if x > self.id && x < self.successor {
+            if x - self.id < self.successor - self.id {
                 self.successor = x;
                 return ChordAction::RemoteAction(x, RemoteAction::Notify(self.id));
                 // successor.notify(n)
@@ -108,7 +110,8 @@ impl Chord {
         // if (predecessor is nil or n' /in (predecessor; n)); predecessor = n';
         match self.predecessor {
             Some(pre) => {
-                if id > pre && id < self.id {
+                // if id <- [pre, self]
+                if self.id - pre > self.id - id {
                     self.predecessor = Some(id)
                 }
             }
@@ -157,16 +160,21 @@ impl Chord {
         }
     }
 
+    /// Fig.5. n.cloest_preceding_node(id)
+    /// for i = m downto1
+    ///    if (finger[i] <- (n, id))
+    ///        return finger[i]
+    /// return n
     pub fn closest_preceding_node(&self, id: Did) -> Result<Did> {
         for i in (0..159).rev() {
             if let Some(v) = self.finger[i] {
-                if v > self.id && v < id {
+                if v - self.id < v - id {
                     // check a recorded did x in (self.id, target_id)
                     return Ok(v);
                 }
             }
         }
-        Err(Error::ChordNotFindCloestNode)
+        Ok(self.id)
     }
 
     // Fig.5 n.find_successor(id)
@@ -191,6 +199,7 @@ impl Chord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ecc::SecretKey;
     use std::str::FromStr;
 
     #[test]
@@ -290,5 +299,71 @@ mod tests {
         );
         assert!(d + Did::from(BigUint::from(2u16).pow(159)) > b);
         assert_eq!(node_d.successor, a);
+    }
+
+    #[test]
+    fn test_two_node_finger() {
+        let mut key1 = SecretKey::random();
+        let mut key2 = SecretKey::random();
+        if key1.address() > key2.address() {
+            (key1, key2) = (key2, key1)
+        }
+        let did1: Did = key1.address().into();
+        let did2: Did = key2.address().into();
+        let mut node1 = Chord::new(did1);
+        let mut node2 = Chord::new(did2);
+
+        node1.join(did2);
+        node2.join(did1);
+        assert_eq!(node1.successor, did2);
+        assert_eq!(node2.successor, did1);
+
+        assert!(
+            node1.finger.contains(&Some(did2)),
+            "did1:{:?}; did2:{:?}",
+            did1,
+            did2
+        );
+        assert!(
+            node2.finger.contains(&Some(did1)),
+            "did1:{:?}; did2:{:?}",
+            did1,
+            did2
+        );
+    }
+
+    #[test]
+    fn test_two_node_finger_failed_case() {
+        let did1 = Did::from_str("0x051cf4f8d020cb910474bef3e17f153fface2b5f").unwrap();
+        let did2 = Did::from_str("0x54baa7dc9e28f41da5d71af8fa6f2a302be1c1bf").unwrap();
+        let max = Did::from(BigUint::from(2u16).pow(160) - 1u16);
+        let zero = Did::from(BigUint::from(2u16).pow(160));
+
+        let mut node1 = Chord::new(did1);
+        let mut node2 = Chord::new(did2);
+
+        node1.join(did2);
+        node2.join(did1);
+        assert_eq!(node1.successor, did2);
+        assert_eq!(node2.successor, did1);
+        let pos_159 = did2 + Did::from(BigUint::from(2u16).pow(159));
+        assert!(pos_159 > did2);
+        assert!(pos_159 < max, "{:?};{:?}", pos_159, max);
+        let pos_160 = did2 + zero;
+        assert_eq!(pos_160, did2);
+        assert!(pos_160 > did1);
+
+        assert!(
+            node1.finger.contains(&Some(did2)),
+            "did1:{:?}; did2:{:?}",
+            did1,
+            did2
+        );
+        assert!(
+            node2.finger.contains(&Some(did1)),
+            "did2:{:?} dont contains did1:{:?}",
+            did2,
+            did1
+        );
     }
 }
