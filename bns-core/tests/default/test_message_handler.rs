@@ -138,7 +138,7 @@ pub mod test {
                 assert_eq!(true, false);
             }
         };
-        assert_eq!(dht1.lock().await.successor == key2.address().into(), true);
+        assert_eq!(dht1.lock().await.successor, key2.address().into());
         Ok(())
     }
 
@@ -188,8 +188,8 @@ pub mod test {
         handler2.listen_once().await;
 
         let transport_1_to_2 = swarm1.get_transport(&swarm2.address()).unwrap();
-        assert_eq!(dht1.lock().await.successor == key2.address().into(), true);
-        assert_eq!(dht2.lock().await.successor == key1.address().into(), true);
+        assert_eq!(dht1.lock().await.successor, key2.address().into());
+        assert_eq!(dht2.lock().await.successor, key1.address().into());
         assert_eq!(
             transport_1_to_2.ice_connection_state().await,
             Some(RTCIceConnectionState::Connected)
@@ -230,8 +230,8 @@ pub mod test {
         handler1.listen_once().await;
         handler2.listen_once().await;
         let transport_1_to_2 = swarm1.get_transport(&swarm2.address()).unwrap();
-        assert_eq!(dht1.lock().await.successor == key2.address().into(), true);
-        assert_eq!(dht2.lock().await.successor == key1.address().into(), true);
+        assert_eq!(dht1.lock().await.successor, key2.address().into());
+        assert_eq!(dht2.lock().await.successor, key1.address().into());
         assert_eq!(
             transport_1_to_2.ice_connection_state().await,
             Some(RTCIceConnectionState::Connected)
