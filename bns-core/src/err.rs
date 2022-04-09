@@ -143,6 +143,9 @@ pub enum Error {
     #[error("DataChannel not ready")]
     RTCDataChannelNotReady,
 
+    #[error("DataChannel state not open")]
+    RTCDataChannelStateNotOpen,
+
     #[cfg(not(feature = "wasm"))]
     #[error("RTC peer_connection add ice candidate error")]
     RTCPeerConnectionAddIceCandidateError(#[source] webrtc::Error),

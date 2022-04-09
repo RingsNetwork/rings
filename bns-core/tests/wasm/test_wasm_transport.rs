@@ -1,4 +1,3 @@
-#[cfg(feature = "wasm")]
 #[cfg(test)]
 pub mod test {
     use bns_core::channels::wasm::CbChannel;
