@@ -256,7 +256,11 @@ pub mod test {
         handler1.listen_once().await;
         assert_eq!(dht1.lock().await.successor, key2.address().into());
 
-        println!("swarm1: {:?}, swarm2: {:?}", swarm1.address(), swarm2.address());
+        println!(
+            "swarm1: {:?}, swarm2: {:?}",
+            swarm1.address(),
+            swarm2.address()
+        );
         handler2
             .send_message(
                 &swarm1.address(),
@@ -300,8 +304,16 @@ pub mod test {
         assert_eq!(dht1.lock().await.successor, key2.address().into());
         assert_eq!(dht2.lock().await.successor, key1.address().into());
 
-        assert!(dht1.lock().await.finger.contains(&Some(key2.address().into())));
-        assert!(dht2.lock().await.finger.contains(&Some(key1.address().into())));
+        assert!(dht1
+            .lock()
+            .await
+            .finger
+            .contains(&Some(key2.address().into())));
+        assert!(dht2
+            .lock()
+            .await
+            .finger
+            .contains(&Some(key1.address().into())));
 
         assert_eq!(
             transport_1_to_2.ice_connection_state().await,
@@ -324,7 +336,11 @@ pub mod test {
         handler1.listen_once().await;
         assert_eq!(dht1.lock().await.successor, key2.address().into());
 
-        println!("swarm1: {:?}, swarm2: {:?}", swarm1.address(), swarm2.address());
+        println!(
+            "swarm1: {:?}, swarm2: {:?}",
+            swarm1.address(),
+            swarm2.address()
+        );
         handler2
             .send_message(
                 &swarm1.address(),
@@ -338,10 +354,9 @@ pub mod test {
             )
             .await?;
         handler1.listen_once().await;
-//        handler2.listen_once().await;
+        //        handler2.listen_once().await;
         assert_eq!(dht2.lock().await.successor, key1.address().into());
         assert_eq!(dht1.lock().await.successor, key2.address().into());
         Ok(())
     }
-
 }

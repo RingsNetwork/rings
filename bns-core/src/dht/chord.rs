@@ -70,7 +70,7 @@ impl Chord {
                         // for a existed value v
                         // if id is more close to self.id than v
                         if id - self.id < v - self.id {
-//                        if id < v || id > -v {
+                            //                        if id < v || id > -v {
                             self.finger[k as usize] = Some(id);
                             // if id is more close to successor
                         }
@@ -199,9 +199,8 @@ impl Chord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::str::FromStr;
     use crate::ecc::SecretKey;
-
+    use std::str::FromStr;
 
     #[test]
     fn test_chord_finger() {
@@ -302,8 +301,7 @@ mod tests {
         assert_eq!(node_d.successor, a);
     }
 
-
- #[test]
+    #[test]
     fn test_two_node_finger() {
         let mut key1 = SecretKey::random();
         let mut key2 = SecretKey::random();
@@ -320,19 +318,26 @@ mod tests {
         assert_eq!(node1.successor, did2);
         assert_eq!(node2.successor, did1);
 
-        assert!(node1.finger.contains(&Some(did2)), "did1:{:?}; did2:{:?}", did1, did2);
-        assert!(node2.finger.contains(&Some(did1)), "did1:{:?}; did2:{:?}", did1, did2);
-
+        assert!(
+            node1.finger.contains(&Some(did2)),
+            "did1:{:?}; did2:{:?}",
+            did1,
+            did2
+        );
+        assert!(
+            node2.finger.contains(&Some(did1)),
+            "did1:{:?}; did2:{:?}",
+            did1,
+            did2
+        );
     }
 
-
- #[test]
+    #[test]
     fn test_two_node_finger_failed_case() {
         let did1 = Did::from_str("0x051cf4f8d020cb910474bef3e17f153fface2b5f").unwrap();
         let did2 = Did::from_str("0x54baa7dc9e28f41da5d71af8fa6f2a302be1c1bf").unwrap();
         let max = Did::from(BigUint::from(2u16).pow(160) - 1u16);
         let zero = Did::from(BigUint::from(2u16).pow(160));
-
 
         let mut node1 = Chord::new(did1);
         let mut node2 = Chord::new(did2);
@@ -348,10 +353,17 @@ mod tests {
         assert_eq!(pos_160, did2);
         assert!(pos_160 > did1);
 
-        assert!(node1.finger.contains(&Some(did2)), "did1:{:?}; did2:{:?}", did1, did2);
-        assert!(node2.finger.contains(&Some(did1)), "did2:{:?} dont contains did1:{:?}", did2, did1);
-
-
+        assert!(
+            node1.finger.contains(&Some(did2)),
+            "did1:{:?}; did2:{:?}",
+            did1,
+            did2
+        );
+        assert!(
+            node2.finger.contains(&Some(did1)),
+            "did2:{:?} dont contains did1:{:?}",
+            did2,
+            did1
+        );
     }
-
 }
