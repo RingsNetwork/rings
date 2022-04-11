@@ -163,6 +163,10 @@ pub mod test {
         let (_, _) = establish_connection(Arc::clone(&swarm1), Arc::clone(&swarm2)).await?;
         let (_, _) = establish_connection(Arc::clone(&swarm2), Arc::clone(&swarm3)).await?;
 
+        let transport_1_to_3 = swarm1.new_transport().await.unwrap();
+        let handshake_info13 = transport_1_to_3.get_handshake_info(swarm1.key, RTCSdpType::Offer).await?;
+        swarm.register(&swarm3.key.address(), Arc::clone(&transport_1_to_3));
+
         let handler1 = MessageHandler::new(Arc::clone(&dht1), Arc::clone(&swarm1));
         let handler2 = MessageHandler::new(Arc::clone(&dht2), Arc::clone(&swarm2));
         let handler3 = MessageHandler::new(Arc::clone(&dht3), Arc::clone(&swarm3));
@@ -180,8 +184,6 @@ pub mod test {
         assert_eq!(dht2.lock().await.successor, key3.address().into(), "dht2 successor is key3");
         assert_eq!(dht3.lock().await.successor, key2.address().into(), "dht3 successor is key2");
 
-        let transport13 = swarm1.new_transport().await.unwrap();
-        let handshake_info13 = transport13.get_handshake_info(swarm1.key, RTCSdpType::Offer).await?;
         transport_1_to_2.wait_for_data_channel_open().await?;
         transport_2_to_3.wait_for_data_channel_open().await?;
         assert_eq!(

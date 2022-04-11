@@ -129,13 +129,9 @@ impl MessageHandler {
         match self.swarm.get_transport(&msg.sender_id) {
             None => {
                 let trans = self.swarm.new_transport().await?;
-                let register_remote_info_ret = trans
+                trans
                     .register_remote_info(msg.handshake_info.to_owned().into())
-                    .await;
-                if register_remote_info_ret.is_err() {
-                    println!("ConnectNode {:?}", register_remote_info_ret);
-                    assert_eq!(false, true);
-                }
+                    .await?;
                 let handshake_info = trans
                     .get_handshake_info(self.swarm.key, RTCSdpType::Answer)
                     .await?
@@ -191,16 +187,14 @@ impl MessageHandler {
                 .await
             }
             None => {
-                let transport = self.swarm.new_transport().await?;
-                let register_remote_info_ret = transport
+                let transport = self
+                    .swarm
+                    .get_transport(&msg.answer_id)
+                    .ok_or(Error::MessageHandlerMissTransportConnectedNode)?;
+                transport
                     .register_remote_info(msg.handshake_info.clone().into())
-                    .await;
-                if register_remote_info_ret.is_err() {
-                    println!("ConnectedNode {:?}", register_remote_info_ret);
-                    assert_eq!(false, true);
-                }
-                println!("Fuck");
-                self.swarm.register(&msg.answer_id, Arc::clone(&transport)).await
+                    .await
+                    .map(|_| ())
             }
         }
     }
