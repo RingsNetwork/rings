@@ -106,6 +106,9 @@ pub enum Error {
     #[error("transport not found")]
     SwarmPendingTransNotFound,
 
+    #[error("failed to close previous while registering, {0}")]
+    SwarmToClosePrevTransport(String),
+
     #[cfg(not(feature = "wasm"))]
     #[error("RTC new peer connection failed")]
     RTCPeerConnectionCreateFailed(#[source] webrtc::Error),

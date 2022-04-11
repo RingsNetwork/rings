@@ -121,7 +121,6 @@ impl MessageSessionRelayProtocol for MessageRelay<Message> {
             }
             MessageRelayMethod::REPORT => {
                 assert_eq!(self.to_path.pop_back(), Some(current));
-                self.to_path.pop_back();
                 self.from_path.push_back(prev);
             }
             _ => unreachable!(),

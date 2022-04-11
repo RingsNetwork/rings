@@ -144,30 +144,83 @@ pub mod test {
 
     #[tokio::test]
     async fn test_handle_connect_node() -> Result<()> {
-        let key1 = SecretKey::random();
-        let key2 = SecretKey::random();
+        let mut key1 = SecretKey::random();
+        let mut key2 = SecretKey::random();
+        let mut key3 = SecretKey::random();
+        let mut v = vec![key1, key2, key3];
+        v.sort_by(|a, b| if a.address() < b.address() {std::cmp::Ordering::Less} else { std::cmp::Ordering::Greater});
+        (key1, key2, key3) = (v[0], v[1], v[2]);
+        assert_eq!(key1.address() < key2.address(), true, "key1 < key2");
+        assert_eq!(key2.address() < key3.address(), true, "key2 < key3");
+        assert_eq!(key1.address() < key3.address(), true, "key1 < key3");
         let swarm1 = Arc::new(new_swarm(&key1));
         let swarm2 = Arc::new(new_swarm(&key2));
+        let swarm3 = Arc::new(new_swarm(&key3));
+        let dht1 = Arc::new(Mutex::new(new_chord(key1.address().into())));
+        let dht2 = Arc::new(Mutex::new(new_chord(key2.address().into())));
+        let dht3 = Arc::new(Mutex::new(new_chord(key3.address().into())));
 
-        assert!(swarm1.get_transport(&swarm2.address()).is_none());
-        assert!(swarm2.get_transport(&swarm1.address()).is_none());
+        let (_, _) = establish_connection(Arc::clone(&swarm1), Arc::clone(&swarm2)).await?;
+        let (_, _) = establish_connection(Arc::clone(&swarm2), Arc::clone(&swarm3)).await?;
 
-        let transport1 = swarm1.new_transport().await.unwrap();
-        let handshake_info1 = transport1
-            .get_handshake_info(key1, RTCSdpType::Offer)
-            .await?;
-        let _relay_message = MessageRelay::new(
-            Message::ConnectNode(message::ConnectNode {
-                sender_id: key1.address().into(),
-                target_id: key2.address().into(),
-                handshake_info: handshake_info1.to_string(),
-            }),
-            &key1,
-            None,
+        let handler1 = MessageHandler::new(Arc::clone(&dht1), Arc::clone(&swarm1));
+        let handler2 = MessageHandler::new(Arc::clone(&dht2), Arc::clone(&swarm2));
+        let handler3 = MessageHandler::new(Arc::clone(&dht3), Arc::clone(&swarm3));
+
+        // handle join dht situation
+        handler1.listen_once().await;
+        handler2.listen_once().await;
+
+        handler3.listen_once().await;
+        handler2.listen_once().await;
+        let transport_1_to_2 = swarm1.get_transport(&swarm2.address()).unwrap();
+        let transport_2_to_3 = swarm2.get_transport(&swarm3.address()).unwrap();
+        println!("key1: {}, key2: {}, key3: {}", key1.address(), key2.address(), key3.address());
+        assert_eq!(dht1.lock().await.successor, key2.address().into(), "dht1 successor is key2");
+        assert_eq!(dht2.lock().await.successor, key3.address().into(), "dht2 successor is key3");
+        assert_eq!(dht3.lock().await.successor, key2.address().into(), "dht3 successor is key2");
+
+        let transport13 = swarm1.new_transport().await.unwrap();
+        let handshake_info13 = transport13.get_handshake_info(swarm1.key, RTCSdpType::Offer).await?;
+        transport_1_to_2.wait_for_data_channel_open().await?;
+        transport_2_to_3.wait_for_data_channel_open().await?;
+        assert_eq!(
+            transport_1_to_2.ice_connection_state().await,
+            Some(RTCIceConnectionState::Connected)
+        );
+        assert_eq!(
+            transport_2_to_3.ice_connection_state().await,
+            Some(RTCIceConnectionState::Connected)
+        );
+        handler1.send_message(
+            &swarm2.address(),
             None,
             None,
             MessageRelayMethod::SEND,
-        )?;
+            Message::ConnectNode(message::ConnectNode {
+                sender_id: swarm1.address().into(),
+                target_id: swarm3.address().into(),
+                handshake_info: handshake_info13.to_string()
+            })
+        ).await?;
+        handler2.listen_once().await;
+        handler3.listen_once().await;
+        handler2.listen_once().await;
+        handler3.listen_once().await;
+        handler2.listen_once().await;
+        handler1.listen_once().await;
+        handler1.listen_once().await;
+
+        let transport_1_to_3 = swarm1.get_transport(&swarm3.address());
+        assert_eq!(transport_1_to_3.is_none(), false);
+        //let transport_1_to_3 = transport_1_to_3.unwrap();
+        //handler1.listen_once().await;
+        //handler3.listen_once().await;
+        //transport_1_to_3.wait_for_data_channel_open().await?;
+        //assert_eq!(
+            //transport_1_to_3.ice_connection_state().await,
+            //Some(RTCIceConnectionState::Connected)
+        //);
         Ok(())
     }
 

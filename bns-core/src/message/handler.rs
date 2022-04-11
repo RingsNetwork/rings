@@ -106,11 +106,9 @@ impl MessageHandler {
         msg: &ConnectNode,
     ) -> Result<()> {
         // TODO: Verify necessity based on Chord to decrease connections but make sure availablitity.
-
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
-        let answer_id = dht.id;
-        relay.push_prev(answer_id, *prev);
+        relay.push_prev(dht.id, *prev);
         if dht.id != msg.target_id {
             let next_node = match dht.find_successor(msg.target_id)? {
                 ChordAction::Some(node) => Some(node),
@@ -131,28 +129,29 @@ impl MessageHandler {
         match self.swarm.get_transport(&msg.sender_id) {
             None => {
                 let trans = self.swarm.new_transport().await?;
-                trans
+                let register_remote_info_ret = trans
                     .register_remote_info(msg.handshake_info.to_owned().into())
-                    .await?;
-
+                    .await;
+                if register_remote_info_ret.is_err() {
+                    println!("ConnectNode {:?}", register_remote_info_ret);
+                    assert_eq!(false, true);
+                }
                 let handshake_info = trans
                     .get_handshake_info(self.swarm.key, RTCSdpType::Answer)
                     .await?
                     .to_string();
-
+                self.swarm.register(&msg.sender_id.into(), Arc::clone(&trans)).await?;
                 self.send_message(
                     &(*prev).into(),
                     Some(relay.from_path),
                     None,
                     MessageRelayMethod::REPORT,
                     Message::ConnectedNode(ConnectedNode {
-                        answer_id,
+                        answer_id: dht.id,
                         handshake_info,
                     }),
                 )
                 .await?;
-
-                trans.wait_for_connected().await?;
                 self.swarm.get_or_register(&msg.sender_id, trans).await?;
 
                 Ok(())
@@ -164,9 +163,44 @@ impl MessageHandler {
                     Some(relay.from_path),
                     None,
                     MessageRelayMethod::REPORT,
-                    Message::AlreadyConnected(AlreadyConnected { answer_id }),
+                    Message::AlreadyConnected(AlreadyConnected { answer_id: dht.id }),
                 )
                 .await
+            }
+        }
+    }
+
+    async fn handle_connected_node(
+        &self,
+        relay: &MessageRelay<Message>,
+        prev: &Did,
+        msg: &ConnectedNode,
+    ) -> Result<()> {
+        let dht = self.dht.lock().await;
+        let mut relay = relay.clone();
+        relay.push_prev(dht.id, *prev);
+        match relay.find_prev() {
+            Some(prev_node) => {
+                self.send_message(
+                    &prev_node,
+                    Some(relay.to_path),
+                    Some(relay.from_path),
+                    MessageRelayMethod::REPORT,
+                    Message::ConnectedNode(msg.clone()),
+                )
+                .await
+            }
+            None => {
+                let transport = self.swarm.new_transport().await?;
+                let register_remote_info_ret = transport
+                    .register_remote_info(msg.handshake_info.clone().into())
+                    .await;
+                if register_remote_info_ret.is_err() {
+                    println!("ConnectedNode {:?}", register_remote_info_ret);
+                    assert_eq!(false, true);
+                }
+                println!("Fuck");
+                self.swarm.register(&msg.answer_id, Arc::clone(&transport)).await
             }
         }
     }
@@ -196,39 +230,6 @@ impl MessageHandler {
                 .get_transport(&msg.answer_id)
                 .map(|_| ())
                 .ok_or(Error::MessageHandlerMissTransportAlreadyConnected),
-        }
-    }
-
-    async fn handle_connected_node(
-        &self,
-        relay: &MessageRelay<Message>,
-        prev: &Did,
-        msg: &ConnectedNode,
-    ) -> Result<()> {
-        let dht = self.dht.lock().await;
-        let mut relay = relay.clone();
-        relay.push_prev(dht.id, *prev);
-        match relay.find_prev() {
-            Some(prev_node) => {
-                self.send_message(
-                    &prev_node,
-                    Some(relay.to_path),
-                    Some(relay.from_path),
-                    MessageRelayMethod::REPORT,
-                    Message::ConnectedNode(msg.clone()),
-                )
-                .await
-            }
-            None => {
-                let transport = self
-                    .swarm
-                    .get_transport(&msg.answer_id)
-                    .ok_or(Error::MessageHandlerMissTransportConnectedNode)?;
-                transport
-                    .register_remote_info(msg.handshake_info.clone().into())
-                    .await
-                    .map(|_| ())
-            }
         }
     }
 
@@ -341,10 +342,6 @@ impl MessageHandler {
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
         relay.push_prev(dht.id, *prev);
-        println!(
-            "current: {:?}, prev: {:?}, find_successor: {:?}",
-            dht.id, prev, msg.id
-        );
         match dht.find_successor(msg.id) {
             Ok(action) => match action {
                 ChordAction::Some(id) => {
