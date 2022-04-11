@@ -5,7 +5,7 @@ pub mod test {
     use bns_core::err::Result;
     use bns_core::message;
     use bns_core::message::handler::MessageHandler;
-    use bns_core::message::{Message, MessageRelay, MessageRelayMethod};
+    use bns_core::message::{Message, MessageRelayMethod};
     use bns_core::swarm::Swarm;
     use bns_core::swarm::TransportManager;
     use bns_core::transports::default::transport::DefaultTransport as Transport;
@@ -148,11 +148,17 @@ pub mod test {
         let mut key2 = SecretKey::random();
         let mut key3 = SecretKey::random();
         let mut v = vec![key1, key2, key3];
-        v.sort_by(|a, b| if a.address() < b.address() {std::cmp::Ordering::Less} else { std::cmp::Ordering::Greater});
+        v.sort_by(|a, b| {
+            if a.address() < b.address() {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Greater
+            }
+        });
         (key1, key2, key3) = (v[0], v[1], v[2]);
-        assert_eq!(key1.address() < key2.address(), true, "key1 < key2");
-        assert_eq!(key2.address() < key3.address(), true, "key2 < key3");
-        assert_eq!(key1.address() < key3.address(), true, "key1 < key3");
+        assert!(key1.address() < key2.address(), "key1 < key2");
+        assert!(key2.address() < key3.address(), "key2 < key3");
+        assert!(key1.address() < key3.address(), "key1 < key3");
         let swarm1 = Arc::new(new_swarm(&key1));
         let swarm2 = Arc::new(new_swarm(&key2));
         let swarm3 = Arc::new(new_swarm(&key3));
@@ -164,8 +170,12 @@ pub mod test {
         let (_, _) = establish_connection(Arc::clone(&swarm2), Arc::clone(&swarm3)).await?;
 
         let transport_1_to_3 = swarm1.new_transport().await.unwrap();
-        let handshake_info13 = transport_1_to_3.get_handshake_info(swarm1.key, RTCSdpType::Offer).await?;
-        swarm1.register(&swarm3.key.address(), Arc::clone(&transport_1_to_3)).await?;
+        let handshake_info13 = transport_1_to_3
+            .get_handshake_info(swarm1.key, RTCSdpType::Offer)
+            .await?;
+        swarm1
+            .register(&swarm3.key.address(), Arc::clone(&transport_1_to_3))
+            .await?;
 
         let handler1 = MessageHandler::new(Arc::clone(&dht1), Arc::clone(&swarm1));
         let handler2 = MessageHandler::new(Arc::clone(&dht2), Arc::clone(&swarm2));
@@ -179,9 +189,21 @@ pub mod test {
         handler2.listen_once().await;
         let transport_1_to_2 = swarm1.get_transport(&swarm2.address()).unwrap();
         let transport_2_to_3 = swarm2.get_transport(&swarm3.address()).unwrap();
-        assert_eq!(dht1.lock().await.successor, key2.address().into(), "dht1 successor is key2");
-        assert_eq!(dht2.lock().await.successor, key3.address().into(), "dht2 successor is key3");
-        assert_eq!(dht3.lock().await.successor, key2.address().into(), "dht3 successor is key2");
+        assert_eq!(
+            dht1.lock().await.successor,
+            key2.address().into(),
+            "dht1 successor is key2"
+        );
+        assert_eq!(
+            dht2.lock().await.successor,
+            key3.address().into(),
+            "dht2 successor is key3"
+        );
+        assert_eq!(
+            dht3.lock().await.successor,
+            key2.address().into(),
+            "dht3 successor is key2"
+        );
 
         transport_1_to_2.wait_for_data_channel_open().await?;
         transport_2_to_3.wait_for_data_channel_open().await?;
@@ -193,17 +215,19 @@ pub mod test {
             transport_2_to_3.ice_connection_state().await,
             Some(RTCIceConnectionState::Connected)
         );
-        handler1.send_message(
-            &swarm2.address(),
-            None,
-            None,
-            MessageRelayMethod::SEND,
-            Message::ConnectNode(message::ConnectNode {
-                sender_id: swarm1.address().into(),
-                target_id: swarm3.address().into(),
-                handshake_info: handshake_info13.to_string()
-            })
-        ).await?;
+        handler1
+            .send_message(
+                &swarm2.address(),
+                None,
+                None,
+                MessageRelayMethod::SEND,
+                Message::ConnectNode(message::ConnectNode {
+                    sender_id: swarm1.address().into(),
+                    target_id: swarm3.address().into(),
+                    handshake_info: handshake_info13.to_string(),
+                }),
+            )
+            .await?;
         handler2.listen_once().await;
         handler3.listen_once().await;
         handler2.listen_once().await;
@@ -216,7 +240,7 @@ pub mod test {
         handler2.listen_once().await;
         handler1.listen_once().await;
         let transport_1_to_3 = swarm1.get_transport(&swarm3.address());
-        assert_eq!(transport_1_to_3.is_none(), false);
+        assert!(transport_1_to_3.is_some());
         let transport_1_to_3 = transport_1_to_3.unwrap();
         assert_eq!(
             transport_1_to_3.ice_connection_state().await,
