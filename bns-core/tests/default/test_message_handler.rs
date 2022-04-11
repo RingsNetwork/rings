@@ -165,7 +165,7 @@ pub mod test {
 
         let transport_1_to_3 = swarm1.new_transport().await.unwrap();
         let handshake_info13 = transport_1_to_3.get_handshake_info(swarm1.key, RTCSdpType::Offer).await?;
-        swarm.register(&swarm3.key.address(), Arc::clone(&transport_1_to_3));
+        swarm1.register(&swarm3.key.address(), Arc::clone(&transport_1_to_3)).await?;
 
         let handler1 = MessageHandler::new(Arc::clone(&dht1), Arc::clone(&swarm1));
         let handler2 = MessageHandler::new(Arc::clone(&dht2), Arc::clone(&swarm2));
@@ -179,7 +179,6 @@ pub mod test {
         handler2.listen_once().await;
         let transport_1_to_2 = swarm1.get_transport(&swarm2.address()).unwrap();
         let transport_2_to_3 = swarm2.get_transport(&swarm3.address()).unwrap();
-        println!("key1: {}, key2: {}, key3: {}", key1.address(), key2.address(), key3.address());
         assert_eq!(dht1.lock().await.successor, key2.address().into(), "dht1 successor is key2");
         assert_eq!(dht2.lock().await.successor, key3.address().into(), "dht2 successor is key3");
         assert_eq!(dht3.lock().await.successor, key2.address().into(), "dht3 successor is key2");
@@ -211,18 +210,25 @@ pub mod test {
         handler3.listen_once().await;
         handler2.listen_once().await;
         handler1.listen_once().await;
+        handler3.listen_once().await;
+        handler3.listen_once().await;
+        handler2.listen_once().await;
+        handler2.listen_once().await;
         handler1.listen_once().await;
-
         let transport_1_to_3 = swarm1.get_transport(&swarm3.address());
         assert_eq!(transport_1_to_3.is_none(), false);
-        //let transport_1_to_3 = transport_1_to_3.unwrap();
-        //handler1.listen_once().await;
-        //handler3.listen_once().await;
-        //transport_1_to_3.wait_for_data_channel_open().await?;
-        //assert_eq!(
-            //transport_1_to_3.ice_connection_state().await,
-            //Some(RTCIceConnectionState::Connected)
-        //);
+        let transport_1_to_3 = transport_1_to_3.unwrap();
+        assert_eq!(
+            transport_1_to_3.ice_connection_state().await,
+            Some(RTCIceConnectionState::New)
+        );
+        handler3.listen_once().await;
+        handler1.listen_once().await;
+        transport_1_to_3.wait_for_data_channel_open().await?;
+        assert_eq!(
+            transport_1_to_3.ice_connection_state().await,
+            Some(RTCIceConnectionState::Connected)
+        );
         Ok(())
     }
 

@@ -136,7 +136,6 @@ impl MessageHandler {
                     .get_handshake_info(self.swarm.key, RTCSdpType::Answer)
                     .await?
                     .to_string();
-                self.swarm.register(&msg.sender_id.into(), Arc::clone(&trans)).await?;
                 self.send_message(
                     &(*prev).into(),
                     Some(relay.from_path),
