@@ -106,11 +106,9 @@ impl MessageHandler {
         msg: &ConnectNode,
     ) -> Result<()> {
         // TODO: Verify necessity based on Chord to decrease connections but make sure availablitity.
-
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
-        let answer_id = dht.id;
-        relay.push_prev(answer_id, *prev);
+        relay.push_prev(dht.id, *prev);
         if dht.id != msg.target_id {
             let next_node = match dht.find_successor(msg.target_id)? {
                 ChordAction::Some(node) => Some(node),
@@ -134,25 +132,21 @@ impl MessageHandler {
                 trans
                     .register_remote_info(msg.handshake_info.to_owned().into())
                     .await?;
-
                 let handshake_info = trans
                     .get_handshake_info(self.swarm.key, RTCSdpType::Answer)
                     .await?
                     .to_string();
-
                 self.send_message(
                     &(*prev).into(),
                     Some(relay.from_path),
                     None,
                     MessageRelayMethod::REPORT,
                     Message::ConnectedNode(ConnectedNode {
-                        answer_id,
+                        answer_id: dht.id,
                         handshake_info,
                     }),
                 )
                 .await?;
-
-                trans.wait_for_connected().await?;
                 self.swarm.get_or_register(&msg.sender_id, trans).await?;
 
                 Ok(())
@@ -164,38 +158,10 @@ impl MessageHandler {
                     Some(relay.from_path),
                     None,
                     MessageRelayMethod::REPORT,
-                    Message::AlreadyConnected(AlreadyConnected { answer_id }),
+                    Message::AlreadyConnected(AlreadyConnected { answer_id: dht.id }),
                 )
                 .await
             }
-        }
-    }
-
-    async fn handle_already_connected(
-        &self,
-        relay: &MessageRelay<Message>,
-        prev: &Did,
-        msg: &AlreadyConnected,
-    ) -> Result<()> {
-        let dht = self.dht.lock().await;
-        let mut relay = relay.clone();
-        relay.push_prev(dht.id, *prev);
-        match relay.find_prev() {
-            Some(prev_node) => {
-                self.send_message(
-                    &prev_node,
-                    Some(relay.to_path),
-                    Some(relay.from_path),
-                    MessageRelayMethod::REPORT,
-                    Message::AlreadyConnected(msg.clone()),
-                )
-                .await
-            }
-            None => self
-                .swarm
-                .get_transport(&msg.answer_id)
-                .map(|_| ())
-                .ok_or(Error::MessageHandlerMissTransportAlreadyConnected),
         }
     }
 
@@ -229,6 +195,34 @@ impl MessageHandler {
                     .await
                     .map(|_| ())
             }
+        }
+    }
+
+    async fn handle_already_connected(
+        &self,
+        relay: &MessageRelay<Message>,
+        prev: &Did,
+        msg: &AlreadyConnected,
+    ) -> Result<()> {
+        let dht = self.dht.lock().await;
+        let mut relay = relay.clone();
+        relay.push_prev(dht.id, *prev);
+        match relay.find_prev() {
+            Some(prev_node) => {
+                self.send_message(
+                    &prev_node,
+                    Some(relay.to_path),
+                    Some(relay.from_path),
+                    MessageRelayMethod::REPORT,
+                    Message::AlreadyConnected(msg.clone()),
+                )
+                .await
+            }
+            None => self
+                .swarm
+                .get_transport(&msg.answer_id)
+                .map(|_| ())
+                .ok_or(Error::MessageHandlerMissTransportAlreadyConnected),
         }
     }
 
@@ -341,10 +335,6 @@ impl MessageHandler {
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
         relay.push_prev(dht.id, *prev);
-        println!(
-            "current: {:?}, prev: {:?}, find_successor: {:?}",
-            dht.id, prev, msg.id
-        );
         match dht.find_successor(msg.id) {
             Ok(action) => match action {
                 ChordAction::Some(id) => {

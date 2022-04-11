@@ -201,6 +201,7 @@ impl TransportManager for Swarm {
         if let Some(transport) = prev_transport {
             if let Err(e) = transport.close().await {
                 log::error!("failed to close previous while registering {:?}", e);
+                return Err(Error::SwarmToClosePrevTransport(format!("{:?}", e)));
             }
         }
 
