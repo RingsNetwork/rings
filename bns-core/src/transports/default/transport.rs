@@ -1,4 +1,4 @@
-use crate::channels::default::AcChannel;
+use crate::channels::Channel as AcChannel;
 use crate::ecc::{PublicKey, SecretKey};
 use crate::err::{Error, Result};
 use crate::message::MessageRelay;

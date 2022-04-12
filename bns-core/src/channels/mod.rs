@@ -1,4 +1,10 @@
 #[cfg(not(feature = "wasm"))]
-pub mod default;
+mod default;
 #[cfg(feature = "wasm")]
-pub mod wasm;
+mod wasm;
+
+#[cfg(feature = "wasm")]
+pub use wasm::CbChannel as Channel;
+
+#[cfg(not(feature = "wasm"))]
+pub use default::AcChannel as Channel;

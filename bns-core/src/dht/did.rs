@@ -52,9 +52,7 @@ impl From<H160> for Did {
 impl FromStr for Did {
     type Err = Error;
     fn from_str(s: &str) -> Result<Self> {
-        Ok(Self(
-            H160::from_str(s).map_err(|_| Error::BadCHexInCache)?,
-        ))
+        Ok(Self(H160::from_str(s).map_err(|_| Error::BadCHexInCache)?))
     }
 }
 

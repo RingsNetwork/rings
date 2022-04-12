@@ -1,5 +1,5 @@
 use super::helper::RtcSessionDescriptionWrapper;
-use crate::channels::wasm::CbChannel;
+use crate::channels::Channel as CbChannel;
 use crate::ecc::{PublicKey, SecretKey};
 use crate::err::{Error, Result};
 use crate::message::MessageRelay;
