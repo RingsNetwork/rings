@@ -82,6 +82,9 @@ pub enum Error {
     #[error("Invalid ChordAction")]
     ChordInvalidAction,
 
+    #[error("chord Unexpected Action, {0:?}")]
+    ChordUnexpectedActhon(crate::dht::ChordAction),
+
     #[error("Chord findsuccessor error, {0}")]
     ChordFindSuccessor(String),
 
