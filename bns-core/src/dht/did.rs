@@ -8,20 +8,19 @@ use std::ops::Deref;
 use std::ops::Neg;
 use std::ops::{Add, Sub};
 use std::str::FromStr;
-use web3::types::Address;
 use web3::types::H160;
 
 #[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd, Debug, Serialize, Deserialize)]
-pub struct Did(Address);
+pub struct Did(H160);
 
 impl Deref for Did {
-    type Target = Address;
+    type Target = H160;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl From<Did> for Address {
+impl From<Did> for H160 {
     fn from(a: Did) -> Self {
         a.0.to_owned()
     }
@@ -44,8 +43,8 @@ impl From<BigUint> for Did {
     }
 }
 
-impl From<Address> for Did {
-    fn from(addr: Address) -> Self {
+impl From<H160> for Did {
+    fn from(addr: H160) -> Self {
         Self(addr)
     }
 }
@@ -54,7 +53,7 @@ impl FromStr for Did {
     type Err = Error;
     fn from_str(s: &str) -> Result<Self> {
         Ok(Self(
-            Address::from_str(s).map_err(|_| Error::BadCHexInCache)?,
+            H160::from_str(s).map_err(|_| Error::BadCHexInCache)?,
         ))
     }
 }
