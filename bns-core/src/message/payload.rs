@@ -1,7 +1,9 @@
-use crate::ecc::{recover, sign, verify, HashStr, PublicKey, SecretKey};
+use crate::ecc::{recover, verify, HashStr, PublicKey, SecretKey};
 use crate::err::{Error, Result};
 use crate::message::{Did, Encoded};
-use chrono::Utc;
+use crate::utils;
+use crate::session::SessionInfo;
+use crate::session::Session;
 use flate2::write::{GzDecoder, GzEncoder};
 use flate2::Compression;
 use serde::de::DeserializeOwned;
@@ -31,6 +33,7 @@ pub struct MessageRelay<T> {
     pub to_path: VecDeque<Did>,
     pub from_path: VecDeque<Did>,
     pub addr: Address,
+    pub session: Session,
     pub sig: Vec<u8>,
     pub method: MessageRelayMethod,
 }
@@ -43,24 +46,24 @@ where
 {
     pub fn new(
         data: T,
-        key: &SecretKey,
+        session_info: &SessionInfo,
         ttl_ms: Option<usize>,
         to_path: Option<VecDeque<Did>>,
         from_path: Option<VecDeque<Did>>,
         method: MessageRelayMethod,
     ) -> Result<Self> {
-        let ts_ms = get_epoch_ms();
+        let ts_ms = utils::get_epoch_ms();
         let ttl_ms = ttl_ms.unwrap_or(DEFAULT_TTL_MS);
-
         let msg = Self::pack_msg(&data, ts_ms, ttl_ms)?;
-        let sig = sign(&msg, key).into();
+        let session = session_info.session;
+        let sig = session_info.sign(&msg);
         let tx_id = msg.into();
-
-        let addr = key.address().to_owned();
+        let addr = session_info.authorizer().to_owned();
         let to_path = to_path.unwrap_or_default();
         let from_path = from_path.unwrap_or_default();
 
         Ok(Self {
+            session,
             data,
             addr,
             tx_id,
@@ -74,13 +77,19 @@ where
     }
 
     pub fn is_expired(&self) -> bool {
-        let now = get_epoch_ms();
-        now < self.ts_ms + self.ttl_ms as u128
+        let now = utils::get_epoch_ms();
+        now > self.ts_ms + self.ttl_ms as u128
     }
 
     pub fn verify(&self) -> bool {
+        if !self.session.verify() {
+            return false;
+        }
+        if self.is_expired() {
+            return false;
+        }
         if let Ok(msg) = Self::pack_msg(&self.data, self.ts_ms, self.ttl_ms) {
-            verify(&msg, &self.addr, self.sig.clone())
+            verify(&msg, &self.session.address(), self.sig.clone())
         } else {
             false
         }
@@ -153,9 +162,7 @@ where
     }
 }
 
-fn get_epoch_ms() -> u128 {
-    Utc::now().timestamp_millis() as u128
-}
+
 
 #[cfg(test)]
 mod tests {

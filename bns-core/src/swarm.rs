@@ -8,6 +8,7 @@ use crate::types::channel::Event;
 use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
+use crate::session::SessionInfo;
 use async_stream::stream;
 use async_trait::async_trait;
 use futures_core::Stream;
@@ -24,7 +25,8 @@ pub struct Swarm {
     pending: Arc<Mutex<Vec<Arc<Transport>>>>,
     ice_server: String,
     transport_event_channel: Channel<Event>,
-    pub key: SecretKey,
+    session_info: Arc<Mutex<SessionInfo>>,
+    pub address: Address,
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
@@ -47,18 +49,19 @@ pub trait TransportManager {
 }
 
 impl Swarm {
-    pub fn new(ice_server: &str, key: SecretKey) -> Self {
+    pub fn new(ice_server: &str, address: Address, session_info: SessionInfo) -> Self {
         Self {
             table: MemStorage::<Address, Arc<Transport>>::new(),
             transport_event_channel: Channel::new(1),
             ice_server: ice_server.into(),
-            key,
+            address,
+            session_info: Arc::new(Mutex::new(session_info)),
             pending: Arc::new(Mutex::new(vec![])),
         }
     }
 
     pub fn address(&self) -> Address {
-        self.key.address()
+        self.address
     }
 
     pub async fn send_message(
@@ -84,7 +87,7 @@ impl Swarm {
                 Some(_) => {
                     let payload = MessageRelay::new(
                         Message::JoinDHT(message::JoinDHT { id: address.into() }),
-                        &self.key,
+                        &self.session_info,
                         None,
                         None,
                         None,

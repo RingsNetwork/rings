@@ -106,6 +106,9 @@ pub enum Error {
     #[error("call lock() failed")]
     SwarmPendingTransTryLockFailed,
 
+    #[error("call lock() failed")]
+    SwarmSessionTryLockFailed,
+
     #[error("transport not found")]
     SwarmPendingTransNotFound,
 
