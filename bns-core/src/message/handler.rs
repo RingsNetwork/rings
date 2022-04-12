@@ -348,7 +348,7 @@ impl MessageHandler {
                         for_fix: msg.for_fix,
                     }),
                 )
-                    .await
+                .await
             }
             ChordAction::RemoteAction(next, ChordRemoteAction::FindSuccessor(id)) => {
                 self.send_message(
@@ -361,11 +361,9 @@ impl MessageHandler {
                         for_fix: msg.for_fix,
                     }),
                 )
-                    .await
+                .await
             }
-            action => {
-                Err(Error::ChordUnexpectedActhon(action))
-            }
+            action => Err(Error::ChordUnexpectedActhon(action)),
         }
     }
 
