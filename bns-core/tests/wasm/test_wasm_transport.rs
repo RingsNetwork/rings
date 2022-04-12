@@ -1,10 +1,10 @@
 #[cfg(test)]
 pub mod test {
-    use bns_core::channels::wasm::CbChannel;
+    use bns_core::channels::Channel as CbChannel;
     use bns_core::ecc::SecretKey;
     use bns_core::err::Result;
 
-    use bns_core::transports::wasm::WasmTransport as Transport;
+    use bns_core::transports::Transport;
     use bns_core::types::channel::Channel;
     use bns_core::types::channel::Event;
     use bns_core::types::ice_transport::IceServer;

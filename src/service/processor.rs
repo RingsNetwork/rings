@@ -4,7 +4,7 @@ use bns_core::{
     ecc::SecretKey,
     message::Encoded,
     swarm::{Swarm, TransportManager},
-    transports::default::DefaultTransport,
+    transports::Transport,
     types::ice_transport::{IceTransport, IceTrickleScheme},
 };
 use jsonrpc_core::Metadata;
@@ -80,7 +80,7 @@ impl Processor {
 
     async fn do_connect_peer_via_http(
         &self,
-        transport: &Arc<DefaultTransport>,
+        transport: &Arc<Transport>,
         node_url: &str,
     ) -> Result<String> {
         let client = new_client(node_url)
@@ -138,7 +138,7 @@ impl Processor {
         }
     }
 
-    async fn handshake(&self, transport: &Arc<DefaultTransport>, data: &str) -> Result<String> {
+    async fn handshake(&self, transport: &Arc<Transport>, data: &str) -> Result<String> {
         // get offer from remote and send answer back
         let hs_info = Encoded::from_encoded_str(data);
         let addr = transport
@@ -229,8 +229,8 @@ impl Peer {
     }
 }
 
-impl From<(H160, Arc<DefaultTransport>)> for Peer {
-    fn from((address, transport): (H160, Arc<DefaultTransport>)) -> Self {
+impl From<(H160, Arc<Transport>)> for Peer {
+    fn from((address, transport): (H160, Arc<Transport>)) -> Self {
         Self {
             address: address.to_string(),
             transport_id: transport.id.to_string(),
@@ -238,8 +238,8 @@ impl From<(H160, Arc<DefaultTransport>)> for Peer {
     }
 }
 
-impl From<&(H160, Arc<DefaultTransport>)> for Peer {
-    fn from((address, transport): &(H160, Arc<DefaultTransport>)) -> Self {
+impl From<&(H160, Arc<Transport>)> for Peer {
+    fn from((address, transport): &(H160, Arc<Transport>)) -> Self {
         Self {
             address: address.to_string(),
             transport_id: transport.id.to_string(),

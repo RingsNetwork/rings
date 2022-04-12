@@ -16,15 +16,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use web3::types::Address;
 
-#[cfg(not(feature = "wasm"))]
-use crate::channels::default::AcChannel as Channel;
-#[cfg(feature = "wasm")]
-use crate::channels::wasm::CbChannel as Channel;
-
-#[cfg(not(feature = "wasm"))]
-use crate::transports::default::DefaultTransport as Transport;
-#[cfg(feature = "wasm")]
-use crate::transports::wasm::WasmTransport as Transport;
+use crate::channels::Channel;
+use crate::transports::Transport;
 
 pub struct Swarm {
     table: MemStorage<Address, Arc<Transport>>,
