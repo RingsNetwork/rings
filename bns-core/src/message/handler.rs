@@ -335,37 +335,35 @@ impl MessageHandler {
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
         relay.push_prev(dht.id, *prev);
-        match dht.find_successor(msg.id) {
-            Ok(action) => match action {
-                ChordAction::Some(id) => {
-                    self.send_message(
-                        &(*prev).into(),
-                        Some(relay.from_path),
-                        Some(relay.to_path),
-                        MessageRelayMethod::REPORT,
-                        Message::FoundSuccessor(FoundSuccessor {
-                            id,
-                            for_fix: msg.for_fix,
-                        }),
-                    )
-                    .await
-                }
-                ChordAction::RemoteAction(next, ChordRemoteAction::FindSuccessor(id)) => {
-                    self.send_message(
-                        &next.into(),
-                        Some(relay.to_path),
-                        Some(relay.from_path),
-                        MessageRelayMethod::SEND,
-                        Message::FindSuccessor(FindSuccessor {
-                            id,
-                            for_fix: msg.for_fix,
-                        }),
-                    )
-                    .await
-                }
-                _action => panic!("{:?}", _action),
-            },
-            Err(e) => panic!("{:?}", e),
+        let action = dht.find_successor(msg.id)?;
+        match action {
+            ChordAction::Some(id) => {
+                self.send_message(
+                    &(*prev).into(),
+                    Some(relay.from_path),
+                    Some(relay.to_path),
+                    MessageRelayMethod::REPORT,
+                    Message::FoundSuccessor(FoundSuccessor {
+                        id,
+                        for_fix: msg.for_fix,
+                    }),
+                )
+                .await
+            }
+            ChordAction::RemoteAction(next, ChordRemoteAction::FindSuccessor(id)) => {
+                self.send_message(
+                    &next.into(),
+                    Some(relay.to_path),
+                    Some(relay.from_path),
+                    MessageRelayMethod::SEND,
+                    Message::FindSuccessor(FindSuccessor {
+                        id,
+                        for_fix: msg.for_fix,
+                    }),
+                )
+                .await
+            }
+            action => Err(Error::ChordUnexpectedActhon(action)),
         }
     }
 
