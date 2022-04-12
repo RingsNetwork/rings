@@ -106,14 +106,14 @@ pub enum Error {
     #[error("call lock() failed")]
     SwarmPendingTransTryLockFailed,
 
-    #[error("call lock() failed")]
-    SwarmSessionTryLockFailed,
-
     #[error("transport not found")]
     SwarmPendingTransNotFound,
 
     #[error("failed to close previous while registering, {0}")]
     SwarmToClosePrevTransport(String),
+
+    #[error("call lock() failed")]
+    SessionTryLockFailed,
 
     #[cfg(not(feature = "wasm"))]
     #[error("RTC new peer connection failed")]

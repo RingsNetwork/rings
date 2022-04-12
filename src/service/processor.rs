@@ -6,6 +6,7 @@ use bns_core::{
     swarm::{Swarm, TransportManager},
     transports::Transport,
     types::ice_transport::{IceTransport, IceTrickleScheme},
+    session::SessionManager
 };
 use jsonrpc_core::Metadata;
 use jsonrpc_core_client::RawClient;
@@ -18,14 +19,14 @@ use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 #[derive(Clone)]
 pub struct Processor {
     pub swarm: Arc<Swarm>,
-    pub key: SecretKey,
+    pub session: SessionManager,
 }
 
 impl Metadata for Processor {}
 
-impl From<(Arc<Swarm>, SecretKey)> for Processor {
-    fn from((swarm, key): (Arc<Swarm>, SecretKey)) -> Self {
-        Self { swarm, key }
+impl From<(Arc<Swarm>, SessionManager)> for Processor {
+    fn from((swarm, session): (Arc<Swarm>, SessionManager)) -> Self {
+        Self { swarm, session }
     }
 }
 
@@ -40,7 +41,7 @@ impl Processor {
         let transport_cloned = transport.clone();
         let task = async move {
             let hs_info = transport_cloned
-                .get_handshake_info(self.key, RTCSdpType::Offer)
+                .get_handshake_info(self.session.clone(), RTCSdpType::Offer)
                 .await
                 .map_err(Error::CreateOffer)?
                 .to_string();
@@ -87,7 +88,7 @@ impl Processor {
             .await
             .map_err(|e| Error::RemoteRpcError(e.to_string()))?;
         let hs_info = transport
-            .get_handshake_info(self.key, RTCSdpType::Offer)
+            .get_handshake_info(self.session.clone(), RTCSdpType::Offer)
             .await
             .map_err(Error::CreateOffer)?
             .to_string();
@@ -153,7 +154,7 @@ impl Processor {
             .map_err(Error::RegisterIceError)?;
 
         let hs_info = transport
-            .get_handshake_info(self.key, RTCSdpType::Answer)
+            .get_handshake_info(self.session.clone(), RTCSdpType::Answer)
             .await
             .map_err(Error::CreateAnswer)?
             .to_string();

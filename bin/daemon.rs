@@ -10,6 +10,7 @@ use futures::lock::Mutex;
 use libc::kill;
 use std::fs::{self, File};
 use std::sync::Arc;
+use bns_core::session::SessionManager;
 
 #[derive(Parser, Debug)]
 #[clap(about)]
@@ -96,15 +97,18 @@ struct ShutdownArgs {
 async fn run_jobs(args: &RunArgs) -> anyhow::Result<()> {
     let key: &SecretKey = &args.eth_key;
     let dht = Arc::new(Mutex::new(Chord::new(key.address().into())));
-    let swarm = Arc::new(Swarm::new(&args.ice_server, key.to_owned()));
+    let (auth, key) = SessionManager::gen_unsign_info(key.address(), None)?;
+    let sig = key.sign(&auth.to_string()?).to_vec();
+    let session = SessionManager::new(&sig, &auth, &key);
+
+    let swarm = Arc::new(Swarm::new(&args.ice_server, key.address(), session.clone()));
 
     let listen_event = MessageHandler::new(dht.clone(), swarm.clone());
     let swarm_clone = swarm.clone();
-    let key = key.to_owned();
     let http_addr = args.http_addr.to_owned();
     if args.disable_turn {
         let (_, _) = futures::join!(async { Arc::new(listen_event).listen().await }, async {
-            run_service(http_addr.to_owned(), swarm_clone, key).await
+            run_service(http_addr.to_owned(), swarm_clone, session.clone()).await
         },);
     } else {
         let public_ip: &str = &args.public_ip;
@@ -114,7 +118,7 @@ async fn run_jobs(args: &RunArgs) -> anyhow::Result<()> {
         let realm: &str = &args.realm;
         let (_, _, _) = futures::join!(
             async { Arc::new(listen_event).listen().await },
-            async { run_service(http_addr.to_owned(), swarm_clone, key).await },
+            async { run_service(http_addr.to_owned(), swarm_clone, session.clone()).await },
             async { run_udp_turn(public_ip, turn_port, username, password, realm).await }
         );
     }

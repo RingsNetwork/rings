@@ -32,24 +32,21 @@ pub struct Session {
 }
 
 #[derive(Debug, Clone)]
-pub struct SessionInfo {
+pub struct SessionManager {
     pub session: Session,
     pub session_key: SecretKey
 }
 
+impl AuthorizedInfo {
+    pub fn to_string(&self) -> Result<String> {
+        serde_json::to_string(self).map_err(|_| {
+            Error::SerializeToString
+        })
+    }
+}
+
 
 impl Session {
-    pub fn gen_unsign_info(authorizer: Address, ttl: Option<Ttl>) -> Result<(AuthorizedInfo, SecretKey)> {
-        let key = SecretKey::random();
-        let info = AuthorizedInfo {
-            authorizer,
-            addr: key.address(),
-            ttl_ms: ttl.unwrap_or(Ttl::Some(DEFAULT_TTL_MS)),
-            ts_ms: utils::get_epoch_ms()
-        };
-        Ok((info, key))
-    }
-
     pub fn new(sig: &Vec<u8>, auth_info: &AuthorizedInfo) -> Self {
         Self {
             sig: sig.clone(),
@@ -87,7 +84,25 @@ impl Session {
 }
 
 
-impl SessionInfo {
+impl SessionManager {
+    pub fn gen_unsign_info(authorizer: Address, ttl: Option<Ttl>) -> Result<(AuthorizedInfo, SecretKey)> {
+        let key = SecretKey::random();
+        let info = AuthorizedInfo {
+            authorizer,
+            addr: key.address(),
+            ttl_ms: ttl.unwrap_or(Ttl::Some(DEFAULT_TTL_MS)),
+            ts_ms: utils::get_epoch_ms()
+        };
+        Ok((info, key))
+    }
+
+    pub fn new(sig: &Vec<u8>, auth_info: &AuthorizedInfo, key: &SecretKey) -> Self {
+        Self {
+            session: Session::new(&sig, &auth_info),
+            session_key: key.clone()
+        }
+    }
+
     pub fn sign(&self, msg: &str) -> Vec<u8> {
         self.session_key.sign(&msg).to_vec()
     }

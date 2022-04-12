@@ -28,7 +28,7 @@ impl Stabilization {
         let mut chord = self.chord.lock().await;
         let message = MessageRelay::new(
             Message::NotifyPredecessor(NotifyPredecessor { id: chord.id }),
-            &self.swarm.session_info(),
+            &self.swarm.session(),
             None,
             None,
             None,
@@ -55,7 +55,7 @@ impl Stabilization {
                             id: current,
                             for_fix: true,
                         }),
-                        &self.swarm.session_info(),
+                        &self.swarm.session(),
                         None,
                         None,
                         None,

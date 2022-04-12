@@ -37,7 +37,7 @@ impl MessageHandler {
     ) -> Result<()> {
         // TODO: diff ttl for each message?
         let payload =
-            MessageRelay::new(message, &self.swarm.session_info(), None, to_path, from_path, method)?;
+            MessageRelay::new(message, &self.swarm.session(), None, to_path, from_path, method)?;
         self.swarm.send_message(address, payload).await
     }
 
@@ -133,7 +133,7 @@ impl MessageHandler {
                     .register_remote_info(msg.handshake_info.to_owned().into())
                     .await?;
                 let handshake_info = trans
-                    .get_handshake_info(self.swarm.session_info(), RTCSdpType::Answer)
+                    .get_handshake_info(self.swarm.session(), RTCSdpType::Answer)
                     .await?
                     .to_string();
                 self.send_message(

@@ -2,7 +2,7 @@ use crate::ecc::{recover, verify, HashStr, PublicKey, SecretKey};
 use crate::err::{Error, Result};
 use crate::message::{Did, Encoded};
 use crate::utils;
-use crate::session::SessionInfo;
+use crate::session::SessionManager;
 use crate::session::Session;
 use flate2::write::{GzDecoder, GzEncoder};
 use flate2::Compression;
@@ -46,7 +46,7 @@ where
 {
     pub fn new(
         data: T,
-        session_info: &SessionInfo,
+        session_manager: &SessionManager,
         ttl_ms: Option<usize>,
         to_path: Option<VecDeque<Did>>,
         from_path: Option<VecDeque<Did>>,
@@ -55,10 +55,10 @@ where
         let ts_ms = utils::get_epoch_ms();
         let ttl_ms = ttl_ms.unwrap_or(DEFAULT_TTL_MS);
         let msg = Self::pack_msg(&data, ts_ms, ttl_ms)?;
-        let session = session_info.session.clone();
-        let sig = session_info.sign(&msg);
+        let session = session_manager.session.clone();
+        let sig = session_manager.sign(&msg);
         let tx_id = msg.into();
-        let addr = session_info.authorizer().to_owned();
+        let addr = session_manager.authorizer().to_owned();
         let to_path = to_path.unwrap_or_default();
         let from_path = from_path.unwrap_or_default();
 
