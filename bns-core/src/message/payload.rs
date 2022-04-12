@@ -55,7 +55,7 @@ where
         let ts_ms = utils::get_epoch_ms();
         let ttl_ms = ttl_ms.unwrap_or(DEFAULT_TTL_MS);
         let msg = Self::pack_msg(&data, ts_ms, ttl_ms)?;
-        let session = session_info.session;
+        let session = session_info.session.clone();
         let sig = session_info.sign(&msg);
         let tx_id = msg.into();
         let addr = session_info.authorizer().to_owned();
@@ -88,8 +88,8 @@ where
         if self.is_expired() {
             return false;
         }
-        if let Ok(msg) = Self::pack_msg(&self.data, self.ts_ms, self.ttl_ms) {
-            verify(&msg, &self.session.address(), self.sig.clone())
+        if let (Ok(msg), Ok(addr)) = (Self::pack_msg(&self.data, self.ts_ms, self.ttl_ms), self.session.address()) {
+            verify(&msg, &addr, self.sig.clone())
         } else {
             false
         }

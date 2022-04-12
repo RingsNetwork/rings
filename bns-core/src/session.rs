@@ -11,7 +11,7 @@ use serde::Serialize;
 const DEFAULT_TTL_MS: usize = 24 * 3600 * 1000;
 
 #[derive(Deserialize, Serialize, PartialEq, Debug, Clone)]
-enum Ttl {
+pub enum Ttl {
     Some(usize),
     Never
 }
@@ -31,13 +31,10 @@ pub struct Session {
     pub auth: AuthorizedInfo
 }
 
+#[derive(Debug, Clone)]
 pub struct SessionInfo {
     pub session: Session,
     pub session_key: SecretKey
-}
-
-pub struct SessionManager {
-    pub session_info: Arc<RwLock<SessionInfo>>,
 }
 
 

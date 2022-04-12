@@ -25,8 +25,8 @@ pub struct Swarm {
     pending: Arc<Mutex<Vec<Arc<Transport>>>>,
     ice_server: String,
     transport_event_channel: Channel<Event>,
-    session_info: Arc<Mutex<SessionInfo>>,
-    pub address: Address,
+    session_info: SessionInfo,
+    address: Address,
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
@@ -55,9 +55,13 @@ impl Swarm {
             transport_event_channel: Channel::new(1),
             ice_server: ice_server.into(),
             address,
-            session_info: Arc::new(Mutex::new(session_info)),
+            session_info: session_info,
             pending: Arc::new(Mutex::new(vec![])),
         }
+    }
+
+    pub fn session_info(&self) -> SessionInfo {
+        self.session_info.clone()
     }
 
     pub fn address(&self) -> Address {
