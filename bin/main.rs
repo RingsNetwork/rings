@@ -60,9 +60,6 @@ struct Daemon {
 
     #[clap(long = "key", short = 'k', env)]
     pub eth_key: SecretKey,
-
-    #[clap(long, short = 'd', help = "Run in daemon mode.")]
-    pub daemon: bool,
 }
 
 #[derive(Args, Debug)]
