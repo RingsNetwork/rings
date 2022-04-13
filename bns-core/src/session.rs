@@ -31,9 +31,22 @@ pub struct Session {
 }
 
 #[derive(Debug, Clone)]
-pub struct SessionManager {
+pub struct SessionWithKey {
     pub session: Session,
     pub session_key: SecretKey,
+}
+
+#[derive(Debug)]
+pub struct SessionManager {
+    inner: Arc<RwLock<SessionWithKey>>,
+}
+
+impl Clone for SessionManager {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
 }
 
 impl AuthorizedInfo {
@@ -97,17 +110,55 @@ impl SessionManager {
     }
 
     pub fn new(sig: &Vec<u8>, auth_info: &AuthorizedInfo, key: &SecretKey) -> Self {
-        Self {
+        let inner = SessionWithKey {
             session: Session::new(&sig, &auth_info),
             session_key: key.clone(),
+        };
+
+        Self {
+            inner: Arc::new(RwLock::new(inner)),
         }
     }
 
-    pub fn sign(&self, msg: &str) -> Vec<u8> {
-        self.session_key.sign(&msg).to_vec()
+    pub fn renew(
+        &self,
+        sig: &Vec<u8>,
+        auth_info: &AuthorizedInfo,
+        key: &SecretKey,
+    ) -> Result<&Self> {
+        let new_inner = SessionWithKey {
+            session: Session::new(&sig, &auth_info),
+            session_key: key.clone(),
+        };
+        let mut inner = self
+            .inner
+            .try_write()
+            .map_err(|_| Error::SessionTryLockFailed)?;
+        *inner = new_inner;
+        Ok(self)
     }
 
-    pub fn authorizer(&self) -> Address {
-        self.session.auth.authorizer
+    pub fn session_key(&self) -> Result<SecretKey> {
+        let inner = self
+            .inner
+            .try_read()
+            .map_err(|_| Error::SessionTryLockFailed)?;
+        Ok(inner.session_key)
+    }
+
+    pub fn session(&self) -> Result<Session> {
+        let inner = self
+            .inner
+            .try_read()
+            .map_err(|_| Error::SessionTryLockFailed)?;
+        Ok(inner.session.clone())
+    }
+
+    pub fn sign(&self, msg: &str) -> Result<Vec<u8>> {
+        Ok(self.session_key()?.sign(&msg).to_vec())
+    }
+
+    pub fn authorizer(&self) -> Result<Address> {
+        Ok(self.session()?.auth.authorizer)
     }
 }

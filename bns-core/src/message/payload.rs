@@ -55,10 +55,10 @@ where
         let ts_ms = utils::get_epoch_ms();
         let ttl_ms = ttl_ms.unwrap_or(DEFAULT_TTL_MS);
         let msg = Self::pack_msg(&data, ts_ms, ttl_ms)?;
-        let session = session_manager.session.clone();
-        let sig = session_manager.sign(&msg);
+        let session = session_manager.session()?.clone();
+        let sig = session_manager.sign(&msg)?;
         let tx_id = msg.into();
-        let addr = session_manager.authorizer().to_owned();
+        let addr = session_manager.authorizer()?.to_owned();
         let to_path = to_path.unwrap_or_default();
         let from_path = from_path.unwrap_or_default();
 
