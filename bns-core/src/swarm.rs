@@ -251,7 +251,8 @@ mod tests {
     fn new_swarm() -> Swarm {
         let stun = "stun://stun.l.google.com:19302";
         let key = SecretKey::random();
-        Swarm::new(stun, key)
+        let session = SessionManager::new_with_seckey(&key).unwrap();
+        Swarm::new(stun, key.address(), session)
     }
 
     #[tokio::test]

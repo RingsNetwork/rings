@@ -11,6 +11,7 @@ pub mod test {
     use bns_core::transports::Transport;
     use bns_core::types::ice_transport::IceTransport;
     use bns_core::types::ice_transport::IceTrickleScheme;
+    use bns_core::session::SessionManager;
     use futures::lock::Mutex;
     use std::sync::Arc;
     use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
@@ -22,7 +23,8 @@ pub mod test {
 
     fn new_swarm(key: &SecretKey) -> Swarm {
         let stun = "stun://stun.l.google.com:19302";
-        Swarm::new(stun, key.to_owned())
+        let session = SessionManager::new_with_seckey(&key).unwrap();
+        Swarm::new(stun, key.address(), session)
     }
 
     pub async fn establish_connection(
@@ -46,7 +48,7 @@ pub mod test {
 
         // Peer 1 try to connect peer 2
         let handshake_info1 = transport1
-            .get_handshake_info(swarm1.key, RTCSdpType::Offer)
+            .get_handshake_info(swarm1.session(), RTCSdpType::Offer)
             .await?;
         assert_eq!(
             transport1.ice_connection_state().await,
@@ -59,7 +61,7 @@ pub mod test {
 
         // Peer 2 got offer then register
         let addr1 = transport2.register_remote_info(handshake_info1).await?;
-        assert_eq!(addr1, swarm1.key.address());
+        assert_eq!(addr1, swarm1.address());
         assert_eq!(
             transport1.ice_connection_state().await,
             Some(RTCIceConnectionState::New)
@@ -71,7 +73,7 @@ pub mod test {
 
         // Peer 2 create answer
         let handshake_info2 = transport2
-            .get_handshake_info(swarm2.key, RTCSdpType::Answer)
+            .get_handshake_info(swarm2.session(), RTCSdpType::Answer)
             .await?;
         assert_eq!(
             transport1.ice_connection_state().await,
@@ -84,7 +86,7 @@ pub mod test {
 
         // Peer 1 got answer then register
         let addr2 = transport1.register_remote_info(handshake_info2).await?;
-        assert_eq!(addr2, swarm2.key.address());
+        assert_eq!(addr2, swarm2.address());
         let promise_1 = transport1.connect_success_promise().await?;
         let promise_2 = transport2.connect_success_promise().await?;
         promise_1.await?;
@@ -171,10 +173,10 @@ pub mod test {
 
         let transport_1_to_3 = swarm1.new_transport().await.unwrap();
         let handshake_info13 = transport_1_to_3
-            .get_handshake_info(swarm1.key, RTCSdpType::Offer)
+            .get_handshake_info(swarm1.session(), RTCSdpType::Offer)
             .await?;
         swarm1
-            .register(&swarm3.key.address(), Arc::clone(&transport_1_to_3))
+            .register(&swarm3.address(), Arc::clone(&transport_1_to_3))
             .await?;
 
         let handler1 = MessageHandler::new(Arc::clone(&dht1), Arc::clone(&swarm1));

@@ -109,15 +109,26 @@ impl SessionManager {
         Ok((info, key))
     }
 
-    pub fn new(sig: &Vec<u8>, auth_info: &AuthorizedInfo, key: &SecretKey) -> Self {
+    /// sig: Sigature of AuthorizedInfo
+    /// auth_info: generated from `gen_unsign_info`
+    /// session_key: temp key from gen_unsign_info
+    pub fn new(sig: &Vec<u8>, auth_info: &AuthorizedInfo, session_key: &SecretKey) -> Self {
         let inner = SessionWithKey {
             session: Session::new(&sig, &auth_info),
-            session_key: key.clone(),
+            session_key: session_key.clone(),
         };
 
         Self {
             inner: Arc::new(RwLock::new(inner)),
         }
+    }
+
+    /// generate Session with private key
+    /// only use it for unittest
+    pub fn new_with_seckey(key: &SecretKey) -> Result<Self> {
+        let (auth, s_key) = Self::gen_unsign_info(key.address(), None)?;
+        let sig = key.sign(&auth.to_string()?).to_vec();
+        Ok(Self::new(&sig, &auth, &s_key))
     }
 
     pub fn renew(

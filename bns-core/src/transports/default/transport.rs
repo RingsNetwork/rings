@@ -525,6 +525,7 @@ pub mod tests {
     use super::*;
     use crate::types::ice_transport::IceServer;
     use std::str::FromStr;
+    use crate::ecc::SecretKey;
 
     async fn prepare_transport() -> Result<Transport> {
         let ch = Arc::new(AcChannel::new(1));
@@ -552,9 +553,14 @@ pub mod tests {
         let key1 = SecretKey::random();
         let key2 = SecretKey::random();
 
+
+        // Generate Session associated to Keys
+        let session1 = SessionManager::new_with_seckey(&key1)?;
+        let session2 = SessionManager::new_with_seckey(&key2)?;
+
         // Peer 1 try to connect peer 2
         let handshake_info1 = transport1
-            .get_handshake_info(key1, RTCSdpType::Offer)
+            .get_handshake_info(session1, RTCSdpType::Offer)
             .await?;
         assert_eq!(
             transport1.ice_connection_state().await,
@@ -579,7 +585,7 @@ pub mod tests {
 
         // Peer 2 create answer
         let handshake_info2 = transport2
-            .get_handshake_info(key2, RTCSdpType::Answer)
+            .get_handshake_info(session2, RTCSdpType::Answer)
             .await?;
         assert_eq!(
             transport1.ice_connection_state().await,
