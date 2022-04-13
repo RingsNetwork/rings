@@ -1,20 +1,15 @@
 #![feature(async_closure)]
-use anyhow::Result;
 use bns_core::dht::Chord;
 use bns_core::ecc::SecretKey;
 use bns_core::message::handler::MessageHandler;
 use bns_core::swarm::Swarm;
 use bns_core::types::message::MessageListener;
+use bns_node::cli::Client;
 use bns_node::logger::LogLevel;
 use bns_node::logger::Logger;
-use bns_node::service::response::Peer;
-use bns_node::service::{request::Method, response::TransportAndIce, run_service};
+use bns_node::service::run_service;
 use clap::{Args, Parser, Subcommand};
 use futures::lock::Mutex;
-use jsonrpc_core::Params;
-use jsonrpc_core::Value;
-use jsonrpc_core_client::RawClient;
-use serde_json::json;
 use std::sync::Arc;
 
 #[derive(Parser, Debug)]
@@ -75,11 +70,7 @@ struct ClientArgs {
 
 impl ClientArgs {
     async fn new_client(&self) -> anyhow::Result<Client> {
-        Ok(Client {
-            client: jsonrpc_core_client::transports::http::connect(self.endpoint_url.as_str())
-                .await
-                .map_err(|e| anyhow::anyhow!("jsonrpc client error: {}.", e))?,
-        })
+        Client::new(self.endpoint_url.as_str()).await
     }
 }
 
@@ -192,109 +183,8 @@ async fn daemon_run(http_addr: String, key: &SecretKey, stun: &str) -> anyhow::R
     Ok(())
 }
 
-#[derive(Clone)]
-struct Client {
-    client: RawClient,
-}
-
-impl Client {
-    async fn connect_peer_via_http(&mut self, http_url: &str) -> anyhow::Result<()> {
-        let resp = self
-            .client
-            .call_method(
-                Method::ConnectPeerViaHttp.as_str(),
-                Params::Array(vec![Value::String(http_url.to_owned())]),
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-
-        log::debug!("resp: {:?}", resp);
-        let transport_id = resp
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Unexpect response"))?;
-        println!("Succeed, Your transport_id: {}", transport_id);
-        Ok(())
-    }
-
-    async fn connect_peer_via_ice(&mut self, ice_info: &str) -> anyhow::Result<()> {
-        let resp = self
-            .client
-            .call_method(
-                Method::ConnectPeerViaIce.as_str(),
-                Params::Array(vec![Value::String(ice_info.to_owned())]),
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let info: TransportAndIce =
-            serde_json::from_value(resp).map_err(|e| anyhow::anyhow!("{}", e))?;
-
-        println!(
-            "Successful!\ntransport_id: {}\nice: {}",
-            info.transport_id, info.ice,
-        );
-        Ok(())
-    }
-
-    async fn create_offer(&mut self) -> anyhow::Result<()> {
-        let resp = self
-            .client
-            .call_method(Method::CreateOffer.as_str(), Params::Array(vec![]))
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let info: TransportAndIce =
-            serde_json::from_value(resp).map_err(|e| anyhow::anyhow!("{}", e))?;
-        println!(
-            "Successful!\ntransport_id: {}\nice: {}",
-            info.transport_id, info.ice
-        );
-        Ok(())
-    }
-
-    async fn accept_answer(&mut self, transport_id: &str, ice: &str) -> anyhow::Result<()> {
-        let resp = self
-            .client
-            .call_method(
-                Method::AcceptAnswer.as_str(),
-                Params::Array(vec![json!(transport_id), json!(ice)]),
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let peer: Peer = serde_json::from_value(resp).map_err(|e| anyhow::anyhow!("{}", e))?;
-        println!("Successful, transport_id: {}", peer.transport_id);
-        Ok(())
-    }
-
-    async fn list_peers(&mut self, _all: bool) -> anyhow::Result<()> {
-        let resp = self
-            .client
-            .call_method(Method::ListPeers.as_str(), Params::Array(vec![]))
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let peers: Vec<Peer> =
-            serde_json::from_value(resp).map_err(|e| anyhow::anyhow!("{}", e))?;
-        println!("Successful");
-        println!("Address, TransportId");
-        peers.iter().for_each(|item| {
-            println!("{}, {}", item.address, item.transport_id);
-        });
-        Ok(())
-    }
-
-    async fn disconnect(&mut self, address: &str) -> anyhow::Result<()> {
-        self.client
-            .call_method(
-                Method::Disconnect.as_str(),
-                Params::Array(vec![json!(address)]),
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        println!("Done.");
-        Ok(())
-    }
-}
-
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> anyhow::Result<()> {
     dotenv::dotenv().ok();
     let cli = Cli::parse();
     Logger::init(cli.log_level.into())?;
@@ -308,11 +198,17 @@ async fn main() -> Result<()> {
                 .new_client()
                 .await?
                 .connect_peer_via_http(args.peer_url.as_str())
-                .await?;
+                .await?
+                .display();
             Ok(())
         }
         Command::Sdp(SdpCommand::Offer(args)) => {
-            args.client_args.new_client().await?.create_offer().await?;
+            args.client_args
+                .new_client()
+                .await?
+                .create_offer()
+                .await?
+                .display();
             Ok(())
         }
         Command::Sdp(SdpCommand::Answer(args)) => {
@@ -320,7 +216,8 @@ async fn main() -> Result<()> {
                 .new_client()
                 .await?
                 .connect_peer_via_ice(args.ice.as_str())
-                .await?;
+                .await?
+                .display();
             Ok(())
         }
         Command::Sdp(SdpCommand::AcceptAnswer(args)) => {
@@ -328,7 +225,8 @@ async fn main() -> Result<()> {
                 .new_client()
                 .await?
                 .accept_answer(args.transport_id.as_str(), args.ice.as_str())
-                .await?;
+                .await?
+                .display();
             Ok(())
         }
         Command::Peer(PeerCommand::List(args)) => {
@@ -336,7 +234,8 @@ async fn main() -> Result<()> {
                 .new_client()
                 .await?
                 .list_peers(args.all)
-                .await?;
+                .await?
+                .display();
             Ok(())
         }
         Command::Peer(PeerCommand::Disconnect(args)) => {
@@ -344,7 +243,8 @@ async fn main() -> Result<()> {
                 .new_client()
                 .await?
                 .disconnect(args.address.as_str())
-                .await?;
+                .await?
+                .display();
             Ok(())
         }
         Command::Send(_args) => {
