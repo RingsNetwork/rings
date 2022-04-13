@@ -2,7 +2,6 @@ use super::{request, response::TransportAndIce};
 use crate::error::{Error, Result};
 use bns_core::{
     message::Encoded,
-    session::SessionManager,
     swarm::{Swarm, TransportManager},
     transports::Transport,
     types::ice_transport::{IceTransport, IceTrickleScheme},
@@ -18,14 +17,13 @@ use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 #[derive(Clone)]
 pub struct Processor {
     pub swarm: Arc<Swarm>,
-    pub session: SessionManager,
 }
 
 impl Metadata for Processor {}
 
-impl From<(Arc<Swarm>, SessionManager)> for Processor {
-    fn from((swarm, session): (Arc<Swarm>, SessionManager)) -> Self {
-        Self { swarm, session }
+impl From<Arc<Swarm>> for Processor {
+    fn from(swarm: Arc<Swarm>) -> Self {
+        Self { swarm }
     }
 }
 
@@ -40,7 +38,7 @@ impl Processor {
         let transport_cloned = transport.clone();
         let task = async move {
             let hs_info = transport_cloned
-                .get_handshake_info(self.session.clone(), RTCSdpType::Offer)
+                .get_handshake_info(self.swarm.session(), RTCSdpType::Offer)
                 .await
                 .map_err(Error::CreateOffer)?
                 .to_string();
@@ -87,7 +85,7 @@ impl Processor {
             .await
             .map_err(|e| Error::RemoteRpcError(e.to_string()))?;
         let hs_info = transport
-            .get_handshake_info(self.session.clone(), RTCSdpType::Offer)
+            .get_handshake_info(self.swarm.session(), RTCSdpType::Offer)
             .await
             .map_err(Error::CreateOffer)?
             .to_string();
@@ -153,7 +151,7 @@ impl Processor {
             .map_err(Error::RegisterIceError)?;
 
         let hs_info = transport
-            .get_handshake_info(self.session.clone(), RTCSdpType::Answer)
+            .get_handshake_info(self.swarm.session(), RTCSdpType::Answer)
             .await
             .map_err(Error::CreateAnswer)?
             .to_string();
@@ -207,6 +205,35 @@ impl Processor {
             .map_err(Error::CloseTransportError)?;
         Ok(())
     }
+
+    pub async fn list_pendings(&self) -> Result<Vec<String>> {
+        let pendings = self
+            .swarm
+            .pending_transports()
+            .await
+            .map_err(|_| Error::InternalError)?;
+        Ok(pendings.iter().map(|x| x.id.to_string()).collect())
+    }
+
+    pub async fn close_pending_transport(&self, transport_id: &str) -> Result<()> {
+        let transport_id =
+            uuid::Uuid::from_str(transport_id).map_err(|_| Error::InvalidTransportId)?;
+        let transport = self
+            .swarm
+            .find_pending_transport(transport_id)
+            .map_err(|_| Error::TransportNotFound)?
+            .ok_or(Error::TransportNotFound)?;
+        if transport.is_connected().await {
+            transport
+                .close()
+                .await
+                .map_err(Error::CloseTransportError)?;
+        }
+        self.swarm
+            .pop_pending_transport(transport_id)
+            .map_err(Error::CloseTransportError)?;
+        Ok(())
+    }
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -252,4 +279,117 @@ pub async fn new_client(url: &str) -> Result<RawClient> {
         .await
         .map_err(|e| Error::RemoteRpcError(e.to_string()))?;
     Ok(c)
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use bns_core::{ecc::SecretKey, session::SessionManager};
+
+    fn new_processor() -> Processor {
+        let key = SecretKey::random();
+
+        let (auth, key) =
+            SessionManager::gen_unsign_info(key.address(), Some(bns_core::session::Ttl::Never))
+                .unwrap();
+        let sig = key.sign(&auth.to_string().unwrap()).to_vec();
+        let session = SessionManager::new(&sig, &auth, &key);
+        let swarm = Arc::new(Swarm::new(
+            "stun://stun.l.google.com:19302",
+            key.address(),
+            session,
+        ));
+        swarm.into()
+    }
+
+    #[tokio::test]
+    async fn test_processor_create_offer() {
+        let processor = new_processor();
+        let ti = processor.create_offer().await.unwrap();
+        let pendings = processor.swarm.pending_transports().await.unwrap();
+        assert_eq!(pendings.len(), 1);
+        assert_eq!(pendings.get(0).unwrap().id.to_string(), ti.transport_id);
+    }
+
+    #[tokio::test]
+    async fn test_processor_list_pendings() {
+        let processor = new_processor();
+        let ti0 = processor.create_offer().await.unwrap();
+        let ti1 = processor.create_offer().await.unwrap();
+        let pendings = processor.swarm.pending_transports().await.unwrap();
+        assert_eq!(pendings.len(), 2);
+        let pending_ids = processor.list_pendings().await.unwrap();
+        assert_eq!(pendings.len(), pending_ids.len());
+        let ids = vec![ti0.transport_id, ti1.transport_id];
+        for item in pending_ids {
+            assert!(ids.contains(&item), "id[{}] not in list", item);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_processor_close_pending_transport() {
+        let processor = new_processor();
+        let ti0 = processor.create_offer().await.unwrap();
+        let _ti1 = processor.create_offer().await.unwrap();
+        let ti2 = processor.create_offer().await.unwrap();
+        let pendings = processor.swarm.pending_transports().await.unwrap();
+        assert_eq!(pendings.len(), 3);
+        assert!(
+            processor.close_pending_transport("abc").await.is_err(),
+            "close_pending_transport() should be error"
+        );
+        let transport1 = processor
+            .swarm
+            .find_pending_transport(uuid::Uuid::from_str(ti0.transport_id.as_str()).unwrap())
+            .unwrap();
+        assert!(transport1.is_some(), "transport_1 should be Some()");
+        let transport1 = transport1.unwrap();
+        assert!(
+            processor
+                .close_pending_transport(ti0.transport_id.as_str())
+                .await
+                .is_ok(),
+            "close_pending_transport({}) should be ok",
+            ti0.transport_id
+        );
+        assert!(!transport1.is_connected().await, "transport1 should closed");
+
+        let pendings = processor.swarm.pending_transports().await.unwrap();
+        assert_eq!(pendings.len(), 2);
+
+        assert!(
+            !pendings
+                .iter()
+                .any(|x| x.id.to_string() == ti0.transport_id),
+            "transport[{}] should not in pending_transports",
+            ti0.transport_id
+        );
+
+        let transport2 = processor
+            .swarm
+            .find_pending_transport(uuid::Uuid::from_str(ti2.transport_id.as_str()).unwrap())
+            .unwrap();
+        assert!(transport2.is_some(), "transport2 should be Some()");
+        let transport2 = transport2.unwrap();
+        assert!(
+            processor
+                .close_pending_transport(ti2.transport_id.as_str())
+                .await
+                .is_ok(),
+            "close_pending_transport({}) should be ok",
+            ti0.transport_id
+        );
+        assert!(!transport2.is_connected().await, "transport2 should closed");
+
+        let pendings = processor.swarm.pending_transports().await.unwrap();
+        assert_eq!(pendings.len(), 1);
+
+        assert!(
+            !pendings
+                .iter()
+                .any(|x| x.id.to_string() == ti2.transport_id),
+            "transport[{}] should not in pending_transports",
+            ti0.transport_id
+        );
+    }
 }

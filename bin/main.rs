@@ -33,6 +33,8 @@ enum Command {
     Sdp(SdpCommand),
     #[clap(subcommand)]
     Peer(PeerCommand),
+    #[clap(subcommand)]
+    Pending(PendingCommand),
     Send(Send),
     NewSecretKey,
 }
@@ -144,8 +146,6 @@ enum PeerCommand {
 struct PeerListArgs {
     #[clap(flatten)]
     client_args: ClientArgs,
-    #[clap(parse(from_flag), short = 'a')]
-    all: bool,
 }
 
 #[derive(Args, Debug)]
@@ -155,6 +155,26 @@ struct PeerDisconnect {
 
     #[clap(about)]
     address: String,
+}
+#[derive(Subcommand, Debug)]
+#[clap(rename_all = "kebab-case")]
+enum PendingCommand {
+    List(PendingList),
+    Close(PendingCloseTransport),
+}
+
+#[derive(Args, Debug)]
+struct PendingList {
+    #[clap(flatten)]
+    client_args: ClientArgs,
+}
+
+#[derive(Args, Debug)]
+struct PendingCloseTransport {
+    #[clap(flatten)]
+    client_args: ClientArgs,
+    #[clap(short = 't')]
+    transport_id: String,
 }
 
 #[derive(Args, Debug)]
@@ -174,14 +194,14 @@ async fn daemon_run(http_addr: String, key: &SecretKey, stun: &str) -> anyhow::R
         SessionManager::gen_unsign_info(key.address(), Some(bns_core::session::Ttl::Never))?;
     let sig = key.sign(&auth.to_string()?).to_vec();
     let session = SessionManager::new(&sig, &auth, &key);
-    let swarm = Arc::new(Swarm::new(stun, key.address(), session.clone()));
+    let swarm = Arc::new(Swarm::new(stun, key.address(), session));
 
     let listen_event = MessageHandler::new(dht.clone(), swarm.clone());
     let swarm_clone = swarm.clone();
 
     let (_, _) = futures::join!(
         Arc::new(listen_event).listen(),
-        run_service(http_addr.to_owned(), swarm_clone, session)
+        run_service(http_addr.to_owned(), swarm_clone)
     );
 
     Ok(())
@@ -234,12 +254,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Command::Peer(PeerCommand::List(args)) => {
-            args.client_args
-                .new_client()
-                .await?
-                .list_peers(args.all)
-                .await?
-                .display();
+            args.client_args.new_client().await?.list_peers().await?;
             Ok(())
         }
         Command::Peer(PeerCommand::Disconnect(args)) => {
@@ -247,6 +262,24 @@ async fn main() -> anyhow::Result<()> {
                 .new_client()
                 .await?
                 .disconnect(args.address.as_str())
+                .await?
+                .display();
+            Ok(())
+        }
+        Command::Pending(PendingCommand::List(args)) => {
+            args.client_args
+                .new_client()
+                .await?
+                .list_pendings()
+                .await?
+                .display();
+            Ok(())
+        }
+        Command::Pending(PendingCommand::Close(args)) => {
+            args.client_args
+                .new_client()
+                .await?
+                .close_pending_transport(args.transport_id.as_str())
                 .await?
                 .display();
             Ok(())

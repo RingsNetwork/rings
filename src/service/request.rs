@@ -9,6 +9,8 @@ pub enum Method {
     SendTo,
     Disconnect,
     AcceptAnswer,
+    ListPendings,
+    ClosePendingTransport,
 }
 
 impl Method {
@@ -21,6 +23,8 @@ impl Method {
             Method::SendTo => "sendTo",
             Method::Disconnect => "disconnect",
             Method::AcceptAnswer => "acceptAnswer",
+            Method::ListPendings => "listPendings",
+            Method::ClosePendingTransport => "closePendingTransport",
         }
     }
 }
@@ -43,6 +47,8 @@ impl TryFrom<&str> for Method {
             "sendTo" => Self::SendTo,
             "disconnect" => Self::Disconnect,
             "acceptAnswer" => Self::AcceptAnswer,
+            "listPendings" => Self::ListPendings,
+            "closePendingTransport" => Self::ClosePendingTransport,
             _ => return Err(Error::InvalidMethod),
         })
     }
