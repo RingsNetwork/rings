@@ -1,4 +1,4 @@
-use crate::ecc::{recover, verify, HashStr, PublicKey, SecretKey};
+use crate::ecc::{verify, HashStr, PublicKey};
 use crate::err::{Error, Result};
 use crate::message::{Did, Encoded};
 use crate::session::Session;
@@ -55,7 +55,7 @@ where
         let ts_ms = utils::get_epoch_ms();
         let ttl_ms = ttl_ms.unwrap_or(DEFAULT_TTL_MS);
         let msg = Self::pack_msg(&data, ts_ms, ttl_ms)?;
-        let session = session_manager.session()?.clone();
+        let session = session_manager.session()?;
         let sig = session_manager.sign(&msg)?;
         let tx_id = msg.into();
         let addr = session_manager.authorizer()?.to_owned();
@@ -167,6 +167,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ecc::SecretKey;
 
     #[derive(Deserialize, Serialize, PartialEq, Debug)]
     struct TestData {

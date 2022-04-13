@@ -198,7 +198,7 @@ mod tests {
         // Ensure that the address belongs to the key.
         assert_eq!(address, &key.address());
 
-        let sig = key.sign(&message);
+        let sig = key.sign(message);
 
         // Verify message signature by address.
         assert!(verify(message, address, sig));

@@ -1,5 +1,3 @@
-/// Swarm is transport management
-use crate::ecc::SecretKey;
 use crate::err::{Error, Result};
 use crate::message::{self, Message, MessageRelay, MessageRelayMethod};
 use crate::session::SessionManager;
@@ -55,7 +53,7 @@ impl Swarm {
             transport_event_channel: Channel::new(1),
             ice_server: ice_server.into(),
             address,
-            session: session,
+            session,
             pending: Arc::new(Mutex::new(vec![])),
         }
     }

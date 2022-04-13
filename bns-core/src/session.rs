@@ -58,9 +58,9 @@ impl AuthorizedInfo {
 }
 
 impl Session {
-    pub fn new(sig: &Vec<u8>, auth_info: &AuthorizedInfo) -> Self {
+    pub fn new(sig: &[u8], auth_info: &AuthorizedInfo) -> Self {
         Self {
-            sig: sig.clone(),
+            sig: sig.to_vec(),
             auth: auth_info.clone(),
         }
     }
@@ -119,10 +119,10 @@ impl SessionManager {
     /// sig: Sigature of AuthorizedInfo
     /// auth_info: generated from `gen_unsign_info`
     /// session_key: temp key from gen_unsign_info
-    pub fn new(sig: &Vec<u8>, auth_info: &AuthorizedInfo, session_key: &SecretKey) -> Self {
+    pub fn new(sig: &[u8], auth_info: &AuthorizedInfo, session_key: &SecretKey) -> Self {
         let inner = SessionWithKey {
-            session: Session::new(&sig, &auth_info),
-            session_key: session_key.clone(),
+            session: Session::new(sig, auth_info),
+            session_key: *session_key,
         };
 
         Self {
@@ -138,15 +138,10 @@ impl SessionManager {
         Ok(Self::new(&sig, &auth, &s_key))
     }
 
-    pub fn renew(
-        &self,
-        sig: &Vec<u8>,
-        auth_info: &AuthorizedInfo,
-        key: &SecretKey,
-    ) -> Result<&Self> {
+    pub fn renew(&self, sig: &[u8], auth_info: &AuthorizedInfo, key: &SecretKey) -> Result<&Self> {
         let new_inner = SessionWithKey {
-            session: Session::new(&sig, &auth_info),
-            session_key: key.clone(),
+            session: Session::new(sig, auth_info),
+            session_key: *key,
         };
         let mut inner = self
             .inner
@@ -173,7 +168,7 @@ impl SessionManager {
     }
 
     pub fn sign(&self, msg: &str) -> Result<Vec<u8>> {
-        Ok(self.session_key()?.sign(&msg).to_vec())
+        Ok(self.session_key()?.sign(msg).to_vec())
     }
 
     pub fn authorizer(&self) -> Result<Address> {

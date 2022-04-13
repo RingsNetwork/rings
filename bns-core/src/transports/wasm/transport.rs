@@ -1,6 +1,6 @@
 use super::helper::RtcSessionDescriptionWrapper;
 use crate::channels::Channel as CbChannel;
-use crate::ecc::{PublicKey, SecretKey};
+use crate::ecc::PublicKey;
 use crate::err::{Error, Result};
 use crate::message::MessageRelay;
 use crate::message::MessageRelayMethod;

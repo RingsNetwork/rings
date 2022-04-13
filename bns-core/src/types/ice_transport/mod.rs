@@ -1,6 +1,6 @@
 pub mod ice_server;
 pub use self::ice_server::IceServer;
-use crate::ecc::{PublicKey, SecretKey};
+use crate::ecc::PublicKey;
 use crate::err::Result;
 use crate::message::Encoded;
 use crate::session::SessionManager;
