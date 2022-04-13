@@ -229,7 +229,7 @@ impl Client {
             serde_json::from_value(resp).map_err(|e| anyhow::anyhow!("{}", e))?;
 
         println!(
-            "Succussful!\ntransport_id: {}\nice: {}",
+            "Successful!\ntransport_id: {}\nice: {}",
             info.transport_id, info.ice,
         );
         Ok(())
@@ -244,7 +244,7 @@ impl Client {
         let info: TransportAndIce =
             serde_json::from_value(resp).map_err(|e| anyhow::anyhow!("{}", e))?;
         println!(
-            "Succussful!\ntransport_id: {}\nice: {}",
+            "Successful!\ntransport_id: {}\nice: {}",
             info.transport_id, info.ice
         );
         Ok(())
@@ -260,7 +260,7 @@ impl Client {
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         let peer: Peer = serde_json::from_value(resp).map_err(|e| anyhow::anyhow!("{}", e))?;
-        println!("Succussful, transport_id: {}", peer.transport_id);
+        println!("Successful, transport_id: {}", peer.transport_id);
         Ok(())
     }
 
@@ -272,7 +272,7 @@ impl Client {
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         let peers: Vec<Peer> =
             serde_json::from_value(resp).map_err(|e| anyhow::anyhow!("{}", e))?;
-        println!("Succussful");
+        println!("Successful");
         println!("Address, TransportId");
         peers.iter().for_each(|item| {
             println!("{}, {}", item.address, item.transport_id);
