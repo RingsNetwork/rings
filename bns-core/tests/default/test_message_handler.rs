@@ -6,12 +6,12 @@ pub mod test {
     use bns_core::message;
     use bns_core::message::handler::MessageHandler;
     use bns_core::message::{Message, MessageRelayMethod};
+    use bns_core::session::SessionManager;
     use bns_core::swarm::Swarm;
     use bns_core::swarm::TransportManager;
     use bns_core::transports::Transport;
     use bns_core::types::ice_transport::IceTransport;
     use bns_core::types::ice_transport::IceTrickleScheme;
-    use bns_core::session::SessionManager;
     use futures::lock::Mutex;
     use std::sync::Arc;
     use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;

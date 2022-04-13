@@ -182,14 +182,14 @@ struct Send {
 async fn daemon_run(http_addr: String, key: &SecretKey, stun: &str) -> anyhow::Result<()> {
     // TODO support run daemonize
     let dht = Arc::new(Mutex::new(Chord::new(key.address().into())));
-    let (auth, key) = SessionManager::gen_unsign_info(key.address(), None)?;
+    let (auth, key) =
+        SessionManager::gen_unsign_info(key.address(), Some(bns_core::session::Ttl::Never))?;
     let sig = key.sign(&auth.to_string()?).to_vec();
     let session = SessionManager::new(&sig, &auth, &key);
     let swarm = Arc::new(Swarm::new(stun, key.address(), session.clone()));
 
     let listen_event = MessageHandler::new(dht.clone(), swarm.clone());
     let swarm_clone = swarm.clone();
-    let key = key.to_owned();
 
     let (_, _) = futures::join!(
         Arc::new(listen_event).listen(),

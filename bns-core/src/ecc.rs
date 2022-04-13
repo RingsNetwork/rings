@@ -1,6 +1,4 @@
 use crate::err::{Error, Result};
-use crate::types::cipher::PrivKey;
-use crate::types::cipher::PubKey;
 use hex;
 use rand::SeedableRng;
 use rand_hc::Hc128Rng;

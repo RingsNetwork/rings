@@ -99,8 +99,7 @@ where
     }
 
     pub fn pubkey(&self) -> Result<PublicKey> {
-        let auth = self.session.auth.to_string()?;
-        recover(&auth, self.session.sig.clone())
+        self.session.pubkey()
     }
 
     pub fn pack_msg(data: &T, ts_ms: u128, ttl_ms: usize) -> Result<String> {
@@ -186,7 +185,15 @@ mod tests {
             c: 2.33,
             d: true,
         };
-        MessageRelay::new(test_data, &session, None, None, None, MessageRelayMethod::SEND).unwrap()
+        MessageRelay::new(
+            test_data,
+            &session,
+            None,
+            None,
+            None,
+            MessageRelayMethod::SEND,
+        )
+        .unwrap()
     }
 
     #[test]

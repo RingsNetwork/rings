@@ -1,4 +1,6 @@
+use crate::ecc::recover;
 use crate::ecc::verify;
+use crate::ecc::PublicKey;
 use crate::ecc::SecretKey;
 use crate::err::{Error, Result};
 use crate::utils;
@@ -91,6 +93,11 @@ impl Session {
         } else {
             Ok(self.auth.addr)
         }
+    }
+
+    pub fn pubkey(&self) -> Result<PublicKey> {
+        let auth = self.auth.to_string()?;
+        recover(&auth, self.sig.clone())
     }
 }
 

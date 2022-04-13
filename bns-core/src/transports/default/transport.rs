@@ -523,9 +523,9 @@ impl DefaultTransport {
 pub mod tests {
     use super::DefaultTransport as Transport;
     use super::*;
+    use crate::ecc::SecretKey;
     use crate::types::ice_transport::IceServer;
     use std::str::FromStr;
-    use crate::ecc::SecretKey;
 
     async fn prepare_transport() -> Result<Transport> {
         let ch = Arc::new(AcChannel::new(1));
@@ -552,7 +552,6 @@ pub mod tests {
         // Generate key pairs for signing and verification
         let key1 = SecretKey::random();
         let key2 = SecretKey::random();
-
 
         // Generate Session associated to Keys
         let session1 = SessionManager::new_with_seckey(&key1)?;
