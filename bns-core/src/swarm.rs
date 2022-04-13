@@ -244,6 +244,7 @@ mod tests {
     use super::*;
     use crate::transports::default::transport::tests::establish_connection;
     use tokio::time;
+    use crate::ecc::SecretKey;
     use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 
     fn new_swarm() -> Swarm {

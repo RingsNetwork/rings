@@ -1,7 +1,6 @@
 use super::{http_error::HttpError, result::HttpResult};
 use anyhow::anyhow;
 use axum::extract::{Extension, Query, RawBody};
-use bns_core::ecc::SecretKey;
 use bns_core::session::SessionManager;
 use bns_core::swarm::{Swarm, TransportManager};
 use bns_core::types::ice_transport::IceTrickleScheme;

@@ -1,7 +1,6 @@
 use super::{request, response::TransportAndIce};
 use crate::error::{Error, Result};
 use bns_core::{
-    ecc::SecretKey,
     message::Encoded,
     session::SessionManager,
     swarm::{Swarm, TransportManager},
