@@ -36,8 +36,14 @@ impl MessageHandler {
         message: Message,
     ) -> Result<()> {
         // TODO: diff ttl for each message?
-        let payload =
-            MessageRelay::new(message, &self.swarm.session(), None, to_path, from_path, method)?;
+        let payload = MessageRelay::new(
+            message,
+            &self.swarm.session(),
+            None,
+            to_path,
+            from_path,
+            method,
+        )?;
         self.swarm.send_message(address, payload).await
     }
 

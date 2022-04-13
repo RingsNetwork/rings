@@ -2,9 +2,9 @@ use super::{http_error::HttpError, result::HttpResult};
 use anyhow::anyhow;
 use axum::extract::{Extension, Query, RawBody};
 use bns_core::ecc::SecretKey;
+use bns_core::session::SessionManager;
 use bns_core::swarm::{Swarm, TransportManager};
 use bns_core::types::ice_transport::IceTrickleScheme;
-use bns_core::session::{SessionManager};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -43,7 +43,11 @@ pub async fn connect_handler(
     }
 }
 
-async fn handshake(swarm: Arc<Swarm>, session: SessionManager, data: Vec<u8>) -> anyhow::Result<String> {
+async fn handshake(
+    swarm: Arc<Swarm>,
+    session: SessionManager,
+    data: Vec<u8>,
+) -> anyhow::Result<String> {
     // get offer from remote and send answer back
 
     let transport = swarm.new_transport().await?;
@@ -52,7 +56,9 @@ async fn handshake(swarm: Arc<Swarm>, session: SessionManager, data: Vec<u8>) ->
         .await
     {
         Ok(addr) => {
-            let resp = transport.get_handshake_info(session.clone(), RTCSdpType::Answer).await;
+            let resp = transport
+                .get_handshake_info(session.clone(), RTCSdpType::Answer)
+                .await;
             match resp {
                 Ok(info) => {
                     swarm.register(&addr, Arc::clone(&transport)).await?;
@@ -79,7 +85,9 @@ pub async fn trickle_forward(
     // request remote offer and sand answer to remote
     let client = reqwest::Client::new();
     let transport = swarm.new_transport().await?;
-    let req = transport.get_handshake_info(session.clone(), RTCSdpType::Offer).await?;
+    let req = transport
+        .get_handshake_info(session.clone(), RTCSdpType::Offer)
+        .await?;
     log::debug!(
         "sending offer and candidate {:?} to {:?}",
         req.to_owned(),

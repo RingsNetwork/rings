@@ -1,9 +1,9 @@
 pub mod ice_server;
 pub use self::ice_server::IceServer;
-use crate::session::SessionManager;
 use crate::ecc::{PublicKey, SecretKey};
 use crate::err::Result;
 use crate::message::Encoded;
+use crate::session::SessionManager;
 use crate::types::channel::Channel;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -78,7 +78,11 @@ pub trait IceTransportCallback<E: Send, Ch: Channel<E>>: IceTransport<E, Ch> {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait IceTrickleScheme<E: Send, Ch: Channel<E>>: IceTransport<E, Ch> {
     type SdpType;
-    async fn get_handshake_info(&self, session: SessionManager, kind: Self::SdpType) -> Result<Encoded>;
+    async fn get_handshake_info(
+        &self,
+        session: SessionManager,
+        kind: Self::SdpType,
+    ) -> Result<Encoded>;
     async fn register_remote_info(&self, data: Encoded) -> Result<Address>;
     async fn wait_for_connected(&self) -> Result<()>;
 }

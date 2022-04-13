@@ -1,9 +1,9 @@
 use crate::ecc::{recover, verify, HashStr, PublicKey, SecretKey};
 use crate::err::{Error, Result};
 use crate::message::{Did, Encoded};
-use crate::utils;
-use crate::session::SessionManager;
 use crate::session::Session;
+use crate::session::SessionManager;
+use crate::utils;
 use flate2::write::{GzDecoder, GzEncoder};
 use flate2::Compression;
 use serde::de::DeserializeOwned;
@@ -88,7 +88,10 @@ where
         if self.is_expired() {
             return false;
         }
-        if let (Ok(msg), Ok(addr)) = (Self::pack_msg(&self.data, self.ts_ms, self.ttl_ms), self.session.address()) {
+        if let (Ok(msg), Ok(addr)) = (
+            Self::pack_msg(&self.data, self.ts_ms, self.ttl_ms),
+            self.session.address(),
+        ) {
             verify(&msg, &addr, self.sig.clone())
         } else {
             false
@@ -161,8 +164,6 @@ where
         Self::from_auto(&v)
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {

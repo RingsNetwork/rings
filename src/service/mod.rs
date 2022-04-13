@@ -17,15 +17,18 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use bns_core::session::SessionManager;
+use bns_core::swarm::Swarm;
 use http::header::{self, HeaderName, HeaderValue};
 use jsonrpc_core::MetaIoHandler;
 use std::sync::Arc;
 use tower_http::set_header::SetResponseHeaderLayer;
-use bns_core::swarm::Swarm;
-use bns_core::session::SessionManager;
 
-
-pub async fn run_service(addr: String, swarm: Arc<Swarm>, session: SessionManager) -> anyhow::Result<()> {
+pub async fn run_service(
+    addr: String,
+    swarm: Arc<Swarm>,
+    session: SessionManager,
+) -> anyhow::Result<()> {
     let binding_addr = addr.parse().unwrap();
 
     let swarm_layer = Extension(swarm.clone());

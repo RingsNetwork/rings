@@ -1,10 +1,10 @@
 use crate::channels::Channel as AcChannel;
-use crate::session::SessionManager;
-use crate::ecc::{PublicKey};
+use crate::ecc::PublicKey;
 use crate::err::{Error, Result};
 use crate::message::MessageRelay;
 use crate::message::MessageRelayMethod;
 use crate::message::{Encoded, Encoder};
+use crate::session::SessionManager;
 use crate::transports::helper::Promise;
 use crate::transports::helper::TricklePayload;
 use crate::types::channel::Channel;
@@ -375,7 +375,11 @@ impl IceTrickleScheme<Event, AcChannel<Event>> for DefaultTransport {
 
     type SdpType = RTCSdpType;
 
-    async fn get_handshake_info(&self, session: SessionManager, kind: RTCSdpType) -> Result<Encoded> {
+    async fn get_handshake_info(
+        &self,
+        session: SessionManager,
+        kind: RTCSdpType,
+    ) -> Result<Encoded> {
         log::trace!("prepareing handshake info {:?}", kind);
         let sdp = match kind {
             RTCSdpType::Answer => self.get_answer().await?,

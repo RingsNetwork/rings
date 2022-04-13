@@ -1,4 +1,5 @@
 use bns_core::message::handler::MessageHandler;
+use bns_core::session::SessionManager;
 use bns_core::swarm::Swarm;
 use bns_core::types::message::MessageListener;
 use bns_core::{dht::Chord, ecc::SecretKey};
@@ -10,7 +11,6 @@ use futures::lock::Mutex;
 use libc::kill;
 use std::fs::{self, File};
 use std::sync::Arc;
-use bns_core::session::SessionManager;
 
 #[derive(Parser, Debug)]
 #[clap(about)]

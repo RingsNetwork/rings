@@ -1,56 +1,52 @@
 use crate::ecc::verify;
 use crate::ecc::SecretKey;
+use crate::err::{Error, Result};
 use crate::utils;
-use crate::err::{Result, Error};
+use serde::Deserialize;
+use serde::Serialize;
 use std::sync::Arc;
 use std::sync::RwLock;
 use web3::types::Address;
-use serde::Deserialize;
-use serde::Serialize;
 
 const DEFAULT_TTL_MS: usize = 24 * 3600 * 1000;
 
 #[derive(Deserialize, Serialize, PartialEq, Debug, Clone)]
 pub enum Ttl {
     Some(usize),
-    Never
+    Never,
 }
 
 #[derive(Deserialize, Serialize, PartialEq, Debug, Clone)]
 pub struct AuthorizedInfo {
-    pub authorizer: Address,
-    pub addr: Address,
-    pub ttl_ms: Ttl,
-    pub ts_ms: u128,
+    authorizer: Address,
+    addr: Address,
+    ttl_ms: Ttl,
+    ts_ms: u128,
 }
-
 
 #[derive(Deserialize, Serialize, PartialEq, Debug, Clone)]
 pub struct Session {
     pub sig: Vec<u8>,
-    pub auth: AuthorizedInfo
+    pub auth: AuthorizedInfo,
 }
 
 #[derive(Debug, Clone)]
 pub struct SessionManager {
     pub session: Session,
-    pub session_key: SecretKey
+    pub session_key: SecretKey,
 }
 
 impl AuthorizedInfo {
     pub fn to_string(&self) -> Result<String> {
-        serde_json::to_string(self).map_err(|_| {
-            Error::SerializeToString
-        })
+        serde_json::to_string(self).map_err(|_| Error::SerializeToString)
     }
 }
-
 
 impl Session {
     pub fn new(sig: &Vec<u8>, auth_info: &AuthorizedInfo) -> Self {
         Self {
             sig: sig.clone(),
-            auth: auth_info.clone()
+            auth: auth_info.clone(),
         }
     }
 
@@ -67,7 +63,9 @@ impl Session {
         if self.is_expired() {
             return false;
         }
-        if let Ok(auth_str) = serde_json::to_string(&self.auth).map_err(|_| Error::SerializeToString) {
+        if let Ok(auth_str) =
+            serde_json::to_string(&self.auth).map_err(|_| Error::SerializeToString)
+        {
             verify(&auth_str, &self.auth.authorizer, self.sig.clone())
         } else {
             false
@@ -83,15 +81,17 @@ impl Session {
     }
 }
 
-
 impl SessionManager {
-    pub fn gen_unsign_info(authorizer: Address, ttl: Option<Ttl>) -> Result<(AuthorizedInfo, SecretKey)> {
+    pub fn gen_unsign_info(
+        authorizer: Address,
+        ttl: Option<Ttl>,
+    ) -> Result<(AuthorizedInfo, SecretKey)> {
         let key = SecretKey::random();
         let info = AuthorizedInfo {
             authorizer,
             addr: key.address(),
             ttl_ms: ttl.unwrap_or(Ttl::Some(DEFAULT_TTL_MS)),
-            ts_ms: utils::get_epoch_ms()
+            ts_ms: utils::get_epoch_ms(),
         };
         Ok((info, key))
     }
@@ -99,7 +99,7 @@ impl SessionManager {
     pub fn new(sig: &Vec<u8>, auth_info: &AuthorizedInfo, key: &SecretKey) -> Self {
         Self {
             session: Session::new(&sig, &auth_info),
-            session_key: key.clone()
+            session_key: key.clone(),
         }
     }
 

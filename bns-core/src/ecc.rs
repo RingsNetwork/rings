@@ -1,3 +1,6 @@
+use crate::err::{Error, Result};
+use crate::types::cipher::PrivKey;
+use crate::types::cipher::PubKey;
 use hex;
 use rand::SeedableRng;
 use rand_hc::Hc128Rng;
@@ -9,8 +12,6 @@ use std::fmt::Write;
 use std::ops::Deref;
 use web3::signing::keccak256;
 use web3::types::Address;
-
-use crate::err::{Error, Result};
 
 // ref https://docs.rs/web3/0.18.0/src/web3/signing.rs.html#69
 
@@ -129,7 +130,8 @@ impl SecretKey {
     }
     pub fn sign(&self, message: &str) -> SigBytes {
         let message_hash = keccak256(message.as_bytes());
-        let (signature, recover_id) = libsecp256k1::sign(&libsecp256k1::Message::parse(&message_hash), &*self);
+        let (signature, recover_id) =
+            libsecp256k1::sign(&libsecp256k1::Message::parse(&message_hash), &*self);
         let mut sig_bytes: SigBytes = [0u8; 65];
         sig_bytes[0..32].copy_from_slice(&signature.r.b32());
         sig_bytes[32..64].copy_from_slice(&signature.s.b32());
@@ -143,7 +145,6 @@ impl PublicKey {
         public_key_address(self)
     }
 }
-
 
 pub fn verify<S>(message: &str, address: &Address, signature: S) -> bool
 where

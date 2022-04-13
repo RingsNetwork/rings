@@ -2,13 +2,13 @@
 use crate::ecc::SecretKey;
 use crate::err::{Error, Result};
 use crate::message::{self, Message, MessageRelay, MessageRelayMethod};
+use crate::session::SessionManager;
 use crate::storage::{MemStorage, Storage};
 use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::Event;
 use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
-use crate::session::SessionManager;
 use async_stream::stream;
 use async_trait::async_trait;
 use futures_core::Stream;

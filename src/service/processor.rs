@@ -3,10 +3,10 @@ use crate::error::{Error, Result};
 use bns_core::{
     ecc::SecretKey,
     message::Encoded,
+    session::SessionManager,
     swarm::{Swarm, TransportManager},
     transports::Transport,
     types::ice_transport::{IceTransport, IceTrickleScheme},
-    session::SessionManager
 };
 use jsonrpc_core::Metadata;
 use jsonrpc_core_client::RawClient;
