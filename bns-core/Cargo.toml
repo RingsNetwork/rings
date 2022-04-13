@@ -18,7 +18,6 @@ rand = { version = "0.8.5", features = ["getrandom"] }
 rand_core = { version = "0.6.3", features = ["getrandom"] }
 rand_hc = "0.3.1"
 libsecp256k1 = "0.7.0"
-ecies = "0.2"
 sha1 = "0.10.1"
 serde_json = { version = "1.0.70" }
 serde = { version = "1.0.130", features = ["derive"] }

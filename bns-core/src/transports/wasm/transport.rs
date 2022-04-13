@@ -5,6 +5,7 @@ use crate::err::{Error, Result};
 use crate::message::MessageRelay;
 use crate::message::MessageRelayMethod;
 use crate::message::{Encoded, Encoder};
+use crate::session::SessionManager;
 use crate::transports::helper::Promise;
 use crate::transports::helper::TricklePayload;
 use crate::types::channel::Channel;
@@ -413,7 +414,11 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
 
     type SdpType = RtcSdpType;
 
-    async fn get_handshake_info(&self, key: SecretKey, kind: Self::SdpType) -> Result<Encoded> {
+    async fn get_handshake_info(
+        &self,
+        session: SessionManager,
+        kind: Self::SdpType,
+    ) -> Result<Encoded> {
         let sdp = match kind {
             RtcSdpType::Answer => self.get_answer().await?,
             RtcSdpType::Offer => self.get_offer().await?,
@@ -433,7 +438,7 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
             candidates: local_candidates_json,
         };
         log::debug!("prepared hanshake info :{:?}", data);
-        let resp = MessageRelay::new(data, &key, None, None, None, MessageRelayMethod::SEND)?;
+        let resp = MessageRelay::new(data, &session, None, None, None, MessageRelayMethod::SEND)?;
         Ok(resp.gzip(9)?.encode()?)
     }
 
