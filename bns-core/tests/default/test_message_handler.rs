@@ -217,25 +217,27 @@ pub mod test {
             transport_2_to_3.ice_connection_state().await,
             Some(RTCIceConnectionState::Connected)
         );
-        let connect_msg = Message::ConnectNode(
-            message::ConnectNode {
-                sender_id: swarm1.address().into(),
-                target_id: swarm3.address().into(),
-                handshake_info: handshake_info13.to_string(),
-            }
-        );
+        let connect_msg = Message::ConnectNode(message::ConnectNode {
+            sender_id: swarm1.address().into(),
+            target_id: swarm3.address().into(),
+            handshake_info: handshake_info13.to_string(),
+        });
         handler1
             .send_message(
                 &swarm2.address(),
                 None,
                 None,
                 MessageRelayMethod::SEND,
-                connect_msg.clone()
+                connect_msg.clone(),
             )
             .await?;
-        assert_eq!(handler2.listen_once().await.unwrap().data, Message::FindSuccessor(
-            message::FindSuccessor{id: swarm1.address().into(), for_fix: false}
-        ));
+        assert_eq!(
+            handler2.listen_once().await.unwrap().data,
+            Message::FindSuccessor(message::FindSuccessor {
+                id: swarm1.address().into(),
+                for_fix: false
+            })
+        );
 
         handler3.listen_once().await;
         handler2.listen_once().await;
