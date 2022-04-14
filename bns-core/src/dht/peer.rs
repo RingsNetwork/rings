@@ -41,7 +41,7 @@ impl VirtualPeer {
             Err(Error::AddressNotEqual)
         } else {
             Ok(Self {
-                address: a.address.clone(),
+                address: a.address,
                 data: [&a.data[..], &b.data[..]].concat(),
             })
         }
