@@ -83,7 +83,7 @@ pub enum Error {
     ChordInvalidAction,
 
     #[error("Unexpected ChordAction, {0:?}")]
-    ChordUnexpectedActhon(crate::dht::ChordAction),
+    ChordUnexpectedAction(crate::dht::ChordAction),
 
     #[error("Chord findsuccessor error, {0}")]
     ChordFindSuccessor(String),
@@ -114,6 +114,9 @@ pub enum Error {
 
     #[error("call lock() failed")]
     SessionTryLockFailed,
+
+    #[error("Invalid peer type")]
+    InvalidPeerType,
 
     #[cfg(not(feature = "wasm"))]
     #[error("RTC new peer connection failed")]

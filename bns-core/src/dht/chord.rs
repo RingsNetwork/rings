@@ -1,8 +1,10 @@
+use super::peer::VirtualPeer;
 /// implementation of CHORD DHT
 /// ref: https://pdos.csail.mit.edu/papers/ton:chord/paper-ton.pdf
 /// With high probability, the number of nodes that must be contacted to find a successor in an N-node network is O(log N).
 use crate::dht::Did;
 use crate::err::{Error, Result};
+use crate::storage::{MemStorage, Storage};
 use num_bigint::BigUint;
 use serde::Deserialize;
 use serde::Serialize;
@@ -12,8 +14,13 @@ use serde::Serialize;
 pub enum RemoteAction {
     // Ask did_a to find did_b
     FindSuccessor(Did),
+    // Ask did_a to find virtual node did_b
+    FindVNode(Did),
+    // Ask did_a to find virtual peer for storage
+    FindAndStore(VirtualPeer),
     // ask Did_a to notify(did_b)
     Notify(Did),
+    NotifyWithVNode(Did, Vec<VirtualPeer>),
     FindSuccessorForFix(Did),
     CheckPredecessor,
 }
@@ -21,6 +28,7 @@ pub enum RemoteAction {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ChordAction {
     None,
+    SomeVNode(VirtualPeer),
     Some(Did),
     RemoteAction(Did, RemoteAction),
 }
@@ -36,6 +44,7 @@ pub struct Chord {
     pub predecessor: Option<Did>,
     pub id: Did,
     pub fix_finger_index: u8,
+    pub storage: MemStorage<Did, VirtualPeer>,
 }
 
 impl Chord {
@@ -46,6 +55,7 @@ impl Chord {
             predecessor: None,
             // for Eth address, it's 160
             finger: vec![None; 160],
+            storage: MemStorage::<Did, VirtualPeer>::new(),
             id,
             fix_finger_index: 0,
         }
@@ -192,6 +202,57 @@ impl Chord {
                 )),
                 Err(e) => Err(e),
             }
+        }
+    }
+}
+
+impl Chord {
+    pub fn lookup(&self, id: Did) -> Result<ChordAction> {
+        match self.find_successor(id) {
+            Ok(ChordAction::Some(id)) => match self.storage.get(&id) {
+                Some(v) => Ok(ChordAction::SomeVNode(v)),
+                None => Ok(ChordAction::None),
+            },
+            Ok(ChordAction::RemoteAction(n, RemoteAction::FindSuccessor(id))) => {
+                Ok(ChordAction::RemoteAction(n, RemoteAction::FindVNode(id)))
+            }
+            Ok(a) => Err(Error::ChordUnexpectedAction(a)),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn store(&self, peer: VirtualPeer) -> Result<ChordAction> {
+        let id = peer.did();
+        match self.find_successor(id) {
+            Ok(ChordAction::Some(id)) => match self.storage.set(&id, peer) {
+                Some(v) => Ok(ChordAction::SomeVNode(v)),
+                None => Ok(ChordAction::None),
+            },
+            Ok(ChordAction::RemoteAction(n, RemoteAction::FindSuccessor(_))) => Ok(
+                ChordAction::RemoteAction(n, RemoteAction::FindAndStore(peer)),
+            ),
+            Ok(a) => Err(Error::ChordUnexpectedAction(a)),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn stablilize_with_vnode(&mut self) -> Result<ChordAction> {
+        match self.stablilize() {
+            ChordAction::RemoteAction(x, RemoteAction::Notify(id)) => {
+                Ok(ChordAction::RemoteAction(
+                    x,
+                    RemoteAction::NotifyWithVNode(id, self.storage.values()),
+                ))
+            }
+            ChordAction::None => Ok(ChordAction::None),
+            x => Err(Error::ChordUnexpectedAction(x)),
+        }
+    }
+
+    pub fn notify_with_vnode(&mut self, id: Did, vnodes: Vec<VirtualPeer>) {
+        self.notify(id);
+        for v in vnodes {
+            self.storage.set(&v.did(), v);
         }
     }
 }

@@ -369,7 +369,7 @@ impl MessageHandler {
                 )
                 .await
             }
-            action => Err(Error::ChordUnexpectedActhon(action)),
+            action => Err(Error::ChordUnexpectedAction(action)),
         }
     }
 
