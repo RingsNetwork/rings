@@ -112,6 +112,9 @@ pub enum Error {
     #[error("failed to close previous while registering, {0}")]
     SwarmToClosePrevTransport(String),
 
+    #[error("call lock() failed")]
+    SessionTryLockFailed,
+
     #[cfg(not(feature = "wasm"))]
     #[error("RTC new peer connection failed")]
     RTCPeerConnectionCreateFailed(#[source] webrtc::Error),

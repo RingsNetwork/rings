@@ -2,6 +2,7 @@
 use bns_core::dht::Chord;
 use bns_core::ecc::SecretKey;
 use bns_core::message::handler::MessageHandler;
+use bns_core::session::SessionManager;
 use bns_core::swarm::Swarm;
 use bns_core::types::message::MessageListener;
 use bns_node::cli::Client;
@@ -169,15 +170,18 @@ struct Send {
 async fn daemon_run(http_addr: String, key: &SecretKey, stun: &str) -> anyhow::Result<()> {
     // TODO support run daemonize
     let dht = Arc::new(Mutex::new(Chord::new(key.address().into())));
-    let swarm = Arc::new(Swarm::new(stun, key.to_owned()));
+    let (auth, key) =
+        SessionManager::gen_unsign_info(key.address(), Some(bns_core::session::Ttl::Never))?;
+    let sig = key.sign(&auth.to_string()?).to_vec();
+    let session = SessionManager::new(&sig, &auth, &key);
+    let swarm = Arc::new(Swarm::new(stun, key.address(), session.clone()));
 
     let listen_event = MessageHandler::new(dht.clone(), swarm.clone());
     let swarm_clone = swarm.clone();
-    let key = key.to_owned();
 
     let (_, _) = futures::join!(
         Arc::new(listen_event).listen(),
-        run_service(http_addr.to_owned(), swarm_clone, key)
+        run_service(http_addr.to_owned(), swarm_clone, session)
     );
 
     Ok(())

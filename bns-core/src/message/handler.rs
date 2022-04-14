@@ -36,8 +36,14 @@ impl MessageHandler {
         message: Message,
     ) -> Result<()> {
         // TODO: diff ttl for each message?
-        let payload =
-            MessageRelay::new(message, &self.swarm.key, None, to_path, from_path, method)?;
+        let payload = MessageRelay::new(
+            message,
+            &self.swarm.session(),
+            None,
+            to_path,
+            from_path,
+            method,
+        )?;
         self.swarm.send_message(address, payload).await
     }
 
@@ -133,7 +139,7 @@ impl MessageHandler {
                     .register_remote_info(msg.handshake_info.to_owned().into())
                     .await?;
                 let handshake_info = trans
-                    .get_handshake_info(self.swarm.key, RTCSdpType::Answer)
+                    .get_handshake_info(self.swarm.session(), RTCSdpType::Answer)
                     .await?
                     .to_string();
                 self.send_message(
@@ -400,7 +406,7 @@ impl MessageHandler {
     /// which means a listening loop cannot running concurrency.
     pub async fn listen_once(&self) {
         if let Some(relay_message) = self.swarm.poll_message().await {
-            if relay_message.is_expired() || !relay_message.verify() {
+            if !relay_message.verify() {
                 log::error!("Cannot verify msg or it's expired: {:?}", relay_message);
             }
 

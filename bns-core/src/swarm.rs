@@ -1,7 +1,6 @@
-/// Swarm is transport management
-use crate::ecc::SecretKey;
 use crate::err::{Error, Result};
 use crate::message::{self, Message, MessageRelay, MessageRelayMethod};
+use crate::session::SessionManager;
 use crate::storage::{MemStorage, Storage};
 use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::Event;
@@ -24,7 +23,8 @@ pub struct Swarm {
     pending: Arc<Mutex<Vec<Arc<Transport>>>>,
     ice_server: String,
     transport_event_channel: Channel<Event>,
-    pub key: SecretKey,
+    session: SessionManager,
+    address: Address,
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
@@ -47,18 +47,23 @@ pub trait TransportManager {
 }
 
 impl Swarm {
-    pub fn new(ice_server: &str, key: SecretKey) -> Self {
+    pub fn new(ice_server: &str, address: Address, session: SessionManager) -> Self {
         Self {
             table: MemStorage::<Address, Arc<Transport>>::new(),
             transport_event_channel: Channel::new(1),
             ice_server: ice_server.into(),
-            key,
+            address,
+            session,
             pending: Arc::new(Mutex::new(vec![])),
         }
     }
 
+    pub fn session(&self) -> SessionManager {
+        self.session.clone()
+    }
+
     pub fn address(&self) -> Address {
-        self.key.address()
+        self.address
     }
 
     pub async fn send_message(
@@ -84,7 +89,7 @@ impl Swarm {
                 Some(_) => {
                     let payload = MessageRelay::new(
                         Message::JoinDHT(message::JoinDHT { id: address.into() }),
-                        &self.key,
+                        &self.session,
                         None,
                         None,
                         None,
@@ -237,6 +242,7 @@ impl TransportManager for Swarm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ecc::SecretKey;
     use crate::transports::default::transport::tests::establish_connection;
     use tokio::time;
     use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
@@ -244,7 +250,8 @@ mod tests {
     fn new_swarm() -> Swarm {
         let stun = "stun://stun.l.google.com:19302";
         let key = SecretKey::random();
-        Swarm::new(stun, key)
+        let session = SessionManager::new_with_seckey(&key).unwrap();
+        Swarm::new(stun, key.address(), session)
     }
 
     #[tokio::test]

@@ -1,9 +1,10 @@
 use crate::channels::Channel as AcChannel;
-use crate::ecc::{PublicKey, SecretKey};
+use crate::ecc::PublicKey;
 use crate::err::{Error, Result};
 use crate::message::MessageRelay;
 use crate::message::MessageRelayMethod;
 use crate::message::{Encoded, Encoder};
+use crate::session::SessionManager;
 use crate::transports::helper::Promise;
 use crate::transports::helper::TricklePayload;
 use crate::types::channel::Channel;
@@ -374,7 +375,11 @@ impl IceTrickleScheme<Event, AcChannel<Event>> for DefaultTransport {
 
     type SdpType = RTCSdpType;
 
-    async fn get_handshake_info(&self, key: SecretKey, kind: RTCSdpType) -> Result<Encoded> {
+    async fn get_handshake_info(
+        &self,
+        session: SessionManager,
+        kind: RTCSdpType,
+    ) -> Result<Encoded> {
         log::trace!("prepareing handshake info {:?}", kind);
         let sdp = match kind {
             RTCSdpType::Answer => self.get_answer().await?,
@@ -397,7 +402,7 @@ impl IceTrickleScheme<Event, AcChannel<Event>> for DefaultTransport {
             candidates: local_candidates_json,
         };
         log::trace!("prepared hanshake info :{:?}", data);
-        let resp = MessageRelay::new(data, &key, None, None, None, MessageRelayMethod::SEND)?;
+        let resp = MessageRelay::new(data, &session, None, None, None, MessageRelayMethod::SEND)?;
         Ok(resp.gzip(9)?.encode()?)
     }
 
@@ -518,6 +523,7 @@ impl DefaultTransport {
 pub mod tests {
     use super::DefaultTransport as Transport;
     use super::*;
+    use crate::ecc::SecretKey;
     use crate::types::ice_transport::IceServer;
     use std::str::FromStr;
 
@@ -547,9 +553,13 @@ pub mod tests {
         let key1 = SecretKey::random();
         let key2 = SecretKey::random();
 
+        // Generate Session associated to Keys
+        let session1 = SessionManager::new_with_seckey(&key1)?;
+        let session2 = SessionManager::new_with_seckey(&key2)?;
+
         // Peer 1 try to connect peer 2
         let handshake_info1 = transport1
-            .get_handshake_info(key1, RTCSdpType::Offer)
+            .get_handshake_info(session1, RTCSdpType::Offer)
             .await?;
         assert_eq!(
             transport1.ice_connection_state().await,
@@ -574,7 +584,7 @@ pub mod tests {
 
         // Peer 2 create answer
         let handshake_info2 = transport2
-            .get_handshake_info(key2, RTCSdpType::Answer)
+            .get_handshake_info(session2, RTCSdpType::Answer)
             .await?;
         assert_eq!(
             transport1.ice_connection_state().await,

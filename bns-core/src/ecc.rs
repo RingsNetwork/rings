@@ -1,3 +1,4 @@
+use crate::err::{Error, Result};
 use hex;
 use rand::SeedableRng;
 use rand_hc::Hc128Rng;
@@ -10,16 +11,14 @@ use std::ops::Deref;
 use web3::signing::keccak256;
 use web3::types::Address;
 
-use crate::err::{Error, Result};
-
 // ref https://docs.rs/web3/0.18.0/src/web3/signing.rs.html#69
 
 // length r: 32, length s: 32, length v(recovery_id): 1
 pub type SigBytes = [u8; 65];
 
-#[derive(Copy, Clone, Debug)]
+#[derive(PartialEq, Debug, Clone, Copy)]
 pub struct SecretKey(libsecp256k1::SecretKey);
-#[derive(Copy, Clone, Debug)]
+#[derive(PartialEq, Debug, Clone, Copy)]
 pub struct PublicKey(libsecp256k1::PublicKey);
 
 #[derive(Deserialize, Serialize, Debug, Clone, Eq, PartialEq)]
@@ -127,8 +126,15 @@ impl SecretKey {
     pub fn address(&self) -> Address {
         secret_key_address(self)
     }
-    pub fn sign(&self, msg: &[u8; 32]) -> (libsecp256k1::Signature, libsecp256k1::RecoveryId) {
-        libsecp256k1::sign(&libsecp256k1::Message::parse(msg), &*self)
+    pub fn sign(&self, message: &str) -> SigBytes {
+        let message_hash = keccak256(message.as_bytes());
+        let (signature, recover_id) =
+            libsecp256k1::sign(&libsecp256k1::Message::parse(&message_hash), &*self);
+        let mut sig_bytes: SigBytes = [0u8; 65];
+        sig_bytes[0..32].copy_from_slice(&signature.r.b32());
+        sig_bytes[32..64].copy_from_slice(&signature.s.b32());
+        sig_bytes[64] = recover_id.serialize();
+        sig_bytes
     }
 }
 
@@ -136,21 +142,6 @@ impl PublicKey {
     pub fn address(&self) -> Address {
         public_key_address(self)
     }
-}
-
-pub fn sign(message: &str, key: &SecretKey) -> SigBytes
-where
-{
-    let message_hash = keccak256(message.as_bytes());
-
-    let (signature, recover_id) = key.sign(&message_hash);
-
-    let mut sig_bytes: SigBytes = [0u8; 65];
-    sig_bytes[0..32].copy_from_slice(&signature.r.b32());
-    sig_bytes[32..64].copy_from_slice(&signature.s.b32());
-    sig_bytes[64] = recover_id.serialize();
-
-    sig_bytes
 }
 
 pub fn verify<S>(message: &str, address: &Address, signature: S) -> bool
@@ -207,7 +198,7 @@ mod tests {
         // Ensure that the address belongs to the key.
         assert_eq!(address, &key.address());
 
-        let sig = sign(message, key);
+        let sig = key.sign(message);
 
         // Verify message signature by address.
         assert!(verify(message, address, sig));

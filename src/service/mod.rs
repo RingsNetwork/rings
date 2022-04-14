@@ -17,19 +17,22 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use bns_core::session::SessionManager;
+use bns_core::swarm::Swarm;
 use http::header::{self, HeaderName, HeaderValue};
 use jsonrpc_core::MetaIoHandler;
 use std::sync::Arc;
 use tower_http::set_header::SetResponseHeaderLayer;
 
-use bns_core::ecc::SecretKey;
-use bns_core::swarm::Swarm;
-
-pub async fn run_service(addr: String, swarm: Arc<Swarm>, key: SecretKey) -> anyhow::Result<()> {
+pub async fn run_service(
+    addr: String,
+    swarm: Arc<Swarm>,
+    session: SessionManager,
+) -> anyhow::Result<()> {
     let binding_addr = addr.parse().unwrap();
 
     let swarm_layer = Extension(swarm.clone());
-    let key_layer = Extension(key);
+    let key_layer = Extension(session);
 
     let mut jsonrpc_handler: MetaIoHandler<Processor> = MetaIoHandler::default();
     jsonrpc::build_handler(&mut jsonrpc_handler).await;
@@ -71,11 +74,11 @@ pub async fn run_service(addr: String, swarm: Arc<Swarm>, key: SecretKey) -> any
 pub async fn jsonrpc_io_handler(
     body: String,
     Extension(swarm): Extension<Arc<Swarm>>,
-    Extension(key): Extension<SecretKey>,
+    Extension(session): Extension<SessionManager>,
     Extension(io_handler): Extension<Arc<MetaIoHandler<Processor>>>,
 ) -> HttpResult<JsonResponse> {
     let r = io_handler
-        .handle_request(&body, (swarm, key).into())
+        .handle_request(&body, (swarm, session.clone()).into())
         .await
         .ok_or(HttpError::BadRequest)?;
     Ok(JsonResponse(r))

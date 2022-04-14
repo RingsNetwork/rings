@@ -1,7 +1,9 @@
-use crate::ecc::{recover, sign, verify, HashStr, PublicKey, SecretKey};
+use crate::ecc::{verify, HashStr, PublicKey};
 use crate::err::{Error, Result};
 use crate::message::{Did, Encoded};
-use chrono::Utc;
+use crate::session::Session;
+use crate::session::SessionManager;
+use crate::utils;
 use flate2::write::{GzDecoder, GzEncoder};
 use flate2::Compression;
 use serde::de::DeserializeOwned;
@@ -31,6 +33,7 @@ pub struct MessageRelay<T> {
     pub to_path: VecDeque<Did>,
     pub from_path: VecDeque<Did>,
     pub addr: Address,
+    pub session: Session,
     pub sig: Vec<u8>,
     pub method: MessageRelayMethod,
 }
@@ -43,24 +46,24 @@ where
 {
     pub fn new(
         data: T,
-        key: &SecretKey,
+        session_manager: &SessionManager,
         ttl_ms: Option<usize>,
         to_path: Option<VecDeque<Did>>,
         from_path: Option<VecDeque<Did>>,
         method: MessageRelayMethod,
     ) -> Result<Self> {
-        let ts_ms = get_epoch_ms();
+        let ts_ms = utils::get_epoch_ms();
         let ttl_ms = ttl_ms.unwrap_or(DEFAULT_TTL_MS);
-
         let msg = Self::pack_msg(&data, ts_ms, ttl_ms)?;
-        let sig = sign(&msg, key).into();
+        let session = session_manager.session()?;
+        let sig = session_manager.sign(&msg)?;
         let tx_id = msg.into();
-
-        let addr = key.address().to_owned();
+        let addr = session_manager.authorizer()?.to_owned();
         let to_path = to_path.unwrap_or_default();
         let from_path = from_path.unwrap_or_default();
 
         Ok(Self {
+            session,
             data,
             addr,
             tx_id,
@@ -74,21 +77,29 @@ where
     }
 
     pub fn is_expired(&self) -> bool {
-        let now = get_epoch_ms();
-        now < self.ts_ms + self.ttl_ms as u128
+        let now = utils::get_epoch_ms();
+        now > self.ts_ms + self.ttl_ms as u128
     }
 
     pub fn verify(&self) -> bool {
-        if let Ok(msg) = Self::pack_msg(&self.data, self.ts_ms, self.ttl_ms) {
-            verify(&msg, &self.addr, self.sig.clone())
+        if !self.session.verify() {
+            return false;
+        }
+        if self.is_expired() {
+            return false;
+        }
+        if let (Ok(msg), Ok(addr)) = (
+            Self::pack_msg(&self.data, self.ts_ms, self.ttl_ms),
+            self.session.address(),
+        ) {
+            verify(&msg, &addr, self.sig.clone())
         } else {
             false
         }
     }
 
     pub fn pubkey(&self) -> Result<PublicKey> {
-        let msg = Self::pack_msg(&self.data, self.ts_ms, self.ttl_ms)?;
-        recover(&msg, self.sig.clone())
+        self.session.pubkey()
     }
 
     pub fn pack_msg(data: &T, ts_ms: u128, ttl_ms: usize) -> Result<String> {
@@ -153,13 +164,10 @@ where
     }
 }
 
-fn get_epoch_ms() -> u128 {
-    Utc::now().timestamp_millis() as u128
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ecc::SecretKey;
 
     #[derive(Deserialize, Serialize, PartialEq, Debug)]
     struct TestData {
@@ -171,13 +179,22 @@ mod tests {
 
     fn new_test_message() -> MessageRelay<TestData> {
         let key = SecretKey::random();
+        let session = SessionManager::new_with_seckey(&key).unwrap();
         let test_data = TestData {
             a: "hello".to_string(),
             b: 111,
             c: 2.33,
             d: true,
         };
-        MessageRelay::new(test_data, &key, None, None, None, MessageRelayMethod::SEND).unwrap()
+        MessageRelay::new(
+            test_data,
+            &session,
+            None,
+            None,
+            None,
+            MessageRelayMethod::SEND,
+        )
+        .unwrap()
     }
 
     #[test]
