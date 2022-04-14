@@ -404,7 +404,7 @@ impl MessageHandler {
 
     /// This method is required because web-sys components is not `Send`
     /// which means a listening loop cannot running concurrency.
-    pub async fn listen_once(&self) {
+    pub async fn listen_once(&self) -> Option<MessageRelay<Message>> {
         if let Some(relay_message) = self.swarm.poll_message().await {
             if !relay_message.verify() {
                 log::error!("Cannot verify msg or it's expired: {:?}", relay_message);
@@ -416,6 +416,9 @@ impl MessageHandler {
             {
                 log::error!("Error in handle_message: {}", e);
             }
+            Some(relay_message)
+        } else {
+            None
         }
     }
 }

@@ -217,20 +217,26 @@ pub mod test {
             transport_2_to_3.ice_connection_state().await,
             Some(RTCIceConnectionState::Connected)
         );
+        let connect_msg = Message::ConnectNode(
+            message::ConnectNode {
+                sender_id: swarm1.address().into(),
+                target_id: swarm3.address().into(),
+                handshake_info: handshake_info13.to_string(),
+            }
+        );
         handler1
             .send_message(
                 &swarm2.address(),
                 None,
                 None,
                 MessageRelayMethod::SEND,
-                Message::ConnectNode(message::ConnectNode {
-                    sender_id: swarm1.address().into(),
-                    target_id: swarm3.address().into(),
-                    handshake_info: handshake_info13.to_string(),
-                }),
+                connect_msg.clone()
             )
             .await?;
-        handler2.listen_once().await;
+        assert_eq!(handler2.listen_once().await.unwrap().data, Message::FindSuccessor(
+            message::FindSuccessor{id: swarm1.address().into(), for_fix: false}
+        ));
+
         handler3.listen_once().await;
         handler2.listen_once().await;
         handler3.listen_once().await;
@@ -440,7 +446,7 @@ pub mod test {
                 }),
             )
             .await?;
-        handler1.listen_once().await;
+        assert!(handler1.listen_once().await.is_some());
         //        handler2.listen_once().await;
         assert_eq!(dht2.lock().await.successor, key1.address().into());
         assert_eq!(dht1.lock().await.successor, key2.address().into());

@@ -37,23 +37,23 @@ pub struct FindSuccessor {
     pub for_fix: bool,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct FoundSuccessor {
     pub id: Did,
     pub for_fix: bool,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct NotifyPredecessor {
     pub id: Did,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct NotifiedPredecessor {
     pub id: Did,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct JoinDHT {
     pub id: Did,
 }
@@ -168,7 +168,7 @@ impl MessageSessionRelayProtocol for MessageRelay<Message> {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub enum Message {
     None,
     JoinDHT(JoinDHT),
