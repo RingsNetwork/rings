@@ -1,6 +1,9 @@
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
+    #[error("Address of Vritual Peer not equal")]
+    AddressNotEqual,
+
     #[error("Encode a byte vector into a base58-check string, adds 4 bytes checksum")]
     Encode,
 
@@ -83,7 +86,7 @@ pub enum Error {
     ChordInvalidAction,
 
     #[error("Unexpected ChordAction, {0:?}")]
-    ChordUnexpectedActhon(crate::dht::ChordAction),
+    ChordUnexpectedAction(crate::dht::ChordAction),
 
     #[error("Chord findsuccessor error, {0}")]
     ChordFindSuccessor(String),
@@ -114,6 +117,9 @@ pub enum Error {
 
     #[error("call lock() failed")]
     SessionTryLockFailed,
+
+    #[error("Invalid peer type")]
+    InvalidPeerType,
 
     #[cfg(not(feature = "wasm"))]
     #[error("RTC new peer connection failed")]

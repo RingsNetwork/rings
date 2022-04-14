@@ -10,7 +10,7 @@ use std::ops::{Add, Sub};
 use std::str::FromStr;
 use web3::types::H160;
 
-#[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd, Debug, Serialize, Deserialize)]
+#[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd, Debug, Serialize, Deserialize, Hash)]
 pub struct Did(H160);
 
 impl Deref for Did {

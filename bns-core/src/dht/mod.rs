@@ -6,3 +6,4 @@ pub use {chord::Chord, chord::ChordAction, chord::RemoteAction as ChordRemoteAct
 
 mod stabilization;
 pub use stabilization::Stabilization;
+pub mod peer;
