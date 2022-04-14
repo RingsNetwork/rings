@@ -1,6 +1,9 @@
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
+    #[error("Address of Vritual Peer not equal")]
+    AddressNotEqual,
+
     #[error("Encode a byte vector into a base58-check string, adds 4 bytes checksum")]
     Encode,
 

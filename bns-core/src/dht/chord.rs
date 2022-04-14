@@ -227,9 +227,15 @@ impl Chord {
     pub fn store(&self, peer: VirtualPeer) -> Result<ChordAction> {
         let id = peer.did();
         match self.find_successor(id) {
-            Ok(ChordAction::Some(id)) => match self.storage.set(&id, peer) {
-                Some(v) => Ok(ChordAction::SomeVNode(v)),
-                None => Ok(ChordAction::None),
+            Ok(ChordAction::Some(id)) => match self.storage.get(&id) {
+                Some(v) => {
+                    let _ = self.storage.set(&id, VirtualPeer::concat(&v, &peer)?);
+                    Ok(ChordAction::None)
+                }
+                None => {
+                    let _ = self.storage.set(&id, peer);
+                    Ok(ChordAction::None)
+                }
             },
             Ok(ChordAction::RemoteAction(n, RemoteAction::FindSuccessor(_))) => Ok(
                 ChordAction::RemoteAction(n, RemoteAction::FindAndStore(peer)),
