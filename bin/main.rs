@@ -46,7 +46,7 @@ struct Daemon {
     pub http_addr: String,
 
     #[clap(long, short = 's', default_value = "stun://stun.l.google.com:19302")]
-    pub ice_server: String,
+    pub ice_servers: String,
 
     #[clap(
         long = "eth",
@@ -187,14 +187,14 @@ struct Send {
     text: String,
 }
 
-async fn daemon_run(http_addr: String, key: &SecretKey, stun: &str) -> anyhow::Result<()> {
+async fn daemon_run(http_addr: String, key: &SecretKey, stuns: &str) -> anyhow::Result<()> {
     // TODO support run daemonize
     let dht = Arc::new(Mutex::new(Chord::new(key.address().into())));
     let (auth, key) =
         SessionManager::gen_unsign_info(key.address(), Some(bns_core::session::Ttl::Never))?;
     let sig = key.sign(&auth.to_string()?).to_vec();
     let session = SessionManager::new(&sig, &auth, &key);
-    let swarm = Arc::new(Swarm::new(stun, key.address(), session));
+    let swarm = Arc::new(Swarm::new(stuns, key.address(), session.clone()));
 
     let listen_event = MessageHandler::new(dht.clone(), swarm.clone());
     let swarm_clone = swarm.clone();
@@ -215,7 +215,7 @@ async fn main() -> anyhow::Result<()> {
 
     if let Err(e) = match cli.command {
         Command::Run(args) => {
-            daemon_run(args.http_addr, &args.eth_key, args.ice_server.as_str()).await
+            daemon_run(args.http_addr, &args.eth_key, args.ice_servers.as_str()).await
         }
         Command::Connect(args) => {
             args.client_args

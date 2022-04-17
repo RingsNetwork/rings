@@ -17,6 +17,7 @@ use web_sys::RtcSdpType as RTCSdpType;
 #[cfg(not(feature = "wasm"))]
 use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 
+#[derive(Clone)]
 pub struct MessageHandler {
     dht: Arc<Mutex<Chord>>,
     swarm: Arc<Swarm>,
@@ -83,10 +84,7 @@ impl MessageHandler {
         let mut dht = self.dht.lock().await;
         let relay = relay.clone();
         match dht.join(msg.id) {
-            ChordAction::None => {
-                log::debug!("Opps, {:?} is same as current", msg.id);
-                Ok(())
-            }
+            ChordAction::None => Ok(()),
             ChordAction::RemoteAction(next, ChordRemoteAction::FindSuccessor(id)) => {
                 if next != *prev {
                     self.send_message(

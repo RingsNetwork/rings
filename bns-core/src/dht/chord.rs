@@ -96,6 +96,7 @@ impl Chord {
             // 2) #fff should follow #001 because id space is a Finate Ring
             // 3) #001 - #fff = #001 + -(#fff) = #001
             self.successor = id;
+            return ChordAction::None;
         }
         ChordAction::RemoteAction(self.successor, RemoteAction::FindSuccessor(self.id))
     }
