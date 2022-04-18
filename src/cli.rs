@@ -103,7 +103,7 @@ impl Client {
         )
     }
 
-    pub async fn list_peers(&mut self, _all: bool) -> Output<Vec<Peer>> {
+    pub async fn list_peers(&mut self) -> Output<Vec<Peer>> {
         let resp = self
             .client
             .call_method(Method::ListPeers.as_str(), Params::Array(vec![]))
@@ -137,6 +137,32 @@ impl Client {
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
+        ClientOutput::ok("Done.".into(), ())
+    }
+
+    pub async fn list_pendings(&self) -> Output<()> {
+        let resp = self
+            .client
+            .call_method(Method::ListPendings.as_str(), Params::Array(vec![]))
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let resp: Vec<String> =
+            serde_json::from_value(resp).map_err(|e| anyhow::anyhow!("{}", e))?;
+        let mut display = String::new();
+        for item in resp.iter() {
+            display.push_str(item)
+        }
+        ClientOutput::ok(display, ())
+    }
+
+    pub async fn close_pending_transport(&self, transport_id: &str) -> Output<()> {
+        self.client
+            .call_method(
+                Method::ClosePendingTransport.as_str(),
+                Params::Array(vec![json!(transport_id)]),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
         ClientOutput::ok("Done.".into(), ())
     }
 }

@@ -32,6 +32,8 @@ pub enum Error {
     JsonDeserializeError,
     #[error("Invalid method.")]
     InvalidMethod,
+    #[error("Internal error.")]
+    InternalError,
 }
 
 impl Error {
@@ -52,6 +54,7 @@ impl Error {
             Error::JsonSerializeError => 12,
             Error::JsonDeserializeError => 13,
             Error::InvalidMethod => 14,
+            Error::InternalError => 15,
         };
         -32000 - code
     }

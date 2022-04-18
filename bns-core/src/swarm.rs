@@ -153,15 +153,12 @@ impl Swarm {
         Ok(())
     }
 
-    pub async fn pending_transports(&self) -> Result<()> {
+    pub async fn pending_transports(&self) -> Result<Vec<Arc<Transport>>> {
         let pending = self
             .pending
             .try_lock()
             .map_err(|_| Error::SwarmPendingTransTryLockFailed)?;
-        for item in pending.iter() {
-            log::debug!("id: {}, pubkey: {:?}", item.id, item.pubkey().await);
-        }
-        Ok(())
+        Ok(pending.iter().cloned().collect::<Vec<_>>())
     }
 
     pub fn find_pending_transport(&self, id: uuid::Uuid) -> Result<Option<Arc<Transport>>> {

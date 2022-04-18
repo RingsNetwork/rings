@@ -1,7 +1,6 @@
 use super::{http_error::HttpError, result::HttpResult};
 use anyhow::anyhow;
 use axum::extract::{Extension, Query, RawBody};
-use bns_core::session::SessionManager;
 use bns_core::swarm::{Swarm, TransportManager};
 use bns_core::types::ice_transport::IceTrickleScheme;
 
@@ -9,15 +8,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 
+#[deprecated]
 pub async fn handshake_handler(
     RawBody(body): RawBody,
     Extension(swarm): Extension<Arc<Swarm>>,
-    Extension(session): Extension<SessionManager>,
 ) -> HttpResult<String> {
     log::info!("Incoming body: {:?}", body);
 
     let payload = hyper::body::to_bytes(body).await?;
-    match handshake(swarm, session.clone(), payload.to_vec()).await {
+    match handshake(swarm, payload.to_vec()).await {
         Ok(data) => Ok(data),
         Err(e) => {
             log::error!("failed to handle trickle scheme: {:?}", e);
@@ -26,14 +25,14 @@ pub async fn handshake_handler(
     }
 }
 
+#[deprecated]
 pub async fn connect_handler(
     Query(params): Query<HashMap<String, String>>,
     Extension(swarm): Extension<Arc<Swarm>>,
-    Extension(session): Extension<SessionManager>,
 ) -> HttpResult<String> {
     let node = params.get("node").ok_or(HttpError::BadRequest)?;
 
-    match trickle_forward(swarm, session.clone(), node.into()).await {
+    match trickle_forward(swarm, node.into()).await {
         Ok(resp) => Ok(resp),
         Err(e) => {
             log::error!("failed to trickle forward {:?}", e);
@@ -42,11 +41,7 @@ pub async fn connect_handler(
     }
 }
 
-async fn handshake(
-    swarm: Arc<Swarm>,
-    session: SessionManager,
-    data: Vec<u8>,
-) -> anyhow::Result<String> {
+async fn handshake(swarm: Arc<Swarm>, data: Vec<u8>) -> anyhow::Result<String> {
     // get offer from remote and send answer back
 
     let transport = swarm.new_transport().await?;
@@ -56,7 +51,7 @@ async fn handshake(
     {
         Ok(addr) => {
             let resp = transport
-                .get_handshake_info(session.clone(), RTCSdpType::Answer)
+                .get_handshake_info(swarm.session(), RTCSdpType::Answer)
                 .await;
             match resp {
                 Ok(info) => {
@@ -76,16 +71,12 @@ async fn handshake(
     }
 }
 
-pub async fn trickle_forward(
-    swarm: Arc<Swarm>,
-    session: SessionManager,
-    node: String,
-) -> anyhow::Result<String> {
+pub async fn trickle_forward(swarm: Arc<Swarm>, node: String) -> anyhow::Result<String> {
     // request remote offer and sand answer to remote
     let client = reqwest::Client::new();
     let transport = swarm.new_transport().await?;
     let req = transport
-        .get_handshake_info(session.clone(), RTCSdpType::Offer)
+        .get_handshake_info(swarm.session(), RTCSdpType::Offer)
         .await?;
     log::debug!(
         "sending offer and candidate {:?} to {:?}",
