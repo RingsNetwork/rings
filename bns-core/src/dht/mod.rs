@@ -9,3 +9,4 @@ pub use {types::Chord, types::ChordStablize};
 mod stabilization;
 pub use stabilization::Stabilization;
 pub mod peer;
+pub mod subring;

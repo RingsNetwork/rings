@@ -1,4 +1,4 @@
-use crate::dht::{PeerRing, PeerRingAction, PeerRingRemoteAction, Did, Chord, ChordStablize};
+use crate::dht::{Chord, ChordStablize, Did, PeerRing, PeerRingAction, PeerRingRemoteAction};
 use crate::err::{Error, Result};
 use crate::message::{
     AlreadyConnected, ConnectNode, ConnectedNode, FindSuccessor, FoundSuccessor, JoinDHT, Message,

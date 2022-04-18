@@ -1,7 +1,7 @@
 #[cfg(test)]
 pub mod test {
     use bns_core::dht::Stabilization;
-    use bns_core::dht::{PeerRing, Did};
+    use bns_core::dht::{Did, PeerRing};
     use bns_core::ecc::SecretKey;
     use bns_core::err::Result;
     use bns_core::message::handler::MessageHandler;

@@ -2,14 +2,15 @@
 /// ref: https://pdos.csail.mit.edu/papers/ton:chord/paper-ton.pdf
 /// With high probability, the number of nodes that must be contacted to find a successor in an N-node network is O(log N).
 use super::peer::VirtualPeer;
-use super::types::{ChordStorage, Chord, ChordStablize};
+use super::types::{Chord, ChordStablize, ChordStorage};
 use crate::dht::Did;
 use crate::err::{Error, Result};
 use crate::storage::{MemStorage, Storage};
-use std::sync::Arc;
 use num_bigint::BigUint;
 use serde::Deserialize;
 use serde::Serialize;
+use std::sync::Arc;
+use std::sync::RwLock;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
@@ -64,7 +65,7 @@ impl PeerRing {
     }
 
     pub fn new_with_storage(id: Did, storage: Arc<MemStorage<Did, VirtualPeer>>) -> Self {
-         Self {
+        Self {
             successor: id,
             predecessor: None,
             // for Eth address, it's 160
@@ -78,7 +79,6 @@ impl PeerRing {
     pub fn number_of_fingers(&self) -> usize {
         self.finger.iter().flatten().count() as usize
     }
-
 }
 
 impl Chord<PeerRingAction> for PeerRing {
@@ -121,7 +121,6 @@ impl Chord<PeerRingAction> for PeerRing {
         PeerRingAction::RemoteAction(self.successor, RemoteAction::FindSuccessor(self.id))
     }
 
-
     // Fig.5 n.find_successor(id)
     fn find_successor(&self, id: Did) -> Result<PeerRingAction> {
         // if (id \in (n; successor]); return successor
@@ -142,7 +141,6 @@ impl Chord<PeerRingAction> for PeerRing {
             }
         }
     }
-
 }
 
 impl ChordStablize<PeerRingAction> for PeerRing {

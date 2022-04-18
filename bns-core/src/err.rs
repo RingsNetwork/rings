@@ -94,6 +94,9 @@ pub enum Error {
     #[error("PeerRing cannot find cloest preceding node")]
     PeerRingNotFindCloestNode,
 
+    #[error("PeerRing RWLock unlock failed")]
+    PeerRingUnlockFailed,
+
     #[error("Cannot seek address in swarm table")]
     SwarmMissAddressInTable,
 

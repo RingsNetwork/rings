@@ -1,4 +1,4 @@
-use crate::dht::{PeerRing, PeerRingAction, PeerRingRemoteAction, ChordStablize};
+use crate::dht::{ChordStablize, PeerRing, PeerRingAction, PeerRingRemoteAction};
 use crate::err::Result;
 use crate::message::{FindSuccessor, Message, MessageRelay, MessageRelayMethod, NotifyPredecessor};
 use crate::swarm::Swarm;
