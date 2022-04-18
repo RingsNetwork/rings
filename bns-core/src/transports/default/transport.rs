@@ -334,7 +334,6 @@ impl IceTransportCallback<Event, AcChannel<Event>> for DefaultTransport {
                         if desc.is_none() {
                             let mut candidates = pending_candidates.lock().await;
                             candidates.push(candidate.clone());
-                            println!("Candidates Number: {:?}", candidates.len());
                         }
                     }
                 }

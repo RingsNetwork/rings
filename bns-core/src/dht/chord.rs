@@ -61,6 +61,10 @@ impl Chord {
         }
     }
 
+    pub fn number_of_fingers(&self) -> usize {
+        self.finger.iter().flatten().count() as usize
+    }
+
     // join a Chord ring containing node id .
     pub fn join(&mut self, id: Did) -> ChordAction {
         if id == self.id {

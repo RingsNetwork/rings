@@ -17,6 +17,7 @@ use web_sys::RtcSdpType as RTCSdpType;
 #[cfg(not(feature = "wasm"))]
 use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 
+#[derive(Clone)]
 pub struct MessageHandler {
     dht: Arc<Mutex<Chord>>,
     swarm: Arc<Swarm>,
@@ -82,13 +83,14 @@ impl MessageHandler {
     ) -> Result<()> {
         let mut dht = self.dht.lock().await;
         let relay = relay.clone();
+        // here is two situation.
+        // finger table just have no other node(beside next), it will be a `create` op
+        // otherwise, it will be a `send` op
+        let join_op = dht.number_of_fingers() > 0;
         match dht.join(msg.id) {
-            ChordAction::None => {
-                log::debug!("Opps, {:?} is same as current", msg.id);
-                Ok(())
-            }
+            ChordAction::None => Ok(()),
             ChordAction::RemoteAction(next, ChordRemoteAction::FindSuccessor(id)) => {
-                if next != *prev {
+                if next != *prev && join_op {
                     self.send_message(
                         &next.into(),
                         Some(relay.to_path),

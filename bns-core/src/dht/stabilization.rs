@@ -24,8 +24,8 @@ impl Stabilization {
         self.timeout
     }
 
-    pub async fn stabilize(&self) -> Result<()> {
-        let mut chord = self.chord.lock().await;
+    async fn notify_predecessor(&self) -> Result<()> {
+        let chord = self.chord.lock().await;
         let message = MessageRelay::new(
             Message::NotifyPredecessor(NotifyPredecessor { id: chord.id }),
             &self.swarm.session(),
@@ -37,9 +37,14 @@ impl Stabilization {
         if chord.id != chord.successor {
             self.swarm
                 .send_message(&chord.successor.into(), message)
-                .await?;
+                .await
+        } else {
+            Ok(())
         }
-        // fix fingers
+    }
+
+    async fn fix_fingers(&self) -> Result<()> {
+        let mut chord = self.chord.lock().await;
         match chord.fix_fingers() {
             Ok(action) => match action {
                 ChordAction::None => {
@@ -73,5 +78,11 @@ impl Stabilization {
                 Err(e)
             }
         }
+    }
+
+    pub async fn stabilize(&self) -> Result<()> {
+        self.notify_predecessor().await?;
+        self.fix_fingers().await?;
+        Ok(())
     }
 }

@@ -21,7 +21,7 @@ use crate::transports::Transport;
 pub struct Swarm {
     table: MemStorage<Address, Arc<Transport>>,
     pending: Arc<Mutex<Vec<Arc<Transport>>>>,
-    ice_server: String,
+    ice_servers: Vec<IceServer>,
     transport_event_channel: Channel<Event>,
     session: SessionManager,
     address: Address,
@@ -47,11 +47,17 @@ pub trait TransportManager {
 }
 
 impl Swarm {
-    pub fn new(ice_server: &str, address: Address, session: SessionManager) -> Self {
+    pub fn new(ice_servers: &str, address: Address, session: SessionManager) -> Self {
+        let ice_servers = ice_servers
+            .split(';')
+            .collect::<Vec<&str>>()
+            .into_iter()
+            .map(|_s| IceServer::from_str(_s).unwrap())
+            .collect::<Vec<IceServer>>();
         Self {
             table: MemStorage::<Address, Arc<Transport>>::new(),
             transport_event_channel: Channel::new(1),
-            ice_server: ice_server.into(),
+            ice_servers,
             address,
             session,
             pending: Arc::new(Mutex::new(vec![])),
@@ -180,7 +186,7 @@ impl TransportManager for Swarm {
         let mut ice_transport = Transport::new(event_sender);
 
         ice_transport
-            .start(&IceServer::from_str(&self.ice_server)?)
+            .start(&self.ice_servers[0])
             .await?
             .apply_callback()
             .await?;
