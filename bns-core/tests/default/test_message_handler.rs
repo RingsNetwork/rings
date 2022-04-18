@@ -267,10 +267,11 @@ pub mod test {
                 let transport_1_to_3 = swarm1.get_transport(&swarm3.address());
                 assert!(transport_1_to_3.is_some());
                 let transport_1_to_3 = transport_1_to_3.unwrap();
-                assert_eq!(
-                    transport_1_to_3.ice_connection_state().await,
-                    Some(RTCIceConnectionState::Checking)
-                );
+                let both = {
+                    transport_1_to_3.ice_connection_state().await == Some(RTCIceConnectionState::New) ||
+                        transport_1_to_3.ice_connection_state().await == Some(RTCIceConnectionState::Checking)
+                };
+                assert!(both);
                 transport_1_to_3.wait_for_data_channel_open().await.unwrap();
                 assert_eq!(
                     transport_1_to_3.ice_connection_state().await,
