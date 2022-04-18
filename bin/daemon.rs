@@ -2,7 +2,7 @@ use bns_core::message::handler::MessageHandler;
 use bns_core::session::SessionManager;
 use bns_core::swarm::Swarm;
 use bns_core::types::message::MessageListener;
-use bns_core::{dht::Chord, ecc::SecretKey};
+use bns_core::{dht::PeerRing, ecc::SecretKey};
 use bns_node::logger::{LogLevel, Logger};
 use bns_node::service::{run_service, run_udp_turn};
 use clap::{Args, Parser, Subcommand};
@@ -96,7 +96,7 @@ struct ShutdownArgs {
 
 async fn run_jobs(args: &RunArgs) -> anyhow::Result<()> {
     let key: &SecretKey = &args.eth_key;
-    let dht = Arc::new(Mutex::new(Chord::new(key.address().into())));
+    let dht = Arc::new(Mutex::new(PeerRing::new(key.address().into())));
     let (auth, key) = SessionManager::gen_unsign_info(key.address(), None)?;
     let sig = key.sign(&auth.to_string()?).to_vec();
     let session = SessionManager::new(&sig, &auth, &key);

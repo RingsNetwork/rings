@@ -1,13 +1,15 @@
-use super::peer::VirtualPeer;
 /// implementation of CHORD DHT
 /// ref: https://pdos.csail.mit.edu/papers/ton:chord/paper-ton.pdf
 /// With high probability, the number of nodes that must be contacted to find a successor in an N-node network is O(log N).
+use super::peer::VirtualPeer;
+use super::types::{Chord, ChordStablize, ChordStorage};
 use crate::dht::Did;
 use crate::err::{Error, Result};
 use crate::storage::{MemStorage, Storage};
 use num_bigint::BigUint;
 use serde::Deserialize;
 use serde::Serialize;
+use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
@@ -26,7 +28,7 @@ pub enum RemoteAction {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum ChordAction {
+pub enum PeerRingAction {
     None,
     SomeVNode(VirtualPeer),
     Some(Did),
@@ -34,7 +36,7 @@ pub enum ChordAction {
 }
 
 #[derive(Clone, Debug)]
-pub struct Chord {
+pub struct PeerRing {
     // first node on circle that succeeds (n + 2 ^(k-1) ) mod 2^m , 1 <= k<= m
     // for index start with 0, it should be (n+2^k) mod 2^m
     pub finger: Vec<Option<Did>>,
@@ -44,10 +46,10 @@ pub struct Chord {
     pub predecessor: Option<Did>,
     pub id: Did,
     pub fix_finger_index: u8,
-    pub storage: MemStorage<Did, VirtualPeer>,
+    pub storage: Arc<MemStorage<Did, VirtualPeer>>,
 }
 
-impl Chord {
+impl PeerRing {
     // create a new Chord ring.
     pub fn new(id: Did) -> Self {
         Self {
@@ -55,7 +57,19 @@ impl Chord {
             predecessor: None,
             // for Eth address, it's 160
             finger: vec![None; 160],
-            storage: MemStorage::<Did, VirtualPeer>::new(),
+            id,
+            fix_finger_index: 0,
+            storage: Arc::new(MemStorage::<Did, VirtualPeer>::new()),
+        }
+    }
+
+    pub fn new_with_storage(id: Did, storage: Arc<MemStorage<Did, VirtualPeer>>) -> Self {
+        Self {
+            successor: id,
+            predecessor: None,
+            // for Eth address, it's 160
+            finger: vec![None; 160],
+            storage: Arc::clone(&storage),
             id,
             fix_finger_index: 0,
         }
@@ -64,12 +78,14 @@ impl Chord {
     pub fn number_of_fingers(&self) -> usize {
         self.finger.iter().flatten().count() as usize
     }
+}
 
-    // join a Chord ring containing node id .
-    pub fn join(&mut self, id: Did) -> ChordAction {
+impl Chord<PeerRingAction> for PeerRing {
+    // join a PeerRing ring containing node id .
+    fn join(&mut self, id: Did) -> PeerRingAction {
         if id == self.id {
             // TODO: Do we allow multiple chord instances of the same node id?
-            return ChordAction::None;
+            return PeerRingAction::None;
         }
         for k in 0u32..159u32 {
             // (n + 2^k) % 2^m >= n
@@ -101,26 +117,49 @@ impl Chord {
             // 3) #001 - #fff = #001 + -(#fff) = #001
             self.successor = id;
         }
-        ChordAction::RemoteAction(self.successor, RemoteAction::FindSuccessor(self.id))
+        PeerRingAction::RemoteAction(self.successor, RemoteAction::FindSuccessor(self.id))
     }
 
+    // Fig.5 n.find_successor(id)
+    fn find_successor(&self, id: Did) -> Result<PeerRingAction> {
+        // if (id \in (n; successor]); return successor
+        // if ID = N63, Successor = N10
+        // N9
+        if id - self.id <= self.successor - self.id || self.id == self.successor {
+            //if self.id < id && id <= self.successor {
+            Ok(PeerRingAction::Some(id))
+        } else {
+            // n = closest preceding node(id);
+            // return n.find_successor(id);
+            match self.closest_preceding_node(id) {
+                Ok(n) => Ok(PeerRingAction::RemoteAction(
+                    n,
+                    RemoteAction::FindSuccessor(id),
+                )),
+                Err(e) => Err(e),
+            }
+        }
+    }
+}
+
+impl ChordStablize<PeerRingAction> for PeerRing {
     // called periodically. verifies n’s immediate
     // successor, and tells the successor about n.
-    pub fn stablilize(&mut self) -> ChordAction {
+    fn stablilize(&mut self) -> PeerRingAction {
         // x = successor:predecessor;
         // if (x in (n, successor)) { successor = x; successor:notify(n); }
         if let Some(x) = self.predecessor {
             if x - self.id < self.successor - self.id {
                 self.successor = x;
-                return ChordAction::RemoteAction(x, RemoteAction::Notify(self.id));
+                return PeerRingAction::RemoteAction(x, RemoteAction::Notify(self.id));
                 // successor.notify(n)
             }
         }
-        ChordAction::None
+        PeerRingAction::None
     }
 
     // n' thinks it might be our predecessor.
-    pub fn notify(&mut self, id: Did) {
+    fn notify(&mut self, id: Did) {
         // if (predecessor is nil or n' /in (predecessor; n)); predecessor = n';
         match self.predecessor {
             Some(pre) => {
@@ -135,7 +174,7 @@ impl Chord {
 
     // called periodically. refreshes finger table entries.
     // next stores the index of the next finger to fix.
-    pub fn fix_fingers(&mut self) -> Result<ChordAction> {
+    fn fix_fingers(&mut self) -> Result<PeerRingAction> {
         // next = next + 1;
         //if (next > m) next = 1;
         // finger[next] = find_successor(n + 2^(next-1) );
@@ -150,27 +189,27 @@ impl Chord {
             % BigUint::from(2u16).pow(160);
         match self.find_successor(did.into()) {
             Ok(res) => match res {
-                ChordAction::Some(v) => {
+                PeerRingAction::Some(v) => {
                     self.finger[self.fix_finger_index as usize] = Some(v);
-                    Ok(ChordAction::None)
+                    Ok(PeerRingAction::None)
                 }
-                ChordAction::RemoteAction(a, RemoteAction::FindSuccessor(b)) => Ok(
-                    ChordAction::RemoteAction(a, RemoteAction::FindSuccessorForFix(b)),
+                PeerRingAction::RemoteAction(a, RemoteAction::FindSuccessor(b)) => Ok(
+                    PeerRingAction::RemoteAction(a, RemoteAction::FindSuccessorForFix(b)),
                 ),
                 _ => {
-                    log::error!("Invalid Chord Action");
-                    Err(Error::ChordInvalidAction)
+                    log::error!("Invalid PeerRing Action");
+                    Err(Error::PeerRingInvalidAction)
                 }
             },
-            Err(e) => Err(Error::ChordFindSuccessor(e.to_string())),
+            Err(e) => Err(Error::PeerRingFindSuccessor(e.to_string())),
         }
     }
 
     // called periodically. checks whether predecessor has failed.
-    pub fn check_predecessor(&self) -> ChordAction {
+    fn check_predecessor(&self) -> PeerRingAction {
         match self.predecessor {
-            Some(p) => ChordAction::RemoteAction(p, RemoteAction::CheckPredecessor),
-            None => ChordAction::None,
+            Some(p) => PeerRingAction::RemoteAction(p, RemoteAction::CheckPredecessor),
+            None => PeerRingAction::None,
         }
     }
 
@@ -179,7 +218,7 @@ impl Chord {
     ///    if (finger[i] <- (n, id))
     ///        return finger[i]
     /// return n
-    pub fn closest_preceding_node(&self, id: Did) -> Result<Did> {
+    fn closest_preceding_node(&self, id: Did) -> Result<Did> {
         for i in (0..159).rev() {
             if let Some(v) = self.finger[i] {
                 if v - self.id < v - id {
@@ -190,79 +229,58 @@ impl Chord {
         }
         Ok(self.id)
     }
-
-    // Fig.5 n.find_successor(id)
-    pub fn find_successor(&self, id: Did) -> Result<ChordAction> {
-        // if (id \in (n; successor]); return successor
-        // if ID = N63, Successor = N10
-        // N9
-        if id - self.id <= self.successor - self.id || self.id == self.successor {
-            //if self.id < id && id <= self.successor {
-            Ok(ChordAction::Some(id))
-        } else {
-            // n = closest preceding node(id);
-            // return n.find_successor(id);
-            match self.closest_preceding_node(id) {
-                Ok(n) => Ok(ChordAction::RemoteAction(
-                    n,
-                    RemoteAction::FindSuccessor(id),
-                )),
-                Err(e) => Err(e),
-            }
-        }
-    }
 }
 
-impl Chord {
-    pub fn lookup(&self, id: Did) -> Result<ChordAction> {
+impl ChordStorage<PeerRingAction> for PeerRing {
+    fn lookup(&self, id: Did) -> Result<PeerRingAction> {
         match self.find_successor(id) {
-            Ok(ChordAction::Some(id)) => match self.storage.get(&id) {
-                Some(v) => Ok(ChordAction::SomeVNode(v)),
-                None => Ok(ChordAction::None),
+            Ok(PeerRingAction::Some(id)) => match self.storage.get(&id) {
+                Some(v) => Ok(PeerRingAction::SomeVNode(v)),
+                None => Ok(PeerRingAction::None),
             },
-            Ok(ChordAction::RemoteAction(n, RemoteAction::FindSuccessor(id))) => {
-                Ok(ChordAction::RemoteAction(n, RemoteAction::FindVNode(id)))
+            Ok(PeerRingAction::RemoteAction(n, RemoteAction::FindSuccessor(id))) => {
+                Ok(PeerRingAction::RemoteAction(n, RemoteAction::FindVNode(id)))
             }
-            Ok(a) => Err(Error::ChordUnexpectedAction(a)),
+            Ok(a) => Err(Error::PeerRingUnexpectedAction(a)),
             Err(e) => Err(e),
         }
     }
 
-    pub fn store(&self, peer: VirtualPeer) -> Result<ChordAction> {
+    fn store(&self, peer: VirtualPeer) -> Result<PeerRingAction> {
         let id = peer.did();
         match self.find_successor(id) {
-            Ok(ChordAction::Some(id)) => match self.storage.get(&id) {
+            Ok(PeerRingAction::Some(id)) => match self.storage.get(&id) {
                 Some(v) => {
                     let _ = self.storage.set(&id, VirtualPeer::concat(&v, &peer)?);
-                    Ok(ChordAction::None)
+                    Ok(PeerRingAction::None)
                 }
                 None => {
                     let _ = self.storage.set(&id, peer);
-                    Ok(ChordAction::None)
+                    Ok(PeerRingAction::None)
                 }
             },
-            Ok(ChordAction::RemoteAction(n, RemoteAction::FindSuccessor(_))) => Ok(
-                ChordAction::RemoteAction(n, RemoteAction::FindAndStore(peer)),
+            Ok(PeerRingAction::RemoteAction(n, RemoteAction::FindSuccessor(_))) => Ok(
+                PeerRingAction::RemoteAction(n, RemoteAction::FindAndStore(peer)),
             ),
-            Ok(a) => Err(Error::ChordUnexpectedAction(a)),
+            Ok(a) => Err(Error::PeerRingUnexpectedAction(a)),
             Err(e) => Err(e),
         }
     }
 
-    pub fn stablilize_with_vnode(&mut self) -> Result<ChordAction> {
+    fn stablilize_with_vnode(&mut self) -> Result<PeerRingAction> {
         match self.stablilize() {
-            ChordAction::RemoteAction(x, RemoteAction::Notify(id)) => {
-                Ok(ChordAction::RemoteAction(
+            PeerRingAction::RemoteAction(x, RemoteAction::Notify(id)) => {
+                Ok(PeerRingAction::RemoteAction(
                     x,
                     RemoteAction::NotifyWithVNode(id, self.storage.values()),
                 ))
             }
-            ChordAction::None => Ok(ChordAction::None),
-            x => Err(Error::ChordUnexpectedAction(x)),
+            PeerRingAction::None => Ok(PeerRingAction::None),
+            x => Err(Error::PeerRingUnexpectedAction(x)),
         }
     }
 
-    pub fn notify_with_vnode(&mut self, id: Did, vnodes: Vec<VirtualPeer>) {
+    fn notify_with_vnode(&mut self, id: Did, vnodes: Vec<VirtualPeer>) {
         self.notify(id);
         for v in vnodes {
             self.storage.set(&v.did(), v);
@@ -287,7 +305,7 @@ mod tests {
         // distence between (a, d) is less than (b, d)
         assert!((a - d) < (b - d));
 
-        let mut node_a = Chord::new(a);
+        let mut node_a = PeerRing::new(a);
         assert_eq!(node_a.successor, a);
 
         // for increase seq join
@@ -308,13 +326,13 @@ mod tests {
         // Node A starts to query node b for it's successor
         assert_eq!(
             node_a.join(b),
-            ChordAction::RemoteAction(b, RemoteAction::FindSuccessor(a))
+            PeerRingAction::RemoteAction(b, RemoteAction::FindSuccessor(a))
         );
         assert_eq!(node_a.successor, b);
         // Node A keep querying node b for it's successor
         assert_eq!(
             node_a.join(c),
-            ChordAction::RemoteAction(b, RemoteAction::FindSuccessor(a))
+            PeerRingAction::RemoteAction(b, RemoteAction::FindSuccessor(a))
         );
         // Node A's finter should be [None, ..B, C]
         assert!(node_a.finger.contains(&Some(c)), "{:?}", node_a.finger);
@@ -330,34 +348,34 @@ mod tests {
         // Node A will query c to find d
         assert_eq!(
             node_a.find_successor(d).unwrap(),
-            ChordAction::RemoteAction(c, RemoteAction::FindSuccessor(d))
+            PeerRingAction::RemoteAction(c, RemoteAction::FindSuccessor(d))
         );
         assert_eq!(
             node_a.find_successor(c).unwrap(),
-            ChordAction::RemoteAction(b, RemoteAction::FindSuccessor(c))
+            PeerRingAction::RemoteAction(b, RemoteAction::FindSuccessor(c))
         );
 
         // for decrease seq join
-        let mut node_d = Chord::new(d);
+        let mut node_d = PeerRing::new(d);
         assert_eq!(
             node_d.join(c),
-            ChordAction::RemoteAction(c, RemoteAction::FindSuccessor(d))
+            PeerRingAction::RemoteAction(c, RemoteAction::FindSuccessor(d))
         );
         assert_eq!(
             node_d.join(b),
-            ChordAction::RemoteAction(b, RemoteAction::FindSuccessor(d))
+            PeerRingAction::RemoteAction(b, RemoteAction::FindSuccessor(d))
         );
         assert_eq!(
             node_d.join(a),
-            ChordAction::RemoteAction(a, RemoteAction::FindSuccessor(d))
+            PeerRingAction::RemoteAction(a, RemoteAction::FindSuccessor(d))
         );
 
         // for over half ring join
-        let mut node_d = Chord::new(d);
+        let mut node_d = PeerRing::new(d);
         assert_eq!(node_d.successor, d);
         assert_eq!(
             node_d.join(a),
-            ChordAction::RemoteAction(a, RemoteAction::FindSuccessor(d))
+            PeerRingAction::RemoteAction(a, RemoteAction::FindSuccessor(d))
         );
         // for a ring a, a is over 2^152 far away from d
         assert!(d + Did::from(BigUint::from(2u16).pow(152)) > a);
@@ -369,7 +387,7 @@ mod tests {
         // when b insearted a is still more close to d
         assert_eq!(
             node_d.join(b),
-            ChordAction::RemoteAction(a, RemoteAction::FindSuccessor(d))
+            PeerRingAction::RemoteAction(a, RemoteAction::FindSuccessor(d))
         );
         assert!(d + Did::from(BigUint::from(2u16).pow(159)) > b);
         assert_eq!(node_d.successor, a);
@@ -384,8 +402,8 @@ mod tests {
         }
         let did1: Did = key1.address().into();
         let did2: Did = key2.address().into();
-        let mut node1 = Chord::new(did1);
-        let mut node2 = Chord::new(did2);
+        let mut node1 = PeerRing::new(did1);
+        let mut node2 = PeerRing::new(did2);
 
         node1.join(did2);
         node2.join(did1);
@@ -413,8 +431,8 @@ mod tests {
         let max = Did::from(BigUint::from(2u16).pow(160) - 1u16);
         let zero = Did::from(BigUint::from(2u16).pow(160));
 
-        let mut node1 = Chord::new(did1);
-        let mut node2 = Chord::new(did2);
+        let mut node1 = PeerRing::new(did1);
+        let mut node2 = PeerRing::new(did2);
 
         node1.join(did2);
         node2.join(did1);

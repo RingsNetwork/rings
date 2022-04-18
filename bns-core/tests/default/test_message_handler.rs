@@ -1,6 +1,6 @@
 #[cfg(test)]
 pub mod test {
-    use bns_core::dht::{Chord, Did};
+    use bns_core::dht::{Did, PeerRing};
     use bns_core::ecc::SecretKey;
     use bns_core::err::Result;
     use bns_core::message;
@@ -19,8 +19,8 @@ pub mod test {
     use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
     use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 
-    fn new_chord(did: Did) -> Chord {
-        Chord::new(did)
+    fn new_chord(did: Did) -> PeerRing {
+        PeerRing::new(did)
     }
 
     fn new_swarm(key: &SecretKey) -> Swarm {

@@ -1,7 +1,7 @@
 #[cfg(test)]
 pub mod test {
     use bns_core::dht::Stabilization;
-    use bns_core::dht::{Chord, Did};
+    use bns_core::dht::{Did, PeerRing};
     use bns_core::ecc::SecretKey;
     use bns_core::err::Result;
     use bns_core::message::handler::MessageHandler;
@@ -18,8 +18,8 @@ pub mod test {
     use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
     use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 
-    fn new_chord(did: Did) -> Chord {
-        Chord::new(did)
+    fn new_chord(did: Did) -> PeerRing {
+        PeerRing::new(did)
     }
 
     fn new_swarm(key: &SecretKey) -> Swarm {
@@ -115,7 +115,7 @@ pub mod test {
         Ok((transport1, transport2))
     }
 
-    async fn run_stabilize(chord: Arc<Mutex<Chord>>, swarm: Arc<Swarm>) {
+    async fn run_stabilize(chord: Arc<Mutex<PeerRing>>, swarm: Arc<Swarm>) {
         let mut result = Result::<()>::Ok(());
         let stabilization = Stabilization::new(chord, swarm, 5usize);
         let timeout_in_secs = stabilization.get_timeout();

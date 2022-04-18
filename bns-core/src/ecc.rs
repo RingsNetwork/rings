@@ -28,6 +28,10 @@ impl HashStr {
     pub fn new<T: Into<String>>(s: T) -> Self {
         HashStr(s.into())
     }
+
+    pub fn inner(&self) -> String {
+        self.0.clone()
+    }
 }
 
 impl Deref for SecretKey {

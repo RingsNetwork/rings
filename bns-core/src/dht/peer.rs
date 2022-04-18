@@ -10,7 +10,7 @@ use serde::Serialize;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VirtualPeer {
-    address: Did,
+    pub address: Did,
     pub data: Vec<Encoded>,
 }
 
