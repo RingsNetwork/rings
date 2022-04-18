@@ -1,4 +1,4 @@
-use crate::dht::{Chord, ChordAction, ChordRemoteAction};
+use crate::dht::{PeerRing, PeerRingAction, PeerRingRemoteAction, ChordStablize};
 use crate::err::Result;
 use crate::message::{FindSuccessor, Message, MessageRelay, MessageRelayMethod, NotifyPredecessor};
 use crate::swarm::Swarm;
@@ -6,13 +6,13 @@ use futures::lock::Mutex;
 use std::sync::Arc;
 
 pub struct Stabilization {
-    chord: Arc<Mutex<Chord>>,
+    chord: Arc<Mutex<PeerRing>>,
     swarm: Arc<Swarm>,
     timeout: usize,
 }
 
 impl Stabilization {
-    pub fn new(chord: Arc<Mutex<Chord>>, swarm: Arc<Swarm>, timeout: usize) -> Self {
+    pub fn new(chord: Arc<Mutex<PeerRing>>, swarm: Arc<Swarm>, timeout: usize) -> Self {
         Self {
             chord,
             swarm,
@@ -47,13 +47,13 @@ impl Stabilization {
         let mut chord = self.chord.lock().await;
         match chord.fix_fingers() {
             Ok(action) => match action {
-                ChordAction::None => {
+                PeerRingAction::None => {
                     log::info!("wait to next round");
                     Ok(())
                 }
-                ChordAction::RemoteAction(
+                PeerRingAction::RemoteAction(
                     next,
-                    ChordRemoteAction::FindSuccessorForFix(current),
+                    PeerRingRemoteAction::FindSuccessorForFix(current),
                 ) => {
                     let message = MessageRelay::new(
                         Message::FindSuccessor(FindSuccessor {
@@ -69,7 +69,7 @@ impl Stabilization {
                     self.swarm.send_message(&next.into(), message).await
                 }
                 _ => {
-                    log::error!("Invalid Chord Action");
+                    log::error!("Invalid PeerRing Action");
                     unreachable!();
                 }
             },

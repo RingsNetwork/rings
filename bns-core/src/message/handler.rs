@@ -1,4 +1,4 @@
-use crate::dht::{Chord, ChordAction, ChordRemoteAction, Did};
+use crate::dht::{PeerRing, PeerRingAction, PeerRingRemoteAction, Did, Chord, ChordStablize};
 use crate::err::{Error, Result};
 use crate::message::{
     AlreadyConnected, ConnectNode, ConnectedNode, FindSuccessor, FoundSuccessor, JoinDHT, Message,
@@ -19,12 +19,12 @@ use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 
 #[derive(Clone)]
 pub struct MessageHandler {
-    dht: Arc<Mutex<Chord>>,
+    dht: Arc<Mutex<PeerRing>>,
     swarm: Arc<Swarm>,
 }
 
 impl MessageHandler {
-    pub fn new(dht: Arc<Mutex<Chord>>, swarm: Arc<Swarm>) -> Self {
+    pub fn new(dht: Arc<Mutex<PeerRing>>, swarm: Arc<Swarm>) -> Self {
         Self { dht, swarm }
     }
 
@@ -88,8 +88,8 @@ impl MessageHandler {
         // otherwise, it will be a `send` op
         let join_op = dht.number_of_fingers() > 0;
         match dht.join(msg.id) {
-            ChordAction::None => Ok(()),
-            ChordAction::RemoteAction(next, ChordRemoteAction::FindSuccessor(id)) => {
+            PeerRingAction::None => Ok(()),
+            PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessor(id)) => {
                 if next != *prev && join_op {
                     self.send_message(
                         &next.into(),
@@ -113,14 +113,14 @@ impl MessageHandler {
         prev: &Did,
         msg: &ConnectNode,
     ) -> Result<()> {
-        // TODO: Verify necessity based on Chord to decrease connections but make sure availablitity.
+        // TODO: Verify necessity based on PeerRing to decrease connections but make sure availablitity.
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
         relay.push_prev(dht.id, *prev);
         if dht.id != msg.target_id {
             let next_node = match dht.find_successor(msg.target_id)? {
-                ChordAction::Some(node) => Some(node),
-                ChordAction::RemoteAction(node, _) => Some(node),
+                PeerRingAction::Some(node) => Some(node),
+                PeerRingAction::RemoteAction(node, _) => Some(node),
                 _ => None,
             }
             .ok_or(Error::MessageHandlerMissNextNode)?;
@@ -345,7 +345,7 @@ impl MessageHandler {
         relay.push_prev(dht.id, *prev);
         let action = dht.find_successor(msg.id)?;
         match action {
-            ChordAction::Some(id) => {
+            PeerRingAction::Some(id) => {
                 self.send_message(
                     &(*prev).into(),
                     Some(relay.from_path),
@@ -358,7 +358,7 @@ impl MessageHandler {
                 )
                 .await
             }
-            ChordAction::RemoteAction(next, ChordRemoteAction::FindSuccessor(id)) => {
+            PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessor(id)) => {
                 self.send_message(
                     &next.into(),
                     Some(relay.to_path),
@@ -371,7 +371,7 @@ impl MessageHandler {
                 )
                 .await
             }
-            action => Err(Error::ChordUnexpectedAction(action)),
+            action => Err(Error::PeerRingUnexpectedAction(action)),
         }
     }
 

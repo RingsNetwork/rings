@@ -82,17 +82,17 @@ pub enum Error {
     #[error("Recv message through channel failed")]
     ChannelRecvMessageFailed,
 
-    #[error("Invalid ChordAction")]
-    ChordInvalidAction,
+    #[error("Invalid PeerRingAction")]
+    PeerRingInvalidAction,
 
-    #[error("Unexpected ChordAction, {0:?}")]
-    ChordUnexpectedAction(crate::dht::ChordAction),
+    #[error("Unexpected PeerRingAction, {0:?}")]
+    PeerRingUnexpectedAction(crate::dht::PeerRingAction),
 
-    #[error("Chord findsuccessor error, {0}")]
-    ChordFindSuccessor(String),
+    #[error("PeerRing findsuccessor error, {0}")]
+    PeerRingFindSuccessor(String),
 
-    #[error("Chord cannot find cloest preceding node")]
-    ChordNotFindCloestNode,
+    #[error("PeerRing cannot find cloest preceding node")]
+    PeerRingNotFindCloestNode,
 
     #[error("Cannot seek address in swarm table")]
     SwarmMissAddressInTable,
