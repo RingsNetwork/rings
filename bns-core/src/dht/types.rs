@@ -2,7 +2,6 @@ use super::did::Did;
 use super::peer::VirtualPeer;
 use crate::err::Result;
 
-
 pub trait Chord<A> {
     fn join(&mut self, id: Did) -> A;
     fn find_successor(&self, id: Did) -> Result<A>;

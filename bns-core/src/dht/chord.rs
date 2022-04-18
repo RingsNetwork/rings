@@ -11,7 +11,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::sync::Arc;
 
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum RemoteAction {
