@@ -196,8 +196,8 @@ impl Chord {
         // if (id \in (n; successor]); return successor
         // if ID = N63, Successor = N10
         // N9
-        //        if id - self.id <= self.successor - self.id {
-        if self.id < id && id <= self.successor {
+        if id - self.id <= self.successor - self.id || self.id == self.successor {
+            //if self.id < id && id <= self.successor {
             Ok(ChordAction::Some(id))
         } else {
             // n = closest preceding node(id);
