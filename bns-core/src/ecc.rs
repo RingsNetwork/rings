@@ -30,7 +30,7 @@ impl HashStr {
     }
 
     pub fn inner(&self) -> String {
-        self.0
+        self.0.clone()
     }
 }
 
