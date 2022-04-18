@@ -1,5 +1,5 @@
 #![feature(async_closure)]
-use bns_core::dht::Chord;
+use bns_core::dht::PeerRing;
 use bns_core::ecc::SecretKey;
 use bns_core::message::handler::MessageHandler;
 use bns_core::session::SessionManager;
@@ -189,7 +189,7 @@ struct Send {
 
 async fn daemon_run(http_addr: String, key: &SecretKey, stuns: &str) -> anyhow::Result<()> {
     // TODO support run daemonize
-    let dht = Arc::new(Mutex::new(Chord::new(key.address().into())));
+    let dht = Arc::new(Mutex::new(PeerRing::new(key.address().into())));
     let (auth, key) =
         SessionManager::gen_unsign_info(key.address(), Some(bns_core::session::Ttl::Never))?;
     let sig = key.sign(&auth.to_string()?).to_vec();
