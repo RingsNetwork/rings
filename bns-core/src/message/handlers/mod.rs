@@ -46,7 +46,11 @@ impl MessageHandler {
         self.swarm.send_message(address, payload).await
     }
 
-    pub async fn handle_message_relay(&self, relay: &MessageRelay<Message>, prev: &Did) -> Result<()> {
+    pub async fn handle_message_relay(
+        &self,
+        relay: &MessageRelay<Message>,
+        prev: &Did,
+    ) -> Result<()> {
         match &relay.data {
             Message::JoinDHT(ref msg) => self.join_chord(relay, prev, msg).await,
             Message::ConnectNode(ref msg) => self.connect_node(relay, prev, msg).await,
@@ -57,7 +61,7 @@ impl MessageHandler {
             Message::NotifyPredecessor(ref msg) => self.notify_predecessor(relay, prev, msg).await,
             Message::NotifiedPredecessor(ref msg) => {
                 self.notified_predecessor(relay, prev, msg).await
-            },
+            }
             Message::SearchVNode(ref msg) => self.search_vnode(relay, prev, msg).await,
             Message::FoundVNode(ref msg) => self.found_vnode(relay, prev, msg).await,
             Message::StoreVNode(ref msg) => self.store_vnode(relay, prev, msg).await,

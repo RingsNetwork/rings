@@ -3,8 +3,8 @@ use crate::dht::{ChordStorage, Did, PeerRingAction};
 use crate::err::{Error, Result};
 use crate::message::payload::{MessageRelay, MessageRelayMethod};
 use crate::message::protocol::MessageSessionRelayProtocol;
+use crate::message::types::{FoundVNode, Message, SearchVNode, StoreVNode};
 use crate::message::MessageHandler;
-use crate::message::types::{Message, SearchVNode, FoundVNode, StoreVNode};
 
 use async_trait::async_trait;
 
@@ -14,21 +14,21 @@ pub trait MessageStorage {
         &self,
         relay: &MessageRelay<Message>,
         prev: &Did,
-        msg: &SearchVNode
+        msg: &SearchVNode,
     ) -> Result<()>;
 
     async fn found_vnode(
         &self,
         relay: &MessageRelay<Message>,
         prev: &Did,
-        msg: &FoundVNode
+        msg: &FoundVNode,
     ) -> Result<()>;
 
     async fn store_vnode(
         &self,
         relay: &MessageRelay<Message>,
         prev: &Did,
-        msg: &StoreVNode
+        msg: &StoreVNode,
     ) -> Result<()>;
 }
 
@@ -38,9 +38,8 @@ impl MessageStorage for MessageHandler {
         &self,
         relay: &MessageRelay<Message>,
         prev: &Did,
-        msg: &SearchVNode
-    ) -> Result<()>
-    {
+        msg: &SearchVNode,
+    ) -> Result<()> {
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
         relay.push_prev(dht.id, *prev);
@@ -55,11 +54,11 @@ impl MessageStorage for MessageHandler {
                         MessageRelayMethod::REPORT,
                         Message::FoundVNode(FoundVNode {
                             target_id: v.did(),
-                            data: v.data
+                            data: v.data,
                         }),
                     )
                     .await
-                },
+                }
                 PeerRingAction::RemoteAction(next, _) => {
                     self.send_message(
                         &next.into(),
@@ -73,9 +72,9 @@ impl MessageStorage for MessageHandler {
                     )
                     .await
                 }
-                act => Err(Error::PeerRingUnexpectedAction(act))
+                act => Err(Error::PeerRingUnexpectedAction(act)),
             },
-            Err(e) => Err(e)
+            Err(e) => Err(e),
         }
     }
 
@@ -83,9 +82,8 @@ impl MessageStorage for MessageHandler {
         &self,
         relay: &MessageRelay<Message>,
         prev: &Did,
-        msg: &FoundVNode
-    ) -> Result<()>
-    {
+        msg: &FoundVNode,
+    ) -> Result<()> {
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
         relay.push_prev(dht.id, *prev);
@@ -95,8 +93,9 @@ impl MessageStorage for MessageHandler {
                 Some(relay.to_path),
                 Some(relay.from_path),
                 MessageRelayMethod::REPORT,
-                Message::FoundVNode(msg.clone())
-            ).await
+                Message::FoundVNode(msg.clone()),
+            )
+            .await
         } else {
             // found vnode and TODO
             Ok(())
@@ -107,15 +106,14 @@ impl MessageStorage for MessageHandler {
         &self,
         relay: &MessageRelay<Message>,
         prev: &Did,
-        msg: &StoreVNode
-    ) -> Result<()>
-    {
+        msg: &StoreVNode,
+    ) -> Result<()> {
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
         relay.push_prev(dht.id, *prev);
         let virtual_peer = VirtualPeer {
-            address: msg.target_id.into(),
-            data: msg.data.clone()
+            address: msg.sender_id.into(),
+            data: msg.data.clone(),
         };
         match dht.store(virtual_peer) {
             Ok(action) => match action {
@@ -129,10 +127,10 @@ impl MessageStorage for MessageHandler {
                         Message::StoreVNode(msg.clone()),
                     )
                     .await
-                },
-                act => Err(Error::PeerRingUnexpectedAction(act))
-            }
-            Err(e) => Err(e)
+                }
+                act => Err(Error::PeerRingUnexpectedAction(act)),
+            },
+            Err(e) => Err(e),
         }
     }
 }

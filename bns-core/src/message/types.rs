@@ -62,7 +62,7 @@ pub struct FoundVNode {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct StoreVNode {
-    pub target_id: Did,
+    pub sender_id: Did,
     pub data: Vec<Encoded>,
 }
 
