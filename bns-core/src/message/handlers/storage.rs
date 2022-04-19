@@ -112,7 +112,7 @@ impl MessageStorage for MessageHandler {
         let mut relay = relay.clone();
         relay.push_prev(dht.id, *prev);
         let virtual_peer = VirtualPeer {
-            address: msg.sender_id.into(),
+            address: msg.sender_id,
             data: msg.data.clone(),
         };
         match dht.store(virtual_peer) {
