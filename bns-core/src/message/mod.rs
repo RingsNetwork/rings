@@ -17,5 +17,5 @@ pub use types::*;
 
 mod handlers;
 pub use handlers::connection::MessageConnection;
-pub use handlers::storage::*;
+pub use handlers::storage::MessageStorage;
 pub use handlers::MessageHandler;

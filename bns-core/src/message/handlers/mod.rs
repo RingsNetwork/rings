@@ -13,6 +13,7 @@ pub mod connection;
 pub mod storage;
 
 use connection::MessageConnection;
+use storage::MessageStorage;
 
 #[derive(Clone)]
 pub struct MessageHandler {
@@ -56,7 +57,10 @@ impl MessageHandler {
             Message::NotifyPredecessor(ref msg) => self.notify_predecessor(relay, prev, msg).await,
             Message::NotifiedPredecessor(ref msg) => {
                 self.notified_predecessor(relay, prev, msg).await
-            }
+            },
+            Message::SearchVNode(ref msg) => self.search_vnode(relay, prev, msg).await,
+            Message::FoundVNode(ref msg) => self.found_vnode(relay, prev, msg).await,
+            Message::StoreVNode(ref msg) => self.store_vnode(relay, prev, msg).await,
             x => Err(Error::MessageHandlerUnsupportMessageType(format!(
                 "{:?}",
                 x
