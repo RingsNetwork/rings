@@ -16,7 +16,8 @@ use web_sys::RtcSdpType as RTCSdpType;
 #[cfg(not(feature = "wasm"))]
 use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 
-#[async_trait]
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait MessageConnection {
     async fn join_chord(
         &self,
@@ -75,7 +76,8 @@ pub trait MessageConnection {
     ) -> Result<()>;
 }
 
-#[async_trait]
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
 impl MessageConnection for MessageHandler {
     async fn join_chord(
         &self,

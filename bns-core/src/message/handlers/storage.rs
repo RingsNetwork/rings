@@ -8,7 +8,8 @@ use crate::message::MessageHandler;
 
 use async_trait::async_trait;
 
-#[async_trait]
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait MessageStorage {
     async fn search_vnode(
         &self,
@@ -32,7 +33,8 @@ pub trait MessageStorage {
     ) -> Result<()>;
 }
 
-#[async_trait]
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
 impl MessageStorage for MessageHandler {
     async fn search_vnode(
         &self,
