@@ -16,6 +16,6 @@ mod types;
 pub use types::*;
 
 mod handlers;
-pub use handlers::connection::MessageConnection;
-pub use handlers::storage::MessageStorage;
+pub use handlers::connection::TChordConnection;
+pub use handlers::storage::TChordStorage;
 pub use handlers::MessageHandler;

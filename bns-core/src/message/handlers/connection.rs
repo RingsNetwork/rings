@@ -18,7 +18,7 @@ use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-pub trait MessageConnection {
+pub trait TChordConnection {
     async fn join_chord(
         &self,
         relay: &MessageRelay<Message>,
@@ -78,7 +78,7 @@ pub trait MessageConnection {
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-impl MessageConnection for MessageHandler {
+impl TChordConnection for MessageHandler {
     async fn join_chord(
         &self,
         relay: &MessageRelay<Message>,

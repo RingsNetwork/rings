@@ -12,8 +12,8 @@ use web3::types::Address;
 pub mod connection;
 pub mod storage;
 
-use connection::MessageConnection;
-use storage::MessageStorage;
+use connection::TChordConnection;
+use storage::TChordStorage;
 
 #[derive(Clone)]
 pub struct MessageHandler {

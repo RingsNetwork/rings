@@ -10,7 +10,7 @@ use async_trait::async_trait;
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-pub trait MessageStorage {
+pub trait TChordStorage {
     async fn search_vnode(
         &self,
         relay: &MessageRelay<Message>,
@@ -35,7 +35,7 @@ pub trait MessageStorage {
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-impl MessageStorage for MessageHandler {
+impl TChordStorage for MessageHandler {
     async fn search_vnode(
         &self,
         relay: &MessageRelay<Message>,
