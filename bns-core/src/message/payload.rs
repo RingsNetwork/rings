@@ -1,6 +1,6 @@
+use crate::dht::Did;
 use crate::ecc::{verify, HashStr, PublicKey};
 use crate::err::{Error, Result};
-use crate::message::{Did, Encoded};
 use crate::session::Session;
 use crate::session::SessionManager;
 use crate::utils;
@@ -13,7 +13,7 @@ use std::collections::VecDeque;
 use std::io::Write;
 use web3::types::Address;
 
-use super::encoder::{Decoder, Encoder};
+use super::encoder::{Decoder, Encoded, Encoder};
 
 const DEFAULT_TTL_MS: usize = 60 * 1000;
 

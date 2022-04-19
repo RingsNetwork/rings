@@ -4,7 +4,7 @@ pub mod test {
     use bns_core::dht::{Did, PeerRing};
     use bns_core::ecc::SecretKey;
     use bns_core::err::Result;
-    use bns_core::message::handler::MessageHandler;
+    use bns_core::message::MessageHandler;
     use bns_core::session::SessionManager;
     use bns_core::swarm::Swarm;
     use bns_core::swarm::TransportManager;
