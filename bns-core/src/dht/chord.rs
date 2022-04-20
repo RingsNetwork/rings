@@ -118,10 +118,7 @@ impl Chord<PeerRingAction> for PeerRing {
             self.successor = id;
             // only triger if successor is updated
         }
-        PeerRingAction::RemoteAction(
-            self.successor,
-            RemoteAction::FindSuccessor(self.id),
-        )
+        PeerRingAction::RemoteAction(self.successor, RemoteAction::FindSuccessor(self.id))
     }
 
     // Fig.5 n.find_successor(id)
