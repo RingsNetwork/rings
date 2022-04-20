@@ -1,91 +1,95 @@
-use crate::dht::{Chord, ChordStablize, Did, PeerRing, PeerRingAction, PeerRingRemoteAction};
+use crate::dht::{Chord, ChordStablize, Did, PeerRingAction, PeerRingRemoteAction};
 use crate::err::{Error, Result};
-use crate::message::{
+use crate::message::payload::{MessageRelay, MessageRelayMethod};
+use crate::message::protocol::MessageSessionRelayProtocol;
+use crate::message::types::{
     AlreadyConnected, ConnectNode, ConnectedNode, FindSuccessor, FoundSuccessor, JoinDHT, Message,
-    MessageRelay, MessageRelayMethod, MessageSessionRelayProtocol, NotifiedPredecessor,
-    NotifyPredecessor,
+    NotifiedPredecessor, NotifyPredecessor,
 };
-use crate::swarm::{Swarm, TransportManager};
+use crate::message::MessageHandler;
+use crate::swarm::TransportManager;
 use crate::types::ice_transport::IceTrickleScheme;
-use futures::lock::Mutex;
-use std::collections::VecDeque;
-use std::sync::Arc;
-use web3::types::Address;
 
+use async_trait::async_trait;
 #[cfg(feature = "wasm")]
 use web_sys::RtcSdpType as RTCSdpType;
 #[cfg(not(feature = "wasm"))]
 use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 
-#[derive(Clone)]
-pub struct MessageHandler {
-    dht: Arc<Mutex<PeerRing>>,
-    swarm: Arc<Swarm>,
-}
-
-impl MessageHandler {
-    pub fn new(dht: Arc<Mutex<PeerRing>>, swarm: Arc<Swarm>) -> Self {
-        Self { dht, swarm }
-    }
-
-    pub async fn send_message(
-        &self,
-        address: &Address,
-        to_path: Option<VecDeque<Did>>,
-        from_path: Option<VecDeque<Did>>,
-        method: MessageRelayMethod,
-        message: Message,
-    ) -> Result<()> {
-        // TODO: diff ttl for each message?
-        let payload = MessageRelay::new(
-            message,
-            &self.swarm.session(),
-            None,
-            to_path,
-            from_path,
-            method,
-        )?;
-        self.swarm.send_message(address, payload).await
-    }
-
-    pub async fn handle_message_relay(
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+pub trait TChordConnection {
+    async fn join_chord(
         &self,
         relay: &MessageRelay<Message>,
         prev: &Did,
-    ) -> Result<()> {
-        match &relay.data {
-            Message::JoinDHT(ref msg) => self.handle_join(relay, prev, msg).await,
-            Message::ConnectNode(ref msg) => self.handle_connect_node(relay, prev, msg).await,
-            Message::ConnectedNode(ref msg) => self.handle_connected_node(relay, prev, msg).await,
-            Message::AlreadyConnected(ref msg) => {
-                self.handle_already_connected(relay, prev, msg).await
-            }
-            Message::FindSuccessor(ref msg) => self.handle_find_successor(relay, prev, msg).await,
-            Message::FoundSuccessor(ref msg) => self.handle_found_successor(relay, prev, msg).await,
-            Message::NotifyPredecessor(ref msg) => {
-                self.handle_notify_predecessor(relay, prev, msg).await
-            }
-            Message::NotifiedPredecessor(ref msg) => {
-                self.handle_notified_predecessor(relay, prev, msg).await
-            }
-            x => Err(Error::MessageHandlerUnsupportMessageType(format!(
-                "{:?}",
-                x
-            ))),
-        }
-    }
+        msg: &JoinDHT,
+    ) -> Result<()>;
 
-    async fn handle_join(
+    async fn connect_node(
+        &self,
+        relay: &MessageRelay<Message>,
+        prev: &Did,
+        msg: &ConnectNode,
+    ) -> Result<()>;
+
+    async fn connected_node(
+        &self,
+        relay: &MessageRelay<Message>,
+        prev: &Did,
+        msg: &ConnectedNode,
+    ) -> Result<()>;
+
+    async fn already_connected(
+        &self,
+        relay: &MessageRelay<Message>,
+        prev: &Did,
+        msg: &AlreadyConnected,
+    ) -> Result<()>;
+
+    async fn find_successor(
+        &self,
+        relay: &MessageRelay<Message>,
+        prev: &Did,
+        msg: &FindSuccessor,
+    ) -> Result<()>;
+
+    async fn found_successor(
+        &self,
+        relay: &MessageRelay<Message>,
+        prev: &Did,
+        msg: &FoundSuccessor,
+    ) -> Result<()>;
+
+    async fn notify_predecessor(
+        &self,
+        relay: &MessageRelay<Message>,
+        prev: &Did,
+        msg: &NotifyPredecessor,
+    ) -> Result<()>;
+
+    async fn notified_predecessor(
+        &self,
+        relay: &MessageRelay<Message>,
+        prev: &Did,
+        msg: &NotifiedPredecessor,
+    ) -> Result<()>;
+}
+
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl TChordConnection for MessageHandler {
+    async fn join_chord(
         &self,
         relay: &MessageRelay<Message>,
         prev: &Did,
         msg: &JoinDHT,
     ) -> Result<()> {
-        let mut dht = self.dht.lock().await;
-        let relay = relay.clone();
         // here is two situation.
         // finger table just have no other node(beside next), it will be a `create` op
         // otherwise, it will be a `send` op
+        let mut dht = self.dht.lock().await;
+        let relay = relay.clone();
         let join_op = dht.number_of_fingers() > 0;
         match dht.join(msg.id) {
             PeerRingAction::None => Ok(()),
@@ -107,7 +111,7 @@ impl MessageHandler {
         }
     }
 
-    async fn handle_connect_node(
+    async fn connect_node(
         &self,
         relay: &MessageRelay<Message>,
         prev: &Did,
@@ -173,7 +177,7 @@ impl MessageHandler {
         }
     }
 
-    async fn handle_connected_node(
+    async fn connected_node(
         &self,
         relay: &MessageRelay<Message>,
         prev: &Did,
@@ -206,7 +210,7 @@ impl MessageHandler {
         }
     }
 
-    async fn handle_already_connected(
+    async fn already_connected(
         &self,
         relay: &MessageRelay<Message>,
         prev: &Did,
@@ -234,43 +238,7 @@ impl MessageHandler {
         }
     }
 
-    async fn handle_notify_predecessor(
-        &self,
-        relay: &MessageRelay<Message>,
-        prev: &Did,
-        msg: &NotifyPredecessor,
-    ) -> Result<()> {
-        let mut dht = self.dht.lock().await;
-        let mut relay = relay.clone();
-        relay.push_prev(dht.id, *prev);
-        dht.notify(msg.id);
-        self.send_message(
-            &(*prev).into(),
-            Some(relay.from_path),
-            Some(relay.to_path),
-            MessageRelayMethod::REPORT,
-            Message::NotifiedPredecessor(NotifiedPredecessor { id: dht.id }),
-        )
-        .await
-    }
-
-    async fn handle_notified_predecessor(
-        &self,
-        relay: &MessageRelay<Message>,
-        prev: &Did,
-        msg: &NotifiedPredecessor,
-    ) -> Result<()> {
-        let mut dht = self.dht.lock().await;
-        let mut relay = relay.clone();
-        relay.push_prev(dht.id, *prev);
-        assert_eq!(relay.method, MessageRelayMethod::REPORT);
-        // if successor: predecessor is between (id, successor]
-        // then update local successor
-        dht.successor = msg.id;
-        Ok(())
-    }
-
-    async fn handle_find_successor(
+    async fn find_successor(
         &self,
         relay: &MessageRelay<Message>,
         prev: &Did,
@@ -343,8 +311,7 @@ impl MessageHandler {
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
         relay.push_prev(dht.id, *prev);
-        let action = dht.find_successor(msg.id)?;
-        match action {
+        match dht.find_successor(msg.id)? {
             PeerRingAction::Some(id) => {
                 self.send_message(
                     &(*prev).into(),
@@ -371,11 +338,11 @@ impl MessageHandler {
                 )
                 .await
             }
-            action => Err(Error::PeerRingUnexpectedAction(action)),
+            act => Err(Error::PeerRingUnexpectedAction(act)),
         }
     }
 
-    async fn handle_found_successor(
+    async fn found_successor(
         &self,
         relay: &MessageRelay<Message>,
         prev: &Did,
@@ -404,84 +371,39 @@ impl MessageHandler {
         }
     }
 
-    /// This method is required because web-sys components is not `Send`
-    /// which means a listening loop cannot running concurrency.
-    pub async fn listen_once(&self) -> Option<MessageRelay<Message>> {
-        if let Some(relay_message) = self.swarm.poll_message().await {
-            if !relay_message.verify() {
-                log::error!("Cannot verify msg or it's expired: {:?}", relay_message);
-            }
-
-            if let Err(e) = self
-                .handle_message_relay(&relay_message, &relay_message.addr.into())
-                .await
-            {
-                log::error!("Error in handle_message: {}", e);
-            }
-            Some(relay_message)
-        } else {
-            None
-        }
+    async fn notify_predecessor(
+        &self,
+        relay: &MessageRelay<Message>,
+        prev: &Did,
+        msg: &NotifyPredecessor,
+    ) -> Result<()> {
+        let mut dht = self.dht.lock().await;
+        let mut relay = relay.clone();
+        relay.push_prev(dht.id, *prev);
+        dht.notify(msg.id);
+        self.send_message(
+            &(*prev).into(),
+            Some(relay.from_path),
+            Some(relay.to_path),
+            MessageRelayMethod::REPORT,
+            Message::NotifiedPredecessor(NotifiedPredecessor { id: dht.id }),
+        )
+        .await
     }
-}
 
-#[cfg(not(feature = "wasm"))]
-mod listener {
-    use super::MessageHandler;
-    use crate::types::message::MessageListener;
-    use async_trait::async_trait;
-    use std::sync::Arc;
-
-    use futures_util::pin_mut;
-    use futures_util::stream::StreamExt;
-
-    #[async_trait]
-    impl MessageListener for MessageHandler {
-        async fn listen(self: Arc<Self>) {
-            let relay_messages = self.swarm.iter_messages();
-
-            pin_mut!(relay_messages);
-
-            while let Some(relay_message) = relay_messages.next().await {
-                if relay_message.is_expired() || !relay_message.verify() {
-                    log::error!("Cannot verify msg or it's expired: {:?}", relay_message);
-                    continue;
-                }
-
-                if let Err(e) = self
-                    .handle_message_relay(&relay_message, &relay_message.addr.into())
-                    .await
-                {
-                    log::error!("Error in handle_message: {}", e);
-                    continue;
-                }
-            }
-        }
-    }
-}
-
-#[cfg(feature = "wasm")]
-mod listener {
-
-    use super::MessageHandler;
-    use crate::poll;
-    use crate::types::message::MessageListener;
-    use async_trait::async_trait;
-    use std::sync::Arc;
-    use wasm_bindgen::UnwrapThrowExt;
-    use wasm_bindgen_futures::spawn_local;
-
-    #[async_trait(?Send)]
-    impl MessageListener for MessageHandler {
-        async fn listen(self: Arc<Self>) {
-            let mut handler = Some(Arc::clone(&self));
-            let mut func = move || {
-                let handler = Arc::clone(&handler.take().unwrap_throw());
-                spawn_local(Box::pin(async move {
-                    handler.listen_once().await;
-                }));
-            };
-            poll!(func, 200);
-        }
+    async fn notified_predecessor(
+        &self,
+        relay: &MessageRelay<Message>,
+        prev: &Did,
+        msg: &NotifiedPredecessor,
+    ) -> Result<()> {
+        let mut dht = self.dht.lock().await;
+        let mut relay = relay.clone();
+        relay.push_prev(dht.id, *prev);
+        assert_eq!(relay.method, MessageRelayMethod::REPORT);
+        // if successor: predecessor is between (id, successor]
+        // then update local successor
+        dht.successor = msg.id;
+        Ok(())
     }
 }

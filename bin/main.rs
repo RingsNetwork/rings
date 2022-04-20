@@ -1,7 +1,7 @@
 #![feature(async_closure)]
 use bns_core::dht::PeerRing;
 use bns_core::ecc::SecretKey;
-use bns_core::message::handler::MessageHandler;
+use bns_core::message::MessageHandler;
 use bns_core::session::SessionManager;
 use bns_core::swarm::Swarm;
 use bns_core::types::message::MessageListener;
