@@ -11,13 +11,11 @@ pub trait ChordStablize<A>: Chord<A> {
     fn closest_preceding_node(&self, id: Did) -> Result<Did>;
     fn check_predecessor(&self) -> A;
     fn stablilize(&mut self) -> A;
-    fn notify(&mut self, id: Did);
+    fn notify(&mut self, id: Did) -> Option<Did>;
     fn fix_fingers(&mut self) -> Result<A>;
 }
 
 pub trait ChordStorage<A>: Chord<A> {
     fn lookup(&self, id: Did) -> Result<A>;
     fn store(&self, peer: VirtualPeer) -> Result<A>;
-    fn stablilize_with_vnode(&mut self) -> Result<A>;
-    fn notify_with_vnode(&mut self, id: Did, vnodes: Vec<VirtualPeer>);
 }

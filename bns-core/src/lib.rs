@@ -2,7 +2,7 @@
 #![feature(async_closure)]
 #![feature(box_syntax)]
 #![feature(derive_default_enum)]
-
+#![feature(generators)]
 pub mod channels;
 pub mod dht;
 pub mod ecc;
