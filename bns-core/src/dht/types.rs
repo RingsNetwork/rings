@@ -18,4 +18,5 @@ pub trait ChordStablize<A>: Chord<A> {
 pub trait ChordStorage<A>: Chord<A> {
     fn lookup(&self, id: Did) -> Result<A>;
     fn store(&self, peer: VirtualPeer) -> Result<A>;
+    fn sync_with_successor(&self) -> Result<A>;
 }

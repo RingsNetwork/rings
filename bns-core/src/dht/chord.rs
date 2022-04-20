@@ -22,7 +22,7 @@ pub enum RemoteAction {
     FindAndStore(VirtualPeer),
     // ask Did_a to notify(did_b)
     Notify(Did),
-    NotifyWithVNode(Did, Vec<VirtualPeer>),
+    SyncVNodeWithSuccessor(Vec<VirtualPeer>),
     FindSuccessorForFix(Did),
     CheckPredecessor,
 }
@@ -30,11 +30,10 @@ pub enum RemoteAction {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum PeerRingAction {
     None,
-    UpdateSuccessor(Did),
     SomeVNode(VirtualPeer),
     Some(Did),
     RemoteAction(Did, RemoteAction),
-    MultiActions(Vec<PeerRingAction>)
+    MultiActions(Vec<PeerRingAction>),
 }
 
 #[derive(Clone, Debug)]
@@ -85,7 +84,7 @@ impl PeerRing {
 impl Chord<PeerRingAction> for PeerRing {
     // join a PeerRing ring containing node id .
     fn join(&mut self, id: Did) -> PeerRingAction {
-        if id == self.id || self.finger.contains(&Some(id)) {
+        if id == self.id {
             return PeerRingAction::None;
         }
         for k in 0u32..159u32 {
@@ -118,9 +117,11 @@ impl Chord<PeerRingAction> for PeerRing {
             // 3) #001 - #fff = #001 + -(#fff) = #001
             self.successor = id;
             // only triger if successor is updated
-            return PeerRingActionPeerRingAction::RemoteAction(self.successor, RemoteAction::FindSuccessor(self.id));
         }
-        PeerRingAction::None
+        PeerRingAction::RemoteAction(
+            self.successor,
+            RemoteAction::FindSuccessor(self.id),
+        )
     }
 
     // Fig.5 n.find_successor(id)
@@ -143,7 +144,6 @@ impl Chord<PeerRingAction> for PeerRing {
             }
         }
     }
-
 }
 
 impl ChordStablize<PeerRingAction> for PeerRing {
@@ -275,6 +275,23 @@ impl ChordStorage<PeerRingAction> for PeerRing {
             Ok(a) => Err(Error::PeerRingUnexpectedAction(a)),
             Err(e) => Err(e),
         }
+    }
+
+    fn sync_with_successor(&self) -> Result<PeerRingAction> {
+        let mut data = Vec::<VirtualPeer>::new();
+        for k in self.storage.keys() {
+            // k in (self, self.successor)
+            // k is more close to self.successor
+            if k - self.successor > k - self.id {
+                if let Some(v) = self.storage.remove(&k) {
+                    data.push(v.1);
+                }
+            }
+        }
+        Ok(PeerRingAction::RemoteAction(
+            self.successor,
+            RemoteAction::SyncVNodeWithSuccessor(data),
+        ))
     }
 }
 
