@@ -22,7 +22,7 @@ pub enum RemoteAction {
     FindAndStore(VirtualPeer),
     // ask Did_a to notify(did_b)
     Notify(Did),
-    NotifyWithVNode(Did, Vec<VirtualPeer>),
+    SyncVNodeWithSuccessor(Vec<VirtualPeer>),
     FindSuccessorForFix(Did),
     CheckPredecessor,
 }
@@ -33,6 +33,7 @@ pub enum PeerRingAction {
     SomeVNode(VirtualPeer),
     Some(Did),
     RemoteAction(Did, RemoteAction),
+    MultiActions(Vec<PeerRingAction>),
 }
 
 #[derive(Clone, Debug)]
@@ -84,7 +85,6 @@ impl Chord<PeerRingAction> for PeerRing {
     // join a PeerRing ring containing node id .
     fn join(&mut self, id: Did) -> PeerRingAction {
         if id == self.id {
-            // TODO: Do we allow multiple chord instances of the same node id?
             return PeerRingAction::None;
         }
         for k in 0u32..159u32 {
@@ -116,6 +116,7 @@ impl Chord<PeerRingAction> for PeerRing {
             // 2) #fff should follow #001 because id space is a Finate Ring
             // 3) #001 - #fff = #001 + -(#fff) = #001
             self.successor = id;
+            // only triger if successor is updated
         }
         PeerRingAction::RemoteAction(self.successor, RemoteAction::FindSuccessor(self.id))
     }
@@ -159,16 +160,22 @@ impl ChordStablize<PeerRingAction> for PeerRing {
     }
 
     // n' thinks it might be our predecessor.
-    fn notify(&mut self, id: Did) {
+    fn notify(&mut self, id: Did) -> Option<Did> {
         // if (predecessor is nil or n' /in (predecessor; n)); predecessor = n';
         match self.predecessor {
             Some(pre) => {
                 // if id <- [pre, self]
                 if self.id - pre > self.id - id {
-                    self.predecessor = Some(id)
+                    self.predecessor = Some(id);
+                    Some(id)
+                } else {
+                    None
                 }
             }
-            None => self.predecessor = Some(id),
+            None => {
+                self.predecessor = Some(id);
+                Some(id)
+            }
         }
     }
 
@@ -267,24 +274,21 @@ impl ChordStorage<PeerRingAction> for PeerRing {
         }
     }
 
-    fn stablilize_with_vnode(&mut self) -> Result<PeerRingAction> {
-        match self.stablilize() {
-            PeerRingAction::RemoteAction(x, RemoteAction::Notify(id)) => {
-                Ok(PeerRingAction::RemoteAction(
-                    x,
-                    RemoteAction::NotifyWithVNode(id, self.storage.values()),
-                ))
+    fn sync_with_successor(&self) -> Result<PeerRingAction> {
+        let mut data = Vec::<VirtualPeer>::new();
+        for k in self.storage.keys() {
+            // k in (self, self.successor)
+            // k is more close to self.successor
+            if k - self.successor > k - self.id {
+                if let Some(v) = self.storage.remove(&k) {
+                    data.push(v.1);
+                }
             }
-            PeerRingAction::None => Ok(PeerRingAction::None),
-            x => Err(Error::PeerRingUnexpectedAction(x)),
         }
-    }
-
-    fn notify_with_vnode(&mut self, id: Did, vnodes: Vec<VirtualPeer>) {
-        self.notify(id);
-        for v in vnodes {
-            self.storage.set(&v.did(), v);
-        }
+        Ok(PeerRingAction::RemoteAction(
+            self.successor,
+            RemoteAction::SyncVNodeWithSuccessor(data),
+        ))
     }
 }
 
