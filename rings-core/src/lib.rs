@@ -9,6 +9,7 @@ pub mod ecc;
 pub mod err;
 pub mod macros;
 pub mod message;
+pub mod prelude;
 pub mod session;
 pub mod storage;
 pub mod swarm;

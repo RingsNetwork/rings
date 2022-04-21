@@ -6,9 +6,14 @@ target/
 .envrc
 .env
 
+# project
+.vscode/
+
 # Tests
 *.log
 
 # OS related
 ### MacOS ###
 .DS_Store
+
+pkg/

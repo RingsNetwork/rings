@@ -1,10 +1,12 @@
 use std::sync::Arc;
 
-use crate::error::{Error, Result};
-use rings_core::transports::Transport;
+use crate::{
+    error::{Error, Result},
+    prelude::rings_core::{message::Encoded, prelude::web3::types::Address, transports::Transport},
+    processor,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use web3::types::H160;
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct Peer {
@@ -21,13 +23,14 @@ impl Peer {
         serde_json::to_value(self).map_err(|_| Error::JsonSerializeError)
     }
 
+    #[cfg(feature = "client")]
     pub fn base64_encode(&self) -> Result<String> {
         Ok(base64::encode(self.to_json_vec()?))
     }
 }
 
-impl From<(H160, Arc<Transport>)> for Peer {
-    fn from((address, transport): (H160, Arc<Transport>)) -> Self {
+impl From<(Address, Arc<Transport>)> for Peer {
+    fn from((address, transport): (Address, Arc<Transport>)) -> Self {
         Self {
             address: address.to_string(),
             transport_id: transport.id.to_string(),
@@ -35,11 +38,20 @@ impl From<(H160, Arc<Transport>)> for Peer {
     }
 }
 
-impl From<&(H160, Arc<Transport>)> for Peer {
-    fn from((address, transport): &(H160, Arc<Transport>)) -> Self {
+impl From<&(Address, Arc<Transport>)> for Peer {
+    fn from((address, transport): &(Address, Arc<Transport>)) -> Self {
         Self {
             address: address.to_string(),
             transport_id: transport.id.to_string(),
+        }
+    }
+}
+
+impl From<processor::Peer> for Peer {
+    fn from(p: processor::Peer) -> Self {
+        Self {
+            address: p.address.to_string(),
+            transport_id: p.transport.id.to_string(),
         }
     }
 }
@@ -57,6 +69,7 @@ impl TransportAndIce {
             ice: ice.to_owned(),
         }
     }
+
     pub fn to_json_vec(&self) -> Result<Vec<u8>> {
         serde_json::to_vec(self).map_err(|_| Error::JsonSerializeError)
     }
@@ -65,7 +78,17 @@ impl TransportAndIce {
         serde_json::to_value(self).map_err(|_| Error::JsonSerializeError)
     }
 
+    #[cfg(feature = "client")]
     pub fn base64_encode(&self) -> Result<String> {
         Ok(base64::encode(self.to_json_vec()?))
+    }
+}
+
+impl From<(Arc<Transport>, Encoded)> for TransportAndIce {
+    fn from((transport, handshake_info): (Arc<Transport>, Encoded)) -> Self {
+        Self {
+            transport_id: transport.id.to_string(),
+            ice: handshake_info.to_string(),
+        }
     }
 }

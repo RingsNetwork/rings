@@ -10,11 +10,8 @@ use crate::message::MessageHandler;
 use crate::swarm::TransportManager;
 use crate::types::ice_transport::IceTrickleScheme;
 
+use crate::prelude::RTCSdpType;
 use async_trait::async_trait;
-#[cfg(feature = "wasm")]
-use web_sys::RtcSdpType as RTCSdpType;
-#[cfg(not(feature = "wasm"))]
-use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
