@@ -1,6 +1,7 @@
 mod backgrounds;
 mod discovery;
 mod http_error;
+#[cfg(feature = "daemon")]
 mod is_turn;
 pub mod jsonrpc;
 pub mod processor;
@@ -9,6 +10,7 @@ pub mod response;
 mod result;
 use self::{http_error::HttpError, processor::Processor, result::HttpResult};
 pub use backgrounds::run_stabilize;
+#[cfg(feature = "daemon")]
 pub use is_turn::run_udp_turn;
 
 use axum::{

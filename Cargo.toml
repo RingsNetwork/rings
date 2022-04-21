@@ -7,6 +7,10 @@ default-run = "bns-node"
 [workspace]
 members = ["bns-core"]
 
+[features]
+default = []
+daemon = ["daemonize", "turn", "libc", "util"]
+
 [dependencies]
 lazy_static = "1.4.0"
 webrtc = { version = "0.3.3" }
@@ -33,17 +37,18 @@ pin-project = "1"
 base64 = "0.13.0"
 arrayref = "0.3.6"
 uuid = { version = "0.8.2", features = ["v4"]}
-daemonize = "0.4.1"
-libc = "0.2.121"
 jsonrpc-core = "18.0.0"
 jsonrpc-core-client = { version = "18.0.0", features = ["http"] }
 thiserror = "1"
 anyhow = "1.0.45"
 
+# daemon
+daemonize = { version = "0.4.1", optional = true }
+libc = { version = "0.2.121", optional = true }
 # turn server dependencies
-turn = "0.5.4"
-rusturn = "0.0.4"
-util = { package = "webrtc-util", version = "0.5.3", default-features = false, features = ["conn", "vnet"] }
+turn = { version = "0.5.4", optional = true }
+rusturn = { version = "0.0.4", optional = true }
+util = { package = "webrtc-util", version = "0.5.3", default-features = false, features = ["conn", "vnet"], optional = true }
 
 [[bin]]
 name = "bns-node"
@@ -52,4 +57,5 @@ path = "bin/main.rs"
 [[bin]]
 name = "bns-node-daemon"
 path = "bin/daemon.rs"
+required-features = ["daemon"]
 
