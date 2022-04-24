@@ -53,7 +53,7 @@ pub async fn accept_answer(params: Params, processor: Processor) -> Result<Value
 
 pub async fn list_peers(_params: Params, processor: Processor) -> Result<Value> {
     let r = processor.list_peers().await?;
-    Ok(serde_json::to_value(&r).map_err(|_| Error::from(ServerError::JsonSerializeError))?)
+    serde_json::to_value(&r).map_err(|_| Error::from(ServerError::JsonSerializeError))
 }
 
 pub async fn close_connection(params: Params, processor: Processor) -> Result<Value> {
