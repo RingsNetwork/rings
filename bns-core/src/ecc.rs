@@ -77,7 +77,7 @@ where
         let bytes = hasher.finalize();
         let mut ret = String::with_capacity(bytes.len() * 2);
         for &b in &bytes {
-            write!(&mut ret, "{:02x}", b).unwrap();
+            write!(ret, "{:02x}", b).unwrap();
         }
         HashStr(ret)
     }
