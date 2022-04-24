@@ -45,7 +45,12 @@ struct Daemon {
     #[clap(long, short = 'b', default_value = "127.0.0.1:50000", env)]
     pub http_addr: String,
 
-    #[clap(long, short = 's', default_value = "stun://stun.l.google.com:19302")]
+    #[clap(
+        long,
+        short = 's',
+        default_value = "stun://stun.l.google.com:19302",
+        env
+    )]
     pub ice_servers: String,
 
     #[clap(
