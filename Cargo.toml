@@ -14,7 +14,7 @@ tokio = { version = "1.13.0", features = ["full"] }
 hyper = { version = "0.14.14", features = ["full"] }
 env_logger = { version = "0.9.0" }
 tokio-util = { version = "0.6.9" }
-tower-http = { version="0.2.4", features = ["set-header"]}
+tower-http = { version = "0.2.4", features = ["set-header"] }
 http = "0.2.6"
 clap = { version = "3", features = ["derive", "env"] }
 bns-core = { path = "./bns-core" }
@@ -32,13 +32,14 @@ dotenv = "0.15.0"
 pin-project = "1"
 base64 = "0.13.0"
 arrayref = "0.3.6"
-uuid = { version = "0.8.2", features = ["v4"]}
+uuid = { version = "0.8.2", features = ["v4"] }
 daemonize = "0.4.1"
 libc = "0.2.121"
 jsonrpc-core = "18.0.0"
 jsonrpc-core-client = { version = "18.0.0", features = ["http"] }
 thiserror = "1"
 anyhow = "1.0.45"
+chrono = "0.4.19"
 
 # turn server dependencies
 turn = "0.5.4"
@@ -52,4 +53,3 @@ path = "bin/main.rs"
 [[bin]]
 name = "bns-node-daemon"
 path = "bin/daemon.rs"
-

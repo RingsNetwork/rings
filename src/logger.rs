@@ -1,3 +1,4 @@
+use chrono::Local;
 use clap::ArgEnum;
 use log::Log;
 use log::{Level, Metadata, Record};
@@ -12,7 +13,12 @@ impl Log for Logger {
 
     fn log(&self, record: &Record) {
         if self.enabled(record.metadata()) {
-            println!("{} - {}", record.level(), record.args());
+            println!(
+                "{} [{}] - {}",
+                Local::now().format("%Y-%m-%dT%H:%M:%S"),
+                record.level(),
+                record.args()
+            );
         }
     }
 

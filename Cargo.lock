@@ -401,6 +401,7 @@ dependencies = [
  "axum",
  "base64",
  "bns-core",
+ "chrono",
  "clap",
  "daemonize",
  "dotenv",
