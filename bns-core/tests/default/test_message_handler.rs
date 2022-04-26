@@ -135,7 +135,7 @@ pub mod test {
             }
         };
         match handle1
-            .handle_message_relay(&relay_message, &key2.address().into())
+            .handle_message_relay(relay_message, key2.address().into())
             .await
         {
             Ok(_) => assert_eq!(true, true),
@@ -256,7 +256,7 @@ pub mod test {
                     transport_2_to_3.ice_connection_state().await,
                     Some(RTCIceConnectionState::Connected)
                 );
-                let connect_msg = Message::ConnectNode(message::ConnectNode {
+                let connect_msg = Message::ConnectNodeSend(message::ConnectNodeSend {
                     sender_id: swarm1.address().into(),
                     target_id: swarm3.address().into(),
                     handshake_info: handshake_info13.to_string(),
@@ -333,7 +333,7 @@ pub mod test {
                         None,
                         None,
                         MessageRelayMethod::SEND,
-                        Message::NotifyPredecessor(message::NotifyPredecessor {
+                        Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
                             id: key1.address().into(),
                         }),
                     )
@@ -394,7 +394,7 @@ pub mod test {
                         None,
                         None,
                         MessageRelayMethod::SEND,
-                        Message::NotifyPredecessor(message::NotifyPredecessor {
+                        Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
                             id: swarm1.address().into(),
                         }),
                     )
@@ -415,7 +415,7 @@ pub mod test {
                         None,
                         None,
                         MessageRelayMethod::SEND,
-                        Message::FindSuccessor(message::FindSuccessor {
+                        Message::FindSuccessorSend(message::FindSuccessorSend {
                             id: swarm2.address().into(),
                             for_fix: false,
                         }),
@@ -488,7 +488,7 @@ pub mod test {
                         None,
                         None,
                         MessageRelayMethod::SEND,
-                        Message::NotifyPredecessor(message::NotifyPredecessor {
+                        Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
                             id: swarm1.address().into(),
                         }),
                     )
@@ -508,7 +508,7 @@ pub mod test {
                         None,
                         None,
                         MessageRelayMethod::SEND,
-                        Message::FindSuccessor(message::FindSuccessor {
+                        Message::FindSuccessorSend(message::FindSuccessorSend {
                             id: swarm2.address().into(),
                             for_fix: false,
                         }),
@@ -570,7 +570,7 @@ pub mod test {
                          None,
                          None,
                          MessageRelayMethod::SEND,
-                         Message::NotifyPredecessor(message::NotifyPredecessor {
+                         Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
                              id: swarm1.address().into(),
                          }),
                      )

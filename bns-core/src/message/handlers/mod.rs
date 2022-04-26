@@ -4,6 +4,8 @@ use crate::message::payload::{MessageRelay, MessageRelayMethod};
 use crate::message::types::Message;
 use crate::swarm::Swarm;
 
+use futures::future::err as FutureErr;
+use futures::future::{BoxFuture, FutureExt};
 use futures::lock::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -46,29 +48,45 @@ impl MessageHandler {
         self.swarm.send_message(address, payload).await
     }
 
-    pub async fn handle_message_relay(
+    pub fn handle_message_relay(
         &self,
-        relay: &MessageRelay<Message>,
-        prev: &Did,
-    ) -> Result<()> {
-        match &relay.data {
-            Message::JoinDHT(ref msg) => self.join_chord(relay, prev, msg).await,
-            Message::ConnectNode(ref msg) => self.connect_node(relay, prev, msg).await,
-            Message::ConnectedNode(ref msg) => self.connected_node(relay, prev, msg).await,
+        relay: MessageRelay<Message>,
+        prev: Did,
+    ) -> BoxFuture<'_, Result<()>> {
+        let data = relay.data.clone();
+        match data {
+            Message::JoinDHT(msg) => async move { self.join_chord(relay, prev, msg).await }.boxed(),
+            Message::ConnectNodeSend(ref msg) => self.connect_node(relay, prev, msg).await,
+            Message::ConnectNodeReport(ref msg) => self.connected_node(relay, prev, msg).await,
             Message::AlreadyConnected(ref msg) => self.already_connected(relay, prev, msg).await,
-            Message::FindSuccessor(ref msg) => self.find_successor(relay, prev, msg).await,
-            Message::FoundSuccessor(ref msg) => self.found_successor(relay, prev, msg).await,
-            Message::NotifyPredecessor(ref msg) => self.notify_predecessor(relay, prev, msg).await,
-            Message::NotifiedPredecessor(ref msg) => {
+            Message::FindSuccessorSend(ref msg) => self.find_successor(relay, prev, msg).await,
+            Message::FindSuccessorReport(ref msg) => self.found_successor(relay, prev, msg).await,
+            Message::NotifyPredecessorSend(ref msg) => {
+                self.notify_predecessor(relay, prev, msg).await
+            }
+            Message::NotifyPredecessorReport(ref msg) => {
                 self.notified_predecessor(relay, prev, msg).await
             }
             Message::SearchVNode(ref msg) => self.search_vnode(relay, prev, msg).await,
             Message::FoundVNode(ref msg) => self.found_vnode(relay, prev, msg).await,
             Message::StoreVNode(ref msg) => self.store_vnode(relay, prev, msg).await,
-            x => Err(Error::MessageHandlerUnsupportMessageType(format!(
-                "{:?}",
-                x
-            ))),
+            Message::MultiCall(ref msg) => {
+                for message in &msg.messages {
+                    let payload = MessageRelay::new(
+                        message.clone(),
+                        &self.swarm.session(),
+                        None,
+                        Some(relay.to_path.clone()),
+                        Some(relay.from_path.clone()),
+                        relay.method.clone(),
+                    )?;
+                    self.handle_message_relay(&payload, prev).await;
+                }
+                Ok(())
+            }
+            x => Box::pin(FutureErr::<(), Error>(
+                Error::MessageHandlerUnsupportMessageType(format!("{:?}", x)),
+            )),
         }
     }
 
@@ -79,11 +97,8 @@ impl MessageHandler {
             if !relay_message.verify() {
                 log::error!("Cannot verify msg or it's expired: {:?}", relay_message);
             }
-
-            if let Err(e) = self
-                .handle_message_relay(&relay_message, &relay_message.addr.into())
-                .await
-            {
+            let addr = relay_message.addr.clone().into();
+            if let Err(e) = self.handle_message_relay(relay_message.clone(), addr).await {
                 log::error!("Error in handle_message: {}", e);
             }
             Some(relay_message)
@@ -107,19 +122,14 @@ mod listener {
     impl MessageListener for MessageHandler {
         async fn listen(self: Arc<Self>) {
             let relay_messages = self.swarm.iter_messages();
-
             pin_mut!(relay_messages);
-
             while let Some(relay_message) = relay_messages.next().await {
                 if relay_message.is_expired() || !relay_message.verify() {
                     log::error!("Cannot verify msg or it's expired: {:?}", relay_message);
                     continue;
                 }
-
-                if let Err(e) = self
-                    .handle_message_relay(&relay_message, &relay_message.addr.into())
-                    .await
-                {
+                let addr = relay_message.addr.clone().into();
+                if let Err(e) = self.handle_message_relay(relay_message, addr).await {
                     log::error!("Error in handle_message: {}", e);
                     continue;
                 }

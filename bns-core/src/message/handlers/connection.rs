@@ -3,8 +3,8 @@ use crate::err::{Error, Result};
 use crate::message::payload::{MessageRelay, MessageRelayMethod};
 use crate::message::protocol::MessageSessionRelayProtocol;
 use crate::message::types::{
-    AlreadyConnected, ConnectNode, ConnectedNode, FindSuccessor, FoundSuccessor, JoinDHT, Message,
-    NotifiedPredecessor, NotifyPredecessor,
+    AlreadyConnected, ConnectNodeReport, ConnectNodeSend, FindSuccessorReport, FindSuccessorSend,
+    JoinDHT, Message, NotifyPredecessorReport, NotifyPredecessorSend,
 };
 use crate::message::MessageHandler;
 use crate::swarm::TransportManager;
@@ -19,60 +19,56 @@ use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait TChordConnection {
-    async fn join_chord(
-        &self,
-        relay: &MessageRelay<Message>,
-        prev: &Did,
-        msg: &JoinDHT,
-    ) -> Result<()>;
+    async fn join_chord(&self, relay: MessageRelay<Message>, prev: Did, msg: JoinDHT)
+        -> Result<()>;
 
     async fn connect_node(
         &self,
-        relay: &MessageRelay<Message>,
-        prev: &Did,
-        msg: &ConnectNode,
+        relay: MessageRelay<Message>,
+        prev: Did,
+        msg: ConnectNodeSend,
     ) -> Result<()>;
 
     async fn connected_node(
         &self,
-        relay: &MessageRelay<Message>,
-        prev: &Did,
-        msg: &ConnectedNode,
+        relay: MessageRelay<Message>,
+        prev: Did,
+        msg: ConnectNodeReport,
     ) -> Result<()>;
 
     async fn already_connected(
         &self,
-        relay: &MessageRelay<Message>,
-        prev: &Did,
-        msg: &AlreadyConnected,
+        relay: MessageRelay<Message>,
+        prev: Did,
+        msg: AlreadyConnected,
     ) -> Result<()>;
 
     async fn find_successor(
         &self,
-        relay: &MessageRelay<Message>,
-        prev: &Did,
-        msg: &FindSuccessor,
+        relay: MessageRelay<Message>,
+        prev: Did,
+        msg: FindSuccessorSend,
     ) -> Result<()>;
 
     async fn found_successor(
         &self,
-        relay: &MessageRelay<Message>,
-        prev: &Did,
-        msg: &FoundSuccessor,
+        relay: MessageRelay<Message>,
+        prev: Did,
+        msg: FindSuccessorReport,
     ) -> Result<()>;
 
     async fn notify_predecessor(
         &self,
-        relay: &MessageRelay<Message>,
-        prev: &Did,
-        msg: &NotifyPredecessor,
+        relay: MessageRelay<Message>,
+        prev: Did,
+        msg: NotifyPredecessorSend,
     ) -> Result<()>;
 
     async fn notified_predecessor(
         &self,
-        relay: &MessageRelay<Message>,
-        prev: &Did,
-        msg: &NotifiedPredecessor,
+        relay: MessageRelay<Message>,
+        prev: Did,
+        msg: NotifyPredecessorReport,
     ) -> Result<()>;
 }
 
@@ -81,9 +77,9 @@ pub trait TChordConnection {
 impl TChordConnection for MessageHandler {
     async fn join_chord(
         &self,
-        relay: &MessageRelay<Message>,
-        prev: &Did,
-        msg: &JoinDHT,
+        relay: MessageRelay<Message>,
+        prev: Did,
+        msg: JoinDHT,
     ) -> Result<()> {
         // here is two situation.
         // finger table just have no other node(beside next), it will be a `create` op
@@ -94,13 +90,13 @@ impl TChordConnection for MessageHandler {
         match dht.join(msg.id) {
             PeerRingAction::None => Ok(()),
             PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessor(id)) => {
-                if next != *prev && join_op {
+                if next != prev && join_op {
                     self.send_message(
                         &next.into(),
                         Some(relay.to_path),
                         Some(relay.from_path),
                         MessageRelayMethod::SEND,
-                        Message::FindSuccessor(FindSuccessor { id, for_fix: false }),
+                        Message::FindSuccessorSend(FindSuccessorSend { id, for_fix: false }),
                     )
                     .await
                 } else {
@@ -113,14 +109,14 @@ impl TChordConnection for MessageHandler {
 
     async fn connect_node(
         &self,
-        relay: &MessageRelay<Message>,
-        prev: &Did,
-        msg: &ConnectNode,
+        relay: MessageRelay<Message>,
+        prev: Did,
+        msg: ConnectNodeSend,
     ) -> Result<()> {
         // TODO: Verify necessity based on PeerRing to decrease connections but make sure availablitity.
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
-        relay.push_prev(dht.id, *prev);
+        relay.push_prev(dht.id, prev);
         if dht.id != msg.target_id {
             let next_node = match dht.find_successor(msg.target_id)? {
                 PeerRingAction::Some(node) => Some(node),
@@ -134,7 +130,7 @@ impl TChordConnection for MessageHandler {
                     Some(relay.to_path),
                     Some(relay.from_path),
                     MessageRelayMethod::SEND,
-                    Message::ConnectNode(msg.clone()),
+                    Message::ConnectNodeSend(msg.clone()),
                 )
                 .await;
         }
@@ -149,11 +145,11 @@ impl TChordConnection for MessageHandler {
                     .await?
                     .to_string();
                 self.send_message(
-                    &(*prev).into(),
+                    &prev.into(),
                     Some(relay.from_path),
                     None,
                     MessageRelayMethod::REPORT,
-                    Message::ConnectedNode(ConnectedNode {
+                    Message::ConnectNodeReport(ConnectNodeReport {
                         answer_id: dht.id,
                         handshake_info,
                     }),
@@ -166,7 +162,7 @@ impl TChordConnection for MessageHandler {
 
             _ => {
                 self.send_message(
-                    &(*prev).into(),
+                    &prev.into(),
                     Some(relay.from_path),
                     None,
                     MessageRelayMethod::REPORT,
@@ -179,13 +175,13 @@ impl TChordConnection for MessageHandler {
 
     async fn connected_node(
         &self,
-        relay: &MessageRelay<Message>,
-        prev: &Did,
-        msg: &ConnectedNode,
+        relay: MessageRelay<Message>,
+        prev: Did,
+        msg: ConnectNodeReport,
     ) -> Result<()> {
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
-        relay.push_prev(dht.id, *prev);
+        relay.push_prev(dht.id, prev);
         match relay.find_prev() {
             Some(prev_node) => {
                 self.send_message(
@@ -193,7 +189,7 @@ impl TChordConnection for MessageHandler {
                     Some(relay.to_path),
                     Some(relay.from_path),
                     MessageRelayMethod::REPORT,
-                    Message::ConnectedNode(msg.clone()),
+                    Message::ConnectNodeReport(msg.clone()),
                 )
                 .await
             }
@@ -212,13 +208,13 @@ impl TChordConnection for MessageHandler {
 
     async fn already_connected(
         &self,
-        relay: &MessageRelay<Message>,
-        prev: &Did,
-        msg: &AlreadyConnected,
+        relay: MessageRelay<Message>,
+        prev: Did,
+        msg: AlreadyConnected,
     ) -> Result<()> {
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
-        relay.push_prev(dht.id, *prev);
+        relay.push_prev(dht.id, prev);
         match relay.find_prev() {
             Some(prev_node) => {
                 self.send_message(
@@ -240,9 +236,9 @@ impl TChordConnection for MessageHandler {
 
     async fn find_successor(
         &self,
-        relay: &MessageRelay<Message>,
-        prev: &Did,
-        msg: &FindSuccessor,
+        relay: MessageRelay<Message>,
+        prev: Did,
+        msg: FindSuccessorSend,
     ) -> Result<()> {
         /*
          * A -> B For Example
@@ -310,15 +306,15 @@ impl TChordConnection for MessageHandler {
          */
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
-        relay.push_prev(dht.id, *prev);
+        relay.push_prev(dht.id, prev);
         match dht.find_successor(msg.id)? {
             PeerRingAction::Some(id) => {
                 self.send_message(
-                    &(*prev).into(),
+                    &prev.into(),
                     Some(relay.from_path),
                     Some(relay.to_path),
                     MessageRelayMethod::REPORT,
-                    Message::FoundSuccessor(FoundSuccessor {
+                    Message::FindSuccessorReport(FindSuccessorReport {
                         id,
                         for_fix: msg.for_fix,
                     }),
@@ -331,7 +327,7 @@ impl TChordConnection for MessageHandler {
                     Some(relay.to_path),
                     Some(relay.from_path),
                     MessageRelayMethod::SEND,
-                    Message::FindSuccessor(FindSuccessor {
+                    Message::FindSuccessorSend(FindSuccessorSend {
                         id,
                         for_fix: msg.for_fix,
                     }),
@@ -344,20 +340,20 @@ impl TChordConnection for MessageHandler {
 
     async fn found_successor(
         &self,
-        relay: &MessageRelay<Message>,
-        prev: &Did,
-        msg: &FoundSuccessor,
+        relay: MessageRelay<Message>,
+        prev: Did,
+        msg: FindSuccessorReport,
     ) -> Result<()> {
         let mut dht = self.dht.lock().await;
         let mut relay = relay.clone();
-        relay.push_prev(dht.id, *prev);
+        relay.push_prev(dht.id, prev);
         if !relay.to_path.is_empty() {
             self.send_message(
-                &(*prev).into(),
+                &prev.into(),
                 Some(relay.to_path),
                 Some(relay.from_path),
                 MessageRelayMethod::REPORT,
-                Message::FoundSuccessor(msg.clone()),
+                Message::FindSuccessorReport(msg.clone()),
             )
             .await
         } else {
@@ -373,33 +369,33 @@ impl TChordConnection for MessageHandler {
 
     async fn notify_predecessor(
         &self,
-        relay: &MessageRelay<Message>,
-        prev: &Did,
-        msg: &NotifyPredecessor,
+        relay: MessageRelay<Message>,
+        prev: Did,
+        msg: NotifyPredecessorSend,
     ) -> Result<()> {
         let mut dht = self.dht.lock().await;
         let mut relay = relay.clone();
-        relay.push_prev(dht.id, *prev);
+        relay.push_prev(dht.id, prev);
         dht.notify(msg.id);
         self.send_message(
-            &(*prev).into(),
+            &prev.into(),
             Some(relay.from_path),
             Some(relay.to_path),
             MessageRelayMethod::REPORT,
-            Message::NotifiedPredecessor(NotifiedPredecessor { id: dht.id }),
+            Message::NotifyPredecessorReport(NotifyPredecessorReport { id: dht.id }),
         )
         .await
     }
 
     async fn notified_predecessor(
         &self,
-        relay: &MessageRelay<Message>,
-        prev: &Did,
-        msg: &NotifiedPredecessor,
+        relay: MessageRelay<Message>,
+        prev: Did,
+        msg: NotifyPredecessorReport,
     ) -> Result<()> {
         let mut dht = self.dht.lock().await;
         let mut relay = relay.clone();
-        relay.push_prev(dht.id, *prev);
+        relay.push_prev(dht.id, prev);
         assert_eq!(relay.method, MessageRelayMethod::REPORT);
         // if successor: predecessor is between (id, successor]
         // then update local successor

@@ -31,6 +31,13 @@ pub trait TChordStorage {
         prev: &Did,
         msg: &StoreVNode,
     ) -> Result<()>;
+
+    //async fn sync_with_successor(
+    //&self,
+    //relay: &MessageRelay<Message>,
+    //prev: &Did,
+    //msg: &SyncVNodeWithSuccessor
+    //) -> Result<()>;
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
@@ -135,4 +142,14 @@ impl TChordStorage for MessageHandler {
             Err(e) => Err(e),
         }
     }
+
+    //async fn sync_with_successor(
+    //&self,
+    //relay: &MessageRelay<Message>,
+    //prev: &Did,
+    //msg: &SyncVNodeWithSuccessor
+    //) -> Result<()>
+    //{
+    //Ok(())
+    //}
 }
