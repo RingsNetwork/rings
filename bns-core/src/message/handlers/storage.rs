@@ -3,7 +3,7 @@ use crate::dht::{ChordStorage, Did, PeerRingAction};
 use crate::err::{Error, Result};
 use crate::message::payload::{MessageRelay, MessageRelayMethod};
 use crate::message::protocol::MessageSessionRelayProtocol;
-use crate::message::types::{FoundVNode, Message, SearchVNode, StoreVNode};
+use crate::message::types::{FoundVNode, Message, SearchVNode, StoreVNode, SyncVNodeWithSuccessor};
 use crate::message::MessageHandler;
 
 use async_trait::async_trait;
@@ -13,31 +13,31 @@ use async_trait::async_trait;
 pub trait TChordStorage {
     async fn search_vnode(
         &self,
-        relay: &MessageRelay<Message>,
-        prev: &Did,
-        msg: &SearchVNode,
+        relay: MessageRelay<Message>,
+        prev: Did,
+        msg: SearchVNode,
     ) -> Result<()>;
 
     async fn found_vnode(
         &self,
-        relay: &MessageRelay<Message>,
-        prev: &Did,
-        msg: &FoundVNode,
+        relay: MessageRelay<Message>,
+        prev: Did,
+        msg: FoundVNode,
     ) -> Result<()>;
 
     async fn store_vnode(
         &self,
-        relay: &MessageRelay<Message>,
-        prev: &Did,
-        msg: &StoreVNode,
+        relay: MessageRelay<Message>,
+        prev: Did,
+        msg: StoreVNode,
     ) -> Result<()>;
 
-    //async fn sync_with_successor(
-    //&self,
-    //relay: &MessageRelay<Message>,
-    //prev: &Did,
-    //msg: &SyncVNodeWithSuccessor
-    //) -> Result<()>;
+    async fn sync_with_successor(
+        &self,
+        relay: MessageRelay<Message>,
+        prev: Did,
+        msg: SyncVNodeWithSuccessor,
+    ) -> Result<()>;
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
@@ -45,19 +45,19 @@ pub trait TChordStorage {
 impl TChordStorage for MessageHandler {
     async fn search_vnode(
         &self,
-        relay: &MessageRelay<Message>,
-        prev: &Did,
-        msg: &SearchVNode,
+        relay: MessageRelay<Message>,
+        prev: Did,
+        msg: SearchVNode,
     ) -> Result<()> {
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
-        relay.push_prev(dht.id, *prev);
+        relay.push_prev(dht.id, prev);
         match dht.lookup(msg.target_id) {
             Ok(action) => match action {
                 PeerRingAction::None => Ok(()),
                 PeerRingAction::SomeVNode(v) => {
                     self.send_message(
-                        &(*prev).into(),
+                        &prev.into(),
                         Some(relay.from_path),
                         Some(relay.to_path),
                         MessageRelayMethod::REPORT,
@@ -89,16 +89,16 @@ impl TChordStorage for MessageHandler {
 
     async fn found_vnode(
         &self,
-        relay: &MessageRelay<Message>,
-        prev: &Did,
-        msg: &FoundVNode,
+        relay: MessageRelay<Message>,
+        prev: Did,
+        msg: FoundVNode,
     ) -> Result<()> {
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
-        relay.push_prev(dht.id, *prev);
+        relay.push_prev(dht.id, prev);
         if !relay.to_path.is_empty() {
             self.send_message(
-                &(*prev).into(),
+                &prev.into(),
                 Some(relay.to_path),
                 Some(relay.from_path),
                 MessageRelayMethod::REPORT,
@@ -113,13 +113,13 @@ impl TChordStorage for MessageHandler {
 
     async fn store_vnode(
         &self,
-        relay: &MessageRelay<Message>,
-        prev: &Did,
-        msg: &StoreVNode,
+        relay: MessageRelay<Message>,
+        prev: Did,
+        msg: StoreVNode,
     ) -> Result<()> {
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
-        relay.push_prev(dht.id, *prev);
+        relay.push_prev(dht.id, prev);
         let virtual_peer = VirtualPeer {
             address: msg.sender_id,
             data: msg.data.clone(),
@@ -143,13 +143,12 @@ impl TChordStorage for MessageHandler {
         }
     }
 
-    //async fn sync_with_successor(
-    //&self,
-    //relay: &MessageRelay<Message>,
-    //prev: &Did,
-    //msg: &SyncVNodeWithSuccessor
-    //) -> Result<()>
-    //{
-    //Ok(())
-    //}
+    async fn sync_with_successor(
+        &self,
+        _relay: MessageRelay<Message>,
+        _prev: Did,
+        _msg: SyncVNodeWithSuccessor,
+    ) -> Result<()> {
+        Ok(())
+    }
 }

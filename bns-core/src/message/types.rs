@@ -1,4 +1,4 @@
-use crate::dht::Did;
+use crate::dht::{peer::VirtualPeer, Did};
 use crate::message::Encoded;
 use serde::Deserialize;
 use serde::Serialize;
@@ -69,6 +69,13 @@ pub struct StoreVNode {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct MultiCall {
     pub messages: Vec<Message>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct SyncVNodeWithSuccessor {
+    pub sender_id: Did,
+    pub target_id: Did,
+    pub data: Vec<VirtualPeer>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
