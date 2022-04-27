@@ -23,13 +23,13 @@ pub struct BiasId {
 impl BiasId {
     pub fn new(bias: &Did, id: &Did) -> BiasId {
         BiasId {
-            bias: bias.clone(),
-            did: (*id - *bias).into(),
+            bias: *bias,
+            did: *id - *bias,
         }
     }
 
     pub fn to_did(bid: &BiasId) -> Did {
-        (bid.did + bid.bias).into()
+        bid.did + bid.bias
     }
 
     pub fn pos(&self) -> Did {
