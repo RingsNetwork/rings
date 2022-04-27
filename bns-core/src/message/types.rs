@@ -1,10 +1,10 @@
-use crate::dht::Did;
+use crate::dht::{peer::VirtualPeer, Did};
 use crate::message::Encoded;
 use serde::Deserialize;
 use serde::Serialize;
 
 #[derive(Debug, PartialEq, Deserialize, Serialize, Clone)]
-pub struct ConnectNode {
+pub struct ConnectNodeSend {
     pub sender_id: Did,
     pub target_id: Did,
     pub handshake_info: String,
@@ -16,30 +16,30 @@ pub struct AlreadyConnected {
 }
 
 #[derive(Debug, PartialEq, Deserialize, Serialize, Clone)]
-pub struct ConnectedNode {
+pub struct ConnectNodeReport {
     pub answer_id: Did,
     pub handshake_info: String,
 }
 
 #[derive(Debug, PartialEq, Deserialize, Serialize, Clone)]
-pub struct FindSuccessor {
+pub struct FindSuccessorSend {
     pub id: Did,
     pub for_fix: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-pub struct FoundSuccessor {
+pub struct FindSuccessorReport {
     pub id: Did,
     pub for_fix: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-pub struct NotifyPredecessor {
+pub struct NotifyPredecessorSend {
     pub id: Did,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-pub struct NotifiedPredecessor {
+pub struct NotifyPredecessorReport {
     pub id: Did,
 }
 
@@ -67,16 +67,29 @@ pub struct StoreVNode {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct MultiCall {
+    pub messages: Vec<Message>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct SyncVNodeWithSuccessor {
+    pub sender_id: Did,
+    pub target_id: Did,
+    pub data: Vec<VirtualPeer>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub enum Message {
     None,
+    MultiCall(MultiCall),
     JoinDHT(JoinDHT),
-    ConnectNode(ConnectNode),
+    ConnectNodeSend(ConnectNodeSend),
     AlreadyConnected(AlreadyConnected),
-    ConnectedNode(ConnectedNode),
-    FindSuccessor(FindSuccessor),
-    FoundSuccessor(FoundSuccessor),
-    NotifyPredecessor(NotifyPredecessor),
-    NotifiedPredecessor(NotifiedPredecessor),
+    ConnectNodeReport(ConnectNodeReport),
+    FindSuccessorSend(FindSuccessorSend),
+    FindSuccessorReport(FindSuccessorReport),
+    NotifyPredecessorSend(NotifyPredecessorSend),
+    NotifyPredecessorReport(NotifyPredecessorReport),
     SearchVNode(SearchVNode),
     FoundVNode(FoundVNode),
     StoreVNode(StoreVNode),

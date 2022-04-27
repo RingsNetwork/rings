@@ -58,6 +58,7 @@ features = [
   "RtcIceCandidateInit",
   "RtcDataChannel",
   "RtcDataChannelEvent",
+  "RtcDataChannelState",
   "RtcConfiguration",
   "RtcIceConnectionState",
   "RtcIceGatheringState",

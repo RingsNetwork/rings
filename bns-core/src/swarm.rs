@@ -80,6 +80,7 @@ impl Swarm {
         let transport = self
             .get_transport(address)
             .ok_or(Error::SwarmMissAddressInTable)?;
+        transport.wait_for_data_channel_open().await?;
         transport.send_message(&payload.gzip(9)?).await
     }
 

@@ -1,6 +1,8 @@
 use crate::dht::{ChordStablize, PeerRing, PeerRingAction, PeerRingRemoteAction};
 use crate::err::Result;
-use crate::message::{FindSuccessor, Message, MessageRelay, MessageRelayMethod, NotifyPredecessor};
+use crate::message::{
+    FindSuccessorSend, Message, MessageRelay, MessageRelayMethod, NotifyPredecessorSend,
+};
 use crate::swarm::Swarm;
 use futures::lock::Mutex;
 use std::sync::Arc;
@@ -27,7 +29,7 @@ impl Stabilization {
     async fn notify_predecessor(&self) -> Result<()> {
         let chord = self.chord.lock().await;
         let message = MessageRelay::new(
-            Message::NotifyPredecessor(NotifyPredecessor { id: chord.id }),
+            Message::NotifyPredecessorSend(NotifyPredecessorSend { id: chord.id }),
             &self.swarm.session(),
             None,
             None,
@@ -56,7 +58,7 @@ impl Stabilization {
                     PeerRingRemoteAction::FindSuccessorForFix(current),
                 ) => {
                     let message = MessageRelay::new(
-                        Message::FindSuccessor(FindSuccessor {
+                        Message::FindSuccessorSend(FindSuccessorSend {
                             id: current,
                             for_fix: true,
                         }),
