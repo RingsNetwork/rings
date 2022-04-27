@@ -38,9 +38,7 @@ impl Stabilization {
         )?;
         if chord.id != chord.successor.min() {
             for s in chord.successor.list() {
-                self.swarm
-                    .send_message(&s.into(), message.clone())
-                    .await?;
+                self.swarm.send_message(&s.into(), message.clone()).await?;
             }
             Ok(())
         } else {

@@ -13,6 +13,54 @@ use web3::types::H160;
 #[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd, Debug, Serialize, Deserialize, Hash)]
 pub struct Did(H160);
 
+pub struct BiasRing {
+    bias: Did,
+}
+
+// Bias Did is a special Did which set origin Did's idendity to bias
+#[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd, Debug, Serialize, Deserialize, Hash)]
+pub struct BiasDid {
+    bias: Did,
+    did: Did,
+}
+
+impl BiasRing {
+    fn new(id: &Did) -> Self {
+        Self { bias: id.clone() }
+    }
+
+    fn build(&self, id: &Did) -> BiasDid {
+        BiasDid {
+            bias: self.bias.clone(),
+            did: (*id - self.bias).into(),
+        }
+    }
+
+    fn to_did(bid: &BiasDid) -> Did {
+        (bid.did + bid.bias).into()
+    }
+}
+
+impl From<BiasDid> for Did {
+    fn from(id: BiasDid) -> Did {
+        BiasRing::to_did(&id)
+    }
+}
+
+impl From<&BiasDid> for Did {
+    fn from(id: &BiasDid) -> Did {
+        BiasRing::to_did(id)
+    }
+}
+
+impl Did {
+    // Test x <- (a, b)
+    fn in_range(&self, id: &Self, a: &Self, b: &Self) -> bool {
+        // Test x > a && b > x
+        *self - *id > *a - *id && *b - *id > *self - *id
+    }
+}
+
 pub trait SortRing {
     fn sort(&self, id: Did) -> Vec<Did>;
 }
@@ -20,12 +68,10 @@ pub trait SortRing {
 impl SortRing for Vec<Did> {
     fn sort(&self, id: Did) -> Vec<Did> {
         let mut ret: Vec<Did> = self.clone();
-        ret.sort_by(
-            |a, b| {
-                let (da, db) = (*a - id, *b - id);
-                (da).partial_cmp(&db).unwrap()
-            }
-        );
+        ret.sort_by(|a, b| {
+            let (da, db) = (*a - id, *b - id);
+            (da).partial_cmp(&db).unwrap()
+        });
         ret
     }
 }

@@ -3,8 +3,8 @@
 /// With high probability, the number of nodes that must be contacted to find a successor in an N-node network is O(log N).
 use super::peer::VirtualPeer;
 use super::types::{Chord, ChordStablize, ChordStorage};
-use crate::dht::Did;
 use crate::dht::did::SortRing;
+use crate::dht::Did;
 use crate::err::{Error, Result};
 use crate::storage::{MemStorage, Storage};
 use num_bigint::BigUint;
@@ -16,7 +16,7 @@ use std::sync::Arc;
 pub struct Successor {
     id: Did,
     max: usize,
-    successors: Vec<Did>
+    successors: Vec<Did>,
 }
 
 impl Successor {
@@ -24,7 +24,7 @@ impl Successor {
         Self {
             id: id.clone(),
             max: 3,
-            successors: vec![]
+            successors: vec![],
         }
     }
 
@@ -51,7 +51,6 @@ impl Successor {
         self.successors.clone()
     }
 }
-
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
@@ -142,7 +141,7 @@ impl Chord<PeerRingAction> for PeerRing {
                         // for a existed value v
                         // if id is more close to self.id than v
                         if id - self.id < v - self.id {
-                            //                        if id < v || id > -v {
+                            // if id < v || id > -v {
                             self.finger[k as usize] = Some(id);
                             // if id is more close to successor
                         }
@@ -161,9 +160,13 @@ impl Chord<PeerRingAction> for PeerRing {
             // only triger if successor is updated
         }
         PeerRingAction::MultiActions(
-            self.successor.list().iter().map(|s| {
-                PeerRingAction::RemoteAction(s.clone(), RemoteAction::FindSuccessor(self.id))
-            }).collect()
+            self.successor
+                .list()
+                .iter()
+                .map(|s| {
+                    PeerRingAction::RemoteAction(s.clone(), RemoteAction::FindSuccessor(self.id))
+                })
+                .collect(),
         )
     }
 
