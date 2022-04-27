@@ -31,6 +31,7 @@ use web3::types::Address;
 use web_sys::MessageEvent;
 use web_sys::RtcConfiguration;
 use web_sys::RtcDataChannel;
+use web_sys::RtcDataChannelState;
 use web_sys::RtcDataChannelEvent;
 use web_sys::RtcIceCandidate;
 use web_sys::RtcIceCandidateInit;
@@ -470,6 +471,39 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
     async fn wait_for_connected(&self) -> Result<()> {
         let promise = self.connect_success_promise().await?;
         promise.await
+    }
+}
+
+impl WasmTransport {
+    pub async fn wait_for_data_channel_open(&self) -> Result<Promise> {
+        match self.get_data_channel().await {
+            Some(dc) => {
+                let promise = Promise::default();
+                let state = Arc::clone(&promise.state());
+                let dc_cloned = Arc::clone(&dc);
+                let callback = Closure::wrap(Box::new(move || match dc_cloned.ready_state() {
+                    RtcDataChannelState::Open => {
+                        let state = Arc::clone(&state);
+                        let mut s = state.lock().unwrap();
+                        if let Some(w) = s.waker.take() {
+                            w.wake();
+                            s.completed = true;
+                            s.successed = Some(true);
+                        }
+                    }
+                    x => {
+                        log::trace!("datachannel status: {:?}", x)
+                    }
+                }) as Box<dyn FnMut()>);
+                dc.set_onopen(Some(callback.as_ref().unchecked_ref()));
+                callback.forget();
+                Ok(promise)
+            },
+            None => {
+                log::error!("{:?}", Error::RTCDataChannelNotReady);
+                Err(Error::RTCDataChannelNotReady)
+            }
+        }
     }
 }
 

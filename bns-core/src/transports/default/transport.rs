@@ -463,7 +463,8 @@ impl DefaultTransport {
                 }
             }
             None => {
-                panic!("{:?}", Error::RTCDataChannelNotReady);
+                log::error!("{:?}", Error::RTCDataChannelNotReady);
+                Err(Error::RTCDataChannelNotReady)
             }
         }
     }
