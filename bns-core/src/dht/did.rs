@@ -163,4 +163,17 @@ mod tests {
         assert_eq!(-a + a, zero);
         assert_eq!(-(-a), a);
     }
+
+    #[test]
+    fn test_sort() {
+        let a = Did::from_str("0xaaE807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
+        let b = Did::from_str("0xbb9999cf1046e68e36E1aA2E0E07105eDDD1f08E").unwrap();
+        let c = Did::from_str("0xccffee254729296a45a3885639AC7E10F9d54979").unwrap();
+        let d = Did::from_str("0xdddfee254729296a45a3885639AC7E10F9d54979").unwrap();
+        let v = vec![c, b, a, d];
+        assert_eq!(v.sort(a), vec![a, b, c ,d]);
+        assert_eq!(v.sort(b), vec![b, c ,d, a]);
+        assert_eq!(v.sort(c), vec![c ,d, a, b]);
+        assert_eq!(v.sort(d), vec![d, a, b, c]);
+    }
 }

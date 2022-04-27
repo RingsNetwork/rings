@@ -205,7 +205,7 @@ impl ChordStablize<PeerRingAction> for PeerRing {
         // x = successor:predecessor;
         // if (x in (n, successor)) { successor = x; successor:notify(n); }
         if let Some(x) = self.predecessor {
-            if x - self.id < self.successor.max() - self.id {
+            if x - self.id < self.successor.max() - self.id || self.id == self.successor.max() {
                 self.successor.update(x);
                 return PeerRingAction::RemoteAction(x, RemoteAction::Notify(self.id));
                 // successor.notify(n)
