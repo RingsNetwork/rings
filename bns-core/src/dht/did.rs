@@ -13,49 +13,69 @@ use web3::types::H160;
 #[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd, Debug, Serialize, Deserialize, Hash)]
 pub struct Did(H160);
 
-pub struct BiasRing {
-    bias: Did,
-}
-
 // Bias Did is a special Did which set origin Did's idendity to bias
-#[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd, Debug, Serialize, Deserialize, Hash)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug, Serialize, Deserialize, Hash)]
 pub struct BiasId {
     bias: Did,
     did: Did,
 }
 
-impl BiasRing {
-    fn new(id: &Did) -> Self {
-        Self { bias: id.clone() }
-    }
-
-    fn build(&self, id: &Did) -> BiasId {
+impl BiasId {
+    pub fn new(bias: &Did, id: &Did) -> BiasId {
         BiasId {
-            bias: self.bias.clone(),
-            did: (*id - self.bias).into(),
+            bias: bias.clone(),
+            did: (*id - *bias).into(),
         }
     }
 
-    fn to_did(bid: &BiasId) -> Did {
+    pub fn to_did(bid: &BiasId) -> Did {
         (bid.did + bid.bias).into()
+    }
+
+    pub fn pos(&self) -> Did {
+        self.did
+    }
+}
+
+impl PartialOrd for BiasId {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        if other.bias != self.bias {
+            let did: Did = other.into();
+            let bid = BiasId::new(&self.bias, &did);
+            self.did.partial_cmp(&bid.did)
+        } else {
+            self.did.partial_cmp(&other.did)
+        }
+    }
+}
+
+impl Ord for BiasId {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        if other.bias != self.bias {
+            let did: Did = other.into();
+            let bid = BiasId::new(&self.bias, &did);
+            self.did.cmp(&bid.did)
+        } else {
+            self.did.cmp(&other.did)
+        }
     }
 }
 
 impl From<BiasId> for Did {
     fn from(id: BiasId) -> Did {
-        BiasRing::to_did(&id)
+        BiasId::to_did(&id)
     }
 }
 
 impl From<&BiasId> for Did {
     fn from(id: &BiasId) -> Did {
-        BiasRing::to_did(id)
+        BiasId::to_did(id)
     }
 }
 
 impl Did {
     // Test x <- (a, b)
-    fn in_range(&self, id: &Self, a: &Self, b: &Self) -> bool {
+    pub fn in_range(&self, id: &Self, a: &Self, b: &Self) -> bool {
         // Test x > a && b > x
         *self - *id > *a - *id && *b - *id > *self - *id
     }
@@ -170,11 +190,11 @@ mod tests {
         let d = Did::from_str("0xdddfee254729296a45a3885639AC7E10F9d54979").unwrap();
         let mut v = vec![c, b, a, d];
         v.sort(a);
-        assert_eq!(v, vec![a, b, c ,d]);
+        assert_eq!(v, vec![a, b, c, d]);
         v.sort(b);
-        assert_eq!(v, vec![b, c ,d, a]);
+        assert_eq!(v, vec![b, c, d, a]);
         v.sort(c);
-        assert_eq!(v, vec![c ,d, a, b]);
+        assert_eq!(v, vec![c, d, a, b]);
         v.sort(d);
         assert_eq!(v, vec![d, a, b, c]);
     }

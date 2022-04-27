@@ -1,12 +1,10 @@
 /// implementation of CHORD DHT
 /// ref: https://pdos.csail.mit.edu/papers/ton:chord/paper-ton.pdf
 /// With high probability, the number of nodes that must be contacted to find a successor in an N-node network is O(log N).
-use super::peer::VirtualPeer;
-use super::types::{Chord, ChordStablize, ChordStorage};
-use super::did::BiasRing;
 use super::did::BiasId;
+use super::peer::VirtualPeer;
 use super::successor::Successor;
-use crate::dht::did::SortRing;
+use super::types::{Chord, ChordStablize, ChordStorage};
 use crate::dht::Did;
 use crate::err::{Error, Result};
 use crate::storage::{MemStorage, Storage};
@@ -14,7 +12,6 @@ use num_bigint::BigUint;
 use serde::Deserialize;
 use serde::Serialize;
 use std::sync::Arc;
-
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
@@ -69,6 +66,10 @@ impl PeerRing {
         }
     }
 
+    pub fn bias(&self, id: Did) -> BiasId {
+        BiasId::new(&self.id, &id)
+    }
+
     pub fn new_with_storage(id: Did, storage: Arc<MemStorage<Did, VirtualPeer>>) -> Self {
         Self {
             successor: Successor::new(&id),
@@ -97,14 +98,14 @@ impl Chord<PeerRingAction> for PeerRing {
             // pos >= id
             // from n to n + 2^160
             let pos = Did::from(BigUint::from(2u16).pow(k));
-
-            // pos less than id or id is on another side of ring
-            if pos <= id - self.id {
+            // pos less than id
+            if self.bias(id).pos() >= pos {
+                //            if pos <= id - self.id {
                 match self.finger[k as usize] {
                     Some(v) => {
                         // for a existed value v
                         // if id is more close to self.id than v
-                        if id - self.id < v - self.id {
+                        if self.bias(id) < self.bias(v) {
                             // if id < v || id > -v {
                             self.finger[k as usize] = Some(id);
                             // if id is more close to successor
@@ -116,7 +117,7 @@ impl Chord<PeerRingAction> for PeerRing {
                 }
             }
         }
-        if (id - self.id) < (id - self.successor.max()) || self.id == self.successor.max() {
+        if self.bias(id) < self.bias(self.successor.max()) || self.successor.is_none() {
             // 1) id should follows self.id
             // 2) #fff should follow #001 because id space is a Finate Ring
             // 3) #001 - #fff = #001 + -(#fff) = #001
@@ -124,7 +125,6 @@ impl Chord<PeerRingAction> for PeerRing {
             // only triger if successor is updated
         }
         PeerRingAction::RemoteAction(id, RemoteAction::FindSuccessor(self.id))
-
     }
 
     // Fig.5 n.find_successor(id)
@@ -132,7 +132,7 @@ impl Chord<PeerRingAction> for PeerRing {
         // if (id \in (n; successor]); return successor
         // if ID = N63, Successor = N10
         // N9
-        if id - self.id <= self.successor.max() - self.id || self.id == self.successor.min() {
+        if self.bias(id) <= self.bias(self.successor.max()) || self.successor.is_none() {
             //if self.id < id && id <= self.successor {
             Ok(PeerRingAction::Some(id))
         } else {
@@ -316,7 +316,12 @@ mod tests {
         assert!((a - d) < (b - d));
 
         let mut node_a = PeerRing::new(a);
-        assert_eq!(node_a.successor.list(), vec![], "{:?}", node_a.successor.list());
+        assert_eq!(
+            node_a.successor.list(),
+            vec![],
+            "{:?}",
+            node_a.successor.list()
+        );
         // for increase seq join
         node_a.join(a);
         // Node A wont add self to finder
@@ -332,7 +337,12 @@ mod tests {
         assert!(node_a.finger.contains(&Some(b)));
         assert!(node_a.finger.contains(&None));
 
-        assert_eq!(node_a.successor.list(), vec![b], "{:?}", node_a.successor.list());
+        assert_eq!(
+            node_a.successor.list(),
+            vec![b],
+            "{:?}",
+            node_a.successor.list()
+        );
 
         // Node A starts to query node b for it's successor
         assert_eq!(
