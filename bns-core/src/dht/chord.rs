@@ -4,12 +4,54 @@
 use super::peer::VirtualPeer;
 use super::types::{Chord, ChordStablize, ChordStorage};
 use crate::dht::Did;
+use crate::dht::did::SortRing;
 use crate::err::{Error, Result};
 use crate::storage::{MemStorage, Storage};
 use num_bigint::BigUint;
 use serde::Deserialize;
 use serde::Serialize;
 use std::sync::Arc;
+
+#[derive(Debug, Clone)]
+pub struct Successor {
+    id: Did,
+    max: usize,
+    successors: Vec<Did>
+}
+
+impl Successor {
+    fn new(id: &Did) -> Self {
+        Self {
+            id: id.clone(),
+            max: 3,
+            successors: vec![]
+        }
+    }
+
+    pub fn is_none(&self) -> bool {
+        self.successors.len() == 0
+    }
+
+    pub fn min(&self) -> Did {
+        self.successors[0]
+    }
+
+    pub fn max(&self) -> Did {
+        self.successors[self.successors.len()]
+    }
+
+    pub fn update(&mut self, successor: Did) {
+        let mut succ = self.successors.clone();
+        succ.push(successor);
+        succ.sort(self.id);
+        self.successors = succ[0..self.max].to_vec();
+    }
+
+    pub fn list(&self) -> Vec<Did> {
+        self.successors.clone()
+    }
+}
+
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
@@ -42,7 +84,7 @@ pub struct PeerRing {
     // for index start with 0, it should be (n+2^k) mod 2^m
     pub finger: Vec<Option<Did>>,
     // The next node on the identifier circle; finger[1].node
-    pub successor: Did,
+    pub successor: Successor,
     // The previous node on the identifier circle
     pub predecessor: Option<Did>,
     pub id: Did,
@@ -54,7 +96,7 @@ impl PeerRing {
     // create a new Chord ring.
     pub fn new(id: Did) -> Self {
         Self {
-            successor: id,
+            successor: Successor::new(&id),
             predecessor: None,
             // for Eth address, it's 160
             finger: vec![None; 160],
@@ -66,7 +108,7 @@ impl PeerRing {
 
     pub fn new_with_storage(id: Did, storage: Arc<MemStorage<Did, VirtualPeer>>) -> Self {
         Self {
-            successor: id,
+            successor: Successor::new(&id),
             predecessor: None,
             // for Eth address, it's 160
             finger: vec![None; 160],
@@ -111,14 +153,18 @@ impl Chord<PeerRingAction> for PeerRing {
                 }
             }
         }
-        if (id - self.id) < (id - self.successor) || self.id == self.successor {
+        if (id - self.id) < (id - self.successor.max()) || self.id == self.successor.max() {
             // 1) id should follows self.id
             // 2) #fff should follow #001 because id space is a Finate Ring
             // 3) #001 - #fff = #001 + -(#fff) = #001
-            self.successor = id;
+            self.successor.update(id);
             // only triger if successor is updated
         }
-        PeerRingAction::RemoteAction(self.successor, RemoteAction::FindSuccessor(self.id))
+        PeerRingAction::MultiActions(
+            self.successor.list().iter().map(|s| {
+                PeerRingAction::RemoteAction(s.clone(), RemoteAction::FindSuccessor(self.id))
+            }).collect()
+        )
     }
 
     // Fig.5 n.find_successor(id)
@@ -126,7 +172,7 @@ impl Chord<PeerRingAction> for PeerRing {
         // if (id \in (n; successor]); return successor
         // if ID = N63, Successor = N10
         // N9
-        if id - self.id <= self.successor - self.id || self.id == self.successor {
+        if id - self.id <= self.successor.max() - self.id || self.id == self.successor.max() {
             //if self.id < id && id <= self.successor {
             Ok(PeerRingAction::Some(id))
         } else {
@@ -150,8 +196,8 @@ impl ChordStablize<PeerRingAction> for PeerRing {
         // x = successor:predecessor;
         // if (x in (n, successor)) { successor = x; successor:notify(n); }
         if let Some(x) = self.predecessor {
-            if x - self.id < self.successor - self.id {
-                self.successor = x;
+            if x - self.id < self.successor.max() - self.id {
+                self.successor.update(x);
                 return PeerRingAction::RemoteAction(x, RemoteAction::Notify(self.id));
                 // successor.notify(n)
             }
@@ -279,14 +325,14 @@ impl ChordStorage<PeerRingAction> for PeerRing {
         for k in self.storage.keys() {
             // k in (self, self.successor)
             // k is more close to self.successor
-            if k - self.successor > k - self.id {
+            if k - self.successor.max() > k - self.id {
                 if let Some(v) = self.storage.remove(&k) {
                     data.push(v.1);
                 }
             }
         }
         Ok(PeerRingAction::RemoteAction(
-            self.successor,
+            self.successor.max(),
             RemoteAction::SyncVNodeWithSuccessor(data),
         ))
     }

@@ -13,6 +13,23 @@ use web3::types::H160;
 #[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd, Debug, Serialize, Deserialize, Hash)]
 pub struct Did(H160);
 
+pub trait SortRing {
+    fn sort(&self, id: Did) -> Vec<Did>;
+}
+
+impl SortRing for Vec<Did> {
+    fn sort(&self, id: Did) -> Vec<Did> {
+        let mut ret: Vec<Did> = self.clone();
+        ret.sort_by(
+            |a, b| {
+                let (da, db) = (*a - id, *b - id);
+                (da).partial_cmp(&db).unwrap()
+            }
+        );
+        ret
+    }
+}
+
 impl Deref for Did {
     type Target = H160;
     fn deref(&self) -> &Self::Target {
