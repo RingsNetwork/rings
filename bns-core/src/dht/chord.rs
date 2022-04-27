@@ -5,6 +5,7 @@ use super::peer::VirtualPeer;
 use super::types::{Chord, ChordStablize, ChordStorage};
 use super::did::BiasRing;
 use super::did::BiasId;
+use super::successor::Successor;
 use crate::dht::did::SortRing;
 use crate::dht::Did;
 use crate::err::{Error, Result};
@@ -14,55 +15,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::sync::Arc;
 
-#[derive(Debug, Clone)]
-pub struct Successor {
-    id: Did,
-    max: usize,
-    successors: Vec<Did>,
-}
-
-impl Successor {
-    fn new(id: &Did) -> Self {
-        Self {
-            id: id.clone(),
-            max: 3,
-            successors: vec![],
-        }
-    }
-
-    pub fn is_none(&self) -> bool {
-        self.successors.len() == 0
-    }
-
-    pub fn min(&self) -> Did {
-        if self.is_none() {
-            self.id
-        } else {
-            self.successors[0]
-        }
-    }
-
-    pub fn max(&self) -> Did {
-        if self.is_none() {
-            self.id
-        } else {
-            self.successors[self.successors.len() - 1]
-        }
-    }
-
-    pub fn update(&mut self, successor: Did) {
-        if self.successors.contains(&successor) || successor == self.id {
-            return;
-        }
-        self.successors.push(successor);
-        self.successors.sort(self.id);
-        self.successors.truncate(self.max);
-    }
-
-    pub fn list(&self) -> Vec<Did> {
-        self.successors.clone()
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
