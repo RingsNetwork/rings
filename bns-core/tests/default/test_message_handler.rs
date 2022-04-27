@@ -144,7 +144,7 @@ pub mod test {
                 assert_eq!(true, false);
             }
         };
-        assert_eq!(dht1.lock().await.successor, key2.address().into());
+        assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
         Ok(())
     }
 
@@ -215,9 +215,9 @@ pub mod test {
                 let transport_2_to_3 = swarm2.get_transport(&swarm3.address()).unwrap();
                 transport_2_to_3.wait_for_data_channel_open().await.unwrap();
                 sleep(Duration::from_millis(1000)).await;
-                let dht1_successor = dht1.lock().await.successor;
-                let dht2_successor = dht2.lock().await.successor;
-                let dht3_successor = dht3.lock().await.successor;
+                let dht1_successor = dht1.lock().await.successor.clone();
+                let dht2_successor = dht2.lock().await.successor.clone();
+                let dht3_successor = dht3.lock().await.successor.clone();
                 println!(
                     "swarm1 key: {:?}, swarm2 key: {:?}, swarm3 key: {:?}",
                     swarm1.address(),
@@ -230,22 +230,25 @@ pub mod test {
                     dht2_successor,
                     dht3_successor
                 );
-                assert_eq!(
-                    dht1_successor,
-                    key2.address().into(),
-                    "dht1 successor is key2"
+                assert!(
+                    dht1_successor.list().contains(
+                        &key2.address().into()
+                    ),
+                    "Expect dht1 successor is key2, Found: {:?}",
+                    dht1_successor.list()
                 );
                 let dht2_successor = {
-                    dht2_successor == key1.address().into() ||
-                        dht2_successor == key2.address().into()
+                    dht2_successor.list().contains(&key1.address().into()) ||
+                        dht2_successor.list().contains(&key2.address().into())
                 };
                 assert!(
                     dht2_successor,
                     "dht2 successor in [key1, key2]"
                 );
-                assert_eq!(
-                    dht3_successor,
-                    key2.address().into(),
+                assert!(
+                    dht3_successor.list().contains(
+                        &key2.address().into()
+                    ),
                     "dht3 successor is key2"
                 );
                 assert_eq!(
@@ -321,8 +324,8 @@ pub mod test {
             _ = async {
                 let transport_1_to_2 = swarm1.get_transport(&swarm2.address()).unwrap();
                 transport_1_to_2.wait_for_data_channel_open().await.unwrap();
-                assert_eq!(dht1.lock().await.successor, key2.address().into());
-                assert_eq!(dht2.lock().await.successor, key1.address().into());
+                assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
+                assert!(dht2.lock().await.successor.list().contains(&key1.address().into()));
                 assert_eq!(
                     transport_1_to_2.ice_connection_state().await,
                     Some(RTCIceConnectionState::Connected)
@@ -341,7 +344,7 @@ pub mod test {
                     .unwrap();
                 sleep(Duration::from_millis(1000)).await;
                 assert_eq!(dht2.lock().await.predecessor, Some(key1.address().into()));
-                assert_eq!(dht1.lock().await.successor, key2.address().into());
+                assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
             } => {}
         }
 
@@ -382,8 +385,8 @@ pub mod test {
             _ = async {
                 let transport_1_to_2 = swarm1.get_transport(&swarm2.address()).unwrap();
                 transport_1_to_2.wait_for_data_channel_open().await.unwrap();
-                assert_eq!(dht1.lock().await.successor, key2.address().into());
-                assert_eq!(dht2.lock().await.successor, key1.address().into());
+                assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
+                assert!(dht2.lock().await.successor.list().contains(&key1.address().into()));
                 assert_eq!(
                     transport_1_to_2.ice_connection_state().await,
                     Some(RTCIceConnectionState::Connected)
@@ -402,7 +405,7 @@ pub mod test {
                     .unwrap();
                 sleep(Duration::from_millis(1000)).await;
                 assert_eq!(dht2.lock().await.predecessor, Some(key1.address().into()));
-                assert_eq!(dht1.lock().await.successor, key2.address().into());
+                assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
 
                 println!(
                     "swarm1: {:?}, swarm2: {:?}",
@@ -423,8 +426,8 @@ pub mod test {
                     .await
                     .unwrap();
                 sleep(Duration::from_millis(1000)).await;
-                assert_eq!(dht2.lock().await.successor, key2.address().into());
-                assert_eq!(dht1.lock().await.successor, key2.address().into());
+                assert!(dht2.lock().await.successor.list().contains(&key2.address().into()));
+                assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
             } => {}
         }
         Ok(())
@@ -466,8 +469,8 @@ pub mod test {
             _ = async {
                 let transport_1_to_2 = swarm1.get_transport(&swarm2.address()).unwrap();
                 transport_1_to_2.wait_for_data_channel_open().await.unwrap();
-                assert_eq!(dht1.lock().await.successor, key2.address().into());
-                assert_eq!(dht2.lock().await.successor, key1.address().into());
+                assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
+                assert!(dht2.lock().await.successor.list().contains(&key1.address().into()));
                 assert!(dht1
                     .lock()
                     .await
@@ -496,7 +499,7 @@ pub mod test {
                     .unwrap();
                 sleep(Duration::from_millis(1000)).await;
                 assert_eq!(dht2.lock().await.predecessor, Some(key1.address().into()));
-                assert_eq!(dht1.lock().await.successor, key2.address().into());
+                assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
                 println!(
                     "swarm1: {:?}, swarm2: {:?}",
                     swarm1.address(),
@@ -516,10 +519,10 @@ pub mod test {
                     .await
                     .unwrap();
                 sleep(Duration::from_millis(1000)).await;
-                let dht1_successor = dht2.lock().await.successor;
-                let dht2_successor = dht2.lock().await.successor;
-                assert!(dht2_successor == key1.address().into() || dht2_successor == key2.address().into());
-                assert_eq!(dht1_successor, key2.address().into());
+                let dht1_successor = dht2.lock().await.successor.clone();
+                let dht2_successor = dht2.lock().await.successor.clone();
+                assert!(dht2_successor.list().contains(&key1.address().into()) || dht2_successor.list().contains(&key2.address().into()));
+                assert!(dht1_successor.list().contains(&key2.address().into()));
             } => {}
         };
         Ok(())
@@ -558,8 +561,8 @@ pub mod test {
              _ = async {
                  let transport_1_to_2 = swarm1.get_transport(&swarm2.address()).unwrap();
                  transport_1_to_2.wait_for_data_channel_open().await.unwrap();
-                 assert_eq!(dht1.lock().await.successor, key2.address().into());
-                 assert_eq!(dht2.lock().await.successor, key1.address().into());
+                 assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
+                 assert!(dht2.lock().await.successor.list().contains(&key1.address().into()));
                  assert_eq!(
                      transport_1_to_2.ice_connection_state().await,
                      Some(RTCIceConnectionState::Connected)
@@ -578,7 +581,7 @@ pub mod test {
                      .unwrap();
                  sleep(Duration::from_millis(1000)).await;
                  assert_eq!(dht2.lock().await.predecessor, Some(key1.address().into()));
-                 assert_eq!(dht1.lock().await.successor, key2.address().into());
+                 assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
 
                  assert!(dht2.lock().await.storage.len() == 0);
                  let message = String::from("this is a test string");

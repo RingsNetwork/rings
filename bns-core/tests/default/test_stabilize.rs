@@ -173,13 +173,13 @@ pub mod test {
             _ = async {
                 let transport_1_to_2 = swarm1.get_transport(&swarm2.address()).unwrap();
                 transport_1_to_2.wait_for_data_channel_open().await.unwrap();
-                assert_eq!(dht1.lock().await.successor, key2.address().into());
-                assert_eq!(dht2.lock().await.successor, key1.address().into());
+                assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
+                assert!(dht2.lock().await.successor.list().contains(&key1.address().into()));
                 let stabilization = Stabilization::new(Arc::clone(&dht1), Arc::clone(&swarm1), 5usize);
                 let _ = stabilization.stabilize().await;
                 sleep(Duration::from_millis(10000)).await;
                 assert_eq!(dht2.lock().await.predecessor, Some(key1.address().into()));
-                assert_eq!(dht1.lock().await.successor, key2.address().into());
+                assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
             } => {}
         }
 
@@ -227,8 +227,8 @@ pub mod test {
             _ = async {
                 let transport_1_to_2 = swarm1.get_transport(&swarm2.address()).unwrap();
                 transport_1_to_2.wait_for_data_channel_open().await.unwrap();
-                assert_eq!(dht1.lock().await.successor, key2.address().into());
-                assert_eq!(dht2.lock().await.successor, key1.address().into());
+                assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
+                assert!(dht2.lock().await.successor.list().contains(&key1.address().into()));
                 sleep(Duration::from_millis(10000)).await;
                 assert_eq!(dht2.lock().await.predecessor, Some(key1.address().into()));
                 assert_eq!(dht1.lock().await.predecessor, Some(key2.address().into()));

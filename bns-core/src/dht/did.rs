@@ -19,7 +19,7 @@ pub struct BiasRing {
 
 // Bias Did is a special Did which set origin Did's idendity to bias
 #[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd, Debug, Serialize, Deserialize, Hash)]
-pub struct BiasDid {
+pub struct BiasId {
     bias: Did,
     did: Did,
 }
@@ -29,26 +29,26 @@ impl BiasRing {
         Self { bias: id.clone() }
     }
 
-    fn build(&self, id: &Did) -> BiasDid {
-        BiasDid {
+    fn build(&self, id: &Did) -> BiasId {
+        BiasId {
             bias: self.bias.clone(),
             did: (*id - self.bias).into(),
         }
     }
 
-    fn to_did(bid: &BiasDid) -> Did {
+    fn to_did(bid: &BiasId) -> Did {
         (bid.did + bid.bias).into()
     }
 }
 
-impl From<BiasDid> for Did {
-    fn from(id: BiasDid) -> Did {
+impl From<BiasId> for Did {
+    fn from(id: BiasId) -> Did {
         BiasRing::to_did(&id)
     }
 }
 
-impl From<&BiasDid> for Did {
-    fn from(id: &BiasDid) -> Did {
+impl From<&BiasId> for Did {
+    fn from(id: &BiasId) -> Did {
         BiasRing::to_did(id)
     }
 }

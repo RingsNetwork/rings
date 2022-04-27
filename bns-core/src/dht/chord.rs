@@ -3,6 +3,8 @@
 /// With high probability, the number of nodes that must be contacted to find a successor in an N-node network is O(log N).
 use super::peer::VirtualPeer;
 use super::types::{Chord, ChordStablize, ChordStorage};
+use super::did::BiasRing;
+use super::did::BiasId;
 use crate::dht::did::SortRing;
 use crate::dht::Did;
 use crate::err::{Error, Result};
@@ -33,18 +35,30 @@ impl Successor {
     }
 
     pub fn min(&self) -> Did {
-        self.successors[0]
+        if self.is_none() {
+            self.id
+        } else {
+            self.successors[0]
+        }
     }
 
     pub fn max(&self) -> Did {
-        self.successors[self.successors.len()]
+        if self.is_none() {
+            self.id
+        } else {
+            self.successors[self.successors.len() - 1]
+        }
     }
 
     pub fn update(&mut self, successor: Did) {
+        if self.successors.contains(&successor) {
+            return;
+        }
         let mut succ = self.successors.clone();
         succ.push(successor);
         succ.sort(self.id);
-        self.successors = succ[0..self.max].to_vec();
+        succ.truncate(self.max);
+        self.successors = succ;
     }
 
     pub fn list(&self) -> Vec<Did> {
@@ -159,15 +173,7 @@ impl Chord<PeerRingAction> for PeerRing {
             self.successor.update(id);
             // only triger if successor is updated
         }
-        PeerRingAction::MultiActions(
-            self.successor
-                .list()
-                .iter()
-                .map(|s| {
-                    PeerRingAction::RemoteAction(s.clone(), RemoteAction::FindSuccessor(self.id))
-                })
-                .collect(),
-        )
+        PeerRingAction::RemoteAction(id, RemoteAction::FindSuccessor(self.id))
     }
 
     // Fig.5 n.find_successor(id)
@@ -359,8 +365,7 @@ mod tests {
         assert!((a - d) < (b - d));
 
         let mut node_a = PeerRing::new(a);
-        assert_eq!(node_a.successor, a);
-
+        assert_eq!(node_a.successor.list(), vec![], "{:?}", node_a.successor.list());
         // for increase seq join
         node_a.join(a);
         // Node A wont add self to finder
@@ -376,17 +381,20 @@ mod tests {
         assert!(node_a.finger.contains(&Some(b)));
         assert!(node_a.finger.contains(&None));
 
+        assert_eq!(node_a.successor.list(), vec![b], "{:?}", node_a.successor.list());
+
         // Node A starts to query node b for it's successor
         assert_eq!(
             node_a.join(b),
             PeerRingAction::RemoteAction(b, RemoteAction::FindSuccessor(a))
         );
-        assert_eq!(node_a.successor, b);
+        assert!(node_a.successor.list().contains(&b));
         // Node A keep querying node b for it's successor
         assert_eq!(
             node_a.join(c),
-            PeerRingAction::RemoteAction(b, RemoteAction::FindSuccessor(a))
+            PeerRingAction::RemoteAction(c, RemoteAction::FindSuccessor(a))
         );
+
         // Node A's finter should be [None, ..B, C]
         assert!(node_a.finger.contains(&Some(c)), "{:?}", node_a.finger);
         // c is in range(a+2^159, a+2^160)
@@ -397,7 +405,7 @@ mod tests {
         assert_eq!(node_a.finger[155], Some(b));
         assert_eq!(node_a.finger[156], Some(b));
 
-        assert_eq!(node_a.successor, b);
+        assert!(node_a.successor.list().contains(&b));
         // Node A will query c to find d
         assert_eq!(
             node_a.find_successor(d).unwrap(),
@@ -425,7 +433,6 @@ mod tests {
 
         // for over half ring join
         let mut node_d = PeerRing::new(d);
-        assert_eq!(node_d.successor, d);
         assert_eq!(
             node_d.join(a),
             PeerRingAction::RemoteAction(a, RemoteAction::FindSuccessor(d))
@@ -440,10 +447,10 @@ mod tests {
         // when b insearted a is still more close to d
         assert_eq!(
             node_d.join(b),
-            PeerRingAction::RemoteAction(a, RemoteAction::FindSuccessor(d))
+            PeerRingAction::RemoteAction(b, RemoteAction::FindSuccessor(d))
         );
         assert!(d + Did::from(BigUint::from(2u16).pow(159)) > b);
-        assert_eq!(node_d.successor, a);
+        assert!(node_d.successor.list().contains(&a));
     }
 
     #[test]
@@ -460,8 +467,8 @@ mod tests {
 
         node1.join(did2);
         node2.join(did1);
-        assert_eq!(node1.successor, did2);
-        assert_eq!(node2.successor, did1);
+        assert!(node1.successor.list().contains(&did2));
+        assert!(node2.successor.list().contains(&did1));
 
         assert!(
             node1.finger.contains(&Some(did2)),
@@ -489,8 +496,8 @@ mod tests {
 
         node1.join(did2);
         node2.join(did1);
-        assert_eq!(node1.successor, did2);
-        assert_eq!(node2.successor, did1);
+        assert!(node1.successor.list().contains(&did2));
+        assert!(node2.successor.list().contains(&did1));
         let pos_159 = did2 + Did::from(BigUint::from(2u16).pow(159));
         assert!(pos_159 > did2);
         assert!(pos_159 < max, "{:?};{:?}", pos_159, max);
