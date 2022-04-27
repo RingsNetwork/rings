@@ -144,7 +144,12 @@ pub mod test {
                 assert_eq!(true, false);
             }
         };
-        assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
+        assert!(dht1
+            .lock()
+            .await
+            .successor
+            .list()
+            .contains(&key2.address().into()));
         Ok(())
     }
 

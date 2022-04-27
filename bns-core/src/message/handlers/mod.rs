@@ -56,36 +56,18 @@ impl MessageHandler {
         let data = relay.data.clone();
         match data {
             Message::JoinDHT(msg) => self.join_chord(relay, prev, msg).await,
-            Message::ConnectNodeSend(msg) => {
-                self.connect_node(relay, prev, msg).await
-            }
-            Message::ConnectNodeReport(msg) => {
-                self.connected_node(relay, prev, msg).await
-            }
-            Message::AlreadyConnected(msg) => {
-                self.already_connected(relay, prev, msg).await
-            }
-            Message::FindSuccessorSend(msg) => {
-                self.find_successor(relay, prev, msg).await
-            }
-            Message::FindSuccessorReport(msg) => {
-                self.found_successor(relay, prev, msg).await
-            }
-            Message::NotifyPredecessorSend(msg) => {
-                self.notify_predecessor(relay, prev, msg).await
-            }
+            Message::ConnectNodeSend(msg) => self.connect_node(relay, prev, msg).await,
+            Message::ConnectNodeReport(msg) => self.connected_node(relay, prev, msg).await,
+            Message::AlreadyConnected(msg) => self.already_connected(relay, prev, msg).await,
+            Message::FindSuccessorSend(msg) => self.find_successor(relay, prev, msg).await,
+            Message::FindSuccessorReport(msg) => self.found_successor(relay, prev, msg).await,
+            Message::NotifyPredecessorSend(msg) => self.notify_predecessor(relay, prev, msg).await,
             Message::NotifyPredecessorReport(msg) => {
                 self.notified_predecessor(relay, prev, msg).await
             }
-            Message::SearchVNode(msg) => {
-                self.search_vnode(relay, prev, msg).await
-            }
-            Message::FoundVNode(msg) => {
-                self.found_vnode(relay, prev, msg).await
-            }
-            Message::StoreVNode(msg) => {
-                self.store_vnode(relay, prev, msg).await
-            }
+            Message::SearchVNode(msg) => self.search_vnode(relay, prev, msg).await,
+            Message::FoundVNode(msg) => self.found_vnode(relay, prev, msg).await,
+            Message::StoreVNode(msg) => self.store_vnode(relay, prev, msg).await,
             Message::MultiCall(msg) => {
                 for message in msg.messages {
                     let payload = MessageRelay::new(
@@ -99,8 +81,11 @@ impl MessageHandler {
                     self.handle_message_relay(payload, prev).await.unwrap_or(());
                 }
                 Ok(())
-            },
-            x => Err(Error::MessageHandlerUnsupportMessageType(format!("{:?}", x))),
+            }
+            x => Err(Error::MessageHandlerUnsupportMessageType(format!(
+                "{:?}",
+                x
+            ))),
         }
     }
 
