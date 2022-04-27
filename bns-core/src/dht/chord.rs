@@ -54,11 +54,9 @@ impl Successor {
         if self.successors.contains(&successor) {
             return;
         }
-        let mut succ = self.successors.clone();
-        succ.push(successor);
-        succ.sort(self.id);
-        succ.truncate(self.max);
-        self.successors = succ;
+        self.successors.push(successor);
+        self.successors.sort(self.id);
+        self.successors.truncate(self.max);
     }
 
     pub fn list(&self) -> Vec<Did> {
@@ -181,7 +179,7 @@ impl Chord<PeerRingAction> for PeerRing {
         // if (id \in (n; successor]); return successor
         // if ID = N63, Successor = N10
         // N9
-        if id - self.id <= self.successor.max() - self.id || self.id == self.successor.max() {
+        if id - self.id <= self.successor.max() - self.id || self.id == self.successor.min() {
             //if self.id < id && id <= self.successor {
             Ok(PeerRingAction::Some(id))
         } else {
@@ -205,7 +203,7 @@ impl ChordStablize<PeerRingAction> for PeerRing {
         // x = successor:predecessor;
         // if (x in (n, successor)) { successor = x; successor:notify(n); }
         if let Some(x) = self.predecessor {
-            if x - self.id < self.successor.max() - self.id || self.id == self.successor.max() {
+            if x - self.id < self.successor.max() - self.id {
                 self.successor.update(x);
                 return PeerRingAction::RemoteAction(x, RemoteAction::Notify(self.id));
                 // successor.notify(n)
@@ -334,14 +332,14 @@ impl ChordStorage<PeerRingAction> for PeerRing {
         for k in self.storage.keys() {
             // k in (self, self.successor)
             // k is more close to self.successor
-            if k - self.successor.max() > k - self.id {
+            if k - self.successor.min() > k - self.id {
                 if let Some(v) = self.storage.remove(&k) {
                     data.push(v.1);
                 }
             }
         }
         Ok(PeerRingAction::RemoteAction(
-            self.successor.max(),
+            self.successor.min(),
             RemoteAction::SyncVNodeWithSuccessor(data),
         ))
     }
