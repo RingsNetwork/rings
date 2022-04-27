@@ -123,7 +123,9 @@ impl MessageHandler {
     ) -> BoxFuture<'_, Result<()>> {
         let data = relay.data.clone();
         match data {
-            Message::JoinDHT(msg) => async move { self.join_chord(relay, prev, msg).await }.boxed_local(),
+            Message::JoinDHT(msg) => {
+                async move { self.join_chord(relay, prev, msg).await }.boxed_local()
+            }
             Message::ConnectNodeSend(msg) => {
                 async move { self.connect_node(relay, prev, msg).await }.boxed_local()
             }

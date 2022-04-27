@@ -31,8 +31,8 @@ use web3::types::Address;
 use web_sys::MessageEvent;
 use web_sys::RtcConfiguration;
 use web_sys::RtcDataChannel;
-use web_sys::RtcDataChannelState;
 use web_sys::RtcDataChannelEvent;
+use web_sys::RtcDataChannelState;
 use web_sys::RtcIceCandidate;
 use web_sys::RtcIceCandidateInit;
 use web_sys::RtcIceConnectionState;
@@ -498,7 +498,7 @@ impl WasmTransport {
                 dc.set_onopen(Some(callback.as_ref().unchecked_ref()));
                 callback.forget();
                 Ok(promise)
-            },
+            }
             None => {
                 log::error!("{:?}", Error::RTCDataChannelNotReady);
                 Err(Error::RTCDataChannelNotReady)
