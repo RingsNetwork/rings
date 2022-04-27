@@ -51,7 +51,7 @@ impl Successor {
     }
 
     pub fn update(&mut self, successor: Did) {
-        if self.successors.contains(&successor) {
+        if self.successors.contains(&successor) || successor == self.id {
             return;
         }
         self.successors.push(successor);
@@ -172,6 +172,7 @@ impl Chord<PeerRingAction> for PeerRing {
             // only triger if successor is updated
         }
         PeerRingAction::RemoteAction(id, RemoteAction::FindSuccessor(self.id))
+
     }
 
     // Fig.5 n.find_successor(id)
