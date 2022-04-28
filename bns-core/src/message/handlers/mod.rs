@@ -3,6 +3,7 @@ use crate::err::{Error, Result};
 use crate::message::payload::{MessageRelay, MessageRelayMethod};
 use crate::message::types::Message;
 use crate::swarm::Swarm;
+
 use async_recursion::async_recursion;
 use futures::lock::Mutex;
 use std::collections::VecDeque;

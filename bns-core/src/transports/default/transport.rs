@@ -187,10 +187,10 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
         self.data_channel.lock().await.clone()
     }
 
-    async fn send_message(&self, msg: &[u8]) -> Result<()> {
+    async fn send_message(&self, msg: &Vec<u8>) -> Result<()> {
         let size = msg.len();
         match self.get_data_channel().await {
-            Some(cnn) => match cnn.send(&Bytes::from(msg.to_vec())).await {
+            Some(cnn) => match cnn.send(&Bytes::from(msg.clone())).await {
                 Ok(s) => {
                     if !s == size {
                         Err(Error::RTCDataChannelMessageIncomplete(s, size))

@@ -7,6 +7,8 @@ use crate::types::channel::Event;
 use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
+use crate::message::{Decoder, Encoder};
+
 use async_stream::stream;
 use async_trait::async_trait;
 use futures_core::Stream;
@@ -81,7 +83,7 @@ impl Swarm {
             .get_transport(address)
             .ok_or(Error::SwarmMissAddressInTable)?;
         transport.wait_for_data_channel_open().await?;
-        transport.send_message(&payload.gzip(9)?).await
+        transport.send_message(&payload.encode()?.into()).await
     }
 
     fn load_message(&self, ev: Result<Option<Event>>) -> Result<Option<MessageRelay<Message>>> {
@@ -89,7 +91,7 @@ impl Swarm {
 
         match ev {
             Some(Event::DataChannelMessage(msg)) => {
-                let payload = MessageRelay::from_gzipped(&msg)?;
+                let payload = MessageRelay::from_encoded(&msg.try_into()?)?;
                 Ok(Some(payload))
             }
             Some(Event::RegisterTransport(address)) => match self.get_transport(&address) {
