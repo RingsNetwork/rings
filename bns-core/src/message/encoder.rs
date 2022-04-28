@@ -84,6 +84,20 @@ impl From<&str> for Encoded {
     }
 }
 
+impl From<Encoded> for Vec<u8> {
+    fn from(a: Encoded) -> Self {
+        a.to_string().as_bytes().to_vec()
+    }
+}
+
+impl TryFrom<Vec<u8>> for Encoded {
+    type Error = Error;
+    fn try_from(a: Vec<u8>) -> Result<Self> {
+        let s: String = String::from_utf8(a)?;
+        Ok(s.into())
+    }
+}
+
 impl Encoded {
     pub fn from_encoded_str(str: &str) -> Self {
         Self(str.to_owned())
