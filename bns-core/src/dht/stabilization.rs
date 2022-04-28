@@ -36,10 +36,11 @@ impl Stabilization {
             None,
             MessageRelayMethod::SEND,
         )?;
-        if chord.id != chord.successor {
-            self.swarm
-                .send_message(&chord.successor.into(), message)
-                .await
+        if chord.id != chord.successor.min() {
+            for s in chord.successor.list() {
+                self.swarm.send_message(&s.into(), message.clone()).await?;
+            }
+            Ok(())
         } else {
             Ok(())
         }

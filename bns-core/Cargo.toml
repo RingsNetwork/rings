@@ -30,6 +30,7 @@ futures-core = "0.3.21"
 url = { version = "2", features = ["serde"] }
 thiserror = "1"
 flate2 = { version = "1.0.22" }
+async-recursion = "1.0.0"
 
 # default
 webrtc = { version = "0.3.3", optional = true }

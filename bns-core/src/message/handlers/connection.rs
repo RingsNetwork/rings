@@ -361,7 +361,7 @@ impl TChordConnection for MessageHandler {
                 let fix_finger_index = dht.fix_finger_index;
                 dht.finger[fix_finger_index as usize] = Some(msg.id);
             } else {
-                dht.successor = msg.id;
+                dht.successor.update(msg.id);
             }
             Ok(())
         }
@@ -399,7 +399,7 @@ impl TChordConnection for MessageHandler {
         assert_eq!(relay.method, MessageRelayMethod::REPORT);
         // if successor: predecessor is between (id, successor]
         // then update local successor
-        dht.successor = msg.id;
+        dht.successor.update(msg.id);
         Ok(())
     }
 }
