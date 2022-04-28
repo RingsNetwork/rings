@@ -197,7 +197,7 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
         self.channel.as_ref().map(Arc::clone)
     }
 
-    async fn send_message(&self, msg: &Vec<u8>) -> Result<()> {
+    async fn send_message(&self, msg: &[u8]) -> Result<()> {
         match self.get_data_channel().await {
             Some(cnn) => cnn
                 .send_with_u8_array(msg)

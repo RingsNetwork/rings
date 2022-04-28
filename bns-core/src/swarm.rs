@@ -1,5 +1,6 @@
 use crate::err::{Error, Result};
 use crate::message::{self, Message, MessageRelay, MessageRelayMethod};
+use crate::message::{Decoder, Encoder};
 use crate::session::SessionManager;
 use crate::storage::{MemStorage, Storage};
 use crate::types::channel::Channel as ChannelTrait;
@@ -7,7 +8,6 @@ use crate::types::channel::Event;
 use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
-use crate::message::{Decoder, Encoder};
 
 use async_stream::stream;
 use async_trait::async_trait;
@@ -82,8 +82,9 @@ impl Swarm {
         let transport = self
             .get_transport(address)
             .ok_or(Error::SwarmMissAddressInTable)?;
+        let data: Vec<u8> = payload.encode()?.into();
         transport.wait_for_data_channel_open().await?;
-        transport.send_message(&payload.encode()?.into()).await
+        transport.send_message(data.as_slice()).await
     }
 
     fn load_message(&self, ev: Result<Option<Event>>) -> Result<Option<MessageRelay<Message>>> {

@@ -51,7 +51,7 @@ pub trait IceTransport<E: Send, Ch: Channel<E>> {
     async fn get_answer_str(&self) -> Result<String>;
     async fn get_offer_str(&self) -> Result<String>;
     async fn get_data_channel(&self) -> Option<Arc<Self::DataChannel>>;
-    async fn send_message(&self, msg: &Vec<u8>) -> Result<()>;
+    async fn send_message(&self, msg: &[u8]) -> Result<()>;
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
     where
         T: Into<Self::Sdp> + Send;

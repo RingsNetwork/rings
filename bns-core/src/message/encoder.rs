@@ -98,7 +98,6 @@ impl TryFrom<Vec<u8>> for Encoded {
     }
 }
 
-
 impl Encoded {
     pub fn from_encoded_str(str: &str) -> Self {
         Self(str.to_owned())
