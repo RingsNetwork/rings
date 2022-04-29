@@ -132,11 +132,11 @@ impl SecretKey {
         secret_key_address(self)
     }
     pub fn sign(&self, message: &str) -> SigBytes {
-        self.sign_raw(&message.as_bytes().to_vec())
+        self.sign_raw(message.as_bytes())
     }
 
-    pub fn sign_raw(&self, message: &Vec<u8>) -> SigBytes {
-        let message_hash = keccak256(message.as_slice());
+    pub fn sign_raw(&self, message: &[u8]) -> SigBytes {
+        let message_hash = keccak256(message);
         self.sign_hash(&message_hash)
     }
 
