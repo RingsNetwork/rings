@@ -131,7 +131,16 @@ impl SecretKey {
         secret_key_address(self)
     }
     pub fn sign(&self, message: &str) -> SigBytes {
-        let message_hash = keccak256(message.as_bytes());
+        self.sign_raw(&message.as_bytes().to_vec())
+    }
+
+    pub fn sign_raw(&self, message: &Vec<u8>) -> SigBytes {
+        let message_hash = keccak256(&message.as_slice());
+        self.sign_hash(&message_hash)
+
+    }
+
+    pub fn sign_hash(&self, message_hash: &[u8; 32]) -> SigBytes {
         let (signature, recover_id) =
             libsecp256k1::sign(&libsecp256k1::Message::parse(&message_hash), &*self);
         let mut sig_bytes: SigBytes = [0u8; 65];
@@ -139,6 +148,7 @@ impl SecretKey {
         sig_bytes[32..64].copy_from_slice(&signature.s.b32());
         sig_bytes[64] = recover_id.serialize();
         sig_bytes
+
     }
 }
 
@@ -187,6 +197,8 @@ fn do_verify(message: &str, address: &Address, sig_bytes: &SigBytes) -> Result<b
 mod tests {
     use super::*;
     use std::str::FromStr;
+    use hex::FromHex;
+    use web3::signing::hash_message;
 
     #[test]
     fn sign_then_verify() {
@@ -220,5 +232,35 @@ mod tests {
         let s = "hello";
         let t: HashStr = s.into();
         assert_eq!(t.0.len(), 40);
+    }
+
+    #[test]
+    fn test_metamask_sign_for_debug() {
+        let key = &SecretKey::try_from(
+            "65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0",
+        )
+            .unwrap();
+        let sig_hash = Vec::from_hex("4a5c5d454721bbbb25540c3317521e71c373ae36458f960d2ad46ef088110e95").unwrap();
+        let msg = "test";
+        // https://docs.rs/web3/latest/src/web3/signing.rs.html#221
+        let prefix_msg_ret = "\x19Ethereum Signed Message:\n4test".to_string().into_bytes();
+        let mut prefix_msg = format!("\x19Ethereum Signed Message:\n{}", msg.len()).into_bytes();
+        prefix_msg.extend_from_slice(&msg.as_bytes());
+        assert_eq!(prefix_msg, prefix_msg_ret, "{}", String::from_utf8(prefix_msg.clone()).unwrap());
+//        let hash = hash_message(msg.as_bytes()).0;
+        assert_eq!(keccak256(&prefix_msg_ret.as_slice()), sig_hash.as_slice());
+        // window.ethereum.request({method: "personal_sign", params: ["test", "0x11E807fcc88dD319270493fB2e822e388Fe36ab0"]})
+        let metamask_sig = Vec::from_hex("724fc31d9272b34d8406e2e3a12a182e72510b008de6cc44684577e31e20d9626fb760d6a0badd79a6cf4cd56b2fc0fbd60c438b809aa7d29bfb598c13e7b50e1b").unwrap();
+        assert_eq!(metamask_sig.len(), 65);
+        let h: [u8; 32] = sig_hash.as_slice().try_into().unwrap();
+        let (_, recover_id) =
+            libsecp256k1::sign(&libsecp256k1::Message::parse(&h), &key);
+        assert_eq!(recover_id.serialize(), 0);
+        let mut sig = key.sign_raw(&prefix_msg);
+        sig[64] = 27;
+        assert_eq!(sig, metamask_sig.as_slice());
+
+        let h: [u8; 32] = sig_hash.as_slice().try_into().unwrap();
+
     }
 }
