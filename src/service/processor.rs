@@ -289,9 +289,12 @@ mod test {
     fn new_processor() -> Processor {
         let key = SecretKey::random();
 
-        let (auth, key) =
-            SessionManager::gen_unsign_info(key.address(), Some(bns_core::session::Ttl::Never), None)
-                .unwrap();
+        let (auth, key) = SessionManager::gen_unsign_info(
+            key.address(),
+            Some(bns_core::session::Ttl::Never),
+            None,
+        )
+        .unwrap();
         let sig = key.sign(&auth.to_string().unwrap()).to_vec();
         let session = SessionManager::new(&sig, &auth, &key);
         let swarm = Arc::new(Swarm::new(
