@@ -1,5 +1,4 @@
-use crate::ecc::recover;
-use crate::ecc::verify;
+use crate::ecc::signers;
 use crate::ecc::PublicKey;
 use crate::ecc::SecretKey;
 use crate::err::{Error, Result};
@@ -13,6 +12,12 @@ use web3::types::Address;
 const DEFAULT_TTL_MS: usize = 24 * 3600 * 1000;
 
 #[derive(Deserialize, Serialize, PartialEq, Debug, Clone)]
+pub enum Signer {
+    DEFAULT,
+    EIP712,
+}
+
+#[derive(Deserialize, Serialize, PartialEq, Debug, Clone)]
 pub enum Ttl {
     Some(usize),
     Never,
@@ -21,6 +26,7 @@ pub enum Ttl {
 #[derive(Deserialize, Serialize, PartialEq, Debug, Clone)]
 pub struct AuthorizedInfo {
     authorizer: Address,
+    signer: Signer,
     addr: Address,
     ttl_ms: Ttl,
     ts_ms: u128,
@@ -81,12 +87,18 @@ impl Session {
         if let Ok(auth_str) =
             serde_json::to_string(&self.auth).map_err(|_| Error::SerializeToString)
         {
-            verify(&auth_str, &self.auth.authorizer, self.sig.clone())
+            match self.auth.signer {
+                Signer::DEFAULT => {
+                    signers::default::verify(&auth_str, &self.auth.authorizer, &self.sig)
+                }
+                Signer::EIP712 => {
+                    signers::eip712::verify(&auth_str, &self.auth.authorizer, &self.sig)
+                }
+            }
         } else {
             false
         }
     }
-
     pub fn address(&self) -> Result<Address> {
         if !self.verify() {
             Err(Error::VerifySignatureFailed)
@@ -97,7 +109,10 @@ impl Session {
 
     pub fn pubkey(&self) -> Result<PublicKey> {
         let auth = self.auth.to_string()?;
-        recover(&auth, self.sig.clone())
+        match self.auth.signer {
+            Signer::DEFAULT => signers::default::recover(&auth, &self.sig),
+            Signer::EIP712 => signers::eip712::recover(&auth, &self.sig),
+        }
     }
 }
 
@@ -105,9 +120,12 @@ impl SessionManager {
     pub fn gen_unsign_info(
         authorizer: Address,
         ttl: Option<Ttl>,
+        signer: Option<Signer>,
     ) -> Result<(AuthorizedInfo, SecretKey)> {
         let key = SecretKey::random();
+        let signer = signer.unwrap_or(Signer::DEFAULT);
         let info = AuthorizedInfo {
+            signer,
             authorizer,
             addr: key.address(),
             ttl_ms: ttl.unwrap_or(Ttl::Some(DEFAULT_TTL_MS)),
@@ -133,7 +151,7 @@ impl SessionManager {
     /// generate Session with private key
     /// only use it for unittest
     pub fn new_with_seckey(key: &SecretKey) -> Result<Self> {
-        let (auth, s_key) = Self::gen_unsign_info(key.address(), None)?;
+        let (auth, s_key) = Self::gen_unsign_info(key.address(), None, None)?;
         let sig = key.sign(&auth.to_string()?).to_vec();
         Ok(Self::new(&sig, &auth, &s_key))
     }
@@ -168,7 +186,12 @@ impl SessionManager {
     }
 
     pub fn sign(&self, msg: &str) -> Result<Vec<u8>> {
-        Ok(self.session_key()?.sign(msg).to_vec())
+        let s = self.session()?;
+        let key = self.session_key()?;
+        match s.auth.signer {
+            Signer::DEFAULT => Ok(signers::default::sign_raw(key, msg).to_vec()),
+            Signer::EIP712 => Ok(signers::eip712::sign_raw(key, msg).to_vec()),
+        }
     }
 
     pub fn authorizer(&self) -> Result<Address> {

@@ -196,7 +196,7 @@ async fn daemon_run(http_addr: String, key: &SecretKey, stuns: &str) -> anyhow::
     // TODO support run daemonize
     let dht = Arc::new(Mutex::new(PeerRing::new(key.address().into())));
     let (auth, temp_key) =
-        SessionManager::gen_unsign_info(key.address(), Some(bns_core::session::Ttl::Never))?;
+        SessionManager::gen_unsign_info(key.address(), Some(bns_core::session::Ttl::Never), None)?;
     let sig = key.sign(&auth.to_string()?).to_vec();
     let session = SessionManager::new(&sig, &auth, &temp_key);
     let swarm = Arc::new(Swarm::new(stuns, key.address(), session.clone()));
