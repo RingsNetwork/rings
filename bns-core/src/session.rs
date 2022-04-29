@@ -1,4 +1,4 @@
-use crate::ecc::recover;
+
 use crate::ecc::signers;
 use crate::ecc::PublicKey;
 use crate::ecc::SecretKey;
@@ -190,8 +190,8 @@ impl SessionManager {
         let s = self.session()?;
         let key = self.session_key()?;
         match s.auth.signer {
-            Signer::DEFAULT => Ok(signers::default::sign_raw(key, &msg).to_vec()),
-            Signer::EIP712 => Ok(signers::eip712::sign_raw(key, &msg).to_vec()),
+            Signer::DEFAULT => Ok(signers::default::sign_raw(key, msg).to_vec()),
+            Signer::EIP712 => Ok(signers::eip712::sign_raw(key, msg).to_vec()),
         }
     }
 

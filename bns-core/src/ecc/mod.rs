@@ -136,13 +136,13 @@ impl SecretKey {
     }
 
     pub fn sign_raw(&self, message: &Vec<u8>) -> SigBytes {
-        let message_hash = keccak256(&message.as_slice());
+        let message_hash = keccak256(message.as_slice());
         self.sign_hash(&message_hash)
     }
 
     pub fn sign_hash(&self, message_hash: &[u8; 32]) -> SigBytes {
         let (signature, recover_id) =
-            libsecp256k1::sign(&libsecp256k1::Message::parse(&message_hash), &*self);
+            libsecp256k1::sign(&libsecp256k1::Message::parse(message_hash), &*self);
         let mut sig_bytes: SigBytes = [0u8; 65];
         sig_bytes[0..32].copy_from_slice(&signature.r.b32());
         sig_bytes[32..64].copy_from_slice(&signature.s.b32());
@@ -181,7 +181,7 @@ pub fn recover_hash(message_hash: &[u8; 32], sig: &[u8; 65]) -> Result<PublicKey
     let r_s_signature: [u8; 64] = sig[..64].try_into()?;
     let recovery_id: u8 = sig[64];
     Ok(libsecp256k1::recover(
-        &libsecp256k1::Message::parse(&message_hash),
+        &libsecp256k1::Message::parse(message_hash),
         &libsecp256k1::Signature::parse_standard(&r_s_signature)
             .map_err(|e| Error::Libsecp256k1SignatureParseStandard(e.to_string()))?,
         &libsecp256k1::RecoveryId::parse(recovery_id)
@@ -251,7 +251,7 @@ mod tests {
             .to_string()
             .into_bytes();
         let mut prefix_msg = format!("\x19Ethereum Signed Message:\n{}", msg.len()).into_bytes();
-        prefix_msg.extend_from_slice(&msg.as_bytes());
+        prefix_msg.extend_from_slice(msg.as_bytes());
         assert_eq!(
             prefix_msg,
             prefix_msg_ret,
@@ -259,12 +259,12 @@ mod tests {
             String::from_utf8(prefix_msg.clone()).unwrap()
         );
         //        let hash = hash_message(msg.as_bytes()).0;
-        assert_eq!(keccak256(&prefix_msg_ret.as_slice()), sig_hash.as_slice());
+        assert_eq!(keccak256(prefix_msg_ret.as_slice()), sig_hash.as_slice());
         // window.ethereum.request({method: "personal_sign", params: ["test", "0x11E807fcc88dD319270493fB2e822e388Fe36ab0"]})
         let metamask_sig = Vec::from_hex("724fc31d9272b34d8406e2e3a12a182e72510b008de6cc44684577e31e20d9626fb760d6a0badd79a6cf4cd56b2fc0fbd60c438b809aa7d29bfb598c13e7b50e1b").unwrap();
         assert_eq!(metamask_sig.len(), 65);
         let h: [u8; 32] = sig_hash.as_slice().try_into().unwrap();
-        let (_, recover_id) = libsecp256k1::sign(&libsecp256k1::Message::parse(&h), &key);
+        let (_, recover_id) = libsecp256k1::sign(&libsecp256k1::Message::parse(&h), key);
         assert_eq!(recover_id.serialize(), 0);
         let mut sig = key.sign_raw(&prefix_msg);
         sig[64] = 27;

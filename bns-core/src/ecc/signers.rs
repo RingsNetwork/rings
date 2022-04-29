@@ -40,19 +40,19 @@ pub mod eip712 {
 
     pub fn sign(sec: SecretKey, hash: &[u8; 32]) -> [u8; 65] {
         let mut sig = sec.sign_hash(hash);
-        sig[64] = sig[64] + 27;
+        sig[64] += 27;
         sig
     }
     pub fn hash(msg: &str) -> [u8; 32] {
         let mut prefix_msg = format!("\x19Ethereum Signed Message:\n{}", msg.len()).into_bytes();
-        prefix_msg.extend_from_slice(&msg.as_bytes());
+        prefix_msg.extend_from_slice(msg.as_bytes());
         keccak256(&prefix_msg)
     }
 
     pub fn recover(msg: &str, sig: impl AsRef<[u8]>) -> Result<PublicKey> {
         let sig_byte: [u8; 65] = sig.as_ref().try_into()?;
         let hash = hash(msg);
-        let mut sig712 = sig_byte.clone();
+        let mut sig712 = sig_byte;
         sig712[64] -= 27;
         crate::ecc::recover_hash(&hash, &sig712)
     }
@@ -82,7 +82,7 @@ mod test {
         let msg = "hello";
         let h = default::hash(msg);
         let sig = default::sign(key, &h);
-        assert_eq!(sig, key.sign(&msg));
+        assert_eq!(sig, key.sign(msg));
     }
 
     #[test]
@@ -99,8 +99,8 @@ mod test {
         let h = eip712::hash(msg);
         let sig = eip712::sign(key, &h);
         assert_eq!(metamask_sig.as_slice(), sig);
-        let pubkey = eip712::recover(&msg, &sig).unwrap();
+        let pubkey = eip712::recover(msg, &sig).unwrap();
         assert_eq!(pubkey.address(), address);
-        assert_eq!(eip712::verify(&msg, &address, &sig), true);
+        assert!(eip712::verify(msg, &address, &sig));
     }
 }
