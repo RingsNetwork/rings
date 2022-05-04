@@ -157,17 +157,6 @@ impl PublicKey {
     }
 }
 
-pub fn verify<S>(message: &str, address: &Address, signature: S) -> bool
-where
-    S: AsRef<[u8]>,
-{
-    if let Ok(sig_bytes) = signature.as_ref().try_into() {
-        do_verify(message, address, sig_bytes).unwrap_or(false)
-    } else {
-        false
-    }
-}
-
 pub fn recover<S>(message: &str, signature: S) -> Result<PublicKey>
 where
     S: AsRef<[u8]>,
@@ -191,36 +180,10 @@ pub fn recover_hash(message_hash: &[u8; 32], sig: &[u8; 65]) -> Result<PublicKey
     .into())
 }
 
-fn do_verify(message: &str, address: &Address, sig_bytes: &SigBytes) -> Result<bool> {
-    let pubkey = recover(message, &sig_bytes)?;
-    Ok(&pubkey.address() == address)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use hex::FromHex;
-    use std::str::FromStr;
-
-    #[test]
-    fn sign_then_verify() {
-        let message = "Hello, world!";
-        // key generate from https://www.ethereumaddressgenerator.com/
-        let address = &Address::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
-
-        let key = &SecretKey::try_from(
-            "65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0",
-        )
-        .unwrap();
-
-        // Ensure that the address belongs to the key.
-        assert_eq!(address, &key.address());
-
-        let sig = key.sign(message);
-
-        // Verify message signature by address.
-        assert!(verify(message, address, sig));
-    }
 
     #[test]
     fn test_parse_to_string_with_sha10x00() {

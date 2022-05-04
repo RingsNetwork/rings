@@ -25,11 +25,11 @@ pub enum Ttl {
 
 #[derive(Deserialize, Serialize, PartialEq, Debug, Clone)]
 pub struct AuthorizedInfo {
-    authorizer: Address,
-    signer: Signer,
-    addr: Address,
-    ttl_ms: Ttl,
-    ts_ms: u128,
+    pub authorizer: Address,
+    pub signer: Signer,
+    pub addr: Address,
+    pub ttl_ms: Ttl,
+    pub ts_ms: u128,
 }
 
 #[derive(Deserialize, Serialize, PartialEq, Debug, Clone)]

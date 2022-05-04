@@ -1,8 +1,8 @@
 use crate::dht::Did;
-use crate::ecc::{verify, HashStr, PublicKey};
+use crate::ecc::{signers, HashStr, PublicKey};
 use crate::err::{Error, Result};
-use crate::session::Session;
 use crate::session::SessionManager;
+use crate::session::{Session, Signer};
 use crate::utils;
 use flate2::write::{GzDecoder, GzEncoder};
 use flate2::Compression;
@@ -92,7 +92,10 @@ where
             Self::pack_msg(&self.data, self.ts_ms, self.ttl_ms),
             self.session.address(),
         ) {
-            verify(&msg, &addr, self.sig.clone())
+            match self.session.auth.signer {
+                Signer::DEFAULT => signers::default::verify(&msg, &addr, &self.sig),
+                Signer::EIP712 => signers::eip712::verify(&msg, &addr, &self.sig),
+            }
         } else {
             false
         }
