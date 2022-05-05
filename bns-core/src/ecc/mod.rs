@@ -164,7 +164,7 @@ impl SecretKey {
     }
 
     pub fn pubkey(&self) -> PublicKey {
-        libsecp256k1::PublicKey::from_secret_key(&self.clone().into()).into()
+        libsecp256k1::PublicKey::from_secret_key(&(*self).into()).into()
     }
 }
 
