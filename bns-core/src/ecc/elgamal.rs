@@ -1,15 +1,13 @@
-use crate::ecc::{SecretKey, PublicKey};
-use libsecp256k1::curve::Scalar;
-use libsecp256k1::curve::ECMultGenContext;
-use libsecp256k1::curve::Jacobian;
+use crate::ecc::{PublicKey, SecretKey};
 use crate::err::Error;
 use crate::err::Result;
 use libsecp256k1::curve::Affine;
+use libsecp256k1::curve::ECMultGenContext;
 use libsecp256k1::curve::Field;
 use libsecp256k1::curve::FieldStorage;
+use libsecp256k1::curve::Jacobian;
+use libsecp256k1::curve::Scalar;
 use libsecp256k1::curve::AFFINE_G as G;
-
-
 
 pub fn u8_to_u32(s: &Vec<u8>) -> Vec<u32> {
     s.chunks(4)
@@ -138,10 +136,7 @@ fn lift_x(x: &Field, bias: Option<u8>) -> Affine {
 pub fn str_to_affine(s: &str) -> Vec<Affine> {
     str_to_field(s)
         .into_iter()
-        .map(|a| {
-
-            lift_x(&a, None)
-        })
+        .map(|a| lift_x(&a, None))
         .collect::<Vec<Affine>>()
 }
 
@@ -156,21 +151,21 @@ pub fn encrypt(s: &str, k: &PublicKey) -> Vec<(Affine, Affine)> {
     let random_sar: Scalar = random_sec.into();
     let h: Affine = pubkey.into();
 
-    str_to_affine(s).into_iter()
-        .map(
-            |c| {
-                let cxt = ECMultGenContext::new_boxed();
+    str_to_affine(s)
+        .into_iter()
+        .map(|c| {
+            let cxt = ECMultGenContext::new_boxed();
 
-                let mut shared_sec = Jacobian::from_ge(&h);
-                cxt.ecmult_gen(&mut shared_sec, &random_sar);
+            let mut shared_sec = Jacobian::from_ge(&h);
+            cxt.ecmult_gen(&mut shared_sec, &random_sar);
 
-                let mut c1 = Jacobian::from_ge(&G);
-                cxt.ecmult_gen(&mut c1, &random_sar);
+            let mut c1 = Jacobian::from_ge(&G);
+            cxt.ecmult_gen(&mut c1, &random_sar);
 
-                let c2 = shared_sec.add_ge(&c);
-                (Affine::from_gej(&c1), Affine::from_gej(&c2))
-            }
-        ).collect()
+            let c2 = shared_sec.add_ge(&c);
+            (Affine::from_gej(&c1), Affine::from_gej(&c2))
+        })
+        .collect()
 }
 
 pub fn decrypt(m: &Vec<(Affine, Affine)>, k: &SecretKey) -> Result<String> {
@@ -185,7 +180,8 @@ pub fn decrypt(m: &Vec<(Affine, Affine)>, k: &SecretKey) -> Result<String> {
                 cxt.ecmult_gen(&mut j_c1, &sar);
                 let t = Affine::from_gej(&j_c2).neg();
                 Affine::from_gej(&j_c2.add_ge(&t))
-            }).collect()
+            })
+            .collect(),
     )
 }
 
