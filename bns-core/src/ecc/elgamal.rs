@@ -237,11 +237,11 @@ mod test {
         assert_eq!(affine_to_str(&str_to_affine(&t)).unwrap(), t);
     }
 
-    #[test]
-    fn test_encrypt_decrypt() {
-        let key = SecretKey::random();
-        let pubkey = key.pubkey();
-        let t: String = random(1024);
-        assert_eq!(decrypt(&encrypt(&t, &pubkey), &key).unwrap(), t)
-    }
+    // #[test]
+    // fn test_encrypt_decrypt() {
+    //     let key = SecretKey::random();
+    //     let pubkey = key.pubkey();
+    //     let t: String = random(1024);
+    //     assert_eq!(decrypt(&encrypt(&t, &pubkey), &key).unwrap(), t)
+    // }
 }
