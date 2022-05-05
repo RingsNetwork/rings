@@ -10,6 +10,7 @@ use std::fmt::Write;
 use std::ops::Deref;
 use web3::signing::keccak256;
 use web3::types::Address;
+pub mod elgamal;
 pub mod signers;
 
 // ref https://docs.rs/web3/0.18.0/src/web3/signing.rs.html#69
@@ -49,9 +50,21 @@ impl Deref for PublicKey {
     }
 }
 
+impl From<SecretKey> for libsecp256k1::SecretKey {
+    fn from(key: SecretKey) -> Self {
+        key.deref().clone()
+    }
+}
+
+impl From<PublicKey> for libsecp256k1::PublicKey {
+    fn from(key: PublicKey) -> Self {
+        key.deref().clone()
+    }
+}
+
 impl From<libsecp256k1::SecretKey> for SecretKey {
     fn from(key: libsecp256k1::SecretKey) -> Self {
-        Self(key)
+        Self(key.into())
     }
 }
 
