@@ -52,19 +52,19 @@ impl Deref for PublicKey {
 
 impl From<SecretKey> for libsecp256k1::SecretKey {
     fn from(key: SecretKey) -> Self {
-        key.deref().clone()
+        *key.deref()
     }
 }
 
 impl From<PublicKey> for libsecp256k1::PublicKey {
     fn from(key: PublicKey) -> Self {
-        key.deref().clone()
+        *key.deref()
     }
 }
 
 impl From<libsecp256k1::SecretKey> for SecretKey {
     fn from(key: libsecp256k1::SecretKey) -> Self {
-        Self(key.into())
+        Self(key)
     }
 }
 
@@ -161,6 +161,10 @@ impl SecretKey {
         sig_bytes[32..64].copy_from_slice(&signature.s.b32());
         sig_bytes[64] = recover_id.serialize();
         sig_bytes
+    }
+
+    pub fn pubkey(&self) -> PublicKey {
+        libsecp256k1::PublicKey::from_secret_key(&self.clone().into()).into()
     }
 }
 
