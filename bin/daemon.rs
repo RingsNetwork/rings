@@ -1,10 +1,10 @@
-use bns_core::message::MessageHandler;
-use bns_core::session::SessionManager;
-use bns_core::swarm::Swarm;
-use bns_core::types::message::MessageListener;
-use bns_core::{dht::PeerRing, ecc::SecretKey};
-use bns_node::logger::{LogLevel, Logger};
-use bns_node::service::{run_service, run_udp_turn};
+use rings_core::message::MessageHandler;
+use rings_core::session::SessionManager;
+use rings_core::swarm::Swarm;
+use rings_core::types::message::MessageListener;
+use rings_core::{dht::PeerRing, ecc::SecretKey};
+use rings_node::logger::{LogLevel, Logger};
+use rings_node::service::{run_service, run_udp_turn};
 use clap::{Args, Parser, Subcommand};
 use daemonize::Daemonize;
 use futures::lock::Mutex;
@@ -47,7 +47,7 @@ struct RunArgs {
     #[clap(long = "key", short = 'k', env)]
     pub eth_key: SecretKey,
 
-    #[clap(long, short = 'p', default_value = "/tmp/bns-node.pid")]
+    #[clap(long, short = 'p', default_value = "/tmp/rings-node.pid")]
     pub pid_file: String,
 
     #[clap(long, default_value = "nobody")]
@@ -68,7 +68,7 @@ struct RunArgs {
     pub public_ip: String,
 
     /// Username.
-    #[clap(long, default_value = "bns")]
+    #[clap(long, default_value = "rings")]
     pub username: String,
 
     /// Password.
@@ -81,7 +81,7 @@ struct RunArgs {
     /// Secret Responses. It contains text which meets the grammar for
     /// "realm" as described in RFC 3261, and will thus contain a quoted
     /// string (including the quotes).
-    #[clap(long, default_value = "bns")]
+    #[clap(long, default_value = "rings")]
     pub realm: String,
 
     #[clap(long)]
@@ -90,7 +90,7 @@ struct RunArgs {
 
 #[derive(Args, Debug)]
 struct ShutdownArgs {
-    #[clap(long, short = 'p', default_value = "/tmp/bns-node.pid")]
+    #[clap(long, short = 'p', default_value = "/tmp/rings-node.pid")]
     pub pid_file: String,
 }
 
@@ -126,8 +126,8 @@ async fn run_jobs(args: &RunArgs) -> anyhow::Result<()> {
 }
 
 fn run_daemon(args: &RunArgs) {
-    let stdout = File::create("/tmp/bns-node/info.log").unwrap();
-    let stderr = File::create("/tmp/bns-node/err.log").unwrap();
+    let stdout = File::create("/tmp/rings-node/info.log").unwrap();
+    let stderr = File::create("/tmp/rings-node/err.log").unwrap();
 
     let daemonize = Daemonize::new()
         .pid_file(args.pid_file.as_str())

@@ -2,7 +2,7 @@
 name = "rings-node"
 version = "0.1.0"
 edition = "2021"
-default-run = "bns-node"
+default-run = "rings-node"
 
 [workspace]
 members = ["rings-core"]
@@ -17,7 +17,7 @@ tokio-util = { version = "0.6.9" }
 tower-http = { version = "0.2.4", features = ["set-header"] }
 http = "0.2.6"
 clap = { version = "3", features = ["derive", "env"] }
-bns-core = { path = "./bns-core" }
+rings-core = { path = "./rings-core" }
 reqwest = { version = "0.11", features = ["json"] }
 form_urlencoded = "1.0.1"
 toml = "0.5.8"
