@@ -23,7 +23,7 @@ pub fn str_to_field(s: &str) -> Vec<Field> {
         .collect()
 }
 
-pub fn field_to_str(f: &Vec<Field>) -> Result<String> {
+pub fn field_to_str(f: &[Field]) -> Result<String> {
     String::from_utf8(
         f.iter()
             .map(|x| {
@@ -85,8 +85,8 @@ pub fn str_to_affine(s: &str) -> Vec<Affine> {
         .collect::<Vec<Affine>>()
 }
 
-pub fn affine_to_str(a: &Vec<Affine>) -> Result<String> {
-    field_to_str(&a.iter().map(|x| x.x).collect())
+pub fn affine_to_str(a: &[Affine]) -> Result<String> {
+    field_to_str(&a.iter().map(|x| x.x).collect::<Vec<Field>>().as_slice())
 }
 
 pub fn encrypt(s: &str, k: &PublicKey) -> Vec<(Affine, Affine)> {
@@ -120,7 +120,7 @@ pub fn encrypt(s: &str, k: &PublicKey) -> Vec<(Affine, Affine)> {
         .collect()
 }
 
-pub fn decrypt(m: &Vec<(Affine, Affine)>, k: &SecretKey) -> Result<String> {
+pub fn decrypt(m: &[(Affine, Affine)], k: &SecretKey) -> Result<String> {
     let seckey: libsecp256k1::SecretKey = (*k).into();
     let sar: Scalar = seckey.into();
     let cxt = ECMultContext::new_boxed();
@@ -137,7 +137,7 @@ pub fn decrypt(m: &Vec<(Affine, Affine)>, k: &SecretKey) -> Result<String> {
                 println!("{:?}", ret);
                 ret
             })
-            .collect(),
+            .collect::<Vec<Affine>>().as_slice(),
     )
 }
 
@@ -193,9 +193,9 @@ mod test {
         assert_eq!(pub_point.x.b32(), pub_x);
         assert_eq!(pub_point.y.b32(), pub_y);
         let test = "test";
-        let points = str_to_affine(&test);
+        let points = str_to_affine(test);
         assert_eq!(points.len(), 1);
-        assert_eq!(affine_to_str(&str_to_affine(&test)).unwrap(), test);
+        assert_eq!(affine_to_str(&str_to_affine(test)).unwrap(), test);
         let m_point = points[0];
         let r: libsecp256k1::SecretKey =
             SecretKey::try_from("1f9275dbafdfba81942eb3330b07f38cbee4ebb86bdc2174af9648d5f5509a54")
