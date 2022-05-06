@@ -23,7 +23,7 @@
 ///    T. ElGamal. A Public Key Cryptosystem and a Signature Scheme Based on Discrete Logarithms. IEEE Trans. Info. Theory, IT 31:469–472, 1985.
 ///    ElGamal encryption https://en.wikipedia.org/wiki/ElGamal_encryption
 ///    http://www.docsdrive.com/pdfs/ansinet/itj/2005/299-306.pdf
-use crate::ecc::{PublicKey, SecretKey};
+use crate::ecc::{CurveEle, PublicKey, SecretKey};
 use crate::err::Error;
 use crate::err::Result;
 use libsecp256k1::curve::Affine;
@@ -114,15 +114,12 @@ pub fn affine_to_str(a: &[Affine]) -> Result<String> {
     field_to_str(a.iter().map(|x| x.x).collect::<Vec<Field>>().as_slice())
 }
 
-pub fn encrypt(s: &str, k: &PublicKey) -> Vec<(Affine, Affine)> {
-    let random_sec: libsecp256k1::SecretKey = SecretKey::random().into();
-    let pubkey: libsecp256k1::PublicKey = (*k).into();
-
-    let random_sar: Scalar = random_sec.into();
-    let mut h: Affine = pubkey.into();
+pub fn encrypt(s: &str, k: &PublicKey) -> Result<Vec<(CurveEle, CurveEle)>> {
+    let random_sar: Scalar = SecretKey::random().into();
+    let mut h: Affine = (*k).into();
     h.y.normalize();
     h.y.normalize();
-    str_to_affine(s)
+    let affines: Vec<(Affine, Affine)> = str_to_affine(s)
         .into_iter()
         .map(|c| {
             let g_cxt = ECMultGenContext::new_boxed();
@@ -142,20 +139,26 @@ pub fn encrypt(s: &str, k: &PublicKey) -> Vec<(Affine, Affine)> {
             a_c2.y.normalize();
             (a_c1, a_c2)
         })
-        .collect()
+        .collect();
+    let mut ret: Vec<(CurveEle, CurveEle)> = vec![];
+    for (c1, c2) in affines {
+        ret.push((c1.try_into()?, c2.try_into()?))
+    }
+    Ok(ret)
 }
 
-pub fn decrypt(m: &[(Affine, Affine)], k: &SecretKey) -> Result<String> {
-    let seckey: libsecp256k1::SecretKey = (*k).into();
-    let sar: Scalar = seckey.into();
+pub fn decrypt(m: &[(CurveEle, CurveEle)], k: &SecretKey) -> Result<String> {
+    let sar: Scalar = (*k).into();
     let cxt = ECMultContext::new_boxed();
     affine_to_str(
         m.iter()
             .map(|(c1, c2)| {
+                let c1: Affine = (*c1).into();
+                let c2: Affine = (*c2).into();
                 let mut t = Jacobian::default();
-                cxt.ecmult_const(&mut t, c1, &sar);
+                cxt.ecmult_const(&mut t, &c1, &sar);
                 let a_t = Affine::from_gej(&t).neg();
-                let j_c2 = Jacobian::from_ge(c2);
+                let j_c2 = Jacobian::from_ge(&c2);
                 let mut ret = Affine::from_gej(&j_c2.add_ge(&a_t));
                 ret.x.normalize();
                 ret.y.normalize();
@@ -315,6 +318,6 @@ mod test {
                 .unwrap();
         let pubkey = key.pubkey();
         let t: String = random(1024);
-        assert_eq!(decrypt(&encrypt(&t, &pubkey), &key).unwrap(), t)
+        assert_eq!(decrypt(&encrypt(&t, &pubkey).unwrap(), &key).unwrap(), t)
     }
 }

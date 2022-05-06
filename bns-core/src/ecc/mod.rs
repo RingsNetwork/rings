@@ -1,5 +1,6 @@
 use crate::err::{Error, Result};
 use hex;
+use libsecp256k1::curve::Affine;
 use rand::SeedableRng;
 use rand_hc::Hc128Rng;
 use serde::Deserialize;
@@ -17,10 +18,11 @@ pub mod signers;
 
 // length r: 32, length s: 32, length v(recovery_id): 1
 pub type SigBytes = [u8; 65];
+pub type CurveEle = PublicKey;
 
 #[derive(PartialEq, Debug, Clone, Copy)]
 pub struct SecretKey(libsecp256k1::SecretKey);
-#[derive(PartialEq, Debug, Clone, Copy)]
+#[derive(Deserialize, Serialize, PartialEq, Debug, Clone, Copy)]
 pub struct PublicKey(libsecp256k1::PublicKey);
 
 #[derive(Deserialize, Serialize, Debug, Clone, Eq, PartialEq)]
@@ -59,6 +61,26 @@ impl From<SecretKey> for libsecp256k1::SecretKey {
 impl From<PublicKey> for libsecp256k1::PublicKey {
     fn from(key: PublicKey) -> Self {
         *key.deref()
+    }
+}
+
+impl From<PublicKey> for libsecp256k1::curve::Affine {
+    fn from(key: PublicKey) -> Self {
+        (*key.deref()).into()
+    }
+}
+
+impl TryFrom<libsecp256k1::curve::Affine> for PublicKey {
+    type Error = Error;
+    fn try_from(a: libsecp256k1::curve::Affine) -> Result<Self> {
+        let pubkey: libsecp256k1::PublicKey = a.try_into().map_err(|_| Error::InvalidPublicKey)?;
+        Ok(pubkey.into())
+    }
+}
+
+impl Into<libsecp256k1::curve::Scalar> for SecretKey {
+    fn into(self) -> libsecp256k1::curve::Scalar {
+        self.0.into()
     }
 }
 
@@ -124,9 +146,10 @@ impl ToString for SecretKey {
 }
 
 fn public_key_address(public_key: &PublicKey) -> Address {
-    let public_key = public_key.serialize();
-    debug_assert_eq!(public_key[0], 0x04);
-    let hash = keccak256(&public_key[1..]);
+    let pub_key: libsecp256k1::PublicKey = *public_key.deref();
+    let pub_key = pub_key.serialize();
+    debug_assert_eq!(pub_key[0], 0x04);
+    let hash = keccak256(&pub_key[1..]);
     Address::from_slice(&hash[12..])
 }
 
