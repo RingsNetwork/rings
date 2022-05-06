@@ -1,7 +1,7 @@
 rings-node
 ===============
 
-[![rings-node](https://github.com/RingsNetwork/rings-node/actions/workflows/rings-node.yml/badge.svg)](https://github.com/RingsNetwork/bns-node/actions/workflows/rings-node.yml)
+[![rings-node](https://github.com/RingsNetwork/rings-node/actions/workflows/rings-node.yml/badge.svg)](https://github.com/RingsNetwork/rings-node/actions/workflows/rings-node.yml)
 
 
 
