@@ -9,64 +9,6 @@ use libsecp256k1::curve::Jacobian;
 use libsecp256k1::curve::Scalar;
 use libsecp256k1::curve::AFFINE_G as G;
 
-pub fn u8_to_u32(s: &Vec<u8>) -> Vec<u32> {
-    s.chunks(4)
-        .map(|x| {
-            let mut pad = vec![0; 4 - x.len()];
-            pad.extend(x);
-            pad.try_into().unwrap()
-        })
-        .fold(vec![], |mut x: Vec<u32>, y: [u8; 4]| {
-            x.push(u32::from_be_bytes(y));
-            x
-        })
-}
-
-pub fn u32_to_u8(v: &Vec<u32>) -> Vec<u8> {
-    v.iter()
-        .map(|a| a.to_be_bytes().into_iter().skip_while(|x| *x == 0))
-        .fold(vec![], |mut x: Vec<u8>, y| {
-            x.extend(y);
-            x
-        })
-}
-
-pub fn u32_to_u8_raw(v: &Vec<u32>) -> Vec<u8> {
-    v.iter()
-        .map(|a| a.to_be_bytes().into_iter())
-        .fold(vec![], |mut x: Vec<u8>, y| {
-            x.extend(y);
-            x
-        })
-}
-
-pub fn str_to_u32(s: &str) -> Vec<u32> {
-    s.to_string()
-        .as_bytes()
-        .chunks(4)
-        .map(|x| {
-            let mut pad = vec![0; 4 - x.len()];
-            pad.extend(x);
-            pad.try_into().unwrap()
-        })
-        .fold(vec![], |mut x: Vec<u32>, y: [u8; 4]| {
-            x.push(u32::from_be_bytes(y));
-            x
-        })
-}
-
-pub fn u32_to_str(v: &Vec<u32>) -> Result<String> {
-    String::from_utf8(
-        v.iter()
-            .map(|a| a.to_be_bytes().into_iter().skip_while(|x| *x == 0))
-            .fold(vec![], |mut x: Vec<u8>, y| {
-                x.extend(y);
-                x
-            }),
-    )
-    .map_err(Error::Utf8Encoding)
-}
-
 pub fn str_to_field(s: &str) -> Vec<Field> {
     s.as_bytes()
         .chunks(31)
@@ -210,27 +152,6 @@ mod test {
             .take(len)
             .map(char::from)
             .collect()
-    }
-
-    #[test]
-    fn test_string_to_u32() {
-        let t = "";
-        assert_eq!(str_to_u32(t).len(), 0);
-
-        let t = "test";
-        assert_eq!(str_to_u32(t), [1952805748]);
-        assert_eq!(u32_to_str(&str_to_u32(t)).unwrap(), t);
-
-        let t = "abc";
-        assert_eq!(u32_to_str(&str_to_u32(t)).unwrap(), t);
-
-        let t = "hello world, hello world";
-        assert_eq!(u32_to_str(&str_to_u32(t)).unwrap(), t);
-        let t: String = random(1024);
-        assert_eq!(u32_to_str(&str_to_u32(&t)).unwrap(), t);
-
-        let t: String = random(127);
-        assert_eq!(u32_to_str(&str_to_u32(&t)).unwrap(), t);
     }
 
     #[test]
