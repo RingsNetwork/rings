@@ -101,7 +101,7 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
             .ok()
             .as_ref()
             .map(|c| Arc::new(c.to_owned()));
-        self.setup_channel("bns").await;
+        self.setup_channel("rings").await;
         return Ok(self);
     }
 

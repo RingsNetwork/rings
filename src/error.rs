@@ -5,23 +5,23 @@ pub enum Error {
     #[error("Connect remote rpc server failed: {0}.")]
     RemoteRpcError(String),
     #[error("Pending Transport error: {0}.")]
-    PendingTransport(bns_core::err::Error),
+    PendingTransport(rings_core::err::Error),
     #[error("Transport not found.")]
     TransportNotFound,
     #[error("Create Transport error.")]
     NewTransportError,
     #[error("Close Transport error: {0}.")]
-    CloseTransportError(bns_core::err::Error),
+    CloseTransportError(rings_core::err::Error),
     #[error("Decode error.")]
     DecodedError,
     #[error("Encode error.")]
     EncodedError,
     #[error("Register ICE error: {0}.")]
-    RegisterIceError(bns_core::err::Error),
+    RegisterIceError(rings_core::err::Error),
     #[error("Create offer info failed: {0}.")]
-    CreateOffer(bns_core::err::Error),
+    CreateOffer(rings_core::err::Error),
     #[error("Create answer info failed: {0}.")]
-    CreateAnswer(bns_core::err::Error),
+    CreateAnswer(rings_core::err::Error),
     #[error("Invalid transport id.")]
     InvalidTransportId,
     #[error("Invalid address.")]
