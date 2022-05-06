@@ -17,9 +17,9 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use rings_core::swarm::Swarm;
 use http::header::{self, HeaderName, HeaderValue};
 use jsonrpc_core::MetaIoHandler;
+use rings_core::swarm::Swarm;
 use std::sync::Arc;
 use tower_http::set_header::SetResponseHeaderLayer;
 

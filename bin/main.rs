@@ -1,4 +1,6 @@
 #![feature(async_closure)]
+use clap::{Args, Parser, Subcommand};
+use futures::lock::Mutex;
 use rings_core::dht::PeerRing;
 use rings_core::ecc::SecretKey;
 use rings_core::message::MessageHandler;
@@ -9,8 +11,6 @@ use rings_node::cli::Client;
 use rings_node::logger::LogLevel;
 use rings_node::logger::Logger;
 use rings_node::service::run_service;
-use clap::{Args, Parser, Subcommand};
-use futures::lock::Mutex;
 use std::sync::Arc;
 
 #[derive(Parser, Debug)]
@@ -195,8 +195,11 @@ struct Send {
 async fn daemon_run(http_addr: String, key: &SecretKey, stuns: &str) -> anyhow::Result<()> {
     // TODO support run daemonize
     let dht = Arc::new(Mutex::new(PeerRing::new(key.address().into())));
-    let (auth, temp_key) =
-        SessionManager::gen_unsign_info(key.address(), Some(rings_core::session::Ttl::Never), None)?;
+    let (auth, temp_key) = SessionManager::gen_unsign_info(
+        key.address(),
+        Some(rings_core::session::Ttl::Never),
+        None,
+    )?;
     let sig = key.sign(&auth.to_string()?).to_vec();
     let session = SessionManager::new(&sig, &auth, &temp_key);
     let swarm = Arc::new(Swarm::new(stuns, key.address(), session.clone()));

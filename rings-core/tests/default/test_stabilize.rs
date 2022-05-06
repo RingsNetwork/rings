@@ -1,5 +1,6 @@
 #[cfg(test)]
 pub mod test {
+    use futures::lock::Mutex;
     use rings_core::dht::Stabilization;
     use rings_core::dht::{Did, PeerRing};
     use rings_core::ecc::SecretKey;
@@ -12,7 +13,6 @@ pub mod test {
     use rings_core::types::ice_transport::IceTransport;
     use rings_core::types::ice_transport::IceTrickleScheme;
     use rings_core::types::message::MessageListener;
-    use futures::lock::Mutex;
     use std::sync::Arc;
     use tokio::time::{sleep, Duration};
     use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;

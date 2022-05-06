@@ -1,3 +1,7 @@
+use clap::{Args, Parser, Subcommand};
+use daemonize::Daemonize;
+use futures::lock::Mutex;
+use libc::kill;
 use rings_core::message::MessageHandler;
 use rings_core::session::SessionManager;
 use rings_core::swarm::Swarm;
@@ -5,10 +9,6 @@ use rings_core::types::message::MessageListener;
 use rings_core::{dht::PeerRing, ecc::SecretKey};
 use rings_node::logger::{LogLevel, Logger};
 use rings_node::service::{run_service, run_udp_turn};
-use clap::{Args, Parser, Subcommand};
-use daemonize::Daemonize;
-use futures::lock::Mutex;
-use libc::kill;
 use std::fs::{self, File};
 use std::sync::Arc;
 

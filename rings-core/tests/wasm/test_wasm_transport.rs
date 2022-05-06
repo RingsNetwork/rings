@@ -5,6 +5,7 @@ pub mod test {
     use rings_core::err::Result;
     use rings_core::session::SessionManager;
 
+    use log::Level;
     use rings_core::transports::Transport;
     use rings_core::types::channel::Channel;
     use rings_core::types::channel::Event;
@@ -12,7 +13,6 @@ pub mod test {
     use rings_core::types::ice_transport::IceTransport;
     use rings_core::types::ice_transport::IceTransportCallback;
     use rings_core::types::ice_transport::IceTrickleScheme;
-    use log::Level;
     use std::str::FromStr;
     use std::sync::Arc;
 

@@ -1,13 +1,13 @@
 use super::{request, response::TransportAndIce};
 use crate::error::{Error, Result};
+use jsonrpc_core::Metadata;
+use jsonrpc_core_client::RawClient;
 use rings_core::{
     message::Encoded,
     swarm::{Swarm, TransportManager},
     transports::Transport,
     types::ice_transport::{IceTransport, IceTrickleScheme},
 };
-use jsonrpc_core::Metadata;
-use jsonrpc_core_client::RawClient;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
 use std::{str::FromStr, sync::Arc};
