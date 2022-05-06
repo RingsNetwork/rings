@@ -1,11 +1,11 @@
 [package]
-name = "bns-node"
+name = "rings-node"
 version = "0.1.0"
 edition = "2021"
 default-run = "bns-node"
 
 [workspace]
-members = ["bns-core"]
+members = ["rings-core"]
 
 [dependencies]
 lazy_static = "1.4.0"
@@ -47,9 +47,9 @@ rusturn = "0.0.4"
 util = { package = "webrtc-util", version = "0.5.3", default-features = false, features = ["conn", "vnet"] }
 
 [[bin]]
-name = "bns-node"
+name = "rings-node"
 path = "bin/main.rs"
 
 [[bin]]
-name = "bns-node-daemon"
+name = "rings-node-daemon"
 path = "bin/daemon.rs"
