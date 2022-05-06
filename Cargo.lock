@@ -364,6 +364,88 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8d696c370c750c948ada61c69a0ee2cbbb9c50b1019ddb86d9317157a99c2cae"
 
 [[package]]
+name = "bns-core"
+version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "async-lock",
+ "async-recursion",
+ "async-stream",
+ "async-trait",
+ "base58-monero",
+ "bytes",
+ "chrono",
+ "console_log",
+ "dashmap",
+ "flate2",
+ "futures 0.3.21",
+ "futures-core",
+ "futures-util",
+ "hex",
+ "js-sys",
+ "libsecp256k1",
+ "log",
+ "num-bigint 0.3.3",
+ "rand 0.8.5",
+ "rand_core 0.6.3",
+ "rand_hc 0.3.1",
+ "serde",
+ "serde_json",
+ "sha1 0.10.1",
+ "thiserror",
+ "tokio",
+ "url 2.2.2",
+ "uuid",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test",
+ "web-sys",
+ "web3",
+ "webrtc",
+]
+
+[[package]]
+name = "bns-node"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrayref",
+ "axum",
+ "base64",
+ "bns-core",
+ "chrono",
+ "clap",
+ "daemonize",
+ "dotenv",
+ "env_logger",
+ "form_urlencoded",
+ "futures 0.3.21",
+ "http",
+ "hyper",
+ "jsonrpc-core",
+ "jsonrpc-core-client",
+ "lazy_static",
+ "libc",
+ "log",
+ "pin-project",
+ "reqwest",
+ "rusturn",
+ "secp256k1",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util 0.6.9",
+ "toml",
+ "tower-http",
+ "turn",
+ "uuid",
+ "web3",
+ "webrtc",
+ "webrtc-util",
+]
+
+[[package]]
 name = "boxfnonce"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2568,88 +2650,6 @@ dependencies = [
  "untrusted",
  "web-sys",
  "winapi 0.3.9",
-]
-
-[[package]]
-name = "rings-core"
-version = "0.1.0"
-dependencies = [
- "async-channel",
- "async-lock",
- "async-recursion",
- "async-stream",
- "async-trait",
- "base58-monero",
- "bytes",
- "chrono",
- "console_log",
- "dashmap",
- "flate2",
- "futures 0.3.21",
- "futures-core",
- "futures-util",
- "hex",
- "js-sys",
- "libsecp256k1",
- "log",
- "num-bigint 0.3.3",
- "rand 0.8.5",
- "rand_core 0.6.3",
- "rand_hc 0.3.1",
- "serde",
- "serde_json",
- "sha1 0.10.1",
- "thiserror",
- "tokio",
- "url 2.2.2",
- "uuid",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "wasm-bindgen-test",
- "web-sys",
- "web3",
- "webrtc",
-]
-
-[[package]]
-name = "rings-node"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arrayref",
- "axum",
- "base64",
- "chrono",
- "clap",
- "daemonize",
- "dotenv",
- "env_logger",
- "form_urlencoded",
- "futures 0.3.21",
- "http",
- "hyper",
- "jsonrpc-core",
- "jsonrpc-core-client",
- "lazy_static",
- "libc",
- "log",
- "pin-project",
- "reqwest",
- "rings-core",
- "rusturn",
- "secp256k1",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-util 0.6.9",
- "toml",
- "tower-http",
- "turn",
- "uuid",
- "web3",
- "webrtc",
- "webrtc-util",
 ]
 
 [[package]]

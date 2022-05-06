@@ -1,8 +1,8 @@
 use super::{http_error::HttpError, result::HttpResult};
 use anyhow::anyhow;
 use axum::extract::{Extension, Query, RawBody};
-use rings_core::swarm::{Swarm, TransportManager};
-use rings_core::types::ice_transport::IceTrickleScheme;
+use bns_core::swarm::{Swarm, TransportManager};
+use bns_core::types::ice_transport::IceTrickleScheme;
 
 use std::collections::HashMap;
 use std::sync::Arc;

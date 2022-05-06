@@ -1,4 +1,4 @@
-name: rings-node
+name: bns-node
 
 on:
   push:
@@ -27,13 +27,13 @@ jobs:
         uses: actions-rs/cargo@v1
         with:
           command: clippy
-          args: -p rings-core --features wasm --no-deps --no-default-features --target=wasm32-unknown-unknown --tests -- -D warnings
+          args: -p bns-core --features wasm --no-deps --no-default-features --target=wasm32-unknown-unknown --tests -- -D warnings
       - name: Build
-        run: cargo build -p rings-core --target=wasm32-unknown-unknown --features wasm --no-default-features
+        run: cargo build -p bns-core --target=wasm32-unknown-unknown --features wasm --no-default-features
       - name: Run tests
         uses: GabrielBB/xvfb-action@v1
         with:
-          working-directory: ./rings-core
+          working-directory: ./bns-core
           run: cargo test --target=wasm32-unknown-unknown --features wasm --no-default-features
   build:
     name: Build and test

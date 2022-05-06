@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::error::{Error, Result};
-use rings_core::transports::Transport;
+use bns_core::transports::Transport;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use web3::types::H160;

@@ -1,19 +1,19 @@
 #[cfg(test)]
 pub mod test {
-    use rings_core::dht::{Chord, Did};
-    use rings_core::channels::Channel as CbChannel;
-    use rings_core::ecc::SecretKey;
-    use rings_core::err::Result;
-    use rings_core::session::SessionManager;
-    use rings_core::swarm::Swarm;
-    use rings_core::swarm::TransportManager;
-    use rings_core::transports::Transport;
-    use rings_core::types::channel::Channel;
-    use rings_core::types::channel::Event;
-    use rings_core::types::ice_transport::IceServer;
-    use rings_core::types::ice_transport::IceTransport;
-    use rings_core::types::ice_transport::IceTransportCallback;
-    use rings_core::types::ice_transport::IceTrickleScheme;
+    use bns_core::dht::{Chord, Did};
+    use bns_core::channels::Channel as CbChannel;
+    use bns_core::ecc::SecretKey;
+    use bns_core::err::Result;
+    use bns_core::session::SessionManager;
+    use bns_core::swarm::Swarm;
+    use bns_core::swarm::TransportManager;
+    use bns_core::transports::Transport;
+    use bns_core::types::channel::Channel;
+    use bns_core::types::channel::Event;
+    use bns_core::types::ice_transport::IceServer;
+    use bns_core::types::ice_transport::IceTransport;
+    use bns_core::types::ice_transport::IceTransportCallback;
+    use bns_core::types::ice_transport::IceTrickleScheme;
     use std::str::FromStr;
     use std::sync::Arc;
 

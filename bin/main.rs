@@ -1,14 +1,14 @@
 #![feature(async_closure)]
-use rings_core::dht::PeerRing;
-use rings_core::ecc::SecretKey;
-use rings_core::message::MessageHandler;
-use rings_core::session::SessionManager;
-use rings_core::swarm::Swarm;
-use rings_core::types::message::MessageListener;
-use rings_node::cli::Client;
-use rings_node::logger::LogLevel;
-use rings_node::logger::Logger;
-use rings_node::service::run_service;
+use bns_core::dht::PeerRing;
+use bns_core::ecc::SecretKey;
+use bns_core::message::MessageHandler;
+use bns_core::session::SessionManager;
+use bns_core::swarm::Swarm;
+use bns_core::types::message::MessageListener;
+use bns_node::cli::Client;
+use bns_node::logger::LogLevel;
+use bns_node::logger::Logger;
+use bns_node::service::run_service;
 use clap::{Args, Parser, Subcommand};
 use futures::lock::Mutex;
 use std::sync::Arc;
@@ -71,7 +71,7 @@ struct ClientArgs {
         long,
         short = 'u',
         default_value = "http://127.0.0.1:50000",
-        help = "rings-node endpoint url."
+        help = "bns-node endpoint url."
     )]
     endpoint_url: String,
 }
@@ -196,7 +196,7 @@ async fn daemon_run(http_addr: String, key: &SecretKey, stuns: &str) -> anyhow::
     // TODO support run daemonize
     let dht = Arc::new(Mutex::new(PeerRing::new(key.address().into())));
     let (auth, temp_key) =
-        SessionManager::gen_unsign_info(key.address(), Some(rings_core::session::Ttl::Never), None)?;
+        SessionManager::gen_unsign_info(key.address(), Some(bns_core::session::Ttl::Never), None)?;
     let sig = key.sign(&auth.to_string()?).to_vec();
     let session = SessionManager::new(&sig, &auth, &temp_key);
     let swarm = Arc::new(Swarm::new(stuns, key.address(), session.clone()));

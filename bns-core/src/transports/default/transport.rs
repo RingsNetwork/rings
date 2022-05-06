@@ -99,7 +99,7 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
             Err(e) => Err(Error::RTCPeerConnectionCreateFailed(e)),
         }?;
 
-        self.setup_channel("rings").await?;
+        self.setup_channel("bns").await?;
         Ok(self)
     }
 

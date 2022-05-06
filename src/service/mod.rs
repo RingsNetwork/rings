@@ -17,7 +17,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use rings_core::swarm::Swarm;
+use bns_core::swarm::Swarm;
 use http::header::{self, HeaderName, HeaderValue};
 use jsonrpc_core::MetaIoHandler;
 use std::sync::Arc;

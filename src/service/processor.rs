@@ -1,6 +1,6 @@
 use super::{request, response::TransportAndIce};
 use crate::error::{Error, Result};
-use rings_core::{
+use bns_core::{
     message::Encoded,
     swarm::{Swarm, TransportManager},
     transports::Transport,
@@ -284,14 +284,14 @@ pub async fn new_client(url: &str) -> Result<RawClient> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use rings_core::{ecc::SecretKey, session::SessionManager};
+    use bns_core::{ecc::SecretKey, session::SessionManager};
 
     fn new_processor() -> Processor {
         let key = SecretKey::random();
 
         let (auth, key) = SessionManager::gen_unsign_info(
             key.address(),
-            Some(rings_core::session::Ttl::Never),
+            Some(bns_core::session::Ttl::Never),
             None,
         )
         .unwrap();

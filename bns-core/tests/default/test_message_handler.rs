@@ -1,20 +1,20 @@
 #[cfg(test)]
 pub mod test {
-    use rings_core::dht::{Did, PeerRing};
-    use rings_core::ecc::SecretKey;
-    use rings_core::err::Result;
-    use rings_core::message;
-    use rings_core::message::Encoder;
-    use rings_core::message::MessageHandler;
-    use rings_core::message::{Message, MessageRelayMethod};
-    use rings_core::session::SessionManager;
-    use rings_core::storage::Storage;
-    use rings_core::swarm::Swarm;
-    use rings_core::swarm::TransportManager;
-    use rings_core::transports::Transport;
-    use rings_core::types::ice_transport::IceTransport;
-    use rings_core::types::ice_transport::IceTrickleScheme;
-    use rings_core::types::message::MessageListener;
+    use bns_core::dht::{Did, PeerRing};
+    use bns_core::ecc::SecretKey;
+    use bns_core::err::Result;
+    use bns_core::message;
+    use bns_core::message::Encoder;
+    use bns_core::message::MessageHandler;
+    use bns_core::message::{Message, MessageRelayMethod};
+    use bns_core::session::SessionManager;
+    use bns_core::storage::Storage;
+    use bns_core::swarm::Swarm;
+    use bns_core::swarm::TransportManager;
+    use bns_core::transports::Transport;
+    use bns_core::types::ice_transport::IceTransport;
+    use bns_core::types::ice_transport::IceTrickleScheme;
+    use bns_core::types::message::MessageListener;
     use futures::lock::Mutex;
     use std::sync::Arc;
     use tokio::time::{sleep, Duration};
