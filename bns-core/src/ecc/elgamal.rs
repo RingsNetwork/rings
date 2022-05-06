@@ -23,8 +23,6 @@
 ///    T. ElGamal. A Public Key Cryptosystem and a Signature Scheme Based on Discrete Logarithms. IEEE Trans. Info. Theory, IT 31:469–472, 1985.
 ///    ElGamal encryption https://en.wikipedia.org/wiki/ElGamal_encryption
 ///    http://www.docsdrive.com/pdfs/ansinet/itj/2005/299-306.pdf
-
-
 use crate::ecc::{PublicKey, SecretKey};
 use crate::err::Error;
 use crate::err::Result;
@@ -164,7 +162,8 @@ pub fn decrypt(m: &[(Affine, Affine)], k: &SecretKey) -> Result<String> {
                 println!("{:?}", ret);
                 ret
             })
-            .collect::<Vec<Affine>>().as_slice(),
+            .collect::<Vec<Affine>>()
+            .as_slice(),
     )
 }
 
