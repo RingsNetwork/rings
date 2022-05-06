@@ -1,6 +1,9 @@
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
+    #[error("InvalidPublicKey")]
+    InvalidPublicKey,
+
     #[error("Address of Vritual Peer not equal")]
     AddressNotEqual,
 
