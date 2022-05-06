@@ -86,7 +86,7 @@ pub fn str_to_affine(s: &str) -> Vec<Affine> {
 }
 
 pub fn affine_to_str(a: &[Affine]) -> Result<String> {
-    field_to_str(&a.iter().map(|x| x.x).collect::<Vec<Field>>().as_slice())
+    field_to_str(a.iter().map(|x| x.x).collect::<Vec<Field>>().as_slice())
 }
 
 pub fn encrypt(s: &str, k: &PublicKey) -> Vec<(Affine, Affine)> {
@@ -125,7 +125,7 @@ pub fn decrypt(m: &[(Affine, Affine)], k: &SecretKey) -> Result<String> {
     let sar: Scalar = seckey.into();
     let cxt = ECMultContext::new_boxed();
     affine_to_str(
-        &m.iter()
+        m.iter()
             .map(|(c1, c2)| {
                 let mut t = Jacobian::default();
                 cxt.ecmult_const(&mut t, c1, &sar);
