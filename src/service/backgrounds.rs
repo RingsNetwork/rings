@@ -1,4 +1,4 @@
-use bns_core::dht::Stabilization;
+use rings_core::dht::Stabilization;
 
 use anyhow::{anyhow, Result};
 use tokio::time::Duration;
