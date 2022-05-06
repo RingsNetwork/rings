@@ -126,7 +126,7 @@ The encapsulation of SCTP over DTLS (see [RFC8261]) over ICE/UDP (see [RFC8445])
 |----------------------------------------+               DID / Resource ID                |
 |                 Chord DHT              |                                                |
 +----------------------------------------+------------------------------------------------+
-|                Trickle SDP             |        ECIES          | Persistence Storage    |
+|                Trickle SDP             |        ElGamal        | Persistence Storage    |
 +----------------------------------------+-----------------------+------------------------+
 |            STUN  | SDP  | ICE          |  Crosschain Binding   | Smart Contract Binding |
 +----------------------------------------+------------------------------------------------+
