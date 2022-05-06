@@ -27,7 +27,7 @@ pub fn field_to_str(f: &Vec<Field>) -> Result<String> {
     String::from_utf8(
         f.iter()
             .map(|x| {
-                let mut field = x.clone();
+                let mut field = *x;
                 field.normalize();
                 let mut v = field.b32();
                 println!("{:?}", v);
@@ -128,9 +128,9 @@ pub fn decrypt(m: &Vec<(Affine, Affine)>, k: &SecretKey) -> Result<String> {
         &m.iter()
             .map(|(c1, c2)| {
                 let mut t = Jacobian::default();
-                cxt.ecmult_const(&mut t, &c1, &sar);
+                cxt.ecmult_const(&mut t, c1, &sar);
                 let a_t = Affine::from_gej(&t).neg();
-                let j_c2 = Jacobian::from_ge(&c2);
+                let j_c2 = Jacobian::from_ge(c2);
                 let mut ret = Affine::from_gej(&j_c2.add_ge(&a_t));
                 ret.x.normalize();
                 ret.y.normalize();
