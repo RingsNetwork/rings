@@ -1,6 +1,6 @@
 use crate::err::{Error, Result};
 use hex;
-use libsecp256k1::curve::Affine;
+
 use rand::SeedableRng;
 use rand_hc::Hc128Rng;
 use serde::Deserialize;
@@ -78,9 +78,9 @@ impl TryFrom<libsecp256k1::curve::Affine> for PublicKey {
     }
 }
 
-impl Into<libsecp256k1::curve::Scalar> for SecretKey {
-    fn into(self) -> libsecp256k1::curve::Scalar {
-        self.0.into()
+impl From<SecretKey> for libsecp256k1::curve::Scalar {
+    fn from(key: SecretKey) -> libsecp256k1::curve::Scalar {
+        key.0.into()
     }
 }
 
