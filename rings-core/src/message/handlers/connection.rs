@@ -71,9 +71,6 @@ use crate::message::types::{
 use crate::message::MessageHandler;
 use crate::swarm::TransportManager;
 use crate::types::ice_transport::IceTrickleScheme;
-
-use crate::message::types::ActorContext;
-use crate::message::types::MessageActor;
 use crate::prelude::RTCSdpType;
 use async_trait::async_trait;
 
