@@ -88,8 +88,10 @@ impl Swarm {
         transport.send_message(data.as_slice()).await
     }
 
-    fn load_message(&self, ev: Result<Option<Event>>) -> Result<Option<MessageRelay<impl MessageActor>>>
-    {
+    fn load_message(
+        &self,
+        ev: Result<Option<Event>>,
+    ) -> Result<Option<MessageRelay<impl MessageActor>>> {
         let ev = ev?;
 
         match ev {
@@ -128,7 +130,9 @@ impl Swarm {
         }
     }
 
-    pub fn iter_messages<'a, 'b>(&'a self) -> impl Stream<Item = MessageRelay<impl MessageActor>> + 'b
+    pub fn iter_messages<'a, 'b>(
+        &'a self,
+    ) -> impl Stream<Item = MessageRelay<impl MessageActor>> + 'b
     where
         'a: 'b,
     {

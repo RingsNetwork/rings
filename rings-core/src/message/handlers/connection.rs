@@ -481,24 +481,23 @@ impl MessageActor for JoinDHT {
             PeerRingAction::None => Ok(()),
             PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessor(id)) => {
                 if next != prev && join_op {
-                    handler.send_message(
-                        &next.into(),
-                        Some(relay.to_path),
-                        Some(relay.from_path),
-                        MessageRelayMethod::SEND,
-                        FindSuccessorSend { id, for_fix: false },
-                    )
-                    .await
+                    handler
+                        .send_message(
+                            &next.into(),
+                            Some(relay.to_path),
+                            Some(relay.from_path),
+                            MessageRelayMethod::SEND,
+                            FindSuccessorSend { id, for_fix: false },
+                        )
+                        .await
                 } else {
                     Ok(())
                 }
             }
             _ => unreachable!(),
         }
-
     }
 }
-
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
