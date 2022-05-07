@@ -1,3 +1,5 @@
+use crate::prelude::rings_core;
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, thiserror::Error)]
@@ -60,6 +62,7 @@ impl Error {
     }
 }
 
+#[cfg(feature = "client")]
 impl From<Error> for jsonrpc_core::Error {
     fn from(e: Error) -> Self {
         Self {

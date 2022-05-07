@@ -1,5 +1,8 @@
-use super::request::Method;
-use crate::{error::Error as ServerError, service::processor::Processor};
+use super::{
+    method::Method,
+    response::{Peer, TransportAndIce},
+};
+use crate::{error::Error as ServerError, processor::Processor};
 use jsonrpc_core::{Error, ErrorCode, MetaIoHandler, Params, Result, Value};
 
 pub async fn build_handler(handler: &mut MetaIoHandler<Processor>) {
@@ -16,11 +19,11 @@ pub async fn connect_peer_via_http(params: Params, processor: Processor) -> Resu
     let peer_url = p
         .first()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
-    let id = processor
+    let transport = processor
         .connect_peer_via_http(peer_url)
         .await
         .map_err(Error::from)?;
-    Ok(Value::String(id))
+    Ok(Value::String(transport.id.to_string()))
 }
 
 pub async fn connect_peer_via_ice(params: Params, processor: Processor) -> Result<Value> {
@@ -32,27 +35,33 @@ pub async fn connect_peer_via_ice(params: Params, processor: Processor) -> Resul
         .connect_peer_via_ice(ice_info)
         .await
         .map_err(Error::from)?;
-    r.to_json_obj().map_err(Error::from)
+    TransportAndIce::from(r).to_json_obj().map_err(Error::from)
 }
 
 pub async fn create_offer(_params: Params, processor: Processor) -> Result<Value> {
     let r = processor.create_offer().await.map_err(Error::from)?;
-    r.to_json_obj().map_err(Error::from)
+    TransportAndIce::from(r).to_json_obj().map_err(Error::from)
 }
 
 pub async fn accept_answer(params: Params, processor: Processor) -> Result<Value> {
     let params: Vec<String> = params.parse()?;
     if let ([transport_id, ice], _) = params.split_at(2) {
-        let r = processor
+        let r: Peer = processor
             .accept_answer(transport_id.as_str(), ice.as_str())
-            .await?;
+            .await?
+            .into();
         return r.to_json_obj().map_err(Error::from);
     };
     Err(Error::new(ErrorCode::InvalidParams))
 }
 
 pub async fn list_peers(_params: Params, processor: Processor) -> Result<Value> {
-    let r = processor.list_peers().await?;
+    let r = processor
+        .list_peers()
+        .await?
+        .into_iter()
+        .map(|x| x.into())
+        .collect::<Vec<Peer>>();
     serde_json::to_value(&r).map_err(|_| Error::from(ServerError::JsonSerializeError))
 }
 

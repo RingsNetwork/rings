@@ -145,15 +145,14 @@ mod listener {
     use crate::types::message::MessageListener;
     use async_trait::async_trait;
     use std::sync::Arc;
-    use wasm_bindgen::UnwrapThrowExt;
     use wasm_bindgen_futures::spawn_local;
 
     #[async_trait(?Send)]
     impl MessageListener for MessageHandler {
         async fn listen(self: Arc<Self>) {
-            let mut handler = Some(Arc::clone(&self));
-            let mut func = move || {
-                let handler = Arc::clone(&handler.take().unwrap_throw());
+            let handler = Arc::clone(&self);
+            let func = move || {
+                let handler = Arc::clone(&handler);
                 spawn_local(Box::pin(async move {
                     handler.listen_once().await;
                 }));

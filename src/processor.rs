@@ -1,24 +1,26 @@
-use super::{request, response::TransportAndIce};
-use crate::error::{Error, Result};
-use jsonrpc_core::Metadata;
-use jsonrpc_core_client::RawClient;
-use rings_core::{
-    message::Encoded,
-    swarm::{Swarm, TransportManager},
-    transports::Transport,
-    types::ice_transport::{IceTransport, IceTrickleScheme},
+use crate::{
+    error::{Error, Result},
+    jsonrpc::{method, response::TransportAndIce},
+    jsonrpc_client::SimpleClient,
+    prelude::rings_core::{
+        message::Encoded,
+        prelude::{uuid, web3::types::Address, RTCSdpType},
+        swarm::{Swarm, TransportManager},
+        transports::Transport,
+        types::ice_transport::{IceTransport, IceTrickleScheme},
+    },
 };
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value as JsonValue};
+
+#[cfg(feature = "client")]
+use jsonrpc_core::Metadata;
 use std::{str::FromStr, sync::Arc};
-use web3::types::{Address, H160};
-use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 
 #[derive(Clone)]
 pub struct Processor {
     pub swarm: Arc<Swarm>,
 }
 
+#[cfg(feature = "client")]
 impl Metadata for Processor {}
 
 impl From<Arc<Swarm>> for Processor {
@@ -28,27 +30,25 @@ impl From<Arc<Swarm>> for Processor {
 }
 
 impl Processor {
-    pub async fn create_offer(&self) -> Result<TransportAndIce> {
+    pub async fn create_offer(&self) -> Result<(Arc<Transport>, Encoded)> {
         let transport = self
             .swarm
             .new_transport()
             .await
             .map_err(|_| Error::NewTransportError)?;
-        let id = transport.id;
         let transport_cloned = transport.clone();
         let task = async move {
             let hs_info = transport_cloned
                 .get_handshake_info(self.swarm.session(), RTCSdpType::Offer)
                 .await
-                .map_err(Error::CreateOffer)?
-                .to_string();
+                .map_err(Error::CreateOffer)?;
             self.swarm
                 .push_pending_transport(&transport_cloned)
                 .map_err(Error::PendingTransport)?;
             Ok(hs_info)
         };
         let hs_info = match task.await {
-            Ok(hs_info) => TransportAndIce::new(id.to_string().as_str(), hs_info.as_str()),
+            Ok(hs_info) => (transport, hs_info),
             Err(e) => {
                 transport.close().await.ok();
                 return Err(e);
@@ -57,7 +57,7 @@ impl Processor {
         Ok(hs_info)
     }
 
-    pub async fn connect_peer_via_http(&self, peer_url: &str) -> Result<String> {
+    pub async fn connect_peer_via_http(&self, peer_url: &str) -> Result<Arc<Transport>> {
         // request remote offer and sand answer to remote
         log::debug!("connect_peer_via_http: {}", peer_url);
         let transport = self
@@ -73,7 +73,7 @@ impl Processor {
                 .map_err(Error::CloseTransportError)?;
             return Err(e);
         }
-        Ok(transport.id.to_string())
+        Ok(transport)
     }
 
     async fn do_connect_peer_via_http(
@@ -81,9 +81,7 @@ impl Processor {
         transport: &Arc<Transport>,
         node_url: &str,
     ) -> Result<String> {
-        let client = new_client(node_url)
-            .await
-            .map_err(|e| Error::RemoteRpcError(e.to_string()))?;
+        let client = SimpleClient::new_with_url(node_url);
         let hs_info = transport
             .get_handshake_info(self.swarm.session(), RTCSdpType::Offer)
             .await
@@ -96,8 +94,8 @@ impl Processor {
         );
         let resp = client
             .call_method(
-                request::Method::ConnectPeerViaIce.as_str(),
-                jsonrpc_core::Params::Array(vec![json!(hs_info)]),
+                method::Method::ConnectPeerViaIce.as_str(),
+                jsonrpc_core::Params::Array(vec![serde_json::json!(hs_info)]),
             )
             .await
             .map_err(|e| Error::RemoteRpcError(e.to_string()))?;
@@ -115,17 +113,14 @@ impl Processor {
         Ok(addr.to_string())
     }
 
-    pub async fn connect_peer_via_ice(&self, ice_info: &str) -> Result<TransportAndIce> {
+    pub async fn connect_peer_via_ice(&self, ice_info: &str) -> Result<(Arc<Transport>, Encoded)> {
         log::debug!("connect peer via ice: {}", ice_info);
         let transport = self.swarm.new_transport().await.map_err(|e| {
             log::error!("new_transport failed: {}", e);
             Error::NewTransportError
         })?;
         match self.handshake(&transport, ice_info).await {
-            Ok(v) => Ok(TransportAndIce::new(
-                transport.id.to_string().as_str(),
-                v.as_str(),
-            )),
+            Ok(v) => Ok((transport, v)),
             Err(e) => {
                 transport
                     .close()
@@ -136,7 +131,7 @@ impl Processor {
         }
     }
 
-    async fn handshake(&self, transport: &Arc<Transport>, data: &str) -> Result<String> {
+    async fn handshake(&self, transport: &Arc<Transport>, data: &str) -> Result<Encoded> {
         // get offer from remote and send answer back
         let hs_info = Encoded::from_encoded_str(data);
         let addr = transport
@@ -153,9 +148,8 @@ impl Processor {
         let hs_info = transport
             .get_handshake_info(self.swarm.session(), RTCSdpType::Answer)
             .await
-            .map_err(Error::CreateAnswer)?
-            .to_string();
-        log::debug!("answer hs_info: {}", hs_info);
+            .map_err(Error::CreateAnswer)?;
+        log::debug!("answer hs_info: {:?}", hs_info);
         Ok(hs_info)
     }
 
@@ -206,13 +200,13 @@ impl Processor {
         Ok(())
     }
 
-    pub async fn list_pendings(&self) -> Result<Vec<String>> {
+    pub async fn list_pendings(&self) -> Result<Vec<Arc<Transport>>> {
         let pendings = self
             .swarm
             .pending_transports()
             .await
             .map_err(|_| Error::InternalError)?;
-        Ok(pendings.iter().map(|x| x.id.to_string()).collect())
+        Ok(pendings)
     }
 
     pub async fn close_pending_transport(&self, transport_id: &str) -> Result<()> {
@@ -236,55 +230,32 @@ impl Processor {
     }
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Clone)]
 pub struct Peer {
-    pub address: String,
-    pub transport_id: String,
+    pub address: Address,
+    pub transport: Arc<Transport>,
 }
 
-impl Peer {
-    pub fn to_json_vec(&self) -> Result<Vec<u8>> {
-        serde_json::to_vec(self).map_err(|_| Error::JsonSerializeError)
-    }
-
-    pub fn to_json_obj(&self) -> Result<JsonValue> {
-        serde_json::to_value(self).map_err(|_| Error::JsonSerializeError)
-    }
-
-    pub fn base64_encode(&self) -> Result<String> {
-        Ok(base64::encode(self.to_json_vec()?))
+impl From<(Address, Arc<Transport>)> for Peer {
+    fn from((address, transport): (Address, Arc<Transport>)) -> Self {
+        Self { address, transport }
     }
 }
 
-impl From<(H160, Arc<Transport>)> for Peer {
-    fn from((address, transport): (H160, Arc<Transport>)) -> Self {
+impl From<&(Address, Arc<Transport>)> for Peer {
+    fn from((address, transport): &(Address, Arc<Transport>)) -> Self {
         Self {
-            address: address.to_string(),
-            transport_id: transport.id.to_string(),
+            address: *address,
+            transport: transport.clone(),
         }
     }
-}
-
-impl From<&(H160, Arc<Transport>)> for Peer {
-    fn from((address, transport): &(H160, Arc<Transport>)) -> Self {
-        Self {
-            address: address.to_string(),
-            transport_id: transport.id.to_string(),
-        }
-    }
-}
-
-pub async fn new_client(url: &str) -> Result<RawClient> {
-    let c: RawClient = jsonrpc_core_client::transports::http::connect(url)
-        .await
-        .map_err(|e| Error::RemoteRpcError(e.to_string()))?;
-    Ok(c)
 }
 
 #[cfg(test)]
+#[cfg(feature = "client")]
 mod test {
     use super::*;
-    use rings_core::{ecc::SecretKey, session::SessionManager};
+    use crate::prelude::rings_core::{ecc::SecretKey, prelude::uuid, session::SessionManager};
 
     fn new_processor() -> Processor {
         let key = SecretKey::random();
@@ -311,7 +282,7 @@ mod test {
         let ti = processor.create_offer().await.unwrap();
         let pendings = processor.swarm.pending_transports().await.unwrap();
         assert_eq!(pendings.len(), 1);
-        assert_eq!(pendings.get(0).unwrap().id.to_string(), ti.transport_id);
+        assert_eq!(pendings.get(0).unwrap().id.to_string(), ti.0.id.to_string());
     }
 
     #[tokio::test]
@@ -323,9 +294,13 @@ mod test {
         assert_eq!(pendings.len(), 2);
         let pending_ids = processor.list_pendings().await.unwrap();
         assert_eq!(pendings.len(), pending_ids.len());
-        let ids = vec![ti0.transport_id, ti1.transport_id];
+        let ids = vec![ti0.0.id.to_string(), ti1.0.id.to_string()];
         for item in pending_ids {
-            assert!(ids.contains(&item), "id[{}] not in list", item);
+            assert!(
+                ids.contains(&item.id.to_string()),
+                "id[{}] not in list",
+                item.id
+            );
         }
     }
 
@@ -343,17 +318,17 @@ mod test {
         );
         let transport1 = processor
             .swarm
-            .find_pending_transport(uuid::Uuid::from_str(ti0.transport_id.as_str()).unwrap())
+            .find_pending_transport(uuid::Uuid::from_str(ti0.0.id.to_string().as_str()).unwrap())
             .unwrap();
         assert!(transport1.is_some(), "transport_1 should be Some()");
         let transport1 = transport1.unwrap();
         assert!(
             processor
-                .close_pending_transport(ti0.transport_id.as_str())
+                .close_pending_transport(ti0.0.id.to_string().as_str())
                 .await
                 .is_ok(),
             "close_pending_transport({}) should be ok",
-            ti0.transport_id
+            ti0.0.id
         );
         assert!(!transport1.is_connected().await, "transport1 should closed");
 
@@ -363,24 +338,24 @@ mod test {
         assert!(
             !pendings
                 .iter()
-                .any(|x| x.id.to_string() == ti0.transport_id),
+                .any(|x| x.id.to_string() == ti0.0.id.to_string()),
             "transport[{}] should not in pending_transports",
-            ti0.transport_id
+            ti0.0.id
         );
 
         let transport2 = processor
             .swarm
-            .find_pending_transport(uuid::Uuid::from_str(ti2.transport_id.as_str()).unwrap())
+            .find_pending_transport(uuid::Uuid::from_str(ti2.0.id.to_string().as_str()).unwrap())
             .unwrap();
         assert!(transport2.is_some(), "transport2 should be Some()");
         let transport2 = transport2.unwrap();
         assert!(
             processor
-                .close_pending_transport(ti2.transport_id.as_str())
+                .close_pending_transport(ti2.0.id.to_string().as_str())
                 .await
                 .is_ok(),
             "close_pending_transport({}) should be ok",
-            ti0.transport_id
+            ti0.0.id
         );
         assert!(!transport2.is_connected().await, "transport2 should closed");
 
@@ -390,9 +365,9 @@ mod test {
         assert!(
             !pendings
                 .iter()
-                .any(|x| x.id.to_string() == ti2.transport_id),
+                .any(|x| x.id.to_string() == ti2.0.id.to_string()),
             "transport[{}] should not in pending_transports",
-            ti0.transport_id
+            ti0.0.id
         );
     }
 }

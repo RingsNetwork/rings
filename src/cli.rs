@@ -1,12 +1,17 @@
-use crate::service::request::Method;
-use crate::service::response::{Peer, TransportAndIce};
+use crate::{
+    jsonrpc::{
+        method::Method,
+        response::{Peer, TransportAndIce},
+    },
+    jsonrpc_client::SimpleClient,
+};
 use jsonrpc_core::{Params, Value};
-use jsonrpc_core_client::RawClient;
+//use jsonrpc_core_client::RawClient;
 use serde_json::json;
 
 #[derive(Clone)]
 pub struct Client {
-    client: RawClient,
+    client: SimpleClient,
 }
 
 pub struct ClientOutput<T> {
@@ -17,9 +22,7 @@ type Output<T> = anyhow::Result<ClientOutput<T>>;
 
 impl Client {
     pub async fn new(endpoint_url: &str) -> anyhow::Result<Self> {
-        let client = jsonrpc_core_client::transports::http::connect(endpoint_url)
-            .await
-            .map_err(|e| anyhow::anyhow!("jsonrpc client error: {}.", e))?;
+        let client = SimpleClient::new_with_url(endpoint_url);
         Ok(Self { client })
     }
 

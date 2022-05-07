@@ -3,6 +3,7 @@ use rings_core::dht::Stabilization;
 use anyhow::{anyhow, Result};
 use tokio::time::Duration;
 
+#[allow(dead_code)]
 pub async fn run_stabilize(stabilization: Stabilization) {
     let mut result = Result::<()>::Ok(());
     let timeout_in_secs = stabilization.get_timeout();
