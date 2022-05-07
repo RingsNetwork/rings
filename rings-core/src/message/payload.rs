@@ -80,7 +80,6 @@ where
     pub fn map<F>(&self, s: &SessionManager, data: F) -> Result<MessageRelay<F>>
     where
         F: Serialize + DeserializeOwned,
-
     {
         MessageRelay::new(
             data,

@@ -1,12 +1,12 @@
 use crate::dht::{peer::VirtualPeer, Did};
-use crate::message::Encoded;
 use crate::err::Result;
-use crate::message::payload::MessageRelay;
 use crate::message::handlers::MessageHandler;
+use crate::message::payload::MessageRelay;
+use crate::message::Encoded;
 use async_trait::async_trait;
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
-use serde::de::DeserializeOwned;
 
 pub struct ActorContext<T> {
     pub relay: MessageRelay<T>,

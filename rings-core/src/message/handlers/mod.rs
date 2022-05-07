@@ -1,12 +1,12 @@
 use crate::dht::{Did, PeerRing};
 use crate::err::{Error, Result};
 use crate::message::payload::{MessageRelay, MessageRelayMethod};
+use crate::message::types::ActorContext;
 use crate::message::types::Message;
 use crate::message::types::MessageActor;
-use crate::message::types::ActorContext;
 use crate::swarm::Swarm;
-use async_trait::async_trait;
 use async_recursion::async_recursion;
+use async_trait::async_trait;
 use futures::lock::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -56,7 +56,7 @@ impl MessageHandler {
     ) -> Result<()> {
         let ctx = ActorContext {
             relay: relay.clone(),
-            prev: prev
+            prev: prev,
         };
         relay.data.handler(self, ctx).await
     }
@@ -97,8 +97,12 @@ impl MessageActor for Message {
                 Message::ConnectNodeReport(msg) => handler.connected_node(relay, prev, msg).await,
                 Message::AlreadyConnected(msg) => handler.already_connected(relay, prev, msg).await,
                 Message::FindSuccessorSend(msg) => handler.find_successor(relay, prev, msg).await,
-                Message::FindSuccessorReport(msg) => handler.found_successor(relay, prev, msg).await,
-                Message::NotifyPredecessorSend(msg) => handler.notify_predecessor(relay, prev, msg).await,
+                Message::FindSuccessorReport(msg) => {
+                    handler.found_successor(relay, prev, msg).await
+                }
+                Message::NotifyPredecessorSend(msg) => {
+                    handler.notify_predecessor(relay, prev, msg).await
+                }
                 Message::NotifyPredecessorReport(msg) => {
                     handler.notified_predecessor(relay, prev, msg).await
                 }
@@ -122,7 +126,6 @@ impl MessageActor for Message {
         let prev = ctx.prev;
         inner(&handler, relay, prev).await
     }
-
 }
 
 #[cfg(not(feature = "wasm"))]

@@ -1,4 +1,5 @@
 use crate::err::{Error, Result};
+use crate::message::MessageActor;
 use crate::message::{self, Message, MessageRelay, MessageRelayMethod};
 use crate::message::{Decoder, Encoder};
 use crate::session::SessionManager;
@@ -8,7 +9,6 @@ use crate::types::channel::Event;
 use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
-use crate::message::MessageActor;
 
 use async_stream::stream;
 use async_trait::async_trait;
