@@ -37,7 +37,7 @@ pub trait MessageSessionRelayProtocol {
     fn remove_from_path(&mut self) -> Option<Did>;
 }
 
-impl MessageSessionRelayProtocol for MessageRelay<Message> {
+impl<T> MessageSessionRelayProtocol for MessageRelay<T> {
     #[inline]
     fn find_prev(&self) -> Option<Did> {
         match self.method {
