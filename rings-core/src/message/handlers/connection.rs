@@ -69,9 +69,9 @@ use crate::message::types::{
     JoinDHT, Message, NotifyPredecessorReport, NotifyPredecessorSend,
 };
 use crate::message::MessageHandler;
+use crate::prelude::RTCSdpType;
 use crate::swarm::TransportManager;
 use crate::types::ice_transport::IceTrickleScheme;
-use crate::prelude::RTCSdpType;
 use async_trait::async_trait;
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
