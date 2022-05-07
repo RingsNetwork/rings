@@ -56,7 +56,7 @@ impl MessageHandler {
     ) -> Result<()> {
         let ctx = ActorContext {
             relay: relay.clone(),
-            prev: prev,
+            prev,
         };
         relay.data.handler(self, ctx).await
     }
@@ -124,7 +124,7 @@ impl MessageActor for Message {
         }
         let relay = ctx.relay;
         let prev = ctx.prev;
-        inner(&handler, relay, prev).await
+        inner(handler, relay, prev).await
     }
 }
 
