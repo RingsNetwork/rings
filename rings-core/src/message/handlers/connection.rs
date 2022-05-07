@@ -146,7 +146,7 @@ impl TChordConnection for MessageHandler {
         // finger table just have no other node(beside next), it will be a `create` op
         // otherwise, it will be a `send` op
         let mut dht = self.dht.lock().await;
-        let mut relay = relay.clone();
+        let relay = relay.clone();
         let join_op = dht.number_of_fingers() > 0;
         match dht.join(msg.id) {
             PeerRingAction::None => Ok(()),
