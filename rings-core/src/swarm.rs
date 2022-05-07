@@ -88,7 +88,8 @@ impl Swarm {
         transport.send_message(data.as_slice()).await
     }
 
-    fn load_message(&self, ev: Result<Option<Event>>) -> Result<Option<MessageRelay<Message>>> {
+    fn load_message(&self, ev: Result<Option<Event>>) -> Result<Option<MessageRelay<impl MessageActor>>>
+    {
         let ev = ev?;
 
         match ev {
@@ -117,7 +118,7 @@ impl Swarm {
 
     /// This method is required because web-sys components is not `Send`
     /// which means an async loop cannot running concurrency.
-    pub async fn poll_message(&self) -> Option<MessageRelay<Message>> {
+    pub async fn poll_message(&self) -> Option<MessageRelay<impl MessageActor>> {
         let receiver = &self.transport_event_channel.receiver();
         let ev = Channel::recv(receiver).await;
         match self.load_message(ev) {
@@ -127,7 +128,7 @@ impl Swarm {
         }
     }
 
-    pub fn iter_messages<'a, 'b>(&'a self) -> impl Stream<Item = MessageRelay<Message>> + 'b
+    pub fn iter_messages<'a, 'b>(&'a self) -> impl Stream<Item = MessageRelay<impl MessageActor>> + 'b
     where
         'a: 'b,
     {

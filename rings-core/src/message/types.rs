@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
+use std::fmt::Debug;
 
 pub struct ActorContext<T> {
     pub relay: MessageRelay<T>,
@@ -15,7 +16,7 @@ pub struct ActorContext<T> {
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-pub trait MessageActor: Sized + Clone + Serialize + DeserializeOwned {
+pub trait MessageActor: Sized + Clone + Serialize + DeserializeOwned + Debug {
     async fn handler(&self, handler: &MessageHandler, ctx: ActorContext<Self>) -> Result<()>;
 }
 
@@ -110,7 +111,6 @@ pub enum Message {
     FoundVNode(FoundVNode),
     StoreVNode(StoreVNode),
 }
-
 impl std::fmt::Display for Message {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{:?}", self)
