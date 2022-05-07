@@ -2,7 +2,6 @@ use crate::dht::Did;
 
 use super::payload::MessageRelay;
 use super::payload::MessageRelayMethod;
-use super::types::Message;
 
 // A -> B -> C
 // B handle_find_success relay with SEND contains
