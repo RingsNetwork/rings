@@ -1,7 +1,23 @@
 use crate::dht::{peer::VirtualPeer, Did};
 use crate::message::Encoded;
+use crate::err::Result;
+use crate::message::payload::MessageRelay;
+use crate::message::handlers::MessageHandler;
+use async_trait::async_trait;
 use serde::Deserialize;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
+
+pub struct ActorContext<T> {
+    pub relay: MessageRelay<T>,
+    pub prev: Did,
+}
+
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+pub trait MessageActor: Sized + Clone + Serialize + DeserializeOwned {
+    async fn handler(&self, handler: &MessageHandler, ctx: ActorContext<Self>) -> Result<()>;
+}
 
 #[derive(Debug, PartialEq, Deserialize, Serialize, Clone)]
 pub struct ConnectNodeSend {

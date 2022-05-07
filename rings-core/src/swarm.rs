@@ -8,6 +8,7 @@ use crate::types::channel::Event;
 use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
+use crate::message::MessageActor;
 
 use async_stream::stream;
 use async_trait::async_trait;
@@ -77,7 +78,7 @@ impl Swarm {
     pub async fn send_message(
         &self,
         address: &Address,
-        payload: MessageRelay<Message>,
+        payload: MessageRelay<impl MessageActor>,
     ) -> Result<()> {
         let transport = self
             .get_transport(address)

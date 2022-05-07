@@ -2,8 +2,10 @@ use crate::dht::{Did, PeerRing};
 use crate::err::{Error, Result};
 use crate::message::payload::{MessageRelay, MessageRelayMethod};
 use crate::message::types::Message;
+use crate::message::types::MessageActor;
+use crate::message::types::ActorContext;
 use crate::swarm::Swarm;
-
+use async_trait::async_trait;
 use async_recursion::async_recursion;
 use futures::lock::Mutex;
 use std::collections::VecDeque;
@@ -33,7 +35,7 @@ impl MessageHandler {
         to_path: Option<VecDeque<Did>>,
         from_path: Option<VecDeque<Did>>,
         method: MessageRelayMethod,
-        message: Message,
+        message: impl MessageActor,
     ) -> Result<()> {
         // TODO: diff ttl for each message?
         let payload = MessageRelay::new(
@@ -47,40 +49,16 @@ impl MessageHandler {
         self.swarm.send_message(address, payload).await
     }
 
-    #[cfg_attr(feature = "wasm", async_recursion(?Send))]
-    #[cfg_attr(not(feature = "wasm"), async_recursion)]
     pub async fn handle_message_relay(
         &self,
-        relay: MessageRelay<Message>,
+        relay: MessageRelay<impl MessageActor>,
         prev: Did,
     ) -> Result<()> {
-        let data = relay.data.clone();
-        match data {
-            Message::JoinDHT(msg) => self.join_chord(relay, prev, msg).await,
-            Message::ConnectNodeSend(msg) => self.connect_node(relay, prev, msg).await,
-            Message::ConnectNodeReport(msg) => self.connected_node(relay, prev, msg).await,
-            Message::AlreadyConnected(msg) => self.already_connected(relay, prev, msg).await,
-            Message::FindSuccessorSend(msg) => self.find_successor(relay, prev, msg).await,
-            Message::FindSuccessorReport(msg) => self.found_successor(relay, prev, msg).await,
-            Message::NotifyPredecessorSend(msg) => self.notify_predecessor(relay, prev, msg).await,
-            Message::NotifyPredecessorReport(msg) => {
-                self.notified_predecessor(relay, prev, msg).await
-            }
-            Message::SearchVNode(msg) => self.search_vnode(relay, prev, msg).await,
-            Message::FoundVNode(msg) => self.found_vnode(relay, prev, msg).await,
-            Message::StoreVNode(msg) => self.store_vnode(relay, prev, msg).await,
-            Message::MultiCall(msg) => {
-                for message in msg.messages {
-                    let payload = relay.map(&self.swarm.session(), message.clone())?;
-                    self.handle_message_relay(payload, prev).await.unwrap_or(());
-                }
-                Ok(())
-            }
-            x => Err(Error::MessageHandlerUnsupportMessageType(format!(
-                "{:?}",
-                x
-            ))),
-        }
+        let ctx = ActorContext {
+            relay: relay.clone(),
+            prev: prev
+        };
+        relay.data.handler(self, ctx).await
     }
 
     /// This method is required because web-sys components is not `Send`
@@ -99,6 +77,52 @@ impl MessageHandler {
             None
         }
     }
+}
+
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl MessageActor for Message {
+    async fn handler(&self, handler: &MessageHandler, ctx: ActorContext<Self>) -> Result<()> {
+        #[cfg_attr(feature = "wasm", async_recursion(?Send))]
+        #[cfg_attr(not(feature = "wasm"), async_recursion)]
+        pub async fn inner(
+            handler: &MessageHandler,
+            relay: MessageRelay<Message>,
+            prev: Did,
+        ) -> Result<()> {
+            let data = relay.data.clone();
+            match data {
+                Message::JoinDHT(msg) => handler.join_chord(relay, prev, msg).await,
+                Message::ConnectNodeSend(msg) => handler.connect_node(relay, prev, msg).await,
+                Message::ConnectNodeReport(msg) => handler.connected_node(relay, prev, msg).await,
+                Message::AlreadyConnected(msg) => handler.already_connected(relay, prev, msg).await,
+                Message::FindSuccessorSend(msg) => handler.find_successor(relay, prev, msg).await,
+                Message::FindSuccessorReport(msg) => handler.found_successor(relay, prev, msg).await,
+                Message::NotifyPredecessorSend(msg) => handler.notify_predecessor(relay, prev, msg).await,
+                Message::NotifyPredecessorReport(msg) => {
+                    handler.notified_predecessor(relay, prev, msg).await
+                }
+                Message::SearchVNode(msg) => handler.search_vnode(relay, prev, msg).await,
+                Message::FoundVNode(msg) => handler.found_vnode(relay, prev, msg).await,
+                Message::StoreVNode(msg) => handler.store_vnode(relay, prev, msg).await,
+                Message::MultiCall(msg) => {
+                    for message in msg.messages {
+                        let payload = relay.map(&handler.swarm.session(), message.clone())?;
+                        inner(handler, payload, prev).await.unwrap_or(());
+                    }
+                    Ok(())
+                }
+                x => Err(Error::MessageHandlerUnsupportMessageType(format!(
+                    "{:?}",
+                    x
+                ))),
+            }
+        }
+        let relay = ctx.relay;
+        let prev = ctx.prev;
+        inner(&handler, relay, prev).await
+    }
+
 }
 
 #[cfg(not(feature = "wasm"))]
