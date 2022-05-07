@@ -146,7 +146,7 @@ impl TChordConnection for MessageHandler {
         // finger table just have no other node(beside next), it will be a `create` op
         // otherwise, it will be a `send` op
         let mut dht = self.dht.lock().await;
-        let relay = relay.clone();
+        let mut relay = relay.clone();
         let join_op = dht.number_of_fingers() > 0;
         match dht.join(msg.id) {
             PeerRingAction::None => Ok(()),
@@ -443,7 +443,7 @@ impl TChordConnection for MessageHandler {
             Some(relay.from_path),
             Some(relay.to_path),
             MessageRelayMethod::REPORT,
-            NotifyPredecessorReport { id: dht.id },
+            Message::NotifyPredecessorReport(NotifyPredecessorReport { id: dht.id }),
         )
         .await
     }
@@ -464,6 +464,41 @@ impl TChordConnection for MessageHandler {
         Ok(())
     }
 }
+
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl MessageActor for JoinDHT {
+    async fn handler(&self, handler: &MessageHandler, ctx: ActorContext<Self>) -> Result<()> {
+        // here is two situation.
+        // finger table just have no other node(beside next), it will be a `create` op
+        // otherwise, it will be a `send` op
+        let mut dht = handler.dht.lock().await;
+        let msg = ctx.relay.data.clone();
+        let relay = ctx.relay.clone();
+        let prev = ctx.prev;
+        let join_op = dht.number_of_fingers() > 0;
+        match dht.join(msg.id) {
+            PeerRingAction::None => Ok(()),
+            PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessor(id)) => {
+                if next != prev && join_op {
+                    handler.send_message(
+                        &next.into(),
+                        Some(relay.to_path),
+                        Some(relay.from_path),
+                        MessageRelayMethod::SEND,
+                        FindSuccessorSend { id, for_fix: false },
+                    )
+                    .await
+                } else {
+                    Ok(())
+                }
+            }
+            _ => unreachable!(),
+        }
+
+    }
+}
+
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
