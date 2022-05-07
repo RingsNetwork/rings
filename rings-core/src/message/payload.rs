@@ -76,6 +76,22 @@ where
         })
     }
 
+    /// map MessageRelay<T> to MessageRelay<F>
+    pub fn map<F>(&self, s: &SessionManager, data: F) -> Result<MessageRelay<F>>
+    where
+        F: Serialize + DeserializeOwned,
+
+    {
+        MessageRelay::new(
+            data,
+            s,
+            None,
+            Some(self.to_path.clone()),
+            Some(self.from_path.clone()),
+            self.method.clone(),
+        )
+    }
+
     pub fn is_expired(&self) -> bool {
         let now = utils::get_epoch_ms();
         now > self.ts_ms + self.ttl_ms as u128

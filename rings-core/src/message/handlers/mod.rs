@@ -71,14 +71,7 @@ impl MessageHandler {
             Message::StoreVNode(msg) => self.store_vnode(relay, prev, msg).await,
             Message::MultiCall(msg) => {
                 for message in msg.messages {
-                    let payload = MessageRelay::new(
-                        message.clone(),
-                        &self.swarm.session(),
-                        None,
-                        Some(relay.to_path.clone()),
-                        Some(relay.from_path.clone()),
-                        relay.method.clone(),
-                    )?;
+                    let payload = relay.map(&self.swarm.session(), message.clone())?;
                     self.handle_message_relay(payload, prev).await.unwrap_or(());
                 }
                 Ok(())
