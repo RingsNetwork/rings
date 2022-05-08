@@ -16,7 +16,7 @@ use std::sync::Arc;
 #[derive(Parser, Debug)]
 #[clap(about, version, author)]
 struct Cli {
-    #[clap(long, short = 'v', default_value_t = LogLevel::Info, arg_enum)]
+    #[clap(long, short = 'v', default_value_t = LogLevel::Info, arg_enum, env)]
     log_level: LogLevel,
 
     #[clap(subcommand)]
@@ -261,7 +261,12 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Command::Peer(PeerCommand::List(args)) => {
-            args.client_args.new_client().await?.list_peers().await?;
+            args.client_args
+                .new_client()
+                .await?
+                .list_peers()
+                .await?
+                .display();
             Ok(())
         }
         Command::Peer(PeerCommand::Disconnect(args)) => {
