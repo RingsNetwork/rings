@@ -79,6 +79,9 @@ pub struct SyncVNodeWithSuccessor {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct CustomMessage(String);
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub enum Message {
     None,
     MultiCall(MultiCall),
@@ -93,6 +96,7 @@ pub enum Message {
     SearchVNode(SearchVNode),
     FoundVNode(FoundVNode),
     StoreVNode(StoreVNode),
+    CustomMessage(CustomMessage),
 }
 
 impl std::fmt::Display for Message {

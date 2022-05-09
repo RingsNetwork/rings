@@ -16,15 +16,38 @@ pub mod storage;
 use connection::TChordConnection;
 use storage::TChordStorage;
 
+#[cfg(not(feature = "wasm"))]
+type CallbackFn = Arc<Box<dyn Fn(&MessageRelay<Message>, Did) -> Result<()> + Send + Sync>>;
+
+#[cfg(feature = "wasm")]
+type CallbackFn = Arc<Box<dyn Fn(&MessageRelay<Message>, Did) -> Result<()>>>;
+
 #[derive(Clone)]
 pub struct MessageHandler {
     dht: Arc<Mutex<PeerRing>>,
     swarm: Arc<Swarm>,
+    callback: Option<CallbackFn>,
 }
 
 impl MessageHandler {
+    pub fn new_with_callback(
+        dht: Arc<Mutex<PeerRing>>,
+        swarm: Arc<Swarm>,
+        callback: CallbackFn,
+    ) -> Self {
+        Self {
+            dht,
+            swarm,
+            callback: Some(callback),
+        }
+    }
+
     pub fn new(dht: Arc<Mutex<PeerRing>>, swarm: Arc<Swarm>) -> Self {
-        Self { dht, swarm }
+        Self {
+            dht,
+            swarm,
+            callback: None,
+        }
     }
 
     pub async fn send_message(
@@ -56,19 +79,25 @@ impl MessageHandler {
     ) -> Result<()> {
         let data = relay.data.clone();
         match data {
-            Message::JoinDHT(msg) => self.join_chord(relay, prev, msg).await,
-            Message::ConnectNodeSend(msg) => self.connect_node(relay, prev, msg).await,
-            Message::ConnectNodeReport(msg) => self.connected_node(relay, prev, msg).await,
-            Message::AlreadyConnected(msg) => self.already_connected(relay, prev, msg).await,
-            Message::FindSuccessorSend(msg) => self.find_successor(relay, prev, msg).await,
-            Message::FindSuccessorReport(msg) => self.found_successor(relay, prev, msg).await,
-            Message::NotifyPredecessorSend(msg) => self.notify_predecessor(relay, prev, msg).await,
-            Message::NotifyPredecessorReport(msg) => {
-                self.notified_predecessor(relay, prev, msg).await
+            Message::JoinDHT(msg) => self.join_chord(relay.clone(), prev, msg).await,
+            Message::ConnectNodeSend(msg) => self.connect_node(relay.clone(), prev, msg).await,
+            Message::ConnectNodeReport(msg) => self.connected_node(relay.clone(), prev, msg).await,
+            Message::AlreadyConnected(msg) => {
+                self.already_connected(relay.clone(), prev, msg).await
             }
-            Message::SearchVNode(msg) => self.search_vnode(relay, prev, msg).await,
-            Message::FoundVNode(msg) => self.found_vnode(relay, prev, msg).await,
-            Message::StoreVNode(msg) => self.store_vnode(relay, prev, msg).await,
+            Message::FindSuccessorSend(msg) => self.find_successor(relay.clone(), prev, msg).await,
+            Message::FindSuccessorReport(msg) => {
+                self.found_successor(relay.clone(), prev, msg).await
+            }
+            Message::NotifyPredecessorSend(msg) => {
+                self.notify_predecessor(relay.clone(), prev, msg).await
+            }
+            Message::NotifyPredecessorReport(msg) => {
+                self.notified_predecessor(relay.clone(), prev, msg).await
+            }
+            Message::SearchVNode(msg) => self.search_vnode(relay.clone(), prev, msg).await,
+            Message::FoundVNode(msg) => self.found_vnode(relay.clone(), prev, msg).await,
+            Message::StoreVNode(msg) => self.store_vnode(relay.clone(), prev, msg).await,
             Message::MultiCall(msg) => {
                 for message in msg.messages {
                     let payload = MessageRelay::new(
@@ -83,11 +112,16 @@ impl MessageHandler {
                 }
                 Ok(())
             }
+            Message::CustomMessage(_) => Ok(()),
             x => Err(Error::MessageHandlerUnsupportMessageType(format!(
                 "{:?}",
                 x
             ))),
+        }?;
+        if let Some(cb) = &self.callback {
+            cb(&relay, prev)?;
         }
+        Ok(())
     }
 
     /// This method is required because web-sys components is not `Send`
