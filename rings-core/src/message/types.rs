@@ -79,7 +79,7 @@ pub struct SyncVNodeWithSuccessor {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-pub struct CustomMessage(String);
+pub struct CustomMessage(pub String);
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub enum Message {
@@ -102,5 +102,11 @@ pub enum Message {
 impl std::fmt::Display for Message {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{:?}", self)
+    }
+}
+
+impl Message {
+    pub fn custom(msg: &str) -> Message {
+        Message::CustomMessage(CustomMessage(msg.to_string()))
     }
 }
