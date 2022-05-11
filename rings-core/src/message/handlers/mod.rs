@@ -17,16 +17,16 @@ use connection::TChordConnection;
 use storage::TChordStorage;
 
 #[cfg(not(feature = "wasm"))]
-type CallbackFn = Arc<Box<dyn Fn(&MessageRelay<Message>, Did) -> Result<()> + Send + Sync>>;
+type CallbackFn = Box<dyn FnMut(&MessageRelay<Message>, Did) -> Result<()> + Send + Sync>;
 
 #[cfg(feature = "wasm")]
-type CallbackFn = Arc<Box<dyn Fn(&MessageRelay<Message>, Did) -> Result<()>>>;
+type CallbackFn = Box<dyn FnMut(&MessageRelay<Message>, Did) -> Result<()>>;
 
 #[derive(Clone)]
 pub struct MessageHandler {
     dht: Arc<Mutex<PeerRing>>,
     swarm: Arc<Swarm>,
-    callback: Option<CallbackFn>,
+    callback: Option<Arc<Mutex<CallbackFn>>>,
 }
 
 impl MessageHandler {
@@ -38,7 +38,7 @@ impl MessageHandler {
         Self {
             dht,
             swarm,
-            callback: Some(callback),
+            callback: Some(Arc::new(Mutex::new(callback))),
         }
     }
 
@@ -48,6 +48,19 @@ impl MessageHandler {
             swarm,
             callback: None,
         }
+    }
+
+    pub async fn send_relay_message(
+        &self,
+        address: &Address,
+        msg: MessageRelay<Message>,
+    ) -> Result<()> {
+        self.swarm.send_message(address, msg).await
+    }
+
+    pub async fn send_message_default(&self, address: &Address, message: Message) -> Result<()> {
+        self.send_message(address, None, None, MessageRelayMethod::SEND, message)
+            .await
     }
 
     pub async fn send_message(
@@ -67,7 +80,7 @@ impl MessageHandler {
             from_path,
             method,
         )?;
-        self.swarm.send_message(address, payload).await
+        self.send_relay_message(address, payload).await
     }
 
     #[cfg_attr(feature = "wasm", async_recursion(?Send))]
@@ -119,7 +132,8 @@ impl MessageHandler {
             ))),
         }?;
         if let Some(cb) = &self.callback {
-            cb(&relay, prev)?;
+            let mut callback = cb.lock().await;
+            callback(&relay, prev)?;
         }
         Ok(())
     }
@@ -193,5 +207,120 @@ mod listener {
             };
             poll!(func, 200);
         }
+    }
+}
+
+#[cfg(not(feature = "wasm"))]
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::dht::PeerRing;
+    use crate::ecc::SecretKey;
+    use crate::message::MessageHandler;
+    use crate::session::SessionManager;
+    use crate::swarm::Swarm;
+    use crate::swarm::TransportManager;
+    use crate::types::ice_transport::IceTrickleScheme;
+    use std::sync;
+    use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
+
+    use futures::lock::Mutex;
+    use std::sync::Arc;
+    use tokio::time::{sleep, Duration};
+
+    #[tokio::test]
+    async fn test_custom_handler() -> Result<()> {
+        let stun = "stun://stun.l.google.com:19302";
+
+        let key1 = SecretKey::random();
+        let key2 = SecretKey::random();
+
+        println!(
+            "test with key1:{:?}, key2:{:?}",
+            key1.address(),
+            key2.address()
+        );
+
+        let dht1 = PeerRing::new(key1.address().into());
+        let dht2 = PeerRing::new(key2.address().into());
+
+        let session1 = SessionManager::new_with_seckey(&key1).unwrap();
+        let session2 = SessionManager::new_with_seckey(&key2).unwrap();
+
+        let swarm1 = Arc::new(Swarm::new(stun, key1.address(), session1.clone()));
+        let swarm2 = Arc::new(Swarm::new(stun, key2.address(), session2.clone()));
+
+        let transport1 = swarm1.new_transport().await.unwrap();
+        let transport2 = swarm2.new_transport().await.unwrap();
+
+        fn custom_handler(relay: &MessageRelay<Message>, id: Did) -> Result<()> {
+            println!("{:?}, {:?}", relay, id);
+            Ok(())
+        }
+
+        let scop_var: Arc<sync::Mutex<Vec<Did>>> = Arc::new(sync::Mutex::new(vec![]));
+
+        let closure_handler = move |relay: &MessageRelay<Message>, id: Did| {
+            let mut v = scop_var.lock().unwrap();
+            v.push(id);
+            println!("{:?}, {:?}", relay, id);
+            Ok(())
+        };
+
+        let cb: CallbackFn = box custom_handler;
+        let cb2: CallbackFn = box closure_handler;
+
+        let handler1 =
+            MessageHandler::new_with_callback(Arc::new(Mutex::new(dht1)), Arc::clone(&swarm1), cb);
+        let handler2 =
+            MessageHandler::new_with_callback(Arc::new(Mutex::new(dht2)), Arc::clone(&swarm2), cb2);
+
+        let handshake_info1 = transport1
+            .get_handshake_info(session1, RTCSdpType::Offer)
+            .await?;
+
+        let addr1 = transport2.register_remote_info(handshake_info1).await?;
+
+        let handshake_info2 = transport2
+            .get_handshake_info(session2, RTCSdpType::Answer)
+            .await?;
+
+        let addr2 = transport1.register_remote_info(handshake_info2).await?;
+
+        assert_eq!(addr1, key1.address());
+        assert_eq!(addr2, key2.address());
+        let promise_1 = transport1.connect_success_promise().await?;
+        let promise_2 = transport2.connect_success_promise().await?;
+        promise_1.await?;
+        promise_2.await?;
+
+        swarm1
+            .register(&swarm2.address(), transport1.clone())
+            .await
+            .unwrap();
+        swarm2
+            .register(&swarm1.address(), transport2.clone())
+            .await
+            .unwrap();
+
+        sleep(Duration::from_millis(1000)).await;
+
+        assert!(handler1.listen_once().await.is_some());
+        assert!(handler2.listen_once().await.is_some());
+
+        handler1
+            .send_message_default(&addr2, Message::custom("Hello world"))
+            .await
+            .unwrap();
+
+        assert!(handler2.listen_once().await.is_some());
+
+        handler2
+            .send_message_default(&addr1, Message::custom("Hello world"))
+            .await
+            .unwrap();
+
+        assert!(handler1.listen_once().await.is_some());
+        Ok(())
     }
 }
