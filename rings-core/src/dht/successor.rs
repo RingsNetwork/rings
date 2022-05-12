@@ -1,10 +1,14 @@
+//! Successor for Chord
 use crate::dht::did::SortRing;
 use crate::dht::Did;
+
+/// We can increase MAX_SUCCESSOR for more replication
+const MAX_SUCCESSOR: u8 = 3;
 
 #[derive(Debug, Clone)]
 pub struct Successor {
     id: Did,
-    max: usize,
+    max: u8,
     successors: Vec<Did>,
 }
 
@@ -12,7 +16,7 @@ impl Successor {
     pub fn new(id: &Did) -> Self {
         Self {
             id: *id,
-            max: 3,
+            max: MAX_SUCCESSOR,
             successors: vec![],
         }
     }
@@ -43,7 +47,7 @@ impl Successor {
         }
         self.successors.push(successor);
         self.successors.sort(self.id);
-        self.successors.truncate(self.max);
+        self.successors.truncate(self.max.into());
     }
 
     pub fn list(&self) -> Vec<Did> {

@@ -1,5 +1,4 @@
 use crate::dht::{peer::VirtualPeer, Did};
-use crate::message::Encoded;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -57,13 +56,13 @@ pub struct SearchVNode {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct FoundVNode {
     pub target_id: Did,
-    pub data: Vec<Encoded>,
+    pub data: Vec<VirtualPeer>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct StoreVNode {
     pub sender_id: Did,
-    pub data: Vec<Encoded>,
+    pub data: Vec<VirtualPeer>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
