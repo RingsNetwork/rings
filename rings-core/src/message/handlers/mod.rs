@@ -279,34 +279,25 @@ pub mod test {
             .register(&swarm1.address(), transport2.clone())
             .await
             .unwrap();
+        assert!(handler1.listen_once().await.is_some());
+        assert!(handler2.listen_once().await.is_some());
         Ok((handler1, handler2))
     }
 
     #[tokio::test]
     async fn test_custom_handler() -> Result<()> {
-        let stun = "stun://stun.l.google.com:19302";
-
         let key1 = SecretKey::random();
         let key2 = SecretKey::random();
+        let addr1 = key1.address();
+        let addr2 = key2.address();
+
+        let (handler1, handler2) = create_connected_pair(key1, key2).await.unwrap();
 
         println!(
             "test with key1:{:?}, key2:{:?}",
             key1.address(),
             key2.address()
         );
-
-        let dht1 = PeerRing::new(key1.address().into());
-        let dht2 = PeerRing::new(key2.address().into());
-
-        let session1 = SessionManager::new_with_seckey(&key1).unwrap();
-        let session2 = SessionManager::new_with_seckey(&key2).unwrap();
-
-        let swarm1 = Arc::new(Swarm::new(stun, key1.address(), session1.clone()));
-        let swarm2 = Arc::new(Swarm::new(stun, key2.address(), session2.clone()));
-
-        let transport1 = swarm1.new_transport().await.unwrap();
-        let transport2 = swarm2.new_transport().await.unwrap();
-
         fn custom_handler(relay: &MessageRelay<Message>, id: Did) -> Result<()> {
             println!("{:?}, {:?}", relay, id);
             Ok(())
@@ -324,43 +315,8 @@ pub mod test {
         let cb: CallbackFn = box custom_handler;
         let cb2: CallbackFn = box closure_handler;
 
-        let handler1 =
-            MessageHandler::new_with_callback(Arc::new(Mutex::new(dht1)), Arc::clone(&swarm1), cb);
-        let handler2 =
-            MessageHandler::new_with_callback(Arc::new(Mutex::new(dht2)), Arc::clone(&swarm2), cb2);
-
-        let handshake_info1 = transport1
-            .get_handshake_info(session1, RTCSdpType::Offer)
-            .await?;
-
-        let addr1 = transport2.register_remote_info(handshake_info1).await?;
-
-        let handshake_info2 = transport2
-            .get_handshake_info(session2, RTCSdpType::Answer)
-            .await?;
-
-        let addr2 = transport1.register_remote_info(handshake_info2).await?;
-
-        assert_eq!(addr1, key1.address());
-        assert_eq!(addr2, key2.address());
-        let promise_1 = transport1.connect_success_promise().await?;
-        let promise_2 = transport2.connect_success_promise().await?;
-        promise_1.await?;
-        promise_2.await?;
-
-        swarm1
-            .register(&swarm2.address(), transport1.clone())
-            .await
-            .unwrap();
-        swarm2
-            .register(&swarm1.address(), transport2.clone())
-            .await
-            .unwrap();
-
-        sleep(Duration::from_millis(1000)).await;
-
-        assert!(handler1.listen_once().await.is_some());
-        assert!(handler2.listen_once().await.is_some());
+        handler1.set_callback(cb).await;
+        handler2.set_callback(cb2).await;
 
         handler1
             .send_message_default(&addr2, Message::custom("Hello world"))
