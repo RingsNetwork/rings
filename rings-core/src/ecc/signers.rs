@@ -1,3 +1,4 @@
+//! Signer for default ECDSA and EIP712
 use crate::ecc::Address;
 use crate::ecc::PublicKey;
 use crate::ecc::SecretKey;

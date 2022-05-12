@@ -1,28 +1,28 @@
-/// Elgamal Crypto Implentation
-/// ----------------
-/// Algorithm Description
-/// # Encrypt
-/// A second party, Bob, encrypts a message 𝑀 to Alice under her public key (𝐺,𝑞,𝑔,ℎ)
-/// as follows:
-///    Map the message 𝑀 to an element 𝑚 of 𝐺 using a reversible mapping function.
-/// Choose an integer 𝑦
-/// randomly from {1,…,𝑞−1}
-/// 1. Compute 𝑠:=ℎ𝑦 This is called the shared secret.
-/// 2. Compute 𝑐1:=𝑔𝑦
-/// 3. Compute 𝑐2:=𝑚⋅𝑠
-/// 4. Bob sends the ciphertext (𝑐1,𝑐2)
-/// to Alice.
-///
-/// # Decrypt
-/// Alice decrypts a ciphertext 𝑐1,𝑐2 with her private key 𝑠𝑘 as follows:
-/// 1. Compute 𝑠:=𝑐𝑥1
-/// 2. Compute 𝑠−1, the inverse of 𝑠 in the group 𝐺
-/// 3. Compute 𝑚:=𝑐2⋅𝑠−1
-///
-/// ref:
-///    T. ElGamal. A Public Key Cryptosystem and a Signature Scheme Based on Discrete Logarithms. IEEE Trans. Info. Theory, IT 31:469–472, 1985.
-///    ElGamal encryption https://en.wikipedia.org/wiki/ElGamal_encryption
-///    http://www.docsdrive.com/pdfs/ansinet/itj/2005/299-306.pdf
+//! Elgamal Crypto Implentation
+//! ----------------
+//! Algorithm Description
+//! # Encrypt
+//! A second party, Bob, encrypts a message 𝑀 to Alice under her public key (𝐺,𝑞,𝑔,ℎ)
+//! as follows:
+//!    Map the message 𝑀 to an element 𝑚 of 𝐺 using a reversible mapping function.
+//! Choose an integer 𝑦
+//! randomly from {1,…,𝑞−1}
+//! 1. Compute 𝑠:=ℎ𝑦 This is called the shared secret.
+//! 2. Compute 𝑐1:=𝑔𝑦
+//! 3. Compute 𝑐2:=𝑚⋅𝑠
+//! 4. Bob sends the ciphertext (𝑐1,𝑐2)
+//! to Alice.
+//!
+//! # Decrypt
+//! Alice decrypts a ciphertext 𝑐1,𝑐2 with her private key 𝑠𝑘 as follows:
+//! 1. Compute 𝑠:=𝑐𝑥1
+//! 2. Compute 𝑠−1, the inverse of 𝑠 in the group 𝐺
+//! 3. Compute 𝑚:=𝑐2⋅𝑠−1
+//!
+//! ref:
+//!    T. ElGamal. A Public Key Cryptosystem and a Signature Scheme Based on Discrete Logarithms. IEEE Trans. Info. Theory, IT 31:469–472, 1985.
+//!    ElGamal encryption <https://en.wikipedia.org/wiki/ElGamal_encryption>
+//!    <http://www.docsdrive.com/pdfs/ansinet/itj/2005/299-306.pdf>
 use crate::ecc::{CurveEle, PublicKey, SecretKey};
 use crate::err::Error;
 use crate::err::Result;

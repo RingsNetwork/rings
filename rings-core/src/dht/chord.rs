@@ -1,6 +1,3 @@
-/// implementation of CHORD DHT
-/// ref: https://pdos.csail.mit.edu/papers/ton:chord/paper-ton.pdf
-/// With high probability, the number of nodes that must be contacted to find a successor in an N-node network is O(log N).
 use super::did::BiasId;
 use super::peer::VirtualPeer;
 use super::successor::Successor;
@@ -228,8 +225,8 @@ impl ChordStablize<PeerRingAction> for PeerRing {
 
     /// Fig.5. n.cloest_preceding_node(id)
     /// for i = m downto1
-    ///    if (finger[i] <- (n, id))
-    ///        return finger[i]
+    ///    if (finger\[i\] <- (n, id))
+    ///        return finger\[i\]
     /// return n
     fn closest_preceding_node(&self, id: Did) -> Result<Did> {
         for i in (0..159).rev() {
