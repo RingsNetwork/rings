@@ -7,7 +7,7 @@ description = "Chord DHT implementation with ICE"
 repository = "https://github.com/RingsNetwork/rings-node"
 license = "GPL-3.0"
 readme = "README.md"
-keywords = ["Chord", "DHT", "Web3", "P2P", "ICE", "WebRTC"]
+keywords = ["Chord", "DHT", "Web3", "P2P", "WASM"]
 categories = ["network-programming", "cryptography", "wasm"]
 [features]
 default = ["webrtc", "bytes", "async-channel"]
