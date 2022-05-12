@@ -545,9 +545,11 @@ pub mod test {
         // random key may faile here, because if key1 is more close to virtual_peer
         // key2 will try send msg back to key1
         let key1 =
-            SecretKey::from_str("ff3e0ea83de6909db79f3452764a24efb25c86c1e85c7c453d903c0cf462df07").unwrap();
+            SecretKey::from_str("ff3e0ea83de6909db79f3452764a24efb25c86c1e85c7c453d903c0cf462df07")
+                .unwrap();
         let key2 =
-            SecretKey::from_str("f782f6b07ae0151b5f83ff49f46087a7a45eb5c97d210c907a2b52ffece4be69").unwrap();
+            SecretKey::from_str("f782f6b07ae0151b5f83ff49f46087a7a45eb5c97d210c907a2b52ffece4be69")
+                .unwrap();
         let dht1 = Arc::new(Mutex::new(new_chord(key1.address().into())));
         let dht2 = Arc::new(Mutex::new(new_chord(key2.address().into())));
         let swarm1 = Arc::new(new_swarm(&key1));
