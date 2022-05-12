@@ -231,7 +231,6 @@ pub mod test {
 
     use futures::lock::Mutex;
     use std::sync::Arc;
-    
 
     pub async fn create_connected_pair(
         key1: SecretKey,
