@@ -5,7 +5,8 @@ target/
 # Local environment configuration
 .envrc
 .env
-
+debug
+docs
 # project
 .vscode/
 

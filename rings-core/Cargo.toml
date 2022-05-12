@@ -2,7 +2,13 @@
 name = "rings-core"
 version = "0.1.0"
 edition = "2021"
-
+authors = ["RND <dev@ringsnetwork.io>"]
+description = "Chord DHT implementation with ICE"
+repository = "https://github.com/RingsNetwork/rings-node"
+license = "GPL-3.0"
+readme = "README.md"
+keywords = ["Chord", "DHT", "Web3", "P2P", "WASM"]
+categories = ["network-programming", "cryptography", "wasm"]
 [features]
 default = ["webrtc", "bytes", "async-channel"]
 wasm = ["web-sys", "wasm-bindgen", "js-sys", "wasm-bindgen-futures"]
