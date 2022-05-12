@@ -123,8 +123,6 @@ struct SdpOffer {
 struct SdpAnswer {
     #[clap(flatten)]
     client_args: ClientArgs,
-
-    #[clap(about)]
     ice: String,
 }
 
@@ -157,8 +155,6 @@ struct PeerListArgs {
 struct PeerDisconnect {
     #[clap(flatten)]
     client_args: ClientArgs,
-
-    #[clap(about)]
     address: String,
 }
 #[derive(Subcommand, Debug)]
