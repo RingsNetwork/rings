@@ -1,6 +1,7 @@
 #[cfg(test)]
 pub mod test {
     use futures::lock::Mutex;
+    use rings_core::dht::peer::VirtualPeer;
     use rings_core::dht::{Did, PeerRing};
     use rings_core::ecc::SecretKey;
     use rings_core::err::Result;
@@ -538,84 +539,85 @@ pub mod test {
         Ok(())
     }
 
-    // #[tokio::test]
-    // async fn test_handle_storage() -> Result<()> {
-    //     let mut key1 = SecretKey::random();
-    //     let mut key2 = SecretKey::random();
-    //     if key1.address() > key2.address() {
-    //         (key1, key2) = (key2, key1)
-    //     }
-    //     let dht1 = Arc::new(Mutex::new(new_chord(key1.address().into())));
-    //     let dht2 = Arc::new(Mutex::new(new_chord(key2.address().into())));
-    //     let swarm1 = Arc::new(new_swarm(&key1));
-    //     let swarm2 = Arc::new(new_swarm(&key2));
-    //     let (_, _) = establish_connection(Arc::clone(&swarm1), Arc::clone(&swarm2)).await?;
+    #[tokio::test]
+    async fn test_handle_storage() -> Result<()> {
+        let mut key1 = SecretKey::random();
+        let mut key2 = SecretKey::random();
+        if key1.address() > key2.address() {
+            (key1, key2) = (key2, key1)
+        }
+        let dht1 = Arc::new(Mutex::new(new_chord(key1.address().into())));
+        let dht2 = Arc::new(Mutex::new(new_chord(key2.address().into())));
+        let swarm1 = Arc::new(new_swarm(&key1));
+        let swarm2 = Arc::new(new_swarm(&key2));
+        let (_, _) = establish_connection(Arc::clone(&swarm1), Arc::clone(&swarm2)).await?;
 
-    //     let handler1 = MessageHandler::new(Arc::clone(&dht1), Arc::clone(&swarm1));
-    //     let handler2 = MessageHandler::new(Arc::clone(&dht2), Arc::clone(&swarm2));
-    //     tokio::select! {
-    //          _ = async {
-    //              futures::join!(
-    //                  async {
-    //                      loop {
-    //                          Arc::new(handler1.clone()).listen().await;
-    //                      }
-    //                  },
-    //                  async {
-    //                      loop {
-    //                          Arc::new(handler2.clone()).listen().await;
-    //                      }
-    //                  }
-    //              );
-    //          } => { unreachable!();}
-    //          _ = async {
-    //              let transport_1_to_2 = swarm1.get_transport(&swarm2.address()).unwrap();
-    //              transport_1_to_2.wait_for_data_channel_open().await.unwrap();
-    //              assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
-    //              assert!(dht2.lock().await.successor.list().contains(&key1.address().into()));
-    //              assert_eq!(
-    //                  transport_1_to_2.ice_connection_state().await,
-    //                  Some(RTCIceConnectionState::Connected)
-    //              );
-    //              handler1
-    //                  .send_message(
-    //                      &swarm2.address(),
-    //                      None,
-    //                      None,
-    //                      MessageRelayMethod::SEND,
-    //                      Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
-    //                          id: swarm1.address().into(),
-    //                      }),
-    //                  )
-    //                  .await
-    //                  .unwrap();
-    //              sleep(Duration::from_millis(1000)).await;
-    //              assert_eq!(dht2.lock().await.predecessor, Some(key1.address().into()));
-    //              assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
+        let handler1 = MessageHandler::new(Arc::clone(&dht1), Arc::clone(&swarm1));
+        let handler2 = MessageHandler::new(Arc::clone(&dht2), Arc::clone(&swarm2));
+        tokio::select! {
+             _ = async {
+                 futures::join!(
+                     async {
+                         loop {
+                             Arc::new(handler1.clone()).listen().await;
+                         }
+                     },
+                     async {
+                         loop {
+                             Arc::new(handler2.clone()).listen().await;
+                         }
+                     }
+                 );
+             } => { unreachable!();}
+             _ = async {
+                 let transport_1_to_2 = swarm1.get_transport(&swarm2.address()).unwrap();
+                 transport_1_to_2.wait_for_data_channel_open().await.unwrap();
+                 assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
+                 assert!(dht2.lock().await.successor.list().contains(&key1.address().into()));
+                 assert_eq!(
+                     transport_1_to_2.ice_connection_state().await,
+                     Some(RTCIceConnectionState::Connected)
+                 );
+                 handler1
+                     .send_message(
+                         &swarm2.address(),
+                         None,
+                         None,
+                         MessageRelayMethod::SEND,
+                         Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
+                             id: swarm1.address().into(),
+                         }),
+                     )
+                     .await
+                     .unwrap();
+                 sleep(Duration::from_millis(1000)).await;
+                 assert_eq!(dht2.lock().await.predecessor, Some(key1.address().into()));
+                 assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
 
-    //              assert!(dht2.lock().await.storage.len() == 0);
-    //              let message = String::from("this is a test string");
-    //              let encoded_message = message.encode().unwrap();
-    //              handler1.send_message(
-    //                  &swarm2.address(),
-    //                  None,
-    //                  None,
-    //                  MessageRelayMethod::SEND,
-    //                  Message::StoreVNode(message::StoreVNode {
-    //                      sender_id: swarm1.address().into(),
-    //                      data: vec![encoded_message.try_into().unwrap()]
-    //                  })
-    //              )
-    //              .await
-    //              .unwrap();
-    //              sleep(Duration::from_millis(1000)).await;
-    //              assert!(dht2.lock().await.storage.len() > 0);
-    //              let data = dht2.lock().await.storage.get(&(key1.address().into()));
-    //              assert!(data.is_some());
-    //              let data = data.unwrap();
-    //              assert_eq!(data.data[0].clone().decode::<String>().unwrap(), message);
-    //          } => {}
-    //     }
-    //     Ok(())
-    // }
+                 assert!(dht2.lock().await.storage.len() == 0);
+                 let message = String::from("this is a test string");
+                 let encoded_message = message.encode().unwrap();
+                 let vnode: VirtualPeer = encoded_message.try_into().unwrap();
+                 handler1.send_message(
+                     &swarm2.address(),
+                     None,
+                     None,
+                     MessageRelayMethod::SEND,
+                     Message::StoreVNode(message::StoreVNode {
+                         sender_id: swarm1.address().into(),
+                         data: vec![vnode.clone()]
+                     })
+                 )
+                 .await
+                 .unwrap();
+                 sleep(Duration::from_millis(1000)).await;
+                 assert!(dht2.lock().await.storage.len() > 0);
+                 let data = dht2.lock().await.storage.get(&(vnode.address));
+                 assert!(data.is_some());
+                 let data = data.unwrap();
+                 assert_eq!(data.data[0].clone().decode::<String>().unwrap(), message);
+             } => {}
+        }
+        Ok(())
+    }
 }

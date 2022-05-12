@@ -50,7 +50,7 @@ impl MessageHandler {
         }
     }
 
-    pub async fn set_callback(&self, f: CallbackFn) -> () {
+    pub async fn set_callback(&self, f: CallbackFn) {
         let mut cb = self.callback.lock().await;
         *cb = Some(f)
     }
@@ -233,7 +233,7 @@ pub mod test {
     use std::sync::Arc;
     use tokio::time::{sleep, Duration};
 
-    async fn create_connected_pair(
+    pub async fn create_connected_pair(
         key1: SecretKey,
         key2: SecretKey,
     ) -> Result<(MessageHandler, MessageHandler)> {
