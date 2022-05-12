@@ -231,7 +231,7 @@ pub mod test {
 
     use futures::lock::Mutex;
     use std::sync::Arc;
-    use tokio::time::{sleep, Duration};
+    
 
     pub async fn create_connected_pair(
         key1: SecretKey,
