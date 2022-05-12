@@ -26,7 +26,7 @@ type CallbackFn = Box<dyn FnMut(&MessageRelay<Message>, Did) -> Result<()>>;
 pub struct MessageHandler {
     dht: Arc<Mutex<PeerRing>>,
     swarm: Arc<Swarm>,
-    callback: Option<Arc<Mutex<CallbackFn>>>,
+    callback: Arc<Mutex<Option<CallbackFn>>>,
 }
 
 impl MessageHandler {
@@ -38,7 +38,7 @@ impl MessageHandler {
         Self {
             dht,
             swarm,
-            callback: Some(Arc::new(Mutex::new(callback))),
+            callback: Arc::new(Mutex::new(Some(callback))),
         }
     }
 
@@ -46,8 +46,13 @@ impl MessageHandler {
         Self {
             dht,
             swarm,
-            callback: None,
+            callback: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub async fn set_callback(&self, f: CallbackFn) -> () {
+        let mut cb = self.callback.lock().await;
+        *cb = Some(f)
     }
 
     pub async fn send_relay_message(
@@ -131,9 +136,9 @@ impl MessageHandler {
                 x
             ))),
         }?;
-        if let Some(cb) = &self.callback {
-            let mut callback = cb.lock().await;
-            callback(&relay, prev)?;
+        let mut callback = self.callback.lock().await;
+        if let Some(ref mut cb) = *callback {
+            cb(&relay, prev)?;
         }
         Ok(())
     }
@@ -212,7 +217,7 @@ mod listener {
 
 #[cfg(not(feature = "wasm"))]
 #[cfg(test)]
-mod test {
+pub mod test {
     use super::*;
     use crate::dht::PeerRing;
     use crate::ecc::SecretKey;
@@ -227,6 +232,55 @@ mod test {
     use futures::lock::Mutex;
     use std::sync::Arc;
     use tokio::time::{sleep, Duration};
+
+    async fn create_connected_pair(
+        key1: SecretKey,
+        key2: SecretKey,
+    ) -> Result<(MessageHandler, MessageHandler)> {
+        let stun = "stun://stun.l.google.com:19302";
+
+        let dht1 = PeerRing::new(key1.address().into());
+        let dht2 = PeerRing::new(key2.address().into());
+
+        let session1 = SessionManager::new_with_seckey(&key1).unwrap();
+        let session2 = SessionManager::new_with_seckey(&key2).unwrap();
+
+        let swarm1 = Arc::new(Swarm::new(stun, key1.address(), session1.clone()));
+        let swarm2 = Arc::new(Swarm::new(stun, key2.address(), session2.clone()));
+
+        let transport1 = swarm1.new_transport().await.unwrap();
+        let transport2 = swarm2.new_transport().await.unwrap();
+        let handler1 = MessageHandler::new(Arc::new(Mutex::new(dht1)), Arc::clone(&swarm1));
+        let handler2 = MessageHandler::new(Arc::new(Mutex::new(dht2)), Arc::clone(&swarm2));
+        let handshake_info1 = transport1
+            .get_handshake_info(session1, RTCSdpType::Offer)
+            .await?;
+
+        let addr1 = transport2.register_remote_info(handshake_info1).await?;
+
+        let handshake_info2 = transport2
+            .get_handshake_info(session2, RTCSdpType::Answer)
+            .await?;
+
+        let addr2 = transport1.register_remote_info(handshake_info2).await?;
+
+        assert_eq!(addr1, key1.address());
+        assert_eq!(addr2, key2.address());
+        let promise_1 = transport1.connect_success_promise().await?;
+        let promise_2 = transport2.connect_success_promise().await?;
+        promise_1.await?;
+        promise_2.await?;
+
+        swarm1
+            .register(&swarm2.address(), transport1.clone())
+            .await
+            .unwrap();
+        swarm2
+            .register(&swarm1.address(), transport2.clone())
+            .await
+            .unwrap();
+        Ok((handler1, handler2))
+    }
 
     #[tokio::test]
     async fn test_custom_handler() -> Result<()> {
