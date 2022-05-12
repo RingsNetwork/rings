@@ -16,10 +16,16 @@ pub trait Decoder: Sized {
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Encoded(String);
 
+impl Encoded {
+    pub fn value(&self) -> &String {
+        &self.0
+    }
+}
+
 impl Deref for Encoded {
     type Target = String;
     fn deref(&self) -> &Self::Target {
-        &self.0
+        self.value()
     }
 }
 

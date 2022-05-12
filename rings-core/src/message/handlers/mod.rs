@@ -26,7 +26,7 @@ type CallbackFn = Box<dyn FnMut(&MessageRelay<Message>, Did) -> Result<()>>;
 pub struct MessageHandler {
     dht: Arc<Mutex<PeerRing>>,
     swarm: Arc<Swarm>,
-    callback: Option<Arc<Mutex<CallbackFn>>>,
+    callback: Arc<Mutex<Option<CallbackFn>>>,
 }
 
 impl MessageHandler {
@@ -38,7 +38,7 @@ impl MessageHandler {
         Self {
             dht,
             swarm,
-            callback: Some(Arc::new(Mutex::new(callback))),
+            callback: Arc::new(Mutex::new(Some(callback))),
         }
     }
 
@@ -46,8 +46,13 @@ impl MessageHandler {
         Self {
             dht,
             swarm,
-            callback: None,
+            callback: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub async fn set_callback(&self, f: CallbackFn) {
+        let mut cb = self.callback.lock().await;
+        *cb = Some(f)
     }
 
     pub async fn send_relay_message(
@@ -131,9 +136,9 @@ impl MessageHandler {
                 x
             ))),
         }?;
-        if let Some(cb) = &self.callback {
-            let mut callback = cb.lock().await;
-            callback(&relay, prev)?;
+        let mut callback = self.callback.lock().await;
+        if let Some(ref mut cb) = *callback {
+            cb(&relay, prev)?;
         }
         Ok(())
     }
@@ -212,7 +217,7 @@ mod listener {
 
 #[cfg(not(feature = "wasm"))]
 #[cfg(test)]
-mod test {
+pub mod test {
     use super::*;
     use crate::dht::PeerRing;
     use crate::ecc::SecretKey;
@@ -226,20 +231,12 @@ mod test {
 
     use futures::lock::Mutex;
     use std::sync::Arc;
-    use tokio::time::{sleep, Duration};
 
-    #[tokio::test]
-    async fn test_custom_handler() -> Result<()> {
+    pub async fn create_connected_pair(
+        key1: SecretKey,
+        key2: SecretKey,
+    ) -> Result<(MessageHandler, MessageHandler)> {
         let stun = "stun://stun.l.google.com:19302";
-
-        let key1 = SecretKey::random();
-        let key2 = SecretKey::random();
-
-        println!(
-            "test with key1:{:?}, key2:{:?}",
-            key1.address(),
-            key2.address()
-        );
 
         let dht1 = PeerRing::new(key1.address().into());
         let dht2 = PeerRing::new(key2.address().into());
@@ -252,29 +249,8 @@ mod test {
 
         let transport1 = swarm1.new_transport().await.unwrap();
         let transport2 = swarm2.new_transport().await.unwrap();
-
-        fn custom_handler(relay: &MessageRelay<Message>, id: Did) -> Result<()> {
-            println!("{:?}, {:?}", relay, id);
-            Ok(())
-        }
-
-        let scop_var: Arc<sync::Mutex<Vec<Did>>> = Arc::new(sync::Mutex::new(vec![]));
-
-        let closure_handler = move |relay: &MessageRelay<Message>, id: Did| {
-            let mut v = scop_var.lock().unwrap();
-            v.push(id);
-            println!("{:?}, {:?}", relay, id);
-            Ok(())
-        };
-
-        let cb: CallbackFn = box custom_handler;
-        let cb2: CallbackFn = box closure_handler;
-
-        let handler1 =
-            MessageHandler::new_with_callback(Arc::new(Mutex::new(dht1)), Arc::clone(&swarm1), cb);
-        let handler2 =
-            MessageHandler::new_with_callback(Arc::new(Mutex::new(dht2)), Arc::clone(&swarm2), cb2);
-
+        let handler1 = MessageHandler::new(Arc::new(Mutex::new(dht1)), Arc::clone(&swarm1));
+        let handler2 = MessageHandler::new(Arc::new(Mutex::new(dht2)), Arc::clone(&swarm2));
         let handshake_info1 = transport1
             .get_handshake_info(session1, RTCSdpType::Offer)
             .await?;
@@ -302,11 +278,44 @@ mod test {
             .register(&swarm1.address(), transport2.clone())
             .await
             .unwrap();
-
-        sleep(Duration::from_millis(1000)).await;
-
         assert!(handler1.listen_once().await.is_some());
         assert!(handler2.listen_once().await.is_some());
+        Ok((handler1, handler2))
+    }
+
+    #[tokio::test]
+    async fn test_custom_handler() -> Result<()> {
+        let key1 = SecretKey::random();
+        let key2 = SecretKey::random();
+        let addr1 = key1.address();
+        let addr2 = key2.address();
+
+        let (handler1, handler2) = create_connected_pair(key1, key2).await.unwrap();
+
+        println!(
+            "test with key1:{:?}, key2:{:?}",
+            key1.address(),
+            key2.address()
+        );
+        fn custom_handler(relay: &MessageRelay<Message>, id: Did) -> Result<()> {
+            println!("{:?}, {:?}", relay, id);
+            Ok(())
+        }
+
+        let scop_var: Arc<sync::Mutex<Vec<Did>>> = Arc::new(sync::Mutex::new(vec![]));
+
+        let closure_handler = move |relay: &MessageRelay<Message>, id: Did| {
+            let mut v = scop_var.lock().unwrap();
+            v.push(id);
+            println!("{:?}, {:?}", relay, id);
+            Ok(())
+        };
+
+        let cb: CallbackFn = box custom_handler;
+        let cb2: CallbackFn = box closure_handler;
+
+        handler1.set_callback(cb).await;
+        handler2.set_callback(cb2).await;
 
         handler1
             .send_message_default(&addr2, Message::custom("Hello world"))
