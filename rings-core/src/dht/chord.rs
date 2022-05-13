@@ -44,8 +44,8 @@ impl PeerRingAction {
     }
 
     pub fn is_some(&self) -> bool {
-         if let Self::Some(_) = self {
-             return true;
+        if let Self::Some(_) = self {
+            return true;
         }
         false
     }
@@ -308,15 +308,17 @@ impl ChordStorage<PeerRingAction> for PeerRing {
     }
 
     fn store_vec(&self, vps: Vec<VirtualPeer>) -> Result<PeerRingAction> {
-        let acts: Vec<PeerRingAction> = vps.iter()
+        let acts: Vec<PeerRingAction> = vps
+            .iter()
             .map(|v| self.store(v.clone()))
             // ignore faiure here
             .filter(|v| v.is_ok())
             .map(|v| v.unwrap())
-            .filter(|v| !v.is_none()).collect();
+            .filter(|v| !v.is_none())
+            .collect();
         match acts.len() {
             0 => Ok(PeerRingAction::None),
-            _ => Ok(PeerRingAction::MultiActions(acts))
+            _ => Ok(PeerRingAction::MultiActions(acts)),
         }
     }
 
