@@ -35,6 +35,36 @@ pub enum PeerRingAction {
     MultiActions(Vec<PeerRingAction>),
 }
 
+impl PeerRingAction {
+    pub fn is_none(&self) -> bool {
+        if let Self::None = self {
+            return true;
+        }
+        false
+    }
+
+    pub fn is_some(&self) -> bool {
+        if let Self::Some(_) = self {
+            return true;
+        }
+        false
+    }
+
+    pub fn is_remote(&self) -> bool {
+        if let Self::RemoteAction(..) = self {
+            return true;
+        }
+        false
+    }
+
+    pub fn is_multi(&self) -> bool {
+        if let Self::MultiActions(..) = self {
+            return true;
+        }
+        false
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PeerRing {
     // first node on circle that succeeds (n + 2 ^(k-1) ) mod 2^m , 1 <= k<= m
@@ -274,6 +304,21 @@ impl ChordStorage<PeerRingAction> for PeerRing {
             ),
             Ok(a) => Err(Error::PeerRingUnexpectedAction(a)),
             Err(e) => Err(e),
+        }
+    }
+
+    fn store_vec(&self, vps: Vec<VirtualPeer>) -> Result<PeerRingAction> {
+        let acts: Vec<PeerRingAction> = vps
+            .iter()
+            .map(|v| self.store(v.clone()))
+            // ignore faiure here
+            .filter(|v| v.is_ok())
+            .map(|v| v.unwrap())
+            .filter(|v| !v.is_none())
+            .collect();
+        match acts.len() {
+            0 => Ok(PeerRingAction::None),
+            _ => Ok(PeerRingAction::MultiActions(acts)),
         }
     }
 
