@@ -37,6 +37,7 @@ url = { version = "2", features = ["serde"] }
 thiserror = "1"
 flate2 = { version = "1.0.22" }
 async-recursion = "1.0.0"
+itertools = "0.10.3"
 
 # default
 webrtc = { version = "0.3.3", optional = true }
