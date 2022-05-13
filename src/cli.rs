@@ -179,6 +179,17 @@ impl Client {
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         ClientOutput::ok("Done.".into(), ())
     }
+
+    pub async fn send_message(&self, address: &str, text: &str) -> Output<()> {
+        let mut params = serde_json::Map::new();
+        params.insert("address".to_owned(), json!(address));
+        params.insert("text".to_owned(), json!(text));
+        self.client
+            .call_method(Method::SendTo.as_str(), Params::Map(params))
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        ClientOutput::ok("Done.".into(), ())
+    }
 }
 
 impl<T> ClientOutput<T> {

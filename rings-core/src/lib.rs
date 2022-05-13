@@ -16,3 +16,6 @@ pub mod swarm;
 pub mod transports;
 pub mod types;
 pub mod utils;
+
+pub use async_trait::async_trait;
+pub use futures;

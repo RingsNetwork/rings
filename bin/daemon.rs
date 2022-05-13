@@ -5,8 +5,14 @@ use libc::kill;
 use rings_node::{
     logger::{LogLevel, Logger},
     prelude::rings_core::{
-        dht::PeerRing, ecc::SecretKey, message::MessageHandler, prelude::url,
-        session::SessionManager, swarm::Swarm, types::message::MessageListener,
+        async_trait,
+        dht::{Did, PeerRing},
+        ecc::SecretKey,
+        message::{self, CustomMessage, Message, MessageHandler, MessageRelay},
+        prelude::url,
+        session::SessionManager,
+        swarm::Swarm,
+        types::message::MessageListener,
     },
     service::{run_service, run_udp_turn},
 };
@@ -105,9 +111,14 @@ struct ShutdownArgs {
 async fn run_jobs(args: &RunArgs) -> anyhow::Result<()> {
     let key: &SecretKey = &args.eth_key;
     let dht = Arc::new(Mutex::new(PeerRing::new(key.address().into())));
-    let (auth, key) = SessionManager::gen_unsign_info(key.address(), None, None)?;
+
+    let (auth, s_key) = SessionManager::gen_unsign_info(
+        key.address(),
+        Some(rings_core::session::Ttl::Never),
+        None,
+    )?;
     let sig = key.sign(&auth.to_string()?).to_vec();
-    let session = SessionManager::new(&sig, &auth, &key);
+    let session = SessionManager::new(&sig, &auth, &s_key);
 
     let mut ice_servers = args.ice_server.clone();
     let turn_server = if !args.without_turn {
@@ -135,7 +146,13 @@ async fn run_jobs(args: &RunArgs) -> anyhow::Result<()> {
     let ice_servers = ice_servers.join(";");
     let swarm = Arc::new(Swarm::new(&ice_servers, key.address(), session));
 
-    let listen_event = Arc::new(MessageHandler::new(dht.clone(), swarm.clone()));
+    // let listen_event = MessageHandler::new(dht.clone(), swarm.clone());
+    let message_callback = MessageCallback {};
+    let listen_event = Arc::new(MessageHandler::new_with_callback(
+        dht.clone(),
+        swarm.clone(),
+        Box::new(message_callback),
+    ));
     let http_addr = args.http_addr.clone();
     let j = tokio::spawn(futures::future::join(
         async {
@@ -161,6 +178,16 @@ async fn run_jobs(args: &RunArgs) -> anyhow::Result<()> {
 }
 
 type AnyhowResult<T> = Result<T, anyhow::Error>;
+
+struct MessageCallback {}
+
+#[async_trait]
+impl message::MessageCallback for MessageCallback {
+    async fn custom_message(&self, _relay: MessageRelay<Message>, _prev: Did, msg: CustomMessage) {
+        log::info!("[MESSAGE] custom_message: {:?}", msg);
+    }
+    async fn builtin_message(&self, _relay: MessageRelay<Message>, _prev: Did) {}
+}
 
 fn run_daemon(args: &RunArgs) -> AnyhowResult<()> {
     if args.daemonize {

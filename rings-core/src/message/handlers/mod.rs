@@ -1,3 +1,4 @@
+use super::{CustomMessage, MaybeEncrypted};
 use crate::dht::{Did, PeerRing};
 use crate::err::{Error, Result};
 use crate::message::payload::{MessageRelay, MessageRelayMethod, OriginVerificationGen};
@@ -7,6 +8,7 @@ use crate::swarm::Swarm;
 use crate::swarm::TransportManager;
 use crate::types::ice_transport::IceTrickleScheme;
 use async_recursion::async_recursion;
+use async_trait::async_trait;
 use connection::TChordConnection;
 use futures::lock::Mutex;
 use std::collections::VecDeque;
@@ -17,21 +19,29 @@ use web3::types::Address;
 pub mod connection;
 pub mod storage;
 
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+pub trait MessageCallback {
+    async fn custom_message(
+        &self,
+        handler: &MessageHandler,
+        relay: &MessageRelay<Message>,
+        prev: Did,
+        msg: &MaybeEncrypted<CustomMessage>,
+    );
+    async fn builtin_message(
+        &self,
+        handler: &MessageHandler,
+        relay: &MessageRelay<Message>,
+        prev: Did,
+    );
+}
+
 #[cfg(not(feature = "wasm"))]
-use futures_core::future::BoxFuture;
-#[cfg(not(feature = "wasm"))]
-type CallbackFn = Box<
-    dyn (FnMut(&MessageHandler, &MessageRelay<Message>, Did) -> BoxFuture<'static, Result<()>>)
-        + Send
-        + Sync,
->;
+type CallbackFn = Box<dyn MessageCallback + Send + Sync>;
 
 #[cfg(feature = "wasm")]
-use futures_core::future::LocalBoxFuture;
-#[cfg(feature = "wasm")]
-type CallbackFn = Box<
-    dyn (FnMut(&MessageHandler, &MessageRelay<Message>, Did) -> LocalBoxFuture<'static, Result<()>>),
->;
+type CallbackFn = Box<dyn MessageCallback>;
 
 #[derive(Clone)]
 pub struct MessageHandler {
@@ -152,6 +162,27 @@ impl MessageHandler {
         self.swarm.push_pending_transport(&transport)
     }
 
+    async fn invoke_callback(&self, relay: &MessageRelay<Message>, prev: Did) -> Result<()> {
+        let mut callback = self.callback.lock().await;
+        if let Some(ref mut cb) = *callback {
+            let data = relay.data.clone();
+            match data {
+                Message::None => {
+                    return Ok(());
+                }
+                Message::CustomMessage(msg) => cb.custom_message(self, relay, prev, &msg).await,
+                _ => cb.builtin_message(self, relay, prev).await,
+            };
+        }
+        Ok(())
+    }
+
+    pub fn decrypt_msg(&self, msg: &MaybeEncrypted<CustomMessage>) -> Result<CustomMessage> {
+        let key = self.swarm.session_manager.session_key()?;
+        let (decrypt_msg, _) = msg.to_owned().decrypt(&key)?;
+        Ok(decrypt_msg)
+    }
+
     #[cfg_attr(feature = "wasm", async_recursion(?Send))]
     #[cfg_attr(not(feature = "wasm"), async_recursion)]
     pub async fn handle_message_relay(
@@ -201,10 +232,10 @@ impl MessageHandler {
                 x
             ))),
         }?;
-        let mut callback = self.callback.lock().await;
-        if let Some(ref mut cb) = *callback {
-            cb(self, &relay, prev).await?;
+        if let Err(e) = self.invoke_callback(&relay, prev).await {
+            log::warn!("invoke callback error: {}", e);
         }
+
         Ok(())
     }
 
@@ -270,7 +301,7 @@ mod listener {
         async fn listen(self: Arc<Self>) {
             let handler = Arc::clone(&self);
             let func = move || {
-                let handler = Arc::clone(&handler);
+                let handler = handler.clone();
                 spawn_local(Box::pin(async move {
                     handler.listen_once().await;
                 }));
@@ -349,55 +380,61 @@ pub mod test {
         Ok((handler1, handler2))
     }
 
+    #[derive(Clone)]
+    struct MessageCallbackInstance {
+        handler_messages: Arc<DashMap<Did, String>>,
+    }
+
     #[tokio::test]
     async fn test_custom_message_handling() -> Result<()> {
         let key1 = SecretKey::random();
         let key2 = SecretKey::random();
         let addr1 = key1.address();
+        let addr2 = key2.address();
 
         let (handler1, handler2) = create_connected_pair(key1, key2).await.unwrap();
 
+        println!(
+            "test with key1:{:?}, key2:{:?}",
+            key1.address(),
+            key2.address()
+        );
+
+        #[async_trait]
+        impl MessageCallback for MessageCallbackInstance {
+            async fn custom_message(
+                &self,
+                handler: &MessageHandler,
+                relay: &MessageRelay<Message>,
+                id: Did,
+                msg: &MaybeEncrypted<CustomMessage>,
+            ) {
+                let decrypted_msg = handler.decrypt_msg(msg).unwrap();
+                self.handler_messages.insert(id, decrypted_msg.0);
+
+                println!("{:?}, {:?}, {:?}", relay, id, msg);
+            }
+
+            async fn builtin_message(
+                &self,
+                _handler: &MessageHandler,
+                relay: &MessageRelay<Message>,
+                prev: Did,
+            ) {
+                println!("{:?}, {:?}", relay, prev);
+            }
+        }
+
+        //let cb: CallbackFn = Box::new(MessageCallbackInstance::new());
+        let msg_callback = MessageCallbackInstance {
+            handler_messages: Arc::new(DashMap::default()),
+        };
+        let cb2: CallbackFn = Box::new(msg_callback.clone());
+        //handler1.set_callback(cb).await;
+        handler2.set_callback(cb2).await;
+
         handler1
-            .set_callback(Box::new(
-                move |handler: &MessageHandler, relay: &MessageRelay<Message>, id: Did| {
-                    let handler = handler.clone();
-                    let relay = relay.clone();
-                    Box::pin(async move {
-                        let pubkey1 = relay.origin_session_pubkey()?;
-                        handler
-                            .send_message_default(
-                                &id,
-                                Message::custom("Hello world 1", &Some(pubkey1))?,
-                            )
-                            .await
-                    })
-                },
-            ))
-            .await;
-
-        let handler2_messages: Arc<DashMap<Did, String>> = Arc::new(DashMap::default());
-        let handler2_messages_for_closure: Arc<DashMap<Did, String>> = handler2_messages.clone();
-        handler2
-            .set_callback(Box::new(
-                move |handler: &MessageHandler, relay: &MessageRelay<Message>, id: Did| {
-                    let handler = handler.clone();
-                    let relay = relay.clone();
-                    let handler2_messages_for_closure = handler2_messages_for_closure.clone();
-                    Box::pin(async move {
-                        let session_key = handler.swarm.session_manager.session_key()?;
-                        if let Message::CustomMessage(msg) = relay.data.clone() {
-                            let (data, _) = msg.decrypt(&session_key).unwrap();
-                            handler2_messages_for_closure.insert(id, data.0);
-                        }
-
-                        Ok(())
-                    })
-                },
-            ))
-            .await;
-
-        handler2
-            .send_message_default(&addr1, Message::custom("Hello world 2", &None)?)
+            .send_message_default(&addr2, Message::custom("Hello world 1", &None)?)
             .await
             .unwrap();
 
@@ -407,7 +444,11 @@ pub mod test {
         sleep(Duration::from_secs(5)).await;
 
         assert_eq!(
-            handler2_messages.get(&addr1.into()).unwrap().as_str(),
+            msg_callback
+                .handler_messages
+                .get(&addr1.into())
+                .unwrap()
+                .as_str(),
             "Hello world 1"
         );
 

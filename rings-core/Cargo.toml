@@ -75,6 +75,7 @@ features = [
   "RtcIceGatheringState",
   "RtcIceCredentialType",
   "RtcLifecycleEvent",
+  "console",
 ]
 
 [target.'cfg(target_family="wasm")'.dependencies]

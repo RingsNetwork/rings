@@ -158,7 +158,7 @@ pub enum Error {
     RTCDataChannelSendTextFailed(#[source] webrtc::Error),
 
     #[cfg(feature = "wasm")]
-    #[error("DataChannel send text message failed")]
+    #[error("DataChannel send text message failed, {0}")]
     RTCDataChannelSendTextFailed(String),
 
     #[error("DataChannel not ready")]

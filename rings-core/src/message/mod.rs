@@ -19,4 +19,5 @@ pub use types::*;
 pub mod handlers;
 pub use handlers::connection::TChordConnection;
 pub use handlers::storage::TChordStorage;
+pub use handlers::MessageCallback;
 pub use handlers::MessageHandler;

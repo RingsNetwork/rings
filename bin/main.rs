@@ -321,12 +321,18 @@ async fn main() -> anyhow::Result<()> {
                 .display();
             Ok(())
         }
-        Command::Send(_args) => {
-            println!("send command does not support.");
+        Command::Send(args) => {
+            args.client_args
+                .new_client()
+                .await?
+                .send_message(args.to_address.as_str(), args.text.as_str())
+                .await?
+                .display();
             Ok(())
         }
         Command::NewSecretKey => {
-            println!("New secretKey: {}", SecretKey::random().to_string());
+            let k = SecretKey::random();
+            println!("New secretKey: {}", k.to_string());
             Ok(())
         }
     } {

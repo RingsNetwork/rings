@@ -3,17 +3,30 @@ use crate::{
     jsonrpc::{method, response::TransportAndIce},
     jsonrpc_client::SimpleClient,
     prelude::rings_core::{
-        message::{Encoded, MessageHandler},
-        prelude::{uuid, web3::types::Address, RTCSdpType},
+        message::{CustomMessage, Encoded, MaybeEncrypted, Message, MessageHandler},
+        prelude::{
+            uuid,
+            web3::{contract::tokens::Tokenizable, ethabi::Token, types::Address},
+            RTCSdpType,
+        },
         swarm::{Swarm, TransportManager},
         transports::Transport,
         types::ice_transport::{IceTransport, IceTrickleScheme},
     },
 };
-
 #[cfg(feature = "client")]
 use jsonrpc_core::Metadata;
 use std::{str::FromStr, sync::Arc};
+
+#[cfg(feature = "client")]
+macro_rules! log_debug {
+    ($($t:tt)*) => (log::debug!("{}", &format_args!($($t)*).to_string()))
+}
+
+#[cfg(feature = "browser")]
+macro_rules! log_debug {
+    ($($t:tt)*) => (super::browser::log(&format_args!($($t)*).to_string()))
+}
 
 #[derive(Clone)]
 pub struct Processor {
@@ -60,7 +73,7 @@ impl Processor {
 
     pub async fn connect_peer_via_http(&self, peer_url: &str) -> Result<Arc<Transport>> {
         // request remote offer and sand answer to remote
-        log::debug!("connect_peer_via_http: {}", peer_url);
+        log_debug!("connect_peer_via_http: {}", peer_url);
         let transport = self
             .swarm
             .new_transport()
@@ -100,7 +113,6 @@ impl Processor {
             )
             .await
             .map_err(|e| Error::RemoteRpcError(e.to_string()))?;
-        log::debug!("resp: {}", resp);
         let info: TransportAndIce =
             serde_json::from_value(resp).map_err(|_| Error::JsonDeserializeError)?;
         let addr = transport
@@ -121,7 +133,7 @@ impl Processor {
     }
 
     pub async fn connect_peer_via_ice(&self, ice_info: &str) -> Result<(Arc<Transport>, Encoded)> {
-        log::debug!("connect peer via ice: {}", ice_info);
+        log::info!("connect peer via ice: {}", ice_info);
         let transport = self.swarm.new_transport().await.map_err(|e| {
             log::error!("new_transport failed: {}", e);
             Error::NewTransportError
@@ -249,24 +261,44 @@ impl Processor {
             .map_err(Error::CloseTransportError)?;
         Ok(())
     }
+
+    pub async fn send_message<T>(&self, address: &str, msg: T) -> Result<()>
+    where
+        T: ToString,
+    {
+        log::info!("send_message, to: {}, text: {}", address, msg.to_string());
+        let address = Address::from_str(address).map_err(|_| Error::InvalidAddress)?;
+        self.msg_handler
+            .send_message_default(
+                &address,
+                Message::CustomMessage(MaybeEncrypted::Plain(CustomMessage(msg.to_string()))),
+            )
+            .await
+            .map_err(Error::SendMessage)?;
+
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
 pub struct Peer {
-    pub address: Address,
+    pub address: Token,
     pub transport: Arc<Transport>,
 }
 
 impl From<(Address, Arc<Transport>)> for Peer {
     fn from((address, transport): (Address, Arc<Transport>)) -> Self {
-        Self { address, transport }
+        Self {
+            address: address.into_token(),
+            transport,
+        }
     }
 }
 
 impl From<&(Address, Arc<Transport>)> for Peer {
     fn from((address, transport): &(Address, Arc<Transport>)) -> Self {
         Self {
-            address: *address,
+            address: address.into_token(),
             transport: transport.clone(),
         }
     }
