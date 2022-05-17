@@ -1,10 +1,10 @@
 #[cfg(test)]
 pub mod test {
+    use log::Level;
     use rings_core::channels::Channel as CbChannel;
     use rings_core::ecc::SecretKey;
     use rings_core::err::Result;
     use rings_core::session::SessionManager;
-    use log::Level;
     use rings_core::transports::Transport;
     use rings_core::types::channel::Channel;
     use rings_core::types::channel::Event;
@@ -14,10 +14,10 @@ pub mod test {
     use rings_core::types::ice_transport::IceTrickleScheme;
     use std::str::FromStr;
     use std::sync::Arc;
+    use wasm_bindgen::JsValue;
     use wasm_bindgen_futures::JsFuture;
     use wasm_bindgen_test::wasm_bindgen_test_configure;
     use wasm_bindgen_test::*;
-    use wasm_bindgen::JsValue;
     use web_sys::RtcIceConnectionState;
     use web_sys::RtcSdpType;
 
