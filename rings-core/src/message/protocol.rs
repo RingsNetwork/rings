@@ -68,8 +68,7 @@ impl MessageSessionRelayProtocol for MessageRelay<Message> {
             },
             MessageRelayMethod::REPORT => {
                 // should always has a prev
-                let prev = self.to_path.pop_back().unwrap();
-                assert_eq!(prev, self.addr.into());
+                let prev = self.from_path.pop_back().unwrap();
                 self.to_path.push_front(prev);
             }
         }
@@ -134,15 +133,14 @@ impl MessageSessionRelayProtocol for MessageRelay<Message> {
 
     // for send, the next hop is the first ele of to_path
     // From<[A, B]> [Current] To<[D, E]> -> D
-    // for report, the next hop is the back ele of to_path
+    // for report, the next hop is the back ele of from_path
     // From<[A, B]> [Current] To<[D, E]> -> D
 
     fn next(&self) -> Option<Did> {
         match self.method {
             MessageRelayMethod::SEND => self.to_path.front().map(|x| x.clone()),
             // needs to fix here
-            MessageRelayMethod::REPORT => self.to_path.back().map(|x| x.clone())
-
+            MessageRelayMethod::REPORT => self.from_path.back().map(|x| x.clone())
         }
     }
 

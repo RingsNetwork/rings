@@ -89,7 +89,7 @@ impl TChordConnection for MessageHandler {
                 // if there is only two nodes A, B, it may cause recursion
                 // A.successor == B
                 // B.successor == A
-                // A.find_successor(B) -> B.find_Successor(A)
+                // A.find_successor(B)
                 if next != prev {
                     relay.record(Some(next));
                     self.send_message(
@@ -303,13 +303,12 @@ impl TChordConnection for MessageHandler {
          */
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
-        relay.push_prev(dht.id, prev);
         match dht.find_successor(msg.id)? {
             PeerRingAction::Some(id) => {
                 self.send_message(
                     &prev.into(),
-                    Some(relay.from_path),
                     Some(relay.to_path),
+                    Some(relay.from_path),
                     MessageRelayMethod::REPORT,
                     Message::FindSuccessorReport(FindSuccessorReport {
                         id,
@@ -319,6 +318,7 @@ impl TChordConnection for MessageHandler {
                 .await
             }
             PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessor(id)) => {
+                relay.record(Some(next));
                 self.send_message(
                     &next.into(),
                     Some(relay.to_path),
@@ -343,7 +343,7 @@ impl TChordConnection for MessageHandler {
     ) -> Result<()> {
         let mut dht = self.dht.lock().await;
         let mut relay = relay.clone();
-        relay.push_prev(dht.id, prev);
+        relay.record(None);
         if let Some(next) = relay.next() {
             self.send_message(
                 &next.into(),

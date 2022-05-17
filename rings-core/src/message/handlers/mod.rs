@@ -353,9 +353,9 @@ pub mod test {
         });
         (key1, key2, key3) = (v[0], v[1], v[2]);
 
-        let dht1 = PeerRing::new(key1.address().into());
-        let dht2 = PeerRing::new(key2.address().into());
-        let dht3 = PeerRing::new(key3.address().into());
+        let dht1 = Arc::new(Mutex::new(PeerRing::new(key1.address().into())));
+        let dht2 = Arc::new(Mutex::new(PeerRing::new(key2.address().into())));
+        let dht3 = Arc::new(Mutex::new(PeerRing::new(key3.address().into())));
 
 
         let session1 = SessionManager::new_with_seckey(&key1).unwrap();
@@ -370,9 +370,9 @@ pub mod test {
         let transport2 = swarm2.new_transport().await.unwrap();
         let transport3 = swarm3.new_transport().await.unwrap();
 
-        let handler1 = MessageHandler::new(Arc::new(Mutex::new(dht1)), Arc::clone(&swarm1));
-        let handler2 = MessageHandler::new(Arc::new(Mutex::new(dht2)), Arc::clone(&swarm2));
-        let handler3 = MessageHandler::new(Arc::new(Mutex::new(dht3)), Arc::clone(&swarm3));
+        let handler1 = MessageHandler::new(Arc::clone(&dht1), Arc::clone(&swarm1));
+        let handler2 = MessageHandler::new(Arc::clone(&dht2), Arc::clone(&swarm2));
+        let handler3 = MessageHandler::new(Arc::clone(&dht3), Arc::clone(&swarm3));
 
         // now we connect handler1 and handler2
 
@@ -429,7 +429,6 @@ pub mod test {
         // will be transform into some remote action
         assert_eq!(&ev_2.addr, &key2.address());
 
-        //
         let ev_1 = handler1.listen_once().await.unwrap();
         // msg is send from key2
         assert_eq!(&ev_1.addr, &key2.address());
@@ -453,15 +452,40 @@ pub mod test {
             assert!(false);
         }
 
+        // key2 response self as key1's successor
+        let ev_1 = handler1.listen_once().await.unwrap();
+        assert_eq!(&ev_1.addr, &key2.address());
+        assert_eq!(&ev_1.from_path.clone(), &vec![key1.address().into()]);
+        assert_eq!(&ev_1.to_path.clone(), &vec![key2.address().into()]);
+        if let Message::FindSuccessorReport(x) = ev_1.data {
+            // for key2 there is no did is more closer to key1, so it response key1
+            // and dht1 wont update
+            assert!(!dht1.lock().await.successor.list().contains(&key1.address().into()));
+            assert_eq!(x.id, key1.address().into());
+            assert_eq!(x.for_fix, false);
 
-        // if let Message::JoinDHT(x) = ev_1.data {
-        //     assert_eq!(x.id, key2.address().into());
-        // } else {
-        //     assert!(false);
-        // }
-        // // the message is send from key1
-        // // will be transform into some remote action
-        // assert_eq!(&ev_1.addr, &key1.address());
+        } else {
+            assert!(false);
+        }
+
+        // key1 response self as key2's successor
+        let ev_2 = handler2.listen_once().await.unwrap();
+        assert_eq!(&ev_2.addr, &key1.address());
+        assert_eq!(&ev_2.from_path.clone(), &vec![key2.address().into()]);
+        assert_eq!(&ev_2.to_path.clone(), &vec![key1.address().into()]);
+        if let Message::FindSuccessorReport(x) = ev_2.data {
+            // for key1 there is no did is more closer to key1, so it response key1
+            // and dht2 wont update
+            assert_eq!(x.id, key2.address().into());
+            assert!(!dht2.lock().await.successor.list().contains(&key2.address().into()));
+            assert_eq!(x.for_fix, false);
+
+        } else {
+            assert!(false);
+        }
+
+
+
         Ok(())
     }
 
