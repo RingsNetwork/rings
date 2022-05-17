@@ -28,6 +28,9 @@ use super::types::Message;
 //    to_path: [A, B]
 // }
 pub trait MessageSessionRelayProtocol {
+    fn sender(&self) -> Option<Did>;
+    fn origin(&self) -> Option<Did>;
+
     fn find_prev(&self) -> Option<Did>;
     fn push_prev(&mut self, current: Did, prev: Did);
     fn next_hop(&mut self, current: Did, next: Did);
@@ -38,6 +41,20 @@ pub trait MessageSessionRelayProtocol {
 }
 
 impl MessageSessionRelayProtocol for MessageRelay<Message> {
+    fn sender(&self) -> Option<Did> {
+        match self.method {
+            MessageRelayMethod::SEND => self.from_path.back().map(|x| x.clone()),
+            MessageRelayMethod::REPORT => self.to_path.back().map(|x| x.clone()),
+        }
+    }
+
+    fn origin(&self) -> Option<Did> {
+        match self.method {
+            MessageRelayMethod::SEND => self.from_path.front().map(|x| x.clone()),
+            MessageRelayMethod::REPORT => self.to_path.front().map(|x| x.clone()),
+        }
+    }
+
     #[inline]
     fn find_prev(&self) -> Option<Did> {
         match self.method {

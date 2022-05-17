@@ -15,7 +15,7 @@ pub use protocol::MessageSessionRelayProtocol;
 mod types;
 pub use types::*;
 
-mod handlers;
+pub mod handlers;
 pub use handlers::connection::TChordConnection;
 pub use handlers::storage::TChordStorage;
 pub use handlers::MessageHandler;

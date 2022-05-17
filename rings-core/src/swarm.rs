@@ -103,7 +103,7 @@ impl Swarm {
                         None,
                         None,
                         None,
-                        MessageRelayMethod::None,
+                        MessageRelayMethod::SEND,
                     )?;
                     Ok(Some(payload))
                 }
