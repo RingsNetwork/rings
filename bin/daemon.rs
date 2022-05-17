@@ -2,15 +2,19 @@ use clap::{Args, Parser, Subcommand};
 use daemonize::Daemonize;
 use futures::lock::Mutex;
 use libc::kill;
-use rings_core::message::MessageHandler;
-use rings_core::session::SessionManager;
-use rings_core::swarm::Swarm;
-use rings_core::types::message::MessageListener;
-use rings_core::{dht::PeerRing, ecc::SecretKey};
-use rings_node::logger::{LogLevel, Logger};
-use rings_node::service::{run_service, run_udp_turn};
-use std::fs::{self, File};
-use std::sync::Arc;
+use rings_node::{
+    logger::{LogLevel, Logger},
+    prelude::rings_core::{
+        dht::PeerRing, ecc::SecretKey, message::MessageHandler, prelude::webrtc::ice::url::Url,
+        session::SessionManager, swarm::Swarm, types::message::MessageListener,
+    },
+    service::{run_service, run_udp_turn},
+};
+use std::{
+    fs::{self, File},
+    sync::Arc,
+};
+use tokio::signal;
 
 #[derive(Parser, Debug)]
 #[clap(about)]
@@ -34,7 +38,7 @@ struct RunArgs {
     pub http_addr: String,
 
     #[clap(long, short = 's', default_value = "stun://stun.l.google.com:19302")]
-    pub ice_server: String,
+    pub ice_server: Vec<String>,
 
     #[clap(
         long = "eth",
@@ -46,6 +50,9 @@ struct RunArgs {
 
     #[clap(long = "key", short = 'k', env)]
     pub eth_key: SecretKey,
+
+    #[clap(short = 'd')]
+    pub daemonize: bool,
 
     #[clap(long, short = 'p', default_value = "/tmp/rings-node.pid")]
     pub pid_file: String,
@@ -61,7 +68,7 @@ struct RunArgs {
 
     /// STUN server address.
     #[clap(long, default_value = "3478")]
-    pub turn_port: String,
+    pub turn_port: u16,
 
     /// STUN publicip.
     #[clap(long, default_value = "127.0.0.1")]
@@ -69,11 +76,11 @@ struct RunArgs {
 
     /// Username.
     #[clap(long, default_value = "rings")]
-    pub username: String,
+    pub turn_username: String,
 
     /// Password.
     #[clap(long, default_value = "password")]
-    pub password: String,
+    pub turn_password: String,
 
     /// Realm.
     /// REALM
@@ -82,10 +89,10 @@ struct RunArgs {
     /// "realm" as described in RFC 3261, and will thus contain a quoted
     /// string (including the quotes).
     #[clap(long, default_value = "rings")]
-    pub realm: String,
+    pub turn_realm: String,
 
     #[clap(long)]
-    pub disable_turn: bool,
+    pub without_turn: bool,
 }
 
 #[derive(Args, Debug)]
@@ -101,44 +108,74 @@ async fn run_jobs(args: &RunArgs) -> anyhow::Result<()> {
     let sig = key.sign(&auth.to_string()?).to_vec();
     let session = SessionManager::new(&sig, &auth, &key);
 
-    let swarm = Arc::new(Swarm::new(&args.ice_server, key.address(), session));
+    let mut ice_servers = args.ice_server.clone();
+    let turn_server = if !args.without_turn {
+        let mut turn_url = Url::parse_url("turn:127.0.0.1").unwrap();
+        turn_url.port = args.turn_port;
+        turn_url.username = args.turn_username.to_owned();
+        turn_url.password = args.turn_password.to_owned();
+        ice_servers.push(turn_url.to_string());
+        Some(
+            run_udp_turn(
+                args.public_ip.as_str(),
+                args.turn_port,
+                args.turn_username.as_str(),
+                args.turn_password.as_str(),
+                args.turn_realm.as_str(),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
+    let ice_servers = ice_servers.join(";");
+    let swarm = Arc::new(Swarm::new(&ice_servers, key.address(), session));
 
     let listen_event = MessageHandler::new(dht.clone(), swarm.clone());
-    let swarm_clone = swarm.clone();
-    let http_addr = args.http_addr.to_owned();
-    if args.disable_turn {
-        let (_, _) = futures::join!(async { Arc::new(listen_event).listen().await }, async {
-            run_service(http_addr.to_owned(), swarm_clone).await
-        },);
-    } else {
-        let public_ip: &str = &args.public_ip;
-        let turn_port: &str = &args.public_ip;
-        let username: &str = &args.username;
-        let password: &str = &args.password;
-        let realm: &str = &args.realm;
-        let (_, _, _) = futures::join!(
-            async { Arc::new(listen_event).listen().await },
-            async { run_service(http_addr.to_owned(), swarm_clone).await },
-            async { run_udp_turn(public_ip, turn_port, username, password, realm).await }
-        );
+    let http_addr = args.http_addr.clone();
+    let j = tokio::spawn(futures::future::join(
+        async {
+            Arc::new(listen_event).listen().await;
+            AnyhowResult::Ok(())
+        },
+        async {
+            run_service(http_addr, swarm).await?;
+            AnyhowResult::Ok(())
+        },
+    ));
+    signal::ctrl_c().await.expect("failed to listen for event");
+    println!("\nClosing connection now...");
+    j.abort();
+    if let Some(s) = turn_server {
+        if let Err(e) = s.close().await {
+            println!("close turn_server failed, {}", e);
+        }
     }
+    println!("Server closed");
+
     Ok(())
 }
 
-fn run_daemon(args: &RunArgs) {
-    let stdout = File::create("/tmp/rings-node/info.log").unwrap();
-    let stderr = File::create("/tmp/rings-node/err.log").unwrap();
+type AnyhowResult<T> = Result<T, anyhow::Error>;
 
-    let daemonize = Daemonize::new()
-        .pid_file(args.pid_file.as_str())
-        .chown_pid_file(true)
-        .working_directory(args.work_dir.as_str())
-        .user(args.user.as_str())
-        .group(args.group.as_str())
-        .stdout(stdout)
-        .stderr(stderr);
-    if let Err(e) = daemonize.start() {
-        panic!("{}", e);
+fn run_daemon(args: &RunArgs) -> AnyhowResult<()> {
+    if args.daemonize {
+        fs::create_dir_all("/tmp/rings-node")?;
+        let stdout = File::create("/tmp/rings-node/info.log")?;
+        let stderr = File::create("/tmp/rings-node/err.log")?;
+
+        let daemonize = Daemonize::new()
+            .pid_file(args.pid_file.as_str())
+            .chown_pid_file(true)
+            .working_directory(args.work_dir.as_str())
+            .user(args.user.as_str())
+            .group(args.group.as_str())
+            .stdout(stdout)
+            .stderr(stderr);
+        if let Err(e) = daemonize.start() {
+            panic!("{}", e);
+        }
     }
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
@@ -146,6 +183,7 @@ fn run_daemon(args: &RunArgs) {
             panic!("{}", e);
         }
     });
+    Ok(())
 }
 
 fn shutdown_daemon(args: &ShutdownArgs) -> anyhow::Result<()> {
@@ -164,7 +202,9 @@ fn main() {
 
     match cli.command {
         Command::Run(args) => {
-            run_daemon(&args);
+            if let Err(e) = run_daemon(&args) {
+                panic!("{}", e);
+            }
         }
         Command::Shutdown(args) => {
             if let Err(e) = shutdown_daemon(&args) {

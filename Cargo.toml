@@ -31,7 +31,7 @@ client = [
   "base64",
   "rings-core"
 ]
-daemon = ["daemonize", "turn", "libc", "client"]
+daemon = ["daemonize", "turn", "libc", "client", "webrtc-util"]
 browser = [
   "console_error_panic_hook",
   "wasm-bindgen",
@@ -74,7 +74,8 @@ daemonize = { version = "0.4.1", optional = true }
 libc = { version = "0.2.121", optional = true }
 # turn server dependencies
 turn = { version = "0.5.4", optional = true }
-rusturn = { version = "0.0.4", optional = true }
+# rusturn = { version = "0.0.4", optional = true }
+webrtc-util = { version = "0.5.3", optional = true }
 
 # browser
 console_error_panic_hook = { version = "0.1.1", optional = true }
