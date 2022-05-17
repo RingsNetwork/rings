@@ -84,11 +84,11 @@ impl TChordConnection for MessageHandler {
         let mut dht = self.dht.lock().await;
         let mut relay = relay.clone();
         relay.push_prev(dht.id, prev);
-        let join_op = dht.number_of_fingers() > 0;
+//        let join_op = dht.number_of_fingers() > 0;
         match dht.join(msg.id) {
             PeerRingAction::None => Ok(()),
             PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessor(id)) => {
-                if next != prev && join_op {
+                if next != prev {
                     self.send_message(
                         &next.into(),
                         Some(relay.to_path),

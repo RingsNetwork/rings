@@ -36,7 +36,7 @@ pub trait MessageSessionRelayProtocol {
     fn next(&self) -> Option<Did>;
     fn target(&self) -> Did;
     // add self to list
-    fn record(&mut self, id: Did);
+    fn record(&mut self, id: Option<Did>);
 
     fn find_prev(&self) -> Option<Did>;
     fn push_prev(&mut self, current: Did, prev: Did);
@@ -56,10 +56,22 @@ impl MessageSessionRelayProtocol for MessageRelay<Message> {
     // From<A, B> - [Current] - To<C, D> =>
     // From<A, B>, To<Current, C, D>
 
-    fn record(&mut self, id: Did) {
+    fn record(&mut self, next: Option<Did>) {
         match self.method {
-            MessageRelayMethod::SEND => self.from_path.push_front(id),
-            MessageRelayMethod::REPORT => self.to_path.push_front(id)
+            MessageRelayMethod::SEND => {
+                if let Some(id) = next {
+                    if self.to_path.front() != Some(&id) {
+                        self.to_path.push_front(id);
+                    }
+                }
+                self.from_path.push_back(self.addr.into())
+            },
+            MessageRelayMethod::REPORT => {
+                // should always has a prev
+                let prev = self.to_path.pop_back().unwrap();
+                assert_eq!(prev, self.addr.into());
+                self.to_path.push_front(prev);
+            }
         }
     }
 

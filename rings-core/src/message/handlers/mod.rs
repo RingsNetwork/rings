@@ -60,6 +60,7 @@ impl MessageHandler {
         address: &Address,
         msg: MessageRelay<Message>,
     ) -> Result<()> {
+        println!("Sent {:?}", msg.clone());
         self.swarm.send_message(address, msg).await
     }
 
@@ -332,4 +333,121 @@ pub mod test {
         assert!(handler1.listen_once().await.is_some());
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_trible_node_handler() -> Result<()> {
+        let stun = "stun://stun.l.google.com:19302";
+
+        let mut key1 = SecretKey::random();
+        let mut key2 = SecretKey::random();
+        let mut key3 = SecretKey::random();
+
+        let mut v = vec![key1, key2, key3];
+
+        v.sort_by(|a, b| {
+            if a.address() < b.address() {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Greater
+            }
+        });
+        (key1, key2, key3) = (v[0], v[1], v[2]);
+
+        let dht1 = PeerRing::new(key1.address().into());
+        let dht2 = PeerRing::new(key2.address().into());
+        let dht3 = PeerRing::new(key3.address().into());
+
+
+        let session1 = SessionManager::new_with_seckey(&key1).unwrap();
+        let session2 = SessionManager::new_with_seckey(&key2).unwrap();
+        let session3 = SessionManager::new_with_seckey(&key3).unwrap();
+
+        let swarm1 = Arc::new(Swarm::new(stun, key1.address(), session1.clone()));
+        let swarm2 = Arc::new(Swarm::new(stun, key2.address(), session2.clone()));
+        let swarm3 = Arc::new(Swarm::new(stun, key3.address(), session3.clone()));
+
+        let transport1 = swarm1.new_transport().await.unwrap();
+        let transport2 = swarm2.new_transport().await.unwrap();
+        let transport3 = swarm3.new_transport().await.unwrap();
+
+        let handler1 = MessageHandler::new(Arc::new(Mutex::new(dht1)), Arc::clone(&swarm1));
+        let handler2 = MessageHandler::new(Arc::new(Mutex::new(dht2)), Arc::clone(&swarm2));
+        let handler3 = MessageHandler::new(Arc::new(Mutex::new(dht3)), Arc::clone(&swarm3));
+
+        // now we connect handler1 and handler2
+
+        let handshake_info1 = transport1
+            .get_handshake_info(session1, RTCSdpType::Offer)
+            .await?;
+
+        let addr1 = transport2.register_remote_info(handshake_info1).await?;
+
+        let handshake_info2 = transport2
+            .get_handshake_info(session2, RTCSdpType::Answer)
+            .await?;
+
+        let addr2 = transport1.register_remote_info(handshake_info2).await?;
+
+        assert_eq!(addr1, key1.address());
+        assert_eq!(addr2, key2.address());
+        let promise_1 = transport1.connect_success_promise().await?;
+        let promise_2 = transport2.connect_success_promise().await?;
+        promise_1.await?;
+        promise_2.await?;
+
+        swarm1
+            .register(&swarm2.address(), transport1.clone())
+            .await
+            .unwrap();
+        swarm2
+            .register(&swarm1.address(), transport2.clone())
+            .await
+            .unwrap();
+        // JoinDHT
+        let ev_1 = handler1.listen_once().await.unwrap();
+        assert_eq!(&ev_1.from_path.clone(), &vec![]);
+        assert_eq!(&ev_1.to_path.clone(), &vec![]);
+        if let Message::JoinDHT(x) = ev_1.data {
+            assert_eq!(x.id, key2.address().into());
+        } else {
+            assert!(false);
+        }
+        // the message is send from key1
+        // will be transform into some remote action
+        assert_eq!(&ev_1.addr, &key1.address());
+
+
+        let ev_2 = handler2.listen_once().await.unwrap();
+        assert_eq!(&ev_2.from_path.clone(), &vec![]);
+        assert_eq!(&ev_2.to_path.clone(), &vec![]);
+        if let Message::JoinDHT(x) = ev_2.data {
+            assert_eq!(x.id, key1.address().into());
+        } else {
+            assert!(false);
+        }
+        // the message is send from key2
+        // will be transform into some remote action
+        assert_eq!(&ev_2.addr, &key2.address());
+
+        //
+        let ev_1 = handler1.listen_once().await.unwrap();
+        // msg is send from key2
+        assert_eq!(&ev_1.addr, &key2.address());
+        assert_eq!(&ev_1.from_path.clone(), &vec![key2.address().into()]);
+//        assert_eq!(&ev_1.to_path.clone(), &vec![key1.address().into()]);
+
+        // let ev_2 = handler2.listen_once().await;
+        // assert!(ev_2.is_some());
+
+        // if let Message::JoinDHT(x) = ev_1.data {
+        //     assert_eq!(x.id, key2.address().into());
+        // } else {
+        //     assert!(false);
+        // }
+        // // the message is send from key1
+        // // will be transform into some remote action
+        // assert_eq!(&ev_1.addr, &key1.address());
+        Ok(())
+    }
+
 }
