@@ -1,11 +1,10 @@
 #[cfg(test)]
 pub mod test {
+    use log::Level;
     use rings_core::channels::Channel as CbChannel;
     use rings_core::ecc::SecretKey;
     use rings_core::err::Result;
     use rings_core::session::SessionManager;
-
-    use log::Level;
     use rings_core::transports::Transport;
     use rings_core::types::channel::Channel;
     use rings_core::types::channel::Event;
@@ -15,7 +14,8 @@ pub mod test {
     use rings_core::types::ice_transport::IceTrickleScheme;
     use std::str::FromStr;
     use std::sync::Arc;
-
+    use wasm_bindgen::JsValue;
+    use wasm_bindgen_futures::JsFuture;
     use wasm_bindgen_test::wasm_bindgen_test_configure;
     use wasm_bindgen_test::*;
     use web_sys::RtcIceConnectionState;
@@ -25,6 +25,18 @@ pub mod test {
 
     fn setup_log() {
         console_log::init_with_level(Level::Debug).expect("error initializing log");
+    }
+
+    async fn get_fake_permission() {
+        let window = web_sys::window().unwrap();
+        let nav = window.navigator();
+        let media = nav.media_devices().unwrap();
+        let mut cons = web_sys::MediaStreamConstraints::new();
+        cons.audio(&JsValue::from(true));
+        cons.video(&JsValue::from(true));
+        cons.fake(true);
+        let promise = media.get_user_media_with_constraints(&cons).unwrap();
+        JsFuture::from(promise).await.unwrap();
     }
 
     async fn prepare_transport(channel: Option<Arc<CbChannel<Event>>>) -> Result<Transport> {
@@ -70,49 +82,19 @@ pub mod test {
         let addr1 = transport2.register_remote_info(handshake_info1).await?;
 
         assert_eq!(addr1, key1.address());
-        assert_eq!(
-            transport1.ice_connection_state().await,
-            Some(RtcIceConnectionState::New)
-        );
-        assert_eq!(
-            transport2.ice_connection_state().await,
-            Some(RtcIceConnectionState::New)
-        );
-
         // Peer 2 create answer
         let handshake_info2 = transport2
             .get_handshake_info(session2, RtcSdpType::Answer)
             .await
             .unwrap();
 
-        assert_eq!(
-            transport1.ice_connection_state().await,
-            Some(RtcIceConnectionState::New)
-        );
-        assert_eq!(
-            transport2.ice_connection_state().await,
-            Some(RtcIceConnectionState::Checking)
-        );
-
         // Peer 1 got answer then register
         let addr2 = transport1
             .register_remote_info(handshake_info2)
             .await
             .unwrap();
-        // assert_eq!(
-        //     transport1.ice_connection_state().await,
-        //     Some(RtcIceConnectionState::Checking)
-        // );
-
         assert_eq!(addr2, key2.address());
-        // let promise_1 = transport1.connect_success_promise().await.unwrap();
-        // let promise_2 = transport2.connect_success_promise().await.unwrap();
-        // promise_1.await.unwrap();
-        // promise_2.await.unwrap();
-        // assert_eq!(
-        //     transport1.ice_connection_state().await,
-        //     Some(RtcIceConnectionState::Connected)
-        // );
+
         // assert_eq!(
         //     transport2.ice_connection_state().await,
         //     Some(RtcIceConnectionState::Connected)
@@ -122,6 +104,7 @@ pub mod test {
 
     #[wasm_bindgen_test]
     async fn test_ice_connection_establish() {
+        get_fake_permission().await;
         setup_log();
         let transport1 = prepare_transport(None).await.unwrap();
         let transport2 = prepare_transport(None).await.unwrap();

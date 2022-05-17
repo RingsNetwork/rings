@@ -54,7 +54,10 @@ version = "0.3.56"
 optional = true
 features = [
   "Window",
+  "Navigator",
   "MessageEvent",
+  "MediaStreamConstraints",
+  "MediaDevices",
   "RtcPeerConnection",
   "RtcSignalingState",
   "RtcSdpType",
@@ -88,7 +91,7 @@ uuid = { package = "uuid", version = "0.8.2", features = ["v4"] }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.0"
-console_log = { version = "0.2", features = ["color"] }
+console_log = { version = "0.2" }
 
 [target.'cfg(not(target_family="wasm"))'.dev-dependencies]
 tokio = { version = "1.13.0", features = ["full"] }
