@@ -82,7 +82,8 @@ impl TChordConnection for MessageHandler {
         // finger table just have no other node(beside next), it will be a `create` op
         // otherwise, it will be a `send` op
         let mut dht = self.dht.lock().await;
-        let relay = relay.clone();
+        let mut relay = relay.clone();
+        relay.push_prev(dht.id, prev);
         let join_op = dht.number_of_fingers() > 0;
         match dht.join(msg.id) {
             PeerRingAction::None => Ok(()),
@@ -179,27 +180,24 @@ impl TChordConnection for MessageHandler {
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
         relay.push_prev(dht.id, prev);
-        match relay.find_prev() {
-            Some(prev_node) => {
-                self.send_message(
-                    &prev_node,
-                    Some(relay.to_path),
-                    Some(relay.from_path),
-                    MessageRelayMethod::REPORT,
-                    Message::ConnectNodeReport(msg.clone()),
-                )
+        if let Some(prev_node) = relay.next() {
+            self.send_message(
+                &prev_node,
+                Some(relay.to_path),
+                Some(relay.from_path),
+                MessageRelayMethod::REPORT,
+                Message::ConnectNodeReport(msg.clone()),
+            )
                 .await
-            }
-            None => {
-                let transport = self
-                    .swarm
-                    .get_transport(&msg.answer_id)
-                    .ok_or(Error::MessageHandlerMissTransportConnectedNode)?;
-                transport
-                    .register_remote_info(msg.handshake_info.clone().into())
-                    .await
-                    .map(|_| ())
-            }
+        } else {
+            let transport = self
+                .swarm
+                .get_transport(&msg.answer_id)
+                .ok_or(Error::MessageHandlerMissTransportConnectedNode)?;
+            transport
+                .register_remote_info(msg.handshake_info.clone().into())
+                .await
+                .map(|_| ())
         }
     }
 
@@ -212,22 +210,21 @@ impl TChordConnection for MessageHandler {
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
         relay.push_prev(dht.id, prev);
-        match relay.find_prev() {
-            Some(prev_node) => {
-                self.send_message(
-                    &prev_node,
-                    Some(relay.to_path),
-                    Some(relay.from_path),
-                    MessageRelayMethod::REPORT,
-                    Message::AlreadyConnected(msg.clone()),
-                )
+        if let Some(prev_node) = relay.next() {
+            self.send_message(
+                &prev_node,
+                Some(relay.to_path),
+                Some(relay.from_path),
+                MessageRelayMethod::REPORT,
+                Message::AlreadyConnected(msg.clone()),
+            )
                 .await
-            }
-            None => self
+        } else {
+            self
                 .swarm
                 .get_transport(&msg.answer_id)
                 .map(|_| ())
-                .ok_or(Error::MessageHandlerMissTransportAlreadyConnected),
+                .ok_or(Error::MessageHandlerMissTransportAlreadyConnected)
         }
     }
 
@@ -344,9 +341,9 @@ impl TChordConnection for MessageHandler {
         let mut dht = self.dht.lock().await;
         let mut relay = relay.clone();
         relay.push_prev(dht.id, prev);
-        if !relay.to_path.is_empty() {
+        if let Some(next) = relay.next() {
             self.send_message(
-                &prev.into(),
+                &next.into(),
                 Some(relay.to_path),
                 Some(relay.from_path),
                 MessageRelayMethod::REPORT,

@@ -28,8 +28,15 @@ use super::types::Message;
 //    to_path: [A, B]
 // }
 pub trait MessageSessionRelayProtocol {
-    fn sender(&self) -> Option<Did>;
-    fn origin(&self) -> Option<Did>;
+    fn sender(&self) -> Did;
+    fn origin(&self) -> Did;
+    fn flip(&self) -> Self;
+    fn relay(&self) -> Self;
+    fn has_next(&self) -> bool;
+    fn next(&self) -> Option<Did>;
+    fn target(&self) -> Did;
+    // add self to list
+    fn record(&mut self, id: Did);
 
     fn find_prev(&self) -> Option<Did>;
     fn push_prev(&mut self, current: Did, prev: Did);
@@ -41,17 +48,89 @@ pub trait MessageSessionRelayProtocol {
 }
 
 impl MessageSessionRelayProtocol for MessageRelay<Message> {
-    fn sender(&self) -> Option<Did> {
+    // record self to relay list
+    // for Send, push self to back of from_path
+    // From<A, B> - [Current] - To<C, D> =>
+    // From<A, B, Current>, To<C, D>
+    // for Report, push self to front of to_path
+    // From<A, B> - [Current] - To<C, D> =>
+    // From<A, B>, To<Current, C, D>
+
+    fn record(&mut self, id: Did) {
         match self.method {
-            MessageRelayMethod::SEND => self.from_path.back().map(|x| x.clone()),
-            MessageRelayMethod::REPORT => self.to_path.back().map(|x| x.clone()),
+            MessageRelayMethod::SEND => self.from_path.push_front(id),
+            MessageRelayMethod::REPORT => self.to_path.push_front(id)
         }
     }
 
-    fn origin(&self) -> Option<Did> {
+    // for Send, the last ele of from_path is Sender
+    // for Report, the first ele of to_path is Sender
+    // A recived Relay should *ALWAYS* has it's sender
+    fn sender(&self) -> Did {
         match self.method {
-            MessageRelayMethod::SEND => self.from_path.front().map(|x| x.clone()),
-            MessageRelayMethod::REPORT => self.to_path.front().map(|x| x.clone()),
+            MessageRelayMethod::SEND => self.from_path.back().unwrap().clone(),
+            MessageRelayMethod::REPORT => self.to_path.front().unwrap().clone(),
+        }
+    }
+
+    // Origin is where the msg is send_from
+    // for Send it's the first ele of from_path
+    // for Report, it's the last ele of to_path
+    // A recived Relay should *ALWAYS* has it's origin
+    fn origin(&self) -> Did {
+        match self.method {
+            MessageRelayMethod::SEND => self.from_path.front().unwrap().clone(),
+            MessageRelayMethod::REPORT => self.to_path.front().unwrap().clone(),
+        }
+    }
+
+    // A recived Relay should *ALWAYS* has it's target
+    fn target(&self) -> Did {
+         match self.method {
+            MessageRelayMethod::SEND => self.to_path.back().unwrap().clone(),
+            MessageRelayMethod::REPORT => self.from_path.back().unwrap().clone(),
+        }
+    }
+
+    fn flip(&self) -> Self {
+        let mut ret = self.clone();
+        ret.method = self.method.flip();
+        ret
+    }
+
+    fn relay(&self) -> Self {
+        // a relay message should always have it's sender
+        let mut ret = self.clone();
+        match self.method {
+            MessageRelayMethod::SEND => {
+                ret.from_path.push_back(self.sender());
+            }
+            MessageRelayMethod::REPORT => {
+                ret.to_path.pop_back();
+                ret.from_path.push_back(self.sender());
+            }
+        }
+        ret
+    }
+
+    fn has_next(&self) -> bool {
+        match self.method {
+            MessageRelayMethod::SEND => !self.to_path.is_empty(),
+            MessageRelayMethod::REPORT => !self.from_path.is_empty()
+        }
+    }
+
+    // for send, the next hop is the first ele of to_path
+    // From<[A, B]> [Current] To<[D, E]> -> D
+    // for report, the next hop is the back ele of to_path
+    // From<[A, B]> [Current] To<[D, E]> -> D
+
+    fn next(&self) -> Option<Did> {
+        match self.method {
+            MessageRelayMethod::SEND => self.to_path.front().map(|x| x.clone()),
+            // needs to fix here
+            MessageRelayMethod::REPORT => self.to_path.back().map(|x| x.clone())
+
         }
     }
 
@@ -72,7 +151,6 @@ impl MessageSessionRelayProtocol for MessageRelay<Message> {
                     None
                 }
             }
-            _ => unreachable!(),
         }
     }
 
@@ -83,10 +161,9 @@ impl MessageSessionRelayProtocol for MessageRelay<Message> {
                 self.from_path.push_back(prev);
             }
             MessageRelayMethod::REPORT => {
-                assert_eq!(self.to_path.pop_back(), Some(current));
+                self.to_path.pop_back();
                 self.from_path.push_back(prev);
             }
-            _ => unreachable!(),
         }
     }
 
@@ -98,7 +175,6 @@ impl MessageSessionRelayProtocol for MessageRelay<Message> {
                 self.from_path.push_back(current);
             }
             MessageRelayMethod::REPORT => unimplemented!(),
-            _ => unreachable!(),
         };
     }
 
