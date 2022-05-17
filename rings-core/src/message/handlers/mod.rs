@@ -434,10 +434,25 @@ pub mod test {
         // msg is send from key2
         assert_eq!(&ev_1.addr, &key2.address());
         assert_eq!(&ev_1.from_path.clone(), &vec![key2.address().into()]);
-//        assert_eq!(&ev_1.to_path.clone(), &vec![key1.address().into()]);
+        assert_eq!(&ev_1.to_path.clone(), &vec![key1.address().into()]);
+        if let Message::FindSuccessorSend(x) = ev_1.data {
+            assert_eq!(x.id, key2.address().into());
+            assert_eq!(x.for_fix, false);
+        } else {
+            assert!(false);
+        }
 
-        // let ev_2 = handler2.listen_once().await;
-        // assert!(ev_2.is_some());
+        let ev_2 = handler2.listen_once().await.unwrap();
+        assert_eq!(&ev_2.addr, &key1.address());
+        assert_eq!(&ev_2.from_path.clone(), &vec![key1.address().into()]);
+        assert_eq!(&ev_2.to_path.clone(), &vec![key2.address().into()]);
+        if let Message::FindSuccessorSend(x) = ev_2.data {
+            assert_eq!(x.id, key1.address().into());
+            assert_eq!(x.for_fix, false);
+        } else {
+            assert!(false);
+        }
+
 
         // if let Message::JoinDHT(x) = ev_1.data {
         //     assert_eq!(x.id, key2.address().into());
