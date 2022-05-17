@@ -31,12 +31,11 @@ pub trait MessageSessionRelayProtocol {
     fn sender(&self) -> Did;
     fn origin(&self) -> Did;
     fn flip(&self) -> Self;
-    fn relay(&self) -> Self;
     fn has_next(&self) -> bool;
     fn next(&self) -> Option<Did>;
     fn target(&self) -> Did;
     // add self to list
-    fn record(&mut self, id: Option<Did>);
+    fn relay(&mut self, id: Option<Did>);
 
     fn find_prev(&self) -> Option<Did>;
     fn push_prev(&mut self, current: Did, prev: Did);
@@ -56,7 +55,7 @@ impl MessageSessionRelayProtocol for MessageRelay<Message> {
     // From<A, B> - [Current] - To<C, D> =>
     // From<A, B>, To<Current, C, D>
 
-    fn record(&mut self, next: Option<Did>) {
+    fn relay(&mut self, next: Option<Did>) {
         match self.method {
             MessageRelayMethod::SEND => {
                 if let Some(id) = next {
@@ -106,21 +105,6 @@ impl MessageSessionRelayProtocol for MessageRelay<Message> {
     fn flip(&self) -> Self {
         let mut ret = self.clone();
         ret.method = self.method.flip();
-        ret
-    }
-
-    fn relay(&self) -> Self {
-        // a relay message should always have it's sender
-        let mut ret = self.clone();
-        match self.method {
-            MessageRelayMethod::SEND => {
-                ret.from_path.push_back(self.sender());
-            }
-            MessageRelayMethod::REPORT => {
-                ret.to_path.pop_back();
-                ret.from_path.push_back(self.sender());
-            }
-        }
         ret
     }
 

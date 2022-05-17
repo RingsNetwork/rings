@@ -91,7 +91,7 @@ impl TChordConnection for MessageHandler {
                 // B.successor == A
                 // A.find_successor(B)
                 if next != prev {
-                    relay.record(Some(next));
+                    relay.relay(Some(next));
                     self.send_message(
                         &next.into(),
                         Some(relay.to_path),
@@ -318,7 +318,7 @@ impl TChordConnection for MessageHandler {
                 .await
             }
             PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessor(id)) => {
-                relay.record(Some(next));
+                relay.relay(Some(next));
                 self.send_message(
                     &next.into(),
                     Some(relay.to_path),
@@ -343,7 +343,7 @@ impl TChordConnection for MessageHandler {
     ) -> Result<()> {
         let mut dht = self.dht.lock().await;
         let mut relay = relay.clone();
-        relay.record(None);
+        relay.relay(None);
         if let Some(next) = relay.next() {
             self.send_message(
                 &next.into(),
