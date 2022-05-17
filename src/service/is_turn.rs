@@ -8,9 +8,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
-use tokio::signal;
 use tokio::time::Duration;
-use util::vnet::net::*;
+use webrtc_util::vnet::net::*;
 
 struct AuthBuilder {
     cred_map: HashMap<String, Vec<u8>>,
@@ -39,11 +38,11 @@ impl AuthHandler for AuthBuilder {
 
 pub async fn run_udp_turn(
     public_ip: &str,
-    port: &str,
+    port: u16,
     username: &str,
     password: &str,
     realm: &str,
-) -> Result<(), Error> {
+) -> Result<Server, Error> {
     let conn = Arc::new(UdpSocket::bind(format!("0.0.0.0:{}", port)).await?);
     let mut cred_map = HashMap::new();
     let auth = generate_auth_key(username, realm, password);
@@ -63,10 +62,5 @@ pub async fn run_udp_turn(
         channel_bind_timeout: Duration::from_secs(0),
     })
     .await?;
-
-    println!("Waiting for Ctrl-C...");
-    signal::ctrl_c().await.expect("failed to listen for event");
-    println!("\nClosing connection now...");
-    server.close().await?;
-    Ok(())
+    Ok(server)
 }
