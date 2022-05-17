@@ -1,9 +1,9 @@
 use crate::channels::Channel as AcChannel;
 use crate::ecc::PublicKey;
 use crate::err::{Error, Result};
-use crate::message::MessageRelay;
 use crate::message::MessageRelayMethod;
 use crate::message::{Encoded, Encoder};
+use crate::message::{MessageRelay, OriginVerificationGen};
 use crate::session::SessionManager;
 use crate::transports::helper::Promise;
 use crate::transports::helper::TricklePayload;
@@ -376,7 +376,7 @@ impl IceTrickleScheme<Event, AcChannel<Event>> for DefaultTransport {
 
     async fn get_handshake_info(
         &self,
-        session: SessionManager,
+        session_manager: &SessionManager,
         kind: RTCSdpType,
     ) -> Result<Encoded> {
         log::trace!("prepareing handshake info {:?}", kind);
@@ -401,7 +401,15 @@ impl IceTrickleScheme<Event, AcChannel<Event>> for DefaultTransport {
             candidates: local_candidates_json,
         };
         log::trace!("prepared hanshake info :{:?}", data);
-        let resp = MessageRelay::new(data, &session, None, None, None, MessageRelayMethod::SEND)?;
+        let resp = MessageRelay::new(
+            data,
+            session_manager,
+            OriginVerificationGen::Origin,
+            None,
+            None,
+            None,
+            MessageRelayMethod::SEND,
+        )?;
         Ok(resp.gzip(9)?.encode()?)
     }
 
@@ -419,7 +427,7 @@ impl IceTrickleScheme<Event, AcChannel<Event>> for DefaultTransport {
                     log::trace!("add candiates: {:?}", c);
                     self.add_ice_candidate(c.clone()).await?;
                 }
-                if let Ok(public_key) = data.pubkey() {
+                if let Ok(public_key) = data.origin_verification.session.authorizer_pubkey() {
                     let mut pk = self.public_key.write().await;
                     *pk = Some(public_key);
                 };
@@ -554,12 +562,12 @@ pub mod tests {
         let key2 = SecretKey::random();
 
         // Generate Session associated to Keys
-        let session1 = SessionManager::new_with_seckey(&key1)?;
-        let session2 = SessionManager::new_with_seckey(&key2)?;
+        let sm1 = SessionManager::new_with_seckey(&key1)?;
+        let sm2 = SessionManager::new_with_seckey(&key2)?;
 
         // Peer 1 try to connect peer 2
         let handshake_info1 = transport1
-            .get_handshake_info(session1, RTCSdpType::Offer)
+            .get_handshake_info(&sm1, RTCSdpType::Offer)
             .await?;
         assert_eq!(
             transport1.ice_connection_state().await,
@@ -584,7 +592,7 @@ pub mod tests {
 
         // Peer 2 create answer
         let handshake_info2 = transport2
-            .get_handshake_info(session2, RTCSdpType::Answer)
+            .get_handshake_info(&sm2, RTCSdpType::Answer)
             .await?;
         assert_eq!(
             transport1.ice_connection_state().await,

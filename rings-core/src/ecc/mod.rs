@@ -273,4 +273,12 @@ mod tests {
         sig[64] = 27;
         assert_eq!(sig, metamask_sig.as_slice());
     }
+
+    #[test]
+    fn test_recover() {
+        let key = SecretKey::random();
+        let pubkey1 = key.pubkey();
+        let pubkey2 = recover("hello", key.sign("hello")).unwrap();
+        assert_eq!(pubkey1, pubkey2);
+    }
 }

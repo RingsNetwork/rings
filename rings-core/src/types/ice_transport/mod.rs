@@ -79,7 +79,7 @@ pub trait IceTrickleScheme<E: Send, Ch: Channel<E>>: IceTransport<E, Ch> {
     type SdpType;
     async fn get_handshake_info(
         &self,
-        session: SessionManager,
+        session_manager: &SessionManager,
         kind: Self::SdpType,
     ) -> Result<Encoded>;
     async fn register_remote_info(&self, data: Encoded) -> Result<Address>;

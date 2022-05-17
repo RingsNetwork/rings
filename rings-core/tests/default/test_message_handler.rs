@@ -8,7 +8,7 @@ pub mod test {
     use rings_core::message;
     use rings_core::message::Encoder;
     use rings_core::message::MessageHandler;
-    use rings_core::message::{Message, MessageRelayMethod};
+    use rings_core::message::{Message, MessageRelayMethod, OriginVerificationGen};
     use rings_core::session::SessionManager;
     use rings_core::storage::Storage;
     use rings_core::swarm::Swarm;
@@ -54,7 +54,7 @@ pub mod test {
 
         // Peer 1 try to connect peer 2
         let handshake_info1 = transport1
-            .get_handshake_info(swarm1.session(), RTCSdpType::Offer)
+            .get_handshake_info(&swarm1.session_manager, RTCSdpType::Offer)
             .await?;
         assert_eq!(
             transport1.ice_connection_state().await,
@@ -79,7 +79,7 @@ pub mod test {
 
         // Peer 2 create answer
         let handshake_info2 = transport2
-            .get_handshake_info(swarm2.session(), RTCSdpType::Answer)
+            .get_handshake_info(&swarm2.session_manager, RTCSdpType::Answer)
             .await?;
         assert_eq!(
             transport1.ice_connection_state().await,
@@ -186,7 +186,7 @@ pub mod test {
 
         let transport_1_to_3 = swarm1.new_transport().await.unwrap();
         let handshake_info13 = transport_1_to_3
-            .get_handshake_info(swarm1.session(), RTCSdpType::Offer)
+            .get_handshake_info(&swarm1.session_manager, RTCSdpType::Offer)
             .await?;
         swarm1
             .register(&swarm3.address(), Arc::clone(&transport_1_to_3))
@@ -281,6 +281,7 @@ pub mod test {
                         None,
                         None,
                         MessageRelayMethod::SEND,
+                        OriginVerificationGen::Origin,
                         connect_msg.clone(),
                     )
                     .await
@@ -349,6 +350,7 @@ pub mod test {
                         None,
                         None,
                         MessageRelayMethod::SEND,
+                        OriginVerificationGen::Origin,
                         Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
                             id: key1.address().into(),
                         }),
@@ -411,6 +413,7 @@ pub mod test {
                         None,
                         None,
                         MessageRelayMethod::SEND,
+                        OriginVerificationGen::Origin,
                         Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
                             id: swarm1.address().into(),
                         }),
@@ -432,6 +435,7 @@ pub mod test {
                         None,
                         None,
                         MessageRelayMethod::SEND,
+                        OriginVerificationGen::Origin,
                         Message::FindSuccessorSend(message::FindSuccessorSend {
                             id: swarm2.address().into(),
                             for_fix: false,
@@ -506,6 +510,7 @@ pub mod test {
                         None,
                         None,
                         MessageRelayMethod::SEND,
+                        OriginVerificationGen::Origin,
                         Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
                             id: swarm1.address().into(),
                         }),
@@ -526,6 +531,7 @@ pub mod test {
                         None,
                         None,
                         MessageRelayMethod::SEND,
+                        OriginVerificationGen::Origin,
                         Message::FindSuccessorSend(message::FindSuccessorSend {
                             id: swarm2.address().into(),
                             for_fix: false,
@@ -592,6 +598,7 @@ pub mod test {
                          None,
                          None,
                          MessageRelayMethod::SEND,
+                         OriginVerificationGen::Origin,
                          Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
                              id: swarm1.address().into(),
                          }),
@@ -611,6 +618,7 @@ pub mod test {
                      None,
                      None,
                      MessageRelayMethod::SEND,
+                     OriginVerificationGen::Origin,
                      Message::StoreVNode(message::StoreVNode {
                          sender_id: swarm1.address().into(),
                          data: vec![vnode.clone()]
