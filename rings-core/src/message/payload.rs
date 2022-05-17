@@ -23,74 +23,41 @@ pub enum MessageRelayMethod {
     REPORT,
 }
 
+pub enum OriginVerificationGen {
+    Origin,
+    Stick(MessageVerification),
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+pub struct MessageVerification {
+    pub session: Session,
+    pub ttl_ms: usize,
+    pub ts_ms: u128,
+    pub sig: Vec<u8>,
+}
+
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct MessageRelay<T> {
     pub data: T,
     pub tx_id: HashStr,
-    pub ttl_ms: usize,
-    pub ts_ms: u128,
     pub to_path: VecDeque<Did>,
     pub from_path: VecDeque<Did>,
     pub addr: Address,
-    pub session: Session,
-    pub sig: Vec<u8>,
+    pub relay_verification: MessageVerification,
+    pub origin_verification: MessageVerification,
     pub method: MessageRelayMethod,
 }
 
-pub trait MessageSessionRelay {}
-
-impl<T> MessageRelay<T>
-where
-    T: Serialize + DeserializeOwned,
-{
-    pub fn new(
-        data: T,
-        session_manager: &SessionManager,
-        ttl_ms: Option<usize>,
-        to_path: Option<VecDeque<Did>>,
-        from_path: Option<VecDeque<Did>>,
-        method: MessageRelayMethod,
-    ) -> Result<Self> {
-        let ts_ms = utils::get_epoch_ms();
-        let ttl_ms = ttl_ms.unwrap_or(DEFAULT_TTL_MS);
-        let msg = Self::pack_msg(&data, ts_ms, ttl_ms)?;
-        let session = session_manager.session()?;
-        let sig = session_manager.sign(&msg)?;
-        let tx_id = msg.into();
-        let addr = session_manager.authorizer()?.to_owned();
-        let to_path = to_path.unwrap_or_default();
-        let from_path = from_path.unwrap_or_default();
-
-        Ok(Self {
-            session,
-            data,
-            addr,
-            tx_id,
-            sig,
-            to_path,
-            from_path,
-            ttl_ms,
-            ts_ms,
-            method,
-        })
-    }
-
-    pub fn is_expired(&self) -> bool {
-        let now = utils::get_epoch_ms();
-        now > self.ts_ms + self.ttl_ms as u128
-    }
-
-    pub fn verify(&self) -> bool {
+impl MessageVerification {
+    pub fn verify<T>(&self, data: &T) -> bool
+    where
+        T: Serialize,
+    {
         if !self.session.verify() {
             return false;
         }
-        if self.is_expired() {
-            return false;
-        }
-        if let (Ok(msg), Ok(addr)) = (
-            Self::pack_msg(&self.data, self.ts_ms, self.ttl_ms),
-            self.session.address(),
-        ) {
+
+        if let (Ok(addr), Ok(msg)) = (self.session.address(), self.msg(data)) {
             match self.session.auth.signer {
                 Signer::DEFAULT => signers::default::verify(&msg, &addr, &self.sig),
                 Signer::EIP712 => signers::eip712::verify(&msg, &addr, &self.sig),
@@ -100,14 +67,95 @@ where
         }
     }
 
-    pub fn pubkey(&self) -> Result<PublicKey> {
-        self.session.pubkey()
+    pub fn session_pubkey<T>(&self, data: &T) -> Result<PublicKey>
+    where
+        T: Serialize,
+    {
+        let msg = self.msg(data)?;
+        match self.session.auth.signer {
+            Signer::DEFAULT => signers::default::recover(&msg, &self.sig),
+            Signer::EIP712 => signers::eip712::recover(&msg, &self.sig),
+        }
     }
 
-    pub fn pack_msg(data: &T, ts_ms: u128, ttl_ms: usize) -> Result<String> {
+    pub fn pack_msg<T>(data: &T, ts_ms: u128, ttl_ms: usize) -> Result<String>
+    where
+        T: Serialize,
+    {
         let mut msg = serde_json::to_string(data).map_err(|_| Error::SerializeToString)?;
         msg.push_str(&format!("\n{}\n{}", ts_ms, ttl_ms));
         Ok(msg)
+    }
+
+    fn msg<T>(&self, data: &T) -> Result<String>
+    where
+        T: Serialize,
+    {
+        Self::pack_msg(data, self.ts_ms, self.ttl_ms)
+    }
+}
+
+impl<T> MessageRelay<T>
+where
+    T: Serialize + DeserializeOwned,
+{
+    pub fn new(
+        data: T,
+        session_manager: &SessionManager,
+        origin_verification_gen: OriginVerificationGen,
+        ttl_ms: Option<usize>,
+        to_path: Option<VecDeque<Did>>,
+        from_path: Option<VecDeque<Did>>,
+        method: MessageRelayMethod,
+    ) -> Result<Self> {
+        let ts_ms = utils::get_epoch_ms();
+        let ttl_ms = ttl_ms.unwrap_or(DEFAULT_TTL_MS);
+        let msg = &MessageVerification::pack_msg(&data, ts_ms, ttl_ms)?;
+        let tx_id = msg.into();
+        let addr = session_manager.authorizer()?.to_owned();
+        let to_path = to_path.unwrap_or_default();
+        let from_path = from_path.unwrap_or_default();
+
+        let relay_verification = MessageVerification {
+            session: session_manager.session()?,
+            sig: session_manager.sign(msg)?,
+            ttl_ms,
+            ts_ms,
+        };
+
+        let origin_verification = match origin_verification_gen {
+            OriginVerificationGen::Origin => relay_verification.clone(),
+            OriginVerificationGen::Stick(ov) => ov,
+        };
+
+        Ok(Self {
+            data,
+            addr,
+            tx_id,
+            relay_verification,
+            origin_verification,
+            to_path,
+            from_path,
+            method,
+        })
+    }
+
+    pub fn is_expired(&self) -> bool {
+        let now = utils::get_epoch_ms();
+        now > self.relay_verification.ts_ms + self.relay_verification.ttl_ms as u128
+            && now > self.origin_verification.ts_ms + self.origin_verification.ttl_ms as u128
+    }
+
+    pub fn verify(&self) -> bool {
+        if self.is_expired() {
+            return false;
+        }
+
+        self.relay_verification.verify(&self.data) && self.origin_verification.verify(&self.data)
+    }
+
+    pub fn origin_session_pubkey(&self) -> Result<PublicKey> {
+        self.origin_verification.session_pubkey(&self.data)
     }
 
     pub fn gzip(&self, level: u8) -> Result<Vec<u8>> {
@@ -191,6 +239,7 @@ mod tests {
         MessageRelay::new(
             test_data,
             &session,
+            OriginVerificationGen::Origin,
             None,
             None,
             None,
@@ -203,6 +252,20 @@ mod tests {
     fn new_then_verify() {
         let payload = new_test_message();
         assert!(payload.verify());
+
+        let key2 = SecretKey::random();
+        let session2 = SessionManager::new_with_seckey(&key2).unwrap();
+        let relaied_payload = MessageRelay::new(
+            payload.data,
+            &session2,
+            OriginVerificationGen::Stick(payload.origin_verification),
+            None,
+            None,
+            None,
+            MessageRelayMethod::SEND,
+        )
+        .unwrap();
+        assert!(relaied_payload.verify());
     }
 
     #[test]

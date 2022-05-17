@@ -3,6 +3,7 @@ use crate::ecc::PublicKey;
 use crate::ecc::SecretKey;
 use crate::err::{Error, Result};
 use crate::utils;
+use dashmap::DashMap;
 use serde::Deserialize;
 use serde::Serialize;
 use std::sync::Arc;
@@ -47,12 +48,14 @@ pub struct SessionWithKey {
 #[derive(Debug)]
 pub struct SessionManager {
     inner: Arc<RwLock<SessionWithKey>>,
+    remote_sessions: Arc<DashMap<Address, (Session, PublicKey)>>,
 }
 
 impl Clone for SessionManager {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
+            remote_sessions: Arc::clone(&self.remote_sessions),
         }
     }
 }
@@ -84,9 +87,7 @@ impl Session {
         if self.is_expired() {
             return false;
         }
-        if let Ok(auth_str) =
-            serde_json::to_string(&self.auth).map_err(|_| Error::SerializeToString)
-        {
+        if let Ok(auth_str) = self.auth.to_string() {
             match self.auth.signer {
                 Signer::DEFAULT => {
                     signers::default::verify(&auth_str, &self.auth.authorizer, &self.sig)
@@ -99,6 +100,7 @@ impl Session {
             false
         }
     }
+
     pub fn address(&self) -> Result<Address> {
         if !self.verify() {
             Err(Error::VerifySignatureFailed)
@@ -107,7 +109,7 @@ impl Session {
         }
     }
 
-    pub fn pubkey(&self) -> Result<PublicKey> {
+    pub fn authorizer_pubkey(&self) -> Result<PublicKey> {
         let auth = self.auth.to_string()?;
         match self.auth.signer {
             Signer::DEFAULT => signers::default::recover(&auth, &self.sig),
@@ -145,6 +147,7 @@ impl SessionManager {
 
         Self {
             inner: Arc::new(RwLock::new(inner)),
+            remote_sessions: Arc::new(DashMap::new()),
         }
     }
 
@@ -196,5 +199,27 @@ impl SessionManager {
 
     pub fn authorizer(&self) -> Result<Address> {
         Ok(self.session()?.auth.authorizer)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    pub fn test_session_verify() {
+        let key = SecretKey::random();
+        let sm = SessionManager::new_with_seckey(&key).unwrap();
+        let session = sm.session().unwrap();
+        assert!(session.verify());
+    }
+
+    #[test]
+    pub fn test_authorizer_pubkey() {
+        let key = SecretKey::random();
+        let sm = SessionManager::new_with_seckey(&key).unwrap();
+        let session = sm.session().unwrap();
+        let pubkey = session.authorizer_pubkey().unwrap();
+        assert_eq!(key.pubkey(), pubkey);
     }
 }

@@ -8,6 +8,7 @@ pub use encoder::Encoder;
 mod payload;
 pub use payload::MessageRelay;
 pub use payload::MessageRelayMethod;
+pub use payload::OriginVerificationGen;
 
 mod protocol;
 pub use protocol::MessageSessionRelayProtocol;

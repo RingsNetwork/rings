@@ -8,7 +8,7 @@ pub mod test {
     use rings_core::message;
     use rings_core::message::Encoder;
     use rings_core::message::MessageHandler;
-    use rings_core::message::{Message, MessageRelayMethod};
+    use rings_core::message::{Message, MessageRelayMethod, OriginVerificationGen};
     use rings_core::session::SessionManager;
     use rings_core::storage::Storage;
     use rings_core::swarm::Swarm;
@@ -54,7 +54,7 @@ pub mod test {
 
         // Peer 1 try to connect peer 2
         let handshake_info1 = transport1
-            .get_handshake_info(swarm1.session(), RTCSdpType::Offer)
+            .get_handshake_info(&swarm1.session_manager, RTCSdpType::Offer)
             .await?;
         assert_eq!(
             transport1.ice_connection_state().await,
@@ -79,7 +79,7 @@ pub mod test {
 
         // Peer 2 create answer
         let handshake_info2 = transport2
-            .get_handshake_info(swarm2.session(), RTCSdpType::Answer)
+            .get_handshake_info(&swarm2.session_manager, RTCSdpType::Answer)
             .await?;
         assert_eq!(
             transport1.ice_connection_state().await,
@@ -186,7 +186,7 @@ pub mod test {
 
         let transport_1_to_3 = swarm1.new_transport().await.unwrap();
         let handshake_info13 = transport_1_to_3
-            .get_handshake_info(swarm1.session(), RTCSdpType::Offer)
+            .get_handshake_info(&swarm1.session_manager, RTCSdpType::Offer)
             .await?;
         // swarm1
         //     .register(&swarm3.address(), Arc::clone(&transport_1_to_3))
@@ -201,21 +201,9 @@ pub mod test {
         tokio::select! {
             _ = async {
                 futures::join!(
-                    async {
-                        loop {
-                            Arc::new(handler1.clone()).listen().await;
-                        }
-                    },
-                    async {
-                        loop {
-                            Arc::new(handler2.clone()).listen().await;
-                        }
-                    },
-                    async {
-                        loop {
-                            Arc::new(handler3.clone()).listen().await;
-                        }
-                    }
+                    async { Arc::new(handler1.clone()).listen().await },
+                    async { Arc::new(handler2.clone()).listen().await },
+                    async { Arc::new(handler3.clone()).listen().await },
                 )
             } => {unreachable!();}
             _ = async {
@@ -229,18 +217,14 @@ pub mod test {
                 let dht1_successor = dht1.lock().await.successor.clone();
                 let dht2_successor = dht2.lock().await.successor.clone();
                 let dht3_successor = dht3.lock().await.successor.clone();
-                println!(
-                    "swarm1 key: {:?}, swarm2 key: {:?}, swarm3 key: {:?}",
-                    swarm1.address(),
-                    swarm2.address(),
-                    swarm3.address()
-                );
-                println!(
-                    "dht1 successor: {:?}, dht2 successor: {:?}, dht3 successor: {:?}",
-                    dht1_successor,
-                    dht2_successor,
-                    dht3_successor
-                );
+
+                println!("swarm1 key address: {:?}", swarm1.address());
+                println!("swarm2 key address: {:?}", swarm2.address());
+                println!("swarm3 key address: {:?}", swarm3.address());
+                println!("dht1 successor: {:?}", dht1_successor);
+                println!("dht2 successor: {:?}", dht2_successor);
+                println!("dht3 successor: {:?}", dht3_successor);
+
                 // key1 < key2 < key3
                 // dht1 -> dht2
                 // dht2 -> dht3
@@ -284,11 +268,12 @@ pub mod test {
                         None,
                         None,
                         MessageRelayMethod::SEND,
+                        OriginVerificationGen::Origin,
                         connect_msg.clone(),
                     )
                     .await
                     .unwrap();
-                sleep(Duration::from_millis(5000)).await;
+                sleep(Duration::from_millis(10000)).await;
                 let transport_1_to_3 = swarm1.get_transport(&swarm3.address());
                 assert!(transport_1_to_3.is_some());
                 let transport_1_to_3 = transport_1_to_3.unwrap();
@@ -352,6 +337,7 @@ pub mod test {
                         None,
                         None,
                         MessageRelayMethod::SEND,
+                        OriginVerificationGen::Origin,
                         Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
                             id: key1.address().into(),
                         }),
@@ -414,6 +400,7 @@ pub mod test {
                         None,
                         None,
                         MessageRelayMethod::SEND,
+                        OriginVerificationGen::Origin,
                         Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
                             id: swarm1.address().into(),
                         }),
@@ -435,6 +422,7 @@ pub mod test {
                         None,
                         None,
                         MessageRelayMethod::SEND,
+                        OriginVerificationGen::Origin,
                         Message::FindSuccessorSend(message::FindSuccessorSend {
                             id: swarm2.address().into(),
                             for_fix: false,
@@ -509,6 +497,7 @@ pub mod test {
                         None,
                         None,
                         MessageRelayMethod::SEND,
+                        OriginVerificationGen::Origin,
                         Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
                             id: swarm1.address().into(),
                         }),
@@ -529,6 +518,7 @@ pub mod test {
                         None,
                         None,
                         MessageRelayMethod::SEND,
+                        OriginVerificationGen::Origin,
                         Message::FindSuccessorSend(message::FindSuccessorSend {
                             id: swarm2.address().into(),
                             for_fix: false,
@@ -595,6 +585,7 @@ pub mod test {
                          None,
                          None,
                          MessageRelayMethod::SEND,
+                         OriginVerificationGen::Origin,
                          Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
                              id: swarm1.address().into(),
                          }),
@@ -614,6 +605,7 @@ pub mod test {
                      None,
                      None,
                      MessageRelayMethod::SEND,
+                     OriginVerificationGen::Origin,
                      Message::StoreVNode(message::StoreVNode {
                          sender_id: swarm1.address().into(),
                          data: vec![vnode.clone()]

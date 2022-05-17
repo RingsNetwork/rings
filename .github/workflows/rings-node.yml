@@ -14,9 +14,10 @@ env:
 jobs:
   build_wasm:
     name: Build and test for wasm
+    timeout-minutes: 10
     strategy:
       matrix:
-        os: ['ubuntu-latest']
+        os: ["ubuntu-latest"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v2
@@ -42,9 +43,10 @@ jobs:
 
   build:
     name: Build and test
+    timeout-minutes: 10
     strategy:
       matrix:
-        os: ['ubuntu-latest']
+        os: ["ubuntu-latest"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v2
@@ -55,6 +57,7 @@ jobs:
 
   rustfmt_and_clippy:
     name: Check rustfmt style && run clippy
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
