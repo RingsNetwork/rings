@@ -105,6 +105,7 @@ impl MessageHandler {
         let handshake_info = transport
             .get_handshake_info(self.swarm.session().clone(), RTCSdpType::Offer)
             .await?;
+        self.swarm.register(&address, transport.clone()).await?;
         let connect_msg = Message::ConnectNodeSend(super::ConnectNodeSend {
             sender_id: self.swarm.address().into(),
             target_id: address.into(),
@@ -637,6 +638,7 @@ pub mod test {
         println!("=======================================================");
 
         // node1's successor is node2
+        assert!(swarm1.get_transport(&key3.address()).is_none());
         assert_eq!(node1.dht.lock().await.successor.max(), key2.address().into());
         node1.connect(key3.address()).await.unwrap();
         let ev2 = node2.listen_once().await.unwrap();
@@ -679,17 +681,17 @@ pub mod test {
         } else {
             assert!(false);
         }
-        node 2 send report to node1
+        // node 2 send report to node1
         let ev1 = node1.listen_once().await.unwrap();
         assert_eq!(&ev1.addr, &key2.address());
         assert_eq!(&ev1.from_path.clone(), &vec![key1.address().into()]);
         assert_eq!(&ev1.to_path.clone(), &vec![key2.address().into(), key3.address().into()]);
         if let Message::ConnectNodeReport(x) = ev1.data {
-            assert_eq!(x.answer_id, key2.address().into());
+            assert_eq!(x.answer_id, key3.address().into());
         } else {
             assert!(false);
         }
-
+        assert!(swarm1.get_transport(&key3.address()).is_some());
         Ok(())
     }
 }
