@@ -335,7 +335,7 @@ pub mod test {
     }
 
     #[tokio::test]
-    async fn test_trible_node_handler() -> Result<()> {
+    async fn test_triple_node() -> Result<()> {
         let stun = "stun://stun.l.google.com:19302";
 
         let mut key1 = SecretKey::random();
@@ -370,11 +370,11 @@ pub mod test {
         let transport2 = swarm2.new_transport().await.unwrap();
         let transport3 = swarm3.new_transport().await.unwrap();
 
-        let handler1 = MessageHandler::new(Arc::clone(&dht1), Arc::clone(&swarm1));
-        let handler2 = MessageHandler::new(Arc::clone(&dht2), Arc::clone(&swarm2));
-        let handler3 = MessageHandler::new(Arc::clone(&dht3), Arc::clone(&swarm3));
+        let node1 = MessageHandler::new(Arc::clone(&dht1), Arc::clone(&swarm1));
+        let node2 = MessageHandler::new(Arc::clone(&dht2), Arc::clone(&swarm2));
+        let node3 = MessageHandler::new(Arc::clone(&dht3), Arc::clone(&swarm3));
 
-        // now we connect handler1 and handler2
+        // now we connect node1 and node2
 
         let handshake_info1 = transport1
             .get_handshake_info(session1, RTCSdpType::Offer)
@@ -383,7 +383,7 @@ pub mod test {
         let addr1 = transport2.register_remote_info(handshake_info1).await?;
 
         let handshake_info2 = transport2
-            .get_handshake_info(session2, RTCSdpType::Answer)
+            .get_handshake_info(session2.clone(), RTCSdpType::Answer)
             .await?;
 
         let addr2 = transport1.register_remote_info(handshake_info2).await?;
@@ -404,7 +404,7 @@ pub mod test {
             .await
             .unwrap();
         // JoinDHT
-        let ev_1 = handler1.listen_once().await.unwrap();
+        let ev_1 = node1.listen_once().await.unwrap();
         assert_eq!(&ev_1.from_path.clone(), &vec![]);
         assert_eq!(&ev_1.to_path.clone(), &vec![]);
         if let Message::JoinDHT(x) = ev_1.data {
@@ -417,7 +417,7 @@ pub mod test {
         assert_eq!(&ev_1.addr, &key1.address());
 
 
-        let ev_2 = handler2.listen_once().await.unwrap();
+        let ev_2 = node2.listen_once().await.unwrap();
         assert_eq!(&ev_2.from_path.clone(), &vec![]);
         assert_eq!(&ev_2.to_path.clone(), &vec![]);
         if let Message::JoinDHT(x) = ev_2.data {
@@ -429,7 +429,7 @@ pub mod test {
         // will be transform into some remote action
         assert_eq!(&ev_2.addr, &key2.address());
 
-        let ev_1 = handler1.listen_once().await.unwrap();
+        let ev_1 = node1.listen_once().await.unwrap();
         // msg is send from key2
         assert_eq!(&ev_1.addr, &key2.address());
         assert_eq!(&ev_1.from_path.clone(), &vec![key2.address().into()]);
@@ -441,7 +441,7 @@ pub mod test {
             assert!(false);
         }
 
-        let ev_2 = handler2.listen_once().await.unwrap();
+        let ev_2 = node2.listen_once().await.unwrap();
         assert_eq!(&ev_2.addr, &key1.address());
         assert_eq!(&ev_2.from_path.clone(), &vec![key1.address().into()]);
         assert_eq!(&ev_2.to_path.clone(), &vec![key2.address().into()]);
@@ -452,13 +452,13 @@ pub mod test {
             assert!(false);
         }
 
-        // key2 response self as key1's successor
-        let ev_1 = handler1.listen_once().await.unwrap();
+        // node2 response self as node1's successor
+        let ev_1 = node1.listen_once().await.unwrap();
         assert_eq!(&ev_1.addr, &key2.address());
         assert_eq!(&ev_1.from_path.clone(), &vec![key1.address().into()]);
         assert_eq!(&ev_1.to_path.clone(), &vec![key2.address().into()]);
         if let Message::FindSuccessorReport(x) = ev_1.data {
-            // for key2 there is no did is more closer to key1, so it response key1
+            // for node2 there is no did is more closer to key1, so it response key1
             // and dht1 wont update
             assert!(!dht1.lock().await.successor.list().contains(&key1.address().into()));
             assert_eq!(x.id, key1.address().into());
@@ -469,7 +469,7 @@ pub mod test {
         }
 
         // key1 response self as key2's successor
-        let ev_2 = handler2.listen_once().await.unwrap();
+        let ev_2 = node2.listen_once().await.unwrap();
         assert_eq!(&ev_2.addr, &key1.address());
         assert_eq!(&ev_2.from_path.clone(), &vec![key2.address().into()]);
         assert_eq!(&ev_2.to_path.clone(), &vec![key1.address().into()]);
@@ -484,8 +484,117 @@ pub mod test {
             assert!(false);
         }
 
+        println!("========================================");
+        println!("||  now we start join node3 to node2   ||");
+        println!("========================================");
 
+        let handshake_info3 = transport3
+            .get_handshake_info(session3, RTCSdpType::Offer)
+            .await?;
+        // created a new transport
+        let transport2 = swarm2.new_transport().await.unwrap();
 
+        let addr3 = transport2.register_remote_info(handshake_info3).await?;
+
+        assert_eq!(addr3, key3.address());
+
+        let handshake_info2 = transport2
+            .get_handshake_info(session2, RTCSdpType::Answer)
+            .await?;
+
+        let addr2 = transport3.register_remote_info(handshake_info2).await?;
+
+        assert_eq!(addr2, key2.address());
+
+        let promise_3 = transport3.connect_success_promise().await?;
+        let promise_2 = transport2.connect_success_promise().await?;
+        promise_3.await?;
+        promise_2.await?;
+
+        swarm2
+            .register(&swarm3.address(), transport2.clone())
+            .await
+            .unwrap();
+
+        swarm3
+            .register(&swarm2.address(), transport3.clone())
+            .await
+            .unwrap();
+
+        let ev_3 = node3.listen_once().await.unwrap();
+        assert_eq!(&ev_3.addr, &key3.address());
+        assert_eq!(&ev_3.from_path.clone(), &vec![]);
+        assert_eq!(&ev_3.to_path.clone(), &vec![]);
+        if let Message::JoinDHT(x) = ev_3.data {
+            assert_eq!(x.id, key2.address().into());
+        } else {
+            assert!(false);
+        }
+
+        let ev_2 = node2.listen_once().await.unwrap();
+        assert_eq!(&ev_2.addr, &key2.address());
+        assert_eq!(&ev_2.from_path.clone(), &vec![]);
+        assert_eq!(&ev_2.to_path.clone(), &vec![]);
+        if let Message::JoinDHT(x) = ev_2.data {
+            assert_eq!(x.id, key3.address().into());
+        } else {
+            assert!(false);
+        }
+
+        let ev_3 = node3.listen_once().await.unwrap();
+        // msg is send from node2
+        assert_eq!(&ev_3.addr, &key2.address());
+        assert_eq!(&ev_3.from_path.clone(), &vec![key2.address().into()]);
+        assert_eq!(&ev_3.to_path.clone(), &vec![key3.address().into()]);
+        if let Message::FindSuccessorSend(x) = ev_3.data {
+            assert_eq!(x.id, key2.address().into());
+            assert_eq!(x.for_fix, false);
+        } else {
+            assert!(false);
+        }
+
+        let ev_2 = node2.listen_once().await.unwrap();
+        assert_eq!(&ev_2.addr, &key3.address());
+        assert_eq!(&ev_2.from_path.clone(), &vec![key3.address().into()]);
+        assert_eq!(&ev_2.to_path.clone(), &vec![key2.address().into()]);
+        if let Message::FindSuccessorSend(x) = ev_2.data {
+            assert_eq!(x.id, key3.address().into());
+            assert_eq!(x.for_fix, false);
+        } else {
+            assert!(false);
+        }
+
+        // node2 response self as node1's successor
+        let ev_3 = node3.listen_once().await.unwrap();
+        assert_eq!(&ev_3.addr, &key2.address());
+        assert_eq!(&ev_3.from_path.clone(), &vec![key3.address().into()]);
+        assert_eq!(&ev_3.to_path.clone(), &vec![key2.address().into()]);
+        if let Message::FindSuccessorReport(x) = ev_3.data {
+            // for node2 there is no did is more closer to key3, so it response key3
+            // and dht3 wont update
+            assert!(!dht3.lock().await.successor.list().contains(&key3.address().into()));
+            assert_eq!(x.id, key3.address().into());
+            assert_eq!(x.for_fix, false);
+
+        } else {
+            assert!(false);
+        }
+
+        // key3 response self as key2's successor
+        let ev_2 = node2.listen_once().await.unwrap();
+        assert_eq!(&ev_2.addr, &key3.address());
+        assert_eq!(&ev_2.from_path.clone(), &vec![key2.address().into()]);
+        assert_eq!(&ev_2.to_path.clone(), &vec![key3.address().into()]);
+        if let Message::FindSuccessorReport(x) = ev_2.data {
+            // for key3 there is no did is more closer to key3, so it response key3
+            // and dht2 wont update
+            assert_eq!(x.id, key2.address().into());
+            assert!(!dht2.lock().await.successor.list().contains(&key2.address().into()));
+            assert_eq!(x.for_fix, false);
+
+        } else {
+            assert!(false);
+        }
         Ok(())
     }
 
