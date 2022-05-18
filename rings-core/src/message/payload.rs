@@ -37,16 +37,6 @@ pub struct MessageRelay<T> {
     pub method: MessageRelayMethod,
 }
 
-impl MessageRelayMethod {
-    #[inline]
-    pub fn flip(&self) -> Self {
-        match self {
-            Self::SEND => Self::REPORT,
-            Self::REPORT => Self::SEND,
-        }
-    }
-}
-
 pub trait MessageSessionRelay {}
 
 impl<T> MessageRelay<T>

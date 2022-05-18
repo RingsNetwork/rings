@@ -35,8 +35,6 @@ pub trait MessageSessionRelayProtocol {
     fn target(&self) -> Did;
     // add self to list
     fn relay(&mut self, current: Did, next: Option<Did>);
-    fn flip(&mut self);
-
     fn find_prev(&self) -> Option<Did>;
     fn push_prev(&mut self, current: Did, prev: Did);
     fn next_hop(&mut self, current: Did, next: Did);
@@ -74,10 +72,6 @@ impl MessageSessionRelayProtocol for MessageRelay<Message> {
                 self.to_path.push_front(prev);
             }
         }
-    }
-
-    fn flip(&mut self) {
-        self.method = self.method.flip();
     }
 
     // for Send, the last ele of from_path is Sender
