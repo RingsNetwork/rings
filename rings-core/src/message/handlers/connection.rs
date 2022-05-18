@@ -74,7 +74,7 @@ pub trait TChordConnection {
 impl TChordConnection for MessageHandler {
     async fn join_chord(
         &self,
-        relay: MessageRelay<Message>,
+        _relay: MessageRelay<Message>,
         prev: Did,
         msg: JoinDHT,
     ) -> Result<()> {
@@ -93,9 +93,9 @@ impl TChordConnection for MessageHandler {
                     self.send_message(
                         &next.into(),
                         // to
-                        Some(vec![next.into()].into()),
+                        Some(vec![next].into()),
                         // from
-                        Some(vec![dht.id.into()].into()),
+                        Some(vec![dht.id].into()),
                         MessageRelayMethod::SEND,
                         Message::FindSuccessorSend(FindSuccessorSend { id, for_fix: false }),
                     )
@@ -177,7 +177,7 @@ impl TChordConnection for MessageHandler {
     async fn connected_node(
         &self,
         relay: MessageRelay<Message>,
-        prev: Did,
+        _prev: Did,
         msg: ConnectNodeReport,
     ) -> Result<()> {
         let dht = self.dht.lock().await;
@@ -337,7 +337,7 @@ impl TChordConnection for MessageHandler {
     async fn found_successor(
         &self,
         relay: MessageRelay<Message>,
-        prev: Did,
+        _prev: Did,
         msg: FindSuccessorReport,
     ) -> Result<()> {
         let mut dht = self.dht.lock().await;
@@ -497,7 +497,7 @@ mod test {
         if let Message::JoinDHT(x) = ev_1.data {
             assert_eq!(x.id, key2.address().into());
         } else {
-            assert!(false);
+            panic!();
         }
         // the message is send from key1
         // will be transform into some remote action
@@ -509,7 +509,7 @@ mod test {
         if let Message::JoinDHT(x) = ev_2.data {
             assert_eq!(x.id, key1.address().into());
         } else {
-            assert!(false);
+            panic!();
         }
         // the message is send from key2
         // will be transform into some remote action
@@ -522,9 +522,9 @@ mod test {
         assert_eq!(&ev_1.to_path.clone(), &vec![key1.address().into()]);
         if let Message::FindSuccessorSend(x) = ev_1.data {
             assert_eq!(x.id, key2.address().into());
-            assert_eq!(x.for_fix, false);
+            assert!(!x.for_fix);
         } else {
-            assert!(false);
+            panic!();
         }
 
         let ev_2 = node2.listen_once().await.unwrap();
@@ -533,9 +533,9 @@ mod test {
         assert_eq!(&ev_2.to_path.clone(), &vec![key2.address().into()]);
         if let Message::FindSuccessorSend(x) = ev_2.data {
             assert_eq!(x.id, key1.address().into());
-            assert_eq!(x.for_fix, false);
+            assert!(!x.for_fix);
         } else {
-            assert!(false);
+            panic!();
         }
 
         // node2 response self as node1's successor
@@ -553,9 +553,9 @@ mod test {
                 .list()
                 .contains(&key1.address().into()));
             assert_eq!(x.id, key1.address().into());
-            assert_eq!(x.for_fix, false);
+            assert!(!x.for_fix);
         } else {
-            assert!(false);
+            panic!();
         }
 
         // key1 response self as key2's successor
@@ -573,9 +573,9 @@ mod test {
                 .successor
                 .list()
                 .contains(&key2.address().into()));
-            assert_eq!(x.for_fix, false);
+            assert!(!x.for_fix);
         } else {
-            assert!(false);
+            panic!();
         }
 
         println!("========================================");
@@ -622,7 +622,7 @@ mod test {
         if let Message::JoinDHT(x) = ev_3.data {
             assert_eq!(x.id, key2.address().into());
         } else {
-            assert!(false);
+            panic!();
         }
 
         let ev_2 = node2.listen_once().await.unwrap();
@@ -632,7 +632,7 @@ mod test {
         if let Message::JoinDHT(x) = ev_2.data {
             assert_eq!(x.id, key3.address().into());
         } else {
-            assert!(false);
+            panic!();
         }
 
         let ev_3 = node3.listen_once().await.unwrap();
@@ -642,9 +642,9 @@ mod test {
         assert_eq!(&ev_3.to_path.clone(), &vec![key3.address().into()]);
         if let Message::FindSuccessorSend(x) = ev_3.data {
             assert_eq!(x.id, key2.address().into());
-            assert_eq!(x.for_fix, false);
+            assert!(!x.for_fix);
         } else {
-            assert!(false);
+            panic!();
         }
 
         let ev_2 = node2.listen_once().await.unwrap();
@@ -653,9 +653,9 @@ mod test {
         assert_eq!(&ev_2.to_path.clone(), &vec![key2.address().into()]);
         if let Message::FindSuccessorSend(x) = ev_2.data {
             assert_eq!(x.id, key3.address().into());
-            assert_eq!(x.for_fix, false);
+            assert!(!x.for_fix);
         } else {
-            assert!(false);
+            panic!();
         }
 
         // node2 response self as node1's successor
@@ -673,9 +673,9 @@ mod test {
                 .list()
                 .contains(&key3.address().into()));
             assert_eq!(x.id, key3.address().into());
-            assert_eq!(x.for_fix, false);
+            assert!(!x.for_fix);
         } else {
-            assert!(false);
+            panic!();
         }
 
         // key3 response self as key2's successor
@@ -693,9 +693,9 @@ mod test {
                 .successor
                 .list()
                 .contains(&key2.address().into()));
-            assert_eq!(x.for_fix, false);
+            assert!(!x.for_fix);
         } else {
-            assert!(false);
+            panic!();
         }
 
         println!("=======================================================");
@@ -720,7 +720,7 @@ mod test {
             assert_eq!(x.target_id, key3.address().into());
             assert_eq!(x.sender_id, key1.address().into());
         } else {
-            assert!(false);
+            panic!();
         }
 
         let ev3 = node3.listen_once().await.unwrap();
@@ -747,7 +747,7 @@ mod test {
             assert_eq!(x.target_id, key3.address().into());
             assert_eq!(x.sender_id, key1.address().into());
         } else {
-            assert!(false);
+            panic!();
         }
 
         let ev2 = node2.listen_once().await.unwrap();
@@ -762,20 +762,20 @@ mod test {
         if let Message::ConnectNodeReport(x) = ev2.data {
             assert_eq!(x.answer_id, key3.address().into());
         } else {
-            assert!(false);
+            panic!();
         }
         // node 2 send report to node1
         let ev1 = node1.listen_once().await.unwrap();
         assert_eq!(&ev1.addr, &key2.address());
-        assert_eq!(&ev1.from_path.clone(), &vec![key1.address().into()]);
+        assert_eq!(&ev1.from_path, &vec![key1.address().into()]);
         assert_eq!(
-            &ev1.to_path.clone(),
+            &ev1.to_path,
             &vec![key2.address().into(), key3.address().into()]
         );
         if let Message::ConnectNodeReport(x) = ev1.data {
             assert_eq!(x.answer_id, key3.address().into());
         } else {
-            assert!(false);
+            panic!();
         }
         assert!(swarm1.get_transport(&key3.address()).is_some());
         Ok(())
