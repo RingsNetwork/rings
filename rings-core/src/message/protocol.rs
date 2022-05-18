@@ -35,7 +35,7 @@ pub trait MessageSessionRelayProtocol {
     fn next(&self) -> Option<Did>;
     fn target(&self) -> Did;
     // add self to list
-    fn relay(&mut self, id: Option<Did>);
+    fn relay(&mut self, current: Did, next: Option<Did>);
 
     fn find_prev(&self) -> Option<Did>;
     fn push_prev(&mut self, current: Did, prev: Did);
@@ -55,15 +55,18 @@ impl MessageSessionRelayProtocol for MessageRelay<Message> {
     // From<A, B> - [Current] - To<C, D> =>
     // From<A, B>, To<Current, C, D>
 
-    fn relay(&mut self, next: Option<Did>) {
+    fn relay(&mut self, current: Did, next: Option<Did>) {
         match self.method {
             MessageRelayMethod::SEND => {
                 if let Some(id) = next {
+                    // if next hop is not in path plan, push it to `to_path`
                     if self.to_path.front() != Some(&id) {
                         self.to_path.push_front(id);
                     }
                 }
-                self.from_path.push_back(self.addr.into())
+                // always reocrd current; even it's a loop
+                self.to_path.pop_back().unwrap();
+                self.from_path.push_back(current.into());
             },
             MessageRelayMethod::REPORT => {
                 // should always has a prev

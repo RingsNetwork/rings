@@ -101,8 +101,8 @@ impl Swarm {
                         Message::JoinDHT(message::JoinDHT { id: address.into() }),
                         &self.session,
                         None,
-                        None,
-                        None,
+                        Some(vec![self.address().into()].into()),
+                        Some(vec![self.address().into()].into()),
                         MessageRelayMethod::SEND,
                     )?;
                     Ok(Some(payload))

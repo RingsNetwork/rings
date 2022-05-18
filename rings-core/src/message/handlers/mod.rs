@@ -3,12 +3,18 @@ use crate::err::{Error, Result};
 use crate::message::payload::{MessageRelay, MessageRelayMethod};
 use crate::message::types::Message;
 use crate::swarm::Swarm;
-
+use crate::swarm::TransportManager;
+use crate::types::ice_transport::IceTrickleScheme;
 use async_recursion::async_recursion;
 use futures::lock::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use web3::types::Address;
+
+#[cfg(feature = "wasm")]
+use web_sys::RtcSdpType;
+#[cfg(not(feature = "wasm"))]
+use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 
 pub mod connection;
 pub mod storage;
@@ -60,7 +66,12 @@ impl MessageHandler {
         address: &Address,
         msg: MessageRelay<Message>,
     ) -> Result<()> {
+        println!("+++++++++++++++++++++++++++++++++");
+        println!("node {:?}", self.swarm.address());
         println!("Sent {:?}", msg.clone());
+        println!("node {:?}", address);
+        println!("+++++++++++++++++++++++++++++++++");
+
         self.swarm.send_message(address, msg).await
     }
 
@@ -87,6 +98,28 @@ impl MessageHandler {
             method,
         )?;
         self.send_relay_message(address, payload).await
+    }
+
+    pub async fn connect(&self, address: Address) -> Result<()> {
+        let transport = self.swarm.new_transport().await?;
+        let handshake_info = transport
+            .get_handshake_info(self.swarm.session().clone(), RTCSdpType::Offer)
+            .await?;
+        let connect_msg = Message::ConnectNodeSend(super::ConnectNodeSend {
+            sender_id: self.swarm.address().into(),
+            target_id: address.into(),
+            handshake_info: handshake_info.to_string(),
+        });
+        let target = self.dht.lock().await.successor.max();
+        self.send_message(
+            &target,
+            // to_path
+            Some(vec![target].into()),
+            // from_path
+            Some(vec![self.swarm.address().into()].into()),
+            MessageRelayMethod::SEND,
+            connect_msg
+        ).await
     }
 
     #[cfg_attr(feature = "wasm", async_recursion(?Send))]
@@ -220,6 +253,7 @@ mod listener {
 #[cfg(test)]
 pub mod test {
     use super::*;
+    use crate::message;
     use crate::dht::PeerRing;
     use crate::ecc::SecretKey;
     use crate::message::MessageHandler;
@@ -253,7 +287,7 @@ pub mod test {
         let handler1 = MessageHandler::new(Arc::new(Mutex::new(dht1)), Arc::clone(&swarm1));
         let handler2 = MessageHandler::new(Arc::new(Mutex::new(dht2)), Arc::clone(&swarm2));
         let handshake_info1 = transport1
-            .get_handshake_info(session1, RTCSdpType::Offer)
+            .get_handshake_info(session1.clone(), RTCSdpType::Offer)
             .await?;
 
         let addr1 = transport2.register_remote_info(handshake_info1).await?;
@@ -353,6 +387,8 @@ pub mod test {
         });
         (key1, key2, key3) = (v[0], v[1], v[2]);
 
+        println!("test with key1: {:?}, key2: {:?}, key3: {:?}", key1.address(), key2.address(), key3.address());
+
         let dht1 = Arc::new(Mutex::new(PeerRing::new(key1.address().into())));
         let dht2 = Arc::new(Mutex::new(PeerRing::new(key2.address().into())));
         let dht3 = Arc::new(Mutex::new(PeerRing::new(key3.address().into())));
@@ -377,7 +413,7 @@ pub mod test {
         // now we connect node1 and node2
 
         let handshake_info1 = transport1
-            .get_handshake_info(session1, RTCSdpType::Offer)
+            .get_handshake_info(session1.clone(), RTCSdpType::Offer)
             .await?;
 
         let addr1 = transport2.register_remote_info(handshake_info1).await?;
@@ -405,8 +441,8 @@ pub mod test {
             .unwrap();
         // JoinDHT
         let ev_1 = node1.listen_once().await.unwrap();
-        assert_eq!(&ev_1.from_path.clone(), &vec![]);
-        assert_eq!(&ev_1.to_path.clone(), &vec![]);
+        assert_eq!(&ev_1.from_path.clone(), &vec![key1.address().into()]);
+        assert_eq!(&ev_1.to_path.clone(), &vec![key1.address().into()]);
         if let Message::JoinDHT(x) = ev_1.data {
             assert_eq!(x.id, key2.address().into());
         } else {
@@ -418,8 +454,8 @@ pub mod test {
 
 
         let ev_2 = node2.listen_once().await.unwrap();
-        assert_eq!(&ev_2.from_path.clone(), &vec![]);
-        assert_eq!(&ev_2.to_path.clone(), &vec![]);
+        assert_eq!(&ev_2.from_path.clone(), &vec![key2.address().into()]);
+        assert_eq!(&ev_2.to_path.clone(), &vec![key2.address().into()]);
         if let Message::JoinDHT(x) = ev_2.data {
             assert_eq!(x.id, key1.address().into());
         } else {
@@ -523,8 +559,8 @@ pub mod test {
 
         let ev_3 = node3.listen_once().await.unwrap();
         assert_eq!(&ev_3.addr, &key3.address());
-        assert_eq!(&ev_3.from_path.clone(), &vec![]);
-        assert_eq!(&ev_3.to_path.clone(), &vec![]);
+        assert_eq!(&ev_3.from_path.clone(), &vec![key3.address().into()]);
+        assert_eq!(&ev_3.to_path.clone(), &vec![key3.address().into()]);
         if let Message::JoinDHT(x) = ev_3.data {
             assert_eq!(x.id, key2.address().into());
         } else {
@@ -533,8 +569,8 @@ pub mod test {
 
         let ev_2 = node2.listen_once().await.unwrap();
         assert_eq!(&ev_2.addr, &key2.address());
-        assert_eq!(&ev_2.from_path.clone(), &vec![]);
-        assert_eq!(&ev_2.to_path.clone(), &vec![]);
+        assert_eq!(&ev_2.from_path.clone(), &vec![key2.address().into()]);
+        assert_eq!(&ev_2.to_path.clone(), &vec![key2.address().into()]);
         if let Message::JoinDHT(x) = ev_2.data {
             assert_eq!(x.id, key3.address().into());
         } else {
@@ -595,7 +631,42 @@ pub mod test {
         } else {
             assert!(false);
         }
+
+        println!("=======================================================");
+        println!("||  now we connect join node3 to node1 via DHT       ||");
+        println!("=======================================================");
+
+        // node1's successor is node2
+        assert_eq!(node1.dht.lock().await.successor.max(), key2.address().into());
+        node1.connect(key3.address()).await.unwrap();
+        let ev2 = node2.listen_once().await.unwrap();
+
+        // msg is send from node 1 to node 2
+        assert_eq!(&ev2.addr, &key1.address());
+        assert_eq!(&ev2.to_path.clone(), &vec![key2.address().into()]);
+        assert_eq!(&ev2.from_path.clone(), &vec![key1.address().into()]);
+
+        if let Message::ConnectNodeSend(x) = ev2.data {
+            assert_eq!(x.target_id, key3.address().into());
+            assert_eq!(x.sender_id, key1.address().into());
+        } else {
+            assert!(false);
+        }
+
+        let ev3 = node3.listen_once().await.unwrap();
+
+        // msg is relayed from node 2 to node 3
+        println!("test with key1: {:?}, key2: {:?}, key3: {:?}", key1.address(), key2.address(), key3.address());
+
+        assert_eq!(&ev3.addr, &key2.address());
+        assert_eq!(&ev3.to_path.clone(), &vec![key3.address().into()], "to_path not match!");
+        // assert_eq!(&ev3.from_path.clone(), &vec![key1.address().into(), key2.address().into()]);
+        if let Message::ConnectNodeSend(x) = ev3.data {
+            assert_eq!(x.target_id, key3.address().into());
+            assert_eq!(x.sender_id, key1.address().into());
+        } else {
+            assert!(false);
+        }
         Ok(())
     }
-
 }

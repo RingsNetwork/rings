@@ -82,7 +82,6 @@ impl TChordConnection for MessageHandler {
         // finger table just have no other node(beside next), it will be a `create` op
         // otherwise, it will be a `send` op
         let mut dht = self.dht.lock().await;
-        let mut relay = relay.clone();
         match dht.join(msg.id) {
             PeerRingAction::None => Ok(()),
             PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessor(id)) => {
@@ -91,11 +90,12 @@ impl TChordConnection for MessageHandler {
                 // B.successor == A
                 // A.find_successor(B)
                 if next != prev {
-                    relay.relay(Some(next));
                     self.send_message(
                         &next.into(),
-                        Some(relay.to_path),
-                        Some(relay.from_path),
+                        // to
+                        Some(vec![next.into()].into()),
+                        // from
+                        Some(vec![dht.id.into()].into()),
                         MessageRelayMethod::SEND,
                         Message::FindSuccessorSend(FindSuccessorSend { id, for_fix: false }),
                     )
@@ -117,7 +117,6 @@ impl TChordConnection for MessageHandler {
         // TODO: Verify necessity based on PeerRing to decrease connections but make sure availablitity.
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
-        relay.push_prev(dht.id, prev);
         if dht.id != msg.target_id {
             let next_node = match dht.find_successor(msg.target_id)? {
                 PeerRingAction::Some(node) => Some(node),
@@ -125,6 +124,7 @@ impl TChordConnection for MessageHandler {
                 _ => None,
             }
             .ok_or(Error::MessageHandlerMissNextNode)?;
+            relay.relay(dht.id, Some(next_node));
             return self
                 .send_message(
                     &next_node,
@@ -318,7 +318,7 @@ impl TChordConnection for MessageHandler {
                 .await
             }
             PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessor(id)) => {
-                relay.relay(Some(next));
+                relay.relay(dht.id, Some(next));
                 self.send_message(
                     &next.into(),
                     Some(relay.to_path),
@@ -343,7 +343,7 @@ impl TChordConnection for MessageHandler {
     ) -> Result<()> {
         let mut dht = self.dht.lock().await;
         let mut relay = relay.clone();
-        relay.relay(None);
+        relay.relay(dht.id, None);
         if let Some(next) = relay.next() {
             self.send_message(
                 &next.into(),
