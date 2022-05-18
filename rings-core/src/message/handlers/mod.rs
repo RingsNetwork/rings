@@ -660,7 +660,7 @@ pub mod test {
 
         assert_eq!(&ev3.addr, &key2.address());
         assert_eq!(&ev3.to_path.clone(), &vec![key3.address().into()], "to_path not match!");
-        // assert_eq!(&ev3.from_path.clone(), &vec![key1.address().into(), key2.address().into()]);
+        assert_eq!(&ev3.from_path.clone(), &vec![key1.address().into(), key2.address().into()]);
         if let Message::ConnectNodeSend(x) = ev3.data {
             assert_eq!(x.target_id, key3.address().into());
             assert_eq!(x.sender_id, key1.address().into());
@@ -669,8 +669,11 @@ pub mod test {
         }
 
         let ev2 = node2.listen_once().await.unwrap();
+        // node3 send report to node2
+        // for a report the to_path should as same as a send request
         assert_eq!(&ev2.addr, &key3.address());
-
+        assert_eq!(&ev2.from_path.clone(), &vec![key1.address().into(), key2.address().into()]);
+        assert_eq!(&ev2.to_path.clone(), &vec![key3.address().into()]);
         Ok(())
     }
 }

@@ -147,8 +147,8 @@ impl TChordConnection for MessageHandler {
                     .to_string();
                 self.send_message(
                     &prev.into(),
+                    Some(relay.to_path),
                     Some(relay.from_path),
-                    None,
                     MessageRelayMethod::REPORT,
                     Message::ConnectNodeReport(ConnectNodeReport {
                         answer_id: dht.id,
