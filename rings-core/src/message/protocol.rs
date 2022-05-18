@@ -105,6 +105,7 @@ impl MessageSessionRelayProtocol for MessageRelay<Message> {
         }
     }
 
+    #[inline]
     fn flip(&self) -> Self {
         let mut ret = self.clone();
         ret.method = self.method.flip();
