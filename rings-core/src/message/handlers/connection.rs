@@ -376,8 +376,8 @@ impl TChordConnection for MessageHandler {
         dht.notify(msg.id);
         self.send_message(
             &prev.into(),
-            Some(relay.from_path),
             Some(relay.to_path),
+            Some(relay.from_path),
             MessageRelayMethod::REPORT,
             Message::NotifyPredecessorReport(NotifyPredecessorReport { id: dht.id }),
         )
