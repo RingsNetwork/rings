@@ -89,12 +89,15 @@ impl MessageHandler {
         message: Message,
     ) -> Result<()> {
         // TODO: diff ttl for each message?
+        let from_path = from_path.unwrap_or(vec![self.swarm.address().into()].into());
+        let to_path = to_path.unwrap_or(vec![address.clone().into()].into());
+
         let payload = MessageRelay::new(
             message,
             &self.swarm.session(),
             None,
-            to_path,
-            from_path,
+            Some(to_path),
+            Some(from_path),
             method,
         )?;
         self.send_relay_message(address, payload).await
@@ -254,7 +257,6 @@ mod listener {
 #[cfg(test)]
 pub mod test {
     use super::*;
-    use crate::message;
     use crate::dht::PeerRing;
     use crate::ecc::SecretKey;
     use crate::message::MessageHandler;
