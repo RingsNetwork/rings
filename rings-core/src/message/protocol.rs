@@ -67,7 +67,7 @@ impl MessageSessionRelayProtocol for MessageRelay<Message> {
                 // always reocrd current; even it's a loop
                 self.to_path.pop_back().unwrap();
                 self.from_path.push_back(current.into());
-            },
+            }
             MessageRelayMethod::REPORT => {
                 // should always has a prev
                 let prev = self.from_path.pop_back().unwrap();
@@ -99,7 +99,7 @@ impl MessageSessionRelayProtocol for MessageRelay<Message> {
 
     // A recived Relay should *ALWAYS* has it's target
     fn target(&self) -> Did {
-         match self.method {
+        match self.method {
             MessageRelayMethod::SEND => self.to_path.back().unwrap().clone(),
             MessageRelayMethod::REPORT => self.from_path.back().unwrap().clone(),
         }
@@ -114,7 +114,7 @@ impl MessageSessionRelayProtocol for MessageRelay<Message> {
     fn has_next(&self) -> bool {
         match self.method {
             MessageRelayMethod::SEND => !self.to_path.is_empty(),
-            MessageRelayMethod::REPORT => !self.from_path.is_empty()
+            MessageRelayMethod::REPORT => !self.from_path.is_empty(),
         }
     }
 
@@ -126,7 +126,7 @@ impl MessageSessionRelayProtocol for MessageRelay<Message> {
     fn next(&self) -> Option<Did> {
         match self.method {
             MessageRelayMethod::SEND => self.to_path.front().map(|x| x.clone()),
-            MessageRelayMethod::REPORT => self.from_path.back().map(|x| x.clone())
+            MessageRelayMethod::REPORT => self.from_path.back().map(|x| x.clone()),
         }
     }
 

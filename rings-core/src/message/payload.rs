@@ -41,7 +41,7 @@ impl MessageRelayMethod {
     pub fn flip(&self) -> Self {
         match self {
             Self::SEND => Self::REPORT,
-            Self::REPORT => Self::SEND
+            Self::REPORT => Self::SEND,
         }
     }
 }

@@ -2,10 +2,10 @@ use crate::dht::{Did, PeerRing};
 use crate::err::{Error, Result};
 use crate::message::payload::{MessageRelay, MessageRelayMethod};
 use crate::message::types::Message;
+use crate::prelude::RTCSdpType;
 use crate::swarm::Swarm;
 use crate::swarm::TransportManager;
 use crate::types::ice_transport::IceTrickleScheme;
-use crate::prelude::RTCSdpType;
 use async_recursion::async_recursion;
 use futures::lock::Mutex;
 use std::collections::VecDeque;
@@ -118,8 +118,9 @@ impl MessageHandler {
             // from_path
             Some(vec![self.swarm.address().into()].into()),
             MessageRelayMethod::SEND,
-            connect_msg
-        ).await
+            connect_msg,
+        )
+        .await
     }
 
     #[cfg_attr(feature = "wasm", async_recursion(?Send))]
@@ -386,12 +387,16 @@ pub mod test {
         });
         (key1, key2, key3) = (v[0], v[1], v[2]);
 
-        println!("test with key1: {:?}, key2: {:?}, key3: {:?}", key1.address(), key2.address(), key3.address());
+        println!(
+            "test with key1: {:?}, key2: {:?}, key3: {:?}",
+            key1.address(),
+            key2.address(),
+            key3.address()
+        );
 
         let dht1 = Arc::new(Mutex::new(PeerRing::new(key1.address().into())));
         let dht2 = Arc::new(Mutex::new(PeerRing::new(key2.address().into())));
         let dht3 = Arc::new(Mutex::new(PeerRing::new(key3.address().into())));
-
 
         let session1 = SessionManager::new_with_seckey(&key1).unwrap();
         let session2 = SessionManager::new_with_seckey(&key2).unwrap();
@@ -451,7 +456,6 @@ pub mod test {
         // will be transform into some remote action
         assert_eq!(&ev_1.addr, &key1.address());
 
-
         let ev_2 = node2.listen_once().await.unwrap();
         assert_eq!(&ev_2.from_path.clone(), &vec![key2.address().into()]);
         assert_eq!(&ev_2.to_path.clone(), &vec![key2.address().into()]);
@@ -495,10 +499,14 @@ pub mod test {
         if let Message::FindSuccessorReport(x) = ev_1.data {
             // for node2 there is no did is more closer to key1, so it response key1
             // and dht1 wont update
-            assert!(!dht1.lock().await.successor.list().contains(&key1.address().into()));
+            assert!(!dht1
+                .lock()
+                .await
+                .successor
+                .list()
+                .contains(&key1.address().into()));
             assert_eq!(x.id, key1.address().into());
             assert_eq!(x.for_fix, false);
-
         } else {
             assert!(false);
         }
@@ -512,9 +520,13 @@ pub mod test {
             // for key1 there is no did is more closer to key1, so it response key1
             // and dht2 wont update
             assert_eq!(x.id, key2.address().into());
-            assert!(!dht2.lock().await.successor.list().contains(&key2.address().into()));
+            assert!(!dht2
+                .lock()
+                .await
+                .successor
+                .list()
+                .contains(&key2.address().into()));
             assert_eq!(x.for_fix, false);
-
         } else {
             assert!(false);
         }
@@ -607,10 +619,14 @@ pub mod test {
         if let Message::FindSuccessorReport(x) = ev_3.data {
             // for node2 there is no did is more closer to key3, so it response key3
             // and dht3 wont update
-            assert!(!dht3.lock().await.successor.list().contains(&key3.address().into()));
+            assert!(!dht3
+                .lock()
+                .await
+                .successor
+                .list()
+                .contains(&key3.address().into()));
             assert_eq!(x.id, key3.address().into());
             assert_eq!(x.for_fix, false);
-
         } else {
             assert!(false);
         }
@@ -624,9 +640,13 @@ pub mod test {
             // for key3 there is no did is more closer to key3, so it response key3
             // and dht2 wont update
             assert_eq!(x.id, key2.address().into());
-            assert!(!dht2.lock().await.successor.list().contains(&key2.address().into()));
+            assert!(!dht2
+                .lock()
+                .await
+                .successor
+                .list()
+                .contains(&key2.address().into()));
             assert_eq!(x.for_fix, false);
-
         } else {
             assert!(false);
         }
@@ -637,7 +657,10 @@ pub mod test {
 
         // node1's successor is node2
         assert!(swarm1.get_transport(&key3.address()).is_none());
-        assert_eq!(node1.dht.lock().await.successor.max(), key2.address().into());
+        assert_eq!(
+            node1.dht.lock().await.successor.max(),
+            key2.address().into()
+        );
         node1.connect(key3.address()).await.unwrap();
         let ev2 = node2.listen_once().await.unwrap();
 
@@ -656,11 +679,23 @@ pub mod test {
         let ev3 = node3.listen_once().await.unwrap();
 
         // msg is relayed from node 2 to node 3
-        println!("test with key1: {:?}, key2: {:?}, key3: {:?}", key1.address(), key2.address(), key3.address());
+        println!(
+            "test with key1: {:?}, key2: {:?}, key3: {:?}",
+            key1.address(),
+            key2.address(),
+            key3.address()
+        );
 
         assert_eq!(&ev3.addr, &key2.address());
-        assert_eq!(&ev3.to_path.clone(), &vec![key3.address().into()], "to_path not match!");
-        assert_eq!(&ev3.from_path.clone(), &vec![key1.address().into(), key2.address().into()]);
+        assert_eq!(
+            &ev3.to_path.clone(),
+            &vec![key3.address().into()],
+            "to_path not match!"
+        );
+        assert_eq!(
+            &ev3.from_path.clone(),
+            &vec![key1.address().into(), key2.address().into()]
+        );
         if let Message::ConnectNodeSend(x) = ev3.data {
             assert_eq!(x.target_id, key3.address().into());
             assert_eq!(x.sender_id, key1.address().into());
@@ -672,7 +707,10 @@ pub mod test {
         // node3 send report to node2
         // for a report the to_path should as same as a send request
         assert_eq!(&ev2.addr, &key3.address());
-        assert_eq!(&ev2.from_path.clone(), &vec![key1.address().into(), key2.address().into()]);
+        assert_eq!(
+            &ev2.from_path.clone(),
+            &vec![key1.address().into(), key2.address().into()]
+        );
         assert_eq!(&ev2.to_path.clone(), &vec![key3.address().into()]);
         if let Message::ConnectNodeReport(x) = ev2.data {
             assert_eq!(x.answer_id, key3.address().into());
@@ -683,7 +721,10 @@ pub mod test {
         let ev1 = node1.listen_once().await.unwrap();
         assert_eq!(&ev1.addr, &key2.address());
         assert_eq!(&ev1.from_path.clone(), &vec![key1.address().into()]);
-        assert_eq!(&ev1.to_path.clone(), &vec![key2.address().into(), key3.address().into()]);
+        assert_eq!(
+            &ev1.to_path.clone(),
+            &vec![key2.address().into(), key3.address().into()]
+        );
         if let Message::ConnectNodeReport(x) = ev1.data {
             assert_eq!(x.answer_id, key3.address().into());
         } else {
