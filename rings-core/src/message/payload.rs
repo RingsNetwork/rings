@@ -38,6 +38,7 @@ pub struct MessageRelay<T> {
 }
 
 impl MessageRelayMethod {
+    #[inline]
     pub fn flip(&self) -> Self {
         match self {
             Self::SEND => Self::REPORT,
