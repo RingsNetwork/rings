@@ -30,12 +30,12 @@ use super::types::Message;
 pub trait MessageSessionRelayProtocol {
     fn sender(&self) -> Did;
     fn origin(&self) -> Did;
-    fn flip(&self) -> Self;
     fn has_next(&self) -> bool;
     fn next(&self) -> Option<Did>;
     fn target(&self) -> Did;
     // add self to list
     fn relay(&mut self, current: Did, next: Option<Did>);
+    fn flip(&mut self);
 
     fn find_prev(&self) -> Option<Did>;
     fn push_prev(&mut self, current: Did, prev: Did);
@@ -76,6 +76,10 @@ impl MessageSessionRelayProtocol for MessageRelay<Message> {
         }
     }
 
+    fn flip(&mut self) {
+        self.method = self.method.flip();
+    }
+
     // for Send, the last ele of from_path is Sender
     // for Report, the first ele of to_path is Sender
     // A recived Relay should *ALWAYS* has it's sender
@@ -103,13 +107,6 @@ impl MessageSessionRelayProtocol for MessageRelay<Message> {
             MessageRelayMethod::SEND => *self.to_path.back().unwrap(),
             MessageRelayMethod::REPORT => *self.from_path.back().unwrap(),
         }
-    }
-
-    #[inline]
-    fn flip(&self) -> Self {
-        let mut ret = self.clone();
-        ret.method = self.method.flip();
-        ret
     }
 
     fn has_next(&self) -> bool {
