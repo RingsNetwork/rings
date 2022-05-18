@@ -182,8 +182,9 @@ impl TChordConnection for MessageHandler {
     ) -> Result<()> {
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
-        relay.push_prev(dht.id, prev);
+        relay.relay(dht.id, None);
         if let Some(prev_node) = relay.next() {
+            println!("fucking relay {:?}, {:?}", prev_node, relay.to_path);
             self.send_message(
                 &prev_node,
                 Some(relay.to_path),

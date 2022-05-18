@@ -126,7 +126,6 @@ impl MessageSessionRelayProtocol for MessageRelay<Message> {
     fn next(&self) -> Option<Did> {
         match self.method {
             MessageRelayMethod::SEND => self.to_path.front().map(|x| x.clone()),
-            // needs to fix here
             MessageRelayMethod::REPORT => self.from_path.back().map(|x| x.clone())
         }
     }

@@ -674,6 +674,22 @@ pub mod test {
         assert_eq!(&ev2.addr, &key3.address());
         assert_eq!(&ev2.from_path.clone(), &vec![key1.address().into(), key2.address().into()]);
         assert_eq!(&ev2.to_path.clone(), &vec![key3.address().into()]);
+        if let Message::ConnectNodeReport(x) = ev2.data {
+            assert_eq!(x.answer_id, key3.address().into());
+        } else {
+            assert!(false);
+        }
+        // node 2 send report to node1
+        // let ev1 = node1.listen_once().await.unwrap();
+        // assert_eq!(&ev1.addr, &key2.address());
+        // assert_eq!(&ev1.from_path.clone(), &vec![key1.address().into()]);
+        // assert_eq!(&ev1.to_path.clone(), &vec![key2.address().into(), key3.address().into()]);
+        // if let Message::ConnectNodeReport(x) = ev1.data {
+        //     assert_eq!(x.answer_id, key2.address().into());
+        // } else {
+        //     assert!(false);
+        // }
+
         Ok(())
     }
 }
