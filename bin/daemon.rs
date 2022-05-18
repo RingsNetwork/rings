@@ -5,13 +5,14 @@ use libc::kill;
 use rings_node::{
     logger::{LogLevel, Logger},
     prelude::rings_core::{
-        dht::PeerRing, ecc::SecretKey, message::MessageHandler, prelude::webrtc::ice::url::Url,
+        dht::PeerRing, ecc::SecretKey, message::MessageHandler, prelude::url,
         session::SessionManager, swarm::Swarm, types::message::MessageListener,
     },
     service::{run_service, run_udp_turn},
 };
 use std::{
     fs::{self, File},
+    str::FromStr,
     sync::Arc,
 };
 use tokio::signal;
@@ -110,10 +111,12 @@ async fn run_jobs(args: &RunArgs) -> anyhow::Result<()> {
 
     let mut ice_servers = args.ice_server.clone();
     let turn_server = if !args.without_turn {
-        let mut turn_url = Url::parse_url("turn:127.0.0.1").unwrap();
-        turn_url.port = args.turn_port;
-        turn_url.username = args.turn_username.to_owned();
-        turn_url.password = args.turn_password.to_owned();
+        let mut turn_url = url::Url::from_str("turn://0.0.0.0:3567").unwrap();
+        turn_url.set_port(Some(args.turn_port)).unwrap();
+        turn_url.set_username(args.turn_username.as_str()).unwrap();
+        turn_url
+            .set_password(Some(args.turn_password.as_str()))
+            .unwrap();
         ice_servers.push(turn_url.to_string());
         Some(
             run_udp_turn(

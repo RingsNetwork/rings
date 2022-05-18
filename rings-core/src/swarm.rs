@@ -54,7 +54,7 @@ impl Swarm {
             .split(';')
             .collect::<Vec<&str>>()
             .into_iter()
-            .map(|_s| IceServer::from_str(_s).unwrap())
+            .map(|s| IceServer::from_str(s).unwrap())
             .collect::<Vec<IceServer>>();
         Self {
             table: MemStorage::<Address, Arc<Transport>>::new(),
