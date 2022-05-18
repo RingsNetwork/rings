@@ -667,6 +667,10 @@ pub mod test {
         } else {
             assert!(false);
         }
+
+        let ev2 = node2.listen_once().await.unwrap();
+        assert_eq!(&ev2.addr, &key3.address());
+
         Ok(())
     }
 }
