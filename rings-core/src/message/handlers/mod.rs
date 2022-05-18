@@ -5,16 +5,12 @@ use crate::message::types::Message;
 use crate::swarm::Swarm;
 use crate::swarm::TransportManager;
 use crate::types::ice_transport::IceTrickleScheme;
+use crate::prelude::RTCSdpType;
 use async_recursion::async_recursion;
 use futures::lock::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use web3::types::Address;
-
-#[cfg(feature = "wasm")]
-use web_sys::RtcSdpType;
-#[cfg(not(feature = "wasm"))]
-use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 
 pub mod connection;
 pub mod storage;
