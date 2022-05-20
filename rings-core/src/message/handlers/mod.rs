@@ -99,6 +99,13 @@ impl MessageHandler {
         self.send_relay_message(address, payload).await
     }
 
+    // disconnect a node if a node is in DHT
+    pub async fn disconnect(&self, address: Address) {
+        let mut dht = self.dht.lock().await;
+        dht.remove(address.into());
+        self.swarm.remove_transport(&address);
+    }
+
     pub async fn connect(&self, address: Address) -> Result<()> {
         let transport = self.swarm.new_transport().await?;
         let handshake_info = transport

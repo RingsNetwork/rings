@@ -93,6 +93,13 @@ impl PeerRing {
         }
     }
 
+    // remove a node from dht finger table
+    pub fn remove(&mut self, id: Did) {
+        self.finger.retain(|v| *v == Some(id));
+    }
+
+
+
     pub fn bias(&self, id: Did) -> BiasId {
         BiasId::new(&self.id, &id)
     }
