@@ -781,7 +781,6 @@ mod test {
         Ok(())
     }
 
-
     /// We have three nodes, where
     /// key 1 > key2 > key3
     /// we connect key1 to key3 first
@@ -1046,7 +1045,10 @@ mod test {
         // node 3 will ask node1 to find successor of node2
         let ev_1 = node1.listen_once().await.unwrap();
         assert_eq!(&ev_1.addr, &key3.address());
-        assert_eq!(&ev_1.from_path.clone(), &vec![key2.address().into(), key3.address().into()]);
+        assert_eq!(
+            &ev_1.from_path.clone(),
+            &vec![key2.address().into(), key3.address().into()]
+        );
         assert_eq!(&ev_1.to_path.clone(), &vec![key1.address().into()]);
         if let Message::FindSuccessorSend(x) = ev_1.data {
             assert_eq!(x.id, key2.address().into());

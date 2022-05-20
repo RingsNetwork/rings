@@ -199,7 +199,7 @@ pub enum Error {
     RTCSdpTypeNotMatch,
 
     #[error("Transport not Found")]
-    TransportNotFound
+    TransportNotFound,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

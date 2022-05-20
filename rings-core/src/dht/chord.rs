@@ -98,8 +98,6 @@ impl PeerRing {
         self.finger.retain(|v| *v == Some(id));
     }
 
-
-
     pub fn bias(&self, id: Did) -> BiasId {
         BiasId::new(&self.id, &id)
     }
