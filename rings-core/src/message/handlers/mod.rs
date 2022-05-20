@@ -2,8 +2,10 @@ use crate::dht::{Did, PeerRing};
 use crate::err::{Error, Result};
 use crate::message::payload::{MessageRelay, MessageRelayMethod};
 use crate::message::types::Message;
+use crate::prelude::RTCSdpType;
 use crate::swarm::Swarm;
-
+use crate::swarm::TransportManager;
+use crate::types::ice_transport::IceTrickleScheme;
 use async_recursion::async_recursion;
 use futures::lock::Mutex;
 use std::collections::VecDeque;
@@ -60,6 +62,12 @@ impl MessageHandler {
         address: &Address,
         msg: MessageRelay<Message>,
     ) -> Result<()> {
+        println!("+++++++++++++++++++++++++++++++++");
+        println!("node {:?}", self.swarm.address());
+        println!("Sent {:?}", msg.clone());
+        println!("node {:?}", address);
+        println!("+++++++++++++++++++++++++++++++++");
+
         self.swarm.send_message(address, msg).await
     }
 
@@ -77,15 +85,49 @@ impl MessageHandler {
         message: Message,
     ) -> Result<()> {
         // TODO: diff ttl for each message?
+        let from_path = from_path.unwrap_or_else(|| vec![self.swarm.address().into()].into());
+        let to_path = to_path.unwrap_or_else(|| vec![(*address).into()].into());
+
         let payload = MessageRelay::new(
             message,
             &self.swarm.session(),
             None,
-            to_path,
-            from_path,
+            Some(to_path),
+            Some(from_path),
             method,
         )?;
         self.send_relay_message(address, payload).await
+    }
+
+    // disconnect a node if a node is in DHT
+    pub async fn disconnect(&self, address: Address) {
+        let mut dht = self.dht.lock().await;
+        dht.remove(address.into());
+        self.swarm.remove_transport(&address);
+    }
+
+    pub async fn connect(&self, address: Address) -> Result<()> {
+        let transport = self.swarm.new_transport().await?;
+        let handshake_info = transport
+            .get_handshake_info(self.swarm.session().clone(), RTCSdpType::Offer)
+            .await?;
+        self.swarm.register(&address, transport.clone()).await?;
+        let connect_msg = Message::ConnectNodeSend(super::ConnectNodeSend {
+            sender_id: self.swarm.address().into(),
+            target_id: address.into(),
+            handshake_info: handshake_info.to_string(),
+        });
+        let target = self.dht.lock().await.successor.max();
+        self.send_message(
+            &target,
+            // to_path
+            Some(vec![target].into()),
+            // from_path
+            Some(vec![self.swarm.address().into()].into()),
+            MessageRelayMethod::SEND,
+            connect_msg,
+        )
+        .await
     }
 
     #[cfg_attr(feature = "wasm", async_recursion(?Send))]
@@ -252,7 +294,7 @@ pub mod test {
         let handler1 = MessageHandler::new(Arc::new(Mutex::new(dht1)), Arc::clone(&swarm1));
         let handler2 = MessageHandler::new(Arc::new(Mutex::new(dht2)), Arc::clone(&swarm2));
         let handshake_info1 = transport1
-            .get_handshake_info(session1, RTCSdpType::Offer)
+            .get_handshake_info(session1.clone(), RTCSdpType::Offer)
             .await?;
 
         let addr1 = transport2.register_remote_info(handshake_info1).await?;

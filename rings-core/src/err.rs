@@ -197,6 +197,9 @@ pub enum Error {
 
     #[error("RTC unsupport sdp type")]
     RTCSdpTypeNotMatch,
+
+    #[error("Transport not Found")]
+    TransportNotFound,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

@@ -21,7 +21,6 @@ const DEFAULT_TTL_MS: usize = 60 * 1000;
 pub enum MessageRelayMethod {
     SEND,
     REPORT,
-    None,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]

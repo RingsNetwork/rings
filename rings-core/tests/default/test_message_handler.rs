@@ -219,8 +219,8 @@ pub mod test {
             _ = async {
                 // handle join dht situation
                 let transport_1_to_2 = swarm1.get_transport(&swarm2.address()).unwrap();
-                transport_1_to_2.wait_for_data_channel_open().await.unwrap();
                 sleep(Duration::from_millis(1000)).await;
+                transport_1_to_2.wait_for_data_channel_open().await.unwrap();
                 let transport_2_to_3 = swarm2.get_transport(&swarm3.address()).unwrap();
                 transport_2_to_3.wait_for_data_channel_open().await.unwrap();
                 sleep(Duration::from_millis(1000)).await;
@@ -335,6 +335,7 @@ pub mod test {
             } => { unreachable!();}
             _ = async {
                 let transport_1_to_2 = swarm1.get_transport(&swarm2.address()).unwrap();
+                sleep(Duration::from_millis(1000)).await;
                 transport_1_to_2.wait_for_data_channel_open().await.unwrap();
                 assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
                 assert!(dht2.lock().await.successor.list().contains(&key1.address().into()));
@@ -396,6 +397,7 @@ pub mod test {
             } => { unreachable!();}
             _ = async {
                 let transport_1_to_2 = swarm1.get_transport(&swarm2.address()).unwrap();
+                sleep(Duration::from_millis(1000)).await;
                 transport_1_to_2.wait_for_data_channel_open().await.unwrap();
                 assert!(dht1.lock().await.successor.list().contains(&key2.address().into()), "{:?}", dht1.lock().await.successor.list());
                 assert!(dht2.lock().await.successor.list().contains(&key1.address().into()));
@@ -480,6 +482,7 @@ pub mod test {
             } => {unreachable!();}
             _ = async {
                 let transport_1_to_2 = swarm1.get_transport(&swarm2.address()).unwrap();
+                sleep(Duration::from_millis(1000)).await;
                 transport_1_to_2.wait_for_data_channel_open().await.unwrap();
                 assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
                 assert!(dht2.lock().await.successor.list().contains(&key1.address().into()));
@@ -575,6 +578,7 @@ pub mod test {
              } => { unreachable!();}
              _ = async {
                  let transport_1_to_2 = swarm1.get_transport(&swarm2.address()).unwrap();
+                 sleep(Duration::from_millis(1000)).await;
                  transport_1_to_2.wait_for_data_channel_open().await.unwrap();
                  assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
                  assert!(dht2.lock().await.successor.list().contains(&key1.address().into()));
