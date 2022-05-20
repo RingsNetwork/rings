@@ -786,8 +786,8 @@ mod test {
     /// key 1 > key2 > key3
     /// we connect key1 to key3 first
     /// then when key1 send `FindSuccessor` to key3
-    /// key3 should response key2 to key1
     /// and when stablization
+    /// key3 should response key2 to key1
     /// key1 should noti key3 that
     /// key3's precessor is key1
     #[tokio::test]
@@ -957,8 +957,103 @@ mod test {
             panic!();
         }
 
+        println!("=======================================================");
+        println!("||  now we connect node2 to node3       ||");
+        println!("=======================================================");
+        // now we connect node2 and node3
+        // first node2 generate handshake info
+        let transport3 = swarm3.new_transport().await.unwrap();
 
+        let handshake_info2 = transport2
+            .get_handshake_info(session2.clone(), RTCSdpType::Offer)
+            .await?;
 
+        // node3 register handshake from node2
+        let addr2 = transport3.register_remote_info(handshake_info2).await?;
+        // and reponse a Answer
+        let handshake_info3 = transport3
+            .get_handshake_info(session3.clone(), RTCSdpType::Answer)
+            .await?;
+
+        // node2 accpeted the answer
+        let addr3 = transport2.register_remote_info(handshake_info3).await?;
+
+        assert_eq!(addr2, key2.address());
+        assert_eq!(addr3, key3.address());
+        // wait until ICE finish
+        let promise_2 = transport2.connect_success_promise().await?;
+        let promise_3 = transport3.connect_success_promise().await?;
+        promise_2.await?;
+        promise_3.await?;
+        // thus register transport to swarm
+        swarm2
+            .register(&swarm3.address(), transport2.clone())
+            .await
+            .unwrap();
+        swarm3
+            .register(&swarm2.address(), transport3.clone())
+            .await
+            .unwrap();
+
+        // node2 and node3 will gen JoinDHT Event
+        let ev_2 = node2.listen_once().await.unwrap();
+        assert_eq!(&ev_2.from_path.clone(), &vec![key2.address().into()]);
+        assert_eq!(&ev_2.to_path.clone(), &vec![key2.address().into()]);
+        assert_eq!(&ev_2.addr, &key2.address());
+
+        if let Message::JoinDHT(x) = ev_2.data {
+            assert_eq!(x.id, key3.address().into());
+        } else {
+            panic!();
+        }
+        // the message is send from key2
+        // will be transform into some remote action
+
+        let ev_3 = node3.listen_once().await.unwrap();
+        assert_eq!(&ev_3.from_path.clone(), &vec![key3.address().into()]);
+        assert_eq!(&ev_3.to_path.clone(), &vec![key3.address().into()]);
+        assert_eq!(&ev_3.addr, &key3.address());
+
+        if let Message::JoinDHT(x) = ev_3.data {
+            assert_eq!(x.id, key2.address().into());
+        } else {
+            panic!();
+        }
+
+        let ev_2 = node2.listen_once().await.unwrap();
+        // msg is send from key3
+        assert_eq!(&ev_2.addr, &key3.address());
+        assert_eq!(&ev_2.from_path.clone(), &vec![key3.address().into()]);
+        assert_eq!(&ev_2.to_path.clone(), &vec![key2.address().into()]);
+        if let Message::FindSuccessorSend(x) = ev_2.data {
+            assert_eq!(x.id, key3.address().into());
+            assert!(!x.for_fix);
+        } else {
+            panic!();
+        }
+
+        let ev_3 = node3.listen_once().await.unwrap();
+        assert_eq!(&ev_3.addr, &key2.address());
+        assert_eq!(&ev_3.from_path.clone(), &vec![key2.address().into()]);
+        assert_eq!(&ev_3.to_path.clone(), &vec![key3.address().into()]);
+        if let Message::FindSuccessorSend(x) = ev_3.data {
+            assert_eq!(x.id, key2.address().into());
+            assert!(!x.for_fix);
+        } else {
+            panic!();
+        }
+
+        // node 3 will ask node1 to find successor of node2
+        let ev_1 = node1.listen_once().await.unwrap();
+        assert_eq!(&ev_1.addr, &key3.address());
+        assert_eq!(&ev_1.from_path.clone(), &vec![key2.address().into(), key3.address().into()]);
+        assert_eq!(&ev_1.to_path.clone(), &vec![key1.address().into()]);
+        if let Message::FindSuccessorSend(x) = ev_1.data {
+            assert_eq!(x.id, key2.address().into());
+            assert!(!x.for_fix);
+        } else {
+            panic!();
+        }
         Ok(())
     }
 }
