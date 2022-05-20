@@ -1046,10 +1046,10 @@ mod test {
         let ev_1 = node1.listen_once().await.unwrap();
         assert_eq!(&ev_1.addr, &key3.address());
         assert_eq!(
-            &ev_1.from_path.clone(),
+            &ev_1.from_path,
             &vec![key2.address().into(), key3.address().into()]
         );
-        assert_eq!(&ev_1.to_path.clone(), &vec![key1.address().into()]);
+        assert_eq!(&ev_1.to_path, &vec![key1.address().into()]);
         if let Message::FindSuccessorSend(x) = ev_1.data {
             assert_eq!(x.id, key2.address().into());
             assert!(!x.for_fix);
