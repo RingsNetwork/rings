@@ -128,7 +128,7 @@ impl MessageHandler {
             MessageRelayMethod::SEND,
             connect_msg,
         )
-        .await;
+        .await?;
         self.swarm.push_pending_transport(&transport)
     }
 
