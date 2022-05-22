@@ -62,12 +62,14 @@ impl MessageHandler {
         address: &Address,
         msg: MessageRelay<Message>,
     ) -> Result<()> {
-        println!("+++++++++++++++++++++++++++++++++");
-        println!("node {:?}", self.swarm.address());
-        println!("Sent {:?}", msg.clone());
-        println!("node {:?}", address);
-        println!("+++++++++++++++++++++++++++++++++");
-
+        #[cfg(test)]
+        {
+            println!("+++++++++++++++++++++++++++++++++");
+            println!("node {:?}", self.swarm.address());
+            println!("Sent {:?}", msg.clone());
+            println!("node {:?}", address);
+            println!("+++++++++++++++++++++++++++++++++");
+        }
         self.swarm.send_message(address, msg).await
     }
 

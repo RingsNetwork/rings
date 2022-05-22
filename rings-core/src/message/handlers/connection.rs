@@ -357,6 +357,10 @@ impl TChordConnection for MessageHandler {
             )
             .await
         } else {
+            if self.swarm.get_transport(&msg.id).is_none() && msg.id != self.swarm.address().into()
+            {
+                return self.connect(msg.id.into()).await;
+            }
             if msg.for_fix {
                 let fix_finger_index = dht.fix_finger_index;
                 dht.finger[fix_finger_index as usize] = Some(msg.id);
@@ -494,6 +498,10 @@ mod test {
             .register(&swarm1.address(), transport2.clone())
             .await
             .unwrap();
+
+        assert!(swarm1.get_transport(&key2.address()).is_some());
+        assert!(swarm2.get_transport(&key1.address()).is_some());
+
         // JoinDHT
         let ev_1 = node1.listen_once().await.unwrap();
         assert_eq!(&ev_1.from_path.clone(), &vec![key1.address().into()]);
@@ -571,16 +579,16 @@ mod test {
             // for key1 there is no did is more closer to key1, so it response key1
             // and dht2 wont update
             assert_eq!(x.id, key2.address().into());
-            assert!(!dht2
-                .lock()
-                .await
-                .successor
-                .list()
-                .contains(&key2.address().into()));
             assert!(!x.for_fix);
         } else {
             panic!();
         }
+        assert!(!dht2
+            .lock()
+            .await
+            .successor
+            .list()
+            .contains(&key2.address().into()));
 
         println!("========================================");
         println!("||  now we start join node3 to node2   ||");
