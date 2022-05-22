@@ -53,4 +53,8 @@ impl Successor {
     pub fn list(&self) -> Vec<Did> {
         self.successors.clone()
     }
+
+    pub fn remove(&mut self, id: Did) {
+        self.successors.retain(|v| *v == id);
+    }
 }

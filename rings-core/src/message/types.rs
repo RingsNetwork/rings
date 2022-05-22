@@ -50,6 +50,11 @@ pub struct JoinDHT {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct LeaveDHT {
+    pub id: Did,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct SearchVNode {
     pub sender_id: Did,
     pub target_id: Did,
@@ -87,6 +92,7 @@ pub enum Message {
     None,
     MultiCall(MultiCall),
     JoinDHT(JoinDHT),
+    LeaveDHT(LeaveDHT),
     ConnectNodeSend(ConnectNodeSend),
     AlreadyConnected(AlreadyConnected),
     ConnectNodeReport(ConnectNodeReport),

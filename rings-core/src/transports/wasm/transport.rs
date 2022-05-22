@@ -350,6 +350,13 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
                         {
                             log::error!("Failed when send RegisterTransport");
                         }
+                        if ice_connection_state == RtcIceConnectionState::Connected
+                            && CbChannel::send(&event_sender, Event::ConnectFailed(local_address))
+                                .await
+                                .is_err()
+                        {
+                            log::error!("Failed when send RegisterTransport");
+                        }
                     })
                 }
                 _ => unreachable!(),

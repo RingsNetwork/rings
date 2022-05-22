@@ -6,6 +6,7 @@ use crate::message::types::{
     AlreadyConnected, ConnectNodeReport, ConnectNodeSend, FindSuccessorReport, FindSuccessorSend,
     JoinDHT, Message, NotifyPredecessorReport, NotifyPredecessorSend,
 };
+use crate::message::LeaveDHT;
 use crate::message::MessageHandler;
 use crate::prelude::RTCSdpType;
 use crate::swarm::TransportManager;
@@ -18,6 +19,13 @@ use std::str::FromStr;
 pub trait TChordConnection {
     async fn join_chord(&self, relay: MessageRelay<Message>, prev: Did, msg: JoinDHT)
         -> Result<()>;
+
+    async fn leave_chord(
+        &self,
+        relay: MessageRelay<Message>,
+        prev: Did,
+        msg: LeaveDHT,
+    ) -> Result<()>;
 
     async fn connect_node(
         &self,
@@ -72,6 +80,17 @@ pub trait TChordConnection {
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl TChordConnection for MessageHandler {
+    async fn leave_chord(
+        &self,
+        _relay: MessageRelay<Message>,
+        prev: Did,
+        msg: LeaveDHT,
+    ) -> Result<()> {
+        let mut dht = self.dht.lock().await;
+        dht.remove(msg.id);
+        Ok(())
+    }
+
     async fn join_chord(
         &self,
         _relay: MessageRelay<Message>,

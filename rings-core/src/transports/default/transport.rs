@@ -312,6 +312,16 @@ impl IceTransportCallback<Event, AcChannel<Event>> for DefaultTransport {
                             log::error!("Failed when send RegisterTransport");
                         }
                     }
+                    Self::IceConnectionState::Failed => {
+                        let local_address: Address = public_key.read().await.unwrap().address();
+                        if event_sender
+                            .send(Event::ConnectFailed(local_address))
+                            .await
+                            .is_err()
+                        {
+                            log::error!("Failed when send RegisterTransport");
+                        }
+                    }
                     _ => {
                         log::debug!("IceTransport state change {:?}", cs);
                     }
