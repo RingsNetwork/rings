@@ -188,9 +188,11 @@ pub mod test {
         let handshake_info13 = transport_1_to_3
             .get_handshake_info(swarm1.session(), RTCSdpType::Offer)
             .await?;
-        swarm1
-            .register(&swarm3.address(), Arc::clone(&transport_1_to_3))
-            .await?;
+        // swarm1
+        //     .register(&swarm3.address(), Arc::clone(&transport_1_to_3))
+        //     .await?;
+
+        swarm1.push_pending_transport(&transport_1_to_3.clone())?;
 
         let handler1 = MessageHandler::new(Arc::clone(&dht1), Arc::clone(&swarm1));
         let handler2 = MessageHandler::new(Arc::clone(&dht2), Arc::clone(&swarm2));
@@ -272,6 +274,7 @@ pub mod test {
                 let connect_msg = Message::ConnectNodeSend(message::ConnectNodeSend {
                     sender_id: swarm1.address().into(),
                     target_id: swarm3.address().into(),
+                    transport_uuid: transport_1_to_3.id.to_string(),
                     handshake_info: handshake_info13.to_string(),
                 });
                 // dht1 send msg to dht2 ask for connecting dht3

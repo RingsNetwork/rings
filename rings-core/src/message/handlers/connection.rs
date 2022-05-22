@@ -7,11 +7,11 @@ use crate::message::types::{
     JoinDHT, Message, NotifyPredecessorReport, NotifyPredecessorSend,
 };
 use crate::message::MessageHandler;
+use crate::prelude::RTCSdpType;
 use crate::swarm::TransportManager;
 use crate::types::ice_transport::IceTrickleScheme;
-
-use crate::prelude::RTCSdpType;
 use async_trait::async_trait;
+use std::str::FromStr;
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
@@ -152,6 +152,7 @@ impl TChordConnection for MessageHandler {
                     MessageRelayMethod::REPORT,
                     Message::ConnectNodeReport(ConnectNodeReport {
                         answer_id: dht.id,
+                        transport_uuid: msg.transport_uuid.clone(),
                         handshake_info,
                     }),
                 )
@@ -195,12 +196,15 @@ impl TChordConnection for MessageHandler {
         } else {
             let transport = self
                 .swarm
-                .get_transport(&msg.answer_id)
+                .find_pending_transport(
+                    uuid::Uuid::from_str(&msg.transport_uuid)
+                        .map_err(|_| Error::InvalidTransportUuid)?,
+                )?
                 .ok_or(Error::MessageHandlerMissTransportConnectedNode)?;
             transport
                 .register_remote_info(msg.handshake_info.clone().into())
-                .await
-                .map(|_| ())
+                .await?;
+            self.swarm.register(&msg.answer_id, transport).await
         }
     }
 

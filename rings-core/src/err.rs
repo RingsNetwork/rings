@@ -200,6 +200,9 @@ pub enum Error {
 
     #[error("Transport not Found")]
     TransportNotFound,
+
+    #[error("Invalid Transport Id")]
+    InvalidTransportUuid,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

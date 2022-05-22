@@ -115,6 +115,7 @@ impl MessageHandler {
         let connect_msg = Message::ConnectNodeSend(super::ConnectNodeSend {
             sender_id: self.swarm.address().into(),
             target_id: address.into(),
+            transport_uuid: transport.id.to_string(),
             handshake_info: handshake_info.to_string(),
         });
         let target = self.dht.lock().await.successor.max();
@@ -127,7 +128,8 @@ impl MessageHandler {
             MessageRelayMethod::SEND,
             connect_msg,
         )
-        .await
+        .await;
+        self.swarm.push_pending_transport(&transport)
     }
 
     #[cfg_attr(feature = "wasm", async_recursion(?Send))]
