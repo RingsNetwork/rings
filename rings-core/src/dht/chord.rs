@@ -93,9 +93,28 @@ impl PeerRing {
         }
     }
 
+    pub fn first(&self) -> Option<Did> {
+        let ids = self
+            .finger
+            .iter()
+            .filter(|x| x.is_some())
+            .take(1)
+            .map(|x| x.unwrap())
+            .collect::<Vec<Did>>();
+        ids.first().copied()
+    }
+
     // remove a node from dht finger table
+    // remote a node from dht successor table
+    // if suuccessor is empty, set it to the cloest node
     pub fn remove(&mut self, id: Did) {
         self.finger.retain(|v| *v == Some(id));
+        self.successor.remove(id);
+        if self.successor.is_none() {
+            if let Some(x) = self.first() {
+                self.successor.update(x);
+            }
+        }
     }
 
     pub fn bias(&self, id: Did) -> BiasId {

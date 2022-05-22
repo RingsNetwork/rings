@@ -6,18 +6,26 @@ use crate::message::types::{
     AlreadyConnected, ConnectNodeReport, ConnectNodeSend, FindSuccessorReport, FindSuccessorSend,
     JoinDHT, Message, NotifyPredecessorReport, NotifyPredecessorSend,
 };
+use crate::message::LeaveDHT;
 use crate::message::MessageHandler;
+use crate::prelude::RTCSdpType;
 use crate::swarm::TransportManager;
 use crate::types::ice_transport::IceTrickleScheme;
-
-use crate::prelude::RTCSdpType;
 use async_trait::async_trait;
+use std::str::FromStr;
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait TChordConnection {
     async fn join_chord(&self, relay: MessageRelay<Message>, prev: Did, msg: JoinDHT)
         -> Result<()>;
+
+    async fn leave_chord(
+        &self,
+        relay: MessageRelay<Message>,
+        prev: Did,
+        msg: LeaveDHT,
+    ) -> Result<()>;
 
     async fn connect_node(
         &self,
@@ -72,6 +80,17 @@ pub trait TChordConnection {
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl TChordConnection for MessageHandler {
+    async fn leave_chord(
+        &self,
+        _relay: MessageRelay<Message>,
+        _prev: Did,
+        msg: LeaveDHT,
+    ) -> Result<()> {
+        let mut dht = self.dht.lock().await;
+        dht.remove(msg.id);
+        Ok(())
+    }
+
     async fn join_chord(
         &self,
         _relay: MessageRelay<Message>,
@@ -152,6 +171,7 @@ impl TChordConnection for MessageHandler {
                     MessageRelayMethod::REPORT,
                     Message::ConnectNodeReport(ConnectNodeReport {
                         answer_id: dht.id,
+                        transport_uuid: msg.transport_uuid.clone(),
                         handshake_info,
                     }),
                 )
@@ -195,12 +215,15 @@ impl TChordConnection for MessageHandler {
         } else {
             let transport = self
                 .swarm
-                .get_transport(&msg.answer_id)
+                .find_pending_transport(
+                    uuid::Uuid::from_str(&msg.transport_uuid)
+                        .map_err(|_| Error::InvalidTransportUuid)?,
+                )?
                 .ok_or(Error::MessageHandlerMissTransportConnectedNode)?;
             transport
                 .register_remote_info(msg.handshake_info.clone().into())
-                .await
-                .map(|_| ())
+                .await?;
+            self.swarm.register(&msg.answer_id, transport).await
         }
     }
 
@@ -353,6 +376,10 @@ impl TChordConnection for MessageHandler {
             )
             .await
         } else {
+            if self.swarm.get_transport(&msg.id).is_none() && msg.id != self.swarm.address().into()
+            {
+                return self.connect(msg.id.into()).await;
+            }
             if msg.for_fix {
                 let fix_finger_index = dht.fix_finger_index;
                 dht.finger[fix_finger_index as usize] = Some(msg.id);
@@ -490,6 +517,10 @@ mod test {
             .register(&swarm1.address(), transport2.clone())
             .await
             .unwrap();
+
+        assert!(swarm1.get_transport(&key2.address()).is_some());
+        assert!(swarm2.get_transport(&key1.address()).is_some());
+
         // JoinDHT
         let ev_1 = node1.listen_once().await.unwrap();
         assert_eq!(&ev_1.from_path.clone(), &vec![key1.address().into()]);
@@ -567,16 +598,16 @@ mod test {
             // for key1 there is no did is more closer to key1, so it response key1
             // and dht2 wont update
             assert_eq!(x.id, key2.address().into());
-            assert!(!dht2
-                .lock()
-                .await
-                .successor
-                .list()
-                .contains(&key2.address().into()));
             assert!(!x.for_fix);
         } else {
             panic!();
         }
+        assert!(!dht2
+            .lock()
+            .await
+            .successor
+            .list()
+            .contains(&key2.address().into()));
 
         println!("========================================");
         println!("||  now we start join node3 to node2   ||");
@@ -1056,6 +1087,7 @@ mod test {
         } else {
             panic!();
         }
+        assert!(swarm1.get_transport(&key3.address()).is_some());
         Ok(())
     }
 }

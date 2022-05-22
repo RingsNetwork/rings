@@ -5,7 +5,7 @@ use web3::types::Address;
 
 #[derive(Debug, PartialEq, Serialize, Clone)]
 pub enum Event {
-    ConnectFailed,
+    ConnectFailed(Address),
     DataChannelMessage(Vec<u8>),
     RegisterTransport(Address),
 }

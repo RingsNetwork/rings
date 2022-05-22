@@ -6,6 +6,7 @@ use serde::Serialize;
 pub struct ConnectNodeSend {
     pub sender_id: Did,
     pub target_id: Did,
+    pub transport_uuid: String,
     pub handshake_info: String,
 }
 
@@ -17,6 +18,7 @@ pub struct AlreadyConnected {
 #[derive(Debug, PartialEq, Deserialize, Serialize, Clone)]
 pub struct ConnectNodeReport {
     pub answer_id: Did,
+    pub transport_uuid: String,
     pub handshake_info: String,
 }
 
@@ -44,6 +46,11 @@ pub struct NotifyPredecessorReport {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct JoinDHT {
+    pub id: Did,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct LeaveDHT {
     pub id: Did,
 }
 
@@ -85,6 +92,7 @@ pub enum Message {
     None,
     MultiCall(MultiCall),
     JoinDHT(JoinDHT),
+    LeaveDHT(LeaveDHT),
     ConnectNodeSend(ConnectNodeSend),
     AlreadyConnected(AlreadyConnected),
     ConnectNodeReport(ConnectNodeReport),

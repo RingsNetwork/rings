@@ -109,8 +109,22 @@ impl Swarm {
                 }
                 None => Err(Error::SwarmMissTransport(address)),
             },
+            Some(Event::ConnectFailed(address)) => {
+                if self.remove_transport(&address).is_some() {
+                    let payload = MessageRelay::new(
+                        Message::LeaveDHT(message::LeaveDHT { id: address.into() }),
+                        &self.session,
+                        None,
+                        Some(vec![self.address().into()].into()),
+                        Some(vec![self.address().into()].into()),
+                        MessageRelayMethod::SEND,
+                    )?;
+                    Ok(Some(payload))
+                } else {
+                    Ok(None)
+                }
+            }
             None => Ok(None),
-            x => Err(Error::SwarmLoadMessageRecvFailed(format!("{:?}", x))),
         }
     }
 
