@@ -1060,6 +1060,7 @@ mod test {
         } else {
             panic!();
         }
+        assert!(swarm1.get_transport(&key3.address()).is_some());
         Ok(())
     }
 }
