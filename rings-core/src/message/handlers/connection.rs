@@ -83,7 +83,7 @@ impl TChordConnection for MessageHandler {
     async fn leave_chord(
         &self,
         _relay: MessageRelay<Message>,
-        prev: Did,
+        _prev: Did,
         msg: LeaveDHT,
     ) -> Result<()> {
         let mut dht = self.dht.lock().await;

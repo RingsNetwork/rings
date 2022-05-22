@@ -124,8 +124,7 @@ impl Swarm {
                     Ok(None)
                 }
             }
-            None => Ok(None),
-            x => Err(Error::SwarmLoadMessageRecvFailed(format!("{:?}", x))),
+            None => Ok(None)
         }
     }
 

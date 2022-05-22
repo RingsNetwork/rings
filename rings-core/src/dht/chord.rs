@@ -99,9 +99,9 @@ impl PeerRing {
             .iter()
             .filter(|x| x.is_some())
             .take(1)
-            .map(|x| x.unwrap().clone())
+            .map(|x| x.unwrap())
             .collect::<Vec<Did>>();
-        ids.first().map(|x| x.clone())
+        ids.first().copied()
     }
 
     // remove a node from dht finger table
@@ -112,7 +112,7 @@ impl PeerRing {
         self.successor.remove(id);
         if self.successor.is_none() {
             if let Some(x) = self.first() {
-                self.successor.update(x.clone());
+                self.successor.update(x);
             }
         }
     }
