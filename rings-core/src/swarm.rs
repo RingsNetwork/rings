@@ -124,7 +124,7 @@ impl Swarm {
                     Ok(None)
                 }
             }
-            None => Ok(None)
+            None => Ok(None),
         }
     }
 
