@@ -285,7 +285,8 @@ impl ChordStablize<PeerRingAction> for PeerRing {
     fn closest_preceding_node(&self, id: Did) -> Result<Did> {
         for i in (0..159).rev() {
             if let Some(v) = self.finger[i] {
-                if v - self.id < v - id {
+                if self.bias(self.id) < self.bias(v) && self.bias(v) < self.bias(id) {
+                    //                if v - self.id < v - id {
                     // check a recorded did x in (self.id, target_id)
                     return Ok(v);
                 }

@@ -993,6 +993,7 @@ mod test {
         // now we connect node2 and node3
         // first node2 generate handshake info
         let transport3 = swarm3.new_transport().await.unwrap();
+        assert!(swarm2.get_transport(&key3.address()).is_none());
 
         let handshake_info2 = transport2
             .get_handshake_info(session2.clone(), RTCSdpType::Offer)
@@ -1052,6 +1053,7 @@ mod test {
 
         let ev_2 = node2.listen_once().await.unwrap();
         // msg is send from key3
+        // node 3 ask node 2 for successor
         assert_eq!(&ev_2.addr, &key3.address());
         assert_eq!(&ev_2.from_path.clone(), &vec![key3.address().into()]);
         assert_eq!(&ev_2.to_path.clone(), &vec![key2.address().into()]);
@@ -1062,6 +1064,8 @@ mod test {
             panic!();
         }
 
+        // node 2 ask node 3 for successor
+        // node 3 will ask it's successor: node 1
         let ev_3 = node3.listen_once().await.unwrap();
         assert_eq!(&ev_3.addr, &key2.address());
         assert_eq!(&ev_3.from_path.clone(), &vec![key2.address().into()]);
@@ -1073,7 +1077,30 @@ mod test {
             panic!();
         }
 
-        // node 3 will ask node1 to find successor of node2
+        // node 2 report to node3
+        // node 2 report node2's successor is node 3
+        let ev_3 = node3.listen_once().await.unwrap();
+        assert_eq!(&ev_3.addr, &key2.address());
+        assert_eq!(&ev_3.from_path, &vec![key3.address().into()]);
+        assert_eq!(&ev_3.to_path, &vec![key2.address().into()]);
+        if let Message::FindSuccessorReport(x) = ev_3.data {
+            assert_eq!(x.id, key3.address().into());
+            assert!(!x.for_fix);
+        } else {
+            panic!();
+        }
+
+        // node 1 -> node 2 -> node 3
+        // node3's successor is node1,
+        // according to Chord algorithm
+        // node 3 will ask cloest_preceding_node to find successor of node2
+        // where v <- (node3, node2)
+        // so node 3 will ask node1 to find successor of node2
+        // *BECAUSE* node1, node2, node3, is a *RING*
+        // which can also pe present as node3, node1, node1
+        // the msg is send from node 3 to node 1
+        // from_path: [node2, node3]
+        // to_path: [node1]
         let ev_1 = node1.listen_once().await.unwrap();
         assert_eq!(&ev_1.addr, &key3.address());
         assert_eq!(
@@ -1087,7 +1114,77 @@ mod test {
         } else {
             panic!();
         }
-        assert!(swarm1.get_transport(&key3.address()).is_some());
+
+        // node 1 report to node3
+        // node 1 report node2's successor is node 3
+        // because, node2 only know node3
+        assert!(!dht1
+            .lock()
+            .await
+            .finger
+            .contains(&Some(key2.address().into())));
+        // from source of chord:
+        //     if self.bias(id) <= self.bias(self.successor.max()) || self.successor.is_none() {
+        //          Ok(PeerRingAction::Some(id))
+        // node1's successor is node3
+        // node2 is in [node1, node3]
+        // so it will response node2
+
+        // [node1, node2, node3]
+        // from_path: node2, node3
+        // to_path: node1
+        let ev_3 = node3.listen_once().await.unwrap();
+        assert_eq!(&ev_3.addr, &key1.address());
+        assert_eq!(
+            &ev_3.from_path,
+            &vec![key2.address().into(), key3.address().into()]
+        );
+        assert_eq!(&ev_3.to_path, &vec![key1.address().into()]);
+        if let Message::FindSuccessorReport(x) = ev_3.data {
+            assert_eq!(x.id, key2.address().into());
+            assert!(!x.for_fix);
+        } else {
+            panic!();
+        }
+
+        // node3 report it's result to node 2
+        // path is: node 2 -> node3 -> node1 -> node3 -> node2
+        // from_path: [node2],
+        // to_path: [node3, node1]
+        let ev_2 = node2.listen_once().await.unwrap();
+        assert_eq!(&ev_2.addr, &key3.address());
+
+        // from_path should be node2
+        assert_eq!(&ev_2.from_path, &vec![key2.address().into()]);
+        // to_path should be node3 node 1
+        assert_eq!(
+            &ev_2.to_path,
+            &vec![key3.address().into(), key1.address().into()]
+        );
+
+        if let Message::FindSuccessorReport(x) = ev_2.data {
+            assert_eq!(x.id, key2.address().into());
+            assert!(!x.for_fix);
+        } else {
+            panic!();
+        }
+
+        // now node1's successor is node3,
+        // node2's successor is node 3
+        // node3's successor is node 1
+        assert_eq!(
+            dht1.lock().await.successor.list(),
+            vec![key3.address().into()]
+        );
+        assert_eq!(
+            dht2.lock().await.successor.list(),
+            vec![key3.address().into()]
+        );
+        assert_eq!(
+            dht3.lock().await.successor.list(),
+            vec![key1.address().into()]
+        );
+
         Ok(())
     }
 }
