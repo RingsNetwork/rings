@@ -3,7 +3,7 @@ use crate::err::{Error, Result};
 use crate::message::payload::{MessageRelay, MessageRelayMethod};
 use crate::message::protocol::MessageSessionRelayProtocol;
 use crate::message::types::{FoundVNode, Message, SearchVNode, StoreVNode, SyncVNodeWithSuccessor};
-use crate::message::MessageHandler;
+use crate::message::{MessageHandler, OriginVerificationGen};
 
 use async_trait::async_trait;
 
@@ -60,6 +60,7 @@ impl TChordStorage for MessageHandler {
                         Some(relay.from_path),
                         Some(relay.to_path),
                         MessageRelayMethod::REPORT,
+                        OriginVerificationGen::Origin,
                         Message::FoundVNode(FoundVNode {
                             target_id: msg.sender_id,
                             data: vec![v],
@@ -73,10 +74,8 @@ impl TChordStorage for MessageHandler {
                         Some(relay.to_path),
                         Some(relay.from_path),
                         MessageRelayMethod::SEND,
-                        Message::SearchVNode(SearchVNode {
-                            sender_id: msg.sender_id,
-                            target_id: msg.target_id,
-                        }),
+                        OriginVerificationGen::Stick(relay.origin_verification),
+                        Message::SearchVNode(msg.clone()),
                     )
                     .await
                 }
@@ -101,6 +100,7 @@ impl TChordStorage for MessageHandler {
                 Some(relay.to_path),
                 Some(relay.from_path),
                 MessageRelayMethod::REPORT,
+                OriginVerificationGen::Stick(relay.origin_verification),
                 Message::FoundVNode(msg.clone()),
             )
             .await
@@ -130,6 +130,7 @@ impl TChordStorage for MessageHandler {
                             Some(relay.to_path.clone()),
                             Some(relay.from_path.clone()),
                             MessageRelayMethod::SEND,
+                            OriginVerificationGen::Stick(relay.origin_verification.clone()),
                             Message::StoreVNode(msg.clone()),
                         )
                         .await
@@ -164,6 +165,7 @@ impl TChordStorage for MessageHandler {
                         Some(relay.to_path.clone()),
                         Some(relay.from_path.clone()),
                         MessageRelayMethod::SEND,
+                        OriginVerificationGen::Origin,
                         Message::StoreVNode(StoreVNode {
                             sender_id: msg.sender_id,
                             data: vec![peer],

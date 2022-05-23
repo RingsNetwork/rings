@@ -203,6 +203,12 @@ pub enum Error {
 
     #[error("Invalid Transport Id")]
     InvalidTransportUuid,
+
+    #[error("Unexpected encrypted data")]
+    UnexpectedEncryptedData,
+
+    #[error("Failed to decrypt data")]
+    DecryptionError,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

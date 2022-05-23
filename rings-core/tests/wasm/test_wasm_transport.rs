@@ -59,12 +59,12 @@ pub mod test {
         let key1 = SecretKey::random();
         let key2 = SecretKey::random();
 
-        let session1 = SessionManager::new_with_seckey(&key1).unwrap();
-        let session2 = SessionManager::new_with_seckey(&key2).unwrap();
+        let sm1 = SessionManager::new_with_seckey(&key1).unwrap();
+        let sm2 = SessionManager::new_with_seckey(&key2).unwrap();
 
         // Peer 1 try to connect peer 2
         let handshake_info1 = transport1
-            .get_handshake_info(session1, RtcSdpType::Offer)
+            .get_handshake_info(&sm1, RtcSdpType::Offer)
             .await
             .unwrap();
 
@@ -84,7 +84,7 @@ pub mod test {
         assert_eq!(addr1, key1.address());
         // Peer 2 create answer
         let handshake_info2 = transport2
-            .get_handshake_info(session2, RtcSdpType::Answer)
+            .get_handshake_info(&sm2, RtcSdpType::Answer)
             .await
             .unwrap();
 

@@ -2,6 +2,7 @@ use crate::dht::{ChordStablize, PeerRing, PeerRingAction, PeerRingRemoteAction};
 use crate::err::Result;
 use crate::message::{
     FindSuccessorSend, Message, MessageRelay, MessageRelayMethod, NotifyPredecessorSend,
+    OriginVerificationGen,
 };
 use crate::swarm::Swarm;
 use futures::lock::Mutex;
@@ -30,7 +31,8 @@ impl Stabilization {
         let chord = self.chord.lock().await;
         let message = MessageRelay::new(
             Message::NotifyPredecessorSend(NotifyPredecessorSend { id: chord.id }),
-            &self.swarm.session(),
+            &self.swarm.session_manager,
+            OriginVerificationGen::Origin,
             None,
             None,
             None,
@@ -63,7 +65,8 @@ impl Stabilization {
                             id: current,
                             for_fix: true,
                         }),
-                        &self.swarm.session(),
+                        &self.swarm.session_manager,
+                        OriginVerificationGen::Origin,
                         None,
                         None,
                         None,
