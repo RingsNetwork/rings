@@ -6,7 +6,7 @@ use rings_node::{
     logger::{LogLevel, Logger},
     prelude::rings_core::{
         async_trait,
-        dht::{Did, PeerRing},
+        dht::{Did, PeerRing, Stabilization},
         ecc::SecretKey,
         message::{self, CustomMessage, Message, MessageHandler, MessageRelay},
         prelude::url,
@@ -14,7 +14,7 @@ use rings_node::{
         swarm::Swarm,
         types::message::MessageListener,
     },
-    service::{run_service, run_udp_turn},
+    service::{run_service, run_udp_turn, run_stabilize},
 };
 use std::{
     fs::{self, File},
@@ -100,6 +100,9 @@ struct RunArgs {
 
     #[clap(long)]
     pub without_turn: bool,
+
+    #[clap(long, defualt_value = "20")]
+    pub stabilize_timeout: usize
 }
 
 #[derive(Args, Debug)]
@@ -144,7 +147,7 @@ async fn run_jobs(args: &RunArgs) -> anyhow::Result<()> {
     };
 
     let ice_servers = ice_servers.join(";");
-    let swarm = Arc::new(Swarm::new(&ice_servers, key.address(), session));
+    let swar = Arc::new(Swarm::new(&ice_servers, key.address(), session));
 
     // let listen_event = MessageHandler::new(dht.clone(), swarm.clone());
     let message_callback = MessageCallback {};
@@ -153,6 +156,7 @@ async fn run_jobs(args: &RunArgs) -> anyhow::Result<()> {
         swarm.clone(),
         Box::new(message_callback),
     ));
+    let stabilization = Stabilization::new(dht.clone(), swarm.clone(), args.stabilize_timeout);
     let http_addr = args.http_addr.clone();
     let j = tokio::spawn(futures::future::join(
         async {
@@ -163,6 +167,10 @@ async fn run_jobs(args: &RunArgs) -> anyhow::Result<()> {
             run_service(http_addr, swarm, listen_event).await?;
             AnyhowResult::Ok(())
         },
+        async {
+            run_stabilize(stabilization).await?;
+            AnyhowResult::Ok(())
+    }
     ));
     signal::ctrl_c().await.expect("failed to listen for event");
     println!("\nClosing connection now...");

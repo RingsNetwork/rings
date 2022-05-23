@@ -13,6 +13,7 @@ use axum::{extract::Extension, response::IntoResponse, routing::post, Router};
 use http::header::{self, HeaderValue};
 #[cfg(feature = "daemon")]
 pub use is_turn::run_udp_turn;
+pub use backgrounds::run_stabilize;
 use jsonrpc_core::MetaIoHandler;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
