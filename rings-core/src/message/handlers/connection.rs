@@ -1168,6 +1168,14 @@ mod test {
         } else {
             panic!();
         }
+
+        // now node1's successor is node3,
+        // node2's successor is node 3
+        // node3's successor is node 1
+        assert_eq!(dht1.lock().await.successor.list(), vec![key3.address().into()]);
+        assert_eq!(dht2.lock().await.successor.list(), vec![key3.address().into()]);
+        assert_eq!(dht3.lock().await.successor.list(), vec![key1.address().into()]);
+
         Ok(())
     }
 }
