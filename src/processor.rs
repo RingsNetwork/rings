@@ -3,7 +3,7 @@ use crate::{
     jsonrpc::{method, response::TransportAndIce},
     jsonrpc_client::SimpleClient,
     prelude::rings_core::{
-        message::Encoded,
+        message::{Encoded, MessageHandler},
         prelude::{uuid, web3::types::Address, RTCSdpType},
         swarm::{Swarm, TransportManager},
         transports::Transport,
@@ -18,14 +18,15 @@ use std::{str::FromStr, sync::Arc};
 #[derive(Clone)]
 pub struct Processor {
     pub swarm: Arc<Swarm>,
+    pub msg_handler: Arc<MessageHandler>,
 }
 
 #[cfg(feature = "client")]
 impl Metadata for Processor {}
 
-impl From<Arc<Swarm>> for Processor {
-    fn from(swarm: Arc<Swarm>) -> Self {
-        Self { swarm }
+impl From<(Arc<Swarm>, Arc<MessageHandler>)> for Processor {
+    fn from((swarm, msg_handler): (Arc<Swarm>, Arc<MessageHandler>)) -> Self {
+        Self { swarm, msg_handler }
     }
 }
 
@@ -106,6 +107,12 @@ impl Processor {
             .register_remote_info(Encoded::from_encoded_str(info.ice.as_str()))
             .await
             .map_err(Error::RegisterIceError)?;
+        transport
+            .connect_success_promise()
+            .await
+            .map_err(Error::ConnectError)?
+            .await
+            .map_err(Error::ConnectError)?;
         self.swarm
             .register(&addr, Arc::clone(transport))
             .await
@@ -129,6 +136,14 @@ impl Processor {
                 Err(e)
             }
         }
+    }
+
+    pub async fn connect_with_address(&self, address: &Address) -> Result<()> {
+        self.msg_handler
+            .connect(address)
+            .await
+            .map_err(Error::ConnectWithAddressError)?;
+        Ok(())
     }
 
     async fn handshake(&self, transport: &Arc<Transport>, data: &str) -> Result<Encoded> {
@@ -167,6 +182,12 @@ impl Processor {
             .register_remote_info(ice)
             .await
             .map_err(Error::RegisterIceError)?;
+        transport
+            .connect_success_promise()
+            .await
+            .map_err(Error::ConnectError)?
+            .await
+            .map_err(Error::ConnectError)?;
         self.swarm
             .register(&addr, transport.clone())
             .await
@@ -255,25 +276,31 @@ impl From<&(Address, Arc<Transport>)> for Peer {
 #[cfg(feature = "client")]
 mod test {
     use super::*;
-    use crate::prelude::rings_core::{ecc::SecretKey, prelude::uuid, session::SessionManager};
+    use crate::prelude::rings_core::{
+        dht::PeerRing, ecc::SecretKey, prelude::uuid, session::SessionManager,
+    };
+    use futures::lock::Mutex;
 
     fn new_processor() -> Processor {
         let key = SecretKey::random();
 
-        let (auth, key) = SessionManager::gen_unsign_info(
+        let (auth, new_key) = SessionManager::gen_unsign_info(
             key.address(),
             Some(rings_core::session::Ttl::Never),
             None,
         )
         .unwrap();
         let sig = key.sign(&auth.to_string().unwrap()).to_vec();
-        let session = SessionManager::new(&sig, &auth, &key);
+        let session = SessionManager::new(&sig, &auth, &new_key);
         let swarm = Arc::new(Swarm::new(
             "stun://stun.l.google.com:19302",
             key.address(),
             session,
         ));
-        swarm.into()
+
+        let dht = Arc::new(Mutex::new(PeerRing::new(key.address().into())));
+        let msg_handler = MessageHandler::new(dht, swarm.clone());
+        (swarm, Arc::new(msg_handler)).into()
     }
 
     #[tokio::test]

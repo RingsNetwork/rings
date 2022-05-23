@@ -108,15 +108,15 @@ impl MessageHandler {
         self.swarm.remove_transport(&address);
     }
 
-    pub async fn connect(&self, address: Address) -> Result<()> {
+    pub async fn connect(&self, address: &Address) -> Result<()> {
         let transport = self.swarm.new_transport().await?;
         let handshake_info = transport
             .get_handshake_info(self.swarm.session().clone(), RTCSdpType::Offer)
             .await?;
-        self.swarm.register(&address, transport.clone()).await?;
+        self.swarm.register(address, transport.clone()).await?;
         let connect_msg = Message::ConnectNodeSend(super::ConnectNodeSend {
             sender_id: self.swarm.address().into(),
-            target_id: address.into(),
+            target_id: address.to_owned().into(),
             transport_uuid: transport.id.to_string(),
             handshake_info: handshake_info.to_string(),
         });

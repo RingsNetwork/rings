@@ -36,6 +36,10 @@ pub enum Error {
     InvalidMethod,
     #[error("Internal error.")]
     InternalError,
+    #[error("Connect with address error, {0}")]
+    ConnectWithAddressError(rings_core::err::Error),
+    #[error("Connect error, {0}")]
+    ConnectError(rings_core::err::Error),
 }
 
 impl Error {
@@ -57,6 +61,8 @@ impl Error {
             Error::JsonDeserializeError => 13,
             Error::InvalidMethod => 14,
             Error::InternalError => 15,
+            Error::ConnectWithAddressError(_) => 16,
+            Error::ConnectError(_) => 17,
         };
         -32000 - code
     }

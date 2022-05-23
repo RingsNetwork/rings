@@ -4,7 +4,11 @@ mod http_error;
 mod is_turn;
 
 use self::http_error::HttpError;
-use crate::{jsonrpc, prelude::rings_core::swarm::Swarm, processor::Processor};
+use crate::{
+    jsonrpc,
+    prelude::rings_core::{message::MessageHandler, swarm::Swarm},
+    processor::Processor,
+};
 use axum::{extract::Extension, response::IntoResponse, routing::post, Router};
 use http::header::{self, HeaderValue};
 #[cfg(feature = "daemon")]
@@ -14,10 +18,15 @@ use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 
 #[allow(deprecated)]
-pub async fn run_service(addr: String, swarm: Arc<Swarm>) -> anyhow::Result<()> {
+pub async fn run_service(
+    addr: String,
+    swarm: Arc<Swarm>,
+    msg_handler: Arc<MessageHandler>,
+) -> anyhow::Result<()> {
     let binding_addr = addr.parse().unwrap();
 
     let swarm_layer = Extension(swarm.clone());
+    let msg_handler_layer = Extension(msg_handler.clone());
 
     let mut jsonrpc_handler: MetaIoHandler<Processor> = MetaIoHandler::default();
     jsonrpc::server::build_handler(&mut jsonrpc_handler).await;
@@ -28,6 +37,7 @@ pub async fn run_service(addr: String, swarm: Arc<Swarm>) -> anyhow::Result<()> 
             "/",
             post(jsonrpc_io_handler)
                 .layer(&swarm_layer)
+                .layer(&msg_handler_layer)
                 .layer(&jsonrpc_handler_layer),
         )
         .layer(CorsLayer::permissive())
@@ -43,10 +53,11 @@ pub async fn run_service(addr: String, swarm: Arc<Swarm>) -> anyhow::Result<()> 
 pub async fn jsonrpc_io_handler(
     body: String,
     Extension(swarm): Extension<Arc<Swarm>>,
+    Extension(msg_handler): Extension<Arc<MessageHandler>>,
     Extension(io_handler): Extension<Arc<MetaIoHandler<Processor>>>,
 ) -> Result<JsonResponse, HttpError> {
     let r = io_handler
-        .handle_request(&body, swarm.into())
+        .handle_request(&body, (swarm, msg_handler).into())
         .await
         .ok_or(HttpError::BadRequest)?;
     Ok(JsonResponse(r))

@@ -1,13 +1,18 @@
+use std::str::FromStr;
+
 use super::{
     method::Method,
     response::{Peer, TransportAndIce},
 };
-use crate::{error::Error as ServerError, processor::Processor};
+use crate::{
+    error::Error as ServerError, prelude::rings_core::prelude::Address, processor::Processor,
+};
 use jsonrpc_core::{Error, ErrorCode, MetaIoHandler, Params, Result, Value};
 
 pub async fn build_handler(handler: &mut MetaIoHandler<Processor>) {
     handler.add_method_with_meta(Method::ConnectPeerViaHttp.as_str(), connect_peer_via_http);
     handler.add_method_with_meta(Method::ConnectPeerViaIce.as_str(), connect_peer_via_ice);
+    handler.add_method_with_meta(Method::ConnectWithAddress.as_str(), connect_with_address);
     handler.add_method_with_meta(Method::CreateOffer.as_str(), create_offer);
     handler.add_method_with_meta(Method::AcceptAnswer.as_str(), accept_answer);
     handler.add_method_with_meta(Method::ListPeers.as_str(), list_peers);
@@ -36,6 +41,20 @@ pub async fn connect_peer_via_ice(params: Params, processor: Processor) -> Resul
         .await
         .map_err(Error::from)?;
     TransportAndIce::from(r).to_json_obj().map_err(Error::from)
+}
+
+pub async fn connect_with_address(params: Params, processor: Processor) -> Result<Value> {
+    let p: Vec<String> = params.parse()?;
+    let address_str = p
+        .first()
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
+    processor
+        .connect_with_address(
+            &Address::from_str(address_str).map_err(|_| Error::new(ErrorCode::InvalidParams))?,
+        )
+        .await
+        .map_err(Error::from)?;
+    Ok(Value::Null)
 }
 
 pub async fn create_offer(_params: Params, processor: Processor) -> Result<Value> {

@@ -84,19 +84,18 @@ impl Client {
         let random_key = unsigned_info.random_key;
         let session = SessionManager::new(&signed_data.to_vec(), &unsigned_info.auth, &random_key);
         let swarm = Arc::new(Swarm::new(&stuns, unsigned_info.key_addr, session));
-        let processor = Arc::new(Processor::from(swarm));
+        let pr = PeerRing::new(swarm.address().into());
+        let dht = Arc::new(Mutex::new(pr));
+        let msg_handler = Arc::new(MessageHandler::new(dht, swarm.clone()));
+        let processor = Arc::new(Processor::from((swarm, msg_handler)));
         Ok(Client { processor })
     }
 
     pub fn start(&self) -> Promise {
-        let p = self.processor.clone();
+        let msg_handler = self.processor.msg_handler.clone();
         future_to_promise(async move {
-            let pr = PeerRing::new(p.swarm.address().into());
-            console_log!("peer_ring: {:?}", pr.id);
-            let dht = Arc::new(Mutex::new(pr.clone()));
-            let msg_handler = Arc::new(MessageHandler::new(dht.clone(), p.swarm.clone()));
             msg_handler.listen().await;
-            Ok(JsValue::from_str(pr.id.to_string().as_str()))
+            Ok(JsValue::from_str(""))
         })
     }
 

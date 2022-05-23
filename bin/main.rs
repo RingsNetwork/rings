@@ -28,7 +28,8 @@ struct Cli {
 enum Command {
     #[clap(about = "daemon")]
     Run(Daemon),
-    Connect(ConnectArgs),
+    #[clap(subcommand)]
+    Connect(ConnectCommand),
     #[clap(subcommand)]
     Sdp(SdpCommand),
     #[clap(subcommand)]
@@ -82,14 +83,33 @@ impl ClientArgs {
     }
 }
 
+#[derive(Subcommand, Debug)]
+#[clap(rename_all = "kebab-case")]
+enum ConnectCommand {
+    #[clap()]
+    Node(ConnectUrlArgs),
+    #[clap()]
+    Address(ConnectWithAddressArgs),
+}
+
 #[derive(Args, Debug)]
 #[clap(about)]
-struct ConnectArgs {
+struct ConnectUrlArgs {
     #[clap(flatten)]
     client_args: ClientArgs,
 
-    #[clap(help = "Connect peer via peer_url")]
-    peer_url: String,
+    #[clap()]
+    node_url: String,
+}
+
+#[derive(Args, Debug)]
+#[clap(about)]
+struct ConnectWithAddressArgs {
+    #[clap(flatten)]
+    client_args: ClientArgs,
+
+    #[clap()]
+    address: String,
 }
 
 #[derive(Subcommand, Debug)]
@@ -199,12 +219,12 @@ async fn daemon_run(http_addr: String, key: &SecretKey, stuns: &str) -> anyhow::
     let sig = key.sign(&auth.to_string()?).to_vec();
     let session = SessionManager::new(&sig, &auth, &temp_key);
     let swarm = Arc::new(Swarm::new(stuns, key.address(), session.clone()));
-    let listen_event = MessageHandler::new(dht.clone(), swarm.clone());
+    let listen_event = Arc::new(MessageHandler::new(dht.clone(), swarm.clone()));
     let swarm_clone = swarm.clone();
 
     let (_, _) = futures::join!(
-        Arc::new(listen_event).listen(),
-        run_service(http_addr.to_owned(), swarm_clone)
+        listen_event.clone().listen(),
+        run_service(http_addr.to_owned(), swarm_clone, listen_event)
     );
 
     Ok(())
@@ -220,11 +240,20 @@ async fn main() -> anyhow::Result<()> {
         Command::Run(args) => {
             daemon_run(args.http_addr, &args.eth_key, args.ice_servers.as_str()).await
         }
-        Command::Connect(args) => {
+        Command::Connect(ConnectCommand::Node(args)) => {
             args.client_args
                 .new_client()
                 .await?
-                .connect_peer_via_http(args.peer_url.as_str())
+                .connect_peer_via_http(args.node_url.as_str())
+                .await?
+                .display();
+            Ok(())
+        }
+        Command::Connect(ConnectCommand::Address(args)) => {
+            args.client_args
+                .new_client()
+                .await?
+                .connect_with_address(args.address.as_str())
                 .await?
                 .display();
             Ok(())

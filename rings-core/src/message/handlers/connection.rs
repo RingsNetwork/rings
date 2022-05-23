@@ -378,7 +378,7 @@ impl TChordConnection for MessageHandler {
         } else {
             if self.swarm.get_transport(&msg.id).is_none() && msg.id != self.swarm.address().into()
             {
-                return self.connect(msg.id.into()).await;
+                return self.connect(&msg.id.into()).await;
             }
             if msg.for_fix {
                 let fix_finger_index = dht.fix_finger_index;
@@ -739,7 +739,7 @@ mod test {
             node1.dht.lock().await.successor.max(),
             key2.address().into()
         );
-        node1.connect(key3.address()).await.unwrap();
+        node1.connect(&key3.address()).await.unwrap();
         let ev2 = node2.listen_once().await.unwrap();
 
         // msg is send from node 1 to node 2
