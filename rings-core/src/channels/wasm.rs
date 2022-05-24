@@ -29,11 +29,11 @@ impl<T: Send> Channel<T> for CbChannel<T> {
     }
 
     fn sender(&self) -> Self::Sender {
-        self.sender.clone()
+        Arc::clone(&self.sender)
     }
 
     fn receiver(&self) -> Self::Receiver {
-        self.receiver.clone()
+        Arc::clone(&self.receiver)
     }
 
     async fn send(sender: &Self::Sender, msg: T) -> Result<()> {

@@ -37,7 +37,7 @@ use web_sys::RtcIceCandidate;
 use web_sys::RtcIceCandidateInit;
 use web_sys::RtcIceConnectionState;
 use web_sys::RtcIceGatheringState;
-use web_sys::RtcLifecycleEvent;
+
 use web_sys::RtcPeerConnection;
 use web_sys::RtcPeerConnectionIceEvent;
 use web_sys::RtcSdpType;
@@ -333,7 +333,7 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
             let event_sender = Arc::clone(&event_sender);
             let public_key = Arc::clone(&public_key);
             log::debug!("got state event {:?}", ev.type_());
-            if ev.type_() == "iceconnectionstatechange".to_string() {
+            if ev.type_() == *"iceconnectionstatechange" {
                 let peer_connection = peer_connection.take().unwrap();
                 let ice_connection_state = peer_connection.ice_connection_state();
                 spawn_local(async move {
@@ -341,27 +341,22 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
                     if ice_connection_state == RtcIceConnectionState::Connected {
                         let local_address: Address =
                             (*public_key.read().unwrap()).unwrap().address();
-                        if CbChannel::send(
-                            &event_sender,
-                            Event::RegisterTransport(local_address),
-                        )
+                        if CbChannel::send(&event_sender, Event::RegisterTransport(local_address))
                             .await
-                            .is_err() {
-                                log::error!("Failed when send RegisterTransport");
-                            }
-
+                            .is_err()
+                        {
+                            log::error!("Failed when send RegisterTransport");
+                        }
                     }
                     if ice_connection_state == RtcIceConnectionState::Failed {
-                         let local_address: Address =
+                        let local_address: Address =
                             (*public_key.read().unwrap()).unwrap().address();
-                        if CbChannel::send(
-                            &event_sender,
-                            Event::ConnectFailed(local_address),
-                        )
+                        if CbChannel::send(&event_sender, Event::ConnectFailed(local_address))
                             .await
-                            .is_err() {
-                                log::error!("Failed when send ConnectFailed");
-                            }
+                            .is_err()
+                        {
+                            log::error!("Failed when send ConnectFailed");
+                        }
                     }
                 })
             }

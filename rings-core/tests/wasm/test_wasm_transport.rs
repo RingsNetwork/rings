@@ -2,9 +2,15 @@
 pub mod test {
     use log::Level;
     use rings_core::channels::Channel as CbChannel;
+    use rings_core::dht::Did;
+    use rings_core::dht::PeerRing;
     use rings_core::ecc::SecretKey;
     use rings_core::err::Result;
+    use rings_core::message::MessageHandler;
+    use rings_core::prelude::RTCSdpType;
     use rings_core::session::SessionManager;
+    use rings_core::swarm::Swarm;
+    use rings_core::swarm::TransportManager;
     use rings_core::transports::Transport;
     use rings_core::types::channel::Channel;
     use rings_core::types::channel::Event;
@@ -12,16 +18,11 @@ pub mod test {
     use rings_core::types::ice_transport::IceTransport;
     use rings_core::types::ice_transport::IceTransportCallback;
     use rings_core::types::ice_transport::IceTrickleScheme;
-    use rings_core::message::MessageHandler;
-    use rings_core::swarm::TransportManager;
-    use rings_core::swarm::Swarm;
-    use rings_core::dht::PeerRing;
-    use rings_core::dht::Did;
-    use rings_core::prelude::RTCSdpType;
 
-    use futures::lock::Mutex;
-    use std::str::FromStr;
     use dashmap::DashMap;
+    use futures::lock::Mutex;
+    use rings_core::types::message::MessageListener;
+    use std::str::FromStr;
     use std::sync::Arc;
     use wasm_bindgen::JsValue;
     use wasm_bindgen_futures::JsFuture;
@@ -29,7 +30,6 @@ pub mod test {
     use wasm_bindgen_test::*;
     use web_sys::RtcIceConnectionState;
     use web_sys::RtcSdpType;
-    use rings_core::types::message::MessageListener;
 
     wasm_bindgen_test_configure!(run_in_browser);
 
@@ -105,7 +105,8 @@ pub mod test {
             .unwrap();
         assert_eq!(addr2, key2.address());
 
-        #[cfg(feature="browser_chrome_test")] {
+        #[cfg(feature = "browser_chrome_test")]
+        {
             assert_eq!(
                 transport2.ice_connection_state().await,
                 Some(RtcIceConnectionState::Connected)
@@ -113,12 +114,6 @@ pub mod test {
         }
         Ok(())
     }
-
-    #[derive(Clone)]
-    struct MessageCallbackInstance {
-        handler_messages: Arc<DashMap<Did, String>>,
-    }
-
 
     #[wasm_bindgen_test]
     async fn test_ice_connection_establish() {
@@ -137,8 +132,8 @@ pub mod test {
         let stun = "stun://stun.l.google.com:19302";
         let key1 = SecretKey::random();
         let key2 = SecretKey::random();
-        let addr1 = key1.address();
-        let addr2 = key2.address();
+        let _addr1 = key1.address();
+        let _addr2 = key2.address();
 
         println!(
             "test with key1:{:?}, key2:{:?}",
@@ -159,22 +154,30 @@ pub mod test {
         let transport2 = swarm2.new_transport().await.unwrap();
 
         let node1 = MessageHandler::new(Arc::clone(&dht1), Arc::clone(&swarm1));
-        let node2 = MessageHandler::new(Arc::clone(&dht2), Arc::clone(&swarm2));
+        let _node2 = MessageHandler::new(Arc::clone(&dht2), Arc::clone(&swarm2));
 
         // first node1 generate handshake info
         let handshake_info1 = transport1
             .get_handshake_info(&sm1, RTCSdpType::Offer)
-            .await.unwrap();
+            .await
+            .unwrap();
 
         // node3 register handshake from node1
-        let addr1 = transport2.register_remote_info(handshake_info1).await.unwrap();
+        let addr1 = transport2
+            .register_remote_info(handshake_info1)
+            .await
+            .unwrap();
         // and reponse a Answer
         let handshake_info2 = transport2
             .get_handshake_info(&sm2, RTCSdpType::Answer)
-            .await.unwrap();
+            .await
+            .unwrap();
 
         // node1 accpeted the answer
-        let addr2 = transport1.register_remote_info(handshake_info2).await.unwrap();
+        let addr2 = transport1
+            .register_remote_info(handshake_info2)
+            .await
+            .unwrap();
 
         assert_eq!(addr1, key1.address());
         assert_eq!(addr2, key2.address());
@@ -194,7 +197,5 @@ pub mod test {
         Arc::new(node1).listen().await;
         // assert_eq!(&ev_1.from_path.clone(), &vec![key1.address().into()]);
         // assert_eq!(&ev_1.to_path.clone(), &vec![key1.address().into()]);
-
     }
-
 }
