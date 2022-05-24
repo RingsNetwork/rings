@@ -147,7 +147,7 @@ async fn run_jobs(args: &RunArgs) -> anyhow::Result<()> {
     };
 
     let ice_servers = ice_servers.join(";");
-    let swar = Arc::new(Swarm::new(&ice_servers, key.address(), session));
+    let swarm = Arc::new(Swarm::new(&ice_servers, key.address(), session));
 
     // let listen_event = MessageHandler::new(dht.clone(), swarm.clone());
     let message_callback = MessageCallback {};

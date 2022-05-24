@@ -229,13 +229,13 @@ async fn daemon_run(
     let sig = key.sign(&auth.to_string()?).to_vec();
     let session = SessionManager::new(&sig, &auth, &temp_key);
     let swarm = Arc::new(Swarm::new(stuns, key.address(), session.clone()));
-    let listen_event = MessageHandler::new(dht.clone(), swarm.clone());
+    let listen_event = Arc::new(MessageHandler::new(dht.clone(), swarm.clone()));
     let stabilize = Stabilization::new(dht.clone(), swarm.clone(), stabilize_timeout);
     let swarm_clone = swarm.clone();
 
     let (_, _, _) = futures::join!(
-        Arc::new(listen_event).listen(),
-        run_service(http_addr.to_owned(), swarm_clone),
+        listen_event.clone().listen(),
+        run_service(http_addr.to_owned(), swarm_clone, listen_event),
         run_stabilize(stabilize),
     );
 
