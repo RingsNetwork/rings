@@ -271,7 +271,7 @@ async fn main() -> anyhow::Result<()> {
             args.client_args
                 .new_client()
                 .await?
-                .connect_peer_via_ice(args.ice.as_str())
+                .answer_offer(args.ice.as_str())
                 .await?
                 .display();
             Ok(())

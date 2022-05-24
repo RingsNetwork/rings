@@ -187,17 +187,6 @@ impl Client {
         })
     }
 
-    pub fn connect_peer_via_ice(&self, ice_info: String) -> Promise {
-        let p = self.processor.clone();
-        future_to_promise(async move {
-            let (transport, handshake_info) = p
-                .connect_peer_via_ice(ice_info.as_str())
-                .await
-                .map_err(JsError::from)?;
-            Ok(TransportAndIce::from((transport, handshake_info)).into())
-        })
-    }
-
     pub fn connect_with_address(&self, address: String) -> Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
@@ -207,6 +196,25 @@ impl Client {
                 .await
                 .map_err(JsError::from)?;
             Ok(JsValue::null())
+        })
+    }
+
+    pub fn create_offer(&self) -> Promise {
+        let p = self.processor.clone();
+        future_to_promise(async move {
+            let peer = p.create_offer().await.map_err(JsError::from)?;
+            Ok(TransportAndIce::from(peer).into())
+        })
+    }
+
+    pub fn answer_offer(&self, ice_info: String) -> Promise {
+        let p = self.processor.clone();
+        future_to_promise(async move {
+            let (transport, handshake_info) = p
+                .answer_offer(ice_info.as_str())
+                .await
+                .map_err(JsError::from)?;
+            Ok(TransportAndIce::from((transport, handshake_info)).into())
         })
     }
 

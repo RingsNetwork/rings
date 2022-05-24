@@ -108,7 +108,7 @@ impl Processor {
         );
         let resp = client
             .call_method(
-                method::Method::ConnectPeerViaIce.as_str(),
+                method::Method::AnswerOffer.as_str(),
                 jsonrpc_core::Params::Array(vec![serde_json::json!(hs_info)]),
             )
             .await
@@ -132,7 +132,7 @@ impl Processor {
         Ok(addr.to_string())
     }
 
-    pub async fn connect_peer_via_ice(&self, ice_info: &str) -> Result<(Arc<Transport>, Encoded)> {
+    pub async fn answer_offer(&self, ice_info: &str) -> Result<(Arc<Transport>, Encoded)> {
         log::info!("connect peer via ice: {}", ice_info);
         let transport = self.swarm.new_transport().await.map_err(|e| {
             log::error!("new_transport failed: {}", e);

@@ -47,11 +47,11 @@ impl Client {
         )
     }
 
-    pub async fn connect_peer_via_ice(&mut self, ice_info: &str) -> Output<TransportAndIce> {
+    pub async fn answer_offer(&mut self, ice_info: &str) -> Output<TransportAndIce> {
         let resp = self
             .client
             .call_method(
-                Method::ConnectPeerViaIce.as_str(),
+                Method::AnswerOffer.as_str(),
                 Params::Array(vec![Value::String(ice_info.to_owned())]),
             )
             .await
