@@ -130,7 +130,6 @@ impl MessageHandler {
         let handshake_info = transport
             .get_handshake_info(&self.swarm.session_manager, RTCSdpType::Offer)
             .await?;
-        self.swarm.register(address, transport.clone()).await?;
         let connect_msg = Message::ConnectNodeSend(super::ConnectNodeSend {
             sender_id: self.swarm.address().into(),
             target_id: address.to_owned().into(),
