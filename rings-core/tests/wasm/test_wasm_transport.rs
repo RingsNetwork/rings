@@ -2,7 +2,7 @@
 pub mod test {
     use log::Level;
     use rings_core::channels::Channel as CbChannel;
-    
+
     use rings_core::dht::PeerRing;
     use rings_core::ecc::SecretKey;
     use rings_core::err::Result;
@@ -19,7 +19,6 @@ pub mod test {
     use rings_core::types::ice_transport::IceTransportCallback;
     use rings_core::types::ice_transport::IceTrickleScheme;
 
-    
     use futures::lock::Mutex;
     use rings_core::types::message::MessageListener;
     use std::str::FromStr;
