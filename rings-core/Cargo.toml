@@ -12,6 +12,7 @@ categories = ["network-programming", "cryptography", "wasm"]
 [features]
 default = ["webrtc", "bytes", "async-channel"]
 wasm = ["web-sys", "wasm-bindgen", "js-sys", "wasm-bindgen-futures"]
+browser_chrome_test = ["wasm"]
 
 [dependencies]
 # global

@@ -332,6 +332,7 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
             let mut peer_connection = peer_connection.clone();
             let event_sender = Arc::clone(&event_sender);
             let public_key = Arc::clone(&public_key);
+            log::debug!("ice_connection_state is {:?}", ev.clone());
             match ev {
                 RtcLifecycleEvent::Iceconnectionstatechange => {
                     let peer_connection = peer_connection.take().unwrap();
@@ -383,11 +384,14 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
 
     async fn on_data_channel(&self) -> Self::OnDataChannelHdlrFn {
         let event_sender = self.event_sender.clone();
+
         box move |ev: RtcDataChannelEvent| {
+            log::debug!("channel open!");
             let event_sender = Arc::clone(&event_sender);
             let ch = ev.channel();
             let on_message_cb = Closure::wrap(
                 (box move |ev: MessageEvent| {
+                    log::debug!("got message");
                     let event_sender = Arc::clone(&event_sender);
                     match ev.data().as_string() {
                         Some(msg) => spawn_local(async move {
@@ -484,6 +488,7 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
     }
 
     async fn wait_for_connected(&self) -> Result<()> {
+        log::warn!("callback is replaced");
         let promise = self.connect_success_promise().await?;
         promise.await
     }
