@@ -40,6 +40,10 @@ pub enum Error {
     ConnectWithAddressError(rings_core::err::Error),
     #[error("Connect error, {0}")]
     ConnectError(rings_core::err::Error),
+    #[error("Send mesage error: {0}")]
+    SendMessage(rings_core::err::Error),
+    #[error("Build message body error: {0}")]
+    MessageRelay(rings_core::err::Error),
 }
 
 impl Error {
@@ -63,6 +67,8 @@ impl Error {
             Error::InternalError => 15,
             Error::ConnectWithAddressError(_) => 16,
             Error::ConnectError(_) => 17,
+            Error::SendMessage(_) => 18,
+            Error::MessageRelay(_) => 19,
         };
         -32000 - code
     }

@@ -2,7 +2,11 @@ use std::sync::Arc;
 
 use crate::{
     error::{Error, Result},
-    prelude::rings_core::{message::Encoded, prelude::web3::types::Address, transports::Transport},
+    prelude::rings_core::{
+        message::Encoded,
+        prelude::web3::{contract::tokens::Tokenizable, types::Address},
+        transports::Transport,
+    },
     processor,
 };
 use serde::{Deserialize, Serialize};
@@ -32,7 +36,7 @@ impl Peer {
 impl From<(Address, Arc<Transport>)> for Peer {
     fn from((address, transport): (Address, Arc<Transport>)) -> Self {
         Self {
-            address: address.to_string(),
+            address: address.into_token().to_string(),
             transport_id: transport.id.to_string(),
         }
     }
@@ -41,7 +45,7 @@ impl From<(Address, Arc<Transport>)> for Peer {
 impl From<&(Address, Arc<Transport>)> for Peer {
     fn from((address, transport): &(Address, Arc<Transport>)) -> Self {
         Self {
-            address: address.to_string(),
+            address: address.into_token().to_string(),
             transport_id: transport.id.to_string(),
         }
     }
@@ -50,7 +54,7 @@ impl From<&(Address, Arc<Transport>)> for Peer {
 impl From<processor::Peer> for Peer {
     fn from(p: processor::Peer) -> Self {
         Self {
-            address: p.address.to_string(),
+            address: p.address.into_token().to_string(),
             transport_id: p.transport.id.to_string(),
         }
     }

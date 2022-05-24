@@ -3,10 +3,10 @@ use crate::error::{Error, Result};
 #[derive(Debug, Clone)]
 pub enum Method {
     ConnectPeerViaHttp,
-    ConnectPeerViaIce,
     ConnectWithAddress,
     ListPeers,
     CreateOffer,
+    AnswerOffer,
     SendTo,
     Disconnect,
     AcceptAnswer,
@@ -18,10 +18,10 @@ impl Method {
     pub fn as_str(&self) -> &str {
         match self {
             Method::ConnectPeerViaHttp => "connectPeerViaHttp",
-            Method::ConnectPeerViaIce => "connectPeerViaIce",
             Method::ConnectWithAddress => "connectWithAddress",
             Method::ListPeers => "listPeers",
             Method::CreateOffer => "createOffer",
+            Method::AnswerOffer => "answerOffer",
             Method::SendTo => "sendTo",
             Method::Disconnect => "disconnect",
             Method::AcceptAnswer => "acceptAnswer",
@@ -43,10 +43,10 @@ impl TryFrom<&str> for Method {
     fn try_from(value: &str) -> Result<Self> {
         Ok(match value {
             "connectPeerViaHttp" => Self::ConnectPeerViaHttp,
-            "connectPeerViaIce" => Self::ConnectPeerViaIce,
             "connectWithAddress" => Self::ConnectWithAddress,
             "listPeers" => Self::ListPeers,
             "createOffer" => Self::CreateOffer,
+            "answerOffer" => Self::AnswerOffer,
             "sendTo" => Self::SendTo,
             "disconnect" => Self::Disconnect,
             "acceptAnswer" => Self::AcceptAnswer,

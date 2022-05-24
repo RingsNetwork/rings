@@ -217,7 +217,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ecc::SecretKey;
+    use crate::{ecc::SecretKey, transports::helper::TricklePayload};
 
     #[derive(Deserialize, Serialize, PartialEq, Debug)]
     struct TestData {
@@ -286,5 +286,31 @@ mod tests {
         let ungzip_encoded_payload = payload.to_json_vec().unwrap().encode().unwrap();
         let payload2: MessageRelay<TestData> = ungzip_encoded_payload.decode().unwrap();
         assert_eq!(payload, payload2);
+    }
+
+    #[test]
+    fn test_message_relay_verify() {
+        let key = SecretKey::random();
+        let (auth, s_key) =
+            SessionManager::gen_unsign_info(key.address(), None, Some(Signer::DEFAULT)).unwrap();
+        let sig = key.sign(&auth.to_string().unwrap()).to_vec();
+        let session = SessionManager::new(&sig, &auth, &s_key);
+
+        let test_data = TricklePayload {
+            sdp: "test_sdp".to_owned(),
+            candidates: vec![],
+        };
+        let payload = MessageRelay::new(
+            test_data,
+            &session,
+            OriginVerificationGen::Origin,
+            None,
+            None,
+            None,
+            MessageRelayMethod::SEND,
+        )
+        .unwrap();
+
+        assert!(payload.verify(), "payload verify failed");
     }
 }

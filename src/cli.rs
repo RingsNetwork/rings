@@ -47,11 +47,11 @@ impl Client {
         )
     }
 
-    pub async fn connect_peer_via_ice(&mut self, ice_info: &str) -> Output<TransportAndIce> {
+    pub async fn answer_offer(&mut self, ice_info: &str) -> Output<TransportAndIce> {
         let resp = self
             .client
             .call_method(
-                Method::ConnectPeerViaIce.as_str(),
+                Method::AnswerOffer.as_str(),
                 Params::Array(vec![Value::String(ice_info.to_owned())]),
             )
             .await
@@ -175,6 +175,17 @@ impl Client {
                 Method::ClosePendingTransport.as_str(),
                 Params::Array(vec![json!(transport_id)]),
             )
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        ClientOutput::ok("Done.".into(), ())
+    }
+
+    pub async fn send_message(&self, address: &str, text: &str) -> Output<()> {
+        let mut params = serde_json::Map::new();
+        params.insert("address".to_owned(), json!(address));
+        params.insert("text".to_owned(), json!(text));
+        self.client
+            .call_method(Method::SendTo.as_str(), Params::Map(params))
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         ClientOutput::ok("Done.".into(), ())

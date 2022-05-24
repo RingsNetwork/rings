@@ -3,9 +3,13 @@ pub mod utils;
 
 use crate::{
     prelude::rings_core::{
-        dht::PeerRing,
+        async_trait,
+        dht::{Did, PeerRing},
         ecc::SecretKey,
-        message::{Encoded, MessageHandler},
+        message::{
+            CustomMessage, Encoded, MaybeEncrypted, Message, MessageCallback, MessageHandler,
+            MessageRelay,
+        },
         prelude::web3::types::Address,
         session::SessionManager,
         session::{AuthorizedInfo, Signer},
@@ -20,12 +24,16 @@ use js_sys::Promise;
 use serde::{Deserialize, Serialize};
 use std::{str::FromStr, sync::Arc};
 use wasm_bindgen::prelude::*;
-use wasm_bindgen_futures::future_to_promise;
+use wasm_bindgen_futures::{future_to_promise, spawn_local};
 
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = console)]
-    fn log(a: &str);
+    pub fn log(a: &str);
+
+    fn setInterval(closure: &Closure<dyn FnMut()>, time: u32) -> i32;
+
+    fn clearInterval(id: i32);
 }
 
 macro_rules! console_log {
@@ -71,6 +79,7 @@ impl UnsignedInfo {
 #[derive(Clone)]
 pub struct Client {
     processor: Arc<Processor>,
+    message_handler: Option<Arc<MessageHandler>>,
 }
 
 #[wasm_bindgen]
@@ -88,7 +97,10 @@ impl Client {
         let dht = Arc::new(Mutex::new(pr));
         let msg_handler = Arc::new(MessageHandler::new(dht, swarm.clone()));
         let processor = Arc::new(Processor::from((swarm, msg_handler)));
-        Ok(Client { processor })
+        Ok(Client {
+            processor,
+            message_handler: None,
+        })
     }
 
     pub fn start(&self) -> Promise {
@@ -99,6 +111,69 @@ impl Client {
         })
     }
 
+    pub fn listen(&mut self, callback: MessageCallbackInstance) -> Result<IntervalHandle, JsError> {
+        let p = self.processor.clone();
+        let pr = PeerRing::new(p.swarm.address().into());
+        console_log!("peer_ring: {:?}", pr.id);
+        let dht = Arc::new(Mutex::new(pr));
+        let msg_handler = Arc::new(MessageHandler::new_with_callback(
+            dht,
+            p.swarm.clone(),
+            Box::new(callback),
+        ));
+        self.message_handler = Some(msg_handler.clone());
+        let h = Arc::clone(&msg_handler);
+
+        let cb = Closure::wrap(Box::new(move || {
+            let h1 = h.clone();
+            spawn_local(async move {
+                h1.clone().listen_once().await;
+            });
+        }) as Box<dyn FnMut()>);
+
+        // Next we pass this via reference to the `setInterval` function, and
+        // `setInterval` gets a handle to the corresponding JS closure.
+        let interval_id = setInterval(&cb, 200);
+
+        // If we were to drop `cb` here it would cause an exception to be raised
+        // whenever the interval elapses. Instead we *return* our handle back to JS
+        // so JS can decide when to cancel the interval and deallocate the closure.
+        Ok(IntervalHandle {
+            interval_id,
+            _closure: cb,
+        })
+
+        // future_to_promise(async move {
+        //     msg_handler.listen().await;
+
+        //     let window = web_sys::window().unwrap();
+        //     // window.set_timeout_with_callback_and_timeout_and_arguments(handler, timeout, arguments)
+        //     let func = js_sys::Function::new_no_args("") wasm_bindgen::prelude::Closure::wrap(
+        //         (box move |func: js_sys::Function| {
+        //             let window = web_sys::window().unwrap();
+        //             window
+        //                 .set_timeout_with_callback_and_timeout_and_arguments(
+        //                     func.unchecked_ref(),
+        //                     200,
+        //                     &js_sys::Array::of1(&func),
+        //                 )
+        //                 .unwrap();
+        //         }) as Box<dyn FnMut(js_sys::Function)>,
+        //     );
+        //     window
+        //         .set_timeout_with_callback_and_timeout_and_arguments(
+        //             &func.as_ref().unchecked_ref(),
+        //             200,
+        //             &js_sys::Array::of1(&func.as_ref().unchecked_ref()),
+        //         )
+        //         .unwrap();
+        //     func.forget();
+
+        //     console_log!("run listen()");
+        //     Ok(JsValue::from_str(pr.id.to_string().as_str()))
+        // })
+    }
+
     pub fn connect_peer_via_http(&self, remote_url: String) -> Promise {
         console_log!("remote_url: {}", remote_url);
         let p = self.processor.clone();
@@ -107,15 +182,36 @@ impl Client {
                 .connect_peer_via_http(remote_url.as_str())
                 .await
                 .map_err(JsError::from)?;
+            console_log!("connect_peer_via_http transport_id: {:?}", transport.id);
             Ok(JsValue::from_str(transport.id.to_string().as_str()))
         })
     }
 
-    pub fn connect_peer_via_ice(&self, ice_info: String) -> Promise {
+    pub fn connect_with_address(&self, address: String) -> Promise {
+        let p = self.processor.clone();
+        future_to_promise(async move {
+            let address =
+                Address::from_str(address.as_str()).map_err(|_| JsError::new("invalid address"))?;
+            p.connect_with_address(&address)
+                .await
+                .map_err(JsError::from)?;
+            Ok(JsValue::null())
+        })
+    }
+
+    pub fn create_offer(&self) -> Promise {
+        let p = self.processor.clone();
+        future_to_promise(async move {
+            let peer = p.create_offer().await.map_err(JsError::from)?;
+            Ok(TransportAndIce::from(peer).into())
+        })
+    }
+
+    pub fn answer_offer(&self, ice_info: String) -> Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
             let (transport, handshake_info) = p
-                .connect_peer_via_ice(ice_info.as_str())
+                .answer_offer(ice_info.as_str())
                 .await
                 .map_err(JsError::from)?;
             Ok(TransportAndIce::from((transport, handshake_info)).into())
@@ -180,6 +276,93 @@ impl Client {
             Ok(transport_id.into())
         })
     }
+
+    pub fn send_message(&self, address: String, msg: String) -> Promise {
+        let p = self.processor.clone();
+        future_to_promise(async move {
+            p.send_message(address.as_str(), msg)
+                .await
+                .map_err(JsError::from)?;
+            Ok(JsValue::from_bool(true))
+        })
+    }
+}
+
+#[wasm_bindgen]
+pub struct MessageCallbackInstance {
+    custom_message: Arc<js_sys::Function>,
+    builtin_message: Arc<js_sys::Function>,
+}
+
+#[wasm_bindgen]
+impl MessageCallbackInstance {
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        custom_message: &js_sys::Function,
+        builtin_message: &js_sys::Function,
+    ) -> Result<MessageCallbackInstance, JsError> {
+        Ok(MessageCallbackInstance {
+            custom_message: Arc::new(custom_message.clone()),
+            builtin_message: Arc::new(builtin_message.clone()),
+        })
+    }
+}
+
+#[async_trait(?Send)]
+impl MessageCallback for MessageCallbackInstance {
+    async fn custom_message(
+        &self,
+        handler: &MessageHandler,
+        relay: &MessageRelay<Message>,
+        prev: Did,
+        msg: &MaybeEncrypted<CustomMessage>,
+    ) {
+        console_log!("custom_message received: {:?}", msg);
+
+        let r = handler.decrypt_msg(msg);
+        if let Err(e) = r {
+            console_log!("custom_message decrypt failed: {:?}", e);
+            return;
+        }
+        let msg = r.unwrap();
+
+        let this = JsValue::null();
+
+        if let Ok(r) = self.custom_message.call3(
+            &this,
+            &JsValue::from_serde(&relay).unwrap(),
+            &JsValue::from_str(prev.to_string().as_str()),
+            &JsValue::from_serde(&msg).unwrap(),
+        ) {
+            if let Ok(p) = js_sys::Promise::try_from(r) {
+                if let Err(e) = wasm_bindgen_futures::JsFuture::from(p).await {
+                    console_log!("invoke on_custom_message error: {:?}", e);
+                }
+            }
+        }
+        //let a = wasm_bindgen_futures::JsFuture::from(self.on_cutom_message.as_ref().clone()).await;
+    }
+
+    async fn builtin_message(
+        &self,
+        _handler: &MessageHandler,
+        relay: &MessageRelay<Message>,
+        prev: Did,
+    ) {
+        let this = JsValue::null();
+        console_log!("builtin_message received: {:?}", relay);
+        if let Ok(r) = self.builtin_message.call2(
+            &this,
+            &JsValue::from_serde(&relay).unwrap(),
+            &JsValue::from_str(prev.to_string().as_str()),
+        ) {
+            if let Ok(p) = js_sys::Promise::try_from(r) {
+                if let Err(e) = wasm_bindgen_futures::JsFuture::from(p).await {
+                    console_log!("invoke on_builtin_message error: {:?}", e);
+                }
+            }
+        }
+    }
 }
 
 #[wasm_bindgen]
@@ -242,5 +425,17 @@ impl TransportAndIce {
 impl From<(Arc<Transport>, Encoded)> for TransportAndIce {
     fn from((transport, ice): (Arc<Transport>, Encoded)) -> Self {
         Self::new(transport.id.to_string().as_str(), ice.to_string().as_str())
+    }
+}
+
+#[wasm_bindgen]
+pub struct IntervalHandle {
+    interval_id: i32,
+    _closure: Closure<dyn FnMut()>,
+}
+
+impl Drop for IntervalHandle {
+    fn drop(&mut self) {
+        clearInterval(self.interval_id);
     }
 }

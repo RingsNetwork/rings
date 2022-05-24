@@ -11,12 +11,13 @@ use jsonrpc_core::{Error, ErrorCode, MetaIoHandler, Params, Result, Value};
 
 pub async fn build_handler(handler: &mut MetaIoHandler<Processor>) {
     handler.add_method_with_meta(Method::ConnectPeerViaHttp.as_str(), connect_peer_via_http);
-    handler.add_method_with_meta(Method::ConnectPeerViaIce.as_str(), connect_peer_via_ice);
+    handler.add_method_with_meta(Method::AnswerOffer.as_str(), answer_offer);
     handler.add_method_with_meta(Method::ConnectWithAddress.as_str(), connect_with_address);
     handler.add_method_with_meta(Method::CreateOffer.as_str(), create_offer);
     handler.add_method_with_meta(Method::AcceptAnswer.as_str(), accept_answer);
     handler.add_method_with_meta(Method::ListPeers.as_str(), list_peers);
     handler.add_method_with_meta(Method::Disconnect.as_str(), close_connection);
+    handler.add_method_with_meta(Method::SendTo.as_str(), send_message)
 }
 
 pub async fn connect_peer_via_http(params: Params, processor: Processor) -> Result<Value> {
@@ -31,15 +32,16 @@ pub async fn connect_peer_via_http(params: Params, processor: Processor) -> Resu
     Ok(Value::String(transport.id.to_string()))
 }
 
-pub async fn connect_peer_via_ice(params: Params, processor: Processor) -> Result<Value> {
+pub async fn answer_offer(params: Params, processor: Processor) -> Result<Value> {
     let p: Vec<String> = params.parse()?;
     let ice_info = p
         .first()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
     let r = processor
-        .connect_peer_via_ice(ice_info)
+        .answer_offer(ice_info)
         .await
         .map_err(Error::from)?;
+    log::debug!("connect_peer_via_ice response: {:?}", r.1);
     TransportAndIce::from(r).to_json_obj().map_err(Error::from)
 }
 
@@ -90,5 +92,22 @@ pub async fn close_connection(params: Params, processor: Processor) -> Result<Va
         .first()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
     processor.disconnect(address).await?;
+    Ok(serde_json::json!({}))
+}
+
+pub async fn send_message(params: Params, processor: Processor) -> Result<Value> {
+    let params: serde_json::Map<String, Value> = params.parse()?;
+    let address = params
+        .get("address")
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
+        .as_str()
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
+    let text = params
+        .get("text")
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
+        .as_str()
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
+
+    processor.send_message(address, text).await?;
     Ok(serde_json::json!({}))
 }
