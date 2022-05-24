@@ -135,15 +135,15 @@ async fn run_jobs(args: &RunArgs) -> anyhow::Result<()> {
     let ice_servers = ice_servers.join(";");
     let swarm = Arc::new(Swarm::new(&ice_servers, key.address(), session));
 
-    let listen_event = MessageHandler::new(dht.clone(), swarm.clone());
+    let listen_event = Arc::new(MessageHandler::new(dht.clone(), swarm.clone()));
     let http_addr = args.http_addr.clone();
     let j = tokio::spawn(futures::future::join(
         async {
-            Arc::new(listen_event).listen().await;
+            listen_event.clone().listen().await;
             AnyhowResult::Ok(())
         },
         async {
-            run_service(http_addr, swarm).await?;
+            run_service(http_addr, swarm, listen_event).await?;
             AnyhowResult::Ok(())
         },
     ));

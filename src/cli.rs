@@ -69,6 +69,17 @@ impl Client {
         )
     }
 
+    pub async fn connect_with_address(&mut self, address: &str) -> Output<()> {
+        self.client
+            .call_method(
+                Method::ConnectWithAddress.as_str(),
+                Params::Array(vec![Value::String(address.to_owned())]),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        ClientOutput::ok("Successful!".to_owned(), ())
+    }
+
     pub async fn create_offer(&mut self) -> Output<TransportAndIce> {
         let resp = self
             .client

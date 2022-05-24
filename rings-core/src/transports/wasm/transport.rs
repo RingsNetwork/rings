@@ -2,9 +2,9 @@ use super::helper::RtcSessionDescriptionWrapper;
 use crate::channels::Channel as CbChannel;
 use crate::ecc::PublicKey;
 use crate::err::{Error, Result};
-use crate::message::MessageRelay;
 use crate::message::MessageRelayMethod;
 use crate::message::{Encoded, Encoder};
+use crate::message::{MessageRelay, OriginVerificationGen};
 use crate::session::SessionManager;
 use crate::transports::helper::Promise;
 use crate::transports::helper::TricklePayload;
@@ -424,7 +424,7 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
 
     async fn get_handshake_info(
         &self,
-        session: SessionManager,
+        session_manager: &SessionManager,
         kind: Self::SdpType,
     ) -> Result<Encoded> {
         let sdp = match kind {
@@ -446,7 +446,15 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
             candidates: local_candidates_json,
         };
         log::debug!("prepared hanshake info :{:?}", data);
-        let resp = MessageRelay::new(data, &session, None, None, None, MessageRelayMethod::SEND)?;
+        let resp = MessageRelay::new(
+            data,
+            session_manager,
+            OriginVerificationGen::Origin,
+            None,
+            None,
+            None,
+            MessageRelayMethod::SEND,
+        )?;
         Ok(resp.gzip(9)?.encode()?)
     }
 
@@ -456,7 +464,7 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
 
         match data.verify() {
             true => {
-                if let Ok(public_key) = data.pubkey() {
+                if let Ok(public_key) = data.origin_verification.session.authorizer_pubkey() {
                     let mut pk = self.public_key.write().unwrap();
                     *pk = Some(public_key);
                 };

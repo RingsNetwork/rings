@@ -4,6 +4,7 @@ use crate::error::{Error, Result};
 pub enum Method {
     ConnectPeerViaHttp,
     ConnectPeerViaIce,
+    ConnectWithAddress,
     ListPeers,
     CreateOffer,
     SendTo,
@@ -18,6 +19,7 @@ impl Method {
         match self {
             Method::ConnectPeerViaHttp => "connectPeerViaHttp",
             Method::ConnectPeerViaIce => "connectPeerViaIce",
+            Method::ConnectWithAddress => "connectWithAddress",
             Method::ListPeers => "listPeers",
             Method::CreateOffer => "createOffer",
             Method::SendTo => "sendTo",
@@ -42,6 +44,7 @@ impl TryFrom<&str> for Method {
         Ok(match value {
             "connectPeerViaHttp" => Self::ConnectPeerViaHttp,
             "connectPeerViaIce" => Self::ConnectPeerViaIce,
+            "connectWithAddress" => Self::ConnectWithAddress,
             "listPeers" => Self::ListPeers,
             "createOffer" => Self::CreateOffer,
             "sendTo" => Self::SendTo,

@@ -1,5 +1,5 @@
 use crate::err::{Error, Result};
-use crate::message::{self, Message, MessageRelay, MessageRelayMethod};
+use crate::message::{self, Message, MessageRelay, MessageRelayMethod, OriginVerificationGen};
 use crate::message::{Decoder, Encoder};
 use crate::session::SessionManager;
 use crate::storage::{MemStorage, Storage};
@@ -25,7 +25,7 @@ pub struct Swarm {
     pending: Arc<Mutex<Vec<Arc<Transport>>>>,
     ice_servers: Vec<IceServer>,
     transport_event_channel: Channel<Event>,
-    session: SessionManager,
+    pub session_manager: SessionManager,
     address: Address,
 }
 
@@ -49,7 +49,7 @@ pub trait TransportManager {
 }
 
 impl Swarm {
-    pub fn new(ice_servers: &str, address: Address, session: SessionManager) -> Self {
+    pub fn new(ice_servers: &str, address: Address, session_manager: SessionManager) -> Self {
         let ice_servers = ice_servers
             .split(';')
             .collect::<Vec<&str>>()
@@ -61,13 +61,9 @@ impl Swarm {
             transport_event_channel: Channel::new(1),
             ice_servers,
             address,
-            session,
+            session_manager,
             pending: Arc::new(Mutex::new(vec![])),
         }
-    }
-
-    pub fn session(&self) -> SessionManager {
-        self.session.clone()
     }
 
     pub fn address(&self) -> Address {
@@ -99,7 +95,8 @@ impl Swarm {
                 Some(_) => {
                     let payload = MessageRelay::new(
                         Message::JoinDHT(message::JoinDHT { id: address.into() }),
-                        &self.session,
+                        &self.session_manager,
+                        OriginVerificationGen::Origin,
                         None,
                         Some(vec![self.address().into()].into()),
                         Some(vec![self.address().into()].into()),
@@ -113,7 +110,8 @@ impl Swarm {
                 if self.remove_transport(&address).is_some() {
                     let payload = MessageRelay::new(
                         Message::LeaveDHT(message::LeaveDHT { id: address.into() }),
-                        &self.session,
+                        &self.session_manager,
+                        OriginVerificationGen::Origin,
                         None,
                         Some(vec![self.address().into()].into()),
                         Some(vec![self.address().into()].into()),
@@ -372,11 +370,6 @@ mod tests {
             RTCIceConnectionState::Connected
         );
 
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_swarm_event_handler() -> Result<()> {
         Ok(())
     }
 }

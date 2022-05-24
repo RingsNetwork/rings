@@ -8,6 +8,7 @@ use crate::message::types::{
 };
 use crate::message::LeaveDHT;
 use crate::message::MessageHandler;
+use crate::message::OriginVerificationGen;
 use crate::prelude::RTCSdpType;
 use crate::swarm::TransportManager;
 use crate::types::ice_transport::IceTrickleScheme;
@@ -116,6 +117,7 @@ impl TChordConnection for MessageHandler {
                         // from
                         Some(vec![dht.id].into()),
                         MessageRelayMethod::SEND,
+                        OriginVerificationGen::Origin,
                         Message::FindSuccessorSend(FindSuccessorSend { id, for_fix: false }),
                     )
                     .await
@@ -150,6 +152,7 @@ impl TChordConnection for MessageHandler {
                     Some(relay.to_path),
                     Some(relay.from_path),
                     MessageRelayMethod::SEND,
+                    OriginVerificationGen::Stick(relay.origin_verification),
                     Message::ConnectNodeSend(msg.clone()),
                 )
                 .await;
@@ -161,7 +164,7 @@ impl TChordConnection for MessageHandler {
                     .register_remote_info(msg.handshake_info.to_owned().into())
                     .await?;
                 let handshake_info = trans
-                    .get_handshake_info(self.swarm.session(), RTCSdpType::Answer)
+                    .get_handshake_info(&self.swarm.session_manager, RTCSdpType::Answer)
                     .await?
                     .to_string();
                 self.send_message(
@@ -169,6 +172,7 @@ impl TChordConnection for MessageHandler {
                     Some(relay.to_path),
                     Some(relay.from_path),
                     MessageRelayMethod::REPORT,
+                    OriginVerificationGen::Origin,
                     Message::ConnectNodeReport(ConnectNodeReport {
                         answer_id: dht.id,
                         transport_uuid: msg.transport_uuid.clone(),
@@ -187,6 +191,7 @@ impl TChordConnection for MessageHandler {
                     Some(relay.from_path),
                     None,
                     MessageRelayMethod::REPORT,
+                    OriginVerificationGen::Origin,
                     Message::AlreadyConnected(AlreadyConnected { answer_id: dht.id }),
                 )
                 .await
@@ -209,6 +214,7 @@ impl TChordConnection for MessageHandler {
                 Some(relay.to_path),
                 Some(relay.from_path),
                 MessageRelayMethod::REPORT,
+                OriginVerificationGen::Stick(relay.origin_verification),
                 Message::ConnectNodeReport(msg.clone()),
             )
             .await
@@ -242,6 +248,7 @@ impl TChordConnection for MessageHandler {
                 Some(relay.to_path),
                 Some(relay.from_path),
                 MessageRelayMethod::REPORT,
+                OriginVerificationGen::Stick(relay.origin_verification),
                 Message::AlreadyConnected(msg.clone()),
             )
             .await
@@ -332,6 +339,7 @@ impl TChordConnection for MessageHandler {
                     Some(relay.to_path),
                     Some(relay.from_path),
                     MessageRelayMethod::REPORT,
+                    OriginVerificationGen::Origin,
                     Message::FindSuccessorReport(FindSuccessorReport {
                         id,
                         for_fix: msg.for_fix,
@@ -346,6 +354,7 @@ impl TChordConnection for MessageHandler {
                     Some(relay.to_path),
                     Some(relay.from_path),
                     MessageRelayMethod::SEND,
+                    OriginVerificationGen::Origin,
                     Message::FindSuccessorSend(FindSuccessorSend {
                         id,
                         for_fix: msg.for_fix,
@@ -372,13 +381,14 @@ impl TChordConnection for MessageHandler {
                 Some(relay.to_path),
                 Some(relay.from_path),
                 MessageRelayMethod::REPORT,
+                OriginVerificationGen::Stick(relay.origin_verification),
                 Message::FindSuccessorReport(msg.clone()),
             )
             .await
         } else {
             if self.swarm.get_transport(&msg.id).is_none() && msg.id != self.swarm.address().into()
             {
-                return self.connect(msg.id.into()).await;
+                return self.connect(&msg.id.into()).await;
             }
             if msg.for_fix {
                 let fix_finger_index = dht.fix_finger_index;
@@ -405,6 +415,7 @@ impl TChordConnection for MessageHandler {
             Some(relay.to_path),
             Some(relay.from_path),
             MessageRelayMethod::REPORT,
+            OriginVerificationGen::Origin,
             Message::NotifyPredecessorReport(NotifyPredecessorReport { id: dht.id }),
         )
         .await
@@ -472,13 +483,13 @@ mod test {
         let dht2 = Arc::new(Mutex::new(PeerRing::new(key2.address().into())));
         let dht3 = Arc::new(Mutex::new(PeerRing::new(key3.address().into())));
 
-        let session1 = SessionManager::new_with_seckey(&key1).unwrap();
-        let session2 = SessionManager::new_with_seckey(&key2).unwrap();
-        let session3 = SessionManager::new_with_seckey(&key3).unwrap();
+        let sm1 = SessionManager::new_with_seckey(&key1).unwrap();
+        let sm2 = SessionManager::new_with_seckey(&key2).unwrap();
+        let sm3 = SessionManager::new_with_seckey(&key3).unwrap();
 
-        let swarm1 = Arc::new(Swarm::new(stun, key1.address(), session1.clone()));
-        let swarm2 = Arc::new(Swarm::new(stun, key2.address(), session2.clone()));
-        let swarm3 = Arc::new(Swarm::new(stun, key3.address(), session3.clone()));
+        let swarm1 = Arc::new(Swarm::new(stun, key1.address(), sm1.clone()));
+        let swarm2 = Arc::new(Swarm::new(stun, key2.address(), sm2.clone()));
+        let swarm3 = Arc::new(Swarm::new(stun, key3.address(), sm3.clone()));
 
         let transport1 = swarm1.new_transport().await.unwrap();
         let transport2 = swarm2.new_transport().await.unwrap();
@@ -491,13 +502,13 @@ mod test {
         // now we connect node1 and node2
 
         let handshake_info1 = transport1
-            .get_handshake_info(session1.clone(), RTCSdpType::Offer)
+            .get_handshake_info(&sm1, RTCSdpType::Offer)
             .await?;
 
         let addr1 = transport2.register_remote_info(handshake_info1).await?;
 
         let handshake_info2 = transport2
-            .get_handshake_info(session2.clone(), RTCSdpType::Answer)
+            .get_handshake_info(&sm2, RTCSdpType::Answer)
             .await?;
 
         let addr2 = transport1.register_remote_info(handshake_info2).await?;
@@ -614,7 +625,7 @@ mod test {
         println!("========================================");
 
         let handshake_info3 = transport3
-            .get_handshake_info(session3, RTCSdpType::Offer)
+            .get_handshake_info(&sm3, RTCSdpType::Offer)
             .await?;
         // created a new transport
         let transport2 = swarm2.new_transport().await.unwrap();
@@ -624,7 +635,7 @@ mod test {
         assert_eq!(addr3, key3.address());
 
         let handshake_info2 = transport2
-            .get_handshake_info(session2, RTCSdpType::Answer)
+            .get_handshake_info(&sm2, RTCSdpType::Answer)
             .await?;
 
         let addr2 = transport3.register_remote_info(handshake_info2).await?;
@@ -739,7 +750,7 @@ mod test {
             node1.dht.lock().await.successor.max(),
             key2.address().into()
         );
-        node1.connect(key3.address()).await.unwrap();
+        node1.connect(&key3.address()).await.unwrap();
         let ev2 = node2.listen_once().await.unwrap();
 
         // msg is send from node 1 to node 2
@@ -850,13 +861,13 @@ mod test {
         let dht2 = Arc::new(Mutex::new(PeerRing::new(key2.address().into())));
         let dht3 = Arc::new(Mutex::new(PeerRing::new(key3.address().into())));
 
-        let session1 = SessionManager::new_with_seckey(&key1).unwrap();
-        let session2 = SessionManager::new_with_seckey(&key2).unwrap();
-        let session3 = SessionManager::new_with_seckey(&key3).unwrap();
+        let sm1 = SessionManager::new_with_seckey(&key1).unwrap();
+        let sm2 = SessionManager::new_with_seckey(&key2).unwrap();
+        let sm3 = SessionManager::new_with_seckey(&key3).unwrap();
 
-        let swarm1 = Arc::new(Swarm::new(stun, key1.address(), session1.clone()));
-        let swarm2 = Arc::new(Swarm::new(stun, key2.address(), session2.clone()));
-        let swarm3 = Arc::new(Swarm::new(stun, key3.address(), session3.clone()));
+        let swarm1 = Arc::new(Swarm::new(stun, key1.address(), sm1.clone()));
+        let swarm2 = Arc::new(Swarm::new(stun, key2.address(), sm2.clone()));
+        let swarm3 = Arc::new(Swarm::new(stun, key3.address(), sm3.clone()));
 
         let transport1 = swarm1.new_transport().await.unwrap();
         let transport2 = swarm2.new_transport().await.unwrap();
@@ -869,14 +880,14 @@ mod test {
         // now we connect node1 and node3
         // first node1 generate handshake info
         let handshake_info1 = transport1
-            .get_handshake_info(session1.clone(), RTCSdpType::Offer)
+            .get_handshake_info(&sm1, RTCSdpType::Offer)
             .await?;
 
         // node3 register handshake from node1
         let addr1 = transport3.register_remote_info(handshake_info1).await?;
         // and reponse a Answer
         let handshake_info3 = transport3
-            .get_handshake_info(session3.clone(), RTCSdpType::Answer)
+            .get_handshake_info(&sm3, RTCSdpType::Answer)
             .await?;
 
         // node1 accpeted the answer
@@ -996,14 +1007,14 @@ mod test {
         assert!(swarm2.get_transport(&key3.address()).is_none());
 
         let handshake_info2 = transport2
-            .get_handshake_info(session2.clone(), RTCSdpType::Offer)
+            .get_handshake_info(&sm2, RTCSdpType::Offer)
             .await?;
 
         // node3 register handshake from node2
         let addr2 = transport3.register_remote_info(handshake_info2).await?;
         // and reponse a Answer
         let handshake_info3 = transport3
-            .get_handshake_info(session3.clone(), RTCSdpType::Answer)
+            .get_handshake_info(&sm3, RTCSdpType::Answer)
             .await?;
 
         // node2 accpeted the answer

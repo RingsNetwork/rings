@@ -1,4 +1,8 @@
 use crate::dht::{peer::VirtualPeer, Did};
+use crate::ecc::elgamal;
+use crate::ecc::{PublicKey, SecretKey};
+use crate::err::{Error, Result};
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -87,6 +91,12 @@ pub struct SyncVNodeWithSuccessor {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct CustomMessage(pub String);
 
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+pub enum MaybeEncrypted<T> {
+    Encrypted(Vec<(PublicKey, PublicKey)>),
+    Plain(T),
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub enum Message {
     None,
@@ -103,7 +113,8 @@ pub enum Message {
     SearchVNode(SearchVNode),
     FoundVNode(FoundVNode),
     StoreVNode(StoreVNode),
-    CustomMessage(CustomMessage),
+    SyncVNodeWithSuccessor(SyncVNodeWithSuccessor),
+    CustomMessage(MaybeEncrypted<CustomMessage>),
 }
 
 impl std::fmt::Display for Message {
@@ -113,7 +124,63 @@ impl std::fmt::Display for Message {
 }
 
 impl Message {
-    pub fn custom(msg: &str) -> Message {
-        Message::CustomMessage(CustomMessage(msg.to_string()))
+    pub fn custom(msg: &str, pubkey: &Option<PublicKey>) -> Result<Message> {
+        let data = CustomMessage(msg.to_string());
+        let msg = MaybeEncrypted::new(data, pubkey)?;
+        Ok(Message::CustomMessage(msg))
+    }
+}
+
+impl<T> MaybeEncrypted<T>
+where
+    T: Serialize + DeserializeOwned,
+{
+    pub fn new(data: T, pubkey: &Option<PublicKey>) -> Result<Self> {
+        if let Some(pubkey) = pubkey {
+            let msg = serde_json::to_string(&data).map_err(Error::Serialize)?;
+            let cipher = elgamal::encrypt(&msg, pubkey)?;
+            Ok(MaybeEncrypted::Encrypted(cipher))
+        } else {
+            Ok(MaybeEncrypted::Plain(data))
+        }
+    }
+
+    pub fn decrypt(self, key: &SecretKey) -> Result<(T, bool)> {
+        match self {
+            MaybeEncrypted::Plain(msg) => Ok((msg, false)),
+            MaybeEncrypted::Encrypted(cipher) => {
+                let plain = elgamal::decrypt(&cipher, key)?;
+                let msg: T = serde_json::from_str(&plain).map_err(Error::Serialize)?;
+                Ok((msg, true))
+            }
+        }
+    }
+
+    pub fn plain_or_error(&self) -> Result<&T> {
+        match self {
+            MaybeEncrypted::Plain(msg) => Ok(msg),
+            MaybeEncrypted::Encrypted(_) => Err(Error::UnexpectedEncryptedData),
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_custom_message_encrypt_decrypt() {
+        let key = SecretKey::random();
+        let pubkey = key.pubkey();
+
+        let msg = Message::custom("hello", &Some(pubkey)).unwrap();
+
+        let (plain, is_decrypted) = match msg {
+            Message::CustomMessage(cipher) => cipher.decrypt(&key).unwrap(),
+            _ => panic!("Unexpected message type"),
+        };
+
+        assert_eq!(plain, CustomMessage("hello".to_string()));
+        assert!(is_decrypted);
     }
 }
