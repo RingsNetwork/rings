@@ -68,7 +68,7 @@ struct Daemon {
     pub eth_key: SecretKey,
 
     #[clap(long, default_value = "20")]
-    pub stabilize_timeout: usize
+    pub stabilize_timeout: usize,
 }
 
 #[derive(Args, Debug)]
@@ -213,7 +213,12 @@ struct Send {
     text: String,
 }
 
-async fn daemon_run(http_addr: String, key: &SecretKey, stuns: &str, stabilize_timeout: usize) -> anyhow::Result<()> {
+async fn daemon_run(
+    http_addr: String,
+    key: &SecretKey,
+    stuns: &str,
+    stabilize_timeout: usize,
+) -> anyhow::Result<()> {
     // TODO support run daemonize
     let dht = Arc::new(Mutex::new(PeerRing::new(key.address().into())));
     let (auth, temp_key) = SessionManager::gen_unsign_info(
@@ -245,7 +250,13 @@ async fn main() -> anyhow::Result<()> {
 
     if let Err(e) = match cli.command {
         Command::Run(args) => {
-            daemon_run(args.http_addr, &args.eth_key, args.ice_servers.as_str(), args.stabilize_timeout).await
+            daemon_run(
+                args.http_addr,
+                &args.eth_key,
+                args.ice_servers.as_str(),
+                args.stabilize_timeout,
+            )
+            .await
         }
         Command::Connect(ConnectCommand::Node(args)) => {
             args.client_args

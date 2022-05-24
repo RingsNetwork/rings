@@ -14,7 +14,7 @@ use rings_node::{
         swarm::Swarm,
         types::message::MessageListener,
     },
-    service::{run_service, run_udp_turn, run_stabilize},
+    service::{run_service, run_stabilize, run_udp_turn},
 };
 use std::{
     fs::{self, File},
@@ -102,7 +102,7 @@ struct RunArgs {
     pub without_turn: bool,
 
     #[clap(long, defualt_value = "20")]
-    pub stabilize_timeout: usize
+    pub stabilize_timeout: usize,
 }
 
 #[derive(Args, Debug)]
@@ -170,7 +170,7 @@ async fn run_jobs(args: &RunArgs) -> anyhow::Result<()> {
         async {
             run_stabilize(stabilization).await?;
             AnyhowResult::Ok(())
-    }
+        },
     ));
     signal::ctrl_c().await.expect("failed to listen for event");
     println!("\nClosing connection now...");
