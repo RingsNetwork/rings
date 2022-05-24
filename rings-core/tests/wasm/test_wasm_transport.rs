@@ -190,7 +190,7 @@ pub mod test {
         assert!(swarm1.get_transport(&key2.address()).is_some());
         assert!(swarm2.get_transport(&key1.address()).is_some());
 
-        // let ev_1 = node1.listen_once().await.unwrap();
+        let ev_1 = node1.listen_once().await.is_none();
         // assert_eq!(&ev_1.from_path.clone(), &vec![key1.address().into()]);
         // assert_eq!(&ev_1.to_path.clone(), &vec![key1.address().into()]);
 
