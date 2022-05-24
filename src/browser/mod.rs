@@ -198,6 +198,18 @@ impl Client {
         })
     }
 
+    pub fn connect_with_address(&self, address: String) -> Promise {
+        let p = self.processor.clone();
+        future_to_promise(async move {
+            let address =
+                Address::from_str(address.as_str()).map_err(|_| JsError::new("invalid address"))?;
+            p.connect_with_address(&address)
+                .await
+                .map_err(JsError::from)?;
+            Ok(JsValue::null())
+        })
+    }
+
     pub fn accept_answer(&self, transport_id: String, ice: String) -> Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
