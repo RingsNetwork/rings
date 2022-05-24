@@ -2,6 +2,7 @@
 use clap::{Args, Parser, Subcommand};
 use futures::lock::Mutex;
 use rings_core::dht::PeerRing;
+use rings_core::dht::Stabilization;
 use rings_core::ecc::SecretKey;
 use rings_core::message::MessageHandler;
 use rings_core::session::SessionManager;
@@ -11,6 +12,7 @@ use rings_node::cli::Client;
 use rings_node::logger::LogLevel;
 use rings_node::logger::Logger;
 use rings_node::service::run_service;
+use rings_node::service::run_stabilize;
 use std::sync::Arc;
 
 #[derive(Parser, Debug)]
@@ -64,6 +66,9 @@ struct Daemon {
 
     #[clap(long = "key", short = 'k', env)]
     pub eth_key: SecretKey,
+
+    #[clap(long, default_value = "20")]
+    pub stabilize_timeout: usize,
 }
 
 #[derive(Args, Debug)]
@@ -208,7 +213,12 @@ struct Send {
     text: String,
 }
 
-async fn daemon_run(http_addr: String, key: &SecretKey, stuns: &str) -> anyhow::Result<()> {
+async fn daemon_run(
+    http_addr: String,
+    key: &SecretKey,
+    stuns: &str,
+    stabilize_timeout: usize,
+) -> anyhow::Result<()> {
     // TODO support run daemonize
     let dht = Arc::new(Mutex::new(PeerRing::new(key.address().into())));
     let (auth, temp_key) = SessionManager::gen_unsign_info(
@@ -220,11 +230,13 @@ async fn daemon_run(http_addr: String, key: &SecretKey, stuns: &str) -> anyhow::
     let session = SessionManager::new(&sig, &auth, &temp_key);
     let swarm = Arc::new(Swarm::new(stuns, key.address(), session.clone()));
     let listen_event = Arc::new(MessageHandler::new(dht.clone(), swarm.clone()));
+    let stabilize = Stabilization::new(dht.clone(), swarm.clone(), stabilize_timeout);
     let swarm_clone = swarm.clone();
 
-    let (_, _) = futures::join!(
+    let (_, _, _) = futures::join!(
         listen_event.clone().listen(),
-        run_service(http_addr.to_owned(), swarm_clone, listen_event)
+        run_service(http_addr.to_owned(), swarm_clone, listen_event),
+        run_stabilize(stabilize),
     );
 
     Ok(())
@@ -238,7 +250,13 @@ async fn main() -> anyhow::Result<()> {
 
     if let Err(e) = match cli.command {
         Command::Run(args) => {
-            daemon_run(args.http_addr, &args.eth_key, args.ice_servers.as_str()).await
+            daemon_run(
+                args.http_addr,
+                &args.eth_key,
+                args.ice_servers.as_str(),
+                args.stabilize_timeout,
+            )
+            .await
         }
         Command::Connect(ConnectCommand::Node(args)) => {
             args.client_args

@@ -6,7 +6,7 @@ use rings_node::{
     logger::{LogLevel, Logger},
     prelude::rings_core::{
         async_trait,
-        dht::{Did, PeerRing},
+        dht::{Did, PeerRing, Stabilization},
         ecc::SecretKey,
         message::{self, CustomMessage, Message, MessageHandler, MessageRelay},
         prelude::url,
@@ -14,7 +14,7 @@ use rings_node::{
         swarm::Swarm,
         types::message::MessageListener,
     },
-    service::{run_service, run_udp_turn},
+    service::{run_service, run_stabilize, run_udp_turn},
 };
 use std::{
     fs::{self, File},
@@ -100,6 +100,9 @@ struct RunArgs {
 
     #[clap(long)]
     pub without_turn: bool,
+
+    #[clap(long, defualt_value = "20")]
+    pub stabilize_timeout: usize,
 }
 
 #[derive(Args, Debug)]
@@ -153,6 +156,7 @@ async fn run_jobs(args: &RunArgs) -> anyhow::Result<()> {
         swarm.clone(),
         Box::new(message_callback),
     ));
+    let stabilization = Stabilization::new(dht.clone(), swarm.clone(), args.stabilize_timeout);
     let http_addr = args.http_addr.clone();
     let j = tokio::spawn(futures::future::join(
         async {
@@ -161,6 +165,10 @@ async fn run_jobs(args: &RunArgs) -> anyhow::Result<()> {
         },
         async {
             run_service(http_addr, swarm, listen_event).await?;
+            AnyhowResult::Ok(())
+        },
+        async {
+            run_stabilize(stabilization).await?;
             AnyhowResult::Ok(())
         },
     ));

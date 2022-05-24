@@ -2429,6 +2429,7 @@ dependencies = [
  "flate2",
  "futures",
  "futures-core",
+ "futures-timer",
  "futures-util",
  "hex",
  "itertools",

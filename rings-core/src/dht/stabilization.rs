@@ -5,13 +5,22 @@ use crate::message::{
     OriginVerificationGen,
 };
 use crate::swarm::Swarm;
+
+use async_trait::async_trait;
 use futures::lock::Mutex;
 use std::sync::Arc;
 
+#[derive(Clone)]
 pub struct Stabilization {
     chord: Arc<Mutex<PeerRing>>,
     swarm: Arc<Swarm>,
     timeout: usize,
+}
+
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+pub trait TStabilize {
+    async fn wait(self: Arc<Self>);
 }
 
 impl Stabilization {
@@ -90,5 +99,58 @@ impl Stabilization {
         self.notify_predecessor().await?;
         self.fix_fingers().await?;
         Ok(())
+    }
+}
+
+#[cfg(not(feature = "wasm"))]
+mod stabilizer {
+    use super::{Stabilization, TStabilize};
+    use async_trait::async_trait;
+    use futures::{future::FutureExt, pin_mut, select};
+    use futures_timer::Delay;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[async_trait]
+    impl TStabilize for Stabilization {
+        async fn wait(self: Arc<Self>) {
+            loop {
+                let timeout = Delay::new(Duration::from_secs(self.timeout as u64)).fuse();
+                pin_mut!(timeout);
+                select! {
+                    _ = timeout => {
+                        match self.stabilize().await {
+                            Ok(()) => {},
+                            Err(e) => {
+                                log::error!("failed to stabilize {:?}", e);
+                            }
+                        };
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "wasm")]
+mod stabilizer {
+    use super::{Stabilization, TStabilize};
+    use crate::poll;
+    use async_trait::async_trait;
+    use std::sync::Arc;
+    use wasm_bindgen_futures::spawn_local;
+
+    #[async_trait(?Send)]
+    impl TStabilize for Stabilization {
+        async fn wait(self: Arc<Self>) {
+            let caller = Arc::clone(&self);
+            let func = move || {
+                let caller = caller.clone();
+                spawn_local(Box::pin(async move {
+                    caller.stabilize().await.unwrap();
+                }))
+            };
+            poll!(func, 200);
+        }
     }
 }
