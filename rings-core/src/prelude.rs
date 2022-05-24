@@ -11,3 +11,5 @@ pub use url;
 pub use web_sys;
 #[cfg(feature = "default")]
 pub use webrtc;
+
+pub use web3::types::Address;
