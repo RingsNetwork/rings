@@ -33,6 +33,7 @@ base58-monero = { version = "0.3", default-features = false, features = ["check"
 async-stream = "0.3.2"
 async-lock = "2.5.0"
 futures-core = "0.3.21"
+futures-timer = "3.0.2"
 url = { version = "2", features = ["serde"] }
 thiserror = "1"
 flate2 = { version = "1.0.22" }
