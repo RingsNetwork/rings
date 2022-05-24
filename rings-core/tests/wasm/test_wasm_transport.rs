@@ -29,6 +29,7 @@ pub mod test {
     use wasm_bindgen_test::*;
     use web_sys::RtcIceConnectionState;
     use web_sys::RtcSdpType;
+    use rings_core::types::message::MessageListener;
 
     wasm_bindgen_test_configure!(run_in_browser);
 
@@ -190,7 +191,7 @@ pub mod test {
         assert!(swarm1.get_transport(&key2.address()).is_some());
         assert!(swarm2.get_transport(&key1.address()).is_some());
 
-        let ev_1 = node1.listen_once().await.is_none();
+        Arc::new(node1).listen().await;
         // assert_eq!(&ev_1.from_path.clone(), &vec![key1.address().into()]);
         // assert_eq!(&ev_1.to_path.clone(), &vec![key1.address().into()]);
 
