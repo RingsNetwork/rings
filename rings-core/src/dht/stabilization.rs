@@ -135,7 +135,6 @@ mod stabilizer {
 #[cfg(feature = "wasm")]
 mod stabilizer {
     use super::{Stabilization, TStabilize};
-    use crate::err::Result;
     use crate::poll;
     use async_trait::async_trait;
     use std::sync::Arc;
@@ -148,7 +147,7 @@ mod stabilizer {
             let func = move || {
                 let caller = caller.clone();
                 spawn_local(Box::pin(async move {
-                    caller.stabilize().await;
+                    caller.stabilize().await.unwrap();
                 }))
             };
             poll!(func, 200);
