@@ -15,13 +15,13 @@ pub struct CbChannel<T> {
     receiver: Receiver<T>,
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl<T: Send> Channel<T> for CbChannel<T> {
     type Sender = Sender<T>;
     type Receiver = Receiver<T>;
 
-    fn new(buffer: usize) -> Self {
-        let (tx, rx) = mpsc::channel(buffer);
+    fn new() -> Self {
+        let (tx, rx) = mpsc::channel(8);
         Self {
             sender: Arc::new(Mutex::new(tx)),
             receiver: Arc::new(Mutex::new(rx)),
@@ -29,11 +29,11 @@ impl<T: Send> Channel<T> for CbChannel<T> {
     }
 
     fn sender(&self) -> Self::Sender {
-        Arc::clone(&self.sender)
+        self.sender.clone()
     }
 
     fn receiver(&self) -> Self::Receiver {
-        Arc::clone(&self.receiver)
+        self.receiver.clone()
     }
 
     async fn send(sender: &Self::Sender, msg: T) -> Result<()> {

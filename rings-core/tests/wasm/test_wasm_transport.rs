@@ -42,7 +42,7 @@ pub mod test {
         let media = nav.media_devices().unwrap();
         let mut cons = web_sys::MediaStreamConstraints::new();
         cons.audio(&JsValue::from(true));
-        cons.video(&JsValue::from(true));
+        cons.video(&JsValue::from(false));
         cons.fake(true);
         let promise = media.get_user_media_with_constraints(&cons).unwrap();
         JsFuture::from(promise).await.unwrap();
@@ -51,7 +51,7 @@ pub mod test {
     async fn prepare_transport(channel: Option<Arc<CbChannel<Event>>>) -> Result<Transport> {
         let ch = match channel {
             Some(c) => Arc::clone(&c),
-            None => Arc::new(<CbChannel<Event> as Channel<Event>>::new(1)),
+            None => Arc::new(<CbChannel<Event> as Channel<Event>>::new()),
         };
         let mut trans = Transport::new(ch.sender());
         let stun = IceServer::from_str("stun://stun.l.google.com:19302").unwrap();
@@ -193,7 +193,7 @@ pub mod test {
         assert!(swarm1.get_transport(&key2.address()).is_some());
         assert!(swarm2.get_transport(&key1.address()).is_some());
 
-        Arc::new(node1).listen().await;
+        Arc::new(node1).listen_once().await;
         // assert_eq!(&ev_1.from_path.clone(), &vec![key1.address().into()]);
         // assert_eq!(&ev_1.to_path.clone(), &vec![key1.address().into()]);
     }

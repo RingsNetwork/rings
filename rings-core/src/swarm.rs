@@ -58,7 +58,7 @@ impl Swarm {
             .collect::<Vec<IceServer>>();
         Self {
             table: MemStorage::<Address, Arc<Transport>>::new(),
-            transport_event_channel: Channel::new(1),
+            transport_event_channel: Channel::new(),
             ice_servers,
             address,
             session_manager,

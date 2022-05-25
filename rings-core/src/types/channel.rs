@@ -10,12 +10,13 @@ pub enum Event {
     RegisterTransport(Address),
 }
 
-#[async_trait]
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait Channel<T: Send> {
     type Sender;
     type Receiver;
 
-    fn new(buffer: usize) -> Self;
+    fn new() -> Self;
     fn sender(&self) -> Self::Sender;
     fn receiver(&self) -> Self::Receiver;
     async fn send(sender: &Self::Sender, msg: T) -> Result<()>;
