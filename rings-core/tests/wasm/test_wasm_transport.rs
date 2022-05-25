@@ -3,6 +3,7 @@ pub mod test {
     use log::Level;
     use rings_core::channels::Channel as CbChannel;
 
+    use futures::lock::Mutex;
     use rings_core::dht::PeerRing;
     use rings_core::ecc::SecretKey;
     use rings_core::err::Result;
@@ -18,8 +19,6 @@ pub mod test {
     use rings_core::types::ice_transport::IceTransport;
     use rings_core::types::ice_transport::IceTransportCallback;
     use rings_core::types::ice_transport::IceTrickleScheme;
-
-    use futures::lock::Mutex;
     use rings_core::types::message::MessageListener;
     use std::str::FromStr;
     use std::sync::Arc;
@@ -152,8 +151,8 @@ pub mod test {
         let transport1 = swarm1.new_transport().await.unwrap();
         let transport2 = swarm2.new_transport().await.unwrap();
 
-        let node1 = MessageHandler::new(Arc::clone(&dht1), Arc::clone(&swarm1));
-        let _node2 = MessageHandler::new(Arc::clone(&dht2), Arc::clone(&swarm2));
+        let node1 = Arc::new(MessageHandler::new(Arc::clone(&dht1), Arc::clone(&swarm1)));
+        let node2 = Arc::new(MessageHandler::new(Arc::clone(&dht2), Arc::clone(&swarm2)));
 
         // first node1 generate handshake info
         let handshake_info1 = transport1
@@ -193,7 +192,8 @@ pub mod test {
         assert!(swarm1.get_transport(&key2.address()).is_some());
         assert!(swarm2.get_transport(&key1.address()).is_some());
 
-        Arc::new(node1).listen_once().await;
+        node1.listen_once().await;
+        node2.listen_once().await;
         // assert_eq!(&ev_1.from_path.clone(), &vec![key1.address().into()]);
         // assert_eq!(&ev_1.to_path.clone(), &vec![key1.address().into()]);
     }

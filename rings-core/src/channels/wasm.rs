@@ -38,6 +38,7 @@ impl<T: Send> Channel<T> for CbChannel<T> {
 
     async fn send(sender: &Self::Sender, msg: T) -> Result<()> {
         let mut sender = sender.lock().await;
+        assert!(!sender.is_closed());
         match sender.try_send(msg) {
             Ok(()) => Ok(()),
             Err(_) => Err(Error::ChannelSendMessageFailed),
@@ -49,6 +50,7 @@ impl<T: Send> Channel<T> for CbChannel<T> {
         match receiver.try_next() {
             Err(_) => Err(Error::ChannelRecvMessageFailed),
             Ok(Some(x)) => Ok(Some(x)),
+            // when channel is closed and no messages left in the queue
             Ok(None) => Ok(None),
         }
     }
