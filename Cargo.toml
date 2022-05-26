@@ -38,7 +38,8 @@ browser = [
   "wasm-bindgen-futures",
   "js-sys",
   "reqwest-wasm",
-  "rings-core-wasm"
+  "rings-core-wasm",
+  "console_log"
 ]
 
 [dependencies]
@@ -84,6 +85,7 @@ wasm-bindgen-futures = {version="0.4.30", features=["futures-core-03-stream"], o
 js-sys = { version = "0.3.57", optional = true }
 reqwest-wasm = { version = "0.11", features = ["json"], optional = true }
 rings-core-wasm = { package = "rings-core", path = "./rings-core", features = ["wasm"], default-features = false, optional = true, version = "0.1.0" }
+console_log = { version = "0.2", optional = true }
 
 [[bin]]
 name = "rings-node"

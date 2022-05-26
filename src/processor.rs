@@ -3,7 +3,7 @@ use crate::{
     jsonrpc::{method, response::TransportAndIce},
     jsonrpc_client::SimpleClient,
     prelude::rings_core::{
-        message::{CustomMessage, Encoded, MaybeEncrypted, Message, MessageHandler},
+        message::{Encoded, Message, MessageHandler},
         prelude::{
             uuid,
             web3::{contract::tokens::Tokenizable, ethabi::Token, types::Address},
@@ -17,16 +17,6 @@ use crate::{
 #[cfg(feature = "client")]
 use jsonrpc_core::Metadata;
 use std::{str::FromStr, sync::Arc};
-
-#[cfg(feature = "client")]
-macro_rules! log_debug {
-    ($($t:tt)*) => (log::debug!("{}", &format_args!($($t)*).to_string()))
-}
-
-#[cfg(feature = "browser")]
-macro_rules! log_debug {
-    ($($t:tt)*) => (super::browser::log(&format_args!($($t)*).to_string()))
-}
 
 #[derive(Clone)]
 pub struct Processor {
@@ -73,7 +63,7 @@ impl Processor {
 
     pub async fn connect_peer_via_http(&self, peer_url: &str) -> Result<Arc<Transport>> {
         // request remote offer and sand answer to remote
-        log_debug!("connect_peer_via_http: {}", peer_url);
+        log::debug!("connect_peer_via_http: {}", peer_url);
         let transport = self
             .swarm
             .new_transport()
@@ -119,12 +109,12 @@ impl Processor {
             .register_remote_info(Encoded::from_encoded_str(info.ice.as_str()))
             .await
             .map_err(Error::RegisterIceError)?;
-        transport
-            .connect_success_promise()
-            .await
-            .map_err(Error::ConnectError)?
-            .await
-            .map_err(Error::ConnectError)?;
+        // transport
+        //     .connect_success_promise()
+        //     .await
+        //     .map_err(Error::ConnectError)?
+        //     .await
+        //     .map_err(Error::ConnectError)?;
         self.swarm
             .register(&addr, Arc::clone(transport))
             .await
@@ -268,14 +258,11 @@ impl Processor {
     {
         log::info!("send_message, to: {}, text: {}", address, msg.to_string());
         let address = Address::from_str(address).map_err(|_| Error::InvalidAddress)?;
+        let msg = Message::custom(msg.to_string().as_str(), &None).map_err(Error::SendMessage)?;
         self.msg_handler
-            .send_message_default(
-                &address,
-                Message::CustomMessage(MaybeEncrypted::Plain(CustomMessage(msg.to_string()))),
-            )
+            .send_message_default(&address, msg)
             .await
             .map_err(Error::SendMessage)?;
-
         Ok(())
     }
 }

@@ -2466,6 +2466,7 @@ dependencies = [
  "chrono",
  "clap",
  "console_error_panic_hook",
+ "console_log",
  "daemonize",
  "dotenv",
  "env_logger",

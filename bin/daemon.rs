@@ -8,7 +8,7 @@ use rings_node::{
         async_trait,
         dht::{Did, PeerRing, Stabilization, TStabilize},
         ecc::SecretKey,
-        message::{self, CustomMessage, Message, MessageHandler, MessageRelay},
+        message::{self, CustomMessage, MaybeEncrypted, Message, MessageHandler, MessageRelay},
         prelude::url,
         session::SessionManager,
         swarm::Swarm,
@@ -101,7 +101,7 @@ struct RunArgs {
     #[clap(long)]
     pub without_turn: bool,
 
-    #[clap(long, defualt_value = "20")]
+    #[clap(long, default_value = "20")]
     pub stabilize_timeout: usize,
 }
 
@@ -162,17 +162,19 @@ async fn run_jobs(args: &RunArgs) -> anyhow::Result<()> {
         args.stabilize_timeout,
     ));
     let http_addr = args.http_addr.clone();
-    let j = tokio::spawn(futures::future::join(
+    let listen_event_1 = listen_event.clone();
+    let listen_event_2 = listen_event.clone();
+    let j = tokio::spawn(futures::future::join3(
         async {
-            listen_event.clone().listen().await;
+            listen_event_1.listen().await;
             AnyhowResult::Ok(())
         },
         async {
-            run_service(http_addr, swarm, listen_event).await?;
+            run_service(http_addr, swarm, listen_event_2).await?;
             AnyhowResult::Ok(())
         },
         async {
-            stabilization.wait().await?;
+            stabilization.wait().await;
             AnyhowResult::Ok(())
         },
     ));
@@ -195,10 +197,26 @@ struct MessageCallback {}
 
 #[async_trait]
 impl message::MessageCallback for MessageCallback {
-    async fn custom_message(&self, _relay: MessageRelay<Message>, _prev: Did, msg: CustomMessage) {
-        log::info!("[MESSAGE] custom_message: {:?}", msg);
+    async fn custom_message(
+        &self,
+        handler: &MessageHandler,
+        _relay: &MessageRelay<Message>,
+        _prev: Did,
+        msg: &MaybeEncrypted<CustomMessage>,
+    ) {
+        if let Ok(msg) = handler.decrypt_msg(msg) {
+            log::info!("[MESSAGE] custom_message: {:?}", msg);
+        } else {
+            log::info!("[MESSAGE] custom_message: {:?}", msg);
+        }
     }
-    async fn builtin_message(&self, _relay: MessageRelay<Message>, _prev: Did) {}
+    async fn builtin_message(
+        &self,
+        _handler: &MessageHandler,
+        _relay: &MessageRelay<Message>,
+        _prev: Did,
+    ) {
+    }
 }
 
 fn run_daemon(args: &RunArgs) -> AnyhowResult<()> {
