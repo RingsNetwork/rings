@@ -1,8 +1,5 @@
 #[cfg(test)]
 mod test {
-    use core::future::Future;
-    use futures_util::pin_mut;
-    use rings_core::poll_fut;
     use wasm_bindgen_futures::future_to_promise;
     use wasm_bindgen_futures::spawn_local;
     use wasm_bindgen_futures::JsFuture;
@@ -27,6 +24,7 @@ mod test {
         let (sender, mut receiver) = futures::channel::mpsc::channel(1);
         let fut = async move {
             let mut sender = sender.clone();
+            assert!(!sender.is_closed());
             sender.try_send("test").unwrap();
             Ok("ok".into())
         };
@@ -41,8 +39,12 @@ mod test {
         let (sender, mut receiver) = futures::channel::mpsc::channel(1);
         spawn_local(async move {
             let mut sender = sender.clone();
+            assert!(!sender.is_closed());
             sender.try_send("test").unwrap();
         });
-        assert_eq!(receiver.try_next().unwrap(), Some("test"));
+        spawn_local(async move {
+            let next = receiver.try_next().unwrap();
+            assert_eq!(next, Some("test"));
+        })
     }
 }
