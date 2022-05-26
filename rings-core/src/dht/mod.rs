@@ -11,6 +11,6 @@ pub use {chord::PeerRing, chord::PeerRingAction, chord::RemoteAction as PeerRing
 pub use {types::Chord, types::ChordStablize, types::ChordStorage};
 
 mod stabilization;
-pub use stabilization::Stabilization;
+pub use stabilization::{Stabilization, TStabilize};
 pub mod peer;
 pub mod subring;

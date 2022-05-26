@@ -2,7 +2,7 @@
 use clap::{Args, Parser, Subcommand};
 use futures::lock::Mutex;
 use rings_core::dht::PeerRing;
-use rings_core::dht::Stabilization;
+use rings_core::dht::{Stabilization, TStabilize};
 use rings_core::ecc::SecretKey;
 use rings_core::message::MessageHandler;
 use rings_core::session::SessionManager;
@@ -12,7 +12,6 @@ use rings_node::cli::Client;
 use rings_node::logger::LogLevel;
 use rings_node::logger::Logger;
 use rings_node::service::run_service;
-use rings_node::service::run_stabilize;
 use std::sync::Arc;
 
 #[derive(Parser, Debug)]
@@ -230,13 +229,17 @@ async fn daemon_run(
     let session = SessionManager::new(&sig, &auth, &temp_key);
     let swarm = Arc::new(Swarm::new(stuns, key.address(), session.clone()));
     let listen_event = Arc::new(MessageHandler::new(dht.clone(), swarm.clone()));
-    let stabilize = Stabilization::new(dht.clone(), swarm.clone(), stabilize_timeout);
+    let stabilize = Arc::new(Stabilization::new(
+        dht.clone(),
+        swarm.clone(),
+        stabilize_timeout,
+    ));
     let swarm_clone = swarm.clone();
 
     let (_, _, _) = futures::join!(
         listen_event.clone().listen(),
         run_service(http_addr.to_owned(), swarm_clone, listen_event),
-        run_stabilize(stabilize),
+        stabilize.wait(),
     );
 
     Ok(())
