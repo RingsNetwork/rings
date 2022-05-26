@@ -545,7 +545,7 @@ pub mod tests {
     use std::str::FromStr;
 
     async fn prepare_transport() -> Result<Transport> {
-        let ch = Arc::new(AcChannel::new(1));
+        let ch = Arc::new(AcChannel::new());
         let mut trans = Transport::new(ch.sender());
 
         let stun = IceServer::from_str("stun://stun.l.google.com:19302").unwrap();
