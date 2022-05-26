@@ -18,18 +18,6 @@ use crate::{
 use jsonrpc_core::Metadata;
 use std::{str::FromStr, sync::Arc};
 
-#[cfg(feature = "client")]
-macro_rules! log_debug {
-    ($($t:tt)*) => (log::debug!("{}", &format_args!($($t)*).to_string()))
-}
-
-#[cfg(feature = "browser")]
-use crate::prelude::rings_core::console_log;
-#[cfg(feature = "browser")]
-macro_rules! log_debug {
-    ($($t:tt)*) => (console_log!("{}", &format_args!($($t)*).to_string()))
-}
-
 #[derive(Clone)]
 pub struct Processor {
     pub swarm: Arc<Swarm>,
@@ -75,7 +63,7 @@ impl Processor {
 
     pub async fn connect_peer_via_http(&self, peer_url: &str) -> Result<Arc<Transport>> {
         // request remote offer and sand answer to remote
-        log_debug!("connect_peer_via_http: {}", peer_url);
+        log::debug!("connect_peer_via_http: {}", peer_url);
         let transport = self
             .swarm
             .new_transport()

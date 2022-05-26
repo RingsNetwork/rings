@@ -3,7 +3,7 @@ pub mod utils;
 
 use crate::{
     prelude::rings_core::{
-        async_trait, console_log,
+        async_trait,
         dht::{Did, PeerRing},
         ecc::SecretKey,
         message::{
@@ -38,6 +38,15 @@ extern "C" {
 pub fn start() -> Result<(), JsError> {
     utils::set_panic_hook();
     Ok(())
+}
+
+#[wasm_bindgen]
+pub fn debug(value: bool) {
+    if value {
+        console_log::init_with_level(log::Level::Debug).ok();
+    } else {
+        console_log::init_with_level(log::Level::Error).ok();
+    }
 }
 
 #[wasm_bindgen]
@@ -108,7 +117,7 @@ impl Client {
     pub fn listen(&mut self, callback: MessageCallbackInstance) -> Result<IntervalHandle, JsError> {
         let p = self.processor.clone();
         let pr = PeerRing::new(p.swarm.address().into());
-        console_log!("peer_ring: {:?}", pr.id);
+        log::debug!("peer_ring: {:?}", pr.id);
         let dht = Arc::new(Mutex::new(pr));
         let msg_handler = Arc::new(MessageHandler::new_with_callback(
             dht,
@@ -144,14 +153,14 @@ impl Client {
     }
 
     pub fn connect_peer_via_http(&self, remote_url: String) -> Promise {
-        console_log!("remote_url: {}", remote_url);
+        log::debug!("remote_url: {}", remote_url);
         let p = self.processor.clone();
         future_to_promise(async move {
             let transport = p
                 .connect_peer_via_http(remote_url.as_str())
                 .await
                 .map_err(JsError::from)?;
-            console_log!("connect_peer_via_http transport_id: {:?}", transport.id);
+            log::debug!("connect_peer_via_http transport_id: {:?}", transport.id);
             Ok(JsValue::from_str(transport.id.to_string().as_str()))
         })
     }
@@ -286,11 +295,11 @@ impl MessageCallback for MessageCallbackInstance {
         prev: Did,
         msg: &MaybeEncrypted<CustomMessage>,
     ) {
-        console_log!("custom_message received: {:?}", msg);
+        log::debug!("custom_message received: {:?}", msg);
 
         let r = handler.decrypt_msg(msg);
         if let Err(e) = r {
-            console_log!("custom_message decrypt failed: {:?}", e);
+            log::error!("custom_message decrypt failed: {:?}", e);
             return;
         }
         let msg = r.unwrap();
@@ -305,7 +314,7 @@ impl MessageCallback for MessageCallbackInstance {
         ) {
             if let Ok(p) = js_sys::Promise::try_from(r) {
                 if let Err(e) = wasm_bindgen_futures::JsFuture::from(p).await {
-                    console_log!("invoke on_custom_message error: {:?}", e);
+                    log::warn!("invoke on_custom_message error: {:?}", e);
                 }
             }
         }
@@ -319,7 +328,7 @@ impl MessageCallback for MessageCallbackInstance {
         prev: Did,
     ) {
         let this = JsValue::null();
-        console_log!("builtin_message received: {:?}", relay);
+        log::debug!("builtin_message received: {:?}", relay);
         if let Ok(r) = self.builtin_message.call2(
             &this,
             &JsValue::from_serde(&relay).unwrap(),
@@ -327,7 +336,7 @@ impl MessageCallback for MessageCallbackInstance {
         ) {
             if let Ok(p) = js_sys::Promise::try_from(r) {
                 if let Err(e) = wasm_bindgen_futures::JsFuture::from(p).await {
-                    console_log!("invoke on_builtin_message error: {:?}", e);
+                    log::warn!("invoke on_builtin_message error: {:?}", e);
                 }
             }
         }

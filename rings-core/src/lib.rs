@@ -4,8 +4,6 @@
 #![feature(derive_default_enum)]
 #![feature(generators)]
 pub mod channels;
-#[cfg(feature = "wasm")]
-pub mod console;
 pub mod dht;
 pub mod ecc;
 pub mod err;

@@ -15,7 +15,6 @@ use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
 use crate::types::ice_transport::IceTrickleScheme;
-use crate::{console_err, console_log};
 use async_trait::async_trait;
 use futures::channel::mpsc;
 use futures::lock::Mutex as FuturesMutex;
@@ -242,11 +241,11 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
 
                 match JsFuture::from(promise).await {
                     Ok(_) => {
-                        console_log!("set remote sdp successed");
+                        log::debug!("set remote sdp successed");
                         Ok(())
                     }
                     Err(e) => {
-                        console_err!("failed to set remote desc: {:?}", e);
+                        log::error!("failed to set remote desc: {:?}", e);
                         Err(Error::RTCPeerConnectionSetRemoteDescFailed(format!(
                             "{:?}",
                             e
@@ -317,7 +316,6 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
                 Ok(self)
             }
             None => {
-                console_err!("cannot get connection");
                 log::error!("cannot get connection");
                 Err(Error::RTCPeerConnectionNotEstablish)
             }
@@ -332,7 +330,7 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
             let mut peer_connection = peer_connection.clone();
             let event_sender = Arc::clone(&event_sender);
             let public_key = Arc::clone(&public_key);
-            console_log!("got state event {:?}", ev.type_());
+            log::debug!("got state event {:?}", ev.type_());
             if ev.type_() == *"iceconnectionstatechange" {
                 let peer_connection = peer_connection.take().unwrap();
                 let ice_connection_state = peer_connection.ice_connection_state();
@@ -345,7 +343,7 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
                             .await
                             .is_err()
                         {
-                            console_err!("Failed when send RegisterTransport");
+                            log::error!("Failed when send RegisterTransport");
                         }
                     }
                     if ice_connection_state == RtcIceConnectionState::Failed {
@@ -355,7 +353,7 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
                             .await
                             .is_err()
                         {
-                            console_err!("Failed when send ConnectFailed");
+                            log::error!("Failed when send ConnectFailed");
                         }
                     }
                 })
@@ -384,12 +382,12 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
         let event_sender = self.event_sender.clone();
 
         box move |ev: RtcDataChannelEvent| {
-            console_log!("channel open");
+            log::debug!("channel open");
             let event_sender = Arc::clone(&event_sender);
             let ch = ev.channel();
             let on_message_cb = Closure::wrap(
                 (box move |ev: MessageEvent| {
-                    console_log!("get message: {:?}", ev.data());
+                    log::debug!("get message: {:?}", ev.data());
                     let event_sender = Arc::clone(&event_sender);
                     let msg = Uint8Array::new(&ev.data()).to_vec();
                     spawn_local(async move {
@@ -397,7 +395,7 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
                         if let Err(e) =
                             CbChannel::send(&event_sender, Event::DataChannelMessage(msg)).await
                         {
-                            console_err!("Failed on handle msg, {:?}", e);
+                            log::error!("Failed on handle msg, {:?}", e);
                         }
                     })
                 }) as Box<dyn FnMut(MessageEvent)>,
