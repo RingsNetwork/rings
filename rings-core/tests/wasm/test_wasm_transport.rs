@@ -19,7 +19,6 @@ pub mod test {
     use rings_core::types::ice_transport::IceTransport;
     use rings_core::types::ice_transport::IceTransportCallback;
     use rings_core::types::ice_transport::IceTrickleScheme;
-    use rings_core::types::message::MessageListener;
     use std::str::FromStr;
     use std::sync::Arc;
     use wasm_bindgen::JsValue;
