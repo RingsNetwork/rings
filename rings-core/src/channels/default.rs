@@ -15,8 +15,8 @@ impl<T: Send> Channel<T> for AcChannel<T> {
     type Sender = Sender<T>;
     type Receiver = Receiver<T>;
 
-    fn new(buffer: usize) -> Self {
-        let (tx, rx) = ac::bounded(buffer);
+    fn new() -> Self {
+        let (tx, rx) = ac::unbounded();
         Self {
             sender: tx,
             receiver: rx,

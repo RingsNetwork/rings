@@ -37,7 +37,7 @@ use web_sys::RtcIceCandidate;
 use web_sys::RtcIceCandidateInit;
 use web_sys::RtcIceConnectionState;
 use web_sys::RtcIceGatheringState;
-use web_sys::RtcLifecycleEvent;
+
 use web_sys::RtcPeerConnection;
 use web_sys::RtcPeerConnectionIceEvent;
 use web_sys::RtcSdpType;
@@ -295,7 +295,7 @@ impl WasmTransport {
 impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
     type OnLocalCandidateHdlrFn = Box<dyn FnMut(RtcPeerConnectionIceEvent)>;
     type OnDataChannelHdlrFn = Box<dyn FnMut(RtcDataChannelEvent)>;
-    type OnIceConnectionStateChangeHdlrFn = Box<dyn FnMut(RtcLifecycleEvent)>;
+    type OnIceConnectionStateChangeHdlrFn = Box<dyn FnMut(web_sys::Event)>;
 
     async fn apply_callback(&self) -> Result<&Self> {
         match &self.get_peer_connection().await {
@@ -307,7 +307,7 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
 
                 c.set_onicecandidate(Some(on_ice_candidate_callback.as_ref().unchecked_ref()));
                 c.set_ondatachannel(Some(on_data_channel_callback.as_ref().unchecked_ref()));
-                c.set_onicegatheringstatechange(Some(
+                c.set_oniceconnectionstatechange(Some(
                     on_ice_connection_state_change_callback
                         .as_ref()
                         .unchecked_ref(),
@@ -328,38 +328,37 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
         let event_sender = self.event_sender.clone();
         let peer_connection = self.get_peer_connection().await;
         let public_key = Arc::clone(&self.public_key);
-        box move |ev: RtcLifecycleEvent| {
+        box move |ev: web_sys::Event| {
             let mut peer_connection = peer_connection.clone();
             let event_sender = Arc::clone(&event_sender);
             let public_key = Arc::clone(&public_key);
-            match ev {
-                RtcLifecycleEvent::Iceconnectionstatechange => {
-                    let peer_connection = peer_connection.take().unwrap();
-                    let ice_connection_state = peer_connection.ice_connection_state();
-                    spawn_local(async move {
-                        let event_sender = Arc::clone(&event_sender);
+            log::debug!("got state event {:?}", ev.type_());
+            if ev.type_() == *"iceconnectionstatechange" {
+                let peer_connection = peer_connection.take().unwrap();
+                let ice_connection_state = peer_connection.ice_connection_state();
+                spawn_local(async move {
+                    let event_sender = Arc::clone(&event_sender);
+                    if ice_connection_state == RtcIceConnectionState::Connected {
                         let local_address: Address =
                             (*public_key.read().unwrap()).unwrap().address();
-                        if ice_connection_state == RtcIceConnectionState::Connected
-                            && CbChannel::send(
-                                &event_sender,
-                                Event::RegisterTransport(local_address),
-                            )
+                        if CbChannel::send(&event_sender, Event::RegisterTransport(local_address))
                             .await
                             .is_err()
                         {
                             log::error!("Failed when send RegisterTransport");
                         }
-                        if ice_connection_state == RtcIceConnectionState::Connected
-                            && CbChannel::send(&event_sender, Event::ConnectFailed(local_address))
-                                .await
-                                .is_err()
+                    }
+                    if ice_connection_state == RtcIceConnectionState::Failed {
+                        let local_address: Address =
+                            (*public_key.read().unwrap()).unwrap().address();
+                        if CbChannel::send(&event_sender, Event::ConnectFailed(local_address))
+                            .await
+                            .is_err()
                         {
-                            log::error!("Failed when send RegisterTransport");
+                            log::error!("Failed when send ConnectFailed");
                         }
-                    })
-                }
-                _ => unreachable!(),
+                    }
+                })
             }
         }
     }
@@ -383,11 +382,14 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
 
     async fn on_data_channel(&self) -> Self::OnDataChannelHdlrFn {
         let event_sender = self.event_sender.clone();
+
         box move |ev: RtcDataChannelEvent| {
+            log::debug!("channel open!");
             let event_sender = Arc::clone(&event_sender);
             let ch = ev.channel();
             let on_message_cb = Closure::wrap(
                 (box move |ev: MessageEvent| {
+                    log::debug!("got message");
                     let event_sender = Arc::clone(&event_sender);
                     match ev.data().as_string() {
                         Some(msg) => spawn_local(async move {
@@ -484,6 +486,7 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
     }
 
     async fn wait_for_connected(&self) -> Result<()> {
+        log::warn!("callback is replaced");
         let promise = self.connect_success_promise().await?;
         promise.await
     }

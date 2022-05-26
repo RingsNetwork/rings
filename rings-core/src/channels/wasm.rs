@@ -15,13 +15,13 @@ pub struct CbChannel<T> {
     receiver: Receiver<T>,
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl<T: Send> Channel<T> for CbChannel<T> {
     type Sender = Sender<T>;
     type Receiver = Receiver<T>;
 
-    fn new(buffer: usize) -> Self {
-        let (tx, rx) = mpsc::channel(buffer);
+    fn new() -> Self {
+        let (tx, rx) = mpsc::channel(8);
         Self {
             sender: Arc::new(Mutex::new(tx)),
             receiver: Arc::new(Mutex::new(rx)),
@@ -49,6 +49,7 @@ impl<T: Send> Channel<T> for CbChannel<T> {
         match receiver.try_next() {
             Err(_) => Err(Error::ChannelRecvMessageFailed),
             Ok(Some(x)) => Ok(Some(x)),
+            // when channel is closed and no messages left in the queue
             Ok(None) => Ok(None),
         }
     }
