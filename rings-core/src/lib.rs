@@ -16,6 +16,9 @@ pub mod swarm;
 pub mod transports;
 pub mod types;
 pub mod utils;
+#[cfg(feature = "wasm")]
+pub mod console;
 
 pub use async_trait::async_trait;
 pub use futures;
+

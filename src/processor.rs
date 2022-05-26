@@ -24,8 +24,10 @@ macro_rules! log_debug {
 }
 
 #[cfg(feature = "browser")]
+use crate::prelude::rings_core::console_log;
+#[cfg(feature = "browser")]
 macro_rules! log_debug {
-    ($($t:tt)*) => (super::browser::log(&format_args!($($t)*).to_string()))
+    ($($t:tt)*) => (console_log!("{}", &format_args!($($t)*).to_string()))
 }
 
 #[derive(Clone)]

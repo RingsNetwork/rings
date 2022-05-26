@@ -3,7 +3,7 @@ pub mod utils;
 
 use crate::{
     prelude::rings_core::{
-        async_trait,
+        async_trait, console_log,
         dht::{Did, PeerRing},
         ecc::SecretKey,
         message::{
@@ -28,16 +28,10 @@ use wasm_bindgen_futures::{future_to_promise, spawn_local};
 
 #[wasm_bindgen]
 extern "C" {
-    #[wasm_bindgen(js_namespace = console)]
-    pub fn log(a: &str);
 
     fn setInterval(closure: &Closure<dyn FnMut()>, time: u32) -> i32;
 
     fn clearInterval(id: i32);
-}
-
-macro_rules! console_log {
-    ($($t:tt)*) => (log(&format_args!($($t)*).to_string()))
 }
 
 #[wasm_bindgen(start)]

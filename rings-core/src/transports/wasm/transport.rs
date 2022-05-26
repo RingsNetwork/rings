@@ -15,10 +15,10 @@ use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
 use crate::types::ice_transport::IceTrickleScheme;
+use crate::{console_err, console_log};
 use async_trait::async_trait;
 use futures::channel::mpsc;
 use futures::lock::Mutex as FuturesMutex;
-use log::info;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
@@ -37,7 +37,6 @@ use web_sys::RtcIceCandidate;
 use web_sys::RtcIceCandidateInit;
 use web_sys::RtcIceConnectionState;
 use web_sys::RtcIceGatheringState;
-
 use web_sys::RtcPeerConnection;
 use web_sys::RtcPeerConnectionIceEvent;
 use web_sys::RtcSdpType;
@@ -242,12 +241,11 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
 
                 match JsFuture::from(promise).await {
                     Ok(_) => {
-                        log::debug!("set remote sdp successed");
+                        console_log!("set remote sdp successed");
                         Ok(())
                     }
                     Err(e) => {
-                        info!("failed to set remote desc");
-                        info!("{:?}", e);
+                        console_err!("failed to set remote desc: {:?}", e);
                         Err(Error::RTCPeerConnectionSetRemoteDescFailed(format!(
                             "{:?}",
                             e
@@ -318,6 +316,7 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
                 Ok(self)
             }
             None => {
+                console_err!("cannot get connection");
                 log::error!("cannot get connection");
                 Err(Error::RTCPeerConnectionNotEstablish)
             }
@@ -332,7 +331,7 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
             let mut peer_connection = peer_connection.clone();
             let event_sender = Arc::clone(&event_sender);
             let public_key = Arc::clone(&public_key);
-            log::debug!("got state event {:?}", ev.type_());
+            console_log!("got state event {:?}", ev.type_());
             if ev.type_() == *"iceconnectionstatechange" {
                 let peer_connection = peer_connection.take().unwrap();
                 let ice_connection_state = peer_connection.ice_connection_state();
@@ -345,7 +344,7 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
                             .await
                             .is_err()
                         {
-                            log::error!("Failed when send RegisterTransport");
+                            console_err!("Failed when send RegisterTransport");
                         }
                     }
                     if ice_connection_state == RtcIceConnectionState::Failed {
@@ -355,7 +354,7 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
                             .await
                             .is_err()
                         {
-                            log::error!("Failed when send ConnectFailed");
+                            console_err!("Failed when send ConnectFailed");
                         }
                     }
                 })
@@ -384,28 +383,27 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
         let event_sender = self.event_sender.clone();
 
         box move |ev: RtcDataChannelEvent| {
-            log::debug!("channel open!");
+            console_log!("channel open");
             let event_sender = Arc::clone(&event_sender);
             let ch = ev.channel();
             let on_message_cb = Closure::wrap(
                 (box move |ev: MessageEvent| {
-                    log::debug!("got message");
+                    console_log!("get message");
                     let event_sender = Arc::clone(&event_sender);
                     match ev.data().as_string() {
                         Some(msg) => spawn_local(async move {
                             let event_sender = Arc::clone(&event_sender);
-                            if CbChannel::send(
+                            if let Err(e) = CbChannel::send(
                                 &event_sender,
                                 Event::DataChannelMessage(msg.into_bytes()),
                             )
                             .await
-                            .is_err()
                             {
-                                log::error!("Failed on handle msg");
+                                console_err!("Failed on handle msg, {:?}", e);
                             }
                         }),
                         None => {
-                            log::error!("Failed on handle msg");
+                            console_err!("Failed on handle msg, msg is empty");
                         }
                     }
                 }) as Box<dyn FnMut(MessageEvent)>,
