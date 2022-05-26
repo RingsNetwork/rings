@@ -125,8 +125,8 @@ impl Client {
         let cb = Closure::wrap(Box::new(move || {
             let h1 = h.clone();
             spawn_local(async move {
-                let a = h1.clone().listen_once().await;
-                console_log!("listen_once: {:?}", a);
+                h1.clone().listen_once().await;
+                // console_log!("listen_once: {:?}", a);
             });
         }) as Box<dyn FnMut()>);
 

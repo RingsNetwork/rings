@@ -19,6 +19,7 @@ use crate::{console_err, console_log};
 use async_trait::async_trait;
 use futures::channel::mpsc;
 use futures::lock::Mutex as FuturesMutex;
+use js_sys::Uint8Array;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
@@ -388,24 +389,17 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
             let ch = ev.channel();
             let on_message_cb = Closure::wrap(
                 (box move |ev: MessageEvent| {
-                    console_log!("get message");
+                    console_log!("get message: {:?}", ev.data());
                     let event_sender = Arc::clone(&event_sender);
-                    match ev.data().as_string() {
-                        Some(msg) => spawn_local(async move {
-                            let event_sender = Arc::clone(&event_sender);
-                            if let Err(e) = CbChannel::send(
-                                &event_sender,
-                                Event::DataChannelMessage(msg.into_bytes()),
-                            )
-                            .await
-                            {
-                                console_err!("Failed on handle msg, {:?}", e);
-                            }
-                        }),
-                        None => {
-                            console_err!("Failed on handle msg, msg is empty");
+                    let msg = Uint8Array::new(&ev.data()).to_vec();
+                    spawn_local(async move {
+                        let event_sender = Arc::clone(&event_sender);
+                        if let Err(e) =
+                            CbChannel::send(&event_sender, Event::DataChannelMessage(msg)).await
+                        {
+                            console_err!("Failed on handle msg, {:?}", e);
                         }
-                    }
+                    })
                 }) as Box<dyn FnMut(MessageEvent)>,
             );
             ch.set_onmessage(Some(on_message_cb.as_ref().unchecked_ref()));

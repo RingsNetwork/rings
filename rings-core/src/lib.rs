@@ -4,6 +4,8 @@
 #![feature(derive_default_enum)]
 #![feature(generators)]
 pub mod channels;
+#[cfg(feature = "wasm")]
+pub mod console;
 pub mod dht;
 pub mod ecc;
 pub mod err;
@@ -16,9 +18,6 @@ pub mod swarm;
 pub mod transports;
 pub mod types;
 pub mod utils;
-#[cfg(feature = "wasm")]
-pub mod console;
 
 pub use async_trait::async_trait;
 pub use futures;
-
