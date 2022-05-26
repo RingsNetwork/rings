@@ -122,12 +122,17 @@ impl Client {
             Box::new(callback),
         ));
         self.message_handler = Some(msg_handler.clone());
+        // future_to_promise(async move {
+        //     msg_handler.listen().await;
+        //     Ok(JsValue::null())
+        // })
         let h = Arc::clone(&msg_handler);
 
         let cb = Closure::wrap(Box::new(move || {
             let h1 = h.clone();
             spawn_local(async move {
-                h1.clone().listen_once().await;
+                let a = h1.clone().listen_once().await;
+                console_log!("listen_once: {:?}", a);
             });
         }) as Box<dyn FnMut()>);
 
@@ -142,36 +147,6 @@ impl Client {
             interval_id,
             _closure: cb,
         })
-
-        // future_to_promise(async move {
-        //     msg_handler.listen().await;
-
-        //     let window = web_sys::window().unwrap();
-        //     // window.set_timeout_with_callback_and_timeout_and_arguments(handler, timeout, arguments)
-        //     let func = js_sys::Function::new_no_args("") wasm_bindgen::prelude::Closure::wrap(
-        //         (box move |func: js_sys::Function| {
-        //             let window = web_sys::window().unwrap();
-        //             window
-        //                 .set_timeout_with_callback_and_timeout_and_arguments(
-        //                     func.unchecked_ref(),
-        //                     200,
-        //                     &js_sys::Array::of1(&func),
-        //                 )
-        //                 .unwrap();
-        //         }) as Box<dyn FnMut(js_sys::Function)>,
-        //     );
-        //     window
-        //         .set_timeout_with_callback_and_timeout_and_arguments(
-        //             &func.as_ref().unchecked_ref(),
-        //             200,
-        //             &js_sys::Array::of1(&func.as_ref().unchecked_ref()),
-        //         )
-        //         .unwrap();
-        //     func.forget();
-
-        //     console_log!("run listen()");
-        //     Ok(JsValue::from_str(pr.id.to_string().as_str()))
-        // })
     }
 
     pub fn connect_peer_via_http(&self, remote_url: String) -> Promise {

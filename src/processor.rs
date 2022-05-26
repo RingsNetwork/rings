@@ -3,7 +3,7 @@ use crate::{
     jsonrpc::{method, response::TransportAndIce},
     jsonrpc_client::SimpleClient,
     prelude::rings_core::{
-        message::{CustomMessage, Encoded, MaybeEncrypted, Message, MessageHandler},
+        message::{Encoded, Message, MessageHandler},
         prelude::{
             uuid,
             web3::{contract::tokens::Tokenizable, ethabi::Token, types::Address},
@@ -119,12 +119,12 @@ impl Processor {
             .register_remote_info(Encoded::from_encoded_str(info.ice.as_str()))
             .await
             .map_err(Error::RegisterIceError)?;
-        transport
-            .connect_success_promise()
-            .await
-            .map_err(Error::ConnectError)?
-            .await
-            .map_err(Error::ConnectError)?;
+        // transport
+        //     .connect_success_promise()
+        //     .await
+        //     .map_err(Error::ConnectError)?
+        //     .await
+        //     .map_err(Error::ConnectError)?;
         self.swarm
             .register(&addr, Arc::clone(transport))
             .await
@@ -268,14 +268,11 @@ impl Processor {
     {
         log::info!("send_message, to: {}, text: {}", address, msg.to_string());
         let address = Address::from_str(address).map_err(|_| Error::InvalidAddress)?;
+        let msg = Message::custom(msg.to_string().as_str(), &None).map_err(Error::SendMessage)?;
         self.msg_handler
-            .send_message_default(
-                &address,
-                Message::CustomMessage(MaybeEncrypted::Plain(CustomMessage(msg.to_string()))),
-            )
+            .send_message_default(&address, msg)
             .await
             .map_err(Error::SendMessage)?;
-
         Ok(())
     }
 }
