@@ -1,4 +1,3 @@
-mod backgrounds;
 mod http_error;
 #[cfg(feature = "daemon")]
 mod is_turn;
@@ -10,7 +9,6 @@ use crate::{
     processor::Processor,
 };
 use axum::{extract::Extension, response::IntoResponse, routing::post, Router};
-pub use backgrounds::run_stabilize;
 use http::header::{self, HeaderValue};
 #[cfg(feature = "daemon")]
 pub use is_turn::run_udp_turn;
