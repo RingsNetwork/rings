@@ -364,7 +364,7 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
     async fn on_ice_candidate(&self) -> Self::OnLocalCandidateHdlrFn {
         let peer_connection = self.get_peer_connection().await;
         let pending_candidates = Arc::clone(&self.pending_candidates);
-        log::info!("binding ice candidate callback");
+        log::debug!("binding ice candidate callback");
         box move |ev: RtcPeerConnectionIceEvent| {
             log::info!("ice_Candidate {:?}", ev.candidate());
             let mut candidates = pending_candidates.lock().unwrap();
