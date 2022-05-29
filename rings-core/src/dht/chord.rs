@@ -313,15 +313,15 @@ impl ChordStorage<PeerRingAction> for PeerRing {
     }
 
     fn store(&self, peer: VirtualPeer) -> Result<PeerRingAction> {
-        let id = peer.did();
-        match self.find_successor(id) {
+        let vid = peer.did();
+        match self.find_successor(vid) {
             Ok(PeerRingAction::Some(id)) => match self.storage.get(&id) {
                 Some(v) => {
-                    let _ = self.storage.set(&id, VirtualPeer::concat(&v, &peer)?);
+                    let _ = self.storage.set(&vid, VirtualPeer::concat(&v, &peer)?);
                     Ok(PeerRingAction::None)
                 }
                 None => {
-                    let _ = self.storage.set(&id, peer);
+                    let _ = self.storage.set(&vid, peer);
                     Ok(PeerRingAction::None)
                 }
             },

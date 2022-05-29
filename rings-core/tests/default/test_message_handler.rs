@@ -548,6 +548,11 @@ pub mod test {
                 .unwrap();
         let dht1 = Arc::new(Mutex::new(new_chord(key1.address().into())));
         let dht2 = Arc::new(Mutex::new(new_chord(key2.address().into())));
+        println!(
+            "test with key1: {:?}, key2: {:?}",
+            key1.address(),
+            key2.address()
+        );
         let swarm1 = Arc::new(new_swarm(&key1));
         let swarm2 = Arc::new(new_swarm(&key2));
         let (_, _) = establish_connection(Arc::clone(&swarm1), Arc::clone(&swarm2)).await?;
@@ -573,6 +578,8 @@ pub mod test {
                  let transport_1_to_2 = swarm1.get_transport(&swarm2.address()).unwrap();
                  sleep(Duration::from_millis(1000)).await;
                  transport_1_to_2.wait_for_data_channel_open().await.unwrap();
+                 // dht1's successor is dht2
+                 // dht2's successor is dht1
                  assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
                  assert!(dht2.lock().await.successor.list().contains(&key1.address().into()));
                  assert_eq!(
@@ -599,6 +606,7 @@ pub mod test {
                  assert!(dht2.lock().await.storage.len() == 0);
                  let message = String::from("this is a test string");
                  let encoded_message = message.encode().unwrap();
+                 // the vid is hash of string
                  let vnode: VirtualPeer = encoded_message.try_into().unwrap();
                  handler1.send_message(
                      &swarm2.address(),
@@ -613,11 +621,13 @@ pub mod test {
                  )
                  .await
                  .unwrap();
-                 sleep(Duration::from_millis(1000)).await;
+                 sleep(Duration::from_millis(5000)).await;
                  // it should store on either dht1 or dht2
                  assert!(dht2.lock().await.storage.len() > 0 || dht2.lock().await.storage.len() > 0);
                  let data = dht2.lock().await.storage.get(&(vnode.address));
-                 assert!(data.is_some());
+                 assert!(data.is_some(), "vnode: {:?} not in , exist keys {:?}",
+                         vnode.did(),
+                         dht2.lock().await.storage.keys());
                  let data = data.unwrap();
                  assert_eq!(data.data[0].clone().decode::<String>().unwrap(), message);
              } => {}

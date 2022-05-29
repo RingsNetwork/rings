@@ -1139,7 +1139,7 @@ mod test {
         //          Ok(PeerRingAction::Some(self.successor.min()))
         // node1's successor is node3
         // node2 is in [node1, node3]
-        // so it will response node3
+        // so it will response node3 to node 1
 
         // [node1, node2, node3]
         // from_path: node2, node3
