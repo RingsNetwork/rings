@@ -5,7 +5,6 @@
 //! - Then we can sign the auth message via some web3 provider like metamask or just with raw private key, and create the SessionManger with
 //! - SessionManager::new(sig, auth_info, temp_key)
 
-
 use crate::ecc::signers;
 use crate::ecc::PublicKey;
 use crate::ecc::SecretKey;
