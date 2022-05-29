@@ -1,4 +1,4 @@
-//pub mod handler;
+//! Message and MessageHandler
 
 mod encoder;
 pub use encoder::Decoder;

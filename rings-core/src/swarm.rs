@@ -1,3 +1,5 @@
+//! Tranposrt managerment
+
 use crate::err::{Error, Result};
 use crate::message::{self, Message, MessageRelay, MessageRelayMethod, OriginVerificationGen};
 use crate::message::{Decoder, Encoder};
