@@ -832,7 +832,7 @@ mod test {
     /// key1 should noti key3 that
     /// key3's precessor is key1
     #[tokio::test]
-    async fn test_stablize() -> Result<()> {
+    async fn test_find_successor() -> Result<()> {
         let stun = "stun://stun.l.google.com:19302";
 
         let mut key1 = SecretKey::random();
@@ -1136,10 +1136,10 @@ mod test {
             .contains(&Some(key2.address().into())));
         // from source of chord:
         //     if self.bias(id) <= self.bias(self.successor.max()) || self.successor.is_none() {
-        //          Ok(PeerRingAction::Some(id))
+        //          Ok(PeerRingAction::Some(self.successor.min()))
         // node1's successor is node3
         // node2 is in [node1, node3]
-        // so it will response node2
+        // so it will response node3
 
         // [node1, node2, node3]
         // from_path: node2, node3
@@ -1152,7 +1152,7 @@ mod test {
         );
         assert_eq!(&ev_3.to_path, &vec![key1.address().into()]);
         if let Message::FindSuccessorReport(x) = ev_3.data {
-            assert_eq!(x.id, key2.address().into());
+            assert_eq!(x.id, key3.address().into());
             assert!(!x.for_fix);
         } else {
             panic!();
@@ -1174,7 +1174,7 @@ mod test {
         );
 
         if let Message::FindSuccessorReport(x) = ev_2.data {
-            assert_eq!(x.id, key2.address().into());
+            assert_eq!(x.id, key3.address().into());
             assert!(!x.for_fix);
         } else {
             panic!();

@@ -185,7 +185,8 @@ impl Chord<PeerRingAction> for PeerRing {
         // N9
         if self.bias(id) <= self.bias(self.successor.max()) || self.successor.is_none() {
             //if self.id < id && id <= self.successor {
-            Ok(PeerRingAction::Some(id))
+            // response the closest one
+            Ok(PeerRingAction::Some(self.successor.min()))
         } else {
             // n = closest preceding node(id);
             // return n.find_successor(id);
