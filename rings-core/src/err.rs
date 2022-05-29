@@ -1,3 +1,5 @@
+//! Error of rings_core
+
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {

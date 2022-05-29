@@ -160,6 +160,7 @@ pub mod test {
         let mut key1 = SecretKey::random();
         let mut key2 = SecretKey::random();
         let mut key3 = SecretKey::random();
+
         let mut v = vec![key1, key2, key3];
         v.sort_by(|a, b| {
             if a.address() < b.address() {
@@ -175,14 +176,16 @@ pub mod test {
         let swarm1 = Arc::new(new_swarm(&key1));
         let swarm2 = Arc::new(new_swarm(&key2));
         let swarm3 = Arc::new(new_swarm(&key3));
+
         let dht1 = Arc::new(Mutex::new(new_chord(key1.address().into())));
         let dht2 = Arc::new(Mutex::new(new_chord(key2.address().into())));
         let dht3 = Arc::new(Mutex::new(new_chord(key3.address().into())));
 
-        // 1 to 2
-        let (_, _) = establish_connection(Arc::clone(&swarm1), Arc::clone(&swarm2)).await?;
         // 2 to 3
         let (_, _) = establish_connection(Arc::clone(&swarm3), Arc::clone(&swarm2)).await?;
+
+        // 1 to 2
+        let (_, _) = establish_connection(Arc::clone(&swarm1), Arc::clone(&swarm2)).await?;
 
         let transport_1_to_3 = swarm1.new_transport().await.unwrap();
         let handshake_info13 = transport_1_to_3
@@ -208,19 +211,22 @@ pub mod test {
             } => {unreachable!();}
             _ = async {
                 // handle join dht situation
+                println!("wait tranposrt 1 to 2 and transport 2 to 3 connected");
+                sleep(Duration::from_millis(1)).await;
                 let transport_1_to_2 = swarm1.get_transport(&swarm2.address()).unwrap();
-                sleep(Duration::from_millis(1000)).await;
                 transport_1_to_2.wait_for_data_channel_open().await.unwrap();
                 let transport_2_to_3 = swarm2.get_transport(&swarm3.address()).unwrap();
                 transport_2_to_3.wait_for_data_channel_open().await.unwrap();
-                sleep(Duration::from_millis(1000)).await;
-                let dht1_successor = dht1.lock().await.successor.clone();
-                let dht2_successor = dht2.lock().await.successor.clone();
-                let dht3_successor = dht3.lock().await.successor.clone();
+
+                println!("wait events trigger");
+                sleep(Duration::from_millis(1)).await;
 
                 println!("swarm1 key address: {:?}", swarm1.address());
                 println!("swarm2 key address: {:?}", swarm2.address());
                 println!("swarm3 key address: {:?}", swarm3.address());
+                let dht1_successor = dht1.lock().await.successor.clone();
+                let dht2_successor = dht2.lock().await.successor.clone();
+                let dht3_successor = dht3.lock().await.successor.clone();
                 println!("dht1 successor: {:?}", dht1_successor);
                 println!("dht2 successor: {:?}", dht2_successor);
                 println!("dht3 successor: {:?}", dht3_successor);
@@ -548,6 +554,11 @@ pub mod test {
                 .unwrap();
         let dht1 = Arc::new(Mutex::new(new_chord(key1.address().into())));
         let dht2 = Arc::new(Mutex::new(new_chord(key2.address().into())));
+        println!(
+            "test with key1: {:?}, key2: {:?}",
+            key1.address(),
+            key2.address()
+        );
         let swarm1 = Arc::new(new_swarm(&key1));
         let swarm2 = Arc::new(new_swarm(&key2));
         let (_, _) = establish_connection(Arc::clone(&swarm1), Arc::clone(&swarm2)).await?;
@@ -573,6 +584,8 @@ pub mod test {
                  let transport_1_to_2 = swarm1.get_transport(&swarm2.address()).unwrap();
                  sleep(Duration::from_millis(1000)).await;
                  transport_1_to_2.wait_for_data_channel_open().await.unwrap();
+                 // dht1's successor is dht2
+                 // dht2's successor is dht1
                  assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
                  assert!(dht2.lock().await.successor.list().contains(&key1.address().into()));
                  assert_eq!(
@@ -599,6 +612,7 @@ pub mod test {
                  assert!(dht2.lock().await.storage.len() == 0);
                  let message = String::from("this is a test string");
                  let encoded_message = message.encode().unwrap();
+                 // the vid is hash of string
                  let vnode: VirtualPeer = encoded_message.try_into().unwrap();
                  handler1.send_message(
                      &swarm2.address(),
@@ -613,11 +627,13 @@ pub mod test {
                  )
                  .await
                  .unwrap();
-                 sleep(Duration::from_millis(1000)).await;
-                 // it should store on either dht1 or dht2
-                 assert!(dht2.lock().await.storage.len() > 0 || dht2.lock().await.storage.len() > 0);
+                 sleep(Duration::from_millis(5000)).await;
+                 assert!(dht1.lock().await.storage.len() == 0);
+                 assert!(dht2.lock().await.storage.len() > 0);
                  let data = dht2.lock().await.storage.get(&(vnode.address));
-                 assert!(data.is_some());
+                 assert!(data.is_some(), "vnode: {:?} not in , exist keys {:?}",
+                         vnode.did(),
+                         dht2.lock().await.storage.keys());
                  let data = data.unwrap();
                  assert_eq!(data.data[0].clone().decode::<String>().unwrap(), message);
              } => {}

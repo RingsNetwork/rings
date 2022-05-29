@@ -1,3 +1,5 @@
+//! ECDSA and ElGamal
+
 use crate::err::{Error, Result};
 use hex;
 
@@ -14,9 +16,8 @@ use web3::types::Address;
 pub mod elgamal;
 pub mod signers;
 
-// ref https://docs.rs/web3/0.18.0/src/web3/signing.rs.html#69
-
-// length r: 32, length s: 32, length v(recovery_id): 1
+/// ref <https://docs.rs/web3/0.18.0/src/web3/signing.rs.html#69>
+/// length r: 32, length s: 32, length v(recovery_id): 1
 pub type SigBytes = [u8; 65];
 pub type CurveEle = PublicKey;
 

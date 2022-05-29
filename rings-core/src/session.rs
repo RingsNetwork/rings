@@ -1,3 +1,10 @@
+//! To avoid too frequent signing, and keep the private key safe, we implemented a session protocol for signing/encrypting and verifying message.
+//! - ECDSA Session is based on secp256k1, which create a temporate secret key with one time signing auth
+//! - To create a ECDSA Session, we should generate the unsign_info with our pubkey (Address)
+//! - `SessionManager::gen_unsign_info(addr, ..)`, it will returns the msg needs for sign, and a temporate private key
+//! - Then we can sign the auth message via some web3 provider like metamask or just with raw private key, and create the SessionManger with
+//! - SessionManager::new(sig, auth_info, temp_key)
+
 use crate::ecc::signers;
 use crate::ecc::PublicKey;
 use crate::ecc::SecretKey;
@@ -12,6 +19,7 @@ use web3::types::Address;
 
 const DEFAULT_TTL_MS: usize = 24 * 3600 * 1000;
 
+/// we support both EIP712 and raw ECDSA singing forrmat
 #[derive(Deserialize, Serialize, PartialEq, Debug, Clone)]
 pub enum Signer {
     DEFAULT,

@@ -1,3 +1,5 @@
+//! prelude
+
 #[cfg(feature = "wasm")]
 pub use web_sys::RtcSdpType as RTCSdpType;
 #[cfg(not(feature = "wasm"))]
