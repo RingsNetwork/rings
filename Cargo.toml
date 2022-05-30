@@ -68,7 +68,7 @@ form_urlencoded = { version = "1.0.1", optional = true }
 axum = { version = "0.5.1", optional = true }
 pin-project = { version = "1", optional = true }
 base64 = { version = "0.13.0", optional = true }
-rings-core = { package = "rings-core", path = "./rings-core", optional = true }
+rings-core = { package = "rings-core", path = "./rings-core", version="0.1.1", optional = true }
 
 # daemon
 daemonize = { version = "0.4.1", optional = true }
@@ -84,7 +84,7 @@ wasm-bindgen = {version = "0.2.80", features = ["serde-serialize"], optional = t
 wasm-bindgen-futures = {version="0.4.30", features=["futures-core-03-stream"], optional = true }
 js-sys = { version = "0.3.57", optional = true }
 reqwest-wasm = { version = "0.11", features = ["json"], optional = true }
-rings-core-wasm = { package = "rings-core", path = "./rings-core", features = ["wasm"], default-features = false, optional = true, version = "0.1.0" }
+rings-core-wasm = { package = "rings-core", path = "./rings-core", features = ["wasm"], default-features = false, optional = true, version = "0.1.1" }
 console_log = { version = "0.2", optional = true }
 
 [[bin]]
