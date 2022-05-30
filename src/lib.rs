@@ -24,7 +24,6 @@
 //!    Set receiveed answer as remote description
 //! }
 
-
 //! ### Keywords
 
 //! * Candidate
@@ -34,7 +33,6 @@
 //! 	- If an agent is multihomed, it obtains a candidate from each IP address.
 
 //! 	- The agent uses STUN or TURN to obtain additional candidates. These come in two flavors: translated addresses on the public side of a NAT (SERVER REFLEXIVE CANDIDATES) and addresses on TURN servers (RELAYED CANDIDATES).
-
 
 //! ```text
 //!                  To Internet
@@ -88,7 +86,6 @@
 
 //! The encapsulation of SCTP over DTLS (see RFC8261) over ICE/UDP (see RFC8445) provides a NAT traversal solution together with confidentiality, source authentication, and integrity-protected transfers.
 
-
 //!  The layering of protocols for WebRTC is shown as:
 
 //! ```text
@@ -106,9 +103,7 @@
 //!                    +----------------------------------+
 //! ```
 
-
 //! ### Architecture
-
 
 //! ```text
 //! +-----------------------------------------------------------------------------------------+
@@ -137,8 +132,6 @@
 //! |     Browser       |                    |                                                |
 //! +-----------------------------------------------------------------------------------------+
 //! ```
-
-
 
 #![feature(async_closure)]
 #[cfg(feature = "browser")]
