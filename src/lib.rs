@@ -9,8 +9,8 @@
 
 //! 1. Peer A:
 //! {
-//! 	create offer,
-//! 	set it as local description
+//!     create offer,
+//!     set it as local description
 //! } -> Send Offer to Peer B
 
 //! 2. Peer B: {
@@ -28,11 +28,11 @@
 
 //! * Candidate
 
-//! 	- A CANDIDATE is a transport address -- a combination of IP address and port for a particular transport protocol (with only UDP specified here).
+//!     - A CANDIDATE is a transport address -- a combination of IP address and port for a particular transport protocol (with only UDP specified here).
 
-//! 	- If an agent is multihomed, it obtains a candidate from each IP address.
+//!     - If an agent is multihomed, it obtains a candidate from each IP address.
 
-//! 	- The agent uses STUN or TURN to obtain additional candidates. These come in two flavors: translated addresses on the public side of a NAT (SERVER REFLEXIVE CANDIDATES) and addresses on TURN servers (RELAYED CANDIDATES).
+//!     - The agent uses STUN or TURN to obtain additional candidates. These come in two flavors: translated addresses on the public side of a NAT (SERVER REFLEXIVE CANDIDATES) and addresses on TURN servers (RELAYED CANDIDATES).
 
 //! ```text
 //!                  To Internet
