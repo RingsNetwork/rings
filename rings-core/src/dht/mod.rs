@@ -12,5 +12,7 @@ pub use {types::Chord, types::ChordStablize, types::ChordStorage};
 
 mod stabilization;
 pub use stabilization::{Stabilization, TStabilize};
+/// Implement SubRing with VNode
 pub mod subring;
+/// VNode is a special node that only has virtual address
 pub mod vnode;
