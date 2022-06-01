@@ -1,7 +1,7 @@
 use super::did::BiasId;
-use super::peer::VirtualPeer;
 use super::successor::Successor;
 use super::types::{Chord, ChordStablize, ChordStorage};
+use super::vnode::VirtualNode;
 use crate::dht::Did;
 use crate::err::{Error, Result};
 use crate::storage::{MemStorage, Storage};
@@ -18,10 +18,10 @@ pub enum RemoteAction {
     // Ask did_a to find virtual node did_b
     FindVNode(Did),
     // Ask did_a to find virtual peer for storage
-    FindAndStore(VirtualPeer),
+    FindAndStore(VirtualNode),
     // ask Did_a to notify(did_b)
     Notify(Did),
-    SyncVNodeWithSuccessor(Vec<VirtualPeer>),
+    SyncVNodeWithSuccessor(Vec<VirtualNode>),
     FindSuccessorForFix(Did),
     CheckPredecessor,
 }
@@ -29,7 +29,7 @@ pub enum RemoteAction {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum PeerRingAction {
     None,
-    SomeVNode(VirtualPeer),
+    SomeVNode(VirtualNode),
     Some(Did),
     RemoteAction(Did, RemoteAction),
     MultiActions(Vec<PeerRingAction>),
@@ -76,7 +76,7 @@ pub struct PeerRing {
     pub predecessor: Option<Did>,
     pub id: Did,
     pub fix_finger_index: u8,
-    pub storage: Arc<MemStorage<Did, VirtualPeer>>,
+    pub storage: Arc<MemStorage<Did, VirtualNode>>,
 }
 
 impl PeerRing {
@@ -89,7 +89,7 @@ impl PeerRing {
             finger: vec![None; 160],
             id,
             fix_finger_index: 0,
-            storage: Arc::new(MemStorage::<Did, VirtualPeer>::new()),
+            storage: Arc::new(MemStorage::<Did, VirtualNode>::new()),
         }
     }
 
@@ -121,7 +121,7 @@ impl PeerRing {
         BiasId::new(&self.id, &id)
     }
 
-    pub fn new_with_storage(id: Did, storage: Arc<MemStorage<Did, VirtualPeer>>) -> Self {
+    pub fn new_with_storage(id: Did, storage: Arc<MemStorage<Did, VirtualNode>>) -> Self {
         Self {
             successor: Successor::new(&id),
             predecessor: None,
@@ -312,12 +312,12 @@ impl ChordStorage<PeerRingAction> for PeerRing {
         }
     }
 
-    fn store(&self, peer: VirtualPeer) -> Result<PeerRingAction> {
+    fn store(&self, peer: VirtualNode) -> Result<PeerRingAction> {
         let vid = peer.did();
         match self.find_successor(vid) {
             Ok(PeerRingAction::Some(id)) => match self.storage.get(&id) {
                 Some(v) => {
-                    let _ = self.storage.set(&vid, VirtualPeer::concat(&v, &peer)?);
+                    let _ = self.storage.set(&vid, VirtualNode::concat(&v, &peer)?);
                     Ok(PeerRingAction::None)
                 }
                 None => {
@@ -333,7 +333,7 @@ impl ChordStorage<PeerRingAction> for PeerRing {
         }
     }
 
-    fn store_vec(&self, vps: Vec<VirtualPeer>) -> Result<PeerRingAction> {
+    fn store_vec(&self, vps: Vec<VirtualNode>) -> Result<PeerRingAction> {
         let acts: Vec<PeerRingAction> = vps
             .iter()
             .map(|v| self.store(v.clone()))
@@ -349,7 +349,7 @@ impl ChordStorage<PeerRingAction> for PeerRing {
     }
 
     fn sync_with_successor(&self) -> Result<PeerRingAction> {
-        let mut data = Vec::<VirtualPeer>::new();
+        let mut data = Vec::<VirtualNode>::new();
         for k in self.storage.keys() {
             // k in (self, self.successor)
             // k is more close to self.successor

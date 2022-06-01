@@ -1,5 +1,5 @@
 use super::did::Did;
-use super::peer::VirtualPeer;
+use super::vnode::VirtualNode;
 use crate::err::Result;
 
 pub trait Chord<A> {
@@ -17,7 +17,7 @@ pub trait ChordStablize<A>: Chord<A> {
 
 pub trait ChordStorage<A>: Chord<A> {
     fn lookup(&self, id: Did) -> Result<A>;
-    fn store(&self, peer: VirtualPeer) -> Result<A>;
-    fn store_vec(&self, peer: Vec<VirtualPeer>) -> Result<A>;
+    fn store(&self, peer: VirtualNode) -> Result<A>;
+    fn store_vec(&self, peer: Vec<VirtualNode>) -> Result<A>;
     fn sync_with_successor(&self) -> Result<A>;
 }

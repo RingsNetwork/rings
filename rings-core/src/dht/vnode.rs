@@ -12,18 +12,18 @@ use serde::Serialize;
 use std::str::FromStr;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct VirtualPeer {
+pub struct VirtualNode {
     pub address: Did,
     pub data: Vec<Encoded>,
 }
 
-impl VirtualPeer {
+impl VirtualNode {
     pub fn did(&self) -> Did {
         self.address
     }
 }
 
-impl<T> TryFrom<MessageRelay<T>> for VirtualPeer
+impl<T> TryFrom<MessageRelay<T>> for VirtualNode
 where
     T: Serialize + DeserializeOwned,
 {
@@ -38,7 +38,7 @@ where
     }
 }
 
-impl TryFrom<Encoded> for VirtualPeer {
+impl TryFrom<Encoded> for VirtualNode {
     type Error = Error;
     fn try_from(e: Encoded) -> Result<Self> {
         let address: HashStr = e.value().into();
@@ -49,7 +49,7 @@ impl TryFrom<Encoded> for VirtualPeer {
     }
 }
 
-impl VirtualPeer {
+impl VirtualNode {
     pub fn concat(a: &Self, b: &Self) -> Result<Self> {
         if a.address != b.address {
             Err(Error::AddressNotEqual)

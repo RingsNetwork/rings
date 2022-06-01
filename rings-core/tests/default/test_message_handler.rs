@@ -1,7 +1,7 @@
 #[cfg(test)]
 pub mod test {
     use futures::lock::Mutex;
-    use rings_core::dht::peer::VirtualPeer;
+    use rings_core::dht::vnode::VirtualNode;
     use rings_core::dht::{Did, PeerRing};
     use rings_core::ecc::SecretKey;
     use rings_core::err::Result;
@@ -613,7 +613,7 @@ pub mod test {
                  let message = String::from("this is a test string");
                  let encoded_message = message.encode().unwrap();
                  // the vid is hash of string
-                 let vnode: VirtualPeer = encoded_message.try_into().unwrap();
+                 let vnode: VirtualNode = encoded_message.try_into().unwrap();
                  handler1.send_message(
                      &swarm2.address(),
                      None,

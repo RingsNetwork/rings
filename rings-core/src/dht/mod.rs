@@ -12,5 +12,5 @@ pub use {types::Chord, types::ChordStablize, types::ChordStorage};
 
 mod stabilization;
 pub use stabilization::{Stabilization, TStabilize};
-pub mod peer;
 pub mod subring;
+pub mod vnode;

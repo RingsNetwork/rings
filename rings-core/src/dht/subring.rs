@@ -1,5 +1,5 @@
 use super::chord::PeerRing;
-use super::peer::VirtualPeer;
+use super::vnode::VirtualNode;
 use crate::dht::Did;
 use crate::ecc::HashStr;
 use crate::err::{Error, Result};
@@ -11,7 +11,7 @@ pub struct SubRing {
     ring: PeerRing,
 }
 
-impl TryFrom<SubRing> for VirtualPeer {
+impl TryFrom<SubRing> for VirtualNode {
     type Error = Error;
     fn try_from(ring: SubRing) -> Result<Self> {
         let address: HashStr = ring.name.into();
