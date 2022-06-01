@@ -1,4 +1,4 @@
-use crate::dht::{peer::VirtualPeer, Did};
+use crate::dht::{vnode::VirtualNode, Did};
 use crate::ecc::elgamal;
 use crate::ecc::{PublicKey, SecretKey};
 use crate::err::{Error, Result};
@@ -67,13 +67,13 @@ pub struct SearchVNode {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct FoundVNode {
     pub target_id: Did,
-    pub data: Vec<VirtualPeer>,
+    pub data: Vec<VirtualNode>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct StoreVNode {
     pub sender_id: Did,
-    pub data: Vec<VirtualPeer>,
+    pub data: Vec<VirtualNode>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -85,7 +85,7 @@ pub struct MultiCall {
 pub struct SyncVNodeWithSuccessor {
     pub sender_id: Did,
     pub target_id: Did,
-    pub data: Vec<VirtualPeer>,
+    pub data: Vec<VirtualNode>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
