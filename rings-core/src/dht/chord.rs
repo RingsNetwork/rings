@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 use super::did::BiasId;
 use super::successor::Successor;
 use super::types::{Chord, ChordStablize, ChordStorage};
@@ -10,32 +11,44 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::sync::Arc;
 
+
+/// Remote actions
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum RemoteAction {
-    // Ask did_a to find did_b
+    /// Ask did_a to find did_b
     FindSuccessor(Did),
-    // Ask did_a to find virtual node did_b
+    /// Ask did_a to find virtual node did_b
     FindVNode(Did),
-    // Ask did_a to find virtual peer for storage
+    /// Ask did_a to find virtual peer for storage
     FindAndStore(VirtualNode),
-    // ask Did_a to notify(did_b)
+    /// Ask Did_a to notify(did_b)
     Notify(Did),
+    /// Async data with it's successor
     SyncVNodeWithSuccessor(Vec<VirtualNode>),
+    /// Find a successor and fix the finger table
     FindSuccessorForFix(Did),
+    /// Check predecessor
     CheckPredecessor,
 }
 
+/// Result of PeerRing algorithm
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum PeerRingAction {
+    /// Do noting
     None,
+    /// Found some VNode
     SomeVNode(VirtualNode),
+    /// Found some node
     Some(Did),
+    /// Trigger remote action
     RemoteAction(Did, RemoteAction),
+    /// Trigger Multiple Actions at sametime
     MultiActions(Vec<PeerRingAction>),
 }
 
 impl PeerRingAction {
+    /// action is Self::None
     pub fn is_none(&self) -> bool {
         if let Self::None = self {
             return true;
@@ -43,6 +56,7 @@ impl PeerRingAction {
         false
     }
 
+    /// Action is Self::Some
     pub fn is_some(&self) -> bool {
         if let Self::Some(_) = self {
             return true;
@@ -50,6 +64,7 @@ impl PeerRingAction {
         false
     }
 
+    /// Action is Self::RemoteAction
     pub fn is_remote(&self) -> bool {
         if let Self::RemoteAction(..) = self {
             return true;
@@ -57,6 +72,7 @@ impl PeerRingAction {
         false
     }
 
+    /// Action is Self::MultiActions
     pub fn is_multi(&self) -> bool {
         if let Self::MultiActions(..) = self {
             return true;
@@ -65,22 +81,27 @@ impl PeerRingAction {
     }
 }
 
+
+/// Implementation of PeerRing
 #[derive(Clone, Debug)]
 pub struct PeerRing {
-    // first node on circle that succeeds (n + 2 ^(k-1) ) mod 2^m , 1 <= k<= m
-    // for index start with 0, it should be (n+2^k) mod 2^m
+    /// first node on circle that succeeds (n + 2 ^(k-1) ) mod 2^m , 1 <= k<= m
+    /// for index start with 0, it should be (n+2^k) mod 2^m
     pub finger: Vec<Option<Did>>,
-    // The next node on the identifier circle; finger[1].node
+    /// The next node on the identifier circle; finger[1].node
     pub successor: Successor,
-    // The previous node on the identifier circle
+    /// The previous node on the identifier circle
     pub predecessor: Option<Did>,
+    /// PeerRing's id is address of Node
     pub id: Did,
+    /// This index is used for FindSuccesorForFix
     pub fix_finger_index: u8,
+    /// LocalStorage
     pub storage: Arc<MemStorage<Did, VirtualNode>>,
 }
 
 impl PeerRing {
-    // create a new Chord ring.
+    /// Create a new Chord ring.
     pub fn new(id: Did) -> Self {
         Self {
             successor: Successor::new(&id),
@@ -93,6 +114,7 @@ impl PeerRing {
         }
     }
 
+    /// Get first element from Finger Table
     pub fn first(&self) -> Option<Did> {
         let ids = self
             .finger
@@ -104,9 +126,9 @@ impl PeerRing {
         ids.first().copied()
     }
 
-    // remove a node from dht finger table
-    // remote a node from dht successor table
-    // if suuccessor is empty, set it to the cloest node
+    /// remove a node from dht finger table
+    /// remote a node from dht successor table
+    /// if suuccessor is empty, set it to the cloest node
     pub fn remove(&mut self, id: Did) {
         self.finger.retain(|v| *v == Some(id));
         self.successor.remove(id);
@@ -117,10 +139,13 @@ impl PeerRing {
         }
     }
 
+
+    /// Calculate Bias of the Did on the Ring
     pub fn bias(&self, id: Did) -> BiasId {
         BiasId::new(&self.id, &id)
     }
 
+    /// Init with given Storage
     pub fn new_with_storage(id: Did, storage: Arc<MemStorage<Did, VirtualNode>>) -> Self {
         Self {
             successor: Successor::new(&id),
@@ -133,13 +158,14 @@ impl PeerRing {
         }
     }
 
+    /// finger length
     pub fn number_of_fingers(&self) -> usize {
         self.finger.iter().flatten().count() as usize
     }
 }
 
 impl Chord<PeerRingAction> for PeerRing {
-    // join a PeerRing ring containing node id .
+    /// join a PeerRing ring containing node id .
     fn join(&mut self, id: Did) -> PeerRingAction {
         if id == self.id {
             return PeerRingAction::None;
@@ -178,7 +204,7 @@ impl Chord<PeerRingAction> for PeerRing {
         PeerRingAction::RemoteAction(id, RemoteAction::FindSuccessor(self.id))
     }
 
-    // Fig.5 n.find_successor(id)
+    /// Fig.5 n.find_successor(id)
     fn find_successor(&self, id: Did) -> Result<PeerRingAction> {
         // if (id \in (n; successor]); return successor
         // if ID = N63, Successor = N10
@@ -202,8 +228,8 @@ impl Chord<PeerRingAction> for PeerRing {
 }
 
 impl ChordStablize<PeerRingAction> for PeerRing {
-    // called periodically. verifies n’s immediate
-    // successor, and tells the successor about n.
+    /// called periodically. verifies n’s immediate
+    /// successor, and tells the successor about n.
     fn stablilize(&mut self) -> PeerRingAction {
         // x = successor:predecessor;
         // if (x in (n, successor)) { successor = x; successor:notify(n); }
@@ -217,7 +243,7 @@ impl ChordStablize<PeerRingAction> for PeerRing {
         PeerRingAction::None
     }
 
-    // n' thinks it might be our predecessor.
+    /// n' thinks it might be our predecessor.
     fn notify(&mut self, id: Did) -> Option<Did> {
         // if (predecessor is nil or n' /in (predecessor; n)); predecessor = n';
         match self.predecessor {
@@ -237,8 +263,8 @@ impl ChordStablize<PeerRingAction> for PeerRing {
         }
     }
 
-    // called periodically. refreshes finger table entries.
-    // next stores the index of the next finger to fix.
+    /// called periodically. refreshes finger table entries.
+    /// next stores the index of the next finger to fix.
     fn fix_fingers(&mut self) -> Result<PeerRingAction> {
         // next = next + 1;
         //if (next > m) next = 1;
@@ -270,7 +296,7 @@ impl ChordStablize<PeerRingAction> for PeerRing {
         }
     }
 
-    // called periodically. checks whether predecessor has failed.
+    /// called periodically. checks whether predecessor has failed.
     fn check_predecessor(&self) -> PeerRingAction {
         match self.predecessor {
             Some(p) => PeerRingAction::RemoteAction(p, RemoteAction::CheckPredecessor),
