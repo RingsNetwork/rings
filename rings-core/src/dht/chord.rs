@@ -11,7 +11,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::sync::Arc;
 
-
 /// Remote actions
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
@@ -81,7 +80,6 @@ impl PeerRingAction {
     }
 }
 
-
 /// Implementation of PeerRing
 #[derive(Clone, Debug)]
 pub struct PeerRing {
@@ -138,7 +136,6 @@ impl PeerRing {
             }
         }
     }
-
 
     /// Calculate Bias of the Did on the Ring
     pub fn bias(&self, id: Did) -> BiasId {
