@@ -1,8 +1,15 @@
+#![warn(missing_docs)]
+//! SimpleClient for jsonrpc request use reqwest::Client.
+//!
+//! Sample:
+//! let client = Simpleclient::new(reqwest::Client::default(), "http://localhost:5000");
+//! client.call_method("test", params);
 use super::request::{parse_response, RequestBuilder};
 use crate::prelude::reqwest::Client as HttpClient;
 use jsonrpc_core::{Error, Params, Value};
 use std::sync::Arc;
 
+/// SimpleClient
 #[derive(Clone)]
 pub struct SimpleClient {
     client: Arc<HttpClient>,
@@ -10,6 +17,9 @@ pub struct SimpleClient {
 }
 
 impl SimpleClient {
+    /// Create a new SimpleClient
+    /// * client: a instance of reqwest::Client
+    /// * url: remote jsonrpc_server url
     pub fn new(client: Arc<HttpClient>, url: &str) -> Self {
         Self {
             client,
@@ -17,6 +27,8 @@ impl SimpleClient {
         }
     }
 
+    /// Create a new SimpleClient,
+    /// * url: remote jsonrpc_server url
     pub fn new_with_url(url: &str) -> Self {
         Self {
             client: Arc::new(HttpClient::default()),
@@ -24,6 +36,7 @@ impl SimpleClient {
         }
     }
 
+    /// JSONRpc call_method
     pub async fn call_method(&self, method: &str, params: Params) -> RpcResult<Value> {
         let msg = CallMessage {
             method: method.into(),
@@ -32,6 +45,7 @@ impl SimpleClient {
         self.do_request(&RpcMessage::Call(msg)).await
     }
 
+    /// JSONRpc notify request
     pub async fn notify(&self, method: &str, params: Params) -> RpcResult<()> {
         let msg = NotifyMessage {
             method: method.into(),
@@ -101,17 +115,6 @@ pub enum RpcError {
     #[error("{0}")]
     Other(Box<dyn std::error::Error + Send>),
 }
-
-// impl std::error::Error for RpcError {
-//     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-//         match *self {
-//             Self::JsonRpcError(ref e) => Some(e),
-//             Self::ParseError(_, ref e) => Some(&**e),
-//             Self::Other(ref e) => Some(&**e),
-//             _ => None,
-//         }
-//     }
-// }
 
 impl From<Error> for RpcError {
     fn from(error: Error) -> Self {

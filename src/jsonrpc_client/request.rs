@@ -1,3 +1,5 @@
+#![warn(missing_docs)]
+//! Basic Request/Response structures used internally.
 use super::client::{CallMessage, NotifyMessage, RpcError};
 use jsonrpc_core::{Call, Error, Id, MethodCall, Notification, Params, Version};
 use jsonrpc_pubsub::SubscriptionId;
@@ -37,10 +39,12 @@ impl RequestBuilder {
         )
     }
 
+    /// call single_request
     pub fn call_request(&mut self, msg: &CallMessage) -> (Id, String) {
         self.single_request(msg.method.clone(), msg.params.clone())
     }
 
+    /// subscribe request
     pub fn subscribe_request(
         &mut self,
         subscribe: String,
@@ -49,6 +53,7 @@ impl RequestBuilder {
         self.single_request(subscribe, subscribe_params)
     }
 
+    /// unsubscribe request
     pub fn unsubscribe_request(
         &mut self,
         unsubscribe: String,
@@ -57,6 +62,7 @@ impl RequestBuilder {
         self.single_request(unsubscribe, Params::Array(vec![Value::from(sid)]))
     }
 
+    /// notification request
     pub fn notification(&mut self, msg: &NotifyMessage) -> String {
         let request = jsonrpc_core::Request::Single(Call::Notification(Notification {
             jsonrpc: Some(Version::V2),

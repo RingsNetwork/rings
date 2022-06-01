@@ -1,3 +1,5 @@
+#![warn(missing_docs)]
+//! Processor of rings-node jsonrpc-server.
 use crate::{
     error::{Error, Result},
     jsonrpc::{method, response::TransportAndIce},
@@ -18,9 +20,12 @@ use crate::{
 use jsonrpc_core::Metadata;
 use std::{str::FromStr, sync::Arc};
 
+/// Processor for rings-node jsonrpc server
 #[derive(Clone)]
 pub struct Processor {
+    /// a swarm instance
     pub swarm: Arc<Swarm>,
+    /// a msg_handler instance
     pub msg_handler: Arc<MessageHandler>,
 }
 
@@ -34,6 +39,13 @@ impl From<(Arc<Swarm>, Arc<MessageHandler>)> for Processor {
 }
 
 impl Processor {
+    /// Create an Offer and waiting for connection.
+    /// The process of manually handshake is:
+    /// 1. PeerA: create_offer
+    /// 2. PeerA: send the handshake info to PeerB.
+    /// 3. PeerB: answer_offer
+    /// 4. PeerB: send the handshake info to PeerA.
+    /// 5. PeerA: accept_answer.
     pub async fn create_offer(&self) -> Result<(Arc<Transport>, Encoded)> {
         let transport = self
             .swarm
@@ -61,6 +73,8 @@ impl Processor {
         Ok(hs_info)
     }
 
+    /// Connect peer with remote rings-node jsonrpc server.
+    /// * peer_url: the remote rings-node jsonrpc server url.
     pub async fn connect_peer_via_http(&self, peer_url: &str) -> Result<Arc<Transport>> {
         // request remote offer and sand answer to remote
         log::debug!("connect_peer_via_http: {}", peer_url);
@@ -122,6 +136,13 @@ impl Processor {
         Ok(addr.to_string())
     }
 
+    /// Answer an Offer.
+    /// The process of manually handshake is:
+    /// 1. PeerA: create_offer
+    /// 2. PeerA: send the handshake info to PeerB.
+    /// 3. PeerB: answer_offer
+    /// 4. PeerB: send the handshake info to PeerA.
+    /// 5. PeerA: accept_answer.
     pub async fn answer_offer(&self, ice_info: &str) -> Result<(Arc<Transport>, Encoded)> {
         log::info!("connect peer via ice: {}", ice_info);
         let transport = self.swarm.new_transport().await.map_err(|e| {
@@ -140,6 +161,11 @@ impl Processor {
         }
     }
 
+    /// Connect peer with web3 address.
+    /// There are 3 peers: PeerA, PeerB, PeerC.
+    /// 1. PeerA has a connection with PeerB.
+    /// 2. PeerC has a connection with PeerB.
+    /// 3. PeerC can connect PeerA with PeerA's web3 address.
     pub async fn connect_with_address(&self, address: &Address) -> Result<()> {
         self.msg_handler
             .connect(address)
@@ -170,6 +196,13 @@ impl Processor {
         Ok(hs_info)
     }
 
+    /// Accept an answer of a connection.
+    /// The process of manually handshake is:
+    /// 1. PeerA: create_offer
+    /// 2. PeerA: send the handshake info to PeerB.
+    /// 3. PeerB: answer_offer
+    /// 4. PeerB: send the handshake info to PeerA.
+    /// 5. PeerA: accept_answer.
     pub async fn accept_answer(&self, transport_id: &str, ice: &str) -> Result<Peer> {
         let ice = Encoded::from_encoded_str(ice);
         log::debug!("accept_answer/ice: {:?}, uuid: {}", ice, transport_id);
@@ -200,6 +233,7 @@ impl Processor {
         Ok(Peer::from((addr, transport)))
     }
 
+    /// List all peers.
     pub async fn list_peers(&self) -> Result<Vec<Peer>> {
         let transports = self.swarm.get_transports();
         log::debug!(
@@ -210,6 +244,7 @@ impl Processor {
         Ok(data)
     }
 
+    /// Disconnect a peer with web3 address.
     pub async fn disconnect(&self, address: &str) -> Result<()> {
         let address = Address::from_str(address).map_err(|_| Error::InvalidAddress)?;
         let transport = self
@@ -223,6 +258,7 @@ impl Processor {
         Ok(())
     }
 
+    /// List all pending transport.
     pub async fn list_pendings(&self) -> Result<Vec<Arc<Transport>>> {
         let pendings = self
             .swarm
@@ -232,6 +268,7 @@ impl Processor {
         Ok(pendings)
     }
 
+    /// Close pending transport
     pub async fn close_pending_transport(&self, transport_id: &str) -> Result<()> {
         let transport_id =
             uuid::Uuid::from_str(transport_id).map_err(|_| Error::InvalidTransportId)?;
@@ -252,6 +289,7 @@ impl Processor {
         Ok(())
     }
 
+    /// Send custom message to an address.
     pub async fn send_message<T>(&self, address: &str, msg: T) -> Result<()>
     where
         T: ToString,
@@ -267,9 +305,12 @@ impl Processor {
     }
 }
 
+/// Peer struct
 #[derive(Clone)]
 pub struct Peer {
+    /// web3 address of a peer.
     pub address: Token,
+    /// transport of the connection.
     pub transport: Arc<Transport>,
 }
 

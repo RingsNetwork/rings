@@ -1,4 +1,8 @@
+///! jsonrpc-server of rings-node
+///! [JSON-RPC]: https://www.jsonrpc.org/specification
 pub mod method;
 pub mod response;
 #[cfg(feature = "client")]
-pub mod server;
+mod server;
+#[cfg(feature = "client")]
+pub(crate) use self::server::build_handler;
