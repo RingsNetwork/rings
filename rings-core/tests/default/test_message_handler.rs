@@ -1,7 +1,7 @@
 #[cfg(test)]
 pub mod test {
     use futures::lock::Mutex;
-    use rings_core::dht::vnode::VNodeType;
+    
     use rings_core::dht::vnode::VirtualNode;
     use rings_core::dht::{Did, PeerRing};
     use rings_core::ecc::SecretKey;
