@@ -110,16 +110,16 @@ impl TChordConnection for MessageHandler {
                 // B.successor == A
                 // A.find_successor(B)
                 if next != prev {
-                    self.send_message(
-                        &next.into(),
-                        // to
-                        Some(vec![next].into()),
-                        // from
-                        Some(vec![dht.id].into()),
-                        MessageRelayMethod::SEND,
-                        OriginVerificationGen::Origin,
+                    self.send_relay_message(MessageRelay::new(
                         Message::FindSuccessorSend(FindSuccessorSend { id, for_fix: false }),
-                    )
+                        &self.swarm.session_manager,
+                        OriginVerificationGen::Origin,
+                        MessageRelayMethod::SEND,
+                        None,
+                        None,
+                        Some(next),
+                        next,
+                    )?)
                     .await
                 } else {
                     Ok(())
@@ -132,10 +132,9 @@ impl TChordConnection for MessageHandler {
     async fn connect_node(
         &self,
         relay: MessageRelay<Message>,
-        prev: Did,
+        _prev: Did,
         msg: ConnectNodeSend,
     ) -> Result<()> {
-        // TODO: Verify necessity based on PeerRing to decrease connections but make sure availablitity.
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
         if dht.id != msg.target_id {
@@ -145,18 +144,17 @@ impl TChordConnection for MessageHandler {
                 _ => None,
             }
             .ok_or(Error::MessageHandlerMissNextNode)?;
-            relay.relay(dht.id, Some(next_node));
+            relay.relay(dht.id, Some(next_node))?;
             return self
-                .send_message(
-                    &next_node,
-                    Some(relay.to_path),
-                    Some(relay.from_path),
-                    MessageRelayMethod::SEND,
-                    OriginVerificationGen::Stick(relay.origin_verification),
-                    Message::ConnectNodeSend(msg.clone()),
-                )
+                .send_relay_message(relay.rewrap(
+                    relay.data.clone(),
+                    &self.swarm.session_manager,
+                    OriginVerificationGen::Stick(relay.origin_verification.clone()),
+                )?)
                 .await;
         }
+
+        relay.relay(dht.id, None)?;
         match self.swarm.get_transport(&msg.sender_id) {
             None => {
                 let trans = self.swarm.new_transport().await?;
@@ -167,18 +165,14 @@ impl TChordConnection for MessageHandler {
                     .get_handshake_info(&self.swarm.session_manager, RTCSdpType::Answer)
                     .await?
                     .to_string();
-                self.send_message(
-                    &prev.into(),
-                    Some(relay.to_path),
-                    Some(relay.from_path),
-                    MessageRelayMethod::REPORT,
-                    OriginVerificationGen::Origin,
+                self.send_relay_message(relay.report(
                     Message::ConnectNodeReport(ConnectNodeReport {
                         answer_id: dht.id,
                         transport_uuid: msg.transport_uuid.clone(),
                         handshake_info,
                     }),
-                )
+                    &self.swarm.session_manager,
+                )?)
                 .await?;
                 self.swarm.get_or_register(&msg.sender_id, trans).await?;
 
@@ -186,14 +180,10 @@ impl TChordConnection for MessageHandler {
             }
 
             _ => {
-                self.send_message(
-                    &prev.into(),
-                    Some(relay.from_path),
-                    None,
-                    MessageRelayMethod::REPORT,
-                    OriginVerificationGen::Origin,
+                self.send_relay_message(relay.report(
                     Message::AlreadyConnected(AlreadyConnected { answer_id: dht.id }),
-                )
+                    &self.swarm.session_manager,
+                )?)
                 .await
             }
         }
@@ -207,16 +197,13 @@ impl TChordConnection for MessageHandler {
     ) -> Result<()> {
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
-        relay.relay(dht.id, None);
-        if let Some(prev_node) = relay.next() {
-            self.send_message(
-                &prev_node,
-                Some(relay.to_path),
-                Some(relay.from_path),
-                MessageRelayMethod::REPORT,
-                OriginVerificationGen::Stick(relay.origin_verification),
-                Message::ConnectNodeReport(msg.clone()),
-            )
+        relay.relay(dht.id, None)?;
+        if relay.next_hop.is_some() {
+            self.send_relay_message(relay.rewrap(
+                relay.data.clone(),
+                &self.swarm.session_manager,
+                OriginVerificationGen::Stick(relay.origin_verification.clone()),
+            )?)
             .await
         } else {
             let transport = self
@@ -236,21 +223,18 @@ impl TChordConnection for MessageHandler {
     async fn already_connected(
         &self,
         relay: MessageRelay<Message>,
-        prev: Did,
+        _prev: Did,
         msg: AlreadyConnected,
     ) -> Result<()> {
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
-        relay.push_prev(dht.id, prev);
-        if let Some(prev_node) = relay.next() {
-            self.send_message(
-                &prev_node,
-                Some(relay.to_path),
-                Some(relay.from_path),
-                MessageRelayMethod::REPORT,
-                OriginVerificationGen::Stick(relay.origin_verification),
-                Message::AlreadyConnected(msg.clone()),
-            )
+        relay.relay(dht.id, None)?;
+        if relay.next_hop.is_some() {
+            self.send_relay_message(relay.rewrap(
+                relay.data.clone(),
+                &self.swarm.session_manager,
+                OriginVerificationGen::Stick(relay.origin_verification.clone()),
+            )?)
             .await
         } else {
             self.swarm
@@ -263,7 +247,7 @@ impl TChordConnection for MessageHandler {
     async fn find_successor(
         &self,
         relay: MessageRelay<Message>,
-        prev: Did,
+        _prev: Did,
         msg: FindSuccessorSend,
     ) -> Result<()> {
         /*
@@ -334,32 +318,23 @@ impl TChordConnection for MessageHandler {
         let mut relay = relay.clone();
         match dht.find_successor(msg.id)? {
             PeerRingAction::Some(id) => {
-                self.send_message(
-                    &prev.into(),
-                    Some(relay.to_path),
-                    Some(relay.from_path),
-                    MessageRelayMethod::REPORT,
-                    OriginVerificationGen::Origin,
+                relay.relay(dht.id, None)?;
+                self.send_relay_message(relay.report(
                     Message::FindSuccessorReport(FindSuccessorReport {
                         id,
                         for_fix: msg.for_fix,
                     }),
-                )
+                    &self.swarm.session_manager,
+                )?)
                 .await
             }
-            PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessor(id)) => {
-                relay.relay(dht.id, Some(next));
-                self.send_message(
-                    &next.into(),
-                    Some(relay.to_path),
-                    Some(relay.from_path),
-                    MessageRelayMethod::SEND,
-                    OriginVerificationGen::Origin,
-                    Message::FindSuccessorSend(FindSuccessorSend {
-                        id,
-                        for_fix: msg.for_fix,
-                    }),
-                )
+            PeerRingAction::RemoteAction(next, _) => {
+                relay.relay(dht.id, Some(next))?;
+                self.send_relay_message(relay.rewrap(
+                    relay.data.clone(),
+                    &self.swarm.session_manager,
+                    OriginVerificationGen::Stick(relay.origin_verification.clone()),
+                )?)
                 .await
             }
             act => Err(Error::PeerRingUnexpectedAction(act)),
@@ -374,16 +349,13 @@ impl TChordConnection for MessageHandler {
     ) -> Result<()> {
         let mut dht = self.dht.lock().await;
         let mut relay = relay.clone();
-        relay.relay(dht.id, None);
-        if let Some(next) = relay.next() {
-            self.send_message(
-                &next.into(),
-                Some(relay.to_path),
-                Some(relay.from_path),
-                MessageRelayMethod::REPORT,
-                OriginVerificationGen::Stick(relay.origin_verification),
-                Message::FindSuccessorReport(msg.clone()),
-            )
+        relay.relay(dht.id, None)?;
+        if relay.next_hop.is_some() {
+            self.send_relay_message(relay.rewrap(
+                relay.data.clone(),
+                &self.swarm.session_manager,
+                OriginVerificationGen::Stick(relay.origin_verification.clone()),
+            )?)
             .await
         } else {
             if self.swarm.get_transport(&msg.id).is_none() && msg.id != self.swarm.address().into()
@@ -403,33 +375,29 @@ impl TChordConnection for MessageHandler {
     async fn notify_predecessor(
         &self,
         relay: MessageRelay<Message>,
-        prev: Did,
+        _prev: Did,
         msg: NotifyPredecessorSend,
     ) -> Result<()> {
         let mut dht = self.dht.lock().await;
         let mut relay = relay.clone();
-        relay.push_prev(dht.id, prev);
+        relay.relay(dht.id, None)?;
         dht.notify(msg.id);
-        self.send_message(
-            &prev.into(),
-            Some(relay.to_path),
-            Some(relay.from_path),
-            MessageRelayMethod::REPORT,
-            OriginVerificationGen::Origin,
+        self.send_relay_message(relay.report(
             Message::NotifyPredecessorReport(NotifyPredecessorReport { id: dht.id }),
-        )
+            &self.swarm.session_manager,
+        )?)
         .await
     }
 
     async fn notified_predecessor(
         &self,
         relay: MessageRelay<Message>,
-        prev: Did,
+        _prev: Did,
         msg: NotifyPredecessorReport,
     ) -> Result<()> {
         let mut dht = self.dht.lock().await;
         let mut relay = relay.clone();
-        relay.push_prev(dht.id, prev);
+        relay.relay(dht.id, None)?;
         assert_eq!(relay.method, MessageRelayMethod::REPORT);
         // if successor: predecessor is between (id, successor]
         // then update local successor

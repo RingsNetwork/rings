@@ -78,7 +78,7 @@ pub enum Error {
     #[error("Receive `AlreadyConnected`` but cannot get transport")]
     MessageHandlerMissTransportAlreadyConnected,
 
-    #[error("Cannot get trans while handle connect node response")]
+    #[error("Cannot get trans when handle connect node response")]
     MessageHandlerMissTransportConnectedNode,
 
     #[error("Send message through channel failed")]
@@ -120,7 +120,7 @@ pub enum Error {
     #[error("transport not found")]
     SwarmPendingTransNotFound,
 
-    #[error("failed to close previous while registering, {0}")]
+    #[error("failed to close previous when registering, {0}")]
     SwarmToClosePrevTransport(String),
 
     #[error("call lock() failed")]
@@ -211,6 +211,27 @@ pub enum Error {
 
     #[error("Failed to decrypt data")]
     DecryptionError,
+
+    #[error("Current node is not the next hop of message")]
+    InvalidNextHop,
+
+    #[error("Adjacent elements in path cannot be equal")]
+    InvalidRelayPath,
+
+    #[error("The destination of report message should always be the first element of path")]
+    InvalidRelayDestination,
+
+    #[error("Cannot infer next hop")]
+    CannotInferNextHop,
+
+    #[error("Cannot get next hop when sending message")]
+    NoNextHop,
+
+    #[error("To generate REPORT, you should provide SEND")]
+    ReportNeedSend,
+
+    #[error("Only SEND message can reset destination")]
+    ResetDestinationNeedSend,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

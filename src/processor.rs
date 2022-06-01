@@ -290,15 +290,21 @@ impl Processor {
     }
 
     /// Send custom message to an address.
-    pub async fn send_message<T>(&self, address: &str, msg: T) -> Result<()>
+    pub async fn send_message<T>(&self, next_hop: &str, destination: &str, msg: T) -> Result<()>
     where
         T: ToString,
     {
-        log::info!("send_message, to: {}, text: {}", address, msg.to_string());
-        let address = Address::from_str(address).map_err(|_| Error::InvalidAddress)?;
+        log::info!(
+            "send_message, to: {}, destination: {}, text: {}",
+            next_hop,
+            destination,
+            msg.to_string()
+        );
+        let next_hop = Address::from_str(next_hop).map_err(|_| Error::InvalidAddress)?;
+        let destination = Address::from_str(destination).map_err(|_| Error::InvalidAddress)?;
         let msg = Message::custom(msg.to_string().as_str(), &None).map_err(Error::SendMessage)?;
         self.msg_handler
-            .send_message_default(&address, msg)
+            .send_message(&next_hop.into(), &destination.into(), msg)
             .await
             .map_err(Error::SendMessage)?;
         Ok(())

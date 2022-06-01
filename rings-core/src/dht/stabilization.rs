@@ -42,10 +42,11 @@ impl Stabilization {
             Message::NotifyPredecessorSend(NotifyPredecessorSend { id: chord.id }),
             &self.swarm.session_manager,
             OriginVerificationGen::Origin,
-            None,
-            None,
-            None,
             MessageRelayMethod::SEND,
+            None,
+            None,
+            None,
+            self.swarm.address().into(),
         )?;
         if chord.id != chord.successor.min() {
             for s in chord.successor.list() {
@@ -76,10 +77,11 @@ impl Stabilization {
                         }),
                         &self.swarm.session_manager,
                         OriginVerificationGen::Origin,
-                        None,
-                        None,
-                        None,
                         MessageRelayMethod::SEND,
+                        None,
+                        None,
+                        None,
+                        self.swarm.address().into(),
                     )?;
                     self.swarm.send_message(&next.into(), message).await
                 }

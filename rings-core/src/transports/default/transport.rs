@@ -414,10 +414,11 @@ impl IceTrickleScheme<Event, AcChannel<Event>> for DefaultTransport {
             data,
             session_manager,
             OriginVerificationGen::Origin,
-            None,
-            None,
-            None,
             MessageRelayMethod::SEND,
+            None,
+            None,
+            None,
+            session_manager.authorizer()?.to_owned().into(), // This is a fake destination
         )?;
         Ok(resp.gzip(9)?.encode()?)
     }
