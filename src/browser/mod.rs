@@ -1,3 +1,4 @@
+//! rings-node browser support.
 #![allow(clippy::unused_unit)]
 pub mod utils;
 
@@ -40,6 +41,9 @@ pub fn start() -> Result<(), JsError> {
     Ok(())
 }
 
+/// set debug for wasm.
+/// if `true` will print `Debug` message in console,
+/// otherwise only print `error` message
 #[wasm_bindgen]
 pub fn debug(value: bool) {
     if value {
@@ -78,6 +82,14 @@ impl UnsignedInfo {
     }
 }
 
+/// rings-node browser client
+/// the process of initialize client.
+/// ``` typescript
+/// const unsignedInfo = new UnsignedInfo(account);
+/// const signed = await signer.signMessage(unsignedInfo.auth);
+/// const sig = new Uint8Array(web3.utils.hexToBytes(signed));
+/// const client = new Client(unsignedInfo, sig, stunOrTurnUrl);
+/// ```
 #[wasm_bindgen]
 #[derive(Clone)]
 pub struct Client {
@@ -114,6 +126,25 @@ impl Client {
         })
     }
 
+    /// listen message callback.
+    /// ```typescript
+    /// await client.listen(new MessageCallbackInstance(
+    ///      async (relay: any, prev: String, msg: any) => {
+    ///        console.group('on custom message')
+    ///        console.log(relay)
+    ///        console.log(prev)
+    ///        console.log(msg)
+    ///        console.groupEnd()
+    ///      }, async (
+    ///        relay: any, prev: String,
+    ///      ) => {
+    ///        console.group('on builtin message')
+    ///        console.log(relay)
+    ///        console.log(prev)
+    ///        console.groupEnd()
+    ///      },
+    /// ))
+    /// ```
     pub fn listen(&mut self, callback: MessageCallbackInstance) -> Result<IntervalHandle, JsError> {
         let p = self.processor.clone();
         let pr = PeerRing::new(p.swarm.address().into());
@@ -125,10 +156,6 @@ impl Client {
             Box::new(callback),
         ));
         self.message_handler = Some(msg_handler.clone());
-        // future_to_promise(async move {
-        //     msg_handler.listen().await;
-        //     Ok(JsValue::null())
-        // })
         let h = Arc::clone(&msg_handler);
 
         let cb = Closure::wrap(Box::new(move || {
@@ -152,6 +179,7 @@ impl Client {
         })
     }
 
+    /// connect peer with remote jsonrpc-server url
     pub fn connect_peer_via_http(&self, remote_url: String) -> Promise {
         log::debug!("remote_url: {}", remote_url);
         let p = self.processor.clone();
@@ -165,6 +193,7 @@ impl Client {
         })
     }
 
+    /// connect peer with web3 address
     pub fn connect_with_address(&self, address: String) -> Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
@@ -177,6 +206,7 @@ impl Client {
         })
     }
 
+    /// Manually make handshke with remote peer
     pub fn create_offer(&self) -> Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
@@ -185,6 +215,7 @@ impl Client {
         })
     }
 
+    /// Manually make handshke with remote peer
     pub fn answer_offer(&self, ice_info: String) -> Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
@@ -196,6 +227,7 @@ impl Client {
         })
     }
 
+    /// Manually make handshke with remote peer
     pub fn accept_answer(&self, transport_id: String, ice: String) -> Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
@@ -207,6 +239,7 @@ impl Client {
         })
     }
 
+    /// list all connect peers
     pub fn list_peers(&self) -> Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
@@ -217,6 +250,7 @@ impl Client {
         })
     }
 
+    /// disconnect a peer with web3 address
     pub fn disconnect(&self, address: String) -> Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
@@ -255,6 +289,7 @@ impl Client {
         })
     }
 
+    /// send custome message to peer.
     pub fn send_message(&self, address: String, msg: String) -> Promise {
         let p = self.processor.clone();
         future_to_promise(async move {

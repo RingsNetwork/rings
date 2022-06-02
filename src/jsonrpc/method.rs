@@ -1,20 +1,34 @@
+#![warn(missing_docs)]
+///! JSONRpc server supports methods.
 use crate::error::{Error, Result};
 
+/// supported methods.
 #[derive(Debug, Clone)]
 pub enum Method {
+    /// Connect peer with remote jsonrpc server url
     ConnectPeerViaHttp,
+    /// Connect peer with remote peer's web3 address
     ConnectWithAddress,
+    /// List all connected peers
     ListPeers,
+    /// Create offer for manually handshake
     CreateOffer,
+    /// Answer offer for manually handshake
     AnswerOffer,
-    SendTo,
-    Disconnect,
+    /// Accept Answer for manually handshake
     AcceptAnswer,
+    /// Send custom message to peer
+    SendTo,
+    /// Disconnect a peer
+    Disconnect,
+    /// List all pending connections
     ListPendings,
+    /// Close pending connect
     ClosePendingTransport,
 }
 
 impl Method {
+    /// Return method's name as `&str`
     pub fn as_str(&self) -> &str {
         match self {
             Method::ConnectPeerViaHttp => "connectPeerViaHttp",

@@ -1,5 +1,4 @@
-use std::str::FromStr;
-
+#![warn(missing_docs)]
 use super::{
     method::Method,
     response::{Peer, TransportAndIce},
@@ -8,8 +7,9 @@ use crate::{
     error::Error as ServerError, prelude::rings_core::prelude::Address, processor::Processor,
 };
 use jsonrpc_core::{Error, ErrorCode, MetaIoHandler, Params, Result, Value};
+use std::str::FromStr;
 
-pub async fn build_handler(handler: &mut MetaIoHandler<Processor>) {
+pub(crate) async fn build_handler(handler: &mut MetaIoHandler<Processor>) {
     handler.add_method_with_meta(Method::ConnectPeerViaHttp.as_str(), connect_peer_via_http);
     handler.add_method_with_meta(Method::AnswerOffer.as_str(), answer_offer);
     handler.add_method_with_meta(Method::ConnectWithAddress.as_str(), connect_with_address);
@@ -20,7 +20,7 @@ pub async fn build_handler(handler: &mut MetaIoHandler<Processor>) {
     handler.add_method_with_meta(Method::SendTo.as_str(), send_message)
 }
 
-pub async fn connect_peer_via_http(params: Params, processor: Processor) -> Result<Value> {
+async fn connect_peer_via_http(params: Params, processor: Processor) -> Result<Value> {
     let p: Vec<String> = params.parse()?;
     let peer_url = p
         .first()
@@ -32,7 +32,7 @@ pub async fn connect_peer_via_http(params: Params, processor: Processor) -> Resu
     Ok(Value::String(transport.id.to_string()))
 }
 
-pub async fn answer_offer(params: Params, processor: Processor) -> Result<Value> {
+async fn answer_offer(params: Params, processor: Processor) -> Result<Value> {
     let p: Vec<String> = params.parse()?;
     let ice_info = p
         .first()
@@ -45,7 +45,7 @@ pub async fn answer_offer(params: Params, processor: Processor) -> Result<Value>
     TransportAndIce::from(r).to_json_obj().map_err(Error::from)
 }
 
-pub async fn connect_with_address(params: Params, processor: Processor) -> Result<Value> {
+async fn connect_with_address(params: Params, processor: Processor) -> Result<Value> {
     let p: Vec<String> = params.parse()?;
     let address_str = p
         .first()
@@ -59,12 +59,12 @@ pub async fn connect_with_address(params: Params, processor: Processor) -> Resul
     Ok(Value::Null)
 }
 
-pub async fn create_offer(_params: Params, processor: Processor) -> Result<Value> {
+async fn create_offer(_params: Params, processor: Processor) -> Result<Value> {
     let r = processor.create_offer().await.map_err(Error::from)?;
     TransportAndIce::from(r).to_json_obj().map_err(Error::from)
 }
 
-pub async fn accept_answer(params: Params, processor: Processor) -> Result<Value> {
+async fn accept_answer(params: Params, processor: Processor) -> Result<Value> {
     let params: Vec<String> = params.parse()?;
     if let ([transport_id, ice], _) = params.split_at(2) {
         let r: Peer = processor
@@ -76,7 +76,7 @@ pub async fn accept_answer(params: Params, processor: Processor) -> Result<Value
     Err(Error::new(ErrorCode::InvalidParams))
 }
 
-pub async fn list_peers(_params: Params, processor: Processor) -> Result<Value> {
+async fn list_peers(_params: Params, processor: Processor) -> Result<Value> {
     let r = processor
         .list_peers()
         .await?
@@ -86,7 +86,7 @@ pub async fn list_peers(_params: Params, processor: Processor) -> Result<Value> 
     serde_json::to_value(&r).map_err(|_| Error::from(ServerError::JsonSerializeError))
 }
 
-pub async fn close_connection(params: Params, processor: Processor) -> Result<Value> {
+async fn close_connection(params: Params, processor: Processor) -> Result<Value> {
     let params: Vec<String> = params.parse()?;
     let address = params
         .first()
@@ -95,7 +95,7 @@ pub async fn close_connection(params: Params, processor: Processor) -> Result<Va
     Ok(serde_json::json!({}))
 }
 
-pub async fn send_message(params: Params, processor: Processor) -> Result<Value> {
+async fn send_message(params: Params, processor: Processor) -> Result<Value> {
     let params: serde_json::Map<String, Value> = params.parse()?;
     let address = params
         .get("address")

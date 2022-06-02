@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::{
     error::{Error, Result},
     prelude::rings_core::{
@@ -11,6 +9,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use std::sync::Arc;
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct Peer {

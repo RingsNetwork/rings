@@ -36,6 +36,8 @@ impl AuthHandler for AuthBuilder {
     }
 }
 
+/// Run a udp turn server.
+/// more about turn server: https://docs.rs/turn/latest/turn/server/struct.Server.html
 pub async fn run_udp_turn(
     public_ip: &str,
     port: u16,

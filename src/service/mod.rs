@@ -1,10 +1,11 @@
+#![warn(missing_docs)]
+//! rings-node server
 mod http_error;
 #[cfg(feature = "daemon")]
 mod is_turn;
 
 use self::http_error::HttpError;
 use crate::{
-    jsonrpc,
     prelude::rings_core::{message::MessageHandler, swarm::Swarm},
     processor::Processor,
 };
@@ -16,7 +17,7 @@ use jsonrpc_core::MetaIoHandler;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 
-#[allow(deprecated)]
+/// Run a web server to handle jsonrpc request
 pub async fn run_service(
     addr: String,
     swarm: Arc<Swarm>,
@@ -28,7 +29,7 @@ pub async fn run_service(
     let msg_handler_layer = Extension(msg_handler.clone());
 
     let mut jsonrpc_handler: MetaIoHandler<Processor> = MetaIoHandler::default();
-    jsonrpc::server::build_handler(&mut jsonrpc_handler).await;
+    crate::jsonrpc::build_handler(&mut jsonrpc_handler).await;
     let jsonrpc_handler_layer = Extension(Arc::new(jsonrpc_handler));
 
     let axum_make_service = Router::new()
@@ -42,14 +43,14 @@ pub async fn run_service(
         .layer(CorsLayer::permissive())
         .into_make_service();
 
-    println!("Service listening on http://{}", addr);
+    println!("Server listening on http://{}", addr);
     axum::Server::bind(&binding_addr)
         .serve(axum_make_service)
         .await?;
     Ok(())
 }
 
-pub async fn jsonrpc_io_handler(
+async fn jsonrpc_io_handler(
     body: String,
     Extension(swarm): Extension<Arc<Swarm>>,
     Extension(msg_handler): Extension<Arc<MessageHandler>>,
@@ -63,7 +64,7 @@ pub async fn jsonrpc_io_handler(
 }
 
 #[derive(Debug, Clone)]
-pub struct JsonResponse(String);
+struct JsonResponse(String);
 
 impl IntoResponse for JsonResponse {
     fn into_response(self) -> axum::response::Response {
