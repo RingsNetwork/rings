@@ -113,8 +113,35 @@ impl<T> MessageSessionRelayProtocol for MessageRelay<T> {
     }
 
     fn path_prev(&self) -> Option<Did> {
-        self.path
-            .get(self.path.len() - 1 - self.path_end_cursor)
-            .copied()
+        if self.path.len() < self.path_end_cursor + 2 {
+            None
+        } else {
+            Some(self.path[self.path.len() - 2 - self.path_end_cursor])
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::ecc::SecretKey;
+    use crate::message::payload::test::new_test_message;
+
+    #[test]
+    fn test_path_prev() {
+        let mut payload = new_test_message();
+        let fake_id = SecretKey::random().address().into();
+        let next_hop1 = SecretKey::random().address().into();
+        let next_hop2 = SecretKey::random().address().into();
+
+        assert!(payload.path_prev().is_none());
+
+        payload.path[0] = fake_id;
+
+        payload.relay(next_hop1, None).unwrap();
+        assert_eq!(payload.path_prev(), Some(fake_id));
+
+        payload.relay(next_hop2, None).unwrap();
+        assert_eq!(payload.path_prev(), Some(next_hop1));
     }
 }

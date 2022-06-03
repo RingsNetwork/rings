@@ -263,19 +263,19 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+pub mod test {
     use super::*;
     use crate::ecc::SecretKey;
 
-    #[derive(Deserialize, Serialize, PartialEq, Debug)]
-    struct TestData {
+    #[derive(Deserialize, Serialize, PartialEq, Debug, Clone)]
+    pub struct TestData {
         a: String,
         b: i64,
         c: f64,
         d: bool,
     }
 
-    fn new_test_message() -> MessageRelay<TestData> {
+    pub fn new_test_message() -> MessageRelay<TestData> {
         let key = SecretKey::random();
         let destination = SecretKey::random().address().into();
         let session = SessionManager::new_with_seckey(&key).unwrap();
@@ -312,9 +312,9 @@ mod tests {
 
         let relaied_payload = payload
             .rewrap(
-                payload.data,
+                payload.data.clone(),
                 &session2,
-                OriginVerificationGen::Stick(payload.origin_verification),
+                OriginVerificationGen::Stick(payload.origin_verification.clone()),
             )
             .unwrap();
 

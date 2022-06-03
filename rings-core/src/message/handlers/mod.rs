@@ -413,9 +413,9 @@ pub mod test {
 
         handler1
             .send_message(
+                &addr2.into(),
+                &addr2.into(),
                 Message::custom("Hello world 1", &None)?,
-                Some(addr2.into()),
-                addr2.into(),
             )
             .await
             .unwrap();

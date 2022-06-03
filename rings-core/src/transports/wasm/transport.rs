@@ -447,7 +447,6 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
             None,
             None,
             session_manager.authorizer()?.to_owned().into(), // This is a fake destination
-
         )?;
         Ok(resp.gzip(9)?.encode()?)
     }

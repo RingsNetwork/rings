@@ -8,8 +8,8 @@ pub mod test {
     use rings_core::err::Result;
     use rings_core::message;
     use rings_core::message::Encoder;
+    use rings_core::message::Message;
     use rings_core::message::MessageHandler;
-    use rings_core::message::{Message, MessageRelayMethod, OriginVerificationGen};
     use rings_core::session::SessionManager;
     use rings_core::storage::Storage;
     use rings_core::swarm::Swarm;
@@ -271,12 +271,9 @@ pub mod test {
                 // dht1 send msg to dht2 ask for connecting dht3
                 handler1
                     .send_message(
-                        &swarm2.address(),
-                        None,
-                        None,
-                        MessageRelayMethod::SEND,
-                        OriginVerificationGen::Origin,
-                        connect_msg.clone(),
+                        &swarm2.address().into(),
+                        &swarm3.address().into(),
+                        connect_msg,
                     )
                     .await
                     .unwrap();
@@ -340,11 +337,8 @@ pub mod test {
                 );
                 handler1
                     .send_message(
-                        &swarm2.address(),
-                        None,
-                        None,
-                        MessageRelayMethod::SEND,
-                        OriginVerificationGen::Origin,
+                        &swarm2.address().into(),
+                        &swarm2.address().into(),
                         Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
                             id: key1.address().into(),
                         }),
@@ -403,11 +397,8 @@ pub mod test {
                 );
                 handler1
                     .send_message(
-                        &swarm2.address(),
-                        None,
-                        None,
-                        MessageRelayMethod::SEND,
-                        OriginVerificationGen::Origin,
+                        &swarm2.address().into(),
+                        &swarm2.address().into(),
                         Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
                             id: swarm1.address().into(),
                         }),
@@ -425,11 +416,8 @@ pub mod test {
                 );
                 handler2
                     .send_message(
-                        &swarm1.address(),
-                        None,
-                        None,
-                        MessageRelayMethod::SEND,
-                        OriginVerificationGen::Origin,
+                        &swarm1.address().into(),
+                        &swarm1.address().into(),
                         Message::FindSuccessorSend(message::FindSuccessorSend {
                             id: swarm2.address().into(),
                             for_fix: false,
@@ -500,11 +488,8 @@ pub mod test {
                 );
                 handler1
                     .send_message(
-                        &swarm2.address(),
-                        None,
-                        None,
-                        MessageRelayMethod::SEND,
-                        OriginVerificationGen::Origin,
+                        &swarm2.address().into(),
+                        &swarm2.address().into(),
                         Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
                             id: swarm1.address().into(),
                         }),
@@ -521,11 +506,8 @@ pub mod test {
                 );
                 handler2
                     .send_message(
-                        &swarm1.address(),
-                        None,
-                        None,
-                        MessageRelayMethod::SEND,
-                        OriginVerificationGen::Origin,
+                        &swarm1.address().into(),
+                        &swarm1.address().into(),
                         Message::FindSuccessorSend(message::FindSuccessorSend {
                             id: swarm2.address().into(),
                             for_fix: false,
@@ -595,11 +577,8 @@ pub mod test {
                  );
                  handler1
                      .send_message(
-                         &swarm2.address(),
-                         None,
-                         None,
-                         MessageRelayMethod::SEND,
-                         OriginVerificationGen::Origin,
+                         &swarm2.address().into(),
+                         &swarm2.address().into(),
                          Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
                              id: swarm1.address().into(),
                          }),
@@ -616,11 +595,8 @@ pub mod test {
                  // the vid is hash of string
                  let vnode: VirtualNode = encoded_message.try_into().unwrap();
                  handler1.send_message(
-                     &swarm2.address(),
-                     None,
-                     None,
-                     MessageRelayMethod::SEND,
-                     OriginVerificationGen::Origin,
+                     &swarm2.address().into(),
+                     &swarm2.address().into(),
                      Message::StoreVNode(message::StoreVNode {
                          sender_id: swarm1.address().into(),
                          data: vec![vnode.clone()]

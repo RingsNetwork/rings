@@ -290,10 +290,10 @@ impl Client {
     }
 
     /// send custome message to peer.
-    pub fn send_message(&self, address: String, msg: String) -> Promise {
+    pub fn send_message(&self, next_hop: String, destination: String, msg: String) -> Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
-            p.send_message(address.as_str(), msg)
+            p.send_message(next_hop.as_str(), destination.as_str(), msg)
                 .await
                 .map_err(JsError::from)?;
             Ok(JsValue::from_bool(true))
