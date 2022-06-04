@@ -371,19 +371,19 @@ impl ChordStorage<PeerRingAction> for PeerRing {
         }
     }
 
-    fn sync_with_successor(&self) -> Result<PeerRingAction> {
+    /// This function should call when successor is updated
+    fn sync_with_successor(&self, new_successor: Did) -> Result<PeerRingAction> {
         let mut data = Vec::<VirtualNode>::new();
         for k in self.storage.keys() {
-            // k in (self, self.successor)
-            // k is more close to self.successor
-            if k - self.successor.min() > k - self.id {
+            // k < self.successor
+            if self.bias(k) < self.bias(new_successor) {
                 if let Some(v) = self.storage.remove(&k) {
                     data.push(v.1);
                 }
             }
         }
         Ok(PeerRingAction::RemoteAction(
-            self.successor.min(),
+            new_successor,
             RemoteAction::SyncVNodeWithSuccessor(data),
         ))
     }
