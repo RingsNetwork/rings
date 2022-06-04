@@ -60,13 +60,11 @@ pub struct LeaveDHT {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct SearchVNode {
-    pub sender_id: Did,
-    pub target_id: Did,
+    pub id: Did,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct FoundVNode {
-    pub target_id: Did,
     pub data: Vec<VirtualNode>,
 }
 

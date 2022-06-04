@@ -94,8 +94,10 @@ pub struct PeerRing {
     pub id: Did,
     /// This index is used for FindSuccesorForFix
     pub fix_finger_index: u8,
-    /// LocalStorage
+    /// LocalStorage for DHT Query
     pub storage: Arc<MemStorage<Did, VirtualNode>>,
+    /// LocalCache
+    pub cache: Arc<MemStorage<Did, VirtualNode>>,
 }
 
 impl PeerRing {
@@ -109,6 +111,7 @@ impl PeerRing {
             id,
             fix_finger_index: 0,
             storage: Arc::new(MemStorage::<Did, VirtualNode>::new()),
+            cache: Arc::new(MemStorage::<Did, VirtualNode>::new()),
         }
     }
 
@@ -150,6 +153,7 @@ impl PeerRing {
             // for Eth address, it's 160
             finger: vec![None; 160],
             storage: Arc::clone(&storage),
+            cache: Arc::new(MemStorage::<Did, VirtualNode>::new()),
             id,
             fix_finger_index: 0,
         }
@@ -321,8 +325,9 @@ impl ChordStablize<PeerRingAction> for PeerRing {
 }
 
 impl ChordStorage<PeerRingAction> for PeerRing {
-    fn lookup(&self, id: Did) -> Result<PeerRingAction> {
-        match self.find_successor(id) {
+    /// lookup always check data via finger table
+    fn lookup(&self, id: &Did) -> Result<PeerRingAction> {
+        match self.find_successor(id.clone()) {
             Ok(PeerRingAction::Some(id)) => match self.storage.get(&id) {
                 Some(v) => Ok(PeerRingAction::SomeVNode(v)),
                 None => Ok(PeerRingAction::None),
@@ -333,6 +338,16 @@ impl ChordStorage<PeerRingAction> for PeerRing {
             Ok(a) => Err(Error::PeerRingUnexpectedAction(a)),
             Err(e) => Err(e),
         }
+    }
+
+    /// When a vnode data is fetched from remote, it should be cache at local
+    fn cache(&self, vnode: VirtualNode) {
+        self.storage.set(&vnode.did(), vnode);
+    }
+
+    /// When a VNode data is fetched from remote, it should be cache at local
+    fn fetch_cache(&self, id: &Did) -> Option<VirtualNode> {
+        self.storage.get(&id)
     }
 
     fn store(&self, peer: VirtualNode) -> Result<PeerRingAction> {

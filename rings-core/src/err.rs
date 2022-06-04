@@ -90,6 +90,9 @@ pub enum Error {
     #[error("Invalid PeerRingAction")]
     PeerRingInvalidAction,
 
+    #[error("Failed on TryInto VNode")]
+    PeerRingInvalidVNode,
+
     #[error("Unexpected PeerRingAction, {0:?}")]
     PeerRingUnexpectedAction(crate::dht::PeerRingAction),
 
