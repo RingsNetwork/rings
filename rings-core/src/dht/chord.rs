@@ -327,9 +327,9 @@ impl ChordStablize<PeerRingAction> for PeerRing {
 impl ChordStorage<PeerRingAction> for PeerRing {
     /// lookup always check data via finger table
     fn lookup(&self, vid: &Did) -> Result<PeerRingAction> {
-        match self.find_successor(vid.clone()) {
+        match self.find_successor(*vid) {
             // if vid is in [self, successor]
-            Ok(PeerRingAction::Some(_)) => match self.storage.get(&vid) {
+            Ok(PeerRingAction::Some(_)) => match self.storage.get(vid) {
                 Some(v) => Ok(PeerRingAction::SomeVNode(v)),
                 None => Ok(PeerRingAction::None),
             },
@@ -348,7 +348,7 @@ impl ChordStorage<PeerRingAction> for PeerRing {
 
     /// When a VNode data is fetched from remote, it should be cache at local
     fn fetch_cache(&self, id: &Did) -> Option<VirtualNode> {
-        self.cache.get(&id)
+        self.cache.get(id)
     }
 
     /// If address of VNode is in range(self, successor), it should store locally,
@@ -403,7 +403,7 @@ impl ChordStorage<PeerRingAction> for PeerRing {
                 }
             }
         }
-        if data.len() > 0 {
+        if !data.is_empty() {
             Ok(PeerRingAction::RemoteAction(
                 new_successor,
                 RemoteAction::SyncVNodeWithSuccessor(data),

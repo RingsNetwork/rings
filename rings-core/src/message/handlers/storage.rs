@@ -47,7 +47,7 @@ impl TChordStorage for MessageHandler {
     async fn fetch(&self, id: &Did) -> Result<()> {
         // If peer found that data is on it's localstore, copy it to the cache
         let dht = self.dht.lock().await;
-        match dht.lookup(&id)? {
+        match dht.lookup(id)? {
             PeerRingAction::SomeVNode(v) => {
                 dht.cache(v);
                 Ok(())
@@ -55,7 +55,7 @@ impl TChordStorage for MessageHandler {
             PeerRingAction::None => Ok(()),
             PeerRingAction::RemoteAction(next, _) => {
                 self.send_relay_message(MessageRelay::direct(
-                    Message::SearchVNode(SearchVNode { id: id.clone() }),
+                    Message::SearchVNode(SearchVNode { id: *id }),
                     &self.swarm.session_manager,
                     next,
                 )?)

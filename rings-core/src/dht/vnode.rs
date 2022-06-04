@@ -76,7 +76,7 @@ impl TryFrom<String> for VirtualNode {
     type Error = Error;
     fn try_from(s: String) -> Result<Self> {
         let encoded_message = s.encode()?;
-        Ok(encoded_message.try_into()?)
+        encoded_message.try_into()
     }
 }
 
