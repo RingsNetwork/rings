@@ -25,15 +25,9 @@ pub trait MessageCallback {
         &self,
         handler: &MessageHandler,
         relay: &MessageRelay<Message>,
-        prev: Did,
         msg: &MaybeEncrypted<CustomMessage>,
     );
-    async fn builtin_message(
-        &self,
-        handler: &MessageHandler,
-        relay: &MessageRelay<Message>,
-        prev: Did,
-    );
+    async fn builtin_message(&self, handler: &MessageHandler, relay: &MessageRelay<Message>);
 }
 
 #[cfg(not(feature = "wasm"))]
@@ -144,7 +138,7 @@ impl MessageHandler {
         self.swarm.push_pending_transport(&transport)
     }
 
-    async fn invoke_callback(&self, relay: &MessageRelay<Message>, prev: Did) -> Result<()> {
+    async fn invoke_callback(&self, relay: &MessageRelay<Message>) -> Result<()> {
         let mut callback = self.callback.lock().await;
         if let Some(ref mut cb) = *callback {
             let data = relay.data.clone();
@@ -152,8 +146,8 @@ impl MessageHandler {
                 Message::None => {
                     return Ok(());
                 }
-                Message::CustomMessage(msg) => cb.custom_message(self, relay, prev, &msg).await,
-                _ => cb.builtin_message(self, relay, prev).await,
+                Message::CustomMessage(msg) => cb.custom_message(self, relay, &msg).await,
+                _ => cb.builtin_message(self, relay).await,
             };
         }
         Ok(())
@@ -167,32 +161,24 @@ impl MessageHandler {
 
     #[cfg_attr(feature = "wasm", async_recursion(?Send))]
     #[cfg_attr(not(feature = "wasm"), async_recursion)]
-    pub async fn handle_message_relay(
-        &self,
-        relay: MessageRelay<Message>,
-        prev: Did,
-    ) -> Result<()> {
+    pub async fn handle_message_relay(&self, relay: MessageRelay<Message>) -> Result<()> {
         let data = relay.data.clone();
         match data {
-            Message::JoinDHT(msg) => self.join_chord(relay.clone(), prev, msg).await,
-            Message::ConnectNodeSend(msg) => self.connect_node(relay.clone(), prev, msg).await,
-            Message::ConnectNodeReport(msg) => self.connected_node(relay.clone(), prev, msg).await,
-            Message::AlreadyConnected(msg) => {
-                self.already_connected(relay.clone(), prev, msg).await
-            }
-            Message::FindSuccessorSend(msg) => self.find_successor(relay.clone(), prev, msg).await,
-            Message::FindSuccessorReport(msg) => {
-                self.found_successor(relay.clone(), prev, msg).await
-            }
+            Message::JoinDHT(msg) => self.join_chord(relay.clone(), msg).await,
+            Message::ConnectNodeSend(msg) => self.connect_node(relay.clone(), msg).await,
+            Message::ConnectNodeReport(msg) => self.connected_node(relay.clone(), msg).await,
+            Message::AlreadyConnected(msg) => self.already_connected(relay.clone(), msg).await,
+            Message::FindSuccessorSend(msg) => self.find_successor(relay.clone(), msg).await,
+            Message::FindSuccessorReport(msg) => self.found_successor(relay.clone(), msg).await,
             Message::NotifyPredecessorSend(msg) => {
-                self.notify_predecessor(relay.clone(), prev, msg).await
+                self.notify_predecessor(relay.clone(), msg).await
             }
             Message::NotifyPredecessorReport(msg) => {
-                self.notified_predecessor(relay.clone(), prev, msg).await
+                self.notified_predecessor(relay.clone(), msg).await
             }
-            Message::SearchVNode(msg) => self.search_vnode(relay.clone(), prev, msg).await,
-            Message::FoundVNode(msg) => self.found_vnode(relay.clone(), prev, msg).await,
-            Message::StoreVNode(msg) => self.store_vnode(relay.clone(), prev, msg).await,
+            Message::SearchVNode(msg) => self.search_vnode(relay.clone(), msg).await,
+            Message::FoundVNode(msg) => self.found_vnode(relay.clone(), msg).await,
+            Message::StoreVNode(msg) => self.store_vnode(relay.clone(), msg).await,
             Message::MultiCall(msg) => {
                 for message in msg.messages {
                     let payload = relay.rewrap(
@@ -200,7 +186,7 @@ impl MessageHandler {
                         &self.swarm.session_manager,
                         OriginVerificationGen::Stick(relay.origin_verification.clone()),
                     )?;
-                    self.handle_message_relay(payload, prev).await.unwrap_or(());
+                    self.handle_message_relay(payload).await.unwrap_or(());
                 }
                 Ok(())
             }
@@ -210,7 +196,7 @@ impl MessageHandler {
                 x
             ))),
         }?;
-        if let Err(e) = self.invoke_callback(&relay, prev).await {
+        if let Err(e) = self.invoke_callback(&relay).await {
             log::warn!("invoke callback error: {}", e);
         }
 
@@ -224,8 +210,7 @@ impl MessageHandler {
             if !relay_message.verify() {
                 log::error!("Cannot verify msg or it's expired: {:?}", relay_message);
             }
-            let addr = relay_message.addr.into();
-            if let Err(e) = self.handle_message_relay(relay_message.clone(), addr).await {
+            if let Err(e) = self.handle_message_relay(relay_message.clone()).await {
                 log::error!("Error in handle_message: {}", e);
             }
             Some(relay_message)
@@ -255,8 +240,7 @@ mod listener {
                     log::error!("Cannot verify msg or it's expired: {:?}", relay_message);
                     continue;
                 }
-                let addr = relay_message.addr.into();
-                if let Err(e) = self.handle_message_relay(relay_message, addr).await {
+                if let Err(e) = self.handle_message_relay(relay_message).await {
                     log::error!("Error in handle_message: {}", e);
                     continue;
                 }
@@ -384,22 +368,21 @@ pub mod test {
                 &self,
                 handler: &MessageHandler,
                 relay: &MessageRelay<Message>,
-                id: Did,
                 msg: &MaybeEncrypted<CustomMessage>,
             ) {
                 let decrypted_msg = handler.decrypt_msg(msg).unwrap();
-                self.handler_messages.insert(id, decrypted_msg.0);
+                self.handler_messages
+                    .insert(relay.addr.into(), decrypted_msg.0);
 
-                println!("{:?}, {:?}, {:?}", relay, id, msg);
+                println!("{:?}, {:?}, {:?}", relay, relay.addr, msg);
             }
 
             async fn builtin_message(
                 &self,
                 _handler: &MessageHandler,
                 relay: &MessageRelay<Message>,
-                prev: Did,
             ) {
-                println!("{:?}, {:?}", relay, prev);
+                println!("{:?}, {:?}", relay, relay.addr);
             }
         }
 

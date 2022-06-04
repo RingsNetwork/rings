@@ -1,4 +1,4 @@
-use crate::dht::{ChordStorage, Did, PeerRingAction, PeerRingRemoteAction};
+use crate::dht::{ChordStorage, PeerRingAction, PeerRingRemoteAction};
 use crate::err::{Error, Result};
 use crate::message::payload::{MessageRelay, MessageRelayMethod};
 use crate::message::protocol::MessageSessionRelayProtocol;
@@ -10,31 +10,12 @@ use async_trait::async_trait;
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait TChordStorage {
-    async fn search_vnode(
-        &self,
-        relay: MessageRelay<Message>,
-        prev: Did,
-        msg: SearchVNode,
-    ) -> Result<()>;
-
-    async fn found_vnode(
-        &self,
-        relay: MessageRelay<Message>,
-        prev: Did,
-        msg: FoundVNode,
-    ) -> Result<()>;
-
-    async fn store_vnode(
-        &self,
-        relay: MessageRelay<Message>,
-        prev: Did,
-        msg: StoreVNode,
-    ) -> Result<()>;
-
+    async fn search_vnode(&self, relay: MessageRelay<Message>, msg: SearchVNode) -> Result<()>;
+    async fn found_vnode(&self, relay: MessageRelay<Message>, msg: FoundVNode) -> Result<()>;
+    async fn store_vnode(&self, relay: MessageRelay<Message>, msg: StoreVNode) -> Result<()>;
     async fn sync_with_successor(
         &self,
         relay: MessageRelay<Message>,
-        prev: Did,
         msg: SyncVNodeWithSuccessor,
     ) -> Result<()>;
 }
@@ -42,12 +23,7 @@ pub trait TChordStorage {
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl TChordStorage for MessageHandler {
-    async fn search_vnode(
-        &self,
-        relay: MessageRelay<Message>,
-        _prev: Did,
-        msg: SearchVNode,
-    ) -> Result<()> {
+    async fn search_vnode(&self, relay: MessageRelay<Message>, msg: SearchVNode) -> Result<()> {
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
         match dht.lookup(msg.target_id) {
@@ -79,12 +55,7 @@ impl TChordStorage for MessageHandler {
         }
     }
 
-    async fn found_vnode(
-        &self,
-        relay: MessageRelay<Message>,
-        _prev: Did,
-        _msg: FoundVNode,
-    ) -> Result<()> {
+    async fn found_vnode(&self, relay: MessageRelay<Message>, _msg: FoundVNode) -> Result<()> {
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
         relay.relay(dht.id, None)?;
@@ -101,12 +72,7 @@ impl TChordStorage for MessageHandler {
         }
     }
 
-    async fn store_vnode(
-        &self,
-        relay: MessageRelay<Message>,
-        _prev: Did,
-        msg: StoreVNode,
-    ) -> Result<()> {
+    async fn store_vnode(&self, relay: MessageRelay<Message>, msg: StoreVNode) -> Result<()> {
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
         let virtual_peer = msg.data.clone();
@@ -136,7 +102,6 @@ impl TChordStorage for MessageHandler {
     async fn sync_with_successor(
         &self,
         relay: MessageRelay<Message>,
-        _prev: Did,
         msg: SyncVNodeWithSuccessor,
     ) -> Result<()> {
         let dht = self.dht.lock().await;
