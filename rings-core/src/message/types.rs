@@ -86,7 +86,7 @@ pub struct SyncVNodeWithSuccessor {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-pub struct CustomMessage(pub String);
+pub struct CustomMessage(pub Vec<u8>);
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub enum MaybeEncrypted<T> {
@@ -121,8 +121,8 @@ impl std::fmt::Display for Message {
 }
 
 impl Message {
-    pub fn custom(msg: &str, pubkey: &Option<PublicKey>) -> Result<Message> {
-        let data = CustomMessage(msg.to_string());
+    pub fn custom(msg: &[u8], pubkey: &Option<PublicKey>) -> Result<Message> {
+        let data = CustomMessage(msg.to_vec());
         let msg = MaybeEncrypted::new(data, pubkey)?;
         Ok(Message::CustomMessage(msg))
     }
@@ -170,14 +170,14 @@ mod test {
         let key = SecretKey::random();
         let pubkey = key.pubkey();
 
-        let msg = Message::custom("hello", &Some(pubkey)).unwrap();
+        let msg = Message::custom("hello".as_bytes(), &Some(pubkey)).unwrap();
 
         let (plain, is_decrypted) = match msg {
             Message::CustomMessage(cipher) => cipher.decrypt(&key).unwrap(),
             _ => panic!("Unexpected message type"),
         };
 
-        assert_eq!(plain, CustomMessage("hello".to_string()));
+        assert_eq!(plain, CustomMessage("hello".as_bytes().to_vec()));
         assert!(is_decrypted);
     }
 }

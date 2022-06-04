@@ -6,7 +6,7 @@ use rings_node::{
     logger::{LogLevel, Logger},
     prelude::rings_core::{
         async_trait,
-        dht::{Did, PeerRing, Stabilization, TStabilize},
+        dht::{PeerRing, Stabilization, TStabilize},
         ecc::SecretKey,
         message::{self, CustomMessage, MaybeEncrypted, Message, MessageHandler, MessageRelay},
         prelude::url,
@@ -18,7 +18,7 @@ use rings_node::{
 };
 use std::{
     fs::{self, File},
-    str::FromStr,
+    str::{self, FromStr},
     sync::Arc,
 };
 use tokio::signal;
@@ -204,7 +204,11 @@ impl message::MessageCallback for MessageCallback {
         msg: &MaybeEncrypted<CustomMessage>,
     ) {
         if let Ok(msg) = handler.decrypt_msg(msg) {
-            log::info!("[MESSAGE] custom_message: {:?}", msg);
+            if let Ok(msg) = str::from_utf8(&msg.0) {
+                log::info!("[MESSAGE] custom_message: {:?}", msg);
+            } else {
+                log::info!("[MESSAGE] custom_message: {:?}", msg);
+            }
         } else {
             log::info!("[MESSAGE] custom_message: {:?}", msg);
         }

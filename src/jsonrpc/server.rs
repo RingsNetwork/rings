@@ -112,7 +112,8 @@ async fn send_message(params: Params, processor: Processor) -> Result<Value> {
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
         .as_str()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
-
-    processor.send_message(next_hop, destination, text).await?;
+    processor
+        .send_message(next_hop, destination, text.as_bytes())
+        .await?;
     Ok(serde_json::json!({}))
 }

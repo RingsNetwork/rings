@@ -344,7 +344,7 @@ pub mod test {
 
     #[derive(Clone)]
     struct MessageCallbackInstance {
-        handler_messages: Arc<DashMap<Did, String>>,
+        handler_messages: Arc<DashMap<Did, Vec<u8>>>,
     }
 
     #[tokio::test]
@@ -398,7 +398,7 @@ pub mod test {
             .send_message(
                 &addr2.into(),
                 &addr2.into(),
-                Message::custom("Hello world 1", &None)?,
+                Message::custom("Hello world 1".as_bytes(), &None)?,
             )
             .await
             .unwrap();
@@ -407,15 +407,10 @@ pub mod test {
         tokio::spawn(async { Arc::new(handler2).listen().await });
 
         sleep(Duration::from_secs(5)).await;
+        let got_value = msg_callback.handler_messages.get(&addr1.into()).unwrap();
+        let got_value = got_value.as_slice();
 
-        assert_eq!(
-            msg_callback
-                .handler_messages
-                .get(&addr1.into())
-                .unwrap()
-                .as_str(),
-            "Hello world 1"
-        );
+        assert_eq!(got_value, "Hello world 1".as_bytes());
 
         Ok(())
     }
