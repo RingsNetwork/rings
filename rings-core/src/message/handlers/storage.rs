@@ -116,7 +116,7 @@ impl TChordStorage for MessageHandler {
     }
 
     async fn found_vnode(&self, relay: MessageRelay<Message>, msg: FoundVNode) -> Result<()> {
-        let mut dht = self.dht.lock().await;
+        let dht = self.dht.lock().await;
         let mut relay = relay.clone();
         relay.relay(dht.id, None)?;
         if relay.next_hop.is_some() {
@@ -207,12 +207,14 @@ mod test {
     use crate::message::MessageHandler;
     use crate::prelude::RTCSdpType;
     use crate::session::SessionManager;
+    use crate::storage::Storage;
     use crate::swarm::Swarm;
     use crate::swarm::TransportManager;
     use crate::types::ice_transport::IceTrickleScheme;
     use futures::lock::Mutex;
     use std::sync::Arc;
 
+    #[tokio::test]
     async fn test_store_vnode() -> Result<()> {
         let stun = "stun://stun.l.google.com:19302";
 
@@ -334,6 +336,87 @@ mod test {
         } else {
             panic!();
         }
+
+        // for now node1's successor is node 2, node2's successor is node 1
+        // now we store adata on ndoe 2 and query it from node 1
+        let data = "Across the Great Wall we can reach every corner in the world.".to_string();
+        let vnode: VirtualNode = data.try_into().unwrap();
+        let vid = vnode.did();
+        assert!(dht1.lock().await.cache.is_empty());
+        assert!(dht2.lock().await.cache.is_empty());
+        assert!(node1.check_cache(&vid).await.is_none());
+        assert!(node2.check_cache(&vid).await.is_none());
+
+        // test remote store
+        if vid.in_range(&did2, &did2, &did1) {
+            node1.store(vnode.clone()).await.unwrap();
+            // if vnode in range [node2, node1]
+            // vnode should stored in node2
+            let ev = node2.listen_once().await.unwrap();
+            if let Message::StoreVNode(x) = ev.data {
+                assert_eq!(x.data[0].did(), vid);
+            } else {
+                panic!();
+            }
+        } else {
+            node2.store(vnode.clone()).await.unwrap();
+            // if vnode in range [node2, node1]
+            // vnode should stored in node1
+            let ev = node1.listen_once().await.unwrap();
+            if let Message::StoreVNode(x) = ev.data {
+                assert_eq!(x.data[0].did(), vid);
+            } else {
+                panic!();
+            }
+        }
+        assert!(node1.check_cache(&vid).await.is_none());
+        assert!(node2.check_cache(&vid).await.is_none());
+        if vid.in_range(&did2, &did2, &did1) {
+            assert!(dht1.lock().await.storage.is_empty());
+            assert!(!dht2.lock().await.storage.is_empty());
+        } else {
+            assert!(!dht1.lock().await.storage.is_empty());
+            assert!(dht2.lock().await.storage.is_empty());
+        }
+        // test remote query
+        if vid.in_range(&did2, &did2, &did1) {
+            // vid is in node 2
+            println!("vid is on node 2 {:?}", &did2);
+            node1.fetch(&vid).await.unwrap();
+            // it will send reqeust to node 2
+            let ev = node2.listen_once().await.unwrap();
+            // node 2 received search vnode request
+            if let Message::SearchVNode(x) = ev.data {
+                assert_eq!(x.id, vid);
+            } else {
+                panic!();
+            }
+            let ev = node1.listen_once().await.unwrap();
+            if let Message::FoundVNode(x) = ev.data {
+                assert_eq!(x.data[0].did(), vid);
+            } else {
+                panic!();
+            }
+            assert!(node1.check_cache(&vid).await.is_some());
+        } else {
+            // vid is in node 1
+            println!("vid is on node 1 {:?}", &did1);
+            node2.fetch(&vid).await.unwrap();
+            let ev = node1.listen_once().await.unwrap();
+            if let Message::SearchVNode(x) = ev.data {
+                assert_eq!(x.id, vid);
+            } else {
+                panic!();
+            }
+            let ev = node2.listen_once().await.unwrap();
+            if let Message::FoundVNode(x) = ev.data {
+                assert_eq!(x.data[0].did(), vid);
+            } else {
+                panic!();
+            }
+            assert!(node2.check_cache(&vid).await.is_some());
+        }
+
         Ok(())
     }
 }
