@@ -201,7 +201,6 @@ impl message::MessageCallback for MessageCallback {
         &self,
         handler: &MessageHandler,
         _relay: &MessageRelay<Message>,
-        _prev: Did,
         msg: &MaybeEncrypted<CustomMessage>,
     ) {
         if let Ok(msg) = handler.decrypt_msg(msg) {
@@ -210,13 +209,7 @@ impl message::MessageCallback for MessageCallback {
             log::info!("[MESSAGE] custom_message: {:?}", msg);
         }
     }
-    async fn builtin_message(
-        &self,
-        _handler: &MessageHandler,
-        _relay: &MessageRelay<Message>,
-        _prev: Did,
-    ) {
-    }
+    async fn builtin_message(&self, _handler: &MessageHandler, _relay: &MessageRelay<Message>) {}
 }
 
 fn run_daemon(args: &RunArgs) -> AnyhowResult<()> {

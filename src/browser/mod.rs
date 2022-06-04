@@ -5,7 +5,7 @@ pub mod utils;
 use crate::{
     prelude::rings_core::{
         async_trait,
-        dht::{Did, PeerRing},
+        dht::PeerRing,
         ecc::SecretKey,
         message::{
             CustomMessage, Encoded, MaybeEncrypted, Message, MessageCallback, MessageHandler,
@@ -327,7 +327,6 @@ impl MessageCallback for MessageCallbackInstance {
         &self,
         handler: &MessageHandler,
         relay: &MessageRelay<Message>,
-        prev: Did,
         msg: &MaybeEncrypted<CustomMessage>,
     ) {
         log::debug!("custom_message received: {:?}", msg);
@@ -341,10 +340,9 @@ impl MessageCallback for MessageCallbackInstance {
 
         let this = JsValue::null();
 
-        if let Ok(r) = self.custom_message.call3(
+        if let Ok(r) = self.custom_message.call2(
             &this,
             &JsValue::from_serde(&relay).unwrap(),
-            &JsValue::from_str(prev.to_string().as_str()),
             &JsValue::from_serde(&msg).unwrap(),
         ) {
             if let Ok(p) = js_sys::Promise::try_from(r) {
@@ -356,19 +354,13 @@ impl MessageCallback for MessageCallbackInstance {
         //let a = wasm_bindgen_futures::JsFuture::from(self.on_cutom_message.as_ref().clone()).await;
     }
 
-    async fn builtin_message(
-        &self,
-        _handler: &MessageHandler,
-        relay: &MessageRelay<Message>,
-        prev: Did,
-    ) {
+    async fn builtin_message(&self, _handler: &MessageHandler, relay: &MessageRelay<Message>) {
         let this = JsValue::null();
         log::debug!("builtin_message received: {:?}", relay);
-        if let Ok(r) = self.builtin_message.call2(
-            &this,
-            &JsValue::from_serde(&relay).unwrap(),
-            &JsValue::from_str(prev.to_string().as_str()),
-        ) {
+        if let Ok(r) = self
+            .builtin_message
+            .call1(&this, &JsValue::from_serde(&relay).unwrap())
+        {
             if let Ok(p) = js_sys::Promise::try_from(r) {
                 if let Err(e) = wasm_bindgen_futures::JsFuture::from(p).await {
                     log::warn!("invoke on_builtin_message error: {:?}", e);

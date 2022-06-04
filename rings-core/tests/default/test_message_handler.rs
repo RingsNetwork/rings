@@ -137,10 +137,7 @@ pub mod test {
                 unreachable!();
             }
         };
-        match handle1
-            .handle_message_relay(relay_message, key2.address().into())
-            .await
-        {
+        match handle1.handle_message_relay(relay_message).await {
             Ok(_) => assert_eq!(true, true),
             Err(e) => {
                 println!("{:?}", e);

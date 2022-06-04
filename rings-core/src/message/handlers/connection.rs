@@ -1,4 +1,4 @@
-use crate::dht::{Chord, ChordStablize, Did, PeerRingAction, PeerRingRemoteAction};
+use crate::dht::{Chord, ChordStablize, PeerRingAction, PeerRingRemoteAction};
 use crate::err::{Error, Result};
 use crate::message::payload::{MessageRelay, MessageRelayMethod};
 use crate::message::protocol::MessageSessionRelayProtocol;
@@ -18,62 +18,45 @@ use std::str::FromStr;
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait TChordConnection {
-    async fn join_chord(&self, relay: MessageRelay<Message>, prev: Did, msg: JoinDHT)
-        -> Result<()>;
+    async fn join_chord(&self, relay: MessageRelay<Message>, msg: JoinDHT) -> Result<()>;
 
-    async fn leave_chord(
-        &self,
-        relay: MessageRelay<Message>,
-        prev: Did,
-        msg: LeaveDHT,
-    ) -> Result<()>;
+    async fn leave_chord(&self, relay: MessageRelay<Message>, msg: LeaveDHT) -> Result<()>;
 
-    async fn connect_node(
-        &self,
-        relay: MessageRelay<Message>,
-        prev: Did,
-        msg: ConnectNodeSend,
-    ) -> Result<()>;
+    async fn connect_node(&self, relay: MessageRelay<Message>, msg: ConnectNodeSend) -> Result<()>;
 
     async fn connected_node(
         &self,
         relay: MessageRelay<Message>,
-        prev: Did,
         msg: ConnectNodeReport,
     ) -> Result<()>;
 
     async fn already_connected(
         &self,
         relay: MessageRelay<Message>,
-        prev: Did,
         msg: AlreadyConnected,
     ) -> Result<()>;
 
     async fn find_successor(
         &self,
         relay: MessageRelay<Message>,
-        prev: Did,
         msg: FindSuccessorSend,
     ) -> Result<()>;
 
     async fn found_successor(
         &self,
         relay: MessageRelay<Message>,
-        prev: Did,
         msg: FindSuccessorReport,
     ) -> Result<()>;
 
     async fn notify_predecessor(
         &self,
         relay: MessageRelay<Message>,
-        prev: Did,
         msg: NotifyPredecessorSend,
     ) -> Result<()>;
 
     async fn notified_predecessor(
         &self,
         relay: MessageRelay<Message>,
-        prev: Did,
         msg: NotifyPredecessorReport,
     ) -> Result<()>;
 }
@@ -81,23 +64,13 @@ pub trait TChordConnection {
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl TChordConnection for MessageHandler {
-    async fn leave_chord(
-        &self,
-        _relay: MessageRelay<Message>,
-        _prev: Did,
-        msg: LeaveDHT,
-    ) -> Result<()> {
+    async fn leave_chord(&self, _relay: MessageRelay<Message>, msg: LeaveDHT) -> Result<()> {
         let mut dht = self.dht.lock().await;
         dht.remove(msg.id);
         Ok(())
     }
 
-    async fn join_chord(
-        &self,
-        _relay: MessageRelay<Message>,
-        prev: Did,
-        msg: JoinDHT,
-    ) -> Result<()> {
+    async fn join_chord(&self, relay: MessageRelay<Message>, msg: JoinDHT) -> Result<()> {
         // here is two situation.
         // finger table just have no other node(beside next), it will be a `create` op
         // otherwise, it will be a `send` op
@@ -109,7 +82,7 @@ impl TChordConnection for MessageHandler {
                 // A.successor == B
                 // B.successor == A
                 // A.find_successor(B)
-                if next != prev {
+                if next != relay.addr.into() {
                     self.send_relay_message(MessageRelay::new(
                         Message::FindSuccessorSend(FindSuccessorSend { id, for_fix: false }),
                         &self.swarm.session_manager,
@@ -129,12 +102,7 @@ impl TChordConnection for MessageHandler {
         }
     }
 
-    async fn connect_node(
-        &self,
-        relay: MessageRelay<Message>,
-        _prev: Did,
-        msg: ConnectNodeSend,
-    ) -> Result<()> {
+    async fn connect_node(&self, relay: MessageRelay<Message>, msg: ConnectNodeSend) -> Result<()> {
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
         if dht.id != msg.target_id {
@@ -192,7 +160,6 @@ impl TChordConnection for MessageHandler {
     async fn connected_node(
         &self,
         relay: MessageRelay<Message>,
-        _prev: Did,
         msg: ConnectNodeReport,
     ) -> Result<()> {
         let dht = self.dht.lock().await;
@@ -223,7 +190,6 @@ impl TChordConnection for MessageHandler {
     async fn already_connected(
         &self,
         relay: MessageRelay<Message>,
-        _prev: Did,
         msg: AlreadyConnected,
     ) -> Result<()> {
         let dht = self.dht.lock().await;
@@ -247,7 +213,6 @@ impl TChordConnection for MessageHandler {
     async fn find_successor(
         &self,
         relay: MessageRelay<Message>,
-        _prev: Did,
         msg: FindSuccessorSend,
     ) -> Result<()> {
         /*
@@ -345,7 +310,6 @@ impl TChordConnection for MessageHandler {
     async fn found_successor(
         &self,
         relay: MessageRelay<Message>,
-        _prev: Did,
         msg: FindSuccessorReport,
     ) -> Result<()> {
         let mut dht = self.dht.lock().await;
@@ -376,7 +340,6 @@ impl TChordConnection for MessageHandler {
     async fn notify_predecessor(
         &self,
         relay: MessageRelay<Message>,
-        _prev: Did,
         msg: NotifyPredecessorSend,
     ) -> Result<()> {
         let mut dht = self.dht.lock().await;
@@ -393,7 +356,6 @@ impl TChordConnection for MessageHandler {
     async fn notified_predecessor(
         &self,
         relay: MessageRelay<Message>,
-        _prev: Did,
         msg: NotifyPredecessorReport,
     ) -> Result<()> {
         let mut dht = self.dht.lock().await;
