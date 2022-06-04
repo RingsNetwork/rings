@@ -116,10 +116,7 @@ impl TChordStorage for MessageHandler {
                 )) => {
                     relay.relay(dht.id, Some(next))?;
                     self.send_relay_message(MessageRelay::new(
-                        Message::StoreVNode(StoreVNode {
-                            sender_id: msg.sender_id,
-                            data: vec![peer],
-                        }),
+                        Message::StoreVNode(StoreVNode { data: vec![peer] }),
                         &self.swarm.session_manager,
                         OriginVerificationGen::Origin,
                         MessageRelayMethod::SEND,

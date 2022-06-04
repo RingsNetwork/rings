@@ -149,6 +149,19 @@ where
         })
     }
 
+    pub fn direct(data: T, session_manager: &SessionManager, dist: Did) -> Result<Self> {
+        Self::new(
+            data,
+            session_manager,
+            OriginVerificationGen::Origin,
+            MessageRelayMethod::SEND,
+            None,
+            None,
+            Some(dist),
+            dist,
+        )
+    }
+
     pub fn rewrap(
         &self,
         data: T,

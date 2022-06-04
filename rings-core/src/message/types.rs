@@ -72,7 +72,6 @@ pub struct FoundVNode {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct StoreVNode {
-    pub sender_id: Did,
     pub data: Vec<VirtualNode>,
 }
 
@@ -83,8 +82,6 @@ pub struct MultiCall {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct SyncVNodeWithSuccessor {
-    pub sender_id: Did,
-    pub target_id: Did,
     pub data: Vec<VirtualNode>,
 }
 

@@ -4,12 +4,13 @@ use crate::message::payload::{MessageRelay, MessageRelayMethod};
 use crate::message::protocol::MessageSessionRelayProtocol;
 use crate::message::types::{
     AlreadyConnected, ConnectNodeReport, ConnectNodeSend, FindSuccessorReport, FindSuccessorSend,
-    JoinDHT, Message, NotifyPredecessorReport, NotifyPredecessorSend,
+    JoinDHT, Message, NotifyPredecessorReport, NotifyPredecessorSend, SyncVNodeWithSuccessor,
 };
 use crate::message::LeaveDHT;
 use crate::message::MessageHandler;
 use crate::message::OriginVerificationGen;
 use crate::prelude::RTCSdpType;
+use crate::storage::Storage;
 use crate::swarm::TransportManager;
 use crate::types::ice_transport::IceTrickleScheme;
 use async_trait::async_trait;
@@ -332,6 +333,16 @@ impl TChordConnection for MessageHandler {
                 dht.finger[fix_finger_index as usize] = Some(msg.id);
             } else {
                 dht.successor.update(msg.id);
+                if !dht.storage.is_empty() {
+                    self.send_relay_message(MessageRelay::direct(
+                        Message::SyncVNodeWithSuccessor(SyncVNodeWithSuccessor {
+                            data: dht.storage.values(),
+                        }),
+                        &self.swarm.session_manager,
+                        msg.id,
+                    )?)
+                    .await?;
+                }
             }
             Ok(())
         }
@@ -365,6 +376,16 @@ impl TChordConnection for MessageHandler {
         // if successor: predecessor is between (id, successor]
         // then update local successor
         dht.successor.update(msg.id);
+        if !dht.storage.is_empty() {
+            self.send_relay_message(MessageRelay::direct(
+                Message::SyncVNodeWithSuccessor(SyncVNodeWithSuccessor {
+                    data: dht.storage.values(),
+                }),
+                &self.swarm.session_manager,
+                msg.id,
+            )?)
+            .await?;
+        }
         Ok(())
     }
 }
