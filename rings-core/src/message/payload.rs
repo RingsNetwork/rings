@@ -1,6 +1,8 @@
+use super::encoder::{Decoder, Encoded, Encoder};
 use crate::dht::Did;
 use crate::ecc::{signers, HashStr, PublicKey};
 use crate::err::{Error, Result};
+use crate::message::protocol::MessageSessionRelayProtocol;
 use crate::session::SessionManager;
 use crate::session::{Session, Signer};
 use crate::utils;
@@ -9,11 +11,8 @@ use flate2::Compression;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
-use std::collections::VecDeque;
 use std::io::Write;
 use web3::types::Address;
-
-use super::encoder::{Decoder, Encoded, Encoder};
 
 const DEFAULT_TTL_MS: usize = 60 * 1000;
 
@@ -40,12 +39,18 @@ pub struct MessageVerification {
 pub struct MessageRelay<T> {
     pub data: T,
     pub tx_id: HashStr,
-    pub to_path: VecDeque<Did>,
-    pub from_path: VecDeque<Did>,
     pub addr: Address,
+
+    // verification
     pub relay_verification: MessageVerification,
     pub origin_verification: MessageVerification,
+
+    // relay
     pub method: MessageRelayMethod,
+    pub path: Vec<Did>,
+    pub path_end_cursor: usize,
+    pub next_hop: Option<Did>,
+    pub destination: Did,
 }
 
 impl MessageVerification {
@@ -99,23 +104,25 @@ impl<T> MessageRelay<T>
 where
     T: Serialize + DeserializeOwned,
 {
+    // TODO: split verification and relay out
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         data: T,
         session_manager: &SessionManager,
         origin_verification_gen: OriginVerificationGen,
-        ttl_ms: Option<usize>,
-        to_path: Option<VecDeque<Did>>,
-        from_path: Option<VecDeque<Did>>,
         method: MessageRelayMethod,
+        path: Option<Vec<Did>>,
+        path_end_cursor: Option<usize>,
+        next_hop: Option<Did>,
+        destination: Did,
     ) -> Result<Self> {
         let ts_ms = utils::get_epoch_ms();
-        let ttl_ms = ttl_ms.unwrap_or(DEFAULT_TTL_MS);
+        let ttl_ms = DEFAULT_TTL_MS;
         let msg = &MessageVerification::pack_msg(&data, ts_ms, ttl_ms)?;
         let tx_id = msg.into();
         let addr = session_manager.authorizer()?.to_owned();
-        let to_path = to_path.unwrap_or_default();
-        let from_path = from_path.unwrap_or_default();
-
+        let path = path.unwrap_or_else(|| vec![addr.into()]);
+        let path_end_cursor = path_end_cursor.unwrap_or(0);
         let relay_verification = MessageVerification {
             session: session_manager.session()?,
             sig: session_manager.sign(msg)?,
@@ -134,10 +141,51 @@ where
             tx_id,
             relay_verification,
             origin_verification,
-            to_path,
-            from_path,
             method,
+            path,
+            path_end_cursor,
+            next_hop,
+            destination,
         })
+    }
+
+    pub fn rewrap(
+        &self,
+        data: T,
+        session_manager: &SessionManager,
+        origin_verification_gen: OriginVerificationGen,
+    ) -> Result<Self> {
+        Self::new(
+            data,
+            session_manager,
+            origin_verification_gen,
+            self.method.clone(),
+            Some(self.path.clone()),
+            Some(self.path_end_cursor),
+            self.next_hop,
+            self.destination,
+        )
+    }
+
+    pub fn report(&self, data: T, session_manager: &SessionManager) -> Result<Self> {
+        if self.method != MessageRelayMethod::SEND {
+            return Err(Error::ReportNeedSend);
+        }
+
+        if self.path.len() < 2 {
+            return Err(Error::CannotInferNextHop);
+        }
+
+        Self::new(
+            data,
+            session_manager,
+            OriginVerificationGen::Origin,
+            MessageRelayMethod::REPORT,
+            Some(self.path.clone()),
+            Some(self.path_end_cursor),
+            self.path_prev(),
+            self.sender(),
+        )
     }
 
     pub fn is_expired(&self) -> bool {
@@ -215,20 +263,21 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+pub mod test {
     use super::*;
-    use crate::{ecc::SecretKey, transports::helper::TricklePayload};
+    use crate::ecc::SecretKey;
 
-    #[derive(Deserialize, Serialize, PartialEq, Debug)]
-    struct TestData {
+    #[derive(Deserialize, Serialize, PartialEq, Debug, Clone)]
+    pub struct TestData {
         a: String,
         b: i64,
         c: f64,
         d: bool,
     }
 
-    fn new_test_message() -> MessageRelay<TestData> {
+    pub fn new_test_message() -> MessageRelay<TestData> {
         let key = SecretKey::random();
+        let destination = SecretKey::random().address().into();
         let session = SessionManager::new_with_seckey(&key).unwrap();
         let test_data = TestData {
             a: "hello".to_string(),
@@ -240,31 +289,35 @@ mod tests {
             test_data,
             &session,
             OriginVerificationGen::Origin,
-            None,
-            None,
-            None,
             MessageRelayMethod::SEND,
+            None,
+            None,
+            None,
+            destination,
         )
         .unwrap()
     }
 
     #[test]
     fn new_then_verify() {
-        let payload = new_test_message();
+        let mut payload = new_test_message();
         assert!(payload.verify());
 
         let key2 = SecretKey::random();
+        let did2 = key2.address().into();
         let session2 = SessionManager::new_with_seckey(&key2).unwrap();
-        let relaied_payload = MessageRelay::new(
-            payload.data,
-            &session2,
-            OriginVerificationGen::Stick(payload.origin_verification),
-            None,
-            None,
-            None,
-            MessageRelayMethod::SEND,
-        )
-        .unwrap();
+
+        payload.next_hop = Some(did2);
+        payload.relay(did2, None).unwrap();
+
+        let relaied_payload = payload
+            .rewrap(
+                payload.data.clone(),
+                &session2,
+                OriginVerificationGen::Stick(payload.origin_verification.clone()),
+            )
+            .unwrap();
+
         assert!(relaied_payload.verify());
     }
 
@@ -286,31 +339,5 @@ mod tests {
         let ungzip_encoded_payload = payload.to_json_vec().unwrap().encode().unwrap();
         let payload2: MessageRelay<TestData> = ungzip_encoded_payload.decode().unwrap();
         assert_eq!(payload, payload2);
-    }
-
-    #[test]
-    fn test_message_relay_verify() {
-        let key = SecretKey::random();
-        let (auth, s_key) =
-            SessionManager::gen_unsign_info(key.address(), None, Some(Signer::DEFAULT)).unwrap();
-        let sig = key.sign(&auth.to_string().unwrap()).to_vec();
-        let session = SessionManager::new(&sig, &auth, &s_key);
-
-        let test_data = TricklePayload {
-            sdp: "test_sdp".to_owned(),
-            candidates: vec![],
-        };
-        let payload = MessageRelay::new(
-            test_data,
-            &session,
-            OriginVerificationGen::Origin,
-            None,
-            None,
-            None,
-            MessageRelayMethod::SEND,
-        )
-        .unwrap();
-
-        assert!(payload.verify(), "payload verify failed");
     }
 }

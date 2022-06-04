@@ -193,7 +193,5 @@ pub mod test {
 
         node1.listen_once().await;
         node2.listen_once().await;
-        // assert_eq!(&ev_1.from_path.clone(), &vec![key1.address().into()]);
-        // assert_eq!(&ev_1.to_path.clone(), &vec![key1.address().into()]);
     }
 }

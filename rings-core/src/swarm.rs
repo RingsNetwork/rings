@@ -99,10 +99,11 @@ impl Swarm {
                         Message::JoinDHT(message::JoinDHT { id: address.into() }),
                         &self.session_manager,
                         OriginVerificationGen::Origin,
-                        None,
-                        Some(vec![self.address().into()].into()),
-                        Some(vec![self.address().into()].into()),
                         MessageRelayMethod::SEND,
+                        None,
+                        None,
+                        None,
+                        self.address().into(),
                     )?;
                     Ok(Some(payload))
                 }
@@ -114,10 +115,11 @@ impl Swarm {
                         Message::LeaveDHT(message::LeaveDHT { id: address.into() }),
                         &self.session_manager,
                         OriginVerificationGen::Origin,
-                        None,
-                        Some(vec![self.address().into()].into()),
-                        Some(vec![self.address().into()].into()),
                         MessageRelayMethod::SEND,
+                        None,
+                        None,
+                        None,
+                        self.address().into(),
                     )?;
                     Ok(Some(payload))
                 } else {

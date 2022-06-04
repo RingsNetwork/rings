@@ -110,16 +110,16 @@ impl TChordConnection for MessageHandler {
                 // B.successor == A
                 // A.find_successor(B)
                 if next != prev {
-                    self.send_message(
-                        &next.into(),
-                        // to
-                        Some(vec![next].into()),
-                        // from
-                        Some(vec![dht.id].into()),
-                        MessageRelayMethod::SEND,
-                        OriginVerificationGen::Origin,
+                    self.send_relay_message(MessageRelay::new(
                         Message::FindSuccessorSend(FindSuccessorSend { id, for_fix: false }),
-                    )
+                        &self.swarm.session_manager,
+                        OriginVerificationGen::Origin,
+                        MessageRelayMethod::SEND,
+                        None,
+                        None,
+                        Some(next),
+                        next,
+                    )?)
                     .await
                 } else {
                     Ok(())
@@ -132,10 +132,9 @@ impl TChordConnection for MessageHandler {
     async fn connect_node(
         &self,
         relay: MessageRelay<Message>,
-        prev: Did,
+        _prev: Did,
         msg: ConnectNodeSend,
     ) -> Result<()> {
-        // TODO: Verify necessity based on PeerRing to decrease connections but make sure availablitity.
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
         if dht.id != msg.target_id {
@@ -145,18 +144,17 @@ impl TChordConnection for MessageHandler {
                 _ => None,
             }
             .ok_or(Error::MessageHandlerMissNextNode)?;
-            relay.relay(dht.id, Some(next_node));
+            relay.relay(dht.id, Some(next_node))?;
             return self
-                .send_message(
-                    &next_node,
-                    Some(relay.to_path),
-                    Some(relay.from_path),
-                    MessageRelayMethod::SEND,
-                    OriginVerificationGen::Stick(relay.origin_verification),
-                    Message::ConnectNodeSend(msg.clone()),
-                )
+                .send_relay_message(relay.rewrap(
+                    relay.data.clone(),
+                    &self.swarm.session_manager,
+                    OriginVerificationGen::Stick(relay.origin_verification.clone()),
+                )?)
                 .await;
         }
+
+        relay.relay(dht.id, None)?;
         match self.swarm.get_transport(&msg.sender_id) {
             None => {
                 let trans = self.swarm.new_transport().await?;
@@ -167,18 +165,14 @@ impl TChordConnection for MessageHandler {
                     .get_handshake_info(&self.swarm.session_manager, RTCSdpType::Answer)
                     .await?
                     .to_string();
-                self.send_message(
-                    &prev.into(),
-                    Some(relay.to_path),
-                    Some(relay.from_path),
-                    MessageRelayMethod::REPORT,
-                    OriginVerificationGen::Origin,
+                self.send_relay_message(relay.report(
                     Message::ConnectNodeReport(ConnectNodeReport {
                         answer_id: dht.id,
                         transport_uuid: msg.transport_uuid.clone(),
                         handshake_info,
                     }),
-                )
+                    &self.swarm.session_manager,
+                )?)
                 .await?;
                 self.swarm.get_or_register(&msg.sender_id, trans).await?;
 
@@ -186,14 +180,10 @@ impl TChordConnection for MessageHandler {
             }
 
             _ => {
-                self.send_message(
-                    &prev.into(),
-                    Some(relay.from_path),
-                    None,
-                    MessageRelayMethod::REPORT,
-                    OriginVerificationGen::Origin,
+                self.send_relay_message(relay.report(
                     Message::AlreadyConnected(AlreadyConnected { answer_id: dht.id }),
-                )
+                    &self.swarm.session_manager,
+                )?)
                 .await
             }
         }
@@ -207,16 +197,13 @@ impl TChordConnection for MessageHandler {
     ) -> Result<()> {
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
-        relay.relay(dht.id, None);
-        if let Some(prev_node) = relay.next() {
-            self.send_message(
-                &prev_node,
-                Some(relay.to_path),
-                Some(relay.from_path),
-                MessageRelayMethod::REPORT,
-                OriginVerificationGen::Stick(relay.origin_verification),
-                Message::ConnectNodeReport(msg.clone()),
-            )
+        relay.relay(dht.id, None)?;
+        if relay.next_hop.is_some() {
+            self.send_relay_message(relay.rewrap(
+                relay.data.clone(),
+                &self.swarm.session_manager,
+                OriginVerificationGen::Stick(relay.origin_verification.clone()),
+            )?)
             .await
         } else {
             let transport = self
@@ -236,21 +223,18 @@ impl TChordConnection for MessageHandler {
     async fn already_connected(
         &self,
         relay: MessageRelay<Message>,
-        prev: Did,
+        _prev: Did,
         msg: AlreadyConnected,
     ) -> Result<()> {
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
-        relay.push_prev(dht.id, prev);
-        if let Some(prev_node) = relay.next() {
-            self.send_message(
-                &prev_node,
-                Some(relay.to_path),
-                Some(relay.from_path),
-                MessageRelayMethod::REPORT,
-                OriginVerificationGen::Stick(relay.origin_verification),
-                Message::AlreadyConnected(msg.clone()),
-            )
+        relay.relay(dht.id, None)?;
+        if relay.next_hop.is_some() {
+            self.send_relay_message(relay.rewrap(
+                relay.data.clone(),
+                &self.swarm.session_manager,
+                OriginVerificationGen::Stick(relay.origin_verification.clone()),
+            )?)
             .await
         } else {
             self.swarm
@@ -263,7 +247,7 @@ impl TChordConnection for MessageHandler {
     async fn find_successor(
         &self,
         relay: MessageRelay<Message>,
-        prev: Did,
+        _prev: Did,
         msg: FindSuccessorSend,
     ) -> Result<()> {
         /*
@@ -334,32 +318,24 @@ impl TChordConnection for MessageHandler {
         let mut relay = relay.clone();
         match dht.find_successor(msg.id)? {
             PeerRingAction::Some(id) => {
-                self.send_message(
-                    &prev.into(),
-                    Some(relay.to_path),
-                    Some(relay.from_path),
-                    MessageRelayMethod::REPORT,
-                    OriginVerificationGen::Origin,
+                relay.relay(dht.id, None)?;
+                self.send_relay_message(relay.report(
                     Message::FindSuccessorReport(FindSuccessorReport {
                         id,
                         for_fix: msg.for_fix,
                     }),
-                )
+                    &self.swarm.session_manager,
+                )?)
                 .await
             }
-            PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessor(id)) => {
-                relay.relay(dht.id, Some(next));
-                self.send_message(
-                    &next.into(),
-                    Some(relay.to_path),
-                    Some(relay.from_path),
-                    MessageRelayMethod::SEND,
-                    OriginVerificationGen::Origin,
-                    Message::FindSuccessorSend(FindSuccessorSend {
-                        id,
-                        for_fix: msg.for_fix,
-                    }),
-                )
+            PeerRingAction::RemoteAction(next, _) => {
+                relay.relay(dht.id, Some(next))?;
+                relay.reset_destination(next)?;
+                self.send_relay_message(relay.rewrap(
+                    relay.data.clone(),
+                    &self.swarm.session_manager,
+                    OriginVerificationGen::Stick(relay.origin_verification.clone()),
+                )?)
                 .await
             }
             act => Err(Error::PeerRingUnexpectedAction(act)),
@@ -374,16 +350,13 @@ impl TChordConnection for MessageHandler {
     ) -> Result<()> {
         let mut dht = self.dht.lock().await;
         let mut relay = relay.clone();
-        relay.relay(dht.id, None);
-        if let Some(next) = relay.next() {
-            self.send_message(
-                &next.into(),
-                Some(relay.to_path),
-                Some(relay.from_path),
-                MessageRelayMethod::REPORT,
-                OriginVerificationGen::Stick(relay.origin_verification),
-                Message::FindSuccessorReport(msg.clone()),
-            )
+        relay.relay(dht.id, None)?;
+        if relay.next_hop.is_some() {
+            self.send_relay_message(relay.rewrap(
+                relay.data.clone(),
+                &self.swarm.session_manager,
+                OriginVerificationGen::Stick(relay.origin_verification.clone()),
+            )?)
             .await
         } else {
             if self.swarm.get_transport(&msg.id).is_none() && msg.id != self.swarm.address().into()
@@ -403,33 +376,29 @@ impl TChordConnection for MessageHandler {
     async fn notify_predecessor(
         &self,
         relay: MessageRelay<Message>,
-        prev: Did,
+        _prev: Did,
         msg: NotifyPredecessorSend,
     ) -> Result<()> {
         let mut dht = self.dht.lock().await;
         let mut relay = relay.clone();
-        relay.push_prev(dht.id, prev);
+        relay.relay(dht.id, None)?;
         dht.notify(msg.id);
-        self.send_message(
-            &prev.into(),
-            Some(relay.to_path),
-            Some(relay.from_path),
-            MessageRelayMethod::REPORT,
-            OriginVerificationGen::Origin,
+        self.send_relay_message(relay.report(
             Message::NotifyPredecessorReport(NotifyPredecessorReport { id: dht.id }),
-        )
+            &self.swarm.session_manager,
+        )?)
         .await
     }
 
     async fn notified_predecessor(
         &self,
         relay: MessageRelay<Message>,
-        prev: Did,
+        _prev: Did,
         msg: NotifyPredecessorReport,
     ) -> Result<()> {
         let mut dht = self.dht.lock().await;
         let mut relay = relay.clone();
-        relay.push_prev(dht.id, prev);
+        relay.relay(dht.id, None)?;
         assert_eq!(relay.method, MessageRelayMethod::REPORT);
         // if successor: predecessor is between (id, successor]
         // then update local successor
@@ -479,9 +448,13 @@ mod test {
             key3.address()
         );
 
-        let dht1 = Arc::new(Mutex::new(PeerRing::new(key1.address().into())));
-        let dht2 = Arc::new(Mutex::new(PeerRing::new(key2.address().into())));
-        let dht3 = Arc::new(Mutex::new(PeerRing::new(key3.address().into())));
+        let did1 = key1.address().into();
+        let did2 = key2.address().into();
+        let did3 = key3.address().into();
+
+        let dht1 = Arc::new(Mutex::new(PeerRing::new(did1)));
+        let dht2 = Arc::new(Mutex::new(PeerRing::new(did2)));
+        let dht3 = Arc::new(Mutex::new(PeerRing::new(did3)));
 
         let sm1 = SessionManager::new_with_seckey(&key1).unwrap();
         let sm2 = SessionManager::new_with_seckey(&key2).unwrap();
@@ -534,10 +507,13 @@ mod test {
 
         // JoinDHT
         let ev_1 = node1.listen_once().await.unwrap();
-        assert_eq!(&ev_1.from_path.clone(), &vec![key1.address().into()]);
-        assert_eq!(&ev_1.to_path.clone(), &vec![key1.address().into()]);
+        assert_eq!(ev_1.method, MessageRelayMethod::SEND);
+        assert_eq!(ev_1.path, vec![did1]);
+        assert_eq!(ev_1.path_end_cursor, 0);
+        assert_eq!(ev_1.next_hop, None);
+        assert_eq!(ev_1.destination, did1);
         if let Message::JoinDHT(x) = ev_1.data {
-            assert_eq!(x.id, key2.address().into());
+            assert_eq!(x.id, did2);
         } else {
             panic!();
         }
@@ -546,35 +522,44 @@ mod test {
         assert_eq!(&ev_1.addr, &key1.address());
 
         let ev_2 = node2.listen_once().await.unwrap();
-        assert_eq!(&ev_2.from_path.clone(), &vec![key2.address().into()]);
-        assert_eq!(&ev_2.to_path.clone(), &vec![key2.address().into()]);
+        assert_eq!(ev_2.method, MessageRelayMethod::SEND);
+        assert_eq!(ev_2.path, vec![did2]);
+        assert_eq!(ev_2.path_end_cursor, 0);
+        assert_eq!(ev_2.next_hop, None);
+        assert_eq!(ev_2.destination, did2);
         if let Message::JoinDHT(x) = ev_2.data {
-            assert_eq!(x.id, key1.address().into());
+            assert_eq!(x.id, did1);
         } else {
             panic!();
         }
         // the message is send from key2
         // will be transform into some remote action
-        assert_eq!(&ev_2.addr, &key2.address());
+        assert_eq!(ev_2.addr, key2.address());
 
         let ev_1 = node1.listen_once().await.unwrap();
         // msg is send from key2
-        assert_eq!(&ev_1.addr, &key2.address());
-        assert_eq!(&ev_1.from_path.clone(), &vec![key2.address().into()]);
-        assert_eq!(&ev_1.to_path.clone(), &vec![key1.address().into()]);
+        assert_eq!(ev_1.addr, key2.address());
+        assert_eq!(ev_1.method, MessageRelayMethod::SEND);
+        assert_eq!(ev_1.path, vec![did2]);
+        assert_eq!(ev_1.path_end_cursor, 0);
+        assert_eq!(ev_1.next_hop, Some(did1));
+        assert_eq!(ev_1.destination, did1);
         if let Message::FindSuccessorSend(x) = ev_1.data {
-            assert_eq!(x.id, key2.address().into());
+            assert_eq!(x.id, did2);
             assert!(!x.for_fix);
         } else {
             panic!();
         }
 
         let ev_2 = node2.listen_once().await.unwrap();
-        assert_eq!(&ev_2.addr, &key1.address());
-        assert_eq!(&ev_2.from_path.clone(), &vec![key1.address().into()]);
-        assert_eq!(&ev_2.to_path.clone(), &vec![key2.address().into()]);
+        assert_eq!(ev_2.addr, key1.address());
+        assert_eq!(ev_2.method, MessageRelayMethod::SEND);
+        assert_eq!(ev_2.path, vec![did1]);
+        assert_eq!(ev_2.path_end_cursor, 0);
+        assert_eq!(ev_2.next_hop, Some(did2));
+        assert_eq!(ev_2.destination, did2);
         if let Message::FindSuccessorSend(x) = ev_2.data {
-            assert_eq!(x.id, key1.address().into());
+            assert_eq!(x.id, did1);
             assert!(!x.for_fix);
         } else {
             panic!();
@@ -582,19 +567,17 @@ mod test {
 
         // node2 response self as node1's successor
         let ev_1 = node1.listen_once().await.unwrap();
-        assert_eq!(&ev_1.addr, &key2.address());
-        assert_eq!(&ev_1.from_path.clone(), &vec![key1.address().into()]);
-        assert_eq!(&ev_1.to_path.clone(), &vec![key2.address().into()]);
+        assert_eq!(ev_1.addr, key2.address());
+        assert_eq!(ev_1.method, MessageRelayMethod::REPORT);
+        assert_eq!(ev_1.path, vec![did1, did2]);
+        assert_eq!(ev_1.path_end_cursor, 0);
+        assert_eq!(ev_1.next_hop, Some(did1));
+        assert_eq!(ev_1.destination, did1);
         if let Message::FindSuccessorReport(x) = ev_1.data {
             // for node2 there is no did is more closer to key1, so it response key1
             // and dht1 wont update
-            assert!(!dht1
-                .lock()
-                .await
-                .successor
-                .list()
-                .contains(&key1.address().into()));
-            assert_eq!(x.id, key1.address().into());
+            assert!(!dht1.lock().await.successor.list().contains(&did1));
+            assert_eq!(x.id, did1);
             assert!(!x.for_fix);
         } else {
             panic!();
@@ -602,23 +585,21 @@ mod test {
 
         // key1 response self as key2's successor
         let ev_2 = node2.listen_once().await.unwrap();
-        assert_eq!(&ev_2.addr, &key1.address());
-        assert_eq!(&ev_2.from_path.clone(), &vec![key2.address().into()]);
-        assert_eq!(&ev_2.to_path.clone(), &vec![key1.address().into()]);
+        assert_eq!(ev_2.addr, key1.address());
+        assert_eq!(ev_2.method, MessageRelayMethod::REPORT);
+        assert_eq!(ev_2.path, vec![did2, did1]);
+        assert_eq!(ev_2.path_end_cursor, 0);
+        assert_eq!(ev_2.next_hop, Some(did2));
+        assert_eq!(ev_2.destination, did2);
         if let Message::FindSuccessorReport(x) = ev_2.data {
             // for key1 there is no did is more closer to key1, so it response key1
             // and dht2 wont update
-            assert_eq!(x.id, key2.address().into());
+            assert_eq!(x.id, did2);
             assert!(!x.for_fix);
         } else {
             panic!();
         }
-        assert!(!dht2
-            .lock()
-            .await
-            .successor
-            .list()
-            .contains(&key2.address().into()));
+        assert!(!dht2.lock().await.successor.list().contains(&did2));
 
         println!("========================================");
         println!("||  now we start join node3 to node2   ||");
@@ -658,43 +639,55 @@ mod test {
             .unwrap();
 
         let ev_3 = node3.listen_once().await.unwrap();
-        assert_eq!(&ev_3.addr, &key3.address());
-        assert_eq!(&ev_3.from_path.clone(), &vec![key3.address().into()]);
-        assert_eq!(&ev_3.to_path.clone(), &vec![key3.address().into()]);
+        assert_eq!(ev_3.addr, key3.address());
+        assert_eq!(ev_3.method, MessageRelayMethod::SEND);
+        assert_eq!(ev_3.path, vec![did3]);
+        assert_eq!(ev_3.path_end_cursor, 0);
+        assert_eq!(ev_3.next_hop, None);
+        assert_eq!(ev_3.destination, did3);
         if let Message::JoinDHT(x) = ev_3.data {
-            assert_eq!(x.id, key2.address().into());
+            assert_eq!(x.id, did2);
         } else {
             panic!();
         }
 
         let ev_2 = node2.listen_once().await.unwrap();
-        assert_eq!(&ev_2.addr, &key2.address());
-        assert_eq!(&ev_2.from_path.clone(), &vec![key2.address().into()]);
-        assert_eq!(&ev_2.to_path.clone(), &vec![key2.address().into()]);
+        assert_eq!(ev_2.addr, key2.address());
+        assert_eq!(ev_2.method, MessageRelayMethod::SEND);
+        assert_eq!(ev_2.path, vec![did2]);
+        assert_eq!(ev_2.path_end_cursor, 0);
+        assert_eq!(ev_2.next_hop, None);
+        assert_eq!(ev_2.destination, did2);
         if let Message::JoinDHT(x) = ev_2.data {
-            assert_eq!(x.id, key3.address().into());
+            assert_eq!(x.id, did3);
         } else {
             panic!();
         }
 
         let ev_3 = node3.listen_once().await.unwrap();
         // msg is send from node2
-        assert_eq!(&ev_3.addr, &key2.address());
-        assert_eq!(&ev_3.from_path.clone(), &vec![key2.address().into()]);
-        assert_eq!(&ev_3.to_path.clone(), &vec![key3.address().into()]);
+        assert_eq!(ev_3.addr, key2.address());
+        assert_eq!(ev_3.method, MessageRelayMethod::SEND);
+        assert_eq!(ev_3.path, vec![did2]);
+        assert_eq!(ev_3.path_end_cursor, 0);
+        assert_eq!(ev_3.next_hop, Some(did3));
+        assert_eq!(ev_3.destination, did3);
         if let Message::FindSuccessorSend(x) = ev_3.data {
-            assert_eq!(x.id, key2.address().into());
+            assert_eq!(x.id, did2);
             assert!(!x.for_fix);
         } else {
             panic!();
         }
 
         let ev_2 = node2.listen_once().await.unwrap();
-        assert_eq!(&ev_2.addr, &key3.address());
-        assert_eq!(&ev_2.from_path.clone(), &vec![key3.address().into()]);
-        assert_eq!(&ev_2.to_path.clone(), &vec![key2.address().into()]);
+        assert_eq!(ev_2.addr, key3.address());
+        assert_eq!(ev_2.method, MessageRelayMethod::SEND);
+        assert_eq!(ev_2.path, vec![did3]);
+        assert_eq!(ev_2.path_end_cursor, 0);
+        assert_eq!(ev_2.next_hop, Some(did2));
+        assert_eq!(ev_2.destination, did2);
         if let Message::FindSuccessorSend(x) = ev_2.data {
-            assert_eq!(x.id, key3.address().into());
+            assert_eq!(x.id, did3);
             assert!(!x.for_fix);
         } else {
             panic!();
@@ -702,19 +695,17 @@ mod test {
 
         // node2 response self as node1's successor
         let ev_3 = node3.listen_once().await.unwrap();
-        assert_eq!(&ev_3.addr, &key2.address());
-        assert_eq!(&ev_3.from_path.clone(), &vec![key3.address().into()]);
-        assert_eq!(&ev_3.to_path.clone(), &vec![key2.address().into()]);
+        assert_eq!(ev_3.addr, key2.address());
+        assert_eq!(ev_3.method, MessageRelayMethod::REPORT);
+        assert_eq!(ev_3.path, vec![did3, did2]);
+        assert_eq!(ev_3.path_end_cursor, 0);
+        assert_eq!(ev_3.next_hop, Some(did3));
+        assert_eq!(ev_3.destination, did3);
         if let Message::FindSuccessorReport(x) = ev_3.data {
             // for node2 there is no did is more closer to key3, so it response key3
             // and dht3 wont update
-            assert!(!dht3
-                .lock()
-                .await
-                .successor
-                .list()
-                .contains(&key3.address().into()));
-            assert_eq!(x.id, key3.address().into());
+            assert!(!dht3.lock().await.successor.list().contains(&did3));
+            assert_eq!(x.id, did3);
             assert!(!x.for_fix);
         } else {
             panic!();
@@ -722,19 +713,17 @@ mod test {
 
         // key3 response self as key2's successor
         let ev_2 = node2.listen_once().await.unwrap();
-        assert_eq!(&ev_2.addr, &key3.address());
-        assert_eq!(&ev_2.from_path.clone(), &vec![key2.address().into()]);
-        assert_eq!(&ev_2.to_path.clone(), &vec![key3.address().into()]);
+        assert_eq!(ev_2.addr, key3.address());
+        assert_eq!(ev_2.method, MessageRelayMethod::REPORT);
+        assert_eq!(ev_2.path, vec![did2, did3]);
+        assert_eq!(ev_2.path_end_cursor, 0);
+        assert_eq!(ev_2.next_hop, Some(did2));
+        assert_eq!(ev_2.destination, did2);
         if let Message::FindSuccessorReport(x) = ev_2.data {
             // for key3 there is no did is more closer to key3, so it response key3
             // and dht2 wont update
-            assert_eq!(x.id, key2.address().into());
-            assert!(!dht2
-                .lock()
-                .await
-                .successor
-                .list()
-                .contains(&key2.address().into()));
+            assert_eq!(x.id, did2);
+            assert!(!dht2.lock().await.successor.list().contains(&did2));
             assert!(!x.for_fix);
         } else {
             panic!();
@@ -746,21 +735,21 @@ mod test {
 
         // node1's successor is node2
         assert!(swarm1.get_transport(&key3.address()).is_none());
-        assert_eq!(
-            node1.dht.lock().await.successor.max(),
-            key2.address().into()
-        );
+        assert_eq!(node1.dht.lock().await.successor.max(), did2);
         node1.connect(&key3.address()).await.unwrap();
         let ev2 = node2.listen_once().await.unwrap();
 
         // msg is send from node 1 to node 2
-        assert_eq!(&ev2.addr, &key1.address());
-        assert_eq!(&ev2.to_path.clone(), &vec![key2.address().into()]);
-        assert_eq!(&ev2.from_path.clone(), &vec![key1.address().into()]);
+        assert_eq!(ev2.addr, key1.address());
+        assert_eq!(ev2.method, MessageRelayMethod::SEND);
+        assert_eq!(ev2.path, vec![did1]);
+        assert_eq!(ev2.path_end_cursor, 0);
+        assert_eq!(ev2.next_hop, Some(did2));
+        assert_eq!(ev2.destination, did3);
 
         if let Message::ConnectNodeSend(x) = ev2.data {
-            assert_eq!(x.target_id, key3.address().into());
-            assert_eq!(x.sender_id, key1.address().into());
+            assert_eq!(x.target_id, did3);
+            assert_eq!(x.sender_id, did1);
         } else {
             panic!();
         }
@@ -775,19 +764,15 @@ mod test {
             key3.address()
         );
 
-        assert_eq!(&ev3.addr, &key2.address());
-        assert_eq!(
-            &ev3.to_path.clone(),
-            &vec![key3.address().into()],
-            "to_path not match!"
-        );
-        assert_eq!(
-            &ev3.from_path.clone(),
-            &vec![key1.address().into(), key2.address().into()]
-        );
+        assert_eq!(ev3.addr, key2.address());
+        assert_eq!(ev3.method, MessageRelayMethod::SEND);
+        assert_eq!(ev3.path, vec![did1, did2]);
+        assert_eq!(ev3.path_end_cursor, 0);
+        assert_eq!(ev3.next_hop, Some(did3));
+        assert_eq!(ev3.destination, did3);
         if let Message::ConnectNodeSend(x) = ev3.data {
-            assert_eq!(x.target_id, key3.address().into());
-            assert_eq!(x.sender_id, key1.address().into());
+            assert_eq!(x.target_id, did3);
+            assert_eq!(x.sender_id, did1);
         } else {
             panic!();
         }
@@ -795,27 +780,27 @@ mod test {
         let ev2 = node2.listen_once().await.unwrap();
         // node3 send report to node2
         // for a report the to_path should as same as a send request
-        assert_eq!(&ev2.addr, &key3.address());
-        assert_eq!(
-            &ev2.from_path.clone(),
-            &vec![key1.address().into(), key2.address().into()]
-        );
-        assert_eq!(&ev2.to_path.clone(), &vec![key3.address().into()]);
+        assert_eq!(ev2.addr, key3.address());
+        assert_eq!(ev2.method, MessageRelayMethod::REPORT);
+        assert_eq!(ev2.path, vec![did1, did2, did3]);
+        assert_eq!(ev2.path_end_cursor, 0);
+        assert_eq!(ev2.next_hop, Some(did2));
+        assert_eq!(ev2.destination, did1);
         if let Message::ConnectNodeReport(x) = ev2.data {
-            assert_eq!(x.answer_id, key3.address().into());
+            assert_eq!(x.answer_id, did3);
         } else {
             panic!();
         }
         // node 2 send report to node1
         let ev1 = node1.listen_once().await.unwrap();
-        assert_eq!(&ev1.addr, &key2.address());
-        assert_eq!(&ev1.from_path, &vec![key1.address().into()]);
-        assert_eq!(
-            &ev1.to_path,
-            &vec![key2.address().into(), key3.address().into()]
-        );
+        assert_eq!(ev1.addr, key2.address());
+        assert_eq!(ev1.method, MessageRelayMethod::REPORT);
+        assert_eq!(ev1.path, vec![did1, did2, did3]);
+        assert_eq!(ev1.path_end_cursor, 1);
+        assert_eq!(ev1.next_hop, Some(did1));
+        assert_eq!(ev1.destination, did1);
         if let Message::ConnectNodeReport(x) = ev1.data {
-            assert_eq!(x.answer_id, key3.address().into());
+            assert_eq!(x.answer_id, did3);
         } else {
             panic!();
         }
@@ -857,9 +842,13 @@ mod test {
             key3.address()
         );
 
-        let dht1 = Arc::new(Mutex::new(PeerRing::new(key1.address().into())));
-        let dht2 = Arc::new(Mutex::new(PeerRing::new(key2.address().into())));
-        let dht3 = Arc::new(Mutex::new(PeerRing::new(key3.address().into())));
+        let did1 = key1.address().into();
+        let did2 = key2.address().into();
+        let did3 = key3.address().into();
+
+        let dht1 = Arc::new(Mutex::new(PeerRing::new(did1)));
+        let dht2 = Arc::new(Mutex::new(PeerRing::new(did2)));
+        let dht3 = Arc::new(Mutex::new(PeerRing::new(did3)));
 
         let sm1 = SessionManager::new_with_seckey(&key1).unwrap();
         let sm2 = SessionManager::new_with_seckey(&key2).unwrap();
@@ -912,12 +901,15 @@ mod test {
 
         // node1 and node3 will gen JoinDHT Event
         let ev_1 = node1.listen_once().await.unwrap();
-        assert_eq!(&ev_1.from_path.clone(), &vec![key1.address().into()]);
-        assert_eq!(&ev_1.to_path.clone(), &vec![key1.address().into()]);
-        assert_eq!(&ev_1.addr, &key1.address());
+        assert_eq!(ev_1.addr, key1.address());
+        assert_eq!(ev_1.method, MessageRelayMethod::SEND);
+        assert_eq!(ev_1.path, vec![did1]);
+        assert_eq!(ev_1.path_end_cursor, 0);
+        assert_eq!(ev_1.next_hop, None);
+        assert_eq!(ev_1.destination, did1);
 
         if let Message::JoinDHT(x) = ev_1.data {
-            assert_eq!(x.id, key3.address().into());
+            assert_eq!(x.id, did3);
         } else {
             panic!();
         }
@@ -925,34 +917,43 @@ mod test {
         // will be transform into some remote action
 
         let ev_3 = node3.listen_once().await.unwrap();
-        assert_eq!(&ev_3.from_path.clone(), &vec![key3.address().into()]);
-        assert_eq!(&ev_3.to_path.clone(), &vec![key3.address().into()]);
-        assert_eq!(&ev_3.addr, &key3.address());
+        assert_eq!(ev_3.addr, key3.address());
+        assert_eq!(ev_3.method, MessageRelayMethod::SEND);
+        assert_eq!(ev_3.path, vec![did3]);
+        assert_eq!(ev_3.path_end_cursor, 0);
+        assert_eq!(ev_3.next_hop, None);
+        assert_eq!(ev_3.destination, did3);
 
         if let Message::JoinDHT(x) = ev_3.data {
-            assert_eq!(x.id, key1.address().into());
+            assert_eq!(x.id, did1);
         } else {
             panic!();
         }
 
         let ev_1 = node1.listen_once().await.unwrap();
         // msg is send from key3
-        assert_eq!(&ev_1.addr, &key3.address());
-        assert_eq!(&ev_1.from_path.clone(), &vec![key3.address().into()]);
-        assert_eq!(&ev_1.to_path.clone(), &vec![key1.address().into()]);
+        assert_eq!(ev_1.addr, key3.address());
+        assert_eq!(ev_1.method, MessageRelayMethod::SEND);
+        assert_eq!(ev_1.path, vec![did3]);
+        assert_eq!(ev_1.path_end_cursor, 0);
+        assert_eq!(ev_1.next_hop, Some(did1));
+        assert_eq!(ev_1.destination, did1);
         if let Message::FindSuccessorSend(x) = ev_1.data {
-            assert_eq!(x.id, key3.address().into());
+            assert_eq!(x.id, did3);
             assert!(!x.for_fix);
         } else {
             panic!();
         }
 
         let ev_3 = node3.listen_once().await.unwrap();
-        assert_eq!(&ev_3.addr, &key1.address());
-        assert_eq!(&ev_3.from_path.clone(), &vec![key1.address().into()]);
-        assert_eq!(&ev_3.to_path.clone(), &vec![key3.address().into()]);
+        assert_eq!(ev_3.addr, key1.address());
+        assert_eq!(ev_3.method, MessageRelayMethod::SEND);
+        assert_eq!(ev_3.path, vec![did1]);
+        assert_eq!(ev_3.path_end_cursor, 0);
+        assert_eq!(ev_3.next_hop, Some(did3));
+        assert_eq!(ev_3.destination, did3);
         if let Message::FindSuccessorSend(x) = ev_3.data {
-            assert_eq!(x.id, key1.address().into());
+            assert_eq!(x.id, did1);
             assert!(!x.for_fix);
         } else {
             panic!();
@@ -960,19 +961,17 @@ mod test {
 
         // node3 response self as node1's successor
         let ev_1 = node1.listen_once().await.unwrap();
-        assert_eq!(&ev_1.addr, &key3.address());
-        assert_eq!(&ev_1.from_path.clone(), &vec![key1.address().into()]);
-        assert_eq!(&ev_1.to_path.clone(), &vec![key3.address().into()]);
+        assert_eq!(ev_1.addr, key3.address());
+        assert_eq!(ev_1.method, MessageRelayMethod::REPORT);
+        assert_eq!(ev_1.path, vec![did1, did3]);
+        assert_eq!(ev_1.path_end_cursor, 0);
+        assert_eq!(ev_1.next_hop, Some(did1));
+        assert_eq!(ev_1.destination, did1);
         if let Message::FindSuccessorReport(x) = ev_1.data {
             // for node3 there is no did is more closer to key1, so it response key1
             // and dht1 wont update
-            assert!(!dht1
-                .lock()
-                .await
-                .successor
-                .list()
-                .contains(&key1.address().into()));
-            assert_eq!(x.id, key1.address().into());
+            assert!(!dht1.lock().await.successor.list().contains(&did1));
+            assert_eq!(x.id, did1);
             assert!(!x.for_fix);
         } else {
             panic!();
@@ -980,19 +979,17 @@ mod test {
 
         // key1 response self as key3's successor
         let ev_3 = node3.listen_once().await.unwrap();
-        assert_eq!(&ev_3.addr, &key1.address());
-        assert_eq!(&ev_3.from_path.clone(), &vec![key3.address().into()]);
-        assert_eq!(&ev_3.to_path.clone(), &vec![key1.address().into()]);
+        assert_eq!(ev_3.addr, key1.address());
+        assert_eq!(ev_3.method, MessageRelayMethod::REPORT);
+        assert_eq!(ev_3.path, vec![did3, did1]);
+        assert_eq!(ev_3.path_end_cursor, 0);
+        assert_eq!(ev_3.next_hop, Some(did3));
+        assert_eq!(ev_3.destination, did3);
         if let Message::FindSuccessorReport(x) = ev_3.data {
             // for key1 there is no did is more closer to key1, so it response key1
             // and dht3 wont update
-            assert_eq!(x.id, key3.address().into());
-            assert!(!dht3
-                .lock()
-                .await
-                .successor
-                .list()
-                .contains(&key3.address().into()));
+            assert_eq!(x.id, did3);
+            assert!(!dht3.lock().await.successor.list().contains(&did3));
             assert!(!x.for_fix);
         } else {
             panic!();
@@ -1039,12 +1036,15 @@ mod test {
 
         // node2 and node3 will gen JoinDHT Event
         let ev_2 = node2.listen_once().await.unwrap();
-        assert_eq!(&ev_2.from_path.clone(), &vec![key2.address().into()]);
-        assert_eq!(&ev_2.to_path.clone(), &vec![key2.address().into()]);
-        assert_eq!(&ev_2.addr, &key2.address());
+        assert_eq!(ev_2.addr, key2.address());
+        assert_eq!(ev_2.method, MessageRelayMethod::SEND);
+        assert_eq!(ev_2.path, vec![did2]);
+        assert_eq!(ev_2.path_end_cursor, 0);
+        assert_eq!(ev_2.next_hop, None);
+        assert_eq!(ev_2.destination, did2);
 
         if let Message::JoinDHT(x) = ev_2.data {
-            assert_eq!(x.id, key3.address().into());
+            assert_eq!(x.id, did3);
         } else {
             panic!();
         }
@@ -1052,12 +1052,15 @@ mod test {
         // will be transform into some remote action
 
         let ev_3 = node3.listen_once().await.unwrap();
-        assert_eq!(&ev_3.from_path.clone(), &vec![key3.address().into()]);
-        assert_eq!(&ev_3.to_path.clone(), &vec![key3.address().into()]);
-        assert_eq!(&ev_3.addr, &key3.address());
+        assert_eq!(ev_3.addr, key3.address());
+        assert_eq!(ev_3.method, MessageRelayMethod::SEND);
+        assert_eq!(ev_3.path, vec![did3]);
+        assert_eq!(ev_3.path_end_cursor, 0);
+        assert_eq!(ev_3.next_hop, None);
+        assert_eq!(ev_3.destination, did3);
 
         if let Message::JoinDHT(x) = ev_3.data {
-            assert_eq!(x.id, key2.address().into());
+            assert_eq!(x.id, did2);
         } else {
             panic!();
         }
@@ -1065,11 +1068,14 @@ mod test {
         let ev_2 = node2.listen_once().await.unwrap();
         // msg is send from key3
         // node 3 ask node 2 for successor
-        assert_eq!(&ev_2.addr, &key3.address());
-        assert_eq!(&ev_2.from_path.clone(), &vec![key3.address().into()]);
-        assert_eq!(&ev_2.to_path.clone(), &vec![key2.address().into()]);
+        assert_eq!(ev_2.addr, key3.address());
+        assert_eq!(ev_2.method, MessageRelayMethod::SEND);
+        assert_eq!(ev_2.path, vec![did3]);
+        assert_eq!(ev_2.path_end_cursor, 0);
+        assert_eq!(ev_2.next_hop, Some(did2));
+        assert_eq!(ev_2.destination, did2);
         if let Message::FindSuccessorSend(x) = ev_2.data {
-            assert_eq!(x.id, key3.address().into());
+            assert_eq!(x.id, did3);
             assert!(!x.for_fix);
         } else {
             panic!();
@@ -1078,11 +1084,14 @@ mod test {
         // node 2 ask node 3 for successor
         // node 3 will ask it's successor: node 1
         let ev_3 = node3.listen_once().await.unwrap();
-        assert_eq!(&ev_3.addr, &key2.address());
-        assert_eq!(&ev_3.from_path.clone(), &vec![key2.address().into()]);
-        assert_eq!(&ev_3.to_path.clone(), &vec![key3.address().into()]);
+        assert_eq!(ev_3.addr, key2.address());
+        assert_eq!(ev_3.method, MessageRelayMethod::SEND);
+        assert_eq!(ev_3.path, vec![did2]);
+        assert_eq!(ev_3.path_end_cursor, 0);
+        assert_eq!(ev_3.next_hop, Some(did3));
+        assert_eq!(ev_3.destination, did3);
         if let Message::FindSuccessorSend(x) = ev_3.data {
-            assert_eq!(x.id, key2.address().into());
+            assert_eq!(x.id, did2);
             assert!(!x.for_fix);
         } else {
             panic!();
@@ -1091,11 +1100,14 @@ mod test {
         // node 2 report to node3
         // node 2 report node2's successor is node 3
         let ev_3 = node3.listen_once().await.unwrap();
-        assert_eq!(&ev_3.addr, &key2.address());
-        assert_eq!(&ev_3.from_path, &vec![key3.address().into()]);
-        assert_eq!(&ev_3.to_path, &vec![key2.address().into()]);
+        assert_eq!(ev_3.addr, key2.address());
+        assert_eq!(ev_3.method, MessageRelayMethod::REPORT);
+        assert_eq!(ev_3.path, vec![did3, did2]);
+        assert_eq!(ev_3.path_end_cursor, 0);
+        assert_eq!(ev_3.next_hop, Some(did3));
+        assert_eq!(ev_3.destination, did3);
         if let Message::FindSuccessorReport(x) = ev_3.data {
-            assert_eq!(x.id, key3.address().into());
+            assert_eq!(x.id, did3);
             assert!(!x.for_fix);
         } else {
             panic!();
@@ -1113,14 +1125,14 @@ mod test {
         // from_path: [node2, node3]
         // to_path: [node1]
         let ev_1 = node1.listen_once().await.unwrap();
-        assert_eq!(&ev_1.addr, &key3.address());
-        assert_eq!(
-            &ev_1.from_path,
-            &vec![key2.address().into(), key3.address().into()]
-        );
-        assert_eq!(&ev_1.to_path, &vec![key1.address().into()]);
+        assert_eq!(ev_1.addr, key3.address());
+        assert_eq!(ev_1.method, MessageRelayMethod::SEND);
+        assert_eq!(ev_1.path, vec![did2, did3]);
+        assert_eq!(ev_1.path_end_cursor, 0);
+        assert_eq!(ev_1.next_hop, Some(did1));
+        assert_eq!(ev_1.destination, did1);
         if let Message::FindSuccessorSend(x) = ev_1.data {
-            assert_eq!(x.id, key2.address().into());
+            assert_eq!(x.id, did2);
             assert!(!x.for_fix);
         } else {
             panic!();
@@ -1129,11 +1141,7 @@ mod test {
         // node 1 report to node3
         // node 1 report node2's successor is node 3
         // because, node2 only know node3
-        assert!(!dht1
-            .lock()
-            .await
-            .finger
-            .contains(&Some(key2.address().into())));
+        assert!(!dht1.lock().await.finger.contains(&Some(did2)));
         // from source of chord:
         //     if self.bias(id) <= self.bias(self.successor.max()) || self.successor.is_none() {
         //          Ok(PeerRingAction::Some(self.successor.min()))
@@ -1145,14 +1153,14 @@ mod test {
         // from_path: node2, node3
         // to_path: node1
         let ev_3 = node3.listen_once().await.unwrap();
-        assert_eq!(&ev_3.addr, &key1.address());
-        assert_eq!(
-            &ev_3.from_path,
-            &vec![key2.address().into(), key3.address().into()]
-        );
-        assert_eq!(&ev_3.to_path, &vec![key1.address().into()]);
+        assert_eq!(ev_3.addr, key1.address());
+        assert_eq!(ev_3.method, MessageRelayMethod::REPORT);
+        assert_eq!(ev_3.path, vec![did2, did3, did1]);
+        assert_eq!(ev_3.path_end_cursor, 0);
+        assert_eq!(ev_3.next_hop, Some(did3));
+        assert_eq!(ev_3.destination, did2);
         if let Message::FindSuccessorReport(x) = ev_3.data {
-            assert_eq!(x.id, key3.address().into());
+            assert_eq!(x.id, did3);
             assert!(!x.for_fix);
         } else {
             panic!();
@@ -1163,18 +1171,15 @@ mod test {
         // from_path: [node2],
         // to_path: [node3, node1]
         let ev_2 = node2.listen_once().await.unwrap();
-        assert_eq!(&ev_2.addr, &key3.address());
-
-        // from_path should be node2
-        assert_eq!(&ev_2.from_path, &vec![key2.address().into()]);
-        // to_path should be node3 node 1
-        assert_eq!(
-            &ev_2.to_path,
-            &vec![key3.address().into(), key1.address().into()]
-        );
+        assert_eq!(ev_2.addr, key3.address());
+        assert_eq!(ev_2.method, MessageRelayMethod::REPORT);
+        assert_eq!(ev_2.path, vec![did2, did3, did1]);
+        assert_eq!(ev_2.path_end_cursor, 1);
+        assert_eq!(ev_2.next_hop, Some(did2));
+        assert_eq!(ev_2.destination, did2);
 
         if let Message::FindSuccessorReport(x) = ev_2.data {
-            assert_eq!(x.id, key3.address().into());
+            assert_eq!(x.id, did3);
             assert!(!x.for_fix);
         } else {
             panic!();
@@ -1183,18 +1188,9 @@ mod test {
         // now node1's successor is node3,
         // node2's successor is node 3
         // node3's successor is node 1
-        assert_eq!(
-            dht1.lock().await.successor.list(),
-            vec![key3.address().into()]
-        );
-        assert_eq!(
-            dht2.lock().await.successor.list(),
-            vec![key3.address().into()]
-        );
-        assert_eq!(
-            dht3.lock().await.successor.list(),
-            vec![key1.address().into()]
-        );
+        assert_eq!(dht1.lock().await.successor.list(), vec![did3]);
+        assert_eq!(dht2.lock().await.successor.list(), vec![did3]);
+        assert_eq!(dht3.lock().await.successor.list(), vec![did1]);
 
         Ok(())
     }

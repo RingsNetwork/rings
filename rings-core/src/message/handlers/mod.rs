@@ -11,7 +11,6 @@ use async_recursion::async_recursion;
 use async_trait::async_trait;
 use connection::TChordConnection;
 use futures::lock::Mutex;
-use std::collections::VecDeque;
 use std::sync::Arc;
 use storage::TChordStorage;
 use web3::types::Address;
@@ -76,56 +75,39 @@ impl MessageHandler {
         *cb = Some(f)
     }
 
-    pub async fn send_relay_message(
-        &self,
-        address: &Address,
-        msg: MessageRelay<Message>,
-    ) -> Result<()> {
+    pub async fn send_relay_message(&self, msg: MessageRelay<Message>) -> Result<()> {
         #[cfg(test)]
         {
             println!("+++++++++++++++++++++++++++++++++");
             println!("node {:?}", self.swarm.address());
             println!("Sent {:?}", msg.clone());
-            println!("node {:?}", address);
+            println!("node {:?}", msg.next_hop);
             println!("+++++++++++++++++++++++++++++++++");
         }
-        self.swarm.send_message(address, msg).await
-    }
-
-    pub async fn send_message_default(&self, address: &Address, message: Message) -> Result<()> {
-        self.send_message(
-            address,
-            None,
-            None,
-            MessageRelayMethod::SEND,
-            OriginVerificationGen::Origin,
-            message,
-        )
-        .await
+        if let Some(id) = msg.next_hop {
+            self.swarm.send_message(&id.into(), msg).await
+        } else {
+            Err(Error::NoNextHop)
+        }
     }
 
     pub async fn send_message(
         &self,
-        address: &Address,
-        to_path: Option<VecDeque<Did>>,
-        from_path: Option<VecDeque<Did>>,
-        method: MessageRelayMethod,
-        origin_verification_gen: OriginVerificationGen,
-        message: Message,
+        next_hop: &Did,
+        destination: &Did,
+        msg: Message,
     ) -> Result<()> {
-        let from_path = from_path.unwrap_or_else(|| vec![self.swarm.address().into()].into());
-        let to_path = to_path.unwrap_or_else(|| vec![(*address).into()].into());
-
-        let payload = MessageRelay::new(
-            message,
+        self.send_relay_message(MessageRelay::new(
+            msg,
             &self.swarm.session_manager,
-            origin_verification_gen,
+            OriginVerificationGen::Origin,
+            MessageRelayMethod::SEND,
             None,
-            Some(to_path),
-            Some(from_path),
-            method,
-        )?;
-        self.send_relay_message(address, payload).await
+            None,
+            Some(*next_hop),
+            *destination,
+        )?)
+        .await
     }
 
     // disconnect a node if a node is in DHT
@@ -136,27 +118,28 @@ impl MessageHandler {
     }
 
     pub async fn connect(&self, address: &Address) -> Result<()> {
+        let target_id = address.to_owned().into();
         let transport = self.swarm.new_transport().await?;
         let handshake_info = transport
             .get_handshake_info(&self.swarm.session_manager, RTCSdpType::Offer)
             .await?;
         let connect_msg = Message::ConnectNodeSend(super::ConnectNodeSend {
             sender_id: self.swarm.address().into(),
-            target_id: address.to_owned().into(),
+            target_id,
             transport_uuid: transport.id.to_string(),
             handshake_info: handshake_info.to_string(),
         });
-        let target = self.dht.lock().await.successor.max();
-        self.send_message(
-            &target,
-            // to_path
-            Some(vec![target].into()),
-            // from_path
-            Some(vec![self.swarm.address().into()].into()),
-            MessageRelayMethod::SEND,
-            OriginVerificationGen::Origin,
+        let next_hop = self.dht.lock().await.successor.max();
+        self.send_relay_message(MessageRelay::new(
             connect_msg,
-        )
+            &self.swarm.session_manager,
+            OriginVerificationGen::Origin,
+            MessageRelayMethod::SEND,
+            None,
+            None,
+            Some(next_hop),
+            target_id,
+        )?)
         .await?;
         self.swarm.push_pending_transport(&transport)
     }
@@ -212,14 +195,10 @@ impl MessageHandler {
             Message::StoreVNode(msg) => self.store_vnode(relay.clone(), prev, msg).await,
             Message::MultiCall(msg) => {
                 for message in msg.messages {
-                    let payload = MessageRelay::new(
-                        message.clone(),
+                    let payload = relay.rewrap(
+                        message,
                         &self.swarm.session_manager,
                         OriginVerificationGen::Stick(relay.origin_verification.clone()),
-                        None,
-                        Some(relay.to_path.clone()),
-                        Some(relay.from_path.clone()),
-                        relay.method.clone(),
                     )?;
                     self.handle_message_relay(payload, prev).await.unwrap_or(());
                 }
@@ -433,7 +412,11 @@ pub mod test {
         handler2.set_callback(cb2).await;
 
         handler1
-            .send_message_default(&addr2, Message::custom("Hello world 1", &None)?)
+            .send_message(
+                &addr2.into(),
+                &addr2.into(),
+                Message::custom("Hello world 1", &None)?,
+            )
             .await
             .unwrap();
 

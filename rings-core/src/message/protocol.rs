@@ -1,196 +1,147 @@
-use crate::dht::Did;
+#![warn(missing_docs)]
 
 use super::payload::MessageRelay;
 use super::payload::MessageRelayMethod;
-use super::types::Message;
+use crate::dht::Did;
+use crate::err::{Error, Result};
 
-// A -> B -> C
-// B handle_find_success relay with SEND contains
-// {
-//     from_path: [A]
-//     to_path: [B]
-// }
-// if find successor on B, then return relay with REPORT
-// then A get relay contains
-// {
-//     from_path: [B],
-//     to_path: [A]
-// }
-// otherwise, send to C with relay with SEND contains
-// {
-//    from_path: [A, B]
-//    to_path: [B, C]
-// }
-// if find successor on C, than return relay with REPORT
-// then B get relay contains
-// {
-//    from_path: [B, C]
-//    to_path: [A, B]
-// }
+/// MessageSessionRelayProtocol guide message passing on rings network by relay.
 pub trait MessageSessionRelayProtocol {
+    /// Check current did, update path and its end cursor, then infer next_hop.
+    fn relay(&mut self, current: Did, next_hop: Option<Did>) -> Result<()>;
+
+    /// A SEND message can change its destination.
+    /// Call with REPORT method will get an error imeediately.
+    fn reset_destination(&mut self, destination: Did) -> Result<()>;
+
+    /// Check if path and destination is valid.
+    /// It will be automatically called at relay started.
+    fn validate(&self) -> Result<()>;
+
+    /// Get sender of current message.
+    /// With SEND method, it will be the `origin()` of the message.
+    /// With REPORT method, it will be the last element of path.
     fn sender(&self) -> Did;
+
+    /// Get the original sender of current message.
+    /// Should always be the first element of path.
     fn origin(&self) -> Did;
-    fn has_next(&self) -> bool;
-    fn next(&self) -> Option<Did>;
-    fn target(&self) -> Did;
-    // add self to list
-    fn relay(&mut self, current: Did, next: Option<Did>);
-    fn find_prev(&self) -> Option<Did>;
-    fn push_prev(&mut self, current: Did, prev: Did);
-    fn next_hop(&mut self, current: Did, next: Did);
-    fn add_to_path(&mut self, node: Did);
-    fn add_from_path(&mut self, node: Did);
-    fn remove_to_path(&mut self) -> Option<Did>;
-    fn remove_from_path(&mut self) -> Option<Did>;
+
+    /// Get the previous element of the element pointed by path_end_cursor.
+    fn path_prev(&self) -> Option<Did>;
 }
 
-impl MessageSessionRelayProtocol for MessageRelay<Message> {
-    // record self to relay list
-    // for Send, push self to back of from_path
-    // From<A, B> - [Current] - To<C, D> =>
-    // From<A, B, Current>, To<C, D>
-    // for Report, push self to front of to_path
-    // From<A, B> - [Current] - To<C, D> =>
-    // From<A, B>, To<Current, C, D>
+impl<T> MessageSessionRelayProtocol for MessageRelay<T> {
+    fn relay(&mut self, current: Did, next_hop: Option<Did>) -> Result<()> {
+        self.validate()?;
 
-    fn relay(&mut self, current: Did, next: Option<Did>) {
+        // If self.next_hop is setted, it should be current
+        if self.next_hop.is_some() && self.next_hop.unwrap() != current {
+            return Err(Error::InvalidNextHop);
+        }
+
         match self.method {
             MessageRelayMethod::SEND => {
-                if let Some(id) = next {
-                    // if next hop is not in path plan, push it to `to_path`
-                    if self.to_path.front() != Some(&id) {
-                        self.to_path.push_front(id);
-                    }
-                }
-                // always reocrd current; even it's a loop
-                self.to_path.pop_back().unwrap();
-                self.from_path.push_back(current);
+                self.path.push(current);
+                self.next_hop = next_hop;
+                Ok(())
             }
+
             MessageRelayMethod::REPORT => {
-                // should always has a prev
-                let prev = self.from_path.pop_back().unwrap();
-                self.to_path.push_front(prev);
+                // The final hop
+                if self.next_hop == Some(self.destination) {
+                    self.path_end_cursor = self.path.len() - 1;
+                    self.next_hop = None;
+                    return Ok(());
+                }
+
+                let pos = self
+                    .path
+                    .iter()
+                    .rev()
+                    .skip(self.path_end_cursor)
+                    .position(|&x| x == current);
+
+                if let (None, None) = (pos, next_hop) {
+                    return Err(Error::CannotInferNextHop);
+                }
+
+                if let Some(pos) = pos {
+                    self.path_end_cursor += pos;
+                }
+
+                // `self.path_prev()` should never return None here, because we have handled final hop
+                self.next_hop = next_hop.or_else(|| self.path_prev());
+
+                Ok(())
             }
         }
     }
 
-    // for Send, the last ele of from_path is Sender
-    // for Report, the first ele of to_path is Sender
-    // A recived Relay should *ALWAYS* has it's sender
+    fn reset_destination(&mut self, destination: Did) -> Result<()> {
+        if self.method == MessageRelayMethod::SEND {
+            self.destination = destination;
+            Ok(())
+        } else {
+            Err(Error::ResetDestinationNeedSend)
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        // Adjacent elements in self.path cannot be equal
+        if self.path.windows(2).any(|w| w[0] == w[1]) {
+            return Err(Error::InvalidRelayPath);
+        }
+
+        // The destination of report message should always be the first element of path
+        if self.method == MessageRelayMethod::REPORT && self.path[0] != self.destination {
+            return Err(Error::InvalidRelayDestination);
+        }
+
+        Ok(())
+    }
+
+    fn origin(&self) -> Did {
+        *self.path.first().unwrap()
+    }
+
     fn sender(&self) -> Did {
         match self.method {
-            MessageRelayMethod::SEND => *self.from_path.back().unwrap(),
-            MessageRelayMethod::REPORT => *self.to_path.front().unwrap(),
+            MessageRelayMethod::SEND => self.origin(),
+            MessageRelayMethod::REPORT => *self.path.last().unwrap(),
         }
     }
 
-    // Origin is where the msg is send_from
-    // for Send it's the first ele of from_path
-    // for Report, it's the last ele of to_path
-    // A recived Relay should *ALWAYS* has it's origin
-    fn origin(&self) -> Did {
-        match self.method {
-            MessageRelayMethod::SEND => *self.from_path.front().unwrap(),
-            MessageRelayMethod::REPORT => *self.to_path.front().unwrap(),
-        }
-    }
-
-    // A recived Relay should *ALWAYS* has it's target
-    fn target(&self) -> Did {
-        match self.method {
-            MessageRelayMethod::SEND => *self.to_path.back().unwrap(),
-            MessageRelayMethod::REPORT => *self.from_path.back().unwrap(),
-        }
-    }
-
-    fn has_next(&self) -> bool {
-        match self.method {
-            MessageRelayMethod::SEND => !self.to_path.is_empty(),
-            MessageRelayMethod::REPORT => !self.from_path.is_empty(),
-        }
-    }
-
-    // for send, the next hop is the first ele of to_path
-    // From<[A, B]> [Current] To<[D, E]> -> D
-    // for report, the next hop is the back ele of from_path
-    // From<[A, B]> [Current] To<[D, E]> -> D
-
-    fn next(&self) -> Option<Did> {
-        match self.method {
-            MessageRelayMethod::SEND => self.to_path.front().copied(),
-            MessageRelayMethod::REPORT => self.from_path.back().copied(),
-        }
-    }
-
-    #[inline]
-    fn find_prev(&self) -> Option<Did> {
-        match self.method {
-            MessageRelayMethod::SEND => {
-                if !self.from_path.is_empty() {
-                    self.from_path.back().cloned()
-                } else {
-                    None
-                }
-            }
-            MessageRelayMethod::REPORT => {
-                if !self.to_path.is_empty() {
-                    self.to_path.back().cloned()
-                } else {
-                    None
-                }
-            }
-        }
-    }
-
-    #[inline]
-    fn push_prev(&mut self, _current: Did, prev: Did) {
-        match self.method {
-            MessageRelayMethod::SEND => {
-                self.from_path.push_back(prev);
-            }
-            MessageRelayMethod::REPORT => {
-                self.to_path.pop_back();
-                self.from_path.push_back(prev);
-            }
-        }
-    }
-
-    #[inline]
-    fn next_hop(&mut self, current: Did, next: Did) {
-        match self.method {
-            MessageRelayMethod::SEND => {
-                self.to_path.push_back(next);
-                self.from_path.push_back(current);
-            }
-            MessageRelayMethod::REPORT => unimplemented!(),
-        };
-    }
-
-    #[inline]
-    fn add_to_path(&mut self, node: Did) {
-        self.to_path.push_back(node);
-    }
-
-    #[inline]
-    fn add_from_path(&mut self, node: Did) {
-        self.from_path.push_back(node);
-    }
-
-    #[inline]
-    fn remove_to_path(&mut self) -> Option<Did> {
-        if !self.to_path.is_empty() {
-            self.to_path.pop_back()
-        } else {
+    fn path_prev(&self) -> Option<Did> {
+        if self.path.len() < self.path_end_cursor + 2 {
             None
+        } else {
+            Some(self.path[self.path.len() - 2 - self.path_end_cursor])
         }
     }
+}
 
-    #[inline]
-    fn remove_from_path(&mut self) -> Option<Did> {
-        if !self.from_path.is_empty() {
-            self.from_path.pop_back()
-        } else {
-            None
-        }
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::ecc::SecretKey;
+    use crate::message::payload::test::new_test_message;
+
+    #[test]
+    fn test_path_prev() {
+        let mut payload = new_test_message();
+        let fake_id = SecretKey::random().address().into();
+        let next_hop1 = SecretKey::random().address().into();
+        let next_hop2 = SecretKey::random().address().into();
+
+        assert!(payload.path_prev().is_none());
+
+        payload.path[0] = fake_id;
+
+        payload.relay(next_hop1, None).unwrap();
+        assert_eq!(payload.path_prev(), Some(fake_id));
+
+        payload.relay(next_hop2, None).unwrap();
+        assert_eq!(payload.path_prev(), Some(next_hop1));
     }
 }
