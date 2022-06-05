@@ -15,9 +15,21 @@ pub trait ChordStablize<A>: Chord<A> {
     fn fix_fingers(&mut self) -> Result<A>;
 }
 
+/// Protocol for Storage Data on Chord
 pub trait ChordStorage<A>: Chord<A> {
-    fn lookup(&self, id: Did) -> Result<A>;
+    /// look up a resouce
+    fn lookup(&self, id: &Did) -> Result<A>;
+    /// Cache, cache fetched Data locally
+    fn cache(&self, vnode: VirtualNode);
+    /// Check localCache
+    fn fetch_cache(&self, id: &Did) -> Option<VirtualNode>;
+    /// store VNode to it's successor
+    /// A VNode's successor should store the data
     fn store(&self, peer: VirtualNode) -> Result<A>;
+    /// Batch store
     fn store_vec(&self, peer: Vec<VirtualNode>) -> Result<A>;
-    fn sync_with_successor(&self) -> Result<A>;
+    /// When A Node's successor is updated, it should check the storage that
+    /// if exist some VNode's address is in (self.id, new_successor), then
+    /// sync the data to the new successor
+    fn sync_with_successor(&self, new_successor: Did) -> Result<A>;
 }

@@ -72,6 +72,14 @@ impl TryFrom<Encoded> for VirtualNode {
     }
 }
 
+impl TryFrom<String> for VirtualNode {
+    type Error = Error;
+    fn try_from(s: String) -> Result<Self> {
+        let encoded_message = s.encode()?;
+        encoded_message.try_into()
+    }
+}
+
 impl VirtualNode {
     /// concat data of a virtual Node
     /// We do not needs to check the type of VNode because two VNode with same address but

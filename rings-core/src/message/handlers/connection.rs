@@ -1,10 +1,11 @@
+use crate::dht::ChordStorage;
 use crate::dht::{Chord, ChordStablize, PeerRingAction, PeerRingRemoteAction};
 use crate::err::{Error, Result};
 use crate::message::payload::{MessageRelay, MessageRelayMethod};
 use crate::message::protocol::MessageSessionRelayProtocol;
 use crate::message::types::{
     AlreadyConnected, ConnectNodeReport, ConnectNodeSend, FindSuccessorReport, FindSuccessorSend,
-    JoinDHT, Message, NotifyPredecessorReport, NotifyPredecessorSend,
+    JoinDHT, Message, NotifyPredecessorReport, NotifyPredecessorSend, SyncVNodeWithSuccessor,
 };
 use crate::message::LeaveDHT;
 use crate::message::MessageHandler;
@@ -332,6 +333,18 @@ impl TChordConnection for MessageHandler {
                 dht.finger[fix_finger_index as usize] = Some(msg.id);
             } else {
                 dht.successor.update(msg.id);
+                if let Ok(PeerRingAction::RemoteAction(
+                    next,
+                    PeerRingRemoteAction::SyncVNodeWithSuccessor(data),
+                )) = dht.sync_with_successor(msg.id)
+                {
+                    self.send_relay_message(MessageRelay::direct(
+                        Message::SyncVNodeWithSuccessor(SyncVNodeWithSuccessor { data }),
+                        &self.swarm.session_manager,
+                        next,
+                    )?)
+                    .await?;
+                }
             }
             Ok(())
         }
@@ -365,6 +378,18 @@ impl TChordConnection for MessageHandler {
         // if successor: predecessor is between (id, successor]
         // then update local successor
         dht.successor.update(msg.id);
+        if let Ok(PeerRingAction::RemoteAction(
+            next,
+            PeerRingRemoteAction::SyncVNodeWithSuccessor(data),
+        )) = dht.sync_with_successor(msg.id)
+        {
+            self.send_relay_message(MessageRelay::direct(
+                Message::SyncVNodeWithSuccessor(SyncVNodeWithSuccessor { data }),
+                &self.swarm.session_manager,
+                next,
+            )?)
+            .await?;
+        }
         Ok(())
     }
 }

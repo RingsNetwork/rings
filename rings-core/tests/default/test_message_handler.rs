@@ -595,7 +595,6 @@ pub mod test {
                      &swarm2.address().into(),
                      &swarm2.address().into(),
                      Message::StoreVNode(message::StoreVNode {
-                         sender_id: swarm1.address().into(),
                          data: vec![vnode.clone()]
                      })
                  )

@@ -94,8 +94,10 @@ pub struct PeerRing {
     pub id: Did,
     /// This index is used for FindSuccesorForFix
     pub fix_finger_index: u8,
-    /// LocalStorage
+    /// LocalStorage for DHT Query
     pub storage: Arc<MemStorage<Did, VirtualNode>>,
+    /// LocalCache
+    pub cache: Arc<MemStorage<Did, VirtualNode>>,
 }
 
 impl PeerRing {
@@ -109,6 +111,7 @@ impl PeerRing {
             id,
             fix_finger_index: 0,
             storage: Arc::new(MemStorage::<Did, VirtualNode>::new()),
+            cache: Arc::new(MemStorage::<Did, VirtualNode>::new()),
         }
     }
 
@@ -150,6 +153,7 @@ impl PeerRing {
             // for Eth address, it's 160
             finger: vec![None; 160],
             storage: Arc::clone(&storage),
+            cache: Arc::new(MemStorage::<Did, VirtualNode>::new()),
             id,
             fix_finger_index: 0,
         }
@@ -321,9 +325,11 @@ impl ChordStablize<PeerRingAction> for PeerRing {
 }
 
 impl ChordStorage<PeerRingAction> for PeerRing {
-    fn lookup(&self, id: Did) -> Result<PeerRingAction> {
-        match self.find_successor(id) {
-            Ok(PeerRingAction::Some(id)) => match self.storage.get(&id) {
+    /// lookup always check data via finger table
+    fn lookup(&self, vid: &Did) -> Result<PeerRingAction> {
+        match self.find_successor(*vid) {
+            // if vid is in [self, successor]
+            Ok(PeerRingAction::Some(_)) => match self.storage.get(vid) {
                 Some(v) => Ok(PeerRingAction::SomeVNode(v)),
                 None => Ok(PeerRingAction::None),
             },
@@ -335,10 +341,25 @@ impl ChordStorage<PeerRingAction> for PeerRing {
         }
     }
 
+    /// When a vnode data is fetched from remote, it should be cache at local
+    fn cache(&self, vnode: VirtualNode) {
+        self.cache.set(&vnode.did(), vnode);
+    }
+
+    /// When a VNode data is fetched from remote, it should be cache at local
+    fn fetch_cache(&self, id: &Did) -> Option<VirtualNode> {
+        self.cache.get(id)
+    }
+
+    /// If address of VNode is in range(self, successor), it should store locally,
+    /// otherwise, it should on remote successor
     fn store(&self, peer: VirtualNode) -> Result<PeerRingAction> {
         let vid = peer.did();
+        // find VNode's closest successor
         match self.find_successor(vid) {
-            Ok(PeerRingAction::Some(id)) => match self.storage.get(&id) {
+            // if vid is in range(self, successor)
+            // self should store it
+            Ok(PeerRingAction::Some(_)) => match self.storage.get(&vid) {
                 Some(v) => {
                     let _ = self.storage.set(&vid, VirtualNode::concat(&v, &peer)?);
                     Ok(PeerRingAction::None)
@@ -371,21 +392,25 @@ impl ChordStorage<PeerRingAction> for PeerRing {
         }
     }
 
-    fn sync_with_successor(&self) -> Result<PeerRingAction> {
+    /// This function should call when successor is updated
+    fn sync_with_successor(&self, new_successor: Did) -> Result<PeerRingAction> {
         let mut data = Vec::<VirtualNode>::new();
         for k in self.storage.keys() {
-            // k in (self, self.successor)
-            // k is more close to self.successor
-            if k - self.successor.min() > k - self.id {
+            // k < self.successor
+            if self.bias(k) < self.bias(new_successor) {
                 if let Some(v) = self.storage.remove(&k) {
                     data.push(v.1);
                 }
             }
         }
-        Ok(PeerRingAction::RemoteAction(
-            self.successor.min(),
-            RemoteAction::SyncVNodeWithSuccessor(data),
-        ))
+        if !data.is_empty() {
+            Ok(PeerRingAction::RemoteAction(
+                new_successor,
+                RemoteAction::SyncVNodeWithSuccessor(data),
+            ))
+        } else {
+            Ok(PeerRingAction::None)
+        }
     }
 }
 
