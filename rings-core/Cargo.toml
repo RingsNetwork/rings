@@ -41,6 +41,8 @@ async-recursion = "1.0.0"
 itertools = "0.10.3"
 arrayref = "0.3.6"
 bincode = "1.3.3"
+redis = { version = "0.21", default-features = false, features = ["aio", "tokio-comp", "tokio-native-tls-comp"] }
+
 
 # default
 webrtc = { version = "0.3.3", optional = true }

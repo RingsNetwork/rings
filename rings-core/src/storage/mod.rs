@@ -1,6 +1,8 @@
+mod cache;
 mod memory;
 pub mod persistence;
 
+pub use cache::{RedisCache, TRedisCacheStorage};
 pub use memory::MemStorage;
 
 #[cfg(feature = "wasm")]
