@@ -13,7 +13,7 @@ use crate::types::ice_transport::IceTransportCallback;
 
 use async_stream::stream;
 use async_trait::async_trait;
-use futures_core::Stream;
+use futures::Stream;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
