@@ -227,8 +227,8 @@ mod listener {
     use async_trait::async_trait;
     use std::sync::Arc;
 
-    use futures_util::pin_mut;
-    use futures_util::stream::StreamExt;
+    use futures::pin_mut;
+    use futures::stream::StreamExt;
 
     #[async_trait]
     impl MessageListener for MessageHandler {

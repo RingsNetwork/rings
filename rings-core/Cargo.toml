@@ -28,12 +28,10 @@ libsecp256k1 = "0.7.0"
 sha1 = "0.10.1"
 serde_json = { version = "1.0.70" }
 serde = { version = "1.0.130", features = ["derive"] }
-futures = { version = "0.3.21" }
 chrono = { version = "0.4.19", features = ["wasmbind"] }
 base58-monero = { version = "0.3", default-features = false, features = ["check"] }
 async-stream = "0.3.2"
 async-lock = "2.5.0"
-futures-core = "0.3.21"
 futures-timer = "3.0.2"
 url = { version = "2", features = ["serde"] }
 thiserror = "1"
@@ -82,13 +80,13 @@ features = [
 
 [target.'cfg(target_family="wasm")'.dependencies]
 web3 = { package = "web3", version = "0.18.0", features = ["wasm"], default-features = false }
-futures-util = { package = "futures-util", version = "0.3.21", default-features = false }
+futures = { package = "futures", version = "0.3.21", default-features = false }
 uuid = { package = "uuid", version = "0.8.2", features = ["wasm-bindgen", "v4"] }
 
 
 [target.'cfg(not(target_family="wasm"))'.dependencies]
 web3 = { package = "web3", version = "0.18.0" }
-futures-util = { package = "futures-util", version = "0.3.21" }
+futures = { package = "futures", version = "0.3.21" }
 uuid = { package = "uuid", version = "0.8.2", features = ["v4"] }
 
 
