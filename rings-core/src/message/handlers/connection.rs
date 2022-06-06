@@ -216,70 +216,6 @@ impl TChordConnection for MessageHandler {
         relay: MessageRelay<Message>,
         msg: FindSuccessorSend,
     ) -> Result<()> {
-        /*
-         * A -> B For Example
-         * B handle_find_successor then push_prev
-         * now relay have paths follow:
-         * {
-         *     from_path: [A],
-         *     to_path: []
-         *     method: SEND
-         * }
-         * if found successor, then report back to A with new relay
-         * which have paths follow:
-         * {
-         *     to_path: [A],
-         *     from_path: [],
-         *     method: REPORT
-         * }
-         * when A got report and handle_found_successor, after push_prev
-         * that relay have paths follow:
-         * {
-         *     from_path: [B],
-         *     to_path: []
-         *     method: REPORT
-         * }
-         * because to_path.pop_back() assert_eq to current Did
-         * then fix finger as request
-         *
-         * otherwise, B -> C
-         * and then C get relay and push_prev, relay has paths follow:
-         * {
-         *     from_path: [A, B],
-         *     to_path: [],
-         *     method: SEND
-         * }
-         * if C found successor lucky, report to B, relay has paths follow:
-         * {
-         *     from_path: [],
-         *     to_path: [A, B],
-         *     method: REPORT
-         * }
-         * if B get message and handle_found_successor, after push_prev, relay has paths follow:
-         * {
-         *     from_path: [C],
-         *     to_path: [A],
-         *     method: REPORT
-         * }
-         * because to_path.pop_back() assert_eq to current Did
-         * so B has been pop out of to_path
-         *
-         * if found to_path still have elements, recursivly report backward
-         * now relay has path follow:
-         * {
-         *     to_path: [A],
-         *     from_path: [C],
-         *     method: REPORT
-         * }
-         * finally, relay handle_found_successor after push_prev, relay has paths follow:
-         * {
-         *     from_path: [C, B],
-         *     to_path: []
-         * }
-         * because to_path.pop_back() assert_eq to current Did
-         * A pop from to_path, and check to_path is empty
-         * so update fix_finger_table with fix_finger_index
-         */
         let dht = self.dht.lock().await;
         let mut relay = relay.clone();
         match dht.find_successor(msg.id)? {
@@ -766,7 +702,6 @@ mod test {
 
         let ev2 = node2.listen_once().await.unwrap();
         // node3 send report to node2
-        // for a report the to_path should as same as a send request
         assert_eq!(ev2.addr, key3.address());
         assert_eq!(ev2.method, MessageRelayMethod::REPORT);
         assert_eq!(ev2.path, vec![did1, did2, did3]);
@@ -1109,8 +1044,6 @@ mod test {
         // *BECAUSE* node1, node2, node3, is a *RING*
         // which can also pe present as node3, node1, node1
         // the msg is send from node 3 to node 1
-        // from_path: [node2, node3]
-        // to_path: [node1]
         let ev_1 = node1.listen_once().await.unwrap();
         assert_eq!(ev_1.addr, key3.address());
         assert_eq!(ev_1.method, MessageRelayMethod::SEND);
@@ -1136,9 +1069,8 @@ mod test {
         // node2 is in [node1, node3]
         // so it will response node3 to node 1
 
-        // [node1, node2, node3]
-        // from_path: node2, node3
-        // to_path: node1
+        // node3 got report from node1
+        // path is node2 -> node3 -> node1 -> node3
         let ev_3 = node3.listen_once().await.unwrap();
         assert_eq!(ev_3.addr, key1.address());
         assert_eq!(ev_3.method, MessageRelayMethod::REPORT);
@@ -1155,8 +1087,6 @@ mod test {
 
         // node3 report it's result to node 2
         // path is: node 2 -> node3 -> node1 -> node3 -> node2
-        // from_path: [node2],
-        // to_path: [node3, node1]
         let ev_2 = node2.listen_once().await.unwrap();
         assert_eq!(ev_2.addr, key3.address());
         assert_eq!(ev_2.method, MessageRelayMethod::REPORT);
