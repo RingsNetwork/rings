@@ -89,7 +89,7 @@ impl Did {
 
     // Transform Did to BiasDid
     pub fn bias(&self, id: &Self) -> BiasId {
-        BiasId::new(&id, &self)
+        BiasId::new(id, self)
     }
 }
 
