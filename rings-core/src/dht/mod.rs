@@ -5,8 +5,11 @@
 mod did;
 pub use did::Did;
 mod chord;
+/// Finger table for Rings
+pub mod finger;
 mod successor;
 mod types;
+pub use finger::FingerTable;
 pub use {chord::PeerRing, chord::PeerRingAction, chord::RemoteAction as PeerRingRemoteAction};
 pub use {types::Chord, types::ChordStablize, types::ChordStorage};
 

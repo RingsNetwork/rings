@@ -3,6 +3,7 @@ use super::did::BiasId;
 use super::successor::Successor;
 use super::types::{Chord, ChordStablize, ChordStorage};
 use super::vnode::VirtualNode;
+use super::FingerTable;
 use crate::dht::Did;
 use crate::err::{Error, Result};
 use crate::storage::{MemStorage, Storage};
@@ -85,7 +86,7 @@ impl PeerRingAction {
 pub struct PeerRing {
     /// first node on circle that succeeds (n + 2 ^(k-1) ) mod 2^m , 1 <= k<= m
     /// for index start with 0, it should be (n+2^k) mod 2^m
-    pub finger: Vec<Option<Did>>,
+    pub finger: FingerTable,
     /// The next node on the identifier circle; finger[1].node
     pub successor: Successor,
     /// The previous node on the identifier circle
@@ -107,7 +108,7 @@ impl PeerRing {
             successor: Successor::new(&id),
             predecessor: None,
             // for Eth address, it's 160
-            finger: vec![None; 160],
+            finger: FingerTable::new(id, 160),
             id,
             fix_finger_index: 0,
             storage: Arc::new(MemStorage::<Did, VirtualNode>::new()),
@@ -117,21 +118,14 @@ impl PeerRing {
 
     /// Get first element from Finger Table
     pub fn first(&self) -> Option<Did> {
-        let ids = self
-            .finger
-            .iter()
-            .filter(|x| x.is_some())
-            .take(1)
-            .map(|x| x.unwrap())
-            .collect::<Vec<Did>>();
-        ids.first().copied()
+        self.finger.first()
     }
 
     /// remove a node from dht finger table
     /// remote a node from dht successor table
     /// if suuccessor is empty, set it to the cloest node
     pub fn remove(&mut self, id: Did) {
-        self.finger.retain(|v| *v == Some(id));
+        self.finger.remove(id);
         self.successor.remove(id);
         if self.successor.is_none() {
             if let Some(x) = self.first() {
@@ -151,7 +145,7 @@ impl PeerRing {
             successor: Successor::new(&id),
             predecessor: None,
             // for Eth address, it's 160
-            finger: vec![None; 160],
+            finger: FingerTable::new(id, 160),
             storage: Arc::clone(&storage),
             cache: Arc::new(MemStorage::<Did, VirtualNode>::new()),
             id,
@@ -161,7 +155,7 @@ impl PeerRing {
 
     /// finger length
     pub fn number_of_fingers(&self) -> usize {
-        self.finger.iter().flatten().count() as usize
+        self.finger.len()
     }
 }
 
@@ -171,30 +165,7 @@ impl Chord<PeerRingAction> for PeerRing {
         if id == self.id {
             return PeerRingAction::None;
         }
-        for k in 0u32..159u32 {
-            // (n + 2^k) % 2^m >= n
-            // pos >= id
-            // from n to n + 2^160
-            let pos = Did::from(BigUint::from(2u16).pow(k));
-            // pos less than id
-            if self.bias(id).pos() >= pos {
-                //            if pos <= id - self.id {
-                match self.finger[k as usize] {
-                    Some(v) => {
-                        // for a existed value v
-                        // if id is more close to self.id than v
-                        if self.bias(id) < self.bias(v) {
-                            // if id < v || id > -v {
-                            self.finger[k as usize] = Some(id);
-                            // if id is more close to successor
-                        }
-                    }
-                    None => {
-                        self.finger[k as usize] = Some(id);
-                    }
-                }
-            }
-        }
+        self.finger.join(id);
         if self.bias(id) < self.bias(self.successor.max()) || self.successor.is_none() {
             // 1) id should follows self.id
             // 2) #fff should follow #001 because id space is a Finate Ring
@@ -217,7 +188,7 @@ impl Chord<PeerRingAction> for PeerRing {
         } else {
             // n = closest preceding node(id);
             // return n.find_successor(id);
-            match self.closest_preceding_node(id) {
+            match self.finger.closest(id) {
                 Ok(n) => Ok(PeerRingAction::RemoteAction(
                     n,
                     RemoteAction::FindSuccessor(id),
@@ -282,7 +253,7 @@ impl ChordStablize<PeerRingAction> for PeerRing {
         match self.find_successor(did.into()) {
             Ok(res) => match res {
                 PeerRingAction::Some(v) => {
-                    self.finger[self.fix_finger_index as usize] = Some(v);
+                    self.finger.set(self.fix_finger_index as usize, &v);
                     Ok(PeerRingAction::None)
                 }
                 PeerRingAction::RemoteAction(a, RemoteAction::FindSuccessor(b)) => Ok(
@@ -311,16 +282,7 @@ impl ChordStablize<PeerRingAction> for PeerRing {
     ///        return finger\[i\]
     /// return n
     fn closest_preceding_node(&self, id: Did) -> Result<Did> {
-        for i in (0..159).rev() {
-            if let Some(v) = self.finger[i] {
-                if self.bias(self.id) < self.bias(v) && self.bias(v) < self.bias(id) {
-                    //                if v - self.id < v - id {
-                    // check a recorded did x in (self.id, target_id)
-                    return Ok(v);
-                }
-            }
-        }
-        Ok(self.id)
+        self.finger.closest(id)
     }
 }
 
@@ -441,7 +403,7 @@ mod tests {
         // for increase seq join
         node_a.join(a);
         // Node A wont add self to finder
-        assert_eq!(node_a.finger, [None; 160]);
+        assert!(node_a.finger.is_empty());
         node_a.join(b);
         // b is very far away from a
         // a.finger should store did as range
@@ -451,7 +413,7 @@ mod tests {
         assert!(BigUint::from(b) < BigUint::from(2u16).pow(157));
         // Node A's finter should be [None, .., B]
         assert!(node_a.finger.contains(&Some(b)));
-        assert!(node_a.finger.contains(&None));
+        assert!(node_a.finger.contains(&None), "{:?}", node_a.finger.list());
 
         assert_eq!(
             node_a.successor.list(),

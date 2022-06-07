@@ -49,6 +49,13 @@ impl PartialOrd for BiasId {
     }
 }
 
+impl PartialEq<Did> for BiasId {
+    fn eq(&self, rhs: &Did) -> bool {
+        let id: Did = self.into();
+        id == *rhs
+    }
+}
+
 impl Ord for BiasId {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         if other.bias != self.bias {
@@ -78,6 +85,11 @@ impl Did {
     pub fn in_range(&self, id: &Self, a: &Self, b: &Self) -> bool {
         // Test x > a && b > x
         *self - *id > *a - *id && *b - *id > *self - *id
+    }
+
+    // Transform Did to BiasDid
+    pub fn bias(&self, id: &Self) -> BiasId {
+        BiasId::new(&id, &self)
     }
 }
 
