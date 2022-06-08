@@ -10,6 +10,15 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::str::FromStr;
 
+/// Auth of SubRing
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SubRingAuth {
+    /// admin's id, it can be a group generated id
+    admin: Did,
+    /// sig for verify
+    sig: Vec<u8>
+}
+
 /// A SubRing is a full functional Ring, but with a name and it's finger table can be
 /// stored on Main Rings DHT, For a SubRing, it's virtual address is `sha1(name)`
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -21,7 +30,7 @@ pub struct SubRing {
     /// finger table
     ring: FingerTable,
     /// admin of ring, for verify that a message is come from ring
-    admin: Option<Did>,
+    admin: Option<SubRingAuth>,
 }
 
 impl SubRing {
