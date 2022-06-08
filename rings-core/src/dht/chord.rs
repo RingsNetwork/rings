@@ -104,8 +104,13 @@ pub struct PeerRing {
 impl PeerRing {
     /// Create a new Chord ring.
     pub fn new(id: Did) -> Self {
+        Self::new_with_config(id, 3)
+    }
+
+    /// Create a new Chord Ring with given successor_max, and finger_size
+    pub fn new_with_config(id: Did, succ_max: u8) -> Self {
         Self {
-            successor: Successor::new(&id),
+            successor: Successor::new(&id, succ_max),
             predecessor: None,
             // for Eth address, it's 160
             finger: FingerTable::new(id, 160),
@@ -113,6 +118,20 @@ impl PeerRing {
             fix_finger_index: 0,
             storage: Arc::new(MemStorage::<Did, VirtualNode>::new()),
             cache: Arc::new(MemStorage::<Did, VirtualNode>::new()),
+        }
+    }
+
+    /// Init with given Storage
+    pub fn new_with_storage(id: Did, storage: Arc<MemStorage<Did, VirtualNode>>) -> Self {
+        Self {
+            successor: Successor::new(&id, 3),
+            predecessor: None,
+            // for Eth address, it's 160
+            finger: FingerTable::new(id, 160),
+            storage: Arc::clone(&storage),
+            cache: Arc::new(MemStorage::<Did, VirtualNode>::new()),
+            id,
+            fix_finger_index: 0,
         }
     }
 
@@ -137,20 +156,6 @@ impl PeerRing {
     /// Calculate Bias of the Did on the Ring
     pub fn bias(&self, id: Did) -> BiasId {
         BiasId::new(&self.id, &id)
-    }
-
-    /// Init with given Storage
-    pub fn new_with_storage(id: Did, storage: Arc<MemStorage<Did, VirtualNode>>) -> Self {
-        Self {
-            successor: Successor::new(&id),
-            predecessor: None,
-            // for Eth address, it's 160
-            finger: FingerTable::new(id, 160),
-            storage: Arc::clone(&storage),
-            cache: Arc::new(MemStorage::<Did, VirtualNode>::new()),
-            id,
-            fix_finger_index: 0,
-        }
     }
 
     /// finger length
