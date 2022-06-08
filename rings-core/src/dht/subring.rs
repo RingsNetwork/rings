@@ -16,7 +16,7 @@ pub struct SubRingAuth {
     /// admin's id, it can be a group generated id
     admin: Did,
     /// sig for verify
-    sig: Vec<u8>
+    sig: Vec<u8>,
 }
 
 /// A SubRing is a full functional Ring, but with a name and it's finger table can be
