@@ -207,7 +207,6 @@ mod test {
     use crate::message::MessageHandler;
     use crate::prelude::RTCSdpType;
     use crate::session::SessionManager;
-    use crate::storage::Storage;
     use crate::swarm::Swarm;
     use crate::swarm::TransportManager;
     use crate::types::ice_transport::IceTrickleScheme;

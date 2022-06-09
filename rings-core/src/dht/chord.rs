@@ -5,7 +5,7 @@ use super::types::{Chord, ChordStablize, ChordStorage};
 use super::vnode::VirtualNode;
 use crate::dht::Did;
 use crate::err::{Error, Result};
-use crate::storage::{MemStorage, Storage};
+use crate::storage::MemStorage;
 use num_bigint::BigUint;
 use serde::Deserialize;
 use serde::Serialize;
