@@ -11,7 +11,6 @@ pub mod test {
     use rings_core::message::Message;
     use rings_core::message::MessageHandler;
     use rings_core::session::SessionManager;
-    use rings_core::storage::Storage;
     use rings_core::swarm::Swarm;
     use rings_core::swarm::TransportManager;
     use rings_core::transports::Transport;

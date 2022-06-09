@@ -4,7 +4,7 @@ use crate::err::{Error, Result};
 use crate::message::{self, Message, MessageRelay, MessageRelayMethod, OriginVerificationGen};
 use crate::message::{Decoder, Encoder};
 use crate::session::SessionManager;
-use crate::storage::{MemStorage, Storage};
+use crate::storage::MemStorage;
 use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::Event;
 use crate::types::ice_transport::IceServer;
