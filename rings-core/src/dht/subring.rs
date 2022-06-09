@@ -43,7 +43,7 @@ impl SubRingManager {
     }
 
     /// create a new SubRing and store in table
-    pub fn create_subring(&self, name: &String) -> Result<SubRing> {
+    pub fn create_subring(&self, name: &str) -> Result<SubRing> {
         let subring = SubRing::new(name, &self.id)?;
         self.table.set(&subring.did.clone(), subring.clone());
         Ok(subring)
@@ -56,59 +56,60 @@ impl SubRingManager {
 
     /// get subring by id
     pub fn set(&self, subring: &SubRing) {
-        let id = subring.did.clone();
+        let id = subring.did;
         self.table.set(&id, subring.clone());
     }
 
     /// get subring by name
-    pub fn get_by_name(&self, name: &String) -> Result<Option<SubRing>> {
-        let address: HashStr = name.clone().into();
+    pub fn get_by_name(&self, name: &str) -> Result<Option<SubRing>> {
+        let address: HashStr = name.to_owned().into();
         let did = Did::from_str(&address.inner())?;
         Ok(self.get(&did))
     }
 
     /// get subring, update and putback
     pub fn get_for_update(&self, id: Did, callback: Box<dyn FnOnce(Option<SubRing>) -> SubRing>) {
-        let subring = callback(self.get(&id)).clone();
+        let subring = callback(self.get(&id));
         self.set(&subring);
     }
 
     /// get subring, update and putback
     pub fn get_for_update_by_name(
         &self,
-        name: &String,
+        name: &str,
         callback: Box<dyn FnOnce(Option<SubRing>) -> SubRing>,
     ) -> Result<()> {
-        let address: HashStr = name.clone().into();
+        let address: HashStr = name.to_owned().into();
         let did = Did::from_str(&address.inner())?;
-        Ok(self.get_for_update(did, callback))
+        self.get_for_update(did, callback);
+        Ok(())
     }
 }
 
 impl SubRing {
     /// Create a new SubRing
-    pub fn new(name: &String, creator: &Did) -> Result<Self> {
-        let address: HashStr = name.clone().into();
+    pub fn new(name: &str, creator: &Did) -> Result<Self> {
+        let address: HashStr = name.to_owned().into();
         let did = Did::from_str(&address.inner())?;
         Ok(Self {
-            name: name.clone(),
+            name: name.to_owned(),
             did,
             finger: FingerTable::new(did, 1),
             admin: None,
-            creator: creator.clone(),
+            creator: *creator,
         })
     }
 
     /// Create a SubRing from Ring
-    pub fn from_ring(name: &String, ring: &PeerRing) -> Result<Self> {
-        let address: HashStr = name.clone().into();
+    pub fn from_ring(name: &str, ring: &PeerRing) -> Result<Self> {
+        let address: HashStr = name.to_owned().into();
         let did = Did::from_str(&address.inner())?;
         Ok(Self {
-            name: name.clone(),
+            name: name.to_owned(),
             did,
             finger: ring.finger.clone(),
             admin: None,
-            creator: ring.id.clone(),
+            creator: ring.id,
         })
     }
 }
@@ -132,7 +133,7 @@ impl From<SubRing> for PeerRing {
         if let Some(id) = ring.finger.first() {
             pr.successor.update(id);
         }
-        pr.finger = ring.finger.clone();
+        pr.finger = ring.finger;
         pr
     }
 }

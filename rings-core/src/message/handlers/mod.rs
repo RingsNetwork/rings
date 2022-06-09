@@ -56,7 +56,7 @@ impl MessageHandler {
             dht,
             swarm: swarm.clone(),
             callback: Arc::new(Mutex::new(Some(callback))),
-            subrings: Arc::new(SubRingManager::new(swarm.address().clone().into())),
+            subrings: Arc::new(SubRingManager::new(swarm.address().into())),
         }
     }
 
@@ -65,7 +65,7 @@ impl MessageHandler {
             dht,
             swarm: swarm.clone(),
             callback: Arc::new(Mutex::new(None)),
-            subrings: Arc::new(SubRingManager::new(swarm.address().clone().into())),
+            subrings: Arc::new(SubRingManager::new(swarm.address().into())),
         }
     }
 

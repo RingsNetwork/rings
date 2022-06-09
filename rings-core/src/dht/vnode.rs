@@ -104,9 +104,9 @@ impl VirtualNode {
                 let decoded_a: String = a.data[0].decode()?;
                 let decoded_b: String = a.data[0].decode()?;
                 let mut subring_a: SubRing =
-                    serde_json::from_str(&decoded_a).map_err(|e| Error::Deserialize(e))?;
+                    serde_json::from_str(&decoded_a).map_err(Error::Deserialize)?;
                 let subring_b: SubRing =
-                    serde_json::from_str(&decoded_b).map_err(|e| Error::Deserialize(e))?;
+                    serde_json::from_str(&decoded_b).map_err(Error::Deserialize)?;
                 subring_a.finger.join(subring_b.creator);
                 subring_a.try_into()
             }

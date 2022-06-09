@@ -17,7 +17,7 @@ impl Successor {
     pub fn new(id: &Did, max: u8) -> Self {
         Self {
             id: *id,
-            max: max,
+            max,
             successors: vec![],
         }
     }
