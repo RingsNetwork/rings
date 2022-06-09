@@ -2398,6 +2398,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rexie"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18791efeab24f59e9d05df476d68d7c8939ba7e7ed66fb91644b2f3286c93a27"
+dependencies = [
+ "console_error_panic_hook",
+ "js-sys",
+ "num-traits",
+ "thiserror",
+ "tokio",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
 name = "ring"
 version = "0.16.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2438,6 +2453,7 @@ dependencies = [
  "rand 0.8.5",
  "rand_core 0.6.3",
  "rand_hc 0.3.1",
+ "rexie",
  "serde",
  "serde_json",
  "sha1",

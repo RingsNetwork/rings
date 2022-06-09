@@ -235,6 +235,13 @@ pub enum Error {
 
     #[error("Only SEND message can reset destination")]
     ResetDestinationNeedSend,
+
+    #[cfg(feature = "wasm")]
+    #[error("IndexedDB error, {0}")]
+    IDBError(rexie::Error),
+
+    #[error("Invalid capacity value")]
+    InvalidCapacity,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
