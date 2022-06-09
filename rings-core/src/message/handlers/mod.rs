@@ -1,4 +1,5 @@
 use super::{CustomMessage, MaybeEncrypted};
+use crate::dht::subring::SubRingManager;
 use crate::dht::{Did, PeerRing};
 use crate::err::{Error, Result};
 use crate::message::payload::{MessageRelay, MessageRelayMethod, OriginVerificationGen};
@@ -17,6 +18,7 @@ use web3::types::Address;
 
 pub mod connection;
 pub mod storage;
+pub mod subring;
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
@@ -41,6 +43,7 @@ pub struct MessageHandler {
     dht: Arc<Mutex<PeerRing>>,
     swarm: Arc<Swarm>,
     callback: Arc<Mutex<Option<CallbackFn>>>,
+    subrings: Arc<SubRingManager>,
 }
 
 impl MessageHandler {
@@ -51,16 +54,18 @@ impl MessageHandler {
     ) -> Self {
         Self {
             dht,
-            swarm,
+            swarm: swarm.clone(),
             callback: Arc::new(Mutex::new(Some(callback))),
+            subrings: Arc::new(SubRingManager::new(swarm.address().clone().into())),
         }
     }
 
     pub fn new(dht: Arc<Mutex<PeerRing>>, swarm: Arc<Swarm>) -> Self {
         Self {
             dht,
-            swarm,
+            swarm: swarm.clone(),
             callback: Arc::new(Mutex::new(None)),
+            subrings: Arc::new(SubRingManager::new(swarm.address().clone().into())),
         }
     }
 
