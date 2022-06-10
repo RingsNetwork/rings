@@ -132,6 +132,9 @@ pub enum Error {
     #[error("Invalid peer type")]
     InvalidPeerType,
 
+    #[error("Invalid virtual node type")]
+    InvalidVNodeType,
+
     #[cfg(not(feature = "wasm"))]
     #[error("RTC new peer connection failed")]
     RTCPeerConnectionCreateFailed(#[source] webrtc::Error),

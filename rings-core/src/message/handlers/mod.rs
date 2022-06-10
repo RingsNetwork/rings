@@ -1,5 +1,4 @@
 use super::{CustomMessage, MaybeEncrypted};
-use crate::dht::subring::SubRingManager;
 use crate::dht::{Did, PeerRing};
 use crate::err::{Error, Result};
 use crate::message::payload::{MessageRelay, MessageRelayMethod, OriginVerificationGen};
@@ -43,7 +42,6 @@ pub struct MessageHandler {
     dht: Arc<Mutex<PeerRing>>,
     swarm: Arc<Swarm>,
     callback: Arc<Mutex<Option<CallbackFn>>>,
-    subrings: Arc<SubRingManager>,
 }
 
 impl MessageHandler {
@@ -54,18 +52,16 @@ impl MessageHandler {
     ) -> Self {
         Self {
             dht,
-            swarm: swarm.clone(),
+            swarm,
             callback: Arc::new(Mutex::new(Some(callback))),
-            subrings: Arc::new(SubRingManager::new(swarm.address().into())),
         }
     }
 
     pub fn new(dht: Arc<Mutex<PeerRing>>, swarm: Arc<Swarm>) -> Self {
         Self {
             dht,
-            swarm: swarm.clone(),
+            swarm,
             callback: Arc::new(Mutex::new(None)),
-            subrings: Arc::new(SubRingManager::new(swarm.address().into())),
         }
     }
 

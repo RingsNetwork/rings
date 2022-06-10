@@ -6,7 +6,6 @@ use super::FingerTable;
 use crate::dht::Did;
 use crate::ecc::HashStr;
 use crate::err::{Error, Result};
-use crate::storage::MemStorage;
 use serde::Deserialize;
 use serde::Serialize;
 use std::str::FromStr;
@@ -27,62 +26,69 @@ pub struct SubRing {
     pub creator: Did,
 }
 
-/// SubRing manager is a HashTable of SubRing
-pub struct SubRingManager {
-    id: Did,
-    table: MemStorage<Did, SubRing>,
+/// Trait for how dht manage SubRing
+pub trait TSubRingManager {
+    /// get subring from storage by id
+    fn get_subring(&self, id: &Did) -> Option<Result<SubRing>>;
+    /// get subring from storage by name
+    fn get_subring_by_name(&self, name: &str) -> Option<Result<SubRing>>;
+    /// store a subring to storage
+    fn store_subring(&self, subring: &SubRing) -> Result<()>;
+    /// get a subring for update
+    fn get_subring_for_update(
+        &self,
+        id: Did,
+        callback: Box<dyn FnOnce(SubRing) -> SubRing>,
+    ) -> Result<bool>;
+    /// get a subring for update by name
+    fn get_subring_for_update_by_name(
+        &self,
+        name: &str,
+        callback: Box<dyn FnOnce(SubRing) -> SubRing>,
+    ) -> Result<bool>;
 }
 
-impl SubRingManager {
-    /// new instance
-    pub fn new(id: Did) -> Self {
-        Self {
-            id,
-            table: MemStorage::<Did, SubRing>::new(),
+impl TSubRingManager for PeerRing {
+    fn get_subring(&self, id: &Did) -> Option<Result<SubRing>> {
+        self.storage.get(id).map(|vn| vn.try_into())
+    }
+
+    fn store_subring(&self, subring: &SubRing) -> Result<()> {
+        let id = subring.did;
+        self.storage.set(&id, subring.clone().try_into()?);
+        Ok(())
+    }
+
+    fn get_subring_by_name(&self, name: &str) -> Option<Result<SubRing>> {
+        let address: HashStr = name.to_owned().into();
+        // trans Result to Option here
+        let did = Did::from_str(&address.inner()).ok()?;
+        self.get_subring(&did)
+    }
+    /// get subring, update and putback
+    fn get_subring_for_update(
+        &self,
+        id: Did,
+        callback: Box<dyn FnOnce(SubRing) -> SubRing>,
+    ) -> Result<bool> {
+        if let Some(Ok(subring)) = self.get_subring(&id) {
+            let sr = callback(subring);
+            self.store_subring(&sr)?;
+            Ok(true)
+        } else {
+            Ok(false)
         }
     }
 
-    /// create a new SubRing and store in table
-    pub fn create_subring(&self, name: &str) -> Result<SubRing> {
-        let subring = SubRing::new(name, &self.id)?;
-        self.table.set(&subring.did.clone(), subring.clone());
-        Ok(subring)
-    }
-
-    /// get subring by id
-    pub fn get(&self, id: &Did) -> Option<SubRing> {
-        self.table.get(id)
-    }
-
-    /// get subring by id
-    pub fn set(&self, subring: &SubRing) {
-        let id = subring.did;
-        self.table.set(&id, subring.clone());
-    }
-
-    /// get subring by name
-    pub fn get_by_name(&self, name: &str) -> Result<Option<SubRing>> {
-        let address: HashStr = name.to_owned().into();
-        let did = Did::from_str(&address.inner())?;
-        Ok(self.get(&did))
-    }
-
     /// get subring, update and putback
-    pub fn get_for_update(&self, id: Did, callback: Box<dyn FnOnce(Option<SubRing>) -> SubRing>) {
-        let subring = callback(self.get(&id));
-        self.set(&subring);
-    }
-
-    /// get subring, update and putback
-    pub fn get_for_update_by_name(
+    fn get_subring_for_update_by_name(
         &self,
         name: &str,
-        callback: Box<dyn FnOnce(Option<SubRing>) -> SubRing>,
-    ) -> Result<()> {
+        callback: Box<dyn FnOnce(SubRing) -> SubRing>,
+    ) -> Result<bool> {
         let address: HashStr = name.to_owned().into();
         let did = Did::from_str(&address.inner())?;
-        self.get_for_update(did, callback);
-        Ok(())
+        self.get_subring_for_update(did, callback)
     }
 }
 
@@ -123,6 +129,21 @@ impl TryFrom<SubRing> for VirtualNode {
             data: vec![data.into()],
             kind: VNodeType::SubRing,
         })
+    }
+}
+
+impl TryFrom<VirtualNode> for SubRing {
+    type Error = Error;
+    fn try_from(vnode: VirtualNode) -> Result<Self> {
+        match &vnode.kind {
+            VNodeType::SubRing => {
+                let decoded: String = vnode.data[0].decode()?;
+                let subring: SubRing =
+                    serde_json::from_str(&decoded).map_err(Error::Deserialize)?;
+                Ok(subring)
+            }
+            _ => Err(Error::InvalidVNodeType),
+        }
     }
 }
 
