@@ -15,8 +15,11 @@ use std::sync::Arc;
 use storage::TChordStorage;
 use web3::types::Address;
 
+/// Operator and Handler for Connection
 pub mod connection;
+/// Operator and Handler for Storage
 pub mod storage;
+/// Operator and Handler for SubRing
 pub mod subring;
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
