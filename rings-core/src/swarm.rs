@@ -1,7 +1,7 @@
 //! Tranposrt managerment
 
 use crate::err::{Error, Result};
-use crate::message::{self, Message, MessageRelay, MessageRelayMethod, OriginVerificationGen};
+use crate::message::{self, Message, MessagePayload};
 use crate::message::{Decoder, Encoder};
 use crate::session::SessionManager;
 use crate::storage::MemStorage;
@@ -75,7 +75,7 @@ impl Swarm {
     pub async fn send_message(
         &self,
         address: &Address,
-        payload: MessageRelay<Message>,
+        payload: MessagePayload<Message>,
     ) -> Result<()> {
         let transport = self
             .get_transport(address)
@@ -85,24 +85,19 @@ impl Swarm {
         transport.send_message(data.as_slice()).await
     }
 
-    fn load_message(&self, ev: Result<Option<Event>>) -> Result<Option<MessageRelay<Message>>> {
+    fn load_message(&self, ev: Result<Option<Event>>) -> Result<Option<MessagePayload<Message>>> {
         let ev = ev?;
 
         match ev {
             Some(Event::DataChannelMessage(msg)) => {
-                let payload = MessageRelay::from_encoded(&msg.try_into()?)?;
+                let payload = MessagePayload::from_encoded(&msg.try_into()?)?;
                 Ok(Some(payload))
             }
             Some(Event::RegisterTransport(address)) => match self.get_transport(&address) {
                 Some(_) => {
-                    let payload = MessageRelay::new(
+                    let payload = MessagePayload::new_direct(
                         Message::JoinDHT(message::JoinDHT { id: address.into() }),
                         &self.session_manager,
-                        OriginVerificationGen::Origin,
-                        MessageRelayMethod::SEND,
-                        None,
-                        None,
-                        None,
                         self.address().into(),
                     )?;
                     Ok(Some(payload))
@@ -111,14 +106,9 @@ impl Swarm {
             },
             Some(Event::ConnectFailed(address)) => {
                 if self.remove_transport(&address).is_some() {
-                    let payload = MessageRelay::new(
+                    let payload = MessagePayload::new_direct(
                         Message::LeaveDHT(message::LeaveDHT { id: address.into() }),
                         &self.session_manager,
-                        OriginVerificationGen::Origin,
-                        MessageRelayMethod::SEND,
-                        None,
-                        None,
-                        None,
                         self.address().into(),
                     )?;
                     Ok(Some(payload))
@@ -132,7 +122,7 @@ impl Swarm {
 
     /// This method is required because web-sys components is not `Send`
     /// which means an async loop cannot running concurrency.
-    pub async fn poll_message(&self) -> Option<MessageRelay<Message>> {
+    pub async fn poll_message(&self) -> Option<MessagePayload<Message>> {
         let receiver = &self.transport_event_channel.receiver();
         let ev = Channel::recv(receiver).await;
         match self.load_message(ev) {
@@ -142,7 +132,7 @@ impl Swarm {
         }
     }
 
-    pub fn iter_messages<'a, 'b>(&'a self) -> impl Stream<Item = MessageRelay<Message>> + 'b
+    pub fn iter_messages<'a, 'b>(&'a self) -> impl Stream<Item = MessagePayload<Message>> + 'b
     where
         'a: 'b,
     {

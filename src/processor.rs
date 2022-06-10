@@ -5,7 +5,7 @@ use crate::{
     jsonrpc::{method, response::TransportAndIce},
     jsonrpc_client::SimpleClient,
     prelude::rings_core::{
-        message::{Encoded, Message, MessageHandler},
+        message::{Encoded, Message, MessageHandler, PayloadSender},
         prelude::{
             uuid,
             web3::{contract::tokens::Tokenizable, ethabi::Token, types::Address},
@@ -301,7 +301,7 @@ impl Processor {
         let destination = Address::from_str(destination).map_err(|_| Error::InvalidAddress)?;
         let msg = Message::custom(msg, &None).map_err(Error::SendMessage)?;
         self.msg_handler
-            .send_message(&next_hop.into(), &destination.into(), msg)
+            .send_message(msg, next_hop.into(), destination.into())
             .await
             .map_err(Error::SendMessage)?;
         Ok(())

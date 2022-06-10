@@ -9,7 +9,7 @@ use crate::{
         ecc::SecretKey,
         message::{
             CustomMessage, Encoded, MaybeEncrypted, Message, MessageCallback, MessageHandler,
-            MessageRelay,
+            MessagePayload,
         },
         prelude::web3::types::Address,
         session::SessionManager,
@@ -326,7 +326,7 @@ impl MessageCallback for MessageCallbackInstance {
     async fn custom_message(
         &self,
         handler: &MessageHandler,
-        relay: &MessageRelay<Message>,
+        relay: &MessagePayload<Message>,
         msg: &MaybeEncrypted<CustomMessage>,
     ) {
         log::debug!("custom_message received: {:?}", msg);
@@ -354,7 +354,7 @@ impl MessageCallback for MessageCallbackInstance {
         //let a = wasm_bindgen_futures::JsFuture::from(self.on_cutom_message.as_ref().clone()).await;
     }
 
-    async fn builtin_message(&self, _handler: &MessageHandler, relay: &MessageRelay<Message>) {
+    async fn builtin_message(&self, _handler: &MessageHandler, relay: &MessagePayload<Message>) {
         let this = JsValue::null();
         log::debug!("builtin_message received: {:?}", relay);
         if let Ok(r) = self

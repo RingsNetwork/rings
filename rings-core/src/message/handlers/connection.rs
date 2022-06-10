@@ -1,15 +1,14 @@
 use crate::dht::ChordStorage;
 use crate::dht::{Chord, ChordStablize, PeerRingAction, PeerRingRemoteAction};
 use crate::err::{Error, Result};
-use crate::message::payload::{MessageRelay, MessageRelayMethod};
-use crate::message::protocol::MessageSessionRelayProtocol;
 use crate::message::types::{
     AlreadyConnected, ConnectNodeReport, ConnectNodeSend, FindSuccessorReport, FindSuccessorSend,
     JoinDHT, Message, NotifyPredecessorReport, NotifyPredecessorSend, SyncVNodeWithSuccessor,
 };
+use crate::message::HandleMsg;
 use crate::message::LeaveDHT;
 use crate::message::MessageHandler;
-use crate::message::OriginVerificationGen;
+use crate::message::{MessagePayload, PayloadSender, RelayMethod};
 use crate::prelude::RTCSdpType;
 use crate::swarm::TransportManager;
 use crate::types::ice_transport::IceTrickleScheme;
@@ -18,60 +17,18 @@ use std::str::FromStr;
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-pub trait TChordConnection {
-    async fn join_chord(&self, relay: MessageRelay<Message>, msg: JoinDHT) -> Result<()>;
-
-    async fn leave_chord(&self, relay: MessageRelay<Message>, msg: LeaveDHT) -> Result<()>;
-
-    async fn connect_node(&self, relay: MessageRelay<Message>, msg: ConnectNodeSend) -> Result<()>;
-
-    async fn connected_node(
-        &self,
-        relay: MessageRelay<Message>,
-        msg: ConnectNodeReport,
-    ) -> Result<()>;
-
-    async fn already_connected(
-        &self,
-        relay: MessageRelay<Message>,
-        msg: AlreadyConnected,
-    ) -> Result<()>;
-
-    async fn find_successor(
-        &self,
-        relay: MessageRelay<Message>,
-        msg: FindSuccessorSend,
-    ) -> Result<()>;
-
-    async fn found_successor(
-        &self,
-        relay: MessageRelay<Message>,
-        msg: FindSuccessorReport,
-    ) -> Result<()>;
-
-    async fn notify_predecessor(
-        &self,
-        relay: MessageRelay<Message>,
-        msg: NotifyPredecessorSend,
-    ) -> Result<()>;
-
-    async fn notified_predecessor(
-        &self,
-        relay: MessageRelay<Message>,
-        msg: NotifyPredecessorReport,
-    ) -> Result<()>;
-}
-
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
-impl TChordConnection for MessageHandler {
-    async fn leave_chord(&self, _relay: MessageRelay<Message>, msg: LeaveDHT) -> Result<()> {
+impl HandleMsg<LeaveDHT> for MessageHandler {
+    async fn handle(&self, _ctx: &MessagePayload<Message>, msg: &LeaveDHT) -> Result<()> {
         let mut dht = self.dht.lock().await;
         dht.remove(msg.id);
         Ok(())
     }
+}
 
-    async fn join_chord(&self, relay: MessageRelay<Message>, msg: JoinDHT) -> Result<()> {
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl HandleMsg<JoinDHT> for MessageHandler {
+    async fn handle(&self, ctx: &MessagePayload<Message>, msg: &JoinDHT) -> Result<()> {
         // here is two situation.
         // finger table just have no other node(beside next), it will be a `create` op
         // otherwise, it will be a `send` op
@@ -83,17 +40,11 @@ impl TChordConnection for MessageHandler {
                 // A.successor == B
                 // B.successor == A
                 // A.find_successor(B)
-                if next != relay.addr.into() {
-                    self.send_relay_message(MessageRelay::new(
+                if next != ctx.addr.into() {
+                    self.send_direct_message(
                         Message::FindSuccessorSend(FindSuccessorSend { id, for_fix: false }),
-                        &self.swarm.session_manager,
-                        OriginVerificationGen::Origin,
-                        MessageRelayMethod::SEND,
-                        None,
-                        None,
-                        Some(next),
                         next,
-                    )?)
+                    )
                     .await
                 } else {
                     Ok(())
@@ -102,10 +53,15 @@ impl TChordConnection for MessageHandler {
             _ => unreachable!(),
         }
     }
+}
 
-    async fn connect_node(&self, relay: MessageRelay<Message>, msg: ConnectNodeSend) -> Result<()> {
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl HandleMsg<ConnectNodeSend> for MessageHandler {
+    async fn handle(&self, ctx: &MessagePayload<Message>, msg: &ConnectNodeSend) -> Result<()> {
         let dht = self.dht.lock().await;
-        let mut relay = relay.clone();
+        let mut relay = ctx.relay.clone();
+
         if dht.id != msg.target_id {
             let next_node = match dht.find_successor(msg.target_id)? {
                 PeerRingAction::Some(node) => Some(node),
@@ -114,13 +70,7 @@ impl TChordConnection for MessageHandler {
             }
             .ok_or(Error::MessageHandlerMissNextNode)?;
             relay.relay(dht.id, Some(next_node))?;
-            return self
-                .send_relay_message(relay.rewrap(
-                    relay.data.clone(),
-                    &self.swarm.session_manager,
-                    OriginVerificationGen::Stick(relay.origin_verification.clone()),
-                )?)
-                .await;
+            return self.transpond_payload(ctx, relay).await;
         }
 
         relay.relay(dht.id, None)?;
@@ -134,14 +84,14 @@ impl TChordConnection for MessageHandler {
                     .get_handshake_info(&self.swarm.session_manager, RTCSdpType::Answer)
                     .await?
                     .to_string();
-                self.send_relay_message(relay.report(
+                self.send_report_message(
                     Message::ConnectNodeReport(ConnectNodeReport {
                         answer_id: dht.id,
                         transport_uuid: msg.transport_uuid.clone(),
                         handshake_info,
                     }),
-                    &self.swarm.session_manager,
-                )?)
+                    relay,
+                )
                 .await?;
                 self.swarm.get_or_register(&msg.sender_id, trans).await?;
 
@@ -149,30 +99,26 @@ impl TChordConnection for MessageHandler {
             }
 
             _ => {
-                self.send_relay_message(relay.report(
+                self.send_report_message(
                     Message::AlreadyConnected(AlreadyConnected { answer_id: dht.id }),
-                    &self.swarm.session_manager,
-                )?)
+                    relay,
+                )
                 .await
             }
         }
     }
+}
 
-    async fn connected_node(
-        &self,
-        relay: MessageRelay<Message>,
-        msg: ConnectNodeReport,
-    ) -> Result<()> {
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl HandleMsg<ConnectNodeReport> for MessageHandler {
+    async fn handle(&self, ctx: &MessagePayload<Message>, msg: &ConnectNodeReport) -> Result<()> {
         let dht = self.dht.lock().await;
-        let mut relay = relay.clone();
+        let mut relay = ctx.relay.clone();
+
         relay.relay(dht.id, None)?;
         if relay.next_hop.is_some() {
-            self.send_relay_message(relay.rewrap(
-                relay.data.clone(),
-                &self.swarm.session_manager,
-                OriginVerificationGen::Stick(relay.origin_verification.clone()),
-            )?)
-            .await
+            self.transpond_payload(ctx, relay).await
         } else {
             let transport = self
                 .swarm
@@ -187,22 +133,18 @@ impl TChordConnection for MessageHandler {
             self.swarm.register(&msg.answer_id, transport).await
         }
     }
+}
 
-    async fn already_connected(
-        &self,
-        relay: MessageRelay<Message>,
-        msg: AlreadyConnected,
-    ) -> Result<()> {
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl HandleMsg<AlreadyConnected> for MessageHandler {
+    async fn handle(&self, ctx: &MessagePayload<Message>, msg: &AlreadyConnected) -> Result<()> {
         let dht = self.dht.lock().await;
-        let mut relay = relay.clone();
+        let mut relay = ctx.relay.clone();
+
         relay.relay(dht.id, None)?;
         if relay.next_hop.is_some() {
-            self.send_relay_message(relay.rewrap(
-                relay.data.clone(),
-                &self.swarm.session_manager,
-                OriginVerificationGen::Stick(relay.origin_verification.clone()),
-            )?)
-            .await
+            self.transpond_payload(ctx, relay).await
         } else {
             self.swarm
                 .get_transport(&msg.answer_id)
@@ -210,55 +152,47 @@ impl TChordConnection for MessageHandler {
                 .ok_or(Error::MessageHandlerMissTransportAlreadyConnected)
         }
     }
+}
 
-    async fn find_successor(
-        &self,
-        relay: MessageRelay<Message>,
-        msg: FindSuccessorSend,
-    ) -> Result<()> {
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl HandleMsg<FindSuccessorSend> for MessageHandler {
+    async fn handle(&self, ctx: &MessagePayload<Message>, msg: &FindSuccessorSend) -> Result<()> {
         let dht = self.dht.lock().await;
-        let mut relay = relay.clone();
+        let mut relay = ctx.relay.clone();
+
         match dht.find_successor(msg.id)? {
             PeerRingAction::Some(id) => {
                 relay.relay(dht.id, None)?;
-                self.send_relay_message(relay.report(
+                self.send_report_message(
                     Message::FindSuccessorReport(FindSuccessorReport {
                         id,
                         for_fix: msg.for_fix,
                     }),
-                    &self.swarm.session_manager,
-                )?)
+                    relay,
+                )
                 .await
             }
             PeerRingAction::RemoteAction(next, _) => {
                 relay.relay(dht.id, Some(next))?;
                 relay.reset_destination(next)?;
-                self.send_relay_message(relay.rewrap(
-                    relay.data.clone(),
-                    &self.swarm.session_manager,
-                    OriginVerificationGen::Stick(relay.origin_verification.clone()),
-                )?)
-                .await
+                self.transpond_payload(ctx, relay).await
             }
             act => Err(Error::PeerRingUnexpectedAction(act)),
         }
     }
+}
 
-    async fn found_successor(
-        &self,
-        relay: MessageRelay<Message>,
-        msg: FindSuccessorReport,
-    ) -> Result<()> {
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl HandleMsg<FindSuccessorReport> for MessageHandler {
+    async fn handle(&self, ctx: &MessagePayload<Message>, msg: &FindSuccessorReport) -> Result<()> {
         let mut dht = self.dht.lock().await;
-        let mut relay = relay.clone();
+        let mut relay = ctx.relay.clone();
+
         relay.relay(dht.id, None)?;
         if relay.next_hop.is_some() {
-            self.send_relay_message(relay.rewrap(
-                relay.data.clone(),
-                &self.swarm.session_manager,
-                OriginVerificationGen::Stick(relay.origin_verification.clone()),
-            )?)
-            .await
+            self.transpond_payload(ctx, relay).await
         } else {
             if self.swarm.get_transport(&msg.id).is_none() && msg.id != self.swarm.address().into()
             {
@@ -274,43 +208,52 @@ impl TChordConnection for MessageHandler {
                     PeerRingRemoteAction::SyncVNodeWithSuccessor(data),
                 )) = dht.sync_with_successor(msg.id)
                 {
-                    self.send_relay_message(MessageRelay::direct(
+                    self.send_direct_message(
                         Message::SyncVNodeWithSuccessor(SyncVNodeWithSuccessor { data }),
-                        &self.swarm.session_manager,
                         next,
-                    )?)
+                    )
                     .await?;
                 }
             }
             Ok(())
         }
     }
+}
 
-    async fn notify_predecessor(
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl HandleMsg<NotifyPredecessorSend> for MessageHandler {
+    async fn handle(
         &self,
-        relay: MessageRelay<Message>,
-        msg: NotifyPredecessorSend,
+        ctx: &MessagePayload<Message>,
+        msg: &NotifyPredecessorSend,
     ) -> Result<()> {
         let mut dht = self.dht.lock().await;
-        let mut relay = relay.clone();
+        let mut relay = ctx.relay.clone();
+
         relay.relay(dht.id, None)?;
         dht.notify(msg.id);
-        self.send_relay_message(relay.report(
+        self.send_report_message(
             Message::NotifyPredecessorReport(NotifyPredecessorReport { id: dht.id }),
-            &self.swarm.session_manager,
-        )?)
+            relay,
+        )
         .await
     }
+}
 
-    async fn notified_predecessor(
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
+    async fn handle(
         &self,
-        relay: MessageRelay<Message>,
-        msg: NotifyPredecessorReport,
+        ctx: &MessagePayload<Message>,
+        msg: &NotifyPredecessorReport,
     ) -> Result<()> {
         let mut dht = self.dht.lock().await;
-        let mut relay = relay.clone();
+        let mut relay = ctx.relay.clone();
+
         relay.relay(dht.id, None)?;
-        assert_eq!(relay.method, MessageRelayMethod::REPORT);
+        assert_eq!(relay.method, RelayMethod::REPORT);
         // if successor: predecessor is between (id, successor]
         // then update local successor
         dht.successor.update(msg.id);
@@ -319,11 +262,10 @@ impl TChordConnection for MessageHandler {
             PeerRingRemoteAction::SyncVNodeWithSuccessor(data),
         )) = dht.sync_with_successor(msg.id)
         {
-            self.send_relay_message(MessageRelay::direct(
+            self.send_direct_message(
                 Message::SyncVNodeWithSuccessor(SyncVNodeWithSuccessor { data }),
-                &self.swarm.session_manager,
                 next,
-            )?)
+            )
             .await?;
         }
         Ok(())
@@ -430,7 +372,7 @@ mod test {
 
         // JoinDHT
         let ev_1 = node1.listen_once().await.unwrap();
-        assert_eq!(ev_1.method, MessageRelayMethod::SEND);
+        assert_eq!(ev_1.method, RelayMethod::SEND);
         assert_eq!(ev_1.path, vec![did1]);
         assert_eq!(ev_1.path_end_cursor, 0);
         assert_eq!(ev_1.next_hop, None);
@@ -445,7 +387,7 @@ mod test {
         assert_eq!(&ev_1.addr, &key1.address());
 
         let ev_2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev_2.method, MessageRelayMethod::SEND);
+        assert_eq!(ev_2.method, RelayMethod::SEND);
         assert_eq!(ev_2.path, vec![did2]);
         assert_eq!(ev_2.path_end_cursor, 0);
         assert_eq!(ev_2.next_hop, None);
@@ -462,7 +404,7 @@ mod test {
         let ev_1 = node1.listen_once().await.unwrap();
         // msg is send from key2
         assert_eq!(ev_1.addr, key2.address());
-        assert_eq!(ev_1.method, MessageRelayMethod::SEND);
+        assert_eq!(ev_1.method, RelayMethod::SEND);
         assert_eq!(ev_1.path, vec![did2]);
         assert_eq!(ev_1.path_end_cursor, 0);
         assert_eq!(ev_1.next_hop, Some(did1));
@@ -476,7 +418,7 @@ mod test {
 
         let ev_2 = node2.listen_once().await.unwrap();
         assert_eq!(ev_2.addr, key1.address());
-        assert_eq!(ev_2.method, MessageRelayMethod::SEND);
+        assert_eq!(ev_2.method, RelayMethod::SEND);
         assert_eq!(ev_2.path, vec![did1]);
         assert_eq!(ev_2.path_end_cursor, 0);
         assert_eq!(ev_2.next_hop, Some(did2));
@@ -491,7 +433,7 @@ mod test {
         // node2 response self as node1's successor
         let ev_1 = node1.listen_once().await.unwrap();
         assert_eq!(ev_1.addr, key2.address());
-        assert_eq!(ev_1.method, MessageRelayMethod::REPORT);
+        assert_eq!(ev_1.method, RelayMethod::REPORT);
         assert_eq!(ev_1.path, vec![did1, did2]);
         assert_eq!(ev_1.path_end_cursor, 0);
         assert_eq!(ev_1.next_hop, Some(did1));
@@ -509,7 +451,7 @@ mod test {
         // key1 response self as key2's successor
         let ev_2 = node2.listen_once().await.unwrap();
         assert_eq!(ev_2.addr, key1.address());
-        assert_eq!(ev_2.method, MessageRelayMethod::REPORT);
+        assert_eq!(ev_2.method, RelayMethod::REPORT);
         assert_eq!(ev_2.path, vec![did2, did1]);
         assert_eq!(ev_2.path_end_cursor, 0);
         assert_eq!(ev_2.next_hop, Some(did2));
@@ -563,7 +505,7 @@ mod test {
 
         let ev_3 = node3.listen_once().await.unwrap();
         assert_eq!(ev_3.addr, key3.address());
-        assert_eq!(ev_3.method, MessageRelayMethod::SEND);
+        assert_eq!(ev_3.method, RelayMethod::SEND);
         assert_eq!(ev_3.path, vec![did3]);
         assert_eq!(ev_3.path_end_cursor, 0);
         assert_eq!(ev_3.next_hop, None);
@@ -576,7 +518,7 @@ mod test {
 
         let ev_2 = node2.listen_once().await.unwrap();
         assert_eq!(ev_2.addr, key2.address());
-        assert_eq!(ev_2.method, MessageRelayMethod::SEND);
+        assert_eq!(ev_2.method, RelayMethod::SEND);
         assert_eq!(ev_2.path, vec![did2]);
         assert_eq!(ev_2.path_end_cursor, 0);
         assert_eq!(ev_2.next_hop, None);
@@ -590,7 +532,7 @@ mod test {
         let ev_3 = node3.listen_once().await.unwrap();
         // msg is send from node2
         assert_eq!(ev_3.addr, key2.address());
-        assert_eq!(ev_3.method, MessageRelayMethod::SEND);
+        assert_eq!(ev_3.method, RelayMethod::SEND);
         assert_eq!(ev_3.path, vec![did2]);
         assert_eq!(ev_3.path_end_cursor, 0);
         assert_eq!(ev_3.next_hop, Some(did3));
@@ -604,7 +546,7 @@ mod test {
 
         let ev_2 = node2.listen_once().await.unwrap();
         assert_eq!(ev_2.addr, key3.address());
-        assert_eq!(ev_2.method, MessageRelayMethod::SEND);
+        assert_eq!(ev_2.method, RelayMethod::SEND);
         assert_eq!(ev_2.path, vec![did3]);
         assert_eq!(ev_2.path_end_cursor, 0);
         assert_eq!(ev_2.next_hop, Some(did2));
@@ -619,7 +561,7 @@ mod test {
         // node2 response self as node1's successor
         let ev_3 = node3.listen_once().await.unwrap();
         assert_eq!(ev_3.addr, key2.address());
-        assert_eq!(ev_3.method, MessageRelayMethod::REPORT);
+        assert_eq!(ev_3.method, RelayMethod::REPORT);
         assert_eq!(ev_3.path, vec![did3, did2]);
         assert_eq!(ev_3.path_end_cursor, 0);
         assert_eq!(ev_3.next_hop, Some(did3));
@@ -637,7 +579,7 @@ mod test {
         // key3 response self as key2's successor
         let ev_2 = node2.listen_once().await.unwrap();
         assert_eq!(ev_2.addr, key3.address());
-        assert_eq!(ev_2.method, MessageRelayMethod::REPORT);
+        assert_eq!(ev_2.method, RelayMethod::REPORT);
         assert_eq!(ev_2.path, vec![did2, did3]);
         assert_eq!(ev_2.path_end_cursor, 0);
         assert_eq!(ev_2.next_hop, Some(did2));
@@ -664,7 +606,7 @@ mod test {
 
         // msg is send from node 1 to node 2
         assert_eq!(ev2.addr, key1.address());
-        assert_eq!(ev2.method, MessageRelayMethod::SEND);
+        assert_eq!(ev2.method, RelayMethod::SEND);
         assert_eq!(ev2.path, vec![did1]);
         assert_eq!(ev2.path_end_cursor, 0);
         assert_eq!(ev2.next_hop, Some(did2));
@@ -688,7 +630,7 @@ mod test {
         );
 
         assert_eq!(ev3.addr, key2.address());
-        assert_eq!(ev3.method, MessageRelayMethod::SEND);
+        assert_eq!(ev3.method, RelayMethod::SEND);
         assert_eq!(ev3.path, vec![did1, did2]);
         assert_eq!(ev3.path_end_cursor, 0);
         assert_eq!(ev3.next_hop, Some(did3));
@@ -703,7 +645,7 @@ mod test {
         let ev2 = node2.listen_once().await.unwrap();
         // node3 send report to node2
         assert_eq!(ev2.addr, key3.address());
-        assert_eq!(ev2.method, MessageRelayMethod::REPORT);
+        assert_eq!(ev2.method, RelayMethod::REPORT);
         assert_eq!(ev2.path, vec![did1, did2, did3]);
         assert_eq!(ev2.path_end_cursor, 0);
         assert_eq!(ev2.next_hop, Some(did2));
@@ -716,7 +658,7 @@ mod test {
         // node 2 send report to node1
         let ev1 = node1.listen_once().await.unwrap();
         assert_eq!(ev1.addr, key2.address());
-        assert_eq!(ev1.method, MessageRelayMethod::REPORT);
+        assert_eq!(ev1.method, RelayMethod::REPORT);
         assert_eq!(ev1.path, vec![did1, did2, did3]);
         assert_eq!(ev1.path_end_cursor, 1);
         assert_eq!(ev1.next_hop, Some(did1));
@@ -824,7 +766,7 @@ mod test {
         // node1 and node3 will gen JoinDHT Event
         let ev_1 = node1.listen_once().await.unwrap();
         assert_eq!(ev_1.addr, key1.address());
-        assert_eq!(ev_1.method, MessageRelayMethod::SEND);
+        assert_eq!(ev_1.method, RelayMethod::SEND);
         assert_eq!(ev_1.path, vec![did1]);
         assert_eq!(ev_1.path_end_cursor, 0);
         assert_eq!(ev_1.next_hop, None);
@@ -840,7 +782,7 @@ mod test {
 
         let ev_3 = node3.listen_once().await.unwrap();
         assert_eq!(ev_3.addr, key3.address());
-        assert_eq!(ev_3.method, MessageRelayMethod::SEND);
+        assert_eq!(ev_3.method, RelayMethod::SEND);
         assert_eq!(ev_3.path, vec![did3]);
         assert_eq!(ev_3.path_end_cursor, 0);
         assert_eq!(ev_3.next_hop, None);
@@ -855,7 +797,7 @@ mod test {
         let ev_1 = node1.listen_once().await.unwrap();
         // msg is send from key3
         assert_eq!(ev_1.addr, key3.address());
-        assert_eq!(ev_1.method, MessageRelayMethod::SEND);
+        assert_eq!(ev_1.method, RelayMethod::SEND);
         assert_eq!(ev_1.path, vec![did3]);
         assert_eq!(ev_1.path_end_cursor, 0);
         assert_eq!(ev_1.next_hop, Some(did1));
@@ -869,7 +811,7 @@ mod test {
 
         let ev_3 = node3.listen_once().await.unwrap();
         assert_eq!(ev_3.addr, key1.address());
-        assert_eq!(ev_3.method, MessageRelayMethod::SEND);
+        assert_eq!(ev_3.method, RelayMethod::SEND);
         assert_eq!(ev_3.path, vec![did1]);
         assert_eq!(ev_3.path_end_cursor, 0);
         assert_eq!(ev_3.next_hop, Some(did3));
@@ -884,7 +826,7 @@ mod test {
         // node3 response self as node1's successor
         let ev_1 = node1.listen_once().await.unwrap();
         assert_eq!(ev_1.addr, key3.address());
-        assert_eq!(ev_1.method, MessageRelayMethod::REPORT);
+        assert_eq!(ev_1.method, RelayMethod::REPORT);
         assert_eq!(ev_1.path, vec![did1, did3]);
         assert_eq!(ev_1.path_end_cursor, 0);
         assert_eq!(ev_1.next_hop, Some(did1));
@@ -902,7 +844,7 @@ mod test {
         // key1 response self as key3's successor
         let ev_3 = node3.listen_once().await.unwrap();
         assert_eq!(ev_3.addr, key1.address());
-        assert_eq!(ev_3.method, MessageRelayMethod::REPORT);
+        assert_eq!(ev_3.method, RelayMethod::REPORT);
         assert_eq!(ev_3.path, vec![did3, did1]);
         assert_eq!(ev_3.path_end_cursor, 0);
         assert_eq!(ev_3.next_hop, Some(did3));
@@ -959,7 +901,7 @@ mod test {
         // node2 and node3 will gen JoinDHT Event
         let ev_2 = node2.listen_once().await.unwrap();
         assert_eq!(ev_2.addr, key2.address());
-        assert_eq!(ev_2.method, MessageRelayMethod::SEND);
+        assert_eq!(ev_2.method, RelayMethod::SEND);
         assert_eq!(ev_2.path, vec![did2]);
         assert_eq!(ev_2.path_end_cursor, 0);
         assert_eq!(ev_2.next_hop, None);
@@ -975,7 +917,7 @@ mod test {
 
         let ev_3 = node3.listen_once().await.unwrap();
         assert_eq!(ev_3.addr, key3.address());
-        assert_eq!(ev_3.method, MessageRelayMethod::SEND);
+        assert_eq!(ev_3.method, RelayMethod::SEND);
         assert_eq!(ev_3.path, vec![did3]);
         assert_eq!(ev_3.path_end_cursor, 0);
         assert_eq!(ev_3.next_hop, None);
@@ -991,7 +933,7 @@ mod test {
         // msg is send from key3
         // node 3 ask node 2 for successor
         assert_eq!(ev_2.addr, key3.address());
-        assert_eq!(ev_2.method, MessageRelayMethod::SEND);
+        assert_eq!(ev_2.method, RelayMethod::SEND);
         assert_eq!(ev_2.path, vec![did3]);
         assert_eq!(ev_2.path_end_cursor, 0);
         assert_eq!(ev_2.next_hop, Some(did2));
@@ -1007,7 +949,7 @@ mod test {
         // node 3 will ask it's successor: node 1
         let ev_3 = node3.listen_once().await.unwrap();
         assert_eq!(ev_3.addr, key2.address());
-        assert_eq!(ev_3.method, MessageRelayMethod::SEND);
+        assert_eq!(ev_3.method, RelayMethod::SEND);
         assert_eq!(ev_3.path, vec![did2]);
         assert_eq!(ev_3.path_end_cursor, 0);
         assert_eq!(ev_3.next_hop, Some(did3));
@@ -1023,7 +965,7 @@ mod test {
         // node 2 report node2's successor is node 3
         let ev_3 = node3.listen_once().await.unwrap();
         assert_eq!(ev_3.addr, key2.address());
-        assert_eq!(ev_3.method, MessageRelayMethod::REPORT);
+        assert_eq!(ev_3.method, RelayMethod::REPORT);
         assert_eq!(ev_3.path, vec![did3, did2]);
         assert_eq!(ev_3.path_end_cursor, 0);
         assert_eq!(ev_3.next_hop, Some(did3));
@@ -1046,7 +988,7 @@ mod test {
         // the msg is send from node 3 to node 1
         let ev_1 = node1.listen_once().await.unwrap();
         assert_eq!(ev_1.addr, key3.address());
-        assert_eq!(ev_1.method, MessageRelayMethod::SEND);
+        assert_eq!(ev_1.method, RelayMethod::SEND);
         assert_eq!(ev_1.path, vec![did2, did3]);
         assert_eq!(ev_1.path_end_cursor, 0);
         assert_eq!(ev_1.next_hop, Some(did1));
@@ -1073,7 +1015,7 @@ mod test {
         // path is node2 -> node3 -> node1 -> node3
         let ev_3 = node3.listen_once().await.unwrap();
         assert_eq!(ev_3.addr, key1.address());
-        assert_eq!(ev_3.method, MessageRelayMethod::REPORT);
+        assert_eq!(ev_3.method, RelayMethod::REPORT);
         assert_eq!(ev_3.path, vec![did2, did3, did1]);
         assert_eq!(ev_3.path_end_cursor, 0);
         assert_eq!(ev_3.next_hop, Some(did3));
@@ -1089,7 +1031,7 @@ mod test {
         // path is: node 2 -> node3 -> node1 -> node3 -> node2
         let ev_2 = node2.listen_once().await.unwrap();
         assert_eq!(ev_2.addr, key3.address());
-        assert_eq!(ev_2.method, MessageRelayMethod::REPORT);
+        assert_eq!(ev_2.method, RelayMethod::REPORT);
         assert_eq!(ev_2.path, vec![did2, did3, did1]);
         assert_eq!(ev_2.path_end_cursor, 1);
         assert_eq!(ev_2.next_hop, Some(did2));

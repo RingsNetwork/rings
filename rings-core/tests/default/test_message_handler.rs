@@ -136,7 +136,7 @@ pub mod test {
                 unreachable!();
             }
         };
-        match handle1.handle_message_relay(relay_message).await {
+        match handle1.handle_payload(relay_message).await {
             Ok(_) => assert_eq!(true, true),
             Err(e) => {
                 println!("{:?}", e);

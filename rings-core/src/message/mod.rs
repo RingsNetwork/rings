@@ -6,18 +6,18 @@ pub use encoder::Encoded;
 pub use encoder::Encoder;
 
 mod payload;
-pub use payload::MessageRelay;
-pub use payload::MessageRelayMethod;
+pub use payload::MessagePayload;
 pub use payload::OriginVerificationGen;
-
-mod protocol;
-pub use protocol::MessageSessionRelayProtocol;
+pub use payload::PayloadSender;
 
 mod types;
 pub use types::*;
 
 pub mod handlers;
-pub use handlers::connection::TChordConnection;
-pub use handlers::storage::TChordStorage;
+pub use handlers::HandleMsg;
 pub use handlers::MessageCallback;
 pub use handlers::MessageHandler;
+
+mod protocols;
+pub use protocols::MessageRelay;
+pub use protocols::RelayMethod;

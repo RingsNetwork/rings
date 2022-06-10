@@ -2,9 +2,7 @@ use super::helper::RtcSessionDescriptionWrapper;
 use crate::channels::Channel as CbChannel;
 use crate::ecc::PublicKey;
 use crate::err::{Error, Result};
-use crate::message::MessageRelayMethod;
-use crate::message::{Encoded, Encoder};
-use crate::message::{MessageRelay, OriginVerificationGen};
+use crate::message::{Encoded, Encoder, MessagePayload};
 use crate::session::SessionManager;
 use crate::transports::helper::Promise;
 use crate::transports::helper::TricklePayload;
@@ -438,21 +436,16 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
             candidates: local_candidates_json,
         };
         log::debug!("prepared hanshake info :{:?}", data);
-        let resp = MessageRelay::new(
+        let resp = MessagePayload::new_direct(
             data,
             session_manager,
-            OriginVerificationGen::Origin,
-            MessageRelayMethod::SEND,
-            None,
-            None,
-            None,
             session_manager.authorizer()?.to_owned().into(), // This is a fake destination
         )?;
         Ok(resp.gzip(9)?.encode()?)
     }
 
     async fn register_remote_info(&self, data: Encoded) -> Result<Address> {
-        let data: MessageRelay<TricklePayload> = data.decode()?;
+        let data: MessagePayload<TricklePayload> = data.decode()?;
         log::debug!("register remote info: {:?}", &data);
 
         match data.verify() {

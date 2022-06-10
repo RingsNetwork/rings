@@ -10,7 +10,6 @@ use crate::ecc::PublicKey;
 use crate::ecc::SecretKey;
 use crate::err::{Error, Result};
 use crate::utils;
-use dashmap::DashMap;
 use serde::Deserialize;
 use serde::Serialize;
 use std::sync::Arc;
@@ -56,14 +55,12 @@ pub struct SessionWithKey {
 #[derive(Debug)]
 pub struct SessionManager {
     inner: Arc<RwLock<SessionWithKey>>,
-    remote_sessions: Arc<DashMap<Address, (Session, PublicKey)>>,
 }
 
 impl Clone for SessionManager {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
-            remote_sessions: Arc::clone(&self.remote_sessions),
         }
     }
 }
@@ -155,7 +152,6 @@ impl SessionManager {
 
         Self {
             inner: Arc::new(RwLock::new(inner)),
-            remote_sessions: Arc::new(DashMap::new()),
         }
     }
 
