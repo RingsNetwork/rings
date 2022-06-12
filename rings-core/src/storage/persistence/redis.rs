@@ -26,12 +26,6 @@ pub trait TRedisStorage<K, V> {
 
     /// Put `entry` in the  under `key`.
     fn put(&self, key: &Self::K, entry: &Self::V) -> Result<()>;
-
-    /// Get the current storage usage, if applicable.
-    fn current_size(&self) -> Result<Option<u64>>;
-
-    /// Get the maximum storage size, if applicable.
-    fn max_size(&self) -> Result<Option<u64>>;
 }
 
 impl Redis {
@@ -51,6 +45,29 @@ impl Redis {
     /// Returns a connection with configured read and write timeouts.
     fn connect(&self) -> Result<Connection> {
         Ok(self.client.get_connection()?)
+    }
+
+    /// Returns the maximum  size. This value is read via
+    /// the Redis CONFIG command (maxmemory). If the server has no
+    /// configured limit, the result is None.
+    pub fn max_size(&self) -> Result<Option<u64>> {
+        let mut con = self.connect()?;
+        let result: redis::RedisResult<HashMap<String, usize>> =
+            cmd("CONFIG").arg("GET").arg("maxmemory").query(&mut con);
+        match result {
+            Ok(h) => Ok(h
+                .get("maxmemory")
+                .and_then(|&s| if s != 0 { Some(s as u64) } else { None })),
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Returns the current  size. This value is aquired via
+    /// the Redis INFO command (used_memory).
+    pub fn current_size(&self) -> Result<Option<u64>> {
+        let mut con = self.connect()?;
+        let v: InfoDict = cmd("INFO").query(&mut con)?;
+        Ok(v.get("used_memory"))
     }
 }
 
@@ -83,28 +100,5 @@ where
             .expire(&_key, 60)
             .query(&mut con)?;
         Ok(())
-    }
-
-    /// Returns the current  size. This value is aquired via
-    /// the Redis INFO command (used_memory).
-    fn current_size(&self) -> Result<Option<u64>> {
-        let mut con = self.connect()?;
-        let v: InfoDict = cmd("INFO").query(&mut con)?;
-        Ok(v.get("used_memory"))
-    }
-
-    /// Returns the maximum  size. This value is read via
-    /// the Redis CONFIG command (maxmemory). If the server has no
-    /// configured limit, the result is None.
-    fn max_size(&self) -> Result<Option<u64>> {
-        let mut con = self.connect()?;
-        let result: redis::RedisResult<HashMap<String, usize>> =
-            cmd("CONFIG").arg("GET").arg("maxmemory").query(&mut con);
-        match result {
-            Ok(h) => Ok(h
-                .get("maxmemory")
-                .and_then(|&s| if s != 0 { Some(s as u64) } else { None })),
-            Err(_) => Ok(None),
-        }
     }
 }
