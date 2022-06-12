@@ -256,8 +256,8 @@ pub enum Error {
     #[error("entry not found")]
     EntryNotFound,
 
-    #[error("RedisCache Miss")]
-    RedisCacheMiss,
+    #[error("Redis Miss")]
+    RedisMiss,
 
     #[error("Redis Invalid Kind")]
     RedisInvalidKind,

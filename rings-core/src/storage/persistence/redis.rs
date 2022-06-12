@@ -7,23 +7,24 @@ use std::hash::Hash;
 use std::string::ToString;
 use url::Url;
 
-/// A cache that stores entries in a Redis.
+/// A  that stores entries in a Redis.
+#[cfg(not(features = "wasm"))]
 #[derive(Clone)]
-pub struct RedisCache {
+pub struct Redis {
     /// for display only: password (if any) will be masked
     pub display_url: String,
     client: Client,
 }
 
-/// RedisCache Taits about Storage
-pub trait TRedisCacheStorage<K, V> {
+/// Redis Taits about Storage
+pub trait TRedisStorage<K, V> {
     type K;
     type V;
 
-    /// Get a cache entry by `key`.
+    /// Get a  entry by `key`.
     fn get(&self, key: &Self::K) -> Result<Self::V>;
 
-    /// Put `entry` in the cache under `key`.
+    /// Put `entry` in the  under `key`.
     fn put(&self, key: &Self::K, entry: &Self::V) -> Result<()>;
 
     /// Get the current storage usage, if applicable.
@@ -33,15 +34,15 @@ pub trait TRedisCacheStorage<K, V> {
     fn max_size(&self) -> Result<Option<u64>>;
 }
 
-impl RedisCache {
-    /// Create a new `RedisCache`.
-    pub fn new(url: &str) -> Result<RedisCache> {
+impl Redis {
+    /// Create a new `Redis`.
+    pub fn new(url: &str) -> Result<Redis> {
         let mut parsed = Url::parse(url)?;
         // If the URL has a password set, mask it when displaying.
         if parsed.password().is_some() {
-            let _ = parsed.set_password(Some("bns-redis-cache"));
+            let _ = parsed.set_password(Some("ring-redis-persistence"));
         }
-        Ok(RedisCache {
+        Ok(Redis {
             display_url: parsed.to_string(),
             client: Client::open(url)?,
         })
@@ -53,7 +54,7 @@ impl RedisCache {
     }
 }
 
-impl<K, V> TRedisCacheStorage<K, V> for RedisCache
+impl<K, V> TRedisStorage<K, V> for Redis
 where
     K: Clone + Eq + Hash + ToString + std::marker::Sync,
     V: Clone + redis::ToRedisArgs + std::marker::Sync + DeserializeOwned,
@@ -63,28 +64,28 @@ where
 
     /// Open a connection and query for a key.
     fn get(&self, key: &Self::K) -> Result<Self::V> {
-        let cache_key = key.to_string();
+        let _key = key.to_string();
         let mut con = self.connect()?;
-        match con.get(&cache_key)? {
-            Value::Nil => Err(Error::RedisCacheMiss),
+        match con.get(&_key)? {
+            Value::Nil => Err(Error::RedisMiss),
             Value::Data(val) => serde_json::from_slice(&val).map_err(Error::Deserialize),
             _ => Err(Error::RedisInvalidKind),
         }
     }
 
-    /// Open a connection and store a object in the cache.
+    /// Open a connection and store a object in the .
     fn put(&self, key: &Self::K, entry: &Self::V) -> Result<()> {
-        let cache_key = key.to_string();
+        let _key = key.to_string();
         let mut con = self.connect()?;
         let _: () = redis::pipe()
             .atomic()
-            .set(&cache_key, &entry)
-            .expire(&cache_key, 60)
+            .set(&_key, &entry)
+            .expire(&_key, 60)
             .query(&mut con)?;
         Ok(())
     }
 
-    /// Returns the current cache size. This value is aquired via
+    /// Returns the current  size. This value is aquired via
     /// the Redis INFO command (used_memory).
     fn current_size(&self) -> Result<Option<u64>> {
         let mut con = self.connect()?;
@@ -92,7 +93,7 @@ where
         Ok(v.get("used_memory"))
     }
 
-    /// Returns the maximum cache size. This value is read via
+    /// Returns the maximum  size. This value is read via
     /// the Redis CONFIG command (maxmemory). If the server has no
     /// configured limit, the result is None.
     fn max_size(&self) -> Result<Option<u64>> {

@@ -49,3 +49,5 @@ pub trait PersistenceStorageOperation {
     /// Prune database storage
     async fn prune(&self) -> Result<()>;
 }
+
+pub(crate) mod redis;

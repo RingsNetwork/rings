@@ -1,9 +1,11 @@
-mod cache;
 mod memory;
 pub mod persistence;
 
-pub use cache::{RedisCache, TRedisCacheStorage};
+use async_trait::async_trait;
+
 pub use memory::MemStorage;
+#[cfg(not(features = "wasm"))]
+pub use persistence::redis::{Redis, TRedisStorage};
 
 #[cfg(feature = "wasm")]
 pub use self::persistence::idb::IDBStorage as Storage;
