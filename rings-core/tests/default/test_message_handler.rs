@@ -1,7 +1,6 @@
 #[cfg(test)]
 pub mod test {
     use futures::lock::Mutex;
-
     use rings_core::dht::vnode::VirtualNode;
     use rings_core::dht::{Did, PeerRing};
     use rings_core::ecc::SecretKey;
@@ -10,6 +9,7 @@ pub mod test {
     use rings_core::message::Encoder;
     use rings_core::message::Message;
     use rings_core::message::MessageHandler;
+    use rings_core::message::PayloadSender;
     use rings_core::session::SessionManager;
     use rings_core::swarm::Swarm;
     use rings_core::swarm::TransportManager;
@@ -129,14 +129,8 @@ pub mod test {
         let swarm2 = Arc::new(new_swarm(&key2));
         let (_, _) = establish_connection(Arc::clone(&swarm1), Arc::clone(&swarm2)).await?;
         let handle1 = MessageHandler::new(Arc::clone(&dht1), Arc::clone(&swarm1));
-        let relay_message = match swarm1.poll_message().await {
-            Some(relay_message) => relay_message,
-            None => {
-                assert_eq!(false, true);
-                unreachable!();
-            }
-        };
-        match handle1.handle_payload(relay_message).await {
+        let payload = swarm1.poll_message().await.unwrap();
+        match handle1.handle_payload(&payload).await {
             Ok(_) => assert_eq!(true, true),
             Err(e) => {
                 println!("{:?}", e);
@@ -267,9 +261,9 @@ pub mod test {
                 // dht1 send msg to dht2 ask for connecting dht3
                 handler1
                     .send_message(
-                        &swarm2.address().into(),
-                        &swarm3.address().into(),
                         connect_msg,
+                        swarm2.address().into(),
+                        swarm3.address().into(),
                     )
                     .await
                     .unwrap();
@@ -333,11 +327,11 @@ pub mod test {
                 );
                 handler1
                     .send_message(
-                        &swarm2.address().into(),
-                        &swarm2.address().into(),
                         Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
                             id: key1.address().into(),
                         }),
+                        swarm2.address().into(),
+                        swarm2.address().into(),
                     )
                     .await
                     .unwrap();
@@ -393,11 +387,11 @@ pub mod test {
                 );
                 handler1
                     .send_message(
-                        &swarm2.address().into(),
-                        &swarm2.address().into(),
                         Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
                             id: swarm1.address().into(),
                         }),
+                        swarm2.address().into(),
+                        swarm2.address().into(),
                     )
                     .await
                     .unwrap();
@@ -412,12 +406,12 @@ pub mod test {
                 );
                 handler2
                     .send_message(
-                        &swarm1.address().into(),
-                        &swarm1.address().into(),
                         Message::FindSuccessorSend(message::FindSuccessorSend {
                             id: swarm2.address().into(),
                             for_fix: false,
                         }),
+                        swarm1.address().into(),
+                        swarm1.address().into(),
                     )
                     .await
                     .unwrap();
@@ -484,11 +478,11 @@ pub mod test {
                 );
                 handler1
                     .send_message(
-                        &swarm2.address().into(),
-                        &swarm2.address().into(),
                         Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
                             id: swarm1.address().into(),
                         }),
+                        swarm2.address().into(),
+                        swarm2.address().into(),
                     )
                     .await
                     .unwrap();
@@ -502,12 +496,12 @@ pub mod test {
                 );
                 handler2
                     .send_message(
-                        &swarm1.address().into(),
-                        &swarm1.address().into(),
                         Message::FindSuccessorSend(message::FindSuccessorSend {
                             id: swarm2.address().into(),
                             for_fix: false,
                         }),
+                        swarm1.address().into(),
+                        swarm1.address().into(),
                     )
                     .await
                     .unwrap();
@@ -573,11 +567,11 @@ pub mod test {
                  );
                  handler1
                      .send_message(
-                         &swarm2.address().into(),
-                         &swarm2.address().into(),
                          Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
                              id: swarm1.address().into(),
                          }),
+                         swarm2.address().into(),
+                         swarm2.address().into(),
                      )
                      .await
                      .unwrap();
@@ -591,11 +585,11 @@ pub mod test {
                  // the vid is hash of string
                  let vnode: VirtualNode = encoded_message.try_into().unwrap();
                  handler1.send_message(
-                     &swarm2.address().into(),
-                     &swarm2.address().into(),
                      Message::StoreVNode(message::StoreVNode {
                          data: vec![vnode.clone()]
-                     })
+                     }),
+                     swarm2.address().into(),
+                     swarm2.address().into(),
                  )
                  .await
                  .unwrap();

@@ -35,13 +35,15 @@ impl Stabilization {
 
     async fn notify_predecessor(&self) -> Result<()> {
         let chord = self.chord.lock().await;
-        let message = MessagePayload::new_direct(
-            Message::NotifyPredecessorSend(NotifyPredecessorSend { id: chord.id }),
-            &self.swarm.session_manager,
-            self.swarm.address().into(),
-        )?;
+        let msg = Message::NotifyPredecessorSend(NotifyPredecessorSend { id: chord.id });
         if chord.id != chord.successor.min() {
             for s in chord.successor.list() {
+                let message = MessagePayload::new_send(
+                    msg.clone(),
+                    &self.swarm.session_manager,
+                    s,
+                    self.swarm.address().into(),
+                )?;
                 self.swarm.send_message(&s.into(), message.clone()).await?;
             }
             Ok(())
@@ -62,12 +64,13 @@ impl Stabilization {
                     next,
                     PeerRingRemoteAction::FindSuccessorForFix(current),
                 ) => {
-                    let message = MessagePayload::new_direct(
+                    let message = MessagePayload::new_send(
                         Message::FindSuccessorSend(FindSuccessorSend {
                             id: current,
                             for_fix: true,
                         }),
                         &self.swarm.session_manager,
+                        next,
                         self.swarm.address().into(),
                     )?;
                     self.swarm.send_message(&next.into(), message).await

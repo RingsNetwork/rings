@@ -254,28 +254,29 @@ pub mod test {
             c: 2.33,
             d: true,
         };
-        MessagePayload::direct(test_data, &session, destination).unwrap()
+        MessagePayload::new_direct(test_data, &session, destination).unwrap()
     }
 
     #[test]
     fn new_then_verify() {
-        let mut payload = new_test_payload();
+        let payload = new_test_payload();
         assert!(payload.verify());
 
         let key2 = SecretKey::random();
         let did2 = key2.address().into();
         let session2 = SessionManager::new_with_seckey(&key2).unwrap();
 
-        payload.relay.next_hop = Some(did2);
-        payload.relay.relay(did2, None).unwrap();
+        let mut relay = payload.relay.clone();
+        relay.next_hop = Some(did2);
+        relay.relay(did2, None).unwrap();
 
-        let relaied_payload = payload
-            .rewrap(
-                payload.data.clone(),
-                &session2,
-                OriginVerificationGen::Stick(payload.origin_verification.clone()),
-            )
-            .unwrap();
+        let relaied_payload = MessagePayload::new(
+            payload.data.clone(),
+            &session2,
+            OriginVerificationGen::Stick(payload.origin_verification),
+            relay,
+        )
+        .unwrap();
 
         assert!(relaied_payload.verify());
     }

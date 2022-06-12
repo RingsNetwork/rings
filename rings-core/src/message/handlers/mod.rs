@@ -134,7 +134,7 @@ impl MessageHandler {
             Message::MultiCall(ref msg) => {
                 for message in msg.messages.iter().cloned() {
                     let payload = MessagePayload::new(
-                        message.clone(),
+                        message,
                         &self.swarm.session_manager,
                         OriginVerificationGen::Stick(payload.origin_verification.clone()),
                         payload.relay.clone(),
@@ -149,7 +149,7 @@ impl MessageHandler {
                 x
             ))),
         }?;
-        if let Err(e) = self.invoke_callback(&payload).await {
+        if let Err(e) = self.invoke_callback(payload).await {
             log::warn!("invoke callback error: {}", e);
         }
 
@@ -250,6 +250,7 @@ mod listener {
 #[cfg(test)]
 pub mod test {
     use super::*;
+    use crate::dht::Did;
     use crate::dht::PeerRing;
     use crate::ecc::SecretKey;
     use crate::message::MessageHandler;
