@@ -1,59 +1,54 @@
-//! # How relay works
-//!
-//! By calling `relay` method in correct place, relay help to do things:
+#![warn(missing_docs)]
+
+//! All messages should be sent with `MessageRelay`.
+//! By calling `relay` method in correct place, `MessageRelay` help to do things:
 //! - Infer the next_hop of a message.
 //! - Get the sender and origin sender of a message.
 //! - Record the whole transport path for inspection.
-//!
-//! Relay divides messages into two types by method: SEND and REPORT.
-//! Generally, a node that got a SEND message will either transpond it to another node or respond with a REPORT message.
-//! And the responded REPORT message will be sent back to the original sender (by inversed came path if possible).
-//!
-//! All messages should be payload with relay, which consists of the following fields:
-//! - `method`: The method of message. SEND or REPORT.
-//! - `path`: A push only stack. Record routes when handling sending messages.
-//! - `path_end_cursor`: Move this cursor to flag the top of the stack when reporting.
-//!    Notice that this cursor is not the index of current.
-//!    It's `path.len() - <index of current> - 1`, which means count down to head of vector.
-//!    It will always be 0 while handling sending messages in this way.
-//! - `next_hop`: The next node to handle the message.
-//!   When and only when located at the end of the message propagation, the `next_hop` is none.
-//!   The current handler will pick transport by this field.
-//! - `destination`: The destination of the message. It may be customized when sending. It cannot be changed when reporting.
-//!   It may help the handler to find out `next_hop` in some situations.
-//!
-//! When handling a SEND message, the `relay(&mut self, current: Did, next_hop: Option<Did>)` method
-//! push `current` to the `self.path` stack, and set `next_hop` parameter to `self.next_node`.
-//!
-//! When handling a REPORT message, the `relay(&mut self, current: Did, next_hop: Option<Did>)` method
-//! will move forward `self.path_end_cursor` to the position of `current` in `self.path`.
-//! If `next_hop` parameter is none, it will also pick the previous node in `self.path` as `self.next_hop`.
-//! (With this feature, one can always pass None as `next_hop` parameter when handling a REPORT message.)
-
-#![warn(missing_docs)]
 
 use crate::dht::Did;
 use crate::err::{Error, Result};
 use serde::Deserialize;
 use serde::Serialize;
 
+/// `MessageRelay` divides messages into two types by method: SEND and REPORT.
+/// And will enable different behaviors when handling SEND and REPORT messages.
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub enum RelayMethod {
+    /// When a node want to send message to another node, it will send a message with SEND method.
     SEND,
+    /// A node that got a SEND message will either transpond it to another node or respond with a REPORT message.
     REPORT,
 }
 
 /// MessageRelay guide message passing on rings network by relay.
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct MessageRelay {
+    /// The method of message. SEND or REPORT.
     pub method: RelayMethod,
+
+    /// A push only stack. Record routes when handling sending messages.
     pub path: Vec<Did>,
+
+    /// Move this cursor to flag the top of the stack when reporting.
+    /// Notice that this cursor is not the index of current.
+    /// It's `path.len() - <index of current> - 1`, which means count down to head of vector.
+    /// It will always be 0 while handling sending messages in this way.
     pub path_end_cursor: usize,
+
+    /// The next node to handle the message.
+    /// When and only when located at the end of the message propagation, the `next_hop` is none.
+    /// The current handler will pick transport by this field.
     pub next_hop: Option<Did>,
+
+    /// The destination of the message. It may be customized when sending. It cannot be changed when reporting.
+    /// It may help the handler to find out `next_hop` in some situations.
     pub destination: Did,
 }
 
 impl MessageRelay {
+    /// Create a new `MessageRelay`.
+    /// Will set `path_end_cursor` to 0 if got None in parameter.
     pub fn new(
         method: RelayMethod,
         path: Vec<Did>,
@@ -69,7 +64,14 @@ impl MessageRelay {
             destination,
         }
     }
+
     /// Check current did, update path and its end cursor, then infer next_hop.
+    ///
+    /// When handling a SEND message, will push `current` to the `self.path` stack, and set `next_hop` parameter to `self.next_node`.
+    ///
+    /// When handling a REPORT message, will move forward `self.path_end_cursor` to the position of `current` in `self.path`.
+    /// If `next_hop` parameter is none, it will also pick the previous node in `self.path` as `self.next_hop`.
+    /// (With this feature, one can always pass None as `next_hop` parameter when handling a REPORT message.)
     pub fn relay(&mut self, current: Did, next_hop: Option<Did>) -> Result<()> {
         self.validate()?;
 
@@ -116,6 +118,9 @@ impl MessageRelay {
         }
     }
 
+    /// Construct an `MessageRelay` of method REPORT from a `MessageRelay` of method REPORT.
+    /// It will return Error if method is not SEND.
+    /// It will return Error if `self.path.len()` is less than 2.
     pub fn report(&self) -> Result<Self> {
         if self.method != RelayMethod::SEND {
             return Err(Error::ReportNeedSend);
@@ -161,15 +166,15 @@ impl MessageRelay {
         Ok(())
     }
 
-    /// Get sender of current message.
-    /// With SEND method, it will be the `origin()` of the message.
-    /// With REPORT method, it will be the last element of path.
+    /// Get the original sender of current message.
+    /// Should always be the first element of path.
     pub fn origin(&self) -> Did {
         *self.path.first().unwrap()
     }
 
-    /// Get the original sender of current message.
-    /// Should always be the first element of path.
+    /// Get sender of current message.
+    /// With SEND method, it will be the `origin()` of the message.
+    /// With REPORT method, it will be the last element of path.
     pub fn sender(&self) -> Did {
         match self.method {
             RelayMethod::SEND => self.origin(),
