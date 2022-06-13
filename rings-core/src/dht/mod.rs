@@ -11,7 +11,7 @@ mod successor;
 mod types;
 pub use finger::FingerTable;
 pub use {chord::PeerRing, chord::PeerRingAction, chord::RemoteAction as PeerRingRemoteAction};
-pub use {types::Chord, types::ChordStablize, types::ChordStorage};
+pub use {types::Chord, types::ChordStablize, types::ChordStorage, types::SubRingManager};
 
 mod stabilization;
 pub use stabilization::{Stabilization, TStabilize};

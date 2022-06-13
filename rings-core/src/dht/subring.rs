@@ -1,5 +1,9 @@
 #![warn(missing_docs)]
 use super::chord::PeerRing;
+use super::chord::PeerRingAction;
+use super::chord::RemoteAction;
+use super::types::Chord;
+use super::types::SubRingManager;
 use super::vnode::VNodeType;
 use super::vnode::VirtualNode;
 use super::FingerTable;
@@ -26,51 +30,29 @@ pub struct SubRing {
     pub creator: Did,
 }
 
-/// Trait for how dht manage SubRing
-pub trait TSubRingManager {
-    /// get subring from storage by id
-    fn get_subring(&self, id: &Did) -> Option<Result<SubRing>>;
-    /// get subring from storage by name
-    fn get_subring_by_name(&self, name: &str) -> Option<Result<SubRing>>;
-    /// store a subring to storage
-    fn store_subring(&self, subring: &SubRing) -> Result<()>;
-    /// get a subring for update
-    fn get_subring_for_update(
-        &self,
-        id: Did,
-        callback: Box<dyn FnOnce(SubRing) -> SubRing>,
-    ) -> Result<bool>;
-    /// get a subring for update by name
-    fn get_subring_for_update_by_name(
-        &self,
-        name: &str,
-        callback: Box<dyn FnOnce(SubRing) -> SubRing>,
-    ) -> Result<bool>;
-
-    /// join a node to subring via given name
-    /// When Node A join Channel C which's vnode is stored on Node B
-    /// A send JoinSubRing to Address C, Node B got the Message And
-    /// Update the Chord Finger Table, then, Node B Response it's finger table to A
-    /// And Noti closest preceding node that A is Joined
-    fn join(&self, id: &Did, name: &str) -> Result<bool>;
-
-    /// search a cloest preceding node
-    fn cloest_preceding_node(&self, id: &Did, name: &str) -> Option<Result<Did>>;
-}
-
-impl TSubRingManager for PeerRing {
-    fn join(&self, id: &Did, name: &str) -> Result<bool> {
-        let id = id.to_owned();
-        self.get_subring_for_update_by_name(name, box move |r: SubRing| {
-            let mut new_ring = r.clone();
-            new_ring.finger.join(id);
-            new_ring
-        })
+impl SubRingManager<PeerRingAction> for PeerRing {
+    fn join_subring(&self, id: &Did, rid: &Did) -> Result<PeerRingAction> {
+        match self.find_successor(*rid) {
+            Ok(PeerRingAction::Some(_)) => {
+                let id = id.to_owned();
+                self.get_subring_for_update(rid, box move |r: SubRing| {
+                    let mut new_ring = r;
+                    new_ring.finger.join(id);
+                    new_ring
+                })?;
+                Ok(PeerRingAction::None)
+            }
+            Ok(PeerRingAction::RemoteAction(n, RemoteAction::FindSuccessor(_))) => Ok(
+                PeerRingAction::RemoteAction(n, RemoteAction::FindAndJoinSubRing(*rid)),
+            ),
+            Ok(a) => Err(Error::PeerRingUnexpectedAction(a)),
+            Err(e) => Err(e),
+        }
     }
 
-    fn cloest_preceding_node(&self, id: &Did, name: &str) -> Option<Result<Did>> {
+    fn cloest_preceding_node_for_subring(&self, id: &Did, rid: &Did) -> Option<Result<Did>> {
         let id = id.to_owned();
-        if let Some(Ok(subring)) = self.get_subring_by_name(name) {
+        if let Some(Ok(subring)) = self.get_subring(rid) {
             Some(subring.finger.closest(id))
         } else {
             None
@@ -96,10 +78,10 @@ impl TSubRingManager for PeerRing {
     /// get subring, update and putback
     fn get_subring_for_update(
         &self,
-        id: Did,
+        id: &Did,
         callback: Box<dyn FnOnce(SubRing) -> SubRing>,
     ) -> Result<bool> {
-        if let Some(Ok(subring)) = self.get_subring(&id) {
+        if let Some(Ok(subring)) = self.get_subring(id) {
             let sr = callback(subring);
             self.store_subring(&sr)?;
             Ok(true)
@@ -116,7 +98,7 @@ impl TSubRingManager for PeerRing {
     ) -> Result<bool> {
         let address: HashStr = name.to_owned().into();
         let did = Did::from_str(&address.inner())?;
-        self.get_subring_for_update(did, callback)
+        self.get_subring_for_update(&did, callback)
     }
 }
 

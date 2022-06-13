@@ -1,3 +1,4 @@
+use crate::ecc::HashStr;
 /// Did is a finate Ring R(P) where P = 2^160
 use crate::err::{Error, Result};
 use num_bigint::BigUint;
@@ -77,6 +78,13 @@ impl From<BiasId> for Did {
 impl From<&BiasId> for Did {
     fn from(id: &BiasId) -> Did {
         BiasId::to_did(id)
+    }
+}
+
+impl TryFrom<HashStr> for Did {
+    type Error = Error;
+    fn try_from(s: HashStr) -> Result<Self> {
+        Did::from_str(&s.inner())
     }
 }
 

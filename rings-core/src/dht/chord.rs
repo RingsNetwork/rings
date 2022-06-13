@@ -22,6 +22,8 @@ pub enum RemoteAction {
     FindVNode(Did),
     /// Ask did_a to find virtual peer for storage
     FindAndStore(VirtualNode),
+    /// Ask did_a to find virtual peer for subring joining
+    FindAndJoinSubRing(Did),
     /// Ask Did_a to notify(did_b)
     Notify(Did),
     /// Async data with it's successor
@@ -344,6 +346,7 @@ impl ChordStorage<PeerRingAction> for PeerRing {
         }
     }
 
+    /// store a vec of data
     fn store_vec(&self, vps: Vec<VirtualNode>) -> Result<PeerRingAction> {
         let acts: Vec<PeerRingAction> = vps
             .iter()
