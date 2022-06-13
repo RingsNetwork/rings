@@ -93,7 +93,7 @@ impl IDBStorageBasic for IDBStorage {
 impl<K, V, I> PersistenceStorageReadAndWrite<K, V> for I
 where
     K: ToString + From<String>,
-    V: DeserializeOwned + Serialize,
+    V: DeserializeOwned + Serialize + Sized,
     I: PersistenceStorageOperation + IDBStorageBasic,
 {
     async fn get(&self, key: &K) -> Result<V> {

@@ -18,3 +18,4 @@ docs
 .DS_Store
 
 pkg/
+temp/

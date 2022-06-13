@@ -39,6 +39,12 @@ pub enum Error {
     #[error("JSON deserialization error")]
     Deserialize(#[source] serde_json::Error),
 
+    #[error("Bincode serialization error")]
+    BincodeSerialize(#[source] bincode::Error),
+
+    #[error("Bincode deserialization error")]
+    BincodeDeserialize(#[source] bincode::Error),
+
     #[error("Failed on verify message signature")]
     VerifySignatureFailed,
 
@@ -242,6 +248,13 @@ pub enum Error {
 
     #[error("Invalid capacity value")]
     InvalidCapacity,
+
+    #[cfg(feature = "default")]
+    #[error("Sled error, {0}")]
+    SledError(sled::Error),
+
+    #[error("entry not found")]
+    EntryNotFound,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
