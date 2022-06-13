@@ -22,7 +22,7 @@
 //! 3. E2e encrypt
 //! - After joining Ring, should encrypt all direct messages with the ElGamal algorithm.
 //!
-//! # MessageRelay
+//! # MessagePayload
 //!
 //! MSRP over WebRTC Data Channel is Published in Jan/2021, which is based on The Message Session Relay Protocol and its extension.
 //!

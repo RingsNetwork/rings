@@ -43,7 +43,7 @@ pub enum Error {
     #[error("Send mesage error: {0}")]
     SendMessage(rings_core::err::Error),
     #[error("Build message body error: {0}")]
-    MessageRelay(rings_core::err::Error),
+    MessagePayload(rings_core::err::Error),
 }
 
 impl Error {
@@ -68,7 +68,7 @@ impl Error {
             Error::ConnectWithAddressError(_) => 16,
             Error::ConnectError(_) => 17,
             Error::SendMessage(_) => 18,
-            Error::MessageRelay(_) => 19,
+            Error::MessagePayload(_) => 19,
         };
         -32000 - code
     }

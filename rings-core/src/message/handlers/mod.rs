@@ -1,18 +1,17 @@
-use super::{CustomMessage, MaybeEncrypted};
-use crate::dht::{Did, PeerRing};
+use super::{
+    CustomMessage, MaybeEncrypted, Message, MessagePayload, OriginVerificationGen, PayloadSender,
+};
+use crate::dht::PeerRing;
 use crate::err::{Error, Result};
-use crate::message::payload::{MessageRelay, MessageRelayMethod, OriginVerificationGen};
-use crate::message::types::Message;
 use crate::prelude::RTCSdpType;
+use crate::session::SessionManager;
 use crate::swarm::Swarm;
 use crate::swarm::TransportManager;
 use crate::types::ice_transport::IceTrickleScheme;
 use async_recursion::async_recursion;
 use async_trait::async_trait;
-use connection::TChordConnection;
 use futures::lock::Mutex;
 use std::sync::Arc;
-use storage::TChordStorage;
 use web3::types::Address;
 
 pub mod connection;
@@ -24,10 +23,10 @@ pub trait MessageCallback {
     async fn custom_message(
         &self,
         handler: &MessageHandler,
-        relay: &MessageRelay<Message>,
+        ctx: &MessagePayload<Message>,
         msg: &MaybeEncrypted<CustomMessage>,
     );
-    async fn builtin_message(&self, handler: &MessageHandler, relay: &MessageRelay<Message>);
+    async fn builtin_message(&self, handler: &MessageHandler, ctx: &MessagePayload<Message>);
 }
 
 #[cfg(not(feature = "wasm"))]
@@ -41,6 +40,12 @@ pub struct MessageHandler {
     dht: Arc<Mutex<PeerRing>>,
     swarm: Arc<Swarm>,
     callback: Arc<Mutex<Option<CallbackFn>>>,
+}
+
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+pub trait HandleMsg<T> {
+    async fn handle(&self, ctx: &MessagePayload<Message>, msg: &T) -> Result<()>;
 }
 
 impl MessageHandler {
@@ -69,41 +74,6 @@ impl MessageHandler {
         *cb = Some(f)
     }
 
-    pub async fn send_relay_message(&self, msg: MessageRelay<Message>) -> Result<()> {
-        #[cfg(test)]
-        {
-            println!("+++++++++++++++++++++++++++++++++");
-            println!("node {:?}", self.swarm.address());
-            println!("Sent {:?}", msg.clone());
-            println!("node {:?}", msg.next_hop);
-            println!("+++++++++++++++++++++++++++++++++");
-        }
-        if let Some(id) = msg.next_hop {
-            self.swarm.send_message(&id.into(), msg).await
-        } else {
-            Err(Error::NoNextHop)
-        }
-    }
-
-    pub async fn send_message(
-        &self,
-        next_hop: &Did,
-        destination: &Did,
-        msg: Message,
-    ) -> Result<()> {
-        self.send_relay_message(MessageRelay::new(
-            msg,
-            &self.swarm.session_manager,
-            OriginVerificationGen::Origin,
-            MessageRelayMethod::SEND,
-            None,
-            None,
-            Some(*next_hop),
-            *destination,
-        )?)
-        .await
-    }
-
     // disconnect a node if a node is in DHT
     pub async fn disconnect(&self, address: Address) {
         let mut dht = self.dht.lock().await;
@@ -124,30 +94,17 @@ impl MessageHandler {
             handshake_info: handshake_info.to_string(),
         });
         let next_hop = self.dht.lock().await.successor.max();
-        self.send_relay_message(MessageRelay::new(
-            connect_msg,
-            &self.swarm.session_manager,
-            OriginVerificationGen::Origin,
-            MessageRelayMethod::SEND,
-            None,
-            None,
-            Some(next_hop),
-            target_id,
-        )?)
-        .await?;
+        self.send_message(connect_msg, next_hop, target_id).await?;
         self.swarm.push_pending_transport(&transport)
     }
 
-    async fn invoke_callback(&self, relay: &MessageRelay<Message>) -> Result<()> {
+    async fn invoke_callback(&self, payload: &MessagePayload<Message>) -> Result<()> {
         let mut callback = self.callback.lock().await;
         if let Some(ref mut cb) = *callback {
-            let data = relay.data.clone();
+            let data = payload.data.clone();
             match data {
-                Message::None => {
-                    return Ok(());
-                }
-                Message::CustomMessage(msg) => cb.custom_message(self, relay, &msg).await,
-                _ => cb.builtin_message(self, relay).await,
+                Message::CustomMessage(msg) => cb.custom_message(self, payload, &msg).await,
+                _ => cb.builtin_message(self, payload).await,
             };
         }
         Ok(())
@@ -161,32 +118,28 @@ impl MessageHandler {
 
     #[cfg_attr(feature = "wasm", async_recursion(?Send))]
     #[cfg_attr(not(feature = "wasm"), async_recursion)]
-    pub async fn handle_message_relay(&self, relay: MessageRelay<Message>) -> Result<()> {
-        let data = relay.data.clone();
-        match data {
-            Message::JoinDHT(msg) => self.join_chord(relay.clone(), msg).await,
-            Message::ConnectNodeSend(msg) => self.connect_node(relay.clone(), msg).await,
-            Message::ConnectNodeReport(msg) => self.connected_node(relay.clone(), msg).await,
-            Message::AlreadyConnected(msg) => self.already_connected(relay.clone(), msg).await,
-            Message::FindSuccessorSend(msg) => self.find_successor(relay.clone(), msg).await,
-            Message::FindSuccessorReport(msg) => self.found_successor(relay.clone(), msg).await,
-            Message::NotifyPredecessorSend(msg) => {
-                self.notify_predecessor(relay.clone(), msg).await
-            }
-            Message::NotifyPredecessorReport(msg) => {
-                self.notified_predecessor(relay.clone(), msg).await
-            }
-            Message::SearchVNode(msg) => self.search_vnode(relay.clone(), msg).await,
-            Message::FoundVNode(msg) => self.found_vnode(relay.clone(), msg).await,
-            Message::StoreVNode(msg) => self.store_vnode(relay.clone(), msg).await,
-            Message::MultiCall(msg) => {
-                for message in msg.messages {
-                    let payload = relay.rewrap(
+    pub async fn handle_payload(&self, payload: &MessagePayload<Message>) -> Result<()> {
+        match &payload.data {
+            Message::JoinDHT(ref msg) => self.handle(payload, msg).await,
+            Message::ConnectNodeSend(ref msg) => self.handle(payload, msg).await,
+            Message::ConnectNodeReport(ref msg) => self.handle(payload, msg).await,
+            Message::AlreadyConnected(ref msg) => self.handle(payload, msg).await,
+            Message::FindSuccessorSend(ref msg) => self.handle(payload, msg).await,
+            Message::FindSuccessorReport(ref msg) => self.handle(payload, msg).await,
+            Message::NotifyPredecessorSend(ref msg) => self.handle(payload, msg).await,
+            Message::NotifyPredecessorReport(ref msg) => self.handle(payload, msg).await,
+            Message::SearchVNode(ref msg) => self.handle(payload, msg).await,
+            Message::FoundVNode(ref msg) => self.handle(payload, msg).await,
+            Message::StoreVNode(ref msg) => self.handle(payload, msg).await,
+            Message::MultiCall(ref msg) => {
+                for message in msg.messages.iter().cloned() {
+                    let payload = MessagePayload::new(
                         message,
                         &self.swarm.session_manager,
-                        OriginVerificationGen::Stick(relay.origin_verification.clone()),
+                        OriginVerificationGen::Stick(payload.origin_verification.clone()),
+                        payload.relay.clone(),
                     )?;
-                    self.handle_message_relay(payload).await.unwrap_or(());
+                    self.handle_payload(&payload).await.unwrap_or(());
                 }
                 Ok(())
             }
@@ -196,7 +149,7 @@ impl MessageHandler {
                 x
             ))),
         }?;
-        if let Err(e) = self.invoke_callback(&relay).await {
+        if let Err(e) = self.invoke_callback(payload).await {
             log::warn!("invoke callback error: {}", e);
         }
 
@@ -205,18 +158,38 @@ impl MessageHandler {
 
     /// This method is required because web-sys components is not `Send`
     /// which means a listening loop cannot running concurrency.
-    pub async fn listen_once(&self) -> Option<MessageRelay<Message>> {
-        if let Some(relay_message) = self.swarm.poll_message().await {
-            if !relay_message.verify() {
-                log::error!("Cannot verify msg or it's expired: {:?}", relay_message);
+    pub async fn listen_once(&self) -> Option<MessagePayload<Message>> {
+        if let Some(payload) = self.swarm.poll_message().await {
+            if !payload.verify() {
+                log::error!("Cannot verify msg or it's expired: {:?}", payload);
             }
-            if let Err(e) = self.handle_message_relay(relay_message.clone()).await {
+            if let Err(e) = self.handle_payload(&payload).await {
                 log::error!("Error in handle_message: {}", e);
             }
-            Some(relay_message)
+            Some(payload)
         } else {
             None
         }
+    }
+}
+
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl PayloadSender<Message> for MessageHandler {
+    fn session_manager(&self) -> &SessionManager {
+        &self.swarm.session_manager
+    }
+
+    async fn do_send(&self, address: &Address, payload: MessagePayload<Message>) -> Result<()> {
+        #[cfg(test)]
+        {
+            println!("+++++++++++++++++++++++++++++++++");
+            println!("node {:?}", self.swarm.address());
+            println!("Sent {:?}", payload.clone());
+            println!("node {:?}", payload.relay.next_hop);
+            println!("+++++++++++++++++++++++++++++++++");
+        }
+        self.swarm.send_message(address, payload).await
     }
 }
 
@@ -233,14 +206,14 @@ mod listener {
     #[async_trait]
     impl MessageListener for MessageHandler {
         async fn listen(self: Arc<Self>) {
-            let relay_messages = self.swarm.iter_messages();
-            pin_mut!(relay_messages);
-            while let Some(relay_message) = relay_messages.next().await {
-                if relay_message.is_expired() || !relay_message.verify() {
-                    log::error!("Cannot verify msg or it's expired: {:?}", relay_message);
+            let payloads = self.swarm.iter_messages();
+            pin_mut!(payloads);
+            while let Some(payload) = payloads.next().await {
+                if !payload.verify() {
+                    log::error!("Cannot verify msg or it's expired: {:?}", payload);
                     continue;
                 }
-                if let Err(e) = self.handle_message_relay(relay_message).await {
+                if let Err(e) = self.handle_payload(&payload).await {
                     log::error!("Error in handle_message: {}", e);
                     continue;
                 }
@@ -277,6 +250,7 @@ mod listener {
 #[cfg(test)]
 pub mod test {
     use super::*;
+    use crate::dht::Did;
     use crate::dht::PeerRing;
     use crate::ecc::SecretKey;
     use crate::message::MessageHandler;
@@ -367,22 +341,22 @@ pub mod test {
             async fn custom_message(
                 &self,
                 handler: &MessageHandler,
-                relay: &MessageRelay<Message>,
+                ctx: &MessagePayload<Message>,
                 msg: &MaybeEncrypted<CustomMessage>,
             ) {
                 let decrypted_msg = handler.decrypt_msg(msg).unwrap();
                 self.handler_messages
-                    .insert(relay.addr.into(), decrypted_msg.0);
+                    .insert(ctx.addr.into(), decrypted_msg.0);
 
-                println!("{:?}, {:?}, {:?}", relay, relay.addr, msg);
+                println!("{:?}, {:?}, {:?}", ctx, ctx.addr, msg);
             }
 
             async fn builtin_message(
                 &self,
                 _handler: &MessageHandler,
-                relay: &MessageRelay<Message>,
+                ctx: &MessagePayload<Message>,
             ) {
-                println!("{:?}, {:?}", relay, relay.addr);
+                println!("{:?}, {:?}", ctx, ctx.addr);
             }
         }
 
@@ -395,10 +369,9 @@ pub mod test {
         handler2.set_callback(cb2).await;
 
         handler1
-            .send_message(
-                &addr2.into(),
-                &addr2.into(),
+            .send_direct_message(
                 Message::custom("Hello world 1".as_bytes(), &None)?,
+                addr2.into(),
             )
             .await
             .unwrap();
