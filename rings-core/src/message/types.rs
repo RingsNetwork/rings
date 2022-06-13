@@ -94,7 +94,6 @@ pub enum MaybeEncrypted<T> {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub enum Message {
-    None,
     MultiCall(MultiCall),
     JoinDHT(JoinDHT),
     LeaveDHT(LeaveDHT),

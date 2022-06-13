@@ -2,11 +2,8 @@ use crate::dht::vnode::VirtualNode;
 use crate::dht::Did;
 use crate::dht::{ChordStorage, PeerRingAction, PeerRingRemoteAction};
 use crate::err::{Error, Result};
-use crate::message::payload::{MessageRelay, MessageRelayMethod};
-use crate::message::protocol::MessageSessionRelayProtocol;
 use crate::message::types::{FoundVNode, Message, SearchVNode, StoreVNode, SyncVNodeWithSuccessor};
-use crate::message::{MessageHandler, OriginVerificationGen};
-
+use crate::message::{HandleMsg, MessageHandler, MessagePayload, PayloadSender};
 use async_trait::async_trait;
 
 /// TChordStorage should imply necessary method for DHT storage
@@ -19,18 +16,6 @@ pub trait TChordStorage {
     async fn fetch(&self, id: &Did) -> Result<()>;
     /// store virtual node on DHT
     async fn store(&self, vnode: VirtualNode) -> Result<()>;
-    /// Search VNode via DHT
-    async fn search_vnode(&self, relay: MessageRelay<Message>, msg: SearchVNode) -> Result<()>;
-    /// Remote Peer Found a vnode
-    async fn found_vnode(&self, relay: MessageRelay<Message>, msg: FoundVNode) -> Result<()>;
-    /// Store VNode
-    async fn store_vnode(&self, relay: MessageRelay<Message>, msg: StoreVNode) -> Result<()>;
-    /// Sync VNode data when successor is updated
-    async fn sync_with_successor(
-        &self,
-        relay: MessageRelay<Message>,
-        msg: SyncVNodeWithSuccessor,
-    ) -> Result<()>;
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
@@ -54,12 +39,8 @@ impl TChordStorage for MessageHandler {
             }
             PeerRingAction::None => Ok(()),
             PeerRingAction::RemoteAction(next, _) => {
-                self.send_relay_message(MessageRelay::direct(
-                    Message::SearchVNode(SearchVNode { id: *id }),
-                    &self.swarm.session_manager,
-                    next,
-                )?)
-                .await?;
+                self.send_direct_message(Message::SearchVNode(SearchVNode { id: *id }), next)
+                    .await?;
                 Ok(())
             }
             act => Err(Error::PeerRingUnexpectedAction(act)),
@@ -72,86 +53,85 @@ impl TChordStorage for MessageHandler {
         match dht.store(vnode)? {
             PeerRingAction::None => Ok(()),
             PeerRingAction::RemoteAction(target, PeerRingRemoteAction::FindAndStore(vnode)) => {
-                self.send_relay_message(MessageRelay::direct(
+                self.send_direct_message(
                     Message::StoreVNode(StoreVNode { data: vec![vnode] }),
-                    &self.swarm.session_manager,
                     target,
-                )?)
+                )
                 .await?;
                 Ok(())
             }
             act => Err(Error::PeerRingUnexpectedAction(act)),
         }
     }
+}
 
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl HandleMsg<SearchVNode> for MessageHandler {
     /// Search VNode via successor
     /// If a VNode is storead local, it will response immediately.
-    async fn search_vnode(&self, relay: MessageRelay<Message>, msg: SearchVNode) -> Result<()> {
+    async fn handle(&self, ctx: &MessagePayload<Message>, msg: &SearchVNode) -> Result<()> {
         let dht = self.dht.lock().await;
-        let mut relay = relay.clone();
+        let mut relay = ctx.relay.clone();
+
         match dht.lookup(&msg.id) {
             Ok(action) => match action {
                 PeerRingAction::None => Ok(()),
                 PeerRingAction::SomeVNode(v) => {
                     relay.relay(dht.id, None)?;
-                    self.send_relay_message(relay.report(
+                    self.send_report_message(
                         Message::FoundVNode(FoundVNode { data: vec![v] }),
-                        &self.swarm.session_manager,
-                    )?)
+                        relay,
+                    )
                     .await
                 }
                 PeerRingAction::RemoteAction(next, _) => {
                     relay.relay(dht.id, Some(next))?;
-                    self.send_relay_message(relay.rewrap(
-                        relay.data.clone(),
-                        &self.swarm.session_manager,
-                        OriginVerificationGen::Stick(relay.origin_verification.clone()),
-                    )?)
-                    .await
+                    self.transpond_payload(ctx, relay).await
                 }
                 act => Err(Error::PeerRingUnexpectedAction(act)),
             },
             Err(e) => Err(e),
         }
     }
+}
 
-    async fn found_vnode(&self, relay: MessageRelay<Message>, msg: FoundVNode) -> Result<()> {
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl HandleMsg<FoundVNode> for MessageHandler {
+    async fn handle(&self, ctx: &MessagePayload<Message>, msg: &FoundVNode) -> Result<()> {
         let dht = self.dht.lock().await;
-        let mut relay = relay.clone();
+        let mut relay = ctx.relay.clone();
+
         relay.relay(dht.id, None)?;
         if relay.next_hop.is_some() {
-            self.send_relay_message(relay.rewrap(
-                relay.data.clone(),
-                &self.swarm.session_manager,
-                OriginVerificationGen::Stick(relay.origin_verification.clone()),
-            )?)
-            .await
+            self.transpond_payload(ctx, relay).await
         } else {
             // When query successor, store in local cache
-            for datum in msg.data {
+            for datum in msg.data.iter().cloned() {
                 dht.cache(datum);
             }
             Ok(())
         }
     }
+}
 
-    async fn store_vnode(&self, relay: MessageRelay<Message>, msg: StoreVNode) -> Result<()> {
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl HandleMsg<StoreVNode> for MessageHandler {
+    async fn handle(&self, ctx: &MessagePayload<Message>, msg: &StoreVNode) -> Result<()> {
         let dht = self.dht.lock().await;
-        let mut relay = relay.clone();
+
         let virtual_peer = msg.data.clone();
         for p in virtual_peer {
             match dht.store(p) {
                 Ok(action) => match action {
                     PeerRingAction::None => Ok(()),
                     PeerRingAction::RemoteAction(next, _) => {
+                        let mut relay = ctx.relay.clone();
                         relay.reset_destination(next)?;
                         relay.relay(dht.id, Some(next))?;
-                        self.send_relay_message(relay.rewrap(
-                            relay.data.clone(),
-                            &self.swarm.session_manager,
-                            OriginVerificationGen::Stick(relay.origin_verification.clone()),
-                        )?)
-                        .await
+                        self.transpond_payload(ctx, relay).await
                     }
                     act => Err(Error::PeerRingUnexpectedAction(act)),
                 },
@@ -160,16 +140,20 @@ impl TChordStorage for MessageHandler {
         }
         Ok(())
     }
+}
 
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl HandleMsg<SyncVNodeWithSuccessor> for MessageHandler {
     // received remote sync vnode request
-    async fn sync_with_successor(
+    async fn handle(
         &self,
-        relay: MessageRelay<Message>,
-        msg: SyncVNodeWithSuccessor,
+        _ctx: &MessagePayload<Message>,
+        msg: &SyncVNodeWithSuccessor,
     ) -> Result<()> {
         let dht = self.dht.lock().await;
-        let mut relay = relay.clone();
-        for data in msg.data {
+
+        for data in msg.data.iter().cloned() {
             // only simply store here
             match dht.store(data) {
                 Ok(PeerRingAction::None) => Ok(()),
@@ -177,17 +161,10 @@ impl TChordStorage for MessageHandler {
                     next,
                     PeerRingRemoteAction::FindAndStore(peer),
                 )) => {
-                    relay.relay(dht.id, Some(next))?;
-                    self.send_relay_message(MessageRelay::new(
+                    self.send_direct_message(
                         Message::StoreVNode(StoreVNode { data: vec![peer] }),
-                        &self.swarm.session_manager,
-                        OriginVerificationGen::Origin,
-                        MessageRelayMethod::SEND,
-                        None,
-                        None,
-                        Some(next),
                         next,
-                    )?)
+                    )
                     .await
                 }
                 Ok(_) => unreachable!(),

@@ -8,7 +8,7 @@ use rings_node::{
         async_trait,
         dht::{PeerRing, Stabilization, TStabilize},
         ecc::SecretKey,
-        message::{self, CustomMessage, MaybeEncrypted, Message, MessageHandler, MessageRelay},
+        message::{self, CustomMessage, MaybeEncrypted, Message, MessageHandler, MessagePayload},
         prelude::url,
         session::SessionManager,
         swarm::Swarm,
@@ -200,7 +200,7 @@ impl message::MessageCallback for MessageCallback {
     async fn custom_message(
         &self,
         handler: &MessageHandler,
-        _relay: &MessageRelay<Message>,
+        _ctx: &MessagePayload<Message>,
         msg: &MaybeEncrypted<CustomMessage>,
     ) {
         if let Ok(msg) = handler.decrypt_msg(msg) {
@@ -213,7 +213,7 @@ impl message::MessageCallback for MessageCallback {
             log::info!("[MESSAGE] custom_message: {:?}", msg);
         }
     }
-    async fn builtin_message(&self, _handler: &MessageHandler, _relay: &MessageRelay<Message>) {}
+    async fn builtin_message(&self, _handler: &MessageHandler, _ctx: &MessagePayload<Message>) {}
 }
 
 fn run_daemon(args: &RunArgs) -> AnyhowResult<()> {

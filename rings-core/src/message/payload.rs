@@ -1,11 +1,11 @@
 use super::encoder::{Decoder, Encoded, Encoder};
+use super::protocols::{MessageRelay, MessageVerification, RelayMethod};
 use crate::dht::Did;
-use crate::ecc::{signers, HashStr, PublicKey};
+use crate::ecc::{HashStr, PublicKey};
 use crate::err::{Error, Result};
-use crate::message::protocol::MessageSessionRelayProtocol;
 use crate::session::SessionManager;
-use crate::session::{Session, Signer};
 use crate::utils;
+use async_trait::async_trait;
 use flate2::write::{GzDecoder, GzEncoder};
 use flate2::Compression;
 use serde::de::DeserializeOwned;
@@ -16,114 +16,37 @@ use web3::types::Address;
 
 const DEFAULT_TTL_MS: usize = 60 * 1000;
 
-#[derive(Deserialize, Serialize, PartialEq, Debug, Clone)]
-pub enum MessageRelayMethod {
-    SEND,
-    REPORT,
-}
-
 pub enum OriginVerificationGen {
     Origin,
     Stick(MessageVerification),
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
-pub struct MessageVerification {
-    pub session: Session,
-    pub ttl_ms: usize,
-    pub ts_ms: u128,
-    pub sig: Vec<u8>,
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
-pub struct MessageRelay<T> {
+pub struct MessagePayload<T> {
     pub data: T,
     pub tx_id: HashStr,
     pub addr: Address,
-
-    // verification
-    pub relay_verification: MessageVerification,
+    pub verification: MessageVerification,
     pub origin_verification: MessageVerification,
-
-    // relay
-    pub method: MessageRelayMethod,
-    pub path: Vec<Did>,
-    pub path_end_cursor: usize,
-    pub next_hop: Option<Did>,
-    pub destination: Did,
+    pub relay: MessageRelay,
 }
 
-impl MessageVerification {
-    pub fn verify<T>(&self, data: &T) -> bool
-    where
-        T: Serialize,
-    {
-        if !self.session.verify() {
-            return false;
-        }
-
-        if let (Ok(addr), Ok(msg)) = (self.session.address(), self.msg(data)) {
-            match self.session.auth.signer {
-                Signer::DEFAULT => signers::default::verify(&msg, &addr, &self.sig),
-                Signer::EIP712 => signers::eip712::verify(&msg, &addr, &self.sig),
-            }
-        } else {
-            false
-        }
-    }
-
-    pub fn session_pubkey<T>(&self, data: &T) -> Result<PublicKey>
-    where
-        T: Serialize,
-    {
-        let msg = self.msg(data)?;
-        match self.session.auth.signer {
-            Signer::DEFAULT => signers::default::recover(&msg, &self.sig),
-            Signer::EIP712 => signers::eip712::recover(&msg, &self.sig),
-        }
-    }
-
-    pub fn pack_msg<T>(data: &T, ts_ms: u128, ttl_ms: usize) -> Result<String>
-    where
-        T: Serialize,
-    {
-        let mut msg = serde_json::to_string(data).map_err(|_| Error::SerializeToString)?;
-        msg.push_str(&format!("\n{}\n{}", ts_ms, ttl_ms));
-        Ok(msg)
-    }
-
-    fn msg<T>(&self, data: &T) -> Result<String>
-    where
-        T: Serialize,
-    {
-        Self::pack_msg(data, self.ts_ms, self.ttl_ms)
-    }
-}
-
-impl<T> MessageRelay<T>
+impl<T> MessagePayload<T>
 where
     T: Serialize + DeserializeOwned,
 {
-    // TODO: split verification and relay out
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         data: T,
         session_manager: &SessionManager,
         origin_verification_gen: OriginVerificationGen,
-        method: MessageRelayMethod,
-        path: Option<Vec<Did>>,
-        path_end_cursor: Option<usize>,
-        next_hop: Option<Did>,
-        destination: Did,
+        relay: MessageRelay,
     ) -> Result<Self> {
         let ts_ms = utils::get_epoch_ms();
         let ttl_ms = DEFAULT_TTL_MS;
         let msg = &MessageVerification::pack_msg(&data, ts_ms, ttl_ms)?;
         let tx_id = msg.into();
-        let addr = session_manager.authorizer()?.to_owned();
-        let path = path.unwrap_or_else(|| vec![addr.into()]);
-        let path_end_cursor = path_end_cursor.unwrap_or(0);
-        let relay_verification = MessageVerification {
+        let addr = session_manager.authorizer()?;
+        let verification = MessageVerification {
             session: session_manager.session()?,
             sig: session_manager.sign(msg)?,
             ttl_ms,
@@ -131,79 +54,52 @@ where
         };
 
         let origin_verification = match origin_verification_gen {
-            OriginVerificationGen::Origin => relay_verification.clone(),
+            OriginVerificationGen::Origin => verification.clone(),
             OriginVerificationGen::Stick(ov) => ov,
         };
 
         Ok(Self {
             data,
-            addr,
             tx_id,
-            relay_verification,
+            addr,
+            verification,
             origin_verification,
-            method,
-            path,
-            path_end_cursor,
-            next_hop,
-            destination,
+            relay,
         })
     }
 
-    pub fn direct(data: T, session_manager: &SessionManager, dist: Did) -> Result<Self> {
-        Self::new(
-            data,
-            session_manager,
-            OriginVerificationGen::Origin,
-            MessageRelayMethod::SEND,
-            None,
-            None,
-            Some(dist),
-            dist,
-        )
-    }
-
-    pub fn rewrap(
-        &self,
+    pub fn new_send(
         data: T,
         session_manager: &SessionManager,
-        origin_verification_gen: OriginVerificationGen,
+        next_hop: Did,
+        destination: Did,
     ) -> Result<Self> {
-        Self::new(
-            data,
-            session_manager,
-            origin_verification_gen,
-            self.method.clone(),
-            Some(self.path.clone()),
-            Some(self.path_end_cursor),
-            self.next_hop,
-            self.destination,
-        )
+        let relay = MessageRelay::new(
+            RelayMethod::SEND,
+            vec![session_manager.authorizer()?.into()],
+            None,
+            Some(next_hop),
+            destination,
+        );
+        Self::new(data, session_manager, OriginVerificationGen::Origin, relay)
     }
 
-    pub fn report(&self, data: T, session_manager: &SessionManager) -> Result<Self> {
-        if self.method != MessageRelayMethod::SEND {
-            return Err(Error::ReportNeedSend);
-        }
+    pub fn new_report(
+        data: T,
+        session_manager: &SessionManager,
+        relay: &MessageRelay,
+    ) -> Result<Self> {
+        let relay = relay.report()?;
+        Self::new(data, session_manager, OriginVerificationGen::Origin, relay)
+    }
 
-        if self.path.len() < 2 {
-            return Err(Error::CannotInferNextHop);
-        }
-
-        Self::new(
-            data,
-            session_manager,
-            OriginVerificationGen::Origin,
-            MessageRelayMethod::REPORT,
-            Some(self.path.clone()),
-            Some(self.path_end_cursor),
-            self.path_prev(),
-            self.sender(),
-        )
+    pub fn new_direct(data: T, session_manager: &SessionManager, destination: Did) -> Result<Self> {
+        Self::new_send(data, session_manager, destination, destination)
     }
 
     pub fn is_expired(&self) -> bool {
         let now = utils::get_epoch_ms();
-        now > self.relay_verification.ts_ms + self.relay_verification.ttl_ms as u128
+        now > self.verification.ts_ms + self.verification.ttl_ms as u128
             && now > self.origin_verification.ts_ms + self.origin_verification.ttl_ms as u128
     }
 
@@ -212,7 +108,7 @@ where
             return false;
         }
 
-        self.relay_verification.verify(&self.data) && self.origin_verification.verify(&self.data)
+        self.verification.verify(&self.data) && self.origin_verification.verify(&self.data)
     }
 
     pub fn origin_session_pubkey(&self) -> Result<PublicKey> {
@@ -256,7 +152,7 @@ where
     }
 }
 
-impl<T> Encoder for MessageRelay<T>
+impl<T> Encoder for MessagePayload<T>
 where
     T: Serialize + DeserializeOwned,
 {
@@ -265,13 +161,73 @@ where
     }
 }
 
-impl<T> Decoder for MessageRelay<T>
+impl<T> Decoder for MessagePayload<T>
 where
     T: Serialize + DeserializeOwned,
 {
     fn from_encoded(encoded: &Encoded) -> Result<Self> {
         let v: Vec<u8> = encoded.decode()?;
         Self::from_auto(&v)
+    }
+}
+
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+pub trait PayloadSender<T>
+where
+    T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static,
+{
+    fn session_manager(&self) -> &SessionManager;
+    async fn do_send(&self, address: &Address, payload: MessagePayload<T>) -> Result<()>;
+
+    async fn send_payload(&self, payload: MessagePayload<T>) -> Result<()> {
+        if let Some(id) = payload.relay.next_hop {
+            self.do_send(&id.into(), payload).await
+        } else {
+            Err(Error::NoNextHop)
+        }
+    }
+
+    async fn send_message(&self, msg: T, next_hop: Did, destination: Did) -> Result<()> {
+        self.send_payload(MessagePayload::new_send(
+            msg,
+            self.session_manager(),
+            next_hop,
+            destination,
+        )?)
+        .await
+    }
+
+    async fn send_direct_message(&self, msg: T, destination: Did) -> Result<()> {
+        self.send_payload(MessagePayload::new_direct(
+            msg,
+            self.session_manager(),
+            destination,
+        )?)
+        .await
+    }
+
+    async fn send_report_message(&self, msg: T, relay: MessageRelay) -> Result<()> {
+        self.send_payload(MessagePayload::new_report(
+            msg,
+            self.session_manager(),
+            &relay,
+        )?)
+        .await
+    }
+
+    async fn transpond_payload(
+        &self,
+        payload: &MessagePayload<T>,
+        relay: MessageRelay,
+    ) -> Result<()> {
+        self.send_payload(MessagePayload::new(
+            payload.data.clone(),
+            self.session_manager(),
+            OriginVerificationGen::Stick(payload.origin_verification.clone()),
+            relay,
+        )?)
+        .await
     }
 }
 
@@ -288,7 +244,7 @@ pub mod test {
         d: bool,
     }
 
-    pub fn new_test_message() -> MessageRelay<TestData> {
+    pub fn new_test_payload() -> MessagePayload<TestData> {
         let key = SecretKey::random();
         let destination = SecretKey::random().address().into();
         let session = SessionManager::new_with_seckey(&key).unwrap();
@@ -298,59 +254,50 @@ pub mod test {
             c: 2.33,
             d: true,
         };
-        MessageRelay::new(
-            test_data,
-            &session,
-            OriginVerificationGen::Origin,
-            MessageRelayMethod::SEND,
-            None,
-            None,
-            None,
-            destination,
-        )
-        .unwrap()
+        MessagePayload::new_direct(test_data, &session, destination).unwrap()
     }
 
     #[test]
     fn new_then_verify() {
-        let mut payload = new_test_message();
+        let payload = new_test_payload();
         assert!(payload.verify());
 
         let key2 = SecretKey::random();
         let did2 = key2.address().into();
         let session2 = SessionManager::new_with_seckey(&key2).unwrap();
 
-        payload.next_hop = Some(did2);
-        payload.relay(did2, None).unwrap();
+        let mut relay = payload.relay.clone();
+        relay.next_hop = Some(did2);
+        relay.relay(did2, None).unwrap();
 
-        let relaied_payload = payload
-            .rewrap(
-                payload.data.clone(),
-                &session2,
-                OriginVerificationGen::Stick(payload.origin_verification.clone()),
-            )
-            .unwrap();
+        let relaied_payload = MessagePayload::new(
+            payload.data.clone(),
+            &session2,
+            OriginVerificationGen::Stick(payload.origin_verification),
+            relay,
+        )
+        .unwrap();
 
         assert!(relaied_payload.verify());
     }
 
     #[test]
     fn test_message_relay_gzip() {
-        let payload = new_test_message();
+        let payload = new_test_payload();
         let gziped = payload.gzip(9).unwrap();
-        let payload2: MessageRelay<TestData> = MessageRelay::from_gzipped(&gziped).unwrap();
+        let payload2: MessagePayload<TestData> = MessagePayload::from_gzipped(&gziped).unwrap();
         assert_eq!(payload, payload2);
     }
 
     #[test]
     fn test_message_relay_from_auto() {
-        let payload = new_test_message();
+        let payload = new_test_payload();
         let gziped_encoded_payload = payload.encode().unwrap();
-        let payload2: MessageRelay<TestData> = gziped_encoded_payload.decode().unwrap();
+        let payload2: MessagePayload<TestData> = gziped_encoded_payload.decode().unwrap();
         assert_eq!(payload, payload2);
 
         let ungzip_encoded_payload = payload.to_json_vec().unwrap().encode().unwrap();
-        let payload2: MessageRelay<TestData> = ungzip_encoded_payload.decode().unwrap();
+        let payload2: MessagePayload<TestData> = ungzip_encoded_payload.decode().unwrap();
         assert_eq!(payload, payload2);
     }
 }

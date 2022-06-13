@@ -5,7 +5,7 @@ use crate::ecc::HashStr;
 use crate::err::{Error, Result};
 use crate::message::Encoded;
 use crate::message::Encoder;
-use crate::message::MessageRelay;
+use crate::message::MessagePayload;
 use num_bigint::BigUint;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -45,12 +45,12 @@ impl VirtualNode {
     }
 }
 
-impl<T> TryFrom<MessageRelay<T>> for VirtualNode
+impl<T> TryFrom<MessagePayload<T>> for VirtualNode
 where
     T: Serialize + DeserializeOwned,
 {
     type Error = Error;
-    fn try_from(msg: MessageRelay<T>) -> Result<Self> {
+    fn try_from(msg: MessagePayload<T>) -> Result<Self> {
         let address = BigUint::from(Did::from(msg.addr)) + BigUint::from(1u16);
         let data = msg.encode()?;
         Ok(Self {

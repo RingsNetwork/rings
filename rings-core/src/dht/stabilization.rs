@@ -1,9 +1,6 @@
 use crate::dht::{ChordStablize, PeerRing, PeerRingAction, PeerRingRemoteAction};
 use crate::err::Result;
-use crate::message::{
-    FindSuccessorSend, Message, MessageRelay, MessageRelayMethod, NotifyPredecessorSend,
-    OriginVerificationGen,
-};
+use crate::message::{FindSuccessorSend, Message, MessagePayload, NotifyPredecessorSend};
 use crate::swarm::Swarm;
 
 use async_trait::async_trait;
@@ -38,18 +35,15 @@ impl Stabilization {
 
     async fn notify_predecessor(&self) -> Result<()> {
         let chord = self.chord.lock().await;
-        let message = MessageRelay::new(
-            Message::NotifyPredecessorSend(NotifyPredecessorSend { id: chord.id }),
-            &self.swarm.session_manager,
-            OriginVerificationGen::Origin,
-            MessageRelayMethod::SEND,
-            None,
-            None,
-            None,
-            self.swarm.address().into(),
-        )?;
+        let msg = Message::NotifyPredecessorSend(NotifyPredecessorSend { id: chord.id });
         if chord.id != chord.successor.min() {
             for s in chord.successor.list() {
+                let message = MessagePayload::new_send(
+                    msg.clone(),
+                    &self.swarm.session_manager,
+                    s,
+                    self.swarm.address().into(),
+                )?;
                 self.swarm.send_message(&s.into(), message.clone()).await?;
             }
             Ok(())
@@ -70,17 +64,13 @@ impl Stabilization {
                     next,
                     PeerRingRemoteAction::FindSuccessorForFix(current),
                 ) => {
-                    let message = MessageRelay::new(
+                    let message = MessagePayload::new_send(
                         Message::FindSuccessorSend(FindSuccessorSend {
                             id: current,
                             for_fix: true,
                         }),
                         &self.swarm.session_manager,
-                        OriginVerificationGen::Origin,
-                        MessageRelayMethod::SEND,
-                        None,
-                        None,
-                        None,
+                        next,
                         self.swarm.address().into(),
                     )?;
                     self.swarm.send_message(&next.into(), message).await
