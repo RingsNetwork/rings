@@ -11,7 +11,7 @@ impl MessageHandler {
     /// Create subring
     /// 1. Created a subring and stored in Handler.subrings
     /// 2. Send StoreVNode message to it's successor
-    pub async fn create_or_join_subring(&self, name: &str) -> Result<()> {
+    pub async fn create(&self, name: &str) -> Result<()> {
         let dht = self.dht.lock().await;
         let subring: SubRing = SubRing::new(name, &dht.id)?;
         let vnode: VirtualNode = subring.clone().try_into()?;

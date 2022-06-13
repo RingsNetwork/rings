@@ -46,9 +46,37 @@ pub trait TSubRingManager {
         name: &str,
         callback: Box<dyn FnOnce(SubRing) -> SubRing>,
     ) -> Result<bool>;
+
+    /// join a node to subring via given name
+    /// When Node A join Channel C which's vnode is stored on Node B
+    /// A send JoinSubRing to Address C, Node B got the Message And
+    /// Update the Chord Finger Table, then, Node B Response it's finger table to A
+    /// And Noti closest preceding node that A is Joined
+    fn join(&self, id: &Did, name: &str) -> Result<bool>;
+
+    /// search a cloest preceding node
+    fn cloest_preceding_node(&self, id: &Did, name: &str) -> Option<Result<Did>>;
 }
 
 impl TSubRingManager for PeerRing {
+    fn join(&self, id: &Did, name: &str) -> Result<bool> {
+        let id = id.to_owned();
+        self.get_subring_for_update_by_name(name, box move |r: SubRing| {
+            let mut new_ring = r.clone();
+            new_ring.finger.join(id);
+            new_ring
+        })
+    }
+
+    fn cloest_preceding_node(&self, id: &Did, name: &str) -> Option<Result<Did>> {
+        let id = id.to_owned();
+        if let Some(Ok(subring)) = self.get_subring_by_name(name) {
+            Some(subring.finger.closest(id))
+        } else {
+            None
+        }
+    }
+
     fn get_subring(&self, id: &Did) -> Option<Result<SubRing>> {
         self.storage.get(id).map(|vn| vn.try_into())
     }
