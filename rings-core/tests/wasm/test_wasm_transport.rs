@@ -1,9 +1,7 @@
 #[cfg(test)]
 pub mod test {
-    use log::Level;
-    use rings_core::channels::Channel as CbChannel;
-
     use futures::lock::Mutex;
+    use rings_core::channels::Channel as CbChannel;
     use rings_core::dht::PeerRing;
     use rings_core::ecc::SecretKey;
     use rings_core::err::Result;
@@ -23,16 +21,11 @@ pub mod test {
     use std::sync::Arc;
     use wasm_bindgen::JsValue;
     use wasm_bindgen_futures::JsFuture;
-    use wasm_bindgen_test::wasm_bindgen_test_configure;
     use wasm_bindgen_test::*;
     use web_sys::RtcIceConnectionState;
     use web_sys::RtcSdpType;
 
-    wasm_bindgen_test_configure!(run_in_browser);
-
-    fn setup_log() {
-        console_log::init_with_level(Level::Trace).expect("error initializing log");
-    }
+    // wasm_bindgen_test_configure!(run_in_browser);
 
     async fn get_fake_permission() {
         let window = web_sys::window().unwrap();
@@ -115,7 +108,6 @@ pub mod test {
     #[wasm_bindgen_test]
     async fn test_ice_connection_establish() {
         get_fake_permission().await;
-        setup_log();
         let transport1 = prepare_transport(None).await.unwrap();
         let transport2 = prepare_transport(None).await.unwrap();
         establish_connection(&transport1, &transport2)
