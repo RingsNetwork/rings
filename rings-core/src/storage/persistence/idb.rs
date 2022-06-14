@@ -54,8 +54,9 @@ pub trait IDBStorageBasic {
 }
 
 impl IDBStorage {
-    /// RexieInstance initialize
-    pub async fn new(cap: usize) -> Result<Self> {
+    /// New IDBStorage
+    /// * cap: rows of data limit
+    pub async fn new_with_cap(cap: usize) -> Result<Self> {
         if cap == 0 {
             return Err(Error::InvalidCapacity);
         }
@@ -73,6 +74,11 @@ impl IDBStorage {
                 .map_err(Error::IDBError)?,
             cap,
         })
+    }
+
+    /// New IDBStorage with default capacity 50000 rows data limit
+    pub async fn new() -> Result<Self> {
+        Self::new_with_cap(50000).await
     }
 }
 
