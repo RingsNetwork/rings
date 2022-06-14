@@ -5,6 +5,7 @@ pub use web_sys::RtcSdpType as RTCSdpType;
 #[cfg(not(feature = "wasm"))]
 pub use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 
+pub use async_trait;
 pub use dashmap;
 pub use futures;
 pub use uuid;

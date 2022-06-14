@@ -1,8 +1,13 @@
 mod memory;
+pub mod persistence;
 
-use async_trait::async_trait;
-
+pub use self::persistence::{
+    PersistenceStorageOperation, PersistenceStorageReadAndWrite, PersistenceStorageRemove,
+};
 pub use memory::MemStorage;
 
-#[async_trait]
-pub trait PersistentStorage {}
+#[cfg(feature = "wasm")]
+pub use self::persistence::idb::IDBStorage;
+
+#[cfg(feature = "default")]
+pub use self::persistence::kv::KvStorage;

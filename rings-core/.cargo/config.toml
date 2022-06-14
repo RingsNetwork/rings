@@ -3,4 +3,4 @@ runner = 'wasm-bindgen-test-runner'
 
 [alias]
 wasm = "build -p rings-core --target=wasm32-unknown-unknown --features wasm --no-default-features"
-test_wasm = "test -p rings-core --target=wasm32-unknown-unknown --features wasm --no-default-features"
+test-wasm = "test -p rings-core --target=wasm32-unknown-unknown --features wasm --no-default-features"
