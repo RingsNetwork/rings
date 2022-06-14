@@ -90,12 +90,25 @@ impl KvStorage {
     /// New KvStorage
     /// * cap: max_size storage can use
     /// * path: db file location
-    pub fn new<P>(cap: usize, path: P) -> Result<Self>
+    pub async fn new_with_cap_and_path<P>(cap: usize, path: P) -> Result<Self>
     where
         P: AsRef<std::path::Path>,
     {
         let db = sled::open(path).map_err(Error::SledError)?;
         Ok(Self { db, cap })
+    }
+
+    /// New KvStorage with default path
+    /// default_path is `./`
+    pub async fn new_with_cap(cap: usize) -> Result<Self> {
+        Self::new_with_cap_and_path(cap, "./data").await
+    }
+
+    /// New KvStorage
+    /// * default capacity 50000 rows data
+    /// * default path `./data`
+    pub async fn new() -> Result<Self> {
+        Self::new_with_cap(50000).await
     }
 }
 
@@ -239,7 +252,9 @@ mod test {
 
     #[tokio::test]
     async fn test_kv_storage_put_delete() {
-        let storage = KvStorage::new(10, "temp/db").unwrap();
+        let storage = KvStorage::new_with_cap_and_path(10, "temp/db")
+            .await
+            .unwrap();
         let key1 = "test1".to_owned();
         let data1 = TestStorageStruct {
             content: "test1".to_string(),
@@ -290,7 +305,9 @@ mod test {
 
     #[tokio::test]
     async fn test_kv_storage_auto_prune() {
-        let storage = KvStorage::new(4, "temp/db").unwrap();
+        let storage = KvStorage::new_with_cap_and_path(4, "temp/db")
+            .await
+            .unwrap();
         storage.clear().await.unwrap();
         assert_eq!(storage.count().await.unwrap(), 0);
         let test_data = create_test_data(6);

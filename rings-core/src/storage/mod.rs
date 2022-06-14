@@ -7,7 +7,7 @@ pub use self::persistence::{
 pub use memory::MemStorage;
 
 #[cfg(feature = "wasm")]
-pub use self::persistence::idb::IDBStorage;
+pub use self::persistence::idb::IDBStorage as Storage;
 
 #[cfg(feature = "default")]
-pub use self::persistence::kv::KvStorage;
+pub use self::persistence::kv::KvStorage as Storage;
