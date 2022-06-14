@@ -129,18 +129,16 @@ impl Client {
     /// listen message callback.
     /// ```typescript
     /// await client.listen(new MessageCallbackInstance(
-    ///      async (relay: any, prev: String, msg: any) => {
+    ///      async (relay: any, msg: any) => {
     ///        console.group('on custom message')
     ///        console.log(relay)
-    ///        console.log(prev)
     ///        console.log(msg)
     ///        console.groupEnd()
     ///      }, async (
-    ///        relay: any, prev: String,
+    ///        relay: any,
     ///      ) => {
     ///        console.group('on builtin message')
     ///        console.log(relay)
-    ///        console.log(prev)
     ///        console.groupEnd()
     ///      },
     /// ))
@@ -290,10 +288,15 @@ impl Client {
     }
 
     /// send custome message to peer.
-    pub fn send_message(&self, next_hop: String, destination: String, msg: String) -> Promise {
+    pub fn send_message(
+        &self,
+        next_hop: String,
+        destination: String,
+        msg: js_sys::Uint8Array,
+    ) -> Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
-            p.send_message(next_hop.as_str(), destination.as_str(), msg.as_bytes())
+            p.send_message(next_hop.as_str(), destination.as_str(), &msg.to_vec())
                 .await
                 .map_err(JsError::from)?;
             Ok(JsValue::from_bool(true))
@@ -332,19 +335,21 @@ impl MessageCallback for MessageCallbackInstance {
         log::debug!("custom_message received: {:?}", msg);
 
         let r = handler.decrypt_msg(msg);
-        if let Err(e) = r {
+        let msg = if let Err(e) = r {
             log::error!("custom_message decrypt failed: {:?}", e);
             return;
-        }
-        let msg = r.unwrap();
+        } else {
+            r.unwrap()
+        };
+        // let msg = r.unwrap();
 
         let this = JsValue::null();
+        let msg = js_sys::Uint8Array::from(&msg.0[..]);
 
-        if let Ok(r) = self.custom_message.call2(
-            &this,
-            &JsValue::from_serde(&relay).unwrap(),
-            &JsValue::from_serde(&msg).unwrap(),
-        ) {
+        if let Ok(r) = self
+            .custom_message
+            .call2(&this, &JsValue::from_serde(&relay).unwrap(), &msg)
+        {
             if let Ok(p) = js_sys::Promise::try_from(r) {
                 if let Err(e) = wasm_bindgen_futures::JsFuture::from(p).await {
                     log::warn!("invoke on_custom_message error: {:?}", e);

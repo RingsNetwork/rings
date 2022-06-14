@@ -217,12 +217,6 @@ impl Processor {
             .register_remote_info(ice)
             .await
             .map_err(Error::RegisterIceError)?;
-        transport
-            .connect_success_promise()
-            .await
-            .map_err(Error::ConnectError)?
-            .await
-            .map_err(Error::ConnectError)?;
         self.swarm
             .register(&addr, transport.clone())
             .await
