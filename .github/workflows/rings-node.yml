@@ -54,6 +54,7 @@ jobs:
       - uses: supercharge/redis-github-action@1.4.0
         with:
           redis-version: ${{ matrix.redis-version }}
+          redis-port: 12345
       - name: Build
         run: cargo build --features client --features daemon --all --verbose
       - name: Run tests
