@@ -2,11 +2,11 @@
 pub mod idb;
 #[cfg(feature = "default")]
 pub mod kv;
-use crate::err::Result;
 use async_trait::async_trait;
 
 #[cfg(feature = "wasm")]
 pub use self::idb::IDBStorage;
+use crate::err::Result;
 
 /// Persistence Storage read and write functions
 #[cfg_attr(feature = "wasm", async_trait(?Send))]

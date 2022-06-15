@@ -1,11 +1,13 @@
 #![warn(missing_docs)]
+use std::str::FromStr;
+
 use super::chord::PeerRing;
 use super::vnode::VNodeType;
 use super::vnode::VirtualNode;
 use crate::dht::Did;
 use crate::ecc::HashStr;
-use crate::err::{Error, Result};
-use std::str::FromStr;
+use crate::err::Error;
+use crate::err::Result;
 
 /// A SubRing is a full functional Ring, but with a name and it's finger table can be
 /// stored on Main Rings DHT, For a SubRing, it's virtual address is `sha1(name)`

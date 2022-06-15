@@ -1,10 +1,18 @@
-use crate::dht::{ChordStablize, PeerRing, PeerRingAction, PeerRingRemoteAction};
-use crate::err::Result;
-use crate::message::{FindSuccessorSend, Message, NotifyPredecessorSend, PayloadSender};
-use crate::swarm::Swarm;
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use futures::lock::Mutex;
-use std::sync::Arc;
+
+use crate::dht::ChordStablize;
+use crate::dht::PeerRing;
+use crate::dht::PeerRingAction;
+use crate::dht::PeerRingRemoteAction;
+use crate::err::Result;
+use crate::message::FindSuccessorSend;
+use crate::message::Message;
+use crate::message::NotifyPredecessorSend;
+use crate::message::PayloadSender;
+use crate::swarm::Swarm;
 
 #[derive(Clone)]
 pub struct Stabilization {
@@ -88,12 +96,17 @@ impl Stabilization {
 
 #[cfg(not(feature = "wasm"))]
 mod stabilizer {
-    use super::{Stabilization, TStabilize};
-    use async_trait::async_trait;
-    use futures::{future::FutureExt, pin_mut, select};
-    use futures_timer::Delay;
     use std::sync::Arc;
     use std::time::Duration;
+
+    use async_trait::async_trait;
+    use futures::future::FutureExt;
+    use futures::pin_mut;
+    use futures::select;
+    use futures_timer::Delay;
+
+    use super::Stabilization;
+    use super::TStabilize;
 
     #[async_trait]
     impl TStabilize for Stabilization {
@@ -118,11 +131,14 @@ mod stabilizer {
 
 #[cfg(feature = "wasm")]
 mod stabilizer {
-    use super::{Stabilization, TStabilize};
-    use crate::poll;
-    use async_trait::async_trait;
     use std::sync::Arc;
+
+    use async_trait::async_trait;
     use wasm_bindgen_futures::spawn_local;
+
+    use super::Stabilization;
+    use super::TStabilize;
+    use crate::poll;
 
     #[async_trait(?Send)]
     impl TStabilize for Stabilization {

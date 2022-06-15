@@ -1,25 +1,11 @@
-use super::helper::RtcSessionDescriptionWrapper;
-use crate::channels::Channel as CbChannel;
-use crate::ecc::PublicKey;
-use crate::err::{Error, Result};
-use crate::message::{Encoded, Encoder, MessagePayload};
-use crate::session::SessionManager;
-use crate::transports::helper::Promise;
-use crate::transports::helper::TricklePayload;
-use crate::types::channel::Channel;
-use crate::types::channel::Event;
-use crate::types::ice_transport::IceCandidate;
-use crate::types::ice_transport::IceServer;
-use crate::types::ice_transport::IceTransport;
-use crate::types::ice_transport::IceTransportCallback;
-use crate::types::ice_transport::IceTrickleScheme;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::RwLock;
+
 use async_trait::async_trait;
 use futures::channel::mpsc;
 use futures::lock::Mutex as FuturesMutex;
 use js_sys::Uint8Array;
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::RwLock;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
@@ -40,6 +26,25 @@ use web_sys::RtcPeerConnectionIceEvent;
 use web_sys::RtcSdpType;
 use web_sys::RtcSessionDescription;
 use web_sys::RtcSessionDescriptionInit;
+
+use super::helper::RtcSessionDescriptionWrapper;
+use crate::channels::Channel as CbChannel;
+use crate::ecc::PublicKey;
+use crate::err::Error;
+use crate::err::Result;
+use crate::message::Encoded;
+use crate::message::Encoder;
+use crate::message::MessagePayload;
+use crate::session::SessionManager;
+use crate::transports::helper::Promise;
+use crate::transports::helper::TricklePayload;
+use crate::types::channel::Channel;
+use crate::types::channel::Event;
+use crate::types::ice_transport::IceCandidate;
+use crate::types::ice_transport::IceServer;
+use crate::types::ice_transport::IceTransport;
+use crate::types::ice_transport::IceTransportCallback;
+use crate::types::ice_transport::IceTrickleScheme;
 
 type EventSender = Arc<FuturesMutex<mpsc::Sender<Event>>>;
 
@@ -204,9 +209,7 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
     }
 
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
-    where
-        T: Into<Self::Sdp>,
-    {
+    where T: Into<Self::Sdp> {
         match &self.get_peer_connection().await {
             Some(c) => {
                 let sdp: Self::Sdp = desc.into();
@@ -226,9 +229,7 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
     }
 
     async fn set_remote_description<T>(&self, desc: T) -> Result<()>
-    where
-        T: Into<Self::Sdp>,
-    {
+    where T: Into<Self::Sdp> {
         match &self.get_peer_connection().await {
             Some(c) => {
                 let sdp: Self::Sdp = desc.into();

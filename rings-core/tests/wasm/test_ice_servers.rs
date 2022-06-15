@@ -1,9 +1,10 @@
 #[cfg(test)]
 pub mod test {
+    use std::str::FromStr;
+
     use js_sys::Array;
     use js_sys::Reflect;
     use rings_core::types::ice_transport::ice_server::IceServer;
-    use std::str::FromStr;
     use wasm_bindgen::JsCast;
     use wasm_bindgen::JsValue;
     use wasm_bindgen_test::wasm_bindgen_test;

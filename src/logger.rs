@@ -1,8 +1,11 @@
 use chrono::Local;
 use clap::ArgEnum;
+use log::Level;
+use log::LevelFilter;
 use log::Log;
-use log::{Level, Metadata, Record};
-use log::{LevelFilter, SetLoggerError};
+use log::Metadata;
+use log::Record;
+use log::SetLoggerError;
 
 pub struct Logger;
 

@@ -1,13 +1,12 @@
-use crate::{
-    jsonrpc::{
-        method::Method,
-        response::{Peer, TransportAndIce},
-    },
-    jsonrpc_client::SimpleClient,
-};
-use jsonrpc_core::{Params, Value};
+use jsonrpc_core::Params;
+use jsonrpc_core::Value;
 //use jsonrpc_core_client::RawClient;
 use serde_json::json;
+
+use crate::jsonrpc::method::Method;
+use crate::jsonrpc::response::Peer;
+use crate::jsonrpc::response::TransportAndIce;
+use crate::jsonrpc_client::SimpleClient;
 
 #[derive(Clone)]
 pub struct Client {

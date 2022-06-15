@@ -1,15 +1,17 @@
 pub mod ice_server;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use serde::Deserialize;
+use serde::Serialize;
+use web3::types::Address;
+
 pub use self::ice_server::IceServer;
 use crate::ecc::PublicKey;
 use crate::err::Result;
 use crate::message::Encoded;
 use crate::session::SessionManager;
 use crate::types::channel::Channel;
-use async_trait::async_trait;
-use serde::Deserialize;
-use serde::Serialize;
-use std::sync::Arc;
-use web3::types::Address;
 
 /// Struct From [webrtc-rs](https://docs.rs/webrtc/latest/webrtc/ice_transport/ice_candidate/struct.RTCIceCandidateInit.html)
 /// For [RFC Std](https://w3c.github.io/webrtc-pc/#dom-rtcicecandidate-tojson), ICE Candidate should be camelCase
@@ -53,12 +55,10 @@ pub trait IceTransport<E: Send, Ch: Channel<E>> {
     async fn get_data_channel(&self) -> Option<Arc<Self::DataChannel>>;
     async fn send_message(&self, msg: &[u8]) -> Result<()>;
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
-    where
-        T: Into<Self::Sdp> + Send;
+    where T: Into<Self::Sdp> + Send;
     async fn add_ice_candidate(&self, candidate: IceCandidate) -> Result<()>;
     async fn set_remote_description<T>(&self, desc: T) -> Result<()>
-    where
-        T: Into<Self::Sdp> + Send;
+    where T: Into<Self::Sdp> + Send;
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]

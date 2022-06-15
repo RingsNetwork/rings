@@ -1,8 +1,12 @@
 #[cfg(test)]
 pub mod test {
+    use std::str::FromStr;
+    use std::sync::Arc;
+
     use futures::lock::Mutex;
     use rings_core::dht::vnode::VirtualNode;
-    use rings_core::dht::{Did, PeerRing};
+    use rings_core::dht::Did;
+    use rings_core::dht::PeerRing;
     use rings_core::ecc::SecretKey;
     use rings_core::err::Result;
     use rings_core::message;
@@ -17,9 +21,8 @@ pub mod test {
     use rings_core::types::ice_transport::IceTransport;
     use rings_core::types::ice_transport::IceTrickleScheme;
     use rings_core::types::message::MessageListener;
-    use std::str::FromStr;
-    use std::sync::Arc;
-    use tokio::time::{sleep, Duration};
+    use tokio::time::sleep;
+    use tokio::time::Duration;
     use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
     use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 

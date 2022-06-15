@@ -1,11 +1,13 @@
 use std::mem::size_of_val;
 
 use rexie::TransactionMode;
-use rings_core::storage::persistence::{
-    idb::IDBStorageBasic, IDBStorage, PersistenceStorageOperation, PersistenceStorageReadAndWrite,
-    PersistenceStorageRemove,
-};
-use serde::{Deserialize, Serialize};
+use rings_core::storage::persistence::idb::IDBStorageBasic;
+use rings_core::storage::persistence::IDBStorage;
+use rings_core::storage::persistence::PersistenceStorageOperation;
+use rings_core::storage::persistence::PersistenceStorageReadAndWrite;
+use rings_core::storage::persistence::PersistenceStorageRemove;
+use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Value as JsonValue;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_test::wasm_bindgen_test;
@@ -175,39 +177,27 @@ async fn test_idb_prune() {
     let key4 = "4".to_string();
     let key5 = "5".to_string();
     instance
-        .put(
-            &key1,
-            &TestDataStruct {
-                content: "test1".to_owned(),
-            },
-        )
+        .put(&key1, &TestDataStruct {
+            content: "test1".to_owned(),
+        })
         .await
         .unwrap();
     instance
-        .put(
-            &key2,
-            &TestDataStruct {
-                content: "test2".to_owned(),
-            },
-        )
+        .put(&key2, &TestDataStruct {
+            content: "test2".to_owned(),
+        })
         .await
         .unwrap();
     instance
-        .put(
-            &key3,
-            &TestDataStruct {
-                content: "test3".to_owned(),
-            },
-        )
+        .put(&key3, &TestDataStruct {
+            content: "test3".to_owned(),
+        })
         .await
         .unwrap();
     instance
-        .put(
-            &key4,
-            &TestDataStruct {
-                content: "test4".to_owned(),
-            },
-        )
+        .put(&key4, &TestDataStruct {
+            content: "test4".to_owned(),
+        })
         .await
         .unwrap();
 
@@ -221,12 +211,9 @@ async fn test_idb_prune() {
     log::debug!("d2, {:?}", d2);
 
     instance
-        .put(
-            &key5,
-            &TestDataStruct {
-                content: "test5".to_owned(),
-            },
-        )
+        .put(&key5, &TestDataStruct {
+            content: "test5".to_owned(),
+        })
         .await
         .unwrap();
 

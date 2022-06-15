@@ -1,8 +1,12 @@
-use crate::ecc::{signers, PublicKey};
-use crate::err::{Error, Result};
-use crate::session::{Session, Signer};
 use serde::Deserialize;
 use serde::Serialize;
+
+use crate::ecc::signers;
+use crate::ecc::PublicKey;
+use crate::err::Error;
+use crate::err::Result;
+use crate::session::Session;
+use crate::session::Signer;
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct MessageVerification {
@@ -14,9 +18,7 @@ pub struct MessageVerification {
 
 impl MessageVerification {
     pub fn verify<T>(&self, data: &T) -> bool
-    where
-        T: Serialize,
-    {
+    where T: Serialize {
         if !self.session.verify() {
             return false;
         }
@@ -32,9 +34,7 @@ impl MessageVerification {
     }
 
     pub fn session_pubkey<T>(&self, data: &T) -> Result<PublicKey>
-    where
-        T: Serialize,
-    {
+    where T: Serialize {
         let msg = self.msg(data)?;
         match self.session.auth.signer {
             Signer::DEFAULT => signers::default::recover(&msg, &self.sig),
@@ -43,18 +43,14 @@ impl MessageVerification {
     }
 
     pub fn pack_msg<T>(data: &T, ts_ms: u128, ttl_ms: usize) -> Result<String>
-    where
-        T: Serialize,
-    {
+    where T: Serialize {
         let mut msg = serde_json::to_string(data).map_err(|_| Error::SerializeToString)?;
         msg.push_str(&format!("\n{}\n{}", ts_ms, ttl_ms));
         Ok(msg)
     }
 
     fn msg<T>(&self, data: &T) -> Result<String>
-    where
-        T: Serialize,
-    {
+    where T: Serialize {
         Self::pack_msg(data, self.ts_ms, self.ttl_ms)
     }
 }

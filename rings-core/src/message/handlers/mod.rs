@@ -1,18 +1,24 @@
-use super::{
-    CustomMessage, MaybeEncrypted, Message, MessagePayload, OriginVerificationGen, PayloadSender,
-};
+use std::sync::Arc;
+
+use async_recursion::async_recursion;
+use async_trait::async_trait;
+use futures::lock::Mutex;
+use web3::types::Address;
+
+use super::CustomMessage;
+use super::MaybeEncrypted;
+use super::Message;
+use super::MessagePayload;
+use super::OriginVerificationGen;
+use super::PayloadSender;
 use crate::dht::PeerRing;
-use crate::err::{Error, Result};
+use crate::err::Error;
+use crate::err::Result;
 use crate::prelude::RTCSdpType;
 use crate::session::SessionManager;
 use crate::swarm::Swarm;
 use crate::swarm::TransportManager;
 use crate::types::ice_transport::IceTrickleScheme;
-use async_recursion::async_recursion;
-use async_trait::async_trait;
-use futures::lock::Mutex;
-use std::sync::Arc;
-use web3::types::Address;
 
 pub mod connection;
 pub mod storage;
@@ -191,13 +197,14 @@ impl PayloadSender<Message> for MessageHandler {
 
 #[cfg(not(feature = "wasm"))]
 mod listener {
-    use super::MessageHandler;
-    use crate::types::message::MessageListener;
-    use async_trait::async_trait;
     use std::sync::Arc;
 
+    use async_trait::async_trait;
     use futures::pin_mut;
     use futures::stream::StreamExt;
+
+    use super::MessageHandler;
+    use crate::types::message::MessageListener;
 
     #[async_trait]
     impl MessageListener for MessageHandler {
@@ -220,12 +227,14 @@ mod listener {
 
 #[cfg(feature = "wasm")]
 mod listener {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use wasm_bindgen_futures::spawn_local;
+
     use super::MessageHandler;
     use crate::poll;
     use crate::types::message::MessageListener;
-    use async_trait::async_trait;
-    use std::sync::Arc;
-    use wasm_bindgen_futures::spawn_local;
 
     #[async_trait(?Send)]
     impl MessageListener for MessageHandler {
@@ -245,6 +254,14 @@ mod listener {
 #[cfg(not(feature = "wasm"))]
 #[cfg(test)]
 pub mod test {
+    use std::sync::Arc;
+
+    use dashmap::DashMap;
+    use futures::lock::Mutex;
+    use tokio::time::sleep;
+    use tokio::time::Duration;
+    use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
+
     use super::*;
     use crate::dht::Did;
     use crate::dht::PeerRing;
@@ -255,11 +272,6 @@ pub mod test {
     use crate::swarm::TransportManager;
     use crate::types::ice_transport::IceTrickleScheme;
     use crate::types::message::MessageListener;
-    use dashmap::DashMap;
-    use futures::lock::Mutex;
-    use std::sync::Arc;
-    use tokio::time::{sleep, Duration};
-    use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 
     pub async fn create_connected_pair(
         key1: SecretKey,

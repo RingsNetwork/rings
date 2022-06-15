@@ -23,15 +23,18 @@
 //!    T. ElGamal. A Public Key Cryptosystem and a Signature Scheme Based on Discrete Logarithms. IEEE Trans. Info. Theory, IT 31:469–472, 1985.
 //!    ElGamal encryption <https://en.wikipedia.org/wiki/ElGamal_encryption>
 //!    <http://www.docsdrive.com/pdfs/ansinet/itj/2005/299-306.pdf>
-use crate::ecc::{CurveEle, PublicKey, SecretKey};
-use crate::err::Error;
-use crate::err::Result;
 use libsecp256k1::curve::Affine;
 use libsecp256k1::curve::ECMultContext;
 use libsecp256k1::curve::ECMultGenContext;
 use libsecp256k1::curve::Field;
 use libsecp256k1::curve::Jacobian;
 use libsecp256k1::curve::Scalar;
+
+use crate::ecc::CurveEle;
+use crate::ecc::PublicKey;
+use crate::ecc::SecretKey;
+use crate::err::Error;
+use crate::err::Result;
 
 pub fn str_to_field(s: &str) -> Vec<Field> {
     s.as_bytes()
@@ -172,8 +175,10 @@ pub fn decrypt(m: &[(CurveEle, CurveEle)], k: &SecretKey) -> Result<String> {
 
 #[cfg(test)]
 mod test {
+    use rand::distributions::Alphanumeric;
+    use rand::Rng;
+
     use super::*;
-    use rand::{distributions::Alphanumeric, Rng};
 
     fn random(len: usize) -> String {
         rand::thread_rng()

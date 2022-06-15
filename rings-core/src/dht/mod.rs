@@ -7,11 +7,16 @@ pub use did::Did;
 mod chord;
 mod successor;
 mod types;
-pub use {chord::PeerRing, chord::PeerRingAction, chord::RemoteAction as PeerRingRemoteAction};
-pub use {types::Chord, types::ChordStablize, types::ChordStorage};
+pub use chord::PeerRing;
+pub use chord::PeerRingAction;
+pub use chord::RemoteAction as PeerRingRemoteAction;
+pub use types::Chord;
+pub use types::ChordStablize;
+pub use types::ChordStorage;
 
 mod stabilization;
-pub use stabilization::{Stabilization, TStabilize};
+pub use stabilization::Stabilization;
+pub use stabilization::TStabilize;
 /// Implement SubRing with VNode
 pub mod subring;
 /// VNode is a special node that only has virtual address
