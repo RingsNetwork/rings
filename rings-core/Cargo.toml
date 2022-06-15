@@ -42,6 +42,7 @@ itertools = "0.10.3"
 arrayref = "0.3.6"
 bincode = "1.3.3"
 redis = { version = "0.21" }
+redis-derive = "0.1.5"
 
 
 # default
@@ -98,9 +99,11 @@ futures = { package = "futures", version = "0.3.21" }
 uuid = { package = "uuid", version = "0.8.2", features = ["v4"] }
 
 
-[dev-dependencies]
+[target.'cfg(target_family="wasm")'.dev-dependencies]
 wasm-bindgen-test = "0.3.0"
 console_log = { version = "0.2" }
 
 [target.'cfg(not(target_family="wasm"))'.dev-dependencies]
 tokio = { version = "1.13.0", features = ["full"] }
+tempfile = { version = "3.2" }
+socket2 = { version = "0.4" }

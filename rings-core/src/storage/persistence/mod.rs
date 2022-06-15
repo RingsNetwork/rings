@@ -50,4 +50,4 @@ pub trait PersistenceStorageOperation {
     async fn prune(&self) -> Result<()>;
 }
 
-pub(crate) mod redis;
+pub mod redis;
