@@ -178,11 +178,11 @@ where
     T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static,
 {
     fn session_manager(&self) -> &SessionManager;
-    async fn do_send(&self, address: &Address, payload: MessagePayload<T>) -> Result<()>;
+    async fn do_send_payload(&self, address: &Address, payload: MessagePayload<T>) -> Result<()>;
 
     async fn send_payload(&self, payload: MessagePayload<T>) -> Result<()> {
         if let Some(id) = payload.relay.next_hop {
-            self.do_send(&id.into(), payload).await
+            self.do_send_payload(&id.into(), payload).await
         } else {
             Err(Error::NoNextHop)
         }

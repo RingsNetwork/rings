@@ -1,8 +1,7 @@
 use crate::dht::{ChordStablize, PeerRing, PeerRingAction, PeerRingRemoteAction};
 use crate::err::Result;
-use crate::message::{FindSuccessorSend, Message, MessagePayload, NotifyPredecessorSend};
+use crate::message::{FindSuccessorSend, Message, NotifyPredecessorSend, PayloadSender};
 use crate::swarm::Swarm;
-
 use async_trait::async_trait;
 use futures::lock::Mutex;
 use std::sync::Arc;
@@ -38,13 +37,9 @@ impl Stabilization {
         let msg = Message::NotifyPredecessorSend(NotifyPredecessorSend { id: chord.id });
         if chord.id != chord.successor.min() {
             for s in chord.successor.list() {
-                let message = MessagePayload::new_send(
-                    msg.clone(),
-                    &self.swarm.session_manager,
-                    s,
-                    self.swarm.address().into(),
-                )?;
-                self.swarm.send_message(&s.into(), message.clone()).await?;
+                self.swarm
+                    .send_message(msg.clone(), s, self.swarm.address().into())
+                    .await?;
             }
             Ok(())
         } else {
@@ -64,16 +59,13 @@ impl Stabilization {
                     next,
                     PeerRingRemoteAction::FindSuccessorForFix(current),
                 ) => {
-                    let message = MessagePayload::new_send(
-                        Message::FindSuccessorSend(FindSuccessorSend {
-                            id: current,
-                            for_fix: true,
-                        }),
-                        &self.swarm.session_manager,
-                        next,
-                        self.swarm.address().into(),
-                    )?;
-                    self.swarm.send_message(&next.into(), message).await
+                    let msg = Message::FindSuccessorSend(FindSuccessorSend {
+                        id: current,
+                        for_fix: true,
+                    });
+                    self.swarm
+                        .send_message(msg.clone(), next, self.swarm.address().into())
+                        .await
                 }
                 _ => {
                     log::error!("Invalid PeerRing Action");

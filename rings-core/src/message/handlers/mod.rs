@@ -85,7 +85,7 @@ impl MessageHandler {
         let target_id = address.to_owned().into();
         let transport = self.swarm.new_transport().await?;
         let handshake_info = transport
-            .get_handshake_info(&self.swarm.session_manager, RTCSdpType::Offer)
+            .get_handshake_info(self.swarm.session_manager(), RTCSdpType::Offer)
             .await?;
         let connect_msg = Message::ConnectNodeSend(super::ConnectNodeSend {
             sender_id: self.swarm.address().into(),
@@ -111,7 +111,7 @@ impl MessageHandler {
     }
 
     pub fn decrypt_msg(&self, msg: &MaybeEncrypted<CustomMessage>) -> Result<CustomMessage> {
-        let key = self.swarm.session_manager.session_key()?;
+        let key = self.swarm.session_manager().session_key()?;
         let (decrypt_msg, _) = msg.to_owned().decrypt(&key)?;
         Ok(decrypt_msg)
     }
@@ -135,7 +135,7 @@ impl MessageHandler {
                 for message in msg.messages.iter().cloned() {
                     let payload = MessagePayload::new(
                         message,
-                        &self.swarm.session_manager,
+                        self.swarm.session_manager(),
                         OriginVerificationGen::Stick(payload.origin_verification.clone()),
                         payload.relay.clone(),
                     )?;
@@ -177,19 +177,15 @@ impl MessageHandler {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl PayloadSender<Message> for MessageHandler {
     fn session_manager(&self) -> &SessionManager {
-        &self.swarm.session_manager
+        self.swarm.session_manager()
     }
 
-    async fn do_send(&self, address: &Address, payload: MessagePayload<Message>) -> Result<()> {
-        #[cfg(test)]
-        {
-            println!("+++++++++++++++++++++++++++++++++");
-            println!("node {:?}", self.swarm.address());
-            println!("Sent {:?}", payload.clone());
-            println!("node {:?}", payload.relay.next_hop);
-            println!("+++++++++++++++++++++++++++++++++");
-        }
-        self.swarm.send_message(address, payload).await
+    async fn do_send_payload(
+        &self,
+        address: &Address,
+        payload: MessagePayload<Message>,
+    ) -> Result<()> {
+        self.swarm.do_send_payload(address, payload).await
     }
 }
 
