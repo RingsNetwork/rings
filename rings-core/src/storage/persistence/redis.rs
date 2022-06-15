@@ -338,6 +338,8 @@ mod test {
         assert!(redis_storage.is_ok());
         let redis_storage = redis_storage.unwrap();
 
+        let before_used_memory = redis_storage.current_size().unwrap().unwrap();
+
         let key1 = "test1".to_owned();
         let data1 = TestStorageStruct {
             content: "test1".to_string(),
@@ -351,5 +353,12 @@ mod test {
             data1.content,
             got_data1.content
         );
+
+        let after_used_memory = redis_storage.current_size().unwrap().unwrap();
+        assert!(after_used_memory > before_used_memory);
+
+        let _ = redis_storage.remove(&key1).unwrap();
+
+        assert!(redis_storage.current_size().unwrap().unwrap() < after_used_memory);
     }
 }
