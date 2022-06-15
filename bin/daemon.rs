@@ -1,7 +1,7 @@
+use std::fs;
 use std::fs::File;
-use std::fs::{self};
+use std::str;
 use std::str::FromStr;
-use std::str::{self};
 use std::sync::Arc;
 
 use clap::Args;
@@ -17,12 +17,12 @@ use rings_node::prelude::rings_core::dht::PeerRing;
 use rings_node::prelude::rings_core::dht::Stabilization;
 use rings_node::prelude::rings_core::dht::TStabilize;
 use rings_node::prelude::rings_core::ecc::SecretKey;
+use rings_node::prelude::rings_core::message;
 use rings_node::prelude::rings_core::message::CustomMessage;
 use rings_node::prelude::rings_core::message::MaybeEncrypted;
 use rings_node::prelude::rings_core::message::Message;
 use rings_node::prelude::rings_core::message::MessageHandler;
 use rings_node::prelude::rings_core::message::MessagePayload;
-use rings_node::prelude::rings_core::message::{self};
 use rings_node::prelude::rings_core::prelude::url;
 use rings_node::prelude::rings_core::session::SessionManager;
 use rings_node::prelude::rings_core::swarm::Swarm;

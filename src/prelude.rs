@@ -9,11 +9,11 @@ pub use rings_core_wasm as rings_core;
 
 pub use self::rings_core::dht::PeerRing;
 pub use self::rings_core::ecc::SecretKey;
-pub use self::rings_core::message::handlers::MessageHandler;
 pub use self::rings_core::message::CustomMessage;
 pub use self::rings_core::message::MaybeEncrypted;
 pub use self::rings_core::message::Message;
 pub use self::rings_core::message::MessageCallback;
+pub use self::rings_core::message::MessageHandler;
 pub use self::rings_core::message::MessagePayload;
 pub use self::rings_core::prelude::async_trait::async_trait;
 pub use self::rings_core::prelude::uuid;
