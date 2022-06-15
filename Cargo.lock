@@ -2371,6 +2371,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "redis-derive"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c5be72582a07842fd60ca4185f8588e21adf01418cb039e5360b3cea10216d1"
+dependencies = [
+ "quote",
+ "redis",
+ "syn",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.2.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2537,10 +2548,13 @@ dependencies = [
  "rand_hc 0.3.1",
  "rexie",
  "redis",
+ "redis-derive",
  "serde",
  "serde_json",
  "sha1",
  "sled",
+ "socket2",
+ "tempfile",
  "thiserror",
  "tokio",
  "url",
@@ -2584,6 +2598,8 @@ dependencies = [
  "rings-core",
  "serde",
  "serde_json",
+ "socket2",
+ "tempfile",
  "thiserror",
  "tokio",
  "tower-http",

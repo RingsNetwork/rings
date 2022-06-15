@@ -60,16 +60,15 @@ impl RedisStorage {
         redis_config: Option<RedisConnectionInfo>,
     ) -> Result<RedisStorage> {
         let client = {
-            if redis_config.is_none() {
+            if let Some(config) = redis_config {
+                Client::open(ConnectionInfo {
+                    addr: addr.clone(),
+                    redis: config,
+                })?
+            } else {
                 Client::open(ConnectionInfo {
                     addr: addr.clone(),
                     redis: Default::default(),
-                })?
-            } else {
-                let redis_config = redis_config.unwrap();
-                Client::open(ConnectionInfo {
-                    addr: addr.clone(),
-                    redis: redis_config,
                 })?
             }
         };
@@ -334,7 +333,7 @@ mod test {
     fn test_redis_operations() {
         let server = RedisServer::new();
         assert!(server.get_tempdir().is_none());
-        let redis_storage = RedisStorage::new(&server.get_client_addr(), None);
+        let redis_storage = RedisStorage::new(server.get_client_addr(), None);
         assert!(redis_storage.is_ok());
         let redis_storage = redis_storage.unwrap();
 
