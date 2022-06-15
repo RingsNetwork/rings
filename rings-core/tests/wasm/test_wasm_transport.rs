@@ -1,5 +1,8 @@
 #[cfg(test)]
 pub mod test {
+    use std::str::FromStr;
+    use std::sync::Arc;
+
     use futures::lock::Mutex;
     use rings_core::channels::Channel as CbChannel;
     use rings_core::dht::PeerRing;
@@ -17,8 +20,6 @@ pub mod test {
     use rings_core::types::ice_transport::IceTransport;
     use rings_core::types::ice_transport::IceTransportCallback;
     use rings_core::types::ice_transport::IceTrickleScheme;
-    use std::str::FromStr;
-    use std::sync::Arc;
     use wasm_bindgen::JsValue;
     use wasm_bindgen_futures::JsFuture;
     use wasm_bindgen_test::*;

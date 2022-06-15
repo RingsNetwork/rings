@@ -1,9 +1,11 @@
-use crate::err::{Error, Result};
-use crate::types::channel::Channel;
 use async_channel as ac;
 use async_channel::Receiver;
 use async_channel::Sender;
 use async_trait::async_trait;
+
+use crate::err::Error;
+use crate::err::Result;
+use crate::types::channel::Channel;
 
 pub struct AcChannel<T> {
     sender: Sender<T>,

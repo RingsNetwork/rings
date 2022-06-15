@@ -1,9 +1,10 @@
 mod helper;
 mod transport;
-use crate::types::ice_transport::IceCandidate;
 pub use transport::WasmTransport;
 use wasm_bindgen::JsValue;
 use web_sys::RtcIceCandidateInit;
+
+use crate::types::ice_transport::IceCandidate;
 
 impl From<IceCandidate> for RtcIceCandidateInit {
     fn from(cand: IceCandidate) -> Self {

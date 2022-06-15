@@ -5,16 +5,19 @@
 //! - Then we can sign the auth message via some web3 provider like metamask or just with raw private key, and create the SessionManger with
 //! - SessionManager::new(sig, auth_info, temp_key)
 
+use std::sync::Arc;
+use std::sync::RwLock;
+
+use serde::Deserialize;
+use serde::Serialize;
+use web3::types::Address;
+
 use crate::ecc::signers;
 use crate::ecc::PublicKey;
 use crate::ecc::SecretKey;
-use crate::err::{Error, Result};
+use crate::err::Error;
+use crate::err::Result;
 use crate::utils;
-use serde::Deserialize;
-use serde::Serialize;
-use std::sync::Arc;
-use std::sync::RwLock;
-use web3::types::Address;
 
 const DEFAULT_TTL_MS: usize = 24 * 3600 * 1000;
 

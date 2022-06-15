@@ -1,18 +1,21 @@
 //! ECDSA and ElGamal
 
-use crate::err::{Error, Result};
-use hex;
+use std::convert::TryFrom;
+use std::fmt::Write;
+use std::ops::Deref;
 
+use hex;
 use rand::SeedableRng;
 use rand_hc::Hc128Rng;
 use serde::Deserialize;
 use serde::Serialize;
-use sha1::{Digest, Sha1};
-use std::convert::TryFrom;
-use std::fmt::Write;
-use std::ops::Deref;
+use sha1::Digest;
+use sha1::Sha1;
 use web3::signing::keccak256;
 use web3::types::Address;
+
+use crate::err::Error;
+use crate::err::Result;
 pub mod elgamal;
 pub mod signers;
 
@@ -104,8 +107,7 @@ impl From<SecretKey> for PublicKey {
 }
 
 impl<T> From<T> for HashStr
-where
-    T: Into<String>,
+where T: Into<String>
 {
     fn from(s: T) -> Self {
         let inputs = s.into();
@@ -199,9 +201,7 @@ impl PublicKey {
 }
 
 pub fn recover<S>(message: &str, signature: S) -> Result<PublicKey>
-where
-    S: AsRef<[u8]>,
-{
+where S: AsRef<[u8]> {
     let sig_bytes: SigBytes = signature.as_ref().try_into()?;
     let message_hash: [u8; 32] = keccak256(message.as_bytes());
     recover_hash(&message_hash, &sig_bytes)
@@ -223,8 +223,9 @@ pub fn recover_hash(message_hash: &[u8; 32], sig: &[u8; 65]) -> Result<PublicKey
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use hex::FromHex;
+
+    use super::*;
 
     #[test]
     fn test_parse_to_string_with_sha10x00() {

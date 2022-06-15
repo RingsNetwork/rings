@@ -1,8 +1,11 @@
-use crate::err::{Error, Result};
+use std::str::FromStr;
+
 use serde::Deserialize;
 use serde::Serialize;
-use std::str::FromStr;
 use url::Url;
+
+use crate::err::Error;
+use crate::err::Result;
 
 #[derive(Deserialize, Serialize, Debug, Clone, Default, PartialEq)]
 pub enum IceCredentialType {
@@ -69,12 +72,13 @@ impl FromStr for IceServer {
 
 #[cfg(feature = "wasm")]
 mod wasm {
-    use super::IceCredentialType;
-    use super::IceServer;
     use js_sys::Array;
     use wasm_bindgen::JsValue;
     use web_sys::RtcIceCredentialType;
     use web_sys::RtcIceServer;
+
+    use super::IceCredentialType;
+    use super::IceServer;
 
     // set default to password
     impl From<IceCredentialType> for RtcIceCredentialType {
@@ -117,10 +121,11 @@ mod wasm {
 
 #[cfg(not(feature = "wasm"))]
 mod default {
-    use super::IceCredentialType;
-    use super::IceServer;
     use webrtc::ice_transport::ice_credential_type::RTCIceCredentialType;
     use webrtc::ice_transport::ice_server::RTCIceServer;
+
+    use super::IceCredentialType;
+    use super::IceServer;
 
     impl From<IceCredentialType> for RTCIceCredentialType {
         fn from(s: IceCredentialType) -> Self {
@@ -146,8 +151,9 @@ mod default {
 
 #[cfg(test)]
 mod test {
-    use super::IceServer;
     use std::str::FromStr;
+
+    use super::IceServer;
 
     #[test]
     fn test_parsing() {

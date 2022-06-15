@@ -1,6 +1,6 @@
 #![warn(missing_docs)]
-///! JSONRpc server supports methods.
-use crate::error::{Error, Result};
+use crate::error::Error;
+use crate::error::Result;
 
 /// supported methods.
 #[derive(Debug, Clone)]

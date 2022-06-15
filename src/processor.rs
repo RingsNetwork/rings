@@ -1,24 +1,30 @@
 #![warn(missing_docs)]
 //! Processor of rings-node jsonrpc-server.
-use crate::{
-    error::{Error, Result},
-    jsonrpc::{method, response::TransportAndIce},
-    jsonrpc_client::SimpleClient,
-    prelude::rings_core::{
-        message::{Encoded, Message, MessageHandler, PayloadSender},
-        prelude::{
-            uuid,
-            web3::{contract::tokens::Tokenizable, ethabi::Token, types::Address},
-            RTCSdpType,
-        },
-        swarm::{Swarm, TransportManager},
-        transports::Transport,
-        types::ice_transport::{IceTransport, IceTrickleScheme},
-    },
-};
+use std::str::FromStr;
+use std::sync::Arc;
+
 #[cfg(feature = "client")]
 use jsonrpc_core::Metadata;
-use std::{str::FromStr, sync::Arc};
+
+use crate::error::Error;
+use crate::error::Result;
+use crate::jsonrpc::method;
+use crate::jsonrpc::response::TransportAndIce;
+use crate::jsonrpc_client::SimpleClient;
+use crate::prelude::rings_core::message::Encoded;
+use crate::prelude::rings_core::message::Message;
+use crate::prelude::rings_core::message::MessageHandler;
+use crate::prelude::rings_core::message::PayloadSender;
+use crate::prelude::rings_core::prelude::uuid;
+use crate::prelude::rings_core::prelude::web3::contract::tokens::Tokenizable;
+use crate::prelude::rings_core::prelude::web3::ethabi::Token;
+use crate::prelude::rings_core::prelude::web3::types::Address;
+use crate::prelude::rings_core::prelude::RTCSdpType;
+use crate::prelude::rings_core::swarm::Swarm;
+use crate::prelude::rings_core::swarm::TransportManager;
+use crate::prelude::rings_core::transports::Transport;
+use crate::prelude::rings_core::types::ice_transport::IceTransport;
+use crate::prelude::rings_core::types::ice_transport::IceTrickleScheme;
 
 /// Processor for rings-node jsonrpc server
 #[derive(Clone)]
@@ -332,11 +338,13 @@ impl From<&(Address, Arc<Transport>)> for Peer {
 #[cfg(test)]
 #[cfg(feature = "client")]
 mod test {
-    use super::*;
-    use crate::prelude::rings_core::{
-        dht::PeerRing, ecc::SecretKey, prelude::uuid, session::SessionManager,
-    };
     use futures::lock::Mutex;
+
+    use super::*;
+    use crate::prelude::rings_core::dht::PeerRing;
+    use crate::prelude::rings_core::ecc::SecretKey;
+    use crate::prelude::rings_core::prelude::uuid;
+    use crate::prelude::rings_core::session::SessionManager;
 
     fn new_processor() -> Processor {
         let key = SecretKey::random();

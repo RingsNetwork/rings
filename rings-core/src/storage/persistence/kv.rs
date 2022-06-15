@@ -1,17 +1,22 @@
 #![warn(missing_docs)]
 #![allow(clippy::ptr_offset_with_cast)]
 //! Persistence Storage for default, use `sled` as backend db.
-use super::{
-    PersistenceStorageOperation, PersistenceStorageReadAndWrite, PersistenceStorageRemove,
-};
-use crate::err::{Error, Result};
+use std::ops::Add;
+use std::ops::Sub;
+
 use arrayref::array_refs;
 use async_trait::async_trait;
 use chrono;
 use itertools::Itertools;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use sled;
-use std::ops::{Add, Sub};
+
+use super::PersistenceStorageOperation;
+use super::PersistenceStorageReadAndWrite;
+use super::PersistenceStorageRemove;
+use crate::err::Error;
+use crate::err::Result;
 
 /// DataStruct of KV store entry
 struct DataStruct {
@@ -65,17 +70,13 @@ impl DataStruct {
 
     /// Deserialize data of DataStruct to `T`
     pub fn deserialize_data<T>(&self) -> Result<T>
-    where
-        T: DeserializeOwned,
-    {
+    where T: DeserializeOwned {
         bincode::deserialize(&self.data).map_err(Error::BincodeDeserialize)
     }
 
     /// Serialize data to `Vec<u8>`
     pub fn serialize_data<T>(data: &T) -> Result<Vec<u8>>
-    where
-        T: Serialize,
-    {
+    where T: Serialize {
         bincode::serialize(data).map_err(Error::BincodeSerialize)
     }
 }
@@ -91,9 +92,7 @@ impl KvStorage {
     /// * cap: max_size storage can use
     /// * path: db file location
     pub async fn new_with_cap_and_path<P>(cap: usize, path: P) -> Result<Self>
-    where
-        P: AsRef<std::path::Path>,
-    {
+    where P: AsRef<std::path::Path> {
         let db = sled::open(path).map_err(Error::SledError)?;
         Ok(Self { db, cap })
     }
@@ -242,8 +241,10 @@ where
 #[cfg(test)]
 #[cfg(feature = "default")]
 mod test {
+    use serde::Deserialize;
+    use serde::Serialize;
+
     use super::*;
-    use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Serialize, Deserialize)]
     struct TestStorageStruct {
@@ -293,12 +294,9 @@ mod test {
     fn create_test_data(count: usize) -> Vec<(String, TestStorageStruct)> {
         let mut data = Vec::new();
         for n in 0..count {
-            data.push((
-                format!("key_{}", n),
-                TestStorageStruct {
-                    content: format!("test_data_{}", n),
-                },
-            ))
+            data.push((format!("key_{}", n), TestStorageStruct {
+                content: format!("test_data_{}", n),
+            }))
         }
         data
     }

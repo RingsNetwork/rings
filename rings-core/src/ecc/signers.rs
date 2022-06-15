@@ -1,9 +1,10 @@
 //! Signer for default ECDSA and EIP712
+use web3::signing::keccak256;
+
 use crate::ecc::Address;
 use crate::ecc::PublicKey;
 use crate::ecc::SecretKey;
 use crate::err::Result;
-use web3::signing::keccak256;
 
 pub mod default {
 
@@ -69,10 +70,11 @@ pub mod eip712 {
 
 #[cfg(test)]
 mod test {
+    use std::str::FromStr;
+
     use super::*;
     use crate::ecc::Address;
     use crate::ecc::SecretKey;
-    use std::str::FromStr;
 
     #[test]
     fn test_default_sign() {

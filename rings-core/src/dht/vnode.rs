@@ -1,15 +1,18 @@
 #![warn(missing_docs)]
-use crate::dht::Did;
-use crate::ecc::HashStr;
-use crate::err::{Error, Result};
-use crate::message::Encoded;
-use crate::message::Encoder;
-use crate::message::MessagePayload;
+use std::str::FromStr;
+
 use num_bigint::BigUint;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
-use std::str::FromStr;
+
+use crate::dht::Did;
+use crate::ecc::HashStr;
+use crate::err::Error;
+use crate::err::Result;
+use crate::message::Encoded;
+use crate::message::Encoder;
+use crate::message::MessagePayload;
 
 /// VNode Types
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -45,8 +48,7 @@ impl VirtualNode {
 }
 
 impl<T> TryFrom<MessagePayload<T>> for VirtualNode
-where
-    T: Serialize + DeserializeOwned,
+where T: Serialize + DeserializeOwned
 {
     type Error = Error;
     fn try_from(msg: MessagePayload<T>) -> Result<Self> {

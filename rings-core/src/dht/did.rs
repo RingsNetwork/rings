@@ -1,14 +1,18 @@
-/// Did is a finate Ring R(P) where P = 2^160
-use crate::err::{Error, Result};
+use std::cmp::Eq;
+use std::cmp::PartialEq;
+use std::ops::Add;
+use std::ops::Deref;
+use std::ops::Neg;
+use std::ops::Sub;
+use std::str::FromStr;
+
 use num_bigint::BigUint;
 use serde::Deserialize;
 use serde::Serialize;
-use std::cmp::{Eq, PartialEq};
-use std::ops::Deref;
-use std::ops::Neg;
-use std::ops::{Add, Sub};
-use std::str::FromStr;
 use web3::types::H160;
+
+use crate::err::Error;
+use crate::err::Result;
 
 #[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd, Debug, Serialize, Deserialize, Hash)]
 pub struct Did(H160);
@@ -163,8 +167,9 @@ impl Sub for Did {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::str::FromStr;
+
+    use super::*;
 
     #[test]
     fn test_did() {

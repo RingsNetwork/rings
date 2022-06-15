@@ -1,10 +1,12 @@
-use crate::err::{Error, Result};
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json;
 use wasm_bindgen::JsValue;
 use web_sys::RtcSdpType;
 use web_sys::RtcSessionDescription;
+
+use crate::err::Error;
+use crate::err::Result;
 
 #[derive(Clone, Deserialize, Serialize, Debug)]
 #[serde(rename_all = "lowercase")]

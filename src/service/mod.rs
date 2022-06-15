@@ -4,18 +4,23 @@ mod http_error;
 #[cfg(feature = "daemon")]
 mod is_turn;
 
-use self::http_error::HttpError;
-use crate::{
-    prelude::rings_core::{message::MessageHandler, swarm::Swarm},
-    processor::Processor,
-};
-use axum::{extract::Extension, response::IntoResponse, routing::post, Router};
-use http::header::{self, HeaderValue};
+use std::sync::Arc;
+
+use axum::extract::Extension;
+use axum::response::IntoResponse;
+use axum::routing::post;
+use axum::Router;
+use http::header::HeaderValue;
+use http::header::{self};
 #[cfg(feature = "daemon")]
 pub use is_turn::run_udp_turn;
 use jsonrpc_core::MetaIoHandler;
-use std::sync::Arc;
 use tower_http::cors::CorsLayer;
+
+use self::http_error::HttpError;
+use crate::prelude::rings_core::message::MessageHandler;
+use crate::prelude::rings_core::swarm::Swarm;
+use crate::processor::Processor;
 
 /// Run a web server to handle jsonrpc request
 pub async fn run_service(

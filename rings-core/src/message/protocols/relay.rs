@@ -6,10 +6,12 @@
 //! - Get the sender and origin sender of a message.
 //! - Record the whole transport path for inspection.
 
-use crate::dht::Did;
-use crate::err::{Error, Result};
 use serde::Deserialize;
 use serde::Serialize;
+
+use crate::dht::Did;
+use crate::err::Error;
+use crate::err::Result;
 
 /// `MessageRelay` divides messages into two types by method: SEND and REPORT.
 /// And will enable different behaviors when handling SEND and REPORT messages.

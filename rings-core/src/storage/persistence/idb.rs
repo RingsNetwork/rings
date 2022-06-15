@@ -1,19 +1,27 @@
 #![warn(missing_docs)]
 
 //! Storage for wasm
-use super::{
-    PersistenceStorageOperation, PersistenceStorageReadAndWrite, PersistenceStorageRemove,
-};
-use crate::err::{Error, Result};
+use std::mem::size_of_val;
+use std::ops::Add;
+use std::ops::Sub;
+
 use async_trait::async_trait;
 use chrono;
-use rexie::{self, Index, ObjectStore, Rexie, TransactionMode};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::{
-    mem::size_of_val,
-    ops::{Add, Sub},
-};
+use rexie::Index;
+use rexie::ObjectStore;
+use rexie::Rexie;
+use rexie::TransactionMode;
+use rexie::{self};
+use serde::de::DeserializeOwned;
+use serde::Deserialize;
+use serde::Serialize;
 use wasm_bindgen::JsValue;
+
+use super::PersistenceStorageOperation;
+use super::PersistenceStorageReadAndWrite;
+use super::PersistenceStorageRemove;
+use crate::err::Error;
+use crate::err::Result;
 
 const REXIE_STORE_NAME: &str = "rings-storage";
 

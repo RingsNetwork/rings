@@ -4,10 +4,15 @@
 //! Sample:
 //! let client = Simpleclient::new(reqwest::Client::default(), "http://localhost:5000");
 //! client.call_method("test", params);
-use super::request::{parse_response, RequestBuilder};
-use crate::prelude::reqwest::Client as HttpClient;
-use jsonrpc_core::{Error, Params, Value};
 use std::sync::Arc;
+
+use jsonrpc_core::Error;
+use jsonrpc_core::Params;
+use jsonrpc_core::Value;
+
+use super::request::parse_response;
+use super::request::RequestBuilder;
+use crate::prelude::reqwest::Client as HttpClient;
 
 /// SimpleClient
 #[derive(Clone)]

@@ -1,9 +1,23 @@
 //! Tranposrt managerment
 
+use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::Mutex;
+
+use async_stream::stream;
+use async_trait::async_trait;
+use futures::Stream;
+use web3::types::Address;
+
 use crate::channels::Channel;
-use crate::err::{Error, Result};
-use crate::message::{self, Message, MessagePayload};
-use crate::message::{Decoder, Encoder, PayloadSender};
+use crate::err::Error;
+use crate::err::Result;
+use crate::message::Decoder;
+use crate::message::Encoder;
+use crate::message::Message;
+use crate::message::MessagePayload;
+use crate::message::PayloadSender;
+use crate::message::{self};
 use crate::session::SessionManager;
 use crate::storage::MemStorage;
 use crate::transports::Transport;
@@ -12,13 +26,6 @@ use crate::types::channel::Event;
 use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
-use async_stream::stream;
-use async_trait::async_trait;
-use futures::Stream;
-use std::str::FromStr;
-use std::sync::Arc;
-use std::sync::Mutex;
-use web3::types::Address;
 
 pub struct Swarm {
     table: MemStorage<Address, Arc<Transport>>,
@@ -122,9 +129,7 @@ impl Swarm {
     }
 
     pub fn iter_messages<'a, 'b>(&'a self) -> impl Stream<Item = MessagePayload<Message>> + 'b
-    where
-        'a: 'b,
-    {
+    where 'a: 'b {
         stream! {
             let receiver = &self.transport_event_channel.receiver();
             loop {
@@ -272,11 +277,12 @@ impl PayloadSender<Message> for Swarm {
 #[cfg(not(feature = "wasm"))]
 #[cfg(test)]
 mod tests {
+    use tokio::time;
+    use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
+
     use super::*;
     use crate::ecc::SecretKey;
     use crate::transports::default::transport::tests::establish_connection;
-    use tokio::time;
-    use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 
     fn new_swarm() -> Swarm {
         let stun = "stun://stun.l.google.com:19302";
