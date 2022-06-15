@@ -54,7 +54,7 @@ pub mod test {
 
         // Peer 1 try to connect peer 2
         let handshake_info1 = transport1
-            .get_handshake_info(&swarm1.session_manager, RTCSdpType::Offer)
+            .get_handshake_info(swarm1.session_manager(), RTCSdpType::Offer)
             .await?;
         assert_eq!(
             transport1.ice_connection_state().await,
@@ -79,7 +79,7 @@ pub mod test {
 
         // Peer 2 create answer
         let handshake_info2 = transport2
-            .get_handshake_info(&swarm2.session_manager, RTCSdpType::Answer)
+            .get_handshake_info(swarm2.session_manager(), RTCSdpType::Answer)
             .await?;
         assert_eq!(
             transport1.ice_connection_state().await,
@@ -180,7 +180,7 @@ pub mod test {
 
         let transport_1_to_3 = swarm1.new_transport().await.unwrap();
         let handshake_info13 = transport_1_to_3
-            .get_handshake_info(&swarm1.session_manager, RTCSdpType::Offer)
+            .get_handshake_info(swarm1.session_manager(), RTCSdpType::Offer)
             .await?;
         // swarm1
         //     .register(&swarm3.address(), Arc::clone(&transport_1_to_3))

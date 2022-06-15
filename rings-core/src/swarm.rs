@@ -1,16 +1,17 @@
 //! Tranposrt managerment
 
+use crate::channels::Channel;
 use crate::err::{Error, Result};
 use crate::message::{self, Message, MessagePayload};
-use crate::message::{Decoder, Encoder};
+use crate::message::{Decoder, Encoder, PayloadSender};
 use crate::session::SessionManager;
 use crate::storage::MemStorage;
+use crate::transports::Transport;
 use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::Event;
 use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
-
 use async_stream::stream;
 use async_trait::async_trait;
 use futures::Stream;
@@ -19,15 +20,12 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use web3::types::Address;
 
-use crate::channels::Channel;
-use crate::transports::Transport;
-
 pub struct Swarm {
     table: MemStorage<Address, Arc<Transport>>,
     pending: Arc<Mutex<Vec<Arc<Transport>>>>,
     ice_servers: Vec<IceServer>,
     transport_event_channel: Channel<Event>,
-    pub session_manager: SessionManager,
+    session_manager: SessionManager,
     address: Address,
 }
 
@@ -72,17 +70,8 @@ impl Swarm {
         self.address
     }
 
-    pub async fn send_message(
-        &self,
-        address: &Address,
-        payload: MessagePayload<Message>,
-    ) -> Result<()> {
-        let transport = self
-            .get_transport(address)
-            .ok_or(Error::SwarmMissAddressInTable)?;
-        let data: Vec<u8> = payload.encode()?.into();
-        transport.wait_for_data_channel_open().await?;
-        transport.send_message(data.as_slice()).await
+    pub fn session_manager(&self) -> &SessionManager {
+        &self.session_manager
     }
 
     fn load_message(&self, ev: Result<Option<Event>>) -> Result<Option<MessagePayload<Message>>> {
@@ -247,6 +236,36 @@ impl TransportManager for Swarm {
             return Err(Error::SwarmDefaultTransportNotConnected);
         }
         Ok(self.table.get_or_set(address, default))
+    }
+}
+
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl PayloadSender<Message> for Swarm {
+    fn session_manager(&self) -> &SessionManager {
+        Swarm::session_manager(self)
+    }
+
+    async fn do_send_payload(
+        &self,
+        address: &Address,
+        payload: MessagePayload<Message>,
+    ) -> Result<()> {
+        #[cfg(test)]
+        {
+            println!("+++++++++++++++++++++++++++++++++");
+            println!("node {:?}", self.address());
+            println!("Sent {:?}", payload.clone());
+            println!("node {:?}", payload.relay.next_hop);
+            println!("+++++++++++++++++++++++++++++++++");
+        }
+
+        let transport = self
+            .get_transport(address)
+            .ok_or(Error::SwarmMissAddressInTable)?;
+        let data: Vec<u8> = payload.encode()?.into();
+        transport.wait_for_data_channel_open().await?;
+        transport.send_message(data.as_slice()).await
     }
 }
 

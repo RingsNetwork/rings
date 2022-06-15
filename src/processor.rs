@@ -55,7 +55,7 @@ impl Processor {
         let transport_cloned = transport.clone();
         let task = async move {
             let hs_info = transport_cloned
-                .get_handshake_info(&self.swarm.session_manager, RTCSdpType::Offer)
+                .get_handshake_info(self.swarm.session_manager(), RTCSdpType::Offer)
                 .await
                 .map_err(Error::CreateOffer)?;
             self.swarm
@@ -101,7 +101,7 @@ impl Processor {
     ) -> Result<String> {
         let client = SimpleClient::new_with_url(node_url);
         let hs_info = transport
-            .get_handshake_info(&self.swarm.session_manager, RTCSdpType::Offer)
+            .get_handshake_info(self.swarm.session_manager(), RTCSdpType::Offer)
             .await
             .map_err(Error::CreateOffer)?
             .to_string();
@@ -189,7 +189,7 @@ impl Processor {
             .map_err(Error::RegisterIceError)?;
 
         let hs_info = transport
-            .get_handshake_info(&self.swarm.session_manager, RTCSdpType::Answer)
+            .get_handshake_info(self.swarm.session_manager(), RTCSdpType::Answer)
             .await
             .map_err(Error::CreateAnswer)?;
         log::debug!("answer hs_info: {:?}", hs_info);
