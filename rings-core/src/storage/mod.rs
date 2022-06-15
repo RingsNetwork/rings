@@ -1,15 +1,15 @@
 mod memory;
 pub mod persistence;
 
-use async_trait::async_trait;
-
 pub use memory::MemStorage;
-
-#[cfg(not(features = "wasm"))]
-pub use persistence::redis::{
-    RedisStorage, TPersistenceStorageOperation, TPersistenceStorageReadAndWrite,
-    TPersistenceStorageRemove,
-};
+#[cfg(feature = "default")]
+pub use persistence::redis::RedisStorage;
+#[cfg(feature = "default")]
+pub use persistence::redis::TPersistenceStorageOperation;
+#[cfg(feature = "default")]
+pub use persistence::redis::TPersistenceStorageReadAndWrite;
+#[cfg(feature = "default")]
+pub use persistence::redis::TPersistenceStorageRemove;
 
 #[cfg(feature = "wasm")]
 pub use self::persistence::idb::IDBStorage as Storage;

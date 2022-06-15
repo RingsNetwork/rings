@@ -1,15 +1,24 @@
-use crate::err::{Error, Result};
-use redis::{
-    cmd, Client, Commands, Connection, ConnectionAddr, ConnectionInfo, InfoDict,
-    RedisConnectionInfo, Value,
-};
-use serde::{de::DeserializeOwned, Serialize};
-use serde_json::{self};
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::string::ToString;
 use std::thread::sleep;
 use std::time::Duration;
+
+use redis::cmd;
+use redis::Client;
+use redis::Commands;
+use redis::Connection;
+use redis::ConnectionAddr;
+use redis::ConnectionInfo;
+use redis::InfoDict;
+use redis::RedisConnectionInfo;
+use redis::Value;
+use serde::de::DeserializeOwned;
+use serde::Serialize;
+use serde_json::{self};
+
+use crate::err::Error;
+use crate::err::Result;
 
 /// Persistence Storage Operations
 #[cfg(not(features = "wasm"))]
@@ -189,11 +198,20 @@ where
 
 #[cfg(test)]
 mod test {
-    use super::*;
+    use std::env;
+    use std::fs;
+    use std::net::SocketAddr;
+    use std::net::TcpListener;
+    use std::path::PathBuf;
+    use std::process;
+
     use redis_derive::ToRedisArgs;
     use serde::Deserialize;
-    use socket2::{Domain, Socket, Type};
-    use std::{env, fs, net::SocketAddr, net::TcpListener, path::PathBuf, process};
+    use socket2::Domain;
+    use socket2::Socket;
+    use socket2::Type;
+
+    use super::*;
 
     #[derive(PartialEq)]
     enum ServerType {

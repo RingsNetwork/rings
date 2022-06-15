@@ -262,6 +262,7 @@ pub enum Error {
     #[error("Redis Invalid Kind")]
     RedisInvalidKind,
 
+    #[cfg(feature = "default")]
     #[error("Redis Error")]
     RedisError(#[from] redis::RedisError),
 }

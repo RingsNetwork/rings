@@ -11,7 +11,7 @@ keywords = ["Chord", "DHT", "Web3", "P2P", "WASM"]
 categories = ["network-programming", "cryptography", "wasm"]
 
 [features]
-default = ["webrtc", "bytes", "async-channel", "sled"]
+default = ["webrtc", "bytes", "async-channel", "sled", "redis", "redis-derive"]
 wasm = ["web-sys", "wasm-bindgen", "js-sys", "wasm-bindgen-futures", "rexie"]
 browser_chrome_test = ["wasm"]
 

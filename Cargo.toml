@@ -29,7 +29,7 @@ client = [
   "form_urlencoded",
   "pin-project",
   "base64",
-  "rings-core"
+  "rings-core",
 ]
 daemon = ["daemonize", "turn", "libc", "client", "webrtc-util"]
 browser = [
@@ -60,8 +60,6 @@ http = { version = "0.2.6" }
 
 # client
 tokio = { version = "1.13.0", features = ["full"], optional = true }
-tempfile = { version = "3.2", optional = true }
-socket2 = { version = "0.4", optional = true }
 hyper = { version = "0.14.14", features = ["full"], optional = true }
 tower-http = { version="0.2.4", features = ["cors"], optional = true}
 clap = { version = "3.1.6", features = ["derive", "env"], optional = true }
