@@ -477,7 +477,7 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
 }
 
 impl WasmTransport {
-    pub async fn wait_for_data_channel_open(&self) -> Result<Promise> {
+    pub async fn wait_for_data_channel_open(&self) -> Result<()> {
         match self.get_data_channel().await {
             Some(dc) => {
                 let promise = Promise::default();
@@ -499,7 +499,7 @@ impl WasmTransport {
                 }) as Box<dyn FnMut()>);
                 dc.set_onopen(Some(callback.as_ref().unchecked_ref()));
                 callback.forget();
-                Ok(promise)
+                promise.await
             }
             None => {
                 log::error!("{:?}", Error::RTCDataChannelNotReady);
