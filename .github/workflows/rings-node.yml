@@ -46,10 +46,14 @@ jobs:
     timeout-minutes: 10
     strategy:
       matrix:
-        os: ["ubuntu-latest"]
+        os: ['ubuntu-latest']
+        redis-version: [4, 5, 6]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v2
+      - uses: supercharge/redis-github-action@1.4.0
+        with:
+          redis-version: ${{ matrix.redis-version }}
       - name: Build
         run: cargo build --features client --features daemon --all --verbose
       - name: Run tests
