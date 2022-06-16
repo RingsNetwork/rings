@@ -1,5 +1,5 @@
 //! Tranposrt managerment
-
+use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -7,6 +7,8 @@ use std::sync::Mutex;
 use async_stream::stream;
 use async_trait::async_trait;
 use futures::Stream;
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use web3::types::Address;
 
 use crate::channels::Channel;
@@ -246,16 +248,14 @@ impl TransportManager for Swarm {
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-impl PayloadSender<Message> for Swarm {
+impl<T> PayloadSender<T> for Swarm
+where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Debug
+{
     fn session_manager(&self) -> &SessionManager {
         Swarm::session_manager(self)
     }
 
-    async fn do_send_payload(
-        &self,
-        address: &Address,
-        payload: MessagePayload<Message>,
-    ) -> Result<()> {
+    async fn do_send_payload(&self, address: &Address, payload: MessagePayload<T>) -> Result<()> {
         #[cfg(test)]
         {
             println!("+++++++++++++++++++++++++++++++++");
