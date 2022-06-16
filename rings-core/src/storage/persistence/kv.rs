@@ -142,7 +142,6 @@ where
 }
 
 #[cfg(test)]
-#[cfg(feature = "default")]
 mod test {
     use serde::Deserialize;
     use serde::Serialize;

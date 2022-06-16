@@ -15,7 +15,7 @@ pub use web3::types::Address;
 pub use web_sys;
 #[cfg(feature = "wasm")]
 pub use web_sys::RtcSdpType as RTCSdpType;
-#[cfg(feature = "default")]
+#[cfg(not(feature = "wasm"))]
 pub use webrtc;
 #[cfg(not(feature = "wasm"))]
 pub use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
