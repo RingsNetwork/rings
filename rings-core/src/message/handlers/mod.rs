@@ -325,6 +325,7 @@ pub mod test {
 
     #[derive(Clone)]
     struct MessageCallbackInstance {
+        #[allow(clippy::type_complexity)]
         handler_messages: Arc<Mutex<Vec<(Did, Vec<u8>)>>>,
     }
 
