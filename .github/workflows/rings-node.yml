@@ -47,15 +47,11 @@ jobs:
     strategy:
       matrix:
         os: ['ubuntu-latest']
-        redis-version: [6]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v2
-      - uses: supercharge/redis-github-action@1.4.0
-        with:
-          redis-version: ${{ matrix.redis-version }}
-      - name: Install redis cli # so we can test the server
-        run: sudo apt-get install -y redis-tools
+      - uses: shogo82148/actions-setup-redis@v1
+        with: auto-start: "false"
       - name: Build
         run: cargo build --features client --features daemon --all --verbose
       - name: Run tests
