@@ -70,6 +70,7 @@ impl Encoder for Vec<u8> {
 
 impl Decoder for Vec<u8> {
     fn from_encoded(encoded: &Encoded) -> Result<Self> {
+        // b58m::decode(encoded.deref()).map_err(|_| Error::Decode)
         b58m::decode_check(encoded.deref()).map_err(|_| Error::Decode)
     }
 }

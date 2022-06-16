@@ -296,15 +296,10 @@ impl Client {
     }
 
     /// send custome message to peer.
-    pub fn send_message(
-        &self,
-        next_hop: String,
-        destination: String,
-        msg: js_sys::Uint8Array,
-    ) -> Promise {
+    pub fn send_message(&self, destination: String, msg: js_sys::Uint8Array) -> Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
-            p.send_message(next_hop.as_str(), destination.as_str(), &msg.to_vec())
+            p.send_message(destination.as_str(), &msg.to_vec())
                 .await
                 .map_err(JsError::from)?;
             Ok(JsValue::from_bool(true))
@@ -457,3 +452,6 @@ impl Drop for IntervalHandle {
         clearInterval(self.interval_id);
     }
 }
+
+#[cfg(test)]
+mod test {}

@@ -181,7 +181,6 @@ impl Client {
 
     pub async fn send_message(&self, address: &str, text: &str) -> Output<()> {
         let mut params = serde_json::Map::new();
-        params.insert("next_hop".to_owned(), json!(address));
         params.insert("destination".to_owned(), json!(address));
         params.insert("text".to_owned(), json!(text));
         self.client
