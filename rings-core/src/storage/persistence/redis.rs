@@ -38,6 +38,9 @@ pub trait TPersistenceStorageOperation {
 pub trait TPersistenceStorageRemove<K>: TPersistenceStorageOperation {
     /// Remove an `entry` by `key`.
     fn remove(&self, key: &K) -> Result<()>;
+
+    /// Existence by `key`
+    fn exists(&self, key: &K) -> Result<bool>;
 }
 
 #[cfg(not(features = "wasm"))]
@@ -191,8 +194,14 @@ where
     /// Delete key and storage
     fn remove(&self, key: &K) -> Result<()> {
         let mut con = self.connect()?;
-        con.del(&key.to_string())?;
+        redis::cmd("DEL").arg(&key.to_string()).execute(&mut con);
         Ok(())
+    }
+
+    fn exists(&self, key: &K) -> Result<bool> {
+        let _key = key.to_string();
+        let mut con = self.connect()?;
+        con.exists::<_, bool>(&_key).map_err(Error::RedisError)
     }
 }
 
@@ -371,11 +380,17 @@ mod test {
             got_data1.content
         );
 
+        assert!(redis_storage.exists(&key1).ok() == Some(true));
+
         let after_used_memory = redis_storage.current_size().unwrap().unwrap();
         assert!(after_used_memory > before_used_memory);
 
         let _ = redis_storage.remove(&key1).unwrap();
 
-        assert!(redis_storage.current_size().unwrap().unwrap() < after_used_memory);
+        assert!(
+            redis_storage.exists(&key1).ok() == Some(false),
+            "{}",
+            redis_storage.exists(&key1).ok().unwrap()
+        );
     }
 }
