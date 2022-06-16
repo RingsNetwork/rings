@@ -47,7 +47,8 @@ jobs:
       - uses: supercharge/redis-github-action@1.4.0
         with:
           redis-version: ${{ matrix.redis-version }}
-          redis-port: 12345
+      - name: Install redis cli # so we can test the server
+        run: sudo apt-get install -y redis-tools
       - name: Build
         run: cargo build --all --verbose
       - name: Run tests
