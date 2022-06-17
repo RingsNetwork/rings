@@ -386,17 +386,28 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
             let ch = ev.channel();
             let on_message_cb = Closure::wrap(
                 (box move |ev: MessageEvent| {
-                    log::debug!("get message: {:?}", ev.data());
+                    let data = ev.data();
                     let event_sender = Arc::clone(&event_sender);
-                    let msg = Uint8Array::new(&ev.data()).to_vec();
                     spawn_local(async move {
+                        let msg = if data.has_type::<web_sys::Blob>() {
+                            let data: web_sys::Blob = data.clone().into();
+                            let data_buffer =
+                                wasm_bindgen_futures::JsFuture::from(data.array_buffer()).await;
+                            if let Err(e) = data_buffer {
+                                log::error!("Failed to read array_buffer from Blob, {:?}", e);
+                                return;
+                            }
+                            Uint8Array::new(&data_buffer.unwrap()).to_vec()
+                        } else {
+                            Uint8Array::new(data.as_ref()).to_vec()
+                        };
                         let event_sender = Arc::clone(&event_sender);
                         if let Err(e) =
                             CbChannel::send(&event_sender, Event::DataChannelMessage(msg)).await
                         {
                             log::error!("Failed on handle msg, {:?}", e);
                         }
-                    })
+                    });
                 }) as Box<dyn FnMut(MessageEvent)>,
             );
             ch.set_onmessage(Some(on_message_cb.as_ref().unchecked_ref()));

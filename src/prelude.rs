@@ -17,6 +17,8 @@ pub use self::rings_core::message::MessageCallback;
 pub use self::rings_core::message::MessagePayload;
 pub use self::rings_core::prelude::async_trait::async_trait;
 pub use self::rings_core::prelude::uuid;
+#[cfg(feature = "browser")]
+pub use self::rings_core::prelude::web_sys;
 pub use self::rings_core::session::Session;
 pub use self::rings_core::session::SessionManager;
 pub use self::rings_core::session::Signer;

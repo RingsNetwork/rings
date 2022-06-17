@@ -9,15 +9,12 @@ use rings_node::prelude::rings_core;
 use rings_node::prelude::*;
 use rings_node::processor::*;
 use wasm_bindgen_test::*;
-
 // wasm_bindgen_test_configure!(run_in_browser);
 
 fn new_processor() -> Processor {
     let key = SecretKey::random();
 
-    let (auth, new_key) =
-        SessionManager::gen_unsign_info(key.address(), Some(rings_core::session::Ttl::Never), None)
-            .unwrap();
+    let (auth, new_key) = SessionManager::gen_unsign_info(key.address(), None, None).unwrap();
     let sig = key.sign(&auth.to_string().unwrap()).to_vec();
     let session = SessionManager::new(&sig, &auth, &new_key);
     let swarm = Arc::new(Swarm::new(
@@ -54,7 +51,7 @@ impl MessageCallback for MsgCallbackStruct {
 }
 
 #[wasm_bindgen_test]
-async fn test_processor_handshake() {
+async fn test_processor_handshake_and_msg() {
     super::setup_log();
     let p1 = new_processor();
     let p2 = new_processor();
@@ -67,7 +64,7 @@ async fn test_processor_handshake() {
         transport_1.id.to_string()
     );
 
-    let (transport_2, answer) = p2.answer_offer(offer.to_string().as_str()).await.unwrap();
+    let (_transport_2, answer) = p2.answer_offer(offer.to_string().as_str()).await.unwrap();
     let peer = p1
         .accept_answer(
             transport_1.id.to_string().as_str(),
@@ -76,27 +73,27 @@ async fn test_processor_handshake() {
         .await
         .unwrap();
     assert!(peer.transport.id.eq(&transport_1.id), "transport not same");
-    transport_1
-        .connect_success_promise()
-        .await
-        .unwrap()
-        .await
-        .unwrap();
-    transport_2
-        .connect_success_promise()
-        .await
-        .unwrap()
-        .await
-        .unwrap();
+    // transport_1
+    //     .connect_success_promise()
+    //     .await
+    //     .unwrap()
+    //     .await
+    //     .unwrap();
+    // transport_2
+    //     .connect_success_promise()
+    //     .await
+    //     .unwrap()
+    //     .await
+    //     .unwrap();
 
-    assert!(
-        transport_1.is_connected().await,
-        "transport_1 not connected"
-    );
-    assert!(
-        transport_2.is_connected().await,
-        "transport_2 not connected"
-    );
+    // assert!(
+    //     transport_1.is_connected().await,
+    //     "transport_1 not connected"
+    // );
+    // assert!(
+    //     transport_2.is_connected().await,
+    //     "transport_2 not connected"
+    // );
 
     let msgs1: Arc<Mutex<Vec<String>>> = Default::default();
     let msgs2: Arc<Mutex<Vec<String>>> = Default::default();
@@ -115,18 +112,6 @@ async fn test_processor_handshake() {
     console_log!("p1_addr: {}", p1_addr);
     console_log!("p2_addr: {}", p2_addr);
 
-    p2.send_message(p1_addr.as_str(), test_text2.as_bytes())
-        .await
-        .unwrap();
-
-    fluvio_wasm_timer::Delay::new(Duration::from_secs(1))
-        .await
-        .unwrap();
-
-    p1.send_message(p2_addr.as_str(), test_text1.as_bytes())
-        .await
-        .unwrap();
-
     console_log!("listen");
     p1.msg_handler.set_callback(callback1).await;
     p1.msg_handler.clone().listen().await;
@@ -134,20 +119,34 @@ async fn test_processor_handshake() {
     p2.msg_handler.set_callback(callback2).await;
     p2.msg_handler.clone().listen().await;
 
-    fluvio_wasm_timer::Delay::new(Duration::from_secs(3))
+    p2.send_message(p1_addr.as_str(), test_text2.as_bytes())
+        .await
+        .unwrap();
+
+    // fluvio_wasm_timer::Delay::new(Duration::from_secs(1))
+    //     .await
+    //     .unwrap();
+
+    p1.send_message(p2_addr.as_str(), test_text1.as_bytes())
+        .await
+        .unwrap();
+
+    console_log!("send_done");
+
+    fluvio_wasm_timer::Delay::new(Duration::from_secs(2))
         .await
         .unwrap();
 
     console_log!("check received");
 
-    // let mut msgs2 = msgs2.try_lock().unwrap();
-    // let got_msg2 = msgs2.pop().unwrap();
-    // assert!(
-    //     got_msg2.eq(test_text1),
-    //     "msg received, expect {}, got {}",
-    //     test_text1,
-    //     got_msg2
-    // );
+    let mut msgs2 = msgs2.try_lock().unwrap();
+    let got_msg2 = msgs2.pop().unwrap();
+    assert!(
+        got_msg2.eq(test_text1),
+        "msg received, expect {}, got {}",
+        test_text1,
+        got_msg2
+    );
 
     let mut msgs1 = msgs1.try_lock().unwrap();
     let got_msg1 = msgs1.pop().unwrap();
