@@ -73,27 +73,6 @@ async fn test_processor_handshake_and_msg() {
         .await
         .unwrap();
     assert!(peer.transport.id.eq(&transport_1.id), "transport not same");
-    // transport_1
-    //     .connect_success_promise()
-    //     .await
-    //     .unwrap()
-    //     .await
-    //     .unwrap();
-    // transport_2
-    //     .connect_success_promise()
-    //     .await
-    //     .unwrap()
-    //     .await
-    //     .unwrap();
-
-    // assert!(
-    //     transport_1.is_connected().await,
-    //     "transport_1 not connected"
-    // );
-    // assert!(
-    //     transport_2.is_connected().await,
-    //     "transport_2 not connected"
-    // );
 
     let msgs1: Arc<Mutex<Vec<String>>> = Default::default();
     let msgs2: Arc<Mutex<Vec<String>>> = Default::default();
@@ -106,6 +85,9 @@ async fn test_processor_handshake_and_msg() {
 
     let test_text1 = "test1";
     let test_text2 = "test2";
+    let test_text3 = "test3";
+    let test_text4 = "test4";
+    let test_text5 = "test5";
 
     let p1_addr = p1.address().into_token().to_string();
     let p2_addr = p2.address().into_token().to_string();
@@ -119,19 +101,30 @@ async fn test_processor_handshake_and_msg() {
     p2.msg_handler.set_callback(callback2).await;
     p2.msg_handler.clone().listen().await;
 
-    p2.send_message(p1_addr.as_str(), test_text2.as_bytes())
-        .await
-        .unwrap();
-
-    // fluvio_wasm_timer::Delay::new(Duration::from_secs(1))
-    //     .await
-    //     .unwrap();
-
     p1.send_message(p2_addr.as_str(), test_text1.as_bytes())
         .await
         .unwrap();
+    console_log!("send test_text1 done");
 
-    console_log!("send_done");
+    p2.send_message(p1_addr.as_str(), test_text2.as_bytes())
+        .await
+        .unwrap();
+    console_log!("send test_text2 done");
+
+    p2.send_message(p1_addr.as_str(), test_text3.as_bytes())
+        .await
+        .unwrap();
+    console_log!("send test_text3 done");
+
+    p1.send_message(p2_addr.as_str(), test_text4.as_bytes())
+        .await
+        .unwrap();
+    console_log!("send test_text4 done");
+
+    p2.send_message(p1_addr.as_str(), test_text5.as_bytes())
+        .await
+        .unwrap();
+    console_log!("send test_text5 done");
 
     fluvio_wasm_timer::Delay::new(Duration::from_secs(2))
         .await
@@ -139,21 +132,9 @@ async fn test_processor_handshake_and_msg() {
 
     console_log!("check received");
 
-    let mut msgs2 = msgs2.try_lock().unwrap();
-    let got_msg2 = msgs2.pop().unwrap();
-    assert!(
-        got_msg2.eq(test_text1),
-        "msg received, expect {}, got {}",
-        test_text1,
-        got_msg2
-    );
+    let msgs1 = msgs1.try_lock().unwrap();
+    let msgs2 = msgs2.try_lock().unwrap();
 
-    let mut msgs1 = msgs1.try_lock().unwrap();
-    let got_msg1 = msgs1.pop().unwrap();
-    assert!(
-        got_msg1.eq(test_text2),
-        "msg received, expect {}, got {}",
-        test_text2,
-        got_msg1
-    );
+    assert_eq!(msgs1.as_slice(), &[test_text2, test_text3, test_text5]);
+    assert_eq!(msgs2.as_slice(), &[test_text1, test_text4]);
 }

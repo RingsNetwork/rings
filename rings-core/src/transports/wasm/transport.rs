@@ -492,6 +492,9 @@ impl WasmTransport {
     pub async fn wait_for_data_channel_open(&self) -> Result<()> {
         match self.get_data_channel().await {
             Some(dc) => {
+                if dc.ready_state() == RtcDataChannelState::Open {
+                    return Ok(());
+                }
                 let promise = Promise::default();
                 let state = Arc::clone(&promise.state());
                 let dc_cloned = Arc::clone(&dc);
