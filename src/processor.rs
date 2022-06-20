@@ -45,6 +45,11 @@ impl From<(Arc<Swarm>, Arc<MessageHandler>)> for Processor {
 }
 
 impl Processor {
+    /// Get current address
+    pub fn address(&self) -> Address {
+        self.swarm.address()
+    }
+
     /// Create an Offer and waiting for connection.
     /// The process of manually handshake is:
     /// 1. PeerA: create_offer
@@ -290,18 +295,17 @@ impl Processor {
     }
 
     /// Send custom message to an address.
-    pub async fn send_message(&self, next_hop: &str, destination: &str, msg: &[u8]) -> Result<()> {
+    pub async fn send_message(&self, destination: &str, msg: &[u8]) -> Result<()> {
         log::info!(
-            "send_message, to: {}, destination: {}, text: {:?}",
-            next_hop,
+            "send_message, destination: {}, text: {:?}",
             destination,
             msg,
         );
-        let next_hop = Address::from_str(next_hop).map_err(|_| Error::InvalidAddress)?;
         let destination = Address::from_str(destination).map_err(|_| Error::InvalidAddress)?;
         let msg = Message::custom(msg, &None).map_err(Error::SendMessage)?;
-        self.msg_handler
-            .send_message(msg, next_hop.into(), destination.into())
+        // self.swarm.do_send_payload(address, payload)
+        self.swarm
+            .send_direct_message(msg, destination.into())
             .await
             .map_err(Error::SendMessage)?;
         Ok(())
@@ -341,20 +345,12 @@ mod test {
     use futures::lock::Mutex;
 
     use super::*;
-    use crate::prelude::rings_core::dht::PeerRing;
-    use crate::prelude::rings_core::ecc::SecretKey;
-    use crate::prelude::rings_core::prelude::uuid;
-    use crate::prelude::rings_core::session::SessionManager;
+    use crate::prelude::*;
 
     fn new_processor() -> Processor {
         let key = SecretKey::random();
 
-        let (auth, new_key) = SessionManager::gen_unsign_info(
-            key.address(),
-            Some(rings_core::session::Ttl::Never),
-            None,
-        )
-        .unwrap();
+        let (auth, new_key) = SessionManager::gen_unsign_info(key.address(), None, None).unwrap();
         let sig = key.sign(&auth.to_string().unwrap()).to_vec();
         let session = SessionManager::new(&sig, &auth, &new_key);
         let swarm = Arc::new(Swarm::new(
@@ -460,6 +456,172 @@ mod test {
                 .any(|x| x.id.to_string() == ti2.0.id.to_string()),
             "transport[{}] should not in pending_transports",
             ti0.0.id
+        );
+    }
+
+    struct MsgCallbackStruct {
+        msgs: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl MessageCallback for MsgCallbackStruct {
+        async fn custom_message(
+            &self,
+            handler: &MessageHandler,
+            _ctx: &MessagePayload<Message>,
+            msg: &MaybeEncrypted<CustomMessage>,
+        ) {
+            let msg = handler.decrypt_msg(msg).unwrap();
+            let text = String::from_utf8(msg.0).unwrap();
+            let mut msgs = self.msgs.try_lock().unwrap();
+            msgs.push(text);
+        }
+
+        async fn builtin_message(&self, _handler: &MessageHandler, _ctx: &MessagePayload<Message>) {
+        }
+    }
+
+    #[tokio::test]
+    async fn test_processor_handshake_msg() {
+        let p1 = new_processor();
+        let p2 = new_processor();
+        let p1_addr = p1.address().into_token().to_string();
+        let p2_addr = p2.address().into_token().to_string();
+        println!("p1_addr: {}", p1_addr);
+        println!("p2_addr: {}", p2_addr);
+
+        let (transport_1, offer) = p1.create_offer().await.unwrap();
+
+        let pendings_1 = p1.swarm.pending_transports().await.unwrap();
+        assert_eq!(pendings_1.len(), 1);
+        assert_eq!(
+            pendings_1.get(0).unwrap().id.to_string(),
+            transport_1.id.to_string()
+        );
+
+        let (transport_2, answer) = p2.answer_offer(offer.as_str()).await.unwrap();
+        let peer = p1
+            .accept_answer(transport_1.id.to_string().as_str(), answer.as_str())
+            .await
+            .unwrap();
+
+        assert!(peer.transport.id.eq(&transport_1.id), "transport not same");
+        assert!(
+            peer.address.to_string().eq(&p2_addr),
+            "peer.address got {}, expect: {}",
+            peer.address,
+            p2_addr
+        );
+        println!("waiting for connection");
+        transport_1
+            .connect_success_promise()
+            .await
+            .unwrap()
+            .await
+            .unwrap();
+        transport_2
+            .connect_success_promise()
+            .await
+            .unwrap()
+            .await
+            .unwrap();
+
+        assert!(
+            transport_1.is_connected().await,
+            "transport_1 not connected"
+        );
+        assert!(
+            p1.swarm
+                .get_transport(&p2.address())
+                .unwrap()
+                .is_connected()
+                .await,
+            "p1 transport not connected"
+        );
+        assert!(
+            transport_2.is_connected().await,
+            "transport_2 not connected"
+        );
+        assert!(
+            p2.swarm
+                .get_transport(&p1.address())
+                .unwrap()
+                .is_connected()
+                .await,
+            "p2 transport not connected"
+        );
+
+        let msgs1: Arc<Mutex<Vec<String>>> = Default::default();
+        let msgs2: Arc<Mutex<Vec<String>>> = Default::default();
+        let callback1 = Box::new(MsgCallbackStruct {
+            msgs: msgs1.clone(),
+        });
+        let callback2 = Box::new(MsgCallbackStruct {
+            msgs: msgs2.clone(),
+        });
+
+        let msg_handler_1 = p1.msg_handler.clone();
+        msg_handler_1.clone().set_callback(callback1).await;
+        let msg_handler_2 = p2.msg_handler.clone();
+        msg_handler_2.clone().set_callback(callback2).await;
+        // tokio::spawn(async move {
+        //     tokio::join!(
+        //         async {
+        //             msg_handler_1.clone().listen().await;
+        //         },
+        //         async {
+        //             msg_handler_2.clone().listen().await;
+        //         }
+        //     );
+        // });
+        let test_text1 = "test1";
+        let test_text2 = "test2";
+
+        println!("send_message 1");
+        p1.send_message(p2_addr.as_str(), test_text1.as_bytes())
+            .await
+            .unwrap();
+        println!("send_message 1 done");
+
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+        println!("send_message 2");
+        p2.send_message(p1_addr.as_str(), test_text2.as_bytes())
+            .await
+            .unwrap();
+        println!("send_message 2 done");
+
+        tokio::spawn(async move {
+            tokio::join!(
+                async {
+                    msg_handler_1.clone().listen().await;
+                },
+                async {
+                    msg_handler_2.clone().listen().await;
+                }
+            );
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
+        println!("check received");
+
+        let mut msgs2 = msgs2.try_lock().unwrap();
+        let got_msg2 = msgs2.pop().unwrap();
+        assert!(
+            got_msg2.eq(test_text1),
+            "msg received, expect {}, got {}",
+            test_text1,
+            got_msg2
+        );
+
+        let mut msgs1 = msgs1.try_lock().unwrap();
+        let got_msg1 = msgs1.pop().unwrap();
+        assert!(
+            got_msg1.eq(test_text2),
+            "msg received, expect {}, got {}",
+            test_text2,
+            got_msg1
         );
     }
 }

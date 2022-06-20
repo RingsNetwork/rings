@@ -103,11 +103,6 @@ async fn close_connection(params: Params, processor: Processor) -> Result<Value>
 
 async fn send_message(params: Params, processor: Processor) -> Result<Value> {
     let params: serde_json::Map<String, Value> = params.parse()?;
-    let next_hop = params
-        .get("next_hop")
-        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
-        .as_str()
-        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
     let destination = params
         .get("destination")
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
@@ -118,8 +113,6 @@ async fn send_message(params: Params, processor: Processor) -> Result<Value> {
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
         .as_str()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
-    processor
-        .send_message(next_hop, destination, text.as_bytes())
-        .await?;
+    processor.send_message(destination, text.as_bytes()).await?;
     Ok(serde_json::json!({}))
 }
