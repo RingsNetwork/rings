@@ -256,7 +256,6 @@ mod listener {
 pub mod test {
     use std::sync::Arc;
 
-    use dashmap::DashMap;
     use futures::lock::Mutex;
     use tokio::time::sleep;
     use tokio::time::Duration;
@@ -326,7 +325,8 @@ pub mod test {
 
     #[derive(Clone)]
     struct MessageCallbackInstance {
-        handler_messages: Arc<DashMap<Did, Vec<u8>>>,
+        #[allow(clippy::type_complexity)]
+        handler_messages: Arc<Mutex<Vec<(Did, Vec<u8>)>>>,
     }
 
     #[tokio::test]
@@ -354,8 +354,9 @@ pub mod test {
             ) {
                 let decrypted_msg = handler.decrypt_msg(msg).unwrap();
                 self.handler_messages
-                    .insert(ctx.addr.into(), decrypted_msg.0);
-
+                    .lock()
+                    .await
+                    .push((ctx.addr.into(), decrypted_msg.0));
                 println!("{:?}, {:?}, {:?}", ctx, ctx.addr, msg);
             }
 
@@ -368,18 +369,54 @@ pub mod test {
             }
         }
 
-        //let cb: CallbackFn = Box::new(MessageCallbackInstance::new());
-        let msg_callback = MessageCallbackInstance {
-            handler_messages: Arc::new(DashMap::default()),
+        let msg_callback1 = MessageCallbackInstance {
+            handler_messages: Arc::new(Mutex::new(vec![])),
         };
-        let cb2: CallbackFn = Box::new(msg_callback.clone());
-        //handler1.set_callback(cb).await;
+        let msg_callback2 = MessageCallbackInstance {
+            handler_messages: Arc::new(Mutex::new(vec![])),
+        };
+        let cb1: CallbackFn = Box::new(msg_callback1.clone());
+        let cb2: CallbackFn = Box::new(msg_callback2.clone());
+
+        handler1.set_callback(cb1).await;
         handler2.set_callback(cb2).await;
 
         handler1
             .send_direct_message(
-                Message::custom("Hello world 1".as_bytes(), &None)?,
+                Message::custom("Hello world 1 to 2 - 1".as_bytes(), &None)?,
                 addr2.into(),
+            )
+            .await
+            .unwrap();
+
+        handler1
+            .send_direct_message(
+                Message::custom("Hello world 1 to 2 - 2".as_bytes(), &None)?,
+                addr2.into(),
+            )
+            .await
+            .unwrap();
+
+        handler2
+            .send_direct_message(
+                Message::custom("Hello world 2 to 1 - 1".as_bytes(), &None)?,
+                addr1.into(),
+            )
+            .await
+            .unwrap();
+
+        handler1
+            .send_direct_message(
+                Message::custom("Hello world 1 to 2 - 3".as_bytes(), &None)?,
+                addr2.into(),
+            )
+            .await
+            .unwrap();
+
+        handler2
+            .send_direct_message(
+                Message::custom("Hello world 2 to 1 - 2".as_bytes(), &None)?,
+                addr1.into(),
             )
             .await
             .unwrap();
@@ -388,10 +425,17 @@ pub mod test {
         tokio::spawn(async { Arc::new(handler2).listen().await });
 
         sleep(Duration::from_secs(5)).await;
-        let got_value = msg_callback.handler_messages.get(&addr1.into()).unwrap();
-        let got_value = got_value.as_slice();
 
-        assert_eq!(got_value, "Hello world 1".as_bytes());
+        assert_eq!(msg_callback1.handler_messages.lock().await.as_slice(), &[
+            (addr2.into(), "Hello world 2 to 1 - 1".as_bytes().to_vec()),
+            (addr2.into(), "Hello world 2 to 1 - 2".as_bytes().to_vec())
+        ]);
+
+        assert_eq!(msg_callback2.handler_messages.lock().await.as_slice(), &[
+            (addr1.into(), "Hello world 1 to 2 - 1".as_bytes().to_vec()),
+            (addr1.into(), "Hello world 1 to 2 - 2".as_bytes().to_vec()),
+            (addr1.into(), "Hello world 1 to 2 - 3".as_bytes().to_vec())
+        ]);
 
         Ok(())
     }
