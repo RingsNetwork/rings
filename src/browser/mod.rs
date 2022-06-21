@@ -13,6 +13,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
 use wasm_bindgen_futures::spawn_local;
 
+use self::utils::from_rtc_ice_connection_state;
 use crate::prelude::rings_core::async_trait;
 use crate::prelude::rings_core::dht::PeerRing;
 use crate::prelude::rings_core::ecc::SecretKey;
@@ -32,8 +33,9 @@ use crate::prelude::rings_core::swarm::TransportManager;
 use crate::prelude::rings_core::transports::Transport;
 use crate::prelude::rings_core::types::ice_transport::IceTransport;
 use crate::prelude::rings_core::types::message::MessageListener;
+use crate::prelude::web_sys::RtcIceConnectionState;
+use crate::processor;
 use crate::processor::Processor;
-use crate::processor::{self};
 
 #[wasm_bindgen]
 extern "C" {
@@ -241,7 +243,8 @@ impl Client {
                 .accept_answer(transport_id.as_str(), ice.as_str())
                 .await
                 .map_err(JsError::from)?;
-            Ok(Peer::from(peer).into())
+            let state = peer.transport.ice_connection_state().await;
+            Ok(Peer::from((state, peer)).into())
         })
     }
 
@@ -250,8 +253,18 @@ impl Client {
         let p = self.processor.clone();
         future_to_promise(async move {
             let peers = p.list_peers().await.map_err(JsError::from)?;
+            let states_async = peers
+                .iter()
+                .map(|x| x.transport.ice_connection_state())
+                .collect::<Vec<_>>();
+            let states = futures::future::join_all(states_async).await;
             let mut js_array = js_sys::Array::new();
-            js_array.extend(peers.into_iter().map(|x| JsValue::from(Peer::from(x))));
+            js_array.extend(
+                peers
+                    .iter()
+                    .zip(states.iter())
+                    .map(|(x, y)| JsValue::from(Peer::from((*y, x.clone())))),
+            );
             Ok(js_array.into())
         })
     }
@@ -303,6 +316,19 @@ impl Client {
                 .await
                 .map_err(JsError::from)?;
             Ok(JsValue::from_bool(true))
+        })
+    }
+
+    pub fn transport_state(&self, address: String) -> Promise {
+        let p = self.processor.clone();
+        future_to_promise(async move {
+            let address = Address::from_str(address.as_str()).map_err(JsError::from)?;
+            let transport = p
+                .swarm
+                .get_transport(&address)
+                .ok_or_else(|| JsError::new("transport not found"))?;
+            let state = transport.ice_connection_state().await;
+            Ok(state.into())
         })
     }
 }
@@ -383,6 +409,7 @@ impl MessageCallback for MessageCallbackInstance {
 pub struct Peer {
     address: String,
     transport_id: String,
+    state: Option<String>,
 }
 
 #[wasm_bindgen]
@@ -396,20 +423,25 @@ impl Peer {
     pub fn transport_id(&self) -> String {
         self.transport_id.to_owned()
     }
+
+    #[wasm_bindgen(getter)]
+    pub fn state(&self) -> Option<String> {
+        self.state.to_owned()
+    }
 }
 
-impl From<processor::Peer> for Peer {
-    fn from(p: processor::Peer) -> Self {
+impl From<(Option<RtcIceConnectionState>, processor::Peer)> for Peer {
+    fn from((st, p): (Option<RtcIceConnectionState>, processor::Peer)) -> Self {
         Self {
             address: p.address.to_string(),
             transport_id: p.transport.id.to_string(),
+            state: st.map(from_rtc_ice_connection_state),
         }
     }
 }
 
 #[wasm_bindgen]
 #[derive(Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
 pub struct TransportAndIce {
     transport_id: String,
     ice: String,
