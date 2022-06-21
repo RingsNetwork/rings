@@ -19,3 +19,5 @@ pub use web_sys::RtcSdpType as RTCSdpType;
 pub use webrtc;
 #[cfg(not(feature = "wasm"))]
 pub use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
+
+pub use crate::transports::Transport;

@@ -50,13 +50,8 @@ impl MessageCallback for MsgCallbackStruct {
     async fn builtin_message(&self, _handler: &MessageHandler, _ctx: &MessagePayload<Message>) {}
 }
 
-#[wasm_bindgen_test]
-async fn test_processor_handshake_and_msg() {
-    super::setup_log();
-    let p1 = new_processor();
-    let p2 = new_processor();
+async fn create_connection(p1: &Processor, p2: &Processor) {
     let (transport_1, offer) = p1.create_offer().await.unwrap();
-
     let pendings_1 = p1.swarm.pending_transports().await.unwrap();
     assert_eq!(pendings_1.len(), 1);
     assert_eq!(
@@ -72,7 +67,16 @@ async fn test_processor_handshake_and_msg() {
         )
         .await
         .unwrap();
+    transport_1.wait_for_data_channel_open().await.unwrap();
     assert!(peer.transport.id.eq(&transport_1.id), "transport not same");
+}
+
+#[wasm_bindgen_test]
+async fn test_processor_handshake_and_msg() {
+    let p1 = new_processor();
+    let p2 = new_processor();
+
+    create_connection(&p1, &p2).await;
 
     let msgs1: Arc<Mutex<Vec<String>>> = Default::default();
     let msgs2: Arc<Mutex<Vec<String>>> = Default::default();
@@ -137,4 +141,71 @@ async fn test_processor_handshake_and_msg() {
 
     assert_eq!(msgs1.as_slice(), &[test_text2, test_text3, test_text5]);
     assert_eq!(msgs2.as_slice(), &[test_text1, test_text4]);
+}
+
+#[wasm_bindgen_test]
+async fn test_processor_connect_with_address() {
+    super::setup_log();
+    let p1 = new_processor();
+    console_log!("p1 address: {}", p1.address().into_token().to_string());
+    let p2 = new_processor();
+    console_log!("p2 address: {}", p2.address().into_token().to_string());
+    let p3 = new_processor();
+    console_log!("p3 address: {}", p3.address().into_token().to_string());
+
+    let callback1 = Box::new(MsgCallbackStruct {
+        msgs: Default::default(),
+    });
+    let callback2 = Box::new(MsgCallbackStruct {
+        msgs: Default::default(),
+    });
+    let callback3 = Box::new(MsgCallbackStruct {
+        msgs: Default::default(),
+    });
+    p1.msg_handler.set_callback(callback1).await;
+    p1.msg_handler.clone().listen().await;
+
+    p2.msg_handler.set_callback(callback2).await;
+    p2.msg_handler.clone().listen().await;
+
+    p3.msg_handler.set_callback(callback3).await;
+    p3.msg_handler.clone().listen().await;
+
+    console_log!("connect p1 and p2");
+    create_connection(&p1, &p2).await;
+    console_log!("connect p1 and p2, done");
+    console_log!("connect p2 and p3");
+    create_connection(&p2, &p3).await;
+    console_log!("connect p2 and p3, done");
+
+    let p1_peers = p1.list_peers().await.unwrap();
+    assert!(
+        p1_peers.iter().any(|p| p
+            .address
+            .to_string()
+            .eq(&p2.address().into_token().to_string())),
+        "p2 not in p1's peer list"
+    );
+    // assert!(
+    //     p1_peers.iter().any(|p| p
+    //         .address
+    //         .to_string()
+    //         .eq(&p3.address().into_token().to_string())),
+    //     "p3 not in p1's peer list"
+    // );
+
+    console_log!("connect p1 and p3");
+    // p1 create connect with p3's address
+    p1.connect_with_address(&p3.address()).await.unwrap();
+    //    transport3.wait_for_data_channel_open().await.unwrap();
+
+    // let p2_peers = p1.list_peers().await.unwrap();
+    // assert!(
+    //     p2_peers.iter().any(|p| p.address.to_string().eq(p3
+    //         .address()
+    //         .into_token()
+    //         .to_string()
+    //         .as_str())),
+    //     "p3 address not in p2 peers list"
+    // );
 }

@@ -113,9 +113,8 @@ impl MessageHandler {
             }
         }
         .ok_or(Error::NoNextHop)?;
-
+        log::debug!("next_hop: {:?}", next_hop);
         self.send_message(connect_msg, next_hop, target_id).await?;
-
         Ok(())
     }
 
