@@ -1,13 +1,19 @@
 #![warn(missing_docs)]
-use super::{
-    method::Method,
-    response::{Peer, TransportAndIce},
-};
-use crate::{
-    error::Error as ServerError, prelude::rings_core::prelude::Address, processor::Processor,
-};
-use jsonrpc_core::{Error, ErrorCode, MetaIoHandler, Params, Result, Value};
 use std::str::FromStr;
+
+use jsonrpc_core::Error;
+use jsonrpc_core::ErrorCode;
+use jsonrpc_core::MetaIoHandler;
+use jsonrpc_core::Params;
+use jsonrpc_core::Result;
+use jsonrpc_core::Value;
+
+use super::method::Method;
+use super::response::Peer;
+use super::response::TransportAndIce;
+use crate::error::Error as ServerError;
+use crate::prelude::rings_core::prelude::Address;
+use crate::processor::Processor;
 
 pub(crate) async fn build_handler(handler: &mut MetaIoHandler<Processor>) {
     handler.add_method_with_meta(Method::ConnectPeerViaHttp.as_str(), connect_peer_via_http);
@@ -97,11 +103,6 @@ async fn close_connection(params: Params, processor: Processor) -> Result<Value>
 
 async fn send_message(params: Params, processor: Processor) -> Result<Value> {
     let params: serde_json::Map<String, Value> = params.parse()?;
-    let next_hop = params
-        .get("next_hop")
-        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
-        .as_str()
-        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
     let destination = params
         .get("destination")
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
@@ -112,8 +113,6 @@ async fn send_message(params: Params, processor: Processor) -> Result<Value> {
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
         .as_str()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
-    processor
-        .send_message(next_hop, destination, text.as_bytes())
-        .await?;
+    processor.send_message(destination, text.as_bytes()).await?;
     Ok(serde_json::json!({}))
 }

@@ -1,10 +1,21 @@
-use crate::dht::vnode::VirtualNode;
-use crate::dht::Did;
-use crate::dht::{ChordStorage, PeerRingAction, PeerRingRemoteAction};
-use crate::err::{Error, Result};
-use crate::message::types::{FoundVNode, Message, SearchVNode, StoreVNode, SyncVNodeWithSuccessor};
-use crate::message::{HandleMsg, MessageHandler, MessagePayload, PayloadSender};
 use async_trait::async_trait;
+
+use crate::dht::vnode::VirtualNode;
+use crate::dht::ChordStorage;
+use crate::dht::Did;
+use crate::dht::PeerRingAction;
+use crate::dht::PeerRingRemoteAction;
+use crate::err::Error;
+use crate::err::Result;
+use crate::message::types::FoundVNode;
+use crate::message::types::Message;
+use crate::message::types::SearchVNode;
+use crate::message::types::StoreVNode;
+use crate::message::types::SyncVNodeWithSuccessor;
+use crate::message::HandleMsg;
+use crate::message::MessageHandler;
+use crate::message::MessagePayload;
+use crate::message::PayloadSender;
 
 /// TChordStorage should imply necessary method for DHT storage
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
@@ -178,6 +189,10 @@ impl HandleMsg<SyncVNodeWithSuccessor> for MessageHandler {
 #[cfg(not(feature = "wasm"))]
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+
+    use futures::lock::Mutex;
+
     use super::*;
     use crate::dht::PeerRing;
     use crate::ecc::SecretKey;
@@ -187,8 +202,6 @@ mod test {
     use crate::swarm::Swarm;
     use crate::swarm::TransportManager;
     use crate::types::ice_transport::IceTrickleScheme;
-    use futures::lock::Mutex;
-    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_store_vnode() -> Result<()> {

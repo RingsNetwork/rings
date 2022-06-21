@@ -1,8 +1,13 @@
 #![feature(async_closure)]
-use clap::{Args, Parser, Subcommand};
+use std::sync::Arc;
+
+use clap::Args;
+use clap::Parser;
+use clap::Subcommand;
 use futures::lock::Mutex;
 use rings_core::dht::PeerRing;
-use rings_core::dht::{Stabilization, TStabilize};
+use rings_core::dht::Stabilization;
+use rings_core::dht::TStabilize;
 use rings_core::ecc::SecretKey;
 use rings_core::message::MessageHandler;
 use rings_core::session::SessionManager;
@@ -12,7 +17,6 @@ use rings_node::cli::Client;
 use rings_node::logger::LogLevel;
 use rings_node::logger::Logger;
 use rings_node::service::run_service;
-use std::sync::Arc;
 
 #[derive(Parser, Debug)]
 #[clap(about, version, author)]

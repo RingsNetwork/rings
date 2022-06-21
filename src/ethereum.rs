@@ -1,5 +1,7 @@
+use anyhow::anyhow;
+use anyhow::Result;
+
 use crate::prelude::rings_core::prelude::web3;
-use anyhow::{anyhow, Result};
 
 pub type Transport = web3::transports::Either<web3::transports::WebSocket, web3::transports::Http>;
 

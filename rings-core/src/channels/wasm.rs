@@ -1,10 +1,13 @@
-use crate::err::{Error, Result};
-use crate::types::channel::Channel;
+use std::sync::Arc;
+
 /// ref: https://github.com/Ciantic/rust-shared-wasm-experiments/blob/master/src/lib.rs
 use async_trait::async_trait;
 use futures::channel::mpsc;
 use futures::lock::Mutex;
-use std::sync::Arc;
+
+use crate::err::Error;
+use crate::err::Result;
+use crate::types::channel::Channel;
 
 type Sender<T> = Arc<Mutex<mpsc::Sender<T>>>;
 type Receiver<T> = Arc<Mutex<mpsc::Receiver<T>>>;

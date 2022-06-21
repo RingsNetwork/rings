@@ -1,10 +1,14 @@
-use crate::dht::{vnode::VirtualNode, Did};
-use crate::ecc::elgamal;
-use crate::ecc::{PublicKey, SecretKey};
-use crate::err::{Error, Result};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
+
+use crate::dht::vnode::VirtualNode;
+use crate::dht::Did;
+use crate::ecc::elgamal;
+use crate::ecc::PublicKey;
+use crate::ecc::SecretKey;
+use crate::err::Error;
+use crate::err::Result;
 
 #[derive(Debug, PartialEq, Deserialize, Serialize, Clone)]
 pub struct ConnectNodeSend {
@@ -132,8 +136,7 @@ impl Message {
 }
 
 impl<T> MaybeEncrypted<T>
-where
-    T: Serialize + DeserializeOwned,
+where T: Serialize + DeserializeOwned
 {
     pub fn new(data: T, pubkey: &Option<PublicKey>) -> Result<Self> {
         if let Some(pubkey) = pubkey {

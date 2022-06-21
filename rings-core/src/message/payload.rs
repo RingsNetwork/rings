@@ -1,18 +1,27 @@
-use super::encoder::{Decoder, Encoded, Encoder};
-use super::protocols::{MessageRelay, MessageVerification, RelayMethod};
-use crate::dht::Did;
-use crate::ecc::{HashStr, PublicKey};
-use crate::err::{Error, Result};
-use crate::session::SessionManager;
-use crate::utils;
+use std::io::Write;
+
 use async_trait::async_trait;
-use flate2::write::{GzDecoder, GzEncoder};
+use flate2::write::GzDecoder;
+use flate2::write::GzEncoder;
 use flate2::Compression;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
-use std::io::Write;
 use web3::types::Address;
+
+use super::encoder::Decoder;
+use super::encoder::Encoded;
+use super::encoder::Encoder;
+use super::protocols::MessageRelay;
+use super::protocols::MessageVerification;
+use super::protocols::RelayMethod;
+use crate::dht::Did;
+use crate::ecc::HashStr;
+use crate::ecc::PublicKey;
+use crate::err::Error;
+use crate::err::Result;
+use crate::session::SessionManager;
+use crate::utils;
 
 const DEFAULT_TTL_MS: usize = 60 * 1000;
 
@@ -32,8 +41,7 @@ pub struct MessagePayload<T> {
 }
 
 impl<T> MessagePayload<T>
-where
-    T: Serialize + DeserializeOwned,
+where T: Serialize + DeserializeOwned
 {
     pub fn new(
         data: T,
@@ -124,9 +132,7 @@ where
     }
 
     pub fn from_gzipped(data: &[u8]) -> Result<Self>
-    where
-        T: DeserializeOwned,
-    {
+    where T: DeserializeOwned {
         let mut writer = Vec::new();
         let mut decoder = GzDecoder::new(writer);
         decoder.write_all(data).map_err(|_| Error::GzipDecode)?;
@@ -153,8 +159,7 @@ where
 }
 
 impl<T> Encoder for MessagePayload<T>
-where
-    T: Serialize + DeserializeOwned,
+where T: Serialize + DeserializeOwned
 {
     fn encode(&self) -> Result<Encoded> {
         self.gzip(9)?.encode()
@@ -162,8 +167,7 @@ where
 }
 
 impl<T> Decoder for MessagePayload<T>
-where
-    T: Serialize + DeserializeOwned,
+where T: Serialize + DeserializeOwned
 {
     fn from_encoded(encoded: &Encoded) -> Result<Self> {
         let v: Vec<u8> = encoded.decode()?;
@@ -174,15 +178,14 @@ where
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait PayloadSender<T>
-where
-    T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static,
+where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
 {
     fn session_manager(&self) -> &SessionManager;
-    async fn do_send(&self, address: &Address, payload: MessagePayload<T>) -> Result<()>;
+    async fn do_send_payload(&self, address: &Address, payload: MessagePayload<T>) -> Result<()>;
 
     async fn send_payload(&self, payload: MessagePayload<T>) -> Result<()> {
         if let Some(id) = payload.relay.next_hop {
-            self.do_send(&id.into(), payload).await
+            self.do_send_payload(&id.into(), payload).await
         } else {
             Err(Error::NoNextHop)
         }

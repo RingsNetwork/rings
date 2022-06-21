@@ -5,3 +5,6 @@ wasm-pack:
 
 core-wasm-test:
 	wasm-pack test --chrome --features browser_chrome_test --no-default-features -p rings-core
+
+test-browser:
+	wasm-pack test --chrome --features browser_chrome_test --no-default-features

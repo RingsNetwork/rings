@@ -1,25 +1,11 @@
-use super::helper::RtcSessionDescriptionWrapper;
-use crate::channels::Channel as CbChannel;
-use crate::ecc::PublicKey;
-use crate::err::{Error, Result};
-use crate::message::{Encoded, Encoder, MessagePayload};
-use crate::session::SessionManager;
-use crate::transports::helper::Promise;
-use crate::transports::helper::TricklePayload;
-use crate::types::channel::Channel;
-use crate::types::channel::Event;
-use crate::types::ice_transport::IceCandidate;
-use crate::types::ice_transport::IceServer;
-use crate::types::ice_transport::IceTransport;
-use crate::types::ice_transport::IceTransportCallback;
-use crate::types::ice_transport::IceTrickleScheme;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::RwLock;
+
 use async_trait::async_trait;
 use futures::channel::mpsc;
 use futures::lock::Mutex as FuturesMutex;
 use js_sys::Uint8Array;
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::RwLock;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
@@ -40,6 +26,25 @@ use web_sys::RtcPeerConnectionIceEvent;
 use web_sys::RtcSdpType;
 use web_sys::RtcSessionDescription;
 use web_sys::RtcSessionDescriptionInit;
+
+use super::helper::RtcSessionDescriptionWrapper;
+use crate::channels::Channel as CbChannel;
+use crate::ecc::PublicKey;
+use crate::err::Error;
+use crate::err::Result;
+use crate::message::Encoded;
+use crate::message::Encoder;
+use crate::message::MessagePayload;
+use crate::session::SessionManager;
+use crate::transports::helper::Promise;
+use crate::transports::helper::TricklePayload;
+use crate::types::channel::Channel;
+use crate::types::channel::Event;
+use crate::types::ice_transport::IceCandidate;
+use crate::types::ice_transport::IceServer;
+use crate::types::ice_transport::IceTransport;
+use crate::types::ice_transport::IceTransportCallback;
+use crate::types::ice_transport::IceTrickleScheme;
 
 type EventSender = Arc<FuturesMutex<mpsc::Sender<Event>>>;
 
@@ -204,9 +209,7 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
     }
 
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
-    where
-        T: Into<Self::Sdp>,
-    {
+    where T: Into<Self::Sdp> {
         match &self.get_peer_connection().await {
             Some(c) => {
                 let sdp: Self::Sdp = desc.into();
@@ -226,9 +229,7 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
     }
 
     async fn set_remote_description<T>(&self, desc: T) -> Result<()>
-    where
-        T: Into<Self::Sdp>,
-    {
+    where T: Into<Self::Sdp> {
         match &self.get_peer_connection().await {
             Some(c) => {
                 let sdp: Self::Sdp = desc.into();
@@ -385,17 +386,28 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
             let ch = ev.channel();
             let on_message_cb = Closure::wrap(
                 (box move |ev: MessageEvent| {
-                    log::debug!("get message: {:?}", ev.data());
+                    let data = ev.data();
                     let event_sender = Arc::clone(&event_sender);
-                    let msg = Uint8Array::new(&ev.data()).to_vec();
                     spawn_local(async move {
+                        let msg = if data.has_type::<web_sys::Blob>() {
+                            let data: web_sys::Blob = data.clone().into();
+                            let data_buffer =
+                                wasm_bindgen_futures::JsFuture::from(data.array_buffer()).await;
+                            if let Err(e) = data_buffer {
+                                log::error!("Failed to read array_buffer from Blob, {:?}", e);
+                                return;
+                            }
+                            Uint8Array::new(&data_buffer.unwrap()).to_vec()
+                        } else {
+                            Uint8Array::new(data.as_ref()).to_vec()
+                        };
                         let event_sender = Arc::clone(&event_sender);
                         if let Err(e) =
                             CbChannel::send(&event_sender, Event::DataChannelMessage(msg)).await
                         {
                             log::error!("Failed on handle msg, {:?}", e);
                         }
-                    })
+                    });
                 }) as Box<dyn FnMut(MessageEvent)>,
             );
             ch.set_onmessage(Some(on_message_cb.as_ref().unchecked_ref()));
@@ -477,9 +489,12 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
 }
 
 impl WasmTransport {
-    pub async fn wait_for_data_channel_open(&self) -> Result<Promise> {
+    pub async fn wait_for_data_channel_open(&self) -> Result<()> {
         match self.get_data_channel().await {
             Some(dc) => {
+                if dc.ready_state() == RtcDataChannelState::Open {
+                    return Ok(());
+                }
                 let promise = Promise::default();
                 let state = Arc::clone(&promise.state());
                 let dc_cloned = Arc::clone(&dc);
@@ -499,7 +514,7 @@ impl WasmTransport {
                 }) as Box<dyn FnMut()>);
                 dc.set_onopen(Some(callback.as_ref().unchecked_ref()));
                 callback.forget();
-                Ok(promise)
+                promise.await
             }
             None => {
                 log::error!("{:?}", Error::RTCDataChannelNotReady);

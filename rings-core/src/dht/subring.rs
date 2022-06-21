@@ -1,4 +1,9 @@
 #![warn(missing_docs)]
+use std::str::FromStr;
+
+use serde::Deserialize;
+use serde::Serialize;
+
 use super::chord::PeerRing;
 use super::chord::PeerRingAction;
 use super::chord::RemoteAction;
@@ -9,10 +14,8 @@ use super::vnode::VirtualNode;
 use super::FingerTable;
 use crate::dht::Did;
 use crate::ecc::HashStr;
-use crate::err::{Error, Result};
-use serde::Deserialize;
-use serde::Serialize;
-use std::str::FromStr;
+use crate::err::Error;
+use crate::err::Result;
 
 /// A SubRing is a full functional Ring, but with a name and it's finger table can be
 /// stored on Main Rings DHT, For a SubRing, it's virtual address is `sha1(name)`

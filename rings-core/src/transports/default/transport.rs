@@ -1,17 +1,5 @@
-use crate::channels::Channel as AcChannel;
-use crate::ecc::PublicKey;
-use crate::err::{Error, Result};
-use crate::message::{Encoded, Encoder, MessagePayload};
-use crate::session::SessionManager;
-use crate::transports::helper::Promise;
-use crate::transports::helper::TricklePayload;
-use crate::types::channel::Channel;
-use crate::types::channel::Event;
-use crate::types::ice_transport::IceCandidate;
-use crate::types::ice_transport::IceServer;
-use crate::types::ice_transport::IceTransport;
-use crate::types::ice_transport::IceTransportCallback;
-use crate::types::ice_transport::IceTrickleScheme;
+use std::sync::Arc;
+
 use async_lock::RwLock as AsyncRwLock;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -19,7 +7,6 @@ use futures::future::join_all;
 use futures::future::BoxFuture;
 use futures::lock::Mutex as FuturesMutex;
 use serde_json;
-use std::sync::Arc;
 use web3::types::Address;
 use webrtc::api::APIBuilder;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
@@ -32,6 +19,24 @@ use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
+
+use crate::channels::Channel as AcChannel;
+use crate::ecc::PublicKey;
+use crate::err::Error;
+use crate::err::Result;
+use crate::message::Encoded;
+use crate::message::Encoder;
+use crate::message::MessagePayload;
+use crate::session::SessionManager;
+use crate::transports::helper::Promise;
+use crate::transports::helper::TricklePayload;
+use crate::types::channel::Channel;
+use crate::types::channel::Event;
+use crate::types::ice_transport::IceCandidate;
+use crate::types::ice_transport::IceServer;
+use crate::types::ice_transport::IceTransport;
+use crate::types::ice_transport::IceTransportCallback;
+use crate::types::ice_transport::IceTrickleScheme;
 
 type EventSender = <AcChannel<Event> as Channel<Event>>::Sender;
 
@@ -216,9 +221,7 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
     }
 
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
-    where
-        T: Into<RTCSessionDescription> + Send,
-    {
+    where T: Into<RTCSessionDescription> + Send {
         match self.get_peer_connection().await {
             Some(peer_connection) => peer_connection
                 .set_local_description(desc.into())
@@ -229,9 +232,7 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
     }
 
     async fn set_remote_description<T>(&self, desc: T) -> Result<()>
-    where
-        T: Into<RTCSessionDescription> + Send,
-    {
+    where T: Into<RTCSessionDescription> + Send {
         match self.get_peer_connection().await {
             Some(peer_connection) => peer_connection
                 .set_remote_description(desc.into())
@@ -532,11 +533,12 @@ impl DefaultTransport {
 
 #[cfg(test)]
 pub mod tests {
+    use std::str::FromStr;
+
     use super::DefaultTransport as Transport;
     use super::*;
     use crate::ecc::SecretKey;
     use crate::types::ice_transport::IceServer;
-    use std::str::FromStr;
 
     async fn prepare_transport() -> Result<Transport> {
         let ch = Arc::new(AcChannel::new());

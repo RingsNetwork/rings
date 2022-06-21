@@ -1,8 +1,9 @@
 pub mod transport;
 
-use crate::types::ice_transport::IceCandidate;
 pub use transport::DefaultTransport;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
+
+use crate::types::ice_transport::IceCandidate;
 
 impl From<RTCIceCandidateInit> for IceCandidate {
     fn from(cand: RTCIceCandidateInit) -> Self {

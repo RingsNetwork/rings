@@ -1,9 +1,11 @@
-use crate::err::Error;
-use crate::err::Result;
+use std::ops::Deref;
+
 use base58_monero as b58m;
 use serde::Deserialize;
 use serde::Serialize;
-use std::ops::Deref;
+
+use crate::err::Error;
+use crate::err::Result;
 
 pub trait Encoder {
     fn encode(&self) -> Result<Encoded>;
@@ -110,9 +112,7 @@ impl Encoded {
     }
 
     pub fn decode<T>(&self) -> Result<T>
-    where
-        T: Decoder,
-    {
+    where T: Decoder {
         T::from_encoded(self)
     }
 }

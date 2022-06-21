@@ -1,15 +1,16 @@
-use crate::{
-    error::{Error, Result},
-    prelude::rings_core::{
-        message::Encoded,
-        prelude::web3::{contract::tokens::Tokenizable, types::Address},
-        transports::Transport,
-    },
-    processor,
-};
-use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
 use std::sync::Arc;
+
+use serde::Deserialize;
+use serde::Serialize;
+use serde_json::Value as JsonValue;
+
+use crate::error::Error;
+use crate::error::Result;
+use crate::prelude::rings_core::message::Encoded;
+use crate::prelude::rings_core::prelude::web3::contract::tokens::Tokenizable;
+use crate::prelude::rings_core::prelude::web3::types::Address;
+use crate::prelude::rings_core::transports::Transport;
+use crate::processor;
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct Peer {

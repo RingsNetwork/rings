@@ -1,5 +1,6 @@
-use dashmap::DashMap;
 use std::hash::Hash;
+
+use dashmap::DashMap;
 
 #[derive(Clone, Debug, Default)]
 pub struct MemStorage<K, V>
@@ -67,9 +68,10 @@ where
 
 #[cfg(test)]
 mod tests {
+    use web3::types::Address;
+
     use super::*;
     use crate::ecc::SecretKey;
-    use web3::types::Address;
 
     #[test]
     fn memstorage_basic_interface_should_work() {

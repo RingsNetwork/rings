@@ -1,18 +1,24 @@
 #![warn(missing_docs)]
+use std::str::FromStr;
+
+use async_trait::async_trait;
+
 use super::storage::TChordStorage;
 use crate::dht::subring::SubRing;
 use crate::dht::vnode::VirtualNode;
 use crate::dht::Did;
+use crate::dht::PeerRingAction;
+use crate::dht::PeerRingRemoteAction as RemoteAction;
 use crate::dht::SubRingManager;
-use crate::dht::{PeerRingAction, PeerRingRemoteAction as RemoteAction};
 use crate::ecc::HashStr;
 use crate::err::Error;
 use crate::err::Result;
 use crate::message::types::JoinSubRing;
 use crate::message::types::Message;
-use crate::message::{HandleMsg, MessageHandler, MessagePayload, PayloadSender};
-use async_trait::async_trait;
-use std::str::FromStr;
+use crate::message::HandleMsg;
+use crate::message::MessageHandler;
+use crate::message::MessagePayload;
+use crate::message::PayloadSender;
 
 /// SubRingOperator should imply necessary operator for DHT SubRing
 #[cfg_attr(feature = "wasm", async_trait(?Send))]

@@ -41,6 +41,7 @@ browser = [
   "rings-core-wasm",
   "console_log"
 ]
+browser_chrome_test = ["browser"]
 
 [dependencies]
 serde = { version = "1.0.136", features = ["derive"] }
@@ -86,6 +87,12 @@ js-sys = { version = "0.3.57", optional = true }
 reqwest-wasm = { version = "0.11", features = ["json"], optional = true }
 rings-core-wasm = { package = "rings-core", path = "./rings-core", features = ["wasm"], default-features = false, optional = true, version = "0.1.1" }
 console_log = { version = "0.2", optional = true }
+
+[dev-dependencies]
+wasm-bindgen-test = { version = "0.3.0" }
+fluvio-wasm-timer = "0.2.5"
+console_log = { version = "0.2" }
+
 
 [[bin]]
 name = "rings-node"

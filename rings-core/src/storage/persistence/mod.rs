@@ -1,16 +1,18 @@
 #[cfg(feature = "wasm")]
 pub mod idb;
-#[cfg(feature = "default")]
+#[cfg(not(feature = "wasm"))]
 pub mod kv;
-use crate::err::Result;
 use async_trait::async_trait;
 
 #[cfg(feature = "wasm")]
 pub use self::idb::IDBStorage;
+#[cfg(not(feature = "wasm"))]
+pub use self::kv::KvStorage;
+use crate::err::Result;
 
 /// Persistence Storage read and write functions
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(feature = "default", async_trait)]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait PersistenceStorageReadAndWrite<K, V>: PersistenceStorageOperation {
     /// Get a cache entry by `key`.
     async fn get(&self, key: &K) -> Result<V>;
@@ -23,7 +25,7 @@ pub trait PersistenceStorageReadAndWrite<K, V>: PersistenceStorageOperation {
 
 /// Persistence Storage remove functions
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(feature = "default", async_trait)]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait PersistenceStorageRemove<K>: PersistenceStorageOperation {
     /// Remove an `entry` by `key`.
     async fn remove(&self, key: &K) -> Result<()>;
@@ -31,7 +33,7 @@ pub trait PersistenceStorageRemove<K>: PersistenceStorageOperation {
 
 /// Persistence Storage Operations
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(feature = "default", async_trait)]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait PersistenceStorageOperation {
     /// Clear Storage.
     /// All `Entry` will be deleted.

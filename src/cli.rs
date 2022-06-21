@@ -1,13 +1,12 @@
-use crate::{
-    jsonrpc::{
-        method::Method,
-        response::{Peer, TransportAndIce},
-    },
-    jsonrpc_client::SimpleClient,
-};
-use jsonrpc_core::{Params, Value};
+use jsonrpc_core::Params;
+use jsonrpc_core::Value;
 //use jsonrpc_core_client::RawClient;
 use serde_json::json;
+
+use crate::jsonrpc::method::Method;
+use crate::jsonrpc::response::Peer;
+use crate::jsonrpc::response::TransportAndIce;
+use crate::jsonrpc_client::SimpleClient;
 
 #[derive(Clone)]
 pub struct Client {
@@ -182,7 +181,6 @@ impl Client {
 
     pub async fn send_message(&self, address: &str, text: &str) -> Output<()> {
         let mut params = serde_json::Map::new();
-        params.insert("next_hop".to_owned(), json!(address));
         params.insert("destination".to_owned(), json!(address));
         params.insert("text".to_owned(), json!(text));
         self.client

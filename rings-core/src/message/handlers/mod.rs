@@ -1,18 +1,24 @@
-use super::{
-    CustomMessage, MaybeEncrypted, Message, MessagePayload, OriginVerificationGen, PayloadSender,
-};
+use std::sync::Arc;
+
+use async_recursion::async_recursion;
+use async_trait::async_trait;
+use futures::lock::Mutex;
+use web3::types::Address;
+
+use super::CustomMessage;
+use super::MaybeEncrypted;
+use super::Message;
+use super::MessagePayload;
+use super::OriginVerificationGen;
+use super::PayloadSender;
 use crate::dht::PeerRing;
-use crate::err::{Error, Result};
+use crate::err::Error;
+use crate::err::Result;
 use crate::prelude::RTCSdpType;
 use crate::session::SessionManager;
 use crate::swarm::Swarm;
 use crate::swarm::TransportManager;
 use crate::types::ice_transport::IceTrickleScheme;
-use async_recursion::async_recursion;
-use async_trait::async_trait;
-use futures::lock::Mutex;
-use std::sync::Arc;
-use web3::types::Address;
 
 /// Operator and Handler for Connection
 pub mod connection;
@@ -89,7 +95,7 @@ impl MessageHandler {
         let target_id = address.to_owned().into();
         let transport = self.swarm.new_transport().await?;
         let handshake_info = transport
-            .get_handshake_info(&self.swarm.session_manager, RTCSdpType::Offer)
+            .get_handshake_info(self.swarm.session_manager(), RTCSdpType::Offer)
             .await?;
         let connect_msg = Message::ConnectNodeSend(super::ConnectNodeSend {
             sender_id: self.swarm.address().into(),
@@ -115,7 +121,7 @@ impl MessageHandler {
     }
 
     pub fn decrypt_msg(&self, msg: &MaybeEncrypted<CustomMessage>) -> Result<CustomMessage> {
-        let key = self.swarm.session_manager.session_key()?;
+        let key = self.swarm.session_manager().session_key()?;
         let (decrypt_msg, _) = msg.to_owned().decrypt(&key)?;
         Ok(decrypt_msg)
     }
@@ -139,7 +145,7 @@ impl MessageHandler {
                 for message in msg.messages.iter().cloned() {
                     let payload = MessagePayload::new(
                         message,
-                        &self.swarm.session_manager,
+                        self.swarm.session_manager(),
                         OriginVerificationGen::Stick(payload.origin_verification.clone()),
                         payload.relay.clone(),
                     )?;
@@ -181,31 +187,28 @@ impl MessageHandler {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl PayloadSender<Message> for MessageHandler {
     fn session_manager(&self) -> &SessionManager {
-        &self.swarm.session_manager
+        self.swarm.session_manager()
     }
 
-    async fn do_send(&self, address: &Address, payload: MessagePayload<Message>) -> Result<()> {
-        #[cfg(test)]
-        {
-            println!("+++++++++++++++++++++++++++++++++");
-            println!("node {:?}", self.swarm.address());
-            println!("Sent {:?}", payload.clone());
-            println!("node {:?}", payload.relay.next_hop);
-            println!("+++++++++++++++++++++++++++++++++");
-        }
-        self.swarm.send_message(address, payload).await
+    async fn do_send_payload(
+        &self,
+        address: &Address,
+        payload: MessagePayload<Message>,
+    ) -> Result<()> {
+        self.swarm.do_send_payload(address, payload).await
     }
 }
 
 #[cfg(not(feature = "wasm"))]
 mod listener {
-    use super::MessageHandler;
-    use crate::types::message::MessageListener;
-    use async_trait::async_trait;
     use std::sync::Arc;
 
+    use async_trait::async_trait;
     use futures::pin_mut;
     use futures::stream::StreamExt;
+
+    use super::MessageHandler;
+    use crate::types::message::MessageListener;
 
     #[async_trait]
     impl MessageListener for MessageHandler {
@@ -228,12 +231,14 @@ mod listener {
 
 #[cfg(feature = "wasm")]
 mod listener {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use wasm_bindgen_futures::spawn_local;
+
     use super::MessageHandler;
     use crate::poll;
     use crate::types::message::MessageListener;
-    use async_trait::async_trait;
-    use std::sync::Arc;
-    use wasm_bindgen_futures::spawn_local;
 
     #[async_trait(?Send)]
     impl MessageListener for MessageHandler {
@@ -253,6 +258,14 @@ mod listener {
 #[cfg(not(feature = "wasm"))]
 #[cfg(test)]
 pub mod test {
+    use std::sync::Arc;
+
+    use dashmap::DashMap;
+    use futures::lock::Mutex;
+    use tokio::time::sleep;
+    use tokio::time::Duration;
+    use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
+
     use super::*;
     use crate::dht::Did;
     use crate::dht::PeerRing;
@@ -263,11 +276,6 @@ pub mod test {
     use crate::swarm::TransportManager;
     use crate::types::ice_transport::IceTrickleScheme;
     use crate::types::message::MessageListener;
-    use dashmap::DashMap;
-    use futures::lock::Mutex;
-    use std::sync::Arc;
-    use tokio::time::{sleep, Duration};
-    use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 
     pub async fn create_connected_pair(
         key1: SecretKey,

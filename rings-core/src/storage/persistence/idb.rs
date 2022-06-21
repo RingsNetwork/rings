@@ -1,19 +1,27 @@
 #![warn(missing_docs)]
 
 //! Storage for wasm
-use super::{
-    PersistenceStorageOperation, PersistenceStorageReadAndWrite, PersistenceStorageRemove,
-};
-use crate::err::{Error, Result};
+use std::mem::size_of_val;
+use std::ops::Add;
+use std::ops::Sub;
+
 use async_trait::async_trait;
 use chrono;
-use rexie::{self, Index, ObjectStore, Rexie, TransactionMode};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::{
-    mem::size_of_val,
-    ops::{Add, Sub},
-};
+use rexie::Index;
+use rexie::ObjectStore;
+use rexie::Rexie;
+use rexie::TransactionMode;
+use rexie::{self};
+use serde::de::DeserializeOwned;
+use serde::Deserialize;
+use serde::Serialize;
 use wasm_bindgen::JsValue;
+
+use super::PersistenceStorageOperation;
+use super::PersistenceStorageReadAndWrite;
+use super::PersistenceStorageRemove;
+use crate::err::Error;
+use crate::err::Result;
 
 const REXIE_STORE_NAME: &str = "rings-storage";
 
@@ -54,8 +62,9 @@ pub trait IDBStorageBasic {
 }
 
 impl IDBStorage {
-    /// RexieInstance initialize
-    pub async fn new(cap: usize) -> Result<Self> {
+    /// New IDBStorage
+    /// * cap: rows of data limit
+    pub async fn new_with_cap(cap: usize) -> Result<Self> {
         if cap == 0 {
             return Err(Error::InvalidCapacity);
         }
@@ -73,6 +82,11 @@ impl IDBStorage {
                 .map_err(Error::IDBError)?,
             cap,
         })
+    }
+
+    /// New IDBStorage with default capacity 50000 rows data limit
+    pub async fn new() -> Result<Self> {
+        Self::new_with_cap(50000).await
     }
 }
 

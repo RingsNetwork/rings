@@ -1,16 +1,21 @@
 #![warn(missing_docs)]
-use super::did::BiasId;
-use super::successor::Successor;
-use super::types::{Chord, ChordStablize, ChordStorage};
-use super::vnode::VirtualNode;
-use super::FingerTable;
-use crate::dht::Did;
-use crate::err::{Error, Result};
-use crate::storage::MemStorage;
+use std::sync::Arc;
+
 use num_bigint::BigUint;
 use serde::Deserialize;
 use serde::Serialize;
-use std::sync::Arc;
+
+use super::did::BiasId;
+use super::successor::Successor;
+use super::types::Chord;
+use super::types::ChordStablize;
+use super::types::ChordStorage;
+use super::vnode::VirtualNode;
+use super::FingerTable;
+use crate::dht::Did;
+use crate::err::Error;
+use crate::err::Result;
+use crate::storage::MemStorage;
 
 /// Remote actions
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -386,9 +391,10 @@ impl ChordStorage<PeerRingAction> for PeerRing {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use super::*;
     use crate::ecc::SecretKey;
-    use std::str::FromStr;
 
     #[test]
     fn test_chord_finger() {

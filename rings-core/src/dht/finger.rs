@@ -1,11 +1,13 @@
 #![warn(missing_docs)]
-use super::did::BiasId;
-use crate::dht::Did;
-use crate::err::Result;
+use std::ops::Index;
+
 use num_bigint::BigUint;
 use serde::Deserialize;
 use serde::Serialize;
-use std::ops::Index;
+
+use super::did::BiasId;
+use crate::dht::Did;
+use crate::err::Result;
 
 /// Finger table of Chord DHT
 /// Ring's finger table is implemented with BiasRing

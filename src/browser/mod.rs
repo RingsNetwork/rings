@@ -2,30 +2,38 @@
 #![allow(clippy::unused_unit)]
 pub mod utils;
 
-use crate::{
-    prelude::rings_core::{
-        async_trait,
-        dht::PeerRing,
-        ecc::SecretKey,
-        message::{
-            CustomMessage, Encoded, MaybeEncrypted, Message, MessageCallback, MessageHandler,
-            MessagePayload,
-        },
-        prelude::web3::types::Address,
-        session::SessionManager,
-        session::{AuthorizedInfo, Signer},
-        swarm::{Swarm, TransportManager},
-        transports::Transport,
-        types::{ice_transport::IceTransport, message::MessageListener},
-    },
-    processor::{self, Processor},
-};
+use std::str::FromStr;
+use std::sync::Arc;
+
 use futures::lock::Mutex;
 use js_sys::Promise;
-use serde::{Deserialize, Serialize};
-use std::{str::FromStr, sync::Arc};
+use serde::Deserialize;
+use serde::Serialize;
 use wasm_bindgen::prelude::*;
-use wasm_bindgen_futures::{future_to_promise, spawn_local};
+use wasm_bindgen_futures::future_to_promise;
+use wasm_bindgen_futures::spawn_local;
+
+use crate::prelude::rings_core::async_trait;
+use crate::prelude::rings_core::dht::PeerRing;
+use crate::prelude::rings_core::ecc::SecretKey;
+use crate::prelude::rings_core::message::CustomMessage;
+use crate::prelude::rings_core::message::Encoded;
+use crate::prelude::rings_core::message::MaybeEncrypted;
+use crate::prelude::rings_core::message::Message;
+use crate::prelude::rings_core::message::MessageCallback;
+use crate::prelude::rings_core::message::MessageHandler;
+use crate::prelude::rings_core::message::MessagePayload;
+use crate::prelude::rings_core::prelude::web3::types::Address;
+use crate::prelude::rings_core::session::AuthorizedInfo;
+use crate::prelude::rings_core::session::SessionManager;
+use crate::prelude::rings_core::session::Signer;
+use crate::prelude::rings_core::swarm::Swarm;
+use crate::prelude::rings_core::swarm::TransportManager;
+use crate::prelude::rings_core::transports::Transport;
+use crate::prelude::rings_core::types::ice_transport::IceTransport;
+use crate::prelude::rings_core::types::message::MessageListener;
+use crate::processor::Processor;
+use crate::processor::{self};
 
 #[wasm_bindgen]
 extern "C" {
@@ -288,15 +296,10 @@ impl Client {
     }
 
     /// send custome message to peer.
-    pub fn send_message(
-        &self,
-        next_hop: String,
-        destination: String,
-        msg: js_sys::Uint8Array,
-    ) -> Promise {
+    pub fn send_message(&self, destination: String, msg: js_sys::Uint8Array) -> Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
-            p.send_message(next_hop.as_str(), destination.as_str(), &msg.to_vec())
+            p.send_message(destination.as_str(), &msg.to_vec())
                 .await
                 .map_err(JsError::from)?;
             Ok(JsValue::from_bool(true))
@@ -449,3 +452,6 @@ impl Drop for IntervalHandle {
         clearInterval(self.interval_id);
     }
 }
+
+#[cfg(test)]
+mod test {}

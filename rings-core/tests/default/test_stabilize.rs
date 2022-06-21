@@ -1,8 +1,11 @@
 #[cfg(test)]
 pub mod test {
+    use std::sync::Arc;
+
     use futures::lock::Mutex;
+    use rings_core::dht::Did;
+    use rings_core::dht::PeerRing;
     use rings_core::dht::Stabilization;
-    use rings_core::dht::{Did, PeerRing};
     use rings_core::ecc::SecretKey;
     use rings_core::err::Result;
     use rings_core::message::MessageHandler;
@@ -13,8 +16,8 @@ pub mod test {
     use rings_core::types::ice_transport::IceTransport;
     use rings_core::types::ice_transport::IceTrickleScheme;
     use rings_core::types::message::MessageListener;
-    use std::sync::Arc;
-    use tokio::time::{sleep, Duration};
+    use tokio::time::sleep;
+    use tokio::time::Duration;
     use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
     use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 
@@ -49,7 +52,7 @@ pub mod test {
 
         // Peer 1 try to connect peer 2
         let handshake_info1 = transport1
-            .get_handshake_info(&swarm1.session_manager, RTCSdpType::Offer)
+            .get_handshake_info(swarm1.session_manager(), RTCSdpType::Offer)
             .await?;
         assert_eq!(
             transport1.ice_connection_state().await,
@@ -74,7 +77,7 @@ pub mod test {
 
         // Peer 2 create answer
         let handshake_info2 = transport2
-            .get_handshake_info(&swarm2.session_manager, RTCSdpType::Answer)
+            .get_handshake_info(swarm2.session_manager(), RTCSdpType::Answer)
             .await?;
         assert_eq!(
             transport1.ice_connection_state().await,

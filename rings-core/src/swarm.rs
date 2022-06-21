@@ -1,33 +1,38 @@
 //! Tranposrt managerment
 
-use crate::err::{Error, Result};
-use crate::message::{self, Message, MessagePayload};
-use crate::message::{Decoder, Encoder};
+use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::Mutex;
+
+use async_stream::stream;
+use async_trait::async_trait;
+use futures::Stream;
+use web3::types::Address;
+
+use crate::channels::Channel;
+use crate::err::Error;
+use crate::err::Result;
+use crate::message::Decoder;
+use crate::message::Encoder;
+use crate::message::Message;
+use crate::message::MessagePayload;
+use crate::message::PayloadSender;
+use crate::message::{self};
 use crate::session::SessionManager;
 use crate::storage::MemStorage;
+use crate::transports::Transport;
 use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::Event;
 use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
 
-use async_stream::stream;
-use async_trait::async_trait;
-use futures::Stream;
-use std::str::FromStr;
-use std::sync::Arc;
-use std::sync::Mutex;
-use web3::types::Address;
-
-use crate::channels::Channel;
-use crate::transports::Transport;
-
 pub struct Swarm {
     table: MemStorage<Address, Arc<Transport>>,
     pending: Arc<Mutex<Vec<Arc<Transport>>>>,
     ice_servers: Vec<IceServer>,
     transport_event_channel: Channel<Event>,
-    pub session_manager: SessionManager,
+    session_manager: SessionManager,
     address: Address,
 }
 
@@ -72,17 +77,8 @@ impl Swarm {
         self.address
     }
 
-    pub async fn send_message(
-        &self,
-        address: &Address,
-        payload: MessagePayload<Message>,
-    ) -> Result<()> {
-        let transport = self
-            .get_transport(address)
-            .ok_or(Error::SwarmMissAddressInTable)?;
-        let data: Vec<u8> = payload.encode()?.into();
-        transport.wait_for_data_channel_open().await?;
-        transport.send_message(data.as_slice()).await
+    pub fn session_manager(&self) -> &SessionManager {
+        &self.session_manager
     }
 
     fn load_message(&self, ev: Result<Option<Event>>) -> Result<Option<MessagePayload<Message>>> {
@@ -133,9 +129,7 @@ impl Swarm {
     }
 
     pub fn iter_messages<'a, 'b>(&'a self) -> impl Stream<Item = MessagePayload<Message>> + 'b
-    where
-        'a: 'b,
-    {
+    where 'a: 'b {
         stream! {
             let receiver = &self.transport_event_channel.receiver();
             loop {
@@ -250,14 +244,45 @@ impl TransportManager for Swarm {
     }
 }
 
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl PayloadSender<Message> for Swarm {
+    fn session_manager(&self) -> &SessionManager {
+        Swarm::session_manager(self)
+    }
+
+    async fn do_send_payload(
+        &self,
+        address: &Address,
+        payload: MessagePayload<Message>,
+    ) -> Result<()> {
+        #[cfg(test)]
+        {
+            println!("+++++++++++++++++++++++++++++++++");
+            println!("node {:?}", self.address());
+            println!("Sent {:?}", payload.clone());
+            println!("node {:?}", payload.relay.next_hop);
+            println!("+++++++++++++++++++++++++++++++++");
+        }
+
+        let transport = self
+            .get_transport(address)
+            .ok_or(Error::SwarmMissAddressInTable)?;
+        let data: Vec<u8> = payload.encode()?.into();
+        transport.wait_for_data_channel_open().await?;
+        transport.send_message(data.as_slice()).await
+    }
+}
+
 #[cfg(not(feature = "wasm"))]
 #[cfg(test)]
 mod tests {
+    use tokio::time;
+    use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
+
     use super::*;
     use crate::ecc::SecretKey;
     use crate::transports::default::transport::tests::establish_connection;
-    use tokio::time;
-    use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 
     fn new_swarm() -> Swarm {
         let stun = "stun://stun.l.google.com:19302";

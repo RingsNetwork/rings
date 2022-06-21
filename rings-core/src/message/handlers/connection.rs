@@ -1,19 +1,33 @@
+use std::str::FromStr;
+
+use async_trait::async_trait;
+
+use crate::dht::Chord;
+use crate::dht::ChordStablize;
 use crate::dht::ChordStorage;
-use crate::dht::{Chord, ChordStablize, PeerRingAction, PeerRingRemoteAction};
-use crate::err::{Error, Result};
-use crate::message::types::{
-    AlreadyConnected, ConnectNodeReport, ConnectNodeSend, FindSuccessorReport, FindSuccessorSend,
-    JoinDHT, Message, NotifyPredecessorReport, NotifyPredecessorSend, SyncVNodeWithSuccessor,
-};
+use crate::dht::PeerRingAction;
+use crate::dht::PeerRingRemoteAction;
+use crate::err::Error;
+use crate::err::Result;
+use crate::message::types::AlreadyConnected;
+use crate::message::types::ConnectNodeReport;
+use crate::message::types::ConnectNodeSend;
+use crate::message::types::FindSuccessorReport;
+use crate::message::types::FindSuccessorSend;
+use crate::message::types::JoinDHT;
+use crate::message::types::Message;
+use crate::message::types::NotifyPredecessorReport;
+use crate::message::types::NotifyPredecessorSend;
+use crate::message::types::SyncVNodeWithSuccessor;
 use crate::message::HandleMsg;
 use crate::message::LeaveDHT;
 use crate::message::MessageHandler;
-use crate::message::{MessagePayload, PayloadSender, RelayMethod};
+use crate::message::MessagePayload;
+use crate::message::PayloadSender;
+use crate::message::RelayMethod;
 use crate::prelude::RTCSdpType;
 use crate::swarm::TransportManager;
 use crate::types::ice_transport::IceTrickleScheme;
-use async_trait::async_trait;
-use std::str::FromStr;
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
@@ -81,7 +95,7 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
                     .register_remote_info(msg.handshake_info.to_owned().into())
                     .await?;
                 let handshake_info = trans
-                    .get_handshake_info(&self.swarm.session_manager, RTCSdpType::Answer)
+                    .get_handshake_info(self.swarm.session_manager(), RTCSdpType::Answer)
                     .await?
                     .to_string();
                 self.send_report_message(
@@ -275,6 +289,10 @@ impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
 #[cfg(not(feature = "wasm"))]
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+
+    use futures::lock::Mutex;
+
     use super::*;
     use crate::dht::PeerRing;
     use crate::ecc::SecretKey;
@@ -284,8 +302,6 @@ mod test {
     use crate::swarm::Swarm;
     use crate::swarm::TransportManager;
     use crate::types::ice_transport::IceTrickleScheme;
-    use futures::lock::Mutex;
-    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_triple_node() -> Result<()> {
