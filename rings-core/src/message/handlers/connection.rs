@@ -210,7 +210,8 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
         } else {
             if self.swarm.get_transport(&msg.id).is_none() && msg.id != self.swarm.address().into()
             {
-                return self.connect(&msg.id.into()).await;
+                self.connect(&msg.id.into()).await?;
+                return Ok(());
             }
             if msg.for_fix {
                 let fix_finger_index = dht.fix_finger_index;

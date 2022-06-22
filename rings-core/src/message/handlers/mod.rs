@@ -17,6 +17,7 @@ use crate::dht::PeerRingAction;
 use crate::err::Error;
 use crate::err::Result;
 use crate::prelude::RTCSdpType;
+use crate::prelude::Transport;
 use crate::session::SessionManager;
 use crate::swarm::Swarm;
 use crate::swarm::TransportManager;
@@ -89,7 +90,7 @@ impl MessageHandler {
         self.swarm.remove_transport(&address);
     }
 
-    pub async fn connect(&self, address: &Address) -> Result<()> {
+    pub async fn connect(&self, address: &Address) -> Result<Arc<Transport>> {
         let target_id = address.to_owned().into();
         let transport = self.swarm.new_transport().await?;
         let handshake_info = transport
@@ -115,7 +116,7 @@ impl MessageHandler {
         .ok_or(Error::NoNextHop)?;
         log::debug!("next_hop: {:?}", next_hop);
         self.send_message(connect_msg, next_hop, target_id).await?;
-        Ok(())
+        Ok(transport)
     }
 
     async fn invoke_callback(&self, payload: &MessagePayload<Message>) -> Result<()> {

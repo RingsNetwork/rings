@@ -177,12 +177,18 @@ impl Processor {
     /// 1. PeerA has a connection with PeerB.
     /// 2. PeerC has a connection with PeerB.
     /// 3. PeerC can connect PeerA with PeerA's web3 address.
-    pub async fn connect_with_address(&self, address: &Address) -> Result<()> {
-        self.msg_handler
+    pub async fn connect_with_address(&self, address: &Address) -> Result<Arc<Transport>> {
+        let transport = self
+            .msg_handler
             .connect(address)
             .await
             .map_err(Error::ConnectWithAddressError)?;
-        Ok(())
+        log::debug!("wait for transport connected");
+        transport
+            .wait_for_data_channel_open()
+            .await
+            .map_err(Error::ConnectWithAddressError)?;
+        Ok(transport)
     }
 
     async fn handshake(&self, transport: &Arc<Transport>, data: &str) -> Result<Encoded> {

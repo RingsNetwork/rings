@@ -6,6 +6,7 @@ use rings_core::async_trait;
 use rings_core::message::MessageCallback;
 use rings_core::prelude::web3::contract::tokens::Tokenizable;
 use rings_node::prelude::rings_core;
+use rings_node::prelude::web_sys::RtcIceConnectionState;
 use rings_node::prelude::*;
 use rings_node::processor::*;
 use wasm_bindgen_test::*;
@@ -186,26 +187,23 @@ async fn test_processor_connect_with_address() {
             .eq(&p2.address().into_token().to_string())),
         "p2 not in p1's peer list"
     );
-    // assert!(
-    //     p1_peers.iter().any(|p| p
-    //         .address
-    //         .to_string()
-    //         .eq(&p3.address().into_token().to_string())),
-    //     "p3 not in p1's peer list"
-    // );
-
     console_log!("connect p1 and p3");
     // p1 create connect with p3's address
-    p1.connect_with_address(&p3.address()).await.unwrap();
+    let transport3 = p1.connect_with_address(&p3.address()).await.unwrap();
     //    transport3.wait_for_data_channel_open().await.unwrap();
+    console_log!("transport connected");
+    assert_eq!(
+        transport3.ice_connection_state().await.unwrap(),
+        RtcIceConnectionState::Connected
+    );
 
-    // let p2_peers = p1.list_peers().await.unwrap();
-    // assert!(
-    //     p2_peers.iter().any(|p| p.address.to_string().eq(p3
-    //         .address()
-    //         .into_token()
-    //         .to_string()
-    //         .as_str())),
-    //     "p3 address not in p2 peers list"
-    // );
+    let peers = p1.list_peers().await.unwrap();
+    assert!(
+        peers.iter().any(|p| p.address.to_string().eq(p3
+            .address()
+            .into_token()
+            .to_string()
+            .as_str())),
+        "peer list dose NOT contains p3 address"
+    );
 }
