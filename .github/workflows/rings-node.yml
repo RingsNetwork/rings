@@ -20,22 +20,32 @@ jobs:
         os: ["ubuntu-latest"]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
+
+      - name: Setup rust toolchain
+        run: rustup show
+
       - uses: jetli/wasm-bindgen-action@v0.1.0
         with:
           version: "0.2.79"
-      - name: Run clippy for wasm
-        uses: actions-rs/cargo@v1
+
+      # If you need to reset the cache version, increment the number after `v`
+      - uses: Swatinem/rust-cache@v1
         with:
-          command: clippy
-          args: -p rings-core --features wasm --no-deps --no-default-features --target=wasm32-unknown-unknown --tests -- -D warnings
+          sharedKey: wasm-v1
+
+      - name: Run clippy for wasm
+        run: cargo clippy -p rings-core --features wasm --no-deps --no-default-features --target=wasm32-unknown-unknown --tests -- -D warnings
+
       - name: Build
         run: cargo build -p rings-core --target=wasm32-unknown-unknown --features wasm --no-default-features
+
       - name: Run tests
         uses: GabrielBB/xvfb-action@v1
         with:
           working-directory: ./rings-core
           run: cargo test --target=wasm32-unknown-unknown --features wasm --no-default-features
+
       - name: Run rings-node test
         uses: GabrielBB/xvfb-action@v1
         with:
@@ -49,9 +59,19 @@ jobs:
         os: ["ubuntu-latest"]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
+
+      - name: Setup rust toolchain
+        run: rustup show
+
+      # If you need to reset the cache version, increment the number after `v`
+      - uses: Swatinem/rust-cache@v1
+        with:
+          sharedKey: default-v1
+
       - name: Build
         run: cargo build --features client --features daemon --all --verbose
+
       - name: Run tests
         run: cargo test --all --verbose
 
@@ -60,20 +80,18 @@ jobs:
     timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: nightly-2022-01-01
-          components: clippy, rustfmt
-          override: true
+      - uses: actions/checkout@v3
+
+      - name: Setup rust toolchain
+        run: rustup show
+
+      # If you need to reset the cache version, increment the number after `v`
       - uses: Swatinem/rust-cache@v1
+        with:
+          sharedKey: static-v1
+
       - name: Run clippy
-        uses: actions-rs/cargo@v1
-        with:
-          command: clippy
-          args: --all --tests -- -D warnings
+        run: cargo clippy --all --tests -- -D warnings
+
       - name: Check formating
-        uses: actions-rs/cargo@v1
-        with:
-          command: fmt
-          args: --all -- --check
+        run: cargo fmt --all -- --check
