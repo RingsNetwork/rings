@@ -1,3 +1,5 @@
+use std::fmt::Write;
+
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -45,7 +47,7 @@ impl MessageVerification {
     pub fn pack_msg<T>(data: &T, ts_ms: u128, ttl_ms: usize) -> Result<String>
     where T: Serialize {
         let mut msg = serde_json::to_string(data).map_err(|_| Error::SerializeToString)?;
-        msg.push_str(&format!("\n{}\n{}", ts_ms, ttl_ms));
+        write!(msg, "\n{}\n{}", ts_ms, ttl_ms).map_err(|_| Error::SerializeToString)?;
         Ok(msg)
     }
 
