@@ -215,7 +215,7 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
             }
             if msg.for_fix {
                 let fix_finger_index = dht.fix_finger_index;
-                dht.finger[fix_finger_index as usize] = Some(msg.id);
+                dht.finger.set(fix_finger_index as usize, &msg.id);
             } else {
                 dht.successor.update(msg.id);
                 if let Ok(PeerRingAction::RemoteAction(

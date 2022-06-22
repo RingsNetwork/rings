@@ -23,8 +23,12 @@ use crate::swarm::Swarm;
 use crate::swarm::TransportManager;
 use crate::types::ice_transport::IceTrickleScheme;
 
+/// Operator and Handler for Connection
 pub mod connection;
+/// Operator and Handler for Storage
 pub mod storage;
+/// Operator and Handler for SubRing
+pub mod subring;
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]

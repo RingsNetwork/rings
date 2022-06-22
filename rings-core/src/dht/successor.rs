@@ -2,21 +2,22 @@
 use crate::dht::did::SortRing;
 use crate::dht::Did;
 
-/// We can increase MAX_SUCCESSOR for more replication
-const MAX_SUCCESSOR: u8 = 3;
-
 #[derive(Debug, Clone)]
 pub struct Successor {
+    /// self id
     id: Did,
+    /// max successor
     max: u8,
+    /// successor's list
     successors: Vec<Did>,
 }
 
 impl Successor {
-    pub fn new(id: &Did) -> Self {
+    /// create a new Successer instance
+    pub fn new(id: &Did, max: u8) -> Self {
         Self {
             id: *id,
-            max: MAX_SUCCESSOR,
+            max,
             successors: vec![],
         }
     }
