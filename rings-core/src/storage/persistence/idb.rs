@@ -6,12 +6,10 @@ use std::ops::Add;
 use std::ops::Sub;
 
 use async_trait::async_trait;
-use chrono;
 use rexie::Index;
 use rexie::ObjectStore;
 use rexie::Rexie;
 use rexie::TransactionMode;
-use rexie::{self};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;

@@ -1,11 +1,5 @@
 #![warn(missing_docs)]
 
-//! All messages should be sent with `MessageRelay`.
-//! By calling `relay` method in correct place, `MessageRelay` help to do things:
-//! - Infer the next_hop of a message.
-//! - Get the sender and origin sender of a message.
-//! - Record the whole transport path for inspection.
-
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -24,6 +18,14 @@ pub enum RelayMethod {
 }
 
 /// MessageRelay guide message passing on rings network by relay.
+///
+/// All messages should be sent with `MessageRelay`.
+/// By calling `relay` method in correct place, `MessageRelay` help to do things:
+/// - Infer the next_hop of a message.
+/// - Get the sender and origin sender of a message.
+/// - Record the whole transport path for inspection.
+///
+/// # Examples
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct MessageRelay {
     /// The method of message. SEND or REPORT.
@@ -40,7 +42,7 @@ pub struct MessageRelay {
 
     /// The next node to handle the message.
     /// When and only when located at the end of the message propagation, the `next_hop` is none.
-    /// The current handler will pick transport by this field.
+    /// A message handler will pick transport by this field.
     pub next_hop: Option<Did>,
 
     /// The destination of the message. It may be customized when sending. It cannot be changed when reporting.
@@ -50,7 +52,7 @@ pub struct MessageRelay {
 
 impl MessageRelay {
     /// Create a new `MessageRelay`.
-    /// Will set `path_end_cursor` to 0 if got None in parameter.
+    /// Will set `path_end_cursor` to 0 if pass None as parameter.
     pub fn new(
         method: RelayMethod,
         path: Vec<Did>,
@@ -120,7 +122,7 @@ impl MessageRelay {
         }
     }
 
-    /// Construct an `MessageRelay` of method REPORT from a `MessageRelay` of method REPORT.
+    /// Construct a `MessageRelay` of method REPORT from a `MessageRelay` of method REPORT.
     /// It will return Error if method is not SEND.
     /// It will return Error if `self.path.len()` is less than 2.
     pub fn report(&self) -> Result<Self> {
@@ -226,7 +228,7 @@ mod test {
         send_relay.relay(next_hop3, None).unwrap();
         assert_eq!(send_relay.path_end_cursor, 0);
 
-        // node3 make REPORT, destination is node0
+        // Node3 make REPORT, destination is node0.
         let mut report_relay = send_relay.report().unwrap();
         assert_eq!(report_relay.path_end_cursor, 0);
 
@@ -237,6 +239,68 @@ mod test {
         // node0 -> node1 -> node2 -> node3 -> node2 -> node1
         report_relay.relay(next_hop1, None).unwrap();
         assert_eq!(report_relay.path_end_cursor, 2);
+    }
+
+    #[test]
+    fn test_jump_to_previous_node_when_reporting() {
+        let origin_sender = SecretKey::random().address().into();
+        let next_hop1 = SecretKey::random().address().into();
+        let next_hop2 = SecretKey::random().address().into();
+        let next_hop3 = SecretKey::random().address().into();
+        let next_hop4 = SecretKey::random().address().into();
+
+        let mut send_relay = MessageRelay {
+            method: RelayMethod::SEND,
+            path: vec![origin_sender],
+            path_end_cursor: 0,
+            next_hop: None,
+            destination: next_hop4,
+        };
+
+        // node0 -> node1 -> node2 -> node3 -> node4
+        send_relay.relay(next_hop1, None).unwrap();
+        send_relay.relay(next_hop2, None).unwrap();
+        send_relay.relay(next_hop3, None).unwrap();
+        send_relay.relay(next_hop4, None).unwrap();
+        assert_eq!(send_relay.path, vec![
+            origin_sender,
+            next_hop1,
+            next_hop2,
+            next_hop3,
+            next_hop4
+        ]);
+        assert_eq!(send_relay.path_end_cursor, 0);
+
+        // Node4 make REPORT, destination is node0.
+        let mut report_relay = send_relay.report().unwrap();
+        assert_eq!(report_relay.path, vec![
+            origin_sender,
+            next_hop1,
+            next_hop2,
+            next_hop3,
+            next_hop4
+        ]);
+        assert_eq!(report_relay.next_hop, Some(next_hop3));
+        assert_eq!(report_relay.path_end_cursor, 0);
+
+        // And node4 find that node2 is connected, so it will skip node3 and will jump to node2.
+        report_relay.next_hop = Some(next_hop2);
+
+        // And node2 find that node0 is connected, so it will skip node1 and will jump to node0.
+        // node0 -> node1 -> node2 -> node3 -> node4 -> node2
+        report_relay.relay(next_hop2, Some(origin_sender)).unwrap();
+        assert_eq!(report_relay.path, vec![
+            origin_sender,
+            next_hop1,
+            next_hop2,
+            next_hop3,
+            next_hop4
+        ]);
+        assert_eq!(report_relay.next_hop, Some(origin_sender));
+        assert_eq!(report_relay.path_end_cursor, 2);
+
+        // node0 -> node1 -> node2 -> node3 -> node4 -> node2 -> node0
+        report_relay.relay(origin_sender, None).unwrap();
     }
 
     #[test]
