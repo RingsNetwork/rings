@@ -5,18 +5,15 @@
 mod did;
 pub use did::Did;
 mod chord;
-/// Finger table for Rings
-pub mod finger;
 mod successor;
 mod types;
 pub use chord::PeerRing;
 pub use chord::PeerRingAction;
 pub use chord::RemoteAction as PeerRingRemoteAction;
-pub use finger::FingerTable;
 pub use types::Chord;
 pub use types::ChordStablize;
 pub use types::ChordStorage;
-pub use types::SubRingManager;
+
 mod stabilization;
 pub use stabilization::Stabilization;
 pub use stabilization::TStabilize;

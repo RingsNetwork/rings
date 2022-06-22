@@ -6,7 +6,6 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::dht::subring::SubRing;
 use crate::dht::Did;
 use crate::ecc::HashStr;
 use crate::err::Error;
@@ -88,30 +87,14 @@ impl VirtualNode {
     /// We do not needs to check the type of VNode because two VNode with same address but
     /// has different Type is incapable
     pub fn concat(a: &Self, b: &Self) -> Result<Self> {
-        match &a.kind {
-            VNodeType::RelayMessage => {
-                if a.address != b.address {
-                    Err(Error::AddressNotEqual)
-                } else {
-                    Ok(Self {
-                        address: a.address,
-                        data: [&a.data[..], &b.data[..]].concat(),
-                        kind: a.kind.clone(),
-                    })
-                }
-            }
-            VNodeType::Data => Ok(a.clone()),
-            VNodeType::SubRing => {
-                // if subring exists, just join creator to new subring
-                let decoded_a: String = a.data[0].decode()?;
-                let decoded_b: String = a.data[0].decode()?;
-                let mut subring_a: SubRing =
-                    serde_json::from_str(&decoded_a).map_err(Error::Deserialize)?;
-                let subring_b: SubRing =
-                    serde_json::from_str(&decoded_b).map_err(Error::Deserialize)?;
-                subring_a.finger.join(subring_b.creator);
-                subring_a.try_into()
-            }
+        if a.address != b.address {
+            Err(Error::AddressNotEqual)
+        } else {
+            Ok(Self {
+                address: a.address,
+                data: [&a.data[..], &b.data[..]].concat(),
+                kind: a.kind.clone(),
+            })
         }
     }
 }

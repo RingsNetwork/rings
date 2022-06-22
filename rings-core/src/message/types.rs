@@ -88,11 +88,6 @@ pub struct SyncVNodeWithSuccessor {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-pub struct JoinSubRing {
-    pub did: Did,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct CustomMessage(pub Vec<u8>);
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
@@ -117,7 +112,6 @@ pub enum Message {
     FoundVNode(FoundVNode),
     StoreVNode(StoreVNode),
     SyncVNodeWithSuccessor(SyncVNodeWithSuccessor),
-    JoinSubRing(JoinSubRing),
     CustomMessage(MaybeEncrypted<CustomMessage>),
 }
 
