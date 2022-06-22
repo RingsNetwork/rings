@@ -11,7 +11,9 @@ use super::Message;
 use super::MessagePayload;
 use super::OriginVerificationGen;
 use super::PayloadSender;
+use crate::dht::Chord;
 use crate::dht::PeerRing;
+use crate::dht::PeerRingAction;
 use crate::err::Error;
 use crate::err::Result;
 use crate::prelude::RTCSdpType;
@@ -93,15 +95,28 @@ impl MessageHandler {
         let handshake_info = transport
             .get_handshake_info(self.swarm.session_manager(), RTCSdpType::Offer)
             .await?;
+        self.swarm.push_pending_transport(&transport)?;
+
         let connect_msg = Message::ConnectNodeSend(super::ConnectNodeSend {
             sender_id: self.swarm.address().into(),
             target_id,
             transport_uuid: transport.id.to_string(),
             handshake_info: handshake_info.to_string(),
         });
-        let next_hop = self.dht.lock().await.successor.max();
+
+        let next_hop = {
+            let dht = self.dht.lock().await;
+            match dht.find_successor(target_id)? {
+                PeerRingAction::Some(node) => Some(node),
+                PeerRingAction::RemoteAction(node, _) => Some(node),
+                _ => None,
+            }
+        }
+        .ok_or(Error::NoNextHop)?;
+
         self.send_message(connect_msg, next_hop, target_id).await?;
-        self.swarm.push_pending_transport(&transport)
+
+        Ok(())
     }
 
     async fn invoke_callback(&self, payload: &MessagePayload<Message>) -> Result<()> {

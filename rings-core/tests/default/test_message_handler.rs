@@ -181,15 +181,7 @@ pub mod test {
         // 1 to 2
         let (_, _) = establish_connection(Arc::clone(&swarm1), Arc::clone(&swarm2)).await?;
 
-        let transport_1_to_3 = swarm1.new_transport().await.unwrap();
-        let handshake_info13 = transport_1_to_3
-            .get_handshake_info(swarm1.session_manager(), RTCSdpType::Offer)
-            .await?;
-        // swarm1
-        //     .register(&swarm3.address(), Arc::clone(&transport_1_to_3))
-        //     .await?;
-
-        swarm1.push_pending_transport(&transport_1_to_3.clone())?;
+        sleep(Duration::from_secs(3)).await;
 
         let handler1 = MessageHandler::new(Arc::clone(&dht1), Arc::clone(&swarm1));
         let handler2 = MessageHandler::new(Arc::clone(&dht2), Arc::clone(&swarm2));
@@ -218,9 +210,9 @@ pub mod test {
                 println!("swarm1 key address: {:?}", swarm1.address());
                 println!("swarm2 key address: {:?}", swarm2.address());
                 println!("swarm3 key address: {:?}", swarm3.address());
-                let dht1_successor = dht1.lock().await.successor.clone();
-                let dht2_successor = dht2.lock().await.successor.clone();
-                let dht3_successor = dht3.lock().await.successor.clone();
+                let dht1_successor = {dht1.lock().await.successor.clone()};
+                let dht2_successor = {dht2.lock().await.successor.clone()};
+                let dht3_successor = {dht3.lock().await.successor.clone()};
                 println!("dht1 successor: {:?}", dht1_successor);
                 println!("dht2 successor: {:?}", dht2_successor);
                 println!("dht3 successor: {:?}", dht3_successor);
@@ -255,22 +247,11 @@ pub mod test {
                     transport_2_to_3.ice_connection_state().await,
                     Some(RTCIceConnectionState::Connected)
                 );
-                let connect_msg = Message::ConnectNodeSend(message::ConnectNodeSend {
-                    sender_id: swarm1.address().into(),
-                    target_id: swarm3.address().into(),
-                    transport_uuid: transport_1_to_3.id.to_string(),
-                    handshake_info: handshake_info13.to_string(),
-                });
+
                 // dht1 send msg to dht2 ask for connecting dht3
-                handler1
-                    .send_message(
-                        connect_msg,
-                        swarm2.address().into(),
-                        swarm3.address().into(),
-                    )
-                    .await
-                    .unwrap();
+                handler1.connect(&swarm3.address()).await.unwrap();
                 sleep(Duration::from_millis(10000)).await;
+
                 let transport_1_to_3 = swarm1.get_transport(&swarm3.address());
                 assert!(transport_1_to_3.is_some());
                 let transport_1_to_3 = transport_1_to_3.unwrap();
