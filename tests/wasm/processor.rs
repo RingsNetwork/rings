@@ -5,10 +5,16 @@ use futures::lock::Mutex;
 use rings_core::async_trait;
 use rings_core::message::MessageCallback;
 use rings_core::prelude::web3::contract::tokens::Tokenizable;
+use rings_core::swarm::TransportManager;
+use rings_node::browser::IntervalHandle;
 use rings_node::prelude::rings_core;
+use rings_node::prelude::wasm_bindgen::prelude::Closure;
+use rings_node::prelude::wasm_bindgen_futures::spawn_local;
+use rings_node::prelude::web_sys::window;
 use rings_node::prelude::web_sys::RtcIceConnectionState;
 use rings_node::prelude::*;
 use rings_node::processor::*;
+use wasm_bindgen::JsCast;
 use wasm_bindgen_test::*;
 // wasm_bindgen_test_configure!(run_in_browser);
 
@@ -27,6 +33,30 @@ fn new_processor() -> Processor {
     let dht = Arc::new(Mutex::new(PeerRing::new(key.address().into())));
     let msg_handler = MessageHandler::new(dht, swarm.clone());
     (swarm, Arc::new(msg_handler)).into()
+}
+
+fn listen(handler: &Arc<MessageHandler>) -> IntervalHandle {
+    let h = Arc::clone(handler);
+
+    let cb = Closure::wrap(Box::new(move || {
+        let h1 = h.clone();
+        spawn_local(Box::pin(async move {
+            h1.clone().listen_once().await;
+            // console_log!("listen_one call: {:?}", a);
+        }));
+    }) as Box<dyn FnMut()>);
+
+    let interval_id = window()
+        .unwrap()
+        .set_interval_with_callback_and_timeout_and_arguments_0(cb.as_ref().unchecked_ref(), 200)
+        .ok()
+        .unwrap();
+
+    IntervalHandle::new(interval_id, cb)
+}
+
+async fn close_all_transport(p: &Processor) {
+    futures::future::join_all(p.swarm.get_transports().iter().map(|(_, t)| t.close())).await;
 }
 
 struct MsgCallbackStruct {
@@ -101,10 +131,10 @@ async fn test_processor_handshake_and_msg() {
 
     console_log!("listen");
     p1.msg_handler.set_callback(callback1).await;
-    p1.msg_handler.clone().listen().await;
+    let interval1 = listen(&p1.msg_handler);
 
     p2.msg_handler.set_callback(callback2).await;
-    p2.msg_handler.clone().listen().await;
+    let interval2 = listen(&p2.msg_handler);
 
     p1.send_message(p2_addr.as_str(), test_text1.as_bytes())
         .await
@@ -137,11 +167,25 @@ async fn test_processor_handshake_and_msg() {
 
     console_log!("check received");
 
-    let msgs1 = msgs1.try_lock().unwrap();
-    let msgs2 = msgs2.try_lock().unwrap();
+    let mut msgs1 = msgs1.try_lock().unwrap().as_slice().to_vec();
+    msgs1.sort();
+    let mut msgs2 = msgs2.try_lock().unwrap().as_slice().to_vec();
+    msgs2.sort();
 
-    assert_eq!(msgs1.as_slice(), &[test_text2, test_text3, test_text5]);
-    assert_eq!(msgs2.as_slice(), &[test_text1, test_text4]);
+    let mut expect1 = vec![
+        test_text2.to_owned(),
+        test_text3.to_owned(),
+        test_text5.to_owned(),
+    ];
+    expect1.sort();
+
+    let mut expect2 = vec![test_text1.to_owned(), test_text4.to_owned()];
+    expect2.sort();
+    assert_eq!(msgs1, expect1);
+    assert_eq!(msgs2, expect2);
+    futures::join!(close_all_transport(&p1), close_all_transport(&p2),);
+    drop(interval1);
+    drop(interval2);
 }
 
 #[wasm_bindgen_test]
@@ -154,23 +198,9 @@ async fn test_processor_connect_with_address() {
     let p3 = new_processor();
     console_log!("p3 address: {}", p3.address().into_token().to_string());
 
-    let callback1 = Box::new(MsgCallbackStruct {
-        msgs: Default::default(),
-    });
-    let callback2 = Box::new(MsgCallbackStruct {
-        msgs: Default::default(),
-    });
-    let callback3 = Box::new(MsgCallbackStruct {
-        msgs: Default::default(),
-    });
-    p1.msg_handler.set_callback(callback1).await;
-    p1.msg_handler.clone().listen().await;
-
-    p2.msg_handler.set_callback(callback2).await;
-    p2.msg_handler.clone().listen().await;
-
-    p3.msg_handler.set_callback(callback3).await;
-    p3.msg_handler.clone().listen().await;
+    let interval1 = listen(&p1.msg_handler);
+    let interval2 = listen(&p2.msg_handler);
+    let interval3 = listen(&p3.msg_handler);
 
     console_log!("connect p1 and p2");
     create_connection(&p1, &p2).await;
@@ -187,13 +217,17 @@ async fn test_processor_connect_with_address() {
             .eq(&p2.address().into_token().to_string())),
         "p2 not in p1's peer list"
     );
+
+    fluvio_wasm_timer::Delay::new(Duration::from_secs(2))
+        .await
+        .unwrap();
+
     console_log!("connect p1 and p3");
     // p1 create connect with p3's address
-    let transport3 = p1.connect_with_address(&p3.address()).await.unwrap();
-    //    transport3.wait_for_data_channel_open().await.unwrap();
+    let peer3 = p1.connect_with_address(&p3.address(), true).await.unwrap();
     console_log!("transport connected");
     assert_eq!(
-        transport3.ice_connection_state().await.unwrap(),
+        peer3.transport.ice_connection_state().await.unwrap(),
         RtcIceConnectionState::Connected
     );
 
@@ -206,4 +240,12 @@ async fn test_processor_connect_with_address() {
             .as_str())),
         "peer list dose NOT contains p3 address"
     );
+    futures::join!(
+        close_all_transport(&p1),
+        close_all_transport(&p2),
+        close_all_transport(&p3),
+    );
+    drop(interval1);
+    drop(interval2);
+    drop(interval3);
 }

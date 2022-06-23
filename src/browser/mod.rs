@@ -33,6 +33,7 @@ use crate::prelude::rings_core::swarm::TransportManager;
 use crate::prelude::rings_core::transports::Transport;
 use crate::prelude::rings_core::types::ice_transport::IceTransport;
 use crate::prelude::rings_core::types::message::MessageListener;
+use crate::prelude::web3::contract::tokens::Tokenizable;
 use crate::prelude::web_sys::RtcIceConnectionState;
 use crate::processor;
 use crate::processor::Processor;
@@ -136,9 +137,15 @@ impl Client {
         })
     }
 
+    /// get self web3 address
+    #[wasm_bindgen(getter)]
+    pub fn address(&self) -> String {
+        self.processor.address().into_token().to_string()
+    }
+
     /// listen message callback.
     /// ```typescript
-    /// await client.listen(new MessageCallbackInstance(
+    /// const intervalHandle = await client.listen(new MessageCallbackInstance(
     ///      async (relay: any, msg: any) => {
     ///        console.group('on custom message')
     ///        console.log(relay)
@@ -201,16 +208,42 @@ impl Client {
         })
     }
 
-    /// connect peer with web3 address
+    /// connect peer with web3 address, without waiting for transport channel connected
+    pub fn connect_with_address_without_wait(&self, address: String) -> Promise {
+        let p = self.processor.clone();
+        future_to_promise(async move {
+            let address =
+                Address::from_str(address.as_str()).map_err(|_| JsError::new("invalid address"))?;
+            let peer = p
+                .connect_with_address(&address, false)
+                .await
+                .map_err(JsError::from)?;
+            let state = peer.transport.ice_connection_state().await;
+            Ok(JsValue::from(Peer::from((state, peer))))
+        })
+    }
+
+    /// connect peer with web3 address, and wait for transport channel connected
+    /// example:
+    /// ```typescript
+    /// const client1 = new Client()
+    /// const client2 = new Client()
+    /// const client3 = new Client()
+    /// await create_connection(client1, client2);
+    /// await create_connection(client2, client3);
+    /// await client1.connect_with_address(client3.address())
+    /// ```
     pub fn connect_with_address(&self, address: String) -> Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
             let address =
                 Address::from_str(address.as_str()).map_err(|_| JsError::new("invalid address"))?;
-            p.connect_with_address(&address)
+            let peer = p
+                .connect_with_address(&address, true)
                 .await
                 .map_err(JsError::from)?;
-            Ok(JsValue::null())
+            let state = peer.transport.ice_connection_state().await;
+            Ok(JsValue::from(Peer::from((state, peer))))
         })
     }
 
@@ -479,11 +512,19 @@ pub struct IntervalHandle {
     _closure: Closure<dyn FnMut()>,
 }
 
-impl Drop for IntervalHandle {
-    fn drop(&mut self) {
-        clearInterval(self.interval_id);
+impl IntervalHandle {
+    /// create new IntervalHandle
+    pub fn new(interval_id: i32, cb: Closure<dyn FnMut()>) -> Self {
+        Self {
+            interval_id,
+            _closure: cb,
+        }
     }
 }
 
-#[cfg(test)]
-mod test {}
+impl Drop for IntervalHandle {
+    fn drop(&mut self) {
+        log::debug!("clear interval: {}", self.interval_id);
+        clearInterval(self.interval_id);
+    }
+}
