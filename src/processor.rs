@@ -272,6 +272,7 @@ impl Processor {
             .close()
             .await
             .map_err(Error::CloseTransportError)?;
+        self.swarm.remove_transport(&address);
         Ok(())
     }
 

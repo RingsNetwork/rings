@@ -6,14 +6,12 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use futures::lock::Mutex;
-use js_sys::Promise;
 use serde::Deserialize;
 use serde::Serialize;
-use wasm_bindgen::prelude::*;
-use wasm_bindgen_futures::future_to_promise;
-use wasm_bindgen_futures::spawn_local;
 
 use self::utils::from_rtc_ice_connection_state;
+use crate::prelude::js_sys;
+use crate::prelude::js_sys::Promise;
 use crate::prelude::rings_core::async_trait;
 use crate::prelude::rings_core::dht::PeerRing;
 use crate::prelude::rings_core::ecc::SecretKey;
@@ -33,18 +31,17 @@ use crate::prelude::rings_core::swarm::TransportManager;
 use crate::prelude::rings_core::transports::Transport;
 use crate::prelude::rings_core::types::ice_transport::IceTransport;
 use crate::prelude::rings_core::types::message::MessageListener;
+use crate::prelude::wasm_bindgen;
+use crate::prelude::wasm_bindgen::prelude::*;
+use crate::prelude::wasm_bindgen::JsCast;
+use crate::prelude::wasm_bindgen_futures;
+use crate::prelude::wasm_bindgen_futures::future_to_promise;
+use crate::prelude::wasm_bindgen_futures::spawn_local;
 use crate::prelude::web3::contract::tokens::Tokenizable;
+use crate::prelude::web_sys::window;
 use crate::prelude::web_sys::RtcIceConnectionState;
 use crate::processor;
 use crate::processor::Processor;
-
-#[wasm_bindgen]
-extern "C" {
-
-    fn setInterval(closure: &Closure<dyn FnMut()>, time: u32) -> i32;
-
-    fn clearInterval(id: i32);
-}
 
 #[wasm_bindgen(start)]
 pub fn start() -> Result<(), JsError> {
@@ -160,7 +157,7 @@ impl Client {
     ///      },
     /// ))
     /// ```
-    pub fn listen(&mut self, callback: MessageCallbackInstance) -> Result<IntervalHandle, JsError> {
+    pub fn listen(&mut self, callback: MessageCallbackInstance) -> Result<IntervalHandle, JsValue> {
         let p = self.processor.clone();
         let pr = PeerRing::new(p.swarm.address().into());
         log::debug!("peer_ring: {:?}", pr.id);
@@ -183,7 +180,13 @@ impl Client {
 
         // Next we pass this via reference to the `setInterval` function, and
         // `setInterval` gets a handle to the corresponding JS closure.
-        let interval_id = setInterval(&cb, 200);
+        let interval_id = window()
+            .ok_or_else(|| JsError::new("window not found"))?
+            .set_interval_with_callback_and_timeout_and_arguments_0(
+                cb.as_ref().unchecked_ref(),
+                200,
+            )?;
+        //let interval_id = setInterval(&cb, 200);
 
         // If we were to drop `cb` here it would cause an exception to be raised
         // whenever the interval elapses. Instead we *return* our handle back to JS
@@ -306,13 +309,9 @@ impl Client {
     pub fn disconnect(&self, address: String) -> Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
-            let address = Address::from_str(address.as_str()).map_err(JsError::from)?;
-            let trans = p
-                .swarm
-                .get_transport(&address)
-                .ok_or_else(|| JsError::new("transport not found"))?;
-            trans.close().await.map_err(JsError::from)?;
-            p.swarm.remove_transport(&address);
+            p.disconnect(address.as_str())
+                .await
+                .map_err(JsError::from)?;
             Ok(JsValue::from_str(address.to_string().as_str()))
         })
     }
@@ -525,6 +524,8 @@ impl IntervalHandle {
 impl Drop for IntervalHandle {
     fn drop(&mut self) {
         log::debug!("clear interval: {}", self.interval_id);
-        clearInterval(self.interval_id);
+        if let Some(window) = window() {
+            window.clear_interval_with_handle(self.interval_id);
+        }
     }
 }

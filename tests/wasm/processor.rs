@@ -9,12 +9,12 @@ use rings_core::swarm::TransportManager;
 use rings_node::browser::IntervalHandle;
 use rings_node::prelude::rings_core;
 use rings_node::prelude::wasm_bindgen::prelude::Closure;
+use rings_node::prelude::wasm_bindgen::JsCast;
 use rings_node::prelude::wasm_bindgen_futures::spawn_local;
 use rings_node::prelude::web_sys::window;
 use rings_node::prelude::web_sys::RtcIceConnectionState;
 use rings_node::prelude::*;
 use rings_node::processor::*;
-use wasm_bindgen::JsCast;
 use wasm_bindgen_test::*;
 // wasm_bindgen_test_configure!(run_in_browser);
 

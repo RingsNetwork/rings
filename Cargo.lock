@@ -2554,7 +2554,6 @@ dependencies = [
  "futures",
  "http",
  "hyper",
- "js-sys",
  "jsonrpc-core",
  "jsonrpc-pubsub",
  "lazy_static",
@@ -2570,8 +2569,6 @@ dependencies = [
  "tokio",
  "tower-http",
  "turn",
- "wasm-bindgen",
- "wasm-bindgen-futures",
  "wasm-bindgen-test",
  "webrtc-util",
 ]
@@ -3466,7 +3463,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6f741de44b75e14c35df886aff5f1eb73aa114fa5d4d00dcd37b5e01259bf3b2"
 dependencies = [
  "cfg-if",
- "futures-core",
  "js-sys",
  "wasm-bindgen",
  "web-sys",
