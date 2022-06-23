@@ -7,15 +7,15 @@ use std::sync::Arc;
 
 use futures::lock::Mutex;
 use js_sys::Promise;
+// use rings_core_wasm::dht::TStabilize;
 use serde::Deserialize;
 use serde::Serialize;
-use wasm_bindgen::prelude::*;
-use wasm_bindgen_futures::future_to_promise;
-use wasm_bindgen_futures::spawn_local;
 
 use self::utils::from_rtc_ice_connection_state;
+use crate::prelude::js_sys;
 use crate::prelude::rings_core::async_trait;
 use crate::prelude::rings_core::dht::PeerRing;
+use crate::prelude::rings_core::dht::Stabilization;
 use crate::prelude::rings_core::ecc::SecretKey;
 use crate::prelude::rings_core::message::CustomMessage;
 use crate::prelude::rings_core::message::Encoded;
@@ -33,18 +33,14 @@ use crate::prelude::rings_core::swarm::TransportManager;
 use crate::prelude::rings_core::transports::Transport;
 use crate::prelude::rings_core::types::ice_transport::IceTransport;
 use crate::prelude::rings_core::types::message::MessageListener;
+use crate::prelude::wasm_bindgen;
+use crate::prelude::wasm_bindgen::prelude::*;
+use crate::prelude::wasm_bindgen_futures;
+use crate::prelude::wasm_bindgen_futures::future_to_promise;
 use crate::prelude::web3::contract::tokens::Tokenizable;
 use crate::prelude::web_sys::RtcIceConnectionState;
 use crate::processor;
 use crate::processor::Processor;
-
-#[wasm_bindgen]
-extern "C" {
-
-    fn setInterval(closure: &Closure<dyn FnMut()>, time: u32) -> i32;
-
-    fn clearInterval(id: i32);
-}
 
 #[wasm_bindgen(start)]
 pub fn start() -> Result<(), JsError> {
@@ -105,7 +101,6 @@ impl UnsignedInfo {
 #[derive(Clone)]
 pub struct Client {
     processor: Arc<Processor>,
-    message_handler: Option<Arc<MessageHandler>>,
 }
 
 #[wasm_bindgen]
@@ -121,12 +116,10 @@ impl Client {
         let swarm = Arc::new(Swarm::new(&stuns, unsigned_info.key_addr, session));
         let pr = PeerRing::new(swarm.address().into());
         let dht = Arc::new(Mutex::new(pr));
-        let msg_handler = Arc::new(MessageHandler::new(dht, swarm.clone()));
-        let processor = Arc::new(Processor::from((swarm, msg_handler)));
-        Ok(Client {
-            processor,
-            message_handler: None,
-        })
+        let msg_handler = Arc::new(MessageHandler::new(dht.clone(), swarm.clone()));
+        let stabilization = Arc::new(Stabilization::new(dht, swarm.clone(), 20));
+        let processor = Arc::new(Processor::from((swarm, msg_handler, stabilization)));
+        Ok(Client { processor })
     }
 
     pub fn start(&self) -> Promise {
@@ -160,37 +153,23 @@ impl Client {
     ///      },
     /// ))
     /// ```
-    pub fn listen(&mut self, callback: MessageCallbackInstance) -> Result<IntervalHandle, JsError> {
+    pub fn listen(&mut self, callback: MessageCallbackInstance) -> Promise {
         let p = self.processor.clone();
-        let pr = PeerRing::new(p.swarm.address().into());
-        log::debug!("peer_ring: {:?}", pr.id);
-        let dht = Arc::new(Mutex::new(pr));
-        let msg_handler = Arc::new(MessageHandler::new_with_callback(
-            dht,
-            p.swarm.clone(),
-            Box::new(callback),
-        ));
-        self.message_handler = Some(msg_handler.clone());
-        let h = Arc::clone(&msg_handler);
+        let cb = Box::new(callback);
 
-        let cb = Closure::wrap(Box::new(move || {
-            let h1 = h.clone();
-            spawn_local(async move {
-                h1.clone().listen_once().await;
-                // console_log!("listen_once: {:?}", a);
-            });
-        }) as Box<dyn FnMut()>);
-
-        // Next we pass this via reference to the `setInterval` function, and
-        // `setInterval` gets a handle to the corresponding JS closure.
-        let interval_id = setInterval(&cb, 200);
-
-        // If we were to drop `cb` here it would cause an exception to be raised
-        // whenever the interval elapses. Instead we *return* our handle back to JS
-        // so JS can decide when to cancel the interval and deallocate the closure.
-        Ok(IntervalHandle {
-            interval_id,
-            _closure: cb,
+        future_to_promise(async move {
+            let h = Arc::clone(&p.msg_handler);
+            // let s = Arc::clone(&p.stabilization);
+            h.set_callback(cb).await;
+            futures::join!(
+                async {
+                    h.listen().await;
+                },
+                // async {
+                //     s.wait().await;
+                // }
+            );
+            Ok(JsValue::null())
         })
     }
 
@@ -306,13 +285,10 @@ impl Client {
     pub fn disconnect(&self, address: String) -> Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
-            let address = Address::from_str(address.as_str()).map_err(JsError::from)?;
-            let trans = p
-                .swarm
-                .get_transport(&address)
-                .ok_or_else(|| JsError::new("transport not found"))?;
-            trans.close().await.map_err(JsError::from)?;
-            p.swarm.remove_transport(&address);
+            p.disconnect(address.as_str())
+                .await
+                .map_err(JsError::from)?;
+
             Ok(JsValue::from_str(address.to_string().as_str()))
         })
     }
@@ -503,28 +479,5 @@ impl TransportAndIce {
 impl From<(Arc<Transport>, Encoded)> for TransportAndIce {
     fn from((transport, ice): (Arc<Transport>, Encoded)) -> Self {
         Self::new(transport.id.to_string().as_str(), ice.to_string().as_str())
-    }
-}
-
-#[wasm_bindgen]
-pub struct IntervalHandle {
-    interval_id: i32,
-    _closure: Closure<dyn FnMut()>,
-}
-
-impl IntervalHandle {
-    /// create new IntervalHandle
-    pub fn new(interval_id: i32, cb: Closure<dyn FnMut()>) -> Self {
-        Self {
-            interval_id,
-            _closure: cb,
-        }
-    }
-}
-
-impl Drop for IntervalHandle {
-    fn drop(&mut self) {
-        log::debug!("clear interval: {}", self.interval_id);
-        clearInterval(self.interval_id);
     }
 }

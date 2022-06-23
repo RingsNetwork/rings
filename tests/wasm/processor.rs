@@ -2,19 +2,21 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::lock::Mutex;
-use rings_core::async_trait;
-use rings_core::message::MessageCallback;
-use rings_core::prelude::web3::contract::tokens::Tokenizable;
-use rings_core::swarm::TransportManager;
-use rings_node::browser::IntervalHandle;
-use rings_node::prelude::rings_core;
-use rings_node::prelude::wasm_bindgen::prelude::Closure;
-use rings_node::prelude::wasm_bindgen_futures::spawn_local;
-use rings_node::prelude::web_sys::window;
+use rings_node::prelude::rings_core::async_trait;
+// use rings_node::browser::IntervalHandle;
+// use rings_node::prelude::rings_core;
+use rings_node::prelude::rings_core::dht::Stabilization;
+use rings_node::prelude::rings_core::dht::TStabilize;
+use rings_node::prelude::rings_core::message::MessageCallback;
+use rings_node::prelude::rings_core::swarm::TransportManager;
+use rings_node::prelude::web3::contract::tokens::Tokenizable;
+// use rings_node::prelude::wasm_bindgen::prelude::Closure;
+// use rings_node::prelude::wasm_bindgen_futures::spawn_local;
+// use rings_node::prelude::web_sys::window;
 use rings_node::prelude::web_sys::RtcIceConnectionState;
 use rings_node::prelude::*;
 use rings_node::processor::*;
-use wasm_bindgen::JsCast;
+// use wasm_bindgen::JsCast;
 use wasm_bindgen_test::*;
 // wasm_bindgen_test_configure!(run_in_browser);
 
@@ -31,28 +33,23 @@ fn new_processor() -> Processor {
     ));
 
     let dht = Arc::new(Mutex::new(PeerRing::new(key.address().into())));
-    let msg_handler = MessageHandler::new(dht, swarm.clone());
-    (swarm, Arc::new(msg_handler)).into()
+    let msg_handler = MessageHandler::new(dht.clone(), swarm.clone());
+    let stab = Arc::new(Stabilization::new(dht, swarm.clone(), 20));
+    (swarm, Arc::new(msg_handler), stab).into()
 }
 
-fn listen(handler: &Arc<MessageHandler>) -> IntervalHandle {
-    let h = Arc::clone(handler);
+async fn listen(p: &Processor) {
+    let h = Arc::clone(&p.msg_handler);
+    let s = Arc::clone(&p.stabilization);
 
-    let cb = Closure::wrap(Box::new(move || {
-        let h1 = h.clone();
-        spawn_local(Box::pin(async move {
-            h1.clone().listen_once().await;
-            // console_log!("listen_one call: {:?}", a);
-        }));
-    }) as Box<dyn FnMut()>);
-
-    let interval_id = window()
-        .unwrap()
-        .set_interval_with_callback_and_timeout_and_arguments_0(cb.as_ref().unchecked_ref(), 200)
-        .ok()
-        .unwrap();
-
-    IntervalHandle::new(interval_id, cb)
+    futures::join!(
+        async {
+            h.listen().await;
+        },
+        async {
+            s.wait().await;
+        }
+    );
 }
 
 async fn close_all_transport(p: &Processor) {
@@ -98,7 +95,6 @@ async fn create_connection(p1: &Processor, p2: &Processor) {
         )
         .await
         .unwrap();
-    transport_1.wait_for_data_channel_open().await.unwrap();
     assert!(peer.transport.id.eq(&transport_1.id), "transport not same");
 }
 
@@ -131,10 +127,10 @@ async fn test_processor_handshake_and_msg() {
 
     console_log!("listen");
     p1.msg_handler.set_callback(callback1).await;
-    let interval1 = listen(&p1.msg_handler);
+    listen(&p1).await;
 
     p2.msg_handler.set_callback(callback2).await;
-    let interval2 = listen(&p2.msg_handler);
+    listen(&p2).await;
 
     p1.send_message(p2_addr.as_str(), test_text1.as_bytes())
         .await
@@ -161,7 +157,7 @@ async fn test_processor_handshake_and_msg() {
         .unwrap();
     console_log!("send test_text5 done");
 
-    fluvio_wasm_timer::Delay::new(Duration::from_secs(2))
+    fluvio_wasm_timer::Delay::new(Duration::from_secs(3))
         .await
         .unwrap();
 
@@ -183,9 +179,8 @@ async fn test_processor_handshake_and_msg() {
     expect2.sort();
     assert_eq!(msgs1, expect1);
     assert_eq!(msgs2, expect2);
+
     futures::join!(close_all_transport(&p1), close_all_transport(&p2),);
-    drop(interval1);
-    drop(interval2);
 }
 
 #[wasm_bindgen_test]
@@ -198,9 +193,9 @@ async fn test_processor_connect_with_address() {
     let p3 = new_processor();
     console_log!("p3 address: {}", p3.address().into_token().to_string());
 
-    let interval1 = listen(&p1.msg_handler);
-    let interval2 = listen(&p2.msg_handler);
-    let interval3 = listen(&p3.msg_handler);
+    listen(&p1).await;
+    listen(&p2).await;
+    listen(&p3).await;
 
     console_log!("connect p1 and p2");
     create_connection(&p1, &p2).await;
@@ -245,7 +240,4 @@ async fn test_processor_connect_with_address() {
         close_all_transport(&p2),
         close_all_transport(&p3),
     );
-    drop(interval1);
-    drop(interval2);
-    drop(interval3);
 }

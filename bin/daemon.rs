@@ -172,17 +172,19 @@ async fn run_jobs(args: &RunArgs) -> anyhow::Result<()> {
     let http_addr = args.http_addr.clone();
     let listen_event_1 = listen_event.clone();
     let listen_event_2 = listen_event.clone();
+    let stabilization_1 = stabilization.clone();
+    let stabilization_2 = stabilization.clone();
     let j = tokio::spawn(futures::future::join3(
         async {
             listen_event_1.listen().await;
             AnyhowResult::Ok(())
         },
         async {
-            run_service(http_addr, swarm, listen_event_2).await?;
+            run_service(http_addr, swarm, listen_event_2, stabilization_1).await?;
             AnyhowResult::Ok(())
         },
         async {
-            stabilization.wait().await;
+            stabilization_2.wait().await;
             AnyhowResult::Ok(())
         },
     ));

@@ -11,6 +11,7 @@ use crate::error::Result;
 use crate::jsonrpc::method;
 use crate::jsonrpc::response::TransportAndIce;
 use crate::jsonrpc_client::SimpleClient;
+use crate::prelude::rings_core::dht::Stabilization;
 use crate::prelude::rings_core::message::Encoded;
 use crate::prelude::rings_core::message::Message;
 use crate::prelude::rings_core::message::MessageHandler;
@@ -33,14 +34,22 @@ pub struct Processor {
     pub swarm: Arc<Swarm>,
     /// a msg_handler instance
     pub msg_handler: Arc<MessageHandler>,
+    /// a stabilization instane,
+    pub stabilization: Arc<Stabilization>,
 }
 
 #[cfg(feature = "client")]
 impl Metadata for Processor {}
 
-impl From<(Arc<Swarm>, Arc<MessageHandler>)> for Processor {
-    fn from((swarm, msg_handler): (Arc<Swarm>, Arc<MessageHandler>)) -> Self {
-        Self { swarm, msg_handler }
+impl From<(Arc<Swarm>, Arc<MessageHandler>, Arc<Stabilization>)> for Processor {
+    fn from(
+        (swarm, msg_handler, stabilization): (Arc<Swarm>, Arc<MessageHandler>, Arc<Stabilization>),
+    ) -> Self {
+        Self {
+            swarm,
+            msg_handler,
+            stabilization,
+        }
     }
 }
 
@@ -272,6 +281,7 @@ impl Processor {
             .close()
             .await
             .map_err(Error::CloseTransportError)?;
+        self.swarm.remove_transport(&address);
         Ok(())
     }
 
@@ -372,8 +382,9 @@ mod test {
         ));
 
         let dht = Arc::new(Mutex::new(PeerRing::new(key.address().into())));
-        let msg_handler = MessageHandler::new(dht, swarm.clone());
-        (swarm, Arc::new(msg_handler)).into()
+        let msg_handler = MessageHandler::new(dht.clone(), swarm.clone());
+        let stabilization = Stabilization::new(dht, swarm.clone(), 200);
+        (swarm, Arc::new(msg_handler), Arc::new(stabilization)).into()
     }
 
     #[tokio::test]

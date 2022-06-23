@@ -60,7 +60,7 @@ impl Stabilization {
         match chord.fix_fingers() {
             Ok(action) => match action {
                 PeerRingAction::None => {
-                    log::debug!("wait to next round");
+                    // log::debug!("wait to next round");
                     Ok(())
                 }
                 PeerRingAction::RemoteAction(
@@ -150,7 +150,7 @@ mod stabilizer {
                     caller.stabilize().await.unwrap();
                 }))
             };
-            poll!(func, 200);
+            poll!(func, 5000);
         }
     }
 }
