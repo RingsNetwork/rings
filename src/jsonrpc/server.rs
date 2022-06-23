@@ -59,6 +59,7 @@ async fn connect_with_address(params: Params, processor: Processor) -> Result<Va
     processor
         .connect_with_address(
             &Address::from_str(address_str).map_err(|_| Error::new(ErrorCode::InvalidParams))?,
+            true,
         )
         .await
         .map_err(Error::from)?;

@@ -9,6 +9,8 @@ pub use url;
 pub use uuid;
 #[cfg(feature = "wasm")]
 pub use wasm_bindgen;
+#[cfg(feature = "wasm")]
+pub use wasm_bindgen_futures;
 pub use web3;
 pub use web3::types::Address;
 #[cfg(feature = "wasm")]
