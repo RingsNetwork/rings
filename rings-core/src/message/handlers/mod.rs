@@ -107,8 +107,6 @@ impl MessageHandler {
         self.swarm.push_pending_transport(&transport)?;
 
         let connect_msg = Message::ConnectNodeSend(super::ConnectNodeSend {
-            sender_id: self.swarm.address().into(),
-            target_id,
             transport_uuid: transport.id.to_string(),
             handshake_info: handshake_info.to_string(),
         });
