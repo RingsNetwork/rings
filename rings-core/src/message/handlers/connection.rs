@@ -76,12 +76,12 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
         let dht = self.dht.lock().await;
         let mut relay = ctx.relay.clone();
 
-        if dht.id != msg.target_id {
-            if self.swarm.get_transport(&msg.target_id).is_some() {
-                relay.relay(dht.id, Some(msg.target_id))?;
+        if dht.id != relay.destination {
+            if self.swarm.get_transport(&relay.destination).is_some() {
+                relay.relay(dht.id, Some(relay.destination))?;
                 return self.transpond_payload(ctx, relay).await;
             } else {
-                let next_node = match dht.find_successor(msg.target_id)? {
+                let next_node = match dht.find_successor(relay.destination)? {
                     PeerRingAction::Some(node) => Some(node),
                     PeerRingAction::RemoteAction(node, _) => Some(node),
                     _ => None,
@@ -93,9 +93,10 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
         }
 
         relay.relay(dht.id, None)?;
-        match self.swarm.get_transport(&msg.sender_id) {
+        match self.swarm.get_transport(&relay.sender()) {
             None => {
                 let trans = self.swarm.new_transport().await?;
+                let sender_id = relay.sender();
                 trans
                     .register_remote_info(msg.handshake_info.to_owned().into())
                     .await?;
@@ -105,24 +106,20 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
                     .to_string();
                 self.send_report_message(
                     Message::ConnectNodeReport(ConnectNodeReport {
-                        answer_id: dht.id,
                         transport_uuid: msg.transport_uuid.clone(),
                         handshake_info,
                     }),
                     relay,
                 )
                 .await?;
-                self.swarm.get_or_register(&msg.sender_id, trans).await?;
+                self.swarm.get_or_register(&sender_id, trans).await?;
 
                 Ok(())
             }
 
             _ => {
-                self.send_report_message(
-                    Message::AlreadyConnected(AlreadyConnected { answer_id: dht.id }),
-                    relay,
-                )
-                .await
+                self.send_report_message(Message::AlreadyConnected(AlreadyConnected), relay)
+                    .await
             }
         }
     }
@@ -149,7 +146,7 @@ impl HandleMsg<ConnectNodeReport> for MessageHandler {
             transport
                 .register_remote_info(msg.handshake_info.clone().into())
                 .await?;
-            self.swarm.register(&msg.answer_id, transport).await
+            self.swarm.register(&relay.sender(), transport).await
         }
     }
 }
@@ -157,7 +154,7 @@ impl HandleMsg<ConnectNodeReport> for MessageHandler {
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<AlreadyConnected> for MessageHandler {
-    async fn handle(&self, ctx: &MessagePayload<Message>, msg: &AlreadyConnected) -> Result<()> {
+    async fn handle(&self, ctx: &MessagePayload<Message>, _msg: &AlreadyConnected) -> Result<()> {
         let dht = self.dht.lock().await;
         let mut relay = ctx.relay.clone();
 
@@ -166,7 +163,7 @@ impl HandleMsg<AlreadyConnected> for MessageHandler {
             self.transpond_payload(ctx, relay).await
         } else {
             self.swarm
-                .get_transport(&msg.answer_id)
+                .get_transport(&relay.sender())
                 .map(|_| ())
                 .ok_or(Error::MessageHandlerMissTransportAlreadyConnected)
         }
@@ -295,6 +292,7 @@ impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
 #[cfg(not(feature = "wasm"))]
 #[cfg(test)]
 mod test {
+    use std::matches;
     use std::sync::Arc;
 
     use futures::lock::Mutex;
@@ -652,13 +650,8 @@ mod test {
         assert_eq!(ev2.relay.path_end_cursor, 0);
         assert_eq!(ev2.relay.next_hop, Some(did2));
         assert_eq!(ev2.relay.destination, did3);
-
-        if let Message::ConnectNodeSend(x) = ev2.data {
-            assert_eq!(x.target_id, did3);
-            assert_eq!(x.sender_id, did1);
-        } else {
-            panic!();
-        }
+        assert!(matches!(ev2.data, Message::ConnectNodeSend(_)));
+        assert_eq!(ev2.relay.sender(), did1);
 
         let ev3 = node3.listen_once().await.unwrap();
 
@@ -676,12 +669,8 @@ mod test {
         assert_eq!(ev3.relay.path_end_cursor, 0);
         assert_eq!(ev3.relay.next_hop, Some(did3));
         assert_eq!(ev3.relay.destination, did3);
-        if let Message::ConnectNodeSend(x) = ev3.data {
-            assert_eq!(x.target_id, did3);
-            assert_eq!(x.sender_id, did1);
-        } else {
-            panic!();
-        }
+        assert!(matches!(ev3.data, Message::ConnectNodeSend(_)));
+        assert_eq!(ev3.relay.sender(), did1);
 
         let ev2 = node2.listen_once().await.unwrap();
         // node3 send report to node2
@@ -691,11 +680,9 @@ mod test {
         assert_eq!(ev2.relay.path_end_cursor, 0);
         assert_eq!(ev2.relay.next_hop, Some(did2));
         assert_eq!(ev2.relay.destination, did1);
-        if let Message::ConnectNodeReport(x) = ev2.data {
-            assert_eq!(x.answer_id, did3);
-        } else {
-            panic!();
-        }
+        assert!(matches!(ev2.data, Message::ConnectNodeReport(_)));
+        assert_eq!(ev2.relay.sender(), did3);
+
         // node 2 send report to node1
         let ev1 = node1.listen_once().await.unwrap();
         assert_eq!(ev1.addr, key2.address());
@@ -704,11 +691,8 @@ mod test {
         assert_eq!(ev1.relay.path_end_cursor, 1);
         assert_eq!(ev1.relay.next_hop, Some(did1));
         assert_eq!(ev1.relay.destination, did1);
-        if let Message::ConnectNodeReport(x) = ev1.data {
-            assert_eq!(x.answer_id, did3);
-        } else {
-            panic!();
-        }
+        assert!(matches!(ev1.data, Message::ConnectNodeReport(_)));
+        assert_eq!(ev1.relay.sender(), did3);
         assert!(swarm1.get_transport(&key3.address()).is_some());
         Ok(())
     }
@@ -1128,10 +1112,8 @@ mod test {
         assert_eq!(ev2.relay.path_end_cursor, 0);
         assert_eq!(ev2.relay.next_hop, Some(did2));
         assert_eq!(ev2.relay.destination, did3);
-
         if let Message::ConnectNodeSend(x) = ev2.data {
-            assert_eq!(x.target_id, did3);
-            assert_eq!(x.sender_id, did1);
+            assert_eq!(ev2.relay.sender(), did1);
         } else {
             panic!();
         }

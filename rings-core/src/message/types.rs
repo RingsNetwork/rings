@@ -12,20 +12,15 @@ use crate::err::Result;
 
 #[derive(Debug, PartialEq, Deserialize, Serialize, Clone)]
 pub struct ConnectNodeSend {
-    pub sender_id: Did,
-    pub target_id: Did,
     pub transport_uuid: String,
     pub handshake_info: String,
 }
 
 #[derive(Debug, PartialEq, Deserialize, Serialize, Clone)]
-pub struct AlreadyConnected {
-    pub answer_id: Did,
-}
+pub struct AlreadyConnected;
 
 #[derive(Debug, PartialEq, Deserialize, Serialize, Clone)]
 pub struct ConnectNodeReport {
-    pub answer_id: Did,
     pub transport_uuid: String,
     pub handshake_info: String,
 }
