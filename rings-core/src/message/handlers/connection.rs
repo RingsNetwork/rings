@@ -327,23 +327,54 @@ mod test {
     // node 2's successor is node3, so it respone node 3 to node 3
     // 8. Node 2 send FindSuccessorReport(Node3) to Node 3
     #[tokio::test]
-    async fn test_triple_node() -> Result<()> {
-        let stun = "stun://stun.l.google.com:19302";
+    async fn test_triple_nodes_1_2_3() -> Result<()> {
+        let (key1, key2, key3) = gen_triple_ordered_keys();
+        test_triple_nodes(key1, key2, key3).await
+    }
 
-        let mut key1 = SecretKey::random();
-        let mut key2 = SecretKey::random();
-        let mut key3 = SecretKey::random();
+    #[tokio::test]
+    async fn test_triple_nodes_2_3_1() -> Result<()> {
+        let (key1, key2, key3) = gen_triple_ordered_keys();
+        test_triple_nodes(key2, key3, key1).await
+    }
 
-        let mut v = vec![key1, key2, key3];
+    #[tokio::test]
+    async fn test_triple_nodes_3_1_2() -> Result<()> {
+        let (key1, key2, key3) = gen_triple_ordered_keys();
+        test_triple_nodes(key3, key1, key2).await
+    }
 
-        v.sort_by(|a, b| {
+    #[tokio::test]
+    async fn test_triple_nodes_1_3_2() -> Result<()> {
+        let (key1, key2, key3) = gen_triple_ordered_keys();
+        test_triple_nodes(key1, key3, key2).await
+    }
+    #[tokio::test]
+    async fn test_triple_nodes_2_1_3() -> Result<()> {
+        let (key1, key2, key3) = gen_triple_ordered_keys();
+        test_triple_nodes(key2, key1, key3).await
+    }
+
+    #[tokio::test]
+    async fn test_triple_nodes_3_2_1() -> Result<()> {
+        let (key1, key2, key3) = gen_triple_ordered_keys();
+        test_triple_nodes(key3, key2, key1).await
+    }
+
+    fn gen_triple_ordered_keys() -> (SecretKey, SecretKey, SecretKey) {
+        let mut keys = Vec::from_iter(std::iter::repeat_with(SecretKey::random).take(3));
+        keys.sort_by(|a, b| {
             if a.address() < b.address() {
                 std::cmp::Ordering::Less
             } else {
                 std::cmp::Ordering::Greater
             }
         });
-        (key1, key2, key3) = (v[0], v[1], v[2]);
+        (keys[0], keys[1], keys[2])
+    }
+
+    async fn test_triple_nodes(key1: SecretKey, key2: SecretKey, key3: SecretKey) -> Result<()> {
+        let stun = "stun://stun.l.google.com:19302";
 
         println!(
             "test with key1: {:?}, key2: {:?}, key3: {:?}",
@@ -498,6 +529,7 @@ mod test {
         if let Message::FindSuccessorReport(x) = ev_2.data {
             // for key1 there is no did is more closer to key1, so it response key1
             // and dht2 wont update
+            assert!(!dht2.lock().await.successor.list().contains(&did2));
             assert_eq!(x.id, did2);
             assert!(!x.for_fix);
         } else {
@@ -626,8 +658,8 @@ mod test {
         if let Message::FindSuccessorReport(x) = ev_2.data {
             // for key3 there is no did is more closer to key3, so it response key3
             // and dht2 wont update
-            assert_eq!(x.id, did2);
             assert!(!dht2.lock().await.successor.list().contains(&did2));
+            assert_eq!(x.id, did2);
             assert!(!x.for_fix);
         } else {
             panic!();
