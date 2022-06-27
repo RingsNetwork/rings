@@ -329,10 +329,15 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
             let mut peer_connection = peer_connection.clone();
             let event_sender = Arc::clone(&event_sender);
             let public_key = Arc::clone(&public_key);
-            log::debug!("got state event {:?}", ev.type_());
+            // log::debug!("got state event {:?}", ev.type_());
             if ev.type_() == *"iceconnectionstatechange" {
                 let peer_connection = peer_connection.take().unwrap();
                 let ice_connection_state = peer_connection.ice_connection_state();
+                log::debug!(
+                    "got state event {:?}, {:?}",
+                    ev.type_(),
+                    ice_connection_state
+                );
                 spawn_local(async move {
                     let event_sender = Arc::clone(&event_sender);
                     if ice_connection_state == RtcIceConnectionState::Connected {

@@ -24,7 +24,7 @@ impl<T: Send> Channel<T> for CbChannel<T> {
     type Receiver = Receiver<T>;
 
     fn new() -> Self {
-        let (tx, rx) = mpsc::channel(8);
+        let (tx, rx) = mpsc::channel(64);
         Self {
             sender: Arc::new(Mutex::new(tx)),
             receiver: Arc::new(Mutex::new(rx)),

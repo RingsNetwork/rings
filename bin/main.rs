@@ -242,7 +242,12 @@ async fn daemon_run(
 
     let (_, _, _) = futures::join!(
         listen_event.clone().listen(),
-        run_service(http_addr.to_owned(), swarm_clone, listen_event),
+        run_service(
+            http_addr.to_owned(),
+            swarm_clone,
+            listen_event,
+            stabilize.clone()
+        ),
         stabilize.wait(),
     );
 
