@@ -193,7 +193,7 @@ impl Chord<PeerRingAction> for PeerRing {
         // if (id \in (n; successor]); return successor
         // if ID = N63, Successor = N10
         // N9
-        if self.bias(id) <= self.bias(self.successor.max()) || self.successor.is_none() {
+        if self.bias(id) <= self.bias(self.successor.min()) || self.successor.is_none() {
             //if self.id < id && id <= self.successor {
             // response the closest one
             Ok(PeerRingAction::Some(self.successor.min()))
