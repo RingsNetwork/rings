@@ -374,7 +374,7 @@ mod test {
     }
 
     async fn test_triple_nodes(key1: SecretKey, key2: SecretKey, key3: SecretKey) -> Result<()> {
-        let stun = "stun://stun.l.google.com:19302";
+        let stun = "stun://127.0.0.1:3478";
 
         println!(
             "test with key1: {:?}, key2: {:?}, key3: {:?}",
