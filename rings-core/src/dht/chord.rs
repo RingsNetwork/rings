@@ -193,7 +193,7 @@ impl Chord<PeerRingAction> for PeerRing {
         // if (id \in (n; successor]); return successor
         // if ID = N63, Successor = N10
         // N9
-        if self.bias(id) <= self.bias(self.successor.max()) || self.successor.is_none() {
+        if self.bias(id) <= self.bias(self.successor.min()) || self.successor.is_none() {
             //if self.id < id && id <= self.successor {
             // response the closest one
             Ok(PeerRingAction::Some(self.successor.min()))
@@ -215,16 +215,15 @@ impl ChordStablize<PeerRingAction> for PeerRing {
     /// called periodically. verifies n’s immediate
     /// successor, and tells the successor about n.
     fn stablilize(&mut self) -> PeerRingAction {
-        // x = successor:predecessor;
+        // x = successor.predecessor;
         // if (x in (n, successor)) { successor = x; successor:notify(n); }
         if let Some(x) = self.predecessor {
-            if x - self.id < self.successor.max() - self.id {
+            if self.bias(x) < self.bias(self.successor.max()) {
                 self.successor.update(x);
-                return PeerRingAction::RemoteAction(x, RemoteAction::Notify(self.id));
                 // successor.notify(n)
             }
         }
-        PeerRingAction::None
+        PeerRingAction::RemoteAction(self.successor.min(), RemoteAction::Notify(self.id))
     }
 
     /// n' thinks it might be our predecessor.
