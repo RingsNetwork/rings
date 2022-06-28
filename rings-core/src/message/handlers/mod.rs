@@ -95,6 +95,10 @@ impl MessageHandler {
     }
 
     pub async fn connect(&self, address: &Address) -> Result<Arc<Transport>> {
+        if let Some(t) = self.swarm.get_transport(&address) {
+            return Ok(t);
+        }
+
         let target_id = address.to_owned().into();
         let transport = self.swarm.new_transport().await?;
         let handshake_info = transport
