@@ -223,7 +223,7 @@ impl ChordStablize<PeerRingAction> for PeerRing {
                 // successor.notify(n)
             }
         }
-        return PeerRingAction::RemoteAction(self.successor.min(), RemoteAction::Notify(self.id));
+        PeerRingAction::RemoteAction(self.successor.min(), RemoteAction::Notify(self.id))
     }
 
     /// n' thinks it might be our predecessor.

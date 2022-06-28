@@ -90,7 +90,6 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
                 relay.relay(dht.id, Some(next_node))?;
                 return self.transpond_payload(ctx, relay).await;
             }
-
         }
 
         relay.relay(dht.id, None)?;
@@ -714,7 +713,6 @@ mod test {
         Ok(())
     }
 
-
     /// We have three nodes, where
     /// key 1 > key2 > key3
     /// we connect key1 to key2 , key2 to key3 first
@@ -1033,7 +1031,10 @@ mod test {
         // it will response node 2
         assert!(dht2.lock().await.successor.list().contains(&did1));
         // did3 not in (did2, did1]
-        assert_eq!(dht1.lock().await.find_successor(did3).unwrap(), PeerRingAction::Some(did2));
+        assert_eq!(
+            dht1.lock().await.find_successor(did3).unwrap(),
+            PeerRingAction::Some(did2)
+        );
         // did3 in (did1, did2]
 
         // node 2 get report from node3
@@ -1086,7 +1087,6 @@ mod test {
             panic!();
         }
 
-
         println!("=======================================================");
         println!("||  now we connect join node3 to node1 via DHT       ||");
         println!("=======================================================");
@@ -1117,7 +1117,10 @@ mod test {
         // msg is send from node 1 to node 2
         // did3 is in (did1, did2), so it relay to did2
         assert!(did3.in_range(&did1, &did1, &did2));
-        assert_eq!(dht1.lock().await.find_successor(did3).unwrap(), PeerRingAction::Some(did2));
+        assert_eq!(
+            dht1.lock().await.find_successor(did3).unwrap(),
+            PeerRingAction::Some(did2)
+        );
 
         assert_eq!(ev2.addr, key1.address());
         assert_eq!(ev2.relay.method, RelayMethod::SEND);
@@ -1139,7 +1142,6 @@ mod test {
         assert!(swarm1.get_transport(&key3.address()).is_some());
         Ok(())
     }
-
 
     /// We have three nodes, where
     /// key 1 > key2 > key3

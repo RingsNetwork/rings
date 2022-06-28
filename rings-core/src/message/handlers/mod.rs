@@ -95,7 +95,7 @@ impl MessageHandler {
     }
 
     pub async fn connect(&self, address: &Address) -> Result<Arc<Transport>> {
-        if let Some(t) = self.swarm.get_transport(&address) {
+        if let Some(t) = self.swarm.get_transport(address) {
             return Ok(t);
         }
 
