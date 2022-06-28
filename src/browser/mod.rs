@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use futures::lock::Mutex;
 use js_sys::Promise;
-// use rings_core_wasm::dht::TStabilize;
+use rings_core_wasm::dht::TStabilize;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -159,15 +159,15 @@ impl Client {
 
         future_to_promise(async move {
             let h = Arc::clone(&p.msg_handler);
-            // let s = Arc::clone(&p.stabilization);
+            let s = Arc::clone(&p.stabilization);
             h.set_callback(cb).await;
             futures::join!(
                 async {
                     h.listen().await;
                 },
-                // async {
-                //     s.wait().await;
-                // }
+                async {
+                    s.wait().await;
+                }
             );
             Ok(JsValue::null())
         })
@@ -226,7 +226,7 @@ impl Client {
         })
     }
 
-    /// Manually make handshke with remote peer
+    /// Manually make handshake with remote peer
     pub fn create_offer(&self) -> Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
@@ -235,7 +235,7 @@ impl Client {
         })
     }
 
-    /// Manually make handshke with remote peer
+    /// Manually make handshake with remote peer
     pub fn answer_offer(&self, ice_info: String) -> Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
@@ -247,7 +247,7 @@ impl Client {
         })
     }
 
-    /// Manually make handshke with remote peer
+    /// Manually make handshake with remote peer
     pub fn accept_answer(&self, transport_id: String, ice: String) -> Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
