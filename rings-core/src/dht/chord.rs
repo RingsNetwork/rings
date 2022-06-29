@@ -217,12 +217,12 @@ impl ChordStablize<PeerRingAction> for PeerRing {
     fn stablilize(&mut self) -> PeerRingAction {
         // x = successor.predecessor;
         // if (x in (n, successor)) { successor = x; successor:notify(n); }
-        if let Some(x) = self.predecessor {
-            if self.bias(x) < self.bias(self.successor.max()) {
-                self.successor.update(x);
-                // successor.notify(n)
-            }
-        }
+        // if let Some(x) = self.predecessor {
+        //     if self.bias(x) < self.bias(self.successor.max()) {
+        //         self.successor.update(x);
+        //         // successor.notify(n)
+        //     }
+        // }
         PeerRingAction::RemoteAction(self.successor.min(), RemoteAction::Notify(self.id))
     }
 
@@ -232,7 +232,7 @@ impl ChordStablize<PeerRingAction> for PeerRing {
         match self.predecessor {
             Some(pre) => {
                 // if id <- [pre, self]
-                if self.id - pre > self.id - id {
+                if self.bias(pre) > self.bias(id) {
                     self.predecessor = Some(id);
                     Some(id)
                 } else {

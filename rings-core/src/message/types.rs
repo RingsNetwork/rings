@@ -88,6 +88,16 @@ pub struct JoinSubRing {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct QueryPredecessorSend {
+    pub id: Did,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct QueryPredecessorReport {
+    pub id: Did,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct CustomMessage(pub Vec<u8>);
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]

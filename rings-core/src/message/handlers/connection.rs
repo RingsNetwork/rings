@@ -1,9 +1,6 @@
 use std::str::FromStr;
-
 use async_trait::async_trait;
-
 use crate::dht::Chord;
-use crate::dht::ChordStablize;
 use crate::dht::ChordStorage;
 use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
@@ -16,15 +13,12 @@ use crate::message::types::FindSuccessorReport;
 use crate::message::types::FindSuccessorSend;
 use crate::message::types::JoinDHT;
 use crate::message::types::Message;
-use crate::message::types::NotifyPredecessorReport;
-use crate::message::types::NotifyPredecessorSend;
 use crate::message::types::SyncVNodeWithSuccessor;
 use crate::message::HandleMsg;
 use crate::message::LeaveDHT;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
-use crate::message::RelayMethod;
 use crate::prelude::RTCSdpType;
 use crate::swarm::TransportManager;
 use crate::types::ice_transport::IceTrickleScheme;
@@ -237,58 +231,6 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
     }
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
-impl HandleMsg<NotifyPredecessorSend> for MessageHandler {
-    async fn handle(
-        &self,
-        ctx: &MessagePayload<Message>,
-        msg: &NotifyPredecessorSend,
-    ) -> Result<()> {
-        let mut dht = self.dht.lock().await;
-        let mut relay = ctx.relay.clone();
-
-        relay.relay(dht.id, None)?;
-        dht.notify(msg.id);
-        self.send_report_message(
-            Message::NotifyPredecessorReport(NotifyPredecessorReport { id: dht.id }),
-            relay,
-        )
-        .await
-    }
-}
-
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
-impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
-    async fn handle(
-        &self,
-        ctx: &MessagePayload<Message>,
-        msg: &NotifyPredecessorReport,
-    ) -> Result<()> {
-        let mut dht = self.dht.lock().await;
-        let mut relay = ctx.relay.clone();
-
-        relay.relay(dht.id, None)?;
-        assert_eq!(relay.method, RelayMethod::REPORT);
-        // if successor: predecessor is between (id, successor]
-        // then update local successor
-        dht.successor.update(msg.id);
-        if let Ok(PeerRingAction::RemoteAction(
-            next,
-            PeerRingRemoteAction::SyncVNodeWithSuccessor(data),
-        )) = dht.sync_with_successor(msg.id)
-        {
-            self.send_direct_message(
-                Message::SyncVNodeWithSuccessor(SyncVNodeWithSuccessor { data }),
-                next,
-            )
-            .await?;
-        }
-        Ok(())
-    }
-}
-
 #[cfg(not(feature = "wasm"))]
 #[cfg(test)]
 mod test {
@@ -307,6 +249,7 @@ mod test {
     use crate::swarm::Swarm;
     use crate::swarm::TransportManager;
     use crate::types::ice_transport::IceTrickleScheme;
+    use crate::message::RelayMethod;
 
     #[tokio::test]
     async fn test_triple_nodes_1_2_3() -> Result<()> {
