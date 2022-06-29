@@ -1,5 +1,7 @@
 use std::str::FromStr;
+
 use async_trait::async_trait;
+
 use crate::dht::Chord;
 use crate::dht::ChordStorage;
 use crate::dht::PeerRingAction;
@@ -244,12 +246,12 @@ mod test {
     use crate::dht::PeerRing;
     use crate::ecc::SecretKey;
     use crate::message::MessageHandler;
+    use crate::message::RelayMethod;
     use crate::prelude::RTCSdpType;
     use crate::session::SessionManager;
     use crate::swarm::Swarm;
     use crate::swarm::TransportManager;
     use crate::types::ice_transport::IceTrickleScheme;
-    use crate::message::RelayMethod;
 
     #[tokio::test]
     async fn test_triple_nodes_1_2_3() -> Result<()> {
