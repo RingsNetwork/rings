@@ -279,12 +279,11 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
 }
 
 impl WasmTransport {
-    pub async fn setup_channel(&mut self, name: &str) -> &Self {
+    pub async fn setup_channel(&mut self, name: &str) {
         if let Some(conn) = &self.connection {
             let channel = conn.create_data_channel(name);
             self.channel = Some(Arc::new(channel));
         }
-        self
     }
 }
 
@@ -310,8 +309,8 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
                         .unchecked_ref(),
                 ));
                 on_ice_candidate_callback.forget();
-                on_ice_connection_state_change_callback.forget();
                 on_data_channel_callback.forget();
+                on_ice_connection_state_change_callback.forget();
                 Ok(self)
             }
             None => {
@@ -396,6 +395,9 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
                     spawn_local(async move {
                         let msg = if data.has_type::<web_sys::Blob>() {
                             let data: web_sys::Blob = data.clone().into();
+                            if data.size() == 0f64 {
+                                return;
+                            }
                             let data_buffer =
                                 wasm_bindgen_futures::JsFuture::from(data.array_buffer()).await;
                             if let Err(e) = data_buffer {
@@ -406,6 +408,9 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
                         } else {
                             Uint8Array::new(data.as_ref()).to_vec()
                         };
+                        if msg.is_empty() {
+                            return;
+                        }
                         let event_sender = Arc::clone(&event_sender);
                         if let Err(e) =
                             CbChannel::send(&event_sender, Event::DataChannelMessage(msg)).await
@@ -452,7 +457,7 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
                 .map_err(Error::Deserialize)?,
             candidates: local_candidates_json,
         };
-        log::debug!("prepared hanshake info :{:?}", data);
+        log::debug!("prepared handshake info :{:?}", data);
         let resp = MessagePayload::new_direct(
             data,
             session_manager,
@@ -495,7 +500,8 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
 
 impl WasmTransport {
     pub async fn wait_for_data_channel_open(&self) -> Result<()> {
-        match self.get_data_channel().await {
+        let dc = self.get_data_channel().await;
+        match dc {
             Some(dc) => {
                 if dc.ready_state() == RtcDataChannelState::Open {
                     return Ok(());
@@ -503,29 +509,36 @@ impl WasmTransport {
                 let promise = Promise::default();
                 let state = Arc::clone(&promise.state());
                 let dc_cloned = Arc::clone(&dc);
-                let callback = Closure::wrap(Box::new(move || match dc_cloned.ready_state() {
-                    RtcDataChannelState::Open => {
-                        let state = Arc::clone(&state);
-                        let mut s = state.lock().unwrap();
-                        if let Some(w) = s.waker.take() {
-                            w.wake();
-                            s.completed = true;
-                            s.successed = Some(true);
+                let callback = Closure::wrap(Box::new(move || {
+                    log::debug!(
+                        "wait_for_data_channel_open, state: {:?}",
+                        dc_cloned.ready_state()
+                    );
+                    match dc_cloned.ready_state() {
+                        RtcDataChannelState::Open => {
+                            let state = Arc::clone(&state);
+                            let mut s = state.lock().unwrap();
+                            if let Some(w) = s.waker.take() {
+                                w.wake();
+                                s.completed = true;
+                                s.successed = Some(true);
+                            }
                         }
-                    }
-                    x => {
-                        log::trace!("datachannel status: {:?}", x)
+                        x => {
+                            log::debug!("datachannel status: {:?}", x)
+                        }
                     }
                 }) as Box<dyn FnMut()>);
                 dc.set_onopen(Some(callback.as_ref().unchecked_ref()));
                 callback.forget();
-                promise.await
+                promise.await?;
             }
             None => {
                 log::error!("{:?}", Error::RTCDataChannelNotReady);
-                Err(Error::RTCDataChannelNotReady)
+                return Err(Error::RTCDataChannelNotReady);
             }
-        }
+        };
+        Ok(())
     }
 }
 
