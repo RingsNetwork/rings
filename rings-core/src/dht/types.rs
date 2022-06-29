@@ -11,7 +11,6 @@ pub trait Chord<A> {
 pub trait ChordStablize<A>: Chord<A> {
     fn closest_preceding_node(&self, id: Did) -> Result<Did>;
     fn check_predecessor(&self) -> A;
-    fn stablilize(&mut self) -> A;
     fn notify(&mut self, id: Did) -> Option<Did>;
     fn fix_fingers(&mut self) -> Result<A>;
 }
