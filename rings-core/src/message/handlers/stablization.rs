@@ -14,6 +14,7 @@ use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
 use crate::message::RelayMethod;
+use crate::swarm::TransportManager;
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
@@ -57,6 +58,10 @@ impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
         assert_eq!(relay.method, RelayMethod::REPORT);
         // if successor: predecessor is between (id, successor]
         // then update local successor
+        if self.swarm.get_transport(&msg.id).is_none() && msg.id != self.swarm.address().into() {
+            self.connect(&msg.id.into()).await?;
+            return Ok(());
+        }
         dht.successor.update(msg.id);
         if let Ok(PeerRingAction::RemoteAction(
             next,
