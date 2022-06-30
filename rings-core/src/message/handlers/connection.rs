@@ -253,418 +253,293 @@ mod test {
     use crate::swarm::TransportManager;
     use crate::types::ice_transport::IceTrickleScheme;
 
+    // ndoe1.key < node2.key < node3.key
+    //
+    // Firstly, we connect node1 to node2, node2 to node3.
+    // Then, we connect key1 to key3 via DHT.
+    //
+    // After full connected, the topological structure should be:
+    //
+    // Node1 ------------ Node2 ------------ Node3
+    //   |-------------------------------------|
+    //
+    // --------- Connect node1 and node2
+    // 0. Node1 and node2 will set each other as their successor in DHTJoin handler.
+    //
+    // 1. Node1 send FindSuccessorSend(node1) to node2.
+    //    Meanwhile, node2 send FindSuccessorSend(node2) to node1.
+    //
+    // 2. Node1 respond by sending FindSuccessorReport(node2) to node2.
+    //    Meanwhile, node2 respond by sending FindSuccessorReport(node1) to node1.
+    //    But no node should update local successor by those reports.
+    //
+    // --------- Join node3 to node2
+    // 0. Node2 and node3 will set each other as their successor in DHTJoin handler.
+    //
+    // 1. Node3 send FindSuccessorSend(node3) to node2.
+    //    Meanwhile, node2 send FindSuccessorSend(node2) to node3.
+    //
+    // 2. Node3 respond by sending FindSuccessorReport(node2) to node2.
+    //    Meanwhile, node2 respond by sending FindSuccessorReport(node3) to node3.
+    //    But no node should update local successor by those reports.
+    //
     #[tokio::test]
     async fn test_triple_nodes_1_2_3() -> Result<()> {
         let (key1, key2, key3) = gen_triple_ordered_keys();
         test_triple_ordered_nodes(key1, key2, key3).await
     }
 
+    // The 2_3_1 should have same behavior as 1_2_3 since they are all clockwise.
     #[tokio::test]
     async fn test_triple_nodes_2_3_1() -> Result<()> {
         let (key1, key2, key3) = gen_triple_ordered_keys();
         test_triple_ordered_nodes(key2, key3, key1).await
     }
 
+    // The 3_1_2 should have same behavior as 1_2_3 since they are all clockwise.
     #[tokio::test]
     async fn test_triple_nodes_3_1_2() -> Result<()> {
         let (key1, key2, key3) = gen_triple_ordered_keys();
         test_triple_ordered_nodes(key3, key1, key2).await
     }
 
-    #[tokio::test]
-    async fn test_triple_nodes_1_3_2() -> Result<()> {
-        let (key1, key2, key3) = gen_triple_ordered_keys();
-        test_triple_desc_ordered_nodes(key1, key3, key2).await
-    }
-
-    #[tokio::test]
-    async fn test_triple_nodes_2_1_3() -> Result<()> {
-        let (key1, key2, key3) = gen_triple_ordered_keys();
-        test_triple_desc_ordered_nodes(key2, key1, key3).await
-    }
-
+    // node1.key > node2.key > node3.key
+    //
+    // All the processes are the same as test_triple_nodes_1_2_3. Except the following:
+    //
+    // --------- Join node3 to node2
+    // 0. Node3 will set node2 as successor in DHTJoin handler.
+    //
+    //    Node2 will not set node3 as successor in DHTJoin handler.
+    //    Because node2.processor.max() is node1, and node1.bias(node1) < node1.bias(node3).
+    //    That means node1 is closer to node2 than node3 on the clock circle.
+    //
+    // 1. Node3 send FindSuccessorSend(node3) to node2. Node2 relay it to Node1.
+    //    Meanwhile, node2 send FindSuccessorSend(node2) to node3.
+    //
+    // 2. Node3 respond by sending FindSuccessorReport(node2) to node2.
+    //    Meanwhile, node1 respond by sending FindSuccessorReport(node2) to node3 through node2.
+    //
     #[tokio::test]
     async fn test_triple_nodes_3_2_1() -> Result<()> {
         let (key1, key2, key3) = gen_triple_ordered_keys();
         test_triple_desc_ordered_nodes(key3, key2, key1).await
     }
 
-    /// We have three nodes, where key1 > key2 > key3
-    /// we connect key1 to key3 first
-    /// then when key1 send `FindSuccessor` to key3
-    /// and when stablization
-    /// key3 should response key2 to key1
-    /// key1 should notify key3 that key3's precessor is key1
+    // The 2_1_3 should have same behavior as 3_2_1 since they are all anti-clockwise.
     #[tokio::test]
-    async fn test_find_successor() -> Result<()> {
-        let stun = "stun://stun.l.google.com:19302";
+    async fn test_triple_nodes_2_1_3() -> Result<()> {
+        let (key1, key2, key3) = gen_triple_ordered_keys();
+        test_triple_desc_ordered_nodes(key2, key1, key3).await
+    }
 
-        let mut key1 = SecretKey::random();
-        let mut key2 = SecretKey::random();
-        let mut key3 = SecretKey::random();
+    // The 1_3_2 should have same behavior as 3_2_1 since they are all anti-clockwise.
+    #[tokio::test]
+    async fn test_triple_nodes_1_3_2() -> Result<()> {
+        let (key1, key2, key3) = gen_triple_ordered_keys();
+        test_triple_desc_ordered_nodes(key1, key3, key2).await
+    }
 
-        let mut v = vec![key1, key2, key3];
+    async fn test_triple_ordered_nodes(
+        key1: SecretKey,
+        key2: SecretKey,
+        key3: SecretKey,
+    ) -> Result<()> {
+        let (did1, dht1, swarm1, node1) = prepare_node(&key1);
+        let (did2, dht2, swarm2, node2) = prepare_node(&key2);
+        let (did3, dht3, swarm3, node3) = prepare_node(&key3);
 
-        v.sort_by(|a, b| {
-            if a.address() < b.address() {
-                std::cmp::Ordering::Less
-            } else {
-                std::cmp::Ordering::Greater
-            }
-        });
-        (key1, key2, key3) = (v[0], v[1], v[2]);
+        println!("========================================");
+        println!("||  now we connect node1 and node2    ||");
+        println!("========================================");
 
-        println!(
-            "test with key1: {:?}, key2: {:?}, key3: {:?}",
-            key1.address(),
-            key2.address(),
-            key3.address()
-        );
+        test_only_two_nodes_establish_connection(
+            (&key1, dht1.clone(), &swarm1, &node1),
+            (&key2, dht2.clone(), &swarm2, &node2),
+        )
+        .await?;
 
-        let did1 = key1.address().into();
-        let did2 = key2.address().into();
-        let did3 = key3.address().into();
+        assert_eq!(dht1.lock().await.successor.list(), vec![did2]);
+        assert_eq!(dht2.lock().await.successor.list(), vec![did1]);
+        assert_eq!(dht3.lock().await.successor.list(), vec![]);
 
-        let dht1 = Arc::new(Mutex::new(PeerRing::new(did1)));
-        let dht2 = Arc::new(Mutex::new(PeerRing::new(did2)));
-        let dht3 = Arc::new(Mutex::new(PeerRing::new(did3)));
+        println!("========================================");
+        println!("||  now we start join node3 to node2  ||");
+        println!("========================================");
 
-        let sm1 = SessionManager::new_with_seckey(&key1).unwrap();
-        let sm2 = SessionManager::new_with_seckey(&key2).unwrap();
-        let sm3 = SessionManager::new_with_seckey(&key3).unwrap();
+        manually_establish_connection(&swarm3, &swarm2).await?;
+        test_listen_join_and_init_find_succeesor((&key3, &node3), (&key2, &node2)).await?;
 
-        let swarm1 = Arc::new(Swarm::new(stun, key1.address(), sm1.clone()));
-        let swarm2 = Arc::new(Swarm::new(stun, key2.address(), sm2.clone()));
-        let swarm3 = Arc::new(Swarm::new(stun, key3.address(), sm3.clone()));
+        assert_eq!(dht1.lock().await.successor.list(), vec![did2]);
+        assert_eq!(dht2.lock().await.successor.list(), vec![did3, did1]);
+        assert_eq!(dht3.lock().await.successor.list(), vec![did2]);
 
-        let transport1 = swarm1.new_transport().await.unwrap();
-        let transport2 = swarm2.new_transport().await.unwrap();
-        let transport3 = swarm3.new_transport().await.unwrap();
-
-        let node1 = MessageHandler::new(Arc::clone(&dht1), Arc::clone(&swarm1));
-        let node2 = MessageHandler::new(Arc::clone(&dht2), Arc::clone(&swarm2));
-        let node3 = MessageHandler::new(Arc::clone(&dht3), Arc::clone(&swarm3));
-
-        // now we connect node1 and node3
-        // first node1 generate handshake info
-        let handshake_info1 = transport1
-            .get_handshake_info(&sm1, RTCSdpType::Offer)
-            .await?;
-
-        // node3 register handshake from node1
-        let addr1 = transport3.register_remote_info(handshake_info1).await?;
-        // and reponse a Answer
-        let handshake_info3 = transport3
-            .get_handshake_info(&sm3, RTCSdpType::Answer)
-            .await?;
-
-        // node1 accpeted the answer
-        let addr3 = transport1.register_remote_info(handshake_info3).await?;
-
-        assert_eq!(addr1, key1.address());
-        assert_eq!(addr3, key3.address());
-        // wait until ICE finish
-        let promise_1 = transport1.connect_success_promise().await?;
-        let promise_3 = transport3.connect_success_promise().await?;
-        promise_1.await?;
-        promise_3.await?;
-        // thus register transport to swarm
-        swarm1
-            .register(&swarm3.address(), transport1.clone())
-            .await
-            .unwrap();
-        swarm3
-            .register(&swarm1.address(), transport3.clone())
-            .await
-            .unwrap();
-
-        // node1 and node3 will gen JoinDHT Event
-        let ev_1 = node1.listen_once().await.unwrap();
-        assert_eq!(ev_1.addr, key1.address());
-        assert_eq!(ev_1.relay.method, RelayMethod::SEND);
-        assert_eq!(ev_1.relay.path, vec![did1]);
-        assert_eq!(ev_1.relay.path_end_cursor, 0);
-        assert_eq!(ev_1.relay.next_hop, Some(did1));
-        assert_eq!(ev_1.relay.destination, did1);
-
-        if let Message::JoinDHT(x) = ev_1.data {
-            assert_eq!(x.id, did3);
-        } else {
-            panic!();
-        }
-        // the message is send from key1
-        // will be transform into some remote action
-
-        let ev_3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev_3.addr, key3.address());
-        assert_eq!(ev_3.relay.method, RelayMethod::SEND);
-        assert_eq!(ev_3.relay.path, vec![did3]);
-        assert_eq!(ev_3.relay.path_end_cursor, 0);
-        assert_eq!(ev_3.relay.next_hop, Some(did3));
-        assert_eq!(ev_3.relay.destination, did3);
-
-        if let Message::JoinDHT(x) = ev_3.data {
-            assert_eq!(x.id, did1);
-        } else {
-            panic!();
-        }
-
-        let ev_1 = node1.listen_once().await.unwrap();
-        // msg is send from key3
-        assert_eq!(ev_1.addr, key3.address());
-        assert_eq!(ev_1.relay.method, RelayMethod::SEND);
-        assert_eq!(ev_1.relay.path, vec![did3]);
-        assert_eq!(ev_1.relay.path_end_cursor, 0);
-        assert_eq!(ev_1.relay.next_hop, Some(did1));
-        assert_eq!(ev_1.relay.destination, did1);
-        if let Message::FindSuccessorSend(x) = ev_1.data {
-            assert_eq!(x.id, did3);
-            assert!(!x.for_fix);
-        } else {
-            panic!();
-        }
-
-        let ev_3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev_3.addr, key1.address());
-        assert_eq!(ev_3.relay.method, RelayMethod::SEND);
-        assert_eq!(ev_3.relay.path, vec![did1]);
-        assert_eq!(ev_3.relay.path_end_cursor, 0);
-        assert_eq!(ev_3.relay.next_hop, Some(did3));
-        assert_eq!(ev_3.relay.destination, did3);
-        if let Message::FindSuccessorSend(x) = ev_3.data {
-            assert_eq!(x.id, did1);
-            assert!(!x.for_fix);
-        } else {
-            panic!();
-        }
-
-        // node3 response self as node1's successor
-        let ev_1 = node1.listen_once().await.unwrap();
-        assert_eq!(ev_1.addr, key3.address());
-        assert_eq!(ev_1.relay.method, RelayMethod::REPORT);
-        assert_eq!(ev_1.relay.path, vec![did1, did3]);
-        assert_eq!(ev_1.relay.path_end_cursor, 0);
-        assert_eq!(ev_1.relay.next_hop, Some(did1));
-        assert_eq!(ev_1.relay.destination, did1);
-        if let Message::FindSuccessorReport(x) = ev_1.data {
-            // for node3 there is no did is more closer to key1, so it response key1
-            // and dht1 won't update
-            assert!(!dht1.lock().await.successor.list().contains(&did1));
-            assert_eq!(x.id, did1);
-            assert!(!x.for_fix);
-        } else {
-            panic!();
-        }
-
-        // key1 response self as key3's successor
-        let ev_3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev_3.addr, key1.address());
-        assert_eq!(ev_3.relay.method, RelayMethod::REPORT);
-        assert_eq!(ev_3.relay.path, vec![did3, did1]);
-        assert_eq!(ev_3.relay.path_end_cursor, 0);
-        assert_eq!(ev_3.relay.next_hop, Some(did3));
-        assert_eq!(ev_3.relay.destination, did3);
-        if let Message::FindSuccessorReport(x) = ev_3.data {
-            // for key1 there is no did is more closer to key1, so it response key1
-            // and dht3 won't update
-            assert_eq!(x.id, did3);
-            assert!(!dht3.lock().await.successor.list().contains(&did3));
-            assert!(!x.for_fix);
-        } else {
-            panic!();
-        }
-
-        println!("=======================================================");
-        println!("||  now we connect node2 to node3       ||");
-        println!("=======================================================");
-        // now we connect node2 and node3
-        // first node2 generate handshake info
-        let transport3 = swarm3.new_transport().await.unwrap();
-        assert!(swarm2.get_transport(&key3.address()).is_none());
-
-        let handshake_info2 = transport2
-            .get_handshake_info(&sm2, RTCSdpType::Offer)
-            .await?;
-
-        // node3 register handshake from node2
-        let addr2 = transport3.register_remote_info(handshake_info2).await?;
-        // and reponse a Answer
-        let handshake_info3 = transport3
-            .get_handshake_info(&sm3, RTCSdpType::Answer)
-            .await?;
-
-        // node2 accpeted the answer
-        let addr3 = transport2.register_remote_info(handshake_info3).await?;
-
-        assert_eq!(addr2, key2.address());
-        assert_eq!(addr3, key3.address());
-        // wait until ICE finish
-        let promise_2 = transport2.connect_success_promise().await?;
-        let promise_3 = transport3.connect_success_promise().await?;
-        promise_2.await?;
-        promise_3.await?;
-        // thus register transport to swarm
-        swarm2
-            .register(&swarm3.address(), transport2.clone())
-            .await
-            .unwrap();
-        swarm3
-            .register(&swarm2.address(), transport3.clone())
-            .await
-            .unwrap();
-
-        // node2 and node3 will gen JoinDHT Event
-        let ev_2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev_2.addr, key2.address());
-        assert_eq!(ev_2.relay.method, RelayMethod::SEND);
-        assert_eq!(ev_2.relay.path, vec![did2]);
-        assert_eq!(ev_2.relay.path_end_cursor, 0);
-        assert_eq!(ev_2.relay.next_hop, Some(did2));
-        assert_eq!(ev_2.relay.destination, did2);
-
-        if let Message::JoinDHT(x) = ev_2.data {
-            assert_eq!(x.id, did3);
-        } else {
-            panic!();
-        }
-        // the message is send from key2
-        // will be transform into some remote action
-
-        let ev_3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev_3.addr, key3.address());
-        assert_eq!(ev_3.relay.method, RelayMethod::SEND);
-        assert_eq!(ev_3.relay.path, vec![did3]);
-        assert_eq!(ev_3.relay.path_end_cursor, 0);
-        assert_eq!(ev_3.relay.next_hop, Some(did3));
-        assert_eq!(ev_3.relay.destination, did3);
-
-        if let Message::JoinDHT(x) = ev_3.data {
-            assert_eq!(x.id, did2);
-        } else {
-            panic!();
-        }
-
-        let ev_2 = node2.listen_once().await.unwrap();
-        // msg is send from key3
-        // node 3 ask node 2 for successor
-        assert_eq!(ev_2.addr, key3.address());
-        assert_eq!(ev_2.relay.method, RelayMethod::SEND);
-        assert_eq!(ev_2.relay.path, vec![did3]);
-        assert_eq!(ev_2.relay.path_end_cursor, 0);
-        assert_eq!(ev_2.relay.next_hop, Some(did2));
-        assert_eq!(ev_2.relay.destination, did2);
-        if let Message::FindSuccessorSend(x) = ev_2.data {
-            assert_eq!(x.id, did3);
-            assert!(!x.for_fix);
-        } else {
-            panic!();
-        }
-
-        // node 2 ask node 3 for successor
-        // node 3 will ask it's successor: node 1
+        // 2->3 FindSuccessorReport
+        // node2 report node3 as node3's successor to node3
+        //
+        // node2 think there is no did that is closer to node3 than node3, so it respond node3
+        // to understand that you can imagine the layouts on the clock circle:
+        //
+        // node2 -> node3 -> node1
+        //   ^                 |
+        //   |-----------------|
+        //
+        // as you can see, in node2's view, node1 is farther than node3
+        // so node2 pick node3 as node3's successor
+        //
         let ev_3 = node3.listen_once().await.unwrap();
         assert_eq!(ev_3.addr, key2.address());
-        assert_eq!(ev_3.relay.method, RelayMethod::SEND);
-        assert_eq!(ev_3.relay.path, vec![did2]);
-        assert_eq!(ev_3.relay.path_end_cursor, 0);
-        assert_eq!(ev_3.relay.next_hop, Some(did3));
-        assert_eq!(ev_3.relay.destination, did3);
-        if let Message::FindSuccessorSend(x) = ev_3.data {
-            assert_eq!(x.id, did2);
-            assert!(!x.for_fix);
-        } else {
-            panic!();
-        }
-
-        // node 2 report to node3
-        // node 2 report node2's successor is node 3
-        let ev_3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev_3.addr, key2.address());
-        assert_eq!(ev_3.relay.method, RelayMethod::REPORT);
         assert_eq!(ev_3.relay.path, vec![did3, did2]);
-        assert_eq!(ev_3.relay.path_end_cursor, 0);
-        assert_eq!(ev_3.relay.next_hop, Some(did3));
-        assert_eq!(ev_3.relay.destination, did3);
-        if let Message::FindSuccessorReport(x) = ev_3.data {
-            assert_eq!(x.id, did3);
-            assert!(!x.for_fix);
-        } else {
-            panic!();
-        }
+        assert!(matches!(
+            ev_3.data,
+            Message::FindSuccessorReport(FindSuccessorReport{id, for_fix: false}) if id == did3
+        ));
+        // dht3 won't set did3 as successor
+        assert!(!dht3.lock().await.successor.list().contains(&did3));
 
-        // node 1 -> node 2 -> node 3
-        // node3's successor is node1,
-        // according to Chord algorithm
-        // node 3 will ask cloest_preceding_node to find successor of node2
-        // where v <- (node3, node2)
-        // so node 3 will ask node1 to find successor of node2
-        // *BECAUSE* node1, node2, node3, is a *RING*
-        // which can also pe present as node3, node1, node1
-        // the msg is send from node 3 to node 1
-        let ev_1 = node1.listen_once().await.unwrap();
-        assert_eq!(ev_1.addr, key3.address());
-        assert_eq!(ev_1.relay.method, RelayMethod::SEND);
-        assert_eq!(ev_1.relay.path, vec![did2, did3]);
-        assert_eq!(ev_1.relay.path_end_cursor, 0);
-        assert_eq!(ev_1.relay.next_hop, Some(did1));
-        assert_eq!(ev_1.relay.destination, did1);
-        if let Message::FindSuccessorSend(x) = ev_1.data {
-            assert_eq!(x.id, did2);
-            assert!(!x.for_fix);
-        } else {
-            panic!();
-        }
-
-        // node 1 report to node3
-        // node 1 report node2's successor is node 3
-        // because, node2 only know node3
-        assert!(!dht1.lock().await.finger.contains(&Some(did2)));
-        // from source of chord:
-        //     if self.bias(id) <= self.bias(self.successor.max()) || self.successor.is_none() {
-        //          Ok(PeerRingAction::Some(self.successor.min()))
-        // node1's successor is node3
-        // node2 is in [node1, node3]
-        // so it will response node3 to node 1
-
-        // node3 got report from node1
-        // path is node2 -> node3 -> node1 -> node3
-        let ev_3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev_3.addr, key1.address());
-        assert_eq!(ev_3.relay.method, RelayMethod::REPORT);
-        assert_eq!(ev_3.relay.path, vec![did2, did3, did1]);
-        assert_eq!(ev_3.relay.path_end_cursor, 0);
-        assert_eq!(ev_3.relay.next_hop, Some(did3));
-        assert_eq!(ev_3.relay.destination, did2);
-        if let Message::FindSuccessorReport(x) = ev_3.data {
-            assert_eq!(x.id, did3);
-            assert!(!x.for_fix);
-        } else {
-            panic!();
-        }
-
-        // node3 report it's result to node 2
-        // path is: node 2 -> node3 -> node1 -> node3 -> node2
+        // 3->2 FindSuccessorReport
+        // node3 report node2 as node2's successor to node2
         let ev_2 = node2.listen_once().await.unwrap();
         assert_eq!(ev_2.addr, key3.address());
-        assert_eq!(ev_2.relay.method, RelayMethod::REPORT);
-        assert_eq!(ev_2.relay.path, vec![did2, did3, did1]);
-        assert_eq!(ev_2.relay.path_end_cursor, 1);
-        assert_eq!(ev_2.relay.next_hop, Some(did2));
-        assert_eq!(ev_2.relay.destination, did2);
+        assert_eq!(ev_2.relay.path, vec![did2, did3]);
+        // node3 is only aware of node2, so it respond node2
+        assert!(matches!(
+            ev_2.data,
+            Message::FindSuccessorReport(FindSuccessorReport{id, for_fix: false}) if id == did2
+        ));
+        // dht2 won't set did2 as successor
+        assert!(!dht2.lock().await.successor.list().contains(&did2));
 
-        if let Message::FindSuccessorReport(x) = ev_2.data {
-            assert_eq!(x.id, did3);
-            assert!(!x.for_fix);
-        } else {
-            panic!();
-        }
+        assert_eq!(dht1.lock().await.successor.list(), vec![did2]);
+        assert_eq!(dht2.lock().await.successor.list(), vec![did3, did1]);
+        assert_eq!(dht3.lock().await.successor.list(), vec![did2]);
 
-        // now node1's successor is node3,
-        // node2's successor is node 3
-        // node3's successor is node 1
-        assert_eq!(dht1.lock().await.successor.list(), vec![did3]);
-        assert_eq!(dht2.lock().await.successor.list(), vec![did3]);
-        assert_eq!(dht3.lock().await.successor.list(), vec![did1]);
+        println!("=============================================");
+        println!("||  now we connect node1 to node3 via DHT  ||");
+        println!("=============================================");
+
+        test_connect_via_dht(
+            (&key1, &swarm1, &node1),
+            (&key2, &swarm2, &node2),
+            (&key3, &swarm3, &node3),
+        )
+        .await?;
+
+        assert_eq!(dht1.lock().await.successor.list(), vec![did2]);
+        assert_eq!(dht2.lock().await.successor.list(), vec![did3, did1]);
+        assert_eq!(dht3.lock().await.successor.list(), vec![did2]);
+
+        Ok(())
+    }
+
+    async fn test_triple_desc_ordered_nodes(
+        key1: SecretKey,
+        key2: SecretKey,
+        key3: SecretKey,
+    ) -> Result<()> {
+        let (did1, dht1, swarm1, node1) = prepare_node(&key1);
+        let (did2, dht2, swarm2, node2) = prepare_node(&key2);
+        let (did3, dht3, swarm3, node3) = prepare_node(&key3);
+
+        println!("========================================");
+        println!("||  now we connect node1 and node2    ||");
+        println!("========================================");
+
+        test_only_two_nodes_establish_connection(
+            (&key1, dht1.clone(), &swarm1, &node1),
+            (&key2, dht2.clone(), &swarm2, &node2),
+        )
+        .await?;
+
+        assert_eq!(dht1.lock().await.successor.list(), vec![did2]);
+        assert_eq!(dht2.lock().await.successor.list(), vec![did1]);
+        assert_eq!(dht3.lock().await.successor.list(), vec![]);
+
+        println!("========================================");
+        println!("||  now we start join node3 to node2  ||");
+        println!("========================================");
+
+        manually_establish_connection(&swarm3, &swarm2).await?;
+        test_listen_join_and_init_find_succeesor((&key3, &node3), (&key2, &node2)).await?;
+
+        assert_eq!(dht1.lock().await.successor.list(), vec![did2]);
+        assert_eq!(dht2.lock().await.successor.list(), vec![did1]);
+        assert_eq!(dht3.lock().await.successor.list(), vec![did2]);
+
+        // 3->2->1 FindSuccessorSend
+        // node2 think node1 is closer than itself to node3, so it relay msg to node1
+        //
+        // to understand that you can imagine the layouts on the clock circle:
+        //
+        // node2 -> node1 -> node3
+        //   ^                 |
+        //   |-----------------|
+        //
+        // as you can see, in node2's view, node1 is closer than node2 to node3.
+        // so node2 pick node1 to find_successor.
+        //
+        let ev_1 = node1.listen_once().await.unwrap();
+        assert_eq!(ev_1.addr, key2.address());
+        assert_eq!(ev_1.relay.path, vec![did3, did2]);
+        assert!(matches!(
+            ev_1.data,
+            Message::FindSuccessorSend(FindSuccessorSend{id, for_fix: false}) if id == did3
+        ));
+
+        // 3->2 FindSuccessorReport
+        // node3 report node2 as node2's successor to node2
+        let ev_2 = node2.listen_once().await.unwrap();
+        assert_eq!(ev_2.addr, key3.address());
+        assert_eq!(ev_2.relay.path, vec![did2, did3]);
+        // node3 is only aware of node2, so it respond node2
+        assert!(matches!(
+            ev_2.data,
+            Message::FindSuccessorReport(FindSuccessorReport{id, for_fix: false}) if id == did2
+        ));
+        // dht2 won't set did2 as successor
+        assert!(!dht2.lock().await.successor.list().contains(&did2));
+
+        // 1->2 FindSuccessorReport
+        // node1 report node2 as node3's successor to node2
+        let ev_2 = node2.listen_once().await.unwrap();
+        assert_eq!(ev_2.addr, key1.address());
+        assert_eq!(ev_2.relay.path, vec![did3, did2, did1]);
+        assert_eq!(ev_2.relay.path_end_cursor, 0);
+        // node1 is only aware of node2, so it respond node2
+        assert!(matches!(
+            ev_2.data,
+            Message::FindSuccessorReport(FindSuccessorReport{id, for_fix: false}) if id == did2
+        ));
+
+        // 1->2->3 FindSuccessorReport
+        // node2 relay report to node3
+        let ev_3 = node3.listen_once().await.unwrap();
+        assert_eq!(ev_3.addr, key2.address());
+        assert_eq!(ev_3.relay.path, vec![did3, did2, did1]);
+        assert_eq!(ev_3.relay.path_end_cursor, 1);
+        assert!(matches!(
+            ev_3.data,
+            Message::FindSuccessorReport(FindSuccessorReport{id, for_fix: false}) if id == did2
+        ));
+
+        assert_eq!(dht1.lock().await.successor.list(), vec![did2]);
+        assert_eq!(dht2.lock().await.successor.list(), vec![did1]);
+        assert_eq!(dht3.lock().await.successor.list(), vec![did2]);
+
+        println!("=============================================");
+        println!("||  now we connect node1 to node3 via DHT  ||");
+        println!("=============================================");
+
+        test_connect_via_dht(
+            (&key1, &swarm1, &node1),
+            (&key2, &swarm2, &node2),
+            (&key3, &swarm3, &node3),
+        )
+        .await?;
+
+        assert_eq!(dht1.lock().await.successor.list(), vec![did2]);
+        assert_eq!(dht2.lock().await.successor.list(), vec![did1]);
+        assert_eq!(dht3.lock().await.successor.list(), vec![did2]);
 
         Ok(())
     }
@@ -682,7 +557,7 @@ mod test {
     }
 
     fn prepare_node(key: &SecretKey) -> (Did, Arc<Mutex<PeerRing>>, Arc<Swarm>, MessageHandler) {
-        let stun = "stun://127.0.0.1:3478";
+        let stun = "stun://stun.l.google.com:19302";
 
         let did = key.address().into();
         let dht = Arc::new(Mutex::new(PeerRing::new(did)));
@@ -739,27 +614,26 @@ mod test {
         Ok(())
     }
 
-    async fn test_only_two_nodes_establish_connection(
-        (key1, dht1, swarm1, node1): (&SecretKey, Arc<Mutex<PeerRing>>, &Swarm, &MessageHandler),
-        (key2, dht2, swarm2, node2): (&SecretKey, Arc<Mutex<PeerRing>>, &Swarm, &MessageHandler),
+    async fn test_listen_join_and_init_find_succeesor(
+        (key1, node1): (&SecretKey, &MessageHandler),
+        (key2, node2): (&SecretKey, &MessageHandler),
     ) -> Result<()> {
         let did1 = key1.address().into();
         let did2 = key2.address().into();
 
-        manually_establish_connection(swarm1, swarm2).await?;
-
-        // JoinDHT
+        // 1 JoinDHT
         let ev_1 = node1.listen_once().await.unwrap();
         assert_eq!(ev_1.addr, key1.address());
         assert_eq!(ev_1.relay.path, vec![did1]);
         assert!(matches!(ev_1.data, Message::JoinDHT(JoinDHT{id}) if id == did2));
 
+        // 2 JoinDHT
         let ev_2 = node2.listen_once().await.unwrap();
         assert_eq!(ev_2.addr, key2.address());
         assert_eq!(ev_2.relay.path, vec![did2]);
         assert!(matches!(ev_2.data, Message::JoinDHT(JoinDHT{id}) if id == did1));
 
-        // FindSuccessorSend
+        // 1->2 FindSuccessorSend
         let ev_1 = node1.listen_once().await.unwrap();
         assert_eq!(ev_1.addr, key2.address());
         assert_eq!(ev_1.relay.path, vec![did2]);
@@ -768,6 +642,7 @@ mod test {
             Message::FindSuccessorSend(FindSuccessorSend{id, for_fix: false}) if id == did2
         ));
 
+        // 2->1 FindSuccessorSend
         let ev_2 = node2.listen_once().await.unwrap();
         assert_eq!(ev_2.addr, key1.address());
         assert_eq!(ev_2.relay.path, vec![did1]);
@@ -776,117 +651,56 @@ mod test {
             Message::FindSuccessorSend(FindSuccessorSend{id, for_fix: false}) if id == did1
         ));
 
-        // FindSuccessorReport
-        // node2 report self as node1's successor to node1
+        Ok(())
+    }
+
+    async fn test_only_two_nodes_establish_connection(
+        (key1, dht1, swarm1, node1): (&SecretKey, Arc<Mutex<PeerRing>>, &Swarm, &MessageHandler),
+        (key2, dht2, swarm2, node2): (&SecretKey, Arc<Mutex<PeerRing>>, &Swarm, &MessageHandler),
+    ) -> Result<()> {
+        let did1 = key1.address().into();
+        let did2 = key2.address().into();
+
+        manually_establish_connection(swarm1, swarm2).await?;
+        test_listen_join_and_init_find_succeesor((key1, node1), (key2, node2)).await?;
+
+        // 2->1 FindSuccessorReport
+        // node2 report node1 as node1's successor to node1
         let ev_1 = node1.listen_once().await.unwrap();
         assert_eq!(ev_1.addr, key2.address());
         assert_eq!(ev_1.relay.path, vec![did1, did2]);
-        // for node2 there is no did is more closer to node1, so it response node1
-        // and dht1 won't update
+        // node2 is only aware of node1, so it respond node1
         assert!(matches!(
             ev_1.data,
             Message::FindSuccessorReport(FindSuccessorReport{id, for_fix: false}) if id == did1
         ));
+        // dht1 won't set did1 as successor
         assert!(!dht1.lock().await.successor.list().contains(&did1));
 
-        // FindSuccessorReport
-        // node1 report self as node2's successor to node2
+        // 1->2 FindSuccessorReport
+        // node1 report node2 as node2's successor to node2
         let ev_2 = node2.listen_once().await.unwrap();
         assert_eq!(ev_2.addr, key1.address());
         assert_eq!(ev_2.relay.path, vec![did2, did1]);
-        // for node1 there is no did is more closer to node2, so it response node2
-        // and dht2 won't update
+        // node1 is only aware of node2, so it respond node2
         assert!(matches!(
             ev_2.data,
             Message::FindSuccessorReport(FindSuccessorReport{id, for_fix: false}) if id == did2
         ));
+        // dht2 won't set did2 as successor
         assert!(!dht2.lock().await.successor.list().contains(&did2));
 
         Ok(())
     }
 
-    async fn test_triple_ordered_nodes(
-        key1: SecretKey,
-        key2: SecretKey,
-        key3: SecretKey,
+    async fn test_connect_via_dht(
+        (key1, swarm1, node1): (&SecretKey, &Swarm, &MessageHandler),
+        (key2, _swarm2, node2): (&SecretKey, &Swarm, &MessageHandler),
+        (key3, _swarm3, node3): (&SecretKey, &Swarm, &MessageHandler),
     ) -> Result<()> {
-        let (did1, dht1, swarm1, node1) = prepare_node(&key1);
-        let (did2, dht2, swarm2, node2) = prepare_node(&key2);
-        let (did3, dht3, swarm3, node3) = prepare_node(&key3);
-
-        println!("========================================");
-        println!("||  now we connect node1 and node2    ||");
-        println!("========================================");
-
-        test_only_two_nodes_establish_connection(
-            (&key1, dht1.clone(), &swarm1, &node1),
-            (&key2, dht2.clone(), &swarm2, &node2),
-        )
-        .await?;
-
-        println!("========================================");
-        println!("||  now we start join node3 to node2  ||");
-        println!("========================================");
-
-        manually_establish_connection(&swarm3, &swarm2).await?;
-
-        // JoinDHT
-        let ev_3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev_3.addr, key3.address());
-        assert_eq!(ev_3.relay.path, vec![did3]);
-        assert!(matches!(ev_3.data, Message::JoinDHT(JoinDHT{id}) if id == did2));
-
-        let ev_2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev_2.addr, key2.address());
-        assert_eq!(ev_2.relay.path, vec![did2]);
-        assert!(matches!(ev_2.data, Message::JoinDHT(JoinDHT{id}) if id == did3));
-
-        // FindSuccessorSend
-        let ev_3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev_3.addr, key2.address());
-        assert_eq!(ev_3.relay.path, vec![did2]);
-        assert!(matches!(
-            ev_3.data,
-            Message::FindSuccessorSend(FindSuccessorSend{id, for_fix: false}) if id == did2
-        ));
-
-        let ev_2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev_2.addr, key3.address());
-        assert_eq!(ev_2.relay.path, vec![did3]);
-        assert!(matches!(
-            ev_2.data,
-            Message::FindSuccessorSend(FindSuccessorSend{id, for_fix: false}) if id == did3
-        ));
-
-        // FindSuccessorReport
-        // node2 report self as node3's successor to node3
-        let ev_3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev_3.addr, key2.address());
-        assert_eq!(ev_3.relay.path, vec![did3, did2]);
-        // for node2 there is no did is more closer to node3, so it response node3
-        // and dht3 won't update
-        assert!(matches!(
-            ev_3.data,
-            Message::FindSuccessorReport(FindSuccessorReport{id, for_fix: false}) if id == did3
-        ));
-        assert!(!dht3.lock().await.successor.list().contains(&did3));
-
-        // FindSuccessorReport
-        // node3 report self as node2's successor to node2
-        let ev_2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev_2.addr, key3.address());
-        assert_eq!(ev_2.relay.path, vec![did2, did3]);
-        // for node3 there is no did is more closer to node2, so it response node2
-        // and dht2 won't update
-        assert!(matches!(
-            ev_2.data,
-            Message::FindSuccessorReport(FindSuccessorReport{id, for_fix: false}) if id == did2
-        ));
-        assert!(!dht2.lock().await.successor.list().contains(&did2));
-
-        println!("=======================================================");
-        println!("||  now we connect join node3 to node1 via DHT       ||");
-        println!("=======================================================");
+        let did1 = key1.address().into();
+        let did2 = key2.address().into();
+        let did3 = key3.address().into();
 
         // check node1 and node3 is not connected to each other
         assert!(swarm1.get_transport(&key3.address()).is_none());
@@ -896,149 +710,7 @@ mod test {
 
         node1.connect(&key3.address()).await.unwrap();
 
-        // msg is send from node1 to node2
-        let ev2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev2.addr, key1.address());
-        assert_eq!(ev2.relay.path, vec![did1]);
-        assert!(matches!(ev2.data, Message::ConnectNodeSend(_)));
-
-        // node2 relay msg to node3
-        let ev3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev3.addr, key2.address());
-        assert_eq!(ev3.relay.path, vec![did1, did2]);
-        assert!(matches!(ev3.data, Message::ConnectNodeSend(_)));
-
-        // node3 send report to node2
-        let ev2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev2.addr, key3.address());
-        assert_eq!(ev2.relay.path, vec![did1, did2, did3]);
-        assert!(matches!(ev2.data, Message::ConnectNodeReport(_)));
-
-        // node 2 relay report to node1
-        let ev1 = node1.listen_once().await.unwrap();
-        assert_eq!(ev1.addr, key2.address());
-        assert_eq!(ev1.relay.path, vec![did1, did2, did3]);
-        assert!(matches!(ev1.data, Message::ConnectNodeReport(_)));
-
-        assert!(swarm1.get_transport(&key3.address()).is_some());
-        Ok(())
-    }
-
-    async fn test_triple_desc_ordered_nodes(
-        key1: SecretKey,
-        key2: SecretKey,
-        key3: SecretKey,
-    ) -> Result<()> {
-        let (did1, dht1, swarm1, node1) = prepare_node(&key1);
-        let (did2, dht2, swarm2, node2) = prepare_node(&key2);
-        let (did3, dht3, swarm3, node3) = prepare_node(&key3);
-
-        println!("========================================");
-        println!("||  now we connect node1 and node2    ||");
-        println!("========================================");
-
-        test_only_two_nodes_establish_connection(
-            (&key1, dht1.clone(), &swarm1, &node1),
-            (&key2, dht2.clone(), &swarm2, &node2),
-        )
-        .await?;
-
-        println!("========================================");
-        println!("||  now we start join node3 to node2  ||");
-        println!("========================================");
-
-        manually_establish_connection(&swarm3, &swarm2).await?;
-
-        // JoinDHT
-        let ev_3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev_3.addr, key3.address());
-        assert_eq!(ev_3.relay.path, vec![did3]);
-        assert!(matches!(ev_3.data, Message::JoinDHT(JoinDHT{id}) if id == did2));
-
-        // JoinDHT
-        let ev_2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev_2.addr, key2.address());
-        assert_eq!(ev_2.relay.path, vec![did2]);
-        assert!(matches!(ev_2.data, Message::JoinDHT(JoinDHT{id}) if id == did3));
-
-        // 2->3 FindSuccessorSend
-        let ev_3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev_3.addr, key2.address());
-        assert_eq!(ev_3.relay.path, vec![did2]);
-        assert!(matches!(
-            ev_3.data,
-            Message::FindSuccessorSend(FindSuccessorSend{id, for_fix: false}) if id == did2
-        ));
-
-        // 3->2 FindSuccessorSend
-        let ev_2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev_2.addr, key3.address());
-        assert_eq!(ev_2.relay.path, vec![did3]);
-        assert!(matches!(
-            ev_2.data,
-            Message::FindSuccessorSend(FindSuccessorSend{id, for_fix: false}) if id == did3
-        ));
-
-        // 3->2->1 FindSuccessorSend
-        // node2 think node1 is closer to node3, so it relay msg to node1
-        let ev_1 = node1.listen_once().await.unwrap();
-        assert_eq!(ev_1.addr, key2.address());
-        assert_eq!(ev_1.relay.path, vec![did3, did2]);
-        assert!(matches!(
-            ev_2.data,
-            Message::FindSuccessorSend(FindSuccessorSend{id, for_fix: false}) if id == did3
-        ));
-
-        // 3->2 FindSuccessorReport
-        // node3 report self as node2's successor to node2
-        let ev_2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev_2.addr, key3.address());
-        assert_eq!(ev_2.relay.path, vec![did2, did3]);
-        // for node3 there is no did is more closer to node2, so it response node2
-        // and dht2 won't update
-        assert!(matches!(
-            ev_2.data,
-            Message::FindSuccessorReport(FindSuccessorReport{id, for_fix: false}) if id == did2
-        ));
-        assert!(!dht2.lock().await.successor.list().contains(&did2));
-
-        // 1->2 FindSuccessorReport
-        // node1 report self as node3's successor to node2
-        let ev_2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev_2.addr, key1.address());
-        assert_eq!(ev_2.relay.path, vec![did3, did2, did1]);
-        assert_eq!(ev_2.relay.path_end_cursor, 0);
-        // node1 think node2 is closer to node3, so it response node2 // ?????????
-        assert!(matches!(
-            ev_2.data,
-            Message::FindSuccessorReport(FindSuccessorReport{id, for_fix: false}) if id == did2
-        ));
-
-        // node2 relay report to node3
-        let ev_3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev_3.addr, key2.address());
-        assert_eq!(ev_3.relay.path, vec![did3, did2, did1]);
-        assert_eq!(ev_3.relay.path_end_cursor, 1);
-        assert!(matches!(
-            ev_3.data,
-            Message::FindSuccessorReport(FindSuccessorReport{id, for_fix: false}) if id == did2
-        ));
-        // and dht3 won't update
-        assert!(!dht3.lock().await.successor.list().contains(&did3));
-
-        println!("=======================================================");
-        println!("||  now we connect join node3 to node1 via DHT       ||");
-        println!("=======================================================");
-
-        // check node1 and node3 is not connected to each other
-        assert!(swarm1.get_transport(&key3.address()).is_none());
-
-        // node1's successor should be node2 now
-        assert_eq!(node1.dht.lock().await.successor.max(), did2);
-
-        node1.connect(&key3.address()).await.unwrap();
-
-        // msg is send from node1 to node2
+        // node1 send msg to node2
         let ev2 = node2.listen_once().await.unwrap();
         assert_eq!(ev2.addr, key1.address());
         assert_eq!(ev2.relay.path, vec![did1]);
