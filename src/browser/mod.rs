@@ -61,6 +61,21 @@ pub fn debug(value: bool) {
 }
 
 #[wasm_bindgen]
+pub enum SignerMode {
+    DEFAULT,
+    EIP712,
+}
+
+impl From<SignerMode> for Signer {
+    fn from(v: SignerMode) -> Self {
+        match v {
+            SignerMode::DEFAULT => Self::DEFAULT,
+            SignerMode::EIP712 => Self::EIP712,
+        }
+    }
+}
+
+#[wasm_bindgen]
 #[derive(Clone)]
 pub struct UnsignedInfo {
     key_addr: Address,
@@ -70,11 +85,25 @@ pub struct UnsignedInfo {
 
 #[wasm_bindgen]
 impl UnsignedInfo {
+    /// Create a new `UnsignedInfo` instance with SignerMode::EIP712
     #[wasm_bindgen(constructor)]
     pub fn new(key_addr: String) -> Result<UnsignedInfo, JsError> {
+        Self::new_with_signer(key_addr, Some(SignerMode::EIP712))
+    }
+
+    /// Create a new `UnsignedInfo` instance
+    ///   * key_addr: wallet address
+    ///   * signer: `SignerMode`
+    pub fn new_with_signer(
+        key_addr: String,
+        signer: Option<SignerMode>,
+    ) -> Result<UnsignedInfo, JsError> {
         let key_addr = Address::from_str(key_addr.as_str())?;
-        let (auth, random_key) =
-            SessionManager::gen_unsign_info(key_addr, None, Some(Signer::EIP712))?;
+        let (auth, random_key) = SessionManager::gen_unsign_info(
+            key_addr,
+            None,
+            Some(signer.unwrap_or(SignerMode::EIP712).into()),
+        )?;
         Ok(UnsignedInfo {
             key_addr,
             auth,
@@ -122,11 +151,22 @@ impl Client {
         Ok(Client { processor })
     }
 
+    /// start backgroud listener without custom callback
     pub fn start(&self) -> Promise {
-        let msg_handler = self.processor.msg_handler.clone();
+        let p = self.processor.clone();
+
         future_to_promise(async move {
-            msg_handler.listen().await;
-            Ok(JsValue::from_str(""))
+            let h = Arc::clone(&p.msg_handler);
+            let s = Arc::clone(&p.stabilization);
+            futures::join!(
+                async {
+                    h.listen().await;
+                },
+                async {
+                    s.wait().await;
+                }
+            );
+            Ok(JsValue::null())
         })
     }
 
@@ -198,7 +238,7 @@ impl Client {
                 .await
                 .map_err(JsError::from)?;
             let state = peer.transport.ice_connection_state().await;
-            Ok(JsValue::from(Peer::from((state, peer))))
+            Ok(JsValue::try_from(&Peer::from((state, peer)))?)
         })
     }
 
@@ -222,7 +262,7 @@ impl Client {
                 .await
                 .map_err(JsError::from)?;
             let state = peer.transport.ice_connection_state().await;
-            Ok(JsValue::from(Peer::from((state, peer))))
+            Ok(JsValue::try_from(&Peer::from((state, peer)))?)
         })
     }
 
@@ -231,7 +271,7 @@ impl Client {
         let p = self.processor.clone();
         future_to_promise(async move {
             let peer = p.create_offer().await.map_err(JsError::from)?;
-            Ok(TransportAndIce::from(peer).into())
+            Ok(JsValue::try_from(&TransportAndIce::from(peer))?)
         })
     }
 
@@ -243,7 +283,10 @@ impl Client {
                 .answer_offer(ice_info.as_str())
                 .await
                 .map_err(JsError::from)?;
-            Ok(TransportAndIce::from((transport, handshake_info)).into())
+            Ok(JsValue::try_from(&TransportAndIce::from((
+                transport,
+                handshake_info,
+            )))?)
         })
     }
 
@@ -256,7 +299,7 @@ impl Client {
                 .await
                 .map_err(JsError::from)?;
             let state = peer.transport.ice_connection_state().await;
-            Ok(Peer::from((state, peer)).into())
+            Ok(JsValue::try_from(&Peer::from((state, peer)))?)
         })
     }
 
@@ -275,7 +318,7 @@ impl Client {
                 peers
                     .iter()
                     .zip(states.iter())
-                    .map(|(x, y)| JsValue::from(Peer::from((*y, x.clone())))),
+                    .flat_map(|(x, y)| JsValue::try_from(&Peer::from((*y, x.clone())))),
             );
             Ok(js_array.into())
         })
@@ -313,7 +356,7 @@ impl Client {
             p.close_pending_transport(transport_id.as_str())
                 .await
                 .map_err(JsError::from)?;
-            Ok(transport_id.into())
+            Ok(JsValue::from_str(&transport_id))
         })
     }
 
@@ -328,6 +371,17 @@ impl Client {
         })
     }
 
+    /// get peer by address
+    pub fn get_peer(&self, address: String) -> Promise {
+        let p = self.processor.clone();
+        future_to_promise(async move {
+            let peer = p.get_peer(address.as_str()).await.map_err(JsError::from)?;
+            let state = peer.transport.ice_connection_state().await;
+            Ok(JsValue::try_from(&Peer::from((state, peer)))?)
+        })
+    }
+
+    /// get transport state by address
     pub fn transport_state(&self, address: String) -> Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
@@ -336,8 +390,28 @@ impl Client {
                 .swarm
                 .get_transport(&address)
                 .ok_or_else(|| JsError::new("transport not found"))?;
-            let state = transport.ice_connection_state().await;
-            Ok(state.into())
+            let state = transport
+                .ice_connection_state()
+                .await
+                .map(from_rtc_ice_connection_state);
+            Ok(JsValue::from_serde(&state).map_err(JsError::from)?)
+        })
+    }
+
+    /// wait for data channel open
+    ///   * address: peer's address
+    pub fn wait_for_data_channel_open(&self, address: String) -> Promise {
+        let p = self.processor.clone();
+        future_to_promise(async move {
+            log::debug!("address: {}", address);
+            let peer = p.get_peer(address.as_str()).await.map_err(JsError::from)?;
+            log::debug!("wait for data channel open start");
+            if let Err(e) = peer.transport.wait_for_data_channel_open().await {
+                log::warn!("wait_for_data_channel failed: {}", e);
+            }
+            //.map_err(JsError::from)?;
+            log::debug!("wait for data channel open done");
+            Ok(JsValue::null())
         })
     }
 }
@@ -449,6 +523,14 @@ impl From<(Option<RtcIceConnectionState>, processor::Peer)> for Peer {
     }
 }
 
+impl TryFrom<&Peer> for JsValue {
+    type Error = JsError;
+
+    fn try_from(value: &Peer) -> Result<Self, Self::Error> {
+        JsValue::from_serde(value).map_err(JsError::from)
+    }
+}
+
 #[wasm_bindgen]
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TransportAndIce {
@@ -479,5 +561,13 @@ impl TransportAndIce {
 impl From<(Arc<Transport>, Encoded)> for TransportAndIce {
     fn from((transport, ice): (Arc<Transport>, Encoded)) -> Self {
         Self::new(transport.id.to_string().as_str(), ice.to_string().as_str())
+    }
+}
+
+impl TryFrom<&TransportAndIce> for JsValue {
+    type Error = JsError;
+
+    fn try_from(value: &TransportAndIce) -> Result<Self, Self::Error> {
+        JsValue::from_serde(value).map_err(JsError::from)
     }
 }

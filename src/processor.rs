@@ -270,6 +270,16 @@ impl Processor {
         Ok(data)
     }
 
+    /// Get peer by remote address
+    pub async fn get_peer(&self, address: &str) -> Result<Peer> {
+        let address = Address::from_str(address).map_err(|_| Error::InvalidAddress)?;
+        let transport = self
+            .swarm
+            .get_transport(&address)
+            .ok_or(Error::TransportNotFound)?;
+        Ok(Peer::from(&(address, transport)))
+    }
+
     /// Disconnect a peer with web3 address.
     pub async fn disconnect(&self, address: &str) -> Result<()> {
         let address = Address::from_str(address).map_err(|_| Error::InvalidAddress)?;
