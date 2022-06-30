@@ -246,7 +246,7 @@ mod test {
     use crate::dht::PeerRing;
     use crate::ecc::SecretKey;
     use crate::message::MessageHandler;
-    use crate::message::RelayMethod;
+    
     use crate::prelude::RTCSdpType;
     use crate::session::SessionManager;
     use crate::swarm::Swarm;
