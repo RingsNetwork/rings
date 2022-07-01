@@ -10,7 +10,7 @@ use crate::err::Result;
 use crate::session::Session;
 use crate::session::Signer;
 
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct MessageVerification {
     pub session: Session,
     pub ttl_ms: usize,

@@ -4,7 +4,7 @@ use web3::types::Address;
 
 use crate::err::Result;
 
-#[derive(Debug, PartialEq, Serialize, Clone)]
+#[derive(Debug, PartialEq, Eq, Serialize, Clone)]
 pub enum Event {
     ConnectFailed(Address),
     DataChannelMessage(Vec<u8>),

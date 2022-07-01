@@ -24,9 +24,9 @@ pub mod signers;
 pub type SigBytes = [u8; 65];
 pub type CurveEle = PublicKey;
 
-#[derive(PartialEq, Debug, Clone, Copy)]
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub struct SecretKey(libsecp256k1::SecretKey);
-#[derive(Deserialize, Serialize, PartialEq, Debug, Clone, Copy)]
+#[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone, Copy)]
 pub struct PublicKey(libsecp256k1::PublicKey);
 
 #[derive(Deserialize, Serialize, Debug, Clone, Eq, PartialEq)]
@@ -181,7 +181,7 @@ impl SecretKey {
 
     pub fn sign_hash(&self, message_hash: &[u8; 32]) -> SigBytes {
         let (signature, recover_id) =
-            libsecp256k1::sign(&libsecp256k1::Message::parse(message_hash), &*self);
+            libsecp256k1::sign(&libsecp256k1::Message::parse(message_hash), self);
         let mut sig_bytes: SigBytes = [0u8; 65];
         sig_bytes[0..32].copy_from_slice(&signature.r.b32());
         sig_bytes[32..64].copy_from_slice(&signature.s.b32());

@@ -18,7 +18,7 @@ use crate::err::Result;
 use crate::storage::MemStorage;
 
 /// Remote actions
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum RemoteAction {
     /// Ask did_a to find did_b

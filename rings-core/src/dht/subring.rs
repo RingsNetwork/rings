@@ -19,7 +19,7 @@ use crate::err::Result;
 
 /// A SubRing is a full functional Ring, but with a name and it's finger table can be
 /// stored on Main Rings DHT, For a SubRing, it's virtual address is `sha1(name)`
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubRing {
     /// name of subring
     pub name: String,

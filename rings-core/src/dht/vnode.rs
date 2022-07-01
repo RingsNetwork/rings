@@ -16,7 +16,7 @@ use crate::message::Encoder;
 use crate::message::MessagePayload;
 
 /// VNode Types
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VNodeType {
     /// Data: Encoded data stored in DHT
     Data,
@@ -31,7 +31,7 @@ pub enum VNodeType {
 /// For Encoded Data, it's sha1 of data, for a SubRing, it's sha1 of SubRing's name,
 /// and for the RelayedMessage, it's the target address of message plus 1 (for ensure that the message is
 /// sent to the successor of target), thus while target Node going online, it will sync from it's successor.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VirtualNode {
     /// address of vnode
     pub address: Did,

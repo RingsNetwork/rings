@@ -7,7 +7,7 @@ use url::Url;
 use crate::err::Error;
 use crate::err::Result;
 
-#[derive(Deserialize, Serialize, Debug, Clone, Default, PartialEq)]
+#[derive(Deserialize, Serialize, Debug, Clone, Default, PartialEq, Eq)]
 pub enum IceCredentialType {
     Unspecified,
     #[default]
@@ -15,7 +15,7 @@ pub enum IceCredentialType {
     Oauth,
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct IceServer {
     pub urls: Vec<String>,
     pub username: String,
