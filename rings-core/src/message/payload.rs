@@ -30,7 +30,7 @@ pub enum OriginVerificationGen {
     Stick(MessageVerification),
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct MessagePayload<T> {
     pub data: T,
     pub tx_id: HashStr,

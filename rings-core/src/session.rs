@@ -22,19 +22,19 @@ use crate::utils;
 const DEFAULT_TTL_MS: usize = 24 * 3600 * 1000;
 
 /// we support both EIP712 and raw ECDSA singing forrmat
-#[derive(Deserialize, Serialize, PartialEq, Debug, Clone)]
+#[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
 pub enum Signer {
     DEFAULT,
     EIP712,
 }
 
-#[derive(Deserialize, Serialize, PartialEq, Debug, Clone)]
+#[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
 pub enum Ttl {
     Some(usize),
     Never,
 }
 
-#[derive(Deserialize, Serialize, PartialEq, Debug, Clone)]
+#[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
 pub struct AuthorizedInfo {
     pub authorizer: Address,
     pub signer: Signer,
@@ -43,7 +43,7 @@ pub struct AuthorizedInfo {
     pub ts_ms: u128,
 }
 
-#[derive(Deserialize, Serialize, PartialEq, Debug, Clone)]
+#[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
 pub struct Session {
     pub sig: Vec<u8>,
     pub auth: AuthorizedInfo,

@@ -11,7 +11,7 @@ use crate::err::Result;
 
 /// Finger table of Chord DHT
 /// Ring's finger table is implemented with BiasRing
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FingerTable {
     id: Did,
     size: usize,

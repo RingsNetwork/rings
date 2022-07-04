@@ -9,7 +9,7 @@ use crate::err::Result;
 
 /// `MessageRelay` divides messages into two types by method: SEND and REPORT.
 /// And will enable different behaviors when handling SEND and REPORT messages.
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub enum RelayMethod {
     /// When a node want to send message to another node, it will send a message with SEND method.
     SEND,
@@ -26,7 +26,7 @@ pub enum RelayMethod {
 /// - Record the whole transport path for inspection.
 ///
 /// # Examples
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct MessageRelay {
     /// The method of message. SEND or REPORT.
     pub method: RelayMethod,
