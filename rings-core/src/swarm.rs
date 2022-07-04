@@ -239,9 +239,6 @@ impl TransportManager for Swarm {
         address: &Address,
         default: Self::Transport,
     ) -> Result<Self::Transport> {
-        if !default.is_connected().await {
-            return Err(Error::SwarmDefaultTransportNotConnected);
-        }
         Ok(self.table.get_or_set(address, default))
     }
 }
