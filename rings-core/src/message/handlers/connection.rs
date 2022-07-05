@@ -240,6 +240,9 @@ mod test {
     use std::sync::Arc;
 
     use futures::lock::Mutex;
+    use tokio::time::sleep;
+    use tokio::time::Duration;
+    use web3::types::Address;
 
     use super::*;
     use crate::dht::Did;
@@ -255,7 +258,7 @@ mod test {
     // ndoe1.key < node2.key < node3.key
     //
     // Firstly, we connect node1 to node2, node2 to node3.
-    // Then, we connect key1 to key3 via DHT.
+    // Then, we connect node1 to node3 via DHT.
     //
     // After full connected, the topological structure should be:
     //
@@ -281,6 +284,17 @@ mod test {
     // 2. Node3 respond by sending FindSuccessorReport(node2) to node2.
     //    Meanwhile, node2 respond by sending FindSuccessorReport(node3) to node3.
     //    But no node should update local successor by those reports.
+    //
+    // --------- Connect node1 to node3 via DHT
+    // 0. After checking finger table locally, node1 pick node2 to send ConnectNodeSend(node3).
+    //
+    // 1. Node2 relay ConnectNodeSend(node3) to node3.
+    //
+    // 2. Node3 respond by sending ConnectNodeReport(node1) to node2.
+    //
+    // 3. Node2 relay ConnectNodeReport(node1) to node1.
+    //
+    // --------- Communications after successful connection
     //
     #[tokio::test]
     async fn test_triple_nodes_1_2_3() -> Result<()> {
@@ -318,6 +332,8 @@ mod test {
     //
     // 2. Node3 respond by sending FindSuccessorReport(node2) to node2.
     //    Meanwhile, node1 respond by sending FindSuccessorReport(node2) to node3 through node2.
+    //
+    // --------- Communications after successful connection
     //
     #[tokio::test]
     async fn test_triple_nodes_3_2_1() -> Result<()> {
@@ -409,6 +425,10 @@ mod test {
         // dht2 won't set did2 as successor
         assert!(!dht2.lock().await.successor.list().contains(&did2));
 
+        println!("=== Check state before connect via DHT ===");
+        assert_transports(swarm1.clone(), vec![key2.address()]);
+        assert_transports(swarm2.clone(), vec![key1.address(), key3.address()]);
+        assert_transports(swarm3.clone(), vec![key2.address()]);
         assert_eq!(dht1.lock().await.successor.list(), vec![did2]);
         assert_eq!(dht2.lock().await.successor.list(), vec![did3, did1]);
         assert_eq!(dht3.lock().await.successor.list(), vec![did2]);
@@ -417,16 +437,61 @@ mod test {
         println!("||  now we connect node1 to node3 via DHT  ||");
         println!("=============================================");
 
-        test_connect_via_dht(
+        test_connect_via_dht_and_init_find_succeesor(
             (&key1, &swarm1, &node1),
             (&key2, &swarm2, &node2),
             (&key3, &swarm3, &node3),
         )
         .await?;
 
+        // The following are other communications after successful connection
+
+        // 3->1->2 FindSuccessorSend
+        let ev_2 = node2.listen_once().await.unwrap();
+        assert_eq!(ev_2.addr, key1.address());
+        assert_eq!(ev_2.relay.path, vec![did3, did1]);
+        assert!(matches!(
+            ev_2.data,
+            Message::FindSuccessorSend(FindSuccessorSend{id, for_fix: false}) if id == did3
+        ));
+
+        // 3->1 FindSuccessorReport
+        // node3 report node1 as node1's successor to node1
+        let ev_1 = node1.listen_once().await.unwrap();
+        assert_eq!(ev_1.addr, key3.address());
+        assert_eq!(ev_1.relay.path, vec![did1, did3]);
+        assert!(matches!(
+            ev_1.data,
+            Message::FindSuccessorReport(FindSuccessorReport{id, for_fix: false}) if id == did1
+        ));
+        // dht1 won't set did1 as successor
+        assert!(!dht1.lock().await.successor.list().contains(&did1));
+
+        // 2->1 FindSuccessorReport
+        let ev_1 = node1.listen_once().await.unwrap();
+        assert_eq!(ev_1.addr, key2.address());
+        assert_eq!(ev_1.relay.path, vec![did3, did1, did2]);
+
+        // 2->1->3 FindSuccessorReport
+        let ev_3 = node3.listen_once().await.unwrap();
+        assert_eq!(ev_3.addr, key1.address());
+        assert_eq!(ev_3.relay.path, vec![did3, did1, did2]);
+        assert!(matches!(
+            ev_3.data,
+            Message::FindSuccessorReport(FindSuccessorReport{id, for_fix: false}) if id == did3
+        ));
+        // dht3 won't set did3 as successor
+        assert!(!dht3.lock().await.successor.list().contains(&did3));
+
+        assert_no_more_msg(&node1, &node2, &node3).await;
+
+        println!("=== Check state after connect via DHT ===");
+        assert_transports(swarm1, vec![key2.address(), key3.address()]);
+        assert_transports(swarm2, vec![key1.address(), key3.address()]);
+        assert_transports(swarm3, vec![key1.address(), key2.address()]);
         assert_eq!(dht1.lock().await.successor.list(), vec![did2]);
         assert_eq!(dht2.lock().await.successor.list(), vec![did3, did1]);
-        assert_eq!(dht3.lock().await.successor.list(), vec![did2]);
+        assert_eq!(dht3.lock().await.successor.list(), vec![did1, did2]);
 
         Ok(())
     }
@@ -521,6 +586,10 @@ mod test {
             Message::FindSuccessorReport(FindSuccessorReport{id, for_fix: false}) if id == did2
         ));
 
+        println!("=== Check state before connect via DHT ===");
+        assert_transports(swarm1.clone(), vec![key2.address()]);
+        assert_transports(swarm2.clone(), vec![key1.address(), key3.address()]);
+        assert_transports(swarm3.clone(), vec![key2.address()]);
         assert_eq!(dht1.lock().await.successor.list(), vec![did2]);
         assert_eq!(dht2.lock().await.successor.list(), vec![did1]);
         assert_eq!(dht3.lock().await.successor.list(), vec![did2]);
@@ -529,14 +598,59 @@ mod test {
         println!("||  now we connect node1 to node3 via DHT  ||");
         println!("=============================================");
 
-        test_connect_via_dht(
+        test_connect_via_dht_and_init_find_succeesor(
             (&key1, &swarm1, &node1),
             (&key2, &swarm2, &node2),
             (&key3, &swarm3, &node3),
         )
         .await?;
 
-        assert_eq!(dht1.lock().await.successor.list(), vec![did2]);
+        // The following are other communications after successful connection
+
+        // 1->3->2 FindSuccessorSend
+        let ev_2 = node2.listen_once().await.unwrap();
+        assert_eq!(ev_2.addr, key3.address());
+        assert_eq!(ev_2.relay.path, vec![did1, did3]);
+        assert!(matches!(
+            ev_2.data,
+            Message::FindSuccessorSend(FindSuccessorSend{id, for_fix: false}) if id == did1
+        ));
+
+        // 1->3 FindSuccessorReport
+        // node1 report node3 as node3's successor to node1
+        let ev_3 = node3.listen_once().await.unwrap();
+        assert_eq!(ev_3.addr, key1.address());
+        assert_eq!(ev_3.relay.path, vec![did3, did1]);
+        assert!(matches!(
+            ev_3.data,
+            Message::FindSuccessorReport(FindSuccessorReport{id, for_fix: false}) if id == did3
+        ));
+        // dht3 won't set did3 as successor
+        assert!(!node3.dht.lock().await.successor.list().contains(&did3));
+
+        // 2->3 FindSuccessorReport
+        let ev_3 = node3.listen_once().await.unwrap();
+        assert_eq!(ev_3.addr, key2.address());
+        assert_eq!(ev_3.relay.path, vec![did1, did3, did2]);
+
+        // 2->3->1 FindSuccessorReport
+        let ev_1 = node1.listen_once().await.unwrap();
+        assert_eq!(ev_1.addr, key3.address());
+        assert_eq!(ev_1.relay.path, vec![did1, did3, did2]);
+        assert!(matches!(
+            ev_1.data,
+            Message::FindSuccessorReport(FindSuccessorReport{id, for_fix: false}) if id == did1
+        ));
+        // dht1 won't set did1 as successor
+        assert!(!node1.dht.lock().await.successor.list().contains(&did1));
+
+        assert_no_more_msg(&node1, &node2, &node3).await;
+
+        println!("=== Check state after connect via DHT ===");
+        assert_transports(swarm1, vec![key2.address(), key3.address()]);
+        assert_transports(swarm2, vec![key1.address(), key3.address()]);
+        assert_transports(swarm3, vec![key1.address(), key2.address()]);
+        assert_eq!(dht1.lock().await.successor.list(), vec![did3, did2]);
         assert_eq!(dht2.lock().await.successor.list(), vec![did1]);
         assert_eq!(dht3.lock().await.successor.list(), vec![did2]);
 
@@ -692,7 +806,7 @@ mod test {
         Ok(())
     }
 
-    async fn test_connect_via_dht(
+    async fn test_connect_via_dht_and_init_find_succeesor(
         (key1, swarm1, node1): (&SecretKey, &Swarm, &MessageHandler),
         (key2, _swarm2, node2): (&SecretKey, &Swarm, &MessageHandler),
         (key3, _swarm3, node3): (&SecretKey, &Swarm, &MessageHandler),
@@ -734,6 +848,65 @@ mod test {
         assert!(matches!(ev1.data, Message::ConnectNodeReport(_)));
 
         assert!(swarm1.get_transport(&key3.address()).is_some());
+
+        // The following are communications after successful connection
+
+        // 1 JoinDHT
+        let ev_1 = node1.listen_once().await.unwrap();
+        assert_eq!(ev_1.addr, key1.address());
+        assert_eq!(ev_1.relay.path, vec![did1]);
+        assert!(matches!(ev_1.data, Message::JoinDHT(JoinDHT{id}) if id == did3));
+
+        // 3 JoinDHT
+        let ev_3 = node3.listen_once().await.unwrap();
+        assert_eq!(ev_3.addr, key3.address());
+        assert_eq!(ev_3.relay.path, vec![did3]);
+        assert!(matches!(ev_3.data, Message::JoinDHT(JoinDHT{id}) if id == did1));
+
+        // 3->1 FindSuccessorSend
+        let ev_1 = node1.listen_once().await.unwrap();
+        assert_eq!(ev_1.addr, key3.address());
+        assert_eq!(ev_1.relay.path, vec![did3]);
+        assert!(matches!(
+            ev_1.data,
+            Message::FindSuccessorSend(FindSuccessorSend{id, for_fix: false}) if id == did3
+        ));
+
+        // 1->3 FindSuccessorSend
+        let ev_3 = node3.listen_once().await.unwrap();
+        assert_eq!(ev_3.addr, key1.address());
+        assert_eq!(ev_3.relay.path, vec![did1]);
+        assert!(matches!(
+            ev_3.data,
+            Message::FindSuccessorSend(FindSuccessorSend{id, for_fix: false}) if id == did1
+        ));
+
         Ok(())
+    }
+
+    async fn assert_no_more_msg(
+        node1: &MessageHandler,
+        node2: &MessageHandler,
+        node3: &MessageHandler,
+    ) {
+        tokio::select! {
+            _ = node1.listen_once() => unreachable!(),
+            _ = node2.listen_once() => unreachable!(),
+            _ = node3.listen_once() => unreachable!(),
+            _ = sleep(Duration::from_secs(3)) => {}
+        }
+    }
+
+    fn assert_transports(swarm: Arc<Swarm>, addresses: Vec<Address>) {
+        println!(
+            "Check tranport of {:?}: {:?} for addresses {:?}",
+            swarm.address(),
+            swarm.get_addresses(),
+            addresses
+        );
+        assert_eq!(swarm.get_transports().len(), addresses.len());
+        for addr in addresses {
+            assert!(swarm.get_transport(&addr).is_some());
+        }
     }
 }
