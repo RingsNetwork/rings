@@ -43,6 +43,7 @@ impl HandleMsg<JoinDHT> for MessageHandler {
         // finger table just have no other node(beside next), it will be a `create` op
         // otherwise, it will be a `send` op
         let mut dht = self.dht.lock().await;
+        log::debug!("[HANDLER] JoinDHT received, {:?}", dht);
         match dht.join(msg.id) {
             PeerRingAction::None => Ok(()),
             PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessor(id)) => {
@@ -71,9 +72,14 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload<Message>, msg: &ConnectNodeSend) -> Result<()> {
         let dht = self.dht.lock().await;
         let mut relay = ctx.relay.clone();
+        log::debug!("[HANDLER] ConnectNodeSend received, {:?}", relay.sender());
 
         if dht.id != relay.destination {
             if self.swarm.get_transport(&relay.destination).is_some() {
+                log::debug!(
+                    "connected_node_send, destination found: {:?}",
+                    relay.destination
+                );
                 relay.relay(dht.id, Some(relay.destination))?;
                 return self.transpond_payload(ctx, relay).await;
             } else {
@@ -84,6 +90,7 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
                 }
                 .ok_or(Error::MessageHandlerMissNextNode)?;
                 relay.relay(dht.id, Some(next_node))?;
+                log::debug!("connected_node_send, next_node: {:?}", next_node);
                 return self.transpond_payload(ctx, relay).await;
             }
         }
@@ -127,6 +134,7 @@ impl HandleMsg<ConnectNodeReport> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload<Message>, msg: &ConnectNodeReport) -> Result<()> {
         let dht = self.dht.lock().await;
         let mut relay = ctx.relay.clone();
+        log::debug!("[HANDLER] ConnectNodeReport received: {:?}", relay.sender());
 
         relay.relay(dht.id, None)?;
         if relay.next_hop.is_some() {
@@ -153,6 +161,7 @@ impl HandleMsg<AlreadyConnected> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload<Message>, _msg: &AlreadyConnected) -> Result<()> {
         let dht = self.dht.lock().await;
         let mut relay = ctx.relay.clone();
+        log::debug!("[HANDLER] AlreadyConnected received, {:?}", relay.sender());
 
         relay.relay(dht.id, None)?;
         if relay.next_hop.is_some() {
@@ -172,6 +181,7 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload<Message>, msg: &FindSuccessorSend) -> Result<()> {
         let dht = self.dht.lock().await;
         let mut relay = ctx.relay.clone();
+        log::debug!("[HANDLER] FindSuccessorSend received, {:?}", relay.sender());
 
         match dht.find_successor(msg.id)? {
             PeerRingAction::Some(id) => {
@@ -201,6 +211,7 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload<Message>, msg: &FindSuccessorReport) -> Result<()> {
         let mut dht = self.dht.lock().await;
         let mut relay = ctx.relay.clone();
+        log::debug!("[HANDLER] FindSuccessorReport received, {:?}", relay.sender());
 
         relay.relay(dht.id, None)?;
         if relay.next_hop.is_some() {

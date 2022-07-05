@@ -88,8 +88,11 @@ impl Stabilization {
     }
 
     pub async fn stabilize(&self) -> Result<()> {
+        log::debug!("run stabilize start");
         self.notify_predecessor().await?;
+        log::debug!("run stabilize notify done");
         self.fix_fingers().await?;
+        log::debug!("run stabilize done");
         Ok(())
     }
 }
@@ -150,7 +153,7 @@ mod stabilizer {
                     caller.stabilize().await.unwrap();
                 }))
             };
-            poll!(func, 5000);
+            poll!(func, 10000);
         }
     }
 }

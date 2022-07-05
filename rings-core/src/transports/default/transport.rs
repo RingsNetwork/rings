@@ -356,7 +356,7 @@ impl IceTransportCallback<Event, AcChannel<Event>> for DefaultTransport {
             let event_sender = event_sender.clone();
             Box::pin(async move {
                 d.on_message(Box::new(move |msg: DataChannelMessage| {
-                    log::debug!("Message from DataChannel: '{:?}'", msg);
+                    // log::debug!("Message from DataChannel: '{:?}'", msg);
                     let event_sender = event_sender.clone();
                     Box::pin(async move {
                         if event_sender

@@ -393,6 +393,7 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
                     let data = ev.data();
                     let event_sender = Arc::clone(&event_sender);
                     spawn_local(async move {
+                        log::debug!("onMessageEvent: {:?}", data);
                         let msg = if data.has_type::<web_sys::Blob>() {
                             let data: web_sys::Blob = data.clone().into();
                             if data.size() == 0f64 {

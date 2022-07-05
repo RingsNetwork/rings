@@ -98,7 +98,7 @@ async fn create_connection(p1: &Processor, p2: &Processor) {
     assert!(peer.transport.id.eq(&transport_1.id), "transport not same");
 }
 
-#[wasm_bindgen_test]
+// #[wasm_bindgen_test]
 async fn test_processor_handshake_and_msg() {
     let p1 = new_processor();
     let p2 = new_processor();
@@ -183,7 +183,7 @@ async fn test_processor_handshake_and_msg() {
     futures::join!(close_all_transport(&p1), close_all_transport(&p2),);
 }
 
-#[wasm_bindgen_test]
+// #[wasm_bindgen_test]
 async fn test_processor_connect_with_address() {
     super::setup_log();
     let p1 = new_processor();
@@ -240,4 +240,64 @@ async fn test_processor_connect_with_address() {
         close_all_transport(&p2),
         close_all_transport(&p3),
     );
+}
+
+async fn connect_node(p: &Processor, node: &str) {
+    let transport = p.connect_peer_via_http(node).await.unwrap();
+    transport.wait_for_data_channel_open().await.unwrap();
+}
+
+#[wasm_bindgen_test]
+async fn test_processor_node_connect_and_connect_with_address() {
+    super::setup_log();
+    let p1 = new_processor();
+    console_log!("p1 address: {}", p1.address().into_token().to_string());
+    let p2 = new_processor();
+    console_log!("p2 address: {}", p2.address().into_token().to_string());
+
+    listen(&p1).await;
+    listen(&p2).await;
+
+    let node_url = "http://127.0.0.1:50000";
+
+    console_log!("p1 connect with node");
+    connect_node(&p1, node_url).await;
+    console_log!("p2 connect with node");
+    connect_node(&p2, node_url).await;
+
+    // let p1_peers = p1.list_peers().await.unwrap();
+    // assert!(
+    //     p1_peers.iter().any(|p| p
+    //         .address
+    //         .to_string()
+    //         .eq(&p2.address().into_token().to_string())),
+    //     "p2 not in p1's peer list"
+    // );
+
+    fluvio_wasm_timer::Delay::new(Duration::from_secs(1))
+        .await
+        .unwrap();
+
+    console_log!("connect p1 and p2");
+    // p1 create connect with p3's address
+    let peer2 = p1.connect_with_address(&p2.address(), true).await.unwrap();
+    console_log!("transport connected");
+    assert_eq!(
+        peer2.transport.ice_connection_state().await.unwrap(),
+        RtcIceConnectionState::Connected
+    );
+    fluvio_wasm_timer::Delay::new(Duration::from_secs(1))
+        .await
+        .unwrap();
+
+    let peers = p1.list_peers().await.unwrap();
+    assert!(
+        peers.iter().any(|p| p.address.to_string().eq(p2
+            .address()
+            .into_token()
+            .to_string()
+            .as_str())),
+        "peer list dose NOT contains p3 address"
+    );
+    futures::join!(close_all_transport(&p1), close_all_transport(&p2),);
 }

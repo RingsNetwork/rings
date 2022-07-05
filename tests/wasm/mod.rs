@@ -1,4 +1,4 @@
-pub mod browser;
+//pub mod browser;
 pub mod processor;
 
 use wasm_bindgen_test::wasm_bindgen_test_configure;

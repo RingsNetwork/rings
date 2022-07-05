@@ -34,7 +34,7 @@ use tokio::signal;
 #[derive(Parser, Debug)]
 #[clap(about)]
 struct Cli {
-    #[clap(long, short = 'v', default_value_t = LogLevel::Info, arg_enum)]
+    #[clap(long, short = 'v', default_value_t = LogLevel::Debug, arg_enum)]
     log_level: LogLevel,
 
     #[clap(subcommand)]
@@ -132,27 +132,28 @@ async fn run_jobs(args: &RunArgs) -> anyhow::Result<()> {
     let session = SessionManager::new(&sig, &auth, &s_key);
 
     let mut ice_servers = args.ice_server.clone();
-    let turn_server = if !args.without_turn {
-        let mut turn_url = url::Url::from_str("turn://0.0.0.0:3567").unwrap();
-        turn_url.set_port(Some(args.turn_port)).unwrap();
-        turn_url.set_username(args.turn_username.as_str()).unwrap();
-        turn_url
-            .set_password(Some(args.turn_password.as_str()))
-            .unwrap();
-        ice_servers.push(turn_url.to_string());
-        Some(
-            run_udp_turn(
-                args.public_ip.as_str(),
-                args.turn_port,
-                args.turn_username.as_str(),
-                args.turn_password.as_str(),
-                args.turn_realm.as_str(),
-            )
-            .await?,
-        )
-    } else {
-        None
-    };
+    // let turn_server = if !args.without_turn {
+        // let mut turn_url = url::Url::from_str("turn://0.0.0.0:3567").unwrap();
+        // turn_url.set_port(Some(args.turn_port)).unwrap();
+        // turn_url.set_username(args.turn_username.as_str()).unwrap();
+        // turn_url
+        //     .set_password(Some(args.turn_password.as_str()))
+        //     .unwrap();
+        // ice_servers.push(turn_url.to_string());
+        // Some(
+        //     run_udp_turn(
+        //         args.public_ip.as_str(),
+        //         args.turn_port,
+        //         args.turn_username.as_str(),
+        //         args.turn_password.as_str(),
+        //         args.turn_realm.as_str(),
+        //     )
+        //     .await?,
+        // )
+    //     None
+    // } else {
+    //     None
+    // };
 
     let ice_servers = ice_servers.join(";");
     let swarm = Arc::new(Swarm::new(&ice_servers, key.address(), session));
@@ -191,11 +192,11 @@ async fn run_jobs(args: &RunArgs) -> anyhow::Result<()> {
     signal::ctrl_c().await.expect("failed to listen for event");
     println!("\nClosing connection now...");
     j.abort();
-    if let Some(s) = turn_server {
-        if let Err(e) = s.close().await {
-            println!("close turn_server failed, {}", e);
-        }
-    }
+    // if let Some(s) = turn_server {
+    //     if let Err(e) = s.close().await {
+    //         println!("close turn_server failed, {}", e);
+    //     }
+    // }
     println!("Server closed");
 
     Ok(())

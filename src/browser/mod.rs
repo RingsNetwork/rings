@@ -29,7 +29,6 @@ use crate::prelude::rings_core::session::AuthorizedInfo;
 use crate::prelude::rings_core::session::SessionManager;
 use crate::prelude::rings_core::session::Signer;
 use crate::prelude::rings_core::swarm::Swarm;
-use crate::prelude::rings_core::swarm::TransportManager;
 use crate::prelude::rings_core::transports::Transport;
 use crate::prelude::rings_core::types::ice_transport::IceTransport;
 use crate::prelude::rings_core::types::message::MessageListener;
@@ -385,12 +384,9 @@ impl Client {
     pub fn transport_state(&self, address: String) -> Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
-            let address = Address::from_str(address.as_str()).map_err(JsError::from)?;
-            let transport = p
-                .swarm
-                .get_transport(&address)
-                .ok_or_else(|| JsError::new("transport not found"))?;
-            let state = transport
+            let peer = p.get_peer(address.as_str()).await.map_err(JsError::from)?;
+            let state = peer
+                .transport
                 .ice_connection_state()
                 .await
                 .map(from_rtc_ice_connection_state);

@@ -148,8 +148,10 @@ impl MessageHandler {
     #[cfg_attr(feature = "wasm", async_recursion(?Send))]
     #[cfg_attr(not(feature = "wasm"), async_recursion)]
     pub async fn handle_payload(&self, payload: &MessagePayload<Message>) -> Result<()> {
+        log::debug!("[HANDLER] handle_payload");
         match &payload.data {
             Message::JoinDHT(ref msg) => self.handle(payload, msg).await,
+            Message::LeaveDHT(ref msg) => self.handle(payload, msg).await,
             Message::ConnectNodeSend(ref msg) => self.handle(payload, msg).await,
             Message::ConnectNodeReport(ref msg) => self.handle(payload, msg).await,
             Message::AlreadyConnected(ref msg) => self.handle(payload, msg).await,
@@ -190,10 +192,10 @@ impl MessageHandler {
     pub async fn listen_once(&self) -> Option<MessagePayload<Message>> {
         if let Some(payload) = self.swarm.poll_message().await {
             if !payload.verify() {
-                log::error!("Cannot verify msg or it's expired: {:?}", payload);
+                log::warn!("Cannot verify msg or it's expired: {:?}", payload);
             }
             if let Err(e) = self.handle_payload(&payload).await {
-                log::error!("Error in handle_message: {}", e);
+                log::warn!("Error in handle_message: {}", e);
             }
             Some(payload)
         } else {
