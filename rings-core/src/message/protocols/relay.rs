@@ -1,5 +1,6 @@
 #![warn(missing_docs)]
 
+use itertools::izip;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -167,6 +168,11 @@ impl MessageRelay {
             return Err(Error::InvalidRelayDestination);
         }
 
+        // Prevent infinite loop
+        if self.method == RelayMethod::SEND && has_infinite_loop(&self.path) {
+            return Err(Error::InfiniteRelayPath);
+        }
+
         Ok(())
     }
 
@@ -194,6 +200,54 @@ impl MessageRelay {
             Some(self.path[self.path.len() - 2 - self.path_end_cursor])
         }
     }
+}
+
+// Since rust cannot zip N iterators, when you change this number,
+// you should also change the code of `has_infinite_loop` below.
+const INFINITE_LOOP_TOLERANCE: usize = 3;
+
+fn has_infinite_loop<T>(path: &[T]) -> bool
+where T: PartialEq + std::fmt::Debug {
+    if let Some(last) = path.last() {
+        let indexes = path
+            .iter()
+            .rev()
+            .enumerate()
+            .filter(|(_, r)| r == &last)
+            .map(|(index, _)| index)
+            .take(INFINITE_LOOP_TOLERANCE)
+            .collect::<Vec<_>>();
+
+        if indexes.len() >= INFINITE_LOOP_TOLERANCE {
+            let p1 = path.iter().rev().skip(indexes[0]);
+            let p2 = path.iter().rev().skip(indexes[1]);
+            let p3 = path.iter().rev().skip(indexes[2]);
+
+            let lens = vec![
+                indexes[1] - indexes[0],
+                indexes[2] - indexes[1],
+                path.len() - indexes[2],
+            ];
+
+            let min_len = lens.iter().min().unwrap();
+
+            for (i, (x, y, z)) in izip!(p1, p2, p3).enumerate() {
+                if !(x == y && y == z) {
+                    return false;
+                }
+
+                if i == min_len - 1 {
+                    break;
+                }
+            }
+
+            if lens[0] == lens[1] {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 #[cfg(test)]
@@ -324,5 +378,123 @@ mod test {
 
         relay.relay(next_hop2, None).unwrap();
         assert_eq!(relay.path_prev(), Some(next_hop1));
+    }
+
+    #[test]
+    #[rustfmt::skip]
+    fn test_has_infinite_loop() {
+        assert!(!has_infinite_loop(&Vec::<u8>::new()));
+
+        assert!(!has_infinite_loop(&[
+            1, 2, 3,
+        ]));
+
+        assert!(!has_infinite_loop(&[
+            1, 2, 3,
+            1, 2, 3,
+        ]));
+
+        assert!(has_infinite_loop(&[
+            1, 2, 3,
+            1, 2, 3,
+            1, 2, 3,
+        ]));
+
+        assert!(has_infinite_loop(&[
+            1, 1, 2, 3,
+               1, 2, 3,
+               1, 2, 3,
+        ]));
+
+        assert!(!has_infinite_loop(&[
+               1, 2, 3,
+            1, 1, 2, 3,
+               1, 2, 3,
+        ]));
+
+        assert!(has_infinite_loop(&[
+            1, 2, 1, 2, 3,
+                  1, 2, 3,
+                  1, 2, 3,
+        ]));
+
+        assert!(has_infinite_loop(&[
+            4, 5, 1, 2, 3,
+                  1, 2, 3,
+                  1, 2, 3,
+        ]));
+
+        assert!(!has_infinite_loop(&[
+            1, 2, 3,
+                  3,
+            1, 2, 3,
+                  3,
+            1, 2, 3,
+        ]));
+
+        assert!(!has_infinite_loop(&[
+                  1,
+            1, 2, 3,
+                  3,
+            1, 2, 3,
+                  3,
+            1, 2, 3,
+        ]));
+
+        // TODO: try to detect this earlier.
+        assert!(!has_infinite_loop(&[
+                  3,
+            1, 2, 3,
+                  3,
+            1, 2, 3,
+                  3,
+            1, 2, 3,
+        ]));
+
+        // TODO: try to detect this earlier.
+        assert!(!has_infinite_loop(&[
+            1, 2, 3,
+            1, 2, 3,
+                  3,
+            1, 2, 3,
+                  3,
+            1, 2, 3,
+        ]));
+
+        // The above two cases will be detected finally.
+        assert!(has_infinite_loop(&[
+                  1, 2,
+               3, 1, 2,
+            3, 3, 1, 2,
+            3, 3, 1, 2,
+            3, 3, 1, 2,
+        ]));
+
+        assert!(!has_infinite_loop(&[
+               2, 3,
+               4, 3,
+            1, 2, 3,
+               4, 3,
+            1, 2, 3,
+               4, 3,
+        ]));
+
+        // TODO: try to detect this earlier.
+        assert!(!has_infinite_loop(&[
+            1, 2, 3,
+               4, 3,
+            1, 2, 3,
+               4, 3,
+            1, 2, 3,
+               4, 3,
+        ]));
+
+        // The above case will be detected finally.
+        assert!(has_infinite_loop(&[
+               1, 2, 3, 4,
+            3, 1, 2, 3, 4,
+            3, 1, 2, 3, 4,
+            3, 1, 2, 3, 4,
+        ]));
     }
 }
