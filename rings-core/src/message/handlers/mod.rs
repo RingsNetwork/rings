@@ -269,7 +269,7 @@ mod listener {
                     handler.listen_once().await;
                 }));
             };
-            poll!(func, 200);
+            poll!(func, 1000);
         }
     }
 }

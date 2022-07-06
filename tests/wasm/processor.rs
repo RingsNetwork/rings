@@ -157,7 +157,7 @@ async fn test_processor_handshake_and_msg() {
         .unwrap();
     console_log!("send test_text5 done");
 
-    fluvio_wasm_timer::Delay::new(Duration::from_secs(3))
+    fluvio_wasm_timer::Delay::new(Duration::from_secs(4))
         .await
         .unwrap();
 
