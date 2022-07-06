@@ -153,7 +153,7 @@ mod stabilizer {
                     caller.stabilize().await.unwrap();
                 }))
             };
-            poll!(func, 10000);
+            poll!(func, 30000);
         }
     }
 }

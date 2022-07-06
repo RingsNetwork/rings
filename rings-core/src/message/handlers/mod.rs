@@ -151,7 +151,7 @@ impl MessageHandler {
         log::debug!("[HANDLER] handle_payload");
         match &payload.data {
             Message::JoinDHT(ref msg) => self.handle(payload, msg).await,
-            Message::LeaveDHT(ref msg) => self.handle(payload, msg).await,
+            // Message::LeaveDHT(ref msg) => self.handle(payload, msg).await,
             Message::ConnectNodeSend(ref msg) => self.handle(payload, msg).await,
             Message::ConnectNodeReport(ref msg) => self.handle(payload, msg).await,
             Message::AlreadyConnected(ref msg) => self.handle(payload, msg).await,
@@ -271,7 +271,7 @@ mod listener {
                     handler.listen_once().await;
                 }));
             };
-            poll!(func, 200);
+            poll!(func, 1000);
         }
     }
 }

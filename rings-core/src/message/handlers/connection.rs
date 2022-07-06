@@ -70,9 +70,10 @@ impl HandleMsg<JoinDHT> for MessageHandler {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<ConnectNodeSend> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload<Message>, msg: &ConnectNodeSend) -> Result<()> {
-        let dht = self.dht.lock().await;
         let mut relay = ctx.relay.clone();
         log::debug!("[HANDLER] ConnectNodeSend received, {:?}", relay.sender());
+        let dht = self.dht.lock().await;
+        log::debug!("[HANDLER] ConnectNodeSend received, {:?}, dht: {:?}", relay.sender(), dht);
 
         if dht.id != relay.destination {
             if self.swarm.get_transport(&relay.destination).is_some() {
@@ -132,9 +133,10 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<ConnectNodeReport> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload<Message>, msg: &ConnectNodeReport) -> Result<()> {
-        let dht = self.dht.lock().await;
         let mut relay = ctx.relay.clone();
         log::debug!("[HANDLER] ConnectNodeReport received: {:?}", relay.sender());
+        let dht = self.dht.lock().await;
+        log::debug!("[HANDLER] ConnectNodeReport received: {:?}, dht: {:?}", relay.sender(), dht);
 
         relay.relay(dht.id, None)?;
         if relay.next_hop.is_some() {
