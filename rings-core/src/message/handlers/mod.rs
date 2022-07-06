@@ -150,6 +150,7 @@ impl MessageHandler {
     pub async fn handle_payload(&self, payload: &MessagePayload<Message>) -> Result<()> {
         match &payload.data {
             Message::JoinDHT(ref msg) => self.handle(payload, msg).await,
+            Message::LeaveDHT(ref msg) => self.handle(payload, msg).await,
             Message::ConnectNodeSend(ref msg) => self.handle(payload, msg).await,
             Message::ConnectNodeReport(ref msg) => self.handle(payload, msg).await,
             Message::AlreadyConnected(ref msg) => self.handle(payload, msg).await,
