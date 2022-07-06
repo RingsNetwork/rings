@@ -230,6 +230,9 @@ pub enum Error {
     #[error("Adjacent elements in path cannot be equal")]
     InvalidRelayPath,
 
+    #[error("Suspected infinite looping in path")]
+    InfiniteRelayPath,
+
     #[error("The destination of report message should always be the first element of path")]
     InvalidRelayDestination,
 
