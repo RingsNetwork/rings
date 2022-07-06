@@ -47,11 +47,17 @@ impl FingerTable {
 
     /// getter
     pub fn get(&self, index: usize) -> &Option<Did> {
+        if index >= self.finger.len() {
+            return &None;
+        }
         &self.finger[index]
     }
 
     /// setter
     pub fn set(&mut self, index: usize, id: &Did) {
+        if index >= self.finger.len() {
+            return;
+        }
         self.finger[index] = Some(*id);
     }
 
@@ -59,7 +65,11 @@ impl FingerTable {
     /// remote a node from dht successor table
     /// if suuccessor is empty, set it to the cloest node
     pub fn remove(&mut self, id: Did) {
-        self.finger.retain(|v| *v == Some(id));
+        for (index, item) in self.finger.clone().iter().enumerate() {
+            if *item == Some(id) {
+                self.finger[index] = None;
+            }
+        }
     }
 
     /// Join FingerTable
@@ -127,5 +137,134 @@ impl Index<usize> for FingerTable {
     type Output = Option<Did>;
     fn index(&self, index: usize) -> &Self::Output {
         self.get(index)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::ecc::SecretKey;
+
+    #[test]
+    fn test_finger_table_get_set_remove() {
+        let key = SecretKey::random();
+        let id: Did = key.address().into();
+        let mut table = FingerTable::new(id, 3);
+        println!("check finger len");
+        assert_eq!(table.len(), 0);
+        assert_eq!(table.finger.len(), 3);
+        println!("check finger all items is none");
+        assert!(*table.get(0) == None, "index 0 should be None");
+        assert!(*table.get(1) == None, "index 1 should be None");
+        assert!(*table.get(2) == None, "index 2 should be None");
+        assert!(*table.get(3) == None, "index 3 should be None");
+
+        println!("set finger item");
+        let id1: Did = SecretKey::random().address().into();
+        let id2: Did = SecretKey::random().address().into();
+        let id3: Did = SecretKey::random().address().into();
+        let id4: Did = SecretKey::random().address().into();
+
+        table.set(0, &id1);
+        assert_eq!(table.len(), 1);
+        assert!(
+            *table.get(0) == Some(id1),
+            "expect value at index 0 is {:?}, got {:?}",
+            Some(id1),
+            table.get(0)
+        );
+        // can not be set, because size is 2
+        table.set(2, &id3);
+        assert_eq!(table.len(), 2);
+        assert_eq!(table.finger.len(), 3);
+        assert!(
+            *table.get(1) == None,
+            "expect value at index 1 is None, got {:?}",
+            table.get(1)
+        );
+        assert!(
+            *table.get(2) == Some(id3),
+            "expect value at index 2 is {:?}, got {:?}",
+            Some(id3),
+            table.get(2)
+        );
+
+        println!("set value out of index");
+        table.set(4, &id4);
+        assert_eq!(table.len(), 2);
+        assert_eq!(table.finger.len(), 3);
+
+        println!("remove node from finger");
+        table.remove(id1);
+        assert_eq!(table.len(), 1);
+        assert_eq!(table.finger.len(), 3);
+        assert!(
+            *table.get(0) == None,
+            "expect value at index 1 is None, got {:?}",
+            table.get(0)
+        );
+        assert!(
+            *table.get(2) == Some(id3),
+            "expect value at index 2 is {:?}, got {:?}",
+            Some(id3),
+            table.get(2)
+        );
+
+        table.set(0, &id1);
+        table.set(1, &id2);
+
+        assert!(
+            *table.get(0) == Some(id1),
+            "expect value at index 0 is {:?}, got {:?}",
+            Some(id1),
+            table.get(0)
+        );
+        assert!(
+            *table.get(1) == Some(id2),
+            "expect value at index 1 is {:?}, got {:?}",
+            Some(id2),
+            table.get(1)
+        );
+        assert!(
+            *table.get(2) == Some(id3),
+            "expect value at index 1 is {:?}, got {:?}",
+            Some(id3),
+            table.get(2)
+        );
+
+        assert!(
+            *table.get(3) == None,
+            "expect value at index 2 is None, got {:?}",
+            table.get(3)
+        );
+
+        table.remove(id1);
+        assert_eq!(table.len(), 2);
+        assert_eq!(table.finger.len(), 3);
+        let t1 = table.get(0);
+        assert!(*t1 == None, "expect value at index 0 is None, got {:?}", t1);
+        let t2 = table.get(1);
+        assert!(
+            *t2 == Some(id2),
+            "expect value at index 1 is {:?}, got {:?}",
+            Some(id2),
+            t2,
+        );
+
+        println!("remove item not in fingers");
+        table.remove(id4);
+
+        println!("remove all items in fingers");
+        table.remove(id1);
+        assert_eq!(table.first(), Some(id2));
+
+        println!("check first item");
+        table.remove(id3);
+        assert_eq!(table.first(), Some(id2));
+
+        table.remove(id2);
+        assert_eq!(table.first(), None);
+        assert_eq!(table.len(), 0);
+        assert_eq!(table.finger.len(), 3);
     }
 }
