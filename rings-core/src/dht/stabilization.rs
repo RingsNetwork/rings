@@ -150,7 +150,7 @@ mod stabilizer {
                     caller.stabilize().await.unwrap();
                 }))
             };
-            poll!(func, 5000);
+            poll!(func, 25000);
         }
     }
 }
