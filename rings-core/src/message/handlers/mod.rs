@@ -112,7 +112,6 @@ impl MessageHandler {
             transport_uuid: transport.id.to_string(),
             handshake_info: handshake_info.to_string(),
         });
-
         let next_hop = {
             let dht = self.dht.lock().await;
             match dht.find_successor(target_id)? {
@@ -148,6 +147,10 @@ impl MessageHandler {
     #[cfg_attr(feature = "wasm", async_recursion(?Send))]
     #[cfg_attr(not(feature = "wasm"), async_recursion)]
     pub async fn handle_payload(&self, payload: &MessagePayload<Message>) -> Result<()> {
+        #[cfg(test)]
+        {
+            println!("{} got msg {}", self.swarm.address(), &payload.data);
+        }
         match &payload.data {
             Message::JoinDHT(ref msg) => self.handle(payload, msg).await,
             Message::LeaveDHT(ref msg) => self.handle(payload, msg).await,
@@ -195,6 +198,10 @@ impl MessageHandler {
             }
             if let Err(e) = self.handle_payload(&payload).await {
                 log::error!("Error in handle_message: {}", e);
+                #[cfg(test)]
+                {
+                    println!("Error in handle_message: {}", e);
+                }
             }
             Some(payload)
         } else {
