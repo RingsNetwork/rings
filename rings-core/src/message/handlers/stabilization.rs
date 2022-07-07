@@ -156,7 +156,7 @@ mod test {
     ) -> Result<()> {
         let (did1, dht1, swarm1, node1) = prepare_node(&key1);
         let (did2, dht2, swarm2, node2) = prepare_node(&key2);
-        let (_did3, dht3, swarm3, node3) = prepare_node(&key3);
+        let (did3, dht3, swarm3, node3) = prepare_node(&key3);
 
         println!("========================================");
         println!("||  now we connect node1 and node2    ||");
@@ -195,18 +195,25 @@ mod test {
         run_stabilize_once(dht1.clone(), swarm1.clone()).await?;
         run_stabilize_once(dht2.clone(), swarm2.clone()).await?;
         run_stabilize_once(dht3.clone(), swarm3.clone()).await?;
-
+        // node 1 noti node 2
+        // node 2 noti node 1
+        // node 3 noti node 2
         node1.listen_once().await.unwrap();
         node2.listen_once().await.unwrap();
         node2.listen_once().await.unwrap();
         assert_no_more_msg(&node1, &node2, &node3).await;
 
         println!("=== Check state after first stabilization ===");
+        // ndoe 3 -> node 2 -> node 1
+        //   |-------------------|
+        // node1's pre is node2, node1's successor is node 2
+        // node2's pre is node3, node2's successor is node 1
         assert_eq!(dht1.lock().await.successor.list(), vec![did2]);
         assert_eq!(dht2.lock().await.successor.list(), vec![did1]);
         assert_eq!(dht3.lock().await.successor.list(), vec![did2]);
+
         assert_eq!(dht1.lock().await.predecessor, Some(did2));
-        assert_eq!(dht2.lock().await.predecessor, Some(did1));
+        assert_eq!(dht2.lock().await.predecessor, Some(did3));
         assert!(dht3.lock().await.predecessor.is_none());
 
         println!("=========================================");
@@ -216,19 +223,39 @@ mod test {
         run_stabilize_once(dht1.clone(), swarm1.clone()).await?;
         run_stabilize_once(dht2.clone(), swarm2.clone()).await?;
         run_stabilize_once(dht3.clone(), swarm3.clone()).await?;
+        // node 1 noti node 2
+        // node 2 noti node 1
+        // node 3 noti node 2
 
-        node1.listen_once().await.unwrap();
-        node2.listen_once().await.unwrap();
-        node2.listen_once().await.unwrap();
+        let ev1 = node1.listen_once().await.unwrap();
+        let ev2 = node2.listen_once().await.unwrap();
+        let ev3 = node2.listen_once().await.unwrap();
+        assert!(matches!(
+            ev1.data,
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{id}) if id == did2
+        ));
+        assert!(matches!(
+            ev2.data,
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{id}) if id == did1
+        ));
+        assert!(matches!(
+            ev3.data,
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{id}) if id == did3
+        ));
+
         assert_no_more_msg(&node1, &node2, &node3).await;
 
         println!("=== Check state after second stabilization ===");
         assert_eq!(dht1.lock().await.successor.list(), vec![did2]);
         assert_eq!(dht2.lock().await.successor.list(), vec![did1]);
         assert_eq!(dht3.lock().await.successor.list(), vec![did2]);
+
         assert_eq!(dht1.lock().await.predecessor, Some(did2));
-        assert_eq!(dht2.lock().await.predecessor, Some(did1));
+        assert_eq!(dht2.lock().await.predecessor, Some(did3));
         assert!(dht3.lock().await.predecessor.is_none());
+
+        // node 2 report node 1
+//        node1.listen_once().await.unwrap();
 
         Ok(())
     }

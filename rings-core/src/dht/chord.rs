@@ -218,7 +218,7 @@ impl ChordStabilize<PeerRingAction> for PeerRing {
         match self.predecessor {
             Some(pre) => {
                 // if id <- [pre, self]
-                if self.bias(pre) > self.bias(id) {
+                if self.bias(pre) < self.bias(id) {
                     self.predecessor = Some(id);
                     Some(id)
                 } else {
