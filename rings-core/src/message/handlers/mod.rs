@@ -26,7 +26,7 @@ use crate::types::ice_transport::IceTrickleScheme;
 /// Operator and Handler for Connection
 pub mod connection;
 /// Operator and handler for DHT stablization
-pub mod stablization;
+pub mod stabilization;
 /// Operator and Handler for Storage
 pub mod storage;
 /// Operator and Handler for SubRing

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::lock::Mutex;
 
-use crate::dht::ChordStablize;
+use crate::dht::ChordStabilize;
 use crate::dht::PeerRing;
 use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;

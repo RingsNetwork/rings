@@ -8,7 +8,7 @@ use serde::Serialize;
 use super::did::BiasId;
 use super::successor::Successor;
 use super::types::Chord;
-use super::types::ChordStablize;
+use super::types::ChordStabilize;
 use super::types::ChordStorage;
 use super::vnode::VirtualNode;
 use super::FingerTable;
@@ -211,7 +211,7 @@ impl Chord<PeerRingAction> for PeerRing {
     }
 }
 
-impl ChordStablize<PeerRingAction> for PeerRing {
+impl ChordStabilize<PeerRingAction> for PeerRing {
     /// n' thinks it might be our predecessor.
     fn notify(&mut self, id: Did) -> Option<Did> {
         // if (predecessor is nil or n' /in (predecessor; n)); predecessor = n';

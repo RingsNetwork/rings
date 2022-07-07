@@ -235,7 +235,7 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
 
 #[cfg(not(feature = "wasm"))]
 #[cfg(test)]
-mod test {
+pub mod test {
     use std::matches;
     use std::sync::Arc;
 
@@ -297,23 +297,23 @@ mod test {
     // --------- Communications after successful connection
     //
     #[tokio::test]
-    async fn test_triple_nodes_1_2_3() -> Result<()> {
+    async fn test_triple_nodes_connection_1_2_3() -> Result<()> {
         let (key1, key2, key3) = gen_triple_ordered_keys();
-        test_triple_ordered_nodes(key1, key2, key3).await
+        test_triple_ordered_nodes_connection(key1, key2, key3).await
     }
 
     // The 2_3_1 should have same behavior as 1_2_3 since they are all clockwise.
     #[tokio::test]
-    async fn test_triple_nodes_2_3_1() -> Result<()> {
+    async fn test_triple_nodes_connection_2_3_1() -> Result<()> {
         let (key1, key2, key3) = gen_triple_ordered_keys();
-        test_triple_ordered_nodes(key2, key3, key1).await
+        test_triple_ordered_nodes_connection(key2, key3, key1).await
     }
 
     // The 3_1_2 should have same behavior as 1_2_3 since they are all clockwise.
     #[tokio::test]
-    async fn test_triple_nodes_3_1_2() -> Result<()> {
+    async fn test_triple_nodes_connection_3_1_2() -> Result<()> {
         let (key1, key2, key3) = gen_triple_ordered_keys();
-        test_triple_ordered_nodes(key3, key1, key2).await
+        test_triple_ordered_nodes_connection(key3, key1, key2).await
     }
 
     // node1.key > node2.key > node3.key
@@ -336,26 +336,26 @@ mod test {
     // --------- Communications after successful connection
     //
     #[tokio::test]
-    async fn test_triple_nodes_3_2_1() -> Result<()> {
+    async fn test_triple_nodes_connection_3_2_1() -> Result<()> {
         let (key1, key2, key3) = gen_triple_ordered_keys();
-        test_triple_desc_ordered_nodes(key3, key2, key1).await
+        test_triple_desc_ordered_nodes_connection(key3, key2, key1).await
     }
 
     // The 2_1_3 should have same behavior as 3_2_1 since they are all anti-clockwise.
     #[tokio::test]
-    async fn test_triple_nodes_2_1_3() -> Result<()> {
+    async fn test_triple_nodes_connection_2_1_3() -> Result<()> {
         let (key1, key2, key3) = gen_triple_ordered_keys();
-        test_triple_desc_ordered_nodes(key2, key1, key3).await
+        test_triple_desc_ordered_nodes_connection(key2, key1, key3).await
     }
 
     // The 1_3_2 should have same behavior as 3_2_1 since they are all anti-clockwise.
     #[tokio::test]
-    async fn test_triple_nodes_1_3_2() -> Result<()> {
+    async fn test_triple_nodes_connection_1_3_2() -> Result<()> {
         let (key1, key2, key3) = gen_triple_ordered_keys();
-        test_triple_desc_ordered_nodes(key1, key3, key2).await
+        test_triple_desc_ordered_nodes_connection(key1, key3, key2).await
     }
 
-    async fn test_triple_ordered_nodes(
+    async fn test_triple_ordered_nodes_connection(
         key1: SecretKey,
         key2: SecretKey,
         key3: SecretKey,
@@ -496,7 +496,7 @@ mod test {
         Ok(())
     }
 
-    async fn test_triple_desc_ordered_nodes(
+    async fn test_triple_desc_ordered_nodes_connection(
         key1: SecretKey,
         key2: SecretKey,
         key3: SecretKey,
@@ -657,7 +657,7 @@ mod test {
         Ok(())
     }
 
-    fn gen_triple_ordered_keys() -> (SecretKey, SecretKey, SecretKey) {
+    pub fn gen_triple_ordered_keys() -> (SecretKey, SecretKey, SecretKey) {
         let mut keys = Vec::from_iter(std::iter::repeat_with(SecretKey::random).take(3));
         keys.sort_by(|a, b| {
             if a.address() < b.address() {
@@ -669,7 +669,9 @@ mod test {
         (keys[0], keys[1], keys[2])
     }
 
-    fn prepare_node(key: &SecretKey) -> (Did, Arc<Mutex<PeerRing>>, Arc<Swarm>, MessageHandler) {
+    pub fn prepare_node(
+        key: &SecretKey,
+    ) -> (Did, Arc<Mutex<PeerRing>>, Arc<Swarm>, MessageHandler) {
         let stun = "stun://stun.l.google.com:19302";
 
         let did = key.address().into();
@@ -684,7 +686,7 @@ mod test {
         (did, dht, swarm, node)
     }
 
-    async fn manually_establish_connection(swarm1: &Swarm, swarm2: &Swarm) -> Result<()> {
+    pub async fn manually_establish_connection(swarm1: &Swarm, swarm2: &Swarm) -> Result<()> {
         let sm1 = swarm1.session_manager();
         let sm2 = swarm2.session_manager();
 
@@ -727,7 +729,7 @@ mod test {
         Ok(())
     }
 
-    async fn test_listen_join_and_init_find_succeesor(
+    pub async fn test_listen_join_and_init_find_succeesor(
         (key1, node1): (&SecretKey, &MessageHandler),
         (key2, node2): (&SecretKey, &MessageHandler),
     ) -> Result<()> {
@@ -767,7 +769,7 @@ mod test {
         Ok(())
     }
 
-    async fn test_only_two_nodes_establish_connection(
+    pub async fn test_only_two_nodes_establish_connection(
         (key1, dht1, swarm1, node1): (&SecretKey, Arc<Mutex<PeerRing>>, &Swarm, &MessageHandler),
         (key2, dht2, swarm2, node2): (&SecretKey, Arc<Mutex<PeerRing>>, &Swarm, &MessageHandler),
     ) -> Result<()> {
@@ -884,7 +886,7 @@ mod test {
         Ok(())
     }
 
-    async fn assert_no_more_msg(
+    pub async fn assert_no_more_msg(
         node1: &MessageHandler,
         node2: &MessageHandler,
         node3: &MessageHandler,
