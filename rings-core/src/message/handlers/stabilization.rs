@@ -13,7 +13,6 @@ use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
-use crate::message::RelayMethod;
 use crate::swarm::TransportManager;
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
@@ -67,7 +66,7 @@ impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
                     Message::SyncVNodeWithSuccessor(SyncVNodeWithSuccessor { data }),
                     next,
                 )
-                    .await?;
+                .await?;
             }
         }
         Ok(())
@@ -142,6 +141,167 @@ mod test {
         assert!(dht2.lock().await.predecessor.is_none());
         assert!(dht3.lock().await.predecessor.is_none());
 
+        println!("========================================");
+        println!("||  now we start first stabilization  ||");
+        println!("========================================");
+
+        run_stabilize_once(dht1.clone(), swarm1.clone()).await?;
+        run_stabilize_once(dht2.clone(), swarm2.clone()).await?;
+        run_stabilize_once(dht3.clone(), swarm3.clone()).await?;
+
+        // node2 notify node1
+        let ev1 = node1.listen_once().await.unwrap();
+        assert_eq!(ev1.addr, key2.address());
+        assert_eq!(ev1.relay.path, vec![did2]);
+        assert!(matches!(
+            ev1.data,
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{id}) if id == did2
+        ));
+
+        // node1 notify node2
+        let ev2 = node2.listen_once().await.unwrap();
+        assert_eq!(ev2.addr, key1.address());
+        assert_eq!(ev2.relay.path, vec![did1]);
+        assert!(matches!(
+            ev2.data,
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{id}) if id == did1
+        ));
+
+        // node2 notify node3
+        let ev3 = node3.listen_once().await.unwrap();
+        assert_eq!(ev3.addr, key2.address());
+        assert_eq!(ev3.relay.path, vec![did2]);
+        assert!(matches!(
+            ev3.data,
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{id}) if id == did2
+        ));
+
+        // node3 notify node2
+        let ev2 = node2.listen_once().await.unwrap();
+        assert_eq!(ev2.addr, key3.address());
+        assert_eq!(ev2.relay.path, vec![did3]);
+        assert!(matches!(
+            ev2.data,
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{id}) if id == did3
+        ));
+
+        // node2 report node3
+        let ev3 = node3.listen_once().await.unwrap();
+        assert_eq!(ev3.addr, key2.address());
+        assert_eq!(ev3.relay.path, vec![did3, did2]);
+        assert!(matches!(
+            ev3.data,
+            Message::NotifyPredecessorReport(NotifyPredecessorReport{id}) if id == did1
+        ));
+
+        // handle messages of connection after stabilization
+        node2.listen_once().await.unwrap();
+        node1.listen_once().await.unwrap();
+        node2.listen_once().await.unwrap();
+        node3.listen_once().await.unwrap();
+        node1.listen_once().await.unwrap();
+        node3.listen_once().await.unwrap();
+        node3.listen_once().await.unwrap();
+        node1.listen_once().await.unwrap();
+        node1.listen_once().await.unwrap();
+        node2.listen_once().await.unwrap();
+        node1.listen_once().await.unwrap();
+        node3.listen_once().await.unwrap();
+
+        assert_no_more_msg(&node1, &node2, &node3).await;
+
+        println!("=== Check state after first stabilization ===");
+        // node1 -> node2 -> node3
+        //   ^                 |
+        //   |-----------------|
+        // node1's pre is node2, node1's successor is node2
+        // node2's pre is node1, node2's successor is node3
+        // node3's pre is node2, node3's successor is node1
+        assert_eq!(dht1.lock().await.successor.list(), vec![did2]);
+        assert_eq!(dht2.lock().await.successor.list(), vec![did3, did1]);
+        assert_eq!(dht3.lock().await.successor.list(), vec![did1, did2]);
+        assert_eq!(dht1.lock().await.predecessor, Some(did2));
+        assert_eq!(dht2.lock().await.predecessor, Some(did1));
+        assert_eq!(dht3.lock().await.predecessor, Some(did2));
+
+        println!("=========================================");
+        println!("||  now we start second stabilization  ||");
+        println!("=========================================");
+
+        run_stabilize_once(dht1.clone(), swarm1.clone()).await?;
+        run_stabilize_once(dht2.clone(), swarm2.clone()).await?;
+        run_stabilize_once(dht3.clone(), swarm3.clone()).await?;
+
+        // node2 notify node3
+        let ev3 = node3.listen_once().await.unwrap();
+        assert_eq!(ev3.addr, key2.address());
+        assert_eq!(ev3.relay.path, vec![did2]);
+        assert!(matches!(
+            ev3.data,
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{id}) if id == did2
+        ));
+
+        // node2 notify node1
+        let ev1 = node1.listen_once().await.unwrap();
+        assert_eq!(ev1.addr, key2.address());
+        assert_eq!(ev1.relay.path, vec![did2]);
+        assert!(matches!(
+            ev1.data,
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{id}) if id == did2
+        ));
+
+        // node3 notify node1
+        let ev1 = node1.listen_once().await.unwrap();
+        assert_eq!(ev1.addr, key3.address());
+        assert_eq!(ev1.relay.path, vec![did3]);
+        assert!(matches!(
+            ev1.data,
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{id}) if id == did3
+        ));
+
+        // node1 notify node2
+        let ev2 = node2.listen_once().await.unwrap();
+        assert_eq!(ev2.addr, key1.address());
+        assert_eq!(ev2.relay.path, vec![did1]);
+        assert!(matches!(
+            ev2.data,
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{id}) if id == did1
+        ));
+
+        // node3 notify node2
+        let ev2 = node2.listen_once().await.unwrap();
+        assert_eq!(ev2.addr, key3.address());
+        assert_eq!(ev2.relay.path, vec![did3]);
+        assert!(matches!(
+            ev2.data,
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{id}) if id == did3
+        ));
+
+        // node1 report node3
+        let ev3 = node3.listen_once().await.unwrap();
+        assert_eq!(ev3.addr, key2.address());
+        assert_eq!(ev3.relay.path, vec![did3, did2]);
+        assert!(matches!(
+            ev3.data,
+            Message::NotifyPredecessorReport(NotifyPredecessorReport{id}) if id == did1
+        ));
+
+        assert_no_more_msg(&node1, &node2, &node3).await;
+
+        println!("=== Check state after second stabilization ===");
+        // node1 -> node2 -> node3
+        //   ^                 |
+        //   |-----------------|
+        // node1's pre is node3, node1's successor is node2
+        // node2's pre is node1, node2's successor is node3
+        // node3's pre is node2, node3's successor is node1
+        assert_eq!(dht1.lock().await.successor.list(), vec![did2]);
+        assert_eq!(dht2.lock().await.successor.list(), vec![did3, did1]);
+        assert_eq!(dht3.lock().await.successor.list(), vec![did1, did2]);
+        assert_eq!(dht1.lock().await.predecessor, Some(did3));
+        assert_eq!(dht2.lock().await.predecessor, Some(did1));
+        assert_eq!(dht3.lock().await.predecessor, Some(did2));
+
         Ok(())
     }
 
@@ -191,23 +351,45 @@ mod test {
         run_stabilize_once(dht1.clone(), swarm1.clone()).await?;
         run_stabilize_once(dht2.clone(), swarm2.clone()).await?;
         run_stabilize_once(dht3.clone(), swarm3.clone()).await?;
-        // node 1 noti node 2
-        // node 2 noti node 1
-        // node 3 noti node 2
-        node1.listen_once().await.unwrap();
-        node2.listen_once().await.unwrap();
-        node2.listen_once().await.unwrap();
+
+        // node2 notify node1
+        let ev1 = node1.listen_once().await.unwrap();
+        assert_eq!(ev1.addr, key2.address());
+        assert_eq!(ev1.relay.path, vec![did2]);
+        assert!(matches!(
+            ev1.data,
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{id}) if id == did2
+        ));
+
+        // node1 notify node2
+        let ev2 = node2.listen_once().await.unwrap();
+        assert_eq!(ev2.addr, key1.address());
+        assert_eq!(ev2.relay.path, vec![did1]);
+        assert!(matches!(
+            ev2.data,
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{id}) if id == did1
+        ));
+
+        // node3 notify node2
+        let ev2 = node2.listen_once().await.unwrap();
+        assert_eq!(ev2.addr, key3.address());
+        assert_eq!(ev2.relay.path, vec![did3]);
+        assert!(matches!(
+            ev2.data,
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{id}) if id == did3
+        ));
+
         assert_no_more_msg(&node1, &node2, &node3).await;
 
         println!("=== Check state after first stabilization ===");
-        // ndoe 3 -> node 2 -> node 1
-        //   |-------------------|
-        // node1's pre is node2, node1's successor is node 2
-        // node2's pre is node3, node2's successor is node 1
+        // node3 -> node2 -> node1
+        //   ^                 |
+        //   |-----------------|
+        // node1's pre is node2, node1's successor is node2
+        // node2's pre is node3, node2's successor is node1
         assert_eq!(dht1.lock().await.successor.list(), vec![did2]);
         assert_eq!(dht2.lock().await.successor.list(), vec![did1]);
         assert_eq!(dht3.lock().await.successor.list(), vec![did2]);
-
         assert_eq!(dht1.lock().await.predecessor, Some(did2));
         assert_eq!(dht2.lock().await.predecessor, Some(did3));
         assert!(dht3.lock().await.predecessor.is_none());
@@ -219,40 +401,72 @@ mod test {
         run_stabilize_once(dht1.clone(), swarm1.clone()).await?;
         run_stabilize_once(dht2.clone(), swarm2.clone()).await?;
         run_stabilize_once(dht3.clone(), swarm3.clone()).await?;
-        // node 1 noti node 2
-        // node 2 noti node 1
-        // node 3 noti node 2
 
+        // node2 notify node1
         let ev1 = node1.listen_once().await.unwrap();
-        let ev2 = node2.listen_once().await.unwrap();
-        let ev3 = node2.listen_once().await.unwrap();
+        assert_eq!(ev1.addr, key2.address());
+        assert_eq!(ev1.relay.path, vec![did2]);
         assert!(matches!(
             ev1.data,
             Message::NotifyPredecessorSend(NotifyPredecessorSend{id}) if id == did2
         ));
+
+        // node1 notify node2
+        let ev2 = node2.listen_once().await.unwrap();
+        assert_eq!(ev2.addr, key1.address());
+        assert_eq!(ev2.relay.path, vec![did1]);
         assert!(matches!(
             ev2.data,
             Message::NotifyPredecessorSend(NotifyPredecessorSend{id}) if id == did1
         ));
+
+        // node3 notify node2
+        let ev2 = node2.listen_once().await.unwrap();
+        assert_eq!(ev2.addr, key3.address());
+        assert_eq!(ev2.relay.path, vec![did3]);
         assert!(matches!(
-            ev3.data,
+            ev2.data,
             Message::NotifyPredecessorSend(NotifyPredecessorSend{id}) if id == did3
         ));
-        let ev1 = node1.listen_once().await.unwrap();
 
-        //assert_no_more_msg(&node1, &node2, &node3).await;
+        // node2 report node1
+        let ev1 = node1.listen_once().await.unwrap();
+        assert_eq!(ev1.addr, key2.address());
+        assert_eq!(ev1.relay.path, vec![did1, did2]);
+        assert!(matches!(
+            ev1.data,
+            Message::NotifyPredecessorReport(NotifyPredecessorReport{id}) if id == did3
+        ));
+
+        // handle messages of connection after stabilization
+        node2.listen_once().await.unwrap();
+        node3.listen_once().await.unwrap();
+        node2.listen_once().await.unwrap();
+        node1.listen_once().await.unwrap();
+        node3.listen_once().await.unwrap();
+        node1.listen_once().await.unwrap();
+        node1.listen_once().await.unwrap();
+        node3.listen_once().await.unwrap();
+        node3.listen_once().await.unwrap();
+        node2.listen_once().await.unwrap();
+        node3.listen_once().await.unwrap();
+        node1.listen_once().await.unwrap();
+
+        assert_no_more_msg(&node1, &node2, &node3).await;
 
         println!("=== Check state after second stabilization ===");
-        assert_eq!(dht1.lock().await.successor.list(), vec![did2]);
+        // node3 -> node2 -> node1
+        //   ^                 |
+        //   |-----------------|
+        // node1's pre is node2, node1's successor is node3
+        // node2's pre is node3, node2's successor is node1
+        // node3's pre is None, node3's successor is node2
+        assert_eq!(dht1.lock().await.successor.list(), vec![did3, did2]);
         assert_eq!(dht2.lock().await.successor.list(), vec![did1]);
         assert_eq!(dht3.lock().await.successor.list(), vec![did2]);
-
         assert_eq!(dht1.lock().await.predecessor, Some(did2));
         assert_eq!(dht2.lock().await.predecessor, Some(did3));
         assert!(dht3.lock().await.predecessor.is_none());
-
-        // node 2 report node 1
-//        node1.listen_once().await.unwrap();
 
         Ok(())
     }
