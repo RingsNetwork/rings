@@ -99,7 +99,31 @@ mod test {
     }
 
     #[tokio::test]
+    async fn test_triple_nodes_stabilization_2_3_1() -> Result<()> {
+        let (key1, key2, key3) = gen_triple_ordered_keys();
+        test_triple_ordered_nodes_stabilization(key1, key2, key3).await
+    }
+
+    #[tokio::test]
+    async fn test_triple_nodes_stabilization_3_1_2() -> Result<()> {
+        let (key1, key2, key3) = gen_triple_ordered_keys();
+        test_triple_ordered_nodes_stabilization(key1, key2, key3).await
+    }
+
+    #[tokio::test]
     async fn test_triple_nodes_stabilization_3_2_1() -> Result<()> {
+        let (key1, key2, key3) = gen_triple_ordered_keys();
+        test_triple_desc_ordered_nodes_stabilization(key3, key2, key1).await
+    }
+
+    #[tokio::test]
+    async fn test_triple_nodes_stabilization_2_1_3() -> Result<()> {
+        let (key1, key2, key3) = gen_triple_ordered_keys();
+        test_triple_desc_ordered_nodes_stabilization(key3, key2, key1).await
+    }
+
+    #[tokio::test]
+    async fn test_triple_nodes_stabilization_1_3_2() -> Result<()> {
         let (key1, key2, key3) = gen_triple_ordered_keys();
         test_triple_desc_ordered_nodes_stabilization(key3, key2, key1).await
     }
