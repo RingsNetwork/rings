@@ -8,7 +8,7 @@ pub trait Chord<A> {
     fn find_successor(&self, id: Did) -> Result<A>;
 }
 
-pub trait ChordStablize<A>: Chord<A> {
+pub trait ChordStabilize<A>: Chord<A> {
     fn closest_preceding_node(&self, id: Did) -> Result<Did>;
     fn check_predecessor(&self) -> A;
     fn notify(&mut self, id: Did) -> Option<Did>;
