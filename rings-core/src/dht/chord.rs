@@ -386,6 +386,7 @@ impl ChordStorage<PeerRingAction> for PeerRing {
     }
 }
 
+#[cfg(not(feature = "wasm"))]
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;

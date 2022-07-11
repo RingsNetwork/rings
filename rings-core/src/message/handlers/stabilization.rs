@@ -133,9 +133,9 @@ mod test {
         key2: SecretKey,
         key3: SecretKey,
     ) -> Result<()> {
-        let (did1, dht1, swarm1, node1) = prepare_node(&key1).await;
-        let (did2, dht2, swarm2, node2) = prepare_node(&key2).await;
-        let (did3, dht3, swarm3, node3) = prepare_node(&key3).await;
+        let (did1, dht1, swarm1, node1, path1) = prepare_node(&key1).await;
+        let (did2, dht2, swarm2, node2, path2) = prepare_node(&key2).await;
+        let (did3, dht3, swarm3, node3, path3) = prepare_node(&key3).await;
 
         println!("========================================");
         println!("||  now we connect node1 and node2    ||");
@@ -325,6 +325,9 @@ mod test {
         assert_eq!(dht1.lock().await.predecessor, Some(did3));
         assert_eq!(dht2.lock().await.predecessor, Some(did1));
         assert_eq!(dht3.lock().await.predecessor, Some(did2));
+        tokio::fs::remove_dir_all(path1).await.unwrap();
+        tokio::fs::remove_dir_all(path2).await.unwrap();
+        tokio::fs::remove_dir_all(path3).await.unwrap();
 
         Ok(())
     }
@@ -334,9 +337,9 @@ mod test {
         key2: SecretKey,
         key3: SecretKey,
     ) -> Result<()> {
-        let (did1, dht1, swarm1, node1) = prepare_node(&key1).await;
-        let (did2, dht2, swarm2, node2) = prepare_node(&key2).await;
-        let (did3, dht3, swarm3, node3) = prepare_node(&key3).await;
+        let (did1, dht1, swarm1, node1, path1) = prepare_node(&key1).await;
+        let (did2, dht2, swarm2, node2, path2) = prepare_node(&key2).await;
+        let (did3, dht3, swarm3, node3, path3) = prepare_node(&key3).await;
 
         println!("========================================");
         println!("||  now we connect node1 and node2    ||");
@@ -491,6 +494,9 @@ mod test {
         assert_eq!(dht1.lock().await.predecessor, Some(did2));
         assert_eq!(dht2.lock().await.predecessor, Some(did3));
         assert!(dht3.lock().await.predecessor.is_none());
+        tokio::fs::remove_dir_all(path1).await.unwrap();
+        tokio::fs::remove_dir_all(path2).await.unwrap();
+        tokio::fs::remove_dir_all(path3).await.unwrap();
 
         Ok(())
     }

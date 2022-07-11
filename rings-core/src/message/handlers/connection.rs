@@ -251,6 +251,7 @@ pub mod test {
     use crate::message::MessageHandler;
     use crate::prelude::RTCSdpType;
     use crate::session::SessionManager;
+    use crate::storage::PersistenceStorage;
     use crate::swarm::Swarm;
     use crate::swarm::TransportManager;
     use crate::types::ice_transport::IceTrickleScheme;
@@ -360,9 +361,9 @@ pub mod test {
         key2: SecretKey,
         key3: SecretKey,
     ) -> Result<()> {
-        let (did1, dht1, swarm1, node1) = prepare_node(&key1).await;
-        let (did2, dht2, swarm2, node2) = prepare_node(&key2).await;
-        let (did3, dht3, swarm3, node3) = prepare_node(&key3).await;
+        let (did1, dht1, swarm1, node1, path1) = prepare_node(&key1).await;
+        let (did2, dht2, swarm2, node2, path2) = prepare_node(&key2).await;
+        let (did3, dht3, swarm3, node3, path3) = prepare_node(&key3).await;
 
         println!("========================================");
         println!("||  now we connect node1 and node2    ||");
@@ -493,6 +494,10 @@ pub mod test {
         assert_eq!(dht2.lock().await.successor.list(), vec![did3, did1]);
         assert_eq!(dht3.lock().await.successor.list(), vec![did1, did2]);
 
+        tokio::fs::remove_dir_all(path1).await.unwrap();
+        tokio::fs::remove_dir_all(path2).await.unwrap();
+        tokio::fs::remove_dir_all(path3).await.unwrap();
+
         Ok(())
     }
 
@@ -501,9 +506,9 @@ pub mod test {
         key2: SecretKey,
         key3: SecretKey,
     ) -> Result<()> {
-        let (did1, dht1, swarm1, node1) = prepare_node(&key1).await;
-        let (did2, dht2, swarm2, node2) = prepare_node(&key2).await;
-        let (did3, dht3, swarm3, node3) = prepare_node(&key3).await;
+        let (did1, dht1, swarm1, node1, path1) = prepare_node(&key1).await;
+        let (did2, dht2, swarm2, node2, path2) = prepare_node(&key2).await;
+        let (did3, dht3, swarm3, node3, path3) = prepare_node(&key3).await;
 
         println!("========================================");
         println!("||  now we connect node1 and node2    ||");
@@ -654,6 +659,9 @@ pub mod test {
         assert_eq!(dht2.lock().await.successor.list(), vec![did1]);
         assert_eq!(dht3.lock().await.successor.list(), vec![did2]);
 
+        tokio::fs::remove_dir_all(path1).await.unwrap();
+        tokio::fs::remove_dir_all(path2).await.unwrap();
+        tokio::fs::remove_dir_all(path3).await.unwrap();
         Ok(())
     }
 
@@ -671,11 +679,29 @@ pub mod test {
 
     pub async fn prepare_node(
         key: &SecretKey,
-    ) -> (Did, Arc<Mutex<PeerRing>>, Arc<Swarm>, MessageHandler) {
+    ) -> (
+        Did,
+        Arc<Mutex<PeerRing>>,
+        Arc<Swarm>,
+        MessageHandler,
+        String,
+    ) {
         let stun = "stun://stun.l.google.com:19302";
 
         let did = key.address().into();
-        let dht = Arc::new(Mutex::new(PeerRing::new(did).await.unwrap()));
+        let path = PersistenceStorage::random_path("./tmp");
+        let dht = Arc::new(Mutex::new(
+            PeerRing::new_with_storage(
+                did,
+                Arc::new(
+                    PersistenceStorage::new_with_path(path.as_str())
+                        .await
+                        .unwrap(),
+                ),
+            )
+            .await
+            .unwrap(),
+        ));
         let sm = SessionManager::new_with_seckey(key).unwrap();
         let swarm = Arc::new(Swarm::new(stun, key.address(), sm));
         let node = MessageHandler::new(dht.clone(), Arc::clone(&swarm));
@@ -683,7 +709,7 @@ pub mod test {
         println!("key: {:?}", key.to_string());
         println!("did: {:?}", did);
 
-        (did, dht, swarm, node)
+        (did, dht, swarm, node, path)
     }
 
     pub async fn manually_establish_connection(swarm1: &Swarm, swarm2: &Swarm) -> Result<()> {
