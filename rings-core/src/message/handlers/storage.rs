@@ -389,9 +389,9 @@ mod test {
         assert!(node2.check_cache(&vid).await.is_none());
         if vid.in_range(&did2, &did2, &did1) {
             assert!(dht1.lock().await.storage.count().await.unwrap() == 0);
-            assert!(!dht2.lock().await.storage.count().await.unwrap() == 0);
+            assert!(dht2.lock().await.storage.count().await.unwrap() != 0);
         } else {
-            assert!(!dht1.lock().await.storage.count().await.unwrap() == 0);
+            assert!(dht1.lock().await.storage.count().await.unwrap() != 0);
             assert!(dht2.lock().await.storage.count().await.unwrap() == 0);
         }
         // test remote query

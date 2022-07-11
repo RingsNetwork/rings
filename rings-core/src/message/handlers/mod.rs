@@ -314,13 +314,21 @@ pub mod test {
         let path2 = PersistenceStorage::random_path("./tmp");
         let dht1 = PeerRing::new_with_storage(
             key1.address().into(),
-            Arc::new(PersistenceStorage::new_with_path(path1.as_str()).await.unwrap()),
+            Arc::new(
+                PersistenceStorage::new_with_path(path1.as_str())
+                    .await
+                    .unwrap(),
+            ),
         )
         .await
         .unwrap();
         let dht2 = PeerRing::new_with_storage(
             key2.address().into(),
-            Arc::new(PersistenceStorage::new_with_path(path2.as_str()).await.unwrap()),
+            Arc::new(
+                PersistenceStorage::new_with_path(path2.as_str())
+                    .await
+                    .unwrap(),
+            ),
         )
         .await
         .unwrap();
