@@ -4,6 +4,7 @@
 use std::mem::size_of_val;
 use std::ops::Add;
 use std::ops::Sub;
+use std::str::FromStr;
 
 use async_trait::async_trait;
 use rexie::Index;
@@ -74,12 +75,13 @@ impl IDBStorage {
     /// New IDBStorage
     /// * cap: max_size in bytes
     /// * path: db file location
-    pub async fn new_with_cap_and_path(cap: usize, _path: Path) -> Result<Self>
+    pub async fn new_with_cap_and_path<P>(cap: usize, _path: P) -> Result<Self>
     where P: AsRef<std::path::Path> {
         Self::new_with_cap(cap).await
     }
 
-    pub async fn new_with_cap_and_name(cap: usize, name: String) -> Result<Self> {
+    /// New IDBStorage with capacity and name
+    pub async fn new_with_cap_and_name(cap: usize, name: &str) -> Result<Self> {
         if cap == 0 {
             return Err(Error::InvalidCapacity);
         }
@@ -147,11 +149,11 @@ where
             .map_err(Error::IDBError)?;
         Ok(entries
             .iter()
-            .map(|(k, v)| {
-                (
-                    K::from_str(k.as_string().unwrap()).ok()?,
+            .filter_map(|(k, v)| {
+                Some((
+                    K::from_str(k.as_string().unwrap().as_str()).ok()?,
                     v.into_serde::<DataStruct<V>>().unwrap().data,
-                )
+                ))
             })
             .collect::<Vec<(K, V)>>())
     }

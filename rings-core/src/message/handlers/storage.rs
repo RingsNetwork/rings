@@ -199,6 +199,7 @@ mod test {
     use crate::message::MessageHandler;
     use crate::prelude::RTCSdpType;
     use crate::session::SessionManager;
+    use crate::storage::PersistenceStorage;
     use crate::storage::PersistenceStorageOperation;
     use crate::swarm::Swarm;
     use crate::swarm::TransportManager;
@@ -231,8 +232,33 @@ mod test {
         let did1 = key1.address().into();
         let did2 = key2.address().into();
 
-        let dht1 = Arc::new(Mutex::new(PeerRing::new(did1).await.unwrap()));
-        let dht2 = Arc::new(Mutex::new(PeerRing::new(did2).await.unwrap()));
+        let path1 = PersistenceStorage::random_path("./tmp");
+        let path2 = PersistenceStorage::random_path("./tmp");
+
+        let dht1 = Arc::new(Mutex::new(
+            PeerRing::new_with_storage(
+                did1,
+                Arc::new(
+                    PersistenceStorage::new_with_path(path1.as_str())
+                        .await
+                        .unwrap(),
+                ),
+            )
+            .await
+            .unwrap(),
+        ));
+        let dht2 = Arc::new(Mutex::new(
+            PeerRing::new_with_storage(
+                did2,
+                Arc::new(
+                    PersistenceStorage::new_with_path(path2.as_str())
+                        .await
+                        .unwrap(),
+                ),
+            )
+            .await
+            .unwrap(),
+        ));
 
         let sm1 = SessionManager::new_with_seckey(&key1).unwrap();
         let sm2 = SessionManager::new_with_seckey(&key2).unwrap();
@@ -407,6 +433,8 @@ mod test {
             assert!(node2.check_cache(&vid).await.is_some());
         }
 
+        tokio::fs::remove_dir_all(path1).await.unwrap();
+        tokio::fs::remove_dir_all(path2).await.unwrap();
         Ok(())
     }
 }
