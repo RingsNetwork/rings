@@ -90,7 +90,7 @@ console_log = { version = "0.2" }
 
 [[bin]]
 name = "rings-node"
-path = "bin/main.rs"
+path = "bin/node.rs"
 required-features = ["client"]
 
 [[bin]]
