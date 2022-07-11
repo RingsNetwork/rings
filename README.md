@@ -27,9 +27,12 @@ cargo install --path . --features daemon
 * Create a ECDSA secret key. And put it to `.env` file:
 
 -- `rings-node new-secret-key`
+
 -- `echo <your security key> >> .env`
 
 * Run rings-node as daemon
+
+
 -- `rings-node-daemon run`
 
 ### ICE Scheme:
