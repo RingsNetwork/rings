@@ -59,7 +59,7 @@ struct Daemon {
     pub ice_servers: String,
 
     #[clap(long = "key", short = 'k', env)]
-    pub eth_key: SecretKey,
+    pub ecdsa_key: SecretKey,
 
     #[clap(long, default_value = "20", env)]
     pub stabilize_timeout: usize,
@@ -127,7 +127,7 @@ enum SdpCommand {
 #[clap(about)]
 struct SdpOffer {
     #[clap(long = "key", short = 'k', env)]
-    pub eth_key: SecretKey,
+    pub ecdsa_key: SecretKey,
     #[clap(
         long,
         short = 's',
@@ -256,7 +256,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Run(args) => {
             daemon_run(
                 args.http_addr,
-                &args.eth_key,
+                &args.ecdsa_key,
                 args.ice_servers.as_str(),
                 args.stabilize_timeout,
             )

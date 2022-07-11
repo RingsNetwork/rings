@@ -5,6 +5,33 @@ rings-node
 [![cargo](https://img.shields.io/crates/v/rings-node.svg)](https://crates.io/crates/rings-node)
 [![docs](https://docs.rs/rings-node/badge.svg)](https://docs.rs/rings-node/latest/rings_node/)
 
+### Installation
+
+#### from cargo
+
+```
+cargo install rings-node --features daemon
+```
+
+#### from source
+
+```
+git clone git@github.com:RingsNetwork/rings-node.git
+cd ./rings-node
+cargo install --path . --features daemon
+```
+
+
+### Usage
+
+* Create a ECDSA secret key. And put it to `.env` file:
+
+-- `rings-node new-secret-key`
+-- `echo <your security key> >> .env`
+
+* Run rings-node as daemon
+-- `rings-node-daemon run`
+
 ### ICE Scheme:
 
 1. Peer A:

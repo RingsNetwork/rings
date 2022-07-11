@@ -56,7 +56,7 @@ struct RunArgs {
     pub ice_server: Vec<String>,
 
     #[clap(long = "key", short = 'k', env)]
-    pub eth_key: SecretKey,
+    pub ecdsa_key: SecretKey,
 
     #[clap(short = 'd')]
     pub daemonize: bool,
@@ -112,7 +112,7 @@ struct ShutdownArgs {
 }
 
 async fn run_jobs(args: &RunArgs) -> anyhow::Result<()> {
-    let key: &SecretKey = &args.eth_key;
+    let key: &SecretKey = &args.ecdsa_key;
     let dht = Arc::new(Mutex::new(PeerRing::new(key.address().into())));
 
     let (auth, s_key) = SessionManager::gen_unsign_info(
