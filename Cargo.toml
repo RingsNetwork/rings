@@ -1,8 +1,8 @@
 [package]
 name = "rings-node"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
-default-run = "rings-node"
+default-run = "rings-cli"
 authors = ["RND <dev@ringsnetwork.io>"]
 description = "Chord DHT implementation with ICE"
 repository = "https://github.com/RingsNetwork/rings-node"
@@ -66,7 +66,7 @@ form_urlencoded = { version = "1.0.1", optional = true }
 axum = { version = "0.5.1", optional = true }
 pin-project = { version = "1", optional = true }
 base64 = { version = "0.13.0", optional = true }
-rings-core = { package = "rings-core", path = "./rings-core", optional = true }
+rings-core = { package = "rings-core", path = "./rings-core", optional = true, version = "0.1.3"}
 
 # daemon
 daemonize = { version = "0.4.1", optional = true }
@@ -79,7 +79,7 @@ webrtc-util = { version = "0.5.3", optional = true }
 # browser
 console_error_panic_hook = { version = "0.1.1", optional = true }
 reqwest-wasm = { version = "0.11", features = ["json"], optional = true }
-rings-core-wasm = { package = "rings-core", path = "./rings-core", features = ["wasm"], default-features = false, optional = true }
+rings-core-wasm = { package = "rings-core", path = "./rings-core", features = ["wasm"], default-features = false, optional = true, version="0.1.3"}
 console_log = { version = "0.2", optional = true }
 
 [dev-dependencies]
@@ -89,11 +89,11 @@ console_log = { version = "0.2" }
 
 
 [[bin]]
-name = "rings-node"
+name = "rings-cli"
 path = "bin/node.rs"
 required-features = ["client"]
 
 [[bin]]
-name = "rings-node-daemon"
+name = "rings-daemon"
 path = "bin/daemon.rs"
 required-features = ["daemon"]
