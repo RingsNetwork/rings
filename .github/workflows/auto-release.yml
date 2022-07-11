@@ -1,0 +1,27 @@
+---
+name: "pre-release"
+
+on:
+  push:
+    branches:
+      - "master"
+
+jobs:
+  pre-release:
+    name: "Pre Release"
+    runs-on: "ubuntu-latest"
+
+    steps:
+      - name: "Build for Native Node"
+        run: cargo build --features daemon --release
+
+      - uses: "marvinpinto/action-automatic-releases@latest"
+        with:
+          repo_token: "${{ secrets.GITHUB_TOKEN }}"
+          automatic_release_tag: "latest-ubuntu"
+          prerelease: true
+          title: "Development Build"
+          files: |
+            LICENSE.txt
+            target/release/rings-daemon
+            target/release/rings-cli
