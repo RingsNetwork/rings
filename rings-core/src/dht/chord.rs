@@ -395,16 +395,29 @@ mod tests {
 
     #[tokio::test]
     async fn test_chord_finger() {
+        let db_path_a = PersistenceStorage::random_path("./tmp");
+        let db_path_b = PersistenceStorage::random_path("./tmp");
+        let db_path_c = PersistenceStorage::random_path("./tmp");
         let a = Did::from_str("0x00E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
         let b = Did::from_str("0x119999cf1046e68e36E1aA2E0E07105eDDD1f08E").unwrap();
         let c = Did::from_str("0xccffee254729296a45a3885639AC7E10F9d54979").unwrap();
         let d = Did::from_str("0xffffee254729296a45a3885639AC7E10F9d54979").unwrap();
 
+        let db_1 = PersistenceStorage::new_with_path(db_path_a.as_str())
+            .await
+            .unwrap();
+        let db_2 = PersistenceStorage::new_with_path(db_path_b.as_str())
+            .await
+            .unwrap();
+        let db_3 = PersistenceStorage::new_with_path(db_path_c.as_str())
+            .await
+            .unwrap();
+
         assert!(a < b && b < c);
         // distence between (a, d) is less than (b, d)
         assert!((a - d) < (b - d));
 
-        let mut node_a = PeerRing::new(a).await.unwrap();
+        let mut node_a = PeerRing::new_with_storage(a, Arc::new(db_1)).await.unwrap();
         assert_eq!(
             node_a.successor.list(),
             vec![],
@@ -467,7 +480,7 @@ mod tests {
         );
 
         // for decrease seq join
-        let mut node_d = PeerRing::new(d).await.unwrap();
+        let mut node_d = PeerRing::new_with_storage(d, Arc::new(db_2)).await.unwrap();
         assert_eq!(
             node_d.join(c),
             PeerRingAction::RemoteAction(c, RemoteAction::FindSuccessor(d))
@@ -482,7 +495,7 @@ mod tests {
         );
 
         // for over half ring join
-        let mut node_d = PeerRing::new(d).await.unwrap();
+        let mut node_d = PeerRing::new_with_storage(d, Arc::new(db_3)).await.unwrap();
         assert_eq!(
             node_d.join(a),
             PeerRingAction::RemoteAction(a, RemoteAction::FindSuccessor(d))
@@ -501,6 +514,9 @@ mod tests {
         );
         assert!(d + Did::from(BigUint::from(2u16).pow(159)) > b);
         assert!(node_d.successor.list().contains(&a));
+        tokio::fs::remove_dir_all(db_path_a).await.unwrap();
+        tokio::fs::remove_dir_all(db_path_b).await.unwrap();
+        tokio::fs::remove_dir_all(db_path_c).await.unwrap();
     }
 
     #[tokio::test]
@@ -512,8 +528,20 @@ mod tests {
         }
         let did1: Did = key1.address().into();
         let did2: Did = key2.address().into();
-        let mut node1 = PeerRing::new(did1).await.unwrap();
-        let mut node2 = PeerRing::new(did2).await.unwrap();
+        let db_path1 = PersistenceStorage::random_path("./tmp");
+        let db_path2 = PersistenceStorage::random_path("./tmp");
+        let db_1 = PersistenceStorage::new_with_path(db_path1.as_str())
+            .await
+            .unwrap();
+        let db_2 = PersistenceStorage::new_with_path(db_path2.as_str())
+            .await
+            .unwrap();
+        let mut node1 = PeerRing::new_with_storage(did1, Arc::new(db_1))
+            .await
+            .unwrap();
+        let mut node2 = PeerRing::new_with_storage(did2, Arc::new(db_2))
+            .await
+            .unwrap();
 
         node1.join(did2);
         node2.join(did1);
@@ -532,6 +560,8 @@ mod tests {
             did1,
             did2
         );
+        tokio::fs::remove_dir_all(db_path1).await.unwrap();
+        tokio::fs::remove_dir_all(db_path2).await.unwrap();
     }
 
     #[tokio::test]
@@ -541,8 +571,20 @@ mod tests {
         let max = Did::from(BigUint::from(2u16).pow(160) - 1u16);
         let zero = Did::from(BigUint::from(2u16).pow(160));
 
-        let mut node1 = PeerRing::new(did1).await.unwrap();
-        let mut node2 = PeerRing::new(did2).await.unwrap();
+        let db_path1 = PersistenceStorage::random_path("./tmp");
+        let db_path2 = PersistenceStorage::random_path("./tmp");
+        let db_1 = PersistenceStorage::new_with_path(db_path1.as_str())
+            .await
+            .unwrap();
+        let db_2 = PersistenceStorage::new_with_path(db_path2.as_str())
+            .await
+            .unwrap();
+        let mut node1 = PeerRing::new_with_storage(did1, Arc::new(db_1))
+            .await
+            .unwrap();
+        let mut node2 = PeerRing::new_with_storage(did2, Arc::new(db_2))
+            .await
+            .unwrap();
 
         node1.join(did2);
         node2.join(did1);
@@ -567,5 +609,7 @@ mod tests {
             did2,
             did1
         );
+        tokio::fs::remove_dir_all(db_path1).await.unwrap();
+        tokio::fs::remove_dir_all(db_path2).await.unwrap();
     }
 }

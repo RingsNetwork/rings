@@ -63,13 +63,30 @@ impl IDBStorage {
     /// New IDBStorage
     /// * cap: rows of data limit
     pub async fn new_with_cap(cap: usize) -> Result<Self> {
+        Self::new_with_cap_and_name(cap, REXIE_STORE_NAME).await
+    }
+
+    /// New IDBStorage with default capacity 50000 rows data limit
+    pub async fn new() -> Result<Self> {
+        Self::new_with_cap(50000).await
+    }
+
+    /// New IDBStorage
+    /// * cap: max_size in bytes
+    /// * path: db file location
+    pub async fn new_with_cap_and_path(cap: usize, _path: Path) -> Result<Self>
+    where P: AsRef<std::path::Path> {
+        Self::new_with_cap(cap).await
+    }
+
+    pub async fn new_with_cap_and_name(cap: usize, name: String) -> Result<Self> {
         if cap == 0 {
             return Err(Error::InvalidCapacity);
         }
         Ok(Self {
-            db: Rexie::builder("rings-storage")
+            db: Rexie::builder(name)
                 .add_object_store(
-                    ObjectStore::new(REXIE_STORE_NAME)
+                    ObjectStore::new(name)
                         .key_path("key")
                         .auto_increment(false)
                         .add_index(Index::new("last_visit_time", "last_visit_time"))
@@ -80,11 +97,6 @@ impl IDBStorage {
                 .map_err(Error::IDBError)?,
             cap,
         })
-    }
-
-    /// New IDBStorage with default capacity 50000 rows data limit
-    pub async fn new() -> Result<Self> {
-        Self::new_with_cap(50000).await
     }
 }
 

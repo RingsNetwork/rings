@@ -261,6 +261,9 @@ pub enum Error {
 
     #[error("entry not found")]
     EntryNotFound,
+
+    #[error("IO error: {0}")]
+    IOError(std::io::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

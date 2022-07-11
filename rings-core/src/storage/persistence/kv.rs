@@ -19,9 +19,11 @@ trait KvStorageBasic {
 }
 
 /// StorageInstance struct
+#[allow(dead_code)]
 pub struct KvStorage {
     db: sled::Db,
     cap: usize,
+    path: String,
 }
 
 impl KvStorage {
@@ -31,12 +33,16 @@ impl KvStorage {
     pub async fn new_with_cap_and_path<P>(cap: usize, path: P) -> Result<Self>
     where P: AsRef<std::path::Path> {
         let db = sled::Config::new()
-            .path(path)
+            .path(path.as_ref())
             .mode(sled::Mode::HighThroughput)
             .cache_capacity(cap as u64)
             .open()
             .map_err(Error::SledError)?;
-        Ok(Self { db, cap })
+        Ok(Self {
+            db,
+            cap,
+            path: path.as_ref().to_string_lossy().to_string(),
+        })
     }
 
     /// New KvStorage with default path
@@ -45,11 +51,35 @@ impl KvStorage {
         Self::new_with_cap_and_path(cap, "./data").await
     }
 
+    /// New KvStorage with default capacity and specific path
+    /// * path: db file location
+    pub async fn new_with_path<P>(path: P) -> Result<Self>
+    where P: AsRef<std::path::Path> {
+        Self::new_with_cap_and_path(200000000, path).await
+    }
+
     /// New KvStorage
     /// * default capacity 200 megabytes
     /// * default path `./data`
     pub async fn new() -> Result<Self> {
         Self::new_with_cap(200000000).await
+    }
+
+    /// Delete current KvStorage
+    #[cfg(test)]
+    pub async fn delete(self) -> Result<()> {
+        let path = self.path.clone();
+        drop(self);
+        tokio::fs::remove_dir_all(path.as_str())
+            .await
+            .map_err(Error::IOError)?;
+        Ok(())
+    }
+
+    /// Generate a random path
+    pub fn random_path(prefix: &str) -> String {
+        let p = std::path::Path::new(prefix).join(uuid::Uuid::new_v4().to_string());
+        p.to_string_lossy().to_string()
     }
 }
 
