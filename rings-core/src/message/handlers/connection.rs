@@ -219,7 +219,7 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
                 if let Ok(PeerRingAction::RemoteAction(
                     next,
                     PeerRingRemoteAction::SyncVNodeWithSuccessor(data),
-                )) = dht.sync_with_successor(msg.id)
+                )) = dht.sync_with_successor(msg.id).await
                 {
                     self.send_direct_message(
                         Message::SyncVNodeWithSuccessor(SyncVNodeWithSuccessor { data }),
@@ -360,9 +360,9 @@ pub mod test {
         key2: SecretKey,
         key3: SecretKey,
     ) -> Result<()> {
-        let (did1, dht1, swarm1, node1) = prepare_node(&key1);
-        let (did2, dht2, swarm2, node2) = prepare_node(&key2);
-        let (did3, dht3, swarm3, node3) = prepare_node(&key3);
+        let (did1, dht1, swarm1, node1) = prepare_node(&key1).await;
+        let (did2, dht2, swarm2, node2) = prepare_node(&key2).await;
+        let (did3, dht3, swarm3, node3) = prepare_node(&key3).await;
 
         println!("========================================");
         println!("||  now we connect node1 and node2    ||");
@@ -501,9 +501,9 @@ pub mod test {
         key2: SecretKey,
         key3: SecretKey,
     ) -> Result<()> {
-        let (did1, dht1, swarm1, node1) = prepare_node(&key1);
-        let (did2, dht2, swarm2, node2) = prepare_node(&key2);
-        let (did3, dht3, swarm3, node3) = prepare_node(&key3);
+        let (did1, dht1, swarm1, node1) = prepare_node(&key1).await;
+        let (did2, dht2, swarm2, node2) = prepare_node(&key2).await;
+        let (did3, dht3, swarm3, node3) = prepare_node(&key3).await;
 
         println!("========================================");
         println!("||  now we connect node1 and node2    ||");
@@ -669,13 +669,13 @@ pub mod test {
         (keys[0], keys[1], keys[2])
     }
 
-    pub fn prepare_node(
+    pub async fn prepare_node(
         key: &SecretKey,
     ) -> (Did, Arc<Mutex<PeerRing>>, Arc<Swarm>, MessageHandler) {
         let stun = "stun://stun.l.google.com:19302";
 
         let did = key.address().into();
-        let dht = Arc::new(Mutex::new(PeerRing::new(did)));
+        let dht = Arc::new(Mutex::new(PeerRing::new(did).await.unwrap()));
         let sm = SessionManager::new_with_seckey(key).unwrap();
         let swarm = Arc::new(Swarm::new(stun, key.address(), sm));
         let node = MessageHandler::new(dht.clone(), Arc::clone(&swarm));

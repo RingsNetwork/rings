@@ -309,8 +309,8 @@ pub mod test {
     ) -> Result<(MessageHandler, MessageHandler)> {
         let stun = "stun://stun.l.google.com:19302";
 
-        let dht1 = PeerRing::new(key1.address().into());
-        let dht2 = PeerRing::new(key2.address().into());
+        let dht1 = PeerRing::new(key1.address().into()).await.unwrap();
+        let dht2 = PeerRing::new(key2.address().into()).await.unwrap();
 
         let sm1 = SessionManager::new_with_seckey(&key1).unwrap();
         let sm2 = SessionManager::new_with_seckey(&key2).unwrap();

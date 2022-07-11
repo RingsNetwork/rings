@@ -35,7 +35,7 @@ impl TChordStorage for MessageHandler {
     /// Check local cache
     async fn check_cache(&self, id: &Did) -> Option<VirtualNode> {
         let dht = self.dht.lock().await;
-        dht.fetch_cache(id)
+        dht.fetch_cache(id).await
     }
 
     /// Fetch virtual node, if exist in localstoreage, copy it to the cache,
@@ -43,9 +43,9 @@ impl TChordStorage for MessageHandler {
     async fn fetch(&self, id: &Did) -> Result<()> {
         // If peer found that data is on it's localstore, copy it to the cache
         let dht = self.dht.lock().await;
-        match dht.lookup(id)? {
+        match dht.lookup(id).await? {
             PeerRingAction::SomeVNode(v) => {
-                dht.cache(v);
+                dht.cache(v).await;
                 Ok(())
             }
             PeerRingAction::None => Ok(()),
@@ -61,7 +61,7 @@ impl TChordStorage for MessageHandler {
     /// Store VirtualNode, TryInto<VirtualNode> is implementated for alot of types
     async fn store(&self, vnode: VirtualNode) -> Result<()> {
         let dht = self.dht.lock().await;
-        match dht.store(vnode)? {
+        match dht.store(vnode).await? {
             PeerRingAction::None => Ok(()),
             PeerRingAction::RemoteAction(target, PeerRingRemoteAction::FindAndStore(vnode)) => {
                 self.send_direct_message(
@@ -85,7 +85,7 @@ impl HandleMsg<SearchVNode> for MessageHandler {
         let dht = self.dht.lock().await;
         let mut relay = ctx.relay.clone();
 
-        match dht.lookup(&msg.id) {
+        match dht.lookup(&msg.id).await {
             Ok(action) => match action {
                 PeerRingAction::None => Ok(()),
                 PeerRingAction::SomeVNode(v) => {
@@ -120,7 +120,7 @@ impl HandleMsg<FoundVNode> for MessageHandler {
         } else {
             // When query successor, store in local cache
             for datum in msg.data.iter().cloned() {
-                dht.cache(datum);
+                dht.cache(datum).await;
             }
             Ok(())
         }
@@ -135,7 +135,7 @@ impl HandleMsg<StoreVNode> for MessageHandler {
 
         let virtual_peer = msg.data.clone();
         for p in virtual_peer {
-            match dht.store(p) {
+            match dht.store(p).await {
                 Ok(action) => match action {
                     PeerRingAction::None => Ok(()),
                     PeerRingAction::RemoteAction(next, _) => {
@@ -166,7 +166,7 @@ impl HandleMsg<SyncVNodeWithSuccessor> for MessageHandler {
 
         for data in msg.data.iter().cloned() {
             // only simply store here
-            match dht.store(data) {
+            match dht.store(data).await {
                 Ok(PeerRingAction::None) => Ok(()),
                 Ok(PeerRingAction::RemoteAction(
                     next,
@@ -199,6 +199,7 @@ mod test {
     use crate::message::MessageHandler;
     use crate::prelude::RTCSdpType;
     use crate::session::SessionManager;
+    use crate::storage::PersistenceStorageOperation;
     use crate::swarm::Swarm;
     use crate::swarm::TransportManager;
     use crate::types::ice_transport::IceTrickleScheme;
@@ -230,8 +231,8 @@ mod test {
         let did1 = key1.address().into();
         let did2 = key2.address().into();
 
-        let dht1 = Arc::new(Mutex::new(PeerRing::new(did1)));
-        let dht2 = Arc::new(Mutex::new(PeerRing::new(did2)));
+        let dht1 = Arc::new(Mutex::new(PeerRing::new(did1).await.unwrap()));
+        let dht2 = Arc::new(Mutex::new(PeerRing::new(did2).await.unwrap()));
 
         let sm1 = SessionManager::new_with_seckey(&key1).unwrap();
         let sm2 = SessionManager::new_with_seckey(&key2).unwrap();
@@ -361,11 +362,11 @@ mod test {
         assert!(node1.check_cache(&vid).await.is_none());
         assert!(node2.check_cache(&vid).await.is_none());
         if vid.in_range(&did2, &did2, &did1) {
-            assert!(dht1.lock().await.storage.is_empty());
-            assert!(!dht2.lock().await.storage.is_empty());
+            assert!(dht1.lock().await.storage.count().await.unwrap() == 0);
+            assert!(!dht2.lock().await.storage.count().await.unwrap() == 0);
         } else {
-            assert!(!dht1.lock().await.storage.is_empty());
-            assert!(dht2.lock().await.storage.is_empty());
+            assert!(!dht1.lock().await.storage.count().await.unwrap() == 0);
+            assert!(dht2.lock().await.storage.count().await.unwrap() == 0);
         }
         // test remote query
         if vid.in_range(&did2, &did2, &did1) {

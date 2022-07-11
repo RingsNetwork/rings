@@ -113,7 +113,7 @@ struct ShutdownArgs {
 
 async fn run_jobs(args: &RunArgs) -> anyhow::Result<()> {
     let key: &SecretKey = &args.ecdsa_key;
-    let dht = Arc::new(Mutex::new(PeerRing::new(key.address().into())));
+    let dht = Arc::new(Mutex::new(PeerRing::new(key.address().into()).await?));
 
     let (auth, s_key) = SessionManager::gen_unsign_info(
         key.address(),

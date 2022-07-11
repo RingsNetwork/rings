@@ -215,7 +215,7 @@ async fn daemon_run(
     stuns: &str,
     stabilize_timeout: usize,
 ) -> anyhow::Result<()> {
-    let dht = Arc::new(Mutex::new(PeerRing::new(key.address().into())));
+    let dht = Arc::new(Mutex::new(PeerRing::new(key.address().into()).await?));
     let (auth, temp_key) = SessionManager::gen_unsign_info(
         key.address(),
         Some(rings_core::session::Ttl::Never),

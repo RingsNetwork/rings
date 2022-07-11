@@ -1,6 +1,7 @@
 #![warn(missing_docs)]
 use std::str::FromStr;
 
+use async_trait::async_trait;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -16,6 +17,8 @@ use crate::dht::Did;
 use crate::ecc::HashStr;
 use crate::err::Error;
 use crate::err::Result;
+use crate::storage::PersistenceStorageReadAndWrite;
+// use crate::storage::PersistenceStorageOperation;
 
 /// A SubRing is a full functional Ring, but with a name and it's finger table can be
 /// stored on Main Rings DHT, For a SubRing, it's virtual address is `sha1(name)`
@@ -33,16 +36,18 @@ pub struct SubRing {
     pub creator: Did,
 }
 
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
 impl SubRingManager<PeerRingAction> for PeerRing {
-    fn join_subring(&self, id: &Did, rid: &Did) -> Result<PeerRingAction> {
+    async fn join_subring(&self, id: &Did, rid: &Did) -> Result<PeerRingAction> {
         match self.find_successor(*rid) {
             Ok(PeerRingAction::Some(_)) => {
                 let id = id.to_owned();
-                self.get_subring_for_update(rid, box move |r: SubRing| {
-                    let mut new_ring = r;
-                    new_ring.finger.join(id);
-                    new_ring
-                })?;
+                if let Ok(subring) = self.get_subring(rid).await {
+                    let mut sr = subring;
+                    sr.finger.join(id);
+                    self.store_subring(&sr).await?;
+                }
                 Ok(PeerRingAction::None)
             }
             Ok(PeerRingAction::RemoteAction(n, RemoteAction::FindSuccessor(_))) => Ok(
@@ -53,56 +58,56 @@ impl SubRingManager<PeerRingAction> for PeerRing {
         }
     }
 
-    fn cloest_preceding_node_for_subring(&self, id: &Did, rid: &Did) -> Option<Result<Did>> {
+    async fn cloest_preceding_node_for_subring(&self, id: &Did, rid: &Did) -> Option<Result<Did>> {
         let id = id.to_owned();
-        if let Some(Ok(subring)) = self.get_subring(rid) {
+        if let Ok(subring) = self.get_subring(rid).await {
             Some(subring.finger.closest(id))
         } else {
             None
         }
     }
 
-    fn get_subring(&self, id: &Did) -> Option<Result<SubRing>> {
-        self.storage.get(id).map(|vn| vn.try_into())
+    async fn get_subring(&self, id: &Did) -> Result<SubRing> {
+        self.storage.get(id).await
     }
 
-    fn store_subring(&self, subring: &SubRing) -> Result<()> {
+    async fn store_subring(&self, subring: &SubRing) -> Result<()> {
         let id = subring.did;
-        self.storage.set(&id, subring.clone().try_into()?);
+        self.storage.put(&id, subring).await?;
         Ok(())
     }
 
-    fn get_subring_by_name(&self, name: &str) -> Option<Result<SubRing>> {
+    async fn get_subring_by_name(&self, name: &str) -> Result<SubRing> {
         let address: HashStr = name.to_owned().into();
         // trans Result to Option here
-        let did = Did::from_str(&address.inner()).ok()?;
-        self.get_subring(&did)
-    }
-    /// get subring, update and putback
-    fn get_subring_for_update(
-        &self,
-        id: &Did,
-        callback: Box<dyn FnOnce(SubRing) -> SubRing>,
-    ) -> Result<bool> {
-        if let Some(Ok(subring)) = self.get_subring(id) {
-            let sr = callback(subring);
-            self.store_subring(&sr)?;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    /// get subring, update and putback
-    fn get_subring_for_update_by_name(
-        &self,
-        name: &str,
-        callback: Box<dyn FnOnce(SubRing) -> SubRing>,
-    ) -> Result<bool> {
-        let address: HashStr = name.to_owned().into();
         let did = Did::from_str(&address.inner())?;
-        self.get_subring_for_update(&did, callback)
+        self.get_subring(&did).await
     }
+    // get subring, update and putback
+    // async fn get_subring_for_update(
+    //     &self,
+    //     id: &Did,
+    //     callback: Arc<dyn FnOnce(SubRing) -> SubRing>,
+    // ) -> Result<bool> {
+    //     if let Ok(subring) = self.get_subring(id).await {
+    //         let sr = callback(subring);
+    //         self.store_subring(&sr).await?;
+    //         Ok(true)
+    //     } else {
+    //         Ok(false)
+    //     }
+    // }
+
+    // /// get subring, update and putback
+    // async fn get_subring_for_update_by_name(
+    //     &self,
+    //     name: &str,
+    //     callback: Box<dyn FnOnce(SubRing) -> SubRing>,
+    // ) -> Result<bool> {
+    //     let address: HashStr = name.to_owned().into();
+    //     let did = Did::from_str(&address.inner())?;
+    //     self.get_subring_for_update(&did, callback)
+    // }
 }
 
 impl SubRing {
@@ -160,14 +165,14 @@ impl TryFrom<VirtualNode> for SubRing {
     }
 }
 
-impl From<SubRing> for PeerRing {
-    fn from(ring: SubRing) -> Self {
-        let mut pr = PeerRing::new_with_config(ring.did, 1);
-        // set finger[0] to successor
-        if let Some(id) = ring.finger.first() {
-            pr.successor.update(id);
-        }
-        pr.finger = ring.finger;
-        pr
-    }
-}
+// impl From<SubRing> for PeerRing {
+//     fn from(ring: SubRing) -> Self {
+//         let mut pr = PeerRing::new_with_config(ring.did, 1);
+//         // set finger[0] to successor
+//         if let Some(id) = ring.finger.first() {
+//             pr.successor.update(id);
+//         }
+//         pr.finger = ring.finger;
+//         pr
+//     }
+// }

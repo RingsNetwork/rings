@@ -9,6 +9,7 @@ use std::str::FromStr;
 use num_bigint::BigUint;
 use serde::Deserialize;
 use serde::Serialize;
+use web3::contract::tokens::Tokenizable;
 use web3::types::H160;
 
 /// Did is a finate Ring R(P) where P = 2^160
@@ -18,6 +19,12 @@ use crate::err::Result;
 
 #[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd, Debug, Serialize, Deserialize, Hash)]
 pub struct Did(H160);
+
+impl ToString for Did {
+    fn to_string(&self) -> String {
+        self.into_token().to_string()
+    }
+}
 
 // Bias Did is a special Did which set origin Did's idendity to bias
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Serialize, Deserialize, Hash)]
@@ -163,7 +170,6 @@ impl FromStr for Did {
 }
 
 // impl Finate Ring For Did
-
 impl Neg for Did {
     type Output = Self;
     fn neg(self) -> Self {

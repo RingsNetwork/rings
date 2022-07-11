@@ -1,6 +1,8 @@
 #![warn(missing_docs)]
 use std::sync::Arc;
 
+use async_trait::async_trait;
+use itertools::Itertools;
 use num_bigint::BigUint;
 use serde::Deserialize;
 use serde::Serialize;
@@ -16,6 +18,10 @@ use crate::dht::Did;
 use crate::err::Error;
 use crate::err::Result;
 use crate::storage::MemStorage;
+use crate::storage::PersistenceStorage;
+use crate::storage::PersistenceStorageReadAndWrite;
+// use crate::storage::PersistenceStorageOperation;
+use crate::storage::PersistenceStorageRemove;
 
 /// Remote actions
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,7 +95,7 @@ impl PeerRingAction {
 }
 
 /// Implementation of PeerRing
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PeerRing {
     /// first node on circle that succeeds (n + 2 ^(k-1) ) mod 2^m , 1 <= k<= m
     /// for index start with 0, it should be (n+2^k) mod 2^m
@@ -103,34 +109,34 @@ pub struct PeerRing {
     /// This index is used for FindSuccesorForFix
     pub fix_finger_index: u8,
     /// LocalStorage for DHT Query
-    pub storage: Arc<MemStorage<Did, VirtualNode>>,
+    pub storage: Arc<PersistenceStorage>,
     /// LocalCache
     pub cache: Arc<MemStorage<Did, VirtualNode>>,
 }
 
 impl PeerRing {
     /// Create a new Chord ring.
-    pub fn new(id: Did) -> Self {
-        Self::new_with_config(id, 3)
+    pub async fn new(id: Did) -> Result<Self> {
+        Self::new_with_config(id, 3).await
     }
 
     /// Create a new Chord Ring with given successor_max, and finger_size
-    pub fn new_with_config(id: Did, succ_max: u8) -> Self {
-        Self {
+    pub async fn new_with_config(id: Did, succ_max: u8) -> Result<Self> {
+        Ok(Self {
             successor: Successor::new(&id, succ_max),
             predecessor: None,
             // for Eth address, it's 160
             finger: FingerTable::new(id, 160),
             id,
             fix_finger_index: 0,
-            storage: Arc::new(MemStorage::<Did, VirtualNode>::new()),
+            storage: Arc::new(PersistenceStorage::new().await?),
             cache: Arc::new(MemStorage::<Did, VirtualNode>::new()),
-        }
+        })
     }
 
     /// Init with given Storage
-    pub fn new_with_storage(id: Did, storage: Arc<MemStorage<Did, VirtualNode>>) -> Self {
-        Self {
+    pub async fn new_with_storage(id: Did, storage: Arc<PersistenceStorage>) -> Result<Self> {
+        Ok(Self {
             successor: Successor::new(&id, 3),
             predecessor: None,
             // for Eth address, it's 160
@@ -139,7 +145,7 @@ impl PeerRing {
             cache: Arc::new(MemStorage::<Did, VirtualNode>::new()),
             id,
             fix_finger_index: 0,
-        }
+        })
     }
 
     /// Get first element from Finger Table
@@ -283,14 +289,16 @@ impl ChordStabilize<PeerRingAction> for PeerRing {
     }
 }
 
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
 impl ChordStorage<PeerRingAction> for PeerRing {
     /// lookup always check data via finger table
-    fn lookup(&self, vid: &Did) -> Result<PeerRingAction> {
+    async fn lookup(&self, vid: &Did) -> Result<PeerRingAction> {
         match self.find_successor(*vid) {
             // if vid is in [self, successor]
-            Ok(PeerRingAction::Some(_)) => match self.storage.get(vid) {
-                Some(v) => Ok(PeerRingAction::SomeVNode(v)),
-                None => Ok(PeerRingAction::None),
+            Ok(PeerRingAction::Some(_)) => match self.storage.get(vid).await {
+                Ok(v) => Ok(PeerRingAction::SomeVNode(v)),
+                Err(_) => Ok(PeerRingAction::None),
             },
             Ok(PeerRingAction::RemoteAction(n, RemoteAction::FindSuccessor(id))) => {
                 Ok(PeerRingAction::RemoteAction(n, RemoteAction::FindVNode(id)))
@@ -301,30 +309,33 @@ impl ChordStorage<PeerRingAction> for PeerRing {
     }
 
     /// When a vnode data is fetched from remote, it should be cache at local
-    fn cache(&self, vnode: VirtualNode) {
+    async fn cache(&self, vnode: VirtualNode) {
         self.cache.set(&vnode.did(), vnode);
     }
 
     /// When a VNode data is fetched from remote, it should be cache at local
-    fn fetch_cache(&self, id: &Did) -> Option<VirtualNode> {
+    async fn fetch_cache(&self, id: &Did) -> Option<VirtualNode> {
         self.cache.get(id)
     }
 
     /// If address of VNode is in range(self, successor), it should store locally,
     /// otherwise, it should on remote successor
-    fn store(&self, peer: VirtualNode) -> Result<PeerRingAction> {
+    async fn store(&self, peer: VirtualNode) -> Result<PeerRingAction> {
         let vid = peer.did();
         // find VNode's closest successor
         match self.find_successor(vid) {
             // if vid is in range(self, successor)
             // self should store it
-            Ok(PeerRingAction::Some(_)) => match self.storage.get(&vid) {
-                Some(v) => {
-                    let _ = self.storage.set(&vid, VirtualNode::concat(&v, &peer)?);
+            Ok(PeerRingAction::Some(_)) => match self.storage.get(&vid).await {
+                Ok(v) => {
+                    let _ = self
+                        .storage
+                        .put(&vid, &VirtualNode::concat(&v, &peer)?)
+                        .await?;
                     Ok(PeerRingAction::None)
                 }
-                None => {
-                    let _ = self.storage.set(&vid, peer);
+                Err(_) => {
+                    let _ = self.storage.put(&vid, &peer).await?;
                     Ok(PeerRingAction::None)
                 }
             },
@@ -337,15 +348,17 @@ impl ChordStorage<PeerRingAction> for PeerRing {
     }
 
     /// store a vec of data
-    fn store_vec(&self, vps: Vec<VirtualNode>) -> Result<PeerRingAction> {
-        let acts: Vec<PeerRingAction> = vps
-            .iter()
-            .map(|v| self.store(v.clone()))
-            // ignore faiure here
-            .filter(|v| v.is_ok())
-            .map(|v| v.unwrap())
-            .filter(|v| !v.is_none())
-            .collect();
+    async fn store_vec(&self, vps: Vec<VirtualNode>) -> Result<PeerRingAction> {
+        let acts: Vec<PeerRingAction> =
+            futures::future::join_all(vps.iter().map(|v| self.store(v.clone())).collect_vec())
+                .await
+                .into_iter()
+                // ignore faiure here
+                //.filter(|v| v.is_ok())
+                .flatten()
+                //.map(|v| v.unwrap())
+                //.filter(|v| !v.is_none())
+                .collect();
         match acts.len() {
             0 => Ok(PeerRingAction::None),
             _ => Ok(PeerRingAction::MultiActions(acts)),
@@ -353,14 +366,13 @@ impl ChordStorage<PeerRingAction> for PeerRing {
     }
 
     /// This function should call when successor is updated
-    fn sync_with_successor(&self, new_successor: Did) -> Result<PeerRingAction> {
+    async fn sync_with_successor(&self, new_successor: Did) -> Result<PeerRingAction> {
         let mut data = Vec::<VirtualNode>::new();
-        for k in self.storage.keys() {
+        let all_items: Vec<(Did, VirtualNode)> = self.storage.get_all().await?;
+        for (k, v) in all_items.iter() {
             // k < self.successor
-            if self.bias(k) < self.bias(new_successor) {
-                if let Some(v) = self.storage.remove(&k) {
-                    data.push(v.1);
-                }
+            if self.bias(*k) < self.bias(new_successor) && self.storage.remove(k).await.is_ok() {
+                data.push(v.clone());
             }
         }
         if !data.is_empty() {
@@ -381,8 +393,8 @@ mod tests {
     use super::*;
     use crate::ecc::SecretKey;
 
-    #[test]
-    fn test_chord_finger() {
+    #[tokio::test]
+    async fn test_chord_finger() {
         let a = Did::from_str("0x00E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
         let b = Did::from_str("0x119999cf1046e68e36E1aA2E0E07105eDDD1f08E").unwrap();
         let c = Did::from_str("0xccffee254729296a45a3885639AC7E10F9d54979").unwrap();
@@ -392,7 +404,7 @@ mod tests {
         // distence between (a, d) is less than (b, d)
         assert!((a - d) < (b - d));
 
-        let mut node_a = PeerRing::new(a);
+        let mut node_a = PeerRing::new(a).await.unwrap();
         assert_eq!(
             node_a.successor.list(),
             vec![],
@@ -455,7 +467,7 @@ mod tests {
         );
 
         // for decrease seq join
-        let mut node_d = PeerRing::new(d);
+        let mut node_d = PeerRing::new(d).await.unwrap();
         assert_eq!(
             node_d.join(c),
             PeerRingAction::RemoteAction(c, RemoteAction::FindSuccessor(d))
@@ -470,7 +482,7 @@ mod tests {
         );
 
         // for over half ring join
-        let mut node_d = PeerRing::new(d);
+        let mut node_d = PeerRing::new(d).await.unwrap();
         assert_eq!(
             node_d.join(a),
             PeerRingAction::RemoteAction(a, RemoteAction::FindSuccessor(d))
@@ -491,8 +503,8 @@ mod tests {
         assert!(node_d.successor.list().contains(&a));
     }
 
-    #[test]
-    fn test_two_node_finger() {
+    #[tokio::test]
+    async fn test_two_node_finger() {
         let mut key1 = SecretKey::random();
         let mut key2 = SecretKey::random();
         if key1.address() > key2.address() {
@@ -500,8 +512,8 @@ mod tests {
         }
         let did1: Did = key1.address().into();
         let did2: Did = key2.address().into();
-        let mut node1 = PeerRing::new(did1);
-        let mut node2 = PeerRing::new(did2);
+        let mut node1 = PeerRing::new(did1).await.unwrap();
+        let mut node2 = PeerRing::new(did2).await.unwrap();
 
         node1.join(did2);
         node2.join(did1);
@@ -522,15 +534,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_two_node_finger_failed_case() {
+    #[tokio::test]
+    async fn test_two_node_finger_failed_case() {
         let did1 = Did::from_str("0x051cf4f8d020cb910474bef3e17f153fface2b5f").unwrap();
         let did2 = Did::from_str("0x54baa7dc9e28f41da5d71af8fa6f2a302be1c1bf").unwrap();
         let max = Did::from(BigUint::from(2u16).pow(160) - 1u16);
         let zero = Did::from(BigUint::from(2u16).pow(160));
 
-        let mut node1 = PeerRing::new(did1);
-        let mut node2 = PeerRing::new(did2);
+        let mut node1 = PeerRing::new(did1).await.unwrap();
+        let mut node2 = PeerRing::new(did2).await.unwrap();
 
         node1.join(did2);
         node2.join(did1);

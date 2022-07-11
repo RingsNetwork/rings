@@ -379,7 +379,7 @@ mod test {
     use super::*;
     use crate::prelude::*;
 
-    fn new_processor() -> Processor {
+    async fn new_processor() -> Processor {
         let key = SecretKey::random();
 
         let (auth, new_key) = SessionManager::gen_unsign_info(key.address(), None, None).unwrap();
@@ -391,7 +391,9 @@ mod test {
             session,
         ));
 
-        let dht = Arc::new(Mutex::new(PeerRing::new(key.address().into())));
+        let dht = Arc::new(Mutex::new(
+            PeerRing::new(key.address().into()).await.unwrap(),
+        ));
         let msg_handler = MessageHandler::new(dht.clone(), swarm.clone());
         let stabilization = Stabilization::new(dht, swarm.clone(), 200);
         (swarm, Arc::new(msg_handler), Arc::new(stabilization)).into()
@@ -399,7 +401,7 @@ mod test {
 
     #[tokio::test]
     async fn test_processor_create_offer() {
-        let processor = new_processor();
+        let processor = new_processor().await;
         let ti = processor.create_offer().await.unwrap();
         let pendings = processor.swarm.pending_transports().await.unwrap();
         assert_eq!(pendings.len(), 1);
@@ -408,7 +410,7 @@ mod test {
 
     #[tokio::test]
     async fn test_processor_list_pendings() {
-        let processor = new_processor();
+        let processor = new_processor().await;
         let ti0 = processor.create_offer().await.unwrap();
         let ti1 = processor.create_offer().await.unwrap();
         let pendings = processor.swarm.pending_transports().await.unwrap();
@@ -427,7 +429,7 @@ mod test {
 
     #[tokio::test]
     async fn test_processor_close_pending_transport() {
-        let processor = new_processor();
+        let processor = new_processor().await;
         let ti0 = processor.create_offer().await.unwrap();
         let _ti1 = processor.create_offer().await.unwrap();
         let ti2 = processor.create_offer().await.unwrap();
@@ -516,8 +518,8 @@ mod test {
 
     #[tokio::test]
     async fn test_processor_handshake_msg() {
-        let p1 = new_processor();
-        let p2 = new_processor();
+        let p1 = new_processor().await;
+        let p2 = new_processor().await;
         let p1_addr = p1.address().into_token().to_string();
         let p2_addr = p2.address().into_token().to_string();
         println!("p1_addr: {}", p1_addr);

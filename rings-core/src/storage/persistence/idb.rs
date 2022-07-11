@@ -104,7 +104,7 @@ impl IDBStorageBasic for IDBStorage {
 #[async_trait(?Send)]
 impl<K, V, I> PersistenceStorageReadAndWrite<K, V> for I
 where
-    K: ToString + From<String>,
+    K: ToString + FromStr,
     V: DeserializeOwned + Serialize + Sized,
     I: PersistenceStorageOperation + IDBStorageBasic,
 {
@@ -137,7 +137,7 @@ where
             .iter()
             .map(|(k, v)| {
                 (
-                    K::from(k.as_string().unwrap()),
+                    K::from_str(k.as_string().unwrap()).ok()?,
                     v.into_serde::<DataStruct<V>>().unwrap().data,
                 )
             })

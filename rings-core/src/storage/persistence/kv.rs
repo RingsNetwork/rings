@@ -1,6 +1,8 @@
 #![warn(missing_docs)]
 #![allow(clippy::ptr_offset_with_cast)]
 //! Persistence Storage for default, use `sled` as backend db.
+use std::str::FromStr;
+
 use async_trait::async_trait;
 use itertools::Itertools;
 use serde::de::DeserializeOwned;
@@ -87,7 +89,7 @@ impl PersistenceStorageOperation for KvStorage {
 #[async_trait]
 impl<K, V, I> PersistenceStorageReadAndWrite<K, V> for I
 where
-    K: ToString + From<String> + std::marker::Sync + Send,
+    K: ToString + FromStr + std::marker::Sync + Send,
     V: DeserializeOwned + serde::Serialize + std::marker::Sync + Send,
     I: PersistenceStorageOperation + std::marker::Sync + KvStorageBasic,
 {
@@ -119,7 +121,7 @@ where
             .flatten()
             .flat_map(|(k, v)| {
                 Some((
-                    K::from(std::str::from_utf8(k.as_ref()).ok()?.to_string()),
+                    K::from_str(std::str::from_utf8(k.as_ref()).ok()?).ok()?,
                     bincode::deserialize(v.as_ref()).ok()?,
                 ))
             })

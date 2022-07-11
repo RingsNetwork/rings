@@ -39,7 +39,7 @@ impl SubRingOperator for MessageHandler {
         let dht = self.dht.lock().await;
         let subring: SubRing = SubRing::new(name, &dht.id)?;
         let vnode: VirtualNode = subring.clone().try_into()?;
-        dht.store_subring(&subring.clone())?;
+        dht.store_subring(&subring.clone()).await?;
         self.store(vnode).await
     }
 
@@ -47,7 +47,7 @@ impl SubRingOperator for MessageHandler {
         let dht = self.dht.lock().await;
         let address: HashStr = name.to_owned().into();
         let did = Did::from_str(&address.inner())?;
-        match dht.join_subring(&dht.id, &did) {
+        match dht.join_subring(&dht.id, &did).await {
             Ok(PeerRingAction::RemoteAction(next, RemoteAction::FindAndJoinSubRing(rid))) => {
                 self.send_direct_message(Message::JoinSubRing(JoinSubRing { did: rid }), next)
                     .await
@@ -66,7 +66,7 @@ impl HandleMsg<JoinSubRing> for MessageHandler {
         let dht = self.dht.lock().await;
         let mut relay = ctx.relay.clone();
         let origin = relay.origin();
-        match dht.join_subring(&origin, &msg.did) {
+        match dht.join_subring(&origin, &msg.did).await {
             Ok(PeerRingAction::RemoteAction(next, RemoteAction::FindAndJoinSubRing(_))) => {
                 relay.relay(dht.id, Some(next))?;
                 relay.reset_destination(next)?;
