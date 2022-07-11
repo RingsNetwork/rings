@@ -55,14 +55,6 @@ struct RunArgs {
     #[clap(long, short = 's', default_value = "stun://stun.l.google.com:19302")]
     pub ice_server: Vec<String>,
 
-    #[clap(
-        long = "eth",
-        short = 'e',
-        default_value = "http://127.0.0.1:8545",
-        env
-    )]
-    pub eth_endpoint: String,
-
     #[clap(long = "key", short = 'k', env)]
     pub eth_key: SecretKey,
 

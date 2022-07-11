@@ -1,4 +1,3 @@
-#![feature(async_closure)]
 use std::sync::Arc;
 
 use clap::Args;
@@ -59,18 +58,10 @@ struct Daemon {
     )]
     pub ice_servers: String,
 
-    #[clap(
-        long = "eth",
-        short = 'e',
-        default_value = "http://127.0.0.1:8545",
-        env
-    )]
-    pub eth_endpoint: String,
-
     #[clap(long = "key", short = 'k', env)]
     pub eth_key: SecretKey,
 
-    #[clap(long, default_value = "20")]
+    #[clap(long, default_value = "20", env)]
     pub stabilize_timeout: usize,
 }
 
@@ -80,7 +71,8 @@ struct ClientArgs {
         long,
         short = 'u',
         default_value = "http://127.0.0.1:50000",
-        help = "rings-node endpoint url."
+        help = "rings-node endpoint url.",
+        env
     )]
     endpoint_url: String,
 }
@@ -185,6 +177,7 @@ struct PeerDisconnect {
     client_args: ClientArgs,
     address: String,
 }
+
 #[derive(Subcommand, Debug)]
 #[clap(rename_all = "kebab-case")]
 enum PendingCommand {
@@ -222,7 +215,6 @@ async fn daemon_run(
     stuns: &str,
     stabilize_timeout: usize,
 ) -> anyhow::Result<()> {
-    // TODO support run daemonize
     let dht = Arc::new(Mutex::new(PeerRing::new(key.address().into())));
     let (auth, temp_key) = SessionManager::gen_unsign_info(
         key.address(),
