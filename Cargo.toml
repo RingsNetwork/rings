@@ -2,7 +2,7 @@
 name = "rings-node"
 version = "0.1.2"
 edition = "2021"
-default-run = "rings-node"
+default-run = "rings-cli"
 authors = ["RND <dev@ringsnetwork.io>"]
 description = "Chord DHT implementation with ICE"
 repository = "https://github.com/RingsNetwork/rings-node"

@@ -93,7 +93,7 @@ enum ConnectCommand {
 }
 
 #[derive(Args, Debug)]
-#[clap(about)]
+#[clap(about="Connect with Node url")]
 struct ConnectUrlArgs {
     #[clap(flatten)]
     client_args: ClientArgs,
@@ -103,7 +103,7 @@ struct ConnectUrlArgs {
 }
 
 #[derive(Args, Debug)]
-#[clap(about)]
+#[clap(about="Connect with Did address via DHT")]
 struct ConnectWithAddressArgs {
     #[clap(flatten)]
     client_args: ClientArgs,
