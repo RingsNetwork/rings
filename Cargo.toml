@@ -89,11 +89,11 @@ console_log = { version = "0.2" }
 
 
 [[bin]]
-name = "rings-node"
+name = "rings-cli"
 path = "bin/node.rs"
 required-features = ["client"]
 
 [[bin]]
-name = "rings-node-daemon"
+name = "rings-daemon"
 path = "bin/daemon.rs"
 required-features = ["daemon"]
