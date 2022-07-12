@@ -3,7 +3,6 @@ use rings_node::browser;
 use rings_node::browser::Peer;
 use rings_node::browser::SignerMode;
 use rings_node::browser::TransportAndIce;
-use rings_node::prelude::rings_core::prelude::rexie;
 use rings_node::prelude::rings_core::prelude::web3::contract::tokens::Tokenizable;
 use rings_node::prelude::wasm_bindgen::convert::FromWasmAbi;
 use rings_node::prelude::wasm_bindgen::JsValue;

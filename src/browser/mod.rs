@@ -125,7 +125,7 @@ impl UnsignedInfo {
 /// const unsignedInfo = new UnsignedInfo(account);
 /// const signed = await signer.signMessage(unsignedInfo.auth);
 /// const sig = new Uint8Array(web3.utils.hexToBytes(signed));
-/// const client = new Client(unsignedInfo, sig, stunOrTurnUrl);
+/// const client: Client = await Client.new_client(unsignedInfo, sig, stunOrTurnUrl);
 /// ```
 #[wasm_bindgen]
 #[derive(Clone)]
@@ -139,45 +139,7 @@ pub struct Client {
 
 #[wasm_bindgen]
 impl Client {
-    // #[wasm_bindgen(constructor)]
-    // pub fn new(
-    //     unsigned_info: &UnsignedInfo,
-    //     signed_data: js_sys::Uint8Array,
-    //     stuns: String,
-    // ) -> Result<Client, JsError> {
-    //     // Self {
-    //     //     processor: None,
-    //     //     unsigned_info: unsigned_info.clone(),
-    //     //     signed_data: signed_data.to_vec(),
-    //     //     stuns,
-    //     // }
-    //     let random_key = unsigned_info.random_key;
-    //     let session = SessionManager::new(&signed_data.to_vec(), &unsigned_info.auth, &random_key);
-    //     let swarm = Arc::new(Swarm::new(&stuns, unsigned_info.key_addr, session));
-
-    //     let mut pr = Option::None;
-
-    //     wasm_bindgen_futures::spawn_local(async{
-    //         pr = Some(PeerRing::new_with_storage(
-    //             swarm.address().into(),
-    //             //storage.inner.clone().unwrap().clone(),
-    //             Arc::new(PersistenceStorage::new().await.unwrap()),
-    //         ));
-    //     });
-    //     let pr = pr.unwrap();
-
-    //     let dht = Arc::new(Mutex::new(pr));
-    //     let msg_handler = Arc::new(MessageHandler::new(dht.clone(), swarm.clone()));
-    //     let stabilization = Arc::new(Stabilization::new(dht, swarm.clone(), 20));
-    //     let processor = Arc::new(Processor::from((swarm, msg_handler, stabilization)));
-    //     Ok(Client {
-    //         processor,
-    //         unsigned_info: unsigned_info.clone(),
-    //         signed_data: signed_data.to_vec(),
-    //         stuns,
-    //     })
-    // }
-
+    /// Creat a new client instance.
     pub fn new_client(
         unsigned_info: &UnsignedInfo,
         signed_data: js_sys::Uint8Array,
@@ -217,31 +179,6 @@ impl Client {
             }))
         })
     }
-
-    // pub fn build(&mut self) -> Promise {
-    //     let p = self.processor.clone();
-    //     future_to_promise(async {
-    //         let random_key = self.unsigned_info.random_key;
-    //         let session =
-    //             SessionManager::new(&self.signed_data, &self.unsigned_info.auth, &random_key);
-    //         let swarm = Arc::new(Swarm::new(
-    //             &self.stuns,
-    //             self.unsigned_info.key_addr,
-    //             session,
-    //         ));
-
-    //         let pr = PeerRing::new(swarm.address().into())
-    //             .await
-    //             .map_err(JsError::from)?;
-
-    //         let dht = Arc::new(Mutex::new(pr));
-    //         let msg_handler = Arc::new(MessageHandler::new(dht.clone(), swarm.clone()));
-    //         let stabilization = Arc::new(Stabilization::new(dht, swarm.clone(), 20));
-    //         let processor = Arc::new(Processor::from((swarm, msg_handler, stabilization)));
-    //         //self.processor = Some(processor);
-    //         Ok(JsValue::null())
-    //     })
-    // }
 
     /// start backgroud listener without custom callback
     pub fn start(&self) -> Promise {
