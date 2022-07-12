@@ -24,9 +24,9 @@ pub trait ChordStorage<A>: Chord<A> {
     /// look up a resouce
     async fn lookup(&self, id: &Did) -> Result<A>;
     /// Cache, cache fetched Data locally
-    async fn cache(&self, vnode: VirtualNode);
+    fn cache(&self, vnode: VirtualNode);
     /// Check localCache
-    async fn fetch_cache(&self, id: &Did) -> Option<VirtualNode>;
+    fn fetch_cache(&self, id: &Did) -> Option<VirtualNode>;
     /// store VNode to it's successor
     /// A VNode's successor should store the data
     async fn store(&self, peer: VirtualNode) -> Result<A>;

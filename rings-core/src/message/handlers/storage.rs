@@ -35,7 +35,7 @@ impl TChordStorage for MessageHandler {
     /// Check local cache
     async fn check_cache(&self, id: &Did) -> Option<VirtualNode> {
         let dht = self.dht.lock().await;
-        dht.fetch_cache(id).await
+        dht.fetch_cache(id)
     }
 
     /// Fetch virtual node, if exist in localstoreage, copy it to the cache,
@@ -45,7 +45,7 @@ impl TChordStorage for MessageHandler {
         let dht = self.dht.lock().await;
         match dht.lookup(id).await? {
             PeerRingAction::SomeVNode(v) => {
-                dht.cache(v).await;
+                dht.cache(v);
                 Ok(())
             }
             PeerRingAction::None => Ok(()),
@@ -120,7 +120,7 @@ impl HandleMsg<FoundVNode> for MessageHandler {
         } else {
             // When query successor, store in local cache
             for datum in msg.data.iter().cloned() {
-                dht.cache(datum).await;
+                dht.cache(datum);
             }
             Ok(())
         }

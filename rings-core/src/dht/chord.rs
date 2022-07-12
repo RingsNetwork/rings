@@ -309,12 +309,12 @@ impl ChordStorage<PeerRingAction> for PeerRing {
     }
 
     /// When a vnode data is fetched from remote, it should be cache at local
-    async fn cache(&self, vnode: VirtualNode) {
+    fn cache(&self, vnode: VirtualNode) {
         self.cache.set(&vnode.did(), vnode);
     }
 
     /// When a VNode data is fetched from remote, it should be cache at local
-    async fn fetch_cache(&self, id: &Did) -> Option<VirtualNode> {
+    fn fetch_cache(&self, id: &Did) -> Option<VirtualNode> {
         self.cache.get(id)
     }
 
