@@ -298,6 +298,7 @@ pub mod test {
     use crate::ecc::SecretKey;
     use crate::message::MessageHandler;
     use crate::session::SessionManager;
+    use crate::storage::PersistenceStorage;
     use crate::swarm::Swarm;
     use crate::swarm::TransportManager;
     use crate::types::ice_transport::IceTrickleScheme;
@@ -309,8 +310,24 @@ pub mod test {
     ) -> Result<(MessageHandler, MessageHandler)> {
         let stun = "stun://stun.l.google.com:19302";
 
-        let dht1 = PeerRing::new(key1.address().into());
-        let dht2 = PeerRing::new(key2.address().into());
+        let path1 = PersistenceStorage::random_path("./tmp");
+        let path2 = PersistenceStorage::random_path("./tmp");
+        let dht1 = PeerRing::new_with_storage(
+            key1.address().into(),
+            Arc::new(
+                PersistenceStorage::new_with_path(path1.as_str())
+                    .await
+                    .unwrap(),
+            ),
+        );
+        let dht2 = PeerRing::new_with_storage(
+            key2.address().into(),
+            Arc::new(
+                PersistenceStorage::new_with_path(path2.as_str())
+                    .await
+                    .unwrap(),
+            ),
+        );
 
         let sm1 = SessionManager::new_with_seckey(&key1).unwrap();
         let sm2 = SessionManager::new_with_seckey(&key2).unwrap();
@@ -351,6 +368,7 @@ pub mod test {
             .unwrap();
         assert!(handler1.listen_once().await.is_some());
         assert!(handler2.listen_once().await.is_some());
+        tokio::fs::remove_dir_all("./tmp").await.ok();
         Ok((handler1, handler2))
     }
 

@@ -4,6 +4,7 @@
 use std::mem::size_of_val;
 use std::ops::Add;
 use std::ops::Sub;
+use std::str::FromStr;
 
 use async_trait::async_trait;
 use rexie::Index;
@@ -21,7 +22,8 @@ use super::PersistenceStorageRemove;
 use crate::err::Error;
 use crate::err::Result;
 
-const REXIE_STORE_NAME: &str = "rings-storage";
+/// Default IndexedDB database and storage name
+pub const DEFAULT_REXIE_STORE_NAME: &str = "rings-storage";
 
 /// DataStruct of IndexedDB store entry
 #[derive(Serialize, Deserialize)]
@@ -51,6 +53,7 @@ impl<T> DataStruct<T> {
 pub struct IDBStorage {
     db: Rexie,
     cap: usize,
+    storage_name: String,
 }
 
 /// IDBStorage basic functions
@@ -63,13 +66,31 @@ impl IDBStorage {
     /// New IDBStorage
     /// * cap: rows of data limit
     pub async fn new_with_cap(cap: usize) -> Result<Self> {
+        Self::new_with_cap_and_name(cap, DEFAULT_REXIE_STORE_NAME).await
+    }
+
+    /// New IDBStorage with default capacity 50000 rows data limit
+    pub async fn new() -> Result<Self> {
+        Self::new_with_cap(50000).await
+    }
+
+    /// New IDBStorage
+    /// * cap: max_size in bytes
+    /// * path: db file location
+    pub async fn new_with_cap_and_path<P>(cap: usize, _path: P) -> Result<Self>
+    where P: AsRef<std::path::Path> {
+        Self::new_with_cap(cap).await
+    }
+
+    /// New IDBStorage with capacity and name
+    pub async fn new_with_cap_and_name(cap: usize, name: &str) -> Result<Self> {
         if cap == 0 {
             return Err(Error::InvalidCapacity);
         }
         Ok(Self {
-            db: Rexie::builder("rings-storage")
+            db: Rexie::builder(name)
                 .add_object_store(
-                    ObjectStore::new(REXIE_STORE_NAME)
+                    ObjectStore::new(name)
                         .key_path("key")
                         .auto_increment(false)
                         .add_index(Index::new("last_visit_time", "last_visit_time"))
@@ -79,12 +100,17 @@ impl IDBStorage {
                 .await
                 .map_err(Error::IDBError)?,
             cap,
+            storage_name: name.to_owned(),
         })
     }
 
-    /// New IDBStorage with default capacity 50000 rows data limit
-    pub async fn new() -> Result<Self> {
-        Self::new_with_cap(50000).await
+    /// Delete db
+    pub async fn delete(self) -> Result<()> {
+        self.db.close();
+        Rexie::delete(self.storage_name.as_str())
+            .await
+            .map_err(Error::IDBError)?;
+        Ok(())
     }
 }
 
@@ -92,10 +118,10 @@ impl IDBStorageBasic for IDBStorage {
     fn get_tx_store(&self, mode: TransactionMode) -> Result<(rexie::Transaction, rexie::Store)> {
         let transaction = self
             .db
-            .transaction(&[REXIE_STORE_NAME], mode)
+            .transaction(&self.db.store_names(), mode)
             .map_err(Error::IDBError)?;
         let store = transaction
-            .store(REXIE_STORE_NAME)
+            .store(self.storage_name.as_str())
             .map_err(Error::IDBError)?;
         Ok((transaction, store))
     }
@@ -104,7 +130,7 @@ impl IDBStorageBasic for IDBStorage {
 #[async_trait(?Send)]
 impl<K, V, I> PersistenceStorageReadAndWrite<K, V> for I
 where
-    K: ToString + From<String>,
+    K: ToString + FromStr,
     V: DeserializeOwned + Serialize + Sized,
     I: PersistenceStorageOperation + IDBStorageBasic,
 {
@@ -135,11 +161,11 @@ where
             .map_err(Error::IDBError)?;
         Ok(entries
             .iter()
-            .map(|(k, v)| {
-                (
-                    K::from(k.as_string().unwrap()),
+            .filter_map(|(k, v)| {
+                Some((
+                    K::from_str(k.as_string().unwrap().as_str()).ok()?,
                     v.into_serde::<DataStruct<V>>().unwrap().data,
-                )
+                ))
             })
             .collect::<Vec<(K, V)>>())
     }
@@ -237,6 +263,11 @@ impl PersistenceStorageOperation for IDBStorage {
                 .map_err(Error::IDBError)?;
         }
         tx.done().await.map_err(Error::IDBError)?;
+        Ok(())
+    }
+
+    async fn close(self) -> Result<()> {
+        self.db.close();
         Ok(())
     }
 }

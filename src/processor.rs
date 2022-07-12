@@ -375,11 +375,12 @@ impl From<&(Address, Arc<Transport>)> for Peer {
 #[cfg(feature = "client")]
 mod test {
     use futures::lock::Mutex;
+    use rings_core::storage::PersistenceStorage;
 
     use super::*;
     use crate::prelude::*;
 
-    fn new_processor() -> Processor {
+    async fn new_processor() -> (Processor, String) {
         let key = SecretKey::random();
 
         let (auth, new_key) = SessionManager::gen_unsign_info(key.address(), None, None).unwrap();
@@ -391,24 +392,37 @@ mod test {
             session,
         ));
 
-        let dht = Arc::new(Mutex::new(PeerRing::new(key.address().into())));
+        let path = PersistenceStorage::random_path("./tmp");
+
+        let dht = Arc::new(Mutex::new(PeerRing::new_with_storage(
+            key.address().into(),
+            Arc::new(
+                PersistenceStorage::new_with_path(path.as_str())
+                    .await
+                    .unwrap(),
+            ),
+        )));
         let msg_handler = MessageHandler::new(dht.clone(), swarm.clone());
         let stabilization = Stabilization::new(dht, swarm.clone(), 200);
-        (swarm, Arc::new(msg_handler), Arc::new(stabilization)).into()
+        (
+            (swarm, Arc::new(msg_handler), Arc::new(stabilization)).into(),
+            path,
+        )
     }
 
     #[tokio::test]
     async fn test_processor_create_offer() {
-        let processor = new_processor();
+        let (processor, path) = new_processor().await;
         let ti = processor.create_offer().await.unwrap();
         let pendings = processor.swarm.pending_transports().await.unwrap();
         assert_eq!(pendings.len(), 1);
         assert_eq!(pendings.get(0).unwrap().id.to_string(), ti.0.id.to_string());
+        tokio::fs::remove_dir_all(path).await.unwrap();
     }
 
     #[tokio::test]
     async fn test_processor_list_pendings() {
-        let processor = new_processor();
+        let (processor, path) = new_processor().await;
         let ti0 = processor.create_offer().await.unwrap();
         let ti1 = processor.create_offer().await.unwrap();
         let pendings = processor.swarm.pending_transports().await.unwrap();
@@ -423,11 +437,12 @@ mod test {
                 item.id
             );
         }
+        tokio::fs::remove_dir_all(path).await.unwrap();
     }
 
     #[tokio::test]
     async fn test_processor_close_pending_transport() {
-        let processor = new_processor();
+        let (processor, path) = new_processor().await;
         let ti0 = processor.create_offer().await.unwrap();
         let _ti1 = processor.create_offer().await.unwrap();
         let ti2 = processor.create_offer().await.unwrap();
@@ -490,6 +505,7 @@ mod test {
             "transport[{}] should not in pending_transports",
             ti0.0.id
         );
+        tokio::fs::remove_dir_all(path).await.unwrap();
     }
 
     struct MsgCallbackStruct {
@@ -516,8 +532,8 @@ mod test {
 
     #[tokio::test]
     async fn test_processor_handshake_msg() {
-        let p1 = new_processor();
-        let p2 = new_processor();
+        let (p1, path1) = new_processor().await;
+        let (p2, path2) = new_processor().await;
         let p1_addr = p1.address().into_token().to_string();
         let p2_addr = p2.address().into_token().to_string();
         println!("p1_addr: {}", p1_addr);
@@ -656,5 +672,7 @@ mod test {
             test_text2,
             got_msg1
         );
+        tokio::fs::remove_dir_all(path1).await.unwrap();
+        tokio::fs::remove_dir_all(path2).await.unwrap();
     }
 }

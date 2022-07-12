@@ -28,6 +28,7 @@ use crate::prelude::rings_core::prelude::web3::types::Address;
 use crate::prelude::rings_core::session::AuthorizedInfo;
 use crate::prelude::rings_core::session::SessionManager;
 use crate::prelude::rings_core::session::Signer;
+use crate::prelude::rings_core::storage::PersistenceStorage;
 use crate::prelude::rings_core::swarm::Swarm;
 use crate::prelude::rings_core::swarm::TransportManager;
 use crate::prelude::rings_core::transports::Transport;
@@ -124,31 +125,59 @@ impl UnsignedInfo {
 /// const unsignedInfo = new UnsignedInfo(account);
 /// const signed = await signer.signMessage(unsignedInfo.auth);
 /// const sig = new Uint8Array(web3.utils.hexToBytes(signed));
-/// const client = new Client(unsignedInfo, sig, stunOrTurnUrl);
+/// const client: Client = await Client.new_client(unsignedInfo, sig, stunOrTurnUrl);
 /// ```
 #[wasm_bindgen]
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct Client {
     processor: Arc<Processor>,
+    unsigned_info: UnsignedInfo,
+    signed_data: Vec<u8>,
+    stuns: String,
 }
 
 #[wasm_bindgen]
 impl Client {
-    #[wasm_bindgen(constructor)]
-    pub fn new(
+    /// Creat a new client instance.
+    pub fn new_client(
         unsigned_info: &UnsignedInfo,
         signed_data: js_sys::Uint8Array,
         stuns: String,
-    ) -> Result<Client, JsError> {
-        let random_key = unsigned_info.random_key;
-        let session = SessionManager::new(&signed_data.to_vec(), &unsigned_info.auth, &random_key);
-        let swarm = Arc::new(Swarm::new(&stuns, unsigned_info.key_addr, session));
-        let pr = PeerRing::new(swarm.address().into());
-        let dht = Arc::new(Mutex::new(pr));
-        let msg_handler = Arc::new(MessageHandler::new(dht.clone(), swarm.clone()));
-        let stabilization = Arc::new(Stabilization::new(dht, swarm.clone(), 20));
-        let processor = Arc::new(Processor::from((swarm, msg_handler, stabilization)));
-        Ok(Client { processor })
+    ) -> Promise {
+        let unsigned_info = unsigned_info.clone();
+        Self::new_client_with_storage(&unsigned_info, signed_data, stuns, "rings-node".to_owned())
+    }
+
+    pub fn new_client_with_storage(
+        unsigned_info: &UnsignedInfo,
+        signed_data: js_sys::Uint8Array,
+        stuns: String,
+        storage_name: String,
+    ) -> Promise {
+        let unsigned_info = unsigned_info.clone();
+        let signed_data = signed_data.to_vec();
+        future_to_promise(async move {
+            let random_key = unsigned_info.random_key;
+            let session = SessionManager::new(&signed_data, &unsigned_info.auth, &random_key);
+            let swarm = Arc::new(Swarm::new(&stuns, unsigned_info.key_addr, session));
+
+            let storage = PersistenceStorage::new_with_cap_and_name(50000, storage_name.as_str())
+                .await
+                .map_err(JsError::from)?;
+            let pr = PeerRing::new_with_storage(swarm.address().into(), Arc::new(storage));
+
+            let dht = Arc::new(Mutex::new(pr));
+            let msg_handler = Arc::new(MessageHandler::new(dht.clone(), swarm.clone()));
+            let stabilization = Arc::new(Stabilization::new(dht, swarm.clone(), 20));
+            let processor = Arc::new(Processor::from((swarm, msg_handler, stabilization)));
+            Ok(JsValue::from(Client {
+                processor,
+                unsigned_info: unsigned_info.clone(),
+                signed_data,
+                stuns,
+            }))
+        })
     }
 
     /// start backgroud listener without custom callback
@@ -172,8 +201,8 @@ impl Client {
 
     /// get self web3 address
     #[wasm_bindgen(getter)]
-    pub fn address(&self) -> String {
-        self.processor.address().into_token().to_string()
+    pub fn address(&self) -> Result<String, JsError> {
+        Ok(self.processor.address().into_token().to_string())
     }
 
     /// listen message callback.

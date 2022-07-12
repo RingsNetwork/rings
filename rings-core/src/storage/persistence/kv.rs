@@ -1,6 +1,8 @@
 #![warn(missing_docs)]
 #![allow(clippy::ptr_offset_with_cast)]
 //! Persistence Storage for default, use `sled` as backend db.
+use std::str::FromStr;
+
 use async_trait::async_trait;
 use itertools::Itertools;
 use serde::de::DeserializeOwned;
@@ -17,9 +19,11 @@ trait KvStorageBasic {
 }
 
 /// StorageInstance struct
+#[allow(dead_code)]
 pub struct KvStorage {
     db: sled::Db,
     cap: usize,
+    path: String,
 }
 
 impl KvStorage {
@@ -29,12 +33,16 @@ impl KvStorage {
     pub async fn new_with_cap_and_path<P>(cap: usize, path: P) -> Result<Self>
     where P: AsRef<std::path::Path> {
         let db = sled::Config::new()
-            .path(path)
+            .path(path.as_ref())
             .mode(sled::Mode::HighThroughput)
             .cache_capacity(cap as u64)
             .open()
             .map_err(Error::SledError)?;
-        Ok(Self { db, cap })
+        Ok(Self {
+            db,
+            cap,
+            path: path.as_ref().to_string_lossy().to_string(),
+        })
     }
 
     /// New KvStorage with default path
@@ -43,11 +51,35 @@ impl KvStorage {
         Self::new_with_cap_and_path(cap, "./data").await
     }
 
+    /// New KvStorage with default capacity and specific path
+    /// * path: db file location
+    pub async fn new_with_path<P>(path: P) -> Result<Self>
+    where P: AsRef<std::path::Path> {
+        Self::new_with_cap_and_path(200000000, path).await
+    }
+
     /// New KvStorage
     /// * default capacity 200 megabytes
     /// * default path `./data`
     pub async fn new() -> Result<Self> {
         Self::new_with_cap(200000000).await
+    }
+
+    /// Delete current KvStorage
+    #[cfg(test)]
+    pub async fn delete(self) -> Result<()> {
+        let path = self.path.clone();
+        drop(self);
+        tokio::fs::remove_dir_all(path.as_str())
+            .await
+            .map_err(Error::IOError)?;
+        Ok(())
+    }
+
+    /// Generate a random path
+    pub fn random_path(prefix: &str) -> String {
+        let p = std::path::Path::new(prefix).join(uuid::Uuid::new_v4().to_string());
+        p.to_string_lossy().to_string()
     }
 }
 
@@ -82,12 +114,16 @@ impl PersistenceStorageOperation for KvStorage {
     async fn prune(&self) -> Result<()> {
         Ok(())
     }
+
+    async fn close(self) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl<K, V, I> PersistenceStorageReadAndWrite<K, V> for I
 where
-    K: ToString + From<String> + std::marker::Sync + Send,
+    K: ToString + FromStr + std::marker::Sync + Send,
     V: DeserializeOwned + serde::Serialize + std::marker::Sync + Send,
     I: PersistenceStorageOperation + std::marker::Sync + KvStorageBasic,
 {
@@ -119,7 +155,7 @@ where
             .flatten()
             .flat_map(|(k, v)| {
                 Some((
-                    K::from(std::str::from_utf8(k.as_ref()).ok()?.to_string()),
+                    K::from_str(std::str::from_utf8(k.as_ref()).ok()?).ok()?,
                     bincode::deserialize(v.as_ref()).ok()?,
                 ))
             })

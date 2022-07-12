@@ -5,6 +5,8 @@ pub use dashmap;
 pub use futures;
 #[cfg(feature = "wasm")]
 pub use js_sys;
+#[cfg(feature = "wasm")]
+pub use rexie;
 pub use url;
 pub use uuid;
 #[cfg(feature = "wasm")]

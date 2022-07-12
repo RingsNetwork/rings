@@ -9,6 +9,7 @@ use rings_core::err::Result;
 use rings_core::message::MessageHandler;
 use rings_core::prelude::RTCSdpType;
 use rings_core::session::SessionManager;
+use rings_core::storage::PersistenceStorage;
 use rings_core::swarm::Swarm;
 use rings_core::swarm::TransportManager;
 use rings_core::transports::Transport;
@@ -127,8 +128,23 @@ async fn test_message_handler() {
         key2.address()
     );
 
-    let dht1 = Arc::new(Mutex::new(PeerRing::new(key1.address().into())));
-    let dht2 = Arc::new(Mutex::new(PeerRing::new(key2.address().into())));
+    let db1 =
+        PersistenceStorage::new_with_cap_and_name(1000, uuid::Uuid::new_v4().to_string().as_str())
+            .await
+            .unwrap();
+    let db2 =
+        PersistenceStorage::new_with_cap_and_name(1000, uuid::Uuid::new_v4().to_string().as_str())
+            .await
+            .unwrap();
+
+    let dht1 = Arc::new(Mutex::new(PeerRing::new_with_storage(
+        key1.address().into(),
+        Arc::new(db1),
+    )));
+    let dht2 = Arc::new(Mutex::new(PeerRing::new_with_storage(
+        key2.address().into(),
+        Arc::new(db2),
+    )));
 
     let sm1 = SessionManager::new_with_seckey(&key1).unwrap();
     let sm2 = SessionManager::new_with_seckey(&key2).unwrap();
