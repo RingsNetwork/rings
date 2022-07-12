@@ -325,10 +325,7 @@ mod test {
         assert_eq!(dht1.lock().await.predecessor, Some(did3));
         assert_eq!(dht2.lock().await.predecessor, Some(did1));
         assert_eq!(dht3.lock().await.predecessor, Some(did2));
-        tokio::fs::remove_dir_all(path1).await.unwrap();
-        tokio::fs::remove_dir_all(path2).await.unwrap();
-        tokio::fs::remove_dir_all(path3).await.unwrap();
-
+        tokio::fs::remove_dir_all("./tmp").await.unwrap();
         Ok(())
     }
 
@@ -494,9 +491,7 @@ mod test {
         assert_eq!(dht1.lock().await.predecessor, Some(did2));
         assert_eq!(dht2.lock().await.predecessor, Some(did3));
         assert!(dht3.lock().await.predecessor.is_none());
-        tokio::fs::remove_dir_all(path1).await.unwrap();
-        tokio::fs::remove_dir_all(path2).await.unwrap();
-        tokio::fs::remove_dir_all(path3).await.unwrap();
+        tokio::fs::remove_dir_all("./tmp").await.unwrap();
 
         Ok(())
     }

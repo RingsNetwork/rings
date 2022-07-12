@@ -493,11 +493,7 @@ pub mod test {
         assert_eq!(dht1.lock().await.successor.list(), vec![did2]);
         assert_eq!(dht2.lock().await.successor.list(), vec![did3, did1]);
         assert_eq!(dht3.lock().await.successor.list(), vec![did1, did2]);
-
-        tokio::fs::remove_dir_all(path1).await.unwrap();
-        tokio::fs::remove_dir_all(path2).await.unwrap();
-        tokio::fs::remove_dir_all(path3).await.unwrap();
-
+        tokio::fs::remove_dir_all("./tmp").await.unwrap();
         Ok(())
     }
 
@@ -659,9 +655,7 @@ pub mod test {
         assert_eq!(dht2.lock().await.successor.list(), vec![did1]);
         assert_eq!(dht3.lock().await.successor.list(), vec![did2]);
 
-        tokio::fs::remove_dir_all(path1).await.unwrap();
-        tokio::fs::remove_dir_all(path2).await.unwrap();
-        tokio::fs::remove_dir_all(path3).await.unwrap();
+        tokio::fs::remove_dir_all("./tmp").await.unwrap();
         Ok(())
     }
 
