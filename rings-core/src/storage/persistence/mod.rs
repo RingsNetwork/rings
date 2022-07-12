@@ -50,4 +50,7 @@ pub trait PersistenceStorageOperation {
 
     /// Prune database storage
     async fn prune(&self) -> Result<()>;
+
+    /// Close db instance
+    async fn close(self) -> Result<()>;
 }

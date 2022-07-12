@@ -104,11 +104,13 @@ impl IDBStorage {
         })
     }
 
-    /// Delete IndexedDB database
-    pub async fn delete(&self) -> Result<()> {
-        Rexie::delete(self.db.name().as_str())
+    /// Delete db
+    pub async fn delete(self) -> Result<()> {
+        self.db.close();
+        Rexie::delete(self.storage_name.as_str())
             .await
-            .map_err(Error::IDBError)
+            .map_err(Error::IDBError)?;
+        Ok(())
     }
 }
 
@@ -261,6 +263,11 @@ impl PersistenceStorageOperation for IDBStorage {
                 .map_err(Error::IDBError)?;
         }
         tx.done().await.map_err(Error::IDBError)?;
+        Ok(())
+    }
+
+    async fn close(self) -> Result<()> {
+        self.db.close();
         Ok(())
     }
 }

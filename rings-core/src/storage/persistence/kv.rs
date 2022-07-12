@@ -114,6 +114,10 @@ impl PersistenceStorageOperation for KvStorage {
     async fn prune(&self) -> Result<()> {
         Ok(())
     }
+
+    async fn close(self) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[async_trait]

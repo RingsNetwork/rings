@@ -84,8 +84,8 @@ async fn get_peers(client: &browser::Client) -> Vec<browser::Peer> {
 #[wasm_bindgen_test]
 async fn test_two_client_connect_and_list() {
     // super::setup_log();
-    let (client1, storage1) = new_client().await;
-    let (client2, storage2) = new_client().await;
+    let (client1, _storage1) = new_client().await;
+    let (client2, _storage2) = new_client().await;
 
     futures::try_join!(
         JsFuture::from(client1.start()),
@@ -119,6 +119,4 @@ async fn test_two_client_connect_and_list() {
         .unwrap();
     let peers = get_peers(&client1).await;
     assert_eq!(peers.len(), 0);
-    rexie::Rexie::delete(storage1.as_str()).await.unwrap();
-    rexie::Rexie::delete(storage2.as_str()).await.unwrap();
 }
