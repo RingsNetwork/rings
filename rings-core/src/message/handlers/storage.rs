@@ -425,7 +425,7 @@ mod test {
             assert!(node2.check_cache(&vid).await.is_some());
         }
 
-        tokio::fs::remove_dir_all("./tmp").await.unwrap();
+        tokio::fs::remove_dir_all("./tmp").await.ok();
         Ok(())
     }
 }

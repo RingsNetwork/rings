@@ -368,7 +368,7 @@ pub mod test {
             .unwrap();
         assert!(handler1.listen_once().await.is_some());
         assert!(handler2.listen_once().await.is_some());
-        tokio::fs::remove_dir_all("./tmp").await.unwrap();
+        tokio::fs::remove_dir_all("./tmp").await.ok();
         Ok((handler1, handler2))
     }
 

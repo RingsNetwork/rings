@@ -155,7 +155,7 @@ pub mod test {
             .successor
             .list()
             .contains(&key2.address().into()));
-        tokio::fs::remove_dir_all("./tmp").await.unwrap();
+        tokio::fs::remove_dir_all("./tmp").await.ok();
         Ok(())
     }
 
@@ -288,7 +288,7 @@ pub mod test {
                 );
             } => {}
         }
-        tokio::fs::remove_dir_all("./tmp").await.unwrap();
+        tokio::fs::remove_dir_all("./tmp").await.ok();
         Ok(())
     }
 
@@ -352,7 +352,7 @@ pub mod test {
             } => {}
         }
 
-        tokio::fs::remove_dir_all("./tmp").await.unwrap();
+        tokio::fs::remove_dir_all("./tmp").await.ok();
         Ok(())
     }
 
@@ -438,7 +438,7 @@ pub mod test {
                 assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
             } => {}
         }
-        tokio::fs::remove_dir_all("./tmp").await.unwrap();
+        tokio::fs::remove_dir_all("./tmp").await.ok();
         Ok(())
     }
 
@@ -537,7 +537,7 @@ pub mod test {
                 assert!(dht1_successor.list().contains(&key2.address().into()));
             } => {}
         };
-        tokio::fs::remove_dir_all("./tmp").await.unwrap();
+        tokio::fs::remove_dir_all("./tmp").await.ok();
         Ok(())
     }
 
@@ -636,7 +636,7 @@ pub mod test {
                  assert_eq!(data.data[0].clone().decode::<String>().unwrap(), message);
              } => {}
         }
-        tokio::fs::remove_dir_all("./tmp").await.unwrap();
+        tokio::fs::remove_dir_all("./tmp").await.ok();
         Ok(())
     }
 }

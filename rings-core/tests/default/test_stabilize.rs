@@ -196,7 +196,7 @@ pub mod test {
                 assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
             } => {}
         }
-        tokio::fs::remove_dir_all("./tmp").await.unwrap();
+        tokio::fs::remove_dir_all("./tmp").await.ok();
         Ok(())
     }
 
@@ -256,7 +256,7 @@ pub mod test {
                 assert_eq!(dht1.lock().await.predecessor, Some(key2.address().into()));
             } => {}
         }
-        tokio::fs::remove_dir_all("./tmp").await.unwrap();
+        tokio::fs::remove_dir_all("./tmp").await.ok();
         Ok(())
     }
 }

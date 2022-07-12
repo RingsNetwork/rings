@@ -515,7 +515,7 @@ mod tests {
         );
         assert!(d + Did::from(BigUint::from(2u16).pow(159)) > b);
         assert!(node_d.successor.list().contains(&a));
-        tokio::fs::remove_dir_all("./tmp").await.unwrap();
+        tokio::fs::remove_dir_all("./tmp").await.ok();
     }
 
     #[tokio::test]
@@ -555,7 +555,7 @@ mod tests {
             did1,
             did2
         );
-        tokio::fs::remove_dir_all("./tmp").await.unwrap();
+        tokio::fs::remove_dir_all("./tmp").await.ok();
     }
 
     #[tokio::test]
@@ -599,6 +599,6 @@ mod tests {
             did2,
             did1
         );
-        tokio::fs::remove_dir_all("./tmp").await.unwrap();
+        tokio::fs::remove_dir_all("./tmp").await.ok();
     }
 }
