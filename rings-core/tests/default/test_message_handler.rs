@@ -133,8 +133,10 @@ pub mod test {
     async fn test_handle_join() -> Result<()> {
         let key1 = SecretKey::random();
         let key2 = SecretKey::random();
-        let path = "./tmp/db_1";
-        let dht1 = Arc::new(Mutex::new(new_chord(key1.address().into(), path).await));
+        let path = PersistenceStorage::random_path("./tmp");
+        let dht1 = Arc::new(Mutex::new(
+            new_chord(key1.address().into(), path.as_str()).await,
+        ));
         let swarm1 = Arc::new(new_swarm(&key1));
         let swarm2 = Arc::new(new_swarm(&key2));
         let (_, _) = establish_connection(Arc::clone(&swarm1), Arc::clone(&swarm2)).await?;
@@ -153,7 +155,7 @@ pub mod test {
             .successor
             .list()
             .contains(&key2.address().into()));
-        tokio::fs::remove_dir_all(path).await.unwrap();
+        tokio::fs::remove_dir_all("./tmp").await.unwrap();
         Ok(())
     }
 
@@ -179,13 +181,19 @@ pub mod test {
         let swarm2 = Arc::new(new_swarm(&key2));
         let swarm3 = Arc::new(new_swarm(&key3));
 
-        let path1 = "./tmp/db_1";
-        let path2 = "./tmp/db_2";
-        let path3 = "./tmp/db_3";
+        let path1 = PersistenceStorage::random_path("./tmp");
+        let path2 = PersistenceStorage::random_path("./tmp");
+        let path3 = PersistenceStorage::random_path("./tmp");
 
-        let dht1 = Arc::new(Mutex::new(new_chord(key1.address().into(), path1).await));
-        let dht2 = Arc::new(Mutex::new(new_chord(key2.address().into(), path2).await));
-        let dht3 = Arc::new(Mutex::new(new_chord(key3.address().into(), path3).await));
+        let dht1 = Arc::new(Mutex::new(
+            new_chord(key1.address().into(), path1.as_str()).await,
+        ));
+        let dht2 = Arc::new(Mutex::new(
+            new_chord(key2.address().into(), path2.as_str()).await,
+        ));
+        let dht3 = Arc::new(Mutex::new(
+            new_chord(key3.address().into(), path3.as_str()).await,
+        ));
 
         // 2 to 3
         let (_, _) = establish_connection(Arc::clone(&swarm3), Arc::clone(&swarm2)).await?;
@@ -280,9 +288,7 @@ pub mod test {
                 );
             } => {}
         }
-        tokio::fs::remove_dir_all(path1).await.unwrap();
-        tokio::fs::remove_dir_all(path2).await.unwrap();
-        tokio::fs::remove_dir_all(path3).await.unwrap();
+        tokio::fs::remove_dir_all("./tmp").await.unwrap();
         Ok(())
     }
 
@@ -346,9 +352,7 @@ pub mod test {
             } => {}
         }
 
-        tokio::fs::remove_dir_all(path1).await.unwrap();
-        tokio::fs::remove_dir_all(path2).await.unwrap();
-
+        tokio::fs::remove_dir_all("./tmp").await.unwrap();
         Ok(())
     }
 
@@ -434,8 +438,7 @@ pub mod test {
                 assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
             } => {}
         }
-        tokio::fs::remove_dir_all(path1).await.unwrap();
-        tokio::fs::remove_dir_all(path2).await.unwrap();
+        tokio::fs::remove_dir_all("./tmp").await.unwrap();
         Ok(())
     }
 
@@ -534,8 +537,7 @@ pub mod test {
                 assert!(dht1_successor.list().contains(&key2.address().into()));
             } => {}
         };
-        tokio::fs::remove_dir_all(path1).await.unwrap();
-        tokio::fs::remove_dir_all(path2).await.unwrap();
+        tokio::fs::remove_dir_all("./tmp").await.unwrap();
         Ok(())
     }
 
@@ -634,8 +636,7 @@ pub mod test {
                  assert_eq!(data.data[0].clone().decode::<String>().unwrap(), message);
              } => {}
         }
-        tokio::fs::remove_dir_all(path1).await.unwrap();
-        tokio::fs::remove_dir_all(path2).await.unwrap();
+        tokio::fs::remove_dir_all("./tmp").await.unwrap();
         Ok(())
     }
 }

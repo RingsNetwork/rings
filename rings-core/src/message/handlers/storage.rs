@@ -235,26 +235,22 @@ mod test {
         let path1 = PersistenceStorage::random_path("./tmp");
         let path2 = PersistenceStorage::random_path("./tmp");
 
-        let dht1 = Arc::new(Mutex::new(
-            PeerRing::new_with_storage(
-                did1,
-                Arc::new(
-                    PersistenceStorage::new_with_path(path1.as_str())
-                        .await
-                        .unwrap(),
-                ),
+        let dht1 = Arc::new(Mutex::new(PeerRing::new_with_storage(
+            did1,
+            Arc::new(
+                PersistenceStorage::new_with_path(path1.as_str())
+                    .await
+                    .unwrap(),
             ),
-        ));
-        let dht2 = Arc::new(Mutex::new(
-            PeerRing::new_with_storage(
-                did2,
-                Arc::new(
-                    PersistenceStorage::new_with_path(path2.as_str())
-                        .await
-                        .unwrap(),
-                ),
+        )));
+        let dht2 = Arc::new(Mutex::new(PeerRing::new_with_storage(
+            did2,
+            Arc::new(
+                PersistenceStorage::new_with_path(path2.as_str())
+                    .await
+                    .unwrap(),
             ),
-        ));
+        )));
 
         let sm1 = SessionManager::new_with_seckey(&key1).unwrap();
         let sm2 = SessionManager::new_with_seckey(&key2).unwrap();
