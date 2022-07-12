@@ -22,7 +22,8 @@ use super::PersistenceStorageRemove;
 use crate::err::Error;
 use crate::err::Result;
 
-const REXIE_STORE_NAME: &str = "rings-storage";
+/// Default IndexedDB database and storage name
+pub const DEFAULT_REXIE_STORE_NAME: &str = "rings-storage";
 
 /// DataStruct of IndexedDB store entry
 #[derive(Serialize, Deserialize)]
@@ -52,6 +53,7 @@ impl<T> DataStruct<T> {
 pub struct IDBStorage {
     db: Rexie,
     cap: usize,
+    storage_name: String,
 }
 
 /// IDBStorage basic functions
@@ -64,7 +66,7 @@ impl IDBStorage {
     /// New IDBStorage
     /// * cap: rows of data limit
     pub async fn new_with_cap(cap: usize) -> Result<Self> {
-        Self::new_with_cap_and_name(cap, REXIE_STORE_NAME).await
+        Self::new_with_cap_and_name(cap, DEFAULT_REXIE_STORE_NAME).await
     }
 
     /// New IDBStorage with default capacity 50000 rows data limit
@@ -98,7 +100,15 @@ impl IDBStorage {
                 .await
                 .map_err(Error::IDBError)?,
             cap,
+            storage_name: name.to_owned(),
         })
+    }
+
+    /// Delete IndexedDB database
+    pub async fn delete(&self) -> Result<()> {
+        Rexie::delete(self.db.name().as_str())
+            .await
+            .map_err(Error::IDBError)
     }
 }
 
@@ -106,10 +116,10 @@ impl IDBStorageBasic for IDBStorage {
     fn get_tx_store(&self, mode: TransactionMode) -> Result<(rexie::Transaction, rexie::Store)> {
         let transaction = self
             .db
-            .transaction(&[REXIE_STORE_NAME], mode)
+            .transaction(&self.db.store_names(), mode)
             .map_err(Error::IDBError)?;
         let store = transaction
-            .store(REXIE_STORE_NAME)
+            .store(self.storage_name.as_str())
             .map_err(Error::IDBError)?;
         Ok((transaction, store))
     }

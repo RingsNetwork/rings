@@ -20,3 +20,5 @@ docs
 
 pkg/
 temp/
+tmp/
+data/

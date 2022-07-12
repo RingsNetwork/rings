@@ -3,14 +3,35 @@ use rings_node::browser;
 use rings_node::browser::Peer;
 use rings_node::browser::SignerMode;
 use rings_node::browser::TransportAndIce;
+use rings_node::prelude::rings_core::prelude::rexie;
 use rings_node::prelude::rings_core::prelude::web3::contract::tokens::Tokenizable;
+use rings_node::prelude::wasm_bindgen::convert::FromWasmAbi;
+use rings_node::prelude::wasm_bindgen::JsValue;
 use rings_node::prelude::wasm_bindgen_futures::JsFuture;
 use rings_node::prelude::*;
 use wasm_bindgen_test::*;
 wasm_bindgen_test_configure!(run_in_browser);
 
+pub fn generic_of_jsval<T: FromWasmAbi<Abi = u32>>(
+    js: JsValue,
+    classname: &str,
+) -> Result<T, JsValue> {
+    use js_sys::Object;
+    use js_sys::Reflect;
+    let ctor_name = Object::get_prototype_of(&js).constructor().name();
+    if ctor_name == classname {
+        #[allow(unused_unsafe)]
+        let ptr = unsafe { Reflect::get(&js, &JsValue::from_str("ptr"))? };
+        let ptr_u32: u32 = ptr.as_f64().ok_or(JsValue::NULL)? as u32;
+        let ge = unsafe { T::from_abi(ptr_u32) };
+        Ok(ge)
+    } else {
+        Err(JsValue::NULL)
+    }
+}
+
 #[allow(dead_code)]
-fn new_client() -> browser::Client {
+async fn new_client() -> (browser::Client, String) {
     let key = SecretKey::random();
     let unsigned_info = browser::UnsignedInfo::new_with_signer(
         key.address().into_token().to_string(),
@@ -21,9 +42,18 @@ fn new_client() -> browser::Client {
     let auth = unsigned_info.auth().ok().unwrap();
     let signed_data = Uint8Array::from(key.sign(&auth).to_vec().as_slice());
     let stuns = "stun://stun.l.google.com:19302".to_owned();
-    browser::Client::new(&unsigned_info, signed_data, stuns)
-        .ok()
-        .unwrap()
+    let storage_name = uuid::Uuid::new_v4().to_string();
+    let c = JsFuture::from(browser::Client::new_client_with_storage(
+        &unsigned_info,
+        signed_data,
+        stuns,
+        storage_name.clone(),
+    ))
+    .await
+    .ok()
+    .unwrap();
+    let client: browser::Client = generic_of_jsval(c, "Client").unwrap();
+    (client, storage_name)
 }
 
 async fn create_connection(client1: &browser::Client, client2: &browser::Client) {
@@ -54,8 +84,8 @@ async fn get_peers(client: &browser::Client) -> Vec<browser::Peer> {
 #[wasm_bindgen_test]
 async fn test_two_client_connect_and_list() {
     // super::setup_log();
-    let client1 = new_client();
-    let client2 = new_client();
+    let (client1, storage1) = new_client().await;
+    let (client2, storage2) = new_client().await;
 
     futures::try_join!(
         JsFuture::from(client1.start()),
@@ -89,4 +119,6 @@ async fn test_two_client_connect_and_list() {
         .unwrap();
     let peers = get_peers(&client1).await;
     assert_eq!(peers.len(), 0);
+    rexie::Rexie::delete(storage1.as_str()).await.unwrap();
+    rexie::Rexie::delete(storage2.as_str()).await.unwrap();
 }

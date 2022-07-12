@@ -135,8 +135,8 @@ impl PeerRing {
     }
 
     /// Init with given Storage
-    pub async fn new_with_storage(id: Did, storage: Arc<PersistenceStorage>) -> Result<Self> {
-        Ok(Self {
+    pub fn new_with_storage(id: Did, storage: Arc<PersistenceStorage>) -> Self {
+        Self {
             successor: Successor::new(&id, 3),
             predecessor: None,
             // for Eth address, it's 160
@@ -145,7 +145,7 @@ impl PeerRing {
             cache: Arc::new(MemStorage::<Did, VirtualNode>::new()),
             id,
             fix_finger_index: 0,
-        })
+        }
     }
 
     /// Get first element from Finger Table
