@@ -402,9 +402,7 @@ mod test {
                         .await
                         .unwrap(),
                 ),
-            )
-            .await
-            .unwrap(),
+            ),
         ));
         let msg_handler = MessageHandler::new(dht.clone(), swarm.clone());
         let stabilization = Stabilization::new(dht, swarm.clone(), 200);

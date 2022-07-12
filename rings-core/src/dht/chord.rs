@@ -418,7 +418,7 @@ mod tests {
         // distence between (a, d) is less than (b, d)
         assert!((a - d) < (b - d));
 
-        let mut node_a = PeerRing::new_with_storage(a, Arc::new(db_1)).await.unwrap();
+        let mut node_a = PeerRing::new_with_storage(a, Arc::new(db_1));
         assert_eq!(
             node_a.successor.list(),
             vec![],
@@ -481,7 +481,7 @@ mod tests {
         );
 
         // for decrease seq join
-        let mut node_d = PeerRing::new_with_storage(d, Arc::new(db_2)).await.unwrap();
+        let mut node_d = PeerRing::new_with_storage(d, Arc::new(db_2));
         assert_eq!(
             node_d.join(c),
             PeerRingAction::RemoteAction(c, RemoteAction::FindSuccessor(d))
@@ -496,7 +496,7 @@ mod tests {
         );
 
         // for over half ring join
-        let mut node_d = PeerRing::new_with_storage(d, Arc::new(db_3)).await.unwrap();
+        let mut node_d = PeerRing::new_with_storage(d, Arc::new(db_3));
         assert_eq!(
             node_d.join(a),
             PeerRingAction::RemoteAction(a, RemoteAction::FindSuccessor(d))
@@ -537,12 +537,8 @@ mod tests {
         let db_2 = PersistenceStorage::new_with_path(db_path2.as_str())
             .await
             .unwrap();
-        let mut node1 = PeerRing::new_with_storage(did1, Arc::new(db_1))
-            .await
-            .unwrap();
-        let mut node2 = PeerRing::new_with_storage(did2, Arc::new(db_2))
-            .await
-            .unwrap();
+        let mut node1 = PeerRing::new_with_storage(did1, Arc::new(db_1));
+        let mut node2 = PeerRing::new_with_storage(did2, Arc::new(db_2));
 
         node1.join(did2);
         node2.join(did1);
@@ -580,12 +576,8 @@ mod tests {
         let db_2 = PersistenceStorage::new_with_path(db_path2.as_str())
             .await
             .unwrap();
-        let mut node1 = PeerRing::new_with_storage(did1, Arc::new(db_1))
-            .await
-            .unwrap();
-        let mut node2 = PeerRing::new_with_storage(did2, Arc::new(db_2))
-            .await
-            .unwrap();
+        let mut node1 = PeerRing::new_with_storage(did1, Arc::new(db_1));
+        let mut node2 = PeerRing::new_with_storage(did2, Arc::new(db_2));
 
         node1.join(did2);
         node2.join(did1);

@@ -319,9 +319,7 @@ pub mod test {
                     .await
                     .unwrap(),
             ),
-        )
-        .await
-        .unwrap();
+        );
         let dht2 = PeerRing::new_with_storage(
             key2.address().into(),
             Arc::new(
@@ -329,9 +327,7 @@ pub mod test {
                     .await
                     .unwrap(),
             ),
-        )
-        .await
-        .unwrap();
+        );
 
         let sm1 = SessionManager::new_with_seckey(&key1).unwrap();
         let sm2 = SessionManager::new_with_seckey(&key2).unwrap();

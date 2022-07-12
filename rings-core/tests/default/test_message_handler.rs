@@ -34,8 +34,6 @@ pub mod test {
             did,
             Arc::new(PersistenceStorage::new_with_path(path).await.unwrap()),
         )
-        .await
-        .unwrap()
     }
 
     fn new_swarm(key: &SecretKey) -> Swarm {

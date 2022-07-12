@@ -137,16 +137,14 @@ async fn test_message_handler() {
             .await
             .unwrap();
 
-    let dht1 = Arc::new(Mutex::new(
-        PeerRing::new_with_storage(key1.address().into(), Arc::new(db1))
-            .await
-            .unwrap(),
-    ));
-    let dht2 = Arc::new(Mutex::new(
-        PeerRing::new_with_storage(key2.address().into(), Arc::new(db2))
-            .await
-            .unwrap(),
-    ));
+    let dht1 = Arc::new(Mutex::new(PeerRing::new_with_storage(
+        key1.address().into(),
+        Arc::new(db1),
+    )));
+    let dht2 = Arc::new(Mutex::new(PeerRing::new_with_storage(
+        key2.address().into(),
+        Arc::new(db2),
+    )));
 
     let sm1 = SessionManager::new_with_seckey(&key1).unwrap();
     let sm2 = SessionManager::new_with_seckey(&key2).unwrap();

@@ -690,18 +690,14 @@ pub mod test {
 
         let did = key.address().into();
         let path = PersistenceStorage::random_path("./tmp");
-        let dht = Arc::new(Mutex::new(
-            PeerRing::new_with_storage(
-                did,
-                Arc::new(
-                    PersistenceStorage::new_with_path(path.as_str())
-                        .await
-                        .unwrap(),
-                ),
-            )
-            .await
-            .unwrap(),
-        ));
+        let dht = Arc::new(Mutex::new(PeerRing::new_with_storage(
+            did,
+            Arc::new(
+                PersistenceStorage::new_with_path(path.as_str())
+                    .await
+                    .unwrap(),
+            ),
+        )));
         let sm = SessionManager::new_with_seckey(key).unwrap();
         let swarm = Arc::new(Swarm::new(stun, key.address(), sm));
         let node = MessageHandler::new(dht.clone(), Arc::clone(&swarm));

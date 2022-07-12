@@ -243,9 +243,7 @@ mod test {
                         .await
                         .unwrap(),
                 ),
-            )
-            .await
-            .unwrap(),
+            ),
         ));
         let dht2 = Arc::new(Mutex::new(
             PeerRing::new_with_storage(
@@ -255,9 +253,7 @@ mod test {
                         .await
                         .unwrap(),
                 ),
-            )
-            .await
-            .unwrap(),
+            ),
         ));
 
         let sm1 = SessionManager::new_with_seckey(&key1).unwrap();
