@@ -133,9 +133,9 @@ mod test {
         key2: SecretKey,
         key3: SecretKey,
     ) -> Result<()> {
-        let (did1, dht1, swarm1, node1, path1) = prepare_node(&key1).await;
-        let (did2, dht2, swarm2, node2, path2) = prepare_node(&key2).await;
-        let (did3, dht3, swarm3, node3, path3) = prepare_node(&key3).await;
+        let (did1, dht1, swarm1, node1, _path1) = prepare_node(&key1).await;
+        let (did2, dht2, swarm2, node2, _path2) = prepare_node(&key2).await;
+        let (did3, dht3, swarm3, node3, _path3) = prepare_node(&key3).await;
 
         println!("========================================");
         println!("||  now we connect node1 and node2    ||");
@@ -334,9 +334,9 @@ mod test {
         key2: SecretKey,
         key3: SecretKey,
     ) -> Result<()> {
-        let (did1, dht1, swarm1, node1, path1) = prepare_node(&key1).await;
-        let (did2, dht2, swarm2, node2, path2) = prepare_node(&key2).await;
-        let (did3, dht3, swarm3, node3, path3) = prepare_node(&key3).await;
+        let (did1, dht1, swarm1, node1, _path1) = prepare_node(&key1).await;
+        let (did2, dht2, swarm2, node2, _path2) = prepare_node(&key2).await;
+        let (did3, dht3, swarm3, node3, _path3) = prepare_node(&key3).await;
 
         println!("========================================");
         println!("||  now we connect node1 and node2    ||");
