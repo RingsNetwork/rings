@@ -75,11 +75,18 @@ struct ClientArgs {
         env
     )]
     endpoint_url: String,
+
+    #[clap(long = "key", short = 'k', env)]
+    pub ecdsa_key: SecretKey,
 }
 
 impl ClientArgs {
     async fn new_client(&self) -> anyhow::Result<Client> {
-        Client::new(self.endpoint_url.as_str()).await
+        Client::new(
+            self.endpoint_url.as_str(),
+            Client::generate_signature(&self.ecdsa_key).as_str(),
+        )
+        .await
     }
 }
 

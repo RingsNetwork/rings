@@ -23,7 +23,6 @@ pub use self::rings_core::prelude::uuid;
 pub use self::rings_core::prelude::wasm_bindgen;
 #[cfg(feature = "browser")]
 pub use self::rings_core::prelude::wasm_bindgen_futures;
-#[cfg(feature = "browser")]
 pub use self::rings_core::prelude::web3;
 #[cfg(feature = "browser")]
 pub use self::rings_core::prelude::web_sys;
