@@ -15,6 +15,16 @@ use crate::error::Error as ServerError;
 use crate::prelude::rings_core::prelude::Address;
 use crate::processor::Processor;
 
+/// authority_info for request authority info check
+#[derive(Debug, Clone)]
+pub struct AuthorityInfo(bool);
+
+impl From<bool> for AuthorityInfo {
+    fn from(v: bool) -> Self {
+        Self(v)
+    }
+}
+
 pub(crate) async fn build_handler(handler: &mut MetaIoHandler<Processor>) {
     handler.add_method_with_meta(Method::ConnectPeerViaHttp.as_str(), connect_peer_via_http);
     handler.add_method_with_meta(Method::AnswerOffer.as_str(), answer_offer);

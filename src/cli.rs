@@ -9,8 +9,6 @@ use crate::jsonrpc::response::Peer;
 use crate::jsonrpc::response::TransportAndIce;
 use crate::jsonrpc_client::SimpleClient;
 use crate::prelude::reqwest;
-use crate::prelude::rings_core::ecc::SecretKey;
-use crate::prelude::web3::contract::tokens::Tokenizable;
 
 #[derive(Clone)]
 pub struct Client {
@@ -24,13 +22,6 @@ pub struct ClientOutput<T> {
 type Output<T> = anyhow::Result<ClientOutput<T>>;
 
 impl Client {
-    pub fn generate_signature(ecdsa_key: &SecretKey) -> String {
-        base64::encode(
-            ecdsa_key
-                .sign_raw(format!("rings-node: {}", ecdsa_key.address().into_token()).as_bytes()),
-        )
-    }
-
     pub async fn new(endpoint_url: &str, signature: &str) -> anyhow::Result<Self> {
         let mut default_headers = reqwest::header::HeaderMap::default();
         default_headers.insert(

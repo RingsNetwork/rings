@@ -12,10 +12,13 @@ use crate::jsonrpc::method;
 use crate::jsonrpc::response::TransportAndIce;
 use crate::jsonrpc_client::SimpleClient;
 use crate::prelude::rings_core::dht::Stabilization;
+use crate::prelude::rings_core::ecc::PublicKey;
+use crate::prelude::rings_core::ecc::SecretKey;
 use crate::prelude::rings_core::message::Encoded;
 use crate::prelude::rings_core::message::Message;
 use crate::prelude::rings_core::message::MessageHandler;
 use crate::prelude::rings_core::message::PayloadSender;
+use crate::prelude::rings_core::prelude::libsecp256k1;
 use crate::prelude::rings_core::prelude::uuid;
 use crate::prelude::rings_core::prelude::web3::contract::tokens::Tokenizable;
 use crate::prelude::rings_core::prelude::web3::ethabi::Token;
@@ -26,6 +29,7 @@ use crate::prelude::rings_core::swarm::TransportManager;
 use crate::prelude::rings_core::transports::Transport;
 use crate::prelude::rings_core::types::ice_transport::IceTransport;
 use crate::prelude::rings_core::types::ice_transport::IceTrickleScheme;
+use crate::prelude::web3::signing::keccak256;
 
 /// Processor for rings-node jsonrpc server
 #[derive(Clone)]
@@ -54,6 +58,30 @@ impl From<(Arc<Swarm>, Arc<MessageHandler>, Arc<Stabilization>)> for Processor {
 }
 
 impl Processor {
+    /// Generate Signature for Authorization
+    pub fn generate_signature(secret_key: &SecretKey) -> String {
+        let message = format!("rings-node: {}", secret_key.address().into_token());
+        let (signature, _recovery_id) = libsecp256k1::sign(
+            &libsecp256k1::Message::parse(&keccak256(message.as_bytes())),
+            secret_key,
+        );
+        base64::encode(signature.serialize())
+    }
+
+    /// verify signature
+    /// will throw error when signature is illegal
+    pub fn verify_signature(signature: &[u8], public_key: &PublicKey) -> Result<bool> {
+        let message = format!("rings-node: {}", public_key.address().into_token());
+        Ok(libsecp256k1::verify(
+            &libsecp256k1::Message::parse(&keccak256(message.as_bytes())),
+            &libsecp256k1::Signature::parse_standard_slice(
+                &base64::decode(signature).map_err(|_| Error::DecodedError)?,
+            )
+            .map_err(|_| Error::DecodedError)?,
+            public_key,
+        ))
+    }
+
     /// Get current address
     pub fn address(&self) -> Address {
         self.swarm.address()
@@ -388,7 +416,7 @@ mod test {
         let session = SessionManager::new(&sig, &auth, &new_key);
         let swarm = Arc::new(Swarm::new(
             "stun://stun.l.google.com:19302",
-            key.address(),
+            key.pubkey(),
             session,
         ));
 

@@ -15,6 +15,7 @@ use rings_core::types::message::MessageListener;
 use rings_node::cli::Client;
 use rings_node::logger::LogLevel;
 use rings_node::logger::Logger;
+use rings_node::processor::Processor;
 use rings_node::service::run_service;
 
 #[derive(Parser, Debug)]
@@ -84,7 +85,7 @@ impl ClientArgs {
     async fn new_client(&self) -> anyhow::Result<Client> {
         Client::new(
             self.endpoint_url.as_str(),
-            Client::generate_signature(&self.ecdsa_key).as_str(),
+            Processor::generate_signature(&self.ecdsa_key).as_str(),
         )
         .await
     }
@@ -230,7 +231,7 @@ async fn daemon_run(
     )?;
     let sig = key.sign(&auth.to_string()?).to_vec();
     let session = SessionManager::new(&sig, &auth, &temp_key);
-    let swarm = Arc::new(Swarm::new(stuns, key.address(), session.clone()));
+    let swarm = Arc::new(Swarm::new(stuns, key.pubkey(), session.clone()));
     let listen_event = Arc::new(MessageHandler::new(dht.clone(), swarm.clone()));
     let stabilize = Arc::new(Stabilization::new(
         dht.clone(),

@@ -6,7 +6,9 @@ mod is_turn;
 
 use std::sync::Arc;
 
+use axum::async_trait;
 use axum::extract::Extension;
+use axum::extract::FromRequest;
 use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::Router;
@@ -59,13 +61,36 @@ pub async fn run_service(
     Ok(())
 }
 
+#[async_trait]
+impl<B> FromRequest<B> for crate::jsonrpc::AuthorityInfo
+where B: Send
+{
+    type Rejection = JsonResponse;
+
+    async fn from_request(
+        req: &mut axum::extract::RequestParts<B>,
+    ) -> Result<Self, Self::Rejection> {
+        let Extension(swarm) = Extension::<Arc<Swarm>>::from_request(req)
+            .await
+            .expect("`Swarm` Extension is missing");
+        let authed = if let Some(auth_value) = req.headers().get(reqwest::header::AUTHORIZATION) {
+            Processor::verify_signature(auth_value.as_bytes(), &swarm.public_key()).unwrap_or(false)
+        } else {
+            false
+        };
+        Ok(authed.into())
+    }
+}
+
 async fn jsonrpc_io_handler(
     body: String,
+    authority_info: crate::jsonrpc::AuthorityInfo,
     Extension(swarm): Extension<Arc<Swarm>>,
     Extension(msg_handler): Extension<Arc<MessageHandler>>,
     Extension(stabilization): Extension<Arc<Stabilization>>,
     Extension(io_handler): Extension<Arc<MetaIoHandler<Processor>>>,
 ) -> Result<JsonResponse, HttpError> {
+    log::debug!("authority_info: {:?}", authority_info);
     let r = io_handler
         .handle_request(&body, (swarm, msg_handler, stabilization).into())
         .await
@@ -73,8 +98,9 @@ async fn jsonrpc_io_handler(
     Ok(JsonResponse(r))
 }
 
+/// JSON response struct
 #[derive(Debug, Clone)]
-struct JsonResponse(String);
+pub struct JsonResponse(String);
 
 impl IntoResponse for JsonResponse {
     fn into_response(self) -> axum::response::Response {
