@@ -703,4 +703,17 @@ mod test {
         tokio::fs::remove_dir_all(path1).await.unwrap();
         tokio::fs::remove_dir_all(path2).await.unwrap();
     }
+
+    #[test]
+    fn test_create_and_verify_signature() {
+        let key1 = SecretKey::random();
+        let key2 = SecretKey::random();
+        let signature = Processor::generate_signature(&key1);
+        let verify1 = Processor::verify_signature(signature.as_bytes(), &key1.pubkey()).unwrap();
+        assert!(verify1, "signature should be verified");
+        let verify2 = Processor::verify_signature(b"abc", &key1.pubkey());
+        assert!(verify2.is_err(), "verify2 should be error");
+        let verify3 = Processor::verify_signature(signature.as_bytes(), &key2.pubkey()).unwrap();
+        assert!(!verify3, "verify3 should be false");
+    }
 }
