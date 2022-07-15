@@ -269,34 +269,50 @@ impl ChordStabilize<PeerRingAction> for PeerRing {
     /// called periodically. refreshes finger table entries.
     /// next stores the index of the next finger to fix.
     fn fix_fingers(&self) -> Result<PeerRingAction> {
-        let mut finger = self.lock_finger()?;
+        let mut fix_finger_index = self.lock_finger()?.fix_finger_index;
+
         // next = next + 1;
         //if (next > m) next = 1;
         // finger[next] = find_successor(n + 2^(next-1) );
         // for index start with 0
         // finger[next] = find_successor(n + 2^(next) );
-        finger.fix_finger_index += 1;
-        if finger.fix_finger_index >= 159 {
-            finger.fix_finger_index = 0;
+        fix_finger_index += 1;
+        if fix_finger_index >= 159 {
+            fix_finger_index = 0;
         }
+
         let did: BigUint = (BigUint::from(self.id)
-            + BigUint::from(2u16).pow(finger.fix_finger_index.into()))
+            + BigUint::from(2u16).pow(fix_finger_index.into()))
             % BigUint::from(2u16).pow(160);
+
         match self.find_successor(did.into()) {
             Ok(res) => match res {
                 PeerRingAction::Some(v) => {
+                    let mut finger = self.lock_finger()?;
+                    finger.fix_finger_index = fix_finger_index;
                     finger.set_fix(&v);
                     Ok(PeerRingAction::None)
                 }
-                PeerRingAction::RemoteAction(a, RemoteAction::FindSuccessor(b)) => Ok(
-                    PeerRingAction::RemoteAction(a, RemoteAction::FindSuccessorForFix(b)),
-                ),
+                PeerRingAction::RemoteAction(a, RemoteAction::FindSuccessor(b)) => {
+                    let mut finger = self.lock_finger()?;
+                    finger.fix_finger_index = fix_finger_index;
+                    Ok(PeerRingAction::RemoteAction(
+                        a,
+                        RemoteAction::FindSuccessorForFix(b),
+                    ))
+                }
                 _ => {
+                    let mut finger = self.lock_finger()?;
+                    finger.fix_finger_index = fix_finger_index;
                     log::error!("Invalid PeerRing Action");
                     Err(Error::PeerRingInvalidAction)
                 }
             },
-            Err(e) => Err(Error::PeerRingFindSuccessor(e.to_string())),
+            Err(e) => {
+                let mut finger = self.lock_finger()?;
+                finger.fix_finger_index = fix_finger_index;
+                Err(Error::PeerRingFindSuccessor(e.to_string()))
+            }
         }
     }
 
