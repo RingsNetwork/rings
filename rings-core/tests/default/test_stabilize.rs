@@ -32,7 +32,7 @@ pub mod test {
     fn new_swarm(key: &SecretKey) -> Swarm {
         let stun = "stun://stun.l.google.com:19302";
         let session = SessionManager::new_with_seckey(key).unwrap();
-        Swarm::new(stun, key.address(), session)
+        Swarm::new(stun, key.pubkey(), session)
     }
 
     pub async fn establish_connection(

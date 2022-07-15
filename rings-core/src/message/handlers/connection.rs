@@ -693,7 +693,7 @@ pub mod test {
             ),
         )));
         let sm = SessionManager::new_with_seckey(key).unwrap();
-        let swarm = Arc::new(Swarm::new(stun, key.address(), sm));
+        let swarm = Arc::new(Swarm::new(stun, key.pubkey(), sm));
         let node = MessageHandler::new(dht.clone(), Arc::clone(&swarm));
 
         println!("key: {:?}", key.to_string());
