@@ -44,6 +44,8 @@ pub enum Error {
     SendMessage(rings_core::err::Error),
     #[error("Build message body error: {0}")]
     MessagePayload(rings_core::err::Error),
+    #[error("No Permission")]
+    NoPermission,
 }
 
 impl Error {
@@ -69,6 +71,7 @@ impl Error {
             Error::ConnectError(_) => 17,
             Error::SendMessage(_) => 18,
             Error::MessagePayload(_) => 19,
+            Error::NoPermission => 20,
         };
         -32000 - code
     }

@@ -6,20 +6,20 @@ mod is_turn;
 
 use std::sync::Arc;
 
-use axum::async_trait;
 use axum::extract::Extension;
-use axum::extract::FromRequest;
 use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::Router;
 use http::header;
 use http::header::HeaderValue;
+use http::HeaderMap;
 #[cfg(feature = "daemon")]
 pub use is_turn::run_udp_turn;
 use jsonrpc_core::MetaIoHandler;
 use tower_http::cors::CorsLayer;
 
 use self::http_error::HttpError;
+use crate::jsonrpc::RpcMeta;
 use crate::prelude::rings_core::dht::Stabilization;
 use crate::prelude::rings_core::message::MessageHandler;
 use crate::prelude::rings_core::swarm::Swarm;
@@ -38,7 +38,7 @@ pub async fn run_service(
     let msg_handler_layer = Extension(msg_handler.clone());
     let stabilization_layer = Extension(stabilization.clone());
 
-    let mut jsonrpc_handler: MetaIoHandler<Processor> = MetaIoHandler::default();
+    let mut jsonrpc_handler: MetaIoHandler<RpcMeta> = MetaIoHandler::default();
     crate::jsonrpc::build_handler(&mut jsonrpc_handler).await;
     let jsonrpc_handler_layer = Extension(Arc::new(jsonrpc_handler));
 
@@ -61,38 +61,24 @@ pub async fn run_service(
     Ok(())
 }
 
-#[async_trait]
-impl<B> FromRequest<B> for crate::jsonrpc::AuthorityInfo
-where B: Send
-{
-    type Rejection = JsonResponse;
-
-    async fn from_request(
-        req: &mut axum::extract::RequestParts<B>,
-    ) -> Result<Self, Self::Rejection> {
-        let Extension(swarm) = Extension::<Arc<Swarm>>::from_request(req)
-            .await
-            .expect("`Swarm` Extension is missing");
-        let authed = if let Some(auth_value) = req.headers().get(reqwest::header::AUTHORIZATION) {
-            Processor::verify_signature(auth_value.as_bytes(), &swarm.public_key()).unwrap_or(false)
-        } else {
-            false
-        };
-        Ok(authed.into())
-    }
-}
-
 async fn jsonrpc_io_handler(
     body: String,
-    authority_info: crate::jsonrpc::AuthorityInfo,
+    headers: HeaderMap,
     Extension(swarm): Extension<Arc<Swarm>>,
     Extension(msg_handler): Extension<Arc<MessageHandler>>,
     Extension(stabilization): Extension<Arc<Stabilization>>,
-    Extension(io_handler): Extension<Arc<MetaIoHandler<Processor>>>,
+    Extension(io_handler): Extension<Arc<MetaIoHandler<RpcMeta>>>,
 ) -> Result<JsonResponse, HttpError> {
-    log::debug!("authority_info: {:?}", authority_info);
+    // let is_auth
+    let processor = Processor::from((swarm, msg_handler, stabilization));
+    let is_auth = if let Some(signature) = headers.get(header::AUTHORIZATION) {
+        Processor::verify_signature(signature.as_bytes(), &processor.swarm.public_key())
+            .map_err(|_| HttpError::BadRequest)?
+    } else {
+        false
+    };
     let r = io_handler
-        .handle_request(&body, (swarm, msg_handler, stabilization).into())
+        .handle_request(&body, (Arc::new(processor), is_auth).into())
         .await
         .ok_or(HttpError::BadRequest)?;
     Ok(JsonResponse(r))

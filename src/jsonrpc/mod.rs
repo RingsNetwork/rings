@@ -5,7 +5,7 @@ pub mod response;
 #[cfg(feature = "client")]
 mod server;
 #[cfg(feature = "client")]
-pub use server::AuthorityInfo;
+pub use server::RpcMeta;
 
 #[cfg(feature = "client")]
 pub(crate) use self::server::build_handler;
