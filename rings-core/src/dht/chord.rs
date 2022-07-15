@@ -1,5 +1,7 @@
 #![warn(missing_docs)]
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::MutexGuard;
 
 use async_trait::async_trait;
 use itertools::Itertools;
@@ -97,17 +99,15 @@ impl PeerRingAction {
 /// Implementation of PeerRing
 #[derive(Clone)]
 pub struct PeerRing {
-    /// first node on circle that succeeds (n + 2 ^(k-1) ) mod 2^m , 1 <= k<= m
-    /// for index start with 0, it should be (n+2^k) mod 2^m
-    pub finger: FingerTable,
-    /// The next node on the identifier circle; finger[1].node
-    pub successor: Successor,
-    /// The previous node on the identifier circle
-    pub predecessor: Option<Did>,
     /// PeerRing's id is address of Node
     pub id: Did,
-    /// This index is used for FindSuccesorForFix
-    pub fix_finger_index: u8,
+    /// first node on circle that succeeds (n + 2 ^(k-1) ) mod 2^m , 1 <= k<= m
+    /// for index start with 0, it should be (n+2^k) mod 2^m
+    pub finger: Arc<Mutex<FingerTable>>,
+    /// The next node on the identifier circle; finger[1].node
+    pub successor: Arc<Mutex<Successor>>,
+    /// The previous node on the identifier circle
+    pub predecessor: Arc<Mutex<Option<Did>>>,
     /// LocalStorage for DHT Query
     pub storage: Arc<PersistenceStorage>,
     /// LocalCache
@@ -123,12 +123,11 @@ impl PeerRing {
     /// Create a new Chord Ring with given successor_max, and finger_size
     pub async fn new_with_config(id: Did, succ_max: u8) -> Result<Self> {
         Ok(Self {
-            successor: Successor::new(&id, succ_max),
-            predecessor: None,
+            successor: Arc::new(Mutex::new(Successor::new(&id, succ_max))),
+            predecessor: Arc::new(Mutex::new(None)),
             // for Eth address, it's 160
-            finger: FingerTable::new(id, 160),
+            finger: Arc::new(Mutex::new(FingerTable::new(id, 160))),
             id,
-            fix_finger_index: 0,
             storage: Arc::new(PersistenceStorage::new().await?),
             cache: Arc::new(MemStorage::<Did, VirtualNode>::new()),
         })
@@ -137,33 +136,51 @@ impl PeerRing {
     /// Init with given Storage
     pub fn new_with_storage(id: Did, storage: Arc<PersistenceStorage>) -> Self {
         Self {
-            successor: Successor::new(&id, 3),
-            predecessor: None,
+            successor: Arc::new(Mutex::new(Successor::new(&id, 3))),
+            predecessor: Arc::new(Mutex::new(None)),
             // for Eth address, it's 160
-            finger: FingerTable::new(id, 160),
+            finger: Arc::new(Mutex::new(FingerTable::new(id, 160))),
             storage: Arc::clone(&storage),
             cache: Arc::new(MemStorage::<Did, VirtualNode>::new()),
             id,
-            fix_finger_index: 0,
         }
     }
 
+    /// Lock and return MutexGuard of Successor
+    pub fn lock_successor(&self) -> Result<MutexGuard<Successor>> {
+        self.successor.lock().map_err(|_| Error::DHTSyncLockError)
+    }
+
+    /// Lock and return MutexGuard of Finger Table
+    pub fn lock_finger(&self) -> Result<MutexGuard<FingerTable>> {
+        self.finger.lock().map_err(|_| Error::DHTSyncLockError)
+    }
+
+    /// Lock and return MutexGuard of Predecessor
+    pub fn lock_predecessor(&self) -> Result<MutexGuard<Option<Did>>> {
+        self.predecessor.lock().map_err(|_| Error::DHTSyncLockError)
+    }
+
     /// Get first element from Finger Table
-    pub fn first(&self) -> Option<Did> {
-        self.finger.first()
+    pub fn first(&self) -> Result<Option<Did>> {
+        let finger = self.lock_finger()?;
+        Ok(finger.first())
     }
 
     /// remove a node from dht finger table
     /// remote a node from dht successor table
     /// if suuccessor is empty, set it to the cloest node
-    pub fn remove(&mut self, id: Did) {
-        self.finger.remove(id);
-        self.successor.remove(id);
-        if self.successor.is_none() {
-            if let Some(x) = self.first() {
-                self.successor.update(x);
+    pub fn remove(&self, id: Did) -> Result<()> {
+        let mut finger = self.lock_finger()?;
+        let mut successor = self.lock_successor()?;
+        finger.remove(id);
+        successor.remove(id);
+        if successor.is_none() {
+            if let Some(x) = finger.first() {
+                successor.update(x);
             }
         }
+        Ok(())
     }
 
     /// Calculate Bias of the Did on the Ring
@@ -172,41 +189,50 @@ impl PeerRing {
     }
 
     /// finger length
-    pub fn number_of_fingers(&self) -> usize {
-        self.finger.len()
+    pub fn number_of_fingers(&self) -> Result<usize> {
+        let finger = self.lock_finger()?;
+        Ok(finger.len())
     }
 }
 
 impl Chord<PeerRingAction> for PeerRing {
     /// join a PeerRing ring containing node id .
-    fn join(&mut self, id: Did) -> PeerRingAction {
+    fn join(&self, id: Did) -> Result<PeerRingAction> {
+        let mut finger = self.lock_finger()?;
+        let mut successor = self.lock_successor()?;
         if id == self.id {
-            return PeerRingAction::None;
+            return Ok(PeerRingAction::None);
         }
-        self.finger.join(id);
-        if self.bias(id) < self.bias(self.successor.max()) || self.successor.is_none() {
+        finger.join(id);
+        if self.bias(id) < self.bias(successor.max()) || successor.is_none() {
             // 1) id should follows self.id
             // 2) #fff should follow #001 because id space is a Finate Ring
             // 3) #001 - #fff = #001 + -(#fff) = #001
-            self.successor.update(id);
+            successor.update(id);
             // only triger if successor is updated
         }
-        PeerRingAction::RemoteAction(id, RemoteAction::FindSuccessor(self.id))
+        Ok(PeerRingAction::RemoteAction(
+            id,
+            RemoteAction::FindSuccessor(self.id),
+        ))
     }
 
     /// Fig.5 n.find_successor(id)
     fn find_successor(&self, id: Did) -> Result<PeerRingAction> {
+        let successor = self.lock_successor()?;
+        let finger = self.lock_finger()?;
         // if (id \in (n; successor]); return successor
         // if ID = N63, Successor = N10
         // N9
-        if self.bias(id) <= self.bias(self.successor.min()) || self.successor.is_none() {
+        if self.bias(id) <= self.bias(successor.min()) || successor.is_none() {
             //if self.id < id && id <= self.successor {
             // response the closest one
-            Ok(PeerRingAction::Some(self.successor.min()))
+            Ok(PeerRingAction::Some(successor.min()))
         } else {
             // n = closest preceding node(id);
             // return n.find_successor(id);
-            match self.finger.closest(id) {
+            let closest = finger.closest(id);
+            match closest {
                 Ok(n) => Ok(PeerRingAction::RemoteAction(
                     n,
                     RemoteAction::FindSuccessor(id),
@@ -219,44 +245,47 @@ impl Chord<PeerRingAction> for PeerRing {
 
 impl ChordStabilize<PeerRingAction> for PeerRing {
     /// n' thinks it might be our predecessor.
-    fn notify(&mut self, id: Did) -> Option<Did> {
+    fn notify(&self, id: Did) -> Result<Option<Did>> {
+        let mut predecessor = self.lock_predecessor()?;
+        let predecessor_value = *predecessor;
         // if (predecessor is nil or n' /in (predecessor; n)); predecessor = n';
-        match self.predecessor {
+        match predecessor_value {
             Some(pre) => {
                 // if id <- [pre, self]
                 if self.bias(pre) < self.bias(id) {
-                    self.predecessor = Some(id);
-                    Some(id)
+                    *predecessor = Some(id);
+                    Ok(Some(id))
                 } else {
-                    None
+                    Ok(None)
                 }
             }
             None => {
-                self.predecessor = Some(id);
-                Some(id)
+                *predecessor = Some(id);
+                Ok(Some(id))
             }
         }
     }
 
     /// called periodically. refreshes finger table entries.
     /// next stores the index of the next finger to fix.
-    fn fix_fingers(&mut self) -> Result<PeerRingAction> {
+    fn fix_fingers(&self) -> Result<PeerRingAction> {
+        let mut finger = self.lock_finger()?;
         // next = next + 1;
         //if (next > m) next = 1;
         // finger[next] = find_successor(n + 2^(next-1) );
         // for index start with 0
         // finger[next] = find_successor(n + 2^(next) );
-        self.fix_finger_index += 1;
-        if self.fix_finger_index >= 159 {
-            self.fix_finger_index = 0;
+        finger.fix_finger_index += 1;
+        if finger.fix_finger_index >= 159 {
+            finger.fix_finger_index = 0;
         }
         let did: BigUint = (BigUint::from(self.id)
-            + BigUint::from(2u16).pow(self.fix_finger_index.into()))
+            + BigUint::from(2u16).pow(finger.fix_finger_index.into()))
             % BigUint::from(2u16).pow(160);
         match self.find_successor(did.into()) {
             Ok(res) => match res {
                 PeerRingAction::Some(v) => {
-                    self.finger.set(self.fix_finger_index as usize, &v);
+                    finger.set_fix(&v);
                     Ok(PeerRingAction::None)
                 }
                 PeerRingAction::RemoteAction(a, RemoteAction::FindSuccessor(b)) => Ok(
@@ -272,11 +301,12 @@ impl ChordStabilize<PeerRingAction> for PeerRing {
     }
 
     /// called periodically. checks whether predecessor has failed.
-    fn check_predecessor(&self) -> PeerRingAction {
-        match self.predecessor {
+    fn check_predecessor(&self) -> Result<PeerRingAction> {
+        let predecessor = *self.lock_predecessor()?;
+        Ok(match predecessor {
             Some(p) => PeerRingAction::RemoteAction(p, RemoteAction::CheckPredecessor),
             None => PeerRingAction::None,
-        }
+        })
     }
 
     /// Fig.5. n.cloest_preceding_node(id)
@@ -285,7 +315,8 @@ impl ChordStabilize<PeerRingAction> for PeerRing {
     ///        return finger\[i\]
     /// return n
     fn closest_preceding_node(&self, id: Did) -> Result<Did> {
-        self.finger.closest(id)
+        let finger = self.lock_finger()?;
+        finger.closest(id)
     }
 }
 
@@ -395,7 +426,7 @@ mod tests {
     use crate::ecc::SecretKey;
 
     #[tokio::test]
-    async fn test_chord_finger() {
+    async fn test_chord_finger() -> Result<()> {
         let db_path_a = PersistenceStorage::random_path("./tmp");
         let db_path_b = PersistenceStorage::random_path("./tmp");
         let db_path_c = PersistenceStorage::random_path("./tmp");
@@ -418,18 +449,18 @@ mod tests {
         // distence between (a, d) is less than (b, d)
         assert!((a - d) < (b - d));
 
-        let mut node_a = PeerRing::new_with_storage(a, Arc::new(db_1));
+        let node_a = PeerRing::new_with_storage(a, Arc::new(db_1));
         assert_eq!(
-            node_a.successor.list(),
+            node_a.lock_successor()?.list(),
             vec![],
             "{:?}",
-            node_a.successor.list()
+            node_a.lock_successor()?.list()
         );
         // for increase seq join
-        node_a.join(a);
+        node_a.join(a)?;
         // Node A wont add self to finder
-        assert!(node_a.finger.is_empty());
-        node_a.join(b);
+        assert!(node_a.lock_finger()?.is_empty());
+        node_a.join(b)?;
         // b is very far away from a
         // a.finger should store did as range
         // [(a, a+2), (a+2, a+4), (a+4, a+8), ..., (a+2^159, a + 2^160)]
@@ -437,39 +468,47 @@ mod tests {
         assert!(BigUint::from(b) > BigUint::from(2u16).pow(156));
         assert!(BigUint::from(b) < BigUint::from(2u16).pow(157));
         // Node A's finter should be [None, .., B]
-        assert!(node_a.finger.contains(&Some(b)));
-        assert!(node_a.finger.contains(&None), "{:?}", node_a.finger.list());
+        assert!(node_a.lock_finger()?.contains(&Some(b)));
+        assert!(
+            node_a.lock_finger()?.contains(&None),
+            "{:?}",
+            node_a.lock_finger()?.list()
+        );
 
         assert_eq!(
-            node_a.successor.list(),
+            node_a.lock_successor()?.list(),
             vec![b],
             "{:?}",
-            node_a.successor.list()
+            node_a.lock_successor()?.list()
         );
 
         // Node A starts to query node b for it's successor
         assert_eq!(
-            node_a.join(b),
+            node_a.join(b)?,
             PeerRingAction::RemoteAction(b, RemoteAction::FindSuccessor(a))
         );
-        assert!(node_a.successor.list().contains(&b));
+        assert!(node_a.lock_successor()?.list().contains(&b));
         // Node A keep querying node b for it's successor
         assert_eq!(
-            node_a.join(c),
+            node_a.join(c)?,
             PeerRingAction::RemoteAction(c, RemoteAction::FindSuccessor(a))
         );
 
         // Node A's finter should be [None, ..B, C]
-        assert!(node_a.finger.contains(&Some(c)), "{:?}", node_a.finger);
+        assert!(
+            node_a.lock_finger()?.contains(&Some(c)),
+            "{:?}",
+            node_a.finger
+        );
         // c is in range(a+2^159, a+2^160)
         assert!(BigUint::from(c) > BigUint::from(2u16).pow(159));
         assert!(BigUint::from(c) < BigUint::from(2u16).pow(160));
 
-        assert_eq!(node_a.finger[158], Some(c));
-        assert_eq!(node_a.finger[155], Some(b));
-        assert_eq!(node_a.finger[156], Some(b));
+        assert_eq!(node_a.lock_finger()?[158], Some(c));
+        assert_eq!(node_a.lock_finger()?[155], Some(b));
+        assert_eq!(node_a.lock_finger()?[156], Some(b));
 
-        assert!(node_a.successor.list().contains(&b));
+        assert!(node_a.lock_successor()?.list().contains(&b));
         // Node A will query c to find d
         assert_eq!(
             node_a.find_successor(d).unwrap(),
@@ -481,45 +520,47 @@ mod tests {
         );
 
         // for decrease seq join
-        let mut node_d = PeerRing::new_with_storage(d, Arc::new(db_2));
+        let node_d = PeerRing::new_with_storage(d, Arc::new(db_2));
         assert_eq!(
-            node_d.join(c),
+            node_d.join(c)?,
             PeerRingAction::RemoteAction(c, RemoteAction::FindSuccessor(d))
         );
         assert_eq!(
-            node_d.join(b),
+            node_d.join(b)?,
             PeerRingAction::RemoteAction(b, RemoteAction::FindSuccessor(d))
         );
         assert_eq!(
-            node_d.join(a),
+            node_d.join(a)?,
             PeerRingAction::RemoteAction(a, RemoteAction::FindSuccessor(d))
         );
 
         // for over half ring join
-        let mut node_d = PeerRing::new_with_storage(d, Arc::new(db_3));
+        let node_d = PeerRing::new_with_storage(d, Arc::new(db_3));
         assert_eq!(
-            node_d.join(a),
+            node_d.join(a)?,
             PeerRingAction::RemoteAction(a, RemoteAction::FindSuccessor(d))
         );
         // for a ring a, a is over 2^152 far away from d
         assert!(d + Did::from(BigUint::from(2u16).pow(152)) > a);
         assert!(d + Did::from(BigUint::from(2u16).pow(151)) < a);
-        assert!(node_d.finger.contains(&Some(a)));
-        assert_eq!(node_d.finger[151], Some(a));
-        assert_eq!(node_d.finger[152], None);
-        assert_eq!(node_d.finger[0], Some(a));
+        assert!(node_d.lock_finger()?.contains(&Some(a)));
+        assert_eq!(node_d.lock_finger()?[151], Some(a));
+        assert_eq!(node_d.lock_finger()?[152], None);
+        assert_eq!(node_d.lock_finger()?[0], Some(a));
         // when b insearted a is still more close to d
         assert_eq!(
-            node_d.join(b),
+            node_d.join(b)?,
             PeerRingAction::RemoteAction(b, RemoteAction::FindSuccessor(d))
         );
         assert!(d + Did::from(BigUint::from(2u16).pow(159)) > b);
-        assert!(node_d.successor.list().contains(&a));
+        assert!(node_d.lock_successor()?.list().contains(&a));
         tokio::fs::remove_dir_all("./tmp").await.ok();
+
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_two_node_finger() {
+    async fn test_two_node_finger() -> Result<()> {
         let mut key1 = SecretKey::random();
         let mut key2 = SecretKey::random();
         if key1.address() > key2.address() {
@@ -535,31 +576,33 @@ mod tests {
         let db_2 = PersistenceStorage::new_with_path(db_path2.as_str())
             .await
             .unwrap();
-        let mut node1 = PeerRing::new_with_storage(did1, Arc::new(db_1));
-        let mut node2 = PeerRing::new_with_storage(did2, Arc::new(db_2));
+        let node1 = PeerRing::new_with_storage(did1, Arc::new(db_1));
+        let node2 = PeerRing::new_with_storage(did2, Arc::new(db_2));
 
-        node1.join(did2);
-        node2.join(did1);
-        assert!(node1.successor.list().contains(&did2));
-        assert!(node2.successor.list().contains(&did1));
+        node1.join(did2)?;
+        node2.join(did1)?;
+        assert!(node1.lock_successor()?.list().contains(&did2));
+        assert!(node2.lock_successor()?.list().contains(&did1));
 
         assert!(
-            node1.finger.contains(&Some(did2)),
+            node1.lock_finger()?.contains(&Some(did2)),
             "did1:{:?}; did2:{:?}",
             did1,
             did2
         );
         assert!(
-            node2.finger.contains(&Some(did1)),
+            node2.lock_finger()?.contains(&Some(did1)),
             "did1:{:?}; did2:{:?}",
             did1,
             did2
         );
         tokio::fs::remove_dir_all("./tmp").await.ok();
+
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_two_node_finger_failed_case() {
+    async fn test_two_node_finger_failed_case() -> Result<()> {
         let did1 = Did::from_str("0x051cf4f8d020cb910474bef3e17f153fface2b5f").unwrap();
         let did2 = Did::from_str("0x54baa7dc9e28f41da5d71af8fa6f2a302be1c1bf").unwrap();
         let max = Did::from(BigUint::from(2u16).pow(160) - 1u16);
@@ -573,13 +616,13 @@ mod tests {
         let db_2 = PersistenceStorage::new_with_path(db_path2.as_str())
             .await
             .unwrap();
-        let mut node1 = PeerRing::new_with_storage(did1, Arc::new(db_1));
-        let mut node2 = PeerRing::new_with_storage(did2, Arc::new(db_2));
+        let node1 = PeerRing::new_with_storage(did1, Arc::new(db_1));
+        let node2 = PeerRing::new_with_storage(did2, Arc::new(db_2));
 
-        node1.join(did2);
-        node2.join(did1);
-        assert!(node1.successor.list().contains(&did2));
-        assert!(node2.successor.list().contains(&did1));
+        node1.join(did2)?;
+        node2.join(did1)?;
+        assert!(node1.lock_successor()?.list().contains(&did2));
+        assert!(node2.lock_successor()?.list().contains(&did1));
         let pos_159 = did2 + Did::from(BigUint::from(2u16).pow(159));
         assert!(pos_159 > did2);
         assert!(pos_159 < max, "{:?};{:?}", pos_159, max);
@@ -588,17 +631,19 @@ mod tests {
         assert!(pos_160 > did1);
 
         assert!(
-            node1.finger.contains(&Some(did2)),
+            node1.lock_finger()?.contains(&Some(did2)),
             "did1:{:?}; did2:{:?}",
             did1,
             did2
         );
         assert!(
-            node2.finger.contains(&Some(did1)),
+            node2.lock_finger()?.contains(&Some(did1)),
             "did2:{:?} dont contains did1:{:?}",
             did2,
             did1
         );
         tokio::fs::remove_dir_all("./tmp").await.ok();
+
+        Ok(())
     }
 }

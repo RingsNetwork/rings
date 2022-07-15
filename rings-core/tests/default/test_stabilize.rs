@@ -2,11 +2,11 @@
 pub mod test {
     use std::sync::Arc;
 
-    use futures::lock::Mutex;
     use rings_core::dht::Did;
     use rings_core::dht::PeerRing;
     use rings_core::dht::Stabilization;
     use rings_core::ecc::SecretKey;
+    use rings_core::err::Error;
     use rings_core::err::Result;
     use rings_core::message::MessageHandler;
     use rings_core::session::SessionManager;
@@ -122,7 +122,7 @@ pub mod test {
         Ok((transport1, transport2))
     }
 
-    async fn run_stabilize(chord: Arc<Mutex<PeerRing>>, swarm: Arc<Swarm>) {
+    async fn run_stabilize(chord: Arc<PeerRing>, swarm: Arc<Swarm>) {
         let mut result = Result::<()>::Ok(());
         let stabilization = Stabilization::new(chord, swarm, 5usize);
         let timeout_in_secs = stabilization.get_timeout();
@@ -150,12 +150,8 @@ pub mod test {
         }
         let path1 = PersistenceStorage::random_path("./tmp");
         let path2 = PersistenceStorage::random_path("./tmp");
-        let dht1 = Arc::new(Mutex::new(
-            new_chord(key1.address().into(), path1.as_str()).await,
-        ));
-        let dht2 = Arc::new(Mutex::new(
-            new_chord(key2.address().into(), path2.as_str()).await,
-        ));
+        let dht1 = Arc::new(new_chord(key1.address().into(), path1.as_str()).await);
+        let dht2 = Arc::new(new_chord(key2.address().into(), path2.as_str()).await);
         let swarm1 = Arc::new(new_swarm(&key1));
         let swarm2 = Arc::new(new_swarm(&key2));
         let (_, _) = establish_connection(Arc::clone(&swarm1), Arc::clone(&swarm2)).await?;
@@ -187,13 +183,15 @@ pub mod test {
                 let transport_1_to_2 = swarm1.get_transport(&swarm2.address()).unwrap();
                 sleep(Duration::from_millis(1000)).await;
                 transport_1_to_2.wait_for_data_channel_open().await.unwrap();
-                assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
-                assert!(dht2.lock().await.successor.list().contains(&key1.address().into()));
+                assert!(dht1.lock_successor()?.list().contains(&key2.address().into()));
+                assert!(dht2.lock_successor()?.list().contains(&key1.address().into()));
                 let stabilization = Stabilization::new(Arc::clone(&dht1), Arc::clone(&swarm1), 5usize);
                 let _ = stabilization.stabilize().await;
                 sleep(Duration::from_millis(10000)).await;
-                assert_eq!(dht2.lock().await.predecessor, Some(key1.address().into()));
-                assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
+                assert_eq!(*dht2.lock_predecessor()?, Some(key1.address().into()));
+                assert!(dht1.lock_successor()?.list().contains(&key2.address().into()));
+
+                Ok::<(), Error>(())
             } => {}
         }
         tokio::fs::remove_dir_all("./tmp").await.ok();
@@ -210,12 +208,8 @@ pub mod test {
         }
         let path1 = PersistenceStorage::random_path("./tmp");
         let path2 = PersistenceStorage::random_path("./tmp");
-        let dht1 = Arc::new(Mutex::new(
-            new_chord(key1.address().into(), path1.as_str()).await,
-        ));
-        let dht2 = Arc::new(Mutex::new(
-            new_chord(key2.address().into(), path2.as_str()).await,
-        ));
+        let dht1 = Arc::new(new_chord(key1.address().into(), path1.as_str()).await);
+        let dht2 = Arc::new(new_chord(key2.address().into(), path2.as_str()).await);
 
         let swarm1 = Arc::new(new_swarm(&key1));
         let swarm2 = Arc::new(new_swarm(&key2));
@@ -249,11 +243,12 @@ pub mod test {
                 let transport_1_to_2 = swarm1.get_transport(&swarm2.address()).unwrap();
                 sleep(Duration::from_millis(1000)).await;
                 transport_1_to_2.wait_for_data_channel_open().await.unwrap();
-                assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
-                assert!(dht2.lock().await.successor.list().contains(&key1.address().into()));
+                assert!(dht1.lock_successor()?.list().contains(&key2.address().into()));
+                assert!(dht2.lock_successor()?.list().contains(&key1.address().into()));
                 sleep(Duration::from_millis(10000)).await;
-                assert_eq!(dht2.lock().await.predecessor, Some(key1.address().into()));
-                assert_eq!(dht1.lock().await.predecessor, Some(key2.address().into()));
+                assert_eq!(*dht2.lock_predecessor()?, Some(key1.address().into()));
+                assert_eq!(*dht1.lock_predecessor()?, Some(key2.address().into()));
+                Ok::<(), Error>(())
             } => {}
         }
         tokio::fs::remove_dir_all("./tmp").await.ok();

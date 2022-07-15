@@ -36,7 +36,7 @@ async fn new_processor() -> (Processor, Arc<PersistenceStorage>) {
 
     let pr = PeerRing::new_with_storage(key.address().into(), storage.clone());
 
-    let dht = Arc::new(Mutex::new(pr));
+    let dht = Arc::new(pr);
     let msg_handler = MessageHandler::new(dht.clone(), swarm.clone());
     let stab = Arc::new(Stabilization::new(dht, swarm.clone(), 20));
     ((swarm, Arc::new(msg_handler), stab).into(), storage)

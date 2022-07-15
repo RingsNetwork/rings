@@ -16,6 +16,7 @@ pub struct FingerTable {
     id: Did,
     size: usize,
     finger: Vec<Option<Did>>,
+    pub(super) fix_finger_index: u8,
 }
 
 impl FingerTable {
@@ -25,6 +26,7 @@ impl FingerTable {
             id,
             size,
             finger: vec![None; size],
+            fix_finger_index: 0,
         }
     }
 
@@ -59,6 +61,12 @@ impl FingerTable {
             return;
         }
         self.finger[index] = Some(*id);
+    }
+
+    /// setter for fix_finger_index
+    pub fn set_fix(&mut self, id: &Did) {
+        let index = self.fix_finger_index as usize;
+        self.set(index, id)
     }
 
     /// remove a node from dht finger table

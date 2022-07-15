@@ -23,12 +23,12 @@ impl HandleMsg<NotifyPredecessorSend> for MessageHandler {
         ctx: &MessagePayload<Message>,
         msg: &NotifyPredecessorSend,
     ) -> Result<()> {
-        let mut dht = self.dht.lock().await;
         let mut relay = ctx.relay.clone();
+        let predecessor = { *self.dht.lock_predecessor()? };
 
-        relay.relay(dht.id, None)?;
-        dht.notify(msg.id);
-        if let Some(id) = dht.predecessor {
+        relay.relay(self.dht.id, None)?;
+        self.dht.notify(msg.id)?;
+        if let Some(id) = predecessor {
             if id != relay.origin() {
                 return self
                     .send_report_message(
@@ -55,12 +55,13 @@ impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
         if self.swarm.get_transport(&msg.id).is_none() && msg.id != self.swarm.address().into() {
             self.connect(&msg.id.into()).await?;
         } else {
-            let mut dht = self.dht.lock().await;
-            dht.successor.update(msg.id);
+            {
+                self.dht.lock_successor()?.update(msg.id)
+            }
             if let Ok(PeerRingAction::RemoteAction(
                 next,
                 PeerRingRemoteAction::SyncVNodeWithSuccessor(data),
-            )) = dht.sync_with_successor(msg.id).await
+            )) = self.dht.sync_with_successor(msg.id).await
             {
                 self.send_direct_message(
                     Message::SyncVNodeWithSuccessor(SyncVNodeWithSuccessor { data }),
@@ -77,8 +78,6 @@ impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
 #[cfg(test)]
 mod test {
     use std::sync::Arc;
-
-    use futures::lock::Mutex;
 
     use super::*;
     use crate::dht::PeerRing;
@@ -158,12 +157,12 @@ mod test {
         assert_no_more_msg(&node1, &node2, &node3).await;
 
         println!("=== Check state before stabilization ===");
-        assert_eq!(dht1.lock().await.successor.list(), vec![did2]);
-        assert_eq!(dht2.lock().await.successor.list(), vec![did3, did1]);
-        assert_eq!(dht3.lock().await.successor.list(), vec![did2]);
-        assert!(dht1.lock().await.predecessor.is_none());
-        assert!(dht2.lock().await.predecessor.is_none());
-        assert!(dht3.lock().await.predecessor.is_none());
+        assert_eq!(dht1.lock_successor()?.list(), vec![did2]);
+        assert_eq!(dht2.lock_successor()?.list(), vec![did3, did1]);
+        assert_eq!(dht3.lock_successor()?.list(), vec![did2]);
+        assert!(dht1.lock_predecessor()?.is_none());
+        assert!(dht2.lock_predecessor()?.is_none());
+        assert!(dht3.lock_predecessor()?.is_none());
 
         println!("========================================");
         println!("||  now we start first stabilization  ||");
@@ -241,12 +240,12 @@ mod test {
         // node1's pre is node2, node1's successor is node2
         // node2's pre is node1, node2's successor is node3
         // node3's pre is node2, node3's successor is node1
-        assert_eq!(dht1.lock().await.successor.list(), vec![did2]);
-        assert_eq!(dht2.lock().await.successor.list(), vec![did3, did1]);
-        assert_eq!(dht3.lock().await.successor.list(), vec![did1, did2]);
-        assert_eq!(dht1.lock().await.predecessor, Some(did2));
-        assert_eq!(dht2.lock().await.predecessor, Some(did1));
-        assert_eq!(dht3.lock().await.predecessor, Some(did2));
+        assert_eq!(dht1.lock_successor()?.list(), vec![did2]);
+        assert_eq!(dht2.lock_successor()?.list(), vec![did3, did1]);
+        assert_eq!(dht3.lock_successor()?.list(), vec![did1, did2]);
+        assert_eq!(*dht1.lock_predecessor()?, Some(did2));
+        assert_eq!(*dht2.lock_predecessor()?, Some(did1));
+        assert_eq!(*dht3.lock_predecessor()?, Some(did2));
 
         println!("=========================================");
         println!("||  now we start second stabilization  ||");
@@ -319,12 +318,12 @@ mod test {
         // node1's pre is node3, node1's successor is node2
         // node2's pre is node1, node2's successor is node3
         // node3's pre is node2, node3's successor is node1
-        assert_eq!(dht1.lock().await.successor.list(), vec![did2]);
-        assert_eq!(dht2.lock().await.successor.list(), vec![did3, did1]);
-        assert_eq!(dht3.lock().await.successor.list(), vec![did1, did2]);
-        assert_eq!(dht1.lock().await.predecessor, Some(did3));
-        assert_eq!(dht2.lock().await.predecessor, Some(did1));
-        assert_eq!(dht3.lock().await.predecessor, Some(did2));
+        assert_eq!(dht1.lock_successor()?.list(), vec![did2]);
+        assert_eq!(dht2.lock_successor()?.list(), vec![did3, did1]);
+        assert_eq!(dht3.lock_successor()?.list(), vec![did1, did2]);
+        assert_eq!(*dht1.lock_predecessor()?, Some(did3));
+        assert_eq!(*dht2.lock_predecessor()?, Some(did1));
+        assert_eq!(*dht3.lock_predecessor()?, Some(did2));
         tokio::fs::remove_dir_all("./tmp").await.ok();
         Ok(())
     }
@@ -361,12 +360,12 @@ mod test {
         assert_no_more_msg(&node1, &node2, &node3).await;
 
         println!("=== Check state before stabilization ===");
-        assert_eq!(dht1.lock().await.successor.list(), vec![did2]);
-        assert_eq!(dht2.lock().await.successor.list(), vec![did1]);
-        assert_eq!(dht3.lock().await.successor.list(), vec![did2]);
-        assert!(dht1.lock().await.predecessor.is_none());
-        assert!(dht2.lock().await.predecessor.is_none());
-        assert!(dht3.lock().await.predecessor.is_none());
+        assert_eq!(dht1.lock_successor()?.list(), vec![did2]);
+        assert_eq!(dht2.lock_successor()?.list(), vec![did1]);
+        assert_eq!(dht3.lock_successor()?.list(), vec![did2]);
+        assert!(dht1.lock_predecessor()?.is_none());
+        assert!(dht2.lock_predecessor()?.is_none());
+        assert!(dht3.lock_predecessor()?.is_none());
 
         println!("========================================");
         println!("||  now we start first stabilization  ||");
@@ -411,12 +410,12 @@ mod test {
         //   |-----------------|
         // node1's pre is node2, node1's successor is node2
         // node2's pre is node3, node2's successor is node1
-        assert_eq!(dht1.lock().await.successor.list(), vec![did2]);
-        assert_eq!(dht2.lock().await.successor.list(), vec![did1]);
-        assert_eq!(dht3.lock().await.successor.list(), vec![did2]);
-        assert_eq!(dht1.lock().await.predecessor, Some(did2));
-        assert_eq!(dht2.lock().await.predecessor, Some(did3));
-        assert!(dht3.lock().await.predecessor.is_none());
+        assert_eq!(dht1.lock_successor()?.list(), vec![did2]);
+        assert_eq!(dht2.lock_successor()?.list(), vec![did1]);
+        assert_eq!(dht3.lock_successor()?.list(), vec![did2]);
+        assert_eq!(*dht1.lock_predecessor()?, Some(did2));
+        assert_eq!(*dht2.lock_predecessor()?, Some(did3));
+        assert!(dht3.lock_predecessor()?.is_none());
 
         println!("=========================================");
         println!("||  now we start second stabilization  ||");
@@ -485,18 +484,18 @@ mod test {
         // node1's pre is node2, node1's successor is node3
         // node2's pre is node3, node2's successor is node1
         // node3's pre is None, node3's successor is node2
-        assert_eq!(dht1.lock().await.successor.list(), vec![did3, did2]);
-        assert_eq!(dht2.lock().await.successor.list(), vec![did1]);
-        assert_eq!(dht3.lock().await.successor.list(), vec![did2]);
-        assert_eq!(dht1.lock().await.predecessor, Some(did2));
-        assert_eq!(dht2.lock().await.predecessor, Some(did3));
-        assert!(dht3.lock().await.predecessor.is_none());
+        assert_eq!(dht1.lock_successor()?.list(), vec![did3, did2]);
+        assert_eq!(dht2.lock_successor()?.list(), vec![did1]);
+        assert_eq!(dht3.lock_successor()?.list(), vec![did2]);
+        assert_eq!(*dht1.lock_predecessor()?, Some(did2));
+        assert_eq!(*dht2.lock_predecessor()?, Some(did3));
+        assert!(dht3.lock_predecessor()?.is_none());
         tokio::fs::remove_dir_all("./tmp").await.ok();
 
         Ok(())
     }
 
-    async fn run_stabilize_once(dht: Arc<Mutex<PeerRing>>, swarm: Arc<Swarm>) -> Result<()> {
+    async fn run_stabilize_once(dht: Arc<PeerRing>, swarm: Arc<Swarm>) -> Result<()> {
         Stabilization::new(dht, swarm, 5).stabilize().await
     }
 }

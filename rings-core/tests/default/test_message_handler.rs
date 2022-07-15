@@ -3,11 +3,11 @@ pub mod test {
     use std::str::FromStr;
     use std::sync::Arc;
 
-    use futures::lock::Mutex;
     use rings_core::dht::vnode::VirtualNode;
     use rings_core::dht::Did;
     use rings_core::dht::PeerRing;
     use rings_core::ecc::SecretKey;
+    use rings_core::err::Error;
     use rings_core::err::Result;
     use rings_core::message;
     use rings_core::message::Encoder;
@@ -134,9 +134,7 @@ pub mod test {
         let key1 = SecretKey::random();
         let key2 = SecretKey::random();
         let path = PersistenceStorage::random_path("./tmp");
-        let dht1 = Arc::new(Mutex::new(
-            new_chord(key1.address().into(), path.as_str()).await,
-        ));
+        let dht1 = Arc::new(new_chord(key1.address().into(), path.as_str()).await);
         let swarm1 = Arc::new(new_swarm(&key1));
         let swarm2 = Arc::new(new_swarm(&key2));
         let (_, _) = establish_connection(Arc::clone(&swarm1), Arc::clone(&swarm2)).await?;
@@ -150,9 +148,7 @@ pub mod test {
             }
         };
         assert!(dht1
-            .lock()
-            .await
-            .successor
+            .lock_successor()?
             .list()
             .contains(&key2.address().into()));
         tokio::fs::remove_dir_all("./tmp").await.ok();
@@ -185,15 +181,9 @@ pub mod test {
         let path2 = PersistenceStorage::random_path("./tmp");
         let path3 = PersistenceStorage::random_path("./tmp");
 
-        let dht1 = Arc::new(Mutex::new(
-            new_chord(key1.address().into(), path1.as_str()).await,
-        ));
-        let dht2 = Arc::new(Mutex::new(
-            new_chord(key2.address().into(), path2.as_str()).await,
-        ));
-        let dht3 = Arc::new(Mutex::new(
-            new_chord(key3.address().into(), path3.as_str()).await,
-        ));
+        let dht1 = Arc::new(new_chord(key1.address().into(), path1.as_str()).await);
+        let dht2 = Arc::new(new_chord(key2.address().into(), path2.as_str()).await);
+        let dht3 = Arc::new(new_chord(key3.address().into(), path3.as_str()).await);
 
         // 2 to 3
         let (_, _) = establish_connection(Arc::clone(&swarm3), Arc::clone(&swarm2)).await?;
@@ -230,9 +220,9 @@ pub mod test {
                 println!("swarm1 key address: {:?}", swarm1.address());
                 println!("swarm2 key address: {:?}", swarm2.address());
                 println!("swarm3 key address: {:?}", swarm3.address());
-                let dht1_successor = {dht1.lock().await.successor.clone()};
-                let dht2_successor = {dht2.lock().await.successor.clone()};
-                let dht3_successor = {dht3.lock().await.successor.clone()};
+                let dht1_successor = dht1.lock_successor()?;
+                let dht2_successor = dht2.lock_successor()?;
+                let dht3_successor = dht3.lock_successor()?;
                 println!("dht1 successor: {:?}", dht1_successor);
                 println!("dht2 successor: {:?}", dht2_successor);
                 println!("dht3 successor: {:?}", dht3_successor);
@@ -286,6 +276,7 @@ pub mod test {
                     transport_1_to_3.ice_connection_state().await,
                     Some(RTCIceConnectionState::Connected)
                 );
+                Ok::<(), Error>(())
             } => {}
         }
         tokio::fs::remove_dir_all("./tmp").await.ok();
@@ -298,12 +289,8 @@ pub mod test {
         let key2 = SecretKey::random();
         let path1 = PersistenceStorage::random_path("./tmp");
         let path2 = PersistenceStorage::random_path("./tmp");
-        let dht1 = Arc::new(Mutex::new(
-            new_chord(key1.address().into(), path1.as_str()).await,
-        ));
-        let dht2 = Arc::new(Mutex::new(
-            new_chord(key2.address().into(), path2.as_str()).await,
-        ));
+        let dht1 = Arc::new(new_chord(key1.address().into(), path1.as_str()).await);
+        let dht2 = Arc::new(new_chord(key2.address().into(), path2.as_str()).await);
         let swarm1 = Arc::new(new_swarm(&key1));
         let swarm2 = Arc::new(new_swarm(&key2));
         let (_, _) = establish_connection(Arc::clone(&swarm1), Arc::clone(&swarm2)).await?;
@@ -330,8 +317,8 @@ pub mod test {
                 let transport_1_to_2 = swarm1.get_transport(&swarm2.address()).unwrap();
                 sleep(Duration::from_millis(1000)).await;
                 transport_1_to_2.wait_for_data_channel_open().await.unwrap();
-                assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
-                assert!(dht2.lock().await.successor.list().contains(&key1.address().into()));
+                assert!(dht1.lock_successor()?.list().contains(&key2.address().into()));
+                assert!(dht2.lock_successor()?.list().contains(&key1.address().into()));
                 assert_eq!(
                     transport_1_to_2.ice_connection_state().await,
                     Some(RTCIceConnectionState::Connected)
@@ -347,8 +334,9 @@ pub mod test {
                     .await
                     .unwrap();
                 sleep(Duration::from_millis(1000)).await;
-                assert_eq!(dht2.lock().await.predecessor, Some(key1.address().into()));
-                assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
+                assert_eq!(*dht2.lock_predecessor()?, Some(key1.address().into()));
+                assert!(dht1.lock_successor()?.list().contains(&key2.address().into()));
+                Ok::<(), Error>(())
             } => {}
         }
 
@@ -365,12 +353,8 @@ pub mod test {
         }
         let path1 = PersistenceStorage::random_path("./tmp");
         let path2 = PersistenceStorage::random_path("./tmp");
-        let dht1 = Arc::new(Mutex::new(
-            new_chord(key1.address().into(), path1.as_str()).await,
-        ));
-        let dht2 = Arc::new(Mutex::new(
-            new_chord(key2.address().into(), path2.as_str()).await,
-        ));
+        let dht1 = Arc::new(new_chord(key1.address().into(), path1.as_str()).await);
+        let dht2 = Arc::new(new_chord(key2.address().into(), path2.as_str()).await);
         let swarm1 = Arc::new(new_swarm(&key1));
         let swarm2 = Arc::new(new_swarm(&key2));
         let (_, _) = establish_connection(Arc::clone(&swarm1), Arc::clone(&swarm2)).await?;
@@ -397,8 +381,8 @@ pub mod test {
                 let transport_1_to_2 = swarm1.get_transport(&swarm2.address()).unwrap();
                 sleep(Duration::from_millis(1000)).await;
                 transport_1_to_2.wait_for_data_channel_open().await.unwrap();
-                assert!(dht1.lock().await.successor.list().contains(&key2.address().into()), "{:?}", dht1.lock().await.successor.list());
-                assert!(dht2.lock().await.successor.list().contains(&key1.address().into()));
+                assert!(dht1.lock_successor()?.list().contains(&key2.address().into()), "{:?}", dht1.lock_successor()?.list());
+                assert!(dht2.lock_successor()?.list().contains(&key1.address().into()));
                 assert_eq!(
                     transport_1_to_2.ice_connection_state().await,
                     Some(RTCIceConnectionState::Connected)
@@ -414,8 +398,8 @@ pub mod test {
                     .await
                     .unwrap();
                 sleep(Duration::from_millis(1000)).await;
-                assert_eq!(dht2.lock().await.predecessor, Some(key1.address().into()));
-                assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
+                assert_eq!(*dht2.lock_predecessor()?, Some(key1.address().into()));
+                assert!(dht1.lock_successor()?.list().contains(&key2.address().into()));
 
                 println!(
                     "swarm1: {:?}, swarm2: {:?}",
@@ -434,8 +418,9 @@ pub mod test {
                     .await
                     .unwrap();
                 sleep(Duration::from_millis(1000)).await;
-                assert!(dht2.lock().await.successor.list().contains(&key1.address().into()));
-                assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
+                assert!(dht2.lock_successor()?.list().contains(&key1.address().into()));
+                assert!(dht1.lock_successor()?.list().contains(&key2.address().into()));
+                Ok::<(), Error>(())
             } => {}
         }
         tokio::fs::remove_dir_all("./tmp").await.ok();
@@ -452,12 +437,8 @@ pub mod test {
         }
         let path1 = PersistenceStorage::random_path("./tmp");
         let path2 = PersistenceStorage::random_path("./tmp");
-        let dht1 = Arc::new(Mutex::new(
-            new_chord(key1.address().into(), path1.as_str()).await,
-        ));
-        let dht2 = Arc::new(Mutex::new(
-            new_chord(key2.address().into(), path2.as_str()).await,
-        ));
+        let dht1 = Arc::new(new_chord(key1.address().into(), path1.as_str()).await);
+        let dht2 = Arc::new(new_chord(key2.address().into(), path2.as_str()).await);
         let swarm1 = Arc::new(new_swarm(&key1));
         let swarm2 = Arc::new(new_swarm(&key2));
         let (_, _) = establish_connection(Arc::clone(&swarm1), Arc::clone(&swarm2)).await?;
@@ -485,17 +466,13 @@ pub mod test {
                 let transport_1_to_2 = swarm1.get_transport(&swarm2.address()).unwrap();
                 sleep(Duration::from_millis(1000)).await;
                 transport_1_to_2.wait_for_data_channel_open().await.unwrap();
-                assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
-                assert!(dht2.lock().await.successor.list().contains(&key1.address().into()));
+                assert!(dht1.lock_successor()?.list().contains(&key2.address().into()));
+                assert!(dht2.lock_successor()?.list().contains(&key1.address().into()));
                 assert!(dht1
-                    .lock()
-                    .await
-                    .finger
+                    .lock_finger()?
                     .contains(&Some(key2.address().into())));
                 assert!(dht2
-                    .lock()
-                    .await
-                    .finger
+                    .lock_finger()?
                     .contains(&Some(key1.address().into())));
                 assert_eq!(
                     transport_1_to_2.ice_connection_state().await,
@@ -512,8 +489,8 @@ pub mod test {
                     .await
                     .unwrap();
                 sleep(Duration::from_millis(1000)).await;
-                assert_eq!(dht2.lock().await.predecessor, Some(key1.address().into()));
-                assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
+                assert_eq!(*dht2.lock_predecessor()?, Some(key1.address().into()));
+                assert!(dht1.lock_successor()?.list().contains(&key2.address().into()));
                 println!(
                     "swarm1: {:?}, swarm2: {:?}",
                     swarm1.address(),
@@ -531,10 +508,11 @@ pub mod test {
                     .await
                     .unwrap();
                 sleep(Duration::from_millis(1000)).await;
-                let dht1_successor = dht1.lock().await.successor.clone();
-                let dht2_successor = dht2.lock().await.successor.clone();
+                let dht1_successor = dht1.lock_successor()?.clone();
+                let dht2_successor = dht2.lock_successor()?.clone();
                 assert!(dht2_successor.list().contains(&key1.address().into()));
                 assert!(dht1_successor.list().contains(&key2.address().into()));
+                Ok::<(), Error>(())
             } => {}
         };
         tokio::fs::remove_dir_all("./tmp").await.ok();
@@ -553,12 +531,8 @@ pub mod test {
                 .unwrap();
         let path1 = PersistenceStorage::random_path("./tmp");
         let path2 = PersistenceStorage::random_path("./tmp");
-        let dht1 = Arc::new(Mutex::new(
-            new_chord(key1.address().into(), path1.as_str()).await,
-        ));
-        let dht2 = Arc::new(Mutex::new(
-            new_chord(key2.address().into(), path2.as_str()).await,
-        ));
+        let dht1 = Arc::new(new_chord(key1.address().into(), path1.as_str()).await);
+        let dht2 = Arc::new(new_chord(key2.address().into(), path2.as_str()).await);
         println!(
             "test with key1: {:?}, key2: {:?}",
             key1.address(),
@@ -591,8 +565,8 @@ pub mod test {
                  transport_1_to_2.wait_for_data_channel_open().await.unwrap();
                  // dht1's successor is dht2
                  // dht2's successor is dht1
-                 assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
-                 assert!(dht2.lock().await.successor.list().contains(&key1.address().into()));
+                 assert!(dht1.lock_successor()?.list().contains(&key2.address().into()));
+                 assert!(dht2.lock_successor()?.list().contains(&key1.address().into()));
                  assert_eq!(
                      transport_1_to_2.ice_connection_state().await,
                      Some(RTCIceConnectionState::Connected)
@@ -608,10 +582,10 @@ pub mod test {
                      .await
                      .unwrap();
                  sleep(Duration::from_millis(1000)).await;
-                 assert_eq!(dht2.lock().await.predecessor, Some(key1.address().into()));
-                 assert!(dht1.lock().await.successor.list().contains(&key2.address().into()));
+                 assert_eq!(*dht2.lock_predecessor()?, Some(key1.address().into()));
+                 assert!(dht1.lock_successor()?.list().contains(&key2.address().into()));
 
-                 assert!(dht2.lock().await.storage.count().await.unwrap() == 0);
+                 assert!(dht2.storage.count().await.unwrap() == 0);
                  let message = String::from("this is a test string");
                  let encoded_message = message.encode().unwrap();
                  // the vid is hash of string
@@ -626,14 +600,13 @@ pub mod test {
                  .await
                  .unwrap();
                  sleep(Duration::from_millis(5000)).await;
-                 assert!(dht1.lock().await.storage.count().await.unwrap() == 0);
-                 assert!(dht2.lock().await.storage.count().await.unwrap() > 0);
-                 let data: Result<VirtualNode> = dht2.lock().await.storage.get(&(vnode.address)).await;
-                 assert!(data.is_ok(), "vnode: {:?} not in",
-                         vnode.did(),
-                         );
+                 assert!(dht1.storage.count().await.unwrap() == 0);
+                 assert!(dht2.storage.count().await.unwrap() > 0);
+                 let data: Result<VirtualNode> = dht2.storage.get(&(vnode.address)).await;
+                 assert!(data.is_ok(), "vnode: {:?} not in", vnode.did());
                  let data = data.unwrap();
                  assert_eq!(data.data[0].clone().decode::<String>().unwrap(), message);
+                 Ok::<(), Error>(())
              } => {}
         }
         tokio::fs::remove_dir_all("./tmp").await.ok();

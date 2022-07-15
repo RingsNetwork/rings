@@ -128,10 +128,11 @@ impl SubRing {
     pub fn from_ring(name: &str, ring: &PeerRing) -> Result<Self> {
         let address: HashStr = name.to_owned().into();
         let did = Did::from_str(&address.inner())?;
+        let finger = ring.lock_finger()?;
         Ok(Self {
             name: name.to_owned(),
             did,
-            finger: ring.finger.clone(),
+            finger: (*finger).clone(),
             admin: None,
             creator: ring.id,
         })

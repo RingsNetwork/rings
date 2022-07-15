@@ -34,18 +34,16 @@ pub trait TChordStorage {
 impl TChordStorage for MessageHandler {
     /// Check local cache
     async fn check_cache(&self, id: &Did) -> Option<VirtualNode> {
-        let dht = self.dht.lock().await;
-        dht.fetch_cache(id)
+        self.dht.fetch_cache(id)
     }
 
     /// Fetch virtual node, if exist in localstoreage, copy it to the cache,
     /// else Query Remote Node
     async fn fetch(&self, id: &Did) -> Result<()> {
         // If peer found that data is on it's localstore, copy it to the cache
-        let dht = self.dht.lock().await;
-        match dht.lookup(id).await? {
+        match self.dht.lookup(id).await? {
             PeerRingAction::SomeVNode(v) => {
-                dht.cache(v);
+                self.dht.cache(v);
                 Ok(())
             }
             PeerRingAction::None => Ok(()),
@@ -60,8 +58,7 @@ impl TChordStorage for MessageHandler {
 
     /// Store VirtualNode, TryInto<VirtualNode> is implementated for alot of types
     async fn store(&self, vnode: VirtualNode) -> Result<()> {
-        let dht = self.dht.lock().await;
-        match dht.store(vnode).await? {
+        match self.dht.store(vnode).await? {
             PeerRingAction::None => Ok(()),
             PeerRingAction::RemoteAction(target, PeerRingRemoteAction::FindAndStore(vnode)) => {
                 self.send_direct_message(
@@ -82,14 +79,13 @@ impl HandleMsg<SearchVNode> for MessageHandler {
     /// Search VNode via successor
     /// If a VNode is storead local, it will response immediately.
     async fn handle(&self, ctx: &MessagePayload<Message>, msg: &SearchVNode) -> Result<()> {
-        let dht = self.dht.lock().await;
         let mut relay = ctx.relay.clone();
 
-        match dht.lookup(&msg.id).await {
+        match self.dht.lookup(&msg.id).await {
             Ok(action) => match action {
                 PeerRingAction::None => Ok(()),
                 PeerRingAction::SomeVNode(v) => {
-                    relay.relay(dht.id, None)?;
+                    relay.relay(self.dht.id, None)?;
                     self.send_report_message(
                         Message::FoundVNode(FoundVNode { data: vec![v] }),
                         relay,
@@ -97,7 +93,7 @@ impl HandleMsg<SearchVNode> for MessageHandler {
                     .await
                 }
                 PeerRingAction::RemoteAction(next, _) => {
-                    relay.relay(dht.id, Some(next))?;
+                    relay.relay(self.dht.id, Some(next))?;
                     self.transpond_payload(ctx, relay).await
                 }
                 act => Err(Error::PeerRingUnexpectedAction(act)),
@@ -111,16 +107,15 @@ impl HandleMsg<SearchVNode> for MessageHandler {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<FoundVNode> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload<Message>, msg: &FoundVNode) -> Result<()> {
-        let dht = self.dht.lock().await;
         let mut relay = ctx.relay.clone();
 
-        relay.relay(dht.id, None)?;
+        relay.relay(self.dht.id, None)?;
         if relay.next_hop.is_some() {
             self.transpond_payload(ctx, relay).await
         } else {
             // When query successor, store in local cache
             for datum in msg.data.iter().cloned() {
-                dht.cache(datum);
+                self.dht.cache(datum);
             }
             Ok(())
         }
@@ -131,17 +126,15 @@ impl HandleMsg<FoundVNode> for MessageHandler {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<StoreVNode> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload<Message>, msg: &StoreVNode) -> Result<()> {
-        let dht = self.dht.lock().await;
-
         let virtual_peer = msg.data.clone();
         for p in virtual_peer {
-            match dht.store(p).await {
+            match self.dht.store(p).await {
                 Ok(action) => match action {
                     PeerRingAction::None => Ok(()),
                     PeerRingAction::RemoteAction(next, _) => {
                         let mut relay = ctx.relay.clone();
                         relay.reset_destination(next)?;
-                        relay.relay(dht.id, Some(next))?;
+                        relay.relay(self.dht.id, Some(next))?;
                         self.transpond_payload(ctx, relay).await
                     }
                     act => Err(Error::PeerRingUnexpectedAction(act)),
@@ -162,11 +155,9 @@ impl HandleMsg<SyncVNodeWithSuccessor> for MessageHandler {
         _ctx: &MessagePayload<Message>,
         msg: &SyncVNodeWithSuccessor,
     ) -> Result<()> {
-        let dht = self.dht.lock().await;
-
         for data in msg.data.iter().cloned() {
             // only simply store here
-            match dht.store(data).await {
+            match self.dht.store(data).await {
                 Ok(PeerRingAction::None) => Ok(()),
                 Ok(PeerRingAction::RemoteAction(
                     next,
@@ -190,8 +181,6 @@ impl HandleMsg<SyncVNodeWithSuccessor> for MessageHandler {
 #[cfg(test)]
 mod test {
     use std::sync::Arc;
-
-    use futures::lock::Mutex;
 
     use super::*;
     use crate::dht::PeerRing;
@@ -235,22 +224,22 @@ mod test {
         let path1 = PersistenceStorage::random_path("./tmp");
         let path2 = PersistenceStorage::random_path("./tmp");
 
-        let dht1 = Arc::new(Mutex::new(PeerRing::new_with_storage(
+        let dht1 = Arc::new(PeerRing::new_with_storage(
             did1,
             Arc::new(
                 PersistenceStorage::new_with_path(path1.as_str())
                     .await
                     .unwrap(),
             ),
-        )));
-        let dht2 = Arc::new(Mutex::new(PeerRing::new_with_storage(
+        ));
+        let dht2 = Arc::new(PeerRing::new_with_storage(
             did2,
             Arc::new(
                 PersistenceStorage::new_with_path(path2.as_str())
                     .await
                     .unwrap(),
             ),
-        )));
+        ));
 
         let sm1 = SessionManager::new_with_seckey(&key1).unwrap();
         let sm2 = SessionManager::new_with_seckey(&key2).unwrap();
@@ -329,7 +318,7 @@ mod test {
         if let Message::FindSuccessorReport(x) = ev_1.data {
             // for node2 there is no did is more closer to key1, so it response key1
             // and dht1 wont update
-            assert!(!dht1.lock().await.successor.list().contains(&did1));
+            assert!(!dht1.lock_successor()?.list().contains(&did1));
             assert_eq!(x.id, did1);
             assert!(!x.for_fix);
         } else {
@@ -350,8 +339,8 @@ mod test {
         let data = "Across the Great Wall we can reach every corner in the world.".to_string();
         let vnode: VirtualNode = data.try_into().unwrap();
         let vid = vnode.did();
-        assert!(dht1.lock().await.cache.is_empty());
-        assert!(dht2.lock().await.cache.is_empty());
+        assert!(dht1.cache.is_empty());
+        assert!(dht2.cache.is_empty());
         assert!(node1.check_cache(&vid).await.is_none());
         assert!(node2.check_cache(&vid).await.is_none());
 
@@ -380,11 +369,11 @@ mod test {
         assert!(node1.check_cache(&vid).await.is_none());
         assert!(node2.check_cache(&vid).await.is_none());
         if vid.in_range(&did2, &did2, &did1) {
-            assert!(dht1.lock().await.storage.count().await.unwrap() == 0);
-            assert!(dht2.lock().await.storage.count().await.unwrap() != 0);
+            assert!(dht1.storage.count().await.unwrap() == 0);
+            assert!(dht2.storage.count().await.unwrap() != 0);
         } else {
-            assert!(dht1.lock().await.storage.count().await.unwrap() != 0);
-            assert!(dht2.lock().await.storage.count().await.unwrap() == 0);
+            assert!(dht1.storage.count().await.unwrap() != 0);
+            assert!(dht2.storage.count().await.unwrap() == 0);
         }
         // test remote query
         if vid.in_range(&did2, &did2, &did1) {
