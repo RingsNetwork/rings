@@ -41,7 +41,7 @@ pub trait IceTransport<E: Send, Ch: Channel<E>> {
     type Msg;
 
     fn new(event_sender: Ch::Sender) -> Self;
-    async fn start(&mut self, addr: &IceServer) -> Result<&Self>;
+    async fn start(&mut self, addr: Vec<IceServer>, external_id: Option<String>) -> Result<&Self>;
     async fn close(&self) -> Result<()>;
     async fn ice_connection_state(&self) -> Option<Self::IceConnectionState>;
     async fn is_connected(&self) -> bool;

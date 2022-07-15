@@ -84,9 +84,14 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
         }
     }
 
-    async fn start(&mut self, ice_server: &IceServer) -> Result<&Self> {
+    async fn start(
+        &mut self,
+        ice_server: Vec<IceServer>,
+        external_ip: Option<String>,
+    ) -> Result<&Self> {
         let mut config = RtcConfiguration::new();
-        let ice_servers: js_sys::Array = js_sys::Array::of1(&ice_server.clone().into());
+        let ice_servers: js_sys::Array =
+            js_sys::Array::from_iter(&ice_server.into_iter().map(|x| x.clone().into()));
         config.ice_servers(&ice_servers.into());
         // hack here
         let r = js_sys::Reflect::set(

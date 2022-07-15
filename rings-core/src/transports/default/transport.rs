@@ -8,11 +8,14 @@ use futures::future::BoxFuture;
 use futures::lock::Mutex as FuturesMutex;
 use serde_json;
 use web3::types::Address;
+use webrtc::api::setting_engine::SettingEngine;
 use webrtc::api::APIBuilder;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::data_channel_state::RTCDataChannelState;
 use webrtc::data_channel::RTCDataChannel;
+use webrtc::ice::mdns::MulticastDnsMode;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
+use webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType;
 use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
@@ -82,14 +85,22 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
         }
     }
 
-    async fn start(&mut self, ice_server: &IceServer) -> Result<&Self> {
+    async fn start(
+        &mut self,
+        ice_server: Vec<IceServer>,
+        external_ip: Option<String>,
+    ) -> Result<&Self> {
         let config = RTCConfiguration {
-            ice_servers: vec![ice_server.clone().into()],
+            ice_servers: ice_server.iter().map(|x| x.clone().into()).collect(),
             ice_candidate_pool_size: 100,
             ..Default::default()
         };
-
-        let api = APIBuilder::new().build();
+        let mut setting = SettingEngine::default();
+        setting.set_ice_multicast_dns_mode(MulticastDnsMode::QueryAndGather);
+        if let Some(addr) = external_ip {
+            setting.set_nat_1to1_ips(vec![addr], RTCIceCandidateType::Host);
+        }
+        let api = APIBuilder::new().with_setting_engine(setting).build();
         match api.new_peer_connection(config).await {
             Ok(c) => {
                 let mut conn = self.connection.lock().await;
@@ -545,7 +556,11 @@ pub mod tests {
         let mut trans = Transport::new(ch.sender());
 
         let stun = IceServer::from_str("stun://stun.l.google.com:19302").unwrap();
-        trans.start(&stun).await?.apply_callback().await?;
+        trans
+            .start(vec![stun], None)
+            .await?
+            .apply_callback()
+            .await?;
         Ok(trans)
     }
 
