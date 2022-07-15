@@ -220,35 +220,33 @@ pub mod test {
                 println!("swarm1 key address: {:?}", swarm1.address());
                 println!("swarm2 key address: {:?}", swarm2.address());
                 println!("swarm3 key address: {:?}", swarm3.address());
-                let dht1_successor = dht1.lock_successor()?;
-                let dht2_successor = dht2.lock_successor()?;
-                let dht3_successor = dht3.lock_successor()?;
-                println!("dht1 successor: {:?}", dht1_successor);
-                println!("dht2 successor: {:?}", dht2_successor);
-                println!("dht3 successor: {:?}", dht3_successor);
+                {
+                    let dht1_successor = dht1.lock_successor()?;
+                    let dht2_successor = dht2.lock_successor()?;
+                    let dht3_successor = dht3.lock_successor()?;
+                    println!("dht1 successor: {:?}", dht1_successor);
+                    println!("dht2 successor: {:?}", dht2_successor);
+                    println!("dht3 successor: {:?}", dht3_successor);
 
-                // key1 < key2 < key3
-                // dht1 -> dht2
-                // dht2 -> dht3
+                    assert!(
+                        dht1_successor.list().contains(
+                            &key2.address().into()
+                        ),
+                        "Expect dht1 successor is key2, Found: {:?}",
+                        dht1_successor.list()
+                    );
+                    assert!(
+                        dht2_successor.list().contains(
+                            &key3.address().into()
+                        ), "{:?}", dht2_successor.list());
+                    assert!(
+                        dht3_successor.list().contains(
+                            &key2.address().into()
+                        ),
+                        "dht3 successor is key2"
+                    );
+                }
 
-                // dht3 -> dht2
-                assert!(
-                    dht1_successor.list().contains(
-                        &key2.address().into()
-                    ),
-                    "Expect dht1 successor is key2, Found: {:?}",
-                    dht1_successor.list()
-                );
-                assert!(
-                    dht2_successor.list().contains(
-                        &key3.address().into()
-                    ), "{:?}", dht2_successor.list());
-                assert!(
-                    dht3_successor.list().contains(
-                        &key2.address().into()
-                    ),
-                    "dht3 successor is key2"
-                );
                 assert_eq!(
                     transport_1_to_2.ice_connection_state().await,
                     Some(RTCIceConnectionState::Connected)
