@@ -98,6 +98,7 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
         let mut setting = SettingEngine::default();
         setting.set_ice_multicast_dns_mode(MulticastDnsMode::QueryAndGather);
         if let Some(addr) = external_ip {
+            log::debug!("setting external ip {:?}", &addr);
             setting.set_nat_1to1_ips(vec![addr], RTCIceCandidateType::Host);
         }
         let api = APIBuilder::new().with_setting_engine(setting).build();
@@ -153,13 +154,17 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
         match self.get_peer_connection().await {
             Some(peer_connection) => {
                 let mut gather_complete = peer_connection.gathering_complete_promise().await;
-                let answer = peer_connection
-                    .create_answer(None)
-                    .await
-                    .map_err(Error::RTCPeerConnectionCreateAnswerFailed)?;
-                self.set_local_description(answer.to_owned()).await?;
-                let _ = gather_complete.recv().await;
-                Ok(answer)
+                match peer_connection.create_answer(None).await {
+                    Ok(answer) => {
+                        self.set_local_description(answer.to_owned()).await?;
+                        let _ = gather_complete.recv().await;
+                        Ok(answer)
+                    }
+                    Err(e) => {
+                        log::error!("{}", e);
+                        Err(Error::RTCPeerConnectionCreateAnswerFailed(e))
+                    }
+                }
             }
             None => Err(Error::RTCPeerConnectionNotEstablish),
         }
@@ -340,21 +345,15 @@ impl IceTransportCallback<Event, AcChannel<Event>> for DefaultTransport {
     }
 
     async fn on_ice_candidate(&self) -> Self::OnLocalCandidateHdlrFn {
-        let peer_connection = self.get_peer_connection().await;
         let pending_candidates = Arc::clone(&self.pending_candidates);
 
         box move |c: Option<<Self as IceTransport<Event, AcChannel<Event>>>::Candidate>| {
-            let peer_connection = peer_connection.clone();
             let pending_candidates = Arc::clone(&pending_candidates);
             Box::pin(async move {
                 if let Some(candidate) = c {
-                    if let Some(peer_connection) = peer_connection {
-                        let desc = peer_connection.remote_description().await;
-                        if desc.is_none() {
-                            let mut candidates = pending_candidates.lock().await;
-                            candidates.push(candidate.clone());
-                        }
-                    }
+                    log::trace!("new candidate found {:?}", &candidate);
+                    let mut candidates = pending_candidates.lock().await;
+                    candidates.push(candidate.clone());
                 }
             })
         }
@@ -414,7 +413,10 @@ impl IceTrickleScheme<Event, AcChannel<Event>> for DefaultTransport {
                 .iter()
                 .map(async move |c| c.clone().to_json().await.unwrap().into()),
         )
-        .await;
+            .await;
+        if local_candidates_json.is_empty() {
+            return Err(Error::FailedOnGatherLocalCandidate);
+        }
         let data = TricklePayload {
             sdp: serde_json::to_string(&sdp).unwrap(),
             candidates: local_candidates_json,
@@ -550,6 +552,7 @@ pub mod tests {
     use super::*;
     use crate::ecc::SecretKey;
     use crate::types::ice_transport::IceServer;
+    use webrtc::ice_transport::ice_gathering_state::RTCIceGatheringState;
 
     async fn prepare_transport() -> Result<Transport> {
         let ch = Arc::new(AcChannel::new());
@@ -576,6 +579,15 @@ pub mod tests {
             transport2.ice_connection_state().await,
             Some(RTCIceConnectionState::New)
         );
+        assert_eq!(
+            transport1.get_peer_connection().await.unwrap().ice_gathering_state(),
+            RTCIceGatheringState::New
+        );
+
+        assert_eq!(
+            transport2.get_peer_connection().await.unwrap().ice_gathering_state(),
+            RTCIceGatheringState::New
+        );
 
         // Generate key pairs for signing and verification
         let key1 = SecretKey::random();
@@ -590,6 +602,14 @@ pub mod tests {
             .get_handshake_info(&sm1, RTCSdpType::Offer)
             .await?;
         assert_eq!(
+            transport1.get_peer_connection().await.unwrap().ice_gathering_state(),
+            RTCIceGatheringState::Complete
+        );
+        assert_eq!(
+            transport2.get_peer_connection().await.unwrap().ice_gathering_state(),
+            RTCIceGatheringState::New
+        );
+        assert_eq!(
             transport1.ice_connection_state().await,
             Some(RTCIceConnectionState::New)
         );
@@ -601,6 +621,16 @@ pub mod tests {
         // Peer 2 got offer then register
         let addr1 = transport2.register_remote_info(handshake_info1).await?;
         assert_eq!(addr1, key1.address());
+
+        assert_eq!(
+            transport1.get_peer_connection().await.unwrap().ice_gathering_state(),
+            RTCIceGatheringState::Complete
+        );
+        assert_eq!(
+            transport2.get_peer_connection().await.unwrap().ice_gathering_state(),
+            RTCIceGatheringState::New
+        );
+
         assert_eq!(
             transport1.ice_connection_state().await,
             Some(RTCIceConnectionState::New)
@@ -614,6 +644,17 @@ pub mod tests {
         let handshake_info2 = transport2
             .get_handshake_info(&sm2, RTCSdpType::Answer)
             .await?;
+
+        assert_eq!(
+            transport1.get_peer_connection().await.unwrap().ice_gathering_state(),
+            RTCIceGatheringState::Complete
+        );
+        assert_eq!(
+            transport2.get_peer_connection().await.unwrap().ice_gathering_state(),
+            RTCIceGatheringState::Complete
+        );
+
+
         assert_eq!(
             transport1.ice_connection_state().await,
             Some(RTCIceConnectionState::New)

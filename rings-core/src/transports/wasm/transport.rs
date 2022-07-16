@@ -460,6 +460,11 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
             .iter()
             .map(|c| c.clone().to_json().into_serde::<IceCandidate>().unwrap())
             .collect();
+
+        if local_candidates_json.is_empty() {
+            return Err(Error::FailedOnGatherLocalCandidate);
+        }
+
         let data = TricklePayload {
             sdp: serde_json::to_string(&RtcSessionDescriptionWrapper::from(sdp))
                 .map_err(Error::Deserialize)?,

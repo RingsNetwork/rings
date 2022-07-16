@@ -114,6 +114,9 @@ pub enum Error {
     #[error("Cannot seek address in swarm table")]
     SwarmMissAddressInTable,
 
+    #[error("Cannot gather local candidate")]
+    FailedOnGatherLocalCandidate,
+
     #[error("Cannot get transport from address: {0}")]
     SwarmMissTransport(web3::types::Address),
 
