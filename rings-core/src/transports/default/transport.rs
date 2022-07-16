@@ -96,10 +96,13 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
             ..Default::default()
         };
         let mut setting = SettingEngine::default();
-        setting.set_ice_multicast_dns_mode(MulticastDnsMode::QueryAndGather);
         if let Some(addr) = external_ip {
             log::debug!("setting external ip {:?}", &addr);
             setting.set_nat_1to1_ips(vec![addr], RTCIceCandidateType::Host);
+            setting.set_ice_multicast_dns_mode(MulticastDnsMode::QueryOnly);
+        } else {
+            // mDNS gathering cannot be used with 1:1 NAT IP mapping for host candidate
+            setting.set_ice_multicast_dns_mode(MulticastDnsMode::QueryAndGather);
         }
         let api = APIBuilder::new().with_setting_engine(setting).build();
         match api.new_peer_connection(config).await {
