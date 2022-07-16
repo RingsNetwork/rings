@@ -63,6 +63,9 @@ struct Daemon {
 
     #[clap(long, default_value = "20", env)]
     pub stabilize_timeout: usize,
+
+    #[clap(long, env, help = "external ip address")]
+    pub external_ip: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -214,6 +217,7 @@ async fn daemon_run(
     key: &SecretKey,
     stuns: &str,
     stabilize_timeout: usize,
+    external_ip: Option<String>,
 ) -> anyhow::Result<()> {
     let dht = Arc::new(Mutex::new(PeerRing::new(key.address().into()).await?));
     let (auth, temp_key) = SessionManager::gen_unsign_info(
@@ -223,7 +227,16 @@ async fn daemon_run(
     )?;
     let sig = key.sign(&auth.to_string()?).to_vec();
     let session = SessionManager::new(&sig, &auth, &temp_key);
-    let swarm = Arc::new(Swarm::new(stuns, key.address(), session.clone()));
+    let swarm = if let Some(eip) = external_ip {
+        Arc::new(Swarm::new_with_external_address(
+            stuns,
+            key.address(),
+            session.clone(),
+            Some(eip.clone()),
+        ))
+    } else {
+        Arc::new(Swarm::new(stuns, key.address(), session.clone()))
+    };
     let listen_event = Arc::new(MessageHandler::new(dht.clone(), swarm.clone()));
     let stabilize = Arc::new(Stabilization::new(
         dht.clone(),
@@ -259,6 +272,7 @@ async fn main() -> anyhow::Result<()> {
                 &args.ecdsa_key,
                 args.ice_servers.as_str(),
                 args.stabilize_timeout,
+                args.external_ip,
             )
             .await
         }
