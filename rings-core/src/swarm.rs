@@ -12,7 +12,6 @@ use serde::Serialize;
 use web3::types::Address;
 
 use crate::channels::Channel;
-use crate::ecc::PublicKey;
 use crate::err::Error;
 use crate::err::Result;
 use crate::message;
@@ -36,7 +35,7 @@ pub struct Swarm {
     ice_servers: Vec<IceServer>,
     transport_event_channel: Channel<Event>,
     session_manager: SessionManager,
-    public_key: PublicKey,
+    address: Address,
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
@@ -59,7 +58,7 @@ pub trait TransportManager {
 }
 
 impl Swarm {
-    pub fn new(ice_servers: &str, public_key: PublicKey, session_manager: SessionManager) -> Self {
+    pub fn new(ice_servers: &str, address: Address, session_manager: SessionManager) -> Self {
         let ice_servers = ice_servers
             .split(';')
             .collect::<Vec<&str>>()
@@ -70,18 +69,14 @@ impl Swarm {
             table: MemStorage::<Address, Arc<Transport>>::new(),
             transport_event_channel: Channel::new(),
             ice_servers,
-            public_key,
+            address,
             session_manager,
             pending: Arc::new(Mutex::new(vec![])),
         }
     }
 
     pub fn address(&self) -> Address {
-        self.public_key.address()
-    }
-
-    pub fn public_key(&self) -> PublicKey {
-        self.public_key
+        self.address
     }
 
     pub fn session_manager(&self) -> &SessionManager {
@@ -290,7 +285,7 @@ mod tests {
         let stun = "stun://stun.l.google.com:19302";
         let key = SecretKey::random();
         let session = SessionManager::new_with_seckey(&key).unwrap();
-        Swarm::new(stun, key.pubkey(), session)
+        Swarm::new(stun, key.address(), session)
     }
 
     #[tokio::test]

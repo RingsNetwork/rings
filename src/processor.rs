@@ -416,7 +416,7 @@ mod test {
         let session = SessionManager::new(&sig, &auth, &new_key);
         let swarm = Arc::new(Swarm::new(
             "stun://stun.l.google.com:19302",
-            key.pubkey(),
+            key.address(),
             session,
         ));
 

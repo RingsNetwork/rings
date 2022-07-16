@@ -332,8 +332,8 @@ pub mod test {
         let sm1 = SessionManager::new_with_seckey(&key1).unwrap();
         let sm2 = SessionManager::new_with_seckey(&key2).unwrap();
 
-        let swarm1 = Arc::new(Swarm::new(stun, key1.pubkey(), sm1.clone()));
-        let swarm2 = Arc::new(Swarm::new(stun, key2.pubkey(), sm2.clone()));
+        let swarm1 = Arc::new(Swarm::new(stun, key1.address(), sm1.clone()));
+        let swarm2 = Arc::new(Swarm::new(stun, key2.address(), sm2.clone()));
 
         let transport1 = swarm1.new_transport().await.unwrap();
         let transport2 = swarm2.new_transport().await.unwrap();

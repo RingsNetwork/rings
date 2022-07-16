@@ -147,7 +147,7 @@ async fn run_jobs(args: &RunArgs) -> anyhow::Result<()> {
     };
 
     let ice_servers = ice_servers.join(";");
-    let swarm = Arc::new(Swarm::new(&ice_servers, key.pubkey(), session));
+    let swarm = Arc::new(Swarm::new(&ice_servers, key.address(), session));
 
     // let listen_event = MessageHandler::new(dht.clone(), swarm.clone());
     let message_callback = MessageCallback {};
@@ -166,13 +166,14 @@ async fn run_jobs(args: &RunArgs) -> anyhow::Result<()> {
     let listen_event_2 = listen_event.clone();
     let stabilization_1 = stabilization.clone();
     let stabilization_2 = stabilization.clone();
+    let pubkey = Arc::new(key.pubkey());
     let j = tokio::spawn(futures::future::join3(
         async {
             listen_event_1.listen().await;
             AnyhowResult::Ok(())
         },
         async {
-            run_service(http_addr, swarm, listen_event_2, stabilization_1).await?;
+            run_service(http_addr, swarm, listen_event_2, stabilization_1, pubkey).await?;
             AnyhowResult::Ok(())
         },
         async {

@@ -231,7 +231,7 @@ async fn daemon_run(
     )?;
     let sig = key.sign(&auth.to_string()?).to_vec();
     let session = SessionManager::new(&sig, &auth, &temp_key);
-    let swarm = Arc::new(Swarm::new(stuns, key.pubkey(), session.clone()));
+    let swarm = Arc::new(Swarm::new(stuns, key.address(), session.clone()));
     let listen_event = Arc::new(MessageHandler::new(dht.clone(), swarm.clone()));
     let stabilize = Arc::new(Stabilization::new(
         dht.clone(),
@@ -239,6 +239,7 @@ async fn daemon_run(
         stabilize_timeout,
     ));
     let swarm_clone = swarm.clone();
+    let pubkey = Arc::new(key.pubkey());
 
     let (_, _, _) = futures::join!(
         listen_event.clone().listen(),
@@ -246,7 +247,8 @@ async fn daemon_run(
             http_addr.to_owned(),
             swarm_clone,
             listen_event,
-            stabilize.clone()
+            stabilize.clone(),
+            pubkey,
         ),
         stabilize.wait(),
     );
