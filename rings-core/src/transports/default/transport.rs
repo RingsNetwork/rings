@@ -346,14 +346,17 @@ impl IceTransportCallback<Event, AcChannel<Event>> for DefaultTransport {
 
     async fn on_ice_candidate(&self) -> Self::OnLocalCandidateHdlrFn {
         let pending_candidates = Arc::clone(&self.pending_candidates);
+        let peer_connection = self.get_peer_connection().await;
 
         box move |c: Option<<Self as IceTransport<Event, AcChannel<Event>>>::Candidate>| {
             let pending_candidates = Arc::clone(&pending_candidates);
+            let peer_connection = peer_connection.clone();
             Box::pin(async move {
                 if let Some(candidate) = c {
-                    log::trace!("new candidate found {:?}", &candidate);
-                    let mut candidates = pending_candidates.lock().await;
-                    candidates.push(candidate.clone());
+                    if peer_connection.is_some() {
+                        let mut candidates = pending_candidates.lock().await;
+                        candidates.push(candidate.clone());
+                    }
                 }
             })
         }
