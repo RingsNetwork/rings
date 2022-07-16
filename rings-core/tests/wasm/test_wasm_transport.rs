@@ -46,7 +46,7 @@ async fn prepare_transport(channel: Option<Arc<CbChannel<Event>>>) -> Result<Tra
     };
     let mut trans = Transport::new(ch.sender());
     let stun = IceServer::from_str("stun://stun.l.google.com:19302").unwrap();
-    trans.start(&stun).await.unwrap();
+    trans.start(vec![stun], None).await.unwrap();
     trans.apply_callback().await.unwrap();
     Ok(trans)
 }
