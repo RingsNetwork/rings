@@ -442,7 +442,9 @@ impl IceTrickleScheme<Event, AcChannel<Event>> for DefaultTransport {
                 log::trace!("setting remote candidate");
                 for c in &data.data.candidates {
                     log::trace!("add candiates: {:?}", c);
-                    self.add_ice_candidate(c.clone()).await?;
+                    if let Err(_) = self.add_ice_candidate(c.clone()).await {
+                        log::warn!("failed on add add candiates: {:?}", c.clone());
+                    };
                 }
                 if let Ok(public_key) = data.origin_verification.session.authorizer_pubkey() {
                     let mut pk = self.public_key.write().await;
