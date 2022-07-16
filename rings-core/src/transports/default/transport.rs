@@ -419,7 +419,7 @@ impl IceTrickleScheme<Event, AcChannel<Event>> for DefaultTransport {
                 .iter()
                 .map(async move |c| c.clone().to_json().await.unwrap().into()),
         )
-            .await;
+        .await;
         if local_candidates_json.is_empty() {
             return Err(Error::FailedOnGatherLocalCandidate);
         }
@@ -448,7 +448,7 @@ impl IceTrickleScheme<Event, AcChannel<Event>> for DefaultTransport {
                 log::trace!("setting remote candidate");
                 for c in &data.data.candidates {
                     log::trace!("add candiates: {:?}", c);
-                    if let Err(_) = self.add_ice_candidate(c.clone()).await {
+                    if self.add_ice_candidate(c.clone()).await.is_err() {
                         log::warn!("failed on add add candiates: {:?}", c.clone());
                     };
                 }
@@ -556,11 +556,12 @@ impl DefaultTransport {
 pub mod tests {
     use std::str::FromStr;
 
+    use webrtc::ice_transport::ice_gathering_state::RTCIceGatheringState;
+
     use super::DefaultTransport as Transport;
     use super::*;
     use crate::ecc::SecretKey;
     use crate::types::ice_transport::IceServer;
-    use webrtc::ice_transport::ice_gathering_state::RTCIceGatheringState;
 
     async fn prepare_transport() -> Result<Transport> {
         let ch = Arc::new(AcChannel::new());
@@ -588,12 +589,20 @@ pub mod tests {
             Some(RTCIceConnectionState::New)
         );
         assert_eq!(
-            transport1.get_peer_connection().await.unwrap().ice_gathering_state(),
+            transport1
+                .get_peer_connection()
+                .await
+                .unwrap()
+                .ice_gathering_state(),
             RTCIceGatheringState::New
         );
 
         assert_eq!(
-            transport2.get_peer_connection().await.unwrap().ice_gathering_state(),
+            transport2
+                .get_peer_connection()
+                .await
+                .unwrap()
+                .ice_gathering_state(),
             RTCIceGatheringState::New
         );
 
@@ -610,11 +619,19 @@ pub mod tests {
             .get_handshake_info(&sm1, RTCSdpType::Offer)
             .await?;
         assert_eq!(
-            transport1.get_peer_connection().await.unwrap().ice_gathering_state(),
+            transport1
+                .get_peer_connection()
+                .await
+                .unwrap()
+                .ice_gathering_state(),
             RTCIceGatheringState::Complete
         );
         assert_eq!(
-            transport2.get_peer_connection().await.unwrap().ice_gathering_state(),
+            transport2
+                .get_peer_connection()
+                .await
+                .unwrap()
+                .ice_gathering_state(),
             RTCIceGatheringState::New
         );
         assert_eq!(
@@ -631,11 +648,19 @@ pub mod tests {
         assert_eq!(addr1, key1.address());
 
         assert_eq!(
-            transport1.get_peer_connection().await.unwrap().ice_gathering_state(),
+            transport1
+                .get_peer_connection()
+                .await
+                .unwrap()
+                .ice_gathering_state(),
             RTCIceGatheringState::Complete
         );
         assert_eq!(
-            transport2.get_peer_connection().await.unwrap().ice_gathering_state(),
+            transport2
+                .get_peer_connection()
+                .await
+                .unwrap()
+                .ice_gathering_state(),
             RTCIceGatheringState::New
         );
 
@@ -654,14 +679,21 @@ pub mod tests {
             .await?;
 
         assert_eq!(
-            transport1.get_peer_connection().await.unwrap().ice_gathering_state(),
+            transport1
+                .get_peer_connection()
+                .await
+                .unwrap()
+                .ice_gathering_state(),
             RTCIceGatheringState::Complete
         );
         assert_eq!(
-            transport2.get_peer_connection().await.unwrap().ice_gathering_state(),
+            transport2
+                .get_peer_connection()
+                .await
+                .unwrap()
+                .ice_gathering_state(),
             RTCIceGatheringState::Complete
         );
-
 
         assert_eq!(
             transport1.ice_connection_state().await,

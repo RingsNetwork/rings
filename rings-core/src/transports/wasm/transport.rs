@@ -493,7 +493,7 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
                 self.set_remote_description(sdp.to_owned()).await?;
                 for c in &data.data.candidates {
                     log::debug!("add remote candiates: {:?}", c);
-                    if let Err(_) = self.add_ice_candidate(c.clone()).await {
+                    if self.add_ice_candidate(c.clone()).await.is_err() {
                         log::warn!("failed on add add candiates: {:?}", c.clone());
                     };
                 }
