@@ -232,7 +232,7 @@ async fn daemon_run(
             stuns,
             key.address(),
             session.clone(),
-            Some(eip.clone()),
+            Some(eip),
         ))
     } else {
         Arc::new(Swarm::new(stuns, key.address(), session.clone()))
