@@ -29,9 +29,7 @@ use crate::types::ice_transport::IceTrickleScheme;
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<LeaveDHT> for MessageHandler {
     async fn handle(&self, _ctx: &MessagePayload<Message>, msg: &LeaveDHT) -> Result<()> {
-        let mut dht = self.dht.lock().await;
-        dht.remove(msg.id);
-        Ok(())
+        self.dht.remove(msg.id)
     }
 }
 
@@ -42,8 +40,7 @@ impl HandleMsg<JoinDHT> for MessageHandler {
         // here is two situation.
         // finger table just have no other node(beside next), it will be a `create` op
         // otherwise, it will be a `send` op
-        let mut dht = self.dht.lock().await;
-        match dht.join(msg.id) {
+        match self.dht.join(msg.id)? {
             PeerRingAction::None => Ok(()),
             PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessor(id)) => {
                 // if there is only two nodes A, B, it may cause recursion
@@ -69,26 +66,25 @@ impl HandleMsg<JoinDHT> for MessageHandler {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<ConnectNodeSend> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload<Message>, msg: &ConnectNodeSend) -> Result<()> {
-        let dht = self.dht.lock().await;
         let mut relay = ctx.relay.clone();
 
-        if dht.id != relay.destination {
+        if self.dht.id != relay.destination {
             if self.swarm.get_transport(&relay.destination).is_some() {
-                relay.relay(dht.id, Some(relay.destination))?;
+                relay.relay(self.dht.id, Some(relay.destination))?;
                 return self.transpond_payload(ctx, relay).await;
             } else {
-                let next_node = match dht.find_successor(relay.destination)? {
+                let next_node = match self.dht.find_successor(relay.destination)? {
                     PeerRingAction::Some(node) => Some(node),
                     PeerRingAction::RemoteAction(node, _) => Some(node),
                     _ => None,
                 }
                 .ok_or(Error::MessageHandlerMissNextNode)?;
-                relay.relay(dht.id, Some(next_node))?;
+                relay.relay(self.dht.id, Some(next_node))?;
                 return self.transpond_payload(ctx, relay).await;
             }
         }
 
-        relay.relay(dht.id, None)?;
+        relay.relay(self.dht.id, None)?;
         match self.swarm.get_transport(&relay.sender()) {
             None => {
                 let trans = self.swarm.new_transport().await?;
@@ -125,10 +121,9 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<ConnectNodeReport> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload<Message>, msg: &ConnectNodeReport) -> Result<()> {
-        let dht = self.dht.lock().await;
         let mut relay = ctx.relay.clone();
 
-        relay.relay(dht.id, None)?;
+        relay.relay(self.dht.id, None)?;
         if relay.next_hop.is_some() {
             self.transpond_payload(ctx, relay).await
         } else {
@@ -151,10 +146,9 @@ impl HandleMsg<ConnectNodeReport> for MessageHandler {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<AlreadyConnected> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload<Message>, _msg: &AlreadyConnected) -> Result<()> {
-        let dht = self.dht.lock().await;
         let mut relay = ctx.relay.clone();
 
-        relay.relay(dht.id, None)?;
+        relay.relay(self.dht.id, None)?;
         if relay.next_hop.is_some() {
             self.transpond_payload(ctx, relay).await
         } else {
@@ -170,12 +164,11 @@ impl HandleMsg<AlreadyConnected> for MessageHandler {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<FindSuccessorSend> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload<Message>, msg: &FindSuccessorSend) -> Result<()> {
-        let dht = self.dht.lock().await;
         let mut relay = ctx.relay.clone();
 
-        match dht.find_successor(msg.id)? {
+        match self.dht.find_successor(msg.id)? {
             PeerRingAction::Some(id) => {
-                relay.relay(dht.id, None)?;
+                relay.relay(self.dht.id, None)?;
                 self.send_report_message(
                     Message::FindSuccessorReport(FindSuccessorReport {
                         id,
@@ -186,7 +179,7 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
                 .await
             }
             PeerRingAction::RemoteAction(next, _) => {
-                relay.relay(dht.id, Some(next))?;
+                relay.relay(self.dht.id, Some(next))?;
                 relay.reset_destination(next)?;
                 self.transpond_payload(ctx, relay).await
             }
@@ -199,10 +192,9 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<FindSuccessorReport> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload<Message>, msg: &FindSuccessorReport) -> Result<()> {
-        let mut dht = self.dht.lock().await;
         let mut relay = ctx.relay.clone();
 
-        relay.relay(dht.id, None)?;
+        relay.relay(self.dht.id, None)?;
         if relay.next_hop.is_some() {
             self.transpond_payload(ctx, relay).await
         } else {
@@ -212,14 +204,13 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
                 return Ok(());
             }
             if msg.for_fix {
-                let fix_finger_index = dht.fix_finger_index;
-                dht.finger.set(fix_finger_index as usize, &msg.id);
+                self.dht.lock_finger()?.set_fix(&msg.id);
             } else {
-                dht.successor.update(msg.id);
+                self.dht.lock_successor()?.update(msg.id);
                 if let Ok(PeerRingAction::RemoteAction(
                     next,
                     PeerRingRemoteAction::SyncVNodeWithSuccessor(data),
-                )) = dht.sync_with_successor(msg.id).await
+                )) = self.dht.sync_with_successor(msg.id).await
                 {
                     self.send_direct_message(
                         Message::SyncVNodeWithSuccessor(SyncVNodeWithSuccessor { data }),
@@ -239,7 +230,6 @@ pub mod test {
     use std::matches;
     use std::sync::Arc;
 
-    use futures::lock::Mutex;
     use tokio::time::sleep;
     use tokio::time::Duration;
     use web3::types::Address;
@@ -375,9 +365,9 @@ pub mod test {
         )
         .await?;
 
-        assert_eq!(dht1.lock().await.successor.list(), vec![did2]);
-        assert_eq!(dht2.lock().await.successor.list(), vec![did1]);
-        assert_eq!(dht3.lock().await.successor.list(), vec![]);
+        assert_eq!(dht1.lock_successor()?.list(), vec![did2]);
+        assert_eq!(dht2.lock_successor()?.list(), vec![did1]);
+        assert_eq!(dht3.lock_successor()?.list(), vec![]);
 
         println!("========================================");
         println!("||  now we start join node3 to node2  ||");
@@ -386,9 +376,9 @@ pub mod test {
         manually_establish_connection(&swarm3, &swarm2).await?;
         test_listen_join_and_init_find_succeesor((&key3, &node3), (&key2, &node2)).await?;
 
-        assert_eq!(dht1.lock().await.successor.list(), vec![did2]);
-        assert_eq!(dht2.lock().await.successor.list(), vec![did3, did1]);
-        assert_eq!(dht3.lock().await.successor.list(), vec![did2]);
+        assert_eq!(dht1.lock_successor()?.list(), vec![did2]);
+        assert_eq!(dht2.lock_successor()?.list(), vec![did3, did1]);
+        assert_eq!(dht3.lock_successor()?.list(), vec![did2]);
 
         // 2->3 FindSuccessorReport
         // node2 report node3 as node3's successor to node3
@@ -411,7 +401,7 @@ pub mod test {
             Message::FindSuccessorReport(FindSuccessorReport{id, for_fix: false}) if id == did3
         ));
         // dht3 won't set did3 as successor
-        assert!(!dht3.lock().await.successor.list().contains(&did3));
+        assert!(!dht3.lock_successor()?.list().contains(&did3));
 
         // 3->2 FindSuccessorReport
         // node3 report node2 as node2's successor to node2
@@ -424,15 +414,15 @@ pub mod test {
             Message::FindSuccessorReport(FindSuccessorReport{id, for_fix: false}) if id == did2
         ));
         // dht2 won't set did2 as successor
-        assert!(!dht2.lock().await.successor.list().contains(&did2));
+        assert!(!dht2.lock_successor()?.list().contains(&did2));
 
         println!("=== Check state before connect via DHT ===");
         assert_transports(swarm1.clone(), vec![key2.address()]);
         assert_transports(swarm2.clone(), vec![key1.address(), key3.address()]);
         assert_transports(swarm3.clone(), vec![key2.address()]);
-        assert_eq!(dht1.lock().await.successor.list(), vec![did2]);
-        assert_eq!(dht2.lock().await.successor.list(), vec![did3, did1]);
-        assert_eq!(dht3.lock().await.successor.list(), vec![did2]);
+        assert_eq!(dht1.lock_successor()?.list(), vec![did2]);
+        assert_eq!(dht2.lock_successor()?.list(), vec![did3, did1]);
+        assert_eq!(dht3.lock_successor()?.list(), vec![did2]);
 
         println!("=============================================");
         println!("||  now we connect node1 to node3 via DHT  ||");
@@ -466,7 +456,7 @@ pub mod test {
             Message::FindSuccessorReport(FindSuccessorReport{id, for_fix: false}) if id == did1
         ));
         // dht1 won't set did1 as successor
-        assert!(!dht1.lock().await.successor.list().contains(&did1));
+        assert!(!dht1.lock_successor()?.list().contains(&did1));
 
         // 2->1 FindSuccessorReport
         let ev_1 = node1.listen_once().await.unwrap();
@@ -482,7 +472,7 @@ pub mod test {
             Message::FindSuccessorReport(FindSuccessorReport{id, for_fix: false}) if id == did3
         ));
         // dht3 won't set did3 as successor
-        assert!(!dht3.lock().await.successor.list().contains(&did3));
+        assert!(!dht3.lock_successor()?.list().contains(&did3));
 
         assert_no_more_msg(&node1, &node2, &node3).await;
 
@@ -490,9 +480,9 @@ pub mod test {
         assert_transports(swarm1, vec![key2.address(), key3.address()]);
         assert_transports(swarm2, vec![key1.address(), key3.address()]);
         assert_transports(swarm3, vec![key1.address(), key2.address()]);
-        assert_eq!(dht1.lock().await.successor.list(), vec![did2]);
-        assert_eq!(dht2.lock().await.successor.list(), vec![did3, did1]);
-        assert_eq!(dht3.lock().await.successor.list(), vec![did1, did2]);
+        assert_eq!(dht1.lock_successor()?.list(), vec![did2]);
+        assert_eq!(dht2.lock_successor()?.list(), vec![did3, did1]);
+        assert_eq!(dht3.lock_successor()?.list(), vec![did1, did2]);
         tokio::fs::remove_dir_all("./tmp").await.ok();
         Ok(())
     }
@@ -516,9 +506,9 @@ pub mod test {
         )
         .await?;
 
-        assert_eq!(dht1.lock().await.successor.list(), vec![did2]);
-        assert_eq!(dht2.lock().await.successor.list(), vec![did1]);
-        assert_eq!(dht3.lock().await.successor.list(), vec![]);
+        assert_eq!(dht1.lock_successor()?.list(), vec![did2]);
+        assert_eq!(dht2.lock_successor()?.list(), vec![did1]);
+        assert_eq!(dht3.lock_successor()?.list(), vec![]);
 
         println!("========================================");
         println!("||  now we start join node3 to node2  ||");
@@ -527,9 +517,9 @@ pub mod test {
         manually_establish_connection(&swarm3, &swarm2).await?;
         test_listen_join_and_init_find_succeesor((&key3, &node3), (&key2, &node2)).await?;
 
-        assert_eq!(dht1.lock().await.successor.list(), vec![did2]);
-        assert_eq!(dht2.lock().await.successor.list(), vec![did1]);
-        assert_eq!(dht3.lock().await.successor.list(), vec![did2]);
+        assert_eq!(dht1.lock_successor()?.list(), vec![did2]);
+        assert_eq!(dht2.lock_successor()?.list(), vec![did1]);
+        assert_eq!(dht3.lock_successor()?.list(), vec![did2]);
 
         // 3->2->1 FindSuccessorSend
         // node2 think node1 is closer than itself to node3, so it relay msg to node1
@@ -562,7 +552,7 @@ pub mod test {
             Message::FindSuccessorReport(FindSuccessorReport{id, for_fix: false}) if id == did2
         ));
         // dht2 won't set did2 as successor
-        assert!(!dht2.lock().await.successor.list().contains(&did2));
+        assert!(!dht2.lock_successor()?.list().contains(&did2));
 
         // 1->2 FindSuccessorReport
         // node1 report node2 as node3's successor to node2
@@ -591,9 +581,9 @@ pub mod test {
         assert_transports(swarm1.clone(), vec![key2.address()]);
         assert_transports(swarm2.clone(), vec![key1.address(), key3.address()]);
         assert_transports(swarm3.clone(), vec![key2.address()]);
-        assert_eq!(dht1.lock().await.successor.list(), vec![did2]);
-        assert_eq!(dht2.lock().await.successor.list(), vec![did1]);
-        assert_eq!(dht3.lock().await.successor.list(), vec![did2]);
+        assert_eq!(dht1.lock_successor()?.list(), vec![did2]);
+        assert_eq!(dht2.lock_successor()?.list(), vec![did1]);
+        assert_eq!(dht3.lock_successor()?.list(), vec![did2]);
 
         println!("=============================================");
         println!("||  now we connect node1 to node3 via DHT  ||");
@@ -627,7 +617,7 @@ pub mod test {
             Message::FindSuccessorReport(FindSuccessorReport{id, for_fix: false}) if id == did3
         ));
         // dht3 won't set did3 as successor
-        assert!(!node3.dht.lock().await.successor.list().contains(&did3));
+        assert!(!node3.dht.lock_successor()?.list().contains(&did3));
 
         // 2->3 FindSuccessorReport
         let ev_3 = node3.listen_once().await.unwrap();
@@ -643,7 +633,7 @@ pub mod test {
             Message::FindSuccessorReport(FindSuccessorReport{id, for_fix: false}) if id == did1
         ));
         // dht1 won't set did1 as successor
-        assert!(!node1.dht.lock().await.successor.list().contains(&did1));
+        assert!(!node1.dht.lock_successor()?.list().contains(&did1));
 
         assert_no_more_msg(&node1, &node2, &node3).await;
 
@@ -651,9 +641,9 @@ pub mod test {
         assert_transports(swarm1, vec![key2.address(), key3.address()]);
         assert_transports(swarm2, vec![key1.address(), key3.address()]);
         assert_transports(swarm3, vec![key1.address(), key2.address()]);
-        assert_eq!(dht1.lock().await.successor.list(), vec![did3, did2]);
-        assert_eq!(dht2.lock().await.successor.list(), vec![did1]);
-        assert_eq!(dht3.lock().await.successor.list(), vec![did2]);
+        assert_eq!(dht1.lock_successor()?.list(), vec![did3, did2]);
+        assert_eq!(dht2.lock_successor()?.list(), vec![did1]);
+        assert_eq!(dht3.lock_successor()?.list(), vec![did2]);
 
         tokio::fs::remove_dir_all("./tmp").await.ok();
         Ok(())
@@ -673,25 +663,19 @@ pub mod test {
 
     pub async fn prepare_node(
         key: &SecretKey,
-    ) -> (
-        Did,
-        Arc<Mutex<PeerRing>>,
-        Arc<Swarm>,
-        MessageHandler,
-        String,
-    ) {
+    ) -> (Did, Arc<PeerRing>, Arc<Swarm>, MessageHandler, String) {
         let stun = "stun://stun.l.google.com:19302";
 
         let did = key.address().into();
         let path = PersistenceStorage::random_path("./tmp");
-        let dht = Arc::new(Mutex::new(PeerRing::new_with_storage(
+        let dht = Arc::new(PeerRing::new_with_storage(
             did,
             Arc::new(
                 PersistenceStorage::new_with_path(path.as_str())
                     .await
                     .unwrap(),
             ),
-        )));
+        ));
         let sm = SessionManager::new_with_seckey(key).unwrap();
         let swarm = Arc::new(Swarm::new(stun, key.address(), sm));
         let node = MessageHandler::new(dht.clone(), Arc::clone(&swarm));
@@ -786,8 +770,8 @@ pub mod test {
     }
 
     pub async fn test_only_two_nodes_establish_connection(
-        (key1, dht1, swarm1, node1): (&SecretKey, Arc<Mutex<PeerRing>>, &Swarm, &MessageHandler),
-        (key2, dht2, swarm2, node2): (&SecretKey, Arc<Mutex<PeerRing>>, &Swarm, &MessageHandler),
+        (key1, dht1, swarm1, node1): (&SecretKey, Arc<PeerRing>, &Swarm, &MessageHandler),
+        (key2, dht2, swarm2, node2): (&SecretKey, Arc<PeerRing>, &Swarm, &MessageHandler),
     ) -> Result<()> {
         let did1 = key1.address().into();
         let did2 = key2.address().into();
@@ -806,7 +790,7 @@ pub mod test {
             Message::FindSuccessorReport(FindSuccessorReport{id, for_fix: false}) if id == did1
         ));
         // dht1 won't set did1 as successor
-        assert!(!dht1.lock().await.successor.list().contains(&did1));
+        assert!(!dht1.lock_successor()?.list().contains(&did1));
 
         // 1->2 FindSuccessorReport
         // node1 report node2 as node2's successor to node2
@@ -819,7 +803,7 @@ pub mod test {
             Message::FindSuccessorReport(FindSuccessorReport{id, for_fix: false}) if id == did2
         ));
         // dht2 won't set did2 as successor
-        assert!(!dht2.lock().await.successor.list().contains(&did2));
+        assert!(!dht2.lock_successor()?.list().contains(&did2));
 
         Ok(())
     }
@@ -837,7 +821,7 @@ pub mod test {
         assert!(swarm1.get_transport(&key3.address()).is_none());
 
         // node1's successor should be node2 now
-        assert_eq!(node1.dht.lock().await.successor.max(), did2);
+        assert_eq!(node1.dht.lock_successor()?.max(), did2);
 
         node1.connect(&key3.address()).await.unwrap();
 

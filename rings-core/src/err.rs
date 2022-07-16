@@ -264,6 +264,9 @@ pub enum Error {
 
     #[error("IO error: {0}")]
     IOError(std::io::Error),
+
+    #[error("Failed to get dht from a sync lock")]
+    DHTSyncLockError,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

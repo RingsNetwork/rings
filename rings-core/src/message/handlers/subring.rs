@@ -36,18 +36,16 @@ pub trait SubRingOperator {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl SubRingOperator for MessageHandler {
     async fn create(&self, name: &str) -> Result<()> {
-        let dht = self.dht.lock().await;
-        let subring: SubRing = SubRing::new(name, &dht.id)?;
+        let subring: SubRing = SubRing::new(name, &self.dht.id)?;
         let vnode: VirtualNode = subring.clone().try_into()?;
-        dht.store_subring(&subring.clone()).await?;
+        self.dht.store_subring(&subring.clone()).await?;
         self.store(vnode).await
     }
 
     async fn join(&self, name: &str) -> Result<()> {
-        let dht = self.dht.lock().await;
         let address: HashStr = name.to_owned().into();
         let did = Did::from_str(&address.inner())?;
-        match dht.join_subring(&dht.id, &did).await {
+        match self.dht.join_subring(&self.dht.id, &did).await {
             Ok(PeerRingAction::RemoteAction(next, RemoteAction::FindAndJoinSubRing(rid))) => {
                 self.send_direct_message(Message::JoinSubRing(JoinSubRing { did: rid }), next)
                     .await
@@ -63,12 +61,11 @@ impl SubRingOperator for MessageHandler {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<JoinSubRing> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload<Message>, msg: &JoinSubRing) -> Result<()> {
-        let dht = self.dht.lock().await;
         let mut relay = ctx.relay.clone();
         let origin = relay.origin();
-        match dht.join_subring(&origin, &msg.did).await {
+        match self.dht.join_subring(&origin, &msg.did).await {
             Ok(PeerRingAction::RemoteAction(next, RemoteAction::FindAndJoinSubRing(_))) => {
-                relay.relay(dht.id, Some(next))?;
+                relay.relay(self.dht.id, Some(next))?;
                 relay.reset_destination(next)?;
                 self.transpond_payload(ctx, relay).await
             }
