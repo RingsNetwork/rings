@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::lock::Mutex;
 
 use crate::dht::ChordStabilize;
 use crate::dht::PeerRing;
@@ -16,7 +15,7 @@ use crate::swarm::Swarm;
 
 #[derive(Clone)]
 pub struct Stabilization {
-    chord: Arc<Mutex<PeerRing>>,
+    chord: Arc<PeerRing>,
     swarm: Arc<Swarm>,
     timeout: usize,
 }
@@ -28,7 +27,7 @@ pub trait TStabilize {
 }
 
 impl Stabilization {
-    pub fn new(chord: Arc<Mutex<PeerRing>>, swarm: Arc<Swarm>, timeout: usize) -> Self {
+    pub fn new(chord: Arc<PeerRing>, swarm: Arc<Swarm>, timeout: usize) -> Self {
         Self {
             chord,
             swarm,
@@ -41,10 +40,14 @@ impl Stabilization {
     }
 
     async fn notify_predecessor(&self) -> Result<()> {
-        let chord = self.chord.lock().await;
-        let msg = Message::NotifyPredecessorSend(NotifyPredecessorSend { id: chord.id });
-        if chord.id != chord.successor.min() {
-            for s in chord.successor.list() {
+        let (successor_min, successor_list) = {
+            let successor = self.chord.lock_successor()?;
+            (successor.min(), successor.list())
+        };
+
+        let msg = Message::NotifyPredecessorSend(NotifyPredecessorSend { id: self.chord.id });
+        if self.chord.id != successor_min {
+            for s in successor_list {
                 self.swarm
                     .send_message(msg.clone(), s, self.swarm.address().into())
                     .await?;
@@ -56,8 +59,7 @@ impl Stabilization {
     }
 
     async fn fix_fingers(&self) -> Result<()> {
-        let mut chord = self.chord.lock().await;
-        match chord.fix_fingers() {
+        match self.chord.fix_fingers() {
             Ok(action) => match action {
                 PeerRingAction::None => {
                     // log::debug!("wait to next round");

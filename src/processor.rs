@@ -394,14 +394,14 @@ mod test {
 
         let path = PersistenceStorage::random_path("./tmp");
 
-        let dht = Arc::new(Mutex::new(PeerRing::new_with_storage(
+        let dht = Arc::new(PeerRing::new_with_storage(
             key.address().into(),
             Arc::new(
                 PersistenceStorage::new_with_path(path.as_str())
                     .await
                     .unwrap(),
             ),
-        )));
+        ));
         let msg_handler = MessageHandler::new(dht.clone(), swarm.clone());
         let stabilization = Stabilization::new(dht, swarm.clone(), 200);
         (

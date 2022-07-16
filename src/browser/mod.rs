@@ -5,7 +5,6 @@ pub mod utils;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use futures::lock::Mutex;
 use js_sys::Promise;
 use rings_core_wasm::dht::TStabilize;
 use serde::Deserialize;
@@ -167,7 +166,7 @@ impl Client {
                 .map_err(JsError::from)?;
             let pr = PeerRing::new_with_storage(swarm.address().into(), Arc::new(storage));
 
-            let dht = Arc::new(Mutex::new(pr));
+            let dht = Arc::new(pr);
             let msg_handler = Arc::new(MessageHandler::new(dht.clone(), swarm.clone()));
             let stabilization = Arc::new(Stabilization::new(dht, swarm.clone(), 20));
             let processor = Arc::new(Processor::from((swarm, msg_handler, stabilization)));

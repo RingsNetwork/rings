@@ -52,7 +52,7 @@ type CallbackFn = Box<dyn MessageCallback>;
 
 #[derive(Clone)]
 pub struct MessageHandler {
-    dht: Arc<Mutex<PeerRing>>,
+    dht: Arc<PeerRing>,
     swarm: Arc<Swarm>,
     callback: Arc<Mutex<Option<CallbackFn>>>,
 }
@@ -64,11 +64,7 @@ pub trait HandleMsg<T> {
 }
 
 impl MessageHandler {
-    pub fn new_with_callback(
-        dht: Arc<Mutex<PeerRing>>,
-        swarm: Arc<Swarm>,
-        callback: CallbackFn,
-    ) -> Self {
+    pub fn new_with_callback(dht: Arc<PeerRing>, swarm: Arc<Swarm>, callback: CallbackFn) -> Self {
         Self {
             dht,
             swarm,
@@ -76,7 +72,7 @@ impl MessageHandler {
         }
     }
 
-    pub fn new(dht: Arc<Mutex<PeerRing>>, swarm: Arc<Swarm>) -> Self {
+    pub fn new(dht: Arc<PeerRing>, swarm: Arc<Swarm>) -> Self {
         Self {
             dht,
             swarm,
@@ -90,10 +86,10 @@ impl MessageHandler {
     }
 
     // disconnect a node if a node is in DHT
-    pub async fn disconnect(&self, address: Address) {
-        let mut dht = self.dht.lock().await;
-        dht.remove(address.into());
+    pub async fn disconnect(&self, address: Address) -> Result<()> {
+        self.dht.remove(address.into())?;
         self.swarm.remove_transport(&address);
+        Ok(())
     }
 
     pub async fn connect(&self, address: &Address) -> Result<Arc<Transport>> {
@@ -113,8 +109,7 @@ impl MessageHandler {
             handshake_info: handshake_info.to_string(),
         });
         let next_hop = {
-            let dht = self.dht.lock().await;
-            match dht.find_successor(target_id)? {
+            match self.dht.find_successor(target_id)? {
                 PeerRingAction::Some(node) => Some(node),
                 PeerRingAction::RemoteAction(node, _) => Some(node),
                 _ => None,
@@ -337,8 +332,8 @@ pub mod test {
 
         let transport1 = swarm1.new_transport().await.unwrap();
         let transport2 = swarm2.new_transport().await.unwrap();
-        let handler1 = MessageHandler::new(Arc::new(Mutex::new(dht1)), Arc::clone(&swarm1));
-        let handler2 = MessageHandler::new(Arc::new(Mutex::new(dht2)), Arc::clone(&swarm2));
+        let handler1 = MessageHandler::new(Arc::new(dht1), Arc::clone(&swarm1));
+        let handler2 = MessageHandler::new(Arc::new(dht2), Arc::clone(&swarm2));
         let handshake_info1 = transport1
             .get_handshake_info(&sm1, RTCSdpType::Offer)
             .await?;

@@ -6,15 +6,15 @@ use super::vnode::VirtualNode;
 use crate::err::Result;
 
 pub trait Chord<A> {
-    fn join(&mut self, id: Did) -> A;
+    fn join(&self, id: Did) -> Result<A>;
     fn find_successor(&self, id: Did) -> Result<A>;
 }
 
 pub trait ChordStabilize<A>: Chord<A> {
     fn closest_preceding_node(&self, id: Did) -> Result<Did>;
-    fn check_predecessor(&self) -> A;
-    fn notify(&mut self, id: Did) -> Option<Did>;
-    fn fix_fingers(&mut self) -> Result<A>;
+    fn check_predecessor(&self) -> Result<A>;
+    fn notify(&self, id: Did) -> Result<Option<Did>>;
+    fn fix_fingers(&self) -> Result<A>;
 }
 
 /// Protocol for Storage Data on Chord

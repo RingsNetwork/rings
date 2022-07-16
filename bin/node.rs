@@ -3,7 +3,6 @@ use std::sync::Arc;
 use clap::Args;
 use clap::Parser;
 use clap::Subcommand;
-use futures::lock::Mutex;
 use rings_core::dht::PeerRing;
 use rings_core::dht::Stabilization;
 use rings_core::dht::TStabilize;
@@ -219,7 +218,7 @@ async fn daemon_run(
     stabilize_timeout: usize,
     external_ip: Option<String>,
 ) -> anyhow::Result<()> {
-    let dht = Arc::new(Mutex::new(PeerRing::new(key.address().into()).await?));
+    let dht = Arc::new(PeerRing::new(key.address().into()).await?);
     let (auth, temp_key) = SessionManager::gen_unsign_info(
         key.address(),
         Some(rings_core::session::Ttl::Never),
