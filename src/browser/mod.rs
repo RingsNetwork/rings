@@ -6,7 +6,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use js_sys::Promise;
-use rings_core_wasm::dht::TStabilize;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -15,6 +14,7 @@ use crate::prelude::js_sys;
 use crate::prelude::rings_core::async_trait;
 use crate::prelude::rings_core::dht::PeerRing;
 use crate::prelude::rings_core::dht::Stabilization;
+use crate::prelude::rings_core::dht::TStabilize;
 use crate::prelude::rings_core::ecc::SecretKey;
 use crate::prelude::rings_core::message::CustomMessage;
 use crate::prelude::rings_core::message::Encoded;

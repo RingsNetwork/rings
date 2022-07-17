@@ -1,9 +1,11 @@
 #![warn(missing_docs)]
 use std::str::FromStr;
+use std::sync::Arc;
 
 use jsonrpc_core::Error;
 use jsonrpc_core::ErrorCode;
 use jsonrpc_core::MetaIoHandler;
+use jsonrpc_core::Metadata;
 use jsonrpc_core::Params;
 use jsonrpc_core::Result;
 use jsonrpc_core::Value;
@@ -15,7 +17,31 @@ use crate::error::Error as ServerError;
 use crate::prelude::rings_core::prelude::Address;
 use crate::processor::Processor;
 
-pub(crate) async fn build_handler(handler: &mut MetaIoHandler<Processor>) {
+/// RpcMeta basic info struct
+#[derive(Clone)]
+pub struct RpcMeta {
+    processor: Arc<Processor>,
+    is_auth: bool,
+}
+
+impl RpcMeta {
+    fn require_authed(&self) -> Result<()> {
+        if !self.is_auth {
+            return Err(Error::from(ServerError::NoPermission));
+        }
+        Ok(())
+    }
+}
+
+impl Metadata for RpcMeta {}
+
+impl From<(Arc<Processor>, bool)> for RpcMeta {
+    fn from((processor, is_auth): (Arc<Processor>, bool)) -> Self {
+        Self { processor, is_auth }
+    }
+}
+
+pub(crate) async fn build_handler(handler: &mut MetaIoHandler<RpcMeta>) {
     handler.add_method_with_meta(Method::ConnectPeerViaHttp.as_str(), connect_peer_via_http);
     handler.add_method_with_meta(Method::AnswerOffer.as_str(), answer_offer);
     handler.add_method_with_meta(Method::ConnectWithAddress.as_str(), connect_with_address);
@@ -26,24 +52,27 @@ pub(crate) async fn build_handler(handler: &mut MetaIoHandler<Processor>) {
     handler.add_method_with_meta(Method::SendTo.as_str(), send_message)
 }
 
-async fn connect_peer_via_http(params: Params, processor: Processor) -> Result<Value> {
+async fn connect_peer_via_http(params: Params, meta: RpcMeta) -> Result<Value> {
     let p: Vec<String> = params.parse()?;
     let peer_url = p
         .first()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
-    let transport = processor
+    let transport = meta
+        .processor
         .connect_peer_via_http(peer_url)
         .await
         .map_err(Error::from)?;
     Ok(Value::String(transport.id.to_string()))
 }
 
-async fn answer_offer(params: Params, processor: Processor) -> Result<Value> {
+async fn answer_offer(params: Params, meta: RpcMeta) -> Result<Value> {
+    meta.require_authed()?;
     let p: Vec<String> = params.parse()?;
     let ice_info = p
         .first()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
-    let r = processor
+    let r = meta
+        .processor
         .answer_offer(ice_info)
         .await
         .map_err(Error::from)?;
@@ -51,12 +80,13 @@ async fn answer_offer(params: Params, processor: Processor) -> Result<Value> {
     TransportAndIce::from(r).to_json_obj().map_err(Error::from)
 }
 
-async fn connect_with_address(params: Params, processor: Processor) -> Result<Value> {
+async fn connect_with_address(params: Params, meta: RpcMeta) -> Result<Value> {
+    meta.require_authed()?;
     let p: Vec<String> = params.parse()?;
     let address_str = p
         .first()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
-    processor
+    meta.processor
         .connect_with_address(
             &Address::from_str(address_str).map_err(|_| Error::new(ErrorCode::InvalidParams))?,
             true,
@@ -66,15 +96,18 @@ async fn connect_with_address(params: Params, processor: Processor) -> Result<Va
     Ok(Value::Null)
 }
 
-async fn create_offer(_params: Params, processor: Processor) -> Result<Value> {
-    let r = processor.create_offer().await.map_err(Error::from)?;
+async fn create_offer(_params: Params, meta: RpcMeta) -> Result<Value> {
+    meta.require_authed()?;
+    let r = meta.processor.create_offer().await.map_err(Error::from)?;
     TransportAndIce::from(r).to_json_obj().map_err(Error::from)
 }
 
-async fn accept_answer(params: Params, processor: Processor) -> Result<Value> {
+async fn accept_answer(params: Params, meta: RpcMeta) -> Result<Value> {
+    meta.require_authed()?;
     let params: Vec<String> = params.parse()?;
     if let ([transport_id, ice], _) = params.split_at(2) {
-        let r: Peer = processor
+        let r: Peer = meta
+            .processor
             .accept_answer(transport_id.as_str(), ice.as_str())
             .await?
             .into();
@@ -83,8 +116,10 @@ async fn accept_answer(params: Params, processor: Processor) -> Result<Value> {
     Err(Error::new(ErrorCode::InvalidParams))
 }
 
-async fn list_peers(_params: Params, processor: Processor) -> Result<Value> {
-    let r = processor
+async fn list_peers(_params: Params, meta: RpcMeta) -> Result<Value> {
+    meta.require_authed()?;
+    let r = meta
+        .processor
         .list_peers()
         .await?
         .into_iter()
@@ -93,16 +128,18 @@ async fn list_peers(_params: Params, processor: Processor) -> Result<Value> {
     serde_json::to_value(&r).map_err(|_| Error::from(ServerError::JsonSerializeError))
 }
 
-async fn close_connection(params: Params, processor: Processor) -> Result<Value> {
+async fn close_connection(params: Params, meta: RpcMeta) -> Result<Value> {
+    meta.require_authed()?;
     let params: Vec<String> = params.parse()?;
     let address = params
         .first()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
-    processor.disconnect(address).await?;
+    meta.processor.disconnect(address).await?;
     Ok(serde_json::json!({}))
 }
 
-async fn send_message(params: Params, processor: Processor) -> Result<Value> {
+async fn send_message(params: Params, meta: RpcMeta) -> Result<Value> {
+    meta.require_authed()?;
     let params: serde_json::Map<String, Value> = params.parse()?;
     let destination = params
         .get("destination")
@@ -114,6 +151,8 @@ async fn send_message(params: Params, processor: Processor) -> Result<Value> {
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
         .as_str()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
-    processor.send_message(destination, text.as_bytes()).await?;
+    meta.processor
+        .send_message(destination, text.as_bytes())
+        .await?;
     Ok(serde_json::json!({}))
 }

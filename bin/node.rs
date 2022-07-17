@@ -14,6 +14,7 @@ use rings_core::types::message::MessageListener;
 use rings_node::cli::Client;
 use rings_node::logger::LogLevel;
 use rings_node::logger::Logger;
+use rings_node::processor::Processor;
 use rings_node::service::run_service;
 
 #[derive(Parser, Debug)]
@@ -74,11 +75,18 @@ struct ClientArgs {
         env
     )]
     endpoint_url: String,
+
+    #[clap(long = "key", short = 'k', env)]
+    pub ecdsa_key: SecretKey,
 }
 
 impl ClientArgs {
     async fn new_client(&self) -> anyhow::Result<Client> {
-        Client::new(self.endpoint_url.as_str()).await
+        Client::new(
+            self.endpoint_url.as_str(),
+            Processor::generate_signature(&self.ecdsa_key).as_str(),
+        )
+        .await
     }
 }
 
@@ -230,6 +238,7 @@ async fn daemon_run(
         stabilize_timeout,
     ));
     let swarm_clone = swarm.clone();
+    let pubkey = Arc::new(key.pubkey());
 
     let (_, _, _) = futures::join!(
         listen_event.clone().listen(),
@@ -237,7 +246,8 @@ async fn daemon_run(
             http_addr.to_owned(),
             swarm_clone,
             listen_event,
-            stabilize.clone()
+            stabilize.clone(),
+            pubkey,
         ),
         stabilize.wait(),
     );

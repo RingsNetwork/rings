@@ -1,12 +1,14 @@
+use std::sync::Arc;
+
 use jsonrpc_core::Params;
 use jsonrpc_core::Value;
-//use jsonrpc_core_client::RawClient;
 use serde_json::json;
 
 use crate::jsonrpc::method::Method;
 use crate::jsonrpc::response::Peer;
 use crate::jsonrpc::response::TransportAndIce;
 use crate::jsonrpc_client::SimpleClient;
+use crate::prelude::reqwest;
 
 #[derive(Clone)]
 pub struct Client {
@@ -20,8 +22,20 @@ pub struct ClientOutput<T> {
 type Output<T> = anyhow::Result<ClientOutput<T>>;
 
 impl Client {
-    pub async fn new(endpoint_url: &str) -> anyhow::Result<Self> {
-        let client = SimpleClient::new_with_url(endpoint_url);
+    pub async fn new(endpoint_url: &str, signature: &str) -> anyhow::Result<Self> {
+        let mut default_headers = reqwest::header::HeaderMap::default();
+        default_headers.insert(
+            reqwest::header::AUTHORIZATION,
+            reqwest::header::HeaderValue::from_str(signature)?,
+        );
+        let client = SimpleClient::new(
+            Arc::new(
+                reqwest::Client::builder()
+                    .default_headers(default_headers)
+                    .build()?,
+            ),
+            endpoint_url,
+        );
         Ok(Self { client })
     }
 
