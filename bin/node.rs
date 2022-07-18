@@ -3,7 +3,6 @@ use std::sync::Arc;
 use clap::Args;
 use clap::Parser;
 use clap::Subcommand;
-use futures::lock::Mutex;
 use rings_core::dht::PeerRing;
 use rings_core::dht::Stabilization;
 use rings_core::dht::TStabilize;
@@ -15,6 +14,7 @@ use rings_core::types::message::MessageListener;
 use rings_node::cli::Client;
 use rings_node::logger::LogLevel;
 use rings_node::logger::Logger;
+use rings_node::processor::Processor;
 use rings_node::service::run_service;
 
 #[derive(Parser, Debug)]
@@ -78,11 +78,18 @@ struct ClientArgs {
         env
     )]
     endpoint_url: String,
+
+    #[clap(long = "key", short = 'k', env)]
+    pub ecdsa_key: SecretKey,
 }
 
 impl ClientArgs {
     async fn new_client(&self) -> anyhow::Result<Client> {
-        Client::new(self.endpoint_url.as_str()).await
+        Client::new(
+            self.endpoint_url.as_str(),
+            Processor::generate_signature(&self.ecdsa_key).as_str(),
+        )
+        .await
     }
 }
 
@@ -219,7 +226,7 @@ async fn daemon_run(
     stabilize_timeout: usize,
     external_ip: Option<String>,
 ) -> anyhow::Result<()> {
-    let dht = Arc::new(Mutex::new(PeerRing::new(key.address().into()).await?));
+    let dht = Arc::new(PeerRing::new(key.address().into()).await?);
     let (auth, temp_key) = SessionManager::gen_unsign_info(
         key.address(),
         Some(rings_core::session::Ttl::Never),
@@ -240,6 +247,7 @@ async fn daemon_run(
         stabilize_timeout,
     ));
     let swarm_clone = swarm.clone();
+    let pubkey = Arc::new(key.pubkey());
 
     let (_, _, _) = futures::join!(
         listen_event.clone().listen(),
@@ -247,7 +255,8 @@ async fn daemon_run(
             http_addr.to_owned(),
             swarm_clone,
             listen_event,
-            stabilize.clone()
+            stabilize.clone(),
+            pubkey,
         ),
         stabilize.wait(),
     );

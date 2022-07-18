@@ -8,7 +8,6 @@ use clap::Args;
 use clap::Parser;
 use clap::Subcommand;
 use daemonize::Daemonize;
-use futures::lock::Mutex;
 use libc::kill;
 use rings_node::logger::LogLevel;
 use rings_node::logger::Logger;
@@ -113,7 +112,7 @@ struct ShutdownArgs {
 
 async fn run_jobs(args: &RunArgs) -> anyhow::Result<()> {
     let key: &SecretKey = &args.ecdsa_key;
-    let dht = Arc::new(Mutex::new(PeerRing::new(key.address().into()).await?));
+    let dht = Arc::new(PeerRing::new(key.address().into()).await?);
 
     let (auth, s_key) = SessionManager::gen_unsign_info(
         key.address(),
@@ -166,13 +165,14 @@ async fn run_jobs(args: &RunArgs) -> anyhow::Result<()> {
     let listen_event_2 = listen_event.clone();
     let stabilization_1 = stabilization.clone();
     let stabilization_2 = stabilization.clone();
+    let pubkey = Arc::new(key.pubkey());
     let j = tokio::spawn(futures::future::join3(
         async {
             listen_event_1.listen().await;
             AnyhowResult::Ok(())
         },
         async {
-            run_service(http_addr, swarm, listen_event_2, stabilization_1).await?;
+            run_service(http_addr, swarm, listen_event_2, stabilization_1, pubkey).await?;
             AnyhowResult::Ok(())
         },
         async {

@@ -5,9 +5,7 @@ pub mod utils;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use futures::lock::Mutex;
 use js_sys::Promise;
-use rings_core_wasm::dht::TStabilize;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -16,6 +14,7 @@ use crate::prelude::js_sys;
 use crate::prelude::rings_core::async_trait;
 use crate::prelude::rings_core::dht::PeerRing;
 use crate::prelude::rings_core::dht::Stabilization;
+use crate::prelude::rings_core::dht::TStabilize;
 use crate::prelude::rings_core::ecc::SecretKey;
 use crate::prelude::rings_core::message::CustomMessage;
 use crate::prelude::rings_core::message::Encoded;
@@ -167,7 +166,7 @@ impl Client {
                 .map_err(JsError::from)?;
             let pr = PeerRing::new_with_storage(swarm.address().into(), Arc::new(storage));
 
-            let dht = Arc::new(Mutex::new(pr));
+            let dht = Arc::new(pr);
             let msg_handler = Arc::new(MessageHandler::new(dht.clone(), swarm.clone()));
             let stabilization = Arc::new(Stabilization::new(dht, swarm.clone(), 20));
             let processor = Arc::new(Processor::from((swarm, msg_handler, stabilization)));

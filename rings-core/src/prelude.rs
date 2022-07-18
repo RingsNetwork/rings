@@ -5,6 +5,7 @@ pub use dashmap;
 pub use futures;
 #[cfg(feature = "wasm")]
 pub use js_sys;
+pub use libsecp256k1;
 #[cfg(feature = "wasm")]
 pub use rexie;
 pub use url;

@@ -1,0 +1,36 @@
+---
+name: "dev-release"
+
+on:
+  push:
+    branches:
+      - "develop"
+
+jobs:
+  pre-release:
+    name: "Dev Release"
+    timeout-minutes: 10
+    runs-on: "ubuntu-latest"
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Setup rust toolchain
+        run: rustup show
+      # If you need to reset the cache version, increment the number after `v`
+      - uses: Swatinem/rust-cache@v1
+        with:
+          sharedKey: default-v1
+
+      - name: Build
+        run: cargo build --features daemon --features client --all --verbose --release
+
+      - uses: "marvinpinto/action-automatic-releases@latest"
+        with:
+          repo_token: "${{ secrets.GITHUB_TOKEN }}"
+          automatic_release_tag: "latest-ubuntu"
+          prerelease: true
+          title: "Pre Release Build"
+          files: |
+            LICENSE
+            target/release/rings-daemon
+            target/release/rings-cli
