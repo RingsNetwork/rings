@@ -156,7 +156,7 @@ async fn run_jobs(args: &RunArgs) -> anyhow::Result<()> {
         &ice_servers,
         key.address(),
         session,
-        args.external_ip,
+        args.external_ip.clone(),
     ));
 
     // let listen_event = MessageHandler::new(dht.clone(), swarm.clone());
