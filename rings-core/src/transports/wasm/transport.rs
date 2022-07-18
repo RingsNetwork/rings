@@ -84,9 +84,17 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
         }
     }
 
-    async fn start(&mut self, ice_server: &IceServer) -> Result<&Self> {
+    async fn start(
+        &mut self,
+        ice_server: Vec<IceServer>,
+        _external_ip: Option<String>,
+    ) -> Result<&Self> {
         let mut config = RtcConfiguration::new();
-        let ice_servers: js_sys::Array = js_sys::Array::of1(&ice_server.clone().into());
+        let ice_servers: js_sys::Array = js_sys::Array::from_iter(
+            ice_server
+                .into_iter()
+                .map(<IceServer as Into<JsValue>>::into),
+        );
         config.ice_servers(&ice_servers.into());
         // hack here
         let r = js_sys::Reflect::set(
@@ -452,6 +460,11 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
             .iter()
             .map(|c| c.clone().to_json().into_serde::<IceCandidate>().unwrap())
             .collect();
+
+        if local_candidates_json.is_empty() {
+            return Err(Error::FailedOnGatherLocalCandidate);
+        }
+
         let data = TricklePayload {
             sdp: serde_json::to_string(&RtcSessionDescriptionWrapper::from(sdp))
                 .map_err(Error::Deserialize)?,
@@ -480,7 +493,9 @@ impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
                 self.set_remote_description(sdp.to_owned()).await?;
                 for c in &data.data.candidates {
                     log::debug!("add remote candiates: {:?}", c);
-                    self.add_ice_candidate(c.clone()).await?;
+                    if self.add_ice_candidate(c.clone()).await.is_err() {
+                        log::warn!("failed on add add candiates: {:?}", c.clone());
+                    };
                 }
                 Ok(data.addr)
             }

@@ -10,19 +10,24 @@ rings-core
 ### ICE Scheme:
 
 1. Peer A:
+
 {
 	create offer,
 	set it as local description
 } -> Send Offer to Peer B
 
-2. Peer B: {
+2. Peer B:
+
+{
   set receiveed offer as remote description
   create answer
   set it as local description
   Send Answer to Peer A
 }
 
-3. Peer A: {
+3. Peer A:
+
+{
    Set receiveed answer as remote description
 }
 

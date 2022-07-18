@@ -36,6 +36,7 @@ pub struct Swarm {
     transport_event_channel: Channel<Event>,
     session_manager: SessionManager,
     address: Address,
+    external_address: Option<String>,
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
@@ -58,7 +59,12 @@ pub trait TransportManager {
 }
 
 impl Swarm {
-    pub fn new(ice_servers: &str, address: Address, session_manager: SessionManager) -> Self {
+    pub fn new_with_external_address(
+        ice_servers: &str,
+        address: Address,
+        session_manager: SessionManager,
+        external_address: Option<String>,
+    ) -> Self {
         let ice_servers = ice_servers
             .split(';')
             .collect::<Vec<&str>>()
@@ -72,7 +78,12 @@ impl Swarm {
             address,
             session_manager,
             pending: Arc::new(Mutex::new(vec![])),
+            external_address,
         }
+    }
+
+    pub fn new(ice_servers: &str, address: Address, session_manager: SessionManager) -> Self {
+        Self::new_with_external_address(ice_servers, address, session_manager, None)
     }
 
     pub fn address(&self) -> Address {
@@ -191,7 +202,7 @@ impl TransportManager for Swarm {
         let event_sender = self.transport_event_channel.sender();
         let mut ice_transport = Transport::new(event_sender);
         ice_transport
-            .start(&self.ice_servers[0])
+            .start(self.ice_servers.clone(), self.external_address.clone())
             .await?
             .apply_callback()
             .await?;

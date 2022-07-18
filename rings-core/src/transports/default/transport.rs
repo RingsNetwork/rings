@@ -8,11 +8,14 @@ use futures::future::BoxFuture;
 use futures::lock::Mutex as FuturesMutex;
 use serde_json;
 use web3::types::Address;
+use webrtc::api::setting_engine::SettingEngine;
 use webrtc::api::APIBuilder;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::data_channel_state::RTCDataChannelState;
 use webrtc::data_channel::RTCDataChannel;
+use webrtc::ice::mdns::MulticastDnsMode;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
+use webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType;
 use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
@@ -82,14 +85,26 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
         }
     }
 
-    async fn start(&mut self, ice_server: &IceServer) -> Result<&Self> {
+    async fn start(
+        &mut self,
+        ice_server: Vec<IceServer>,
+        external_ip: Option<String>,
+    ) -> Result<&Self> {
         let config = RTCConfiguration {
-            ice_servers: vec![ice_server.clone().into()],
+            ice_servers: ice_server.iter().map(|x| x.clone().into()).collect(),
             ice_candidate_pool_size: 100,
             ..Default::default()
         };
-
-        let api = APIBuilder::new().build();
+        let mut setting = SettingEngine::default();
+        if let Some(addr) = external_ip {
+            log::debug!("setting external ip {:?}", &addr);
+            setting.set_nat_1to1_ips(vec![addr], RTCIceCandidateType::Host);
+            setting.set_ice_multicast_dns_mode(MulticastDnsMode::QueryOnly);
+        } else {
+            // mDNS gathering cannot be used with 1:1 NAT IP mapping for host candidate
+            setting.set_ice_multicast_dns_mode(MulticastDnsMode::QueryAndGather);
+        }
+        let api = APIBuilder::new().with_setting_engine(setting).build();
         match api.new_peer_connection(config).await {
             Ok(c) => {
                 let mut conn = self.connection.lock().await;
@@ -142,13 +157,17 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
         match self.get_peer_connection().await {
             Some(peer_connection) => {
                 let mut gather_complete = peer_connection.gathering_complete_promise().await;
-                let answer = peer_connection
-                    .create_answer(None)
-                    .await
-                    .map_err(Error::RTCPeerConnectionCreateAnswerFailed)?;
-                self.set_local_description(answer.to_owned()).await?;
-                let _ = gather_complete.recv().await;
-                Ok(answer)
+                match peer_connection.create_answer(None).await {
+                    Ok(answer) => {
+                        self.set_local_description(answer.to_owned()).await?;
+                        let _ = gather_complete.recv().await;
+                        Ok(answer)
+                    }
+                    Err(e) => {
+                        log::error!("{}", e);
+                        Err(Error::RTCPeerConnectionCreateAnswerFailed(e))
+                    }
+                }
             }
             None => Err(Error::RTCPeerConnectionNotEstablish),
         }
@@ -329,20 +348,17 @@ impl IceTransportCallback<Event, AcChannel<Event>> for DefaultTransport {
     }
 
     async fn on_ice_candidate(&self) -> Self::OnLocalCandidateHdlrFn {
-        let peer_connection = self.get_peer_connection().await;
         let pending_candidates = Arc::clone(&self.pending_candidates);
+        let peer_connection = self.get_peer_connection().await;
 
         box move |c: Option<<Self as IceTransport<Event, AcChannel<Event>>>::Candidate>| {
-            let peer_connection = peer_connection.clone();
             let pending_candidates = Arc::clone(&pending_candidates);
+            let peer_connection = peer_connection.clone();
             Box::pin(async move {
                 if let Some(candidate) = c {
-                    if let Some(peer_connection) = peer_connection {
-                        let desc = peer_connection.remote_description().await;
-                        if desc.is_none() {
-                            let mut candidates = pending_candidates.lock().await;
-                            candidates.push(candidate.clone());
-                        }
+                    if peer_connection.is_some() {
+                        let mut candidates = pending_candidates.lock().await;
+                        candidates.push(candidate.clone());
                     }
                 }
             })
@@ -404,6 +420,9 @@ impl IceTrickleScheme<Event, AcChannel<Event>> for DefaultTransport {
                 .map(async move |c| c.clone().to_json().await.unwrap().into()),
         )
         .await;
+        if local_candidates_json.is_empty() {
+            return Err(Error::FailedOnGatherLocalCandidate);
+        }
         let data = TricklePayload {
             sdp: serde_json::to_string(&sdp).unwrap(),
             candidates: local_candidates_json,
@@ -429,7 +448,9 @@ impl IceTrickleScheme<Event, AcChannel<Event>> for DefaultTransport {
                 log::trace!("setting remote candidate");
                 for c in &data.data.candidates {
                     log::trace!("add candiates: {:?}", c);
-                    self.add_ice_candidate(c.clone()).await?;
+                    if self.add_ice_candidate(c.clone()).await.is_err() {
+                        log::warn!("failed on add add candiates: {:?}", c.clone());
+                    };
                 }
                 if let Ok(public_key) = data.origin_verification.session.authorizer_pubkey() {
                     let mut pk = self.public_key.write().await;
@@ -535,6 +556,8 @@ impl DefaultTransport {
 pub mod tests {
     use std::str::FromStr;
 
+    use webrtc::ice_transport::ice_gathering_state::RTCIceGatheringState;
+
     use super::DefaultTransport as Transport;
     use super::*;
     use crate::ecc::SecretKey;
@@ -545,7 +568,11 @@ pub mod tests {
         let mut trans = Transport::new(ch.sender());
 
         let stun = IceServer::from_str("stun://stun.l.google.com:19302").unwrap();
-        trans.start(&stun).await?.apply_callback().await?;
+        trans
+            .start(vec![stun], None)
+            .await?
+            .apply_callback()
+            .await?;
         Ok(trans)
     }
 
@@ -561,6 +588,23 @@ pub mod tests {
             transport2.ice_connection_state().await,
             Some(RTCIceConnectionState::New)
         );
+        assert_eq!(
+            transport1
+                .get_peer_connection()
+                .await
+                .unwrap()
+                .ice_gathering_state(),
+            RTCIceGatheringState::New
+        );
+
+        assert_eq!(
+            transport2
+                .get_peer_connection()
+                .await
+                .unwrap()
+                .ice_gathering_state(),
+            RTCIceGatheringState::New
+        );
 
         // Generate key pairs for signing and verification
         let key1 = SecretKey::random();
@@ -575,6 +619,22 @@ pub mod tests {
             .get_handshake_info(&sm1, RTCSdpType::Offer)
             .await?;
         assert_eq!(
+            transport1
+                .get_peer_connection()
+                .await
+                .unwrap()
+                .ice_gathering_state(),
+            RTCIceGatheringState::Complete
+        );
+        assert_eq!(
+            transport2
+                .get_peer_connection()
+                .await
+                .unwrap()
+                .ice_gathering_state(),
+            RTCIceGatheringState::New
+        );
+        assert_eq!(
             transport1.ice_connection_state().await,
             Some(RTCIceConnectionState::New)
         );
@@ -586,6 +646,24 @@ pub mod tests {
         // Peer 2 got offer then register
         let addr1 = transport2.register_remote_info(handshake_info1).await?;
         assert_eq!(addr1, key1.address());
+
+        assert_eq!(
+            transport1
+                .get_peer_connection()
+                .await
+                .unwrap()
+                .ice_gathering_state(),
+            RTCIceGatheringState::Complete
+        );
+        assert_eq!(
+            transport2
+                .get_peer_connection()
+                .await
+                .unwrap()
+                .ice_gathering_state(),
+            RTCIceGatheringState::New
+        );
+
         assert_eq!(
             transport1.ice_connection_state().await,
             Some(RTCIceConnectionState::New)
@@ -599,6 +677,24 @@ pub mod tests {
         let handshake_info2 = transport2
             .get_handshake_info(&sm2, RTCSdpType::Answer)
             .await?;
+
+        assert_eq!(
+            transport1
+                .get_peer_connection()
+                .await
+                .unwrap()
+                .ice_gathering_state(),
+            RTCIceGatheringState::Complete
+        );
+        assert_eq!(
+            transport2
+                .get_peer_connection()
+                .await
+                .unwrap()
+                .ice_gathering_state(),
+            RTCIceGatheringState::Complete
+        );
+
         assert_eq!(
             transport1.ice_connection_state().await,
             Some(RTCIceConnectionState::New)
