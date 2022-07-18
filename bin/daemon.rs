@@ -38,6 +38,9 @@ struct Cli {
 
     #[clap(subcommand)]
     command: Command,
+
+    #[clap(long, short = 'c')]
+    config_file: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -102,6 +105,9 @@ struct RunArgs {
 
     #[clap(long, default_value = "20")]
     pub stabilize_timeout: usize,
+
+    #[clap(long, env, help = "external ip address")]
+    pub external_ip: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -146,7 +152,12 @@ async fn run_jobs(args: &RunArgs) -> anyhow::Result<()> {
     };
 
     let ice_servers = ice_servers.join(";");
-    let swarm = Arc::new(Swarm::new(&ice_servers, key.address(), session));
+    let swarm = Arc::new(Swarm::new_with_external_address(
+        &ice_servers,
+        key.address(),
+        session,
+        args.external_ip,
+    ));
 
     // let listen_event = MessageHandler::new(dht.clone(), swarm.clone());
     let message_callback = MessageCallback {};
@@ -258,6 +269,11 @@ fn main() {
     dotenv::dotenv().ok();
     let cli = Cli::parse();
     Logger::init(cli.log_level.into()).expect("log err");
+
+    // if config file was set, it should override existing .env
+    if let Some(conf) = cli.config_file {
+        dotenv::from_path(std::path::Path::new(&conf)).ok();
+    }
 
     match cli.command {
         Command::Run(args) => {

@@ -23,6 +23,9 @@ struct Cli {
     #[clap(long, short = 'v', default_value_t = LogLevel::Info, arg_enum, env)]
     log_level: LogLevel,
 
+    #[clap(long, short = 'c')]
+    config_file: Option<String>,
+
     #[clap(subcommand)]
     command: Command,
 }
@@ -269,6 +272,10 @@ async fn main() -> anyhow::Result<()> {
     dotenv::dotenv().ok();
     let cli = Cli::parse();
     Logger::init(cli.log_level.into())?;
+    // if config file was set, it should override existing .env
+    if let Some(conf) = cli.config_file {
+        dotenv::from_path(std::path::Path::new(&conf)).ok();
+    }
 
     if let Err(e) = match cli.command {
         Command::Run(args) => {
