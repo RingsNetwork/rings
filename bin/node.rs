@@ -227,16 +227,12 @@ async fn daemon_run(
     )?;
     let sig = key.sign(&auth.to_string()?).to_vec();
     let session = SessionManager::new(&sig, &auth, &temp_key);
-    let swarm = if let Some(eip) = external_ip {
-        Arc::new(Swarm::new_with_external_address(
-            stuns,
-            key.address(),
-            session.clone(),
-            Some(eip),
-        ))
-    } else {
-        Arc::new(Swarm::new(stuns, key.address(), session.clone()))
-    };
+    let swarm = Arc::new(Swarm::new_with_external_address(
+        stuns,
+        key.address(),
+        session.clone(),
+        external_ip,
+    ));
     let listen_event = Arc::new(MessageHandler::new(dht.clone(), swarm.clone()));
     let stabilize = Arc::new(Stabilization::new(
         dht.clone(),
