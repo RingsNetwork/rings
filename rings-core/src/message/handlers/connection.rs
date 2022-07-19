@@ -307,22 +307,28 @@ pub mod test {
     //
     #[tokio::test]
     async fn test_triple_nodes_connection_1_2_3() -> Result<()> {
-        let (key1, key2, key3) = gen_triple_ordered_keys();
-        test_triple_ordered_nodes_connection(key1, key2, key3).await
+        let keys = gen_ordered_keys(3);
+        let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
+        test_triple_ordered_nodes_connection(key1, key2, key3).await?;
+        Ok(())
     }
 
     // The 2_3_1 should have same behavior as 1_2_3 since they are all clockwise.
     #[tokio::test]
     async fn test_triple_nodes_connection_2_3_1() -> Result<()> {
-        let (key1, key2, key3) = gen_triple_ordered_keys();
-        test_triple_ordered_nodes_connection(key2, key3, key1).await
+        let keys = gen_ordered_keys(3);
+        let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
+        test_triple_ordered_nodes_connection(key2, key3, key1).await?;
+        Ok(())
     }
 
     // The 3_1_2 should have same behavior as 1_2_3 since they are all clockwise.
     #[tokio::test]
     async fn test_triple_nodes_connection_3_1_2() -> Result<()> {
-        let (key1, key2, key3) = gen_triple_ordered_keys();
-        test_triple_ordered_nodes_connection(key3, key1, key2).await
+        let keys = gen_ordered_keys(3);
+        let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
+        test_triple_ordered_nodes_connection(key3, key1, key2).await?;
+        Ok(())
     }
 
     // node1.key > node2.key > node3.key
@@ -346,29 +352,35 @@ pub mod test {
     //
     #[tokio::test]
     async fn test_triple_nodes_connection_3_2_1() -> Result<()> {
-        let (key1, key2, key3) = gen_triple_ordered_keys();
-        test_triple_desc_ordered_nodes_connection(key3, key2, key1).await
+        let keys = gen_ordered_keys(3);
+        let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
+        test_triple_desc_ordered_nodes_connection(key3, key2, key1).await?;
+        Ok(())
     }
 
     // The 2_1_3 should have same behavior as 3_2_1 since they are all anti-clockwise.
     #[tokio::test]
     async fn test_triple_nodes_connection_2_1_3() -> Result<()> {
-        let (key1, key2, key3) = gen_triple_ordered_keys();
-        test_triple_desc_ordered_nodes_connection(key2, key1, key3).await
+        let keys = gen_ordered_keys(3);
+        let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
+        test_triple_desc_ordered_nodes_connection(key2, key1, key3).await?;
+        Ok(())
     }
 
     // The 1_3_2 should have same behavior as 3_2_1 since they are all anti-clockwise.
     #[tokio::test]
     async fn test_triple_nodes_connection_1_3_2() -> Result<()> {
-        let (key1, key2, key3) = gen_triple_ordered_keys();
-        test_triple_desc_ordered_nodes_connection(key1, key3, key2).await
+        let keys = gen_ordered_keys(3);
+        let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
+        test_triple_desc_ordered_nodes_connection(key1, key3, key2).await?;
+        Ok(())
     }
 
     async fn test_triple_ordered_nodes_connection(
         key1: SecretKey,
         key2: SecretKey,
         key3: SecretKey,
-    ) -> Result<()> {
+    ) -> Result<(MessageHandler, MessageHandler, MessageHandler)> {
         let (did1, dht1, swarm1, node1, _path1) = prepare_node(&key1).await;
         let (did2, dht2, swarm2, node2, _path2) = prepare_node(&key2).await;
         let (did3, dht3, swarm3, node3, _path3) = prepare_node(&key3).await;
@@ -502,14 +514,14 @@ pub mod test {
         assert_eq!(dht2.lock_successor()?.list(), vec![did3, did1]);
         assert_eq!(dht3.lock_successor()?.list(), vec![did1, did2]);
         tokio::fs::remove_dir_all("./tmp").await.ok();
-        Ok(())
+        Ok((node1, node2, node3))
     }
 
     async fn test_triple_desc_ordered_nodes_connection(
         key1: SecretKey,
         key2: SecretKey,
         key3: SecretKey,
-    ) -> Result<()> {
+    ) -> Result<(MessageHandler, MessageHandler, MessageHandler)> {
         let (did1, dht1, swarm1, node1, _path1) = prepare_node(&key1).await;
         let (did2, dht2, swarm2, node2, _path2) = prepare_node(&key2).await;
         let (did3, dht3, swarm3, node3, _path3) = prepare_node(&key3).await;
@@ -664,11 +676,11 @@ pub mod test {
         assert_eq!(dht3.lock_successor()?.list(), vec![did2]);
 
         tokio::fs::remove_dir_all("./tmp").await.ok();
-        Ok(())
+        Ok((node1, node2, node3))
     }
 
-    pub fn gen_triple_ordered_keys() -> (SecretKey, SecretKey, SecretKey) {
-        let mut keys = Vec::from_iter(std::iter::repeat_with(SecretKey::random).take(3));
+    pub fn gen_ordered_keys(n: usize) -> Vec<SecretKey> {
+        let mut keys = Vec::from_iter(std::iter::repeat_with(SecretKey::random).take(n));
         keys.sort_by(|a, b| {
             if a.address() < b.address() {
                 std::cmp::Ordering::Less
@@ -676,7 +688,7 @@ pub mod test {
                 std::cmp::Ordering::Greater
             }
         });
-        (keys[0], keys[1], keys[2])
+        keys
     }
 
     pub async fn prepare_node(
@@ -928,5 +940,60 @@ pub mod test {
         for addr in addresses {
             assert!(swarm.get_transport(&addr).is_some());
         }
+    }
+
+    #[tokio::test]
+    async fn test_quadra_desc_node_connection() -> Result<()> {
+        // 1. node1 to node2
+        // 2. node 3 to node 2
+        let keys = gen_ordered_keys(4);
+        let (key1, key2, key3, key4) = (keys[0], keys[1], keys[2], keys[3]);
+        let (node1, node2, node3) = test_triple_ordered_nodes_connection(key1, key2, key3).await?;
+        // we now have triple connected node
+        let (_, _, swarm4, node4, _path4) = prepare_node(&key4).await;
+        // connect node 4 to node2
+        manually_establish_connection(&swarm4, &node2.swarm).await?;
+        test_listen_join_and_init_find_succeesor((&key4, &node4), (&key2, &node2)).await?;
+        // node 1 -> node 2 -> node 3
+        //  |-<-----<---------<--|
+        let _ = node2.listen_once().await.unwrap();
+        let _ = node3.listen_once().await.unwrap();
+        let _ = node2.listen_once().await.unwrap();
+        let _ = node4.listen_once().await.unwrap();
+        let _ = node2.listen_once().await.unwrap();
+        println!("==================================================");
+        println!("| test connect node 4 from node 1 via node 2     |");
+        println!("==================================================");
+        println!(
+            "did1: {:?}, did2: {:?}, did3: {:?}, did4: {:?}",
+            key1.address(),
+            key2.address(),
+            key3.address(),
+            key4.address()
+        );
+        println!("==================================================");
+        node4.connect(&key1.address()).await?;
+        // node 4 send msg to node2
+        assert!(matches!(
+            node2.listen_once().await.unwrap().data,
+            Message::ConnectNodeSend(_)
+        ));
+        // node 2 relay to node 2
+        assert!(matches!(
+            node1.listen_once().await.unwrap().data,
+            Message::ConnectNodeSend(_)
+        ));
+        // report to node 2
+        assert!(matches!(
+            node2.listen_once().await.unwrap().data,
+            Message::ConnectNodeReport(_)
+        ));
+        // report to node 4
+        assert!(matches!(
+            node4.listen_once().await.unwrap().data,
+            Message::ConnectNodeReport(_)
+        ));
+        println!("=================Finish handshake here=================");
+        Ok(())
     }
 }
