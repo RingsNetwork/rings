@@ -198,11 +198,6 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
         if relay.next_hop.is_some() {
             self.transpond_payload(ctx, relay).await
         } else {
-            if self.swarm.get_transport(&msg.id).is_none() && msg.id != self.swarm.address().into()
-            {
-                self.connect(&msg.id.into()).await?;
-                return Ok(());
-            }
             if msg.for_fix {
                 self.dht.lock_finger()?.set_fix(&msg.id);
             } else {
