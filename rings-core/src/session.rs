@@ -21,6 +21,75 @@ use crate::utils;
 
 const DEFAULT_TTL_MS: usize = 24 * 3600 * 1000;
 
+#[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
+pub enum Protocol {
+    ECDSA,
+    EdDSA
+}
+
+/// Present the authorizer DID
+/// suport ECDSA and EdDSA
+#[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
+pub struct Authorizer{
+    protocol: Protocol,
+    data: Vec<u8>
+}
+
+impl Authorizer {
+    pub fn is_ecdsa(&self) -> bool {
+        if let Protocol::ECDSA = self.protocol {
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn is_eddsa(&self) -> bool {
+        if let Protocol::ECDSA = self.protocol {
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn into_ecdsa(&self) -> Result<Address> {
+        if self.is_ecdsa() && self.data.len() == 20 {
+            Ok(web3::types::H160::from_slice(&self.data.as_slice()))
+        } else {
+            Err(Error::InvalidAddress)
+        }
+    }
+
+    pub fn into_eddsa(&self) -> Result<ed25519_dalek::PublicKey> {
+         if self.is_eddsa() && self.data.len() == 32 {
+             ed25519_dalek::PublicKey::from_bytes(
+                 &self.data.as_slice()).map_err(|_| Error::InvalidPublicKey
+             )
+        } else {
+            Err(Error::InvalidPublicKey)
+        }
+    }
+}
+
+impl From<Address> for Authorizer {
+    fn from(addr: Address) -> Self {
+        Self {
+            protocol: Protocol::ECDSA,
+            data: addr.0.to_vec()
+        }
+    }
+}
+
+impl From<ed25519_dalek::PublicKey> for Authorizer {
+    fn from(key: ed25519_dalek::PublicKey) -> Self {
+        Self {
+            protocol: Protocol::EdDSA,
+            data: key.to_bytes().as_slice().to_vec()
+        }
+    }
+}
+
+
 /// we support both EIP712 and raw ECDSA singing forrmat
 #[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
 pub enum Signer {

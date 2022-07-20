@@ -27,6 +27,7 @@ rand_core = { version = "0.6.3", features = ["getrandom"] }
 rand_hc = "0.3.1"
 libsecp256k1 = "0.7.0"
 sha1 = "0.10.1"
+sha2 = "0.10.2"
 serde_json = { version = "1.0.70" }
 serde = { version = "1.0.130", features = ["derive"] }
 chrono = { version = "0.4.19", features = ["wasmbind"] }

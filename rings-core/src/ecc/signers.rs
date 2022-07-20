@@ -71,6 +71,7 @@ pub mod eip712 {
 pub mod ed25519 {
     use super::*;
 
+    /// will use 512-bit hash here
     pub fn sign_raw(sec: SecretKey, msg: &str) -> [u8; 65] {
         let key: ed25519_dalek::SecretKey = sec.into();
         let pubkey: ed25519_dalek::PublicKey = (&key).into();

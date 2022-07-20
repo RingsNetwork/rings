@@ -6,6 +6,9 @@ pub enum Error {
     #[error("InvalidPublicKey")]
     InvalidPublicKey,
 
+    #[error("InvalidAddress")]
+    InvalidAddress,
+
     #[error("Address of Vritual Peer not equal")]
     AddressNotEqual,
 
