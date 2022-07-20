@@ -88,6 +88,7 @@ impl HandleMsg<SearchVNode> for MessageHandler {
                     relay.relay(self.dht.id, None)?;
                     self.send_report_message(
                         Message::FoundVNode(FoundVNode { data: vec![v] }),
+                        ctx.tx_id,
                         relay,
                     )
                     .await

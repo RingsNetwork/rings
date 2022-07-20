@@ -105,6 +105,7 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
                         transport_uuid: msg.transport_uuid.clone(),
                         handshake_info,
                     }),
+                    ctx.tx_id,
                     relay,
                 )
                 .await?;
@@ -114,8 +115,12 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
             }
 
             _ => {
-                self.send_report_message(Message::AlreadyConnected(AlreadyConnected), relay)
-                    .await
+                self.send_report_message(
+                    Message::AlreadyConnected(AlreadyConnected),
+                    ctx.tx_id,
+                    relay,
+                )
+                .await
             }
         }
     }
@@ -175,6 +180,7 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
                 relay.relay(self.dht.id, None)?;
                 self.send_report_message(
                     Message::FindSuccessorReport(FindSuccessorReport { id, then: msg.then }),
+                    ctx.tx_id,
                     relay,
                 )
                 .await

@@ -33,6 +33,7 @@ impl HandleMsg<NotifyPredecessorSend> for MessageHandler {
                 return self
                     .send_report_message(
                         Message::NotifyPredecessorReport(NotifyPredecessorReport { id }),
+                        ctx.tx_id,
                         relay,
                     )
                     .await;
