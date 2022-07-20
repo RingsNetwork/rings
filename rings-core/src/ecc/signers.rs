@@ -68,6 +68,21 @@ pub mod eip712 {
     }
 }
 
+pub mod ed25519 {
+    use super::*;
+
+    pub fn sign_raw(sec: SecretKey, msg: &str) -> [u8; 65] {
+        let key: ed25519_dalek::SecretKey = sec.into();
+        let pubkey: ed25519_dalek::PublicKey = (&key).into();
+        let ext_seckey: ed25519_dalek::ExpandedSecretKey = (&key).into();
+        // always [u8;64] here
+        let mut sig = ext_seckey.sign(msg.as_bytes(), &pubkey).to_bytes().to_vec();
+        // push zero to tail
+        sig.push(0);
+        sig.as_slice().try_into().unwrap()
+    }
+}
+
 #[cfg(test)]
 mod test {
     use std::str::FromStr;

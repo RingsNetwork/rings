@@ -13,6 +13,7 @@ use sha1::Digest;
 use sha1::Sha1;
 use web3::signing::keccak256;
 use web3::types::Address;
+use ed25519_dalek as ed25519;
 
 use crate::err::Error;
 use crate::err::Result;
@@ -39,6 +40,29 @@ impl HashStr {
 
     pub fn inner(&self) -> String {
         self.0.clone()
+    }
+}
+
+impl From<SecretKey> for ed25519::SecretKey {
+    fn from(key: SecretKey) -> Self {
+        //if bytes.len() != SECRET_KEY_LENGTH {
+        //   return Err(InternalError::BytesLengthError
+        // ref: https://docs.rs/ed25519-dalek/latest/src/ed25519_dalek/secret.rs.html#512
+        // We can always unwrap here
+        ed25519::SecretKey::from_bytes(&key.0.serialize()).unwrap()
+    }
+}
+
+impl TryFrom<ed25519::SecretKey> for SecretKey {
+    type Error = Error;
+    fn try_from(key: ed25519::SecretKey) -> Result<Self> {
+        Ok(Self(
+            libsecp256k1::SecretKey::parse(
+                &key.to_bytes()
+            ).map_err(
+                |e|Error::Libsecp256k1SecretKeyParse(format!("{:?}", e))
+            )?
+        ))
     }
 }
 
