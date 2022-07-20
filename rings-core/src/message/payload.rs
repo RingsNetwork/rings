@@ -16,7 +16,6 @@ use super::protocols::MessageRelay;
 use super::protocols::MessageVerification;
 use super::protocols::RelayMethod;
 use crate::dht::Did;
-use crate::ecc::HashStr;
 use crate::ecc::PublicKey;
 use crate::err::Error;
 use crate::err::Result;
@@ -33,7 +32,7 @@ pub enum OriginVerificationGen {
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct MessagePayload<T> {
     pub data: T,
-    pub tx_id: HashStr,
+    pub tx_id: uuid::Uuid,
     pub addr: Address,
     pub verification: MessageVerification,
     pub origin_verification: MessageVerification,
@@ -52,7 +51,7 @@ where T: Serialize + DeserializeOwned
         let ts_ms = utils::get_epoch_ms();
         let ttl_ms = DEFAULT_TTL_MS;
         let msg = &MessageVerification::pack_msg(&data, ts_ms, ttl_ms)?;
-        let tx_id = msg.into();
+        let tx_id = uuid::Uuid::new_v4();
         let addr = session_manager.authorizer()?;
         let verification = MessageVerification {
             session: session_manager.session()?,
@@ -94,11 +93,14 @@ where T: Serialize + DeserializeOwned
 
     pub fn new_report(
         data: T,
+        tx_id: uuid::Uuid,
         session_manager: &SessionManager,
         relay: &MessageRelay,
     ) -> Result<Self> {
         let relay = relay.report()?;
-        Self::new(data, session_manager, OriginVerificationGen::Origin, relay)
+        let mut pl = Self::new(data, session_manager, OriginVerificationGen::Origin, relay)?;
+        pl.tx_id = tx_id;
+        Ok(pl)
     }
 
     pub fn new_direct(data: T, session_manager: &SessionManager, destination: Did) -> Result<Self> {
@@ -210,9 +212,15 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
         .await
     }
 
-    async fn send_report_message(&self, msg: T, relay: MessageRelay) -> Result<()> {
+    async fn send_report_message(
+        &self,
+        msg: T,
+        tx_id: uuid::Uuid,
+        relay: MessageRelay,
+    ) -> Result<()> {
         self.send_payload(MessagePayload::new_report(
             msg,
+            tx_id,
             self.session_manager(),
             &relay,
         )?)
