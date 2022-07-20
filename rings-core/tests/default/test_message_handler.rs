@@ -11,6 +11,7 @@ pub mod test {
     use rings_core::err::Result;
     use rings_core::message;
     use rings_core::message::Encoder;
+    use rings_core::message::FindSuccessorThen;
     use rings_core::message::Message;
     use rings_core::message::MessageHandler;
     use rings_core::message::PayloadSender;
@@ -408,7 +409,7 @@ pub mod test {
                     .send_message(
                         Message::FindSuccessorSend(message::FindSuccessorSend {
                             id: swarm2.address().into(),
-                            for_fix: false,
+                            then: FindSuccessorThen::Connect,
                         }),
                         swarm1.address().into(),
                         swarm1.address().into(),
@@ -498,7 +499,7 @@ pub mod test {
                     .send_message(
                         Message::FindSuccessorSend(message::FindSuccessorSend {
                             id: swarm2.address().into(),
-                            for_fix: false,
+                            then: FindSuccessorThen::Connect,
                         }),
                         swarm1.address().into(),
                         swarm1.address().into(),

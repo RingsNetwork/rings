@@ -185,6 +185,7 @@ mod test {
     use super::*;
     use crate::dht::PeerRing;
     use crate::ecc::SecretKey;
+    use crate::message::FindSuccessorThen;
     use crate::message::MessageHandler;
     use crate::prelude::RTCSdpType;
     use crate::session::SessionManager;
@@ -303,14 +304,14 @@ mod test {
         let ev_1 = node1.listen_once().await.unwrap();
         if let Message::FindSuccessorSend(x) = ev_1.data {
             assert_eq!(x.id, did2);
-            assert!(!x.for_fix);
+            assert_eq!(x.then, FindSuccessorThen::Connect);
         } else {
             panic!();
         }
         let ev_2 = node2.listen_once().await.unwrap();
         if let Message::FindSuccessorSend(x) = ev_2.data {
             assert_eq!(x.id, did1);
-            assert!(!x.for_fix);
+            assert_eq!(x.then, FindSuccessorThen::Connect);
         } else {
             panic!();
         }
@@ -320,7 +321,7 @@ mod test {
             // and dht1 wont update
             assert!(!dht1.lock_successor()?.list().contains(&did1));
             assert_eq!(x.id, did1);
-            assert!(!x.for_fix);
+            assert_eq!(x.then, FindSuccessorThen::Connect);
         } else {
             panic!();
         }
@@ -329,7 +330,7 @@ mod test {
             // for key1 there is no did is more closer to key1, so it response key1
             // and dht2 wont update
             assert_eq!(x.id, did2);
-            assert!(!x.for_fix);
+            assert_eq!(x.then, FindSuccessorThen::Connect);
         } else {
             panic!();
         }

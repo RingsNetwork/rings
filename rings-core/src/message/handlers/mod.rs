@@ -124,9 +124,8 @@ impl MessageHandler {
     async fn invoke_callback(&self, payload: &MessagePayload<Message>) -> Result<()> {
         let mut callback = self.callback.lock().await;
         if let Some(ref mut cb) = *callback {
-            let data = payload.data.clone();
-            match data {
-                Message::CustomMessage(msg) => cb.custom_message(self, payload, &msg).await,
+            match payload.data {
+                Message::CustomMessage(ref msg) => cb.custom_message(self, payload, msg).await,
                 _ => cb.builtin_message(self, payload).await,
             };
         }

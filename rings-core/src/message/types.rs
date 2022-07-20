@@ -28,13 +28,13 @@ pub struct ConnectNodeReport {
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
 pub struct FindSuccessorSend {
     pub id: Did,
-    pub for_fix: bool,
+    pub then: FindSuccessorThen,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct FindSuccessorReport {
     pub id: Did,
-    pub for_fix: bool,
+    pub then: FindSuccessorThen,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -94,6 +94,16 @@ pub struct CustomMessage(pub Vec<u8>);
 pub enum MaybeEncrypted<T> {
     Encrypted(Vec<(PublicKey, PublicKey)>),
     Plain(T),
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FindSuccessorThen {
+    None,
+    Connect,
+    FixFingerTable,
+    SyncStorage,
+    CustomCallback(u8),
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
