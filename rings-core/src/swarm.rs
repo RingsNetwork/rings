@@ -295,8 +295,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Deb
             payload.relay.next_hop
         );
         let transport = self
-            .get_and_check_transport(address)
-            .await
+            .get_transport(address)
             .ok_or(Error::SwarmMissAddressInTable)?;
         let data: Vec<u8> = payload.encode()?.into();
         transport.wait_for_data_channel_open().await?;
