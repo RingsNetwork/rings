@@ -88,13 +88,13 @@ features = [
 [target.'cfg(target_family="wasm")'.dependencies]
 web3 = { package = "web3", version = "0.18.0", features = ["wasm"], default-features = false }
 futures = { package = "futures", version = "0.3.21", default-features = false }
-uuid = { package = "uuid", version = "0.8.2", features = ["wasm-bindgen", "v4"] }
+uuid = { package = "uuid", version = "0.8.2", features = ["wasm-bindgen", "v4", "serde"] }
 
 
 [target.'cfg(not(target_family="wasm"))'.dependencies]
 web3 = { package = "web3", version = "0.18.0" }
 futures = { package = "futures", version = "0.3.21" }
-uuid = { package = "uuid", version = "0.8.2", features = ["v4"] }
+uuid = { package = "uuid", version = "0.8.2", features = ["v4", "serde"] }
 
 
 [dev-dependencies]

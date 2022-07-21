@@ -25,6 +25,8 @@ use crate::types::ice_transport::IceTrickleScheme;
 
 /// Operator and Handler for Connection
 pub mod connection;
+/// Operator and Handler for CustomMessage
+pub mod custom;
 /// Operator and handler for DHT stablization
 pub mod stabilization;
 /// Operator and Handler for Storage
@@ -125,7 +127,11 @@ impl MessageHandler {
         let mut callback = self.callback.lock().await;
         if let Some(ref mut cb) = *callback {
             match payload.data {
-                Message::CustomMessage(ref msg) => cb.custom_message(self, payload, msg).await,
+                Message::CustomMessage(ref msg) => {
+                    if self.dht.id == payload.relay.destination {
+                        cb.custom_message(self, payload, msg).await
+                    }
+                }
                 _ => cb.builtin_message(self, payload).await,
             };
         }
@@ -159,6 +165,7 @@ impl MessageHandler {
             Message::SearchVNode(ref msg) => self.handle(payload, msg).await,
             Message::FoundVNode(ref msg) => self.handle(payload, msg).await,
             Message::StoreVNode(ref msg) => self.handle(payload, msg).await,
+            Message::CustomMessage(ref msg) => self.handle(payload, msg).await,
             Message::MultiCall(ref msg) => {
                 for message in msg.messages.iter().cloned() {
                     let payload = MessagePayload::new(
@@ -171,7 +178,6 @@ impl MessageHandler {
                 }
                 Ok(())
             }
-            Message::CustomMessage(_) => Ok(()),
             x => Err(Error::MessageHandlerUnsupportMessageType(format!(
                 "{:?}",
                 x
