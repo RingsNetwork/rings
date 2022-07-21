@@ -18,11 +18,12 @@ use crate::ecc::SecretKey;
 use crate::err::Error;
 use crate::err::Result;
 use crate::utils;
+use crate::dht::Did;
 
 const DEFAULT_TTL_MS: usize = 24 * 3600 * 1000;
 
 #[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
-pub enum Protocol {
+pub enum Cipher {
     ECDSA,
     EdDSA
 }
@@ -31,13 +32,41 @@ pub enum Protocol {
 /// suport ECDSA and EdDSA
 #[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
 pub struct Authorizer{
-    protocol: Protocol,
+    cipher: Cipher,
     data: Vec<u8>
+}
+
+impl From<Authorizer> for web3::types::H160 {
+    fn from(a: Authorizer) -> Self {
+        match a.cipher {
+            Cipher::ECDSA => {
+                web3::types::H160::from_slice(&a.data.as_slice())
+            },
+            Cipher::EdDSA => {
+                // simply take first 20
+                web3::types::H160::from_slice(&a.data.as_slice()[..20])
+            }
+        }
+    }
+}
+
+impl From<Authorizer> for Did {
+    fn from(a: Authorizer) -> Self {
+        match a.cipher {
+            Cipher::ECDSA => {
+                Into::<web3::types::H160>::into(a).into()
+            },
+            Cipher::EdDSA => {
+                // simply take first 20
+                Into::<web3::types::H160>::into(a).into()
+            }
+        }
+    }
 }
 
 impl Authorizer {
     pub fn is_ecdsa(&self) -> bool {
-        if let Protocol::ECDSA = self.protocol {
+        if let Cipher::ECDSA = self.cipher {
             true
         } else {
             false
@@ -45,7 +74,7 @@ impl Authorizer {
     }
 
     pub fn is_eddsa(&self) -> bool {
-        if let Protocol::ECDSA = self.protocol {
+        if let Cipher::ECDSA = self.cipher {
             true
         } else {
             false
@@ -74,7 +103,7 @@ impl Authorizer {
 impl From<Address> for Authorizer {
     fn from(addr: Address) -> Self {
         Self {
-            protocol: Protocol::ECDSA,
+            cipher: Cipher::ECDSA,
             data: addr.0.to_vec()
         }
     }
@@ -83,7 +112,7 @@ impl From<Address> for Authorizer {
 impl From<ed25519_dalek::PublicKey> for Authorizer {
     fn from(key: ed25519_dalek::PublicKey) -> Self {
         Self {
-            protocol: Protocol::EdDSA,
+            cipher: Cipher::EdDSA,
             data: key.to_bytes().as_slice().to_vec()
         }
     }
@@ -95,6 +124,7 @@ impl From<ed25519_dalek::PublicKey> for Authorizer {
 pub enum Signer {
     DEFAULT,
     EIP712,
+    ED25519
 }
 
 #[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
@@ -105,7 +135,7 @@ pub enum Ttl {
 
 #[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
 pub struct AuthorizedInfo {
-    pub authorizer: Address,
+    pub authorizer: Authorizer,
     pub signer: Signer,
     pub addr: Address,
     pub ttl_ms: Ttl,
@@ -167,10 +197,13 @@ impl Session {
         if let Ok(auth_str) = self.auth.to_string() {
             match self.auth.signer {
                 Signer::DEFAULT => {
-                    signers::default::verify(&auth_str, &self.auth.authorizer, &self.sig)
+                    signers::default::verify(&auth_str, &Into::<Address>::into(self.auth.authorizer.clone()), &self.sig)
                 }
                 Signer::EIP712 => {
-                    signers::eip712::verify(&auth_str, &self.auth.authorizer, &self.sig)
+                    signers::eip712::verify(&auth_str, &Into::<Address>::into(self.auth.authorizer.clone()), &self.sig)
+                }
+                Signer::ED25519 => {
+                    unimplemented!();
                 }
             }
         } else {
@@ -191,13 +224,17 @@ impl Session {
         match self.auth.signer {
             Signer::DEFAULT => signers::default::recover(&auth, &self.sig),
             Signer::EIP712 => signers::eip712::recover(&auth, &self.sig),
+            Signer::ED25519 => {
+                unimplemented!();
+                //self.auth.authorizer.data
+            }
         }
     }
 }
 
 impl SessionManager {
     pub fn gen_unsign_info(
-        authorizer: Address,
+        authorizer: Authorizer,
         ttl: Option<Ttl>,
         signer: Option<Signer>,
     ) -> Result<(AuthorizedInfo, SecretKey)> {
@@ -228,16 +265,16 @@ impl SessionManager {
     }
 
     /// generate Session with private key
-    /// only use it for unittest
+    /// only use it for unittest and only works on ECDSA
     pub fn new_with_seckey(key: &SecretKey) -> Result<Self> {
-        let (auth, s_key) = Self::gen_unsign_info(key.address(), None, None)?;
+        let (auth, s_key) = Self::gen_unsign_info(key.address().into(), None, None)?;
         let sig = key.sign(&auth.to_string()?).to_vec();
         Ok(Self::new(&sig, &auth, &s_key))
     }
 
     pub fn renew(&self, sig: &[u8], auth_info: &AuthorizedInfo, key: &SecretKey) -> Result<&Self> {
         let new_inner = SessionWithKey {
-            session: Session::new(sig, auth_info),
+            session: Session::new(sig, &auth_info.clone()),
             session_key: *key,
         };
         let mut inner = self
@@ -270,11 +307,13 @@ impl SessionManager {
         match s.auth.signer {
             Signer::DEFAULT => Ok(signers::default::sign_raw(key, msg).to_vec()),
             Signer::EIP712 => Ok(signers::eip712::sign_raw(key, msg).to_vec()),
+            Signer::ED25519 => Ok(signers::ed25519::sign_raw(key, msg).to_vec())
+
         }
     }
 
     pub fn authorizer(&self) -> Result<Address> {
-        Ok(self.session()?.auth.authorizer)
+        Ok(self.session()?.auth.authorizer.into())
     }
 }
 

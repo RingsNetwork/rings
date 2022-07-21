@@ -53,6 +53,13 @@ impl From<SecretKey> for ed25519::SecretKey {
     }
 }
 
+impl TryFrom<PublicKey> for ed25519::PublicKey {
+    type Error = Error;
+    fn try_from(pk: PublicKey) -> Result<Self> {
+        Self::from_bytes(&pk.0.serialize()[..32]).map_err(|_| Error::InvalidPublicKey)
+    }
+}
+
 impl TryFrom<ed25519::SecretKey> for SecretKey {
     type Error = Error;
     fn try_from(key: ed25519::SecretKey) -> Result<Self> {
