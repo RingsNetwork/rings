@@ -232,7 +232,7 @@ impl TransportManager for Swarm {
                 if t.is_connected().await {
                     Some(t)
                 } else {
-                    if let Err(_) = t.close().await {
+                    if t.close().await.is_err() {
                         log::error!("Failed on close transport");
                     };
                     None
