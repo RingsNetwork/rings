@@ -68,12 +68,14 @@ impl SubRingManager<PeerRingAction> for PeerRing {
     }
 
     async fn get_subring(&self, id: &Did) -> Result<SubRing> {
-        self.storage.get(id).await
+        let vn: VirtualNode = self.storage.get(id).await?;
+        Ok(vn.try_into()?)
     }
 
     async fn store_subring(&self, subring: &SubRing) -> Result<()> {
         let id = subring.did;
-        self.storage.put(&id, subring).await?;
+        let vn: VirtualNode = subring.clone().try_into()?;
+        self.storage.put(&id, &vn).await?;
         Ok(())
     }
 
