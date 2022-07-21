@@ -66,7 +66,6 @@ async fn connect_peer_via_http(params: Params, meta: RpcMeta) -> Result<Value> {
 }
 
 async fn answer_offer(params: Params, meta: RpcMeta) -> Result<Value> {
-    meta.require_authed()?;
     let p: Vec<String> = params.parse()?;
     let ice_info = p
         .first()

@@ -52,7 +52,9 @@ impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
     ) -> Result<()> {
         // if successor: predecessor is between (id, successor]
         // then update local successor
-        if self.swarm.get_transport(&msg.id).is_none() && msg.id != self.swarm.address().into() {
+        if self.swarm.get_and_check_transport(&msg.id).await.is_none()
+            && msg.id != self.swarm.address().into()
+        {
             self.connect(&msg.id.into()).await?;
         } else {
             {

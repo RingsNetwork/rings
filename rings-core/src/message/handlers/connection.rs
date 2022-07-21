@@ -73,7 +73,12 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
         let mut relay = ctx.relay.clone();
 
         if self.dht.id != relay.destination {
-            if self.swarm.get_transport(&relay.destination).is_some() {
+            if self
+                .swarm
+                .get_and_check_transport(&relay.destination)
+                .await
+                .is_some()
+            {
                 relay.relay(self.dht.id, Some(relay.destination))?;
                 return self.transpond_payload(ctx, relay).await;
             } else {
@@ -89,7 +94,7 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
         }
 
         relay.relay(self.dht.id, None)?;
-        match self.swarm.get_transport(&relay.sender()) {
+        match self.swarm.get_and_check_transport(&relay.sender()).await {
             None => {
                 let trans = self.swarm.new_transport().await?;
                 let sender_id = relay.sender();
@@ -157,7 +162,8 @@ impl HandleMsg<AlreadyConnected> for MessageHandler {
             self.transpond_payload(ctx, relay).await
         } else {
             self.swarm
-                .get_transport(&relay.sender())
+                .get_and_check_transport(&relay.sender())
+                .await
                 .map(|_| ())
                 .ok_or(Error::MessageHandlerMissTransportAlreadyConnected)
         }
@@ -203,7 +209,7 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
         match msg.then {
             FindSuccessorThen::FixFingerTable => self.dht.lock_finger()?.set_fix(&msg.id),
             FindSuccessorThen::Connect => {
-                if self.swarm.get_transport(&msg.id).is_none()
+                if self.swarm.get_and_check_transport(&msg.id).await.is_none()
                     && msg.id != self.swarm.address().into()
                 {
                     self.connect(&msg.id.into()).await?;

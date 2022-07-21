@@ -347,24 +347,35 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
                 );
                 spawn_local(async move {
                     let event_sender = Arc::clone(&event_sender);
-                    if ice_connection_state == RtcIceConnectionState::Connected {
-                        let local_address: Address =
-                            (*public_key.read().unwrap()).unwrap().address();
-                        if CbChannel::send(&event_sender, Event::RegisterTransport(local_address))
+                    match ice_connection_state {
+                        Self::IceConnectionState::Connected => {
+                            let local_address: Address =
+                                (*public_key.read().unwrap()).unwrap().address();
+                            if CbChannel::send(
+                                &event_sender,
+                                Event::RegisterTransport(local_address),
+                            )
                             .await
                             .is_err()
-                        {
-                            log::error!("Failed when send RegisterTransport");
+                            {
+                                log::error!("Failed when send RegisterTransport");
+                            }
                         }
-                    }
-                    if ice_connection_state == RtcIceConnectionState::Failed {
-                        let local_address: Address =
-                            (*public_key.read().unwrap()).unwrap().address();
-                        if CbChannel::send(&event_sender, Event::ConnectFailed(local_address))
-                            .await
-                            .is_err()
-                        {
-                            log::error!("Failed when send ConnectFailed");
+                        Self::IceConnectionState::Failed
+                        | Self::IceConnectionState::Disconnected
+                        | Self::IceConnectionState::Closed
+                        | Self::IceConnectionState::Completed => {
+                            let local_address: Address =
+                                (*public_key.read().unwrap()).unwrap().address();
+                            if CbChannel::send(&event_sender, Event::ConnectClosed(local_address))
+                                .await
+                                .is_err()
+                            {
+                                log::error!("Failed when send ConnectFailed");
+                            }
+                        }
+                        _ => {
+                            log::debug!("IceTransport state change {:?}", ice_connection_state);
                         }
                     }
                 })

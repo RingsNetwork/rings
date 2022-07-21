@@ -93,7 +93,7 @@ impl MessageHandler {
     }
 
     pub async fn connect(&self, address: &Address) -> Result<Arc<Transport>> {
-        if let Some(t) = self.swarm.get_transport(address) {
+        if let Some(t) = self.swarm.get_and_check_transport(address).await {
             return Ok(t);
         }
 
@@ -145,6 +145,7 @@ impl MessageHandler {
         {
             println!("{} got msg {}", self.swarm.address(), &payload.data);
         }
+        log::trace!("NEW MESSAGE: {}", &payload.data);
         match &payload.data {
             Message::JoinDHT(ref msg) => self.handle(payload, msg).await,
             Message::LeaveDHT(ref msg) => self.handle(payload, msg).await,

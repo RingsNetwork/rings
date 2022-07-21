@@ -49,6 +49,7 @@ pub trait TransportManager {
     fn get_transport(&self, address: &Address) -> Option<Self::Transport>;
     fn remove_transport(&self, address: &Address) -> Option<(Address, Self::Transport)>;
     fn get_transport_numbers(&self) -> usize;
+    async fn get_and_check_transport(&self, address: &Address) -> Option<Self::Transport>;
     async fn new_transport(&self) -> Result<Self::Transport>;
     async fn register(&self, address: &Address, trans: Self::Transport) -> Result<()>;
     async fn get_or_register(
@@ -113,7 +114,7 @@ impl Swarm {
                 }
                 None => Err(Error::SwarmMissTransport(address)),
             },
-            Some(Event::ConnectFailed(address)) => {
+            Some(Event::ConnectClosed(address)) => {
                 if self.remove_transport(&address).is_some() {
                     let payload = MessagePayload::new_direct(
                         Message::LeaveDHT(message::LeaveDHT { id: address.into() }),
@@ -225,6 +226,22 @@ impl TransportManager for Swarm {
         Ok(())
     }
 
+    async fn get_and_check_transport(&self, address: &Address) -> Option<Self::Transport> {
+        match self.get_transport(address) {
+            Some(t) => {
+                if t.is_connected().await {
+                    Some(t)
+                } else {
+                    if let Err(_) = t.close().await {
+                        log::error!("Failed on close transport");
+                    };
+                    None
+                }
+            }
+            None => None,
+        }
+    }
+
     fn get_transport(&self, address: &Address) -> Option<Self::Transport> {
         self.table.get(address)
     }
@@ -272,9 +289,14 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Deb
             println!("node {:?}", payload.relay.next_hop);
             println!("+++++++++++++++++++++++++++++++++");
         }
-
+        log::trace!(
+            "SENT {:?}, to node {:?}",
+            payload.clone(),
+            payload.relay.next_hop
+        );
         let transport = self
-            .get_transport(address)
+            .get_and_check_transport(address)
+            .await
             .ok_or(Error::SwarmMissAddressInTable)?;
         let data: Vec<u8> = payload.encode()?.into();
         transport.wait_for_data_channel_open().await?;
