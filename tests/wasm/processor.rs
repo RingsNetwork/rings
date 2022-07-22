@@ -91,7 +91,7 @@ async fn create_connection(p1: &Processor, p2: &Processor) {
         transport_1.id.to_string()
     );
 
-    let (_transport_2, answer) = p2.answer_offer(offer.to_string().as_str()).await.unwrap();
+    let (transport_2, answer) = p2.answer_offer(offer.to_string().as_str()).await.unwrap();
     let peer = p1
         .accept_answer(
             transport_1.id.to_string().as_str(),
@@ -100,6 +100,11 @@ async fn create_connection(p1: &Processor, p2: &Processor) {
         .await
         .unwrap();
     assert!(peer.transport.id.eq(&transport_1.id), "transport not same");
+    futures::try_join!(
+        async { transport_1.wait_for_data_channel_open().await },
+        async { transport_2.wait_for_data_channel_open().await }
+    )
+    .unwrap();
 }
 
 #[wasm_bindgen_test]
