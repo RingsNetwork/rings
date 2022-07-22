@@ -126,62 +126,49 @@ impl Processor {
     pub async fn connect_peer_via_http(&self, peer_url: &str) -> Result<Arc<Transport>> {
         // request remote offer and sand answer to remote
         log::debug!("connect_peer_via_http: {}", peer_url);
-        let transport = self
-            .swarm
-            .new_transport()
-            .await
-            .map_err(|_| Error::NewTransportError)?;
-        let hs_info = self.do_connect_peer_via_http(&transport, peer_url).await;
-        if let Err(e) = hs_info {
-            transport
-                .close()
-                .await
-                .map_err(Error::CloseTransportError)?;
-            return Err(e);
-        }
+        let (transport, _hs_info) = self.do_connect_peer_via_http(peer_url).await?;
         Ok(transport)
     }
 
-    async fn do_connect_peer_via_http(
-        &self,
-        transport: &Arc<Transport>,
-        node_url: &str,
-    ) -> Result<String> {
+    async fn do_connect_peer_via_http(&self, node_url: &str) -> Result<(Arc<Transport>, String)> {
         let client = SimpleClient::new_with_url(node_url);
-        let hs_info = transport
-            .get_handshake_info(self.swarm.session_manager(), RTCSdpType::Offer)
-            .await
-            .map_err(Error::CreateOffer)?
-            .to_string();
+        let (transport, hs_info) = self.create_offer().await?;
         log::debug!(
             "sending offer and candidate {:?} to {:?}",
             hs_info.to_owned(),
             node_url,
         );
-        let resp = client
-            .call_method(
-                method::Method::AnswerOffer.as_str(),
-                jsonrpc_core::Params::Array(vec![serde_json::json!(hs_info)]),
-            )
-            .await
-            .map_err(|e| Error::RemoteRpcError(e.to_string()))?;
-        let info: TransportAndIce =
-            serde_json::from_value(resp).map_err(|_| Error::JsonDeserializeError)?;
-        let addr = transport
-            .register_remote_info(Encoded::from_encoded_str(info.ice.as_str()))
-            .await
-            .map_err(Error::RegisterIceError)?;
-        // transport
-        //     .connect_success_promise()
-        //     .await
-        //     .map_err(Error::ConnectError)?
-        //     .await
-        //     .map_err(Error::ConnectError)?;
-        self.swarm
-            .register(&addr, Arc::clone(transport))
-            .await
-            .map_err(Error::RegisterIceError)?;
-        Ok(addr.to_string())
+
+        let addr_result = {
+            let resp = client
+                .call_method(
+                    method::Method::AnswerOffer.as_str(),
+                    jsonrpc_core::Params::Array(vec![serde_json::json!(hs_info)]),
+                )
+                .await
+                .map_err(|e| Error::RemoteRpcError(e.to_string()))?;
+            let info: TransportAndIce =
+                serde_json::from_value(resp).map_err(|_| Error::JsonDeserializeError)?;
+            let addr = transport
+                .register_remote_info(Encoded::from_encoded_str(info.ice.as_str()))
+                .await
+                .map_err(Error::RegisterIceError)?;
+            self.swarm
+                .register(&addr, transport.clone())
+                .await
+                .map_err(Error::RegisterIceError)?;
+            Ok(addr)
+        };
+        if let Err(e) = addr_result {
+            if let Err(close_e) = transport.close().await {
+                log::warn!(
+                    "connect_peer_via_http failed, close tranposrt error: {}",
+                    close_e
+                );
+            }
+            return Err(e);
+        }
+        Ok((transport, addr_result.unwrap().to_string()))
     }
 
     /// Answer an Offer.
