@@ -6,7 +6,7 @@ use crate::err::Result;
 
 #[derive(Debug, PartialEq, Eq, Serialize, Clone)]
 pub enum Event {
-    ConnectFailed(Address),
+    ConnectClosed(Address),
     DataChannelMessage(Vec<u8>),
     RegisterTransport(Address),
 }
