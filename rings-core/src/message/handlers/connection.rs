@@ -30,7 +30,7 @@ use crate::types::ice_transport::IceTrickleScheme;
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<LeaveDHT> for MessageHandler {
     async fn handle(&self, _ctx: &MessagePayload<Message>, msg: &LeaveDHT) -> Result<()> {
-        self.disconnect(msg.id.clone().into()).await
+        self.disconnect(msg.id.into()).await
     }
 }
 
