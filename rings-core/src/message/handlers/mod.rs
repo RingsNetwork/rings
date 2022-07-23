@@ -89,6 +89,7 @@ impl MessageHandler {
 
     // disconnect a node if a node is in DHT
     pub async fn disconnect(&self, address: Address) -> Result<()> {
+        log::info!("disconnect {:?}", address);
         self.dht.remove(address.into())?;
         self.swarm.remove_transport(&address);
         Ok(())

@@ -144,29 +144,29 @@ async fn test_processor_handshake_and_msg() {
     p1.send_message(p2_addr.as_str(), test_text1.as_bytes())
         .await
         .unwrap();
-    console_log!("send test_text1 done");
+    console_log!("p1 send test_text1 to p2 done");
 
     p2.send_message(p1_addr.as_str(), test_text2.as_bytes())
         .await
         .unwrap();
-    console_log!("send test_text2 done");
+    console_log!("p2 send test_text2 to p1 done");
 
     p2.send_message(p1_addr.as_str(), test_text3.as_bytes())
         .await
         .unwrap();
-    console_log!("send test_text3 done");
+    console_log!("p2 send test_text3 to p1 done");
 
     p1.send_message(p2_addr.as_str(), test_text4.as_bytes())
         .await
         .unwrap();
-    console_log!("send test_text4 done");
+    console_log!("p1 send test_text4 to p2 done");
 
     p2.send_message(p1_addr.as_str(), test_text5.as_bytes())
         .await
         .unwrap();
-    console_log!("send test_text5 done");
+    console_log!("p2 send test_text5 to p1 done");
 
-    fluvio_wasm_timer::Delay::new(Duration::from_secs(4))
+    fluvio_wasm_timer::Delay::new(Duration::from_secs(10))
         .await
         .unwrap();
 
@@ -186,7 +186,9 @@ async fn test_processor_handshake_and_msg() {
 
     let mut expect2 = vec![test_text1.to_owned(), test_text4.to_owned()];
     expect2.sort();
+    console_log!("check msg1 {:?}, {:?}", msgs1, expect1);
     assert_eq!(msgs1, expect1);
+    console_log!("check msg2 {:?}, {:?}", msgs2, expect2);
     assert_eq!(msgs2, expect2);
 
     futures::join!(close_all_transport(&p1), close_all_transport(&p2),);

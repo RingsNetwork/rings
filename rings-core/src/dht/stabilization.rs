@@ -150,7 +150,12 @@ mod stabilizer {
             let func = move || {
                 let caller = caller.clone();
                 spawn_local(Box::pin(async move {
-                    caller.stabilize().await.unwrap();
+                    match caller.stabilize().await {
+                        Ok(()) => {}
+                        Err(e) => {
+                            log::error!("failed to stabilize {:?}", e);
+                        }
+                    };
                 }))
             };
             poll!(func, 25000);
