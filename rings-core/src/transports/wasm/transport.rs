@@ -331,11 +331,14 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
     async fn on_ice_connection_state_change(&self) -> Self::OnIceConnectionStateChangeHdlrFn {
         let event_sender = self.event_sender.clone();
         let peer_connection = self.get_peer_connection().await;
+        let id = self.id.clone();
         let public_key = Arc::clone(&self.public_key);
         box move |ev: web_sys::Event| {
             let mut peer_connection = peer_connection.clone();
             let event_sender = Arc::clone(&event_sender);
             let public_key = Arc::clone(&public_key);
+            let id = id.clone();
+
             // log::debug!("got state event {:?}", ev.type_());
             if ev.type_() == *"iceconnectionstatechange" {
                 let peer_connection = peer_connection.take().unwrap();
@@ -367,7 +370,7 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
                         | Self::IceConnectionState::Completed => {
                             let local_address: Address =
                                 (*public_key.read().unwrap()).unwrap().address();
-                            if CbChannel::send(&event_sender, Event::ConnectClosed(local_address))
+                            if CbChannel::send(&event_sender, Event::ConnectClosed((local_address, id)))
                                 .await
                                 .is_err()
                             {

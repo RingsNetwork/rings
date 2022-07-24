@@ -114,8 +114,13 @@ impl Swarm {
                 }
                 None => Err(Error::SwarmMissTransport(address)),
             },
-            Some(Event::ConnectClosed(address)) => {
+            Some(Event::ConnectClosed((address, uuid))) => {
+                if let Ok(_) = self.pop_pending_transport(uuid) {
+                    log::info!("Swarm: Pending transport {:?} dropped", uuid);
+                };
+
                 if self.remove_transport(&address).is_some() {
+                    log::info!("Swarm: transport {:?} dropped", address);
                     let payload = MessagePayload::new_direct(
                         Message::LeaveDHT(message::LeaveDHT { id: address.into() }),
                         &self.session_manager,
