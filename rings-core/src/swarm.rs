@@ -251,14 +251,14 @@ impl TransportManager for Swarm {
     async fn get_and_check_transport(&self, address: &Address) -> Option<Self::Transport> {
         match self.get_transport(address) {
             Some(t) => {
-                if t.is_connected().await {
-                    Some(t)
-                } else {
+                if t.is_disconnected().await {
                     log::debug!("[get_and_check_transport] transport {:?} is not connected will be drop", t.id);
                     if t.close().await.is_err() {
                         log::error!("Failed on close transport");
                     };
                     None
+                } else {
+                    Some(t)
                 }
             }
             None => None,

@@ -139,6 +139,16 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
             .unwrap_or(false)
     }
 
+    async fn is_disconnected(&self) -> bool {
+        match self.ice_connection_state().await {
+            Some(Self::IceConnectionState::Failed)
+                | Some(Self::IceConnectionState::Disconnected)
+                | Some(Self::IceConnectionState::Closed)
+                | Some(Self::IceConnectionState::Completed)  => true,
+            _ => false
+        }
+    }
+
     async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>> {
         self.connection.as_ref().map(Arc::clone)
     }

@@ -134,6 +134,16 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
             .map(|pc| pc.ice_connection_state())
     }
 
+    async fn is_disconnected(&self) -> bool {
+        match self.ice_connection_state().await {
+            Some(Self::IceConnectionState::Failed)
+                | Some(Self::IceConnectionState::Disconnected)
+                | Some(Self::IceConnectionState::Closed)
+                | Some(Self::IceConnectionState::Completed)  => true,
+            _ => false
+        }
+    }
+
     async fn is_connected(&self) -> bool {
         self.ice_connection_state()
             .await
