@@ -16,6 +16,7 @@ use crate::processor;
 pub struct Peer {
     pub address: String,
     pub transport_id: String,
+    pub state: String,
 }
 
 impl Peer {
@@ -33,29 +34,22 @@ impl Peer {
     }
 }
 
-impl From<(Address, Arc<Transport>)> for Peer {
-    fn from((address, transport): (Address, Arc<Transport>)) -> Self {
+impl From<(Address, &Arc<Transport>, Option<String>)> for Peer {
+    fn from((address, transport, state): (Address, &Arc<Transport>, Option<String>)) -> Self {
         Self {
             address: address.into_token().to_string(),
             transport_id: transport.id.to_string(),
+            state: state.unwrap_or_else(|| "Unknown".to_owned()),
         }
     }
 }
 
-impl From<&(Address, Arc<Transport>)> for Peer {
-    fn from((address, transport): &(Address, Arc<Transport>)) -> Self {
+impl From<(&processor::Peer, Option<String>)> for Peer {
+    fn from((p, state): (&processor::Peer, Option<String>)) -> Self {
         Self {
-            address: address.into_token().to_string(),
-            transport_id: transport.id.to_string(),
-        }
-    }
-}
-
-impl From<processor::Peer> for Peer {
-    fn from(p: processor::Peer) -> Self {
-        Self {
-            address: p.address.into_token().to_string(),
+            address: p.address.clone().into_token().to_string(),
             transport_id: p.transport.id.to_string(),
+            state: state.unwrap_or_else(|| "Unknown".to_owned()),
         }
     }
 }

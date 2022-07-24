@@ -142,11 +142,11 @@ impl Client {
 
         let mut display = String::new();
         display.push_str("Successful\n");
-        display.push_str("Address, TransportId\n");
+        display.push_str("Address, TransportId, Status\n");
         display.push_str(
             peers
                 .iter()
-                .map(|peer| format!("{}, {}", peer.address, peer.transport_id))
+                .map(|peer| format!("{}, {}, {}", peer.address, peer.transport_id, peer.state))
                 .collect::<Vec<_>>()
                 .join("\n")
                 .as_str(),
