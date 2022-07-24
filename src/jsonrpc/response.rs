@@ -54,6 +54,28 @@ impl From<(&processor::Peer, Option<String>)> for Peer {
     }
 }
 
+/// Base Transport Info
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransportInfo {
+    pub transport_id: String,
+    pub state: String,
+}
+
+impl TransportInfo {
+    pub fn new(transport_id: String, state: Option<String>) -> Self {
+        Self {
+            transport_id,
+            state: state.unwrap_or_else(|| "Unknown".to_owned()),
+        }
+    }
+}
+
+impl From<(&Arc<Transport>, Option<String>)> for TransportInfo {
+    fn from((transport, state): (&Arc<Transport>, Option<String>)) -> Self {
+        Self::new(transport.id.to_string(), state)
+    }
+}
+
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct TransportAndIce {
     pub transport_id: String,

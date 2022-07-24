@@ -12,6 +12,7 @@ use jsonrpc_core::Value;
 use rings_core::types::ice_transport::IceTransport;
 
 use super::method::Method;
+use super::response;
 use super::response::Peer;
 use super::response::TransportAndIce;
 use crate::error::Error as ServerError;
@@ -51,7 +52,12 @@ pub(crate) async fn build_handler(handler: &mut MetaIoHandler<RpcMeta>) {
     handler.add_method_with_meta(Method::AcceptAnswer.as_str(), accept_answer);
     handler.add_method_with_meta(Method::ListPeers.as_str(), list_peers);
     handler.add_method_with_meta(Method::Disconnect.as_str(), close_connection);
-    handler.add_method_with_meta(Method::SendTo.as_str(), send_message)
+    handler.add_method_with_meta(Method::ListPendings.as_str(), list_pendings);
+    handler.add_method_with_meta(
+        Method::ClosePendingTransport.as_str(),
+        close_pending_transport,
+    );
+    handler.add_method_with_meta(Method::SendTo.as_str(), send_message);
 }
 
 async fn connect_peer_via_http(params: Params, meta: RpcMeta) -> Result<Value> {
@@ -141,6 +147,34 @@ async fn close_connection(params: Params, meta: RpcMeta) -> Result<Value> {
         .first()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
     meta.processor.disconnect(address).await?;
+    Ok(serde_json::json!({}))
+}
+
+async fn list_pendings(_params: Params, meta: RpcMeta) -> Result<Value> {
+    meta.require_authed()?;
+    let transports = meta.processor.list_pendings().await?;
+    let states_async = transports
+        .iter()
+        .map(|x| x.ice_connection_state())
+        .collect::<Vec<_>>();
+    let states = futures::future::join_all(states_async).await;
+    let r: Vec<response::TransportInfo> = transports
+        .iter()
+        .zip(states.iter())
+        .map(|(x, y)| response::TransportInfo::from((x, y.map(|s| s.to_string()))))
+        .collect::<Vec<_>>();
+    serde_json::to_value(&r).map_err(|_| Error::from(ServerError::JsonSerializeError))
+}
+
+async fn close_pending_transport(params: Params, meta: RpcMeta) -> Result<Value> {
+    meta.require_authed()?;
+    let params: Vec<String> = params.parse()?;
+    let transport_id = params
+        .first()
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
+    meta.processor
+        .close_pending_transport(transport_id.as_str())
+        .await?;
     Ok(serde_json::json!({}))
 }
 
