@@ -314,17 +314,17 @@ impl IceTransportCallback<Event, AcChannel<Event>> for DefaultTransport {
     async fn on_ice_connection_state_change(&self) -> Self::OnIceConnectionStateChangeHdlrFn {
         let event_sender = self.event_sender.clone();
         let public_key = Arc::clone(&self.public_key);
-        let id = self.id.clone();
+        let id = self.id;
         box move |cs: Self::IceConnectionState| {
             let event_sender = event_sender.clone();
             let public_key = Arc::clone(&public_key);
-            let id = id.clone();
+            let id = id;
             Box::pin(async move {
                 match cs {
                     Self::IceConnectionState::Connected => {
                         let local_address: Address = public_key.read().await.unwrap().address();
                         if event_sender
-                            .send(Event::RegisterTransport(local_address))
+                            .send(Event::RegisterTransport((local_address, id)))
                             .await
                             .is_err()
                         {

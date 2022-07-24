@@ -242,7 +242,7 @@ mod listener {
     #[async_trait]
     impl MessageListener for MessageHandler {
         async fn listen(self: Arc<Self>) {
-            let payloads = self.swarm.iter_messages();
+            let payloads = self.swarm.iter_messages().await;
             pin_mut!(payloads);
             while let Some(payload) = payloads.next().await {
                 if !payload.verify() {

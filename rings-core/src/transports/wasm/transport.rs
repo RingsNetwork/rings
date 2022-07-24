@@ -356,7 +356,7 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
                                 (*public_key.read().unwrap()).unwrap().address();
                             if CbChannel::send(
                                 &event_sender,
-                                Event::RegisterTransport(local_address),
+                                Event::RegisterTransport((local_address, id)),
                             )
                             .await
                             .is_err()

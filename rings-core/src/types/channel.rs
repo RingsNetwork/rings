@@ -8,7 +8,7 @@ use crate::err::Result;
 pub enum Event {
     ConnectClosed((Address, uuid::Uuid)),
     DataChannelMessage(Vec<u8>),
-    RegisterTransport(Address),
+    RegisterTransport((Address, uuid::Uuid)),
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
