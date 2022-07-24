@@ -23,6 +23,8 @@ use crate::prelude::rings_core::message::Message;
 use crate::prelude::rings_core::message::MessageCallback;
 use crate::prelude::rings_core::message::MessageHandler;
 use crate::prelude::rings_core::message::MessagePayload;
+use crate::prelude::rings_core::prelude::uuid::Uuid;
+use crate::prelude::rings_core::prelude::web3::ethabi::Token;
 use crate::prelude::rings_core::prelude::web3::types::Address;
 use crate::prelude::rings_core::session::AuthorizedInfo;
 use crate::prelude::rings_core::session::SessionManager;
@@ -39,7 +41,6 @@ use crate::prelude::wasm_bindgen_futures;
 use crate::prelude::wasm_bindgen_futures::future_to_promise;
 use crate::prelude::web3::contract::tokens::Tokenizable;
 use crate::prelude::web_sys::RtcIceConnectionState;
-use crate::processor;
 use crate::processor::Processor;
 
 #[wasm_bindgen(start)]
@@ -266,7 +267,11 @@ impl Client {
                 .await
                 .map_err(JsError::from)?;
             let state = peer.transport.ice_connection_state().await;
-            Ok(JsValue::try_from(&Peer::from((state, peer)))?)
+            Ok(JsValue::try_from(&Peer::from((
+                state,
+                peer.address,
+                peer.transport.id,
+            )))?)
         })
     }
 
@@ -290,7 +295,11 @@ impl Client {
                 .await
                 .map_err(JsError::from)?;
             let state = peer.transport.ice_connection_state().await;
-            Ok(JsValue::try_from(&Peer::from((state, peer)))?)
+            Ok(JsValue::try_from(&Peer::from((
+                state,
+                peer.address,
+                peer.transport.id,
+            )))?)
         })
     }
 
@@ -327,7 +336,11 @@ impl Client {
                 .await
                 .map_err(JsError::from)?;
             let state = peer.transport.ice_connection_state().await;
-            Ok(JsValue::try_from(&Peer::from((state, peer)))?)
+            Ok(JsValue::try_from(&Peer::from((
+                state,
+                peer.address,
+                peer.transport.id,
+            )))?)
         })
     }
 
@@ -342,12 +355,9 @@ impl Client {
                 .collect::<Vec<_>>();
             let states = futures::future::join_all(states_async).await;
             let mut js_array = js_sys::Array::new();
-            js_array.extend(
-                peers
-                    .iter()
-                    .zip(states.iter())
-                    .flat_map(|(x, y)| JsValue::try_from(&Peer::from((*y, x.clone())))),
-            );
+            js_array.extend(peers.iter().zip(states.iter()).flat_map(|(x, y)| {
+                JsValue::try_from(&Peer::from((*y, x.address.clone(), x.transport.id)))
+            }));
             Ok(js_array.into())
         })
     }
@@ -405,7 +415,11 @@ impl Client {
         future_to_promise(async move {
             let peer = p.get_peer(address.as_str()).await.map_err(JsError::from)?;
             let state = peer.transport.ice_connection_state().await;
-            Ok(JsValue::try_from(&Peer::from((state, peer)))?)
+            Ok(JsValue::try_from(&Peer::from((
+                state,
+                peer.address,
+                peer.transport.id,
+            )))?)
         })
     }
 
@@ -541,11 +555,11 @@ impl Peer {
     }
 }
 
-impl From<(Option<RtcIceConnectionState>, processor::Peer)> for Peer {
-    fn from((st, p): (Option<RtcIceConnectionState>, processor::Peer)) -> Self {
+impl From<(Option<RtcIceConnectionState>, Token, Uuid)> for Peer {
+    fn from((st, address, transport_id): (Option<RtcIceConnectionState>, Token, Uuid)) -> Self {
         Self {
-            address: p.address.to_string(),
-            transport_id: p.transport.id.to_string(),
+            address: address.to_string(),
+            transport_id: transport_id.to_string(),
             state: st.map(from_rtc_ice_connection_state),
         }
     }
