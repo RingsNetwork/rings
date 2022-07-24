@@ -9,12 +9,14 @@ use jsonrpc_core::Metadata;
 use jsonrpc_core::Params;
 use jsonrpc_core::Result;
 use jsonrpc_core::Value;
+use rings_core::types::ice_transport::IceTransport;
 
 use super::method::Method;
 use super::response::Peer;
 use super::response::TransportAndIce;
 use crate::error::Error as ServerError;
 use crate::prelude::rings_core::prelude::Address;
+use crate::processor;
 use crate::processor::Processor;
 
 /// RpcMeta basic info struct
@@ -105,11 +107,12 @@ async fn accept_answer(params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
     let params: Vec<String> = params.parse()?;
     if let ([transport_id, ice], _) = params.split_at(2) {
-        let r: Peer = meta
+        let p: processor::Peer = meta
             .processor
             .accept_answer(transport_id.as_str(), ice.as_str())
-            .await?
-            .into();
+            .await?;
+        let state = p.transport.ice_connection_state().await;
+        let r: Peer = (&p, state.map(|x| x.to_string())).into();
         return r.to_json_obj().map_err(Error::from);
     };
     Err(Error::new(ErrorCode::InvalidParams))
@@ -117,13 +120,17 @@ async fn accept_answer(params: Params, meta: RpcMeta) -> Result<Value> {
 
 async fn list_peers(_params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
-    let r = meta
-        .processor
-        .list_peers()
-        .await?
-        .into_iter()
-        .map(|x| x.into())
-        .collect::<Vec<Peer>>();
+    let peers = meta.processor.list_peers().await?;
+    let states_async = peers
+        .iter()
+        .map(|x| x.transport.ice_connection_state())
+        .collect::<Vec<_>>();
+    let states = futures::future::join_all(states_async).await;
+    let r: Vec<Peer> = peers
+        .iter()
+        .zip(states.iter())
+        .map(|(x, y)| Peer::from((x, y.map(|s| s.to_string()))))
+        .collect::<Vec<_>>();
     serde_json::to_value(&r).map_err(|_| Error::from(ServerError::JsonSerializeError))
 }
 
