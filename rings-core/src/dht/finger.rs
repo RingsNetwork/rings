@@ -70,8 +70,6 @@ impl FingerTable {
     }
 
     /// remove a node from dht finger table
-    /// remote a node from dht successor table
-    /// if suuccessor is empty, set it to the cloest node
     pub fn remove(&mut self, id: Did) {
         for (index, item) in self.finger.clone().iter().enumerate() {
             if *item == Some(id) {

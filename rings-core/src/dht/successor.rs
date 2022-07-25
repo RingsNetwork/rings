@@ -13,10 +13,10 @@ pub struct Successor {
 }
 
 impl Successor {
-    /// create a new Successer instance
-    pub fn new(id: &Did, max: u8) -> Self {
+    /// create a new Successor instance
+    pub fn new(id: Did, max: u8) -> Self {
         Self {
-            id: *id,
+            id,
             max,
             successors: vec![],
         }
@@ -56,6 +56,57 @@ impl Successor {
     }
 
     pub fn remove(&mut self, id: Did) {
-        self.successors.retain(|v| *v == id);
+        self.successors.retain(|&v| v != id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ecc::tests::gen_ordered_keys;
+
+    #[test]
+    fn test_successor_update() {
+        let dids: Vec<Did> = gen_ordered_keys(6)
+            .iter()
+            .map(|x| x.address().into())
+            .collect();
+
+        let mut succ = Successor::new(dids[0], 3);
+        assert!(succ.is_none());
+
+        succ.update(dids[2]);
+        assert_eq!(succ.list(), dids[2..3]);
+
+        succ.update(dids[3]);
+        assert_eq!(succ.list(), dids[2..4]);
+
+        succ.update(dids[4]);
+        assert_eq!(succ.list(), dids[2..5]);
+
+        succ.update(dids[5]);
+        assert_eq!(succ.list(), dids[2..5]);
+
+        succ.update(dids[1]);
+        assert_eq!(succ.list(), dids[1..4]);
+    }
+
+    #[test]
+    fn test_successor_remove() {
+        let dids: Vec<Did> = gen_ordered_keys(4)
+            .iter()
+            .map(|x| x.address().into())
+            .collect();
+
+        let mut succ = Successor::new(dids[0], 3);
+        assert!(succ.is_none());
+
+        succ.update(dids[1]);
+        succ.update(dids[2]);
+        succ.update(dids[3]);
+        assert_eq!(succ.list(), dids[1..4]);
+
+        succ.remove(dids[2]);
+        assert_eq!(succ.list(), vec![dids[1], dids[3]]);
     }
 }
