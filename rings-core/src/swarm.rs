@@ -95,7 +95,10 @@ impl Swarm {
         &self.session_manager
     }
 
-    async fn load_message(&self, ev: Result<Option<Event>>) -> Result<Option<MessagePayload<Message>>> {
+    async fn load_message(
+        &self,
+        ev: Result<Option<Event>>,
+    ) -> Result<Option<MessagePayload<Message>>> {
         let ev = ev?;
 
         match ev {
@@ -104,7 +107,6 @@ impl Swarm {
                 Ok(Some(payload))
             }
             Some(Event::RegisterTransport((address, id))) => {
-
                 // if transport is still pending
                 if let Ok(Some(t)) = self.find_pending_transport(id) {
                     log::debug!("transport is inside pending list, mov to swarm table");
@@ -120,14 +122,15 @@ impl Swarm {
                         )?;
                         Ok(Some(payload))
                     }
-                    None => {
-                        Err(Error::SwarmMissTransport(address))
-                    },
+                    None => Err(Error::SwarmMissTransport(address)),
                 }
-            },
+            }
             Some(Event::ConnectClosed((address, uuid))) => {
                 if self.pop_pending_transport(uuid).is_ok() {
-                    log::info!("[Swarm::ConnectClosed] Pending transport {:?} dropped", uuid);
+                    log::info!(
+                        "[Swarm::ConnectClosed] Pending transport {:?} dropped",
+                        uuid
+                    );
                 };
 
                 if let Some(t) = self.get_transport(&address) {
@@ -159,7 +162,9 @@ impl Swarm {
         }
     }
 
-    pub async fn iter_messages<'a, 'b>(&'a self) -> impl Stream<Item = MessagePayload<Message>> + 'b
+    pub async fn iter_messages<'a, 'b>(
+        &'a self,
+    ) -> impl Stream<Item = MessagePayload<Message>> + 'b
     where 'a: 'b {
         stream! {
             let receiver = &self.transport_event_channel.receiver();
@@ -260,7 +265,10 @@ impl TransportManager for Swarm {
         match self.get_transport(address) {
             Some(t) => {
                 if t.is_disconnected().await {
-                    log::debug!("[get_and_check_transport] transport {:?} is not connected will be drop", t.id);
+                    log::debug!(
+                        "[get_and_check_transport] transport {:?} is not connected will be drop",
+                        t.id
+                    );
                     if t.close().await.is_err() {
                         log::error!("Failed on close transport");
                     };

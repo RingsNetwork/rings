@@ -140,9 +140,12 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
     }
 
     async fn is_disconnected(&self) -> bool {
-     matches!(self.ice_connection_state().await, Some(Self::IceConnectionState::Failed)
-                 | Some(Self::IceConnectionState::Disconnected)
-                 | Some(Self::IceConnectionState::Closed))
+        matches!(
+            self.ice_connection_state().await,
+            Some(Self::IceConnectionState::Failed)
+                | Some(Self::IceConnectionState::Disconnected)
+                | Some(Self::IceConnectionState::Closed)
+        )
     }
 
     async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>> {
