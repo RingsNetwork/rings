@@ -130,17 +130,15 @@ struct ConnectWithAddressArgs {
 enum SdpCommand {
     #[clap()]
     Offer(SdpOffer),
-    #[clap(about)]
+    #[clap()]
     Answer(SdpAnswer),
-    #[clap(about)]
+    #[clap()]
     AcceptAnswer(SdpAcceptAnswer),
 }
 
 #[derive(Args, Debug)]
-#[clap(about)]
+#[clap()]
 struct SdpOffer {
-    #[clap(long = "key", short = 'k', env)]
-    pub ecdsa_key: SecretKey,
     #[clap(
         long,
         short = 's',
@@ -208,7 +206,7 @@ struct PendingList {
 struct PendingCloseTransport {
     #[clap(flatten)]
     client_args: ClientArgs,
-    #[clap(short = 't')]
+    #[clap()]
     transport_id: String,
 }
 
