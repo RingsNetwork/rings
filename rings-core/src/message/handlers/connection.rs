@@ -244,7 +244,7 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
 
 #[cfg(not(feature = "wasm"))]
 #[cfg(test)]
-pub mod test {
+pub mod tests {
     use std::matches;
     use std::sync::Arc;
 
@@ -255,6 +255,7 @@ pub mod test {
     use super::*;
     use crate::dht::Did;
     use crate::dht::PeerRing;
+    use crate::ecc::tests::gen_ordered_keys;
     use crate::ecc::SecretKey;
     use crate::message::MessageHandler;
     use crate::prelude::RTCSdpType;
@@ -677,18 +678,6 @@ pub mod test {
 
         tokio::fs::remove_dir_all("./tmp").await.ok();
         Ok((node1, node2, node3))
-    }
-
-    pub fn gen_ordered_keys(n: usize) -> Vec<SecretKey> {
-        let mut keys = Vec::from_iter(std::iter::repeat_with(SecretKey::random).take(n));
-        keys.sort_by(|a, b| {
-            if a.address() < b.address() {
-                std::cmp::Ordering::Less
-            } else {
-                std::cmp::Ordering::Greater
-            }
-        });
-        keys
     }
 
     pub async fn prepare_node(
