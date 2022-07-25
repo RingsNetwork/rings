@@ -127,12 +127,12 @@ impl Swarm {
             },
             Some(Event::ConnectClosed((address, uuid))) => {
                 if self.pop_pending_transport(uuid).is_ok() {
-                    log::info!("Swarm: Pending transport {:?} dropped", uuid);
+                    log::info!("[Swarm::ConnectClosed] Pending transport {:?} dropped", uuid);
                 };
 
                 if let Some(t) = self.get_transport(&address) {
                     if t.id == uuid && self.remove_transport(&address).is_some() {
-                        log::info!("[ConnectClosed] transport {:?} closed", uuid);
+                        log::info!("[Swarm::ConnectClosed] transport {:?} closed", uuid);
                         let payload = MessagePayload::new_direct(
                             Message::LeaveDHT(message::LeaveDHT { id: address.into() }),
                             &self.session_manager,
@@ -315,7 +315,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Deb
         let transport = self
             .get_and_check_transport(address)
             .await
-            .ok_or(Error::SwarmMissAddressInTable)?;
+            .ok_or(Error::SwarmMissAddressInTable(address.clone()))?;
         log::trace!(
             "SENT {:?}, to node {:?} via transport {:?}",
             payload.clone(),

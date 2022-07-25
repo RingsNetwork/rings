@@ -111,8 +111,8 @@ pub enum Error {
     #[error("PeerRing RWLock unlock failed")]
     PeerRingUnlockFailed,
 
-    #[error("Cannot seek address in swarm table")]
-    SwarmMissAddressInTable,
+    #[error("Cannot seek address in swarm table, {0}")]
+    SwarmMissAddressInTable(web3::types::Address),
 
     #[error("Cannot gather local candidate")]
     FailedOnGatherLocalCandidate,
