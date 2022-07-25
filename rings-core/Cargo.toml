@@ -17,89 +17,86 @@ browser_chrome_test = ["wasm"]
 
 [dependencies]
 # global
+arrayref = "0.3.6"
+async-lock = "2.5.0"
+async-recursion = "1.0.0"
+async-stream = "0.3.2"
 async-trait = "0.1.52"
-log = "0.4"
+base58-monero = { version = "0.3", default-features = false, features = ["check"] }
+bincode = "1.3.3"
+chrono = { version = "0.4.19", features = ["wasmbind"] }
 dashmap = "5"
+flate2 = { version = "1.0.22" }
+futures-timer = "3.0.2"
 hex = "0.4.3"
+itertools = "0.10.3"
+libsecp256k1 = "0.7.0"
+log = "0.4"
 num-bigint = "0.3.1"
 rand = { version = "0.8.5", features = ["getrandom"] }
 rand_core = { version = "0.6.3", features = ["getrandom"] }
 rand_hc = "0.3.1"
-libsecp256k1 = "0.7.0"
-sha1 = "0.10.1"
-serde_json = { version = "1.0.70" }
 serde = { version = "1.0.130", features = ["derive"] }
-chrono = { version = "0.4.19", features = ["wasmbind"] }
-base58-monero = { version = "0.3", default-features = false, features = ["check"] }
-async-stream = "0.3.2"
-async-lock = "2.5.0"
-futures-timer = "3.0.2"
-url = { version = "2", features = ["serde"] }
+serde_json = { version = "1.0.70" }
+sha1 = "0.10.1"
 thiserror = "1"
-flate2 = { version = "1.0.22" }
-async-recursion = "1.0.0"
-itertools = "0.10.3"
-arrayref = "0.3.6"
-bincode = "1.3.3"
+url = { version = "2", features = ["serde"] }
 
 # default
-webrtc = { version = "0.4.0", optional = true }
-bytes = { version = "1.1.0", optional = true }
 async-channel = { version = "1.6.1", optional = true }
+bytes = { version = "1.1.0", optional = true }
 sled = { version = "0.34.7", optional = true }
-
+webrtc = { version = "0.4.0", optional = true }
 
 # wasm
-wasm-bindgen = { version = "0.2.80", features = ["serde-serialize"], optional = true }
-wasm-bindgen-futures = { version = "0.4.30", optional = true }
 js-sys = { version = "0.3.56", optional = true }
 rexie = { version = "0.4.1", optional = true }
+wasm-bindgen = { version = "0.2.80", features = ["serde-serialize"], optional = true }
+wasm-bindgen-futures = { version = "0.4.30", optional = true }
 
 [dependencies.web-sys]
-version = "0.3.56"
-optional = true
 features = [
-  "Window",
-  "Navigator",
-  "MessageEvent",
-  "MediaStreamConstraints",
-  "MediaDevices",
-  "RtcPeerConnection",
-  "RtcSignalingState",
-  "RtcSdpType",
-  "RtcIceServer",
-  "RtcSessionDescriptionInit",
-  "RtcSessionDescription",
-  "RtcPeerConnectionIceEvent",
-  "RtcIceCandidate",
-  "RtcIceCandidateInit",
-  "RtcDataChannel",
-  "RtcDataChannelEvent",
-  "RtcDataChannelState",
-  "RtcConfiguration",
-  "RtcIceConnectionState",
-  "RtcIceGatheringState",
-  "RtcIceCredentialType",
-  "RtcLifecycleEvent",
-  "console",
-  "Blob",
+    "Window",
+    "Navigator",
+    "MessageEvent",
+    "MediaStreamConstraints",
+    "MediaDevices",
+    "RtcPeerConnection",
+    "RtcSignalingState",
+    "RtcSdpType",
+    "RtcIceServer",
+    "RtcSessionDescriptionInit",
+    "RtcSessionDescription",
+    "RtcPeerConnectionIceEvent",
+    "RtcIceCandidate",
+    "RtcIceCandidateInit",
+    "RtcDataChannel",
+    "RtcDataChannelEvent",
+    "RtcDataChannelState",
+    "RtcConfiguration",
+    "RtcIceConnectionState",
+    "RtcIceGatheringState",
+    "RtcIceCredentialType",
+    "RtcLifecycleEvent",
+    "console",
+    "Blob",
 ]
+optional = true
+version = "0.3.56"
 
 [target.'cfg(target_family="wasm")'.dependencies]
 web3 = { package = "web3", version = "0.18.0", features = ["wasm"], default-features = false }
 futures = { package = "futures", version = "0.3.21", default-features = false }
 uuid = { package = "uuid", version = "0.8.2", features = ["wasm-bindgen", "v4", "serde"] }
 
-
 [target.'cfg(not(target_family="wasm"))'.dependencies]
 web3 = { package = "web3", version = "0.18.0" }
 futures = { package = "futures", version = "0.3.21" }
 uuid = { package = "uuid", version = "0.8.2", features = ["v4", "serde"] }
 
-
 [dev-dependencies]
-wasm-bindgen-test = "0.3.0"
 console_log = { version = "0.2" }
+wasm-bindgen-test = "0.3.0"
 
 [target.'cfg(not(target_family="wasm"))'.dev-dependencies]
 tokio = { version = "1.13.0", features = ["full"] }

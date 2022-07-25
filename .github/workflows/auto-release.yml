@@ -9,17 +9,18 @@ on:
 jobs:
   pre-release:
     name: "Pre Release"
-    timeout-minutes: 10
+    timeout-minutes: 20
     runs-on: "ubuntu-latest"
     steps:
       - uses: actions/checkout@v3
 
       - name: Setup rust toolchain
         run: rustup show
+
       # If you need to reset the cache version, increment the number after `v`
       - uses: Swatinem/rust-cache@v1
         with:
-          sharedKey: default-v1
+          sharedKey: release-v1
 
       - name: Build
         run: cargo build --features daemon --features client --all --verbose --release
@@ -27,7 +28,7 @@ jobs:
       - uses: "marvinpinto/action-automatic-releases@latest"
         with:
           repo_token: "${{ secrets.GITHUB_TOKEN }}"
-          automatic_release_tag: "latest-ubuntu"
+          automatic_release_tag: latest
           prerelease: true
           title: "Development Build"
           files: |
