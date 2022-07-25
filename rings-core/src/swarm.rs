@@ -331,7 +331,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Deb
         let transport = self
             .get_and_check_transport(address)
             .await
-            .ok_or(Error::SwarmMissAddressInTable(address.clone()))?;
+            .ok_or(Error::SwarmMissAddressInTable(*address))?;
         log::trace!(
             "SENT {:?}, to node {:?} via transport {:?}",
             payload.clone(),
