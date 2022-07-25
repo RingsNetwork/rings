@@ -140,13 +140,9 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
     }
 
     async fn is_disconnected(&self) -> bool {
-        match self.ice_connection_state().await {
-            Some(Self::IceConnectionState::Failed)
-                | Some(Self::IceConnectionState::Disconnected)
-                | Some(Self::IceConnectionState::Closed)
-                | Some(Self::IceConnectionState::Completed)  => true,
-            _ => false
-        }
+     matches!(self.ice_connection_state().await, Some(Self::IceConnectionState::Failed)
+                 | Some(Self::IceConnectionState::Disconnected)
+                 | Some(Self::IceConnectionState::Closed))
     }
 
     async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>> {
@@ -376,13 +372,15 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
                         }
                         Self::IceConnectionState::Failed
                         | Self::IceConnectionState::Disconnected
-                        | Self::IceConnectionState::Closed
-                        | Self::IceConnectionState::Completed => {
+                        | Self::IceConnectionState::Closed => {
                             let local_address: Address =
                                 (*public_key.read().unwrap()).unwrap().address();
-                            if CbChannel::send(&event_sender, Event::ConnectClosed((local_address, id)))
-                                .await
-                                .is_err()
+                            if CbChannel::send(
+                                &event_sender,
+                                Event::ConnectClosed((local_address, id)),
+                            )
+                            .await
+                            .is_err()
                             {
                                 log::error!("Failed when send ConnectFailed");
                             }

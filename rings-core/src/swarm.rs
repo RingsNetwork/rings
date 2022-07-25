@@ -228,22 +228,30 @@ impl TransportManager for Swarm {
         Ok(Arc::new(ice_transport))
     }
 
-    /// register to swarm table
-    /// should not wait connection statues here
-    /// a connection `Promise` may cause deadlock of both end
+    // register to swarm table
+    // should not wait connection statues here
+    // a connection `Promise` may cause deadlock of both end
     async fn register(&self, address: &Address, trans: Self::Transport) -> Result<()> {
+        if trans.is_disconnected().await {
+            return Err(Error::InvalidTransport);
+        }
+
         log::info!("register transport {:?}", trans.id.clone());
         let id = trans.id;
-        let prev_transport = self.table.set(address, trans);
-        if let Some(transport) = prev_transport {
-            // if transport is new
-            if transport.id != id {
-                if let Err(e) = transport.close().await {
+        if let Some(t) = self.table.get(address) {
+            if t.is_connected().await && !trans.is_connected().await {
+                return Err(Error::InvalidTransport);
+            }
+            if t.id != id {
+                self.table.set(address, trans);
+                if let Err(e) = t.close().await {
                     log::error!("failed to close previous while registering {:?}", e);
                     return Err(Error::SwarmToClosePrevTransport(format!("{:?}", e)));
                 }
-                log::debug!("replace and closed previous connection! {:?}", transport.id);
+                log::debug!("replace and closed previous connection! {:?}", t.id);
             }
+        } else {
+            self.table.set(address, trans);
         }
         Ok(())
     }

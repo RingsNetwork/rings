@@ -3,6 +3,9 @@
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
+    #[error("Invalid Transport")]
+    InvalidTransport,
+
     #[error("InvalidPublicKey")]
     InvalidPublicKey,
 

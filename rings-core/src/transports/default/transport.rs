@@ -135,13 +135,9 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
     }
 
     async fn is_disconnected(&self) -> bool {
-        match self.ice_connection_state().await {
-            Some(Self::IceConnectionState::Failed)
-                | Some(Self::IceConnectionState::Disconnected)
-                | Some(Self::IceConnectionState::Closed)
-                | Some(Self::IceConnectionState::Completed)  => true,
-            _ => false
-        }
+        matches!(self.ice_connection_state().await, Some(Self::IceConnectionState::Failed)
+                 | Some(Self::IceConnectionState::Disconnected)
+                 | Some(Self::IceConnectionState::Closed))
     }
 
     async fn is_connected(&self) -> bool {
@@ -343,8 +339,7 @@ impl IceTransportCallback<Event, AcChannel<Event>> for DefaultTransport {
                     }
                     Self::IceConnectionState::Failed
                     | Self::IceConnectionState::Disconnected
-                    | Self::IceConnectionState::Closed
-                    | Self::IceConnectionState::Completed => {
+                    | Self::IceConnectionState::Closed => {
                         let local_address: Address = public_key.read().await.unwrap().address();
                         if event_sender
                             .send(Event::ConnectClosed((local_address, id)))
