@@ -71,9 +71,32 @@ impl FingerTable {
 
     /// remove a node from dht finger table
     pub fn remove(&mut self, id: Did) {
-        for (index, item) in self.finger.clone().iter().enumerate() {
-            if *item == Some(id) {
-                self.finger[index] = None;
+        let indexes: Vec<usize> = self
+            .finger
+            .iter()
+            .enumerate()
+            .filter(|(_, &x)| x == Some(id))
+            .map(|(id, _)| id)
+            .collect();
+
+        if let Some(last_idx) = indexes.last() {
+            let (first_idx, end_idx) = (*indexes.first().unwrap(), *last_idx + 1);
+
+            // Update to the next did of last equaled did in finger table.
+            // If cannot get that, use None.
+            let fix_id = self
+                .finger
+                .iter()
+                .skip(end_idx)
+                .take(1)
+                .collect::<Vec<_>>()
+                .first()
+                .unwrap_or(&&None)
+                .as_ref()
+                .copied();
+
+            for idx in first_idx..end_idx {
+                self.finger[idx] = fix_id
             }
         }
     }
@@ -245,10 +268,15 @@ mod test {
         );
 
         table.remove(id1);
-        assert_eq!(table.len(), 2);
+        assert_eq!(table.len(), 3);
         assert_eq!(table.finger.len(), 3);
         let t1 = table.get(0);
-        assert!(*t1 == None, "expect value at index 0 is None, got {:?}", t1);
+        assert!(
+            *t1 == Some(id2),
+            "expect value at index 0 is {:?}, got {:?}",
+            id2,
+            t1
+        );
         let t2 = table.get(1);
         assert!(
             *t2 == Some(id2),
