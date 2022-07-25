@@ -1,3 +1,4 @@
+GIT_COMMIT := $(shell git rev-parse --short HEAD)
 wasm-pack:
 	# wasm-pack build --release -t web --no-default-features --features browser
 	cargo build --release --target wasm32-unknown-unknown --no-default-features --features browser
@@ -11,3 +12,6 @@ test-core-wasm:
 
 test-browser:
 	wasm-pack test --chrome --features browser_chrome_test --no-default-features
+
+build-docker-image:
+	docker build --build-arg GIT_SHORT_HASH=$(GIT_COMMIT) -t rings-network/rings-node -f ./docker/alpinelinux/Dockerfile ./
