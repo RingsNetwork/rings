@@ -87,7 +87,7 @@ mod test {
     use crate::dht::Stabilization;
     use crate::ecc::SecretKey;
     use crate::message::handlers::connection::test::assert_no_more_msg;
-    use crate::message::handlers::connection::test::gen_triple_ordered_keys;
+    use crate::message::handlers::connection::test::gen_ordered_keys;
     use crate::message::handlers::connection::test::manually_establish_connection;
     use crate::message::handlers::connection::test::prepare_node;
     use crate::message::handlers::connection::test::test_listen_join_and_init_find_succeesor;
@@ -96,37 +96,44 @@ mod test {
 
     #[tokio::test]
     async fn test_triple_nodes_stabilization_1_2_3() -> Result<()> {
-        let (key1, key2, key3) = gen_triple_ordered_keys();
+        let keys = gen_ordered_keys(3);
+        let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
         test_triple_ordered_nodes_stabilization(key1, key2, key3).await
     }
 
     #[tokio::test]
     async fn test_triple_nodes_stabilization_2_3_1() -> Result<()> {
-        let (key1, key2, key3) = gen_triple_ordered_keys();
+        let keys = gen_ordered_keys(3);
+        let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
+
         test_triple_ordered_nodes_stabilization(key1, key2, key3).await
     }
 
     #[tokio::test]
     async fn test_triple_nodes_stabilization_3_1_2() -> Result<()> {
-        let (key1, key2, key3) = gen_triple_ordered_keys();
+        let keys = gen_ordered_keys(3);
+        let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
         test_triple_ordered_nodes_stabilization(key1, key2, key3).await
     }
 
     #[tokio::test]
     async fn test_triple_nodes_stabilization_3_2_1() -> Result<()> {
-        let (key1, key2, key3) = gen_triple_ordered_keys();
+        let keys = gen_ordered_keys(3);
+        let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
         test_triple_desc_ordered_nodes_stabilization(key3, key2, key1).await
     }
 
     #[tokio::test]
     async fn test_triple_nodes_stabilization_2_1_3() -> Result<()> {
-        let (key1, key2, key3) = gen_triple_ordered_keys();
+        let keys = gen_ordered_keys(3);
+        let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
         test_triple_desc_ordered_nodes_stabilization(key3, key2, key1).await
     }
 
     #[tokio::test]
     async fn test_triple_nodes_stabilization_1_3_2() -> Result<()> {
-        let (key1, key2, key3) = gen_triple_ordered_keys();
+        let keys = gen_ordered_keys(3);
+        let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
         test_triple_desc_ordered_nodes_stabilization(key3, key2, key1).await
     }
 
