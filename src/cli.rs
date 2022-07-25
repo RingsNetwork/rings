@@ -4,6 +4,7 @@ use jsonrpc_core::Params;
 use jsonrpc_core::Value;
 use serde_json::json;
 
+use crate::jsonrpc;
 use crate::jsonrpc::method::Method;
 use crate::jsonrpc::response::Peer;
 use crate::jsonrpc::response::TransportAndIce;
@@ -130,7 +131,7 @@ impl Client {
         )
     }
 
-    pub async fn list_peers(&mut self) -> Output<Vec<Peer>> {
+    pub async fn list_peers(&mut self) -> Output<()> {
         let resp = self
             .client
             .call_method(Method::ListPeers.as_str(), Params::Array(vec![]))
@@ -152,7 +153,7 @@ impl Client {
                 .as_str(),
         );
 
-        ClientOutput::ok(display, peers)
+        ClientOutput::ok(display, ())
     }
 
     pub async fn disconnect(&mut self, address: &str) -> Output<()> {
@@ -173,11 +174,13 @@ impl Client {
             .call_method(Method::ListPendings.as_str(), Params::Array(vec![]))
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let resp: Vec<String> =
+        let resp: Vec<jsonrpc::response::TransportInfo> =
             serde_json::from_value(resp).map_err(|e| anyhow::anyhow!("{}", e))?;
         let mut display = String::new();
+        display.push_str("Successful\n");
+        display.push_str("TransportId, Status\n");
         for item in resp.iter() {
-            display.push_str(item)
+            display.push_str(format!("{}, {}", item.transport_id, item.state).as_str())
         }
         ClientOutput::ok(display, ())
     }

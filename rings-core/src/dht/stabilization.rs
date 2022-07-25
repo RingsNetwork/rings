@@ -118,14 +118,10 @@ mod stabilizer {
                 let timeout = Delay::new(Duration::from_secs(self.timeout as u64)).fuse();
                 pin_mut!(timeout);
                 select! {
-                    _ = timeout => {
-                        match self.stabilize().await {
-                            Ok(()) => {},
-                            Err(e) => {
-                                log::error!("failed to stabilize {:?}", e);
-                            }
-                        };
-                    }
+                    _ = timeout => self
+                        .stabilize()
+                        .await
+                        .unwrap_or_else(|e| log::error!("failed to stabilize {:?}", e)),
                 }
             }
         }
@@ -150,12 +146,10 @@ mod stabilizer {
             let func = move || {
                 let caller = caller.clone();
                 spawn_local(Box::pin(async move {
-                    match caller.stabilize().await {
-                        Ok(()) => {}
-                        Err(e) => {
-                            log::error!("failed to stabilize {:?}", e);
-                        }
-                    };
+                    caller
+                        .stabilize()
+                        .await
+                        .unwrap_or_else(|e| log::error!("failed to stabilize {:?}", e));
                 }))
             };
             poll!(func, 25000);

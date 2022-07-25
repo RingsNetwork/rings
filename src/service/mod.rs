@@ -98,26 +98,15 @@ async fn node_info_header<B>(
     let mut res = next.run(req).await;
     let headers = res.headers_mut();
 
-    if let Ok(version) = axum::http::HeaderValue::from_str(build_version().as_str()) {
+    if let Ok(version) = axum::http::HeaderValue::from_str(crate::util::build_version().as_str()) {
         headers.insert("X-NODE-VERSION", version);
     }
     res
 }
 
-fn build_version() -> String {
-    let mut infos = vec![];
-    if let Some(version) = option_env!("CARGO_PKG_VERSION") {
-        infos.push(version);
-    };
-    if let Some(git_hash) = option_env!("GIT_SHORT_HASH") {
-        infos.push(git_hash);
-    }
-    infos.join("-")
-}
-
 async fn status_handler() -> Result<axum::extract::Json<serde_json::Value>, HttpError> {
     Ok(axum::extract::Json(serde_json::json!({
-        "node_version": build_version()
+        "node_version": crate::util::build_version()
     })))
 }
 

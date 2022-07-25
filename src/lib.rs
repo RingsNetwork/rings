@@ -149,3 +149,4 @@ pub mod prelude;
 pub mod processor;
 #[cfg(feature = "client")]
 pub mod service;
+pub mod util;

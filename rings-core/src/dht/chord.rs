@@ -123,7 +123,7 @@ impl PeerRing {
     /// Create a new Chord Ring with given successor_max, and finger_size
     pub async fn new_with_config(id: Did, succ_max: u8) -> Result<Self> {
         Ok(Self {
-            successor: Arc::new(Mutex::new(Successor::new(&id, succ_max))),
+            successor: Arc::new(Mutex::new(Successor::new(id, succ_max))),
             predecessor: Arc::new(Mutex::new(None)),
             // for Eth address, it's 160
             finger: Arc::new(Mutex::new(FingerTable::new(id, 160))),
@@ -136,7 +136,7 @@ impl PeerRing {
     /// Init with given Storage
     pub fn new_with_storage(id: Did, storage: Arc<PersistenceStorage>) -> Self {
         Self {
-            successor: Arc::new(Mutex::new(Successor::new(&id, 3))),
+            successor: Arc::new(Mutex::new(Successor::new(id, 3))),
             predecessor: Arc::new(Mutex::new(None)),
             // for Eth address, it's 160
             finger: Arc::new(Mutex::new(FingerTable::new(id, 160))),
@@ -168,7 +168,7 @@ impl PeerRing {
     }
 
     /// remove a node from dht finger table
-    /// remote a node from dht successor table
+    /// remove a node from dht successor table
     /// if suuccessor is empty, set it to the cloest node
     pub fn remove(&self, id: Did) -> Result<()> {
         let mut finger = self.lock_finger()?;

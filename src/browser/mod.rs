@@ -619,3 +619,33 @@ impl TryFrom<&TransportAndIce> for JsValue {
         JsValue::from_serde(value).map_err(JsError::from)
     }
 }
+
+#[wasm_bindgen]
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+/// Internal Info struct
+pub struct InternalInfo {
+    build_version: String,
+}
+
+#[wasm_bindgen]
+impl InternalInfo {
+    /// Get InternalInfo
+    fn build() -> Self {
+        Self {
+            build_version: crate::util::build_version(),
+        }
+    }
+
+    /// build_version getter
+    #[wasm_bindgen(getter)]
+    pub fn build_version(&self) -> String {
+        self.build_version.clone()
+    }
+}
+
+/// Build InternalInfo
+#[wasm_bindgen]
+pub fn internal_info() -> InternalInfo {
+    InternalInfo::build()
+}
