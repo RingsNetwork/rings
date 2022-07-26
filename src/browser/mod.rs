@@ -61,6 +61,12 @@ pub fn debug(value: bool) {
     }
 }
 
+/// set log_level
+#[wasm_bindgen]
+pub fn log_level(level: &str) {
+    console_log::init_with_level(log::Level::from_str(level).unwrap()).ok();
+}
+
 #[wasm_bindgen]
 pub enum SignerMode {
     DEFAULT,

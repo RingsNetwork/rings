@@ -95,7 +95,10 @@ impl Swarm {
         &self.session_manager
     }
 
-    fn load_message(&self, ev: Result<Option<Event>>) -> Result<Option<MessagePayload<Message>>> {
+    async fn load_message(
+        &self,
+        ev: Result<Option<Event>>,
+    ) -> Result<Option<MessagePayload<Message>>> {
         let ev = ev?;
 
         match ev {
@@ -103,28 +106,45 @@ impl Swarm {
                 let payload = MessagePayload::from_encoded(&msg.try_into()?)?;
                 Ok(Some(payload))
             }
-            Some(Event::RegisterTransport(address)) => match self.get_transport(&address) {
-                Some(_) => {
-                    let payload = MessagePayload::new_direct(
-                        Message::JoinDHT(message::JoinDHT { id: address.into() }),
-                        &self.session_manager,
-                        self.address().into(),
-                    )?;
-                    Ok(Some(payload))
+            Some(Event::RegisterTransport((address, id))) => {
+                // if transport is still pending
+                if let Ok(Some(t)) = self.find_pending_transport(id) {
+                    log::debug!("transport is inside pending list, mov to swarm table");
+                    self.register(&address, t).await?;
+                    self.pop_pending_transport(id)?;
                 }
-                None => Err(Error::SwarmMissTransport(address)),
-            },
-            Some(Event::ConnectClosed(address)) => {
-                if self.remove_transport(&address).is_some() {
-                    let payload = MessagePayload::new_direct(
-                        Message::LeaveDHT(message::LeaveDHT { id: address.into() }),
-                        &self.session_manager,
-                        self.address().into(),
-                    )?;
-                    Ok(Some(payload))
-                } else {
-                    Ok(None)
+                match self.get_transport(&address) {
+                    Some(_) => {
+                        let payload = MessagePayload::new_direct(
+                            Message::JoinDHT(message::JoinDHT { id: address.into() }),
+                            &self.session_manager,
+                            self.address().into(),
+                        )?;
+                        Ok(Some(payload))
+                    }
+                    None => Err(Error::SwarmMissTransport(address)),
                 }
+            }
+            Some(Event::ConnectClosed((address, uuid))) => {
+                if self.pop_pending_transport(uuid).is_ok() {
+                    log::info!(
+                        "[Swarm::ConnectClosed] Pending transport {:?} dropped",
+                        uuid
+                    );
+                };
+
+                if let Some(t) = self.get_transport(&address) {
+                    if t.id == uuid && self.remove_transport(&address).is_some() {
+                        log::info!("[Swarm::ConnectClosed] transport {:?} closed", uuid);
+                        let payload = MessagePayload::new_direct(
+                            Message::LeaveDHT(message::LeaveDHT { id: address.into() }),
+                            &self.session_manager,
+                            self.address().into(),
+                        )?;
+                        return Ok(Some(payload));
+                    }
+                }
+                Ok(None)
             }
             None => Ok(None),
         }
@@ -135,20 +155,22 @@ impl Swarm {
     pub async fn poll_message(&self) -> Option<MessagePayload<Message>> {
         let receiver = &self.transport_event_channel.receiver();
         let ev = Channel::recv(receiver).await;
-        match self.load_message(ev) {
+        match self.load_message(ev).await {
             Ok(Some(msg)) => Some(msg),
             Ok(None) => None,
             Err(_) => None,
         }
     }
 
-    pub fn iter_messages<'a, 'b>(&'a self) -> impl Stream<Item = MessagePayload<Message>> + 'b
+    pub async fn iter_messages<'a, 'b>(
+        &'a self,
+    ) -> impl Stream<Item = MessagePayload<Message>> + 'b
     where 'a: 'b {
         stream! {
             let receiver = &self.transport_event_channel.receiver();
             loop {
                 let ev = Channel::recv(receiver).await;
-                if let Ok(Some(msg)) = self.load_message(ev) {
+                if let Ok(Some(msg)) = self.load_message(ev).await {
                     yield msg
                 }
             }
@@ -211,31 +233,48 @@ impl TransportManager for Swarm {
         Ok(Arc::new(ice_transport))
     }
 
-    /// register to swarm table
-    /// should not wait connection statues here
-    /// a connection `Promise` may cause deadlock of both end
+    // register to swarm table
+    // should not wait connection statues here
+    // a connection `Promise` may cause deadlock of both end
     async fn register(&self, address: &Address, trans: Self::Transport) -> Result<()> {
-        let prev_transport = self.table.set(address, trans);
-        if let Some(transport) = prev_transport {
-            if let Err(e) = transport.close().await {
-                log::error!("failed to close previous while registering {:?}", e);
-                return Err(Error::SwarmToClosePrevTransport(format!("{:?}", e)));
-            }
+        if trans.is_disconnected().await {
+            return Err(Error::InvalidTransport);
         }
 
+        log::info!("register transport {:?}", trans.id.clone());
+        let id = trans.id;
+        if let Some(t) = self.table.get(address) {
+            if t.is_connected().await && !trans.is_connected().await {
+                return Err(Error::InvalidTransport);
+            }
+            if t.id != id {
+                self.table.set(address, trans);
+                if let Err(e) = t.close().await {
+                    log::error!("failed to close previous while registering {:?}", e);
+                    return Err(Error::SwarmToClosePrevTransport(format!("{:?}", e)));
+                }
+                log::debug!("replace and closed previous connection! {:?}", t.id);
+            }
+        } else {
+            self.table.set(address, trans);
+        }
         Ok(())
     }
 
     async fn get_and_check_transport(&self, address: &Address) -> Option<Self::Transport> {
         match self.get_transport(address) {
             Some(t) => {
-                if t.is_connected().await {
-                    Some(t)
-                } else {
+                if t.is_disconnected().await {
+                    log::debug!(
+                        "[get_and_check_transport] transport {:?} is not connected will be drop",
+                        t.id
+                    );
                     if t.close().await.is_err() {
                         log::error!("Failed on close transport");
                     };
                     None
+                } else {
+                    Some(t)
                 }
             }
             None => None,
@@ -289,15 +328,16 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Deb
             println!("node {:?}", payload.relay.next_hop);
             println!("+++++++++++++++++++++++++++++++++");
         }
-        log::trace!(
-            "SENT {:?}, to node {:?}",
-            payload.clone(),
-            payload.relay.next_hop
-        );
         let transport = self
             .get_and_check_transport(address)
             .await
-            .ok_or(Error::SwarmMissAddressInTable)?;
+            .ok_or(Error::SwarmMissAddressInTable(*address))?;
+        log::trace!(
+            "SENT {:?}, to node {:?} via transport {:?}",
+            payload.clone(),
+            payload.relay.next_hop,
+            transport.id
+        );
         let data: Vec<u8> = payload.encode()?.into();
         transport.wait_for_data_channel_open().await?;
         transport.send_message(data.as_slice()).await

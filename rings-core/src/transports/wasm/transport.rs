@@ -139,6 +139,15 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
             .unwrap_or(false)
     }
 
+    async fn is_disconnected(&self) -> bool {
+        matches!(
+            self.ice_connection_state().await,
+            Some(Self::IceConnectionState::Failed)
+                | Some(Self::IceConnectionState::Disconnected)
+                | Some(Self::IceConnectionState::Closed)
+        )
+    }
+
     async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>> {
         self.connection.as_ref().map(Arc::clone)
     }
@@ -331,11 +340,14 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
     async fn on_ice_connection_state_change(&self) -> Self::OnIceConnectionStateChangeHdlrFn {
         let event_sender = self.event_sender.clone();
         let peer_connection = self.get_peer_connection().await;
+        let id = self.id;
         let public_key = Arc::clone(&self.public_key);
         box move |ev: web_sys::Event| {
             let mut peer_connection = peer_connection.clone();
             let event_sender = Arc::clone(&event_sender);
             let public_key = Arc::clone(&public_key);
+            let id = id;
+
             // log::debug!("got state event {:?}", ev.type_());
             if ev.type_() == *"iceconnectionstatechange" {
                 let peer_connection = peer_connection.take().unwrap();
@@ -353,7 +365,7 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
                                 (*public_key.read().unwrap()).unwrap().address();
                             if CbChannel::send(
                                 &event_sender,
-                                Event::RegisterTransport(local_address),
+                                Event::RegisterTransport((local_address, id)),
                             )
                             .await
                             .is_err()
@@ -363,13 +375,15 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
                         }
                         Self::IceConnectionState::Failed
                         | Self::IceConnectionState::Disconnected
-                        | Self::IceConnectionState::Closed
-                        | Self::IceConnectionState::Completed => {
+                        | Self::IceConnectionState::Closed => {
                             let local_address: Address =
                                 (*public_key.read().unwrap()).unwrap().address();
-                            if CbChannel::send(&event_sender, Event::ConnectClosed(local_address))
-                                .await
-                                .is_err()
+                            if CbChannel::send(
+                                &event_sender,
+                                Event::ConnectClosed((local_address, id)),
+                            )
+                            .await
+                            .is_err()
                             {
                                 log::error!("Failed when send ConnectFailed");
                             }

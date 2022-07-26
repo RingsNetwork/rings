@@ -173,6 +173,12 @@ impl PeerRing {
     pub fn remove(&self, id: Did) -> Result<()> {
         let mut finger = self.lock_finger()?;
         let mut successor = self.lock_successor()?;
+        let mut predecessor = self.lock_predecessor()?;
+        if let Some(pid) = *predecessor {
+            if pid == id {
+                *predecessor = None;
+            }
+        }
         finger.remove(id);
         successor.remove(id);
         if successor.is_none() {
