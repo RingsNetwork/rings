@@ -213,7 +213,7 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
         }
 
         match msg.then {
-            FindSuccessorThen::FixFingerTable => self.dht.lock_finger()?.set_fix(&msg.id),
+            FindSuccessorThen::FixFingerTable => self.dht.lock_finger()?.set_fix(msg.id),
             FindSuccessorThen::Connect => {
                 if self.swarm.get_and_check_transport(&msg.id).await.is_none()
                     && msg.id != self.swarm.address().into()
