@@ -162,8 +162,13 @@ impl FingerTable {
     }
 
     #[cfg(test)]
-    fn reset_finger(&mut self) {
+    pub fn reset_finger(&mut self) {
         self.finger = vec![None; self.size]
+    }
+
+    #[cfg(test)]
+    pub fn clone_finger(self) -> Vec<Option<Did>> {
+        self.finger
     }
 }
 
