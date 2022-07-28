@@ -52,11 +52,6 @@ pub trait TransportManager {
     async fn get_and_check_transport(&self, address: &Address) -> Option<Self::Transport>;
     async fn new_transport(&self) -> Result<Self::Transport>;
     async fn register(&self, address: &Address, trans: Self::Transport) -> Result<()>;
-    async fn get_or_register(
-        &self,
-        address: &Address,
-        default: Self::Transport,
-    ) -> Result<Self::Transport>;
 }
 
 impl Swarm {
@@ -299,14 +294,6 @@ impl TransportManager for Swarm {
 
     fn get_transports(&self) -> Vec<(Address, Self::Transport)> {
         self.table.items()
-    }
-
-    async fn get_or_register(
-        &self,
-        address: &Address,
-        default: Self::Transport,
-    ) -> Result<Self::Transport> {
-        Ok(self.table.get_or_set(address, default))
     }
 }
 
