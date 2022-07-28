@@ -71,7 +71,7 @@ impl HandleMsg<JoinDHT> for MessageHandler {
 impl HandleMsg<ConnectNodeSend> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload<Message>, msg: &ConnectNodeSend) -> Result<()> {
         let mut relay = ctx.relay.clone();
-
+        // if id is not dest
         if self.dht.id != relay.destination {
             if self
                 .swarm
@@ -91,41 +91,40 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
                 relay.relay(self.dht.id, Some(next_node))?;
                 return self.transpond_payload(ctx, relay).await;
             }
-        }
-
-        relay.relay(self.dht.id, None)?;
-        match self.swarm.get_and_check_transport(&relay.sender()).await {
-            None => {
-                let trans = self.swarm.new_transport().await?;
-                let sender_id = relay.sender();
-                trans
-                    .register_remote_info(msg.handshake_info.to_owned().into())
+        } else {
+            // self is dest
+            relay.relay(self.dht.id, None)?;
+            match self.swarm.get_and_check_transport(&relay.sender()).await {
+                None => {
+                    let trans = self.swarm.new_transport().await?;
+                    trans
+                        .register_remote_info(msg.handshake_info.to_owned().into())
+                        .await?;
+                    let handshake_info = trans
+                        .get_handshake_info(self.swarm.session_manager(), RTCSdpType::Answer)
+                        .await?
+                        .to_string();
+                    self.send_report_message(
+                        Message::ConnectNodeReport(ConnectNodeReport {
+                            transport_uuid: msg.transport_uuid.clone(),
+                            handshake_info,
+                        }),
+                        ctx.tx_id,
+                        relay,
+                    )
                     .await?;
-                let handshake_info = trans
-                    .get_handshake_info(self.swarm.session_manager(), RTCSdpType::Answer)
-                    .await?
-                    .to_string();
-                self.send_report_message(
-                    Message::ConnectNodeReport(ConnectNodeReport {
-                        transport_uuid: msg.transport_uuid.clone(),
-                        handshake_info,
-                    }),
-                    ctx.tx_id,
-                    relay,
-                )
-                .await?;
-                self.swarm.get_or_register(&sender_id, trans).await?;
+                    self.swarm.push_pending_transport(&trans)?;
+                    Ok(())
+                }
 
-                Ok(())
-            }
-
-            _ => {
-                self.send_report_message(
-                    Message::AlreadyConnected(AlreadyConnected),
-                    ctx.tx_id,
-                    relay,
-                )
-                .await
+                _ => {
+                    self.send_report_message(
+                        Message::AlreadyConnected(AlreadyConnected),
+                        ctx.tx_id,
+                        relay,
+                    )
+                    .await
+                }
             }
         }
     }

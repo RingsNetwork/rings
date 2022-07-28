@@ -90,7 +90,7 @@ impl Stabilization {
         }
     }
 
-    pub async fn stabilize(&self) ->  Result<()> {
+    pub async fn stabilize(&self) -> Result<()> {
         if let Err(e) = self.notify_predecessor().await {
             log::error!("[stabilize] Failed on notify predecessor {:?}", e);
         }
