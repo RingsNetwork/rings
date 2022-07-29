@@ -91,8 +91,12 @@ impl Stabilization {
     }
 
     pub async fn stabilize(&self) -> Result<()> {
-        self.notify_predecessor().await?;
-        self.fix_fingers().await?;
+        if let Err(e) = self.notify_predecessor().await {
+            log::error!("[stabilize] Failed on notify predecessor {:?}", e);
+        }
+        if let Err(e) = self.fix_fingers().await {
+            log::error!("[stabilize] Failed on fix_finger {:?}", e);
+        }
         Ok(())
     }
 }
