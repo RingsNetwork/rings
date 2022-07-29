@@ -88,10 +88,10 @@ mod test {
     use crate::ecc::tests::gen_ordered_keys;
     use crate::ecc::SecretKey;
     use crate::message::handlers::connection::tests::assert_no_more_msg;
-    use crate::message::handlers::connection::tests::manually_establish_connection;
-    use crate::message::handlers::connection::tests::prepare_node;
     use crate::message::handlers::connection::tests::test_listen_join_and_init_find_succeesor;
     use crate::message::handlers::connection::tests::test_only_two_nodes_establish_connection;
+    use crate::message::handlers::tests::manually_establish_connection;
+    use crate::message::handlers::tests::prepare_node;
     use crate::swarm::Swarm;
 
     #[tokio::test]

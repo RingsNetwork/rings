@@ -21,6 +21,7 @@ use crate::prelude::Transport;
 use crate::session::SessionManager;
 use crate::swarm::Swarm;
 use crate::swarm::TransportManager;
+use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTrickleScheme;
 
 /// Operator and Handler for Connection
@@ -91,7 +92,9 @@ impl MessageHandler {
     pub async fn disconnect(&self, address: Address) -> Result<()> {
         log::info!("disconnect {:?}", address);
         self.dht.remove(address.into())?;
-        self.swarm.remove_transport(&address);
+        if let Some((_address, trans)) = self.swarm.remove_transport(&address) {
+            trans.close().await?
+        }
         Ok(())
     }
 
@@ -286,7 +289,7 @@ mod listener {
 
 #[cfg(not(feature = "wasm"))]
 #[cfg(test)]
-pub mod test {
+pub mod tests {
     use std::sync::Arc;
 
     use futures::lock::Mutex;
@@ -306,72 +309,72 @@ pub mod test {
     use crate::types::ice_transport::IceTrickleScheme;
     use crate::types::message::MessageListener;
 
-    pub async fn create_connected_pair(
-        key1: SecretKey,
-        key2: SecretKey,
-    ) -> Result<(MessageHandler, MessageHandler)> {
+    pub async fn prepare_node(
+        key: &SecretKey,
+    ) -> (Did, Arc<PeerRing>, Arc<Swarm>, MessageHandler, String) {
         let stun = "stun://stun.l.google.com:19302";
 
-        let path1 = PersistenceStorage::random_path("./tmp");
-        let path2 = PersistenceStorage::random_path("./tmp");
-        let dht1 = PeerRing::new_with_storage(
-            key1.address().into(),
+        let did = key.address().into();
+        let path = PersistenceStorage::random_path("./tmp");
+        let dht = Arc::new(PeerRing::new_with_storage(
+            did,
             Arc::new(
-                PersistenceStorage::new_with_path(path1.as_str())
+                PersistenceStorage::new_with_path(path.as_str())
                     .await
                     .unwrap(),
             ),
-        );
-        let dht2 = PeerRing::new_with_storage(
-            key2.address().into(),
-            Arc::new(
-                PersistenceStorage::new_with_path(path2.as_str())
-                    .await
-                    .unwrap(),
-            ),
-        );
+        ));
+        let sm = SessionManager::new_with_seckey(key).unwrap();
+        let swarm = Arc::new(Swarm::new(stun, key.address(), sm));
+        let node = MessageHandler::new(dht.clone(), Arc::clone(&swarm));
 
-        let sm1 = SessionManager::new_with_seckey(&key1).unwrap();
-        let sm2 = SessionManager::new_with_seckey(&key2).unwrap();
+        println!("key: {:?}", key.to_string());
+        println!("did: {:?}", did);
 
-        let swarm1 = Arc::new(Swarm::new(stun, key1.address(), sm1.clone()));
-        let swarm2 = Arc::new(Swarm::new(stun, key2.address(), sm2.clone()));
+        (did, dht, swarm, node, path)
+    }
+
+    pub async fn manually_establish_connection(swarm1: &Swarm, swarm2: &Swarm) -> Result<()> {
+        let sm1 = swarm1.session_manager();
+        let sm2 = swarm2.session_manager();
 
         let transport1 = swarm1.new_transport().await.unwrap();
-        let transport2 = swarm2.new_transport().await.unwrap();
-        let handler1 = MessageHandler::new(Arc::new(dht1), Arc::clone(&swarm1));
-        let handler2 = MessageHandler::new(Arc::new(dht2), Arc::clone(&swarm2));
         let handshake_info1 = transport1
-            .get_handshake_info(&sm1, RTCSdpType::Offer)
+            .get_handshake_info(sm1, RTCSdpType::Offer)
             .await?;
 
+        let transport2 = swarm2.new_transport().await.unwrap();
         let addr1 = transport2.register_remote_info(handshake_info1).await?;
 
+        assert_eq!(addr1, swarm1.address());
+
         let handshake_info2 = transport2
-            .get_handshake_info(&sm2, RTCSdpType::Answer)
+            .get_handshake_info(sm2, RTCSdpType::Answer)
             .await?;
 
         let addr2 = transport1.register_remote_info(handshake_info2).await?;
 
-        assert_eq!(addr1, key1.address());
-        assert_eq!(addr2, key2.address());
+        assert_eq!(addr2, swarm2.address());
+
         let promise_1 = transport1.connect_success_promise().await?;
         let promise_2 = transport2.connect_success_promise().await?;
         promise_1.await?;
         promise_2.await?;
 
-        swarm1
-            .register(&swarm2.address(), transport1.clone())
-            .await
-            .unwrap();
         swarm2
             .register(&swarm1.address(), transport2.clone())
             .await
             .unwrap();
-        assert!(handler1.listen_once().await.is_some());
-        assert!(handler2.listen_once().await.is_some());
-        tokio::fs::remove_dir_all("./tmp").await.ok();
-        Ok((handler1, handler2))
+
+        swarm1
+            .register(&swarm2.address(), transport1.clone())
+            .await
+            .unwrap();
+
+        assert!(swarm1.get_transport(&swarm2.address()).is_some());
+        assert!(swarm2.get_transport(&swarm1.address()).is_some());
+
+        Ok(())
     }
 
     #[derive(Clone)]
@@ -384,16 +387,11 @@ pub mod test {
     async fn test_custom_message_handling() -> Result<()> {
         let key1 = SecretKey::random();
         let key2 = SecretKey::random();
-        let addr1 = key1.address();
-        let addr2 = key2.address();
 
-        let (handler1, handler2) = create_connected_pair(key1, key2).await.unwrap();
+        let (did1, _dht1, swarm1, handler1, _path1) = prepare_node(&key1).await;
+        let (did2, _dht2, swarm2, handler2, _path2) = prepare_node(&key2).await;
 
-        println!(
-            "test with key1:{:?}, key2:{:?}",
-            key1.address(),
-            key2.address()
-        );
+        manually_establish_connection(&swarm1, &swarm2).await?;
 
         #[async_trait]
         impl MessageCallback for MessageCallbackInstance {
@@ -435,7 +433,7 @@ pub mod test {
         handler1
             .send_direct_message(
                 Message::custom("Hello world 1 to 2 - 1".as_bytes(), &None)?,
-                addr2.into(),
+                did2,
             )
             .await
             .unwrap();
@@ -443,7 +441,7 @@ pub mod test {
         handler1
             .send_direct_message(
                 Message::custom("Hello world 1 to 2 - 2".as_bytes(), &None)?,
-                addr2.into(),
+                did2,
             )
             .await
             .unwrap();
@@ -451,7 +449,7 @@ pub mod test {
         handler2
             .send_direct_message(
                 Message::custom("Hello world 2 to 1 - 1".as_bytes(), &None)?,
-                addr1.into(),
+                did1,
             )
             .await
             .unwrap();
@@ -459,7 +457,7 @@ pub mod test {
         handler1
             .send_direct_message(
                 Message::custom("Hello world 1 to 2 - 3".as_bytes(), &None)?,
-                addr2.into(),
+                did2,
             )
             .await
             .unwrap();
@@ -467,7 +465,7 @@ pub mod test {
         handler2
             .send_direct_message(
                 Message::custom("Hello world 2 to 1 - 2".as_bytes(), &None)?,
-                addr1.into(),
+                did1,
             )
             .await
             .unwrap();
@@ -478,14 +476,14 @@ pub mod test {
         sleep(Duration::from_secs(5)).await;
 
         assert_eq!(msg_callback1.handler_messages.lock().await.as_slice(), &[
-            (addr2.into(), "Hello world 2 to 1 - 1".as_bytes().to_vec()),
-            (addr2.into(), "Hello world 2 to 1 - 2".as_bytes().to_vec())
+            (did2, "Hello world 2 to 1 - 1".as_bytes().to_vec()),
+            (did2, "Hello world 2 to 1 - 2".as_bytes().to_vec())
         ]);
 
         assert_eq!(msg_callback2.handler_messages.lock().await.as_slice(), &[
-            (addr1.into(), "Hello world 1 to 2 - 1".as_bytes().to_vec()),
-            (addr1.into(), "Hello world 1 to 2 - 2".as_bytes().to_vec()),
-            (addr1.into(), "Hello world 1 to 2 - 3".as_bytes().to_vec())
+            (did1, "Hello world 1 to 2 - 1".as_bytes().to_vec()),
+            (did1, "Hello world 1 to 2 - 2".as_bytes().to_vec()),
+            (did1, "Hello world 1 to 2 - 3".as_bytes().to_vec())
         ]);
 
         Ok(())

@@ -63,14 +63,11 @@ impl Successor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ecc::tests::gen_ordered_keys;
+    use crate::dht::tests::gen_ordered_dids;
 
     #[test]
     fn test_successor_update() {
-        let dids: Vec<Did> = gen_ordered_keys(6)
-            .iter()
-            .map(|x| x.address().into())
-            .collect();
+        let dids = gen_ordered_dids(6);
 
         let mut succ = Successor::new(dids[0], 3);
         assert!(succ.is_none());
@@ -93,10 +90,7 @@ mod tests {
 
     #[test]
     fn test_successor_remove() {
-        let dids: Vec<Did> = gen_ordered_keys(4)
-            .iter()
-            .map(|x| x.address().into())
-            .collect();
+        let dids = gen_ordered_dids(4);
 
         let mut succ = Successor::new(dids[0], 3);
         assert!(succ.is_none());

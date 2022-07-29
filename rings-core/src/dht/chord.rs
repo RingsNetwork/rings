@@ -296,7 +296,7 @@ impl ChordStabilize<PeerRingAction> for PeerRing {
                 PeerRingAction::Some(v) => {
                     let mut finger = self.lock_finger()?;
                     finger.fix_finger_index = fix_finger_index;
-                    finger.set_fix(&v);
+                    finger.set_fix(v);
                     Ok(PeerRingAction::None)
                 }
                 PeerRingAction::RemoteAction(a, RemoteAction::FindSuccessor(b)) => {

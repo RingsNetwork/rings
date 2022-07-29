@@ -24,3 +24,16 @@ pub use stabilization::TStabilize;
 pub mod subring;
 /// VNode is a special node that only has virtual address
 pub mod vnode;
+
+#[cfg(test)]
+pub mod tests {
+    use super::*;
+    use crate::ecc::tests::gen_ordered_keys;
+
+    pub fn gen_ordered_dids(n: usize) -> Vec<Did> {
+        gen_ordered_keys(n)
+            .iter()
+            .map(|x| x.address().into())
+            .collect()
+    }
+}

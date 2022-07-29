@@ -212,7 +212,7 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
         }
 
         match msg.then {
-            FindSuccessorThen::FixFingerTable => self.dht.lock_finger()?.set_fix(&msg.id),
+            FindSuccessorThen::FixFingerTable => self.dht.lock_finger()?.set_fix(msg.id),
             FindSuccessorThen::Connect => {
                 if self.swarm.get_and_check_transport(&msg.id).await.is_none()
                     && msg.id != self.swarm.address().into()
@@ -252,17 +252,15 @@ pub mod tests {
     use web3::types::Address;
 
     use super::*;
-    use crate::dht::Did;
     use crate::dht::PeerRing;
     use crate::ecc::tests::gen_ordered_keys;
     use crate::ecc::SecretKey;
+    use crate::message::handlers::tests::manually_establish_connection;
+    use crate::message::handlers::tests::prepare_node;
     use crate::message::MessageHandler;
-    use crate::prelude::RTCSdpType;
-    use crate::session::SessionManager;
-    use crate::storage::PersistenceStorage;
     use crate::swarm::Swarm;
     use crate::swarm::TransportManager;
-    use crate::types::ice_transport::IceTrickleScheme;
+    use crate::types::ice_transport::IceTransport;
 
     // ndoe1.key < node2.key < node3.key
     //
@@ -679,74 +677,6 @@ pub mod tests {
         Ok((node1, node2, node3))
     }
 
-    pub async fn prepare_node(
-        key: &SecretKey,
-    ) -> (Did, Arc<PeerRing>, Arc<Swarm>, MessageHandler, String) {
-        let stun = "stun://stun.l.google.com:19302";
-
-        let did = key.address().into();
-        let path = PersistenceStorage::random_path("./tmp");
-        let dht = Arc::new(PeerRing::new_with_storage(
-            did,
-            Arc::new(
-                PersistenceStorage::new_with_path(path.as_str())
-                    .await
-                    .unwrap(),
-            ),
-        ));
-        let sm = SessionManager::new_with_seckey(key).unwrap();
-        let swarm = Arc::new(Swarm::new(stun, key.address(), sm));
-        let node = MessageHandler::new(dht.clone(), Arc::clone(&swarm));
-
-        println!("key: {:?}", key.to_string());
-        println!("did: {:?}", did);
-
-        (did, dht, swarm, node, path)
-    }
-
-    pub async fn manually_establish_connection(swarm1: &Swarm, swarm2: &Swarm) -> Result<()> {
-        let sm1 = swarm1.session_manager();
-        let sm2 = swarm2.session_manager();
-
-        let transport1 = swarm1.new_transport().await.unwrap();
-        let handshake_info1 = transport1
-            .get_handshake_info(sm1, RTCSdpType::Offer)
-            .await?;
-
-        let transport2 = swarm2.new_transport().await.unwrap();
-        let addr1 = transport2.register_remote_info(handshake_info1).await?;
-
-        assert_eq!(addr1, swarm1.address());
-
-        let handshake_info2 = transport2
-            .get_handshake_info(sm2, RTCSdpType::Answer)
-            .await?;
-
-        let addr2 = transport1.register_remote_info(handshake_info2).await?;
-
-        assert_eq!(addr2, swarm2.address());
-
-        let promise_1 = transport1.connect_success_promise().await?;
-        let promise_2 = transport2.connect_success_promise().await?;
-        promise_1.await?;
-        promise_2.await?;
-
-        swarm2
-            .register(&swarm1.address(), transport2.clone())
-            .await
-            .unwrap();
-
-        swarm1
-            .register(&swarm2.address(), transport1.clone())
-            .await
-            .unwrap();
-
-        assert!(swarm1.get_transport(&swarm2.address()).is_some());
-        assert!(swarm2.get_transport(&swarm1.address()).is_some());
-
-        Ok(())
-    }
-
     pub async fn test_listen_join_and_init_find_succeesor(
         (key1, node1): (&SecretKey, &MessageHandler),
         (key2, node2): (&SecretKey, &MessageHandler),
@@ -982,6 +912,81 @@ pub mod tests {
             Message::ConnectNodeReport(_)
         ));
         println!("=================Finish handshake here=================");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_finger_when_disconnect() -> Result<()> {
+        let key1 = SecretKey::random();
+        let key2 = SecretKey::random();
+        let key3 = SecretKey::random();
+
+        let (did1, dht1, swarm1, node1, _path1) = prepare_node(&key1).await;
+        let (did2, dht2, swarm2, node2, _path2) = prepare_node(&key2).await;
+
+        // This is only a dummy node for using assert_no_more_msg function
+        let (_did3, _dht3, _swarm3, node3, _path3) = prepare_node(&key3).await;
+
+        {
+            assert!(dht1.lock_finger()?.is_empty());
+            assert!(dht1.lock_finger()?.is_empty());
+        }
+
+        test_only_two_nodes_establish_connection(
+            (&key1, dht1.clone(), &swarm1, &node1),
+            (&key2, dht2.clone(), &swarm2, &node2),
+        )
+        .await?;
+        assert_no_more_msg(&node1, &node2, &node3).await;
+
+        assert_transports(swarm1.clone(), vec![key2.address()]);
+        assert_transports(swarm2.clone(), vec![key1.address()]);
+        {
+            let finger1 = dht1.lock_finger()?.clone().clone_finger();
+            let finger2 = dht2.lock_finger()?.clone().clone_finger();
+
+            assert!(finger1.into_iter().any(|x| x == Some(did2)));
+            assert!(finger2.into_iter().any(|x| x == Some(did1)));
+        }
+
+        println!("===================================");
+        println!("| test disconnect node1 and node2 |");
+        println!("===================================");
+        node1.disconnect(did2.into()).await?;
+
+        // The transport is already dropped by disconnect function.
+        // So that we get no msg from this listening.
+        let ev1 = node1.listen_once().await;
+        assert!(ev1.is_none());
+
+        for _ in 1..10 {
+            println!("wait 3 seconds for node2's transport 2to1 closing");
+            sleep(Duration::from_secs(3)).await;
+            if let Some(t) = swarm2.get_transport(&did1.into()) {
+                if t.is_disconnected().await {
+                    println!("transport 2to1 is disconnected!!!!");
+                    break;
+                }
+            } else {
+                println!("transport 2to1 is disappeared!!!!");
+                break;
+            }
+        }
+        let ev2 = node2.listen_once().await.unwrap();
+        assert_eq!(ev2.addr, key2.address());
+        assert!(matches!(ev2.data, Message::LeaveDHT(LeaveDHT{id}) if id == did1));
+
+        assert_no_more_msg(&node1, &node2, &node3).await;
+
+        assert_transports(swarm1.clone(), vec![]);
+        assert_transports(swarm2.clone(), vec![]);
+        {
+            let finger1 = dht1.lock_finger()?.clone().clone_finger();
+            let finger2 = dht2.lock_finger()?.clone().clone_finger();
+            assert!(finger1.into_iter().all(|x| x.is_none()));
+            assert!(finger2.into_iter().all(|x| x.is_none()));
+        }
+
         Ok(())
     }
 }
