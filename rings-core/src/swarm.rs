@@ -105,6 +105,7 @@ impl Swarm {
                 // if transport is still pending
                 if let Ok(Some(t)) = self.find_pending_transport(id) {
                     log::debug!("transport is inside pending list, mov to swarm table");
+
                     self.register(&address, t).await?;
                     self.pop_pending_transport(id)?;
                 }
@@ -237,6 +238,10 @@ impl TransportManager for Swarm {
         }
 
         log::info!("register transport {:?}", trans.id.clone());
+        #[cfg(test)]
+        {
+            println!("register transport {:?}", trans.id.clone());
+        }
         let id = trans.id;
         if let Some(t) = self.table.get(address) {
             if t.is_connected().await && !trans.is_connected().await {
