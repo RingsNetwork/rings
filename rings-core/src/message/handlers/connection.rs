@@ -1035,20 +1035,13 @@ pub mod tests {
         // transport got from node3 for node
         // JoinDHT twice here
         let ev3 = node3.listen_once().await.unwrap();
-        assert!(matches!(
-            ev3.data,
-            Message::JoinDHT(_)
-        ));
+        assert!(matches!(ev3.data, Message::JoinDHT(_)));
         let _ = node3.listen_once().await.is_none();
 
         // JoinDHT twice here
         let ev1 = node1.listen_once().await.unwrap();
-        assert!(matches!(
-            ev1.data,
-            Message::JoinDHT(_)
-        ));
+        assert!(matches!(ev1.data, Message::JoinDHT(_)));
         let _ = node1.listen_once().await.is_none();
-
 
         let t1_3 = swarm1.get_transport(&did3).unwrap();
         println!("transport is replace by second");
