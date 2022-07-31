@@ -150,7 +150,7 @@ impl HandleMsg<ConnectNodeReport> for MessageHandler {
             transport
                 .register_remote_info(msg.handshake_info.clone().into())
                 .await?;
-            self.swarm.register(&relay.sender(), transport).await
+            Ok(())
         }
     }
 }
@@ -797,7 +797,7 @@ pub mod tests {
         assert_eq!(ev1.relay.path, vec![did1, did2, did3]);
         assert!(matches!(ev1.data, Message::ConnectNodeReport(_)));
 
-        assert!(swarm1.get_transport(&key3.address()).is_some());
+        //        assert!(swarm1.get_transport(&key3.address()).is_some());
 
         // The following are communications after successful connection
 
@@ -987,6 +987,69 @@ pub mod tests {
             assert!(finger2.into_iter().all(|x| x.is_none()));
         }
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_already_connect_fixture() -> Result<()> {
+        // NodeA-NodeB-NodeC
+        let keys = gen_ordered_keys(3);
+        let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
+        let (did1, dht1, swarm1, node1, _path1) = prepare_node(&key1).await;
+        let (_did2, dht2, swarm2, node2, _path2) = prepare_node(&key2).await;
+        let (did3, dht3, swarm3, node3, _path3) = prepare_node(&key3).await;
+        test_only_two_nodes_establish_connection(
+            (&key1, dht1.clone(), &swarm1, &node1),
+            (&key2, dht2.clone(), &swarm2, &node2),
+        )
+        .await?;
+        assert_no_more_msg(&node1, &node2, &node3).await;
+
+        test_only_two_nodes_establish_connection(
+            (&key3, dht3.clone(), &swarm3, &node3),
+            (&key2, dht2.clone(), &swarm2, &node2),
+        )
+        .await?;
+        assert_no_more_msg(&node1, &node2, &node3).await;
+        // Node 1 -- Node 2 -- Node 3
+        println!("node1 connect node2 twice here");
+        let _ = node1.connect(&did3).await.unwrap();
+        let t_1_3_b = node1.connect(&did3).await.unwrap();
+        // ConnectNodeSend
+        let _ = node2.listen_once().await.unwrap();
+        let _ = node2.listen_once().await.unwrap();
+        // ConnectNodeSend
+        let _ = node3.listen_once().await.unwrap();
+        let _ = node3.listen_once().await.unwrap();
+        // ConnectNodeReport
+        // `self.swarm.push_pending_transport(&trans)?;`
+        let _ = node2.listen_once().await.unwrap();
+        let _ = node2.listen_once().await.unwrap();
+        // ConnectNodeReport
+        // self.swarm.register(&relay.sender(), transport).await
+        let _ = node1.listen_once().await.unwrap();
+        let _ = node1.listen_once().await.unwrap();
+        println!("wait for handshake here");
+        sleep(Duration::from_secs(3)).await;
+        // transport got from node1 for node3
+        // transport got from node3 for node
+        // JoinDHT twice here
+        let ev3 = node3.listen_once().await.unwrap();
+        assert!(matches!(ev3.data, Message::JoinDHT(_)));
+        let _ = node3.listen_once().await.is_none();
+
+        // JoinDHT twice here
+        let ev1 = node1.listen_once().await.unwrap();
+        assert!(matches!(ev1.data, Message::JoinDHT(_)));
+        let _ = node1.listen_once().await.is_none();
+
+        let t1_3 = swarm1.get_transport(&did3).unwrap();
+        println!("transport is replace by second");
+        assert_eq!(t1_3.id, t_1_3_b.id);
+        let t3_1 = swarm3.get_transport(&did1).unwrap();
+
+        assert!(t1_3.is_connected().await);
+        assert!(t3_1.is_connected().await);
         Ok(())
     }
 }

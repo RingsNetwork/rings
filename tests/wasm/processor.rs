@@ -230,7 +230,7 @@ async fn test_processor_connect_with_address() {
     // p1 create connect with p3's address
     let peer3 = p1.connect_with_address(&p3.address(), true).await.unwrap();
     console_log!("transport connected");
-    fluvio_wasm_timer::Delay::new(Duration::from_millis(500))
+    fluvio_wasm_timer::Delay::new(Duration::from_millis(1000))
         .await
         .unwrap();
     assert_eq!(

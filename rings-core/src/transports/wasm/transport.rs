@@ -64,6 +64,15 @@ impl PartialEq for WasmTransport {
     }
 }
 
+impl Drop for WasmTransport {
+    fn drop(&mut self) {
+        log::trace!("[WASM] Transport dropped!");
+        if let Some(conn) = &self.connection {
+            conn.close();
+        }
+    }
+}
+
 #[async_trait(?Send)]
 impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
     type Connection = RtcPeerConnection;
