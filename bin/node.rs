@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Args;
@@ -16,6 +17,7 @@ use rings_node::logger::LogLevel;
 use rings_node::logger::Logger;
 use rings_node::processor::Processor;
 use rings_node::service::run_service;
+use rings_node::util;
 
 #[derive(Parser, Debug)]
 #[clap(about, version, author)]
@@ -23,8 +25,8 @@ struct Cli {
     #[clap(long, short = 'v', default_value_t = LogLevel::Info, arg_enum, env)]
     log_level: LogLevel,
 
-    #[clap(long, short = 'c')]
-    config_file: Option<String>,
+    #[clap(long, short = 'c', parse(from_os_str))]
+    config_file: Option<PathBuf>,
 
     #[clap(subcommand)]
     command: Command,
@@ -268,6 +270,9 @@ async fn daemon_run(
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenv::dotenv().ok();
+
+    util::load_config();
+
     let cli = Cli::parse();
     Logger::init(cli.log_level.into())?;
     // if config file was set, it should override existing .env
