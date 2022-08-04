@@ -30,7 +30,7 @@ use crate::types::ice_transport::IceTrickleScheme;
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<LeaveDHT> for MessageHandler {
     async fn handle(&self, _ctx: &MessagePayload<Message>, msg: &LeaveDHT) -> Result<()> {
-        self.dht.remove(msg.id)
+        self.disconnect(msg.id.into()).await
     }
 }
 
@@ -71,9 +71,14 @@ impl HandleMsg<JoinDHT> for MessageHandler {
 impl HandleMsg<ConnectNodeSend> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload<Message>, msg: &ConnectNodeSend) -> Result<()> {
         let mut relay = ctx.relay.clone();
-
+        // if id is not dest
         if self.dht.id != relay.destination {
-            if self.swarm.get_transport(&relay.destination).is_some() {
+            if self
+                .swarm
+                .get_and_check_transport(&relay.destination)
+                .await
+                .is_some()
+            {
                 relay.relay(self.dht.id, Some(relay.destination))?;
                 return self.transpond_payload(ctx, relay).await;
             } else {
@@ -86,41 +91,40 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
                 relay.relay(self.dht.id, Some(next_node))?;
                 return self.transpond_payload(ctx, relay).await;
             }
-        }
-
-        relay.relay(self.dht.id, None)?;
-        match self.swarm.get_transport(&relay.sender()) {
-            None => {
-                let trans = self.swarm.new_transport().await?;
-                let sender_id = relay.sender();
-                trans
-                    .register_remote_info(msg.handshake_info.to_owned().into())
+        } else {
+            // self is dest
+            relay.relay(self.dht.id, None)?;
+            match self.swarm.get_and_check_transport(&relay.sender()).await {
+                None => {
+                    let trans = self.swarm.new_transport().await?;
+                    trans
+                        .register_remote_info(msg.handshake_info.to_owned().into())
+                        .await?;
+                    let handshake_info = trans
+                        .get_handshake_info(self.swarm.session_manager(), RTCSdpType::Answer)
+                        .await?
+                        .to_string();
+                    self.send_report_message(
+                        Message::ConnectNodeReport(ConnectNodeReport {
+                            transport_uuid: msg.transport_uuid.clone(),
+                            handshake_info,
+                        }),
+                        ctx.tx_id,
+                        relay,
+                    )
                     .await?;
-                let handshake_info = trans
-                    .get_handshake_info(self.swarm.session_manager(), RTCSdpType::Answer)
-                    .await?
-                    .to_string();
-                self.send_report_message(
-                    Message::ConnectNodeReport(ConnectNodeReport {
-                        transport_uuid: msg.transport_uuid.clone(),
-                        handshake_info,
-                    }),
-                    ctx.tx_id,
-                    relay,
-                )
-                .await?;
-                self.swarm.get_or_register(&sender_id, trans).await?;
+                    self.swarm.push_pending_transport(&trans)?;
+                    Ok(())
+                }
 
-                Ok(())
-            }
-
-            _ => {
-                self.send_report_message(
-                    Message::AlreadyConnected(AlreadyConnected),
-                    ctx.tx_id,
-                    relay,
-                )
-                .await
+                _ => {
+                    self.send_report_message(
+                        Message::AlreadyConnected(AlreadyConnected),
+                        ctx.tx_id,
+                        relay,
+                    )
+                    .await
+                }
             }
         }
     }
@@ -146,7 +150,7 @@ impl HandleMsg<ConnectNodeReport> for MessageHandler {
             transport
                 .register_remote_info(msg.handshake_info.clone().into())
                 .await?;
-            self.swarm.register(&relay.sender(), transport).await
+            Ok(())
         }
     }
 }
@@ -162,7 +166,8 @@ impl HandleMsg<AlreadyConnected> for MessageHandler {
             self.transpond_payload(ctx, relay).await
         } else {
             self.swarm
-                .get_transport(&relay.sender())
+                .get_and_check_transport(&relay.sender())
+                .await
                 .map(|_| ())
                 .ok_or(Error::MessageHandlerMissTransportAlreadyConnected)
         }
@@ -207,9 +212,9 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
         }
 
         match msg.then {
-            FindSuccessorThen::FixFingerTable => self.dht.lock_finger()?.set_fix(&msg.id),
+            FindSuccessorThen::FixFingerTable => self.dht.lock_finger()?.set_fix(msg.id),
             FindSuccessorThen::Connect => {
-                if self.swarm.get_transport(&msg.id).is_none()
+                if self.swarm.get_and_check_transport(&msg.id).await.is_none()
                     && msg.id != self.swarm.address().into()
                 {
                     self.connect(&msg.id.into()).await?;
@@ -238,7 +243,7 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
 
 #[cfg(not(feature = "wasm"))]
 #[cfg(test)]
-pub mod test {
+pub mod tests {
     use std::matches;
     use std::sync::Arc;
 
@@ -247,16 +252,15 @@ pub mod test {
     use web3::types::Address;
 
     use super::*;
-    use crate::dht::Did;
     use crate::dht::PeerRing;
+    use crate::ecc::tests::gen_ordered_keys;
     use crate::ecc::SecretKey;
+    use crate::message::handlers::tests::manually_establish_connection;
+    use crate::message::handlers::tests::prepare_node;
     use crate::message::MessageHandler;
-    use crate::prelude::RTCSdpType;
-    use crate::session::SessionManager;
-    use crate::storage::PersistenceStorage;
     use crate::swarm::Swarm;
     use crate::swarm::TransportManager;
-    use crate::types::ice_transport::IceTrickleScheme;
+    use crate::types::ice_transport::IceTransport;
 
     // ndoe1.key < node2.key < node3.key
     //
@@ -301,22 +305,28 @@ pub mod test {
     //
     #[tokio::test]
     async fn test_triple_nodes_connection_1_2_3() -> Result<()> {
-        let (key1, key2, key3) = gen_triple_ordered_keys();
-        test_triple_ordered_nodes_connection(key1, key2, key3).await
+        let keys = gen_ordered_keys(3);
+        let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
+        test_triple_ordered_nodes_connection(key1, key2, key3).await?;
+        Ok(())
     }
 
     // The 2_3_1 should have same behavior as 1_2_3 since they are all clockwise.
     #[tokio::test]
     async fn test_triple_nodes_connection_2_3_1() -> Result<()> {
-        let (key1, key2, key3) = gen_triple_ordered_keys();
-        test_triple_ordered_nodes_connection(key2, key3, key1).await
+        let keys = gen_ordered_keys(3);
+        let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
+        test_triple_ordered_nodes_connection(key2, key3, key1).await?;
+        Ok(())
     }
 
     // The 3_1_2 should have same behavior as 1_2_3 since they are all clockwise.
     #[tokio::test]
     async fn test_triple_nodes_connection_3_1_2() -> Result<()> {
-        let (key1, key2, key3) = gen_triple_ordered_keys();
-        test_triple_ordered_nodes_connection(key3, key1, key2).await
+        let keys = gen_ordered_keys(3);
+        let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
+        test_triple_ordered_nodes_connection(key3, key1, key2).await?;
+        Ok(())
     }
 
     // node1.key > node2.key > node3.key
@@ -340,29 +350,35 @@ pub mod test {
     //
     #[tokio::test]
     async fn test_triple_nodes_connection_3_2_1() -> Result<()> {
-        let (key1, key2, key3) = gen_triple_ordered_keys();
-        test_triple_desc_ordered_nodes_connection(key3, key2, key1).await
+        let keys = gen_ordered_keys(3);
+        let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
+        test_triple_desc_ordered_nodes_connection(key3, key2, key1).await?;
+        Ok(())
     }
 
     // The 2_1_3 should have same behavior as 3_2_1 since they are all anti-clockwise.
     #[tokio::test]
     async fn test_triple_nodes_connection_2_1_3() -> Result<()> {
-        let (key1, key2, key3) = gen_triple_ordered_keys();
-        test_triple_desc_ordered_nodes_connection(key2, key1, key3).await
+        let keys = gen_ordered_keys(3);
+        let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
+        test_triple_desc_ordered_nodes_connection(key2, key1, key3).await?;
+        Ok(())
     }
 
     // The 1_3_2 should have same behavior as 3_2_1 since they are all anti-clockwise.
     #[tokio::test]
     async fn test_triple_nodes_connection_1_3_2() -> Result<()> {
-        let (key1, key2, key3) = gen_triple_ordered_keys();
-        test_triple_desc_ordered_nodes_connection(key1, key3, key2).await
+        let keys = gen_ordered_keys(3);
+        let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
+        test_triple_desc_ordered_nodes_connection(key1, key3, key2).await?;
+        Ok(())
     }
 
     async fn test_triple_ordered_nodes_connection(
         key1: SecretKey,
         key2: SecretKey,
         key3: SecretKey,
-    ) -> Result<()> {
+    ) -> Result<(MessageHandler, MessageHandler, MessageHandler)> {
         let (did1, dht1, swarm1, node1, _path1) = prepare_node(&key1).await;
         let (did2, dht2, swarm2, node2, _path2) = prepare_node(&key2).await;
         let (did3, dht3, swarm3, node3, _path3) = prepare_node(&key3).await;
@@ -496,14 +512,14 @@ pub mod test {
         assert_eq!(dht2.lock_successor()?.list(), vec![did3, did1]);
         assert_eq!(dht3.lock_successor()?.list(), vec![did1, did2]);
         tokio::fs::remove_dir_all("./tmp").await.ok();
-        Ok(())
+        Ok((node1, node2, node3))
     }
 
     async fn test_triple_desc_ordered_nodes_connection(
         key1: SecretKey,
         key2: SecretKey,
         key3: SecretKey,
-    ) -> Result<()> {
+    ) -> Result<(MessageHandler, MessageHandler, MessageHandler)> {
         let (did1, dht1, swarm1, node1, _path1) = prepare_node(&key1).await;
         let (did2, dht2, swarm2, node2, _path2) = prepare_node(&key2).await;
         let (did3, dht3, swarm3, node3, _path3) = prepare_node(&key3).await;
@@ -658,87 +674,7 @@ pub mod test {
         assert_eq!(dht3.lock_successor()?.list(), vec![did2]);
 
         tokio::fs::remove_dir_all("./tmp").await.ok();
-        Ok(())
-    }
-
-    pub fn gen_triple_ordered_keys() -> (SecretKey, SecretKey, SecretKey) {
-        let mut keys = Vec::from_iter(std::iter::repeat_with(SecretKey::random).take(3));
-        keys.sort_by(|a, b| {
-            if a.address() < b.address() {
-                std::cmp::Ordering::Less
-            } else {
-                std::cmp::Ordering::Greater
-            }
-        });
-        (keys[0], keys[1], keys[2])
-    }
-
-    pub async fn prepare_node(
-        key: &SecretKey,
-    ) -> (Did, Arc<PeerRing>, Arc<Swarm>, MessageHandler, String) {
-        let stun = "stun://stun.l.google.com:19302";
-
-        let did = key.address().into();
-        let path = PersistenceStorage::random_path("./tmp");
-        let dht = Arc::new(PeerRing::new_with_storage(
-            did,
-            Arc::new(
-                PersistenceStorage::new_with_path(path.as_str())
-                    .await
-                    .unwrap(),
-            ),
-        ));
-        let sm = SessionManager::new_with_seckey(key).unwrap();
-        let swarm = Arc::new(Swarm::new(stun, key.address(), sm));
-        let node = MessageHandler::new(dht.clone(), Arc::clone(&swarm));
-
-        println!("key: {:?}", key.to_string());
-        println!("did: {:?}", did);
-
-        (did, dht, swarm, node, path)
-    }
-
-    pub async fn manually_establish_connection(swarm1: &Swarm, swarm2: &Swarm) -> Result<()> {
-        let sm1 = swarm1.session_manager();
-        let sm2 = swarm2.session_manager();
-
-        let transport1 = swarm1.new_transport().await.unwrap();
-        let handshake_info1 = transport1
-            .get_handshake_info(sm1, RTCSdpType::Offer)
-            .await?;
-
-        let transport2 = swarm2.new_transport().await.unwrap();
-        let addr1 = transport2.register_remote_info(handshake_info1).await?;
-
-        assert_eq!(addr1, swarm1.address());
-
-        let handshake_info2 = transport2
-            .get_handshake_info(sm2, RTCSdpType::Answer)
-            .await?;
-
-        let addr2 = transport1.register_remote_info(handshake_info2).await?;
-
-        assert_eq!(addr2, swarm2.address());
-
-        let promise_1 = transport1.connect_success_promise().await?;
-        let promise_2 = transport2.connect_success_promise().await?;
-        promise_1.await?;
-        promise_2.await?;
-
-        swarm2
-            .register(&swarm1.address(), transport2.clone())
-            .await
-            .unwrap();
-
-        swarm1
-            .register(&swarm2.address(), transport1.clone())
-            .await
-            .unwrap();
-
-        assert!(swarm1.get_transport(&swarm2.address()).is_some());
-        assert!(swarm2.get_transport(&swarm1.address()).is_some());
-
-        Ok(())
+        Ok((node1, node2, node3))
     }
 
     pub async fn test_listen_join_and_init_find_succeesor(
@@ -861,7 +797,7 @@ pub mod test {
         assert_eq!(ev1.relay.path, vec![did1, did2, did3]);
         assert!(matches!(ev1.data, Message::ConnectNodeReport(_)));
 
-        assert!(swarm1.get_transport(&key3.address()).is_some());
+        //        assert!(swarm1.get_transport(&key3.address()).is_some());
 
         // The following are communications after successful connection
 
@@ -922,5 +858,198 @@ pub mod test {
         for addr in addresses {
             assert!(swarm.get_transport(&addr).is_some());
         }
+    }
+
+    #[tokio::test]
+    async fn test_quadra_desc_node_connection() -> Result<()> {
+        // 1. node1 to node2
+        // 2. node 3 to node 2
+        let keys = gen_ordered_keys(4);
+        let (key1, key2, key3, key4) = (keys[0], keys[1], keys[2], keys[3]);
+        let (node1, node2, node3) = test_triple_ordered_nodes_connection(key1, key2, key3).await?;
+        // we now have triple connected node
+        let (_, _, swarm4, node4, _path4) = prepare_node(&key4).await;
+        // connect node 4 to node2
+        manually_establish_connection(&swarm4, &node2.swarm).await?;
+        test_listen_join_and_init_find_succeesor((&key4, &node4), (&key2, &node2)).await?;
+        // node 1 -> node 2 -> node 3
+        //  |-<-----<---------<--|
+        let _ = node2.listen_once().await.unwrap();
+        let _ = node3.listen_once().await.unwrap();
+        let _ = node2.listen_once().await.unwrap();
+        let _ = node4.listen_once().await.unwrap();
+        let _ = node2.listen_once().await.unwrap();
+        println!("==================================================");
+        println!("| test connect node 4 from node 1 via node 2     |");
+        println!("==================================================");
+        println!(
+            "did1: {:?}, did2: {:?}, did3: {:?}, did4: {:?}",
+            key1.address(),
+            key2.address(),
+            key3.address(),
+            key4.address()
+        );
+        println!("==================================================");
+        node4.connect(&key1.address()).await?;
+        // node 4 send msg to node2
+        assert!(matches!(
+            node2.listen_once().await.unwrap().data,
+            Message::ConnectNodeSend(_)
+        ));
+        // node 2 relay to node 2
+        assert!(matches!(
+            node1.listen_once().await.unwrap().data,
+            Message::ConnectNodeSend(_)
+        ));
+        // report to node 2
+        assert!(matches!(
+            node2.listen_once().await.unwrap().data,
+            Message::ConnectNodeReport(_)
+        ));
+        // report to node 4
+        assert!(matches!(
+            node4.listen_once().await.unwrap().data,
+            Message::ConnectNodeReport(_)
+        ));
+        println!("=================Finish handshake here=================");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_finger_when_disconnect() -> Result<()> {
+        let key1 = SecretKey::random();
+        let key2 = SecretKey::random();
+        let key3 = SecretKey::random();
+
+        let (did1, dht1, swarm1, node1, _path1) = prepare_node(&key1).await;
+        let (did2, dht2, swarm2, node2, _path2) = prepare_node(&key2).await;
+
+        // This is only a dummy node for using assert_no_more_msg function
+        let (_did3, _dht3, _swarm3, node3, _path3) = prepare_node(&key3).await;
+
+        {
+            assert!(dht1.lock_finger()?.is_empty());
+            assert!(dht1.lock_finger()?.is_empty());
+        }
+
+        test_only_two_nodes_establish_connection(
+            (&key1, dht1.clone(), &swarm1, &node1),
+            (&key2, dht2.clone(), &swarm2, &node2),
+        )
+        .await?;
+        assert_no_more_msg(&node1, &node2, &node3).await;
+
+        assert_transports(swarm1.clone(), vec![key2.address()]);
+        assert_transports(swarm2.clone(), vec![key1.address()]);
+        {
+            let finger1 = dht1.lock_finger()?.clone().clone_finger();
+            let finger2 = dht2.lock_finger()?.clone().clone_finger();
+
+            assert!(finger1.into_iter().any(|x| x == Some(did2)));
+            assert!(finger2.into_iter().any(|x| x == Some(did1)));
+        }
+
+        println!("===================================");
+        println!("| test disconnect node1 and node2 |");
+        println!("===================================");
+        node1.disconnect(did2.into()).await?;
+
+        // The transport is already dropped by disconnect function.
+        // So that we get no msg from this listening.
+        let ev1 = node1.listen_once().await;
+        assert!(ev1.is_none());
+
+        for _ in 1..10 {
+            println!("wait 3 seconds for node2's transport 2to1 closing");
+            sleep(Duration::from_secs(3)).await;
+            if let Some(t) = swarm2.get_transport(&did1.into()) {
+                if t.is_disconnected().await {
+                    println!("transport 2to1 is disconnected!!!!");
+                    break;
+                }
+            } else {
+                println!("transport 2to1 is disappeared!!!!");
+                break;
+            }
+        }
+        let ev2 = node2.listen_once().await.unwrap();
+        assert_eq!(ev2.addr, key2.address());
+        assert!(matches!(ev2.data, Message::LeaveDHT(LeaveDHT{id}) if id == did1));
+
+        assert_no_more_msg(&node1, &node2, &node3).await;
+
+        assert_transports(swarm1.clone(), vec![]);
+        assert_transports(swarm2.clone(), vec![]);
+        {
+            let finger1 = dht1.lock_finger()?.clone().clone_finger();
+            let finger2 = dht2.lock_finger()?.clone().clone_finger();
+            assert!(finger1.into_iter().all(|x| x.is_none()));
+            assert!(finger2.into_iter().all(|x| x.is_none()));
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_already_connect_fixture() -> Result<()> {
+        // NodeA-NodeB-NodeC
+        let keys = gen_ordered_keys(3);
+        let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
+        let (did1, dht1, swarm1, node1, _path1) = prepare_node(&key1).await;
+        let (_did2, dht2, swarm2, node2, _path2) = prepare_node(&key2).await;
+        let (did3, dht3, swarm3, node3, _path3) = prepare_node(&key3).await;
+        test_only_two_nodes_establish_connection(
+            (&key1, dht1.clone(), &swarm1, &node1),
+            (&key2, dht2.clone(), &swarm2, &node2),
+        )
+        .await?;
+        assert_no_more_msg(&node1, &node2, &node3).await;
+
+        test_only_two_nodes_establish_connection(
+            (&key3, dht3.clone(), &swarm3, &node3),
+            (&key2, dht2.clone(), &swarm2, &node2),
+        )
+        .await?;
+        assert_no_more_msg(&node1, &node2, &node3).await;
+        // Node 1 -- Node 2 -- Node 3
+        println!("node1 connect node2 twice here");
+        let _ = node1.connect(&did3).await.unwrap();
+        let t_1_3_b = node1.connect(&did3).await.unwrap();
+        // ConnectNodeSend
+        let _ = node2.listen_once().await.unwrap();
+        let _ = node2.listen_once().await.unwrap();
+        // ConnectNodeSend
+        let _ = node3.listen_once().await.unwrap();
+        let _ = node3.listen_once().await.unwrap();
+        // ConnectNodeReport
+        // `self.swarm.push_pending_transport(&trans)?;`
+        let _ = node2.listen_once().await.unwrap();
+        let _ = node2.listen_once().await.unwrap();
+        // ConnectNodeReport
+        // self.swarm.register(&relay.sender(), transport).await
+        let _ = node1.listen_once().await.unwrap();
+        let _ = node1.listen_once().await.unwrap();
+        println!("wait for handshake here");
+        sleep(Duration::from_secs(3)).await;
+        // transport got from node1 for node3
+        // transport got from node3 for node
+        // JoinDHT twice here
+        let ev3 = node3.listen_once().await.unwrap();
+        assert!(matches!(ev3.data, Message::JoinDHT(_)));
+        let _ = node3.listen_once().await.is_none();
+
+        // JoinDHT twice here
+        let ev1 = node1.listen_once().await.unwrap();
+        assert!(matches!(ev1.data, Message::JoinDHT(_)));
+        let _ = node1.listen_once().await.is_none();
+
+        let t1_3 = swarm1.get_transport(&did3).unwrap();
+        println!("transport is replace by second");
+        assert_eq!(t1_3.id, t_1_3_b.id);
+        let t3_1 = swarm3.get_transport(&did1).unwrap();
+
+        assert!(t1_3.is_connected().await);
+        assert!(t3_1.is_connected().await);
+        Ok(())
     }
 }

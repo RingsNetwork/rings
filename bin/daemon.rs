@@ -28,6 +28,7 @@ use rings_node::prelude::rings_core::swarm::Swarm;
 use rings_node::prelude::rings_core::types::message::MessageListener;
 use rings_node::service::run_service;
 use rings_node::service::run_udp_turn;
+use rings_node::util;
 use tokio::signal;
 
 #[derive(Parser, Debug)]
@@ -267,6 +268,9 @@ fn shutdown_daemon(args: &ShutdownArgs) -> anyhow::Result<()> {
 
 fn main() {
     dotenv::dotenv().ok();
+
+    util::load_config();
+
     let cli = Cli::parse();
     Logger::init(cli.log_level.into()).expect("log err");
 

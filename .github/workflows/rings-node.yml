@@ -97,3 +97,9 @@ jobs:
 
       - name: Check formating
         run: cargo fmt --all -- --check
+
+      - name: Install taplo
+        run: cargo install taplo-cli
+
+      - name: Check toml file formating by taplo
+        run: taplo format --check

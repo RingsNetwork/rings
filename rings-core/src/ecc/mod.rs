@@ -253,7 +253,7 @@ pub fn recover_hash(message_hash: &[u8; 32], sig: &[u8; 65]) -> Result<PublicKey
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use hex::FromHex;
 
     use super::*;
@@ -313,5 +313,17 @@ mod tests {
         let pubkey1 = key.pubkey();
         let pubkey2 = recover("hello", key.sign("hello")).unwrap();
         assert_eq!(pubkey1, pubkey2);
+    }
+
+    pub fn gen_ordered_keys(n: usize) -> Vec<SecretKey> {
+        let mut keys = Vec::from_iter(std::iter::repeat_with(SecretKey::random).take(n));
+        keys.sort_by(|a, b| {
+            if a.address() < b.address() {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Greater
+            }
+        });
+        keys
     }
 }

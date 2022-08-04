@@ -56,26 +56,47 @@ impl FingerTable {
     }
 
     /// setter
-    pub fn set(&mut self, index: usize, id: &Did) {
+    pub fn set(&mut self, index: usize, id: Did) {
         if index >= self.finger.len() {
             return;
         }
-        self.finger[index] = Some(*id);
+        self.finger[index] = Some(id);
     }
 
     /// setter for fix_finger_index
-    pub fn set_fix(&mut self, id: &Did) {
+    pub fn set_fix(&mut self, id: Did) {
         let index = self.fix_finger_index as usize;
         self.set(index, id)
     }
 
     /// remove a node from dht finger table
-    /// remote a node from dht successor table
-    /// if suuccessor is empty, set it to the cloest node
     pub fn remove(&mut self, id: Did) {
-        for (index, item) in self.finger.clone().iter().enumerate() {
-            if *item == Some(id) {
-                self.finger[index] = None;
+        let indexes: Vec<usize> = self
+            .finger
+            .iter()
+            .enumerate()
+            .filter(|(_, &x)| x == Some(id))
+            .map(|(id, _)| id)
+            .collect();
+
+        if let Some(last_idx) = indexes.last() {
+            let (first_idx, end_idx) = (*indexes.first().unwrap(), *last_idx + 1);
+
+            // Update to the next did of last equaled did in finger table.
+            // If cannot get that, use None.
+            let fix_id = self
+                .finger
+                .iter()
+                .skip(end_idx)
+                .take(1)
+                .collect::<Vec<_>>()
+                .first()
+                .unwrap_or(&&None)
+                .as_ref()
+                .copied();
+
+            for idx in first_idx..end_idx {
+                self.finger[idx] = fix_id
             }
         }
     }
@@ -139,6 +160,16 @@ impl FingerTable {
     pub fn list(&self) -> &Vec<Option<Did>> {
         &self.finger
     }
+
+    #[cfg(test)]
+    pub fn reset_finger(&mut self) {
+        self.finger = vec![None; self.size]
+    }
+
+    #[cfg(test)]
+    pub fn clone_finger(self) -> Vec<Option<Did>> {
+        self.finger
+    }
 }
 
 impl Index<usize> for FingerTable {
@@ -151,13 +182,13 @@ impl Index<usize> for FingerTable {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::ecc::SecretKey;
+    use crate::dht::tests::gen_ordered_dids;
 
     #[test]
     fn test_finger_table_get_set_remove() {
-        let key = SecretKey::random();
-        let id: Did = key.address().into();
-        let mut table = FingerTable::new(id, 3);
+        let dids = gen_ordered_dids(5);
+
+        let mut table = FingerTable::new(dids[0], 3);
         println!("check finger len");
         assert_eq!(table.len(), 0);
         assert_eq!(table.finger.len(), 3);
@@ -168,23 +199,22 @@ mod test {
         assert!(*table.get(3) == None, "index 3 should be None");
 
         println!("set finger item");
-        let id1: Did = SecretKey::random().address().into();
-        let id2: Did = SecretKey::random().address().into();
-        let id3: Did = SecretKey::random().address().into();
-        let id4: Did = SecretKey::random().address().into();
+        let (id1, id2, id3, id4) = (dids[1], dids[2], dids[3], dids[4]);
 
-        table.set(0, &id1);
+        table.set(0, id1);
         assert_eq!(table.len(), 1);
+        assert_eq!(table.finger.len(), 3);
+
+        table.set(2, id3);
+        assert_eq!(table.len(), 2);
+        assert_eq!(table.finger.len(), 3);
+
         assert!(
             *table.get(0) == Some(id1),
             "expect value at index 0 is {:?}, got {:?}",
             Some(id1),
             table.get(0)
         );
-        // can not be set, because size is 2
-        table.set(2, &id3);
-        assert_eq!(table.len(), 2);
-        assert_eq!(table.finger.len(), 3);
         assert!(
             *table.get(1) == None,
             "expect value at index 1 is None, got {:?}",
@@ -198,7 +228,7 @@ mod test {
         );
 
         println!("set value out of index");
-        table.set(4, &id4);
+        table.set(4, id4);
         assert_eq!(table.len(), 2);
         assert_eq!(table.finger.len(), 3);
 
@@ -218,9 +248,9 @@ mod test {
             table.get(2)
         );
 
-        table.set(0, &id1);
-        table.set(1, &id2);
-
+        println!("remove node with auto fill");
+        table.set(0, id1);
+        table.set(1, id2);
         assert!(
             *table.get(0) == Some(id1),
             "expect value at index 0 is {:?}, got {:?}",
@@ -235,28 +265,25 @@ mod test {
         );
         assert!(
             *table.get(2) == Some(id3),
-            "expect value at index 1 is {:?}, got {:?}",
+            "expect value at index 2 is {:?}, got {:?}",
             Some(id3),
             table.get(2)
         );
 
-        assert!(
-            *table.get(3) == None,
-            "expect value at index 2 is None, got {:?}",
-            table.get(3)
-        );
-
         table.remove(id1);
-        assert_eq!(table.len(), 2);
+        assert_eq!(table.len(), 3);
         assert_eq!(table.finger.len(), 3);
-        let t1 = table.get(0);
-        assert!(*t1 == None, "expect value at index 0 is None, got {:?}", t1);
-        let t2 = table.get(1);
         assert!(
-            *t2 == Some(id2),
+            *table.get(0) == Some(id2),
+            "expect value at index 0 is {:?}, got {:?}",
+            id2,
+            table.get(0)
+        );
+        assert!(
+            *table.get(1) == Some(id2),
             "expect value at index 1 is {:?}, got {:?}",
             Some(id2),
-            t2,
+            table.get(1),
         );
 
         println!("remove item not in fingers");
@@ -274,5 +301,91 @@ mod test {
         assert_eq!(table.first(), None);
         assert_eq!(table.len(), 0);
         assert_eq!(table.finger.len(), 3);
+    }
+
+    #[test]
+    fn test_finger_table_remove_then_fill() {
+        let dids = gen_ordered_dids(6);
+        let (did1, did2, did3, did4, did5) = (dids[1], dids[2], dids[3], dids[4], dids[5]);
+
+        let mut table = FingerTable::new(dids[0], 5);
+
+        // [did1, did2, did3, did4, did5] - did1 = [did2, did2, did3, did4, did5]
+        table.reset_finger();
+        table.set(0, did1);
+        table.set(1, did2);
+        table.set(2, did3);
+        table.set(3, did4);
+        table.set(4, did5);
+        table.remove(did1);
+        assert_eq!(table.finger, [
+            Some(did2),
+            Some(did2),
+            Some(did3),
+            Some(did4),
+            Some(did5),
+        ]);
+
+        // [did1, did2, did3, did4, did5] - did2 = [did1, did3, did3, did4, did5]
+        table.reset_finger();
+        table.set(0, did1);
+        table.set(1, did2);
+        table.set(2, did3);
+        table.set(3, did4);
+        table.set(4, did5);
+        table.remove(did2);
+        assert_eq!(table.finger, [
+            Some(did1),
+            Some(did3),
+            Some(did3),
+            Some(did4),
+            Some(did5),
+        ]);
+
+        // [did1, None, did3, did4, did5] - did1 = [None, None, did3, did4, did5]
+        table.reset_finger();
+        table.set(0, did1);
+        table.set(2, did3);
+        table.set(3, did4);
+        table.set(4, did5);
+        table.remove(did1);
+        assert_eq!(table.finger, [
+            None,
+            None,
+            Some(did3),
+            Some(did4),
+            Some(did5),
+        ]);
+
+        // [did1, None, did3, did4, did5] - did3 = [did1, None, did4, did4, did5]
+        table.reset_finger();
+        table.set(0, did1);
+        table.set(2, did3);
+        table.set(3, did4);
+        table.set(4, did5);
+        table.remove(did3);
+        assert_eq!(table.finger, [
+            Some(did1),
+            None,
+            Some(did4),
+            Some(did4),
+            Some(did5),
+        ]);
+
+        // [did1, did2, did3, did4, did5] - did5 = [did1, did2, did4, did4, None]
+        table.reset_finger();
+        table.set(0, did1);
+        table.set(1, did2);
+        table.set(2, did3);
+        table.set(3, did4);
+        table.set(4, did5);
+        table.remove(did5);
+        assert_eq!(table.finger, [
+            Some(did1),
+            Some(did2),
+            Some(did3),
+            Some(did4),
+            None
+        ]);
     }
 }

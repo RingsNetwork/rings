@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use axum::extract::Extension;
 use axum::response::IntoResponse;
+use axum::routing::get;
 use axum::routing::post;
 use axum::Router;
 use http::header;
@@ -57,7 +58,9 @@ pub async fn run_service(
                 .layer(&jsonrpc_handler_layer)
                 .layer(&pubkey_layer),
         )
+        .route("/status", get(status_handler))
         .layer(CorsLayer::permissive())
+        .layer(axum::middleware::from_fn(node_info_header))
         .into_make_service();
 
     println!("Server listening on http://{}", addr);
@@ -86,6 +89,25 @@ async fn jsonrpc_io_handler(
         .await
         .ok_or(HttpError::BadRequest)?;
     Ok(JsonResponse(r))
+}
+
+async fn node_info_header<B>(
+    req: axum::http::Request<B>,
+    next: axum::middleware::Next<B>,
+) -> axum::response::Response {
+    let mut res = next.run(req).await;
+    let headers = res.headers_mut();
+
+    if let Ok(version) = axum::http::HeaderValue::from_str(crate::util::build_version().as_str()) {
+        headers.insert("X-NODE-VERSION", version);
+    }
+    res
+}
+
+async fn status_handler() -> Result<axum::extract::Json<serde_json::Value>, HttpError> {
+    Ok(axum::extract::Json(serde_json::json!({
+        "node_version": crate::util::build_version()
+    })))
 }
 
 /// JSON response struct

@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Args;
@@ -16,6 +17,7 @@ use rings_node::logger::LogLevel;
 use rings_node::logger::Logger;
 use rings_node::processor::Processor;
 use rings_node::service::run_service;
+use rings_node::util;
 
 #[derive(Parser, Debug)]
 #[clap(about, version, author)]
@@ -23,8 +25,8 @@ struct Cli {
     #[clap(long, short = 'v', default_value_t = LogLevel::Info, arg_enum, env)]
     log_level: LogLevel,
 
-    #[clap(long, short = 'c')]
-    config_file: Option<String>,
+    #[clap(long, short = 'c', parse(from_os_str))]
+    config_file: Option<PathBuf>,
 
     #[clap(subcommand)]
     command: Command,
@@ -130,17 +132,15 @@ struct ConnectWithAddressArgs {
 enum SdpCommand {
     #[clap()]
     Offer(SdpOffer),
-    #[clap(about)]
+    #[clap()]
     Answer(SdpAnswer),
-    #[clap(about)]
+    #[clap()]
     AcceptAnswer(SdpAcceptAnswer),
 }
 
 #[derive(Args, Debug)]
-#[clap(about)]
+#[clap()]
 struct SdpOffer {
-    #[clap(long = "key", short = 'k', env)]
-    pub ecdsa_key: SecretKey,
     #[clap(
         long,
         short = 's',
@@ -208,7 +208,7 @@ struct PendingList {
 struct PendingCloseTransport {
     #[clap(flatten)]
     client_args: ClientArgs,
-    #[clap(short = 't')]
+    #[clap()]
     transport_id: String,
 }
 
@@ -270,6 +270,9 @@ async fn daemon_run(
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenv::dotenv().ok();
+
+    util::load_config();
+
     let cli = Cli::parse();
     Logger::init(cli.log_level.into())?;
     // if config file was set, it should override existing .env

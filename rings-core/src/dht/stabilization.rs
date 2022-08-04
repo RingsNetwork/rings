@@ -91,8 +91,12 @@ impl Stabilization {
     }
 
     pub async fn stabilize(&self) -> Result<()> {
-        self.notify_predecessor().await?;
-        self.fix_fingers().await?;
+        if let Err(e) = self.notify_predecessor().await {
+            log::error!("[stabilize] Failed on notify predecessor {:?}", e);
+        }
+        if let Err(e) = self.fix_fingers().await {
+            log::error!("[stabilize] Failed on fix_finger {:?}", e);
+        }
         Ok(())
     }
 }
@@ -118,14 +122,10 @@ mod stabilizer {
                 let timeout = Delay::new(Duration::from_secs(self.timeout as u64)).fuse();
                 pin_mut!(timeout);
                 select! {
-                    _ = timeout => {
-                        match self.stabilize().await {
-                            Ok(()) => {},
-                            Err(e) => {
-                                log::error!("failed to stabilize {:?}", e);
-                            }
-                        };
-                    }
+                    _ = timeout => self
+                        .stabilize()
+                        .await
+                        .unwrap_or_else(|e| log::error!("failed to stabilize {:?}", e)),
                 }
             }
         }
@@ -150,7 +150,10 @@ mod stabilizer {
             let func = move || {
                 let caller = caller.clone();
                 spawn_local(Box::pin(async move {
-                    caller.stabilize().await.unwrap();
+                    caller
+                        .stabilize()
+                        .await
+                        .unwrap_or_else(|e| log::error!("failed to stabilize {:?}", e));
                 }))
             };
             poll!(func, 25000);

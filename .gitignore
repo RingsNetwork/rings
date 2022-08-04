@@ -22,3 +22,4 @@ pkg/
 temp/
 tmp/
 data/
+nohup.out

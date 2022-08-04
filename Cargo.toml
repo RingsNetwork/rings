@@ -20,52 +20,52 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = ["client"]
 client = [
-  "tokio",
-  "hyper",
-  "axum",
-  "tower-http",
-  "clap",
-  "reqwest",
-  "form_urlencoded",
-  "pin-project",
-  "rings-core"
+    "tokio",
+    "hyper",
+    "axum",
+    "tower-http",
+    "clap",
+    "reqwest",
+    "form_urlencoded",
+    "pin-project",
+    "rings-core",
 ]
 daemon = ["daemonize", "turn", "libc", "client", "webrtc-util"]
 browser = [
-  "console_error_panic_hook",
-  "reqwest-wasm",
-  "rings-core-wasm",
-  "console_log"
+    "console_error_panic_hook",
+    "reqwest-wasm",
+    "rings-core-wasm",
+    "console_log",
 ]
 browser_chrome_test = ["browser"]
 
 [dependencies]
-serde = { version = "1.0.136", features = ["derive"] }
-serde_json = "1.0.70"
-log = "0.4"
-futures = "0.3.21"
-env_logger = "0.9.0"
-dotenv = "0.15.0"
-thiserror = "1"
 anyhow = "1.0.45"
-lazy_static = "1.4.0"
 arrayref = "0.3.6"
+base64 = { version = "0.13.0" }
 chrono = "0.4.19"
+dotenv = "0.15.0"
+env_logger = "0.9.0"
+futures = "0.3.21"
+http = { version = "0.2.6" }
 jsonrpc-core = { version = "18.0.0" }
 jsonrpc-pubsub = { version = "18.0.0" }
-http = { version = "0.2.6" }
-base64 = { version = "0.13.0" }
+lazy_static = "1.4.0"
+log = "0.4"
+serde = { version = "1.0.136", features = ["derive"] }
+serde_json = "1.0.70"
+thiserror = "1"
 
 # client
-tokio = { version = "1.13.0", features = ["full"], optional = true }
-hyper = { version = "0.14.14", features = ["full"], optional = true }
-tower-http = { version="0.2.4", features = ["cors"], optional = true}
+axum = { version = "0.5.13", optional = true }
 clap = { version = "3.1.6", features = ["derive", "env"], optional = true }
-reqwest = { version = "0.11", features = ["json"], optional = true }
 form_urlencoded = { version = "1.0.1", optional = true }
-axum = { version = "0.5.1", optional = true }
+hyper = { version = "0.14.14", features = ["full"], optional = true }
 pin-project = { version = "1", optional = true }
-rings-core = { package = "rings-core", path = "./rings-core", optional = true, version = "0.2.0"}
+reqwest = { version = "0.11", features = ["json"], optional = true }
+rings-core = { package = "rings-core", path = "./rings-core", optional = true, version = "0.2.0" }
+tokio = { version = "1.13.0", features = ["full"], optional = true }
+tower-http = { version = "0.3.4", features = ["cors"], optional = true }
 
 # daemon
 daemonize = { version = "0.4.1", optional = true }
@@ -77,15 +77,14 @@ webrtc-util = { version = "0.5.3", optional = true }
 
 # browser
 console_error_panic_hook = { version = "0.1.1", optional = true }
-reqwest-wasm = { version = "0.11", features = ["json"], optional = true }
-rings-core-wasm = { package = "rings-core", path = "./rings-core", features = ["wasm"], default-features = false, optional = true, version="0.2.0"}
 console_log = { version = "0.2", optional = true }
+reqwest-wasm = { version = "0.11", features = ["json"], optional = true }
+rings-core-wasm = { package = "rings-core", path = "./rings-core", features = ["wasm"], default-features = false, optional = true, version = "0.2.0" }
 
 [dev-dependencies]
-wasm-bindgen-test = { version = "0.3.0" }
-fluvio-wasm-timer = "0.2.5"
 console_log = { version = "0.2" }
-
+fluvio-wasm-timer = "0.2.5"
+wasm-bindgen-test = { version = "0.3.0" }
 
 [[bin]]
 name = "rings-cli"
