@@ -18,6 +18,7 @@ use crate::ecc::SecretKey;
 use crate::err::Error;
 use crate::err::Result;
 use crate::utils;
+use crate::dht::Did;
 
 const DEFAULT_TTL_MS: usize = 24 * 3600 * 1000;
 
@@ -26,6 +27,7 @@ const DEFAULT_TTL_MS: usize = 24 * 3600 * 1000;
 pub enum Signer {
     DEFAULT,
     EIP712,
+    EdDSA
 }
 
 #[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
@@ -35,8 +37,16 @@ pub enum Ttl {
 }
 
 #[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
+pub struct Authorizer {
+    pub did: Did,
+    // for ecdsa, it's hash of pubkey
+    // for ed25519' it's pubkey
+    pub ext: Option<Vec<u8>>,
+}
+
+#[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
 pub struct AuthorizedInfo {
-    pub authorizer: Address,
+    pub authorizer: Authorizer,
     pub signer: Signer,
     pub addr: Address,
     pub ttl_ms: Ttl,
@@ -98,10 +108,13 @@ impl Session {
         if let Ok(auth_str) = self.auth.to_string() {
             match self.auth.signer {
                 Signer::DEFAULT => {
-                    signers::default::verify(&auth_str, &self.auth.authorizer, &self.sig)
+                    signers::default::verify(&auth_str, &self.auth.authorizer.did.into(), &self.sig)
                 }
                 Signer::EIP712 => {
-                    signers::eip712::verify(&auth_str, &self.auth.authorizer, &self.sig)
+                    signers::eip712::verify(&auth_str, &self.auth.authorizer.did.into(), &self.sig)
+                }
+                Signer::EdDSA => {
+                    unimplemented!()
                 }
             }
         } else {
@@ -122,18 +135,25 @@ impl Session {
         match self.auth.signer {
             Signer::DEFAULT => signers::default::recover(&auth, &self.sig),
             Signer::EIP712 => signers::eip712::recover(&auth, &self.sig),
+            Signer::EdDSA => {
+                unimplemented!()
+            }
         }
     }
 }
 
 impl SessionManager {
     pub fn gen_unsign_info(
-        authorizer: Address,
+        did: Address,
         ttl: Option<Ttl>,
         signer: Option<Signer>,
     ) -> Result<(AuthorizedInfo, SecretKey)> {
         let key = SecretKey::random();
         let signer = signer.unwrap_or(Signer::DEFAULT);
+        let authorizer = Authorizer {
+            did: did.into(),
+            ext: None
+        };
         let info = AuthorizedInfo {
             signer,
             authorizer,
@@ -201,11 +221,14 @@ impl SessionManager {
         match s.auth.signer {
             Signer::DEFAULT => Ok(signers::default::sign_raw(key, msg).to_vec()),
             Signer::EIP712 => Ok(signers::eip712::sign_raw(key, msg).to_vec()),
+            Signer::EdDSA => {
+                unimplemented!()
+            }
         }
     }
 
     pub fn authorizer(&self) -> Result<Address> {
-        Ok(self.session()?.auth.authorizer)
+        Ok(self.session()?.auth.authorizer.did.into())
     }
 }
 

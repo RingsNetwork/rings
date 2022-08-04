@@ -29,6 +29,10 @@ impl MessageVerification {
             match self.session.auth.signer {
                 Signer::DEFAULT => signers::default::verify(&msg, &addr, &self.sig),
                 Signer::EIP712 => signers::eip712::verify(&msg, &addr, &self.sig),
+                Signer::EdDSA => {
+                    unimplemented!()
+                },
+
             }
         } else {
             false
@@ -41,6 +45,9 @@ impl MessageVerification {
         match self.session.auth.signer {
             Signer::DEFAULT => signers::default::recover(&msg, &self.sig),
             Signer::EIP712 => signers::eip712::recover(&msg, &self.sig),
+            Signer::EdDSA => {
+                unimplemented!()
+            },
         }
     }
 
