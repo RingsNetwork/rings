@@ -77,7 +77,7 @@ impl Error {
     }
 }
 
-#[cfg(feature = "client")]
+#[cfg(feature = "default")]
 impl From<Error> for jsonrpc_core::Error {
     fn from(e: Error) -> Self {
         Self {

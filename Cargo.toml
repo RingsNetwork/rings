@@ -2,7 +2,7 @@
 name = "rings-node"
 version = "0.2.1"
 edition = "2021"
-default-run = "rings-cli"
+default-run = "rings"
 authors = ["RND <dev@ringsnetwork.io>"]
 description = "Chord DHT implementation with ICE"
 repository = "https://github.com/RingsNetwork/rings-node"
@@ -18,8 +18,7 @@ members = ["rings-core"]
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["client"]
-client = [
+default = [
     "tokio",
     "hyper",
     "axum",
@@ -79,6 +78,6 @@ fluvio-wasm-timer = "0.2.5"
 wasm-bindgen-test = { version = "0.3.0" }
 
 [[bin]]
-name = "rings-cli"
-path = "bin/node.rs"
-required-features = ["client"]
+name = "rings"
+path = "bin/rings.rs"
+required-features = ["default"]

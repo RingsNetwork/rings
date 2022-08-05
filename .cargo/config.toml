@@ -1,9 +1,7 @@
 [alias]
 build-browser-pack = "build --lib --target=wasm32-unknown-unknown --features browser --no-default-features"
-build-client = "build --features client --no-default-features"
-build-daemon = "build --features daemon --no-default-features"
+build-client = "build"
 test-browser = "test --target=wasm32-unknown-unknown --features browser --no-default-features"
 
 [target.wasm32-unknown-unknown]
 runner = 'wasm-bindgen-test-runner'
-
