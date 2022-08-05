@@ -10,7 +10,7 @@ rings-node
 #### from cargo
 
 ```
-cargo install rings-node --features daemon
+cargo install rings-node
 ```
 
 #### from source
@@ -18,7 +18,7 @@ cargo install rings-node --features daemon
 ```
 git clone git@github.com:RingsNetwork/rings-node.git
 cd ./rings-node
-cargo install --path . --features daemon
+cargo install --path .
 ```
 
 

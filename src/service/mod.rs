@@ -1,8 +1,6 @@
 #![warn(missing_docs)]
 //! rings-node server
 mod http_error;
-#[cfg(feature = "daemon")]
-mod is_turn;
 
 use std::sync::Arc;
 
@@ -14,8 +12,6 @@ use axum::Router;
 use http::header;
 use http::header::HeaderValue;
 use http::HeaderMap;
-#[cfg(feature = "daemon")]
-pub use is_turn::run_udp_turn;
 use jsonrpc_core::MetaIoHandler;
 use tower_http::cors::CorsLayer;
 

@@ -30,7 +30,6 @@ client = [
     "pin-project",
     "rings-core",
 ]
-daemon = ["daemonize", "turn", "libc", "client", "webrtc-util"]
 browser = [
     "console_error_panic_hook",
     "reqwest-wasm",
@@ -68,14 +67,6 @@ rings-core = { package = "rings-core", path = "./rings-core", optional = true, v
 tokio = { version = "1.13.0", features = ["full"], optional = true }
 tower-http = { version = "0.3.4", features = ["cors"], optional = true }
 
-# daemon
-daemonize = { version = "0.4.1", optional = true }
-libc = { version = "0.2.121", optional = true }
-# turn server dependencies
-turn = { version = "0.5.4", optional = true }
-# rusturn = { version = "0.0.4", optional = true }
-webrtc-util = { version = "0.5.3", optional = true }
-
 # browser
 console_error_panic_hook = { version = "0.1.1", optional = true }
 console_log = { version = "0.2", optional = true }
@@ -91,8 +82,3 @@ wasm-bindgen-test = { version = "0.3.0" }
 name = "rings-cli"
 path = "bin/node.rs"
 required-features = ["client"]
-
-[[bin]]
-name = "rings-daemon"
-path = "bin/daemon.rs"
-required-features = ["daemon"]
