@@ -246,8 +246,7 @@ impl SessionManager {
 
     pub fn sign(&self, msg: &str) -> Result<Vec<u8>> {
         let key = self.session_key()?;
-           Ok(signers::default::sign_raw(key, msg).to_vec()),
-        }
+        Ok(signers::default::sign_raw(key, msg).to_vec())
     }
 
     pub fn authorizer(&self) -> Result<Address> {

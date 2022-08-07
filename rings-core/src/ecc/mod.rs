@@ -36,7 +36,7 @@ impl Serialize for PublicKey {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where S: serde::ser::Serializer {
         serializer.serialize_str(
-            &base58_monero::encode_check(&self.0[..]).map_err(|e| serde::ser::Error::custom(e))?,
+            &base58_monero::encode_check(&self.0[..]).map_err(serde::ser::Error::custom)?,
         )
     }
 }
@@ -46,23 +46,23 @@ impl PublicKey {
     pub fn try_from_b58t(value: &str) -> Result<PublicKey> {
         let value: Vec<u8> =
             base58::FromBase58::from_base58(value).map_err(|_| Error::PubKeyBadFormat)?;
-        Self::from_u8(&value.as_slice())
+        Self::from_u8(value.as_slice())
     }
 
     /// monero style b58
     pub fn try_from_b58m(value: &str) -> Result<PublicKey> {
         let value: &[u8] =
             &base58_monero::decode_check(value).map_err(|_| Error::PubKeyBadFormat)?;
-        Self::from_u8(&value)
+        Self::from_u8(value)
     }
 
     pub fn try_from_b58m_uncheck(value: &str) -> Result<PublicKey> {
         let value: &[u8] = &base58_monero::decode(value).map_err(|_| Error::PubKeyBadFormat)?;
-        Self::from_u8(&value)
+        Self::from_u8(value)
     }
 
     pub fn from_u8(value: &[u8]) -> Result<PublicKey> {
-        let mut s = value.clone().to_vec();
+        let mut s = value.to_vec();
         let data: Vec<u8> = match s.len() {
             32 => {
                 s.push(0);
@@ -376,8 +376,8 @@ pub mod tests {
     #[test]
     fn test_verify_ed25519() {
         // test tx: https://explorer.solana.com/tx/3BfW8GwZ5QKi9txfsf2wNTe7ksoEzbHW4LrpPTheR5cms4XBMm84pFvWMZ4rxfj8jNJesqnZuBjP5e9y2Um13ccU/inspect
-        let signer =
+        let _signer =
             PublicKey::try_from_b58t("BMjAwW3XdQiwXbMQ6tQQuvSjpnfxscuc8FizLhjesydp").unwrap();
-        let sig = "3BfW8GwZ5QKi9txfsf2wNTe7ksoEzbHW4LrpPTheR5cms4XBMm84pFvWMZ4rxfj8jNJesqnZuBjP5e9y2Um13ccU";
+        let _sig = "3BfW8GwZ5QKi9txfsf2wNTe7ksoEzbHW4LrpPTheR5cms4XBMm84pFvWMZ4rxfj8jNJesqnZuBjP5e9y2Um13ccU";
     }
 }
