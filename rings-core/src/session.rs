@@ -245,14 +245,8 @@ impl SessionManager {
     }
 
     pub fn sign(&self, msg: &str) -> Result<Vec<u8>> {
-        let s = self.session()?;
         let key = self.session_key()?;
-        match s.auth.signer {
-            Signer::DEFAULT => Ok(signers::default::sign_raw(key, msg).to_vec()),
-            Signer::EIP712 => Ok(signers::eip712::sign_raw(key, msg).to_vec()),
-            Signer::EdDSA => {
-                unimplemented!()
-            }
+           Ok(signers::default::sign_raw(key, msg).to_vec()),
         }
     }
 

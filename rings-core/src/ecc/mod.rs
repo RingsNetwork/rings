@@ -378,6 +378,6 @@ pub mod tests {
         // test tx: https://explorer.solana.com/tx/3BfW8GwZ5QKi9txfsf2wNTe7ksoEzbHW4LrpPTheR5cms4XBMm84pFvWMZ4rxfj8jNJesqnZuBjP5e9y2Um13ccU/inspect
         let signer =
             PublicKey::try_from_b58t("BMjAwW3XdQiwXbMQ6tQQuvSjpnfxscuc8FizLhjesydp").unwrap();
-        // let sig = "3BfW8GwZ5QKi9txfsf2wNTe7ksoEzbHW4LrpPTheR5cms4XBMm84pFvWMZ4rxfj8jNJesqnZuBjP5e9y2Um13ccU";
+        let sig = "3BfW8GwZ5QKi9txfsf2wNTe7ksoEzbHW4LrpPTheR5cms4XBMm84pFvWMZ4rxfj8jNJesqnZuBjP5e9y2Um13ccU";
     }
 }
