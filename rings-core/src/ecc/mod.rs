@@ -44,10 +44,9 @@ impl Serialize for PublicKey {
 impl PublicKey {
     /// trezor style b58
     pub fn try_from_b58t(value: &str) -> Result<PublicKey> {
-        let value: Vec<u8> = base58::FromBase58::from_base58(value)
-            .map_err(|_| Error::PubKeyBadFormat)?
-            .as_slice();
-        Self::from_u8(&value)
+        let value: Vec<u8> =
+            base58::FromBase58::from_base58(value).map_err(|_| Error::PubKeyBadFormat)?;
+        Self::from_u8(&value.as_slice())
     }
 
     /// monero style b58
@@ -64,7 +63,7 @@ impl PublicKey {
 
     pub fn from_u8(value: &[u8]) -> Result<PublicKey> {
         let mut s = value.clone().to_vec();
-        let data = match s.len() {
+        let data: Vec<u8> = match s.len() {
             32 => {
                 s.push(0);
                 Ok(s)
@@ -72,7 +71,7 @@ impl PublicKey {
             33 => Ok(s),
             _ => Err(Error::PubKeyBadFormat),
         }?;
-        let pub_data: [u8; 33] = data.try_into()?;
+        let pub_data: [u8; 33] = data.as_slice().try_into()?;
         Ok(PublicKey(pub_data))
     }
 }
