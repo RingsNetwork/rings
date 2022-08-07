@@ -12,13 +12,13 @@ use serde::Deserialize;
 use serde::Serialize;
 use web3::types::Address;
 
+use crate::dht::Did;
 use crate::ecc::signers;
 use crate::ecc::PublicKey;
 use crate::ecc::SecretKey;
 use crate::err::Error;
 use crate::err::Result;
 use crate::utils;
-use crate::dht::Did;
 
 const DEFAULT_TTL_MS: usize = 24 * 3600 * 1000;
 
@@ -27,7 +27,7 @@ const DEFAULT_TTL_MS: usize = 24 * 3600 * 1000;
 pub enum Signer {
     DEFAULT,
     EIP712,
-    EdDSA
+    EdDSA,
 }
 
 #[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
@@ -113,9 +113,15 @@ impl Session {
                 Signer::EIP712 => {
                     signers::eip712::verify(&auth_str, &self.auth.authorizer.did.into(), &self.sig)
                 }
-                Signer::EdDSA => {
-                    signers::ed25519::verify(&auth_str, &self.auth.authorizer.did.into(), &self.sig)
-                }
+                Signer::EdDSA => match self.authorizer_pubkey() {
+                    Ok(p) => signers::ed25519::verify(
+                        &auth_str,
+                        &self.auth.authorizer.did.into(),
+                        &self.sig,
+                        p,
+                    ),
+                    Err(_) => false,
+                },
             }
         } else {
             false
@@ -136,8 +142,17 @@ impl Session {
             Signer::DEFAULT => signers::default::recover(&auth, &self.sig),
             Signer::EIP712 => signers::eip712::recover(&auth, &self.sig),
             Signer::EdDSA => {
-
-                unimplemented!()
+                let pubkey_data = self
+                    .auth
+                    .authorizer
+                    .ext
+                    .as_ref()
+                    .ok_or(Error::EdDSAPubKeyNotFound)?;
+                let pubkey: [u8; 33] = pubkey_data
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| Error::EdDSAPubKeyBadFormat)?;
+                Ok(PublicKey(pubkey))
             }
         }
     }
@@ -153,7 +168,7 @@ impl SessionManager {
         let signer = signer.unwrap_or(Signer::DEFAULT);
         let authorizer = Authorizer {
             did: did.into(),
-            ext: None
+            ext: None,
         };
         let info = AuthorizedInfo {
             signer,

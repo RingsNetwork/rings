@@ -28,17 +28,15 @@ pub type CurveEle = PublicKey;
 pub struct SecretKey(libsecp256k1::SecretKey);
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
-pub struct PublicKey([u8;33]);
+pub struct PublicKey(pub [u8; 33]);
 
 struct PublicKeyVisitor;
 // /// twist from https://docs.rs/libsecp256k1/latest/src/libsecp256k1/lib.rs.html#335-344
 impl Serialize for PublicKey {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: serde::ser::Serializer,
-    {
+    where S: serde::ser::Serializer {
         serializer.serialize_str(
-            &base58_monero::encode_check(&self.0[..]).map_err(|e| serde::ser::Error::custom(e))?
+            &base58_monero::encode_check(&self.0[..]).map_err(|e| serde::ser::Error::custom(e))?,
         )
     }
 }
@@ -47,28 +45,22 @@ impl<'de> serde::de::Visitor<'de> for PublicKeyVisitor {
     type Value = PublicKey;
 
     fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
-        formatter
-            .write_str("a bytestring of in length 33")
+        formatter.write_str("a bytestring of in length 33")
     }
     fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
-    where
-        E: serde::de::Error,
-    {
+    where E: serde::de::Error {
         let value: &[u8] = &base58_monero::decode_check(value).map_err(|e| E::custom(e))?;
-        let data: [u8;33] = value.try_into().map_err(|e| E::custom(e))?;
+        let data: [u8; 33] = value.try_into().map_err(|e| E::custom(e))?;
         Ok(PublicKey(data))
     }
 }
 
 impl<'de> Deserialize<'de> for PublicKey {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::de::Deserializer<'de>,
-    {
+    where D: serde::de::Deserializer<'de> {
         deserializer.deserialize_str(PublicKeyVisitor)
     }
 }
-
 
 #[derive(Deserialize, Serialize, Debug, Clone, Eq, PartialEq)]
 pub struct HashStr(String);
@@ -99,6 +91,24 @@ impl From<SecretKey> for libsecp256k1::SecretKey {
 impl From<PublicKey> for libsecp256k1::PublicKey {
     fn from(key: PublicKey) -> Self {
         Self::parse_compressed(&key.0).unwrap()
+    }
+}
+
+impl TryFrom<PublicKey> for ed25519_dalek::PublicKey {
+    type Error = Error;
+    fn try_from(key: PublicKey) -> Result<Self> {
+        Self::from_bytes(&key.0[..32]).map_err(|_| Error::EdDSAPubKeyBadFormat)
+    }
+}
+
+impl From<ed25519_dalek::PublicKey> for PublicKey {
+    fn from(key: ed25519_dalek::PublicKey) -> Self {
+        // [u8;32] here
+        // ref: https://docs.rs/ed25519-dalek/latest/ed25519_dalek/struct.PublicKey.html
+        let mut s = key.to_bytes().as_slice().to_vec();
+        // [u8;32] + [0]
+        s.push(0);
+        Self(s.as_slice().try_into().unwrap())
     }
 }
 

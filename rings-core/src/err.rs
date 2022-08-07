@@ -3,6 +3,12 @@
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
+    #[error("Ed25519/EdDSA pubkey not found")]
+    EdDSAPubKeyNotFound,
+
+    #[error("Ed25519/EdDSA pubkey bad format")]
+    EdDSAPubKeyBadFormat,
+
     #[error("Invalid Transport")]
     InvalidTransport,
 

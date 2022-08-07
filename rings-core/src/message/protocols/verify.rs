@@ -31,8 +31,7 @@ impl MessageVerification {
                 Signer::EIP712 => signers::eip712::verify(&msg, &addr, &self.sig),
                 Signer::EdDSA => {
                     unimplemented!()
-                },
-
+                }
             }
         } else {
             false
@@ -47,7 +46,7 @@ impl MessageVerification {
             Signer::EIP712 => signers::eip712::recover(&msg, &self.sig),
             Signer::EdDSA => {
                 unimplemented!()
-            },
+            }
         }
     }
 

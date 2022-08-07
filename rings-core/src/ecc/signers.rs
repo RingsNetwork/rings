@@ -71,11 +71,24 @@ pub mod eip712 {
 pub mod ed25519 {
     use super::*;
 
-    pub fn verify(msg: &str, address: &Address, sig: impl AsRef<[u8]>) -> bool {
-        unimplemented!()
+    pub fn verify(msg: &str, address: &Address, sig: impl AsRef<[u8]>, pubkey: PublicKey) -> bool {
+        if sig.as_ref().len() != 64 {
+            return false;
+        }
+        if pubkey.address() != *address {
+            return false;
+        }
+        let sig_data: [u8; 64] = sig.as_ref().try_into().unwrap();
+        let sig = ed25519_dalek::Signature::new(sig_data);
+        if let Ok(p) = TryInto::<ed25519_dalek::PublicKey>::try_into(pubkey) {
+            match p.verify_strict(msg.as_bytes(), &sig) {
+                Ok(()) => true,
+                Err(_) => false,
+            }
+        } else {
+            false
+        }
     }
-
-
 }
 
 #[cfg(test)]
