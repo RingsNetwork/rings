@@ -44,13 +44,16 @@ impl Serialize for PublicKey {
 impl PublicKey {
     /// trezor style b58
     pub fn try_from_b58t(value: &str) -> Result<PublicKey> {
-        let value: Vec<u8> = base58::FromBase58::from_base58(value).map_err(|_| Error::PubKeyBadFormat)?.as_slice();
+        let value: Vec<u8> = base58::FromBase58::from_base58(value)
+            .map_err(|_| Error::PubKeyBadFormat)?
+            .as_slice();
         Self::from_u8(&value)
     }
 
     /// monero style b58
     pub fn try_from_b58m(value: &str) -> Result<PublicKey> {
-        let value: &[u8] = &base58_monero::decode_check(value).map_err(|_| Error::PubKeyBadFormat)?;
+        let value: &[u8] =
+            &base58_monero::decode_check(value).map_err(|_| Error::PubKeyBadFormat)?;
         Self::from_u8(&value)
     }
 
@@ -65,13 +68,12 @@ impl PublicKey {
             32 => {
                 s.push(0);
                 Ok(s)
-            },
+            }
             33 => Ok(s),
-            _ => Err(Error::PubKeyBadFormat)
+            _ => Err(Error::PubKeyBadFormat),
         }?;
         let pub_data: [u8; 33] = data.try_into()?;
         Ok(PublicKey(pub_data))
-
     }
 }
 
@@ -375,8 +377,8 @@ pub mod tests {
     #[test]
     fn test_verify_ed25519() {
         // test tx: https://explorer.solana.com/tx/3BfW8GwZ5QKi9txfsf2wNTe7ksoEzbHW4LrpPTheR5cms4XBMm84pFvWMZ4rxfj8jNJesqnZuBjP5e9y2Um13ccU/inspect
-        let signer = PublicKey::try_from_b58t("BMjAwW3XdQiwXbMQ6tQQuvSjpnfxscuc8FizLhjesydp").unwrap();
+        let signer =
+            PublicKey::try_from_b58t("BMjAwW3XdQiwXbMQ6tQQuvSjpnfxscuc8FizLhjesydp").unwrap();
         // let sig = "3BfW8GwZ5QKi9txfsf2wNTe7ksoEzbHW4LrpPTheR5cms4XBMm84pFvWMZ4rxfj8jNJesqnZuBjP5e9y2Um13ccU";
-
     }
 }

@@ -141,7 +141,11 @@ impl Session {
         match self.auth.signer {
             Signer::DEFAULT => signers::default::recover(&auth, &self.sig),
             Signer::EIP712 => signers::eip712::recover(&auth, &self.sig),
-            Signer::EdDSA => self.auth.authorizer.pubkey.ok_or(Error::EdDSAPubKeyNotFound)
+            Signer::EdDSA => self
+                .auth
+                .authorizer
+                .pubkey
+                .ok_or(Error::EdDSAPubKeyNotFound),
         }
     }
 }
