@@ -41,7 +41,7 @@ pub struct Authorizer {
     pub did: Did,
     // for ecdsa, it's hash of pubkey
     // for ed25519' it's pubkey
-    pub ext: Option<Vec<u8>>,
+    pub pubkey: Option<PublicKey>,
 }
 
 #[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
@@ -141,24 +141,33 @@ impl Session {
         match self.auth.signer {
             Signer::DEFAULT => signers::default::recover(&auth, &self.sig),
             Signer::EIP712 => signers::eip712::recover(&auth, &self.sig),
-            Signer::EdDSA => {
-                let pubkey_data = self
-                    .auth
-                    .authorizer
-                    .ext
-                    .as_ref()
-                    .ok_or(Error::EdDSAPubKeyNotFound)?;
-                let pubkey: [u8; 33] = pubkey_data
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| Error::EdDSAPubKeyBadFormat)?;
-                Ok(PublicKey(pubkey))
-            }
+            Signer::EdDSA => self.auth.authorizer.pubkey.ok_or(Error::EdDSAPubKeyNotFound)
         }
     }
 }
 
 impl SessionManager {
+    pub fn gen_unsign_info_with_pubkey(
+        ttl: Option<Ttl>,
+        signer: Option<Signer>,
+        pubkey: PublicKey,
+    ) -> Result<(AuthorizedInfo, SecretKey)> {
+        let key = SecretKey::random();
+        let signer = signer.unwrap_or(Signer::DEFAULT);
+        let authorizer = Authorizer {
+            did: pubkey.address().into(),
+            pubkey: Some(pubkey),
+        };
+        let info = AuthorizedInfo {
+            signer,
+            authorizer,
+            addr: key.address(),
+            ttl_ms: ttl.unwrap_or(Ttl::Some(DEFAULT_TTL_MS)),
+            ts_ms: utils::get_epoch_ms(),
+        };
+        Ok((info, key))
+    }
+
     pub fn gen_unsign_info(
         did: Address,
         ttl: Option<Ttl>,
@@ -168,7 +177,7 @@ impl SessionManager {
         let signer = signer.unwrap_or(Signer::DEFAULT);
         let authorizer = Authorizer {
             did: did.into(),
-            ext: None,
+            pubkey: None,
         };
         let info = AuthorizedInfo {
             signer,

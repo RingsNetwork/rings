@@ -41,6 +41,40 @@ impl Serialize for PublicKey {
     }
 }
 
+impl PublicKey {
+    /// trezor style b58
+    pub fn try_from_b58t(value: &str) -> Result<PublicKey> {
+        let value: Vec<u8> = base58::FromBase58::from_base58(value).map_err(|_| Error::PubKeyBadFormat)?.as_slice();
+        Self::from_u8(&value)
+    }
+
+    /// monero style b58
+    pub fn try_from_b58m(value: &str) -> Result<PublicKey> {
+        let value: &[u8] = &base58_monero::decode_check(value).map_err(|_| Error::PubKeyBadFormat)?;
+        Self::from_u8(&value)
+    }
+
+    pub fn try_from_b58m_uncheck(value: &str) -> Result<PublicKey> {
+        let value: &[u8] = &base58_monero::decode(value).map_err(|_| Error::PubKeyBadFormat)?;
+        Self::from_u8(&value)
+    }
+
+    pub fn from_u8(value: &[u8]) -> Result<PublicKey> {
+        let mut s = value.clone().to_vec();
+        let data = match s.len() {
+            32 => {
+                s.push(0);
+                Ok(s)
+            },
+            33 => Ok(s),
+            _ => Err(Error::PubKeyBadFormat)
+        }?;
+        let pub_data: [u8; 33] = data.try_into()?;
+        Ok(PublicKey(pub_data))
+
+    }
+}
+
 impl<'de> serde::de::Visitor<'de> for PublicKeyVisitor {
     type Value = PublicKey;
 
@@ -49,9 +83,7 @@ impl<'de> serde::de::Visitor<'de> for PublicKeyVisitor {
     }
     fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
     where E: serde::de::Error {
-        let value: &[u8] = &base58_monero::decode_check(value).map_err(|e| E::custom(e))?;
-        let data: [u8; 33] = value.try_into().map_err(|e| E::custom(e))?;
-        Ok(PublicKey(data))
+        PublicKey::try_from_b58m(value).map_err(|e| E::custom(e))
     }
 }
 
@@ -338,5 +370,13 @@ pub mod tests {
             }
         });
         keys
+    }
+
+    #[test]
+    fn test_verify_ed25519() {
+        // test tx: https://explorer.solana.com/tx/3BfW8GwZ5QKi9txfsf2wNTe7ksoEzbHW4LrpPTheR5cms4XBMm84pFvWMZ4rxfj8jNJesqnZuBjP5e9y2Um13ccU/inspect
+        let signer = PublicKey::try_from_b58t("BMjAwW3XdQiwXbMQ6tQQuvSjpnfxscuc8FizLhjesydp").unwrap();
+        // let sig = "3BfW8GwZ5QKi9txfsf2wNTe7ksoEzbHW4LrpPTheR5cms4XBMm84pFvWMZ4rxfj8jNJesqnZuBjP5e9y2Um13ccU";
+
     }
 }

@@ -263,6 +263,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "base58"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6107fe1be6682a68940da878d9e9f5e90ca5745b3dec9fd1bb393c8777d4f581"
+
+[[package]]
 name = "base58-monero"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2522,6 +2528,7 @@ dependencies = [
  "async-recursion",
  "async-stream",
  "async-trait",
+ "base58",
  "base58-monero",
  "bincode",
  "bytes",

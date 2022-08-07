@@ -9,6 +9,9 @@ pub enum Error {
     #[error("Ed25519/EdDSA pubkey bad format")]
     EdDSAPubKeyBadFormat,
 
+    #[error("ECDSA or EdDSA pubkey bad format")]
+    PubKeyBadFormat,
+
     #[error("Invalid Transport")]
     InvalidTransport,
 
