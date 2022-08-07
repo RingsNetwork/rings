@@ -36,6 +36,9 @@ pub enum Error {
     #[error("JSON serialize toString error")]
     SerializeToString,
 
+    #[error("Serialization error")]
+    SerializeError,
+
     #[error("JSON serialization error")]
     Serialize(#[source] serde_json::Error),
 

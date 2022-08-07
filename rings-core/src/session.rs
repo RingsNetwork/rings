@@ -114,7 +114,7 @@ impl Session {
                     signers::eip712::verify(&auth_str, &self.auth.authorizer.did.into(), &self.sig)
                 }
                 Signer::EdDSA => {
-                    unimplemented!()
+                    signers::ed25519::verify(&auth_str, &self.auth.authorizer.did.into(), &self.sig)
                 }
             }
         } else {
@@ -136,6 +136,7 @@ impl Session {
             Signer::DEFAULT => signers::default::recover(&auth, &self.sig),
             Signer::EIP712 => signers::eip712::recover(&auth, &self.sig),
             Signer::EdDSA => {
+
                 unimplemented!()
             }
         }

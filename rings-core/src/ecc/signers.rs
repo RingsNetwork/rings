@@ -68,6 +68,16 @@ pub mod eip712 {
     }
 }
 
+pub mod ed25519 {
+    use super::*;
+
+    pub fn verify(msg: &str, address: &Address, sig: impl AsRef<[u8]>) -> bool {
+        unimplemented!()
+    }
+
+
+}
+
 #[cfg(test)]
 mod test {
     use std::str::FromStr;
