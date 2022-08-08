@@ -79,7 +79,7 @@ impl Processor {
             )
             .map_err(|_| Error::DecodedError)?,
             &TryInto::<libsecp256k1::PublicKey>::try_into(*public_key)
-                .map_err(|_| Error::InternalError)?,
+                .map_err(|_| Error::DecodedError)?,
         ))
     }
 
