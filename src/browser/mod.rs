@@ -15,6 +15,7 @@ use crate::prelude::rings_core::async_trait;
 use crate::prelude::rings_core::dht::PeerRing;
 use crate::prelude::rings_core::dht::Stabilization;
 use crate::prelude::rings_core::dht::TStabilize;
+use crate::prelude::rings_core::ecc::PublicKey;
 use crate::prelude::rings_core::ecc::SecretKey;
 use crate::prelude::rings_core::message::CustomMessage;
 use crate::prelude::rings_core::message::Encoded;
@@ -71,6 +72,7 @@ pub fn log_level(level: &str) {
 pub enum SignerMode {
     DEFAULT,
     EIP712,
+    EdDSA,
 }
 
 impl From<SignerMode> for Signer {
@@ -78,6 +80,7 @@ impl From<SignerMode> for Signer {
         match v {
             SignerMode::DEFAULT => Self::DEFAULT,
             SignerMode::EIP712 => Self::EIP712,
+            SignerMode::EdDSA => Self::EdDSA,
         }
     }
 }
@@ -85,36 +88,38 @@ impl From<SignerMode> for Signer {
 #[wasm_bindgen]
 #[derive(Clone)]
 pub struct UnsignedInfo {
-    key_addr: Address,
     auth: AuthorizedInfo,
     random_key: SecretKey,
+    pubkey: PublicKey,
 }
 
 #[wasm_bindgen]
 impl UnsignedInfo {
-    /// Create a new `UnsignedInfo` instance with SignerMode::EIP712
-    #[wasm_bindgen(constructor)]
-    pub fn new(key_addr: String) -> Result<UnsignedInfo, JsError> {
-        Self::new_with_signer(key_addr, Some(SignerMode::EIP712))
+    /// Create a new `UnsignedInfo` instance
+    ///   * pubkey: eth wallet pubkey
+    pub fn new_with_pubkey(pubkey: String) -> Result<UnsignedInfo, JsError> {
+        let pubkey = PublicKey::try_from_b58m(&pubkey).map_err(JsError::from)?;
+        let (auth, random_key) =
+            SessionManager::gen_unsign_info_with_pubkey(None, Some(Signer::EIP712), pubkey)?;
+        Ok(UnsignedInfo {
+            // key_addr,
+            auth,
+            random_key,
+            pubkey,
+        })
     }
 
     /// Create a new `UnsignedInfo` instance
-    ///   * key_addr: wallet address
-    ///   * signer: `SignerMode`
-    pub fn new_with_signer(
-        key_addr: String,
-        signer: Option<SignerMode>,
-    ) -> Result<UnsignedInfo, JsError> {
-        let key_addr = Address::from_str(key_addr.as_str())?;
-        let (auth, random_key) = SessionManager::gen_unsign_info(
-            key_addr,
-            None,
-            Some(signer.unwrap_or(SignerMode::EIP712).into()),
-        )?;
+    ///   * pubkey: solana wallet pubkey
+    pub fn new_with_ed25519_pubkey(pubkey: String) -> Result<UnsignedInfo, JsError> {
+        let pubkey = PublicKey::try_from_b58t(&pubkey).map_err(JsError::from)?;
+        let (auth, random_key) =
+            SessionManager::gen_unsign_info_with_pubkey(None, Some(Signer::EdDSA), pubkey)?;
         Ok(UnsignedInfo {
-            key_addr,
+            // key_addr,
             auth,
             random_key,
+            pubkey,
         })
     }
 
@@ -166,7 +171,7 @@ impl Client {
         future_to_promise(async move {
             let random_key = unsigned_info.random_key;
             let session = SessionManager::new(&signed_data, &unsigned_info.auth, &random_key);
-            let swarm = Arc::new(Swarm::new(&stuns, unsigned_info.key_addr, session));
+            let swarm = Arc::new(Swarm::new(&stuns, unsigned_info.pubkey.address(), session));
 
             let storage = PersistenceStorage::new_with_cap_and_name(50000, storage_name.as_str())
                 .await
