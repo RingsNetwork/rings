@@ -1,5 +1,4 @@
-//! ECDSA and ElGamal
-
+//! ECDSA, EdDSA, and ElGamal
 use std::convert::TryFrom;
 use std::fmt::Write;
 use std::ops::Deref;
@@ -16,8 +15,10 @@ use web3::types::Address;
 
 use crate::err::Error;
 use crate::err::Result;
+mod types;
 pub mod elgamal;
 pub mod signers;
+pub use types::PublicKey;
 
 /// ref <https://docs.rs/web3/0.18.0/src/web3/signing.rs.html#69>
 /// length r: 32, length s: 32, length v(recovery_id): 1
@@ -26,74 +27,6 @@ pub type CurveEle = PublicKey;
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub struct SecretKey(libsecp256k1::SecretKey);
-
-#[derive(PartialEq, Eq, Debug, Clone, Copy)]
-pub struct PublicKey(pub [u8; 33]);
-
-struct PublicKeyVisitor;
-// /// twist from https://docs.rs/libsecp256k1/latest/src/libsecp256k1/lib.rs.html#335-344
-impl Serialize for PublicKey {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where S: serde::ser::Serializer {
-        serializer.serialize_str(
-            &base58_monero::encode_check(&self.0[..]).map_err(serde::ser::Error::custom)?,
-        )
-    }
-}
-
-impl PublicKey {
-    /// trezor style b58
-    pub fn try_from_b58t(value: &str) -> Result<PublicKey> {
-        let value: Vec<u8> =
-            base58::FromBase58::from_base58(value).map_err(|_| Error::PubKeyBadFormat)?;
-        Self::from_u8(value.as_slice())
-    }
-
-    /// monero style b58
-    pub fn try_from_b58m(value: &str) -> Result<PublicKey> {
-        let value: &[u8] =
-            &base58_monero::decode_check(value).map_err(|_| Error::PubKeyBadFormat)?;
-        Self::from_u8(value)
-    }
-
-    pub fn try_from_b58m_uncheck(value: &str) -> Result<PublicKey> {
-        let value: &[u8] = &base58_monero::decode(value).map_err(|_| Error::PubKeyBadFormat)?;
-        Self::from_u8(value)
-    }
-
-    pub fn from_u8(value: &[u8]) -> Result<PublicKey> {
-        let mut s = value.to_vec();
-        let data: Vec<u8> = match s.len() {
-            32 => {
-                s.push(0);
-                Ok(s)
-            }
-            33 => Ok(s),
-            _ => Err(Error::PubKeyBadFormat),
-        }?;
-        let pub_data: [u8; 33] = data.as_slice().try_into()?;
-        Ok(PublicKey(pub_data))
-    }
-}
-
-impl<'de> serde::de::Visitor<'de> for PublicKeyVisitor {
-    type Value = PublicKey;
-
-    fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
-        formatter.write_str("a bytestring of in length 33")
-    }
-    fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
-    where E: serde::de::Error {
-        PublicKey::try_from_b58m(value).map_err(|e| E::custom(e))
-    }
-}
-
-impl<'de> Deserialize<'de> for PublicKey {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where D: serde::de::Deserializer<'de> {
-        deserializer.deserialize_str(PublicKeyVisitor)
-    }
-}
 
 #[derive(Deserialize, Serialize, Debug, Clone, Eq, PartialEq)]
 pub struct HashStr(String);
@@ -121,16 +54,18 @@ impl From<SecretKey> for libsecp256k1::SecretKey {
     }
 }
 
-impl From<PublicKey> for libsecp256k1::PublicKey {
-    fn from(key: PublicKey) -> Self {
-        Self::parse_compressed(&key.0).unwrap()
+impl TryFrom<PublicKey> for libsecp256k1::PublicKey {
+    type Error = Error;
+    fn try_from(key: PublicKey) -> Result<Self> {
+        Self::parse_compressed(&key.0).map_err(|_| Error::ECDSAPubKeyBadFormat)
     }
 }
 
 impl TryFrom<PublicKey> for ed25519_dalek::PublicKey {
     type Error = Error;
     fn try_from(key: PublicKey) -> Result<Self> {
-        Self::from_bytes(&key.0[..32]).map_err(|_| Error::EdDSAPubKeyBadFormat)
+        // pubkey[0] == 0
+        Self::from_bytes(&key.0[1..]).map_err(|_| Error::EdDSAPubKeyBadFormat)
     }
 }
 
@@ -140,14 +75,17 @@ impl From<ed25519_dalek::PublicKey> for PublicKey {
         // ref: https://docs.rs/ed25519-dalek/latest/ed25519_dalek/struct.PublicKey.html
         let mut s = key.to_bytes().as_slice().to_vec();
         // [u8;32] + [0]
+        s.reverse();
         s.push(0);
+        s.reverse();
         Self(s.as_slice().try_into().unwrap())
     }
 }
 
-impl From<PublicKey> for libsecp256k1::curve::Affine {
-    fn from(key: PublicKey) -> Self {
-        Into::<libsecp256k1::PublicKey>::into(key).into()
+impl TryFrom<PublicKey> for libsecp256k1::curve::Affine {
+    type Error = Error;
+    fn try_from(key: PublicKey) -> Result<Self> {
+        Ok(TryInto::<libsecp256k1::PublicKey>::try_into(key)?.into())
     }
 }
 
@@ -225,11 +163,19 @@ impl ToString for SecretKey {
     }
 }
 
-fn public_key_address(public_key: &PublicKey) -> Address {
-    let pub_key: libsecp256k1::PublicKey = (*public_key).into();
-    let pub_key = pub_key.serialize();
-    debug_assert_eq!(pub_key[0], 0x04);
-    let hash = keccak256(&pub_key[1..]);
+fn public_key_address(pubkey: &PublicKey) -> Address {
+    let hash = match TryInto::<libsecp256k1::PublicKey>::try_into(*pubkey) {
+        // if pubkey is ecdsa key
+        Ok(pk) => {
+            let data = pk.serialize();
+            debug_assert_eq!(data[0], 0x04);
+            keccak256(&data[1..])
+        },
+        // if pubkey is eddsa key
+        Err(_) => {
+            keccak256(&pubkey.0[1..])
+        }
+    };
     Address::from_slice(&hash[12..])
 }
 
@@ -371,13 +317,5 @@ pub mod tests {
             }
         });
         keys
-    }
-
-    #[test]
-    fn test_verify_ed25519() {
-        // test tx: https://explorer.solana.com/tx/3BfW8GwZ5QKi9txfsf2wNTe7ksoEzbHW4LrpPTheR5cms4XBMm84pFvWMZ4rxfj8jNJesqnZuBjP5e9y2Um13ccU/inspect
-        let _signer =
-            PublicKey::try_from_b58t("BMjAwW3XdQiwXbMQ6tQQuvSjpnfxscuc8FizLhjesydp").unwrap();
-        let _sig = "3BfW8GwZ5QKi9txfsf2wNTe7ksoEzbHW4LrpPTheR5cms4XBMm84pFvWMZ4rxfj8jNJesqnZuBjP5e9y2Um13ccU";
     }
 }

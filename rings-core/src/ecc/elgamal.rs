@@ -119,7 +119,7 @@ pub fn affine_to_str(a: &[Affine]) -> Result<String> {
 
 pub fn encrypt(s: &str, k: &PublicKey) -> Result<Vec<(CurveEle, CurveEle)>> {
     let random_sar: Scalar = SecretKey::random().into();
-    let mut h: Affine = (*k).into();
+    let mut h: Affine = (*k).try_into()?;
     h.y.normalize();
     h.y.normalize();
     let affines: Vec<(Affine, Affine)> = str_to_affine(s)
@@ -156,8 +156,8 @@ pub fn decrypt(m: &[(CurveEle, CurveEle)], k: &SecretKey) -> Result<String> {
     affine_to_str(
         m.iter()
             .map(|(c1, c2)| {
-                let c1: Affine = (*c1).into();
-                let c2: Affine = (*c2).into();
+                let c1: Affine = (*c1).try_into().expect("bad curve point");
+                let c2: Affine = (*c2).try_into().expect("bad curve point");
                 let mut t = Jacobian::default();
                 cxt.ecmult_const(&mut t, &c1, &sar);
                 let a_t = Affine::from_gej(&t).neg();
@@ -212,7 +212,7 @@ mod test {
             SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0")
                 .unwrap();
         let sec_key: libsecp256k1::SecretKey = key.into();
-        let pubkey: libsecp256k1::PublicKey = key.pubkey().into();
+        let pubkey: libsecp256k1::PublicKey = key.pubkey().try_into().unwrap();
         let mut pub_point: Affine = pubkey.into();
         pub_point.x.normalize();
         pub_point.y.normalize();
