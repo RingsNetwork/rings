@@ -12,7 +12,6 @@ pub enum Error {
     #[error("Secp256k1/ECDSA pubkey bad format")]
     ECDSAPubKeyBadFormat,
 
-
     #[error("ECDSA or EdDSA pubkey bad format")]
     PubKeyBadFormat,
 

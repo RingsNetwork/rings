@@ -145,11 +145,15 @@ mod test {
         // signature: "2V1AR5byk4a4CkVmFRWU1TVs3ns2CGkuq6xgGju1huGQGq5hGkiHUDjEaJJaL2txfqCSGnQW55jUJpcjKFkZEKq"
 
         let msg = "helloworld";
-        let signer = PublicKey::try_from_b58t("9z1ZTaGocNSAu3DSqGKR6Dqt214X4dXucVd6C53EgqBK").unwrap();
+        let signer =
+            PublicKey::try_from_b58t("9z1ZTaGocNSAu3DSqGKR6Dqt214X4dXucVd6C53EgqBK").unwrap();
         let sig_b58 = "3BfW8GwZ5QKi9txfsf2wNTe7ksoEzbHW4LrpPTheR5cms4XBMm84pFvWMZ4rxfj8jNJesqnZuBjP5e9y2Um13ccU";
         let sig: Vec<u8> = base58::FromBase58::from_base58(sig_b58).unwrap();
-        assert!(ed25519::verify(msg, &signer.address(), sig.as_slice(), signer))
-
+        assert!(ed25519::verify(
+            msg,
+            &signer.address(),
+            sig.as_slice(),
+            signer
+        ))
     }
-
 }

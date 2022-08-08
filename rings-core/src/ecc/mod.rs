@@ -15,9 +15,9 @@ use web3::types::Address;
 
 use crate::err::Error;
 use crate::err::Result;
-mod types;
 pub mod elgamal;
 pub mod signers;
+mod types;
 pub use types::PublicKey;
 
 /// ref <https://docs.rs/web3/0.18.0/src/web3/signing.rs.html#69>
@@ -170,11 +170,9 @@ fn public_key_address(pubkey: &PublicKey) -> Address {
             let data = pk.serialize();
             debug_assert_eq!(data[0], 0x04);
             keccak256(&data[1..])
-        },
-        // if pubkey is eddsa key
-        Err(_) => {
-            keccak256(&pubkey.0[1..])
         }
+        // if pubkey is eddsa key
+        Err(_) => keccak256(&pubkey.0[1..]),
     };
     Address::from_slice(&hash[12..])
 }
