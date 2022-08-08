@@ -24,20 +24,20 @@ impl PublicKey {
     /// trezor style b58
     pub fn try_from_b58t(value: &str) -> Result<PublicKey> {
         let value: Vec<u8> =
-            base58::FromBase58::from_base58(value).map_err(|_| Error::PubKeyBadFormat)?;
+            base58::FromBase58::from_base58(value).map_err(|_| Error::PublicKeyBadFormat)?;
         Self::from_u8(value.as_slice())
     }
 
     /// monero and bitcoin style b58
     pub fn try_from_b58m(value: &str) -> Result<PublicKey> {
         let value: &[u8] =
-            &base58_monero::decode_check(value).map_err(|_| Error::PubKeyBadFormat)?;
+            &base58_monero::decode_check(value).map_err(|_| Error::PublicKeyBadFormat)?;
         Self::from_u8(value)
     }
 
     /// monero style uncheck base56
     pub fn try_from_b58m_uncheck(value: &str) -> Result<PublicKey> {
-        let value: &[u8] = &base58_monero::decode(value).map_err(|_| Error::PubKeyBadFormat)?;
+        let value: &[u8] = &base58_monero::decode(value).map_err(|_| Error::PublicKeyBadFormat)?;
         Self::from_u8(value)
     }
 
@@ -52,7 +52,7 @@ impl PublicKey {
                 Ok(s)
             }
             33 => Ok(s),
-            _ => Err(Error::PubKeyBadFormat),
+            _ => Err(Error::PublicKeyBadFormat),
         }?;
         let pub_data: [u8; 33] = data.as_slice().try_into()?;
         Ok(PublicKey(pub_data))

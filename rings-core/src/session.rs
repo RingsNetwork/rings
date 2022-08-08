@@ -145,7 +145,7 @@ impl Session {
                 .auth
                 .authorizer
                 .pubkey
-                .ok_or(Error::EdDSAPubKeyNotFound),
+                .ok_or(Error::EdDSAPublicKeyNotFound),
         }
     }
 }

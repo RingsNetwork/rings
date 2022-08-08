@@ -78,7 +78,8 @@ impl Processor {
                 &base64::decode(signature).map_err(|_| Error::DecodedError)?,
             )
             .map_err(|_| Error::DecodedError)?,
-            &Into::<libsecp256k1::PublicKey>::into(*public_key),
+            &TryInto::<libsecp256k1::PublicKey>::try_into(*public_key)
+                .map_err(|_| Error::InternalError)?,
         ))
     }
 

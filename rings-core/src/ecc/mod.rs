@@ -57,7 +57,7 @@ impl From<SecretKey> for libsecp256k1::SecretKey {
 impl TryFrom<PublicKey> for libsecp256k1::PublicKey {
     type Error = Error;
     fn try_from(key: PublicKey) -> Result<Self> {
-        Self::parse_compressed(&key.0).map_err(|_| Error::ECDSAPubKeyBadFormat)
+        Self::parse_compressed(&key.0).map_err(|_| Error::ECDSAPublicKeyBadFormat)
     }
 }
 
@@ -65,7 +65,7 @@ impl TryFrom<PublicKey> for ed25519_dalek::PublicKey {
     type Error = Error;
     fn try_from(key: PublicKey) -> Result<Self> {
         // pubkey[0] == 0
-        Self::from_bytes(&key.0[1..]).map_err(|_| Error::EdDSAPubKeyBadFormat)
+        Self::from_bytes(&key.0[1..]).map_err(|_| Error::EdDSAPublicKeyBadFormat)
     }
 }
 

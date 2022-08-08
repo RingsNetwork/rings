@@ -4,16 +4,16 @@
 #[non_exhaustive]
 pub enum Error {
     #[error("Ed25519/EdDSA pubkey not found")]
-    EdDSAPubKeyNotFound,
+    EdDSAPublicKeyNotFound,
 
     #[error("Ed25519/EdDSA pubkey bad format")]
-    EdDSAPubKeyBadFormat,
+    EdDSAPublicKeyBadFormat,
 
     #[error("Secp256k1/ECDSA pubkey bad format")]
-    ECDSAPubKeyBadFormat,
+    ECDSAPublicKeyBadFormat,
 
     #[error("ECDSA or EdDSA pubkey bad format")]
-    PubKeyBadFormat,
+    PublicKeyBadFormat,
 
     #[error("Invalid Transport")]
     InvalidTransport,
