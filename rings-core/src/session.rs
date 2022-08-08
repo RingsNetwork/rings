@@ -156,7 +156,7 @@ impl SessionManager {
         ttl: Option<Ttl>,
         pubkey: PublicKey,
     ) -> Result<(AuthorizedInfo, SecretKey)> {
-        Self::gen_unsign_info_with_pubkey(ttl, Some(EdDSA), pubkey)
+        Self::gen_unsign_info_with_pubkey(ttl, Some(Signer::EdDSA), pubkey)
     }
 
     pub fn gen_unsign_info_with_pubkey(
