@@ -12,6 +12,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use web3::types::Address;
 
+use crate::dht::Did;
 use crate::ecc::signers;
 use crate::ecc::PublicKey;
 use crate::ecc::SecretKey;
@@ -26,6 +27,7 @@ const DEFAULT_TTL_MS: usize = 24 * 3600 * 1000;
 pub enum Signer {
     DEFAULT,
     EIP712,
+    EdDSA,
 }
 
 #[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
@@ -35,8 +37,16 @@ pub enum Ttl {
 }
 
 #[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
+pub struct Authorizer {
+    pub did: Did,
+    // for ecdsa, it's hash of pubkey
+    // for ed25519' it's pubkey
+    pub pubkey: Option<PublicKey>,
+}
+
+#[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
 pub struct AuthorizedInfo {
-    pub authorizer: Address,
+    pub authorizer: Authorizer,
     pub signer: Signer,
     pub addr: Address,
     pub ttl_ms: Ttl,
@@ -98,11 +108,20 @@ impl Session {
         if let Ok(auth_str) = self.auth.to_string() {
             match self.auth.signer {
                 Signer::DEFAULT => {
-                    signers::default::verify(&auth_str, &self.auth.authorizer, &self.sig)
+                    signers::default::verify(&auth_str, &self.auth.authorizer.did.into(), &self.sig)
                 }
                 Signer::EIP712 => {
-                    signers::eip712::verify(&auth_str, &self.auth.authorizer, &self.sig)
+                    signers::eip712::verify(&auth_str, &self.auth.authorizer.did.into(), &self.sig)
                 }
+                Signer::EdDSA => match self.authorizer_pubkey() {
+                    Ok(p) => signers::ed25519::verify(
+                        &auth_str,
+                        &self.auth.authorizer.did.into(),
+                        &self.sig,
+                        p,
+                    ),
+                    Err(_) => false,
+                },
             }
         } else {
             false
@@ -122,18 +141,56 @@ impl Session {
         match self.auth.signer {
             Signer::DEFAULT => signers::default::recover(&auth, &self.sig),
             Signer::EIP712 => signers::eip712::recover(&auth, &self.sig),
+            Signer::EdDSA => self
+                .auth
+                .authorizer
+                .pubkey
+                .ok_or(Error::EdDSAPublicKeyNotFound),
         }
     }
 }
 
 impl SessionManager {
+    /// gen unsign info with a given ed25519 pubkey
+    pub fn gen_unsign_info_with_ed25519_pubkey(
+        ttl: Option<Ttl>,
+        pubkey: PublicKey,
+    ) -> Result<(AuthorizedInfo, SecretKey)> {
+        Self::gen_unsign_info_with_pubkey(ttl, Some(Signer::EdDSA), pubkey)
+    }
+
+    pub fn gen_unsign_info_with_pubkey(
+        ttl: Option<Ttl>,
+        signer: Option<Signer>,
+        pubkey: PublicKey,
+    ) -> Result<(AuthorizedInfo, SecretKey)> {
+        let key = SecretKey::random();
+        let signer = signer.unwrap_or(Signer::DEFAULT);
+        let authorizer = Authorizer {
+            did: pubkey.address().into(),
+            pubkey: Some(pubkey),
+        };
+        let info = AuthorizedInfo {
+            signer,
+            authorizer,
+            addr: key.address(),
+            ttl_ms: ttl.unwrap_or(Ttl::Some(DEFAULT_TTL_MS)),
+            ts_ms: utils::get_epoch_ms(),
+        };
+        Ok((info, key))
+    }
+
     pub fn gen_unsign_info(
-        authorizer: Address,
+        did: Address,
         ttl: Option<Ttl>,
         signer: Option<Signer>,
     ) -> Result<(AuthorizedInfo, SecretKey)> {
         let key = SecretKey::random();
         let signer = signer.unwrap_or(Signer::DEFAULT);
+        let authorizer = Authorizer {
+            did: did.into(),
+            pubkey: None,
+        };
         let info = AuthorizedInfo {
             signer,
             authorizer,
@@ -196,16 +253,12 @@ impl SessionManager {
     }
 
     pub fn sign(&self, msg: &str) -> Result<Vec<u8>> {
-        let s = self.session()?;
         let key = self.session_key()?;
-        match s.auth.signer {
-            Signer::DEFAULT => Ok(signers::default::sign_raw(key, msg).to_vec()),
-            Signer::EIP712 => Ok(signers::eip712::sign_raw(key, msg).to_vec()),
-        }
+        Ok(signers::default::sign_raw(key, msg).to_vec())
     }
 
     pub fn authorizer(&self) -> Result<Address> {
-        Ok(self.session()?.auth.authorizer)
+        Ok(self.session()?.auth.authorizer.did.into())
     }
 }
 

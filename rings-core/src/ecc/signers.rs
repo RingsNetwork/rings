@@ -68,6 +68,31 @@ pub mod eip712 {
     }
 }
 
+pub mod ed25519 {
+    use ed25519_dalek::Verifier;
+
+    use super::*;
+
+    pub fn verify(msg: &str, address: &Address, sig: impl AsRef<[u8]>, pubkey: PublicKey) -> bool {
+        if pubkey.address() != *address {
+            return false;
+        }
+        if sig.as_ref().len() != 64 {
+            return false;
+        }
+        let sig_data: [u8; 64] = sig.as_ref().try_into().unwrap();
+        let sig = ed25519_dalek::Signature::new(sig_data);
+        if let Ok(p) = TryInto::<ed25519_dalek::PublicKey>::try_into(pubkey) {
+            match p.verify(msg.as_bytes(), &sig) {
+                Ok(()) => true,
+                Err(_) => false,
+            }
+        } else {
+            false
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use std::str::FromStr;
@@ -105,5 +130,32 @@ mod test {
         let pubkey = eip712::recover(msg, &sig).unwrap();
         assert_eq!(pubkey.address(), address);
         assert!(eip712::verify(msg, &address, &sig));
+    }
+
+    #[test]
+    fn test_verify_ed25519() {
+        // test via phantom
+        // const msg = "helloworld";
+        // const encoded = new TextEncoder().encode(msg);
+        // const signedMessage = await solana.request({
+        //     method: "signMessage",
+        //     params: {
+        //     message: encoded,
+        //     },
+        // });
+        // publicKey: "9z1ZTaGocNSAu3DSqGKR6Dqt214X4dXucVd6C53EgqBK"
+        // signature: "2V1AR5byk4a4CkVmFRWU1TVs3ns2CGkuq6xgGju1huGQGq5hGkiHUDjEaJJaL2txfqCSGnQW55jUJpcjKFkZEKq"
+
+        let msg = "helloworld";
+        let signer =
+            PublicKey::try_from_b58t("9z1ZTaGocNSAu3DSqGKR6Dqt214X4dXucVd6C53EgqBK").unwrap();
+        let sig_b58 = "2V1AR5byk4a4CkVmFRWU1TVs3ns2CGkuq6xgGju1huGQGq5hGkiHUDjEaJJaL2txfqCSGnQW55jUJpcjKFkZEKq";
+        let sig: Vec<u8> = base58::FromBase58::from_base58(sig_b58).unwrap();
+        assert!(ed25519::verify(
+            msg,
+            &signer.address(),
+            sig.as_slice(),
+            signer
+        ))
     }
 }

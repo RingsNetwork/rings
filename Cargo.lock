@@ -263,6 +263,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "base58"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6107fe1be6682a68940da878d9e9f5e90ca5745b3dec9fd1bb393c8777d4f581"
+
+[[package]]
 name = "base58-monero"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -900,6 +906,29 @@ dependencies = [
  "elliptic-curve",
  "hmac 0.10.1",
  "signature",
+]
+
+[[package]]
+name = "ed25519"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4620d40f6d2601794401d6dd95a5cf69b6c157852539470eeda433a99b3c0efc"
+dependencies = [
+ "signature",
+]
+
+[[package]]
+name = "ed25519-dalek"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c762bae6dcaf24c4c84667b8579785430908723d5c889f469d76a41d59cc7a9d"
+dependencies = [
+ "curve25519-dalek",
+ "ed25519",
+ "rand 0.7.3",
+ "serde",
+ "sha2 0.9.9",
+ "zeroize",
 ]
 
 [[package]]
@@ -2491,7 +2520,7 @@ dependencies = [
 
 [[package]]
 name = "rings-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "arrayref",
  "async-channel",
@@ -2499,12 +2528,14 @@ dependencies = [
  "async-recursion",
  "async-stream",
  "async-trait",
+ "base58",
  "base58-monero",
  "bincode",
  "bytes",
  "chrono",
  "console_log",
  "dashmap",
+ "ed25519-dalek",
  "flate2",
  "futures",
  "futures-timer",
@@ -2536,7 +2567,7 @@ dependencies = [
 
 [[package]]
 name = "rings-node"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "arrayref",

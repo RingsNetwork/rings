@@ -3,6 +3,18 @@
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
+    #[error("Ed25519/EdDSA pubkey not found")]
+    EdDSAPublicKeyNotFound,
+
+    #[error("Ed25519/EdDSA pubkey bad format")]
+    EdDSAPublicKeyBadFormat,
+
+    #[error("Secp256k1/ECDSA pubkey bad format")]
+    ECDSAPublicKeyBadFormat,
+
+    #[error("ECDSA or EdDSA pubkey bad format")]
+    PublicKeyBadFormat,
+
     #[error("Invalid Transport")]
     InvalidTransport,
 
@@ -35,6 +47,9 @@ pub enum Error {
 
     #[error("JSON serialize toString error")]
     SerializeToString,
+
+    #[error("Serialization error")]
+    SerializeError,
 
     #[error("JSON serialization error")]
     Serialize(#[source] serde_json::Error),

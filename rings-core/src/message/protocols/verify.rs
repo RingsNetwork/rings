@@ -29,6 +29,9 @@ impl MessageVerification {
             match self.session.auth.signer {
                 Signer::DEFAULT => signers::default::verify(&msg, &addr, &self.sig),
                 Signer::EIP712 => signers::eip712::verify(&msg, &addr, &self.sig),
+                Signer::EdDSA => {
+                    unimplemented!()
+                }
             }
         } else {
             false
@@ -38,10 +41,7 @@ impl MessageVerification {
     pub fn session_pubkey<T>(&self, data: &T) -> Result<PublicKey>
     where T: Serialize {
         let msg = self.msg(data)?;
-        match self.session.auth.signer {
-            Signer::DEFAULT => signers::default::recover(&msg, &self.sig),
-            Signer::EIP712 => signers::eip712::recover(&msg, &self.sig),
-        }
+        signers::default::recover(&msg, &self.sig)
     }
 
     pub fn pack_msg<T>(data: &T, ts_ms: u128, ttl_ms: usize) -> Result<String>
