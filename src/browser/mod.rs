@@ -97,12 +97,28 @@ pub struct UnsignedInfo {
 impl UnsignedInfo {
     /// Create a new `UnsignedInfo` instance
     ///   * pubkey: eth wallet pubkey
-    pub fn new_with_pubkey(pubkey: String) -> Result<UnsignedInfo, JsError> {
+    pub fn new_with_pubkey(
+        pubkey: Vec<u8>,
+        signer_mode: SignerMode,
+    ) -> Result<UnsignedInfo, JsError> {
+        let pubkey = PublicKey::from_u8(&pubkey).map_err(JsError::from)?;
+
+        let (auth, random_key) =
+            SessionManager::gen_unsign_info_with_pubkey(None, Some(signer_mode.into()), pubkey)?;
+        Ok(UnsignedInfo {
+            auth,
+            random_key,
+            pubkey,
+        })
+    }
+
+    /// Create a new `UnsignedInfo` instance
+    ///   * pubkey: eth wallet pubkey
+    pub fn new_with_eip712_pubkey(pubkey: String) -> Result<UnsignedInfo, JsError> {
         let pubkey = PublicKey::try_from_b58m(&pubkey).map_err(JsError::from)?;
         let (auth, random_key) =
             SessionManager::gen_unsign_info_with_pubkey(None, Some(Signer::EIP712), pubkey)?;
         Ok(UnsignedInfo {
-            // key_addr,
             auth,
             random_key,
             pubkey,
@@ -116,7 +132,6 @@ impl UnsignedInfo {
         let (auth, random_key) =
             SessionManager::gen_unsign_info_with_pubkey(None, Some(Signer::EdDSA), pubkey)?;
         Ok(UnsignedInfo {
-            // key_addr,
             auth,
             random_key,
             pubkey,

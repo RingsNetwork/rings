@@ -30,9 +30,12 @@ pub fn generic_of_jsval<T: FromWasmAbi<Abi = u32>>(
 #[allow(dead_code)]
 async fn new_client() -> (browser::Client, String) {
     let key = SecretKey::random();
-    let unsigned_info = browser::UnsignedInfo::new_with_pubkey(key.to_string())
-        .ok()
-        .unwrap();
+    let unsigned_info = browser::UnsignedInfo::new_with_pubkey(
+        key.pubkey().0.to_vec(),
+        browser::SignerMode::EIP712,
+    )
+    .ok()
+    .unwrap();
     let auth = unsigned_info.auth().ok().unwrap();
     let signed_data = Uint8Array::from(key.sign(&auth).to_vec().as_slice());
     let stuns = "stun://stun.l.google.com:19302".to_owned();
