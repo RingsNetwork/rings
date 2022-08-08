@@ -1,9 +1,7 @@
 use js_sys::Uint8Array;
 use rings_node::browser;
 use rings_node::browser::Peer;
-use rings_node::browser::SignerMode;
 use rings_node::browser::TransportAndIce;
-use rings_node::prelude::rings_core::prelude::web3::contract::tokens::Tokenizable;
 use rings_node::prelude::wasm_bindgen::convert::FromWasmAbi;
 use rings_node::prelude::wasm_bindgen::JsValue;
 use rings_node::prelude::wasm_bindgen_futures::JsFuture;
@@ -32,12 +30,9 @@ pub fn generic_of_jsval<T: FromWasmAbi<Abi = u32>>(
 #[allow(dead_code)]
 async fn new_client() -> (browser::Client, String) {
     let key = SecretKey::random();
-    let unsigned_info = browser::UnsignedInfo::new_with_signer(
-        key.address().into_token().to_string(),
-        Some(SignerMode::DEFAULT),
-    )
-    .ok()
-    .unwrap();
+    let unsigned_info = browser::UnsignedInfo::new_with_pubkey(key.to_string())
+        .ok()
+        .unwrap();
     let auth = unsigned_info.auth().ok().unwrap();
     let signed_data = Uint8Array::from(key.sign(&auth).to_vec().as_slice());
     let stuns = "stun://stun.l.google.com:19302".to_owned();
