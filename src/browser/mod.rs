@@ -90,25 +90,37 @@ impl From<SignerMode> for Signer {
 pub struct UnsignedInfo {
     auth: AuthorizedInfo,
     random_key: SecretKey,
-    pubkey: PublicKey,
+    pubkey: Option<PublicKey>,
+    key_addr: Option<Address>,
 }
 
 #[wasm_bindgen]
 impl UnsignedInfo {
-    /// Create a new `UnsignedInfo` instance
-    ///   * pubkey: eth wallet pubkey
-    pub fn new_with_pubkey(
-        pubkey: Vec<u8>,
-        signer_mode: SignerMode,
-    ) -> Result<UnsignedInfo, JsError> {
-        let pubkey = PublicKey::from_u8(&pubkey).map_err(JsError::from)?;
+    /// Create a new `UnsignedInfo` instance with SignerMode::EIP712
+    #[wasm_bindgen(constructor)]
+    pub fn new(key_addr: String) -> Result<UnsignedInfo, JsError> {
+        Self::new_with_signer(key_addr, Some(SignerMode::EIP712))
+    }
 
-        let (auth, random_key) =
-            SessionManager::gen_unsign_info_with_pubkey(None, Some(signer_mode.into()), pubkey)?;
+    /// Create a new `UnsignedInfo` instance
+    ///   * key_addr: wallet address
+    ///   * signer: `SignerMode`
+    pub fn new_with_signer(
+        key_addr: String,
+        signer: Option<SignerMode>,
+    ) -> Result<UnsignedInfo, JsError> {
+        let key_addr = Address::from_str(key_addr.as_str())?;
+        let (auth, random_key) = SessionManager::gen_unsign_info(
+            key_addr,
+            None,
+            Some(signer.unwrap_or(SignerMode::EIP712).into()),
+        )?;
+
         Ok(UnsignedInfo {
             auth,
             random_key,
-            pubkey,
+            pubkey: None,
+            key_addr: Some(key_addr),
         })
     }
 
@@ -121,7 +133,8 @@ impl UnsignedInfo {
         Ok(UnsignedInfo {
             auth,
             random_key,
-            pubkey,
+            pubkey: Some(pubkey),
+            key_addr: None,
         })
     }
 
@@ -134,7 +147,8 @@ impl UnsignedInfo {
         Ok(UnsignedInfo {
             auth,
             random_key,
-            pubkey,
+            pubkey: Some(pubkey),
+            key_addr: None,
         })
     }
 
@@ -142,6 +156,16 @@ impl UnsignedInfo {
     pub fn auth(&self) -> Result<String, JsError> {
         let s = self.auth.to_string()?;
         Ok(s)
+    }
+
+    fn get_address(&self) -> Option<Address> {
+        if let Some(addr) = self.key_addr {
+            return Some(addr);
+        }
+        if let Some(pubkey) = self.pubkey {
+            return Some(pubkey.address());
+        }
+        None
     }
 }
 
@@ -186,7 +210,11 @@ impl Client {
         future_to_promise(async move {
             let random_key = unsigned_info.random_key;
             let session = SessionManager::new(&signed_data, &unsigned_info.auth, &random_key);
-            let swarm = Arc::new(Swarm::new(&stuns, unsigned_info.pubkey.address(), session));
+            let swarm = Arc::new(Swarm::new(
+                &stuns,
+                unsigned_info.get_address().unwrap(),
+                session,
+            ));
 
             let storage = PersistenceStorage::new_with_cap_and_name(50000, storage_name.as_str())
                 .await
