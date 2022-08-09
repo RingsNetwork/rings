@@ -287,27 +287,25 @@ impl Processor {
     }
 
     /// Get peer by remote address
-    pub async fn get_peer(&self, address: &str) -> Result<Peer> {
-        let address = Address::from_str(address).map_err(|_| Error::InvalidAddress)?;
+    pub async fn get_peer(&self, address: &Address) -> Result<Peer> {
         let transport = self
             .swarm
-            .get_transport(&address)
+            .get_transport(address)
             .ok_or(Error::TransportNotFound)?;
-        Ok(Peer::from(&(address, transport)))
+        Ok(Peer::from(&(*address, transport)))
     }
 
     /// Disconnect a peer with web3 address.
-    pub async fn disconnect(&self, address: &str) -> Result<()> {
-        let address = Address::from_str(address).map_err(|_| Error::InvalidAddress)?;
+    pub async fn disconnect(&self, address: &Address) -> Result<()> {
         let transport = self
             .swarm
-            .get_transport(&address)
+            .get_transport(address)
             .ok_or(Error::TransportNotFound)?;
         transport
             .close()
             .await
             .map_err(Error::CloseTransportError)?;
-        self.swarm.remove_transport(&address);
+        self.swarm.remove_transport(address);
         Ok(())
     }
 
