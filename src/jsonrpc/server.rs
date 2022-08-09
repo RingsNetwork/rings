@@ -146,7 +146,9 @@ async fn close_connection(params: Params, meta: RpcMeta) -> Result<Value> {
     let address = params
         .first()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
-    meta.processor.disconnect(address).await?;
+    let address =
+        Address::from_str(address).map_err(|_| Error::from(ServerError::InvalidAddress))?;
+    meta.processor.disconnect(&address).await?;
     Ok(serde_json::json!({}))
 }
 

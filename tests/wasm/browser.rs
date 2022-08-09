@@ -1,12 +1,11 @@
 use js_sys::Uint8Array;
 use rings_node::browser;
 use rings_node::browser::Peer;
-use rings_node::browser::SignerMode;
 use rings_node::browser::TransportAndIce;
-use rings_node::prelude::rings_core::prelude::web3::contract::tokens::Tokenizable;
 use rings_node::prelude::wasm_bindgen::convert::FromWasmAbi;
 use rings_node::prelude::wasm_bindgen::JsValue;
 use rings_node::prelude::wasm_bindgen_futures::JsFuture;
+use rings_node::prelude::web3::contract::tokens::Tokenizable;
 use rings_node::prelude::*;
 use wasm_bindgen_test::*;
 wasm_bindgen_test_configure!(run_in_browser);
@@ -34,7 +33,7 @@ async fn new_client() -> (browser::Client, String) {
     let key = SecretKey::random();
     let unsigned_info = browser::UnsignedInfo::new_with_signer(
         key.address().into_token().to_string(),
-        Some(SignerMode::DEFAULT),
+        browser::SignerMode::DEFAULT,
     )
     .ok()
     .unwrap();
@@ -96,16 +95,16 @@ async fn test_two_client_connect_and_list() {
     assert!(peers.len() == 1, "peers len should be 1");
     let peer1 = peers.get(0).unwrap();
     console_log!("wait for data channel open");
-    JsFuture::from(client1.wait_for_data_channel_open(peer1.address()))
+    JsFuture::from(client1.wait_for_data_channel_open(peer1.address(), None))
         .await
         .unwrap();
     console_log!("get peer");
-    let peer1: Peer = JsFuture::from(client1.get_peer(peer1.address()))
+    let peer1: Peer = JsFuture::from(client1.get_peer(peer1.address(), None))
         .await
         .unwrap()
         .into_serde()
         .unwrap();
-    let peer1_state = JsFuture::from(client1.transport_state(peer1.address()))
+    let peer1_state = JsFuture::from(client1.transport_state(peer1.address(), None))
         .await
         .unwrap();
     assert!(
@@ -113,7 +112,7 @@ async fn test_two_client_connect_and_list() {
         "peer1 state got {:?}",
         peer1_state,
     );
-    JsFuture::from(client1.disconnect(peer1.address()))
+    JsFuture::from(client1.disconnect(peer1.address(), None))
         .await
         .unwrap();
     let peers = get_peers(&client1).await;
