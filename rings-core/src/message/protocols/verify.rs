@@ -8,7 +8,6 @@ use crate::ecc::PublicKey;
 use crate::err::Error;
 use crate::err::Result;
 use crate::session::Session;
-use crate::session::Signer;
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct MessageVerification {
@@ -26,13 +25,7 @@ impl MessageVerification {
         }
 
         if let (Ok(addr), Ok(msg)) = (self.session.address(), self.msg(data)) {
-            match self.session.auth.signer {
-                Signer::DEFAULT => signers::default::verify(&msg, &addr, &self.sig),
-                Signer::EIP712 => signers::eip712::verify(&msg, &addr, &self.sig),
-                Signer::EdDSA => {
-                    unimplemented!()
-                }
-            }
+            signers::default::verify(&msg, &addr, &self.sig)
         } else {
             false
         }
