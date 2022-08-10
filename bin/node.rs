@@ -105,6 +105,8 @@ enum ConnectCommand {
     Node(ConnectUrlArgs),
     #[clap()]
     Address(ConnectWithAddressArgs),
+    #[clap()]
+    Seed(ConnectWithSeedArgs),
 }
 
 #[derive(Args, Debug)]
@@ -125,6 +127,16 @@ struct ConnectWithAddressArgs {
 
     #[clap()]
     address: String,
+}
+
+#[derive(Args, Debug)]
+#[clap(about = "Connect with seed from url or file")]
+struct ConnectWithSeedArgs {
+    #[clap(flatten)]
+    client_args: ClientArgs,
+
+    #[clap()]
+    source: String,
 }
 
 #[derive(Subcommand, Debug)]
@@ -305,6 +317,15 @@ async fn main() -> anyhow::Result<()> {
                 .new_client()
                 .await?
                 .connect_with_address(args.address.as_str())
+                .await?
+                .display();
+            Ok(())
+        }
+        Command::Connect(ConnectCommand::Seed(args)) => {
+            args.client_args
+                .new_client()
+                .await?
+                .connect_with_seed(args.source.as_str())
                 .await?
                 .display();
             Ok(())

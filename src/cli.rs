@@ -10,6 +10,8 @@ use crate::jsonrpc::response::Peer;
 use crate::jsonrpc::response::TransportAndIce;
 use crate::jsonrpc_client::SimpleClient;
 use crate::prelude::reqwest;
+use crate::seed::Seed;
+use crate::seed::SeedLoader;
 
 #[derive(Clone)]
 pub struct Client {
@@ -50,7 +52,6 @@ impl Client {
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        log::debug!("resp: {:?}", resp);
         let transport_id = resp
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Unexpect response"))?;
@@ -59,6 +60,21 @@ impl Client {
             format!("Succeed, Your transport_id: {}", transport_id),
             transport_id.to_string(),
         )
+    }
+
+    pub async fn connect_with_seed(&mut self, source: &str) -> Output<()> {
+        let seed = Seed::load(source).await?;
+        let seed_v = serde_json::to_value(seed).map_err(|_| anyhow::anyhow!("serialize failed"))?;
+
+        self.client
+            .call_method(
+                Method::ConnectWithSeed.as_str(),
+                Params::Array(vec![seed_v]),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        ClientOutput::ok("Successful!".to_string(), ())
     }
 
     pub async fn answer_offer(&mut self, ice_info: &str) -> Output<TransportAndIce> {

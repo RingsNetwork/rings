@@ -2571,6 +2571,7 @@ version = "0.2.1"
 dependencies = [
  "anyhow",
  "arrayref",
+ "async-trait",
  "axum",
  "base64",
  "chrono",
