@@ -147,6 +147,7 @@ pub mod jsonrpc_client;
 pub mod logger;
 pub mod prelude;
 pub mod processor;
+pub mod seed;
 #[cfg(feature = "client")]
 pub mod service;
 pub mod util;

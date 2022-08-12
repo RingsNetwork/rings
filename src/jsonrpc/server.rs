@@ -1,7 +1,9 @@
 #![warn(missing_docs)]
+use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use futures::future::join_all;
 use jsonrpc_core::Error;
 use jsonrpc_core::ErrorCode;
 use jsonrpc_core::MetaIoHandler;
@@ -17,8 +19,10 @@ use super::response::Peer;
 use super::response::TransportAndIce;
 use crate::error::Error as ServerError;
 use crate::prelude::rings_core::prelude::Address;
+use crate::prelude::rings_core::swarm::TransportManager;
 use crate::processor;
 use crate::processor::Processor;
+use crate::seed::Seed;
 
 /// RpcMeta basic info struct
 #[derive(Clone)]
@@ -46,6 +50,7 @@ impl From<(Arc<Processor>, bool)> for RpcMeta {
 
 pub(crate) async fn build_handler(handler: &mut MetaIoHandler<RpcMeta>) {
     handler.add_method_with_meta(Method::ConnectPeerViaHttp.as_str(), connect_peer_via_http);
+    handler.add_method_with_meta(Method::ConnectWithSeed.as_str(), connect_with_seed);
     handler.add_method_with_meta(Method::AnswerOffer.as_str(), answer_offer);
     handler.add_method_with_meta(Method::ConnectWithAddress.as_str(), connect_with_address);
     handler.add_method_with_meta(Method::CreateOffer.as_str(), create_offer);
@@ -71,6 +76,32 @@ async fn connect_peer_via_http(params: Params, meta: RpcMeta) -> Result<Value> {
         .await
         .map_err(Error::from)?;
     Ok(Value::String(transport.id.to_string()))
+}
+
+async fn connect_with_seed(params: Params, meta: RpcMeta) -> Result<Value> {
+    let p: Vec<Seed> = params.parse()?;
+    let seed = p
+        .first()
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
+
+    let mut connected_addresses: HashSet<Address> =
+        HashSet::from_iter(meta.processor.swarm.get_addresses());
+    connected_addresses.insert(meta.processor.swarm.address());
+
+    let tasks = seed
+        .peers
+        .iter()
+        .filter(|&x| connected_addresses.contains(&x.did))
+        .map(|x| meta.processor.connect_peer_via_http(&x.endpoint));
+
+    let results = join_all(tasks).await;
+
+    let first_err = results.into_iter().find(|x| x.is_err());
+    if let Some(err) = first_err {
+        err.map_err(Error::from)?;
+    }
+
+    Ok(Value::Null)
 }
 
 async fn answer_offer(params: Params, meta: RpcMeta) -> Result<Value> {

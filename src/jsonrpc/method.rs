@@ -9,6 +9,8 @@ pub enum Method {
     ConnectPeerViaHttp,
     /// Connect peer with remote peer's web3 address
     ConnectWithAddress,
+    /// Connect peers from a seed file
+    ConnectWithSeed,
     /// List all connected peers
     ListPeers,
     /// Create offer for manually handshake
@@ -33,6 +35,7 @@ impl Method {
         match self {
             Method::ConnectPeerViaHttp => "connectPeerViaHttp",
             Method::ConnectWithAddress => "connectWithAddress",
+            Method::ConnectWithSeed => "connectWithSeed",
             Method::ListPeers => "listPeers",
             Method::CreateOffer => "createOffer",
             Method::AnswerOffer => "answerOffer",
@@ -58,6 +61,7 @@ impl TryFrom<&str> for Method {
         Ok(match value {
             "connectPeerViaHttp" => Self::ConnectPeerViaHttp,
             "connectWithAddress" => Self::ConnectWithAddress,
+            "connectWithSeed" => Self::ConnectWithSeed,
             "listPeers" => Self::ListPeers,
             "createOffer" => Self::CreateOffer,
             "answerOffer" => Self::AnswerOffer,

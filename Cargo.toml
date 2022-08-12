@@ -42,6 +42,7 @@ browser_chrome_test = ["browser"]
 [dependencies]
 anyhow = "1.0.45"
 arrayref = "0.3.6"
+async-trait = "0.1.52"
 base64 = { version = "0.13.0" }
 chrono = "0.4.19"
 dotenv = "0.15.0"
