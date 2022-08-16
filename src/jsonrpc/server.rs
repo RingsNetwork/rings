@@ -91,7 +91,7 @@ async fn connect_with_seed(params: Params, meta: RpcMeta) -> Result<Value> {
     let tasks = seed
         .peers
         .iter()
-        .filter(|&x| connected_addresses.contains(&x.did))
+        .filter(|&x| !connected_addresses.contains(&x.did))
         .map(|x| meta.processor.connect_peer_via_http(&x.endpoint));
 
     let results = join_all(tasks).await;
