@@ -34,7 +34,6 @@ mod loader {
             let url = Url::parse(source).map_err(|e| anyhow::anyhow!("{}", e))?;
 
             if let Ok(path) = url.to_file_path() {
-                dbg!(&path);
                 let data = std::fs::read_to_string(path)
                     .map_err(|_| anyhow::anyhow!("Unable to read seed file"))?;
 
