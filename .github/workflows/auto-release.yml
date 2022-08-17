@@ -23,7 +23,7 @@ jobs:
           sharedKey: release-v1
 
       - name: Build
-        run: cargo build --features daemon --features client --all --verbose --release
+        run: cargo build --all --verbose --release
 
       - uses: "marvinpinto/action-automatic-releases@latest"
         with:
@@ -33,5 +33,4 @@ jobs:
           title: "Development Build"
           files: |
             LICENSE
-            target/release/rings-daemon
-            target/release/rings-cli
+            target/release/rings
