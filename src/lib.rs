@@ -136,18 +136,18 @@
 #![feature(async_closure)]
 #[cfg(feature = "browser")]
 pub mod browser;
-#[cfg(feature = "client")]
+#[cfg(feature = "default")]
 pub mod cli;
 pub mod error;
-#[cfg(feature = "client")]
+#[cfg(feature = "default")]
 pub mod ethereum;
 pub mod jsonrpc;
 pub mod jsonrpc_client;
-#[cfg(feature = "client")]
+#[cfg(feature = "default")]
 pub mod logger;
 pub mod prelude;
 pub mod processor;
 pub mod seed;
-#[cfg(feature = "client")]
+#[cfg(feature = "default")]
 pub mod service;
 pub mod util;

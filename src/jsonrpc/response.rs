@@ -28,7 +28,7 @@ impl Peer {
         serde_json::to_value(self).map_err(|_| Error::JsonSerializeError)
     }
 
-    #[cfg(feature = "client")]
+    #[cfg(feature = "default")]
     pub fn base64_encode(&self) -> Result<String> {
         Ok(base64::encode(self.to_json_vec()?))
     }
@@ -98,7 +98,7 @@ impl TransportAndIce {
         serde_json::to_value(self).map_err(|_| Error::JsonSerializeError)
     }
 
-    #[cfg(feature = "client")]
+    #[cfg(feature = "default")]
     pub fn base64_encode(&self) -> Result<String> {
         Ok(base64::encode(self.to_json_vec()?))
     }

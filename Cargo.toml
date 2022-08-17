@@ -2,7 +2,7 @@
 name = "rings-node"
 version = "0.2.1"
 edition = "2021"
-default-run = "rings-cli"
+default-run = "rings"
 authors = ["RND <dev@ringsnetwork.io>"]
 description = "Chord DHT implementation with ICE"
 repository = "https://github.com/RingsNetwork/rings-node"
@@ -18,8 +18,7 @@ members = ["rings-core"]
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["client"]
-client = [
+default = [
     "tokio",
     "hyper",
     "axum",
@@ -30,7 +29,6 @@ client = [
     "pin-project",
     "rings-core",
 ]
-daemon = ["daemonize", "turn", "libc", "client", "webrtc-util"]
 browser = [
     "console_error_panic_hook",
     "reqwest-wasm",
@@ -68,14 +66,6 @@ rings-core = { package = "rings-core", path = "./rings-core", optional = true, v
 tokio = { version = "1.13.0", features = ["full"], optional = true }
 tower-http = { version = "0.3.4", features = ["cors"], optional = true }
 
-# daemon
-daemonize = { version = "0.4.1", optional = true }
-libc = { version = "0.2.121", optional = true }
-# turn server dependencies
-turn = { version = "0.5.4", optional = true }
-# rusturn = { version = "0.0.4", optional = true }
-webrtc-util = { version = "0.5.3", optional = true }
-
 # browser
 console_error_panic_hook = { version = "0.1.1", optional = true }
 console_log = { version = "0.2", optional = true }
@@ -88,11 +78,6 @@ fluvio-wasm-timer = "0.2.5"
 wasm-bindgen-test = { version = "0.3.0" }
 
 [[bin]]
-name = "rings-cli"
-path = "bin/node.rs"
-required-features = ["client"]
-
-[[bin]]
-name = "rings-daemon"
-path = "bin/daemon.rs"
-required-features = ["daemon"]
+name = "rings"
+path = "bin/rings.rs"
+required-features = ["default"]

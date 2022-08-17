@@ -22,7 +22,7 @@ use rings_node::util;
 #[derive(Parser, Debug)]
 #[clap(about, version, author)]
 struct Cli {
-    #[clap(long, short = 'v', default_value_t = LogLevel::Info, arg_enum, env)]
+    #[clap(long, default_value_t = LogLevel::Info, arg_enum, env)]
     log_level: LogLevel,
 
     #[clap(long, short = 'c', parse(from_os_str))]
@@ -35,8 +35,8 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 #[clap(rename_all = "kebab-case")]
 enum Command {
-    #[clap(about = "daemon")]
-    Run(Daemon),
+    #[clap()]
+    Daemon(Daemon),
     #[clap(subcommand)]
     Connect(ConnectCommand),
     #[clap(subcommand)]
@@ -293,7 +293,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if let Err(e) = match cli.command {
-        Command::Run(args) => {
+        Command::Daemon(args) => {
             daemon_run(
                 args.http_addr,
                 &args.ecdsa_key,
