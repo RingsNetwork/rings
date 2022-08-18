@@ -613,6 +613,11 @@ impl Peer {
     pub fn state(&self) -> Option<String> {
         self.state.to_owned()
     }
+
+    #[wasm_bindgen(getter)]
+    pub fn transport_addr(&self) -> String {
+        self.transport_addr.to_owned()
+    }
 }
 
 impl From<(Option<RtcIceConnectionState>, Token, Uuid, PublicKey)> for Peer {
