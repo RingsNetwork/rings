@@ -5,7 +5,7 @@ wasm-pack:
 	wasm-bindgen --out-dir pkg --target web ./target/wasm32-unknown-unknown/release/rings_node.wasm
 
 build-browser-pack:
-	wasm-pack build --scope ringsnetwork -t web --no-default-features --features browser
+	wasm-pack build --scope ringsnetwork -t web --no-default-features --features browser --features console_error_panic_hook
 test-core-wasm:
 	wasm-pack test --chrome --features browser_chrome_test --no-default-features -p rings-core
 
