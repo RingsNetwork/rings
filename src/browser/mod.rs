@@ -10,6 +10,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use self::utils::from_rtc_ice_connection_state;
+use crate::prelude::base58::ToBase58;
 use crate::prelude::js_sys;
 use crate::prelude::rings_core::async_trait;
 use crate::prelude::rings_core::dht::PeerRing;
@@ -631,7 +632,7 @@ impl From<(Option<RtcIceConnectionState>, Token, Uuid, PublicKey)> for Peer {
     ) -> Self {
         Self {
             address: address.to_string(),
-            transport_addr: transport_pubkey.address().into_token().to_string(),
+            transport_addr: transport_pubkey.to_base58(),
             transport_id: transport_id.to_string(),
             state: st.map(from_rtc_ice_connection_state),
         }

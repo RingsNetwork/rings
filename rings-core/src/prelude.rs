@@ -1,6 +1,7 @@
 //! prelude
 
 pub use async_trait;
+pub use base58;
 pub use dashmap;
 pub use futures;
 #[cfg(feature = "wasm")]
