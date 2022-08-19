@@ -77,3 +77,9 @@ impl<'de> Deserialize<'de> for PublicKey {
         deserializer.deserialize_str(PublicKeyVisitor)
     }
 }
+
+impl base58::ToBase58 for PublicKey {
+    fn to_base58(&self) -> String {
+        self.0.to_base58()
+    }
+}
