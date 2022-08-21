@@ -589,9 +589,7 @@ impl WasmTransport {
         };
         Ok(())
     }
-}
 
-impl WasmTransport {
     pub async fn gather_complete_promise(&self) -> Result<Promise> {
         match self.get_peer_connection().await {
             Some(conn) => {

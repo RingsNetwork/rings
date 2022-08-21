@@ -959,10 +959,13 @@ pub mod tests {
         let ev1 = node1.listen_once().await;
         assert!(ev1.is_none());
 
+        #[cfg(not(feature = "wasm"))]
+        swarm2.get_transport(&did1).unwrap().close().await.unwrap();
+
         for _ in 1..10 {
             println!("wait 3 seconds for node2's transport 2to1 closing");
             sleep(Duration::from_secs(3)).await;
-            if let Some(t) = swarm2.get_transport(&did1.into()) {
+            if let Some(t) = swarm2.get_transport(&did1) {
                 if t.is_disconnected().await {
                     println!("transport 2to1 is disconnected!!!!");
                     break;

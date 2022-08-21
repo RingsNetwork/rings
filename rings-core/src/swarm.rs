@@ -27,7 +27,6 @@ use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::Event;
 use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransport;
-use crate::types::ice_transport::IceTransportCallback;
 
 pub struct Swarm {
     table: MemStorage<Address, Arc<Transport>>,
@@ -344,7 +343,10 @@ mod tests {
 
     use super::*;
     use crate::ecc::SecretKey;
+    #[cfg(not(feature = "dummy"))]
     use crate::transports::default::transport::tests::establish_connection;
+    #[cfg(feature = "dummy")]
+    use crate::transports::dummy::transport::tests::establish_connection;
 
     fn new_swarm() -> Swarm {
         let stun = "stun://stun.l.google.com:19302";

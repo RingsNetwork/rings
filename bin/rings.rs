@@ -292,7 +292,7 @@ async fn main() -> anyhow::Result<()> {
         dotenv::from_path(std::path::Path::new(&conf)).ok();
     }
 
-    if let Err(e) = match cli.command {
+    match cli.command {
         Command::Daemon(args) => {
             daemon_run(
                 args.http_addr,
@@ -407,8 +407,5 @@ async fn main() -> anyhow::Result<()> {
             println!("New secretKey: {}", k.to_string());
             Ok(())
         }
-    } {
-        return Err(e);
     }
-    Ok(())
 }
