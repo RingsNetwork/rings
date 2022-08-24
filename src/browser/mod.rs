@@ -10,7 +10,6 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use self::utils::from_rtc_ice_connection_state;
-use crate::prelude::base58::ToBase58;
 use crate::prelude::js_sys;
 use crate::prelude::rings_core::async_trait;
 use crate::prelude::rings_core::dht::PeerRing;
@@ -593,7 +592,7 @@ impl MessageCallback for MessageCallbackInstance {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Peer {
     address: String,
-    transport_addr: String,
+    transport_pubkey: String,
     transport_id: String,
     state: Option<String>,
 }
@@ -616,8 +615,8 @@ impl Peer {
     }
 
     #[wasm_bindgen(getter)]
-    pub fn transport_addr(&self) -> String {
-        self.transport_addr.to_owned()
+    pub fn transport_pubkey(&self) -> String {
+        self.transport_pubkey.to_owned()
     }
 }
 
@@ -632,7 +631,7 @@ impl From<(Option<RtcIceConnectionState>, Token, Uuid, PublicKey)> for Peer {
     ) -> Self {
         Self {
             address: address.to_string(),
-            transport_addr: transport_pubkey.to_base58(),
+            transport_pubkey: Result::unwrap_or(transport_pubkey.to_base58_string(), "".to_owned()),
             transport_id: transport_id.to_string(),
             state: st.map(from_rtc_ice_connection_state),
         }

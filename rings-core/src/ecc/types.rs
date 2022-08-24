@@ -57,6 +57,11 @@ impl PublicKey {
         let pub_data: [u8; 33] = data.as_slice().try_into()?;
         Ok(PublicKey(pub_data))
     }
+
+    /// convert pubkey to base58_string
+    pub fn to_base58_string(&self) -> Result<String> {
+        Ok(base58::ToBase58::to_base58(&self.0[..]))
+    }
 }
 
 impl<'de> serde::de::Visitor<'de> for PublicKeyVisitor {
@@ -75,11 +80,5 @@ impl<'de> Deserialize<'de> for PublicKey {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where D: serde::de::Deserializer<'de> {
         deserializer.deserialize_str(PublicKeyVisitor)
-    }
-}
-
-impl base58::ToBase58 for PublicKey {
-    fn to_base58(&self) -> String {
-        self.0.to_base58()
     }
 }
