@@ -61,9 +61,7 @@ pub trait IceTransportCallback<E: Send, Ch: Channel<E>>: IceTransport<E, Ch> {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait IceCandidateGathering<E: Send, Ch: Channel<E>>: IceTransport<E, Ch> {
     type Sdp;
-    type IceGatheringState;
 
-    async fn ice_gathering_state(&self) -> Option<Self::IceGatheringState>;
     async fn add_ice_candidate(&self, candidate: IceCandidate) -> Result<()>;
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
     where T: Into<Self::Sdp> + Send;

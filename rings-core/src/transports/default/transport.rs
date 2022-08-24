@@ -291,13 +291,6 @@ impl IceTransportCallback<Event, AcChannel<Event>> for DefaultTransport {
 #[async_trait]
 impl IceCandidateGathering<Event, AcChannel<Event>> for DefaultTransport {
     type Sdp = RTCSessionDescription;
-    type IceGatheringState = RTCIceGatheringState;
-
-    async fn ice_gathering_state(&self) -> Option<Self::IceGatheringState> {
-        self.get_peer_connection()
-            .await
-            .map(|pc| pc.ice_gathering_state())
-    }
 
     async fn add_ice_candidate(&self, candidate: IceCandidate) -> Result<()> {
         match self.get_peer_connection().await {
@@ -421,6 +414,12 @@ impl DefaultTransport {
 
     async fn get_data_channel(&self) -> Option<Arc<RTCDataChannel>> {
         self.data_channel.lock().await.clone()
+    }
+
+    pub async fn ice_gathering_state(&self) -> Option<RTCIceGatheringState> {
+        self.get_peer_connection()
+            .await
+            .map(|pc| pc.ice_gathering_state())
     }
 
     async fn get_offer(&self) -> Result<RTCSessionDescription> {
