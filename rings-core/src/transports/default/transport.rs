@@ -17,6 +17,7 @@ use webrtc::ice::mdns::MulticastDnsMode;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
 use webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType;
 use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
+use webrtc::ice_transport::ice_gathering_state::RTCIceGatheringState;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
@@ -36,9 +37,11 @@ use crate::transports::helper::TricklePayload;
 use crate::types::channel::Channel;
 use crate::types::channel::Event;
 use crate::types::ice_transport::IceCandidate;
+use crate::types::ice_transport::IceCandidateGathering;
 use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
+use crate::types::ice_transport::IceTransportInterface;
 use crate::types::ice_transport::IceTrickleScheme;
 
 type EventSender = <AcChannel<Event> as Channel<Event>>::Sender;
@@ -66,13 +69,69 @@ impl Drop for DefaultTransport {
 }
 
 #[async_trait]
-impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
+impl IceTransport for DefaultTransport {
     type Connection = RTCPeerConnection;
     type Candidate = RTCIceCandidate;
     type Sdp = RTCSessionDescription;
     type DataChannel = RTCDataChannel;
+
+    async fn get_peer_connection(&self) -> Option<Arc<RTCPeerConnection>> {
+        self.connection.lock().await.clone()
+    }
+
+    async fn get_pending_candidates(&self) -> Vec<RTCIceCandidate> {
+        self.pending_candidates.lock().await.to_vec()
+    }
+
+    async fn get_data_channel(&self) -> Option<Arc<RTCDataChannel>> {
+        self.data_channel.lock().await.clone()
+    }
+
+    async fn get_offer(&self) -> Result<RTCSessionDescription> {
+        match self.get_peer_connection().await {
+            Some(peer_connection) => {
+                // wait gather candidates
+                let mut gather_complete = peer_connection.gathering_complete_promise().await;
+                match peer_connection.create_offer(None).await {
+                    Ok(offer) => {
+                        self.set_local_description(offer.to_owned()).await?;
+                        let _ = gather_complete.recv().await;
+                        Ok(offer)
+                    }
+                    Err(e) => {
+                        log::error!("{}", e);
+                        Err(Error::RTCPeerConnectionCreateOfferFailed(e))
+                    }
+                }
+            }
+            None => Err(Error::RTCPeerConnectionNotEstablish),
+        }
+    }
+
+    async fn get_answer(&self) -> Result<RTCSessionDescription> {
+        match self.get_peer_connection().await {
+            Some(peer_connection) => {
+                let mut gather_complete = peer_connection.gathering_complete_promise().await;
+                match peer_connection.create_answer(None).await {
+                    Ok(answer) => {
+                        self.set_local_description(answer.to_owned()).await?;
+                        let _ = gather_complete.recv().await;
+                        Ok(answer)
+                    }
+                    Err(e) => {
+                        log::error!("{}", e);
+                        Err(Error::RTCPeerConnectionCreateAnswerFailed(e))
+                    }
+                }
+            }
+            None => Err(Error::RTCPeerConnectionNotEstablish),
+        }
+    }
+}
+
+#[async_trait]
+impl IceTransportInterface<Event, AcChannel<Event>> for DefaultTransport {
     type IceConnectionState = RTCIceConnectionState;
-    type Msg = DataChannelMessage;
 
     fn new(event_sender: EventSender) -> Self {
         Self {
@@ -118,6 +177,27 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
         Ok(self)
     }
 
+    async fn apply_callback(&self) -> Result<&Self> {
+        let on_ice_candidate_callback = self.on_ice_candidate().await;
+        let on_data_channel_callback = self.on_data_channel().await;
+        let on_ice_connection_state_change_callback = self.on_ice_connection_state_change().await;
+        match self.get_peer_connection().await {
+            Some(peer_connection) => {
+                peer_connection
+                    .on_ice_candidate(on_ice_candidate_callback)
+                    .await;
+                peer_connection
+                    .on_data_channel(on_data_channel_callback)
+                    .await;
+                peer_connection
+                    .on_ice_connection_state_change(on_ice_connection_state_change_callback)
+                    .await;
+                Ok(self)
+            }
+            None => Err(Error::RTCPeerConnectionNotEstablish),
+        }
+    }
+
     async fn close(&self) -> Result<()> {
         if let Some(pc) = self.get_peer_connection().await {
             pc.close()
@@ -154,67 +234,6 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
         self.public_key.read().await.unwrap()
     }
 
-    async fn get_peer_connection(&self) -> Option<Arc<RTCPeerConnection>> {
-        self.connection.lock().await.clone()
-    }
-
-    async fn get_pending_candidates(&self) -> Vec<RTCIceCandidate> {
-        self.pending_candidates.lock().await.to_vec()
-    }
-
-    async fn get_answer(&self) -> Result<RTCSessionDescription> {
-        match self.get_peer_connection().await {
-            Some(peer_connection) => {
-                let mut gather_complete = peer_connection.gathering_complete_promise().await;
-                match peer_connection.create_answer(None).await {
-                    Ok(answer) => {
-                        self.set_local_description(answer.to_owned()).await?;
-                        let _ = gather_complete.recv().await;
-                        Ok(answer)
-                    }
-                    Err(e) => {
-                        log::error!("{}", e);
-                        Err(Error::RTCPeerConnectionCreateAnswerFailed(e))
-                    }
-                }
-            }
-            None => Err(Error::RTCPeerConnectionNotEstablish),
-        }
-    }
-
-    async fn get_answer_str(&self) -> Result<String> {
-        Ok(self.get_answer().await?.sdp)
-    }
-
-    async fn get_offer(&self) -> Result<RTCSessionDescription> {
-        match self.get_peer_connection().await {
-            Some(peer_connection) => {
-                // wait gather candidates
-                let mut gather_complete = peer_connection.gathering_complete_promise().await;
-                match peer_connection.create_offer(None).await {
-                    Ok(offer) => {
-                        self.set_local_description(offer.to_owned()).await?;
-                        let _ = gather_complete.recv().await;
-                        Ok(offer)
-                    }
-                    Err(e) => {
-                        log::error!("{}", e);
-                        Err(Error::RTCPeerConnectionCreateOfferFailed(e))
-                    }
-                }
-            }
-            None => Err(Error::RTCPeerConnectionNotEstablish),
-        }
-    }
-
-    async fn get_offer_str(&self) -> Result<String> {
-        Ok(self.get_offer().await?.sdp)
-    }
-
-    async fn get_data_channel(&self) -> Option<Arc<RTCDataChannel>> {
-        self.data_channel.lock().await.clone()
-    }
-
     async fn send_message(&self, msg: &[u8]) -> Result<()> {
         let size = msg.len();
         match self.get_data_channel().await {
@@ -237,100 +256,28 @@ impl IceTransport<Event, AcChannel<Event>> for DefaultTransport {
             None => Err(Error::RTCDataChannelNotReady),
         }
     }
-
-    async fn add_ice_candidate(&self, candidate: IceCandidate) -> Result<()> {
-        match self.get_peer_connection().await {
-            Some(peer_connection) => peer_connection
-                .add_ice_candidate(candidate.into())
-                .await
-                .map_err(Error::RTCPeerConnectionAddIceCandidateError),
-            None => Err(Error::RTCPeerConnectionNotEstablish),
-        }
-    }
-
-    async fn set_local_description<T>(&self, desc: T) -> Result<()>
-    where T: Into<RTCSessionDescription> + Send {
-        match self.get_peer_connection().await {
-            Some(peer_connection) => peer_connection
-                .set_local_description(desc.into())
-                .await
-                .map_err(Error::RTCPeerConnectionSetLocalDescFailed),
-            None => Err(Error::RTCPeerConnectionNotEstablish),
-        }
-    }
-
-    async fn set_remote_description<T>(&self, desc: T) -> Result<()>
-    where T: Into<RTCSessionDescription> + Send {
-        match self.get_peer_connection().await {
-            Some(peer_connection) => peer_connection
-                .set_remote_description(desc.into())
-                .await
-                .map_err(Error::RTCPeerConnectionSetRemoteDescFailed),
-            None => Err(Error::RTCPeerConnectionNotEstablish),
-        }
-    }
-}
-
-impl DefaultTransport {
-    pub async fn setup_channel(&mut self, name: &str) -> Result<()> {
-        match self.get_peer_connection().await {
-            Some(peer_connection) => {
-                let channel = peer_connection.create_data_channel(name, None).await;
-                match channel {
-                    Ok(ch) => {
-                        let mut channel = self.data_channel.lock().await;
-                        *channel = Some(ch);
-                        Ok(())
-                    }
-                    Err(_) => Err(Error::RTCDataChannelNotReady),
-                }
-            }
-            None => Err(Error::RTCPeerConnectionNotEstablish),
-        }
-    }
 }
 
 #[async_trait]
-impl IceTransportCallback<Event, AcChannel<Event>> for DefaultTransport {
+impl IceTransportCallback for DefaultTransport {
     type OnLocalCandidateHdlrFn =
-        Box<dyn FnMut(Option<Self::Candidate>) -> BoxFuture<'static, ()> + Send + Sync>;
+        Box<dyn FnMut(Option<RTCIceCandidate>) -> BoxFuture<'static, ()> + Send + Sync>;
     type OnDataChannelHdlrFn =
-        Box<dyn FnMut(Arc<Self::DataChannel>) -> BoxFuture<'static, ()> + Send + Sync>;
+        Box<dyn FnMut(Arc<RTCDataChannel>) -> BoxFuture<'static, ()> + Send + Sync>;
     type OnIceConnectionStateChangeHdlrFn =
         Box<(dyn FnMut(RTCIceConnectionState) -> BoxFuture<'static, ()> + Sync + Send + 'static)>;
-
-    async fn apply_callback(&self) -> Result<&Self> {
-        let on_ice_candidate_callback = self.on_ice_candidate().await;
-        let on_data_channel_callback = self.on_data_channel().await;
-        let on_ice_connection_state_change_callback = self.on_ice_connection_state_change().await;
-        match self.get_peer_connection().await {
-            Some(peer_connection) => {
-                peer_connection
-                    .on_ice_candidate(on_ice_candidate_callback)
-                    .await;
-                peer_connection
-                    .on_data_channel(on_data_channel_callback)
-                    .await;
-                peer_connection
-                    .on_ice_connection_state_change(on_ice_connection_state_change_callback)
-                    .await;
-                Ok(self)
-            }
-            None => Err(Error::RTCPeerConnectionNotEstablish),
-        }
-    }
 
     async fn on_ice_connection_state_change(&self) -> Self::OnIceConnectionStateChangeHdlrFn {
         let event_sender = self.event_sender.clone();
         let public_key = Arc::clone(&self.public_key);
         let id = self.id;
-        box move |cs: Self::IceConnectionState| {
+        box move |cs: RTCIceConnectionState| {
             let event_sender = event_sender.clone();
             let public_key = Arc::clone(&public_key);
             let id = id;
             Box::pin(async move {
                 match cs {
-                    Self::IceConnectionState::Connected => {
+                    RTCIceConnectionState::Connected => {
                         let local_address: Address = public_key.read().await.unwrap().address();
                         if event_sender
                             .send(Event::RegisterTransport((local_address, id)))
@@ -340,9 +287,9 @@ impl IceTransportCallback<Event, AcChannel<Event>> for DefaultTransport {
                             log::error!("Failed when send RegisterTransport");
                         }
                     }
-                    Self::IceConnectionState::Failed
-                    | Self::IceConnectionState::Disconnected
-                    | Self::IceConnectionState::Closed => {
+                    RTCIceConnectionState::Failed
+                    | RTCIceConnectionState::Disconnected
+                    | RTCIceConnectionState::Closed => {
                         let local_address: Address = public_key.read().await.unwrap().address();
                         if event_sender
                             .send(Event::ConnectClosed((local_address, id)))
@@ -364,7 +311,7 @@ impl IceTransportCallback<Event, AcChannel<Event>> for DefaultTransport {
         let pending_candidates = Arc::clone(&self.pending_candidates);
         let peer_connection = self.get_peer_connection().await;
 
-        box move |c: Option<<Self as IceTransport<Event, AcChannel<Event>>>::Candidate>| {
+        box move |c: Option<RTCIceCandidate>| {
             let pending_candidates = Arc::clone(&pending_candidates);
             let peer_connection = peer_connection.clone();
             Box::pin(async move {
@@ -404,7 +351,42 @@ impl IceTransportCallback<Event, AcChannel<Event>> for DefaultTransport {
 }
 
 #[async_trait]
-impl IceTrickleScheme<Event, AcChannel<Event>> for DefaultTransport {
+impl IceCandidateGathering for DefaultTransport {
+    async fn add_ice_candidate(&self, candidate: IceCandidate) -> Result<()> {
+        match self.get_peer_connection().await {
+            Some(peer_connection) => peer_connection
+                .add_ice_candidate(candidate.into())
+                .await
+                .map_err(Error::RTCPeerConnectionAddIceCandidateError),
+            None => Err(Error::RTCPeerConnectionNotEstablish),
+        }
+    }
+
+    async fn set_local_description<T>(&self, desc: T) -> Result<()>
+    where T: Into<RTCSessionDescription> + Send {
+        match self.get_peer_connection().await {
+            Some(peer_connection) => peer_connection
+                .set_local_description(desc.into())
+                .await
+                .map_err(Error::RTCPeerConnectionSetLocalDescFailed),
+            None => Err(Error::RTCPeerConnectionNotEstablish),
+        }
+    }
+
+    async fn set_remote_description<T>(&self, desc: T) -> Result<()>
+    where T: Into<RTCSessionDescription> + Send {
+        match self.get_peer_connection().await {
+            Some(peer_connection) => peer_connection
+                .set_remote_description(desc.into())
+                .await
+                .map_err(Error::RTCPeerConnectionSetRemoteDescFailed),
+            None => Err(Error::RTCPeerConnectionNotEstablish),
+        }
+    }
+}
+
+#[async_trait]
+impl IceTrickleScheme for DefaultTransport {
     // https://datatracker.ietf.org/doc/html/rfc5245
     // 1. Send (SdpOffer, IceCandidates) to remote
     // 2. Recv (SdpAnswer, IceCandidate) From Remote
@@ -427,7 +409,8 @@ impl IceTrickleScheme<Event, AcChannel<Event>> for DefaultTransport {
             }
         };
         let local_candidates_json = join_all(
-            self.get_pending_candidates()
+            self.pending_candidates
+                .lock()
                 .await
                 .iter()
                 .map(async move |c| c.clone().to_json().await.unwrap().into()),
@@ -485,6 +468,29 @@ impl IceTrickleScheme<Event, AcChannel<Event>> for DefaultTransport {
 }
 
 impl DefaultTransport {
+    pub async fn ice_gathering_state(&self) -> Option<RTCIceGatheringState> {
+        self.get_peer_connection()
+            .await
+            .map(|pc| pc.ice_gathering_state())
+    }
+
+    pub async fn setup_channel(&mut self, name: &str) -> Result<()> {
+        match self.get_peer_connection().await {
+            Some(peer_connection) => {
+                let channel = peer_connection.create_data_channel(name, None).await;
+                match channel {
+                    Ok(ch) => {
+                        let mut channel = self.data_channel.lock().await;
+                        *channel = Some(ch);
+                        Ok(())
+                    }
+                    Err(_) => Err(Error::RTCDataChannelNotReady),
+                }
+            }
+            None => Err(Error::RTCPeerConnectionNotEstablish),
+        }
+    }
+
     pub async fn wait_for_data_channel_open(&self) -> Result<()> {
         match self.get_data_channel().await {
             Some(dc) => {
@@ -569,8 +575,6 @@ impl DefaultTransport {
 pub mod tests {
     use std::str::FromStr;
 
-    use webrtc::ice_transport::ice_gathering_state::RTCIceGatheringState;
-
     use super::DefaultTransport as Transport;
     use super::*;
     use crate::ecc::SecretKey;
@@ -602,21 +606,12 @@ pub mod tests {
             Some(RTCIceConnectionState::New)
         );
         assert_eq!(
-            transport1
-                .get_peer_connection()
-                .await
-                .unwrap()
-                .ice_gathering_state(),
-            RTCIceGatheringState::New
+            transport1.ice_gathering_state().await,
+            Some(RTCIceGatheringState::New)
         );
-
         assert_eq!(
-            transport2
-                .get_peer_connection()
-                .await
-                .unwrap()
-                .ice_gathering_state(),
-            RTCIceGatheringState::New
+            transport2.ice_gathering_state().await,
+            Some(RTCIceGatheringState::New)
         );
 
         // Generate key pairs for signing and verification
@@ -632,20 +627,12 @@ pub mod tests {
             .get_handshake_info(&sm1, RTCSdpType::Offer)
             .await?;
         assert_eq!(
-            transport1
-                .get_peer_connection()
-                .await
-                .unwrap()
-                .ice_gathering_state(),
-            RTCIceGatheringState::Complete
+            transport1.ice_gathering_state().await,
+            Some(RTCIceGatheringState::Complete)
         );
         assert_eq!(
-            transport2
-                .get_peer_connection()
-                .await
-                .unwrap()
-                .ice_gathering_state(),
-            RTCIceGatheringState::New
+            transport2.ice_gathering_state().await,
+            Some(RTCIceGatheringState::New)
         );
         assert_eq!(
             transport1.ice_connection_state().await,
@@ -661,22 +648,13 @@ pub mod tests {
         assert_eq!(addr1, key1.address());
 
         assert_eq!(
-            transport1
-                .get_peer_connection()
-                .await
-                .unwrap()
-                .ice_gathering_state(),
-            RTCIceGatheringState::Complete
+            transport1.ice_gathering_state().await,
+            Some(RTCIceGatheringState::Complete)
         );
         assert_eq!(
-            transport2
-                .get_peer_connection()
-                .await
-                .unwrap()
-                .ice_gathering_state(),
-            RTCIceGatheringState::New
+            transport2.ice_gathering_state().await,
+            Some(RTCIceGatheringState::New)
         );
-
         assert_eq!(
             transport1.ice_connection_state().await,
             Some(RTCIceConnectionState::New)
@@ -692,22 +670,13 @@ pub mod tests {
             .await?;
 
         assert_eq!(
-            transport1
-                .get_peer_connection()
-                .await
-                .unwrap()
-                .ice_gathering_state(),
-            RTCIceGatheringState::Complete
+            transport1.ice_gathering_state().await,
+            Some(RTCIceGatheringState::Complete)
         );
         assert_eq!(
-            transport2
-                .get_peer_connection()
-                .await
-                .unwrap()
-                .ice_gathering_state(),
-            RTCIceGatheringState::Complete
+            transport2.ice_gathering_state().await,
+            Some(RTCIceGatheringState::Complete)
         );
-
         assert_eq!(
             transport1.ice_connection_state().await,
             Some(RTCIceConnectionState::New)

@@ -11,7 +11,7 @@ use jsonrpc_core::Metadata;
 use jsonrpc_core::Params;
 use jsonrpc_core::Result;
 use jsonrpc_core::Value;
-use rings_core::types::ice_transport::IceTransport;
+use rings_core::types::ice_transport::IceTransportInterface;
 
 use super::method::Method;
 use super::response;

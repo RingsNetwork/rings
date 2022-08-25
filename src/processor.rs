@@ -27,7 +27,7 @@ use crate::prelude::rings_core::prelude::RTCSdpType;
 use crate::prelude::rings_core::swarm::Swarm;
 use crate::prelude::rings_core::swarm::TransportManager;
 use crate::prelude::rings_core::transports::Transport;
-use crate::prelude::rings_core::types::ice_transport::IceTransport;
+use crate::prelude::rings_core::types::ice_transport::IceTransportInterface;
 use crate::prelude::rings_core::types::ice_transport::IceTrickleScheme;
 use crate::prelude::web3::signing::keccak256;
 

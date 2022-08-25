@@ -32,5 +32,5 @@ pub use self::rings_core::session::SessionManager;
 pub use self::rings_core::session::Signer;
 pub use self::rings_core::swarm::Swarm;
 pub use self::rings_core::transports::Transport;
-pub use self::rings_core::types::ice_transport::IceTransport;
+pub use self::rings_core::types::ice_transport::IceTransportInterface;
 pub use self::rings_core::types::message::MessageListener;

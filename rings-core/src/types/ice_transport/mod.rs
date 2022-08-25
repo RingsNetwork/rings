@@ -32,43 +32,42 @@ pub struct IceCandidate {
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-pub trait IceTransport<E: Send, Ch: Channel<E>> {
+pub trait IceTransport {
     type Connection;
     type Candidate;
     type Sdp;
     type DataChannel;
+
+    async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>>;
+    async fn get_pending_candidates(&self) -> Vec<Self::Candidate>;
+    async fn get_answer(&self) -> Result<Self::Sdp>;
+    async fn get_offer(&self) -> Result<Self::Sdp>;
+    async fn get_data_channel(&self) -> Option<Arc<Self::DataChannel>>;
+}
+
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+pub trait IceTransportInterface<E: Send, Ch: Channel<E>> {
     type IceConnectionState;
-    type Msg;
 
     fn new(event_sender: Ch::Sender) -> Self;
     async fn start(&mut self, addr: Vec<IceServer>, external_id: Option<String>) -> Result<&Self>;
+    async fn apply_callback(&self) -> Result<&Self>;
     async fn close(&self) -> Result<()>;
     async fn ice_connection_state(&self) -> Option<Self::IceConnectionState>;
     async fn is_connected(&self) -> bool;
     async fn is_disconnected(&self) -> bool;
     async fn pubkey(&self) -> PublicKey;
-    async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>>;
-    async fn get_pending_candidates(&self) -> Vec<Self::Candidate>;
-    async fn get_answer(&self) -> Result<Self::Sdp>;
-    async fn get_offer(&self) -> Result<Self::Sdp>;
-    async fn get_answer_str(&self) -> Result<String>;
-    async fn get_offer_str(&self) -> Result<String>;
-    async fn get_data_channel(&self) -> Option<Arc<Self::DataChannel>>;
     async fn send_message(&self, msg: &[u8]) -> Result<()>;
-    async fn set_local_description<T>(&self, desc: T) -> Result<()>
-    where T: Into<Self::Sdp> + Send;
-    async fn add_ice_candidate(&self, candidate: IceCandidate) -> Result<()>;
-    async fn set_remote_description<T>(&self, desc: T) -> Result<()>
-    where T: Into<Self::Sdp> + Send;
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-pub trait IceTransportCallback<E: Send, Ch: Channel<E>>: IceTransport<E, Ch> {
+pub trait IceTransportCallback: IceTransport {
     type OnLocalCandidateHdlrFn;
     type OnDataChannelHdlrFn;
     type OnIceConnectionStateChangeHdlrFn;
-    async fn apply_callback(&self) -> Result<&Self>;
+
     async fn on_ice_connection_state_change(&self) -> Self::OnIceConnectionStateChangeHdlrFn;
     async fn on_ice_candidate(&self) -> Self::OnLocalCandidateHdlrFn;
     async fn on_data_channel(&self) -> Self::OnDataChannelHdlrFn;
@@ -76,8 +75,19 @@ pub trait IceTransportCallback<E: Send, Ch: Channel<E>>: IceTransport<E, Ch> {
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-pub trait IceTrickleScheme<E: Send, Ch: Channel<E>>: IceTransport<E, Ch> {
+pub trait IceCandidateGathering: IceTransport {
+    async fn add_ice_candidate(&self, candidate: IceCandidate) -> Result<()>;
+    async fn set_local_description<T>(&self, desc: T) -> Result<()>
+    where T: Into<Self::Sdp> + Send;
+    async fn set_remote_description<T>(&self, desc: T) -> Result<()>
+    where T: Into<Self::Sdp> + Send;
+}
+
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+pub trait IceTrickleScheme {
     type SdpType;
+
     async fn get_handshake_info(
         &self,
         session_manager: &SessionManager,

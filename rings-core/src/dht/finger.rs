@@ -193,10 +193,10 @@ mod test {
         assert_eq!(table.len(), 0);
         assert_eq!(table.finger.len(), 3);
         println!("check finger all items is none");
-        assert!(*table.get(0) == None, "index 0 should be None");
-        assert!(*table.get(1) == None, "index 1 should be None");
-        assert!(*table.get(2) == None, "index 2 should be None");
-        assert!(*table.get(3) == None, "index 3 should be None");
+        assert!(table.get(0).is_none(), "index 0 should be None");
+        assert!(table.get(1).is_none(), "index 1 should be None");
+        assert!(table.get(2).is_none(), "index 2 should be None");
+        assert!(table.get(3).is_none(), "index 3 should be None");
 
         println!("set finger item");
         let (id1, id2, id3, id4) = (dids[1], dids[2], dids[3], dids[4]);
@@ -216,7 +216,7 @@ mod test {
             table.get(0)
         );
         assert!(
-            *table.get(1) == None,
+            table.get(1).is_none(),
             "expect value at index 1 is None, got {:?}",
             table.get(1)
         );
@@ -237,7 +237,7 @@ mod test {
         assert_eq!(table.len(), 1);
         assert_eq!(table.finger.len(), 3);
         assert!(
-            *table.get(0) == None,
+            table.get(0).is_none(),
             "expect value at index 1 is None, got {:?}",
             table.get(0)
         );

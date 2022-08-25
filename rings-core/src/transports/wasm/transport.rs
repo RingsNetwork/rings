@@ -41,9 +41,11 @@ use crate::transports::helper::TricklePayload;
 use crate::types::channel::Channel;
 use crate::types::channel::Event;
 use crate::types::ice_transport::IceCandidate;
+use crate::types::ice_transport::IceCandidateGathering;
 use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
+use crate::types::ice_transport::IceTransportInterface;
 use crate::types::ice_transport::IceTrickleScheme;
 
 type EventSender = Arc<FuturesMutex<mpsc::Sender<Event>>>;
@@ -74,13 +76,76 @@ impl Drop for WasmTransport {
 }
 
 #[async_trait(?Send)]
-impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
+impl IceTransport for WasmTransport {
     type Connection = RtcPeerConnection;
     type Candidate = RtcIceCandidate;
     type Sdp = RtcSessionDescription;
     type DataChannel = RtcDataChannel;
+
+    async fn get_peer_connection(&self) -> Option<Arc<RtcPeerConnection>> {
+        self.connection.as_ref().map(Arc::clone)
+    }
+
+    async fn get_pending_candidates(&self) -> Vec<RtcIceCandidate> {
+        self.pending_candidates.lock().unwrap().to_vec()
+    }
+
+    async fn get_answer(&self) -> Result<RtcSessionDescription> {
+        match self.get_peer_connection().await {
+            Some(c) => {
+                let promise = c.create_answer();
+                match JsFuture::from(promise).await {
+                    Ok(answer) => {
+                        self.set_local_description(RtcSessionDescriptionWrapper::from(
+                            answer.to_owned(),
+                        ))
+                        .await?;
+                        let promise = self.gather_complete_promise().await?;
+                        promise.await?;
+                        Ok(answer.into())
+                    }
+                    Err(e) => Err(Error::RTCPeerConnectionCreateAnswerFailed(format!(
+                        "{:?}",
+                        e
+                    ))),
+                }
+            }
+            None => Err(Error::RTCPeerConnectionNotEstablish),
+        }
+    }
+
+    async fn get_offer(&self) -> Result<RtcSessionDescription> {
+        match self.get_peer_connection().await {
+            Some(c) => {
+                let promise = c.create_offer();
+                match JsFuture::from(promise).await {
+                    Ok(offer) => {
+                        self.set_local_description(RtcSessionDescriptionWrapper::from(
+                            offer.to_owned(),
+                        ))
+                        .await?;
+                        let promise = self.gather_complete_promise().await?;
+                        promise.await?;
+                        Ok(offer.into())
+                    }
+                    Err(e) => Err(Error::RTCPeerConnectionCreateOfferFailed(format!(
+                        "{:?}",
+                        e
+                    ))),
+                }
+            }
+            None => Err(Error::RTCPeerConnectionNotEstablish),
+        }
+    }
+
+    async fn get_data_channel(&self) -> Option<Arc<RtcDataChannel>> {
+        self.channel.as_ref().map(Arc::clone)
+    }
+}
+
+#[async_trait(?Send)]
+impl IceTransportInterface<Event, CbChannel<Event>> for WasmTransport {
     type IceConnectionState = RtcIceConnectionState;
-    type Msg = JsValue;
 
     fn new(event_sender: EventSender) -> Self {
         Self {
@@ -124,6 +189,33 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
         return Ok(self);
     }
 
+    async fn apply_callback(&self) -> Result<&Self> {
+        match &self.get_peer_connection().await {
+            Some(c) => {
+                let on_ice_candidate_callback = Closure::wrap(self.on_ice_candidate().await);
+                let on_data_channel_callback = Closure::wrap(self.on_data_channel().await);
+                let on_ice_connection_state_change_callback =
+                    Closure::wrap(self.on_ice_connection_state_change().await);
+
+                c.set_onicecandidate(Some(on_ice_candidate_callback.as_ref().unchecked_ref()));
+                c.set_ondatachannel(Some(on_data_channel_callback.as_ref().unchecked_ref()));
+                c.set_oniceconnectionstatechange(Some(
+                    on_ice_connection_state_change_callback
+                        .as_ref()
+                        .unchecked_ref(),
+                ));
+                on_ice_candidate_callback.forget();
+                on_data_channel_callback.forget();
+                on_ice_connection_state_change_callback.forget();
+                Ok(self)
+            }
+            None => {
+                log::error!("cannot get connection");
+                Err(Error::RTCPeerConnectionNotEstablish)
+            }
+        }
+    }
+
     async fn close(&self) -> Result<()> {
         if let Some(pc) = self.get_peer_connection().await {
             pc.close()
@@ -157,149 +249,12 @@ impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
         )
     }
 
-    async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>> {
-        self.connection.as_ref().map(Arc::clone)
-    }
-
-    async fn get_pending_candidates(&self) -> Vec<Self::Candidate> {
-        self.pending_candidates.lock().unwrap().to_vec()
-    }
-
-    async fn get_answer(&self) -> Result<Self::Sdp> {
-        match self.get_peer_connection().await {
-            Some(c) => {
-                let promise = c.create_answer();
-                match JsFuture::from(promise).await {
-                    Ok(answer) => {
-                        self.set_local_description(RtcSessionDescriptionWrapper::from(
-                            answer.to_owned(),
-                        ))
-                        .await?;
-                        let promise = self.gather_complete_promise().await?;
-                        promise.await?;
-                        Ok(answer.into())
-                    }
-                    Err(e) => Err(Error::RTCPeerConnectionCreateAnswerFailed(format!(
-                        "{:?}",
-                        e
-                    ))),
-                }
-            }
-            None => Err(Error::RTCPeerConnectionNotEstablish),
-        }
-    }
-
-    async fn get_offer(&self) -> Result<Self::Sdp> {
-        match self.get_peer_connection().await {
-            Some(c) => {
-                let promise = c.create_offer();
-                match JsFuture::from(promise).await {
-                    Ok(offer) => {
-                        self.set_local_description(RtcSessionDescriptionWrapper::from(
-                            offer.to_owned(),
-                        ))
-                        .await?;
-                        let promise = self.gather_complete_promise().await?;
-                        promise.await?;
-                        Ok(offer.into())
-                    }
-                    Err(e) => Err(Error::RTCPeerConnectionCreateOfferFailed(format!(
-                        "{:?}",
-                        e
-                    ))),
-                }
-            }
-            None => Err(Error::RTCPeerConnectionNotEstablish),
-        }
-    }
-
-    async fn get_offer_str(&self) -> Result<String> {
-        Ok(self.get_offer().await?.sdp())
-    }
-
-    async fn get_answer_str(&self) -> Result<String> {
-        Ok(self.get_answer().await?.sdp())
-    }
-
-    async fn get_data_channel(&self) -> Option<Arc<Self::DataChannel>> {
-        self.channel.as_ref().map(Arc::clone)
-    }
-
     async fn send_message(&self, msg: &[u8]) -> Result<()> {
         match self.get_data_channel().await {
             Some(cnn) => cnn
                 .send_with_u8_array(msg)
                 .map_err(|e| Error::RTCDataChannelSendTextFailed(format!("{:?}", e))),
             None => Err(Error::RTCDataChannelNotReady),
-        }
-    }
-
-    async fn set_local_description<T>(&self, desc: T) -> Result<()>
-    where T: Into<Self::Sdp> {
-        match &self.get_peer_connection().await {
-            Some(c) => {
-                let sdp: Self::Sdp = desc.into();
-                let mut offer_obj = RtcSessionDescriptionInit::new(sdp.type_());
-                offer_obj.sdp(&sdp.sdp());
-                let promise = c.set_local_description(&offer_obj);
-                match JsFuture::from(promise).await {
-                    Ok(_) => Ok(()),
-                    Err(e) => Err(Error::RTCPeerConnectionSetLocalDescFailed(format!(
-                        "{:?}",
-                        e
-                    ))),
-                }
-            }
-            None => Err(Error::RTCPeerConnectionNotEstablish),
-        }
-    }
-
-    async fn set_remote_description<T>(&self, desc: T) -> Result<()>
-    where T: Into<Self::Sdp> {
-        match &self.get_peer_connection().await {
-            Some(c) => {
-                let sdp: Self::Sdp = desc.into();
-                let mut offer_obj = RtcSessionDescriptionInit::new(sdp.type_());
-                let sdp = &sdp.sdp();
-                offer_obj.sdp(sdp);
-                let promise = c.set_remote_description(&offer_obj);
-
-                match JsFuture::from(promise).await {
-                    Ok(_) => {
-                        log::debug!("set remote sdp successed");
-                        Ok(())
-                    }
-                    Err(e) => {
-                        log::error!("failed to set remote desc: {:?}", e);
-                        Err(Error::RTCPeerConnectionSetRemoteDescFailed(format!(
-                            "{:?}",
-                            e
-                        )))
-                    }
-                }
-            }
-            None => Err(Error::RTCPeerConnectionNotEstablish),
-        }
-    }
-
-    async fn add_ice_candidate(&self, candidate: IceCandidate) -> Result<()> {
-        match &self.get_peer_connection().await {
-            Some(c) => {
-                let cand: RtcIceCandidateInit = candidate.clone().into();
-                let promise = c.add_ice_candidate_with_opt_rtc_ice_candidate_init(Some(&cand));
-
-                match JsFuture::from(promise).await {
-                    Ok(_) => Ok(()),
-                    Err(e) => {
-                        log::error!("failed to add ice candate");
-                        Err(Error::RTCPeerConnectionAddIceCandidateError(format!(
-                            "{:?}",
-                            e
-                        )))
-                    }
-                }
-            }
-            None => Err(Error::RTCPeerConnectionNotEstablish),
         }
     }
 }
@@ -314,37 +269,10 @@ impl WasmTransport {
 }
 
 #[async_trait(?Send)]
-impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
+impl IceTransportCallback for WasmTransport {
     type OnLocalCandidateHdlrFn = Box<dyn FnMut(RtcPeerConnectionIceEvent)>;
     type OnDataChannelHdlrFn = Box<dyn FnMut(RtcDataChannelEvent)>;
     type OnIceConnectionStateChangeHdlrFn = Box<dyn FnMut(web_sys::Event)>;
-
-    async fn apply_callback(&self) -> Result<&Self> {
-        match &self.get_peer_connection().await {
-            Some(c) => {
-                let on_ice_candidate_callback = Closure::wrap(self.on_ice_candidate().await);
-                let on_data_channel_callback = Closure::wrap(self.on_data_channel().await);
-                let on_ice_connection_state_change_callback =
-                    Closure::wrap(self.on_ice_connection_state_change().await);
-
-                c.set_onicecandidate(Some(on_ice_candidate_callback.as_ref().unchecked_ref()));
-                c.set_ondatachannel(Some(on_data_channel_callback.as_ref().unchecked_ref()));
-                c.set_oniceconnectionstatechange(Some(
-                    on_ice_connection_state_change_callback
-                        .as_ref()
-                        .unchecked_ref(),
-                ));
-                on_ice_candidate_callback.forget();
-                on_data_channel_callback.forget();
-                on_ice_connection_state_change_callback.forget();
-                Ok(self)
-            }
-            None => {
-                log::error!("cannot get connection");
-                Err(Error::RTCPeerConnectionNotEstablish)
-            }
-        }
-    }
 
     async fn on_ice_connection_state_change(&self) -> Self::OnIceConnectionStateChangeHdlrFn {
         let event_sender = self.event_sender.clone();
@@ -369,7 +297,7 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
                 spawn_local(async move {
                     let event_sender = Arc::clone(&event_sender);
                     match ice_connection_state {
-                        Self::IceConnectionState::Connected => {
+                        RtcIceConnectionState::Connected => {
                             let local_address: Address =
                                 (*public_key.read().unwrap()).unwrap().address();
                             if CbChannel::send(
@@ -382,9 +310,9 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
                                 log::error!("Failed when send RegisterTransport");
                             }
                         }
-                        Self::IceConnectionState::Failed
-                        | Self::IceConnectionState::Disconnected
-                        | Self::IceConnectionState::Closed => {
+                        RtcIceConnectionState::Failed
+                        | RtcIceConnectionState::Disconnected
+                        | RtcIceConnectionState::Closed => {
                             let local_address: Address =
                                 (*public_key.read().unwrap()).unwrap().address();
                             if CbChannel::send(
@@ -469,7 +397,79 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
 }
 
 #[async_trait(?Send)]
-impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
+impl IceCandidateGathering for WasmTransport {
+    async fn set_local_description<T>(&self, desc: T) -> Result<()>
+    where T: Into<RtcSessionDescription> {
+        match &self.get_peer_connection().await {
+            Some(c) => {
+                let sdp: RtcSessionDescription = desc.into();
+                let mut offer_obj = RtcSessionDescriptionInit::new(sdp.type_());
+                offer_obj.sdp(&sdp.sdp());
+                let promise = c.set_local_description(&offer_obj);
+                match JsFuture::from(promise).await {
+                    Ok(_) => Ok(()),
+                    Err(e) => Err(Error::RTCPeerConnectionSetLocalDescFailed(format!(
+                        "{:?}",
+                        e
+                    ))),
+                }
+            }
+            None => Err(Error::RTCPeerConnectionNotEstablish),
+        }
+    }
+
+    async fn set_remote_description<T>(&self, desc: T) -> Result<()>
+    where T: Into<RtcSessionDescription> {
+        match &self.get_peer_connection().await {
+            Some(c) => {
+                let sdp: RtcSessionDescription = desc.into();
+                let mut offer_obj = RtcSessionDescriptionInit::new(sdp.type_());
+                let sdp = &sdp.sdp();
+                offer_obj.sdp(sdp);
+                let promise = c.set_remote_description(&offer_obj);
+
+                match JsFuture::from(promise).await {
+                    Ok(_) => {
+                        log::debug!("set remote sdp successed");
+                        Ok(())
+                    }
+                    Err(e) => {
+                        log::error!("failed to set remote desc: {:?}", e);
+                        Err(Error::RTCPeerConnectionSetRemoteDescFailed(format!(
+                            "{:?}",
+                            e
+                        )))
+                    }
+                }
+            }
+            None => Err(Error::RTCPeerConnectionNotEstablish),
+        }
+    }
+
+    async fn add_ice_candidate(&self, candidate: IceCandidate) -> Result<()> {
+        match &self.get_peer_connection().await {
+            Some(c) => {
+                let cand: RtcIceCandidateInit = candidate.clone().into();
+                let promise = c.add_ice_candidate_with_opt_rtc_ice_candidate_init(Some(&cand));
+
+                match JsFuture::from(promise).await {
+                    Ok(_) => Ok(()),
+                    Err(e) => {
+                        log::error!("failed to add ice candate");
+                        Err(Error::RTCPeerConnectionAddIceCandidateError(format!(
+                            "{:?}",
+                            e
+                        )))
+                    }
+                }
+            }
+            None => Err(Error::RTCPeerConnectionNotEstablish),
+        }
+    }
+}
+
+#[async_trait(?Send)]
+impl IceTrickleScheme for WasmTransport {
     // https://datatracker.ietf.org/doc/html/rfc5245
     // 1. Send (SdpOffer, IceCandidates) to remote
     // 2. Recv (SdpAnswer, IceCandidate) From Remote
@@ -589,9 +589,7 @@ impl WasmTransport {
         };
         Ok(())
     }
-}
 
-impl WasmTransport {
     pub async fn gather_complete_promise(&self) -> Result<Promise> {
         match self.get_peer_connection().await {
             Some(conn) => {

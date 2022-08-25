@@ -22,7 +22,7 @@ pub mod test {
     use rings_core::swarm::Swarm;
     use rings_core::swarm::TransportManager;
     use rings_core::transports::Transport;
-    use rings_core::types::ice_transport::IceTransport;
+    use rings_core::types::ice_transport::IceTransportInterface;
     use rings_core::types::ice_transport::IceTrickleScheme;
     use rings_core::types::message::MessageListener;
     use tokio::time::sleep;

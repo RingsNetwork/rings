@@ -1,10 +1,14 @@
-#[cfg(not(feature = "wasm"))]
+#[cfg(all(not(feature = "wasm"), not(feature = "dummy")))]
 pub mod default;
+#[cfg(all(not(feature = "wasm"), feature = "dummy"))]
+pub mod dummy;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
-#[cfg(not(feature = "wasm"))]
+#[cfg(all(not(feature = "wasm"), not(feature = "dummy")))]
 pub use default::DefaultTransport as Transport;
+#[cfg(all(not(feature = "wasm"), feature = "dummy"))]
+pub use dummy::DummyTransport as Transport;
 #[cfg(feature = "wasm")]
 pub use wasm::WasmTransport as Transport;
 

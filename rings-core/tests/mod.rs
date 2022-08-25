@@ -3,5 +3,5 @@
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
-#[cfg(not(feature = "wasm"))]
+#[cfg(all(not(feature = "wasm"), not(feature = "dummy")))]
 pub mod default;

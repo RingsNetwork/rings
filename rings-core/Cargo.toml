@@ -12,6 +12,7 @@ categories = ["network-programming", "cryptography", "wasm"]
 
 [features]
 default = ["webrtc", "bytes", "async-channel", "sled"]
+dummy = ["webrtc", "bytes", "async-channel", "sled", "lazy_static"]
 wasm = ["web-sys", "wasm-bindgen", "js-sys", "wasm-bindgen-futures", "rexie"]
 browser_chrome_test = ["wasm"]
 
@@ -44,11 +45,14 @@ sha1 = "0.10.1"
 thiserror = "1"
 url = { version = "2", features = ["serde"] }
 
-# default
+# default and dummy
 async-channel = { version = "1.6.1", optional = true }
 bytes = { version = "1.1.0", optional = true }
 sled = { version = "0.34.7", optional = true }
 webrtc = { version = "0.4.0", optional = true }
+
+# dummy
+lazy_static = { version = "1.4.0", optional = true }
 
 # wasm
 js-sys = { version = "0.3.56", optional = true }
