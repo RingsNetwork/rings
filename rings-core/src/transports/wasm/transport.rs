@@ -45,6 +45,7 @@ use crate::types::ice_transport::IceCandidateGathering;
 use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
+use crate::types::ice_transport::IceTransportInterface;
 use crate::types::ice_transport::IceTrickleScheme;
 
 type EventSender = Arc<FuturesMutex<mpsc::Sender<Event>>>;
@@ -75,7 +76,75 @@ impl Drop for WasmTransport {
 }
 
 #[async_trait(?Send)]
-impl IceTransport<Event, CbChannel<Event>> for WasmTransport {
+impl IceTransport for WasmTransport {
+    type Connection = RtcPeerConnection;
+    type Candidate = RtcIceCandidate;
+    type Sdp = RtcSessionDescription;
+    type DataChannel = RtcDataChannel;
+
+    async fn get_peer_connection(&self) -> Option<Arc<RtcPeerConnection>> {
+        self.connection.as_ref().map(Arc::clone)
+    }
+
+    async fn get_pending_candidates(&self) -> Vec<RtcIceCandidate> {
+        self.pending_candidates.lock().unwrap().to_vec()
+    }
+
+    async fn get_answer(&self) -> Result<RtcSessionDescription> {
+        match self.get_peer_connection().await {
+            Some(c) => {
+                let promise = c.create_answer();
+                match JsFuture::from(promise).await {
+                    Ok(answer) => {
+                        self.set_local_description(RtcSessionDescriptionWrapper::from(
+                            answer.to_owned(),
+                        ))
+                        .await?;
+                        let promise = self.gather_complete_promise().await?;
+                        promise.await?;
+                        Ok(answer.into())
+                    }
+                    Err(e) => Err(Error::RTCPeerConnectionCreateAnswerFailed(format!(
+                        "{:?}",
+                        e
+                    ))),
+                }
+            }
+            None => Err(Error::RTCPeerConnectionNotEstablish),
+        }
+    }
+
+    async fn get_offer(&self) -> Result<RtcSessionDescription> {
+        match self.get_peer_connection().await {
+            Some(c) => {
+                let promise = c.create_offer();
+                match JsFuture::from(promise).await {
+                    Ok(offer) => {
+                        self.set_local_description(RtcSessionDescriptionWrapper::from(
+                            offer.to_owned(),
+                        ))
+                        .await?;
+                        let promise = self.gather_complete_promise().await?;
+                        promise.await?;
+                        Ok(offer.into())
+                    }
+                    Err(e) => Err(Error::RTCPeerConnectionCreateOfferFailed(format!(
+                        "{:?}",
+                        e
+                    ))),
+                }
+            }
+            None => Err(Error::RTCPeerConnectionNotEstablish),
+        }
+    }
+
+    async fn get_data_channel(&self) -> Option<Arc<RtcDataChannel>> {
+        self.channel.as_ref().map(Arc::clone)
+    }
+}
+
+#[async_trait(?Send)]
+impl IceTransportInterface<Event, CbChannel<Event>> for WasmTransport {
     type IceConnectionState = RtcIceConnectionState;
 
     fn new(event_sender: EventSender) -> Self {
@@ -197,70 +266,10 @@ impl WasmTransport {
             self.channel = Some(Arc::new(channel));
         }
     }
-
-    async fn get_peer_connection(&self) -> Option<Arc<RtcPeerConnection>> {
-        self.connection.as_ref().map(Arc::clone)
-    }
-
-    async fn get_pending_candidates(&self) -> Vec<RtcIceCandidate> {
-        self.pending_candidates.lock().unwrap().to_vec()
-    }
-
-    async fn get_answer(&self) -> Result<RtcSessionDescription> {
-        match self.get_peer_connection().await {
-            Some(c) => {
-                let promise = c.create_answer();
-                match JsFuture::from(promise).await {
-                    Ok(answer) => {
-                        self.set_local_description(RtcSessionDescriptionWrapper::from(
-                            answer.to_owned(),
-                        ))
-                        .await?;
-                        let promise = self.gather_complete_promise().await?;
-                        promise.await?;
-                        Ok(answer.into())
-                    }
-                    Err(e) => Err(Error::RTCPeerConnectionCreateAnswerFailed(format!(
-                        "{:?}",
-                        e
-                    ))),
-                }
-            }
-            None => Err(Error::RTCPeerConnectionNotEstablish),
-        }
-    }
-
-    async fn get_offer(&self) -> Result<RtcSessionDescription> {
-        match self.get_peer_connection().await {
-            Some(c) => {
-                let promise = c.create_offer();
-                match JsFuture::from(promise).await {
-                    Ok(offer) => {
-                        self.set_local_description(RtcSessionDescriptionWrapper::from(
-                            offer.to_owned(),
-                        ))
-                        .await?;
-                        let promise = self.gather_complete_promise().await?;
-                        promise.await?;
-                        Ok(offer.into())
-                    }
-                    Err(e) => Err(Error::RTCPeerConnectionCreateOfferFailed(format!(
-                        "{:?}",
-                        e
-                    ))),
-                }
-            }
-            None => Err(Error::RTCPeerConnectionNotEstablish),
-        }
-    }
-
-    async fn get_data_channel(&self) -> Option<Arc<RtcDataChannel>> {
-        self.channel.as_ref().map(Arc::clone)
-    }
 }
 
 #[async_trait(?Send)]
-impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
+impl IceTransportCallback for WasmTransport {
     type OnLocalCandidateHdlrFn = Box<dyn FnMut(RtcPeerConnectionIceEvent)>;
     type OnDataChannelHdlrFn = Box<dyn FnMut(RtcDataChannelEvent)>;
     type OnIceConnectionStateChangeHdlrFn = Box<dyn FnMut(web_sys::Event)>;
@@ -288,7 +297,7 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
                 spawn_local(async move {
                     let event_sender = Arc::clone(&event_sender);
                     match ice_connection_state {
-                        Self::IceConnectionState::Connected => {
+                        RtcIceConnectionState::Connected => {
                             let local_address: Address =
                                 (*public_key.read().unwrap()).unwrap().address();
                             if CbChannel::send(
@@ -301,9 +310,9 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
                                 log::error!("Failed when send RegisterTransport");
                             }
                         }
-                        Self::IceConnectionState::Failed
-                        | Self::IceConnectionState::Disconnected
-                        | Self::IceConnectionState::Closed => {
+                        RtcIceConnectionState::Failed
+                        | RtcIceConnectionState::Disconnected
+                        | RtcIceConnectionState::Closed => {
                             let local_address: Address =
                                 (*public_key.read().unwrap()).unwrap().address();
                             if CbChannel::send(
@@ -388,9 +397,7 @@ impl IceTransportCallback<Event, CbChannel<Event>> for WasmTransport {
 }
 
 #[async_trait(?Send)]
-impl IceCandidateGathering<Event, CbChannel<Event>> for WasmTransport {
-    type Sdp = RtcSessionDescription;
-
+impl IceCandidateGathering for WasmTransport {
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
     where T: Into<RtcSessionDescription> {
         match &self.get_peer_connection().await {
@@ -462,7 +469,7 @@ impl IceCandidateGathering<Event, CbChannel<Event>> for WasmTransport {
 }
 
 #[async_trait(?Send)]
-impl IceTrickleScheme<Event, CbChannel<Event>> for WasmTransport {
+impl IceTrickleScheme for WasmTransport {
     // https://datatracker.ietf.org/doc/html/rfc5245
     // 1. Send (SdpOffer, IceCandidates) to remote
     // 2. Recv (SdpAnswer, IceCandidate) From Remote

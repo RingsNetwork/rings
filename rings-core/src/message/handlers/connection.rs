@@ -260,7 +260,7 @@ pub mod tests {
     use crate::message::MessageHandler;
     use crate::swarm::Swarm;
     use crate::swarm::TransportManager;
-    use crate::types::ice_transport::IceTransport;
+    use crate::types::ice_transport::IceTransportInterface;
 
     // ndoe1.key < node2.key < node3.key
     //

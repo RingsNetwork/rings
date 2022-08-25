@@ -26,7 +26,7 @@ use crate::transports::Transport;
 use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::Event;
 use crate::types::ice_transport::IceServer;
-use crate::types::ice_transport::IceTransport;
+use crate::types::ice_transport::IceTransportInterface;
 
 pub struct Swarm {
     table: MemStorage<Address, Arc<Transport>>,

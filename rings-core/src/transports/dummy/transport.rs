@@ -23,7 +23,7 @@ use crate::transports::helper::TricklePayload;
 use crate::types::channel::Channel;
 use crate::types::channel::Event;
 use crate::types::ice_transport::IceServer;
-use crate::types::ice_transport::IceTransport;
+use crate::types::ice_transport::IceTransportInterface;
 use crate::types::ice_transport::IceTrickleScheme;
 
 type EventSender = <AcChannel<Event> as Channel<Event>>::Sender;
@@ -54,7 +54,7 @@ impl PartialEq for DummyTransport {
 }
 
 #[async_trait]
-impl IceTransport<Event, AcChannel<Event>> for DummyTransport {
+impl IceTransportInterface<Event, AcChannel<Event>> for DummyTransport {
     type IceConnectionState = RTCIceConnectionState;
 
     fn new(event_sender: EventSender) -> Self {
@@ -133,7 +133,7 @@ impl IceTransport<Event, AcChannel<Event>> for DummyTransport {
 }
 
 #[async_trait]
-impl IceTrickleScheme<Event, AcChannel<Event>> for DummyTransport {
+impl IceTrickleScheme for DummyTransport {
     // https://datatracker.ietf.org/doc/html/rfc5245
     // 1. Send (SdpOffer, IceCandidates) to remote
     // 2. Recv (SdpAnswer, IceCandidate) From Remote

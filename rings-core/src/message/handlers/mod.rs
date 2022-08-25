@@ -21,7 +21,7 @@ use crate::prelude::Transport;
 use crate::session::SessionManager;
 use crate::swarm::Swarm;
 use crate::swarm::TransportManager;
-use crate::types::ice_transport::IceTransport;
+use crate::types::ice_transport::IceTransportInterface;
 use crate::types::ice_transport::IceTrickleScheme;
 
 /// Operator and Handler for Connection

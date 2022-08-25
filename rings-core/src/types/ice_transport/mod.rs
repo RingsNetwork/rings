@@ -1,4 +1,5 @@
 pub mod ice_server;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -31,7 +32,22 @@ pub struct IceCandidate {
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-pub trait IceTransport<E: Send, Ch: Channel<E>> {
+pub trait IceTransport {
+    type Connection;
+    type Candidate;
+    type Sdp;
+    type DataChannel;
+
+    async fn get_peer_connection(&self) -> Option<Arc<Self::Connection>>;
+    async fn get_pending_candidates(&self) -> Vec<Self::Candidate>;
+    async fn get_answer(&self) -> Result<Self::Sdp>;
+    async fn get_offer(&self) -> Result<Self::Sdp>;
+    async fn get_data_channel(&self) -> Option<Arc<Self::DataChannel>>;
+}
+
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+pub trait IceTransportInterface<E: Send, Ch: Channel<E>> {
     type IceConnectionState;
 
     fn new(event_sender: Ch::Sender) -> Self;
@@ -47,7 +63,7 @@ pub trait IceTransport<E: Send, Ch: Channel<E>> {
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-pub trait IceTransportCallback<E: Send, Ch: Channel<E>>: IceTransport<E, Ch> {
+pub trait IceTransportCallback: IceTransport {
     type OnLocalCandidateHdlrFn;
     type OnDataChannelHdlrFn;
     type OnIceConnectionStateChangeHdlrFn;
@@ -59,9 +75,7 @@ pub trait IceTransportCallback<E: Send, Ch: Channel<E>>: IceTransport<E, Ch> {
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-pub trait IceCandidateGathering<E: Send, Ch: Channel<E>>: IceTransport<E, Ch> {
-    type Sdp;
-
+pub trait IceCandidateGathering: IceTransport {
     async fn add_ice_candidate(&self, candidate: IceCandidate) -> Result<()>;
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
     where T: Into<Self::Sdp> + Send;
@@ -71,7 +85,7 @@ pub trait IceCandidateGathering<E: Send, Ch: Channel<E>>: IceTransport<E, Ch> {
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-pub trait IceTrickleScheme<E: Send, Ch: Channel<E>>: IceTransport<E, Ch> {
+pub trait IceTrickleScheme {
     type SdpType;
 
     async fn get_handshake_info(
