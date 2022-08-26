@@ -81,7 +81,7 @@ pub mod ed25519 {
             return false;
         }
         let sig_data: [u8; 64] = sig.as_ref().try_into().unwrap();
-        let sig = ed25519_dalek::Signature::new(sig_data);
+        let sig = ed25519_dalek::Signature::from_bytes(sig_data);
         if let Ok(p) = TryInto::<ed25519_dalek::PublicKey>::try_into(pubkey) {
             match p.verify(msg.as_bytes(), &sig) {
                 Ok(()) => true,
