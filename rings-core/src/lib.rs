@@ -73,6 +73,8 @@ pub mod prelude;
 pub mod session;
 pub mod storage;
 pub mod swarm;
+#[cfg(test)]
+mod tests;
 pub mod transports;
 pub mod types;
 pub mod utils;
