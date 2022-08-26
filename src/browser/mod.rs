@@ -184,8 +184,8 @@ pub struct Client {
 }
 
 impl Client {
-    pub async fn new_client_with_storage_fut(
-        unsigned_info: &UnsignedInfo,
+    pub async fn new(
+        unsigned_info: UnsignedInfo,
         signed_data: js_sys::Uint8Array,
         stuns: String,
         storage_name: String,
@@ -232,28 +232,10 @@ impl Client {
         stuns: String,
         storage_name: String,
     ) -> Promise {
-        let unsigned_info = unsigned_info.clone();
-        let signed_data = signed_data.to_vec();
+        let unsigned = unsigned_info.clone();
         future_to_promise(async move {
-            let random_key = unsigned_info.random_key;
-            let session = SessionManager::new(&signed_data, &unsigned_info.auth, &random_key);
-            let swarm = Arc::new(Swarm::new(&stuns, unsigned_info.key_addr, session));
-
-            let storage = PersistenceStorage::new_with_cap_and_name(50000, storage_name.as_str())
-                .await
-                .map_err(JsError::from)?;
-            let pr = PeerRing::new_with_storage(swarm.address().into(), Arc::new(storage));
-
-            let dht = Arc::new(pr);
-            let msg_handler = Arc::new(MessageHandler::new(dht.clone(), swarm.clone()));
-            let stabilization = Arc::new(Stabilization::new(dht, swarm.clone(), 20));
-            let processor = Arc::new(Processor::from((swarm, msg_handler, stabilization)));
-            Ok(JsValue::from(Client {
-                processor,
-                unsigned_info: unsigned_info.clone(),
-                signed_data,
-                stuns,
-            }))
+            let client = Self::new(unsigned, signed_data, stuns, storage_name).await?;
+            Ok(JsValue::from(client))
         })
     }
 
