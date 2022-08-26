@@ -46,6 +46,8 @@ pub enum Error {
     MessagePayload(rings_core::err::Error),
     #[error("No Permission")]
     NoPermission,
+    #[error("Init Storage Error")]
+    FailedOnInitStorage
 }
 
 impl Error {
@@ -72,6 +74,8 @@ impl Error {
             Error::SendMessage(_) => 18,
             Error::MessagePayload(_) => 19,
             Error::NoPermission => 20,
+            Error::FailedOnInitStorage => 21
+
         };
         -32000 - code
     }
@@ -85,5 +89,14 @@ impl From<Error> for jsonrpc_core::Error {
             message: e.to_string(),
             data: None,
         }
+    }
+}
+
+
+#[cfg(feature = "browser")]
+impl From<Error> for crate::prelude::wasm_bindgen::JsValue {
+    fn from(e: Error) -> Self {
+        let desc = e.to_string();
+        crate::prelude::wasm_bindgen::JsValue::from(desc)
     }
 }

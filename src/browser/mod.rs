@@ -43,6 +43,8 @@ use crate::prelude::wasm_bindgen_futures::future_to_promise;
 use crate::prelude::web3::contract::tokens::Tokenizable;
 use crate::prelude::web_sys::RtcIceConnectionState;
 use crate::processor::Processor;
+use crate::error;
+
 
 #[wasm_bindgen(start)]
 pub fn start() -> Result<(), JsError> {
@@ -179,6 +181,37 @@ pub struct Client {
     unsigned_info: UnsignedInfo,
     signed_data: Vec<u8>,
     stuns: String,
+}
+
+impl Client {
+    pub async fn new_client_with_storage_fut(
+        unsigned_info: &UnsignedInfo,
+        signed_data: js_sys::Uint8Array,
+        stuns: String,
+        storage_name: String,
+    ) -> error::Result<Client> {
+        let unsigned_info = unsigned_info.clone();
+        let signed_data = signed_data.to_vec();
+        let random_key = unsigned_info.random_key;
+        let session = SessionManager::new(&signed_data, &unsigned_info.auth, &random_key);
+        let swarm = Arc::new(Swarm::new(&stuns, unsigned_info.key_addr, session));
+
+        let storage = PersistenceStorage::new_with_cap_and_name(50000, storage_name.as_str())
+            .await.map_err(|_| error::Error::FailedOnInitStorage)?;
+        let pr = PeerRing::new_with_storage(swarm.address().into(), Arc::new(storage));
+
+        let dht = Arc::new(pr);
+        let msg_handler = Arc::new(MessageHandler::new(dht.clone(), swarm.clone()));
+        let stabilization = Arc::new(Stabilization::new(dht, swarm.clone(), 20));
+        let processor = Arc::new(Processor::from((swarm, msg_handler, stabilization)));
+        Ok(Client {
+            processor,
+            unsigned_info: unsigned_info.clone(),
+            signed_data,
+            stuns,
+        })
+    }
+
 }
 
 #[wasm_bindgen]
