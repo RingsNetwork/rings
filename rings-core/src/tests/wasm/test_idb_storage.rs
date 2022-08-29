@@ -1,16 +1,17 @@
 use std::mem::size_of_val;
 
 use rexie::TransactionMode;
-use rings_core::storage::persistence::idb::IDBStorageBasic;
-use rings_core::storage::persistence::IDBStorage;
-use rings_core::storage::persistence::PersistenceStorageOperation;
-use rings_core::storage::persistence::PersistenceStorageReadAndWrite;
-use rings_core::storage::persistence::PersistenceStorageRemove;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_test::wasm_bindgen_test;
+
+use crate::storage::persistence::idb::IDBStorageBasic;
+use crate::storage::persistence::IDBStorage;
+use crate::storage::persistence::PersistenceStorageOperation;
+use crate::storage::persistence::PersistenceStorageReadAndWrite;
+use crate::storage::persistence::PersistenceStorageRemove;
 
 async fn create_db_instance(cap: usize) -> IDBStorage {
     //console_log::init_with_level(log::Level::Debug).unwrap();

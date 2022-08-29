@@ -13,7 +13,7 @@ pub use payload::PayloadSender;
 mod types;
 pub use types::*;
 
-pub(self) mod handlers;
+pub(crate) mod handlers;
 pub use handlers::HandleMsg;
 pub use handlers::MessageCallback;
 pub use handlers::MessageHandler;

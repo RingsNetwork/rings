@@ -1,27 +1,28 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
-use rings_core::channels::Channel as CbChannel;
-use rings_core::dht::PeerRing;
-use rings_core::ecc::SecretKey;
-use rings_core::err::Result;
-use rings_core::message::MessageHandler;
-use rings_core::prelude::RTCSdpType;
-use rings_core::session::SessionManager;
-use rings_core::storage::PersistenceStorage;
-use rings_core::swarm::Swarm;
-use rings_core::swarm::TransportManager;
-use rings_core::transports::Transport;
-use rings_core::types::channel::Channel;
-use rings_core::types::channel::Event;
-use rings_core::types::ice_transport::IceServer;
-use rings_core::types::ice_transport::IceTransportInterface;
-use rings_core::types::ice_transport::IceTrickleScheme;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::*;
 use web_sys::RtcIceConnectionState;
 use web_sys::RtcSdpType;
+
+use crate::channels::Channel as CbChannel;
+use crate::dht::PeerRing;
+use crate::ecc::SecretKey;
+use crate::err::Result;
+use crate::message::MessageHandler;
+use crate::prelude::RTCSdpType;
+use crate::session::SessionManager;
+use crate::storage::PersistenceStorage;
+use crate::swarm::Swarm;
+use crate::swarm::TransportManager;
+use crate::transports::Transport;
+use crate::types::channel::Channel;
+use crate::types::channel::Event;
+use crate::types::ice_transport::IceServer;
+use crate::types::ice_transport::IceTransportInterface;
+use crate::types::ice_transport::IceTrickleScheme;
 
 // wasm_bindgen_test_configure!(run_in_browser);
 
