@@ -1,7 +1,7 @@
-pub mod test_channel;
-pub mod test_ice_servers;
-pub mod test_idb_storage;
-pub mod test_wasm_transport;
+mod test_channel;
+mod test_ice_servers;
+mod test_idb_storage;
+mod test_wasm_transport;
 
 use wasm_bindgen_test::wasm_bindgen_test_configure;
 

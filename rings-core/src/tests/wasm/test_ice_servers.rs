@@ -2,11 +2,12 @@ use std::str::FromStr;
 
 use js_sys::Array;
 use js_sys::Reflect;
-use rings_core::types::ice_transport::ice_server::IceServer;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_test::wasm_bindgen_test;
 use web_sys::RtcIceServer;
+
+use crate::types::ice_transport::ice_server::IceServer;
 
 #[wasm_bindgen_test]
 fn test_transform() {
