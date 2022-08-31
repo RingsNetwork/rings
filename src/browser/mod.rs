@@ -186,12 +186,12 @@ pub struct Client {
 impl Client {
     pub async fn new(
         unsigned_info: UnsignedInfo,
-        signed_data: js_sys::Uint8Array,
+        signed_data: Vec<u8>,
         stuns: String,
         storage_name: String,
     ) -> error::Result<Client> {
         let unsigned_info = unsigned_info.clone();
-        let signed_data = signed_data.to_vec();
+        let signed_data = signed_data;
         let random_key = unsigned_info.random_key;
         let session = SessionManager::new(&signed_data, &unsigned_info.auth, &random_key);
         let swarm = Arc::new(Swarm::new(&stuns, unsigned_info.key_addr, session));
@@ -234,7 +234,7 @@ impl Client {
     ) -> Promise {
         let unsigned = unsigned_info.clone();
         future_to_promise(async move {
-            let client = Self::new(unsigned, signed_data, stuns, storage_name).await?;
+            let client = Self::new(unsigned, signed_data.to_vec(), stuns, storage_name).await?;
             Ok(JsValue::from(client))
         })
     }
