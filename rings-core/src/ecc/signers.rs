@@ -69,7 +69,6 @@ pub mod eip712 {
 }
 
 pub mod ed25519 {
-    use ed25519_dalek::ed25519::signature::Signature;
     use ed25519_dalek::Verifier;
 
     use super::*;
