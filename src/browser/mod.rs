@@ -10,6 +10,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use self::utils::from_rtc_ice_connection_state;
+use crate::error;
 use crate::prelude::js_sys;
 use crate::prelude::rings_core::async_trait;
 use crate::prelude::rings_core::dht::PeerRing;
@@ -43,8 +44,6 @@ use crate::prelude::wasm_bindgen_futures::future_to_promise;
 use crate::prelude::web3::contract::tokens::Tokenizable;
 use crate::prelude::web_sys::RtcIceConnectionState;
 use crate::processor::Processor;
-use crate::error;
-
 
 #[wasm_bindgen(start)]
 pub fn start() -> Result<(), JsError> {
@@ -197,7 +196,8 @@ impl Client {
         let swarm = Arc::new(Swarm::new(&stuns, unsigned_info.key_addr, session));
 
         let storage = PersistenceStorage::new_with_cap_and_name(50000, storage_name.as_str())
-            .await.map_err(|_| error::Error::FailedOnInitStorage)?;
+            .await
+            .map_err(|_| error::Error::FailedOnInitStorage)?;
         let pr = PeerRing::new_with_storage(swarm.address().into(), Arc::new(storage));
 
         let dht = Arc::new(pr);
@@ -211,7 +211,6 @@ impl Client {
             stuns,
         })
     }
-
 }
 
 #[wasm_bindgen]

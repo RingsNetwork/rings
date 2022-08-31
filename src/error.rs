@@ -47,7 +47,7 @@ pub enum Error {
     #[error("No Permission")]
     NoPermission,
     #[error("Init Storage Error")]
-    FailedOnInitStorage
+    FailedOnInitStorage,
 }
 
 impl Error {
@@ -74,8 +74,7 @@ impl Error {
             Error::SendMessage(_) => 18,
             Error::MessagePayload(_) => 19,
             Error::NoPermission => 20,
-            Error::FailedOnInitStorage => 21
-
+            Error::FailedOnInitStorage => 21,
         };
         -32000 - code
     }
@@ -91,7 +90,6 @@ impl From<Error> for jsonrpc_core::Error {
         }
     }
 }
-
 
 #[cfg(feature = "browser")]
 impl From<Error> for crate::prelude::wasm_bindgen::JsValue {
