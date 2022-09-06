@@ -11,7 +11,7 @@ use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
-use crate::swarm::TransportManager;
+use crate::transports::manager::TransportManager;
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]

@@ -22,6 +22,7 @@ use crate::message::MessagePayload;
 use crate::message::PayloadSender;
 use crate::session::SessionManager;
 use crate::storage::MemStorage;
+use crate::transports::manager::TransportManager;
 use crate::transports::Transport;
 use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::Event;
@@ -29,28 +30,13 @@ use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransportInterface;
 
 pub struct Swarm {
-    table: MemStorage<Address, Arc<Transport>>,
-    pending: Arc<Mutex<Vec<Arc<Transport>>>>,
-    ice_servers: Vec<IceServer>,
-    transport_event_channel: Channel<Event>,
+    pub(crate) transports: MemStorage<Address, Arc<Transport>>,
+    pub(crate) pending: Arc<Mutex<Vec<Arc<Transport>>>>,
+    pub(crate) ice_servers: Vec<IceServer>,
+    pub(crate) transport_event_channel: Channel<Event>,
+    pub(crate) external_address: Option<String>,
     session_manager: SessionManager,
     address: Address,
-    external_address: Option<String>,
-}
-
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
-pub trait TransportManager {
-    type Transport;
-
-    fn get_transports(&self) -> Vec<(Address, Self::Transport)>;
-    fn get_addresses(&self) -> Vec<Address>;
-    fn get_transport(&self, address: &Address) -> Option<Self::Transport>;
-    fn remove_transport(&self, address: &Address) -> Option<(Address, Self::Transport)>;
-    fn get_transport_numbers(&self) -> usize;
-    async fn get_and_check_transport(&self, address: &Address) -> Option<Self::Transport>;
-    async fn new_transport(&self) -> Result<Self::Transport>;
-    async fn register(&self, address: &Address, trans: Self::Transport) -> Result<()>;
 }
 
 impl Swarm {
@@ -67,7 +53,7 @@ impl Swarm {
             .map(|s| IceServer::from_str(s).unwrap())
             .collect::<Vec<IceServer>>();
         Self {
-            table: MemStorage::<Address, Arc<Transport>>::new(),
+            transports: MemStorage::<Address, Arc<Transport>>::new(),
             transport_event_channel: Channel::new(),
             ice_servers,
             address,
@@ -103,7 +89,7 @@ impl Swarm {
             Some(Event::RegisterTransport((address, id))) => {
                 // if transport is still pending
                 if let Ok(Some(t)) = self.find_pending_transport(id) {
-                    log::debug!("transport is inside pending list, mov to swarm table");
+                    log::debug!("transport is inside pending list, mov to swarm transports");
 
                     self.register(&address, t).await?;
                     self.pop_pending_transport(id)?;
@@ -213,96 +199,6 @@ impl Swarm {
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-impl TransportManager for Swarm {
-    type Transport = Arc<Transport>;
-
-    async fn new_transport(&self) -> Result<Self::Transport> {
-        let event_sender = self.transport_event_channel.sender();
-        let mut ice_transport = Transport::new(event_sender);
-        ice_transport
-            .start(self.ice_servers.clone(), self.external_address.clone())
-            .await?
-            .apply_callback()
-            .await?;
-
-        Ok(Arc::new(ice_transport))
-    }
-
-    // register to swarm table
-    // should not wait connection statues here
-    // a connection `Promise` may cause deadlock of both end
-    async fn register(&self, address: &Address, trans: Self::Transport) -> Result<()> {
-        if trans.is_disconnected().await {
-            return Err(Error::InvalidTransport);
-        }
-
-        log::info!("register transport {:?}", trans.id.clone());
-        #[cfg(test)]
-        {
-            println!("register transport {:?}", trans.id.clone());
-        }
-        let id = trans.id;
-        if let Some(t) = self.table.get(address) {
-            if t.is_connected().await && !trans.is_connected().await {
-                return Err(Error::InvalidTransport);
-            }
-            if t.id != id {
-                self.table.set(address, trans);
-                if let Err(e) = t.close().await {
-                    log::error!("failed to close previous while registering {:?}", e);
-                    return Err(Error::SwarmToClosePrevTransport(format!("{:?}", e)));
-                }
-                log::debug!("replace and closed previous connection! {:?}", t.id);
-            }
-        } else {
-            self.table.set(address, trans);
-        }
-        Ok(())
-    }
-
-    async fn get_and_check_transport(&self, address: &Address) -> Option<Self::Transport> {
-        match self.get_transport(address) {
-            Some(t) => {
-                if t.is_disconnected().await {
-                    log::debug!(
-                        "[get_and_check_transport] transport {:?} is not connected will be drop",
-                        t.id
-                    );
-                    if t.close().await.is_err() {
-                        log::error!("Failed on close transport");
-                    };
-                    None
-                } else {
-                    Some(t)
-                }
-            }
-            None => None,
-        }
-    }
-
-    fn get_transport(&self, address: &Address) -> Option<Self::Transport> {
-        self.table.get(address)
-    }
-
-    fn remove_transport(&self, address: &Address) -> Option<(Address, Self::Transport)> {
-        self.table.remove(address)
-    }
-
-    fn get_transport_numbers(&self) -> usize {
-        self.table.len()
-    }
-
-    fn get_addresses(&self) -> Vec<Address> {
-        self.table.keys()
-    }
-
-    fn get_transports(&self) -> Vec<(Address, Self::Transport)> {
-        self.table.items()
-    }
-}
-
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
 impl<T> PayloadSender<T> for Swarm
 where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Debug
 {
@@ -378,16 +274,6 @@ mod tests {
         let transport1 = swarm1.new_transport().await.unwrap();
         let transport2 = swarm2.new_transport().await.unwrap();
 
-        // Cannot register if not connected
-        // assert!(swarm1
-        //     .register(&swarm2.address(), transport1.clone())
-        //     .await
-        //     .is_err());
-        // assert!(swarm2
-        //     .register(&swarm1.address(), transport2.clone())
-        //     .await
-        //     .is_err());
-
         establish_connection(&transport1, &transport2).await?;
 
         // Can register if connected
@@ -398,7 +284,7 @@ mod tests {
             .register(&swarm1.address(), transport2.clone())
             .await?;
 
-        // Check address transport pairs in table
+        // Check address transport pairs in transports
         let transport_1_to_2 = swarm1.get_transport(&swarm2.address()).unwrap();
         let transport_2_to_1 = swarm2.get_transport(&swarm1.address()).unwrap();
 

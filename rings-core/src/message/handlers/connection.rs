@@ -23,7 +23,7 @@ use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
 use crate::prelude::RTCSdpType;
-use crate::swarm::TransportManager;
+use crate::transports::manager::TransportManager;
 use crate::types::ice_transport::IceTrickleScheme;
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
@@ -259,7 +259,7 @@ pub mod tests {
     use crate::message::handlers::tests::prepare_node;
     use crate::message::MessageHandler;
     use crate::swarm::Swarm;
-    use crate::swarm::TransportManager;
+    use crate::transports::manager::TransportManager;
     use crate::types::ice_transport::IceTransportInterface;
 
     // ndoe1.key < node2.key < node3.key

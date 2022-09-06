@@ -14,7 +14,7 @@ use crate::session::SessionManager;
 use crate::types::channel::Channel;
 
 /// Struct From [webrtc-rs](https://docs.rs/webrtc/latest/webrtc/ice_transport/ice_candidate/struct.RTCIceCandidateInit.html)
-/// For [RFC Std](https://w3c.github.io/webrtc-pc/#dom-rtcicecandidate-tojson), ICE Candidate should be camelCase
+/// According to [RFC Std](https://w3c.github.io/webrtc-pc/#dom-rtcicecandidate-tojson), ICE Candidate should be camelCase
 /// dictionary RTCIceCandidateInit {
 ///  DOMString candidate = "";
 ///  DOMString? sdpMid = null;

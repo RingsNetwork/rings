@@ -193,7 +193,7 @@ mod test {
     use crate::storage::PersistenceStorage;
     use crate::storage::PersistenceStorageOperation;
     use crate::swarm::Swarm;
-    use crate::swarm::TransportManager;
+    use crate::transports::manager::TransportManager;
     use crate::types::ice_transport::IceTrickleScheme;
 
     #[tokio::test]

@@ -7,7 +7,7 @@ use rings_node::prelude::rings_core::dht::Stabilization;
 use rings_node::prelude::rings_core::dht::TStabilize;
 use rings_node::prelude::rings_core::message::MessageCallback;
 use rings_node::prelude::rings_core::storage::PersistenceStorage;
-use rings_node::prelude::rings_core::swarm::TransportManager;
+use rings_node::prelude::rings_core::transports::TransportManager;
 use rings_node::prelude::web3::contract::tokens::Tokenizable;
 use rings_node::prelude::web_sys::RtcIceConnectionState;
 use rings_node::prelude::*;

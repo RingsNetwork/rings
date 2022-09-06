@@ -20,7 +20,7 @@ use crate::prelude::RTCSdpType;
 use crate::prelude::Transport;
 use crate::session::SessionManager;
 use crate::swarm::Swarm;
-use crate::swarm::TransportManager;
+use crate::transports::manager::TransportManager;
 use crate::types::ice_transport::IceTransportInterface;
 use crate::types::ice_transport::IceTrickleScheme;
 
@@ -305,7 +305,7 @@ pub mod tests {
     use crate::session::SessionManager;
     use crate::storage::PersistenceStorage;
     use crate::swarm::Swarm;
-    use crate::swarm::TransportManager;
+    use crate::transports::manager::TransportManager;
     use crate::types::ice_transport::IceTrickleScheme;
     use crate::types::message::MessageListener;
 

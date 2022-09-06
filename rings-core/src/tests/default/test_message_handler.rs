@@ -25,7 +25,7 @@ use crate::storage::PersistenceStorage;
 use crate::storage::PersistenceStorageOperation;
 use crate::storage::PersistenceStorageReadAndWrite;
 use crate::swarm::Swarm;
-use crate::swarm::TransportManager;
+use crate::transports::manager::TransportManager;
 use crate::types::ice_transport::IceTransportInterface;
 use crate::types::message::MessageListener;
 

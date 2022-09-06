@@ -14,7 +14,7 @@ use crate::message::MessageHandler;
 use crate::session::SessionManager;
 use crate::storage::PersistenceStorage;
 use crate::swarm::Swarm;
-use crate::swarm::TransportManager;
+use crate::transports::manager::TransportManager;
 use crate::types::message::MessageListener;
 
 async fn new_chord(did: Did, path: &str) -> PeerRing {

@@ -19,7 +19,7 @@ use super::response::Peer;
 use super::response::TransportAndIce;
 use crate::error::Error as ServerError;
 use crate::prelude::rings_core::prelude::Address;
-use crate::prelude::rings_core::swarm::TransportManager;
+use crate::prelude::rings_core::transports::TransportManager;
 use crate::processor;
 use crate::processor::Processor;
 use crate::seed::Seed;
