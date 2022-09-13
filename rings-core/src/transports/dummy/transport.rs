@@ -5,11 +5,11 @@ use async_lock::RwLock as AsyncRwLock;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use lazy_static::lazy_static;
-use web3::types::Address;
 use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 
 use crate::channels::Channel as AcChannel;
+use crate::dht::Did;
 use crate::ecc::PublicKey;
 use crate::err::Error;
 use crate::err::Result;
@@ -31,7 +31,7 @@ type EventSender = <AcChannel<Event> as Channel<Event>>::Sender;
 #[derive(Default)]
 pub struct DummyTransportHub {
     pub senders: DashMap<uuid::Uuid, EventSender>,
-    pub addresses: DashMap<uuid::Uuid, Address>,
+    pub dids: DashMap<uuid::Uuid, Did>,
 }
 
 lazy_static! {
@@ -90,7 +90,7 @@ impl IceTransportInterface<Event, AcChannel<Event>> for DummyTransport {
 
         self.event_sender
             .send(Event::ConnectClosed((
-                self.pubkey().await.address(),
+                self.pubkey().await.address().into(),
                 self.id,
             )))
             .await
@@ -149,15 +149,12 @@ impl IceTrickleScheme for DummyTransport {
             sdp: serde_json::to_string(&self.id).unwrap(),
             candidates: vec![],
         };
-        let resp = MessagePayload::new_direct(
-            data,
-            session_manager,
-            session_manager.authorizer()?.to_owned().into(), // This is a fake destination
-        )?;
+        let resp =
+            MessagePayload::new_direct(data, session_manager, session_manager.authorizer()?)?;
         Ok(resp.encode()?)
     }
 
-    async fn register_remote_info(&self, data: Encoded) -> Result<Address> {
+    async fn register_remote_info(&self, data: Encoded) -> Result<Did> {
         let data: MessagePayload<TricklePayload> = data.decode()?;
         match data.verify() {
             true => {
@@ -179,10 +176,10 @@ impl IceTrickleScheme for DummyTransport {
                     *pk = Some(public_key);
                 };
 
-                let local_address = self.pubkey().await.address();
-                HUB.addresses.insert(self.id, local_address);
+                let local_did = self.pubkey().await.address().into();
+                HUB.dids.insert(self.id, local_did);
                 self.event_sender
-                    .send(Event::RegisterTransport((local_address, self.id)))
+                    .send(Event::RegisterTransport((local_did, self.id)))
                     .await
                     .unwrap_or_else(|e| log::warn!("failed to send register event: {:?}", e));
 
@@ -219,10 +216,6 @@ impl DummyTransport {
 
     pub fn remote_sender(&self) -> EventSender {
         HUB.senders.get(&self.remote_id()).unwrap().clone()
-    }
-
-    pub fn remote_address(&self) -> Address {
-        *HUB.addresses.get(&self.remote_id()).unwrap()
     }
 }
 
@@ -267,8 +260,8 @@ pub mod tests {
         let key2 = SecretKey::random();
 
         // Generate Session associated to Keys
-        let sm1 = SessionManager::new_with_seckey(&key1)?;
-        let sm2 = SessionManager::new_with_seckey(&key2)?;
+        let sm1 = SessionManager::new_with_seckey(&key1, None)?;
+        let sm2 = SessionManager::new_with_seckey(&key2, None)?;
 
         assert_eq!(
             transport1.ice_connection_state().await,
@@ -286,7 +279,7 @@ pub mod tests {
 
         // Peer 2 got offer then register
         let addr1 = transport2.register_remote_info(handshake_info1).await?;
-        assert_eq!(addr1, key1.address());
+        assert_eq!(addr1, key1.address().into());
 
         // Peer 2 create answer
         let handshake_info2 = transport2
@@ -295,7 +288,7 @@ pub mod tests {
 
         // Peer 1 got answer then register
         let addr2 = transport1.register_remote_info(handshake_info2).await?;
-        assert_eq!(addr2, key2.address());
+        assert_eq!(addr2, key2.address().into());
 
         let promise_1 = transport1.connect_success_promise().await?;
         let promise_2 = transport2.connect_success_promise().await?;

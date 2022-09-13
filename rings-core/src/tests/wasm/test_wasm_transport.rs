@@ -5,18 +5,14 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::*;
 use web_sys::RtcIceConnectionState;
-use web_sys::RtcSdpType;
 
+use super::prepare_node;
 use crate::channels::Channel as CbChannel;
-use crate::dht::PeerRing;
 use crate::ecc::SecretKey;
 use crate::err::Result;
-use crate::message::MessageHandler;
 use crate::prelude::RTCSdpType;
 use crate::session::SessionManager;
-use crate::storage::PersistenceStorage;
-use crate::swarm::Swarm;
-use crate::transports::manager::TransportManager;
+use crate::tests::manually_establish_connection;
 use crate::transports::Transport;
 use crate::types::channel::Channel;
 use crate::types::channel::Event;
@@ -50,25 +46,25 @@ async fn prepare_transport(channel: Option<Arc<CbChannel<Event>>>) -> Result<Tra
     Ok(trans)
 }
 
-pub async fn establish_connection(transport1: &Transport, transport2: &Transport) -> Result<()> {
+pub async fn establish_ice_connection(
+    transport1: &Transport,
+    transport2: &Transport,
+) -> Result<()> {
     // Generate key pairs for signing and verification
     let key1 = SecretKey::random();
     let key2 = SecretKey::random();
 
-    let sm1 = SessionManager::new_with_seckey(&key1).unwrap();
-    let sm2 = SessionManager::new_with_seckey(&key2).unwrap();
+    let sm1 = SessionManager::new_with_seckey(&key1, None)?;
+    let sm2 = SessionManager::new_with_seckey(&key2, None)?;
 
     // Peer 1 try to connect peer 2
     let handshake_info1 = transport1
-        .get_handshake_info(&sm1, RtcSdpType::Offer)
-        .await
-        .unwrap();
-
+        .get_handshake_info(&sm1, RTCSdpType::Offer)
+        .await?;
     assert_eq!(
         transport1.ice_connection_state().await,
         Some(RtcIceConnectionState::New)
     );
-
     assert_eq!(
         transport2.ice_connection_state().await,
         Some(RtcIceConnectionState::New)
@@ -76,11 +72,11 @@ pub async fn establish_connection(transport1: &Transport, transport2: &Transport
 
     // Peer 2 got offer then register
     let addr1 = transport2.register_remote_info(handshake_info1).await?;
+    assert_eq!(addr1, key1.address().into());
 
-    assert_eq!(addr1, key1.address());
     // Peer 2 create answer
     let handshake_info2 = transport2
-        .get_handshake_info(&sm2, RtcSdpType::Answer)
+        .get_handshake_info(&sm2, RTCSdpType::Answer)
         .await
         .unwrap();
 
@@ -89,7 +85,7 @@ pub async fn establish_connection(transport1: &Transport, transport2: &Transport
         .register_remote_info(handshake_info2)
         .await
         .unwrap();
-    assert_eq!(addr2, key2.address());
+    assert_eq!(addr2, key2.address().into());
 
     #[cfg(feature = "browser_chrome_test")]
     {
@@ -107,7 +103,7 @@ async fn test_ice_connection_establish() {
     get_fake_permission().await;
     let transport1 = prepare_transport(None).await.unwrap();
     let transport2 = prepare_transport(None).await.unwrap();
-    establish_connection(&transport1, &transport2)
+    establish_ice_connection(&transport1, &transport2)
         .await
         .unwrap();
 }
@@ -115,86 +111,14 @@ async fn test_ice_connection_establish() {
 #[wasm_bindgen_test]
 async fn test_message_handler() {
     get_fake_permission().await;
-    let stun = "stun://stun.l.google.com:19302";
+
     let key1 = SecretKey::random();
     let key2 = SecretKey::random();
-    let _addr1 = key1.address();
-    let _addr2 = key2.address();
 
-    println!(
-        "test with key1:{:?}, key2:{:?}",
-        key1.address(),
-        key2.address()
-    );
+    let (_did1, _dht1, swarm1, _handler1) = prepare_node(key1).await;
+    let (_did2, _dht2, swarm2, _handler2) = prepare_node(key2).await;
 
-    let db1 =
-        PersistenceStorage::new_with_cap_and_name(1000, uuid::Uuid::new_v4().to_string().as_str())
-            .await
-            .unwrap();
-    let db2 =
-        PersistenceStorage::new_with_cap_and_name(1000, uuid::Uuid::new_v4().to_string().as_str())
-            .await
-            .unwrap();
-
-    let dht1 = Arc::new(PeerRing::new_with_storage(
-        key1.address().into(),
-        Arc::new(db1),
-    ));
-    let dht2 = Arc::new(PeerRing::new_with_storage(
-        key2.address().into(),
-        Arc::new(db2),
-    ));
-
-    let sm1 = SessionManager::new_with_seckey(&key1).unwrap();
-    let sm2 = SessionManager::new_with_seckey(&key2).unwrap();
-
-    let swarm1 = Arc::new(Swarm::new(stun, key1.address(), sm1.clone()));
-    let swarm2 = Arc::new(Swarm::new(stun, key2.address(), sm2.clone()));
-
-    let transport1 = swarm1.new_transport().await.unwrap();
-    let transport2 = swarm2.new_transport().await.unwrap();
-
-    let node1 = Arc::new(MessageHandler::new(Arc::clone(&dht1), Arc::clone(&swarm1)));
-    let node2 = Arc::new(MessageHandler::new(Arc::clone(&dht2), Arc::clone(&swarm2)));
-
-    // first node1 generate handshake info
-    let handshake_info1 = transport1
-        .get_handshake_info(&sm1, RTCSdpType::Offer)
+    manually_establish_connection(&swarm1, &swarm2)
         .await
         .unwrap();
-
-    // node3 register handshake from node1
-    let addr1 = transport2
-        .register_remote_info(handshake_info1)
-        .await
-        .unwrap();
-    // and reponse a Answer
-    let handshake_info2 = transport2
-        .get_handshake_info(&sm2, RTCSdpType::Answer)
-        .await
-        .unwrap();
-
-    // node1 accpeted the answer
-    let addr2 = transport1
-        .register_remote_info(handshake_info2)
-        .await
-        .unwrap();
-
-    assert_eq!(addr1, key1.address());
-    assert_eq!(addr2, key2.address());
-
-    swarm1
-        .register(&swarm2.address(), transport1.clone())
-        .await
-        .unwrap();
-    swarm2
-        .register(&swarm1.address(), transport2.clone())
-        .await
-        .unwrap();
-
-    assert!(swarm1.get_transport(&key2.address()).is_some());
-    assert!(swarm2.get_transport(&key1.address()).is_some());
-
-    node1.listen_once().await;
-    node2.listen_once().await;
 }

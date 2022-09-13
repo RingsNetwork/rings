@@ -3,7 +3,6 @@ use std::sync::Arc;
 use async_recursion::async_recursion;
 use async_trait::async_trait;
 use futures::lock::Mutex;
-use web3::types::Address;
 
 use super::CustomMessage;
 use super::MaybeEncrypted;
@@ -12,6 +11,7 @@ use super::MessagePayload;
 use super::OriginVerificationGen;
 use super::PayloadSender;
 use crate::dht::Chord;
+use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::dht::PeerRingAction;
 use crate::err::Error;
@@ -48,10 +48,10 @@ pub trait MessageCallback {
 }
 
 #[cfg(not(feature = "wasm"))]
-type CallbackFn = Box<dyn MessageCallback + Send + Sync>;
+pub type CallbackFn = Box<dyn MessageCallback + Send + Sync>;
 
 #[cfg(feature = "wasm")]
-type CallbackFn = Box<dyn MessageCallback>;
+pub type CallbackFn = Box<dyn MessageCallback>;
 
 #[derive(Clone)]
 pub struct MessageHandler {
@@ -75,9 +75,9 @@ impl MessageHandler {
         }
     }
 
-    pub fn new(dht: Arc<PeerRing>, swarm: Arc<Swarm>) -> Self {
+    pub fn new(swarm: Arc<Swarm>) -> Self {
         Self {
-            dht,
+            dht: swarm.dht(),
             swarm,
             callback: Arc::new(Mutex::new(None)),
         }
@@ -89,21 +89,20 @@ impl MessageHandler {
     }
 
     // disconnect a node if a node is in DHT
-    pub async fn disconnect(&self, address: Address) -> Result<()> {
-        log::info!("disconnect {:?}", address);
-        self.dht.remove(address.into())?;
-        if let Some((_address, trans)) = self.swarm.remove_transport(&address) {
+    pub async fn disconnect(&self, did: Did) -> Result<()> {
+        log::info!("disconnect {:?}", did);
+        self.dht.remove(did)?;
+        if let Some((_address, trans)) = self.swarm.remove_transport(did) {
             trans.close().await?
         }
         Ok(())
     }
 
-    pub async fn connect(&self, address: &Address) -> Result<Arc<Transport>> {
-        if let Some(t) = self.swarm.get_and_check_transport(address).await {
+    pub async fn connect(&self, did: Did) -> Result<Arc<Transport>> {
+        if let Some(t) = self.swarm.get_and_check_transport(did).await {
             return Ok(t);
         }
 
-        let target_id = address.to_owned().into();
         let transport = self.swarm.new_transport().await?;
         let handshake_info = transport
             .get_handshake_info(self.swarm.session_manager(), RTCSdpType::Offer)
@@ -115,7 +114,7 @@ impl MessageHandler {
             handshake_info: handshake_info.to_string(),
         });
         let next_hop = {
-            match self.dht.find_successor(target_id)? {
+            match self.dht.find_successor(did)? {
                 PeerRingAction::Some(node) => Some(node),
                 PeerRingAction::RemoteAction(node, _) => Some(node),
                 _ => None,
@@ -123,7 +122,7 @@ impl MessageHandler {
         }
         .ok_or(Error::NoNextHop)?;
         log::debug!("next_hop: {:?}", next_hop);
-        self.send_message(connect_msg, next_hop, target_id).await?;
+        self.send_message(connect_msg, next_hop, did).await?;
         Ok(transport)
     }
 
@@ -153,7 +152,7 @@ impl MessageHandler {
     pub async fn handle_payload(&self, payload: &MessagePayload<Message>) -> Result<()> {
         #[cfg(test)]
         {
-            println!("{} got msg {}", self.swarm.address(), &payload.data);
+            println!("{} got msg {}", self.swarm.did(), &payload.data);
         }
         log::trace!("NEW MESSAGE: {}", &payload.data);
         match &payload.data {
@@ -222,12 +221,8 @@ impl PayloadSender<Message> for MessageHandler {
         self.swarm.session_manager()
     }
 
-    async fn do_send_payload(
-        &self,
-        address: &Address,
-        payload: MessagePayload<Message>,
-    ) -> Result<()> {
-        self.swarm.do_send_payload(address, payload).await
+    async fn do_send_payload(&self, did: Did, payload: MessagePayload<Message>) -> Result<()> {
+        self.swarm.do_send_payload(did, payload).await
     }
 }
 
@@ -290,92 +285,17 @@ mod listener {
 #[cfg(not(feature = "wasm"))]
 #[cfg(test)]
 pub mod tests {
-    use std::sync::Arc;
-
     use futures::lock::Mutex;
     use tokio::time::sleep;
     use tokio::time::Duration;
-    use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 
     use super::*;
     use crate::dht::Did;
-    use crate::dht::PeerRing;
     use crate::ecc::SecretKey;
     use crate::message::MessageHandler;
-    use crate::session::SessionManager;
-    use crate::storage::PersistenceStorage;
-    use crate::swarm::Swarm;
-    use crate::transports::manager::TransportManager;
-    use crate::types::ice_transport::IceTrickleScheme;
+    use crate::tests::default::prepare_node;
+    use crate::tests::manually_establish_connection;
     use crate::types::message::MessageListener;
-
-    pub async fn prepare_node(
-        key: &SecretKey,
-    ) -> (Did, Arc<PeerRing>, Arc<Swarm>, MessageHandler, String) {
-        let stun = "stun://stun.l.google.com:19302";
-
-        let did = key.address().into();
-        let path = PersistenceStorage::random_path("./tmp");
-        let dht = Arc::new(PeerRing::new_with_storage(
-            did,
-            Arc::new(
-                PersistenceStorage::new_with_path(path.as_str())
-                    .await
-                    .unwrap(),
-            ),
-        ));
-        let sm = SessionManager::new_with_seckey(key).unwrap();
-        let swarm = Arc::new(Swarm::new(stun, key.address(), sm));
-        let node = MessageHandler::new(dht.clone(), Arc::clone(&swarm));
-
-        println!("key: {:?}", key.to_string());
-        println!("did: {:?}", did);
-
-        (did, dht, swarm, node, path)
-    }
-
-    pub async fn manually_establish_connection(swarm1: &Swarm, swarm2: &Swarm) -> Result<()> {
-        let sm1 = swarm1.session_manager();
-        let sm2 = swarm2.session_manager();
-
-        let transport1 = swarm1.new_transport().await.unwrap();
-        let handshake_info1 = transport1
-            .get_handshake_info(sm1, RTCSdpType::Offer)
-            .await?;
-
-        let transport2 = swarm2.new_transport().await.unwrap();
-        let addr1 = transport2.register_remote_info(handshake_info1).await?;
-
-        assert_eq!(addr1, swarm1.address());
-
-        let handshake_info2 = transport2
-            .get_handshake_info(sm2, RTCSdpType::Answer)
-            .await?;
-
-        let addr2 = transport1.register_remote_info(handshake_info2).await?;
-
-        assert_eq!(addr2, swarm2.address());
-
-        let promise_1 = transport1.connect_success_promise().await?;
-        let promise_2 = transport2.connect_success_promise().await?;
-        promise_1.await?;
-        promise_2.await?;
-
-        swarm2
-            .register(&swarm1.address(), transport2.clone())
-            .await
-            .unwrap();
-
-        swarm1
-            .register(&swarm2.address(), transport1.clone())
-            .await
-            .unwrap();
-
-        assert!(swarm1.get_transport(&swarm2.address()).is_some());
-        assert!(swarm2.get_transport(&swarm1.address()).is_some());
-
-        Ok(())
-    }
 
     #[derive(Clone)]
     struct MessageCallbackInstance {
@@ -388,8 +308,8 @@ pub mod tests {
         let key1 = SecretKey::random();
         let key2 = SecretKey::random();
 
-        let (did1, _dht1, swarm1, handler1, _path1) = prepare_node(&key1).await;
-        let (did2, _dht2, swarm2, handler2, _path2) = prepare_node(&key2).await;
+        let (did1, _dht1, swarm1, handler1, _path1) = prepare_node(key1).await;
+        let (did2, _dht2, swarm2, handler2, _path2) = prepare_node(key2).await;
 
         manually_establish_connection(&swarm1, &swarm2).await?;
 
@@ -405,7 +325,7 @@ pub mod tests {
                 self.handler_messages
                     .lock()
                     .await
-                    .push((ctx.addr.into(), decrypted_msg.0));
+                    .push((ctx.addr, decrypted_msg.0));
                 println!("{:?}, {:?}, {:?}", ctx, ctx.addr, msg);
             }
 

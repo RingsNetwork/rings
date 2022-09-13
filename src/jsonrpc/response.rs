@@ -6,15 +6,15 @@ use serde_json::Value as JsonValue;
 
 use crate::error::Error;
 use crate::error::Result;
+use crate::prelude::rings_core::dht::Did;
 use crate::prelude::rings_core::message::Encoded;
 use crate::prelude::rings_core::prelude::web3::contract::tokens::Tokenizable;
-use crate::prelude::rings_core::prelude::web3::types::Address;
 use crate::prelude::rings_core::transports::Transport;
 use crate::processor;
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct Peer {
-    pub address: String,
+    pub did: String,
     pub transport_id: String,
     pub state: String,
 }
@@ -34,10 +34,10 @@ impl Peer {
     }
 }
 
-impl From<(Address, &Arc<Transport>, Option<String>)> for Peer {
-    fn from((address, transport, state): (Address, &Arc<Transport>, Option<String>)) -> Self {
+impl From<(Did, &Arc<Transport>, Option<String>)> for Peer {
+    fn from((did, transport, state): (Did, &Arc<Transport>, Option<String>)) -> Self {
         Self {
-            address: address.into_token().to_string(),
+            did: did.to_string(),
             transport_id: transport.id.to_string(),
             state: state.unwrap_or_else(|| "Unknown".to_owned()),
         }
@@ -47,7 +47,7 @@ impl From<(Address, &Arc<Transport>, Option<String>)> for Peer {
 impl From<(&processor::Peer, Option<String>)> for Peer {
     fn from((p, state): (&processor::Peer, Option<String>)) -> Self {
         Self {
-            address: p.address.clone().into_token().to_string(),
+            did: p.did.clone().into_token().to_string(),
             transport_id: p.transport.id.to_string(),
             state: state.unwrap_or_else(|| "Unknown".to_owned()),
         }

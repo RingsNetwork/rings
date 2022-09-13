@@ -24,7 +24,7 @@ impl HandleMsg<MaybeEncrypted<CustomMessage>> for MessageHandler {
         let mut relay = ctx.relay.clone();
 
         if self.dht.id != relay.destination {
-            if self.swarm.get_transport(&relay.destination).is_some() {
+            if self.swarm.get_transport(relay.destination).is_some() {
                 relay.relay(self.dht.id, Some(relay.destination))?;
                 return self.transpond_payload(ctx, relay).await;
             } else {

@@ -99,11 +99,11 @@ impl Client {
         )
     }
 
-    pub async fn connect_with_address(&mut self, address: &str) -> Output<()> {
+    pub async fn connect_with_address(&mut self, did: &str) -> Output<()> {
         self.client
             .call_method(
                 Method::ConnectWithAddress.as_str(),
-                Params::Array(vec![Value::String(address.to_owned())]),
+                Params::Array(vec![Value::String(did.to_owned())]),
             )
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -159,11 +159,11 @@ impl Client {
 
         let mut display = String::new();
         display.push_str("Successful\n");
-        display.push_str("Address, TransportId, Status\n");
+        display.push_str("Did, TransportId, Status\n");
         display.push_str(
             peers
                 .iter()
-                .map(|peer| format!("{}, {}, {}", peer.address, peer.transport_id, peer.state))
+                .map(|peer| format!("{}, {}, {}", peer.did, peer.transport_id, peer.state))
                 .collect::<Vec<_>>()
                 .join("\n")
                 .as_str(),
@@ -172,12 +172,9 @@ impl Client {
         ClientOutput::ok(display, ())
     }
 
-    pub async fn disconnect(&mut self, address: &str) -> Output<()> {
+    pub async fn disconnect(&mut self, did: &str) -> Output<()> {
         self.client
-            .call_method(
-                Method::Disconnect.as_str(),
-                Params::Array(vec![json!(address)]),
-            )
+            .call_method(Method::Disconnect.as_str(), Params::Array(vec![json!(did)]))
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
@@ -212,9 +209,9 @@ impl Client {
         ClientOutput::ok("Done.".into(), ())
     }
 
-    pub async fn send_message(&self, address: &str, text: &str) -> Output<()> {
+    pub async fn send_message(&self, did: &str, text: &str) -> Output<()> {
         let mut params = serde_json::Map::new();
-        params.insert("destination".to_owned(), json!(address));
+        params.insert("destination".to_owned(), json!(did));
         params.insert("text".to_owned(), json!(text));
         self.client
             .call_method(Method::SendTo.as_str(), Params::Map(params))

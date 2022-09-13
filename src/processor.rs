@@ -11,6 +11,7 @@ use crate::error::Result;
 use crate::jsonrpc::method;
 use crate::jsonrpc::response::TransportAndIce;
 use crate::jsonrpc_client::SimpleClient;
+use crate::prelude::rings_core::dht::Did;
 use crate::prelude::rings_core::dht::Stabilization;
 use crate::prelude::rings_core::ecc::PublicKey;
 use crate::prelude::rings_core::ecc::SecretKey;
@@ -22,11 +23,10 @@ use crate::prelude::rings_core::prelude::libsecp256k1;
 use crate::prelude::rings_core::prelude::uuid;
 use crate::prelude::rings_core::prelude::web3::contract::tokens::Tokenizable;
 use crate::prelude::rings_core::prelude::web3::ethabi::Token;
-use crate::prelude::rings_core::prelude::web3::types::Address;
 use crate::prelude::rings_core::prelude::RTCSdpType;
 use crate::prelude::rings_core::swarm::Swarm;
+use crate::prelude::rings_core::transports::manager::TransportManager;
 use crate::prelude::rings_core::transports::Transport;
-use crate::prelude::rings_core::transports::TransportManager;
 use crate::prelude::rings_core::types::ice_transport::IceTransportInterface;
 use crate::prelude::rings_core::types::ice_transport::IceTrickleScheme;
 use crate::prelude::web3::signing::keccak256;
@@ -83,9 +83,9 @@ impl Processor {
         ))
     }
 
-    /// Get current address
-    pub fn address(&self) -> Address {
-        self.swarm.address()
+    /// Get current did
+    pub fn did(&self) -> Did {
+        self.swarm.did()
     }
 
     /// Create an Offer and waiting for connection.
@@ -150,15 +150,15 @@ impl Processor {
                 .map_err(|e| Error::RemoteRpcError(e.to_string()))?;
             let info: TransportAndIce =
                 serde_json::from_value(resp).map_err(|_| Error::JsonDeserializeError)?;
-            let addr = transport
+            let did = transport
                 .register_remote_info(Encoded::from_encoded_str(info.ice.as_str()))
                 .await
                 .map_err(Error::RegisterIceError)?;
             self.swarm
-                .register(&addr, transport.clone())
+                .register(did, transport.clone())
                 .await
                 .map_err(Error::RegisterIceError)?;
-            Ok(addr)
+            Ok(did)
         };
         if let Err(e) = addr_result {
             if let Err(close_e) = transport.close().await {
@@ -197,42 +197,38 @@ impl Processor {
         }
     }
 
-    /// Connect peer with web3 address.
+    /// Connect peer with web3 did.
     /// There are 3 peers: PeerA, PeerB, PeerC.
     /// 1. PeerA has a connection with PeerB.
     /// 2. PeerC has a connection with PeerB.
     /// 3. PeerC can connect PeerA with PeerA's web3 address.
-    pub async fn connect_with_address(
-        &self,
-        address: &Address,
-        wait_for_open: bool,
-    ) -> Result<Peer> {
+    pub async fn connect_with_did(&self, did: Did, wait_for_open: bool) -> Result<Peer> {
         let transport = self
             .msg_handler
-            .connect(address)
+            .connect(did)
             .await
-            .map_err(Error::ConnectWithAddressError)?;
+            .map_err(Error::ConnectWithDidError)?;
         log::debug!("wait for transport connected");
         if wait_for_open {
             transport
                 .wait_for_data_channel_open()
                 .await
-                .map_err(Error::ConnectWithAddressError)?;
+                .map_err(Error::ConnectWithDidError)?;
         }
-        Ok(Peer::from((*address, transport)))
+        Ok(Peer::from((did, transport)))
     }
 
     async fn handshake(&self, transport: &Arc<Transport>, data: &str) -> Result<Encoded> {
         // get offer from remote and send answer back
         let hs_info = Encoded::from_encoded_str(data);
-        let addr = transport
+        let did = transport
             .register_remote_info(hs_info.to_owned())
             .await
             .map_err(Error::RegisterIceError)?;
 
-        log::debug!("register: {}", addr);
+        log::debug!("register: {}", did);
         self.swarm
-            .register(&addr, Arc::clone(transport))
+            .register(did, Arc::clone(transport))
             .await
             .map_err(Error::RegisterIceError)?;
 
@@ -261,18 +257,18 @@ impl Processor {
             .find_pending_transport(transport_id)
             .map_err(Error::PendingTransport)?
             .ok_or(Error::TransportNotFound)?;
-        let addr = transport
+        let did = transport
             .register_remote_info(ice)
             .await
             .map_err(Error::RegisterIceError)?;
         self.swarm
-            .register(&addr, transport.clone())
+            .register(did, transport.clone())
             .await
             .map_err(Error::RegisterIceError)?;
         if let Err(e) = self.swarm.pop_pending_transport(transport.id) {
             log::warn!("pop_pending_transport err: {}", e)
         };
-        Ok(Peer::from((addr, transport)))
+        Ok(Peer::from((did, transport)))
     }
 
     /// List all peers.
@@ -286,26 +282,26 @@ impl Processor {
         Ok(data)
     }
 
-    /// Get peer by remote address
-    pub async fn get_peer(&self, address: &Address) -> Result<Peer> {
+    /// Get peer by remote did
+    pub async fn get_peer(&self, did: Did) -> Result<Peer> {
         let transport = self
             .swarm
-            .get_transport(address)
+            .get_transport(did)
             .ok_or(Error::TransportNotFound)?;
-        Ok(Peer::from(&(*address, transport)))
+        Ok(Peer::from(&(did, transport)))
     }
 
-    /// Disconnect a peer with web3 address.
-    pub async fn disconnect(&self, address: &Address) -> Result<()> {
+    /// Disconnect a peer with web3 did.
+    pub async fn disconnect(&self, did: Did) -> Result<()> {
         let transport = self
             .swarm
-            .get_transport(address)
+            .get_transport(did)
             .ok_or(Error::TransportNotFound)?;
         transport
             .close()
             .await
             .map_err(Error::CloseTransportError)?;
-        self.swarm.remove_transport(address);
+        self.swarm.remove_transport(did);
         Ok(())
     }
 
@@ -340,18 +336,18 @@ impl Processor {
         Ok(())
     }
 
-    /// Send custom message to an address.
+    /// Send custom message to a did.
     pub async fn send_message(&self, destination: &str, msg: &[u8]) -> Result<()> {
         log::info!(
             "send_message, destination: {}, text: {:?}",
             destination,
             msg,
         );
-        let destination = Address::from_str(destination).map_err(|_| Error::InvalidAddress)?;
+        let destination = Did::from_str(destination).map_err(|_| Error::InvalidDid)?;
         let msg = Message::custom(msg, &None).map_err(Error::SendMessage)?;
         // self.swarm.do_send_payload(address, payload)
         self.swarm
-            .send_direct_message(msg, destination.into())
+            .send_direct_message(msg, destination)
             .await
             .map_err(Error::SendMessage)?;
         Ok(())
@@ -361,25 +357,25 @@ impl Processor {
 /// Peer struct
 #[derive(Clone)]
 pub struct Peer {
-    /// web3 address of a peer.
-    pub address: Token,
+    /// web3 did of a peer.
+    pub did: Token,
     /// transport of the connection.
     pub transport: Arc<Transport>,
 }
 
-impl From<(Address, Arc<Transport>)> for Peer {
-    fn from((address, transport): (Address, Arc<Transport>)) -> Self {
+impl From<(Did, Arc<Transport>)> for Peer {
+    fn from((did, transport): (Did, Arc<Transport>)) -> Self {
         Self {
-            address: address.into_token(),
+            did: did.into_token(),
             transport,
         }
     }
 }
 
-impl From<&(Address, Arc<Transport>)> for Peer {
-    fn from((address, transport): &(Address, Arc<Transport>)) -> Self {
+impl From<&(Did, Arc<Transport>)> for Peer {
+    fn from((did, transport): &(Did, Arc<Transport>)) -> Self {
         Self {
-            address: address.into_token(),
+            did: did.into_token(),
             transport: transport.clone(),
         }
     }
@@ -389,7 +385,10 @@ impl From<&(Address, Arc<Transport>)> for Peer {
 #[cfg(feature = "default")]
 mod test {
     use futures::lock::Mutex;
+    use rings_core::ecc::SecretKey;
+    use rings_core::message::MessageHandler;
     use rings_core::storage::PersistenceStorage;
+    use rings_core::swarm::SwarmBuilder;
 
     use super::*;
     use crate::prelude::*;
@@ -397,27 +396,15 @@ mod test {
     async fn new_processor() -> (Processor, String) {
         let key = SecretKey::random();
 
-        let (auth, new_key) = SessionManager::gen_unsign_info(key.address(), None, None).unwrap();
-        let sig = key.sign(&auth.to_string().unwrap()).to_vec();
-        let session = SessionManager::new(&sig, &auth, &new_key);
-        let swarm = Arc::new(Swarm::new(
-            "stun://stun.l.google.com:19302",
-            key.address(),
-            session,
-        ));
-
+        let stun = "stun://stun.l.google.com:19302";
         let path = PersistenceStorage::random_path("./tmp");
+        let storage = PersistenceStorage::new_with_path(path.as_str())
+            .await
+            .unwrap();
 
-        let dht = Arc::new(PeerRing::new_with_storage(
-            key.address().into(),
-            Arc::new(
-                PersistenceStorage::new_with_path(path.as_str())
-                    .await
-                    .unwrap(),
-            ),
-        ));
-        let msg_handler = MessageHandler::new(dht.clone(), swarm.clone());
-        let stabilization = Stabilization::new(dht, swarm.clone(), 200);
+        let swarm = Arc::new(SwarmBuilder::new(key, stun, storage).build().unwrap());
+        let msg_handler = MessageHandler::new(swarm.clone());
+        let stabilization = Stabilization::new(swarm.clone(), 200);
         (
             (swarm, Arc::new(msg_handler), Arc::new(stabilization)).into(),
             path,
@@ -548,10 +535,11 @@ mod test {
     async fn test_processor_handshake_msg() {
         let (p1, path1) = new_processor().await;
         let (p2, path2) = new_processor().await;
-        let p1_addr = p1.address().into_token().to_string();
-        let p2_addr = p2.address().into_token().to_string();
-        println!("p1_addr: {}", p1_addr);
-        println!("p2_addr: {}", p2_addr);
+        let did1 = p1.did().to_string();
+        let did2 = p2.did().to_string();
+
+        println!("p1_did: {}", did1);
+        println!("p2_did: {}", did2);
 
         let (transport_1, offer) = p1.create_offer().await.unwrap();
 
@@ -570,10 +558,10 @@ mod test {
 
         assert!(peer.transport.id.eq(&transport_1.id), "transport not same");
         assert!(
-            peer.address.to_string().eq(&p2_addr),
+            peer.did.to_string().eq(&did2),
             "peer.address got {}, expect: {}",
-            peer.address,
-            p2_addr
+            peer.did,
+            did2
         );
         println!("waiting for connection");
         transport_1
@@ -595,7 +583,7 @@ mod test {
         );
         assert!(
             p1.swarm
-                .get_transport(&p2.address())
+                .get_transport(p2.did())
                 .unwrap()
                 .is_connected()
                 .await,
@@ -607,7 +595,7 @@ mod test {
         );
         assert!(
             p2.swarm
-                .get_transport(&p1.address())
+                .get_transport(p1.did())
                 .unwrap()
                 .is_connected()
                 .await,
@@ -641,7 +629,7 @@ mod test {
         let test_text2 = "test2";
 
         println!("send_message 1");
-        p1.send_message(p2_addr.as_str(), test_text1.as_bytes())
+        p1.send_message(did2.as_str(), test_text1.as_bytes())
             .await
             .unwrap();
         println!("send_message 1 done");
@@ -649,7 +637,7 @@ mod test {
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
         println!("send_message 2");
-        p2.send_message(p1_addr.as_str(), test_text2.as_bytes())
+        p2.send_message(did1.as_str(), test_text2.as_bytes())
             .await
             .unwrap();
         println!("send_message 2 done");

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use web3::types::Address;
 
+use crate::dht::Did;
 use crate::err::Error;
 use crate::err::Result;
 use crate::swarm::Swarm;
@@ -15,14 +15,14 @@ use crate::types::ice_transport::IceTransportInterface;
 pub trait TransportManager {
     type Transport;
 
-    fn get_transports(&self) -> Vec<(Address, Self::Transport)>;
-    fn get_addresses(&self) -> Vec<Address>;
-    fn get_transport(&self, address: &Address) -> Option<Self::Transport>;
-    fn remove_transport(&self, address: &Address) -> Option<(Address, Self::Transport)>;
+    fn get_transports(&self) -> Vec<(Did, Self::Transport)>;
+    fn get_dids(&self) -> Vec<Did>;
+    fn get_transport(&self, did: Did) -> Option<Self::Transport>;
+    fn remove_transport(&self, did: Did) -> Option<(Did, Self::Transport)>;
     fn get_transport_numbers(&self) -> usize;
-    async fn get_and_check_transport(&self, address: &Address) -> Option<Self::Transport>;
+    async fn get_and_check_transport(&self, did: Did) -> Option<Self::Transport>;
     async fn new_transport(&self) -> Result<Self::Transport>;
-    async fn register(&self, address: &Address, trans: Self::Transport) -> Result<()>;
+    async fn register(&self, did: Did, trans: Self::Transport) -> Result<()>;
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
@@ -45,7 +45,7 @@ impl TransportManager for Swarm {
     // register to swarm transports
     // should not wait connection statues here
     // a connection `Promise` may cause deadlock of both end
-    async fn register(&self, address: &Address, trans: Self::Transport) -> Result<()> {
+    async fn register(&self, did: Did, trans: Self::Transport) -> Result<()> {
         if trans.is_disconnected().await {
             return Err(Error::InvalidTransport);
         }
@@ -56,12 +56,12 @@ impl TransportManager for Swarm {
             println!("register transport {:?}", trans.id.clone());
         }
         let id = trans.id;
-        if let Some(t) = self.transports.get(address) {
+        if let Some(t) = self.transports.get(&did) {
             if t.is_connected().await && !trans.is_connected().await {
                 return Err(Error::InvalidTransport);
             }
             if t.id != id {
-                self.transports.set(address, trans);
+                self.transports.set(&did, trans);
                 if let Err(e) = t.close().await {
                     log::error!("failed to close previous while registering {:?}", e);
                     return Err(Error::SwarmToClosePrevTransport(format!("{:?}", e)));
@@ -69,13 +69,13 @@ impl TransportManager for Swarm {
                 log::debug!("replace and closed previous connection! {:?}", t.id);
             }
         } else {
-            self.transports.set(address, trans);
+            self.transports.set(&did, trans);
         }
         Ok(())
     }
 
-    async fn get_and_check_transport(&self, address: &Address) -> Option<Self::Transport> {
-        match self.get_transport(address) {
+    async fn get_and_check_transport(&self, did: Did) -> Option<Self::Transport> {
+        match self.get_transport(did) {
             Some(t) => {
                 if t.is_disconnected().await {
                     log::debug!(
@@ -94,23 +94,23 @@ impl TransportManager for Swarm {
         }
     }
 
-    fn get_transport(&self, address: &Address) -> Option<Self::Transport> {
-        self.transports.get(address)
+    fn get_transport(&self, did: Did) -> Option<Self::Transport> {
+        self.transports.get(&did)
     }
 
-    fn remove_transport(&self, address: &Address) -> Option<(Address, Self::Transport)> {
-        self.transports.remove(address)
+    fn remove_transport(&self, did: Did) -> Option<(Did, Self::Transport)> {
+        self.transports.remove(&did)
     }
 
     fn get_transport_numbers(&self) -> usize {
         self.transports.len()
     }
 
-    fn get_addresses(&self) -> Vec<Address> {
+    fn get_dids(&self) -> Vec<Did> {
         self.transports.keys()
     }
 
-    fn get_transports(&self) -> Vec<(Address, Self::Transport)> {
+    fn get_transports(&self) -> Vec<(Did, Self::Transport)> {
         self.transports.items()
     }
 }

@@ -20,7 +20,7 @@ use crate::err::Error;
 use crate::err::Result;
 use crate::utils;
 
-const DEFAULT_TTL_MS: usize = 24 * 3600 * 1000;
+pub const DEFAULT_TTL_MS: usize = 24 * 3600 * 1000;
 
 /// we support both EIP712 and raw ECDSA singing forrmat
 #[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
@@ -184,7 +184,7 @@ impl SessionManager {
         did: Address,
         ttl: Option<Ttl>,
         signer: Option<Signer>,
-    ) -> Result<(AuthorizedInfo, SecretKey)> {
+    ) -> (AuthorizedInfo, SecretKey) {
         let key = SecretKey::random();
         let signer = signer.unwrap_or(Signer::DEFAULT);
         let authorizer = Authorizer {
@@ -198,7 +198,7 @@ impl SessionManager {
             ttl_ms: ttl.unwrap_or(Ttl::Some(DEFAULT_TTL_MS)),
             ts_ms: utils::get_epoch_ms(),
         };
-        Ok((info, key))
+        (info, key)
     }
 
     /// sig: Sigature of AuthorizedInfo
@@ -217,8 +217,8 @@ impl SessionManager {
 
     /// generate Session with private key
     /// only use it for unittest
-    pub fn new_with_seckey(key: &SecretKey) -> Result<Self> {
-        let (auth, s_key) = Self::gen_unsign_info(key.address(), None, None)?;
+    pub fn new_with_seckey(key: &SecretKey, ttl: Option<Ttl>) -> Result<Self> {
+        let (auth, s_key) = Self::gen_unsign_info(key.address(), ttl, None);
         let sig = key.sign(&auth.to_string()?).to_vec();
         Ok(Self::new(&sig, &auth, &s_key))
     }
@@ -257,8 +257,8 @@ impl SessionManager {
         Ok(signers::default::sign_raw(key, msg).to_vec())
     }
 
-    pub fn authorizer(&self) -> Result<Address> {
-        Ok(self.session()?.auth.authorizer.did.into())
+    pub fn authorizer(&self) -> Result<Did> {
+        Ok(self.session()?.auth.authorizer.did)
     }
 }
 
@@ -269,7 +269,7 @@ mod test {
     #[test]
     pub fn test_session_verify() {
         let key = SecretKey::random();
-        let sm = SessionManager::new_with_seckey(&key).unwrap();
+        let sm = SessionManager::new_with_seckey(&key, None).unwrap();
         let session = sm.session().unwrap();
         assert!(session.verify());
     }
@@ -277,7 +277,7 @@ mod test {
     #[test]
     pub fn test_authorizer_pubkey() {
         let key = SecretKey::random();
-        let sm = SessionManager::new_with_seckey(&key).unwrap();
+        let sm = SessionManager::new_with_seckey(&key, None).unwrap();
         let session = sm.session().unwrap();
         let pubkey = session.authorizer_pubkey().unwrap();
         assert_eq!(key.pubkey(), pubkey);

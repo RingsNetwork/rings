@@ -4,13 +4,12 @@ use std::sync::Arc;
 use clap::Args;
 use clap::Parser;
 use clap::Subcommand;
-use rings_core::dht::PeerRing;
 use rings_core::dht::Stabilization;
 use rings_core::dht::TStabilize;
 use rings_core::ecc::SecretKey;
 use rings_core::message::MessageHandler;
-use rings_core::session::SessionManager;
-use rings_core::swarm::Swarm;
+use rings_core::storage::PersistenceStorage;
+use rings_core::swarm::SwarmBuilder;
 use rings_core::types::message::MessageListener;
 use rings_node::cli::Client;
 use rings_node::logger::LogLevel;
@@ -236,31 +235,21 @@ struct Send {
 
 async fn daemon_run(
     http_addr: String,
-    key: &SecretKey,
+    key: SecretKey,
     stuns: &str,
     stabilize_timeout: usize,
     external_ip: Option<String>,
 ) -> anyhow::Result<()> {
-    let dht = Arc::new(PeerRing::new(key.address().into()).await?);
-    let (auth, temp_key) = SessionManager::gen_unsign_info(
-        key.address(),
-        Some(rings_core::session::Ttl::Never),
-        None,
-    )?;
-    let sig = key.sign(&auth.to_string()?).to_vec();
-    let session = SessionManager::new(&sig, &auth, &temp_key);
-    let swarm = Arc::new(Swarm::new_with_external_address(
-        stuns,
-        key.address(),
-        session.clone(),
-        external_ip,
-    ));
-    let listen_event = Arc::new(MessageHandler::new(dht.clone(), swarm.clone()));
-    let stabilize = Arc::new(Stabilization::new(
-        dht.clone(),
-        swarm.clone(),
-        stabilize_timeout,
-    ));
+    let storage = PersistenceStorage::new().await?;
+
+    let swarm = Arc::new(
+        SwarmBuilder::new(key, stuns, storage)
+            .external_address(external_ip)
+            .build()?,
+    );
+
+    let listen_event = Arc::new(MessageHandler::new(swarm.clone()));
+    let stabilize = Arc::new(Stabilization::new(swarm.clone(), stabilize_timeout));
     let swarm_clone = swarm.clone();
     let pubkey = Arc::new(key.pubkey());
 
@@ -296,7 +285,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Daemon(args) => {
             daemon_run(
                 args.http_addr,
-                &args.ecdsa_key,
+                args.ecdsa_key,
                 args.ice_servers.as_str(),
                 args.stabilize_timeout,
                 args.external_ip,

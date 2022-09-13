@@ -4,9 +4,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde::Serialize;
-use web3::types::Address;
 
 pub use self::ice_server::IceServer;
+use crate::dht::Did;
 use crate::ecc::PublicKey;
 use crate::err::Result;
 use crate::message::Encoded;
@@ -93,6 +93,6 @@ pub trait IceTrickleScheme {
         session_manager: &SessionManager,
         kind: Self::SdpType,
     ) -> Result<Encoded>;
-    async fn register_remote_info(&self, data: Encoded) -> Result<Address>;
+    async fn register_remote_info(&self, data: Encoded) -> Result<Did>;
     async fn wait_for_connected(&self) -> Result<()>;
 }
