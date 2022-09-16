@@ -27,6 +27,7 @@ pub use self::rings_core::prelude::wasm_bindgen_futures;
 pub use self::rings_core::prelude::web3;
 #[cfg(feature = "browser")]
 pub use self::rings_core::prelude::web_sys;
+pub use self::rings_core::prelude::PersistenceStorage;
 pub use self::rings_core::session::Session;
 pub use self::rings_core::session::SessionManager;
 pub use self::rings_core::session::Signer;
