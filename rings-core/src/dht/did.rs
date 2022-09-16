@@ -20,9 +20,9 @@ use crate::err::Result;
 #[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd, Debug, Serialize, Deserialize, Hash)]
 pub struct Did(H160);
 
-impl ToString for Did {
-    fn to_string(&self) -> String {
-        self.into_token().to_string()
+impl std::fmt::Display for Did {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.into_token())
     }
 }
 

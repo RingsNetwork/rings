@@ -7,7 +7,6 @@ use flate2::Compression;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
-use web3::types::Address;
 
 use super::encoder::Decoder;
 use super::encoder::Encoded;
@@ -33,7 +32,7 @@ pub enum OriginVerificationGen {
 pub struct MessagePayload<T> {
     pub data: T,
     pub tx_id: uuid::Uuid,
-    pub addr: Address,
+    pub addr: Did,
     pub verification: MessageVerification,
     pub origin_verification: MessageVerification,
     pub relay: MessageRelay,
@@ -83,7 +82,7 @@ where T: Serialize + DeserializeOwned
     ) -> Result<Self> {
         let relay = MessageRelay::new(
             RelayMethod::SEND,
-            vec![session_manager.authorizer()?.into()],
+            vec![session_manager.authorizer()?],
             None,
             Some(next_hop),
             destination,
@@ -183,11 +182,11 @@ pub trait PayloadSender<T>
 where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
 {
     fn session_manager(&self) -> &SessionManager;
-    async fn do_send_payload(&self, address: &Address, payload: MessagePayload<T>) -> Result<()>;
+    async fn do_send_payload(&self, did: Did, payload: MessagePayload<T>) -> Result<()>;
 
     async fn send_payload(&self, payload: MessagePayload<T>) -> Result<()> {
-        if let Some(id) = payload.relay.next_hop {
-            self.do_send_payload(&id.into(), payload).await
+        if let Some(did) = payload.relay.next_hop {
+            self.do_send_payload(did, payload).await
         } else {
             Err(Error::NoNextHop)
         }
@@ -258,7 +257,7 @@ pub mod test {
     pub fn new_test_payload() -> MessagePayload<TestData> {
         let key = SecretKey::random();
         let destination = SecretKey::random().address().into();
-        let session = SessionManager::new_with_seckey(&key).unwrap();
+        let session = SessionManager::new_with_seckey(&key, None).unwrap();
         let test_data = TestData {
             a: "hello".to_string(),
             b: 111,
@@ -275,7 +274,7 @@ pub mod test {
 
         let key2 = SecretKey::random();
         let did2 = key2.address().into();
-        let session2 = SessionManager::new_with_seckey(&key2).unwrap();
+        let session2 = SessionManager::new_with_seckey(&key2, None).unwrap();
 
         let mut relay = payload.relay.clone();
         relay.next_hop = Some(did2);

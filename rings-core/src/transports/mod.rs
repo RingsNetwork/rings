@@ -13,3 +13,4 @@ pub use dummy::DummyTransport as Transport;
 pub use wasm::WasmTransport as Transport;
 
 pub mod helper;
+pub mod manager;

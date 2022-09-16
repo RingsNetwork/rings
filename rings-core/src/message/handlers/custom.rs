@@ -11,7 +11,7 @@ use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
-use crate::swarm::TransportManager;
+use crate::transports::manager::TransportManager;
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
@@ -24,7 +24,7 @@ impl HandleMsg<MaybeEncrypted<CustomMessage>> for MessageHandler {
         let mut relay = ctx.relay.clone();
 
         if self.dht.id != relay.destination {
-            if self.swarm.get_transport(&relay.destination).is_some() {
+            if self.swarm.get_transport(relay.destination).is_some() {
                 relay.relay(self.dht.id, Some(relay.destination))?;
                 return self.transpond_payload(ctx, relay).await;
             } else {

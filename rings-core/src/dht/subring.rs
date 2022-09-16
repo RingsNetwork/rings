@@ -167,15 +167,3 @@ impl TryFrom<VirtualNode> for SubRing {
         }
     }
 }
-
-// impl From<SubRing> for PeerRing {
-//     fn from(ring: SubRing) -> Self {
-//         let mut pr = PeerRing::new_with_config(ring.did, 1);
-//         // set finger[0] to successor
-//         if let Some(id) = ring.finger.first() {
-//             pr.successor.update(id);
-//         }
-//         pr.finger = ring.finger;
-//         pr
-//     }
-// }

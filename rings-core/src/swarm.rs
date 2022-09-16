@@ -9,80 +9,146 @@ use async_trait::async_trait;
 use futures::Stream;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use web3::types::Address;
 
 use crate::channels::Channel;
+use crate::dht::Did;
+use crate::dht::PeerRing;
+use crate::ecc::SecretKey;
 use crate::err::Error;
 use crate::err::Result;
 use crate::message;
+use crate::message::handlers::CallbackFn;
 use crate::message::Decoder;
 use crate::message::Encoder;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
 use crate::session::SessionManager;
+use crate::session::Ttl;
 use crate::storage::MemStorage;
+use crate::storage::PersistenceStorage;
+use crate::transports::manager::TransportManager;
 use crate::transports::Transport;
 use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::Event;
 use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransportInterface;
 
-pub struct Swarm {
-    table: MemStorage<Address, Arc<Transport>>,
-    pending: Arc<Mutex<Vec<Arc<Transport>>>>,
+pub struct SwarmBuilder {
+    key: Option<SecretKey>,
     ice_servers: Vec<IceServer>,
-    transport_event_channel: Channel<Event>,
-    session_manager: SessionManager,
-    address: Address,
     external_address: Option<String>,
+    dht_did: Option<Did>,
+    dht_succ_max: u8,
+    dht_storage: PersistenceStorage,
+    session_manager: Option<SessionManager>,
+    session_ttl: Option<Ttl>,
+    callback: Option<CallbackFn>,
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
-pub trait TransportManager {
-    type Transport;
-
-    fn get_transports(&self) -> Vec<(Address, Self::Transport)>;
-    fn get_addresses(&self) -> Vec<Address>;
-    fn get_transport(&self, address: &Address) -> Option<Self::Transport>;
-    fn remove_transport(&self, address: &Address) -> Option<(Address, Self::Transport)>;
-    fn get_transport_numbers(&self) -> usize;
-    async fn get_and_check_transport(&self, address: &Address) -> Option<Self::Transport>;
-    async fn new_transport(&self) -> Result<Self::Transport>;
-    async fn register(&self, address: &Address, trans: Self::Transport) -> Result<()>;
-}
-
-impl Swarm {
-    pub fn new_with_external_address(
-        ice_servers: &str,
-        address: Address,
-        session_manager: SessionManager,
-        external_address: Option<String>,
-    ) -> Self {
+impl SwarmBuilder {
+    pub fn new(ice_servers: &str, dht_storage: PersistenceStorage) -> Self {
         let ice_servers = ice_servers
             .split(';')
             .collect::<Vec<&str>>()
             .into_iter()
             .map(|s| IceServer::from_str(s).unwrap())
             .collect::<Vec<IceServer>>();
-        Self {
-            table: MemStorage::<Address, Arc<Transport>>::new(),
-            transport_event_channel: Channel::new(),
+        SwarmBuilder {
+            key: None,
             ice_servers,
-            address,
-            session_manager,
-            pending: Arc::new(Mutex::new(vec![])),
-            external_address,
+            external_address: None,
+            dht_did: None,
+            dht_succ_max: 3,
+            dht_storage,
+            session_manager: None,
+            session_ttl: None,
+            callback: None,
         }
     }
 
-    pub fn new(ice_servers: &str, address: Address, session_manager: SessionManager) -> Self {
-        Self::new_with_external_address(ice_servers, address, session_manager, None)
+    pub fn dht_succ_max(mut self, succ_max: u8) -> Self {
+        self.dht_succ_max = succ_max;
+        self
     }
 
-    pub fn address(&self) -> Address {
-        self.address
+    pub fn callback(mut self, callback: CallbackFn) -> Self {
+        self.callback = Some(callback);
+        self
+    }
+
+    pub fn external_address(mut self, external_address: Option<String>) -> Self {
+        self.external_address = external_address;
+        self
+    }
+
+    pub fn key(mut self, key: SecretKey) -> Self {
+        self.key = Some(key);
+        self.dht_did = Some(key.address().into());
+        self
+    }
+
+    pub fn session_manager(mut self, did: Did, session_manager: SessionManager) -> Self {
+        self.session_manager = Some(session_manager);
+        self.dht_did = Some(did);
+        self
+    }
+
+    pub fn session_ttl(mut self, ttl: Ttl) -> Self {
+        self.session_ttl = Some(ttl);
+        self
+    }
+
+    pub fn build(self) -> Result<Swarm> {
+        let session_manager = {
+            if self.session_manager.is_some() {
+                Ok(self.session_manager.unwrap())
+            } else if self.key.is_some() {
+                SessionManager::new_with_seckey(&self.key.unwrap(), self.session_ttl)
+            } else {
+                Err(Error::SwarmBuildFailed(
+                    "Should set session_manager or key".into(),
+                ))
+            }
+        }?;
+
+        let dht_did = self
+            .dht_did
+            .ok_or_else(|| Error::SwarmBuildFailed("Should set session_manager or key".into()))?;
+
+        let dht = PeerRing::new_with_storage(dht_did, self.dht_succ_max, self.dht_storage);
+
+        Ok(Swarm {
+            pending_transports: Arc::new(Mutex::new(vec![])),
+            transports: MemStorage::new(),
+            transport_event_channel: Channel::new(),
+            ice_servers: self.ice_servers,
+            external_address: self.external_address,
+            dht: Arc::new(dht),
+            session_manager,
+            callback: self.callback,
+        })
+    }
+}
+
+pub struct Swarm {
+    pub(crate) pending_transports: Arc<Mutex<Vec<Arc<Transport>>>>,
+    pub(crate) transports: MemStorage<Did, Arc<Transport>>,
+    pub(crate) ice_servers: Vec<IceServer>,
+    pub(crate) transport_event_channel: Channel<Event>,
+    pub(crate) external_address: Option<String>,
+    dht: Arc<PeerRing>,
+    pub callback: Option<CallbackFn>,
+    session_manager: SessionManager,
+}
+
+impl Swarm {
+    pub fn did(&self) -> Did {
+        self.dht.id
+    }
+
+    pub fn dht(&self) -> Arc<PeerRing> {
+        self.dht.clone()
     }
 
     pub fn session_manager(&self) -> &SessionManager {
@@ -100,27 +166,27 @@ impl Swarm {
                 let payload = MessagePayload::from_encoded(&msg.try_into()?)?;
                 Ok(Some(payload))
             }
-            Some(Event::RegisterTransport((address, id))) => {
+            Some(Event::RegisterTransport((did, id))) => {
                 // if transport is still pending
                 if let Ok(Some(t)) = self.find_pending_transport(id) {
-                    log::debug!("transport is inside pending list, mov to swarm table");
+                    log::debug!("transport is inside pending list, mov to swarm transports");
 
-                    self.register(&address, t).await?;
+                    self.register(did, t).await?;
                     self.pop_pending_transport(id)?;
                 }
-                match self.get_transport(&address) {
+                match self.get_transport(did) {
                     Some(_) => {
                         let payload = MessagePayload::new_direct(
-                            Message::JoinDHT(message::JoinDHT { id: address.into() }),
+                            Message::JoinDHT(message::JoinDHT { id: did }),
                             &self.session_manager,
-                            self.address().into(),
+                            self.dht.id,
                         )?;
                         Ok(Some(payload))
                     }
-                    None => Err(Error::SwarmMissTransport(address)),
+                    None => Err(Error::SwarmMissTransport(did)),
                 }
             }
-            Some(Event::ConnectClosed((address, uuid))) => {
+            Some(Event::ConnectClosed((did, uuid))) => {
                 if self.pop_pending_transport(uuid).is_ok() {
                     log::info!(
                         "[Swarm::ConnectClosed] Pending transport {:?} dropped",
@@ -128,13 +194,13 @@ impl Swarm {
                     );
                 };
 
-                if let Some(t) = self.get_transport(&address) {
-                    if t.id == uuid && self.remove_transport(&address).is_some() {
+                if let Some(t) = self.get_transport(did) {
+                    if t.id == uuid && self.remove_transport(did).is_some() {
                         log::info!("[Swarm::ConnectClosed] transport {:?} closed", uuid);
                         let payload = MessagePayload::new_direct(
-                            Message::LeaveDHT(message::LeaveDHT { id: address.into() }),
+                            Message::LeaveDHT(message::LeaveDHT { id: did }),
                             &self.session_manager,
-                            self.address().into(),
+                            self.dht.id,
                         )?;
                         return Ok(Some(payload));
                     }
@@ -174,7 +240,7 @@ impl Swarm {
 
     pub fn push_pending_transport(&self, transport: &Arc<Transport>) -> Result<()> {
         let mut pending = self
-            .pending
+            .pending_transports
             .try_lock()
             .map_err(|_| Error::SwarmPendingTransTryLockFailed)?;
         pending.push(transport.to_owned());
@@ -183,7 +249,7 @@ impl Swarm {
 
     pub fn pop_pending_transport(&self, transport_id: uuid::Uuid) -> Result<()> {
         let mut pending = self
-            .pending
+            .pending_transports
             .try_lock()
             .map_err(|_| Error::SwarmPendingTransTryLockFailed)?;
         let index = pending
@@ -196,7 +262,7 @@ impl Swarm {
 
     pub async fn pending_transports(&self) -> Result<Vec<Arc<Transport>>> {
         let pending = self
-            .pending
+            .pending_transports
             .try_lock()
             .map_err(|_| Error::SwarmPendingTransTryLockFailed)?;
         Ok(pending.iter().cloned().collect::<Vec<_>>())
@@ -204,100 +270,10 @@ impl Swarm {
 
     pub fn find_pending_transport(&self, id: uuid::Uuid) -> Result<Option<Arc<Transport>>> {
         let pending = self
-            .pending
+            .pending_transports
             .try_lock()
             .map_err(|_| Error::SwarmPendingTransTryLockFailed)?;
         Ok(pending.iter().find(|x| x.id.eq(&id)).cloned())
-    }
-}
-
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
-impl TransportManager for Swarm {
-    type Transport = Arc<Transport>;
-
-    async fn new_transport(&self) -> Result<Self::Transport> {
-        let event_sender = self.transport_event_channel.sender();
-        let mut ice_transport = Transport::new(event_sender);
-        ice_transport
-            .start(self.ice_servers.clone(), self.external_address.clone())
-            .await?
-            .apply_callback()
-            .await?;
-
-        Ok(Arc::new(ice_transport))
-    }
-
-    // register to swarm table
-    // should not wait connection statues here
-    // a connection `Promise` may cause deadlock of both end
-    async fn register(&self, address: &Address, trans: Self::Transport) -> Result<()> {
-        if trans.is_disconnected().await {
-            return Err(Error::InvalidTransport);
-        }
-
-        log::info!("register transport {:?}", trans.id.clone());
-        #[cfg(test)]
-        {
-            println!("register transport {:?}", trans.id.clone());
-        }
-        let id = trans.id;
-        if let Some(t) = self.table.get(address) {
-            if t.is_connected().await && !trans.is_connected().await {
-                return Err(Error::InvalidTransport);
-            }
-            if t.id != id {
-                self.table.set(address, trans);
-                if let Err(e) = t.close().await {
-                    log::error!("failed to close previous while registering {:?}", e);
-                    return Err(Error::SwarmToClosePrevTransport(format!("{:?}", e)));
-                }
-                log::debug!("replace and closed previous connection! {:?}", t.id);
-            }
-        } else {
-            self.table.set(address, trans);
-        }
-        Ok(())
-    }
-
-    async fn get_and_check_transport(&self, address: &Address) -> Option<Self::Transport> {
-        match self.get_transport(address) {
-            Some(t) => {
-                if t.is_disconnected().await {
-                    log::debug!(
-                        "[get_and_check_transport] transport {:?} is not connected will be drop",
-                        t.id
-                    );
-                    if t.close().await.is_err() {
-                        log::error!("Failed on close transport");
-                    };
-                    None
-                } else {
-                    Some(t)
-                }
-            }
-            None => None,
-        }
-    }
-
-    fn get_transport(&self, address: &Address) -> Option<Self::Transport> {
-        self.table.get(address)
-    }
-
-    fn remove_transport(&self, address: &Address) -> Option<(Address, Self::Transport)> {
-        self.table.remove(address)
-    }
-
-    fn get_transport_numbers(&self) -> usize {
-        self.table.len()
-    }
-
-    fn get_addresses(&self) -> Vec<Address> {
-        self.table.keys()
-    }
-
-    fn get_transports(&self) -> Vec<(Address, Self::Transport)> {
-        self.table.items()
     }
 }
 
@@ -310,19 +286,19 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Deb
         Swarm::session_manager(self)
     }
 
-    async fn do_send_payload(&self, address: &Address, payload: MessagePayload<T>) -> Result<()> {
+    async fn do_send_payload(&self, did: Did, payload: MessagePayload<T>) -> Result<()> {
         #[cfg(test)]
         {
             println!("+++++++++++++++++++++++++++++++++");
-            println!("node {:?}", self.address());
+            println!("node {:?}", self.dht.id);
             println!("Sent {:?}", payload.clone());
             println!("node {:?}", payload.relay.next_hop);
             println!("+++++++++++++++++++++++++++++++++");
         }
         let transport = self
-            .get_and_check_transport(address)
+            .get_and_check_transport(did)
             .await
-            .ok_or(Error::SwarmMissAddressInTable(*address))?;
+            .ok_or(Error::SwarmMissDidInTable(did))?;
         log::trace!(
             "SENT {:?}, to node {:?} via transport {:?}",
             payload.clone(),
@@ -337,7 +313,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Deb
 
 #[cfg(not(feature = "wasm"))]
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use tokio::time;
     use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 
@@ -348,16 +324,16 @@ mod tests {
     #[cfg(feature = "dummy")]
     use crate::transports::dummy::transport::tests::establish_connection;
 
-    fn new_swarm() -> Swarm {
+    pub async fn new_swarm(key: SecretKey) -> Result<Swarm> {
         let stun = "stun://stun.l.google.com:19302";
-        let key = SecretKey::random();
-        let session = SessionManager::new_with_seckey(&key).unwrap();
-        Swarm::new(stun, key.address(), session)
+        let storage =
+            PersistenceStorage::new_with_path(PersistenceStorage::random_path("./tmp")).await?;
+        SwarmBuilder::new(stun, storage).key(key).build()
     }
 
     #[tokio::test]
     async fn swarm_new_transport() -> Result<()> {
-        let swarm = new_swarm();
+        let swarm = new_swarm(SecretKey::random()).await?;
         let transport = swarm.new_transport().await.unwrap();
         assert_eq!(
             transport.ice_connection_state().await.unwrap(),
@@ -369,38 +345,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_swarm_register_and_get() -> Result<()> {
-        let swarm1 = new_swarm();
-        let swarm2 = new_swarm();
+        let swarm1 = new_swarm(SecretKey::random()).await?;
+        let swarm2 = new_swarm(SecretKey::random()).await?;
 
-        assert!(swarm1.get_transport(&swarm2.address()).is_none());
-        assert!(swarm2.get_transport(&swarm1.address()).is_none());
+        assert!(swarm1.get_transport(swarm2.did()).is_none());
+        assert!(swarm2.get_transport(swarm1.did()).is_none());
 
         let transport1 = swarm1.new_transport().await.unwrap();
         let transport2 = swarm2.new_transport().await.unwrap();
 
-        // Cannot register if not connected
-        // assert!(swarm1
-        //     .register(&swarm2.address(), transport1.clone())
-        //     .await
-        //     .is_err());
-        // assert!(swarm2
-        //     .register(&swarm1.address(), transport2.clone())
-        //     .await
-        //     .is_err());
-
         establish_connection(&transport1, &transport2).await?;
 
         // Can register if connected
-        swarm1
-            .register(&swarm2.address(), transport1.clone())
-            .await?;
-        swarm2
-            .register(&swarm1.address(), transport2.clone())
-            .await?;
+        swarm1.register(swarm2.did(), transport1.clone()).await?;
+        swarm2.register(swarm1.did(), transport2.clone()).await?;
 
-        // Check address transport pairs in table
-        let transport_1_to_2 = swarm1.get_transport(&swarm2.address()).unwrap();
-        let transport_2_to_1 = swarm2.get_transport(&swarm1.address()).unwrap();
+        // Check address transport pairs in transports
+        let transport_1_to_2 = swarm1.get_transport(swarm2.did()).unwrap();
+        let transport_2_to_1 = swarm2.get_transport(swarm1.did()).unwrap();
 
         assert!(Arc::ptr_eq(&transport_1_to_2, &transport1));
         assert!(Arc::ptr_eq(&transport_2_to_1, &transport2));
@@ -410,10 +372,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_swarm_will_close_previous_transport() -> Result<()> {
-        let swarm1 = new_swarm();
-        let swarm2 = new_swarm();
+        let swarm1 = new_swarm(SecretKey::random()).await?;
+        let swarm2 = new_swarm(SecretKey::random()).await?;
 
-        assert!(swarm1.get_transport(&swarm2.address()).is_none());
+        assert!(swarm1.get_transport(swarm2.did()).is_none());
 
         let transport0 = swarm1.new_transport().await.unwrap();
         let transport1 = swarm1.new_transport().await.unwrap();
@@ -424,12 +386,8 @@ mod tests {
         establish_connection(&transport0, &transport_2_to_0).await?;
         establish_connection(&transport1, &transport_2_to_1).await?;
 
-        swarm1
-            .register(&swarm2.address(), transport0.clone())
-            .await?;
-        swarm1
-            .register(&swarm2.address(), transport1.clone())
-            .await?;
+        swarm1.register(swarm2.did(), transport0.clone()).await?;
+        swarm1.register(swarm2.did(), transport1.clone()).await?;
 
         time::sleep(time::Duration::from_secs(3)).await;
 

@@ -18,8 +18,8 @@ use super::response;
 use super::response::Peer;
 use super::response::TransportAndIce;
 use crate::error::Error as ServerError;
-use crate::prelude::rings_core::prelude::Address;
-use crate::prelude::rings_core::swarm::TransportManager;
+use crate::prelude::rings_core::dht::Did;
+use crate::prelude::rings_core::transports::manager::TransportManager;
 use crate::processor;
 use crate::processor::Processor;
 use crate::seed::Seed;
@@ -52,7 +52,7 @@ pub(crate) async fn build_handler(handler: &mut MetaIoHandler<RpcMeta>) {
     handler.add_method_with_meta(Method::ConnectPeerViaHttp.as_str(), connect_peer_via_http);
     handler.add_method_with_meta(Method::ConnectWithSeed.as_str(), connect_with_seed);
     handler.add_method_with_meta(Method::AnswerOffer.as_str(), answer_offer);
-    handler.add_method_with_meta(Method::ConnectWithAddress.as_str(), connect_with_address);
+    handler.add_method_with_meta(Method::ConnectWithDid.as_str(), connect_with_did);
     handler.add_method_with_meta(Method::CreateOffer.as_str(), create_offer);
     handler.add_method_with_meta(Method::AcceptAnswer.as_str(), accept_answer);
     handler.add_method_with_meta(Method::ListPeers.as_str(), list_peers);
@@ -84,9 +84,8 @@ async fn connect_with_seed(params: Params, meta: RpcMeta) -> Result<Value> {
         .first()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
 
-    let mut connected_addresses: HashSet<Address> =
-        HashSet::from_iter(meta.processor.swarm.get_addresses());
-    connected_addresses.insert(meta.processor.swarm.address());
+    let mut connected_addresses: HashSet<Did> = HashSet::from_iter(meta.processor.swarm.get_dids());
+    connected_addresses.insert(meta.processor.swarm.did());
 
     let tasks = seed
         .peers
@@ -118,15 +117,15 @@ async fn answer_offer(params: Params, meta: RpcMeta) -> Result<Value> {
     TransportAndIce::from(r).to_json_obj().map_err(Error::from)
 }
 
-async fn connect_with_address(params: Params, meta: RpcMeta) -> Result<Value> {
+async fn connect_with_did(params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
     let p: Vec<String> = params.parse()?;
     let address_str = p
         .first()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
     meta.processor
-        .connect_with_address(
-            &Address::from_str(address_str).map_err(|_| Error::new(ErrorCode::InvalidParams))?,
+        .connect_with_did(
+            Did::from_str(address_str).map_err(|_| Error::new(ErrorCode::InvalidParams))?,
             true,
         )
         .await
@@ -174,12 +173,11 @@ async fn list_peers(_params: Params, meta: RpcMeta) -> Result<Value> {
 async fn close_connection(params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
     let params: Vec<String> = params.parse()?;
-    let address = params
+    let did = params
         .first()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
-    let address =
-        Address::from_str(address).map_err(|_| Error::from(ServerError::InvalidAddress))?;
-    meta.processor.disconnect(&address).await?;
+    let did = Did::from_str(did).map_err(|_| Error::from(ServerError::InvalidDid))?;
+    meta.processor.disconnect(did).await?;
     Ok(serde_json::json!({}))
 }
 

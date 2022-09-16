@@ -191,6 +191,7 @@ impl SecretKey {
     pub fn address(&self) -> Address {
         secret_key_address(self)
     }
+
     pub fn sign(&self, message: &str) -> SigBytes {
         self.sign_raw(message.as_bytes())
     }

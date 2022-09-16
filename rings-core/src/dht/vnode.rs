@@ -53,7 +53,7 @@ where T: Serialize + DeserializeOwned
 {
     type Error = Error;
     fn try_from(msg: MessagePayload<T>) -> Result<Self> {
-        let address = BigUint::from(Did::from(msg.addr)) + BigUint::from(1u16);
+        let address = BigUint::from(msg.addr) + BigUint::from(1u16);
         let data = msg.encode()?;
         Ok(Self {
             address: address.into(),
@@ -91,7 +91,7 @@ impl VirtualNode {
         match &a.kind {
             VNodeType::RelayMessage => {
                 if a.address != b.address {
-                    Err(Error::AddressNotEqual)
+                    Err(Error::DidNotEqual)
                 } else {
                     Ok(Self {
                         address: a.address,

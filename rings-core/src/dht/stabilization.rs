@@ -28,9 +28,9 @@ pub trait TStabilize {
 }
 
 impl Stabilization {
-    pub fn new(chord: Arc<PeerRing>, swarm: Arc<Swarm>, timeout: usize) -> Self {
+    pub fn new(swarm: Arc<Swarm>, timeout: usize) -> Self {
         Self {
-            chord,
+            chord: swarm.dht(),
             swarm,
             timeout,
         }
@@ -50,7 +50,7 @@ impl Stabilization {
         if self.chord.id != successor_min {
             for s in successor_list {
                 self.swarm
-                    .send_message(msg.clone(), s, self.swarm.address().into())
+                    .send_message(msg.clone(), s, self.swarm.did())
                     .await?;
             }
             Ok(())
@@ -75,7 +75,7 @@ impl Stabilization {
                         then: FindSuccessorThen::FixFingerTable,
                     });
                     self.swarm
-                        .send_message(msg.clone(), next, self.swarm.address().into())
+                        .send_message(msg.clone(), next, self.swarm.did())
                         .await
                 }
                 _ => {

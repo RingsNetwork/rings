@@ -181,160 +181,19 @@ impl HandleMsg<SyncVNodeWithSuccessor> for MessageHandler {
 #[cfg(not(feature = "wasm"))]
 #[cfg(test)]
 mod test {
-    use std::sync::Arc;
-
     use super::*;
-    use crate::dht::PeerRing;
-    use crate::ecc::SecretKey;
-    use crate::message::FindSuccessorThen;
-    use crate::message::MessageHandler;
-    use crate::prelude::RTCSdpType;
-    use crate::session::SessionManager;
-    use crate::storage::PersistenceStorage;
+    use crate::ecc::tests::gen_ordered_keys;
+    use crate::message::handlers::connection::tests::test_only_two_nodes_establish_connection;
     use crate::storage::PersistenceStorageOperation;
-    use crate::swarm::Swarm;
-    use crate::swarm::TransportManager;
-    use crate::types::ice_transport::IceTrickleScheme;
+    use crate::tests::default::prepare_node;
 
     #[tokio::test]
     async fn test_store_vnode() -> Result<()> {
-        let stun = "stun://stun.l.google.com:19302";
-
-        let mut key1 = SecretKey::random();
-        let mut key2 = SecretKey::random();
-
-        let mut v = vec![key1, key2];
-
-        v.sort_by(|a, b| {
-            if a.address() < b.address() {
-                std::cmp::Ordering::Less
-            } else {
-                std::cmp::Ordering::Greater
-            }
-        });
-        (key1, key2) = (v[0], v[1]);
-
-        println!(
-            "test with key1: {:?}, key2: {:?}",
-            key1.address(),
-            key2.address(),
-        );
-
-        let did1 = key1.address().into();
-        let did2 = key2.address().into();
-
-        let path1 = PersistenceStorage::random_path("./tmp");
-        let path2 = PersistenceStorage::random_path("./tmp");
-
-        let dht1 = Arc::new(PeerRing::new_with_storage(
-            did1,
-            Arc::new(
-                PersistenceStorage::new_with_path(path1.as_str())
-                    .await
-                    .unwrap(),
-            ),
-        ));
-        let dht2 = Arc::new(PeerRing::new_with_storage(
-            did2,
-            Arc::new(
-                PersistenceStorage::new_with_path(path2.as_str())
-                    .await
-                    .unwrap(),
-            ),
-        ));
-
-        let sm1 = SessionManager::new_with_seckey(&key1).unwrap();
-        let sm2 = SessionManager::new_with_seckey(&key2).unwrap();
-
-        let swarm1 = Arc::new(Swarm::new(stun, key1.address(), sm1.clone()));
-        let swarm2 = Arc::new(Swarm::new(stun, key2.address(), sm2.clone()));
-
-        let transport1 = swarm1.new_transport().await.unwrap();
-        let transport2 = swarm2.new_transport().await.unwrap();
-
-        let node1 = MessageHandler::new(Arc::clone(&dht1), Arc::clone(&swarm1));
-        let node2 = MessageHandler::new(Arc::clone(&dht2), Arc::clone(&swarm2));
-
-        // now we connect node1 and node2
-
-        let handshake_info1 = transport1
-            .get_handshake_info(&sm1, RTCSdpType::Offer)
-            .await?;
-
-        let addr1 = transport2.register_remote_info(handshake_info1).await?;
-
-        let handshake_info2 = transport2
-            .get_handshake_info(&sm2, RTCSdpType::Answer)
-            .await?;
-
-        let addr2 = transport1.register_remote_info(handshake_info2).await?;
-
-        assert_eq!(addr1, key1.address());
-        assert_eq!(addr2, key2.address());
-        let promise_1 = transport1.connect_success_promise().await?;
-        let promise_2 = transport2.connect_success_promise().await?;
-        promise_1.await?;
-        promise_2.await?;
-
-        swarm1
-            .register(&swarm2.address(), transport1.clone())
-            .await
-            .unwrap();
-        swarm2
-            .register(&swarm1.address(), transport2.clone())
-            .await
-            .unwrap();
-
-        assert!(swarm1.get_transport(&key2.address()).is_some());
-        assert!(swarm2.get_transport(&key1.address()).is_some());
-
-        // JoinDHT
-        let ev_1 = node1.listen_once().await.unwrap();
-        if let Message::JoinDHT(x) = ev_1.data {
-            assert_eq!(x.id, did2);
-        } else {
-            panic!();
-        }
-
-        let ev_2 = node2.listen_once().await.unwrap();
-        if let Message::JoinDHT(x) = ev_2.data {
-            assert_eq!(x.id, did1);
-        } else {
-            panic!();
-        }
-        let ev_1 = node1.listen_once().await.unwrap();
-        if let Message::FindSuccessorSend(x) = ev_1.data {
-            assert_eq!(x.id, did2);
-            assert_eq!(x.then, FindSuccessorThen::Connect);
-        } else {
-            panic!();
-        }
-        let ev_2 = node2.listen_once().await.unwrap();
-        if let Message::FindSuccessorSend(x) = ev_2.data {
-            assert_eq!(x.id, did1);
-            assert_eq!(x.then, FindSuccessorThen::Connect);
-        } else {
-            panic!();
-        }
-        let ev_1 = node1.listen_once().await.unwrap();
-        if let Message::FindSuccessorReport(x) = ev_1.data {
-            // for node2 there is no did is more closer to key1, so it response key1
-            // and dht1 wont update
-            assert!(!dht1.lock_successor()?.list().contains(&did1));
-            assert_eq!(x.id, did1);
-            assert_eq!(x.then, FindSuccessorThen::Connect);
-        } else {
-            panic!();
-        }
-        let ev_2 = node2.listen_once().await.unwrap();
-        if let Message::FindSuccessorReport(x) = ev_2.data {
-            // for key1 there is no did is more closer to key1, so it response key1
-            // and dht2 wont update
-            assert_eq!(x.id, did2);
-            assert_eq!(x.then, FindSuccessorThen::Connect);
-        } else {
-            panic!();
-        }
+        let keys = gen_ordered_keys(2);
+        let (key1, key2) = (keys[0], keys[1]);
+        let (did1, dht1, _swarm1, node1, _path1) = prepare_node(key1).await;
+        let (did2, dht2, _swarm2, node2, _path2) = prepare_node(key2).await;
+        test_only_two_nodes_establish_connection(&node1, &node2).await?;
 
         // for now node1's successor is node 2, node2's successor is node 1
         // now we store adata on ndoe 2 and query it from node 1

@@ -8,7 +8,7 @@ use crate::ecc::SecretKey;
 use crate::err::Result;
 use crate::session::SessionManager;
 use crate::swarm::Swarm;
-use crate::swarm::TransportManager;
+use crate::transports::manager::TransportManager;
 use crate::transports::Transport;
 use crate::types::channel::Channel;
 use crate::types::channel::Event;

@@ -134,13 +134,13 @@ impl PeerRing {
     }
 
     /// Init with given Storage
-    pub fn new_with_storage(id: Did, storage: Arc<PersistenceStorage>) -> Self {
+    pub fn new_with_storage(id: Did, succ_max: u8, storage: PersistenceStorage) -> Self {
         Self {
-            successor: Arc::new(Mutex::new(Successor::new(id, 3))),
+            successor: Arc::new(Mutex::new(Successor::new(id, succ_max))),
             predecessor: Arc::new(Mutex::new(None)),
             // for Eth address, it's 160
             finger: Arc::new(Mutex::new(FingerTable::new(id, 160))),
-            storage: Arc::clone(&storage),
+            storage: Arc::new(storage),
             cache: Arc::new(MemStorage::<Did, VirtualNode>::new()),
             id,
         }
@@ -471,7 +471,7 @@ mod tests {
         // distence between (a, d) is less than (b, d)
         assert!((a - d) < (b - d));
 
-        let node_a = PeerRing::new_with_storage(a, Arc::new(db_1));
+        let node_a = PeerRing::new_with_storage(a, 3, db_1);
         assert_eq!(
             node_a.lock_successor()?.list(),
             vec![],
@@ -542,7 +542,7 @@ mod tests {
         );
 
         // for decrease seq join
-        let node_d = PeerRing::new_with_storage(d, Arc::new(db_2));
+        let node_d = PeerRing::new_with_storage(d, 3, db_2);
         assert_eq!(
             node_d.join(c)?,
             PeerRingAction::RemoteAction(c, RemoteAction::FindSuccessor(d))
@@ -557,7 +557,7 @@ mod tests {
         );
 
         // for over half ring join
-        let node_d = PeerRing::new_with_storage(d, Arc::new(db_3));
+        let node_d = PeerRing::new_with_storage(d, 3, db_3);
         assert_eq!(
             node_d.join(a)?,
             PeerRingAction::RemoteAction(a, RemoteAction::FindSuccessor(d))
@@ -598,8 +598,8 @@ mod tests {
         let db_2 = PersistenceStorage::new_with_path(db_path2.as_str())
             .await
             .unwrap();
-        let node1 = PeerRing::new_with_storage(did1, Arc::new(db_1));
-        let node2 = PeerRing::new_with_storage(did2, Arc::new(db_2));
+        let node1 = PeerRing::new_with_storage(did1, 3, db_1);
+        let node2 = PeerRing::new_with_storage(did2, 3, db_2);
 
         node1.join(did2)?;
         node2.join(did1)?;
@@ -638,8 +638,8 @@ mod tests {
         let db_2 = PersistenceStorage::new_with_path(db_path2.as_str())
             .await
             .unwrap();
-        let node1 = PeerRing::new_with_storage(did1, Arc::new(db_1));
-        let node2 = PeerRing::new_with_storage(did2, Arc::new(db_2));
+        let node1 = PeerRing::new_with_storage(did1, 3, db_1);
+        let node2 = PeerRing::new_with_storage(did2, 3, db_2);
 
         node1.join(did2)?;
         node2.join(did1)?;

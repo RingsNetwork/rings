@@ -11,7 +11,6 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::spawn_local;
 use wasm_bindgen_futures::JsFuture;
-use web3::types::Address;
 use web_sys::MessageEvent;
 use web_sys::RtcConfiguration;
 use web_sys::RtcDataChannel;
@@ -29,6 +28,7 @@ use web_sys::RtcSessionDescriptionInit;
 
 use super::helper::RtcSessionDescriptionWrapper;
 use crate::channels::Channel as CbChannel;
+use crate::dht::Did;
 use crate::ecc::PublicKey;
 use crate::err::Error;
 use crate::err::Result;
@@ -298,11 +298,10 @@ impl IceTransportCallback for WasmTransport {
                     let event_sender = Arc::clone(&event_sender);
                     match ice_connection_state {
                         RtcIceConnectionState::Connected => {
-                            let local_address: Address =
-                                (*public_key.read().unwrap()).unwrap().address();
+                            let local_did = (*public_key.read().unwrap()).unwrap().address().into();
                             if CbChannel::send(
                                 &event_sender,
-                                Event::RegisterTransport((local_address, id)),
+                                Event::RegisterTransport((local_did, id)),
                             )
                             .await
                             .is_err()
@@ -313,14 +312,10 @@ impl IceTransportCallback for WasmTransport {
                         RtcIceConnectionState::Failed
                         | RtcIceConnectionState::Disconnected
                         | RtcIceConnectionState::Closed => {
-                            let local_address: Address =
-                                (*public_key.read().unwrap()).unwrap().address();
-                            if CbChannel::send(
-                                &event_sender,
-                                Event::ConnectClosed((local_address, id)),
-                            )
-                            .await
-                            .is_err()
+                            let local_did = (*public_key.read().unwrap()).unwrap().address().into();
+                            if CbChannel::send(&event_sender, Event::ConnectClosed((local_did, id)))
+                                .await
+                                .is_err()
                             {
                                 log::error!("Failed when send ConnectFailed");
                             }
@@ -508,12 +503,12 @@ impl IceTrickleScheme for WasmTransport {
         let resp = MessagePayload::new_direct(
             data,
             session_manager,
-            session_manager.authorizer()?.to_owned().into(), // This is a fake destination
+            session_manager.authorizer()?.to_owned(), // This is a fake destination
         )?;
         Ok(resp.gzip(9)?.encode()?)
     }
 
-    async fn register_remote_info(&self, data: Encoded) -> Result<Address> {
+    async fn register_remote_info(&self, data: Encoded) -> Result<Did> {
         let data: MessagePayload<TricklePayload> = data.decode()?;
         log::debug!("register remote info: {:?}", &data);
 

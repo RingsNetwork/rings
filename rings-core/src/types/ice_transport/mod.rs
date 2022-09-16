@@ -4,9 +4,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde::Serialize;
-use web3::types::Address;
 
 pub use self::ice_server::IceServer;
+use crate::dht::Did;
 use crate::ecc::PublicKey;
 use crate::err::Result;
 use crate::message::Encoded;
@@ -14,7 +14,7 @@ use crate::session::SessionManager;
 use crate::types::channel::Channel;
 
 /// Struct From [webrtc-rs](https://docs.rs/webrtc/latest/webrtc/ice_transport/ice_candidate/struct.RTCIceCandidateInit.html)
-/// For [RFC Std](https://w3c.github.io/webrtc-pc/#dom-rtcicecandidate-tojson), ICE Candidate should be camelCase
+/// According to [RFC Std](https://w3c.github.io/webrtc-pc/#dom-rtcicecandidate-tojson), ICE Candidate should be camelCase
 /// dictionary RTCIceCandidateInit {
 ///  DOMString candidate = "";
 ///  DOMString? sdpMid = null;
@@ -93,6 +93,6 @@ pub trait IceTrickleScheme {
         session_manager: &SessionManager,
         kind: Self::SdpType,
     ) -> Result<Encoded>;
-    async fn register_remote_info(&self, data: Encoded) -> Result<Address>;
+    async fn register_remote_info(&self, data: Encoded) -> Result<Did>;
     async fn wait_for_connected(&self) -> Result<()>;
 }

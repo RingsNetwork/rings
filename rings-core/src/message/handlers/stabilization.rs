@@ -13,7 +13,7 @@ use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
-use crate::swarm::TransportManager;
+use crate::transports::manager::TransportManager;
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
@@ -53,10 +53,9 @@ impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
     ) -> Result<()> {
         // if successor: predecessor is between (id, successor]
         // then update local successor
-        if self.swarm.get_and_check_transport(&msg.id).await.is_none()
-            && msg.id != self.swarm.address().into()
+        if self.swarm.get_and_check_transport(msg.id).await.is_none() && msg.id != self.swarm.did()
         {
-            self.connect(&msg.id.into()).await?;
+            self.connect(msg.id).await?;
         } else {
             {
                 self.dht.lock_successor()?.update(msg.id)
@@ -83,16 +82,15 @@ mod test {
     use std::sync::Arc;
 
     use super::*;
-    use crate::dht::PeerRing;
     use crate::dht::Stabilization;
     use crate::ecc::tests::gen_ordered_keys;
     use crate::ecc::SecretKey;
     use crate::message::handlers::connection::tests::assert_no_more_msg;
     use crate::message::handlers::connection::tests::test_listen_join_and_init_find_succeesor;
     use crate::message::handlers::connection::tests::test_only_two_nodes_establish_connection;
-    use crate::message::handlers::tests::manually_establish_connection;
-    use crate::message::handlers::tests::prepare_node;
     use crate::swarm::Swarm;
+    use crate::tests::default::prepare_node;
+    use crate::tests::manually_establish_connection;
 
     #[tokio::test]
     async fn test_triple_nodes_stabilization_1_2_3() -> Result<()> {
@@ -142,26 +140,22 @@ mod test {
         key2: SecretKey,
         key3: SecretKey,
     ) -> Result<()> {
-        let (did1, dht1, swarm1, node1, _path1) = prepare_node(&key1).await;
-        let (did2, dht2, swarm2, node2, _path2) = prepare_node(&key2).await;
-        let (did3, dht3, swarm3, node3, _path3) = prepare_node(&key3).await;
+        let (did1, dht1, swarm1, node1, _path1) = prepare_node(key1).await;
+        let (did2, dht2, swarm2, node2, _path2) = prepare_node(key2).await;
+        let (did3, dht3, swarm3, node3, _path3) = prepare_node(key3).await;
 
         println!("========================================");
         println!("||  now we connect node1 and node2    ||");
         println!("========================================");
 
-        test_only_two_nodes_establish_connection(
-            (&key1, dht1.clone(), &swarm1, &node1),
-            (&key2, dht2.clone(), &swarm2, &node2),
-        )
-        .await?;
+        test_only_two_nodes_establish_connection(&node1, &node2).await?;
 
         println!("========================================");
         println!("||  now we start join node3 to node2  ||");
         println!("========================================");
 
         manually_establish_connection(&swarm3, &swarm2).await?;
-        test_listen_join_and_init_find_succeesor((&key3, &node3), (&key2, &node2)).await?;
+        test_listen_join_and_init_find_succeesor(&node3, &node2).await?;
         node3.listen_once().await.unwrap();
         node2.listen_once().await.unwrap();
         assert_no_more_msg(&node1, &node2, &node3).await;
@@ -178,13 +172,13 @@ mod test {
         println!("||  now we start first stabilization  ||");
         println!("========================================");
 
-        run_stabilize_once(dht1.clone(), swarm1.clone()).await?;
-        run_stabilize_once(dht2.clone(), swarm2.clone()).await?;
-        run_stabilize_once(dht3.clone(), swarm3.clone()).await?;
+        run_stabilize_once(swarm1.clone()).await?;
+        run_stabilize_once(swarm2.clone()).await?;
+        run_stabilize_once(swarm3.clone()).await?;
 
         // node2 notify node1
         let ev1 = node1.listen_once().await.unwrap();
-        assert_eq!(ev1.addr, key2.address());
+        assert_eq!(ev1.addr, did2);
         assert_eq!(ev1.relay.path, vec![did2]);
         assert!(matches!(
             ev1.data,
@@ -193,7 +187,7 @@ mod test {
 
         // node1 notify node2
         let ev2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev2.addr, key1.address());
+        assert_eq!(ev2.addr, did1);
         assert_eq!(ev2.relay.path, vec![did1]);
         assert!(matches!(
             ev2.data,
@@ -202,7 +196,7 @@ mod test {
 
         // node2 notify node3
         let ev3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev3.addr, key2.address());
+        assert_eq!(ev3.addr, did2);
         assert_eq!(ev3.relay.path, vec![did2]);
         assert!(matches!(
             ev3.data,
@@ -211,7 +205,7 @@ mod test {
 
         // node3 notify node2
         let ev2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev2.addr, key3.address());
+        assert_eq!(ev2.addr, did3);
         assert_eq!(ev2.relay.path, vec![did3]);
         assert!(matches!(
             ev2.data,
@@ -220,7 +214,7 @@ mod test {
 
         // node2 report node3
         let ev3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev3.addr, key2.address());
+        assert_eq!(ev3.addr, did2);
         assert_eq!(ev3.relay.path, vec![did3, did2]);
         assert!(matches!(
             ev3.data,
@@ -261,13 +255,13 @@ mod test {
         println!("||  now we start second stabilization  ||");
         println!("=========================================");
 
-        run_stabilize_once(dht1.clone(), swarm1.clone()).await?;
-        run_stabilize_once(dht2.clone(), swarm2.clone()).await?;
-        run_stabilize_once(dht3.clone(), swarm3.clone()).await?;
+        run_stabilize_once(swarm1.clone()).await?;
+        run_stabilize_once(swarm2.clone()).await?;
+        run_stabilize_once(swarm3.clone()).await?;
 
         // node2 notify node3
         let ev3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev3.addr, key2.address());
+        assert_eq!(ev3.addr, did2);
         assert_eq!(ev3.relay.path, vec![did2]);
         assert!(matches!(
             ev3.data,
@@ -276,7 +270,7 @@ mod test {
 
         // node2 notify node1
         let ev1 = node1.listen_once().await.unwrap();
-        assert_eq!(ev1.addr, key2.address());
+        assert_eq!(ev1.addr, did2);
         assert_eq!(ev1.relay.path, vec![did2]);
         assert!(matches!(
             ev1.data,
@@ -285,7 +279,7 @@ mod test {
 
         // node3 notify node1
         let ev1 = node1.listen_once().await.unwrap();
-        assert_eq!(ev1.addr, key3.address());
+        assert_eq!(ev1.addr, did3);
         assert_eq!(ev1.relay.path, vec![did3]);
         assert!(matches!(
             ev1.data,
@@ -294,7 +288,7 @@ mod test {
 
         // node1 notify node2
         let ev2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev2.addr, key1.address());
+        assert_eq!(ev2.addr, did1);
         assert_eq!(ev2.relay.path, vec![did1]);
         assert!(matches!(
             ev2.data,
@@ -303,7 +297,7 @@ mod test {
 
         // node3 notify node2
         let ev2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev2.addr, key3.address());
+        assert_eq!(ev2.addr, did3);
         assert_eq!(ev2.relay.path, vec![did3]);
         assert!(matches!(
             ev2.data,
@@ -312,7 +306,7 @@ mod test {
 
         // node1 report node3
         let ev3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev3.addr, key1.address());
+        assert_eq!(ev3.addr, did1);
         assert_eq!(ev3.relay.path, vec![did3, did1]);
         assert!(matches!(
             ev3.data,
@@ -321,7 +315,7 @@ mod test {
 
         // node2 report node3
         let ev3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev3.addr, key2.address());
+        assert_eq!(ev3.addr, did2);
         assert_eq!(ev3.relay.path, vec![did3, did2]);
         assert!(matches!(
             ev3.data,
@@ -352,26 +346,22 @@ mod test {
         key2: SecretKey,
         key3: SecretKey,
     ) -> Result<()> {
-        let (did1, dht1, swarm1, node1, _path1) = prepare_node(&key1).await;
-        let (did2, dht2, swarm2, node2, _path2) = prepare_node(&key2).await;
-        let (did3, dht3, swarm3, node3, _path3) = prepare_node(&key3).await;
+        let (did1, dht1, swarm1, node1, _path1) = prepare_node(key1).await;
+        let (did2, dht2, swarm2, node2, _path2) = prepare_node(key2).await;
+        let (did3, dht3, swarm3, node3, _path3) = prepare_node(key3).await;
 
         println!("========================================");
         println!("||  now we connect node1 and node2    ||");
         println!("========================================");
 
-        test_only_two_nodes_establish_connection(
-            (&key1, dht1.clone(), &swarm1, &node1),
-            (&key2, dht2.clone(), &swarm2, &node2),
-        )
-        .await?;
+        test_only_two_nodes_establish_connection(&node1, &node2).await?;
 
         println!("========================================");
         println!("||  now we start join node3 to node2  ||");
         println!("========================================");
 
         manually_establish_connection(&swarm3, &swarm2).await?;
-        test_listen_join_and_init_find_succeesor((&key3, &node3), (&key2, &node2)).await?;
+        test_listen_join_and_init_find_succeesor(&node3, &node2).await?;
         node1.listen_once().await.unwrap();
         node2.listen_once().await.unwrap();
         node2.listen_once().await.unwrap();
@@ -390,13 +380,13 @@ mod test {
         println!("||  now we start first stabilization  ||");
         println!("========================================");
 
-        run_stabilize_once(dht1.clone(), swarm1.clone()).await?;
-        run_stabilize_once(dht2.clone(), swarm2.clone()).await?;
-        run_stabilize_once(dht3.clone(), swarm3.clone()).await?;
+        run_stabilize_once(swarm1.clone()).await?;
+        run_stabilize_once(swarm2.clone()).await?;
+        run_stabilize_once(swarm3.clone()).await?;
 
         // node2 notify node1
         let ev1 = node1.listen_once().await.unwrap();
-        assert_eq!(ev1.addr, key2.address());
+        assert_eq!(ev1.addr, did2);
         assert_eq!(ev1.relay.path, vec![did2]);
         assert!(matches!(
             ev1.data,
@@ -405,7 +395,7 @@ mod test {
 
         // node1 notify node2
         let ev2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev2.addr, key1.address());
+        assert_eq!(ev2.addr, did1);
         assert_eq!(ev2.relay.path, vec![did1]);
         assert!(matches!(
             ev2.data,
@@ -414,7 +404,7 @@ mod test {
 
         // node3 notify node2
         let ev2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev2.addr, key3.address());
+        assert_eq!(ev2.addr, did3);
         assert_eq!(ev2.relay.path, vec![did3]);
         assert!(matches!(
             ev2.data,
@@ -423,7 +413,7 @@ mod test {
 
         // node2 report node3
         let ev3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev3.addr, key2.address());
+        assert_eq!(ev3.addr, did2);
         assert_eq!(ev3.relay.path, vec![did3, did2]);
         assert!(matches!(
             ev3.data,
@@ -463,13 +453,13 @@ mod test {
         println!("||  now we start second stabilization  ||");
         println!("=========================================");
 
-        run_stabilize_once(dht1.clone(), swarm1.clone()).await?;
-        run_stabilize_once(dht2.clone(), swarm2.clone()).await?;
-        run_stabilize_once(dht3.clone(), swarm3.clone()).await?;
+        run_stabilize_once(swarm1.clone()).await?;
+        run_stabilize_once(swarm2.clone()).await?;
+        run_stabilize_once(swarm3.clone()).await?;
 
         // node2 notify node1
         let ev1 = node1.listen_once().await.unwrap();
-        assert_eq!(ev1.addr, key2.address());
+        assert_eq!(ev1.addr, did2);
         assert_eq!(ev1.relay.path, vec![did2]);
         assert!(matches!(
             ev1.data,
@@ -478,7 +468,7 @@ mod test {
 
         // node1 notify node2
         let ev2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev2.addr, key1.address());
+        assert_eq!(ev2.addr, did1);
         assert_eq!(ev2.relay.path, vec![did1]);
         assert!(matches!(
             ev2.data,
@@ -487,7 +477,7 @@ mod test {
 
         // node3 notify node2
         let ev2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev2.addr, key3.address());
+        assert_eq!(ev2.addr, did3);
         assert_eq!(ev2.relay.path, vec![did3]);
         assert!(matches!(
             ev2.data,
@@ -496,7 +486,7 @@ mod test {
 
         // node2 report node1
         let ev1 = node1.listen_once().await.unwrap();
-        assert_eq!(ev1.addr, key2.address());
+        assert_eq!(ev1.addr, did2);
         assert_eq!(ev1.relay.path, vec![did1, did2]);
         assert!(matches!(
             ev1.data,
@@ -505,7 +495,7 @@ mod test {
 
         // node1 notify node3
         let ev3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev3.addr, key1.address());
+        assert_eq!(ev3.addr, did1);
         assert_eq!(ev3.relay.path, vec![did1]);
         assert!(matches!(
             ev3.data,
@@ -532,7 +522,7 @@ mod test {
         Ok(())
     }
 
-    async fn run_stabilize_once(dht: Arc<PeerRing>, swarm: Arc<Swarm>) -> Result<()> {
-        Stabilization::new(dht, swarm, 5).stabilize().await
+    async fn run_stabilize_once(swarm: Arc<Swarm>) -> Result<()> {
+        Stabilization::new(swarm, 5).stabilize().await
     }
 }

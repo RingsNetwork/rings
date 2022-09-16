@@ -7,7 +7,6 @@ use futures::future::join_all;
 use futures::future::BoxFuture;
 use futures::lock::Mutex as FuturesMutex;
 use serde_json;
-use web3::types::Address;
 use webrtc::api::setting_engine::SettingEngine;
 use webrtc::api::APIBuilder;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
@@ -25,6 +24,7 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 
 use crate::channels::Channel as AcChannel;
+use crate::dht::Did;
 use crate::ecc::PublicKey;
 use crate::err::Error;
 use crate::err::Result;
@@ -278,9 +278,9 @@ impl IceTransportCallback for DefaultTransport {
             Box::pin(async move {
                 match cs {
                     RTCIceConnectionState::Connected => {
-                        let local_address: Address = public_key.read().await.unwrap().address();
+                        let local_did = public_key.read().await.unwrap().address().into();
                         if event_sender
-                            .send(Event::RegisterTransport((local_address, id)))
+                            .send(Event::RegisterTransport((local_did, id)))
                             .await
                             .is_err()
                         {
@@ -290,9 +290,9 @@ impl IceTransportCallback for DefaultTransport {
                     RTCIceConnectionState::Failed
                     | RTCIceConnectionState::Disconnected
                     | RTCIceConnectionState::Closed => {
-                        let local_address: Address = public_key.read().await.unwrap().address();
+                        let local_did = public_key.read().await.unwrap().address().into();
                         if event_sender
-                            .send(Event::ConnectClosed((local_address, id)))
+                            .send(Event::ConnectClosed((local_did, id)))
                             .await
                             .is_err()
                         {
@@ -427,12 +427,12 @@ impl IceTrickleScheme for DefaultTransport {
         let resp = MessagePayload::new_direct(
             data,
             session_manager,
-            session_manager.authorizer()?.to_owned().into(), // This is a fake destination
+            session_manager.authorizer()?.to_owned(), // This is a fake destination
         )?;
         Ok(resp.gzip(9)?.encode()?)
     }
 
-    async fn register_remote_info(&self, data: Encoded) -> Result<Address> {
+    async fn register_remote_info(&self, data: Encoded) -> Result<Did> {
         let data: MessagePayload<TricklePayload> = data.decode()?;
         log::trace!("register remote info: {:?}", data);
         match data.verify() {
@@ -619,8 +619,8 @@ pub mod tests {
         let key2 = SecretKey::random();
 
         // Generate Session associated to Keys
-        let sm1 = SessionManager::new_with_seckey(&key1)?;
-        let sm2 = SessionManager::new_with_seckey(&key2)?;
+        let sm1 = SessionManager::new_with_seckey(&key1, None)?;
+        let sm2 = SessionManager::new_with_seckey(&key2, None)?;
 
         // Peer 1 try to connect peer 2
         let handshake_info1 = transport1
@@ -645,7 +645,7 @@ pub mod tests {
 
         // Peer 2 got offer then register
         let addr1 = transport2.register_remote_info(handshake_info1).await?;
-        assert_eq!(addr1, key1.address());
+        assert_eq!(addr1, key1.address().into());
 
         assert_eq!(
             transport1.ice_gathering_state().await,
@@ -688,7 +688,7 @@ pub mod tests {
 
         // Peer 1 got answer then register
         let addr2 = transport1.register_remote_info(handshake_info2).await?;
-        assert_eq!(addr2, key2.address());
+        assert_eq!(addr2, key2.address().into());
         let promise_1 = transport1.connect_success_promise().await?;
         let promise_2 = transport2.connect_success_promise().await?;
         promise_1.await?;

@@ -1,14 +1,14 @@
 use async_trait::async_trait;
 use serde::Serialize;
-use web3::types::Address;
 
+use crate::dht::Did;
 use crate::err::Result;
 
 #[derive(Debug, PartialEq, Eq, Serialize, Clone)]
 pub enum Event {
-    ConnectClosed((Address, uuid::Uuid)),
+    ConnectClosed((Did, uuid::Uuid)),
     DataChannelMessage(Vec<u8>),
-    RegisterTransport((Address, uuid::Uuid)),
+    RegisterTransport((Did, uuid::Uuid)),
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]

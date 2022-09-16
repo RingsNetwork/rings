@@ -26,8 +26,8 @@ pub enum Error {
     CreateAnswer(rings_core::err::Error),
     #[error("Invalid transport id.")]
     InvalidTransportId,
-    #[error("Invalid address.")]
-    InvalidAddress,
+    #[error("Invalid did.")]
+    InvalidDid,
     #[error("Json serialize error.")]
     JsonSerializeError,
     #[error("Json Deserialize error.")]
@@ -36,8 +36,8 @@ pub enum Error {
     InvalidMethod,
     #[error("Internal error.")]
     InternalError,
-    #[error("Connect with address error, {0}")]
-    ConnectWithAddressError(rings_core::err::Error),
+    #[error("Connect with did error, {0}")]
+    ConnectWithDidError(rings_core::err::Error),
     #[error("Connect error, {0}")]
     ConnectError(rings_core::err::Error),
     #[error("Send mesage error: {0}")]
@@ -62,12 +62,12 @@ impl Error {
             Error::CreateOffer(_) => 8,
             Error::CreateAnswer(_) => 9,
             Error::InvalidTransportId => 10,
-            Error::InvalidAddress => 11,
+            Error::InvalidDid => 11,
             Error::JsonSerializeError => 12,
             Error::JsonDeserializeError => 13,
             Error::InvalidMethod => 14,
             Error::InternalError => 15,
-            Error::ConnectWithAddressError(_) => 16,
+            Error::ConnectWithDidError(_) => 16,
             Error::ConnectError(_) => 17,
             Error::SendMessage(_) => 18,
             Error::MessagePayload(_) => 19,

@@ -7,8 +7,8 @@ use crate::error::Result;
 pub enum Method {
     /// Connect peer with remote jsonrpc server url
     ConnectPeerViaHttp,
-    /// Connect peer with remote peer's web3 address
-    ConnectWithAddress,
+    /// Connect peer with remote peer's did
+    ConnectWithDid,
     /// Connect peers from a seed file
     ConnectWithSeed,
     /// List all connected peers
@@ -34,7 +34,7 @@ impl Method {
     pub fn as_str(&self) -> &str {
         match self {
             Method::ConnectPeerViaHttp => "connectPeerViaHttp",
-            Method::ConnectWithAddress => "connectWithAddress",
+            Method::ConnectWithDid => "connectWithDid",
             Method::ConnectWithSeed => "connectWithSeed",
             Method::ListPeers => "listPeers",
             Method::CreateOffer => "createOffer",
@@ -60,7 +60,7 @@ impl TryFrom<&str> for Method {
     fn try_from(value: &str) -> Result<Self> {
         Ok(match value {
             "connectPeerViaHttp" => Self::ConnectPeerViaHttp,
-            "connectWithAddress" => Self::ConnectWithAddress,
+            "connectWithDid" => Self::ConnectWithDid,
             "connectWithSeed" => Self::ConnectWithSeed,
             "listPeers" => Self::ListPeers,
             "createOffer" => Self::CreateOffer,

@@ -24,8 +24,8 @@ impl MessageVerification {
             return false;
         }
 
-        if let (Ok(addr), Ok(msg)) = (self.session.address(), self.msg(data)) {
-            signers::default::verify(&msg, &addr, &self.sig)
+        if let (Ok(did), Ok(msg)) = (self.session.did(), self.msg(data)) {
+            signers::default::verify(&msg, &did, &self.sig)
         } else {
             false
         }

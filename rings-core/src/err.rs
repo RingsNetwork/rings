@@ -21,8 +21,8 @@ pub enum Error {
     #[error("InvalidPublicKey")]
     InvalidPublicKey,
 
-    #[error("Address of Vritual Peer not equal")]
-    AddressNotEqual,
+    #[error("Did of Vritual Peer not equal")]
+    DidNotEqual,
 
     #[error("Encode a byte vector into a base58-check string, adds 4 bytes checksum")]
     Encode,
@@ -129,14 +129,14 @@ pub enum Error {
     #[error("PeerRing RWLock unlock failed")]
     PeerRingUnlockFailed,
 
-    #[error("Cannot seek address in swarm table, {0}")]
-    SwarmMissAddressInTable(web3::types::Address),
+    #[error("Cannot seek did in swarm table, {0}")]
+    SwarmMissDidInTable(crate::dht::Did),
 
     #[error("Cannot gather local candidate")]
     FailedOnGatherLocalCandidate,
 
-    #[error("Cannot get transport from address: {0}")]
-    SwarmMissTransport(web3::types::Address),
+    #[error("Cannot get transport from did: {0}")]
+    SwarmMissTransport(crate::dht::Did),
 
     #[error("Load message failed with message: {0}")]
     SwarmLoadMessageRecvFailed(String),
@@ -288,6 +288,9 @@ pub enum Error {
 
     #[error("Failed to get dht from a sync lock")]
     DHTSyncLockError,
+
+    #[error("Failed to build swarm: {0}")]
+    SwarmBuildFailed(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
