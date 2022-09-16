@@ -7,39 +7,33 @@ use rings_node::prelude::rings_core::dht::Stabilization;
 use rings_node::prelude::rings_core::dht::TStabilize;
 use rings_node::prelude::rings_core::message::MessageCallback;
 use rings_node::prelude::rings_core::storage::PersistenceStorage;
-use rings_node::prelude::rings_core::transports::TransportManager;
+use rings_node::prelude::rings_core::transports::manager::TransportManager;
 use rings_node::prelude::web3::contract::tokens::Tokenizable;
 use rings_node::prelude::web_sys::RtcIceConnectionState;
 use rings_node::prelude::*;
 use rings_node::processor::*;
 use wasm_bindgen_test::*;
 
-async fn new_processor() -> (Processor, Arc<PersistenceStorage>) {
+async fn new_processor() -> Processor {
     let key = SecretKey::random();
-
-    let (auth, new_key) = SessionManager::gen_unsign_info(key.address(), None, None).unwrap();
-    let sig = key.sign(&auth.to_string().unwrap()).to_vec();
-    let session = SessionManager::new(&sig, &auth, &new_key);
-    let swarm = Arc::new(Swarm::new(
-        "stun://stun.l.google.com:19302",
-        key.address(),
-        session,
-    ));
 
     let path = uuid::Uuid::new_v4().to_simple().to_string();
     console_log!("uuid: {}", path);
-    let storage = Arc::new(
-        PersistenceStorage::new_with_cap_and_name(1000, path.as_str())
-            .await
+    let storage = PersistenceStorage::new_with_cap_and_name(1000, path.as_str())
+        .await
+        .unwrap();
+
+    let swarm = Arc::new(
+        SwarmBuilder::new("stun://stun.l.google.com:19302", storage)
+            .key(key)
+            .build()
             .unwrap(),
     );
 
-    let pr = PeerRing::new_with_storage(key.address().into(), storage.clone());
+    let msg_handler = MessageHandler::new(swarm.clone());
+    let stab = Arc::new(Stabilization::new(swarm.clone(), 20));
 
-    let dht = Arc::new(pr);
-    let msg_handler = MessageHandler::new(dht.clone(), swarm.clone());
-    let stab = Arc::new(Stabilization::new(dht, swarm.clone(), 20));
-    ((swarm, Arc::new(msg_handler), stab).into(), storage)
+    (swarm, Arc::new(msg_handler), stab).into()
 }
 
 async fn listen(p: &Processor) {
@@ -109,8 +103,8 @@ async fn create_connection(p1: &Processor, p2: &Processor) {
 
 #[wasm_bindgen_test]
 async fn test_processor_handshake_and_msg() {
-    let (p1, _storage1) = new_processor().await;
-    let (p2, _storage2) = new_processor().await;
+    let p1 = new_processor().await;
+    let p2 = new_processor().await;
 
     create_connection(&p1, &p2).await;
 
@@ -129,8 +123,8 @@ async fn test_processor_handshake_and_msg() {
     let test_text4 = "test4";
     let test_text5 = "test5";
 
-    let p1_addr = p1.address().into_token().to_string();
-    let p2_addr = p2.address().into_token().to_string();
+    let p1_addr = p1.did().into_token().to_string();
+    let p2_addr = p2.did().into_token().to_string();
     console_log!("p1_addr: {}", p1_addr);
     console_log!("p2_addr: {}", p2_addr);
 
@@ -193,14 +187,14 @@ async fn test_processor_handshake_and_msg() {
 }
 
 #[wasm_bindgen_test]
-async fn test_processor_connect_with_address() {
+async fn test_processor_connect_with_did() {
     super::setup_log();
-    let (p1, _storage1) = new_processor().await;
-    console_log!("p1 address: {}", p1.address().into_token().to_string());
-    let (p2, _storage2) = new_processor().await;
-    console_log!("p2 address: {}", p2.address().into_token().to_string());
-    let (p3, _storage3) = new_processor().await;
-    console_log!("p3 address: {}", p3.address().into_token().to_string());
+    let p1 = new_processor().await;
+    console_log!("p1 address: {}", p1.did());
+    let p2 = new_processor().await;
+    console_log!("p2 address: {}", p2.did());
+    let p3 = new_processor().await;
+    console_log!("p3 address: {}", p3.did());
 
     listen(&p1).await;
     listen(&p2).await;
@@ -215,10 +209,9 @@ async fn test_processor_connect_with_address() {
 
     let p1_peers = p1.list_peers().await.unwrap();
     assert!(
-        p1_peers.iter().any(|p| p
-            .address
-            .to_string()
-            .eq(&p2.address().into_token().to_string())),
+        p1_peers
+            .iter()
+            .any(|p| p.did.to_string().eq(&p2.did().into_token().to_string())),
         "p2 not in p1's peer list"
     );
 
@@ -228,7 +221,7 @@ async fn test_processor_connect_with_address() {
 
     console_log!("connect p1 and p3");
     // p1 create connect with p3's address
-    let peer3 = p1.connect_with_address(&p3.address(), true).await.unwrap();
+    let peer3 = p1.connect_with_did(p3.did(), true).await.unwrap();
     console_log!("transport connected");
     fluvio_wasm_timer::Delay::new(Duration::from_millis(1000))
         .await
@@ -240,11 +233,10 @@ async fn test_processor_connect_with_address() {
 
     let peers = p1.list_peers().await.unwrap();
     assert!(
-        peers.iter().any(|p| p.address.to_string().eq(p3
-            .address()
-            .into_token()
+        peers.iter().any(|p| p
+            .did
             .to_string()
-            .as_str())),
+            .eq(p3.did().into_token().to_string().as_str())),
         "peer list dose NOT contains p3 address"
     );
     futures::join!(

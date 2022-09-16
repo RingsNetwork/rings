@@ -52,7 +52,7 @@ pub(crate) async fn build_handler(handler: &mut MetaIoHandler<RpcMeta>) {
     handler.add_method_with_meta(Method::ConnectPeerViaHttp.as_str(), connect_peer_via_http);
     handler.add_method_with_meta(Method::ConnectWithSeed.as_str(), connect_with_seed);
     handler.add_method_with_meta(Method::AnswerOffer.as_str(), answer_offer);
-    handler.add_method_with_meta(Method::ConnectWithAddress.as_str(), connect_with_address);
+    handler.add_method_with_meta(Method::ConnectWithDid.as_str(), connect_with_did);
     handler.add_method_with_meta(Method::CreateOffer.as_str(), create_offer);
     handler.add_method_with_meta(Method::AcceptAnswer.as_str(), accept_answer);
     handler.add_method_with_meta(Method::ListPeers.as_str(), list_peers);
@@ -117,7 +117,7 @@ async fn answer_offer(params: Params, meta: RpcMeta) -> Result<Value> {
     TransportAndIce::from(r).to_json_obj().map_err(Error::from)
 }
 
-async fn connect_with_address(params: Params, meta: RpcMeta) -> Result<Value> {
+async fn connect_with_did(params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
     let p: Vec<String> = params.parse()?;
     let address_str = p

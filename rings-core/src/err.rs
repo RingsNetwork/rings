@@ -288,6 +288,9 @@ pub enum Error {
 
     #[error("Failed to get dht from a sync lock")]
     DHTSyncLockError,
+
+    #[error("Failed to build swarm: {0}")]
+    SwarmBuildFailed(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

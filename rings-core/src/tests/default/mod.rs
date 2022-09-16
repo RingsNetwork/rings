@@ -21,7 +21,7 @@ pub async fn prepare_node(
         .await
         .unwrap();
 
-    let swarm = Arc::new(SwarmBuilder::new(key, stun, storage).build().unwrap());
+    let swarm = Arc::new(SwarmBuilder::new(stun, storage).key(key).build().unwrap());
     let dht = swarm.dht();
     let node = MessageHandler::new(swarm.clone());
 

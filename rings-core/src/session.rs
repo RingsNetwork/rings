@@ -10,7 +10,6 @@ use std::sync::RwLock;
 
 use serde::Deserialize;
 use serde::Serialize;
-use web3::types::Address;
 
 use crate::dht::Did;
 use crate::ecc::signers;
@@ -48,7 +47,7 @@ pub struct Authorizer {
 pub struct AuthorizedInfo {
     pub authorizer: Authorizer,
     pub signer: Signer,
-    pub addr: Address,
+    pub did: Did,
     pub ttl_ms: Ttl,
     pub ts_ms: u128,
 }
@@ -128,11 +127,11 @@ impl Session {
         }
     }
 
-    pub fn address(&self) -> Result<Address> {
+    pub fn did(&self) -> Result<Did> {
         if !self.verify() {
             Err(Error::VerifySignatureFailed)
         } else {
-            Ok(self.auth.addr)
+            Ok(self.auth.did)
         }
     }
 
@@ -173,7 +172,7 @@ impl SessionManager {
         let info = AuthorizedInfo {
             signer,
             authorizer,
-            addr: key.address(),
+            did: key.address().into(),
             ttl_ms: ttl.unwrap_or(Ttl::Some(DEFAULT_TTL_MS)),
             ts_ms: utils::get_epoch_ms(),
         };
@@ -181,20 +180,17 @@ impl SessionManager {
     }
 
     pub fn gen_unsign_info(
-        did: Address,
+        did: Did,
         ttl: Option<Ttl>,
         signer: Option<Signer>,
     ) -> (AuthorizedInfo, SecretKey) {
         let key = SecretKey::random();
         let signer = signer.unwrap_or(Signer::DEFAULT);
-        let authorizer = Authorizer {
-            did: did.into(),
-            pubkey: None,
-        };
+        let authorizer = Authorizer { did, pubkey: None };
         let info = AuthorizedInfo {
             signer,
             authorizer,
-            addr: key.address(),
+            did: key.address().into(),
             ttl_ms: ttl.unwrap_or(Ttl::Some(DEFAULT_TTL_MS)),
             ts_ms: utils::get_epoch_ms(),
         };
@@ -218,7 +214,7 @@ impl SessionManager {
     /// generate Session with private key
     /// only use it for unittest
     pub fn new_with_seckey(key: &SecretKey, ttl: Option<Ttl>) -> Result<Self> {
-        let (auth, s_key) = Self::gen_unsign_info(key.address(), ttl, None);
+        let (auth, s_key) = Self::gen_unsign_info(key.address().into(), ttl, None);
         let sig = key.sign(&auth.to_string()?).to_vec();
         Ok(Self::new(&sig, &auth, &s_key))
     }

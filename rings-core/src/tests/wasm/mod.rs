@@ -30,7 +30,7 @@ pub async fn prepare_node(key: SecretKey) -> (Did, Arc<PeerRing>, Arc<Swarm>, Me
             .await
             .unwrap();
 
-    let swarm = Arc::new(SwarmBuilder::new(key, stun, storage).build().unwrap());
+    let swarm = Arc::new(SwarmBuilder::new(stun, storage).key(key).build().unwrap());
     let dht = swarm.dht();
     let node = MessageHandler::new(swarm.clone());
 

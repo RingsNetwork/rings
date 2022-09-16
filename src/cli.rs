@@ -99,10 +99,10 @@ impl Client {
         )
     }
 
-    pub async fn connect_with_address(&mut self, did: &str) -> Output<()> {
+    pub async fn connect_with_did(&mut self, did: &str) -> Output<()> {
         self.client
             .call_method(
-                Method::ConnectWithAddress.as_str(),
+                Method::ConnectWithDid.as_str(),
                 Params::Array(vec![Value::String(did.to_owned())]),
             )
             .await

@@ -35,10 +35,13 @@ pub async fn manually_establish_connection(swarm1: &Swarm, swarm2: &Swarm) -> Re
 
     assert_eq!(addr2, swarm2.did());
 
-    let promise_1 = transport1.connect_success_promise().await?;
-    let promise_2 = transport2.connect_success_promise().await?;
-    promise_1.await?;
-    promise_2.await?;
+    #[cfg(all(not(feature = "wasm")))]
+    {
+        let promise_1 = transport1.connect_success_promise().await?;
+        let promise_2 = transport2.connect_success_promise().await?;
+        promise_1.await?;
+        promise_2.await?;
+    }
 
     swarm2
         .register(swarm1.did(), transport2.clone())

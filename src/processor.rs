@@ -402,7 +402,7 @@ mod test {
             .await
             .unwrap();
 
-        let swarm = Arc::new(SwarmBuilder::new(key, stun, storage).build().unwrap());
+        let swarm = Arc::new(SwarmBuilder::new(stun, storage).key(key).build().unwrap());
         let msg_handler = MessageHandler::new(swarm.clone());
         let stabilization = Stabilization::new(swarm.clone(), 200);
         (

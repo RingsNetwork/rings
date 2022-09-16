@@ -35,34 +35,33 @@ use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransportInterface;
 
 pub struct SwarmBuilder {
-    key: SecretKey,
+    key: Option<SecretKey>,
     ice_servers: Vec<IceServer>,
     external_address: Option<String>,
-    dht_did: Did,
+    dht_did: Option<Did>,
     dht_succ_max: u8,
     dht_storage: PersistenceStorage,
+    session_manager: Option<SessionManager>,
     session_ttl: Option<Ttl>,
     callback: Option<CallbackFn>,
 }
 
 impl SwarmBuilder {
-    pub fn new(key: SecretKey, ice_servers: &str, dht_storage: PersistenceStorage) -> Self {
-        let did = key.address().into();
-
+    pub fn new(ice_servers: &str, dht_storage: PersistenceStorage) -> Self {
         let ice_servers = ice_servers
             .split(';')
             .collect::<Vec<&str>>()
             .into_iter()
             .map(|s| IceServer::from_str(s).unwrap())
             .collect::<Vec<IceServer>>();
-
         SwarmBuilder {
-            key,
+            key: None,
             ice_servers,
             external_address: None,
-            dht_did: did,
+            dht_did: None,
             dht_succ_max: 3,
             dht_storage,
+            session_manager: None,
             session_ttl: None,
             callback: None,
         }
@@ -83,14 +82,42 @@ impl SwarmBuilder {
         self
     }
 
+    pub fn key(mut self, key: SecretKey) -> Self {
+        self.key = Some(key);
+        self.dht_did = Some(key.address().into());
+        self
+    }
+
+    pub fn session_manager(mut self, did: Did, session_manager: SessionManager) -> Self {
+        self.session_manager = Some(session_manager);
+        self.dht_did = Some(did);
+        self
+    }
+
     pub fn session_ttl(mut self, ttl: Ttl) -> Self {
         self.session_ttl = Some(ttl);
         self
     }
 
     pub fn build(self) -> Result<Swarm> {
-        let dht = PeerRing::new_with_storage(self.dht_did, self.dht_succ_max, self.dht_storage);
-        let session_manager = SessionManager::new_with_seckey(&self.key, self.session_ttl)?;
+        let session_manager = {
+            if self.session_manager.is_some() {
+                Ok(self.session_manager.unwrap())
+            } else if self.key.is_some() {
+                SessionManager::new_with_seckey(&self.key.unwrap(), self.session_ttl)
+            } else {
+                Err(Error::SwarmBuildFailed(
+                    "Should set session_manager or key".into(),
+                ))
+            }
+        }?;
+
+        let dht_did = self
+            .dht_did
+            .ok_or_else(|| Error::SwarmBuildFailed("Should set session_manager or key".into()))?;
+
+        let dht = PeerRing::new_with_storage(dht_did, self.dht_succ_max, self.dht_storage);
+
         Ok(Swarm {
             pending_transports: Arc::new(Mutex::new(vec![])),
             transports: MemStorage::new(),
@@ -301,7 +328,7 @@ pub mod tests {
         let stun = "stun://stun.l.google.com:19302";
         let storage =
             PersistenceStorage::new_with_path(PersistenceStorage::random_path("./tmp")).await?;
-        SwarmBuilder::new(key, stun, storage).build()
+        SwarmBuilder::new(stun, storage).key(key).build()
     }
 
     #[tokio::test]

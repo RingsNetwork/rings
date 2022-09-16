@@ -103,7 +103,7 @@ enum ConnectCommand {
     #[clap()]
     Node(ConnectUrlArgs),
     #[clap()]
-    Address(ConnectWithAddressArgs),
+    Did(ConnectWithDidArgs),
     #[clap()]
     Seed(ConnectWithSeedArgs),
 }
@@ -119,13 +119,13 @@ struct ConnectUrlArgs {
 }
 
 #[derive(Args, Debug)]
-#[clap(about = "Connect with Did address via DHT")]
-struct ConnectWithAddressArgs {
+#[clap(about = "Connect with Did via DHT")]
+struct ConnectWithDidArgs {
     #[clap(flatten)]
     client_args: ClientArgs,
 
     #[clap()]
-    address: String,
+    did: String,
 }
 
 #[derive(Args, Debug)]
@@ -243,7 +243,8 @@ async fn daemon_run(
     let storage = PersistenceStorage::new().await?;
 
     let swarm = Arc::new(
-        SwarmBuilder::new(key, stuns, storage)
+        SwarmBuilder::new(stuns, storage)
+            .key(key)
             .external_address(external_ip)
             .build()?,
     );
@@ -301,11 +302,11 @@ async fn main() -> anyhow::Result<()> {
                 .display();
             Ok(())
         }
-        Command::Connect(ConnectCommand::Address(args)) => {
+        Command::Connect(ConnectCommand::Did(args)) => {
             args.client_args
                 .new_client()
                 .await?
-                .connect_with_address(args.address.as_str())
+                .connect_with_did(args.did.as_str())
                 .await?
                 .display();
             Ok(())

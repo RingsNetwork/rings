@@ -12,7 +12,7 @@ use serde::Serialize;
 use self::utils::from_rtc_ice_connection_state;
 use crate::prelude::js_sys;
 use crate::prelude::rings_core::async_trait;
-use crate::prelude::rings_core::dht::PeerRing;
+use crate::prelude::rings_core::dht::Did;
 use crate::prelude::rings_core::dht::Stabilization;
 use crate::prelude::rings_core::dht::TStabilize;
 use crate::prelude::rings_core::ecc::PublicKey;
@@ -26,14 +26,13 @@ use crate::prelude::rings_core::message::MessageHandler;
 use crate::prelude::rings_core::message::MessagePayload;
 use crate::prelude::rings_core::prelude::uuid::Uuid;
 use crate::prelude::rings_core::prelude::web3::ethabi::Token;
-use crate::prelude::rings_core::prelude::web3::types::Address;
 use crate::prelude::rings_core::session::AuthorizedInfo;
 use crate::prelude::rings_core::session::SessionManager;
 use crate::prelude::rings_core::session::Signer;
 use crate::prelude::rings_core::storage::PersistenceStorage;
-use crate::prelude::rings_core::swarm::Swarm;
+use crate::prelude::rings_core::swarm::SwarmBuilder;
+use crate::prelude::rings_core::transports::manager::TransportManager;
 use crate::prelude::rings_core::transports::Transport;
-use crate::prelude::rings_core::transports::TransportManager;
 use crate::prelude::rings_core::types::ice_transport::IceTransportInterface;
 use crate::prelude::rings_core::types::message::MessageListener;
 use crate::prelude::wasm_bindgen;
@@ -101,7 +100,7 @@ impl ToString for AddressType {
 #[wasm_bindgen]
 #[derive(Clone)]
 pub struct UnsignedInfo {
-    key_addr: Address,
+    key_addr: Did,
     auth: AuthorizedInfo,
     random_key: SecretKey,
 }
@@ -118,9 +117,9 @@ impl UnsignedInfo {
     ///   * key_addr: wallet address
     ///   * signer: `SignerMode`
     pub fn new_with_signer(key_addr: String, signer: SignerMode) -> Result<UnsignedInfo, JsError> {
-        let key_addr = Address::from_str(key_addr.as_str())?;
+        let key_addr = Did::from_str(key_addr.as_str())?;
         let (auth, random_key) =
-            SessionManager::gen_unsign_info(key_addr, None, Some(signer.into()))?;
+            SessionManager::gen_unsign_info(key_addr, None, Some(signer.into()));
 
         Ok(UnsignedInfo {
             auth,
@@ -137,16 +136,16 @@ impl UnsignedInfo {
     ) -> Result<UnsignedInfo, JsError> {
         let (key_addr, auth, random_key) = match addr_type {
             AddressType::DEFAULT => {
-                let key_addr = Address::from_str(address.as_str())?;
+                let key_addr = Did::from_str(address.as_str())?;
                 let (auth, random_key) =
-                    SessionManager::gen_unsign_info(key_addr, None, Some(Signer::EIP712))?;
+                    SessionManager::gen_unsign_info(key_addr, None, Some(Signer::EIP712));
                 (key_addr, auth, random_key)
             }
             AddressType::ED25519 => {
                 let pubkey = PublicKey::try_from_b58t(&address).map_err(JsError::from)?;
                 let (auth, random_key) =
                     SessionManager::gen_unsign_info_with_ed25519_pubkey(None, pubkey)?;
-                (pubkey.address(), auth, random_key)
+                (pubkey.address().into(), auth, random_key)
             }
         };
         Ok(UnsignedInfo {
@@ -202,18 +201,23 @@ impl Client {
         let unsigned_info = unsigned_info.clone();
         let signed_data = signed_data.to_vec();
         future_to_promise(async move {
-            let random_key = unsigned_info.random_key;
-            let session = SessionManager::new(&signed_data, &unsigned_info.auth, &random_key);
-            let swarm = Arc::new(Swarm::new(&stuns, unsigned_info.key_addr, session));
-
             let storage = PersistenceStorage::new_with_cap_and_name(50000, storage_name.as_str())
                 .await
                 .map_err(JsError::from)?;
-            let pr = PeerRing::new_with_storage(swarm.address().into(), Arc::new(storage));
 
-            let dht = Arc::new(pr);
-            let msg_handler = Arc::new(MessageHandler::new(dht.clone(), swarm.clone()));
-            let stabilization = Arc::new(Stabilization::new(dht, swarm.clone(), 20));
+            let random_key = unsigned_info.random_key;
+            let session_manager =
+                SessionManager::new(&signed_data, &unsigned_info.auth, &random_key);
+
+            let swarm = Arc::new(
+                SwarmBuilder::new(&stuns, storage)
+                    .session_manager(unsigned_info.key_addr, session_manager)
+                    .build()
+                    .map_err(JsError::from)?,
+            );
+
+            let msg_handler = Arc::new(MessageHandler::new(swarm.clone()));
+            let stabilization = Arc::new(Stabilization::new(swarm.clone(), 20));
             let processor = Arc::new(Processor::from((swarm, msg_handler, stabilization)));
             Ok(JsValue::from(Client {
                 processor,
@@ -246,7 +250,7 @@ impl Client {
     /// get self web3 address
     #[wasm_bindgen(getter)]
     pub fn address(&self) -> Result<String, JsError> {
-        Ok(self.processor.address().into_token().to_string())
+        Ok(self.processor.did().into_token().to_string())
     }
 
     /// listen message callback.
@@ -308,15 +312,15 @@ impl Client {
     ) -> Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
-            let address = get_address(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
+            let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
             let peer = p
-                .connect_with_address(&address, false)
+                .connect_with_did(did, false)
                 .await
                 .map_err(JsError::from)?;
             let state = peer.transport.ice_connection_state().await;
             Ok(JsValue::try_from(&Peer::from((
                 state,
-                peer.address,
+                peer.did,
                 peer.transport.id,
                 peer.transport.pubkey().await,
             )))?)
@@ -331,20 +335,17 @@ impl Client {
     /// const client3 = new Client()
     /// await create_connection(client1, client2);
     /// await create_connection(client2, client3);
-    /// await client1.connect_with_address(client3.address())
+    /// await client1.connect_with_did(client3.address())
     /// ```
     pub fn connect_with_address(&self, address: String, addr_type: Option<AddressType>) -> Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
-            let address = get_address(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
-            let peer = p
-                .connect_with_address(&address, true)
-                .await
-                .map_err(JsError::from)?;
+            let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
+            let peer = p.connect_with_did(did, true).await.map_err(JsError::from)?;
             let state = peer.transport.ice_connection_state().await;
             Ok(JsValue::try_from(&Peer::from((
                 state,
-                peer.address,
+                peer.did,
                 peer.transport.id,
                 peer.transport.pubkey().await,
             )))?)
@@ -386,7 +387,7 @@ impl Client {
             let state = peer.transport.ice_connection_state().await;
             Ok(JsValue::try_from(&Peer::from((
                 state,
-                peer.address,
+                peer.did,
                 peer.transport.id,
                 peer.transport.pubkey().await,
             )))?)
@@ -410,7 +411,7 @@ impl Client {
             let states = futures::future::join_all(states_async).await;
             let mut js_array = js_sys::Array::new();
             js_array.extend(peers.iter().zip(states.iter()).flat_map(|(x, (y, z))| {
-                JsValue::try_from(&Peer::from((*y, x.address.clone(), x.transport.id, *z)))
+                JsValue::try_from(&Peer::from((*y, x.did.clone(), x.transport.id, *z)))
             }));
             Ok(js_array.into())
         })
@@ -420,10 +421,10 @@ impl Client {
     pub fn disconnect(&self, address: String, addr_type: Option<AddressType>) -> Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
-            let address = get_address(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
-            p.disconnect(&address).await.map_err(JsError::from)?;
+            let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
+            p.disconnect(did).await.map_err(JsError::from)?;
 
-            Ok(JsValue::from_str(address.to_string().as_str()))
+            Ok(JsValue::from_str(did.to_string().as_str()))
         })
     }
 
@@ -466,12 +467,12 @@ impl Client {
     pub fn get_peer(&self, address: String, addr_type: Option<AddressType>) -> Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
-            let address = get_address(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
-            let peer = p.get_peer(&address).await.map_err(JsError::from)?;
+            let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
+            let peer = p.get_peer(did).await.map_err(JsError::from)?;
             let state = peer.transport.ice_connection_state().await;
             Ok(JsValue::try_from(&Peer::from((
                 state,
-                peer.address,
+                peer.did,
                 peer.transport.id,
                 peer.transport.pubkey().await,
             )))?)
@@ -482,10 +483,10 @@ impl Client {
     pub fn transport_state(&self, address: String, addr_type: Option<AddressType>) -> Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
-            let address = get_address(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
+            let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
             let transport = p
                 .swarm
-                .get_transport(&address)
+                .get_transport(did)
                 .ok_or_else(|| JsError::new("transport not found"))?;
             let state = transport
                 .ice_connection_state()
@@ -504,8 +505,8 @@ impl Client {
     ) -> Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
-            let address = get_address(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
-            let peer = p.get_peer(&address).await.map_err(JsError::from)?;
+            let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
+            let peer = p.get_peer(did).await.map_err(JsError::from)?;
             log::debug!("wait for data channel open start");
             if let Err(e) = peer.transport.wait_for_data_channel_open().await {
                 log::warn!("wait_for_data_channel failed: {}", e);
@@ -717,14 +718,15 @@ pub fn internal_info() -> InternalInfo {
     InternalInfo::build()
 }
 
-pub fn get_address(address: &str, addr_type: AddressType) -> Result<Address, JsError> {
-    let address = match addr_type {
+pub fn get_did(address: &str, addr_type: AddressType) -> Result<Did, JsError> {
+    let did = match addr_type {
         AddressType::DEFAULT => {
-            Address::from_str(address).map_err(|_| JsError::new("invalid address"))?
+            Did::from_str(address).map_err(|_| JsError::new("invalid address"))?
         }
         AddressType::ED25519 => PublicKey::try_from_b58t(address)
             .map_err(|_| JsError::new("invalid address"))?
-            .address(),
+            .address()
+            .into(),
     };
-    Ok(address)
+    Ok(did)
 }
