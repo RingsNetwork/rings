@@ -45,11 +45,11 @@ use crate::prelude::web3::contract::tokens::Tokenizable;
 use crate::prelude::web_sys::RtcIceConnectionState;
 use crate::processor::Processor;
 
-#[wasm_bindgen(start)]
-pub fn start() -> Result<(), JsError> {
-    utils::set_panic_hook();
-    Ok(())
-}
+// #[wasm_bindgen(start)]
+// pub fn start() -> Result<(), JsError> {
+//     utils::set_panic_hook();
+//     Ok(())
+// }
 
 /// set debug for wasm.
 /// if `true` will print `Debug` message in console,
