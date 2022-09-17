@@ -2,10 +2,10 @@
 ///! [JSON-RPC]: https://www.jsonrpc.org/specification
 pub mod method;
 pub mod response;
-#[cfg(feature = "default")]
+#[cfg(feature = "node")]
 mod server;
-#[cfg(feature = "default")]
+#[cfg(feature = "node")]
 pub use server::RpcMeta;
 
-#[cfg(feature = "default")]
+#[cfg(feature = "node")]
 pub(crate) use self::server::build_handler;

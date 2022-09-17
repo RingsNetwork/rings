@@ -15,14 +15,14 @@ pub struct SeedPeer {
     pub endpoint: String,
 }
 
-#[cfg_attr(feature = "default", async_trait)]
-#[cfg_attr(not(feature = "default"), async_trait(?Send))]
+#[cfg_attr(feature = "node", async_trait)]
+#[cfg_attr(not(feature = "node"), async_trait(?Send))]
 pub trait SeedLoader {
     async fn load(source: &str) -> anyhow::Result<Self>
     where Self: Sized;
 }
 
-#[cfg(feature = "default")]
+#[cfg(feature = "node")]
 mod loader {
     use reqwest::Url;
 
