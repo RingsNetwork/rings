@@ -6,6 +6,7 @@ use std::sync::Arc;
 #[cfg(feature = "node")]
 use jsonrpc_core::Metadata;
 
+use crate::error;
 use crate::error::Error;
 use crate::error::Result;
 use crate::jsonrpc::method;
@@ -29,7 +30,9 @@ use crate::prelude::rings_core::transports::manager::TransportManager;
 use crate::prelude::rings_core::transports::Transport;
 use crate::prelude::rings_core::types::ice_transport::IceTransportInterface;
 use crate::prelude::rings_core::types::ice_transport::IceTrickleScheme;
+use crate::prelude::vnode;
 use crate::prelude::web3::signing::keccak256;
+use crate::prelude::TChordStorage;
 
 /// Processor for rings-node jsonrpc server
 #[derive(Clone)]
@@ -351,6 +354,29 @@ impl Processor {
             .await
             .map_err(Error::SendMessage)?;
         Ok(())
+    }
+
+    /// check local cache of dht
+    pub async fn check_cache(&self, id: &Did) -> Option<vnode::VirtualNode> {
+        self.msg_handler
+            .check_cache(id)
+            .await
+    }
+
+    /// fetch virtual node from DHT
+    pub async fn fetch(&self, id: &Did) -> Result<()> {
+        self.msg_handler
+            .fetch(id)
+            .await
+            .map_err(error::Error::VNodeError)
+    }
+
+    /// store virtual node on DHT
+    pub async fn store(&self, vnode: vnode::VirtualNode) -> Result<()> {
+        self.msg_handler
+            .store(vnode)
+            .await
+            .map_err(error::Error::VNodeError)
     }
 }
 
