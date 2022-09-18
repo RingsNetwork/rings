@@ -3,7 +3,7 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
-#[cfg(feature = "default")]
+#[cfg(feature = "node")]
 use jsonrpc_core::Metadata;
 
 use crate::error::Error;
@@ -42,7 +42,7 @@ pub struct Processor {
     pub stabilization: Arc<Stabilization>,
 }
 
-#[cfg(feature = "default")]
+#[cfg(feature = "node")]
 impl Metadata for Processor {}
 
 impl From<(Arc<Swarm>, Arc<MessageHandler>, Arc<Stabilization>)> for Processor {
@@ -382,7 +382,7 @@ impl From<&(Did, Arc<Transport>)> for Peer {
 }
 
 #[cfg(test)]
-#[cfg(feature = "default")]
+#[cfg(feature = "node")]
 mod test {
     use futures::lock::Mutex;
     use rings_core::ecc::SecretKey;

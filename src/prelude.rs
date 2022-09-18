@@ -1,8 +1,8 @@
-#[cfg(feature = "default")]
+#[cfg(feature = "node")]
 pub use reqwest;
 #[cfg(feature = "browser")]
 pub use reqwest_wasm as reqwest;
-#[cfg(feature = "default")]
+#[cfg(feature = "node")]
 pub use rings_core;
 #[cfg(feature = "browser")]
 pub use rings_core_wasm as rings_core;

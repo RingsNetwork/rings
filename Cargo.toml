@@ -18,7 +18,8 @@ members = ["rings-core"]
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = [
+default = ["node"]
+node = [
     "tokio",
     "hyper",
     "axum",
