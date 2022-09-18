@@ -358,9 +358,7 @@ impl Processor {
 
     /// check local cache of dht
     pub async fn check_cache(&self, id: &Did) -> Option<vnode::VirtualNode> {
-        self.msg_handler
-            .check_cache(id)
-            .await
+        self.msg_handler.check_cache(id).await
     }
 
     /// fetch virtual node from DHT

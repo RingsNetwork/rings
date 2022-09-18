@@ -20,6 +20,7 @@ pub use self::rings_core::prelude::base58;
 #[cfg(feature = "browser")]
 pub use self::rings_core::prelude::js_sys;
 pub use self::rings_core::prelude::uuid;
+pub use self::rings_core::prelude::vnode;
 #[cfg(feature = "browser")]
 pub use self::rings_core::prelude::wasm_bindgen;
 #[cfg(feature = "browser")]
@@ -29,7 +30,6 @@ pub use self::rings_core::prelude::web3;
 pub use self::rings_core::prelude::web_sys;
 pub use self::rings_core::prelude::PersistenceStorage;
 pub use self::rings_core::prelude::TChordStorage;
-pub use self::rings_core::prelude::vnode;
 pub use self::rings_core::session::Session;
 pub use self::rings_core::session::SessionManager;
 pub use self::rings_core::session::Signer;
