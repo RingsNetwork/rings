@@ -1,6 +1,6 @@
 [alias]
+build-node= "build --features node --no-default-features"
 build-browser-pack = "build --lib --target=wasm32-unknown-unknown --features browser --no-default-features"
-build-client = "build"
 test-browser = "test --target=wasm32-unknown-unknown --features browser --no-default-features"
 
 [target.wasm32-unknown-unknown]

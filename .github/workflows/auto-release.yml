@@ -23,7 +23,7 @@ jobs:
           sharedKey: release-v1
 
       - name: Build
-        run: cargo build --all --verbose --release
+        run: cargo build --features node --no-default-features --verbose --release
 
       - uses: "marvinpinto/action-automatic-releases@latest"
         with:
