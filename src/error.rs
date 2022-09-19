@@ -46,6 +46,8 @@ pub enum Error {
     MessagePayload(rings_core::err::Error),
     #[error("No Permission")]
     NoPermission,
+    #[error("vnode action error: {0}")]
+    VNodeError(rings_core::err::Error),
 }
 
 impl Error {
@@ -72,6 +74,7 @@ impl Error {
             Error::SendMessage(_) => 18,
             Error::MessagePayload(_) => 19,
             Error::NoPermission => 20,
+            Error::VNodeError(_) => 21,
         };
         -32000 - code
     }

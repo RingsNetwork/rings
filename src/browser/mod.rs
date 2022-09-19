@@ -2,6 +2,7 @@
 #![allow(clippy::unused_unit)]
 pub mod utils;
 
+use std::convert::TryFrom;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -25,6 +26,7 @@ use crate::prelude::rings_core::message::MessageCallback;
 use crate::prelude::rings_core::message::MessageHandler;
 use crate::prelude::rings_core::message::MessagePayload;
 use crate::prelude::rings_core::prelude::uuid::Uuid;
+use crate::prelude::rings_core::prelude::vnode;
 use crate::prelude::rings_core::prelude::web3::ethabi::Token;
 use crate::prelude::rings_core::session::AuthorizedInfo;
 use crate::prelude::rings_core::session::SessionManager;
@@ -516,6 +518,40 @@ impl Client {
             Ok(JsValue::null())
         })
     }
+
+    pub fn check_cache(&self, address: String, addr_type: Option<AddressType>) -> Promise {
+        let p = self.processor.clone();
+        future_to_promise(async move {
+            let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
+            let v_node = p.check_cache(&did).await;
+            if let Some(v) = v_node {
+                let wasm_vnode = VirtualNode::from(v);
+                let data = JsValue::from_serde(&wasm_vnode).map_err(JsError::from)?;
+                return Ok(data);
+            } else {
+                return Ok(JsValue::null());
+            }
+        })
+    }
+
+    pub fn fetch(&self, address: String, addr_type: Option<AddressType>) -> Promise {
+        let p = self.processor.clone();
+        future_to_promise(async move {
+            let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
+            p.fetch(&did).await.map_err(JsError::from)?;
+            Ok(JsValue::null())
+        })
+    }
+
+    /// store virtual node on DHT
+    pub fn store(&self, data: String) -> Promise {
+        let p = self.processor.clone();
+        future_to_promise(async move {
+            let vnode_info = vnode::VirtualNode::try_from(data).map_err(JsError::from)?;
+            p.store(vnode_info).await.map_err(JsError::from)?;
+            Ok(JsValue::null())
+        })
+    }
 }
 
 #[wasm_bindgen]
@@ -729,4 +765,65 @@ pub fn get_did(address: &str, addr_type: AddressType) -> Result<Did, JsError> {
             .into(),
     };
     Ok(did)
+}
+
+#[wasm_bindgen]
+#[derive(Clone, Serialize, Deserialize)]
+pub enum VNodeType {
+    /// Data: Encoded data stored in DHT
+    Data,
+    /// SubRing: Finger table of a SubRing
+    SubRing,
+    /// RelayMessage: A Relayed but unreach message, which is stored on it's successor
+    RelayMessage,
+}
+
+impl From<vnode::VNodeType> for VNodeType {
+    fn from(v: vnode::VNodeType) -> Self {
+        match v {
+            vnode::VNodeType::Data => Self::Data,
+            vnode::VNodeType::SubRing => Self::SubRing,
+            vnode::VNodeType::RelayMessage => Self::RelayMessage,
+        }
+    }
+}
+
+#[wasm_bindgen]
+#[derive(Clone, Serialize, Deserialize)]
+pub struct VirtualNode {
+    address: String,
+    data: Vec<String>,
+    kind: VNodeType,
+}
+
+#[wasm_bindgen]
+impl VirtualNode {
+    #[wasm_bindgen(getter)]
+    pub fn address(&self) -> String {
+        self.address.to_owned()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn kind(&self) -> VNodeType {
+        self.kind.to_owned()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn data(&self) -> js_sys::Array {
+        let array_data = js_sys::Array::new();
+        for d in self.data.iter() {
+            array_data.push(&JsValue::from_str(d));
+        }
+        array_data
+    }
+}
+
+impl From<vnode::VirtualNode> for VirtualNode {
+    fn from(v: vnode::VirtualNode) -> Self {
+        Self {
+            address: v.address.into_token().to_string(),
+            kind: VNodeType::Data,
+            data: v.data.iter().map(|x| x.to_string()).collect(),
+        }
+    }
 }
