@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use async_recursion::async_recursion;
 use async_trait::async_trait;
-use futures::lock::Mutex;
 
 use super::CustomMessage;
 use super::MaybeEncrypted;
@@ -73,8 +72,8 @@ pub type ValidatorFn = Box<dyn MessageValidator>;
 pub struct MessageHandler {
     dht: Arc<PeerRing>,
     swarm: Arc<Swarm>,
-    callback: Arc<Mutex<Option<CallbackFn>>>,
-    validator: Arc<Mutex<Option<ValidatorFn>>>,
+    callback: Arc<Option<CallbackFn>>,
+    validator: Arc<Option<ValidatorFn>>,
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
@@ -84,23 +83,17 @@ pub trait HandleMsg<T> {
 }
 
 impl MessageHandler {
-    pub fn new(swarm: Arc<Swarm>) -> Self {
+    pub fn new(
+        swarm: Arc<Swarm>,
+        callback: Option<CallbackFn>,
+        validator: Option<ValidatorFn>,
+    ) -> Self {
         Self {
             dht: swarm.dht(),
             swarm,
-            callback: Arc::new(Mutex::new(None)),
-            validator: Arc::new(Mutex::new(None)),
+            callback: Arc::new(callback),
+            validator: Arc::new(validator),
         }
-    }
-
-    pub async fn set_callback(&self, f: CallbackFn) {
-        let mut cb = self.callback.lock().await;
-        *cb = Some(f)
-    }
-
-    pub async fn set_validator(&self, f: ValidatorFn) {
-        let mut v = self.validator.lock().await;
-        *v = Some(f)
     }
 
     // disconnect a node if a node is in DHT
@@ -142,8 +135,7 @@ impl MessageHandler {
     }
 
     async fn invoke_callback(&self, payload: &MessagePayload<Message>) -> Result<()> {
-        let mut callback = self.callback.lock().await;
-        if let Some(ref mut cb) = *callback {
+        if let Some(ref cb) = *self.callback {
             match payload.data {
                 Message::CustomMessage(ref msg) => {
                     if self.dht.id == payload.relay.destination {
@@ -157,8 +149,7 @@ impl MessageHandler {
     }
 
     async fn validate(&self, payload: &MessagePayload<Message>) -> Result<()> {
-        let mut validator = self.validator.lock().await;
-        if let Some(ref mut v) = *validator {
+        if let Some(ref v) = *self.validator {
             match payload.data {
                 Message::StoreVNode(_) => v.store_vnode(self, payload).await,
                 _ => None,
@@ -340,8 +331,8 @@ pub mod tests {
         let key1 = SecretKey::random();
         let key2 = SecretKey::random();
 
-        let (did1, _dht1, swarm1, handler1, _path1) = prepare_node(key1).await;
-        let (did2, _dht2, swarm2, handler2, _path2) = prepare_node(key2).await;
+        let (did1, _dht1, swarm1, _handler1, _path1) = prepare_node(key1).await;
+        let (did2, _dht2, swarm2, _handler2, _path2) = prepare_node(key2).await;
 
         manually_establish_connection(&swarm1, &swarm2).await?;
 
@@ -379,8 +370,8 @@ pub mod tests {
         let cb1: CallbackFn = Box::new(msg_callback1.clone());
         let cb2: CallbackFn = Box::new(msg_callback2.clone());
 
-        handler1.set_callback(cb1).await;
-        handler2.set_callback(cb2).await;
+        let handler1 = swarm1.message_handler(Some(cb1), None);
+        let handler2 = swarm2.message_handler(Some(cb2), None);
 
         handler1
             .send_direct_message(

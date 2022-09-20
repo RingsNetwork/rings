@@ -32,7 +32,7 @@ pub async fn prepare_node(key: SecretKey) -> (Did, Arc<PeerRing>, Arc<Swarm>, Me
 
     let swarm = Arc::new(SwarmBuilder::new(stun, storage).key(key).build().unwrap());
     let dht = swarm.dht();
-    let node = MessageHandler::new(swarm.clone());
+    let node = swarm.message_handler(None, None);
 
     println!("key: {:?}", key.to_string());
     println!("did: {:?}", did);

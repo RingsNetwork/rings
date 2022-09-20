@@ -5,6 +5,7 @@ use futures::lock::Mutex;
 use rings_node::prelude::rings_core::async_trait;
 use rings_node::prelude::rings_core::dht::Stabilization;
 use rings_node::prelude::rings_core::dht::TStabilize;
+use rings_node::prelude::rings_core::message::CallbackFn;
 use rings_node::prelude::rings_core::message::MessageCallback;
 use rings_node::prelude::rings_core::storage::PersistenceStorage;
 use rings_node::prelude::rings_core::transports::manager::TransportManager;
@@ -30,14 +31,14 @@ async fn new_processor() -> Processor {
             .unwrap(),
     );
 
-    let msg_handler = MessageHandler::new(swarm.clone());
+    let msg_handler = Arc::new(swarm.message_handler(None, None));
     let stab = Arc::new(Stabilization::new(swarm.clone(), 20));
 
-    (swarm, Arc::new(msg_handler), stab).into()
+    (swarm, msg_handler, stab).into()
 }
 
-async fn listen(p: &Processor) {
-    let h = Arc::clone(&p.msg_handler);
+async fn listen(p: &Processor, cb: Option<CallbackFn>) {
+    let h = Arc::new(p.swarm.message_handler(cb, None));
     let s = Arc::clone(&p.stabilization);
 
     futures::join!(
@@ -129,11 +130,8 @@ async fn test_processor_handshake_and_msg() {
     console_log!("p2_addr: {}", p2_addr);
 
     console_log!("listen");
-    p1.msg_handler.set_callback(callback1).await;
-    listen(&p1).await;
-
-    p2.msg_handler.set_callback(callback2).await;
-    listen(&p2).await;
+    listen(&p1, Some(callback1)).await;
+    listen(&p2, Some(callback2)).await;
 
     p1.send_message(p2_addr.as_str(), test_text1.as_bytes())
         .await
@@ -196,9 +194,9 @@ async fn test_processor_connect_with_did() {
     let p3 = new_processor().await;
     console_log!("p3 address: {}", p3.did());
 
-    listen(&p1).await;
-    listen(&p2).await;
-    listen(&p3).await;
+    listen(&p1, None).await;
+    listen(&p2, None).await;
+    listen(&p3, None).await;
 
     console_log!("connect p1 and p2");
     create_connection(&p1, &p2).await;

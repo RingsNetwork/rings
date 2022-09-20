@@ -218,7 +218,7 @@ impl Client {
                     .map_err(JsError::from)?,
             );
 
-            let msg_handler = Arc::new(MessageHandler::new(swarm.clone()));
+            let msg_handler = Arc::new(swarm.message_handler(None, None));
             let stabilization = Arc::new(Stabilization::new(swarm.clone(), 20));
             let processor = Arc::new(Processor::from((swarm, msg_handler, stabilization)));
             Ok(JsValue::from(Client {
@@ -277,9 +277,8 @@ impl Client {
         let cb = Box::new(callback);
 
         future_to_promise(async move {
-            let h = Arc::clone(&p.msg_handler);
+            let h = Arc::new(p.swarm.message_handler(Some(cb), None));
             let s = Arc::clone(&p.stabilization);
-            h.set_callback(cb).await;
             futures::join!(
                 async {
                     h.listen().await;

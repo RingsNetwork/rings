@@ -7,7 +7,6 @@ use clap::Subcommand;
 use rings_core::dht::Stabilization;
 use rings_core::dht::TStabilize;
 use rings_core::ecc::SecretKey;
-use rings_core::message::MessageHandler;
 use rings_core::storage::PersistenceStorage;
 use rings_core::swarm::SwarmBuilder;
 use rings_core::types::message::MessageListener;
@@ -249,7 +248,7 @@ async fn daemon_run(
             .build()?,
     );
 
-    let listen_event = Arc::new(MessageHandler::new(swarm.clone()));
+    let listen_event = Arc::new(swarm.message_handler(None, None));
     let stabilize = Arc::new(Stabilization::new(swarm.clone(), stabilize_timeout));
     let swarm_clone = swarm.clone();
     let pubkey = Arc::new(key.pubkey());

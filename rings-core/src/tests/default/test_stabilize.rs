@@ -7,7 +7,6 @@ use crate::dht::Stabilization;
 use crate::ecc::SecretKey;
 use crate::err::Error;
 use crate::err::Result;
-use crate::message::MessageHandler;
 use crate::swarm::tests::new_swarm;
 use crate::swarm::Swarm;
 use crate::tests::manually_establish_connection;
@@ -43,8 +42,8 @@ async fn test_stabilization_once() -> Result<()> {
     let swarm1 = Arc::new(new_swarm(key1).await?);
     let swarm2 = Arc::new(new_swarm(key2).await?);
     manually_establish_connection(&swarm1, &swarm2).await?;
-    let handler1 = MessageHandler::new(swarm1.clone());
-    let handler2 = MessageHandler::new(swarm2.clone());
+    let handler1 = swarm1.message_handler(None, None);
+    let handler2 = swarm2.message_handler(None, None);
     println!("swarm1: {:?}, swarm2: {:?}", swarm1.did(), swarm2.did());
 
     tokio::select! {
@@ -92,8 +91,8 @@ async fn test_stabilization() -> Result<()> {
     let swarm1 = Arc::new(new_swarm(key1).await?);
     let swarm2 = Arc::new(new_swarm(key2).await?);
     manually_establish_connection(&swarm1, &swarm2).await?;
-    let handler1 = MessageHandler::new(swarm1.clone());
-    let handler2 = MessageHandler::new(swarm2.clone());
+    let handler1 = swarm1.message_handler(None, None);
+    let handler2 = swarm2.message_handler(None, None);
 
     tokio::select! {
         _ = async {
