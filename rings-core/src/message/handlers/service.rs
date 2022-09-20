@@ -47,6 +47,7 @@ impl TChordSocketForward for MessageHandler {
     }
 }
 
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<RequestServiceReport> for MessageHandler {
     async fn handle(
