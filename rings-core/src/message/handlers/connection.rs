@@ -15,7 +15,6 @@ use crate::message::types::FindSuccessorReport;
 use crate::message::types::FindSuccessorSend;
 use crate::message::types::JoinDHT;
 use crate::message::types::Message;
-use crate::message::types::RequestServiceReport;
 use crate::message::types::SyncVNodeWithSuccessor;
 use crate::message::FindSuccessorAnd;
 use crate::message::FindSuccessorThen;
@@ -201,14 +200,16 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
                             )
                             .await
                         }
+                        #[allow(unused_variables)]
                         FindSuccessorAnd::RequestService(data) => {
                             #[cfg(not(feature = "wasm"))]
                             {
                                 use std::io::Read;
                                 use std::io::Write;
 
-                                if let Some(p) = self.swarm.hidden_service_port {
+                                use crate::message::types::RequestServiceReport;
 
+                                if let Some(p) = self.swarm.hidden_service_port {
                                     let mut stream =
                                         std::net::TcpStream::connect(format!("127.0.0.1:{}", p))?;
                                     // 100k
@@ -222,7 +223,8 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
                                             }),
                                             ctx.tx_id,
                                             relay,
-                                        ).await
+                                        )
+                                        .await;
                                 }
                             }
                             Ok(())
