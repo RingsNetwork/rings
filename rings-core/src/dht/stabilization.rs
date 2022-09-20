@@ -9,6 +9,7 @@ use crate::dht::PeerRingRemoteAction;
 use crate::err::Result;
 use crate::message::FindSuccessorSend;
 use crate::message::FindSuccessorThen;
+use crate::message::FindSuccessorAnd;
 use crate::message::Message;
 use crate::message::NotifyPredecessorSend;
 use crate::message::PayloadSender;
@@ -72,7 +73,9 @@ impl Stabilization {
                 ) => {
                     let msg = Message::FindSuccessorSend(FindSuccessorSend {
                         id: current,
-                        then: FindSuccessorThen::FixFingerTable,
+                        and: FindSuccessorAnd::Report,
+                        strict: true,
+                        report_then: FindSuccessorThen::FixFingerTable,
                     });
                     self.swarm
                         .send_message(msg.clone(), next, self.swarm.did())

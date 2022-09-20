@@ -44,6 +44,8 @@ pub struct SwarmBuilder {
     session_manager: Option<SessionManager>,
     session_ttl: Option<Ttl>,
     callback: Option<CallbackFn>,
+    /// support forward request to hidden services.
+    hidden_service_port: Option<usize>
 }
 
 impl SwarmBuilder {
@@ -64,6 +66,7 @@ impl SwarmBuilder {
             session_manager: None,
             session_ttl: None,
             callback: None,
+            hidden_service_port: None
         }
     }
 
@@ -126,6 +129,7 @@ impl SwarmBuilder {
             external_address: self.external_address,
             dht: Arc::new(dht),
             session_manager,
+            hidden_service_port: self.hidden_service_port,
             callback: self.callback,
         })
     }
@@ -139,6 +143,8 @@ pub struct Swarm {
     pub(crate) external_address: Option<String>,
     dht: Arc<PeerRing>,
     pub callback: Option<CallbackFn>,
+    /// support forward request to hidden services.
+    pub hidden_service_port: Option<usize>,
     session_manager: SessionManager,
 }
 

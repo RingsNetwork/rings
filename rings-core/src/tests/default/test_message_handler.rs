@@ -14,6 +14,7 @@ use crate::err::Result;
 use crate::message;
 use crate::message::Encoder;
 use crate::message::FindSuccessorThen;
+use crate::message::FindSuccessorAnd;
 use crate::message::Message;
 use crate::message::MessageHandler;
 use crate::message::PayloadSender;
@@ -269,7 +270,9 @@ async fn test_handle_find_successor_increase() -> Result<()> {
                 .send_message(
                     Message::FindSuccessorSend(message::FindSuccessorSend {
                         id: swarm2.did(),
-                        then: FindSuccessorThen::Connect,
+                        report_then: FindSuccessorThen::Connect,
+                        and: FindSuccessorAnd::Report,
+                        strict: true
                     }),
                     swarm1.did(),
                     swarm1.did(),
@@ -354,7 +357,9 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
                 .send_message(
                     Message::FindSuccessorSend(message::FindSuccessorSend {
                         id: swarm2.did(),
-                        then: FindSuccessorThen::Connect,
+                        report_then: FindSuccessorThen::Connect,
+                        and: FindSuccessorAnd::Report,
+                        strict: true
                     }),
                     swarm1.did(),
                     swarm1.did(),

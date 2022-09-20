@@ -12,11 +12,13 @@ use crate::message::types::AlreadyConnected;
 use crate::message::types::ConnectNodeReport;
 use crate::message::types::ConnectNodeSend;
 use crate::message::types::FindSuccessorReport;
+use crate::message::types::VisitServiceReport;
 use crate::message::types::FindSuccessorSend;
 use crate::message::types::JoinDHT;
 use crate::message::types::Message;
 use crate::message::types::SyncVNodeWithSuccessor;
 use crate::message::FindSuccessorThen;
+use crate::message::FindSuccessorAnd;
 use crate::message::HandleMsg;
 use crate::message::LeaveDHT;
 use crate::message::MessageHandler;
@@ -52,7 +54,9 @@ impl HandleMsg<JoinDHT> for MessageHandler {
                     self.send_direct_message(
                         Message::FindSuccessorSend(FindSuccessorSend {
                             id,
-                            then: FindSuccessorThen::Connect,
+                            strict: false,
+                            and: FindSuccessorAnd::Report,
+                            report_then: FindSuccessorThen::Connect,
                         }),
                         next,
                     )
@@ -182,13 +186,27 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
 
         match self.dht.find_successor(msg.id)? {
             PeerRingAction::Some(id) => {
-                relay.relay(self.dht.id, None)?;
-                self.send_report_message(
-                    Message::FindSuccessorReport(FindSuccessorReport { id, then: msg.then }),
-                    ctx.tx_id,
-                    relay,
-                )
-                .await
+                if msg.strict == false || self.dht.id == msg.id {
+                    relay.relay(self.dht.id, None)?;
+                    self.send_report_message(
+                        Message::FindSuccessorReport(FindSuccessorReport { id, then: msg.report_then.clone() }),
+                        ctx.tx_id,
+                        relay,
+                    )
+                        .await
+                } else {
+                    if self
+                        .swarm
+                        .get_and_check_transport(msg.id)
+                        .await
+                        .is_some()
+                    {
+                        relay.relay(self.dht.id, Some(relay.destination))?;
+                        return self.transpond_payload(ctx, relay).await;
+                    } else {
+                        return Err(Error::MessageHandlerMissNextNode)
+                    }
+                }
             }
             PeerRingAction::RemoteAction(next, _) => {
                 relay.relay(self.dht.id, Some(next))?;
@@ -211,7 +229,7 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
             return self.transpond_payload(ctx, relay).await;
         }
 
-        match msg.then {
+        match &msg.then {
             FindSuccessorThen::FixFingerTable => self.dht.lock_finger()?.set_fix(msg.id),
             FindSuccessorThen::Connect => {
                 if self.swarm.get_and_check_transport(msg.id).await.is_none()
@@ -232,6 +250,25 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
                         next,
                     )
                     .await?
+                }
+            }
+            FindSuccessorThen::VisitService(data) => {
+                if let Some(p) = self.swarm.hidden_service_port {
+                    #[cfg(not(feature = "wasm"))]
+                    {
+                        use std::io::Read;
+                        use std::io::Write;
+                        let mut stream = std::net::TcpStream::connect(format!("127.0.0.1:{}", p))?;
+                        // 100k
+                        let mut buff: Vec<u8> = Vec::new();
+                        stream.write(&data)?;
+                        stream.read_to_end(&mut buff)?;
+                        self.send_report_message(
+                            Message::VisitServiceReport(VisitServiceReport{ data: buff.to_vec()}),
+                            ctx.tx_id,
+                            relay
+                        ).await?;
+                    }
                 }
             }
             _ => {}
@@ -461,7 +498,7 @@ pub mod tests {
         assert_eq!(ev_2.relay.path, vec![did3, did1]);
         assert!(matches!(
             ev_2.data,
-            Message::FindSuccessorSend(FindSuccessorSend{id, then: FindSuccessorThen::Connect}) if id == did3
+            Message::FindSuccessorSend(FindSuccessorSend{id, report_then: FindSuccessorThen::Connect, strict: false, and: FindSuccessorAnd::None}) if id == did3
         ));
 
         // 3->1 FindSuccessorReport
@@ -552,7 +589,7 @@ pub mod tests {
         assert_eq!(ev_1.relay.path, vec![did3, did2]);
         assert!(matches!(
             ev_1.data,
-            Message::FindSuccessorSend(FindSuccessorSend{id, then: FindSuccessorThen::Connect}) if id == did3
+            Message::FindSuccessorSend(FindSuccessorSend{id, report_then: FindSuccessorThen::Connect, strict: false, and: FindSuccessorAnd::Report}) if id == did3
         ));
 
         // 3->2 FindSuccessorReport
@@ -613,7 +650,7 @@ pub mod tests {
         assert_eq!(ev_2.relay.path, vec![did1, did3]);
         assert!(matches!(
             ev_2.data,
-            Message::FindSuccessorSend(FindSuccessorSend{id, then: FindSuccessorThen::Connect}) if id == did1
+            Message::FindSuccessorSend(FindSuccessorSend{id, report_then: FindSuccessorThen::Connect, strict: false, and: FindSuccessorAnd::Report}) if id == did1
         ));
 
         // 1->3 FindSuccessorReport
@@ -683,7 +720,7 @@ pub mod tests {
         assert_eq!(ev_1.relay.path, vec![did2]);
         assert!(matches!(
             ev_1.data,
-            Message::FindSuccessorSend(FindSuccessorSend{id, then: FindSuccessorThen::Connect}) if id == did2
+            Message::FindSuccessorSend(FindSuccessorSend{id, report_then: FindSuccessorThen::Connect, and: FindSuccessorAnd::Report, strict: false}) if id == did2
         ));
 
         // 2->1 FindSuccessorSend
@@ -692,7 +729,7 @@ pub mod tests {
         assert_eq!(ev_2.relay.path, vec![did1]);
         assert!(matches!(
             ev_2.data,
-            Message::FindSuccessorSend(FindSuccessorSend{id, then: FindSuccessorThen::Connect}) if id == did1
+            Message::FindSuccessorSend(FindSuccessorSend{id, report_then: FindSuccessorThen::Connect, and: FindSuccessorAnd::Report, strict: false}) if id == did1
         ));
 
         Ok(())
@@ -802,7 +839,7 @@ pub mod tests {
         assert_eq!(ev_1.relay.path, vec![did3]);
         assert!(matches!(
             ev_1.data,
-            Message::FindSuccessorSend(FindSuccessorSend{id, then: FindSuccessorThen::Connect}) if id == did3
+            Message::FindSuccessorSend(FindSuccessorSend{id, report_then: FindSuccessorThen::Connect, strict: false, and: FindSuccessorAnd::Report}) if id == did3
         ));
 
         // 1->3 FindSuccessorSend
@@ -811,7 +848,7 @@ pub mod tests {
         assert_eq!(ev_3.relay.path, vec![did1]);
         assert!(matches!(
             ev_3.data,
-            Message::FindSuccessorSend(FindSuccessorSend{id, then: FindSuccessorThen::Connect}) if id == did1
+            Message::FindSuccessorSend(FindSuccessorSend{id, report_then: FindSuccessorThen::Connect, strict: false, and: FindSuccessorAnd::Report}) if id == did1
         ));
 
         Ok(())

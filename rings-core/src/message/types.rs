@@ -28,13 +28,20 @@ pub struct ConnectNodeReport {
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
 pub struct FindSuccessorSend {
     pub id: Did,
-    pub then: FindSuccessorThen,
+    pub strict: bool,
+    pub and: FindSuccessorAnd,
+    pub report_then: FindSuccessorThen,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct FindSuccessorReport {
     pub id: Did,
     pub then: FindSuccessorThen,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct VisitServiceReport {
+    pub data: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -96,7 +103,7 @@ pub enum MaybeEncrypted<T> {
     Plain(T),
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FindSuccessorThen {
     None,
@@ -104,6 +111,14 @@ pub enum FindSuccessorThen {
     FixFingerTable,
     SyncStorage,
     CustomCallback(u8),
+    VisitService(Vec<u8>)
+}
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FindSuccessorAnd {
+    None,
+    Report,
+    VisitService(Vec<u8>)
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -114,6 +129,7 @@ pub enum Message {
     ConnectNodeSend(ConnectNodeSend),
     AlreadyConnected(AlreadyConnected),
     ConnectNodeReport(ConnectNodeReport),
+    VisitServiceReport(VisitServiceReport),
     FindSuccessorSend(FindSuccessorSend),
     FindSuccessorReport(FindSuccessorReport),
     NotifyPredecessorSend(NotifyPredecessorSend),
