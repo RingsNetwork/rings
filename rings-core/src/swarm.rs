@@ -70,6 +70,11 @@ impl SwarmBuilder {
         }
     }
 
+    pub fn hidden_service(mut self, port: Option<usize>) -> Self {
+        self.hidden_service_port = port;
+        self
+    }
+
     pub fn dht_succ_max(mut self, succ_max: u8) -> Self {
         self.dht_succ_max = succ_max;
         self

@@ -70,6 +70,9 @@ struct Daemon {
 
     #[clap(long, env, help = "external ip address")]
     pub external_ip: Option<String>,
+
+    #[clap(long, env, help = "hidden service port")]
+    pub hidden_service_port: Option<usize>,
 }
 
 #[derive(Args, Debug)]
@@ -239,6 +242,7 @@ async fn daemon_run(
     stuns: &str,
     stabilize_timeout: usize,
     external_ip: Option<String>,
+    hidden_service_port: Option<usize>,
 ) -> anyhow::Result<()> {
     let storage = PersistenceStorage::new().await?;
 
@@ -246,6 +250,7 @@ async fn daemon_run(
         SwarmBuilder::new(stuns, storage)
             .key(key)
             .external_address(external_ip)
+            .hidden_service(hidden_service_port)
             .build()?,
     );
 
@@ -290,6 +295,7 @@ async fn main() -> anyhow::Result<()> {
                 args.ice_servers.as_str(),
                 args.stabilize_timeout,
                 args.external_ip,
+                args.hidden_service_port,
             )
             .await
         }
