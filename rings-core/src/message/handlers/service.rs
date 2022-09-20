@@ -17,13 +17,13 @@ use crate::message::PayloadSender;
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-pub trait TChordSocketForward {
+pub trait TChordHiddenService {
     async fn request(&self, id: Did, req: Vec<u8>) -> Result<()>;
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-impl TChordSocketForward for MessageHandler {
+impl TChordHiddenService for MessageHandler {
     async fn request(&self, id: Did, req: Vec<u8>) -> Result<()> {
         let connect_msg = Message::FindSuccessorSend(FindSuccessorSend {
             id,

@@ -32,5 +32,6 @@ pub use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 
 pub use crate::dht::vnode;
 pub use crate::message::handlers::storage::TChordStorage;
+pub use crate::message::handlers::service::TChordHiddenService;
 pub use crate::storage::PersistenceStorage;
 pub use crate::transports::Transport;

@@ -45,6 +45,7 @@ enum Command {
     #[clap(subcommand)]
     Pending(PendingCommand),
     Send(Send),
+    Request(Request),
     NewSecretKey,
 }
 
@@ -227,6 +228,16 @@ struct PendingCloseTransport {
 }
 
 #[derive(Args, Debug)]
+struct Request {
+    #[clap(flatten)]
+    client_args: ClientArgs,
+    #[clap()]
+    did: String,
+    #[clap()]
+    text: String,
+}
+
+#[derive(Args, Debug)]
 struct Send {
     #[clap(flatten)]
     client_args: ClientArgs,
@@ -395,6 +406,14 @@ async fn main() -> anyhow::Result<()> {
                 .await?
                 .send_message(args.to_address.as_str(), args.text.as_str())
                 .await?
+                .display();
+            Ok(())
+        }
+        Command::Request(args) => {
+            args.client_args
+                .new_client()
+                .await?
+                .request_service(&args.did, &args.text).await?
                 .display();
             Ok(())
         }
