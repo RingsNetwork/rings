@@ -40,7 +40,7 @@ pub struct FindSuccessorReport {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct VisitServiceReport {
+pub struct RequestServiceReport {
     pub data: Vec<u8>,
 }
 
@@ -111,14 +111,13 @@ pub enum FindSuccessorThen {
     FixFingerTable,
     SyncStorage,
     CustomCallback(u8),
-    VisitService(Vec<u8>)
 }
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FindSuccessorAnd {
     None,
     Report,
-    VisitService(Vec<u8>)
+    RequestService(Vec<u8>),
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -129,7 +128,7 @@ pub enum Message {
     ConnectNodeSend(ConnectNodeSend),
     AlreadyConnected(AlreadyConnected),
     ConnectNodeReport(ConnectNodeReport),
-    VisitServiceReport(VisitServiceReport),
+    RequestServiceReport(RequestServiceReport),
     FindSuccessorSend(FindSuccessorSend),
     FindSuccessorReport(FindSuccessorReport),
     NotifyPredecessorSend(NotifyPredecessorSend),

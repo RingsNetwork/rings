@@ -12,13 +12,13 @@ use crate::message::types::AlreadyConnected;
 use crate::message::types::ConnectNodeReport;
 use crate::message::types::ConnectNodeSend;
 use crate::message::types::FindSuccessorReport;
-use crate::message::types::VisitServiceReport;
 use crate::message::types::FindSuccessorSend;
 use crate::message::types::JoinDHT;
 use crate::message::types::Message;
+use crate::message::types::RequestServiceReport;
 use crate::message::types::SyncVNodeWithSuccessor;
-use crate::message::FindSuccessorThen;
 use crate::message::FindSuccessorAnd;
+use crate::message::FindSuccessorThen;
 use crate::message::HandleMsg;
 use crate::message::LeaveDHT;
 use crate::message::MessageHandler;
@@ -187,24 +187,52 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
         match self.dht.find_successor(msg.id)? {
             PeerRingAction::Some(id) => {
                 if msg.strict == false || self.dht.id == msg.id {
-                    relay.relay(self.dht.id, None)?;
-                    self.send_report_message(
-                        Message::FindSuccessorReport(FindSuccessorReport { id, then: msg.report_then.clone() }),
-                        ctx.tx_id,
-                        relay,
-                    )
-                        .await
+                    match &msg.and {
+                        FindSuccessorAnd::None => Ok(()),
+                        FindSuccessorAnd::Report => {
+                            relay.relay(self.dht.id, None)?;
+                            self.send_report_message(
+                                Message::FindSuccessorReport(FindSuccessorReport {
+                                    id,
+                                    then: msg.report_then.clone(),
+                                }),
+                                ctx.tx_id,
+                                relay,
+                            )
+                            .await
+                        }
+                        FindSuccessorAnd::RequestService(data) => {
+                            if let Some(p) = self.swarm.hidden_service_port {
+                                #[cfg(not(feature = "wasm"))]
+                                {
+                                    use std::io::Read;
+                                    use std::io::Write;
+                                    let mut stream =
+                                        std::net::TcpStream::connect(format!("127.0.0.1:{}", p))?;
+                                    // 100k
+                                    let mut buff: Vec<u8> = Vec::new();
+                                    stream.write(&data)?;
+                                    stream.read_to_end(&mut buff)?;
+                                    return self
+                                        .send_report_message(
+                                            Message::RequestServiceReport(RequestServiceReport {
+                                                data: buff.to_vec(),
+                                            }),
+                                            ctx.tx_id,
+                                            relay,
+                                        )
+                                        .await;
+                                }
+                            }
+                            Ok(())
+                        }
+                    }
                 } else {
-                    if self
-                        .swarm
-                        .get_and_check_transport(msg.id)
-                        .await
-                        .is_some()
-                    {
+                    if self.swarm.get_and_check_transport(msg.id).await.is_some() {
                         relay.relay(self.dht.id, Some(relay.destination))?;
                         return self.transpond_payload(ctx, relay).await;
                     } else {
-                        return Err(Error::MessageHandlerMissNextNode)
+                        return Err(Error::MessageHandlerMissNextNode);
                     }
                 }
             }
@@ -250,25 +278,6 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
                         next,
                     )
                     .await?
-                }
-            }
-            FindSuccessorThen::VisitService(data) => {
-                if let Some(p) = self.swarm.hidden_service_port {
-                    #[cfg(not(feature = "wasm"))]
-                    {
-                        use std::io::Read;
-                        use std::io::Write;
-                        let mut stream = std::net::TcpStream::connect(format!("127.0.0.1:{}", p))?;
-                        // 100k
-                        let mut buff: Vec<u8> = Vec::new();
-                        stream.write(&data)?;
-                        stream.read_to_end(&mut buff)?;
-                        self.send_report_message(
-                            Message::VisitServiceReport(VisitServiceReport{ data: buff.to_vec()}),
-                            ctx.tx_id,
-                            relay
-                        ).await?;
-                    }
                 }
             }
             _ => {}

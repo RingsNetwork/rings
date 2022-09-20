@@ -45,7 +45,7 @@ pub struct SwarmBuilder {
     session_ttl: Option<Ttl>,
     callback: Option<CallbackFn>,
     /// support forward request to hidden services.
-    hidden_service_port: Option<usize>
+    hidden_service_port: Option<usize>,
 }
 
 impl SwarmBuilder {
@@ -66,7 +66,7 @@ impl SwarmBuilder {
             session_manager: None,
             session_ttl: None,
             callback: None,
-            hidden_service_port: None
+            hidden_service_port: None,
         }
     }
 
