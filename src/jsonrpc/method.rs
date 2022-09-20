@@ -28,7 +28,7 @@ pub enum Method {
     /// Close pending connect
     ClosePendingTransport,
     /// Request hidden service
-    RequestService
+    RequestService,
 }
 
 impl Method {
@@ -47,7 +47,6 @@ impl Method {
             Method::ListPendings => "listPendings",
             Method::ClosePendingTransport => "closePendingTransport",
             Method::RequestService => "requestService",
-
         }
     }
 }

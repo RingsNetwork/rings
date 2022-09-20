@@ -230,7 +230,6 @@ impl Client {
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         ClientOutput::ok("Done.".into(), ())
     }
-
 }
 
 impl<T> ClientOutput<T> {

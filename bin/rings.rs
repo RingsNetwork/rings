@@ -413,7 +413,8 @@ async fn main() -> anyhow::Result<()> {
             args.client_args
                 .new_client()
                 .await?
-                .request_service(&args.did, &args.text).await?
+                .request_service(&args.did, &args.text)
+                .await?
                 .display();
             Ok(())
         }

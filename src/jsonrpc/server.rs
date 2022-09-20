@@ -229,7 +229,6 @@ async fn send_message(params: Params, meta: RpcMeta) -> Result<Value> {
     Ok(serde_json::json!({}))
 }
 
-
 async fn request_service(params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
     let params: serde_json::Map<String, Value> = params.parse()?;
