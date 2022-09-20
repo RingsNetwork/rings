@@ -47,17 +47,34 @@ pub trait MessageCallback {
     async fn builtin_message(&self, handler: &MessageHandler, ctx: &MessagePayload<Message>);
 }
 
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+pub trait MessageValidator {
+    async fn store_vnode(
+        &self,
+        handler: &MessageHandler,
+        ctx: &MessagePayload<Message>,
+    ) -> Option<String>;
+}
+
 #[cfg(not(feature = "wasm"))]
 pub type CallbackFn = Box<dyn MessageCallback + Send + Sync>;
 
 #[cfg(feature = "wasm")]
 pub type CallbackFn = Box<dyn MessageCallback>;
 
+#[cfg(not(feature = "wasm"))]
+pub type ValidatorFn = Box<dyn MessageValidator + Send + Sync>;
+
+#[cfg(feature = "wasm")]
+pub type ValidatorFn = Box<dyn MessageValidator>;
+
 #[derive(Clone)]
 pub struct MessageHandler {
     dht: Arc<PeerRing>,
     swarm: Arc<Swarm>,
     callback: Arc<Mutex<Option<CallbackFn>>>,
+    validator: Arc<Mutex<Option<ValidatorFn>>>,
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
@@ -67,25 +84,23 @@ pub trait HandleMsg<T> {
 }
 
 impl MessageHandler {
-    pub fn new_with_callback(dht: Arc<PeerRing>, swarm: Arc<Swarm>, callback: CallbackFn) -> Self {
-        Self {
-            dht,
-            swarm,
-            callback: Arc::new(Mutex::new(Some(callback))),
-        }
-    }
-
     pub fn new(swarm: Arc<Swarm>) -> Self {
         Self {
             dht: swarm.dht(),
             swarm,
             callback: Arc::new(Mutex::new(None)),
+            validator: Arc::new(Mutex::new(None)),
         }
     }
 
     pub async fn set_callback(&self, f: CallbackFn) {
         let mut cb = self.callback.lock().await;
         *cb = Some(f)
+    }
+
+    pub async fn set_validator(&self, f: ValidatorFn) {
+        let mut v = self.validator.lock().await;
+        *v = Some(f)
     }
 
     // disconnect a node if a node is in DHT
@@ -141,6 +156,19 @@ impl MessageHandler {
         Ok(())
     }
 
+    async fn validate(&self, payload: &MessagePayload<Message>) -> Result<()> {
+        let mut validator = self.validator.lock().await;
+        if let Some(ref mut v) = *validator {
+            match payload.data {
+                Message::StoreVNode(_) => v.store_vnode(self, payload).await,
+                _ => None,
+            }
+            .map(|info| Err(Error::InvalidMessage(info)))
+            .unwrap_or(Ok(()))?;
+        };
+        Ok(())
+    }
+
     pub fn decrypt_msg(&self, msg: &MaybeEncrypted<CustomMessage>) -> Result<CustomMessage> {
         let key = self.swarm.session_manager().session_key()?;
         let (decrypt_msg, _) = msg.to_owned().decrypt(&key)?;
@@ -155,6 +183,9 @@ impl MessageHandler {
             println!("{} got msg {}", self.swarm.did(), &payload.data);
         }
         log::trace!("NEW MESSAGE: {}", &payload.data);
+
+        self.validate(payload).await?;
+
         match &payload.data {
             Message::JoinDHT(ref msg) => self.handle(payload, msg).await,
             Message::LeaveDHT(ref msg) => self.handle(payload, msg).await,
@@ -186,6 +217,7 @@ impl MessageHandler {
                 x
             ))),
         }?;
+
         if let Err(e) = self.invoke_callback(payload).await {
             log::warn!("invoke callback error: {}", e);
         }
