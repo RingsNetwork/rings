@@ -204,8 +204,10 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
                         FindSuccessorAnd::RequestService(data) => {
                             #[cfg(not(feature = "wasm"))]
                             {
+                                use std::io::Read;
+                                use std::io::Write;
+
                                 if let Some(p) = self.swarm.hidden_service_port {
-                                    use std::io::Read;
 
                                     let mut stream =
                                         std::net::TcpStream::connect(format!("127.0.0.1:{}", p))?;
@@ -220,7 +222,7 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
                                             }),
                                             ctx.tx_id,
                                             relay,
-                                        )
+                                        ).await
                                 }
                             }
                             Ok(())
