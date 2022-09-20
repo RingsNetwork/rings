@@ -498,7 +498,7 @@ pub mod tests {
         assert_eq!(ev_2.relay.path, vec![did3, did1]);
         assert!(matches!(
             ev_2.data,
-            Message::FindSuccessorSend(FindSuccessorSend{id, report_then: FindSuccessorThen::Connect, strict: false, and: FindSuccessorAnd::None}) if id == did3
+            Message::FindSuccessorSend(FindSuccessorSend{id, report_then: FindSuccessorThen::Connect, strict: false, and: FindSuccessorAnd::Report}) if id == did3
         ));
 
         // 3->1 FindSuccessorReport
