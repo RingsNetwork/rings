@@ -186,7 +186,7 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
 
         match self.dht.find_successor(msg.id)? {
             PeerRingAction::Some(id) => {
-                if msg.strict == false || self.dht.id == msg.id {
+                if !msg.strict || self.dht.id == msg.id {
                     match &msg.and {
                         FindSuccessorAnd::None => Ok(()),
                         FindSuccessorAnd::Report => {
@@ -211,7 +211,7 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
                                         std::net::TcpStream::connect(format!("127.0.0.1:{}", p))?;
                                     // 100k
                                     let mut buff: Vec<u8> = Vec::new();
-                                    stream.write(&data)?;
+                                    stream.write_all(data)?;
                                     stream.read_to_end(&mut buff)?;
                                     return self
                                         .send_report_message(
@@ -227,13 +227,11 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
                             Ok(())
                         }
                     }
+                } else if self.swarm.get_and_check_transport(msg.id).await.is_some() {
+                    relay.relay(self.dht.id, Some(relay.destination))?;
+                    return self.transpond_payload(ctx, relay).await;
                 } else {
-                    if self.swarm.get_and_check_transport(msg.id).await.is_some() {
-                        relay.relay(self.dht.id, Some(relay.destination))?;
-                        return self.transpond_payload(ctx, relay).await;
-                    } else {
-                        return Err(Error::MessageHandlerMissNextNode);
-                    }
+                    return Err(Error::MessageHandlerMissNextNode);
                 }
             }
             PeerRingAction::RemoteAction(next, _) => {

@@ -1,10 +1,6 @@
-use std::net::TcpStream;
-
 use async_trait::async_trait;
-
 use crate::dht::Chord;
 use crate::dht::Did;
-use crate::dht::PeerRing;
 use crate::dht::PeerRingAction;
 use crate::err::Error;
 use crate::err::Result;
@@ -29,7 +25,7 @@ pub trait TChordSocketForward {
 impl TChordSocketForward for MessageHandler {
     async fn request(&self, id: Did, req: Vec<u8>) -> Result<()> {
         let connect_msg = Message::FindSuccessorSend(FindSuccessorSend {
-            id: id,
+            id,
             strict: true,
             report_then: FindSuccessorThen::None,
             and: FindSuccessorAnd::RequestService(req),
