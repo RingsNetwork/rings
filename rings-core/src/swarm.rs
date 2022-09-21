@@ -17,12 +17,14 @@ use crate::ecc::SecretKey;
 use crate::err::Error;
 use crate::err::Result;
 use crate::message;
-use crate::message::handlers::CallbackFn;
+use crate::message::CallbackFn;
 use crate::message::Decoder;
 use crate::message::Encoder;
 use crate::message::Message;
+use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
+use crate::message::ValidatorFn;
 use crate::session::SessionManager;
 use crate::session::Ttl;
 use crate::storage::MemStorage;
@@ -43,7 +45,6 @@ pub struct SwarmBuilder {
     dht_storage: PersistenceStorage,
     session_manager: Option<SessionManager>,
     session_ttl: Option<Ttl>,
-    callback: Option<CallbackFn>,
     /// support forward request to hidden services.
     hidden_service_port: Option<usize>,
 }
@@ -65,7 +66,6 @@ impl SwarmBuilder {
             dht_storage,
             session_manager: None,
             session_ttl: None,
-            callback: None,
             hidden_service_port: None,
         }
     }
@@ -77,11 +77,6 @@ impl SwarmBuilder {
 
     pub fn dht_succ_max(mut self, succ_max: u8) -> Self {
         self.dht_succ_max = succ_max;
-        self
-    }
-
-    pub fn callback(mut self, callback: CallbackFn) -> Self {
-        self.callback = Some(callback);
         self
     }
 
@@ -135,7 +130,6 @@ impl SwarmBuilder {
             dht: Arc::new(dht),
             session_manager,
             hidden_service_port: self.hidden_service_port,
-            callback: self.callback,
         })
     }
 }
@@ -147,7 +141,6 @@ pub struct Swarm {
     pub(crate) transport_event_channel: Channel<Event>,
     pub(crate) external_address: Option<String>,
     dht: Arc<PeerRing>,
-    pub callback: Option<CallbackFn>,
     /// support forward request to hidden services.
     pub hidden_service_port: Option<usize>,
     session_manager: SessionManager,
@@ -164,6 +157,14 @@ impl Swarm {
 
     pub fn session_manager(&self) -> &SessionManager {
         &self.session_manager
+    }
+
+    pub fn create_message_handler(
+        self: &Arc<Self>,
+        callback: Option<CallbackFn>,
+        validator: Option<ValidatorFn>,
+    ) -> MessageHandler {
+        MessageHandler::new(self.clone(), callback, validator)
     }
 
     async fn load_message(

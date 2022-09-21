@@ -294,6 +294,9 @@ pub enum Error {
 
     #[error("Failed to build swarm: {0}")]
     SwarmBuildFailed(String),
+
+    #[error("Message invalid: {0}")]
+    InvalidMessage(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
