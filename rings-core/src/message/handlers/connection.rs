@@ -31,7 +31,7 @@ use crate::types::ice_transport::IceTrickleScheme;
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<LeaveDHT> for MessageHandler {
     async fn handle(&self, _ctx: &MessagePayload<Message>, msg: &LeaveDHT) -> Result<()> {
-        self.disconnect(msg.id).await
+        self.swarm.disconnect(msg.id).await
     }
 }
 
@@ -262,7 +262,7 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
                 if self.swarm.get_and_check_transport(msg.id).await.is_none()
                     && msg.id != self.swarm.did()
                 {
-                    self.connect(msg.id).await?;
+                    self.swarm.connect(msg.id).await?;
                 }
             }
             FindSuccessorReportHandler::SyncStorage => {
@@ -799,7 +799,7 @@ pub mod tests {
         // node1's successor should be node2 now
         assert_eq!(node1.dht.lock_successor()?.max(), did2);
 
-        node1.connect(did3).await.unwrap();
+        node1.swarm.connect(did3).await.unwrap();
 
         // node1 send msg to node2
         let ev2 = node2.listen_once().await.unwrap();
@@ -920,7 +920,7 @@ pub mod tests {
             did1, did2, did3, did4,
         );
         println!("==================================================");
-        node4.connect(did1).await?;
+        swarm4.connect(did1).await?;
         // node 4 send msg to node2
         assert!(matches!(
             node2.listen_once().await.unwrap().data,
@@ -978,7 +978,7 @@ pub mod tests {
         println!("===================================");
         println!("| test disconnect node1 and node2 |");
         println!("===================================");
-        node1.disconnect(did2).await?;
+        swarm1.disconnect(did2).await?;
 
         // The transport is already dropped by disconnect function.
         // So that we get no msg from this listening.
@@ -1034,8 +1034,8 @@ pub mod tests {
         assert_no_more_msg(&node1, &node2, &node3).await;
         // Node 1 -- Node 2 -- Node 3
         println!("node1 connect node2 twice here");
-        let _ = node1.connect(did3).await.unwrap();
-        let t_1_3_b = node1.connect(did3).await.unwrap();
+        let _ = swarm1.connect(did3).await.unwrap();
+        let t_1_3_b = swarm1.connect(did3).await.unwrap();
         // ConnectNodeSend
         let _ = node2.listen_once().await.unwrap();
         let _ = node2.listen_once().await.unwrap();

@@ -9,19 +9,12 @@ use super::Message;
 use super::MessagePayload;
 use super::OriginVerificationGen;
 use super::PayloadSender;
-use crate::dht::Chord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
-use crate::dht::PeerRingAction;
 use crate::err::Error;
 use crate::err::Result;
-use crate::prelude::RTCSdpType;
-use crate::prelude::Transport;
 use crate::session::SessionManager;
 use crate::swarm::Swarm;
-use crate::transports::manager::TransportManager;
-use crate::types::ice_transport::IceTransportInterface;
-use crate::types::ice_transport::IceTrickleScheme;
 
 /// Operator and Handler for Connection
 pub mod connection;
@@ -96,44 +89,6 @@ impl MessageHandler {
             callback: Arc::new(callback),
             validator: Arc::new(validator),
         }
-    }
-
-    // disconnect a node if a node is in DHT
-    pub async fn disconnect(&self, did: Did) -> Result<()> {
-        log::info!("disconnect {:?}", did);
-        self.dht.remove(did)?;
-        if let Some((_address, trans)) = self.swarm.remove_transport(did) {
-            trans.close().await?
-        }
-        Ok(())
-    }
-
-    pub async fn connect(&self, did: Did) -> Result<Arc<Transport>> {
-        if let Some(t) = self.swarm.get_and_check_transport(did).await {
-            return Ok(t);
-        }
-
-        let transport = self.swarm.new_transport().await?;
-        let handshake_info = transport
-            .get_handshake_info(self.swarm.session_manager(), RTCSdpType::Offer)
-            .await?;
-        self.swarm.push_pending_transport(&transport)?;
-
-        let connect_msg = Message::ConnectNodeSend(super::ConnectNodeSend {
-            transport_uuid: transport.id.to_string(),
-            handshake_info: handshake_info.to_string(),
-        });
-        let next_hop = {
-            match self.dht.find_successor(did)? {
-                PeerRingAction::Some(node) => Some(node),
-                PeerRingAction::RemoteAction(node, _) => Some(node),
-                _ => None,
-            }
-        }
-        .ok_or(Error::NoNextHop)?;
-        log::debug!("next_hop: {:?}", next_hop);
-        self.send_message(connect_msg, next_hop, did).await?;
-        Ok(transport)
     }
 
     async fn invoke_callback(&self, payload: &MessagePayload<Message>) -> Result<()> {

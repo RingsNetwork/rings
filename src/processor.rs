@@ -18,7 +18,6 @@ use crate::prelude::rings_core::ecc::PublicKey;
 use crate::prelude::rings_core::ecc::SecretKey;
 use crate::prelude::rings_core::message::Encoded;
 use crate::prelude::rings_core::message::Message;
-use crate::prelude::rings_core::message::MessageHandler;
 use crate::prelude::rings_core::message::PayloadSender;
 use crate::prelude::rings_core::prelude::libsecp256k1;
 use crate::prelude::rings_core::prelude::uuid;
@@ -40,8 +39,6 @@ use crate::prelude::TChordStorage;
 pub struct Processor {
     /// a swarm instance
     pub swarm: Arc<Swarm>,
-    /// a msg_handler instance
-    pub msg_handler: Arc<MessageHandler>,
     /// a stabilization instane,
     pub stabilization: Arc<Stabilization>,
 }
@@ -49,13 +46,10 @@ pub struct Processor {
 #[cfg(feature = "node")]
 impl Metadata for Processor {}
 
-impl From<(Arc<Swarm>, Arc<MessageHandler>, Arc<Stabilization>)> for Processor {
-    fn from(
-        (swarm, msg_handler, stabilization): (Arc<Swarm>, Arc<MessageHandler>, Arc<Stabilization>),
-    ) -> Self {
+impl From<(Arc<Swarm>, Arc<Stabilization>)> for Processor {
+    fn from((swarm, stabilization): (Arc<Swarm>, Arc<Stabilization>)) -> Self {
         Self {
             swarm,
-            msg_handler,
             stabilization,
         }
     }
@@ -208,7 +202,7 @@ impl Processor {
     /// 3. PeerC can connect PeerA with PeerA's web3 address.
     pub async fn connect_with_did(&self, did: Did, wait_for_open: bool) -> Result<Peer> {
         let transport = self
-            .msg_handler
+            .swarm
             .connect(did)
             .await
             .map_err(Error::ConnectWithDidError)?;
@@ -360,29 +354,29 @@ impl Processor {
     pub async fn request_service(&self, destination: &str, msg: &[u8]) -> Result<()> {
         let did = Did::from_str(destination).map_err(|_| Error::InvalidDid)?;
         let data = msg.to_vec();
-        self.msg_handler
-            .request(did, data)
+        self.swarm
+            .service_request(did, data)
             .await
             .map_err(Error::SendMessage)
     }
 
     /// check local cache of dht
     pub async fn check_cache(&self, id: &Did) -> Option<vnode::VirtualNode> {
-        self.msg_handler.check_cache(id).await
+        self.swarm.storage_check_cache(id).await
     }
 
     /// fetch virtual node from DHT
     pub async fn fetch(&self, id: &Did) -> Result<()> {
-        self.msg_handler
-            .fetch(id)
+        self.swarm
+            .storage_fetch(id)
             .await
             .map_err(error::Error::VNodeError)
     }
 
     /// store virtual node on DHT
     pub async fn store(&self, vnode: vnode::VirtualNode) -> Result<()> {
-        self.msg_handler
-            .store(vnode)
+        self.swarm
+            .storage_store(vnode)
             .await
             .map_err(error::Error::VNodeError)
     }
@@ -437,12 +431,8 @@ mod test {
             .unwrap();
 
         let swarm = Arc::new(SwarmBuilder::new(stun, storage).key(key).build().unwrap());
-        let msg_handler = swarm.create_message_handler(None, None);
-        let stabilization = Stabilization::new(swarm.clone(), 200);
-        (
-            (swarm, Arc::new(msg_handler), Arc::new(stabilization)).into(),
-            path,
-        )
+        let stabilization = Arc::new(Stabilization::new(swarm.clone(), 200));
+        ((swarm, stabilization).into(), path)
     }
 
     #[tokio::test]

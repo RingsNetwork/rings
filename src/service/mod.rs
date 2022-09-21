@@ -19,7 +19,6 @@ use self::http_error::HttpError;
 use crate::jsonrpc::RpcMeta;
 use crate::prelude::rings_core::dht::Stabilization;
 use crate::prelude::rings_core::ecc::PublicKey;
-use crate::prelude::rings_core::message::MessageHandler;
 use crate::prelude::rings_core::swarm::Swarm;
 use crate::processor::Processor;
 
@@ -27,17 +26,12 @@ use crate::processor::Processor;
 pub async fn run_service(
     addr: String,
     swarm: Arc<Swarm>,
-    msg_handler: Arc<MessageHandler>,
     stabilization: Arc<Stabilization>,
     pubkey: Arc<PublicKey>,
 ) -> anyhow::Result<()> {
     let binding_addr = addr.parse().unwrap();
 
-    // let swarm_layer = Extension(swarm.clone());
-    // let msg_handler_layer = Extension(msg_handler.clone());
-    // let stabilization_layer = Extension(stabilization.clone());
-
-    let processor = Arc::new(Processor::from((swarm, msg_handler, stabilization)));
+    let processor = Arc::new(Processor::from((swarm, stabilization)));
     let processor_layer = Extension(processor);
 
     let mut jsonrpc_handler: MetaIoHandler<RpcMeta> = MetaIoHandler::default();

@@ -13,17 +13,18 @@ use crate::message::Message;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
+use crate::swarm::Swarm;
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait TChordHiddenService {
-    async fn request(&self, id: Did, req: Vec<u8>) -> Result<()>;
+    async fn service_request(&self, id: Did, req: Vec<u8>) -> Result<()>;
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-impl TChordHiddenService for MessageHandler {
-    async fn request(&self, id: Did, req: Vec<u8>) -> Result<()> {
+impl TChordHiddenService for Swarm {
+    async fn service_request(&self, id: Did, req: Vec<u8>) -> Result<()> {
         let connect_msg = Message::FindSuccessorSend(FindSuccessorSend {
             id,
             strict: true,

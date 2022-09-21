@@ -55,7 +55,7 @@ impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
         // then update local successor
         if self.swarm.get_and_check_transport(msg.id).await.is_none() && msg.id != self.swarm.did()
         {
-            self.connect(msg.id).await?;
+            self.swarm.connect(msg.id).await?;
         } else {
             {
                 self.dht.lock_successor()?.update(msg.id)
