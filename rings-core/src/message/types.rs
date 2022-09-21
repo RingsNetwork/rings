@@ -29,14 +29,13 @@ pub struct ConnectNodeReport {
 pub struct FindSuccessorSend {
     pub id: Did,
     pub strict: bool,
-    pub and: FindSuccessorAnd,
-    pub report_then: FindSuccessorThen,
+    pub then: FindSuccessorThen,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct FindSuccessorReport {
     pub id: Did,
-    pub then: FindSuccessorThen,
+    pub handler: FindSuccessorReportHandler,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -106,18 +105,18 @@ pub enum MaybeEncrypted<T> {
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FindSuccessorThen {
+    Report(FindSuccessorReportHandler),
+    RequestService(Vec<u8>),
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FindSuccessorReportHandler {
     None,
     Connect,
     FixFingerTable,
     SyncStorage,
     CustomCallback(u8),
-}
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum FindSuccessorAnd {
-    None,
-    Report,
-    RequestService(Vec<u8>),
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

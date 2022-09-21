@@ -7,7 +7,6 @@ use crate::err::Error;
 use crate::err::Result;
 use crate::message::types::FindSuccessorSend;
 use crate::message::types::RequestServiceReport;
-use crate::message::FindSuccessorAnd;
 use crate::message::FindSuccessorThen;
 use crate::message::HandleMsg;
 use crate::message::Message;
@@ -28,8 +27,7 @@ impl TChordHiddenService for MessageHandler {
         let connect_msg = Message::FindSuccessorSend(FindSuccessorSend {
             id,
             strict: true,
-            report_then: FindSuccessorThen::None,
-            and: FindSuccessorAnd::RequestService(req),
+            then: FindSuccessorThen::RequestService(req),
         });
         let next_hop = {
             match self.dht.find_successor(id)? {
