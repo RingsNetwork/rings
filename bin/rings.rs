@@ -44,6 +44,7 @@ enum Command {
     #[clap(subcommand)]
     Pending(PendingCommand),
     Send(Send),
+    Request(Request),
     NewSecretKey,
 }
 
@@ -69,6 +70,9 @@ struct Daemon {
 
     #[clap(long, env, help = "external ip address")]
     pub external_ip: Option<String>,
+
+    #[clap(long, env, help = "hidden service port")]
+    pub hidden_service_port: Option<usize>,
 }
 
 #[derive(Args, Debug)]
@@ -223,6 +227,16 @@ struct PendingCloseTransport {
 }
 
 #[derive(Args, Debug)]
+struct Request {
+    #[clap(flatten)]
+    client_args: ClientArgs,
+    #[clap()]
+    did: String,
+    #[clap()]
+    text: String,
+}
+
+#[derive(Args, Debug)]
 struct Send {
     #[clap(flatten)]
     client_args: ClientArgs,
@@ -238,6 +252,7 @@ async fn daemon_run(
     stuns: &str,
     stabilize_timeout: usize,
     external_ip: Option<String>,
+    hidden_service_port: Option<usize>,
 ) -> anyhow::Result<()> {
     let storage = PersistenceStorage::new().await?;
 
@@ -245,6 +260,7 @@ async fn daemon_run(
         SwarmBuilder::new(stuns, storage)
             .key(key)
             .external_address(external_ip)
+            .hidden_service(hidden_service_port)
             .build()?,
     );
 
@@ -289,6 +305,7 @@ async fn main() -> anyhow::Result<()> {
                 args.ice_servers.as_str(),
                 args.stabilize_timeout,
                 args.external_ip,
+                args.hidden_service_port,
             )
             .await
         }
@@ -387,6 +404,15 @@ async fn main() -> anyhow::Result<()> {
                 .new_client()
                 .await?
                 .send_message(args.to_address.as_str(), args.text.as_str())
+                .await?
+                .display();
+            Ok(())
+        }
+        Command::Request(args) => {
+            args.client_args
+                .new_client()
+                .await?
+                .request_service(&args.did, &args.text)
                 .await?
                 .display();
             Ok(())

@@ -27,6 +27,8 @@ use crate::types::ice_transport::IceTrickleScheme;
 pub mod connection;
 /// Operator and Handler for CustomMessage
 pub mod custom;
+/// Forward a request
+pub mod service;
 /// Operator and handler for DHT stablization
 pub mod stabilization;
 /// Operator and Handler for Storage

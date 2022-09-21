@@ -45,6 +45,8 @@ pub struct SwarmBuilder {
     dht_storage: PersistenceStorage,
     session_manager: Option<SessionManager>,
     session_ttl: Option<Ttl>,
+    /// support forward request to hidden services.
+    hidden_service_port: Option<usize>,
 }
 
 impl SwarmBuilder {
@@ -64,7 +66,13 @@ impl SwarmBuilder {
             dht_storage,
             session_manager: None,
             session_ttl: None,
+            hidden_service_port: None,
         }
+    }
+
+    pub fn hidden_service(mut self, port: Option<usize>) -> Self {
+        self.hidden_service_port = port;
+        self
     }
 
     pub fn dht_succ_max(mut self, succ_max: u8) -> Self {
@@ -121,6 +129,7 @@ impl SwarmBuilder {
             external_address: self.external_address,
             dht: Arc::new(dht),
             session_manager,
+            hidden_service_port: self.hidden_service_port,
         })
     }
 }
@@ -132,6 +141,8 @@ pub struct Swarm {
     pub(crate) transport_event_channel: Channel<Event>,
     pub(crate) external_address: Option<String>,
     dht: Arc<PeerRing>,
+    /// support forward request to hidden services.
+    pub hidden_service_port: Option<usize>,
     session_manager: SessionManager,
 }
 

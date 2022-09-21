@@ -14,6 +14,7 @@ mod types;
 pub use types::*;
 
 mod handlers;
+pub use handlers::service::TChordHiddenService;
 pub use handlers::storage::TChordStorage;
 pub use handlers::CallbackFn;
 pub use handlers::HandleMsg;

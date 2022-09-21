@@ -33,6 +33,9 @@ pub enum Error {
     #[error("Couldn't decode data as UTF-8.")]
     Utf8Encoding(#[from] std::string::FromUtf8Error),
 
+    #[error("IOError")]
+    ServiceIOError(#[from] std::io::Error),
+
     #[error("Invalid hexadecimal id in directory cache")]
     BadHexInCache(#[from] hex::FromHexError),
 
