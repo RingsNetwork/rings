@@ -13,10 +13,13 @@ pub use payload::PayloadSender;
 mod types;
 pub use types::*;
 
-pub(crate) mod handlers;
+mod handlers;
+pub use handlers::storage::TChordStorage;
+pub use handlers::CallbackFn;
 pub use handlers::HandleMsg;
 pub use handlers::MessageCallback;
 pub use handlers::MessageHandler;
+pub use handlers::ValidatorFn;
 
 mod protocols;
 pub use protocols::MessageRelay;

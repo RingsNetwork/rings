@@ -23,7 +23,7 @@ pub async fn prepare_node(
 
     let swarm = Arc::new(SwarmBuilder::new(stun, storage).key(key).build().unwrap());
     let dht = swarm.dht();
-    let node = MessageHandler::new(swarm.clone());
+    let node = swarm.create_message_handler(None, None);
 
     println!("key: {:?}", key.to_string());
     println!("did: {:?}", did);
