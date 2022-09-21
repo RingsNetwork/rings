@@ -127,7 +127,7 @@ async fn test_handle_connect_node() -> Result<()> {
             );
 
             // dht1 send msg to dht2 ask for connecting dht3
-            handler1.connect(swarm3.did()).await.unwrap();
+            swarm1.connect(swarm3.did()).await.unwrap();
             sleep(Duration::from_millis(10000)).await;
 
             let transport_1_to_3 = swarm1.get_transport(swarm3.did());

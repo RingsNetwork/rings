@@ -19,6 +19,7 @@ use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
+use crate::swarm::Swarm;
 
 /// SubRingOperator should imply necessary operator for DHT SubRing
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
@@ -27,22 +28,22 @@ pub trait SubRingOperator {
     /// Create subring
     /// 1. Created a subring and stored in Handler.subrings
     /// 2. Send StoreVNode message to it's successor
-    async fn create(&self, name: &str) -> Result<()>;
+    async fn subring_create(&self, name: &str) -> Result<()>;
     /// join a subring
-    async fn join(&self, name: &str) -> Result<()>;
+    async fn subring_join(&self, name: &str) -> Result<()>;
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-impl SubRingOperator for MessageHandler {
-    async fn create(&self, name: &str) -> Result<()> {
+impl SubRingOperator for Swarm {
+    async fn subring_create(&self, name: &str) -> Result<()> {
         let subring: SubRing = SubRing::new(name, &self.dht.id)?;
         let vnode: VirtualNode = subring.clone().try_into()?;
         self.dht.store_subring(&subring.clone()).await?;
-        self.store(vnode).await
+        self.storage_store(vnode).await
     }
 
-    async fn join(&self, name: &str) -> Result<()> {
+    async fn subring_join(&self, name: &str) -> Result<()> {
         let address: HashStr = name.to_owned().into();
         let did = Did::from_str(&address.inner())?;
         match self.dht.join_subring(&self.dht.id, &did).await {

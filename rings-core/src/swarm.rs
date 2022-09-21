@@ -11,8 +11,10 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use crate::channels::Channel;
+use crate::dht::Chord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
+use crate::dht::PeerRingAction;
 use crate::ecc::SecretKey;
 use crate::err::Error;
 use crate::err::Result;
@@ -25,6 +27,7 @@ use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
 use crate::message::ValidatorFn;
+use crate::prelude::RTCSdpType;
 use crate::session::SessionManager;
 use crate::session::Ttl;
 use crate::storage::MemStorage;
@@ -35,6 +38,7 @@ use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::Event;
 use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransportInterface;
+use crate::types::ice_transport::IceTrickleScheme;
 
 pub struct SwarmBuilder {
     key: Option<SecretKey>,
@@ -140,7 +144,7 @@ pub struct Swarm {
     pub(crate) ice_servers: Vec<IceServer>,
     pub(crate) transport_event_channel: Channel<Event>,
     pub(crate) external_address: Option<String>,
-    dht: Arc<PeerRing>,
+    pub(crate) dht: Arc<PeerRing>,
     /// support forward request to hidden services.
     pub hidden_service_port: Option<usize>,
     session_manager: SessionManager,
@@ -286,6 +290,43 @@ impl Swarm {
             .try_lock()
             .map_err(|_| Error::SwarmPendingTransTryLockFailed)?;
         Ok(pending.iter().find(|x| x.id.eq(&id)).cloned())
+    }
+
+    pub async fn disconnect(&self, did: Did) -> Result<()> {
+        log::info!("disconnect {:?}", did);
+        self.dht.remove(did)?;
+        if let Some((_address, trans)) = self.remove_transport(did) {
+            trans.close().await?
+        }
+        Ok(())
+    }
+
+    pub async fn connect(&self, did: Did) -> Result<Arc<Transport>> {
+        if let Some(t) = self.get_and_check_transport(did).await {
+            return Ok(t);
+        }
+
+        let transport = self.new_transport().await?;
+        let handshake_info = transport
+            .get_handshake_info(self.session_manager(), RTCSdpType::Offer)
+            .await?;
+        self.push_pending_transport(&transport)?;
+
+        let connect_msg = Message::ConnectNodeSend(message::ConnectNodeSend {
+            transport_uuid: transport.id.to_string(),
+            handshake_info: handshake_info.to_string(),
+        });
+        let next_hop = {
+            match self.dht.find_successor(did)? {
+                PeerRingAction::Some(node) => Some(node),
+                PeerRingAction::RemoteAction(node, _) => Some(node),
+                _ => None,
+            }
+        }
+        .ok_or(Error::NoNextHop)?;
+        log::debug!("next_hop: {:?}", next_hop);
+        self.send_message(connect_msg, next_hop, did).await?;
+        Ok(transport)
     }
 }
 

@@ -31,10 +31,9 @@ async fn new_processor() -> Processor {
             .unwrap(),
     );
 
-    let msg_handler = Arc::new(swarm.create_message_handler(None, None));
     let stab = Arc::new(Stabilization::new(swarm.clone(), 20));
 
-    (swarm, msg_handler, stab).into()
+    (swarm, stab).into()
 }
 
 async fn listen(p: &Processor, cb: Option<CallbackFn>) {

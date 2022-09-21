@@ -218,9 +218,8 @@ impl Client {
                     .map_err(JsError::from)?,
             );
 
-            let msg_handler = Arc::new(swarm.create_message_handler(None, None));
             let stabilization = Arc::new(Stabilization::new(swarm.clone(), 20));
-            let processor = Arc::new(Processor::from((swarm, msg_handler, stabilization)));
+            let processor = Arc::new(Processor::from((swarm, stabilization)));
             Ok(JsValue::from(Client {
                 processor,
                 unsigned_info: unsigned_info.clone(),
@@ -235,7 +234,7 @@ impl Client {
         let p = self.processor.clone();
 
         future_to_promise(async move {
-            let h = Arc::clone(&p.msg_handler);
+            let h = Arc::new(p.swarm.create_message_handler(None, None));
             let s = Arc::clone(&p.stabilization);
             futures::join!(
                 async {
@@ -526,9 +525,9 @@ impl Client {
             if let Some(v) = v_node {
                 let wasm_vnode = VirtualNode::from(v);
                 let data = JsValue::from_serde(&wasm_vnode).map_err(JsError::from)?;
-                return Ok(data);
+                Ok(data)
             } else {
-                return Ok(JsValue::null());
+                Ok(JsValue::null())
             }
         })
     }

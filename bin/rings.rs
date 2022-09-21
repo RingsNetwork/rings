@@ -270,14 +270,8 @@ async fn daemon_run(
     let pubkey = Arc::new(key.pubkey());
 
     let (_, _, _) = futures::join!(
-        listen_event.clone().listen(),
-        run_service(
-            http_addr.to_owned(),
-            swarm_clone,
-            listen_event,
-            stabilize.clone(),
-            pubkey,
-        ),
+        listen_event.listen(),
+        run_service(http_addr.to_owned(), swarm_clone, stabilize.clone(), pubkey),
         stabilize.wait(),
     );
 
