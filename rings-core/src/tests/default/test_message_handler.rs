@@ -31,7 +31,7 @@ async fn test_handle_join() -> Result<()> {
     let swarm1 = Arc::new(new_swarm(key1).await?);
     let swarm2 = Arc::new(new_swarm(key2).await?);
     manually_establish_connection(&swarm1, &swarm2).await?;
-    let handle1 = swarm1.message_handler(None, None);
+    let handle1 = swarm1.create_message_handler(None, None);
     let payload = swarm1.poll_message().await.unwrap();
     match handle1.handle_payload(&payload).await {
         Ok(_) => assert_eq!(true, true),
@@ -157,8 +157,8 @@ async fn test_handle_notify_predecessor() -> Result<()> {
     let swarm1 = Arc::new(new_swarm(key1).await?);
     let swarm2 = Arc::new(new_swarm(key2).await?);
     manually_establish_connection(&swarm1, &swarm2).await?;
-    let handler1 = swarm1.message_handler(None, None);
-    let handler2 = swarm2.message_handler(None, None);
+    let handler1 = swarm1.create_message_handler(None, None);
+    let handler2 = swarm2.create_message_handler(None, None);
 
     // handle join dht situation
     tokio::select! {
@@ -217,8 +217,8 @@ async fn test_handle_find_successor_increase() -> Result<()> {
     let swarm1 = Arc::new(new_swarm(key1).await?);
     let swarm2 = Arc::new(new_swarm(key2).await?);
     manually_establish_connection(&swarm1, &swarm2).await?;
-    let handler1 = swarm1.message_handler(None, None);
-    let handler2 = swarm2.message_handler(None, None);
+    let handler1 = swarm1.create_message_handler(None, None);
+    let handler2 = swarm2.create_message_handler(None, None);
 
     tokio::select! {
         _ = async {
@@ -296,8 +296,8 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
     let swarm1 = Arc::new(new_swarm(key1).await?);
     let swarm2 = Arc::new(new_swarm(key2).await?);
     manually_establish_connection(&swarm1, &swarm2).await?;
-    let handler1 = swarm1.message_handler(None, None);
-    let handler2 = swarm2.message_handler(None, None);
+    let handler1 = swarm1.create_message_handler(None, None);
+    let handler2 = swarm2.create_message_handler(None, None);
 
     // handle join dht situation
     tokio::select! {
@@ -390,8 +390,8 @@ async fn test_handle_storage() -> Result<()> {
     let swarm1 = Arc::new(new_swarm(key1).await?);
     let swarm2 = Arc::new(new_swarm(key2).await?);
     manually_establish_connection(&swarm1, &swarm2).await?;
-    let handler1 = swarm1.message_handler(None, None);
-    let handler2 = swarm2.message_handler(None, None);
+    let handler1 = swarm1.create_message_handler(None, None);
+    let handler2 = swarm2.create_message_handler(None, None);
     tokio::select! {
          _ = async {
              futures::join!(

@@ -427,7 +427,7 @@ mod test {
             .unwrap();
 
         let swarm = Arc::new(SwarmBuilder::new(stun, storage).key(key).build().unwrap());
-        let msg_handler = swarm.message_handler(None, None);
+        let msg_handler = swarm.create_message_handler(None, None);
         let stabilization = Stabilization::new(swarm.clone(), 200);
         (
             (swarm, Arc::new(msg_handler), Arc::new(stabilization)).into(),
@@ -635,8 +635,8 @@ mod test {
             msgs: msgs2.clone(),
         });
 
-        let msg_handler_1 = Arc::new(p1.swarm.message_handler(Some(callback1), None));
-        let msg_handler_2 = Arc::new(p2.swarm.message_handler(Some(callback2), None));
+        let msg_handler_1 = Arc::new(p1.swarm.create_message_handler(Some(callback1), None));
+        let msg_handler_2 = Arc::new(p2.swarm.create_message_handler(Some(callback2), None));
 
         let test_text1 = "test1";
         let test_text2 = "test2";

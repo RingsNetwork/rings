@@ -49,7 +49,7 @@ pub trait MessageCallback {
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait MessageValidator {
-    async fn store_vnode(
+    async fn validate(
         &self,
         handler: &MessageHandler,
         ctx: &MessagePayload<Message>,
@@ -150,12 +150,10 @@ impl MessageHandler {
 
     async fn validate(&self, payload: &MessagePayload<Message>) -> Result<()> {
         if let Some(ref v) = *self.validator {
-            match payload.data {
-                Message::StoreVNode(_) => v.store_vnode(self, payload).await,
-                _ => None,
-            }
-            .map(|info| Err(Error::InvalidMessage(info)))
-            .unwrap_or(Ok(()))?;
+            v.validate(self, payload)
+                .await
+                .map(|info| Err(Error::InvalidMessage(info)))
+                .unwrap_or(Ok(()))?;
         };
         Ok(())
     }
@@ -370,8 +368,8 @@ pub mod tests {
         let cb1: CallbackFn = Box::new(msg_callback1.clone());
         let cb2: CallbackFn = Box::new(msg_callback2.clone());
 
-        let handler1 = swarm1.message_handler(Some(cb1), None);
-        let handler2 = swarm2.message_handler(Some(cb2), None);
+        let handler1 = swarm1.create_message_handler(Some(cb1), None);
+        let handler2 = swarm2.create_message_handler(Some(cb2), None);
 
         handler1
             .send_direct_message(

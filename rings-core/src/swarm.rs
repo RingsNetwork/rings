@@ -148,7 +148,7 @@ impl Swarm {
         &self.session_manager
     }
 
-    pub fn message_handler(
+    pub fn create_message_handler(
         self: &Arc<Self>,
         callback: Option<CallbackFn>,
         validator: Option<ValidatorFn>,

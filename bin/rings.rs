@@ -248,7 +248,7 @@ async fn daemon_run(
             .build()?,
     );
 
-    let listen_event = Arc::new(swarm.message_handler(None, None));
+    let listen_event = Arc::new(swarm.create_message_handler(None, None));
     let stabilize = Arc::new(Stabilization::new(swarm.clone(), stabilize_timeout));
     let swarm_clone = swarm.clone();
     let pubkey = Arc::new(key.pubkey());
