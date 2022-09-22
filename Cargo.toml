@@ -80,4 +80,4 @@ wasm-bindgen-test = { version = "0.3.0" }
 [[bin]]
 name = "rings"
 path = "bin/rings.rs"
-required-features = ["default"]
+required-features = ["node"]
