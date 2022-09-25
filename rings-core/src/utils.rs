@@ -1,3 +1,4 @@
+//! Utils for ring-core
 use chrono::Utc;
 
 pub fn get_epoch_ms() -> u128 {

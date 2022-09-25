@@ -1,4 +1,6 @@
-//! To avoid too frequent signing, and keep the private key safe, we implemented a session protocol for signing/encrypting and verifying message.
+//! Signing/encrypting and verifying message.
+//!
+//! To avoid too frequent signing, and keep the private key safe
 //! - ECDSA Session is based on secp256k1, which create a temporate secret key with one time signing auth
 //! - To create a ECDSA Session, we should generate the unsign_info with our pubkey (Address)
 //! - `SessionManager::gen_unsign_info(addr, ..)`, it will returns the msg needs for sign, and a temporate private key

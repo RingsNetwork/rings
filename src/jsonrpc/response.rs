@@ -1,3 +1,4 @@
+//! A JSONRPC response object
 use std::sync::Arc;
 
 use serde::Deserialize;
@@ -14,8 +15,11 @@ use crate::processor;
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct Peer {
+    /// a processor' address
     pub did: String,
+    /// a transport protocol using in swarm instance
     pub transport_id: String,
+    /// transport ice connection state
     pub state: String,
 }
 

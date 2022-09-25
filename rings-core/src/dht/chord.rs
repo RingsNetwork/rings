@@ -104,7 +104,7 @@ pub struct PeerRing {
     /// first node on circle that succeeds (n + 2 ^(k-1) ) mod 2^m , 1 <= k<= m
     /// for index start with 0, it should be (n+2^k) mod 2^m
     pub finger: Arc<Mutex<FingerTable>>,
-    /// The next node on the identifier circle; finger[1].node
+    /// The next node on the identifier circle; finger\[1\].node
     pub successor: Arc<Mutex<Successor>>,
     /// The previous node on the identifier circle
     pub predecessor: Arc<Mutex<Option<Did>>>,

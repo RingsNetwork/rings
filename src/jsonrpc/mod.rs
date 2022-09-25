@@ -1,5 +1,5 @@
 ///! jsonrpc-server of rings-node
-///! [JSON-RPC]: https://www.jsonrpc.org/specification
+///! [JSON-RPC]: `<https://www.jsonrpc.org/specification>`
 pub mod method;
 pub mod response;
 /// jsonrpc server

@@ -131,6 +131,8 @@ where T: Serialize + DeserializeOwned
         Ok(pl)
     }
 
+    /// new_direct is A specific new_send, with same next_hop and destination
+    /// just like a normal server-client base model.
     pub fn new_direct(data: T, session_manager: &SessionManager, destination: Did) -> Result<Self> {
         Self::new_send(data, session_manager, destination, destination)
     }

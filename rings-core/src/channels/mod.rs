@@ -1,4 +1,4 @@
-//! async channel for both browser(wasm) and native
+//! Async channel for both browser(wasm) and native
 
 #[cfg(not(feature = "wasm"))]
 mod default;

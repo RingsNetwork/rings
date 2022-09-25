@@ -45,8 +45,11 @@ impl RpcMeta {
     }
 }
 
-/// MetaIoHandler<T>, T: Metadata
+<<<<<<< HEAD
 #[cfg(feature = "node")]
+=======
+/// MetaIoHandler<T>, T: Metadata
+>>>>>>> 87cb20e (update documents)
 impl Metadata for RpcMeta {}
 
 impl From<(Arc<Processor>, bool)> for RpcMeta {
@@ -55,9 +58,12 @@ impl From<(Arc<Processor>, bool)> for RpcMeta {
     }
 }
 
+<<<<<<< HEAD
+#[cfg(feature = "node")]
+=======
 /// MetaIoHandler add methods from `super::methods::*` with RpcMeta
 /// which contains `processor` and `is_auth`.
-#[cfg(feature = "node")]
+>>>>>>> 87cb20e (update documents)
 pub(crate) async fn build_handler(handler: &mut MetaIoHandler<RpcMeta>) {
     handler.add_method_with_meta(Method::ConnectPeerViaHttp.as_str(), connect_peer_via_http);
     handler.add_method_with_meta(Method::ConnectWithSeed.as_str(), connect_with_seed);
@@ -261,9 +267,8 @@ async fn send_message(params: Params, meta: RpcMeta) -> Result<Value> {
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
         .as_str()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
-    let tx_id = meta
-        .processor
+    meta.processor
         .send_message(destination, text.as_bytes())
         .await?;
-    Ok(serde_json::json!({"tx_id": tx_id.to_string()}))
+    Ok(serde_json::json!({}))
 }

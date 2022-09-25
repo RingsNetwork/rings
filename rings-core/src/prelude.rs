@@ -1,4 +1,4 @@
-//! prelude
+//! Re-exports of important traits, types, and functions used with rin-core.
 
 pub use async_trait;
 pub use base58;

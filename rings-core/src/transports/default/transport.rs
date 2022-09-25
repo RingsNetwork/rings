@@ -53,11 +53,17 @@ type EventSender = <AcChannel<Event> as Channel<Event>>::Sender;
 
 #[derive(Clone)]
 pub struct DefaultTransport {
+    /// an unique identity
     pub id: uuid::Uuid,
+    /// webrtc'RTCPeerConnection
     connection: Arc<FuturesMutex<Option<Arc<RTCPeerConnection>>>>,
+    /// ice candidates will be noticed when connecting
     pending_candidates: Arc<FuturesMutex<Vec<RTCIceCandidate>>>,
+    /// ice protocol message communication channel
     data_channel: Arc<FuturesMutex<Option<Arc<RTCDataChannel>>>>,
+    /// channel contains `Sender` and `Receiver` with specific `Event`
     event_sender: EventSender,
+    /// node publicKey
     public_key: Arc<AsyncRwLock<Option<PublicKey>>>,
     chunk_list: Arc<FuturesMutex<ChunkList<TRANSPORT_MTU>>>,
 }
@@ -93,6 +99,7 @@ impl IceTransport for DefaultTransport {
         self.data_channel.lock().await.clone()
     }
 
+    /// get a RTCConnection offer, use to connect other nodes.
     async fn get_offer(&self) -> Result<RTCSessionDescription> {
         match self.get_peer_connection().await {
             Some(peer_connection) => {
@@ -114,6 +121,7 @@ impl IceTransport for DefaultTransport {
         }
     }
 
+    /// get a RTCConnection answer, relay `offer` message and make connection.
     async fn get_answer(&self) -> Result<RTCSessionDescription> {
         match self.get_peer_connection().await {
             Some(peer_connection) => {

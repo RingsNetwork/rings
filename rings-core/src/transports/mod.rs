@@ -1,3 +1,4 @@
+//! Transport about `wasm` and `node`, use `dummy` for testing
 #[cfg(all(not(feature = "wasm"), not(feature = "dummy")))]
 pub mod default;
 #[cfg(all(not(feature = "wasm"), feature = "dummy"))]
