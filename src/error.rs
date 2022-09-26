@@ -80,7 +80,6 @@ impl Error {
     }
 }
 
-#[cfg(feature = "node")]
 impl From<Error> for jsonrpc_core::Error {
     fn from(e: Error) -> Self {
         Self {

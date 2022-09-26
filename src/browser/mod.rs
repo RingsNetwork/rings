@@ -6,12 +6,15 @@ use std::convert::TryFrom;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use js_sys::Promise;
 use serde::Deserialize;
 use serde::Serialize;
 
-use self::utils::from_rtc_ice_connection_state;
+use crate::jsonrpc;
+use crate::jsonrpc::method::Method;
+use crate::jsonrpc::RpcMeta;
 use crate::prelude::js_sys;
+use crate::prelude::js_sys::Promise;
+use crate::prelude::jsonrpc_core;
 use crate::prelude::rings_core::async_trait;
 use crate::prelude::rings_core::dht::Did;
 use crate::prelude::rings_core::dht::Stabilization;
@@ -44,6 +47,7 @@ use crate::prelude::wasm_bindgen_futures::future_to_promise;
 use crate::prelude::web3::contract::tokens::Tokenizable;
 use crate::prelude::web_sys::RtcIceConnectionState;
 use crate::processor::Processor;
+use crate::util::from_rtc_ice_connection_state;
 
 #[wasm_bindgen(start)]
 pub fn start() -> Result<(), JsError> {
@@ -180,6 +184,7 @@ pub struct Client {
     unsigned_info: UnsignedInfo,
     signed_data: Vec<u8>,
     stuns: String,
+    rpc_meta: RpcMeta,
 }
 
 #[wasm_bindgen]
@@ -192,6 +197,12 @@ impl Client {
     ) -> Promise {
         let unsigned_info = unsigned_info.clone();
         Self::new_client_with_storage(&unsigned_info, signed_data, stuns, "rings-node".to_owned())
+    }
+
+    /// get self web3 address
+    #[wasm_bindgen(getter)]
+    pub fn address(&self) -> Result<String, JsError> {
+        Ok(self.processor.did().into_token().to_string())
     }
 
     pub fn new_client_with_storage(
@@ -220,11 +231,13 @@ impl Client {
 
             let stabilization = Arc::new(Stabilization::new(swarm.clone(), 20));
             let processor = Arc::new(Processor::from((swarm, stabilization)));
+            let rpc_meta = (processor.clone(), false).into();
             Ok(JsValue::from(Client {
-                processor,
+                processor: processor.clone(),
                 unsigned_info: unsigned_info.clone(),
                 signed_data,
                 stuns,
+                rpc_meta,
             }))
         })
     }
@@ -246,12 +259,6 @@ impl Client {
             );
             Ok(JsValue::null())
         })
-    }
-
-    /// get self web3 address
-    #[wasm_bindgen(getter)]
-    pub fn address(&self) -> Result<String, JsError> {
-        Ok(self.processor.did().into_token().to_string())
     }
 
     /// listen message callback.
@@ -548,6 +555,31 @@ impl Client {
             let vnode_info = vnode::VirtualNode::try_from(data).map_err(JsError::from)?;
             p.store(vnode_info).await.map_err(JsError::from)?;
             Ok(JsValue::null())
+        })
+    }
+
+    pub fn request(&self, method: String, params: String) -> Promise {
+        let params = jsonrpc_core::Params::None;
+        let p = self.rpc_meta.clone();
+        future_to_promise(async move {
+            let method = Method::try_from(method.as_str())
+                .map_err(|e| JsError::new(e.to_string().as_str()))?;
+            let r = match method {
+                Method::ConnectPeerViaHttp => todo!(),
+                Method::ConnectWithDid => jsonrpc::server::connect_with_did(params, p).await,
+                Method::ConnectWithSeed => todo!(),
+                Method::ListPeers => todo!(),
+                Method::CreateOffer => todo!(),
+                Method::AnswerOffer => todo!(),
+                Method::AcceptAnswer => todo!(),
+                Method::SendTo => todo!(),
+                Method::Disconnect => todo!(),
+                Method::ListPendings => todo!(),
+                Method::ClosePendingTransport => todo!(),
+                Method::RequestService => todo!(),
+            };
+            let r = r.map_err(JsError::from)?;
+            Ok(JsValue::from_serde(&r).map_err(JsError::from)?)
         })
     }
 }

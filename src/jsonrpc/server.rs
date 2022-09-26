@@ -6,12 +6,15 @@ use std::sync::Arc;
 use futures::future::join_all;
 use jsonrpc_core::Error;
 use jsonrpc_core::ErrorCode;
+#[cfg(feature = "node")]
 use jsonrpc_core::MetaIoHandler;
+#[cfg(feature = "node")]
 use jsonrpc_core::Metadata;
 use jsonrpc_core::Params;
 use jsonrpc_core::Result;
 use jsonrpc_core::Value;
 
+#[cfg(feature = "node")]
 use super::method::Method;
 use super::response;
 use super::response::Peer;
@@ -23,6 +26,7 @@ use crate::prelude::rings_core::types::ice_transport::IceTransportInterface;
 use crate::processor;
 use crate::processor::Processor;
 use crate::seed::Seed;
+use crate::util::from_rtc_ice_connection_state;
 
 /// RpcMeta basic info struct
 #[derive(Clone)]
@@ -40,6 +44,7 @@ impl RpcMeta {
     }
 }
 
+#[cfg(feature = "node")]
 impl Metadata for RpcMeta {}
 
 impl From<(Arc<Processor>, bool)> for RpcMeta {
@@ -48,6 +53,7 @@ impl From<(Arc<Processor>, bool)> for RpcMeta {
     }
 }
 
+#[cfg(feature = "node")]
 pub(crate) async fn build_handler(handler: &mut MetaIoHandler<RpcMeta>) {
     handler.add_method_with_meta(Method::ConnectPeerViaHttp.as_str(), connect_peer_via_http);
     handler.add_method_with_meta(Method::ConnectWithSeed.as_str(), connect_with_seed);
@@ -65,6 +71,7 @@ pub(crate) async fn build_handler(handler: &mut MetaIoHandler<RpcMeta>) {
     handler.add_method_with_meta(Method::SendTo.as_str(), send_message);
 }
 
+/// Connect Peer VIA http
 async fn connect_peer_via_http(params: Params, meta: RpcMeta) -> Result<Value> {
     let p: Vec<String> = params.parse()?;
     let peer_url = p
@@ -78,6 +85,7 @@ async fn connect_peer_via_http(params: Params, meta: RpcMeta) -> Result<Value> {
     Ok(Value::String(transport.id.to_string()))
 }
 
+/// Connect Peer with seed
 async fn connect_with_seed(params: Params, meta: RpcMeta) -> Result<Value> {
     let p: Vec<Seed> = params.parse()?;
     let seed = p
@@ -103,6 +111,7 @@ async fn connect_with_seed(params: Params, meta: RpcMeta) -> Result<Value> {
     Ok(Value::Null)
 }
 
+/// Handle Answer Offer
 async fn answer_offer(params: Params, meta: RpcMeta) -> Result<Value> {
     let p: Vec<String> = params.parse()?;
     let ice_info = p
@@ -117,7 +126,8 @@ async fn answer_offer(params: Params, meta: RpcMeta) -> Result<Value> {
     TransportAndIce::from(r).to_json_obj().map_err(Error::from)
 }
 
-async fn connect_with_did(params: Params, meta: RpcMeta) -> Result<Value> {
+/// Handle Connect with DID
+pub async fn connect_with_did(params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
     let p: Vec<String> = params.parse()?;
     let address_str = p
@@ -133,12 +143,14 @@ async fn connect_with_did(params: Params, meta: RpcMeta) -> Result<Value> {
     Ok(Value::Null)
 }
 
+/// Handle create offer
 async fn create_offer(_params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
     let r = meta.processor.create_offer().await.map_err(Error::from)?;
     TransportAndIce::from(r).to_json_obj().map_err(Error::from)
 }
 
+/// Handle accept answer
 async fn accept_answer(params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
     let params: Vec<String> = params.parse()?;
@@ -148,12 +160,13 @@ async fn accept_answer(params: Params, meta: RpcMeta) -> Result<Value> {
             .accept_answer(transport_id.as_str(), ice.as_str())
             .await?;
         let state = p.transport.ice_connection_state().await;
-        let r: Peer = (&p, state.map(|x| x.to_string())).into();
+        let r: Peer = (&p, state.map(|x| from_rtc_ice_connection_state(x))).into();
         return r.to_json_obj().map_err(Error::from);
     };
     Err(Error::new(ErrorCode::InvalidParams))
 }
 
+/// Handle list peers
 async fn list_peers(_params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
     let peers = meta.processor.list_peers().await?;
@@ -165,11 +178,12 @@ async fn list_peers(_params: Params, meta: RpcMeta) -> Result<Value> {
     let r: Vec<Peer> = peers
         .iter()
         .zip(states.iter())
-        .map(|(x, y)| Peer::from((x, y.map(|s| s.to_string()))))
+        .map(|(x, y)| Peer::from((x, y.map(|s| from_rtc_ice_connection_state(s)))))
         .collect::<Vec<_>>();
     serde_json::to_value(&r).map_err(|_| Error::from(ServerError::JsonSerializeError))
 }
 
+/// Handle close connection
 async fn close_connection(params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
     let params: Vec<String> = params.parse()?;
@@ -181,6 +195,7 @@ async fn close_connection(params: Params, meta: RpcMeta) -> Result<Value> {
     Ok(serde_json::json!({}))
 }
 
+/// Handle list pendings
 async fn list_pendings(_params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
     let transports = meta.processor.list_pendings().await?;
@@ -192,11 +207,14 @@ async fn list_pendings(_params: Params, meta: RpcMeta) -> Result<Value> {
     let r: Vec<response::TransportInfo> = transports
         .iter()
         .zip(states.iter())
-        .map(|(x, y)| response::TransportInfo::from((x, y.map(|s| s.to_string()))))
+        .map(|(x, y)| {
+            response::TransportInfo::from((x, y.map(|s| from_rtc_ice_connection_state(s))))
+        })
         .collect::<Vec<_>>();
     serde_json::to_value(&r).map_err(|_| Error::from(ServerError::JsonSerializeError))
 }
 
+/// Handle close pending transport
 async fn close_pending_transport(params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
     let params: Vec<String> = params.parse()?;
@@ -209,6 +227,7 @@ async fn close_pending_transport(params: Params, meta: RpcMeta) -> Result<Value>
     Ok(serde_json::json!({}))
 }
 
+/// Handle send message
 async fn send_message(params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
     let params: serde_json::Map<String, Value> = params.parse()?;
@@ -224,6 +243,26 @@ async fn send_message(params: Params, meta: RpcMeta) -> Result<Value> {
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
     meta.processor
         .send_message(destination, text.as_bytes())
+        .await?;
+    Ok(serde_json::json!({}))
+}
+
+/// Handle request service
+async fn request_service(params: Params, meta: RpcMeta) -> Result<Value> {
+    meta.require_authed()?;
+    let params: serde_json::Map<String, Value> = params.parse()?;
+    let destination = params
+        .get("destination")
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
+        .as_str()
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
+    let text = params
+        .get("text")
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
+        .as_str()
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
+    meta.processor
+        .request_service(destination, text.as_bytes())
         .await?;
     Ok(serde_json::json!({}))
 }
