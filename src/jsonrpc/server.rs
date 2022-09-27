@@ -180,7 +180,7 @@ async fn accept_answer(params: Params, meta: RpcMeta) -> Result<Value> {
             .accept_answer(transport_id.as_str(), ice.as_str())
             .await?;
         let state = p.transport.ice_connection_state().await;
-        let r: Peer = (&p, state.map(|x| from_rtc_ice_connection_state(x))).into();
+        let r: Peer = (&p, state.map(from_rtc_ice_connection_state)).into();
         return r.to_json_obj().map_err(Error::from);
     };
     Err(Error::new(ErrorCode::InvalidParams))
@@ -198,7 +198,7 @@ async fn list_peers(_params: Params, meta: RpcMeta) -> Result<Value> {
     let r: Vec<Peer> = peers
         .iter()
         .zip(states.iter())
-        .map(|(x, y)| Peer::from((x, y.map(|s| from_rtc_ice_connection_state(s)))))
+        .map(|(x, y)| Peer::from((x, y.map(from_rtc_ice_connection_state))))
         .collect::<Vec<_>>();
     serde_json::to_value(&r).map_err(|_| Error::from(ServerError::JsonSerializeError))
 }
@@ -227,9 +227,7 @@ async fn list_pendings(_params: Params, meta: RpcMeta) -> Result<Value> {
     let r: Vec<response::TransportInfo> = transports
         .iter()
         .zip(states.iter())
-        .map(|(x, y)| {
-            response::TransportInfo::from((x, y.map(|s| from_rtc_ice_connection_state(s))))
-        })
+        .map(|(x, y)| response::TransportInfo::from((x, y.map(from_rtc_ice_connection_state))))
         .collect::<Vec<_>>();
     serde_json::to_value(&r).map_err(|_| Error::from(ServerError::JsonSerializeError))
 }
