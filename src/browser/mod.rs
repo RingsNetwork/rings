@@ -14,7 +14,6 @@ use crate::jsonrpc::server as jsonrpc_server;
 use crate::jsonrpc::RpcMeta;
 use crate::prelude::js_sys;
 use crate::prelude::js_sys::Promise;
-use crate::prelude::jsonrpc_core;
 use crate::prelude::rings_core::async_trait;
 use crate::prelude::rings_core::dht::Did;
 use crate::prelude::rings_core::dht::Stabilization;
@@ -561,25 +560,8 @@ impl Client {
     pub fn request(&self, method: String, params: JsValue) -> Promise {
         let meta = self.rpc_meta.clone();
         future_to_promise(async move {
-            let params = if params.is_null() {
-                jsonrpc_core::Params::None
-            } else if js_sys::Array::is_array(&params) {
-                let arr = js_sys::Array::from(&params);
-                let v = arr
-                    .iter()
-                    .flat_map(|x| x.into_serde::<serde_json::Value>().ok())
-                    .collect::<Vec<serde_json::Value>>();
-                jsonrpc_core::Params::Array(v)
-            } else if params.is_object() {
-                let d = params
-                    .into_serde::<serde_json::Map<String, serde_json::Value>>()
-                    .map_err(JsError::from)?;
-                jsonrpc_core::Params::Map(d)
-            } else {
-                //return Err(JsError::new("unsupport params"));
-                return Err(JsValue::from_str("unsupport params"));
-            };
-
+            let params =
+                utils::parse_params(params).map_err(|e| JsError::new(e.to_string().as_str()))?;
             let method = Method::try_from(method.as_str())
                 .map_err(|e| JsError::new(e.to_string().as_str()))?;
             let r = jsonrpc_server::handle_request(method, meta, params)
