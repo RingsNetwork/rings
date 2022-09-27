@@ -1,4 +1,6 @@
 #![warn(missing_docs)]
+///! jsonrpc-server of rings-node
+///! [JSON-RPC]: https://www.jsonrpc.org/specification
 use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -14,7 +16,6 @@ use jsonrpc_core::Params;
 use jsonrpc_core::Result;
 use jsonrpc_core::Value;
 
-#[cfg(feature = "node")]
 use super::method::Method;
 use super::response;
 use super::response::Peer;
@@ -69,6 +70,25 @@ pub(crate) async fn build_handler(handler: &mut MetaIoHandler<RpcMeta>) {
         close_pending_transport,
     );
     handler.add_method_with_meta(Method::SendTo.as_str(), send_message);
+}
+
+#[cfg(feature = "browser")]
+/// handle jsonrpc method request for browser
+pub async fn handle_request(method: Method, meta: RpcMeta, params: Params) -> Result<Value> {
+    match method {
+        Method::ConnectPeerViaHttp => connect_peer_via_http(params, meta).await,
+        Method::ConnectWithDid => connect_with_did(params, meta).await,
+        Method::ConnectWithSeed => connect_with_seed(params, meta).await,
+        Method::ListPeers => list_peers(params, meta).await,
+        Method::CreateOffer => create_offer(params, meta).await,
+        Method::AnswerOffer => answer_offer(params, meta).await,
+        Method::AcceptAnswer => accept_answer(params, meta).await,
+        Method::SendTo => send_message(params, meta).await,
+        Method::Disconnect => close_connection(params, meta).await,
+        Method::ListPendings => list_pendings(params, meta).await,
+        Method::ClosePendingTransport => close_pending_transport(params, meta).await,
+        Method::RequestService => request_service(params, meta).await,
+    }
 }
 
 /// Connect Peer VIA http
@@ -127,7 +147,7 @@ async fn answer_offer(params: Params, meta: RpcMeta) -> Result<Value> {
 }
 
 /// Handle Connect with DID
-pub async fn connect_with_did(params: Params, meta: RpcMeta) -> Result<Value> {
+async fn connect_with_did(params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
     let p: Vec<String> = params.parse()?;
     let address_str = p

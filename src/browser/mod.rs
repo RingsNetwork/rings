@@ -9,8 +9,8 @@ use std::sync::Arc;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::jsonrpc;
 use crate::jsonrpc::method::Method;
+use crate::jsonrpc::server as jsonrpc_server;
 use crate::jsonrpc::RpcMeta;
 use crate::prelude::js_sys;
 use crate::prelude::js_sys::Promise;
@@ -558,28 +558,35 @@ impl Client {
         })
     }
 
-    pub fn request(&self, method: String, params: String) -> Promise {
-        let params = jsonrpc_core::Params::None;
-        let p = self.rpc_meta.clone();
+    pub fn request(&self, method: String, params: JsValue) -> Promise {
+        let meta = self.rpc_meta.clone();
         future_to_promise(async move {
+            let params = if params.is_null() {
+                jsonrpc_core::Params::None
+            } else if js_sys::Array::is_array(&params) {
+                let arr = js_sys::Array::from(&params);
+                let v = arr
+                    .iter()
+                    .flat_map(|x| x.into_serde::<serde_json::Value>().ok())
+                    .collect::<Vec<serde_json::Value>>();
+                jsonrpc_core::Params::Array(v)
+            } else if params.is_object() {
+                let d = params
+                    .into_serde::<serde_json::Map<String, serde_json::Value>>()
+                    .map_err(JsError::from)?;
+                jsonrpc_core::Params::Map(d)
+            } else {
+                //return Err(JsError::new("unsupport params"));
+                return Err(JsValue::from_str("unsupport params"));
+            };
+
             let method = Method::try_from(method.as_str())
                 .map_err(|e| JsError::new(e.to_string().as_str()))?;
-            let r = match method {
-                Method::ConnectPeerViaHttp => todo!(),
-                Method::ConnectWithDid => jsonrpc::server::connect_with_did(params, p).await,
-                Method::ConnectWithSeed => todo!(),
-                Method::ListPeers => todo!(),
-                Method::CreateOffer => todo!(),
-                Method::AnswerOffer => todo!(),
-                Method::AcceptAnswer => todo!(),
-                Method::SendTo => todo!(),
-                Method::Disconnect => todo!(),
-                Method::ListPendings => todo!(),
-                Method::ClosePendingTransport => todo!(),
-                Method::RequestService => todo!(),
-            };
-            let r = r.map_err(JsError::from)?;
-            Ok(JsValue::from_serde(&r).map_err(JsError::from)?)
+            let r = jsonrpc_server::handle_request(method, meta, params)
+                .await
+                .map_err(JsError::from)?;
+            let r = JsValue::from_serde(&r).map_err(JsError::from)?;
+            Ok(r)
         })
     }
 }

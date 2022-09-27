@@ -32,7 +32,7 @@ pub fn load_config() {
 }
 
 /// convert RTCIceConnectionState to string
-pub fn from_rtc_ice_connection_state(state: RTCIceConnectionState) -> String {
+pub(crate) fn from_rtc_ice_connection_state(state: RTCIceConnectionState) -> String {
     match state {
         RTCIceConnectionState::New => "new",
         RTCIceConnectionState::Checking => "checking",
@@ -47,7 +47,8 @@ pub fn from_rtc_ice_connection_state(state: RTCIceConnectionState) -> String {
 }
 
 /// convert string to RTCIceConnectionState
-pub fn into_rtc_ice_connection_state(value: &str) -> Option<RTCIceConnectionState> {
+#[allow(dead_code)]
+pub(crate) fn into_rtc_ice_connection_state(value: &str) -> Option<RTCIceConnectionState> {
     Some(match value {
         "new" => RTCIceConnectionState::New,
         "checking" => RTCIceConnectionState::Checking,
