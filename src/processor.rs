@@ -402,12 +402,12 @@ impl From<&(Did, Arc<Transport>)> for Peer {
 #[cfg(feature = "node")]
 mod test {
     use futures::lock::Mutex;
-    use rings_core::ecc::SecretKey;
-    use rings_core::message::MessageHandler;
-    use rings_core::storage::PersistenceStorage;
-    use rings_core::swarm::SwarmBuilder;
 
     use super::*;
+    use crate::prelude::rings_core::ecc::SecretKey;
+    use crate::prelude::rings_core::message::MessageHandler;
+    use crate::prelude::rings_core::storage::PersistenceStorage;
+    use crate::prelude::rings_core::swarm::SwarmBuilder;
     use crate::prelude::*;
 
     async fn new_processor() -> (Processor, String) {

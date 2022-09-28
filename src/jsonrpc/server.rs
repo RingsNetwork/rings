@@ -11,7 +11,6 @@ use jsonrpc_core::Metadata;
 use jsonrpc_core::Params;
 use jsonrpc_core::Result;
 use jsonrpc_core::Value;
-use rings_core::types::ice_transport::IceTransportInterface;
 
 use super::method::Method;
 use super::response;
@@ -20,6 +19,7 @@ use super::response::TransportAndIce;
 use crate::error::Error as ServerError;
 use crate::prelude::rings_core::dht::Did;
 use crate::prelude::rings_core::transports::manager::TransportManager;
+use crate::prelude::rings_core::types::ice_transport::IceTransportInterface;
 use crate::processor;
 use crate::processor::Processor;
 use crate::seed::Seed;
