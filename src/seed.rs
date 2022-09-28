@@ -17,35 +17,15 @@ pub struct SeedPeer {
 
 #[cfg_attr(feature = "node", async_trait)]
 #[cfg_attr(not(feature = "node"), async_trait(?Send))]
-pub trait SeedLoader {
+pub trait SourceLoader {
     async fn load(source: &str) -> anyhow::Result<Self>
     where Self: Sized;
 }
 
 #[cfg(feature = "node")]
 mod loader {
-    use reqwest::Url;
-
     use super::*;
+    use crate::util::loader::ResourceLoader;
 
-    #[async_trait]
-    impl SeedLoader for Seed {
-        async fn load(source: &str) -> anyhow::Result<Self> {
-            let url = Url::parse(source).map_err(|e| anyhow::anyhow!("{}", e))?;
-
-            if let Ok(path) = url.to_file_path() {
-                let data = std::fs::read_to_string(path)
-                    .map_err(|_| anyhow::anyhow!("Unable to read seed file"))?;
-
-                serde_json::from_str(&data).map_err(|e| anyhow::anyhow!("{}", e))
-            } else {
-                let resp = reqwest::get(source)
-                    .await
-                    .map_err(|_| anyhow::anyhow!("failed to get seed from {}", source))?;
-                resp.json()
-                    .await
-                    .map_err(|_| anyhow::anyhow!("failed to load seed from {}", source))
-            }
-        }
-    }
+    impl ResourceLoader for Seed {}
 }

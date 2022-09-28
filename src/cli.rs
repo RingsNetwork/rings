@@ -11,7 +11,7 @@ use crate::jsonrpc::response::TransportAndIce;
 use crate::jsonrpc_client::SimpleClient;
 use crate::prelude::reqwest;
 use crate::seed::Seed;
-use crate::seed::SeedLoader;
+use crate::util::loader::ResourceLoader;
 
 #[derive(Clone)]
 pub struct Client {
@@ -215,17 +215,6 @@ impl Client {
         params.insert("text".to_owned(), json!(text));
         self.client
             .call_method(Method::SendTo.as_str(), Params::Map(params))
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        ClientOutput::ok("Done.".into(), ())
-    }
-
-    pub async fn request_service(&self, did: &str, text: &str) -> Output<()> {
-        let mut params = serde_json::Map::new();
-        params.insert("destination".to_owned(), json!(did));
-        params.insert("text".to_owned(), json!(text));
-        self.client
-            .call_method(Method::RequestService.as_str(), Params::Map(params))
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         ClientOutput::ok("Done.".into(), ())

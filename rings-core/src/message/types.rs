@@ -39,11 +39,6 @@ pub struct FindSuccessorReport {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct RequestServiceReport {
-    pub data: Vec<u8>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct NotifyPredecessorSend {
     pub id: Did,
 }
@@ -106,7 +101,6 @@ pub enum MaybeEncrypted<T> {
 #[non_exhaustive]
 pub enum FindSuccessorThen {
     Report(FindSuccessorReportHandler),
-    RequestService(Vec<u8>),
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
@@ -127,7 +121,6 @@ pub enum Message {
     ConnectNodeSend(ConnectNodeSend),
     AlreadyConnected(AlreadyConnected),
     ConnectNodeReport(ConnectNodeReport),
-    RequestServiceReport(RequestServiceReport),
     FindSuccessorSend(FindSuccessorSend),
     FindSuccessorReport(FindSuccessorReport),
     NotifyPredecessorSend(NotifyPredecessorSend),

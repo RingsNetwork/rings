@@ -63,7 +63,6 @@ pub(crate) async fn build_handler(handler: &mut MetaIoHandler<RpcMeta>) {
         close_pending_transport,
     );
     handler.add_method_with_meta(Method::SendTo.as_str(), send_message);
-    handler.add_method_with_meta(Method::RequestService.as_str(), request_service);
 }
 
 async fn connect_peer_via_http(params: Params, meta: RpcMeta) -> Result<Value> {
@@ -225,25 +224,6 @@ async fn send_message(params: Params, meta: RpcMeta) -> Result<Value> {
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
     meta.processor
         .send_message(destination, text.as_bytes())
-        .await?;
-    Ok(serde_json::json!({}))
-}
-
-async fn request_service(params: Params, meta: RpcMeta) -> Result<Value> {
-    meta.require_authed()?;
-    let params: serde_json::Map<String, Value> = params.parse()?;
-    let destination = params
-        .get("destination")
-        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
-        .as_str()
-        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
-    let text = params
-        .get("text")
-        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
-        .as_str()
-        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
-    meta.processor
-        .request_service(destination, text.as_bytes())
         .await?;
     Ok(serde_json::json!({}))
 }

@@ -31,7 +31,6 @@ use crate::prelude::rings_core::types::ice_transport::IceTransportInterface;
 use crate::prelude::rings_core::types::ice_transport::IceTrickleScheme;
 use crate::prelude::vnode;
 use crate::prelude::web3::signing::keccak256;
-use crate::prelude::TChordHiddenService;
 use crate::prelude::TChordStorage;
 
 /// Processor for rings-node jsonrpc server
@@ -346,16 +345,6 @@ impl Processor {
         // self.swarm.do_send_payload(address, payload)
         self.swarm
             .send_direct_message(msg, destination)
-            .await
-            .map_err(Error::SendMessage)
-    }
-
-    /// request hidden services
-    pub async fn request_service(&self, destination: &str, msg: &[u8]) -> Result<()> {
-        let did = Did::from_str(destination).map_err(|_| Error::InvalidDid)?;
-        let data = msg.to_vec();
-        self.swarm
-            .service_request(did, data)
             .await
             .map_err(Error::SendMessage)
     }
