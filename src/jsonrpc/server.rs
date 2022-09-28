@@ -87,7 +87,6 @@ pub async fn handle_request(method: Method, meta: RpcMeta, params: Params) -> Re
         Method::Disconnect => close_connection(params, meta).await,
         Method::ListPendings => list_pendings(params, meta).await,
         Method::ClosePendingTransport => close_pending_transport(params, meta).await,
-        Method::RequestService => request_service(params, meta).await,
     }
 }
 
@@ -261,26 +260,6 @@ async fn send_message(params: Params, meta: RpcMeta) -> Result<Value> {
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
     meta.processor
         .send_message(destination, text.as_bytes())
-        .await?;
-    Ok(serde_json::json!({}))
-}
-
-/// Handle request service
-async fn request_service(params: Params, meta: RpcMeta) -> Result<Value> {
-    meta.require_authed()?;
-    let params: serde_json::Map<String, Value> = params.parse()?;
-    let destination = params
-        .get("destination")
-        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
-        .as_str()
-        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
-    let text = params
-        .get("text")
-        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
-        .as_str()
-        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
-    meta.processor
-        .request_service(destination, text.as_bytes())
         .await?;
     Ok(serde_json::json!({}))
 }
