@@ -15,6 +15,7 @@ pub use self::rings_core::message::Message;
 pub use self::rings_core::message::MessageCallback;
 pub use self::rings_core::message::MessageHandler;
 pub use self::rings_core::message::MessagePayload;
+pub use self::rings_core::message::PayloadSender;
 pub use self::rings_core::prelude::async_trait::async_trait;
 pub use self::rings_core::prelude::base58;
 #[cfg(feature = "browser")]
@@ -29,7 +30,6 @@ pub use self::rings_core::prelude::web3;
 #[cfg(feature = "browser")]
 pub use self::rings_core::prelude::web_sys;
 pub use self::rings_core::prelude::PersistenceStorage;
-pub use self::rings_core::prelude::TChordHiddenService;
 pub use self::rings_core::prelude::TChordStorage;
 pub use self::rings_core::session::Session;
 pub use self::rings_core::session::SessionManager;

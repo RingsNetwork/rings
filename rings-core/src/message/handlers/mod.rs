@@ -20,8 +20,6 @@ use crate::swarm::Swarm;
 pub mod connection;
 /// Operator and Handler for CustomMessage
 pub mod custom;
-/// Forward a request
-pub mod service;
 /// Operator and handler for DHT stablization
 pub mod stabilization;
 /// Operator and Handler for Storage
@@ -117,7 +115,7 @@ impl MessageHandler {
 
     pub fn decrypt_msg(&self, msg: &MaybeEncrypted<CustomMessage>) -> Result<CustomMessage> {
         let key = self.swarm.session_manager().session_key()?;
-        let (decrypt_msg, _) = msg.to_owned().decrypt(&key)?;
+        let (decrypt_msg, _) = msg.to_owned().decrypt(key)?;
         Ok(decrypt_msg)
     }
 
@@ -330,7 +328,7 @@ pub mod tests {
 
         handler1
             .send_direct_message(
-                Message::custom("Hello world 1 to 2 - 1".as_bytes(), &None)?,
+                Message::custom("Hello world 1 to 2 - 1".as_bytes(), None)?,
                 did2,
             )
             .await
@@ -338,7 +336,7 @@ pub mod tests {
 
         handler1
             .send_direct_message(
-                Message::custom("Hello world 1 to 2 - 2".as_bytes(), &None)?,
+                Message::custom("Hello world 1 to 2 - 2".as_bytes(), None)?,
                 did2,
             )
             .await
@@ -346,7 +344,7 @@ pub mod tests {
 
         handler2
             .send_direct_message(
-                Message::custom("Hello world 2 to 1 - 1".as_bytes(), &None)?,
+                Message::custom("Hello world 2 to 1 - 1".as_bytes(), None)?,
                 did1,
             )
             .await
@@ -354,7 +352,7 @@ pub mod tests {
 
         handler1
             .send_direct_message(
-                Message::custom("Hello world 1 to 2 - 3".as_bytes(), &None)?,
+                Message::custom("Hello world 1 to 2 - 3".as_bytes(), None)?,
                 did2,
             )
             .await
@@ -362,7 +360,7 @@ pub mod tests {
 
         handler2
             .send_direct_message(
-                Message::custom("Hello world 2 to 1 - 2".as_bytes(), &None)?,
+                Message::custom("Hello world 2 to 1 - 2".as_bytes(), None)?,
                 did1,
             )
             .await

@@ -117,9 +117,9 @@ pub fn affine_to_str(a: &[Affine]) -> Result<String> {
     field_to_str(a.iter().map(|x| x.x).collect::<Vec<Field>>().as_slice())
 }
 
-pub fn encrypt(s: &str, k: &PublicKey) -> Result<Vec<(CurveEle, CurveEle)>> {
+pub fn encrypt(s: &str, k: PublicKey) -> Result<Vec<(CurveEle, CurveEle)>> {
     let random_sar: Scalar = SecretKey::random().into();
-    let mut h: Affine = (*k).try_into()?;
+    let mut h: Affine = k.try_into()?;
     h.y.normalize();
     h.y.normalize();
     let affines: Vec<(Affine, Affine)> = str_to_affine(s)
@@ -150,8 +150,8 @@ pub fn encrypt(s: &str, k: &PublicKey) -> Result<Vec<(CurveEle, CurveEle)>> {
     Ok(ret)
 }
 
-pub fn decrypt(m: &[(CurveEle, CurveEle)], k: &SecretKey) -> Result<String> {
-    let sar: Scalar = (*k).into();
+pub fn decrypt(m: &[(CurveEle, CurveEle)], k: SecretKey) -> Result<String> {
+    let sar: Scalar = k.into();
     let cxt = ECMultContext::new_boxed();
     affine_to_str(
         m.iter()
@@ -323,6 +323,6 @@ mod test {
                 .unwrap();
         let pubkey = key.pubkey();
         let t: String = random(1024);
-        assert_eq!(decrypt(&encrypt(&t, &pubkey).unwrap(), &key).unwrap(), t)
+        assert_eq!(decrypt(&encrypt(&t, pubkey).unwrap(), key).unwrap(), t)
     }
 }

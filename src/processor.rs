@@ -31,7 +31,6 @@ use crate::prelude::rings_core::types::ice_transport::IceTransportInterface;
 use crate::prelude::rings_core::types::ice_transport::IceTrickleScheme;
 use crate::prelude::vnode;
 use crate::prelude::web3::signing::keccak256;
-use crate::prelude::TChordHiddenService;
 use crate::prelude::TChordStorage;
 
 /// Processor for rings-node jsonrpc server
@@ -342,20 +341,10 @@ impl Processor {
             msg,
         );
         let destination = Did::from_str(destination).map_err(|_| Error::InvalidDid)?;
-        let msg = Message::custom(msg, &None).map_err(Error::SendMessage)?;
+        let msg = Message::custom(msg, None).map_err(Error::SendMessage)?;
         // self.swarm.do_send_payload(address, payload)
         self.swarm
             .send_direct_message(msg, destination)
-            .await
-            .map_err(Error::SendMessage)
-    }
-
-    /// request hidden services
-    pub async fn request_service(&self, destination: &str, msg: &[u8]) -> Result<()> {
-        let did = Did::from_str(destination).map_err(|_| Error::InvalidDid)?;
-        let data = msg.to_vec();
-        self.swarm
-            .service_request(did, data)
             .await
             .map_err(Error::SendMessage)
     }
@@ -413,12 +402,12 @@ impl From<&(Did, Arc<Transport>)> for Peer {
 #[cfg(feature = "node")]
 mod test {
     use futures::lock::Mutex;
-    use rings_core::ecc::SecretKey;
-    use rings_core::message::MessageHandler;
-    use rings_core::storage::PersistenceStorage;
-    use rings_core::swarm::SwarmBuilder;
 
     use super::*;
+    use crate::prelude::rings_core::ecc::SecretKey;
+    use crate::prelude::rings_core::message::MessageHandler;
+    use crate::prelude::rings_core::storage::PersistenceStorage;
+    use crate::prelude::rings_core::swarm::SwarmBuilder;
     use crate::prelude::*;
 
     async fn new_processor() -> (Processor, String) {

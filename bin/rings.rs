@@ -4,18 +4,22 @@ use std::sync::Arc;
 use clap::Args;
 use clap::Parser;
 use clap::Subcommand;
-use rings_core::dht::Stabilization;
-use rings_core::dht::TStabilize;
-use rings_core::ecc::SecretKey;
-use rings_core::storage::PersistenceStorage;
-use rings_core::swarm::SwarmBuilder;
-use rings_core::types::message::MessageListener;
+use rings_core::message::CallbackFn;
+use rings_node::backend::Backend;
+use rings_node::backend::BackendConfig;
 use rings_node::cli::Client;
 use rings_node::logger::LogLevel;
 use rings_node::logger::Logger;
+use rings_node::prelude::rings_core::dht::Stabilization;
+use rings_node::prelude::rings_core::dht::TStabilize;
+use rings_node::prelude::rings_core::ecc::SecretKey;
+use rings_node::prelude::rings_core::storage::PersistenceStorage;
+use rings_node::prelude::rings_core::swarm::SwarmBuilder;
+use rings_node::prelude::rings_core::types::message::MessageListener;
 use rings_node::processor::Processor;
 use rings_node::service::run_service;
 use rings_node::util;
+use rings_node::util::loader::ResourceLoader;
 
 #[derive(Parser, Debug)]
 #[clap(about, version, author)]
@@ -44,7 +48,6 @@ enum Command {
     #[clap(subcommand)]
     Pending(PendingCommand),
     Send(Send),
-    Request(Request),
     NewSecretKey,
 }
 
@@ -71,8 +74,8 @@ struct Daemon {
     #[clap(long, env, help = "external ip address")]
     pub external_ip: Option<String>,
 
-    #[clap(long, env, help = "hidden service port")]
-    pub hidden_service_port: Option<usize>,
+    #[clap(long, env, help = "backend service config")]
+    pub backend: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -227,16 +230,6 @@ struct PendingCloseTransport {
 }
 
 #[derive(Args, Debug)]
-struct Request {
-    #[clap(flatten)]
-    client_args: ClientArgs,
-    #[clap()]
-    did: String,
-    #[clap()]
-    text: String,
-}
-
-#[derive(Args, Debug)]
 struct Send {
     #[clap(flatten)]
     client_args: ClientArgs,
@@ -252,7 +245,7 @@ async fn daemon_run(
     stuns: &str,
     stabilize_timeout: usize,
     external_ip: Option<String>,
-    hidden_service_port: Option<usize>,
+    backend: Option<String>,
 ) -> anyhow::Result<()> {
     let storage = PersistenceStorage::new().await?;
 
@@ -260,11 +253,20 @@ async fn daemon_run(
         SwarmBuilder::new(stuns, storage)
             .key(key)
             .external_address(external_ip)
-            .hidden_service(hidden_service_port)
             .build()?,
     );
 
-    let listen_event = Arc::new(swarm.create_message_handler(None, None));
+    let callback: Option<CallbackFn> = {
+        if let Some(backend) = backend {
+            let config = BackendConfig::load(&backend).await?;
+            let backend = Backend::new(config).await;
+            Some(Box::new(backend))
+        } else {
+            None
+        }
+    };
+
+    let listen_event = Arc::new(swarm.create_message_handler(callback, None));
     let stabilize = Arc::new(Stabilization::new(swarm.clone(), stabilize_timeout));
     let swarm_clone = swarm.clone();
     let pubkey = Arc::new(key.pubkey());
@@ -299,7 +301,7 @@ async fn main() -> anyhow::Result<()> {
                 args.ice_servers.as_str(),
                 args.stabilize_timeout,
                 args.external_ip,
-                args.hidden_service_port,
+                args.backend,
             )
             .await
         }
@@ -398,15 +400,6 @@ async fn main() -> anyhow::Result<()> {
                 .new_client()
                 .await?
                 .send_message(args.to_address.as_str(), args.text.as_str())
-                .await?
-                .display();
-            Ok(())
-        }
-        Command::Request(args) => {
-            args.client_args
-                .new_client()
-                .await?
-                .request_service(&args.did, &args.text)
                 .await?
                 .display();
             Ok(())

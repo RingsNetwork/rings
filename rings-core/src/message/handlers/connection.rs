@@ -198,35 +198,6 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
                             )
                             .await
                         }
-                        #[allow(unused_variables)]
-                        FindSuccessorThen::RequestService(data) => {
-                            #[cfg(not(feature = "wasm"))]
-                            {
-                                use std::io::Read;
-                                use std::io::Write;
-
-                                use crate::message::types::RequestServiceReport;
-
-                                if let Some(p) = self.swarm.hidden_service_port {
-                                    let mut stream =
-                                        std::net::TcpStream::connect(format!("127.0.0.1:{}", p))?;
-                                    // 100k
-                                    let mut buff: Vec<u8> = Vec::new();
-                                    stream.write_all(data)?;
-                                    stream.read_to_end(&mut buff)?;
-                                    return self
-                                        .send_report_message(
-                                            Message::RequestServiceReport(RequestServiceReport {
-                                                data: buff.to_vec(),
-                                            }),
-                                            ctx.tx_id,
-                                            relay,
-                                        )
-                                        .await;
-                                }
-                            }
-                            Ok(())
-                        }
                     }
                 } else if self.swarm.get_and_check_transport(msg.id).await.is_some() {
                     relay.relay(self.dht.id, Some(relay.destination))?;

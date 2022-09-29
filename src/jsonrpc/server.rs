@@ -11,7 +11,6 @@ use jsonrpc_core::Metadata;
 use jsonrpc_core::Params;
 use jsonrpc_core::Result;
 use jsonrpc_core::Value;
-use rings_core::types::ice_transport::IceTransportInterface;
 
 use super::method::Method;
 use super::response;
@@ -20,6 +19,7 @@ use super::response::TransportAndIce;
 use crate::error::Error as ServerError;
 use crate::prelude::rings_core::dht::Did;
 use crate::prelude::rings_core::transports::manager::TransportManager;
+use crate::prelude::rings_core::types::ice_transport::IceTransportInterface;
 use crate::processor;
 use crate::processor::Processor;
 use crate::seed::Seed;
@@ -63,7 +63,6 @@ pub(crate) async fn build_handler(handler: &mut MetaIoHandler<RpcMeta>) {
         close_pending_transport,
     );
     handler.add_method_with_meta(Method::SendTo.as_str(), send_message);
-    handler.add_method_with_meta(Method::RequestService.as_str(), request_service);
 }
 
 async fn connect_peer_via_http(params: Params, meta: RpcMeta) -> Result<Value> {
@@ -225,25 +224,6 @@ async fn send_message(params: Params, meta: RpcMeta) -> Result<Value> {
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
     meta.processor
         .send_message(destination, text.as_bytes())
-        .await?;
-    Ok(serde_json::json!({}))
-}
-
-async fn request_service(params: Params, meta: RpcMeta) -> Result<Value> {
-    meta.require_authed()?;
-    let params: serde_json::Map<String, Value> = params.parse()?;
-    let destination = params
-        .get("destination")
-        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
-        .as_str()
-        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
-    let text = params
-        .get("text")
-        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
-        .as_str()
-        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
-    meta.processor
-        .request_service(destination, text.as_bytes())
         .await?;
     Ok(serde_json::json!({}))
 }

@@ -39,11 +39,6 @@ pub struct FindSuccessorReport {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct RequestServiceReport {
-    pub data: Vec<u8>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct NotifyPredecessorSend {
     pub id: Did,
 }
@@ -106,7 +101,6 @@ pub enum MaybeEncrypted<T> {
 #[non_exhaustive]
 pub enum FindSuccessorThen {
     Report(FindSuccessorReportHandler),
-    RequestService(Vec<u8>),
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
@@ -120,6 +114,7 @@ pub enum FindSuccessorReportHandler {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Message {
     MultiCall(MultiCall),
     JoinDHT(JoinDHT),
@@ -127,7 +122,6 @@ pub enum Message {
     ConnectNodeSend(ConnectNodeSend),
     AlreadyConnected(AlreadyConnected),
     ConnectNodeReport(ConnectNodeReport),
-    RequestServiceReport(RequestServiceReport),
     FindSuccessorSend(FindSuccessorSend),
     FindSuccessorReport(FindSuccessorReport),
     NotifyPredecessorSend(NotifyPredecessorSend),
@@ -147,7 +141,7 @@ impl std::fmt::Display for Message {
 }
 
 impl Message {
-    pub fn custom(msg: &[u8], pubkey: &Option<PublicKey>) -> Result<Message> {
+    pub fn custom(msg: &[u8], pubkey: Option<PublicKey>) -> Result<Message> {
         let data = CustomMessage(msg.to_vec());
         let msg = MaybeEncrypted::new(data, pubkey)?;
         Ok(Message::CustomMessage(msg))
@@ -157,7 +151,7 @@ impl Message {
 impl<T> MaybeEncrypted<T>
 where T: Serialize + DeserializeOwned
 {
-    pub fn new(data: T, pubkey: &Option<PublicKey>) -> Result<Self> {
+    pub fn new(data: T, pubkey: Option<PublicKey>) -> Result<Self> {
         if let Some(pubkey) = pubkey {
             let msg = serde_json::to_string(&data).map_err(Error::Serialize)?;
             let cipher = elgamal::encrypt(&msg, pubkey)?;
@@ -167,7 +161,7 @@ where T: Serialize + DeserializeOwned
         }
     }
 
-    pub fn decrypt(self, key: &SecretKey) -> Result<(T, bool)> {
+    pub fn decrypt(self, key: SecretKey) -> Result<(T, bool)> {
         match self {
             MaybeEncrypted::Plain(msg) => Ok((msg, false)),
             MaybeEncrypted::Encrypted(cipher) => {
@@ -195,10 +189,10 @@ mod test {
         let key = SecretKey::random();
         let pubkey = key.pubkey();
 
-        let msg = Message::custom("hello".as_bytes(), &Some(pubkey)).unwrap();
+        let msg = Message::custom("hello".as_bytes(), Some(pubkey)).unwrap();
 
         let (plain, is_decrypted) = match msg {
-            Message::CustomMessage(cipher) => cipher.decrypt(&key).unwrap(),
+            Message::CustomMessage(cipher) => cipher.decrypt(key).unwrap(),
             _ => panic!("Unexpected message type"),
         };
 
