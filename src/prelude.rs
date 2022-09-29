@@ -15,6 +15,7 @@ pub use self::rings_core::message::Message;
 pub use self::rings_core::message::MessageCallback;
 pub use self::rings_core::message::MessageHandler;
 pub use self::rings_core::message::MessagePayload;
+pub use self::rings_core::message::PayloadSender;
 pub use self::rings_core::prelude::async_trait::async_trait;
 pub use self::rings_core::prelude::base58;
 #[cfg(feature = "browser")]

@@ -21,11 +21,3 @@ pub trait SourceLoader {
     async fn load(source: &str) -> anyhow::Result<Self>
     where Self: Sized;
 }
-
-#[cfg(feature = "node")]
-mod loader {
-    use super::*;
-    use crate::util::loader::ResourceLoader;
-
-    impl ResourceLoader for Seed {}
-}

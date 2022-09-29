@@ -4,7 +4,9 @@ use std::sync::Arc;
 use clap::Args;
 use clap::Parser;
 use clap::Subcommand;
+use rings_core::message::CallbackFn;
 use rings_node::backend::Backend;
+use rings_node::backend::BackendConfig;
 use rings_node::cli::Client;
 use rings_node::logger::LogLevel;
 use rings_node::logger::Logger;
@@ -254,10 +256,11 @@ async fn daemon_run(
             .build()?,
     );
 
-    let callback = {
+    let callback: Option<CallbackFn> = {
         if let Some(backend) = backend {
-            let backend = Backend::load(&backend).await?;
-            None
+            let config = BackendConfig::load(&backend).await?;
+            let backend = Backend::new(config).await;
+            Some(Box::new(backend))
         } else {
             None
         }

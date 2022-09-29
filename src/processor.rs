@@ -341,7 +341,7 @@ impl Processor {
             msg,
         );
         let destination = Did::from_str(destination).map_err(|_| Error::InvalidDid)?;
-        let msg = Message::custom(msg, &None).map_err(Error::SendMessage)?;
+        let msg = Message::custom(msg, None).map_err(Error::SendMessage)?;
         // self.swarm.do_send_payload(address, payload)
         self.swarm
             .send_direct_message(msg, destination)
