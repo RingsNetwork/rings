@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use clap::ArgAction;
 use clap::Args;
 use clap::Parser;
 use clap::Subcommand;
@@ -22,42 +23,42 @@ use rings_node::util;
 use rings_node::util::loader::ResourceLoader;
 
 #[derive(Parser, Debug)]
-#[clap(about, version, author)]
+#[command(about, version, author)]
 struct Cli {
-    #[clap(long, default_value_t = LogLevel::Info, arg_enum, env)]
+    #[arg(long, default_value_t = LogLevel::Info, value_enum, env)]
     log_level: LogLevel,
 
-    #[clap(long, short = 'c', parse(from_os_str))]
+    #[arg(long, short = 'c', value_parser)]
     config_file: Option<PathBuf>,
 
-    #[clap(subcommand)]
+    #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand, Debug)]
-#[clap(rename_all = "kebab-case")]
+#[command(rename_all = "kebab-case")]
 enum Command {
-    #[clap()]
-    Daemon(Daemon),
-    #[clap(subcommand)]
-    Connect(ConnectCommand),
-    #[clap(subcommand)]
-    Sdp(SdpCommand),
-    #[clap(subcommand)]
-    Peer(PeerCommand),
-    #[clap(subcommand)]
-    Pending(PendingCommand),
-    Send(Send),
     NewSecretKey,
+    #[command(about = "Start a long-running node daemon")]
+    Daemon(DaemonCommand),
+    #[command(subcommand)]
+    Connect(ConnectCommand),
+    #[command(subcommand)]
+    Sdp(SdpCommand),
+    #[command(subcommand)]
+    Peer(PeerCommand),
+    #[command(subcommand)]
+    Pending(PendingCommand),
+    #[command(subcommand)]
+    Send(SendCommand),
 }
 
 #[derive(Args, Debug)]
-#[clap(about)]
-struct Daemon {
-    #[clap(long, short = 'b', default_value = "127.0.0.1:50000", env)]
+struct DaemonCommand {
+    #[arg(long, short = 'b', default_value = "127.0.0.1:50000", env)]
     pub http_addr: String,
 
-    #[clap(
+    #[arg(
         long,
         short = 's',
         default_value = "stun://stun.l.google.com:19302",
@@ -65,22 +66,22 @@ struct Daemon {
     )]
     pub ice_servers: String,
 
-    #[clap(long = "key", short = 'k', env)]
+    #[arg(long = "key", short = 'k', env)]
     pub ecdsa_key: SecretKey,
 
-    #[clap(long, default_value = "20", env)]
+    #[arg(long, default_value = "20", env)]
     pub stabilize_timeout: usize,
 
-    #[clap(long, env, help = "external ip address")]
+    #[arg(long, env, help = "external ip address")]
     pub external_ip: Option<String>,
 
-    #[clap(long, env, help = "backend service config")]
+    #[arg(long, env, help = "backend service config")]
     pub backend: Option<String>,
 }
 
 #[derive(Args, Debug)]
 struct ClientArgs {
-    #[clap(
+    #[arg(
         long,
         short = 'u',
         default_value = "http://127.0.0.1:50000",
@@ -89,7 +90,7 @@ struct ClientArgs {
     )]
     endpoint_url: String,
 
-    #[clap(long = "key", short = 'k', env)]
+    #[arg(long = "key", short = 'k', env)]
     pub ecdsa_key: SecretKey,
 }
 
@@ -104,139 +105,158 @@ impl ClientArgs {
 }
 
 #[derive(Subcommand, Debug)]
-#[clap(rename_all = "kebab-case")]
+#[command(rename_all = "kebab-case")]
 enum ConnectCommand {
-    #[clap()]
-    Node(ConnectUrlArgs),
-    #[clap()]
-    Did(ConnectWithDidArgs),
-    #[clap()]
-    Seed(ConnectWithSeedArgs),
+    #[command(about = "Connect with Node url")]
+    Node(ConnectUrlCommand),
+    #[command(about = "Connect with Did via DHT")]
+    Did(ConnectWithDidCommand),
+    #[command(about = "Connect with seed from url or file")]
+    Seed(ConnectWithSeedCommand),
 }
 
 #[derive(Args, Debug)]
-#[clap(about = "Connect with Node url")]
-struct ConnectUrlArgs {
-    #[clap(flatten)]
+struct ConnectUrlCommand {
+    #[command(flatten)]
     client_args: ClientArgs,
 
-    #[clap()]
     node_url: String,
 }
 
 #[derive(Args, Debug)]
-#[clap(about = "Connect with Did via DHT")]
-struct ConnectWithDidArgs {
-    #[clap(flatten)]
+struct ConnectWithDidCommand {
+    #[command(flatten)]
     client_args: ClientArgs,
 
-    #[clap()]
     did: String,
 }
 
 #[derive(Args, Debug)]
-#[clap(about = "Connect with seed from url or file")]
-struct ConnectWithSeedArgs {
-    #[clap(flatten)]
+struct ConnectWithSeedCommand {
+    #[command(flatten)]
     client_args: ClientArgs,
 
-    #[clap()]
     source: String,
 }
 
 #[derive(Subcommand, Debug)]
-#[clap(rename_all = "kebab-case")]
+#[command(rename_all = "kebab-case")]
 enum SdpCommand {
-    #[clap()]
-    Offer(SdpOffer),
-    #[clap()]
-    Answer(SdpAnswer),
-    #[clap()]
-    AcceptAnswer(SdpAcceptAnswer),
+    Offer(SdpOfferCommand),
+    Answer(SdpAnswerCommand),
+    AcceptAnswer(SdpAcceptAnswerCommand),
 }
 
 #[derive(Args, Debug)]
-#[clap()]
-struct SdpOffer {
-    #[clap(
+struct SdpOfferCommand {
+    #[command(flatten)]
+    client_args: ClientArgs,
+
+    #[arg(
         long,
         short = 's',
         default_value = "stun://stun.l.google.com:19302",
         env
     )]
     pub ice_server: String,
-    #[clap(flatten)]
-    client_args: ClientArgs,
 }
 
 #[derive(Args, Debug)]
-struct SdpAnswer {
-    #[clap(flatten)]
+struct SdpAnswerCommand {
+    #[command(flatten)]
     client_args: ClientArgs,
+
     ice: String,
 }
 
 #[derive(Args, Debug)]
-struct SdpAcceptAnswer {
-    #[clap(flatten)]
+struct SdpAcceptAnswerCommand {
+    #[command(flatten)]
     client_args: ClientArgs,
 
-    #[clap(help = "transport_id of pending transport.")]
+    #[arg(help = "transport_id of pending transport.")]
     transport_id: String,
 
-    #[clap(help = "ice from remote.")]
+    #[arg(help = "ice from remote.")]
     ice: String,
 }
 
 #[derive(Subcommand, Debug)]
-#[clap(rename_all = "kebab-case")]
+#[command(rename_all = "kebab-case")]
 enum PeerCommand {
-    List(PeerListArgs),
-    Disconnect(PeerDisconnect),
+    List(PeerListCommand),
+    Disconnect(PeerDisconnectCommand),
 }
 
 #[derive(Args, Debug)]
-struct PeerListArgs {
-    #[clap(flatten)]
+struct PeerListCommand {
+    #[command(flatten)]
     client_args: ClientArgs,
 }
 
 #[derive(Args, Debug)]
-struct PeerDisconnect {
-    #[clap(flatten)]
+struct PeerDisconnectCommand {
+    #[command(flatten)]
     client_args: ClientArgs,
+
     address: String,
 }
 
 #[derive(Subcommand, Debug)]
-#[clap(rename_all = "kebab-case")]
+#[command(rename_all = "kebab-case")]
 enum PendingCommand {
-    List(PendingList),
-    Close(PendingCloseTransport),
+    List(PendingListCommand),
+    Close(PendingCloseTransportCommand),
 }
 
 #[derive(Args, Debug)]
-struct PendingList {
-    #[clap(flatten)]
+struct PendingListCommand {
+    #[command(flatten)]
     client_args: ClientArgs,
 }
 
 #[derive(Args, Debug)]
-struct PendingCloseTransport {
-    #[clap(flatten)]
+struct PendingCloseTransportCommand {
+    #[command(flatten)]
     client_args: ClientArgs,
-    #[clap()]
+
     transport_id: String,
 }
 
+#[derive(Subcommand, Debug)]
+#[command(rename_all = "kebab-case")]
+enum SendCommand {
+    Raw(SendRawCommand),
+    Http(SendHttpCommand),
+}
+
 #[derive(Args, Debug)]
-struct Send {
-    #[clap(flatten)]
+struct SendRawCommand {
+    #[command(flatten)]
     client_args: ClientArgs,
-    #[clap()]
-    to_address: String,
-    #[clap()]
+
+    to_did: String,
+
     text: String,
+}
+
+#[derive(Args, Debug)]
+struct SendHttpCommand {
+    #[command(flatten)]
+    client_args: ClientArgs,
+
+    #[arg(long="header", short = 'H', action=ArgAction::Append, help = "headers append to the request")]
+    headers: Vec<String>,
+
+    #[arg(long, help = "set content of http body")]
+    body: Option<String>,
+
+    method: String,
+
+    to_did: String,
+
+    #[arg(default_value = "/")]
+    path: String,
 }
 
 async fn daemon_run(
@@ -259,7 +279,7 @@ async fn daemon_run(
     let callback: Option<CallbackFn> = {
         if let Some(backend) = backend {
             let config = BackendConfig::load(&backend).await?;
-            let backend = Backend::new(config).await;
+            let backend = Backend::new(config);
             Some(Box::new(backend))
         } else {
             None
@@ -395,11 +415,26 @@ async fn main() -> anyhow::Result<()> {
                 .display();
             Ok(())
         }
-        Command::Send(args) => {
+        Command::Send(SendCommand::Raw(args)) => {
             args.client_args
                 .new_client()
                 .await?
-                .send_message(args.to_address.as_str(), args.text.as_str())
+                .send_message(args.to_did.as_str(), args.text.as_str())
+                .await?
+                .display();
+            Ok(())
+        }
+        Command::Send(SendCommand::Http(args)) => {
+            args.client_args
+                .new_client()
+                .await?
+                .send_http(
+                    args.to_did.as_str(),
+                    args.method,
+                    args.path,
+                    args.headers,
+                    args.body,
+                )
                 .await?
                 .display();
             Ok(())

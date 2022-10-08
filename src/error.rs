@@ -50,6 +50,8 @@ pub enum Error {
     VNodeError(rings_core::err::Error),
     #[error("JsError: {0}")]
     JsError(String),
+    #[error("Invalid http request: {0}")]
+    HttpRequestError(String),
 }
 
 impl Error {
@@ -78,6 +80,7 @@ impl Error {
             Error::NoPermission => 20,
             Error::VNodeError(_) => 21,
             Error::JsError(_) => 22,
+            Error::HttpRequestError(_) => 23,
         };
         -32000 - code
     }
