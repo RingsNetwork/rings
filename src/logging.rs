@@ -1,5 +1,6 @@
 use tracing::Level;
 use tracing_log::LogTracer;
+use tracing_subscriber::filter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::Registry;
 
@@ -12,7 +13,6 @@ pub mod node {
     use opentelemetry::global;
     use opentelemetry::sdk::propagation::TraceContextPropagator;
     use tracing::error;
-    use tracing_subscriber::filter::LevelFilter;
     use tracing_subscriber::fmt;
     use tracing_subscriber::Layer;
 
@@ -72,13 +72,22 @@ pub mod node {
         set_panic_hook();
 
         let subscriber = Registry::default();
-        let level_filter = LevelFilter::from_level(level);
+        let level_filter = filter::LevelFilter::from_level(level);
+
+        // Filter floating log of mdns
+        let mdns_log_filter = filter::FilterFn::new(|metadata| {
+            !metadata.target().starts_with("webrtc_mdns::conn")
+                || [276, 322]
+                    .iter()
+                    .all(|&line| !metadata.line().unwrap_or_default() == line)
+        });
 
         // Stderr
         let subscriber = subscriber.with(
             fmt::layer()
                 .with_writer(std::io::stderr)
-                .with_filter(level_filter),
+                .with_filter(level_filter)
+                .with_filter(mdns_log_filter.clone()),
         );
 
         // Jaeger
@@ -94,7 +103,8 @@ pub mod node {
                 subscriber.with(Some(
                     tracing_opentelemetry::layer()
                         .with_tracer(jaeger)
-                        .with_filter(level_filter),
+                        .with_filter(level_filter)
+                        .with_filter(mdns_log_filter),
                 ))
             } else {
                 subscriber.with(None)
