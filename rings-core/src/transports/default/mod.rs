@@ -22,7 +22,7 @@ impl From<IceCandidate> for RTCIceCandidateInit {
             candidate: cand.candidate.clone(),
             sdp_mid: cand.sdp_mid.clone().unwrap_or_else(|| "0".to_string()),
             sdp_mline_index: cand.sdp_m_line_index.unwrap_or(0),
-            username_fragment: cand.username_fragment.unwrap_or_else(|| "".to_string()),
+            username_fragment: cand.username_fragment.unwrap_or_default(),
         }
     }
 }
