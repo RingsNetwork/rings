@@ -253,7 +253,7 @@ impl PersistenceStorageOperation for IDBStorage {
             .get_all(None, Some(delete_count), None, None)
             .await
             .map_err(Error::IDBError)?;
-        log::debug!("entries: {:?}", entries);
+        tracing::debug!("entries: {:?}", entries);
         if let Some((_k, value)) = entries.first() {
             let data_entry: DataStruct<serde_json::Value> =
                 value.into_serde().map_err(Error::Serialize)?;

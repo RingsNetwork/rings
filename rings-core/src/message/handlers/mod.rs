@@ -126,7 +126,7 @@ impl MessageHandler {
         {
             println!("{} got msg {}", self.swarm.did(), &payload.data);
         }
-        log::trace!("NEW MESSAGE: {}", &payload.data);
+        tracing::trace!("NEW MESSAGE: {}", &payload.data);
 
         self.validate(payload).await?;
 
@@ -163,7 +163,7 @@ impl MessageHandler {
         }?;
 
         if let Err(e) = self.invoke_callback(payload).await {
-            log::warn!("invoke callback error: {}", e);
+            tracing::warn!("invoke callback error: {}", e);
         }
 
         Ok(())
@@ -174,10 +174,10 @@ impl MessageHandler {
     pub async fn listen_once(&self) -> Option<MessagePayload<Message>> {
         if let Some(payload) = self.swarm.poll_message().await {
             if !payload.verify() {
-                log::error!("Cannot verify msg or it's expired: {:?}", payload);
+                tracing::error!("Cannot verify msg or it's expired: {:?}", payload);
             }
             if let Err(e) = self.handle_payload(&payload).await {
-                log::error!("Error in handle_message: {}", e);
+                tracing::error!("Error in handle_message: {}", e);
                 #[cfg(test)]
                 {
                     println!("Error in handle_message: {}", e);
@@ -220,11 +220,11 @@ mod listener {
             pin_mut!(payloads);
             while let Some(payload) = payloads.next().await {
                 if !payload.verify() {
-                    log::error!("Cannot verify msg or it's expired: {:?}", payload);
+                    tracing::error!("Cannot verify msg or it's expired: {:?}", payload);
                     continue;
                 }
                 if let Err(e) = self.handle_payload(&payload).await {
-                    log::error!("Error in handle_message: {}", e);
+                    tracing::error!("Error in handle_message: {}", e);
                     continue;
                 }
             }

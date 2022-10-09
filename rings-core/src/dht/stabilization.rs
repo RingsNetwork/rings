@@ -64,7 +64,7 @@ impl Stabilization {
         match self.chord.fix_fingers() {
             Ok(action) => match action {
                 PeerRingAction::None => {
-                    // log::debug!("wait to next round");
+                    // tracing::debug!("wait to next round");
                     Ok(())
                 }
                 PeerRingAction::RemoteAction(
@@ -81,12 +81,12 @@ impl Stabilization {
                         .await
                 }
                 _ => {
-                    log::error!("Invalid PeerRing Action");
+                    tracing::error!("Invalid PeerRing Action");
                     unreachable!();
                 }
             },
             Err(e) => {
-                log::error!("{:?}", e);
+                tracing::error!("{:?}", e);
                 Err(e)
             }
         }
@@ -94,10 +94,10 @@ impl Stabilization {
 
     pub async fn stabilize(&self) -> Result<()> {
         if let Err(e) = self.notify_predecessor().await {
-            log::error!("[stabilize] Failed on notify predecessor {:?}", e);
+            tracing::error!("[stabilize] Failed on notify predecessor {:?}", e);
         }
         if let Err(e) = self.fix_fingers().await {
-            log::error!("[stabilize] Failed on fix_finger {:?}", e);
+            tracing::error!("[stabilize] Failed on fix_finger {:?}", e);
         }
         Ok(())
     }
@@ -127,7 +127,7 @@ mod stabilizer {
                     _ = timeout => self
                         .stabilize()
                         .await
-                        .unwrap_or_else(|e| log::error!("failed to stabilize {:?}", e)),
+                        .unwrap_or_else(|e| tracing::error!("failed to stabilize {:?}", e)),
                 }
             }
         }
@@ -155,7 +155,7 @@ mod stabilizer {
                     caller
                         .stabilize()
                         .await
-                        .unwrap_or_else(|e| log::error!("failed to stabilize {:?}", e));
+                        .unwrap_or_else(|e| tracing::error!("failed to stabilize {:?}", e));
                 }))
             };
             poll!(func, 25000);

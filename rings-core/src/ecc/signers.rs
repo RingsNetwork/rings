@@ -129,9 +129,9 @@ mod test {
         let h = eip712::hash(msg);
         let sig = eip712::sign(key, &h);
         assert_eq!(metamask_sig.as_slice(), sig);
-        let pubkey = eip712::recover(msg, &sig).unwrap();
+        let pubkey = eip712::recover(msg, sig).unwrap();
         assert_eq!(pubkey.address(), address);
-        assert!(eip712::verify(msg, &address, &sig));
+        assert!(eip712::verify(msg, &address, sig));
     }
 
     #[test]

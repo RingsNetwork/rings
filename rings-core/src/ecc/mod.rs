@@ -127,7 +127,7 @@ where T: Into<String>
     fn from(s: T) -> Self {
         let inputs = s.into();
         let mut hasher = Sha1::new();
-        hasher.update(&inputs.as_bytes());
+        hasher.update(inputs.as_bytes());
         let bytes = hasher.finalize();
         let mut ret = String::with_capacity(bytes.len() * 2);
         for &b in &bytes {

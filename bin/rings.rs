@@ -8,8 +8,8 @@ use rings_core::message::CallbackFn;
 use rings_node::backend::Backend;
 use rings_node::backend::BackendConfig;
 use rings_node::cli::Client;
-use rings_node::logger::LogLevel;
-use rings_node::logger::Logger;
+use rings_node::logging::node::init_logging;
+use rings_node::logging::node::LogLevel;
 use rings_node::prelude::rings_core::dht::Stabilization;
 use rings_node::prelude::rings_core::dht::TStabilize;
 use rings_node::prelude::rings_core::ecc::SecretKey;
@@ -287,7 +287,7 @@ async fn main() -> anyhow::Result<()> {
     util::load_config();
 
     let cli = Cli::parse();
-    Logger::init(cli.log_level.into())?;
+    init_logging(cli.log_level.into());
     // if config file was set, it should override existing .env
     if let Some(conf) = cli.config_file {
         dotenv::from_path(std::path::Path::new(&conf)).ok();

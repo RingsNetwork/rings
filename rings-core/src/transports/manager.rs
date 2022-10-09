@@ -50,7 +50,7 @@ impl TransportManager for Swarm {
             return Err(Error::InvalidTransport);
         }
 
-        log::info!("register transport {:?}", trans.id.clone());
+        tracing::info!("register transport {:?}", trans.id.clone());
         #[cfg(test)]
         {
             println!("register transport {:?}", trans.id.clone());
@@ -63,10 +63,10 @@ impl TransportManager for Swarm {
             if t.id != id {
                 self.transports.set(&did, trans);
                 if let Err(e) = t.close().await {
-                    log::error!("failed to close previous while registering {:?}", e);
+                    tracing::error!("failed to close previous while registering {:?}", e);
                     return Err(Error::SwarmToClosePrevTransport(format!("{:?}", e)));
                 }
-                log::debug!("replace and closed previous connection! {:?}", t.id);
+                tracing::debug!("replace and closed previous connection! {:?}", t.id);
             }
         } else {
             self.transports.set(&did, trans);
@@ -78,12 +78,12 @@ impl TransportManager for Swarm {
         match self.get_transport(did) {
             Some(t) => {
                 if t.is_disconnected().await {
-                    log::debug!(
+                    tracing::debug!(
                         "[get_and_check_transport] transport {:?} is not connected will be drop",
                         t.id
                     );
                     if t.close().await.is_err() {
-                        log::error!("Failed on close transport");
+                        tracing::error!("Failed on close transport");
                     };
                     None
                 } else {
