@@ -48,6 +48,8 @@ pub enum Error {
     NoPermission,
     #[error("vnode action error: {0}")]
     VNodeError(rings_core::err::Error),
+    #[error("JsError: {0}")]
+    JsError(String),
 }
 
 impl Error {
@@ -75,12 +77,12 @@ impl Error {
             Error::MessagePayload(_) => 19,
             Error::NoPermission => 20,
             Error::VNodeError(_) => 21,
+            Error::JsError(_) => 22,
         };
         -32000 - code
     }
 }
 
-#[cfg(feature = "node")]
 impl From<Error> for jsonrpc_core::Error {
     fn from(e: Error) -> Self {
         Self {

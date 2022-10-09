@@ -3,6 +3,8 @@
 
 use std::env;
 
+use crate::prelude::RTCIceConnectionState;
+
 /// build_version of program
 pub fn build_version() -> String {
     let mut infos = vec![];
@@ -27,6 +29,36 @@ pub fn load_config() {
             break;
         }
     }
+}
+
+/// convert RTCIceConnectionState to string
+pub(crate) fn from_rtc_ice_connection_state(state: RTCIceConnectionState) -> String {
+    match state {
+        RTCIceConnectionState::New => "new",
+        RTCIceConnectionState::Checking => "checking",
+        RTCIceConnectionState::Connected => "connected",
+        RTCIceConnectionState::Completed => "completed",
+        RTCIceConnectionState::Failed => "failed",
+        RTCIceConnectionState::Disconnected => "disconnected",
+        RTCIceConnectionState::Closed => "closed",
+        _ => "unknown",
+    }
+    .to_owned()
+}
+
+/// convert string to RTCIceConnectionState
+#[allow(dead_code)]
+pub(crate) fn into_rtc_ice_connection_state(value: &str) -> Option<RTCIceConnectionState> {
+    Some(match value {
+        "new" => RTCIceConnectionState::New,
+        "checking" => RTCIceConnectionState::Checking,
+        "connected" => RTCIceConnectionState::Connected,
+        "completed" => RTCIceConnectionState::Completed,
+        "failed" => RTCIceConnectionState::Failed,
+        "disconnected" => RTCIceConnectionState::Disconnected,
+        "closed" => RTCIceConnectionState::Closed,
+        _ => return None,
+    })
 }
 
 #[cfg(feature = "node")]

@@ -2,9 +2,8 @@
 ///! [JSON-RPC]: https://www.jsonrpc.org/specification
 pub mod method;
 pub mod response;
-#[cfg(feature = "node")]
-mod server;
-#[cfg(feature = "node")]
+/// jsonrpc server
+pub mod server;
 pub use server::RpcMeta;
 
 #[cfg(feature = "node")]
