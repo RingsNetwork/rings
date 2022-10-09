@@ -145,8 +145,7 @@ pub mod error;
 pub mod ethereum;
 pub mod jsonrpc;
 pub mod jsonrpc_client;
-#[cfg(feature = "node")]
-pub mod logger;
+pub mod logging;
 pub mod prelude;
 pub mod processor;
 pub mod seed;

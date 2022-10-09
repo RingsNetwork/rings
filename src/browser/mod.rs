@@ -14,7 +14,7 @@ use crate::prelude::wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(start)]
 pub fn start() -> Result<(), JsError> {
-    utils::set_panic_hook();
+    init_logging();
     Ok(())
 }
 
@@ -24,14 +24,14 @@ pub fn start() -> Result<(), JsError> {
 #[wasm_bindgen]
 pub fn debug(value: bool) {
     if value {
-        console_log::init_with_level(log::Level::Debug).ok();
+        console_log::init_with_level(tracing::Level::Debug).ok();
     } else {
-        console_log::init_with_level(log::Level::Error).ok();
+        console_log::init_with_level(tracing::Level::Error).ok();
     }
 }
 
 /// set log_level
 #[wasm_bindgen]
 pub fn log_level(level: &str) {
-    console_log::init_with_level(log::Level::from_str(level).unwrap()).ok();
+    console_log::init_with_level(tracing::Level::from_str(level).unwrap()).ok();
 }

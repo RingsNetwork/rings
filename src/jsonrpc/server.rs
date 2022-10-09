@@ -141,7 +141,7 @@ async fn answer_offer(params: Params, meta: RpcMeta) -> Result<Value> {
         .answer_offer(ice_info)
         .await
         .map_err(Error::from)?;
-    log::debug!("connect_peer_via_ice response: {:?}", r.1);
+    tracing::debug!("connect_peer_via_ice response: {:?}", r.1);
     TransportAndIce::from(r).to_json_obj().map_err(Error::from)
 }
 

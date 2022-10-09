@@ -185,7 +185,7 @@ impl Swarm {
             Some(Event::RegisterTransport((did, id))) => {
                 // if transport is still pending
                 if let Ok(Some(t)) = self.find_pending_transport(id) {
-                    log::debug!("transport is inside pending list, mov to swarm transports");
+                    tracing::debug!("transport is inside pending list, mov to swarm transports");
 
                     self.register(did, t).await?;
                     self.pop_pending_transport(id)?;
@@ -204,7 +204,7 @@ impl Swarm {
             }
             Some(Event::ConnectClosed((did, uuid))) => {
                 if self.pop_pending_transport(uuid).is_ok() {
-                    log::info!(
+                    tracing::info!(
                         "[Swarm::ConnectClosed] Pending transport {:?} dropped",
                         uuid
                     );
@@ -212,7 +212,7 @@ impl Swarm {
 
                 if let Some(t) = self.get_transport(did) {
                     if t.id == uuid && self.remove_transport(did).is_some() {
-                        log::info!("[Swarm::ConnectClosed] transport {:?} closed", uuid);
+                        tracing::info!("[Swarm::ConnectClosed] transport {:?} closed", uuid);
                         let payload = MessagePayload::new_direct(
                             Message::LeaveDHT(message::LeaveDHT { id: did }),
                             &self.session_manager,
@@ -293,7 +293,7 @@ impl Swarm {
     }
 
     pub async fn disconnect(&self, did: Did) -> Result<()> {
-        log::info!("disconnect {:?}", did);
+        tracing::info!("disconnect {:?}", did);
         self.dht.remove(did)?;
         if let Some((_address, trans)) = self.remove_transport(did) {
             trans.close().await?
@@ -324,7 +324,7 @@ impl Swarm {
             }
         }
         .ok_or(Error::NoNextHop)?;
-        log::debug!("next_hop: {:?}", next_hop);
+        tracing::debug!("next_hop: {:?}", next_hop);
         self.send_message(connect_msg, next_hop, did).await?;
         Ok(transport)
     }
@@ -352,7 +352,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Deb
             .get_and_check_transport(did)
             .await
             .ok_or(Error::SwarmMissDidInTable(did))?;
-        log::trace!(
+        tracing::trace!(
             "SENT {:?}, to node {:?} via transport {:?}",
             payload.clone(),
             payload.relay.next_hop,

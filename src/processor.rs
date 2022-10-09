@@ -123,7 +123,7 @@ impl Processor {
     /// * peer_url: the remote rings-node jsonrpc server url.
     pub async fn connect_peer_via_http(&self, peer_url: &str) -> Result<Arc<Transport>> {
         // request remote offer and sand answer to remote
-        log::debug!("connect_peer_via_http: {}", peer_url);
+        tracing::debug!("connect_peer_via_http: {}", peer_url);
         let (transport, _hs_info) = self.do_connect_peer_via_http(peer_url).await?;
         Ok(transport)
     }
@@ -131,7 +131,7 @@ impl Processor {
     async fn do_connect_peer_via_http(&self, node_url: &str) -> Result<(Arc<Transport>, String)> {
         let client = SimpleClient::new_with_url(node_url);
         let (transport, hs_info) = self.create_offer().await?;
-        log::debug!(
+        tracing::debug!(
             "sending offer and candidate {:?} to {:?}",
             hs_info.to_owned(),
             node_url,
@@ -159,7 +159,7 @@ impl Processor {
         };
         if let Err(e) = addr_result {
             if let Err(close_e) = transport.close().await {
-                log::warn!(
+                tracing::warn!(
                     "connect_peer_via_http failed, close tranposrt error: {}",
                     close_e
                 );
@@ -177,9 +177,9 @@ impl Processor {
     /// 4. PeerB: send the handshake info to PeerA.
     /// 5. PeerA: accept_answer.
     pub async fn answer_offer(&self, ice_info: &str) -> Result<(Arc<Transport>, Encoded)> {
-        log::info!("connect peer via ice: {}", ice_info);
+        tracing::info!("connect peer via ice: {}", ice_info);
         let transport = self.swarm.new_transport().await.map_err(|e| {
-            log::error!("new_transport failed: {}", e);
+            tracing::error!("new_transport failed: {}", e);
             Error::NewTransportError
         })?;
         match self.handshake(&transport, ice_info).await {
@@ -205,7 +205,7 @@ impl Processor {
             .connect(did)
             .await
             .map_err(Error::ConnectWithDidError)?;
-        log::debug!("wait for transport connected");
+        tracing::debug!("wait for transport connected");
         if wait_for_open {
             transport
                 .wait_for_data_channel_open()
@@ -223,7 +223,7 @@ impl Processor {
             .await
             .map_err(Error::RegisterIceError)?;
 
-        log::debug!("register: {}", did);
+        tracing::debug!("register: {}", did);
         self.swarm
             .register(did, Arc::clone(transport))
             .await
@@ -233,7 +233,7 @@ impl Processor {
             .get_handshake_info(self.swarm.session_manager(), RTCSdpType::Answer)
             .await
             .map_err(Error::CreateAnswer)?;
-        log::debug!("answer hs_info: {:?}", hs_info);
+        tracing::debug!("answer hs_info: {:?}", hs_info);
         Ok(hs_info)
     }
 
@@ -246,7 +246,7 @@ impl Processor {
     /// 5. PeerA: accept_answer.
     pub async fn accept_answer(&self, transport_id: &str, ice: &str) -> Result<Peer> {
         let ice = Encoded::from_encoded_str(ice);
-        log::debug!("accept_answer/ice: {:?}, uuid: {}", ice, transport_id);
+        tracing::debug!("accept_answer/ice: {:?}, uuid: {}", ice, transport_id);
         let transport_id =
             uuid::Uuid::from_str(transport_id).map_err(|_| Error::InvalidTransportId)?;
         let transport = self
@@ -263,7 +263,7 @@ impl Processor {
             .await
             .map_err(Error::RegisterIceError)?;
         if let Err(e) = self.swarm.pop_pending_transport(transport.id) {
-            log::warn!("pop_pending_transport err: {}", e)
+            tracing::warn!("pop_pending_transport err: {}", e)
         };
         Ok(Peer::from((did, transport)))
     }
@@ -271,7 +271,7 @@ impl Processor {
     /// List all peers.
     pub async fn list_peers(&self) -> Result<Vec<Peer>> {
         let transports = self.swarm.get_transports();
-        log::debug!(
+        tracing::debug!(
             "addresses: {:?}",
             transports.iter().map(|(a, _b)| a).collect::<Vec<_>>()
         );
@@ -335,7 +335,7 @@ impl Processor {
 
     /// Send custom message to a did.
     pub async fn send_message(&self, destination: &str, msg: &[u8]) -> Result<()> {
-        log::info!(
+        tracing::info!(
             "send_message, destination: {}, text: {:?}",
             destination,
             msg,

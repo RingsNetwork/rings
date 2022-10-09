@@ -14,7 +14,7 @@ use crate::storage::persistence::PersistenceStorageReadAndWrite;
 use crate::storage::persistence::PersistenceStorageRemove;
 
 async fn create_db_instance(cap: usize) -> IDBStorage {
-    //console_log::init_with_level(log::Level::Debug).unwrap();
+    //console_log::init_with_level(tracing::Level::Debug).unwrap();
     let instance = IDBStorage::new_with_cap(cap).await.unwrap();
     let (tx, store) = instance.get_tx_store(TransactionMode::ReadWrite).unwrap();
     store.clear().await.unwrap();
@@ -63,7 +63,7 @@ async fn test_create_put_data() {
     );
 
     let r: TestDataStruct = instance.get(&key).await.unwrap();
-    log::debug!("{:?}", r);
+    tracing::debug!("{:?}", r);
     assert_eq!(r.content, value.content);
 
     let (_tx, store) = instance.get_tx_store(TransactionMode::ReadOnly).unwrap();
@@ -203,13 +203,13 @@ async fn test_idb_prune() {
         .unwrap();
 
     let d3: TestDataStruct = instance.get(&key3).await.unwrap();
-    log::debug!("d3, {:?}", d3);
+    tracing::debug!("d3, {:?}", d3);
     let d3: TestDataStruct = instance.get(&key3).await.unwrap();
-    log::debug!("d3, {:?}", d3);
+    tracing::debug!("d3, {:?}", d3);
     let d1: TestDataStruct = instance.get(&key1).await.unwrap();
-    log::debug!("d1, {:?}", d1);
+    tracing::debug!("d1, {:?}", d1);
     let d2: TestDataStruct = instance.get(&key2).await.unwrap();
-    log::debug!("d2, {:?}", d2);
+    tracing::debug!("d2, {:?}", d2);
 
     instance
         .put(&key5, &TestDataStruct {

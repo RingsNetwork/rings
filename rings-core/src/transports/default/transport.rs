@@ -64,7 +64,7 @@ impl PartialEq for DefaultTransport {
 
 impl Drop for DefaultTransport {
     fn drop(&mut self) {
-        log::debug!("transport dropped: {}", self.id);
+        tracing::debug!("transport dropped: {}", self.id);
     }
 }
 
@@ -99,7 +99,7 @@ impl IceTransport for DefaultTransport {
                         Ok(offer)
                     }
                     Err(e) => {
-                        log::error!("{}", e);
+                        tracing::error!("{}", e);
                         Err(Error::RTCPeerConnectionCreateOfferFailed(e))
                     }
                 }
@@ -119,7 +119,7 @@ impl IceTransport for DefaultTransport {
                         Ok(answer)
                     }
                     Err(e) => {
-                        log::error!("{}", e);
+                        tracing::error!("{}", e);
                         Err(Error::RTCPeerConnectionCreateAnswerFailed(e))
                     }
                 }
@@ -156,7 +156,7 @@ impl IceTransportInterface<Event, AcChannel<Event>> for DefaultTransport {
         };
         let mut setting = SettingEngine::default();
         if let Some(addr) = external_ip {
-            log::debug!("setting external ip {:?}", &addr);
+            tracing::debug!("setting external ip {:?}", &addr);
             setting.set_nat_1to1_ips(vec![addr], RTCIceCandidateType::Host);
             setting.set_ice_multicast_dns_mode(MulticastDnsMode::QueryOnly);
         } else {
@@ -284,7 +284,7 @@ impl IceTransportCallback for DefaultTransport {
                             .await
                             .is_err()
                         {
-                            log::error!("Failed when send RegisterTransport");
+                            tracing::error!("Failed when send RegisterTransport");
                         }
                     }
                     RTCIceConnectionState::Failed
@@ -296,11 +296,11 @@ impl IceTransportCallback for DefaultTransport {
                             .await
                             .is_err()
                         {
-                            log::error!("Failed when send RegisterTransport");
+                            tracing::error!("Failed when send RegisterTransport");
                         }
                     }
                     _ => {
-                        log::debug!("IceTransport state change {:?}", cs);
+                        tracing::debug!("IceTransport state change {:?}", cs);
                     }
                 }
             })
@@ -332,7 +332,7 @@ impl IceTransportCallback for DefaultTransport {
             let event_sender = event_sender.clone();
             Box::pin(async move {
                 d.on_message(Box::new(move |msg: DataChannelMessage| {
-                    log::debug!("Message from DataChannel: '{:?}'", msg);
+                    tracing::debug!("Message from DataChannel: '{:?}'", msg);
                     let event_sender = event_sender.clone();
                     Box::pin(async move {
                         if event_sender
@@ -340,7 +340,7 @@ impl IceTransportCallback for DefaultTransport {
                             .await
                             .is_err()
                         {
-                            log::error!("Failed on handle msg")
+                            tracing::error!("Failed on handle msg")
                         };
                     })
                 }))
@@ -398,7 +398,7 @@ impl IceTrickleScheme for DefaultTransport {
         session_manager: &SessionManager,
         kind: RTCSdpType,
     ) -> Result<Encoded> {
-        log::trace!("prepareing handshake info {:?}", kind);
+        tracing::trace!("prepareing handshake info {:?}", kind);
         let sdp = match kind {
             RTCSdpType::Answer => self.get_answer().await?,
             RTCSdpType::Offer => self.get_offer().await?,
@@ -423,7 +423,7 @@ impl IceTrickleScheme for DefaultTransport {
             sdp: serde_json::to_string(&sdp).unwrap(),
             candidates: local_candidates_json,
         };
-        log::trace!("prepared hanshake info :{:?}", data);
+        tracing::trace!("prepared hanshake info :{:?}", data);
         let resp = MessagePayload::new_direct(
             data,
             session_manager,
@@ -434,18 +434,18 @@ impl IceTrickleScheme for DefaultTransport {
 
     async fn register_remote_info(&self, data: Encoded) -> Result<Did> {
         let data: MessagePayload<TricklePayload> = data.decode()?;
-        log::trace!("register remote info: {:?}", data);
+        tracing::trace!("register remote info: {:?}", data);
         match data.verify() {
             true => {
                 let sdp = serde_json::from_str::<RTCSessionDescription>(&data.data.sdp)
                     .map_err(Error::Deserialize)?;
-                log::trace!("setting remote sdp: {:?}", sdp);
+                tracing::trace!("setting remote sdp: {:?}", sdp);
                 self.set_remote_description(sdp).await?;
-                log::trace!("setting remote candidate");
+                tracing::trace!("setting remote candidate");
                 for c in &data.data.candidates {
-                    log::trace!("add candiates: {:?}", c);
+                    tracing::trace!("add candiates: {:?}", c);
                     if self.add_ice_candidate(c.clone()).await.is_err() {
-                        log::warn!("failed on add add candiates: {:?}", c.clone());
+                        tracing::warn!("failed on add add candiates: {:?}", c.clone());
                     };
                 }
                 if let Ok(public_key) = data.origin_verification.session.authorizer_pubkey() {
@@ -455,7 +455,7 @@ impl IceTrickleScheme for DefaultTransport {
                 Ok(data.addr)
             }
             _ => {
-                log::error!("cannot verify message sig");
+                tracing::error!("cannot verify message sig");
                 return Err(Error::VerifySignatureFailed);
             }
         }
@@ -515,7 +515,7 @@ impl DefaultTransport {
                 }
             }
             None => {
-                log::error!("{:?}", Error::RTCDataChannelNotReady);
+                tracing::error!("{:?}", Error::RTCDataChannelNotReady);
                 Err(Error::RTCDataChannelNotReady)
             }
         }
@@ -549,7 +549,7 @@ impl DefaultTransport {
                                     }
                                 }
                                 _ => {
-                                    log::trace!("Connect State changed to {:?}", st);
+                                    tracing::trace!("Connect State changed to {:?}", st);
                                 }
                             }
                         })

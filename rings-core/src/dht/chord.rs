@@ -310,7 +310,7 @@ impl ChordStabilize<PeerRingAction> for PeerRing {
                 _ => {
                     let mut finger = self.lock_finger()?;
                     finger.fix_finger_index = fix_finger_index;
-                    log::error!("Invalid PeerRing Action");
+                    tracing::error!("Invalid PeerRing Action");
                     Err(Error::PeerRingInvalidAction)
                 }
             },

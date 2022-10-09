@@ -181,7 +181,7 @@ impl IceTrickleScheme for DummyTransport {
                 self.event_sender
                     .send(Event::RegisterTransport((local_did, self.id)))
                     .await
-                    .unwrap_or_else(|e| log::warn!("failed to send register event: {:?}", e));
+                    .unwrap_or_else(|e| tracing::warn!("failed to send register event: {:?}", e));
 
                 Ok(data.addr)
             }

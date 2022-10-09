@@ -6,6 +6,6 @@ use wasm_bindgen_test::wasm_bindgen_test_configure;
 wasm_bindgen_test_configure!(run_in_browser);
 
 pub fn setup_log() {
-    console_log::init_with_level(log::Level::Trace).unwrap();
-    log::debug!("test")
+    console_log::init_with_level(tracing::Level::Trace).unwrap();
+    tracing::debug!("test")
 }

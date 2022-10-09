@@ -68,7 +68,7 @@ impl PartialEq for WasmTransport {
 
 impl Drop for WasmTransport {
     fn drop(&mut self) {
-        log::trace!("[WASM] Transport dropped!");
+        tracing::trace!("[WASM] Transport dropped!");
         if let Some(conn) = &self.connection {
             conn.close();
         }
@@ -210,7 +210,7 @@ impl IceTransportInterface<Event, CbChannel<Event>> for WasmTransport {
                 Ok(self)
             }
             None => {
-                log::error!("cannot get connection");
+                tracing::error!("cannot get connection");
                 Err(Error::RTCPeerConnectionNotEstablish)
             }
         }
@@ -285,11 +285,11 @@ impl IceTransportCallback for WasmTransport {
             let public_key = Arc::clone(&public_key);
             let id = id;
 
-            // log::debug!("got state event {:?}", ev.type_());
+            // tracing::debug!("got state event {:?}", ev.type_());
             if ev.type_() == *"iceconnectionstatechange" {
                 let peer_connection = peer_connection.take().unwrap();
                 let ice_connection_state = peer_connection.ice_connection_state();
-                log::debug!(
+                tracing::debug!(
                     "got state event {:?}, {:?}",
                     ev.type_(),
                     ice_connection_state
@@ -306,7 +306,7 @@ impl IceTransportCallback for WasmTransport {
                             .await
                             .is_err()
                             {
-                                log::error!("Failed when send RegisterTransport");
+                                tracing::error!("Failed when send RegisterTransport");
                             }
                         }
                         RtcIceConnectionState::Failed
@@ -317,11 +317,11 @@ impl IceTransportCallback for WasmTransport {
                                 .await
                                 .is_err()
                             {
-                                log::error!("Failed when send ConnectFailed");
+                                tracing::error!("Failed when send ConnectFailed");
                             }
                         }
                         _ => {
-                            log::debug!("IceTransport state change {:?}", ice_connection_state);
+                            tracing::debug!("IceTransport state change {:?}", ice_connection_state);
                         }
                     }
                 })
@@ -332,9 +332,9 @@ impl IceTransportCallback for WasmTransport {
     async fn on_ice_candidate(&self) -> Self::OnLocalCandidateHdlrFn {
         let peer_connection = self.get_peer_connection().await;
         let pending_candidates = Arc::clone(&self.pending_candidates);
-        log::debug!("binding ice candidate callback");
+        tracing::debug!("binding ice candidate callback");
         box move |ev: RtcPeerConnectionIceEvent| {
-            log::info!("ice_Candidate {:?}", ev.candidate());
+            tracing::info!("ice_Candidate {:?}", ev.candidate());
             let mut candidates = pending_candidates.lock().unwrap();
             let peer_connection = peer_connection.clone();
             if let Some(candidate) = ev.candidate() {
@@ -350,7 +350,7 @@ impl IceTransportCallback for WasmTransport {
         let event_sender = self.event_sender.clone();
 
         box move |ev: RtcDataChannelEvent| {
-            log::debug!("channel open");
+            tracing::debug!("channel open");
             let event_sender = Arc::clone(&event_sender);
             let ch = ev.channel();
             let on_message_cb = Closure::wrap(
@@ -366,7 +366,7 @@ impl IceTransportCallback for WasmTransport {
                             let data_buffer =
                                 wasm_bindgen_futures::JsFuture::from(data.array_buffer()).await;
                             if let Err(e) = data_buffer {
-                                log::error!("Failed to read array_buffer from Blob, {:?}", e);
+                                tracing::error!("Failed to read array_buffer from Blob, {:?}", e);
                                 return;
                             }
                             Uint8Array::new(&data_buffer.unwrap()).to_vec()
@@ -380,7 +380,7 @@ impl IceTransportCallback for WasmTransport {
                         if let Err(e) =
                             CbChannel::send(&event_sender, Event::DataChannelMessage(msg)).await
                         {
-                            log::error!("Failed on handle msg, {:?}", e);
+                            tracing::error!("Failed on handle msg, {:?}", e);
                         }
                     });
                 }) as Box<dyn FnMut(MessageEvent)>,
@@ -425,11 +425,11 @@ impl IceCandidateGathering for WasmTransport {
 
                 match JsFuture::from(promise).await {
                     Ok(_) => {
-                        log::debug!("set remote sdp successed");
+                        tracing::debug!("set remote sdp successed");
                         Ok(())
                     }
                     Err(e) => {
-                        log::error!("failed to set remote desc: {:?}", e);
+                        tracing::error!("failed to set remote desc: {:?}", e);
                         Err(Error::RTCPeerConnectionSetRemoteDescFailed(format!(
                             "{:?}",
                             e
@@ -450,7 +450,7 @@ impl IceCandidateGathering for WasmTransport {
                 match JsFuture::from(promise).await {
                     Ok(_) => Ok(()),
                     Err(e) => {
-                        log::error!("failed to add ice candate");
+                        tracing::error!("failed to add ice candate");
                         Err(Error::RTCPeerConnectionAddIceCandidateError(format!(
                             "{:?}",
                             e
@@ -499,7 +499,7 @@ impl IceTrickleScheme for WasmTransport {
                 .map_err(Error::Deserialize)?,
             candidates: local_candidates_json,
         };
-        log::debug!("prepared handshake info :{:?}", data);
+        tracing::debug!("prepared handshake info :{:?}", data);
         let resp = MessagePayload::new_direct(
             data,
             session_manager,
@@ -510,7 +510,7 @@ impl IceTrickleScheme for WasmTransport {
 
     async fn register_remote_info(&self, data: Encoded) -> Result<Did> {
         let data: MessagePayload<TricklePayload> = data.decode()?;
-        log::debug!("register remote info: {:?}", &data);
+        tracing::debug!("register remote info: {:?}", &data);
 
         match data.verify() {
             true => {
@@ -521,22 +521,22 @@ impl IceTrickleScheme for WasmTransport {
                 let sdp: RtcSessionDescriptionWrapper = data.data.sdp.try_into()?;
                 self.set_remote_description(sdp.to_owned()).await?;
                 for c in &data.data.candidates {
-                    log::debug!("add remote candiates: {:?}", c);
+                    tracing::debug!("add remote candiates: {:?}", c);
                     if self.add_ice_candidate(c.clone()).await.is_err() {
-                        log::warn!("failed on add add candiates: {:?}", c.clone());
+                        tracing::warn!("failed on add add candiates: {:?}", c.clone());
                     };
                 }
                 Ok(data.addr)
             }
             _ => {
-                log::error!("cannot verify message sig");
+                tracing::error!("cannot verify message sig");
                 return Err(Error::VerifySignatureFailed);
             }
         }
     }
 
     async fn wait_for_connected(&self) -> Result<()> {
-        log::warn!("callback is replaced");
+        tracing::warn!("callback is replaced");
         let promise = self.connect_success_promise().await?;
         promise.await
     }
@@ -554,7 +554,7 @@ impl WasmTransport {
                 let state = Arc::clone(&promise.state());
                 let dc_cloned = Arc::clone(&dc);
                 let callback = Closure::wrap(Box::new(move || {
-                    log::debug!(
+                    tracing::debug!(
                         "wait_for_data_channel_open, state: {:?}",
                         dc_cloned.ready_state()
                     );
@@ -569,7 +569,7 @@ impl WasmTransport {
                             }
                         }
                         x => {
-                            log::debug!("datachannel status: {:?}", x)
+                            tracing::debug!("datachannel status: {:?}", x)
                         }
                     }
                 }) as Box<dyn FnMut()>);
@@ -578,7 +578,7 @@ impl WasmTransport {
                 promise.await?;
             }
             None => {
-                log::error!("{:?}", Error::RTCDataChannelNotReady);
+                tracing::error!("{:?}", Error::RTCDataChannelNotReady);
                 return Err(Error::RTCDataChannelNotReady);
             }
         };
@@ -603,7 +603,7 @@ impl WasmTransport {
                             }
                         }
                         x => {
-                            log::trace!("gather status: {:?}", x)
+                            tracing::trace!("gather status: {:?}", x)
                         }
                     }) as Box<dyn FnMut()>);
                 conn.set_onicegatheringstatechange(Some(callback.as_ref().unchecked_ref()));
@@ -637,7 +637,7 @@ impl WasmTransport {
                         }
                     }
                     _ => {
-                        log::trace!("Connect State changed to {:?}", st);
+                        tracing::trace!("Connect State changed to {:?}", st);
                     }
                 })
                     as Box<dyn FnMut(RtcIceConnectionState)>);
