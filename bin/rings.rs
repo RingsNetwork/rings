@@ -9,7 +9,7 @@ use rings_node::backend::Backend;
 use rings_node::backend::BackendConfig;
 use rings_node::cli::Client;
 use rings_node::logging::node::init_logging;
-use rings_node::logging::LogLevel;
+use rings_node::logging::node::LogLevel;
 use rings_node::prelude::rings_core::dht::Stabilization;
 use rings_node::prelude::rings_core::dht::TStabilize;
 use rings_node::prelude::rings_core::ecc::SecretKey;

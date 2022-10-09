@@ -14,7 +14,6 @@ use crate::storage::persistence::PersistenceStorageReadAndWrite;
 use crate::storage::persistence::PersistenceStorageRemove;
 
 async fn create_db_instance(cap: usize) -> IDBStorage {
-    //console_log::init_with_level(tracing::Level::Debug).unwrap();
     let instance = IDBStorage::new_with_cap(cap).await.unwrap();
     let (tx, store) = instance.get_tx_store(TransactionMode::ReadWrite).unwrap();
     store.clear().await.unwrap();

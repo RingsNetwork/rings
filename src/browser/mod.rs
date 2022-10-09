@@ -4,17 +4,18 @@
 pub mod client;
 pub mod jsonrpc_client;
 pub mod utils;
-
 use std::str::FromStr;
 
 pub use self::client::*;
 pub use self::jsonrpc_client::JsonRpcClient;
+use crate::logging::browser::init_logging;
+use crate::logging::browser::set_panic_hook;
 use crate::prelude::wasm_bindgen;
 use crate::prelude::wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(start)]
 pub fn start() -> Result<(), JsError> {
-    init_logging();
+    set_panic_hook();
     Ok(())
 }
 
@@ -24,14 +25,14 @@ pub fn start() -> Result<(), JsError> {
 #[wasm_bindgen]
 pub fn debug(value: bool) {
     if value {
-        console_log::init_with_level(tracing::Level::Debug).ok();
+        init_logging(tracing::Level::DEBUG);
     } else {
-        console_log::init_with_level(tracing::Level::Error).ok();
+        init_logging(tracing::Level::ERROR);
     }
 }
 
 /// set log_level
 #[wasm_bindgen]
 pub fn log_level(level: &str) {
-    console_log::init_with_level(tracing::Level::from_str(level).unwrap()).ok();
+    init_logging(tracing::Level::from_str(level).unwrap());
 }

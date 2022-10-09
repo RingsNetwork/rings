@@ -101,7 +101,7 @@ futures = { package = "futures", version = "0.3.21" }
 uuid = { package = "uuid", version = "0.8.2", features = ["v4", "serde"] }
 
 [dev-dependencies]
-console_log = { version = "0.2" }
+tracing-wasm = "0.2.1"
 wasm-bindgen-test = "0.3.0"
 
 [target.'cfg(not(target_family="wasm"))'.dev-dependencies]

@@ -18,7 +18,7 @@ mod test_wasm_transport;
 wasm_bindgen_test_configure!(run_in_browser);
 
 pub fn setup_log() {
-    console_log::init_with_level(tracing::Level::Trace).unwrap();
+    tracing_wasm::set_as_global_default();
     tracing::debug!("test")
 }
 
