@@ -1,3 +1,4 @@
+//! Did is a finate Ring R(P) where P = 2^160
 use std::cmp::Eq;
 use std::cmp::PartialEq;
 use std::ops::Add;
@@ -12,7 +13,6 @@ use serde::Serialize;
 use web3::contract::tokens::Tokenizable;
 use web3::types::H160;
 
-/// Did is a finate Ring R(P) where P = 2^160
 use crate::ecc::HashStr;
 use crate::err::Error;
 use crate::err::Result;
