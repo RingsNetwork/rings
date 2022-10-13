@@ -1,9 +1,13 @@
 use std::sync::Arc;
 
+use bytes::Bytes;
 use jsonrpc_core::Params;
 use jsonrpc_core::Value;
 use serde_json::json;
 
+use crate::backend_client::BackendMessage;
+use crate::backend_client::HttpServerMessage;
+use crate::backend_client::HttpServerRequest;
 use crate::jsonrpc;
 use crate::jsonrpc::method::Method;
 use crate::jsonrpc::response::Peer;
@@ -210,6 +214,43 @@ impl Client {
     }
 
     pub async fn send_message(&self, did: &str, text: &str) -> Output<()> {
+        let mut params = serde_json::Map::new();
+        params.insert("destination".to_owned(), json!(did));
+        params.insert("text".to_owned(), json!(text));
+        self.client
+            .call_method(Method::SendTo.as_str(), Params::Map(params))
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        ClientOutput::ok("Done.".into(), ())
+    }
+
+    pub async fn send_http(
+        &self,
+        did: &str,
+        method: String,
+        path: String,
+        headers: Vec<String>,
+        body: Option<String>,
+    ) -> Output<()> {
+        let headers = headers
+            .iter()
+            .map(|header| {
+                let mut split = header.split(':');
+                let name = split.next().unwrap().trim().to_string();
+                let value = split.next().unwrap().trim().to_string();
+                (name, value)
+            })
+            .collect();
+
+        let msg = BackendMessage::HttpServer(HttpServerMessage::Request(HttpServerRequest {
+            method,
+            path,
+            headers,
+            body: body.map(Bytes::from),
+        }));
+
+        let text = serde_json::to_string(&msg).unwrap();
+
         let mut params = serde_json::Map::new();
         params.insert("destination".to_owned(), json!(did));
         params.insert("text".to_owned(), json!(text));

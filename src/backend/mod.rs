@@ -1,43 +1,118 @@
 use async_trait::async_trait;
+use bytes::Bytes;
+use reqwest::header::HeaderMap;
+use reqwest::header::HeaderName;
 use serde::Deserialize;
 use serde::Serialize;
-use tokio::io::AsyncReadExt;
-use tokio::io::AsyncWriteExt;
-use tokio::net::TcpStream;
 
+use crate::backend_client::BackendMessage;
+use crate::backend_client::HttpServerMessage;
+use crate::backend_client::HttpServerRequest;
+use crate::backend_client::HttpServerResponse;
+use crate::error::Error;
+use crate::error::Result;
 use crate::prelude::rings_core::message::Message;
 use crate::prelude::*;
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct BackendConfig {
-    pub tcp_proxy: Option<TcpProxyConfig>,
+    pub http_server: Option<HttpServerConfig>,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
-pub struct TcpProxyConfig {
+pub struct HttpServerConfig {
     pub port: u16,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub enum BackendMessage {
-    TcpProxy(TcpProxyMessage),
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub enum TcpProxyMessage {
-    Write(Vec<u8>),
-    Read(Vec<u8>),
-}
-
 pub struct Backend {
-    tcp_proxy_port: Option<u16>,
+    http_server: Option<HttpServer>,
+}
+
+pub struct HttpServer {
+    client: reqwest::Client,
+    port: u16,
 }
 
 impl Backend {
-    pub async fn new(config: BackendConfig) -> Self {
+    pub fn new(config: BackendConfig) -> Self {
         Self {
-            tcp_proxy_port: config.tcp_proxy.map(|c| c.port),
+            http_server: config.http_server.map(HttpServer::new),
         }
+    }
+}
+
+impl HttpServer {
+    pub fn new(config: HttpServerConfig) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            port: config.port,
+        }
+    }
+
+    pub async fn execute(&self, request: HttpServerRequest) -> Result<HttpServerResponse> {
+        let url = format!(
+            "http://localhost:{}/{}",
+            self.port,
+            request.path.trim_start_matches('/')
+        );
+        let method = try_into_method(&request.method)?;
+
+        let mut headers = HeaderMap::new();
+        for (name, value) in request.headers {
+            headers.insert(
+                name.parse::<HeaderName>().map_err(|_| {
+                    Error::HttpRequestError(format!("Invalid header name: {}", &name))
+                })?,
+                value.parse().map_err(|_| {
+                    Error::HttpRequestError(format!("Invalid header value: {}", &value))
+                })?,
+            );
+        }
+
+        let req = self
+            .client
+            .request(method, &url)
+            .headers(headers)
+            .timeout(std::time::Duration::from_secs(15));
+        let req = request
+            .body
+            .map_or(req.try_clone().unwrap(), |body| req.body(body));
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| Error::HttpRequestError(e.to_string()))?;
+
+        let status = resp.status().as_u16();
+        let headers = resp
+            .headers()
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_str().unwrap().to_string()))
+            .collect();
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| Error::HttpRequestError(e.to_string()))?;
+
+        Ok(HttpServerResponse {
+            status,
+            headers,
+            body: Some(body),
+        })
+    }
+}
+
+fn try_into_method(s: &str) -> Result<http::Method> {
+    match s.to_uppercase().as_str() {
+        "GET" => Ok(http::Method::GET),
+        "POST" => Ok(http::Method::POST),
+        "PUT" => Ok(http::Method::PUT),
+        "DELETE" => Ok(http::Method::DELETE),
+        "HEAD" => Ok(http::Method::HEAD),
+        "OPTIONS" => Ok(http::Method::OPTIONS),
+        "TRACE" => Ok(http::Method::TRACE),
+        "CONNECT" => Ok(http::Method::CONNECT),
+        "PATCH" => Ok(http::Method::PATCH),
+        _ => Err(Error::HttpRequestError("Invalid HTTP method".to_string())),
     }
 }
 
@@ -55,20 +130,22 @@ impl MessageCallback for Backend {
         if let Ok(CustomMessage(raw_msg)) = handler.decrypt_msg(msg) {
             if let Ok(msg) = serde_json::from_slice(&raw_msg) {
                 match msg {
-                    BackendMessage::TcpProxy(msg) => match msg {
-                        TcpProxyMessage::Write(msg) => {
-                            if let Some(port) = self.tcp_proxy_port {
-                                let mut conn = TcpStream::connect(format!("127.0.0.1:{}", port))
-                                    .await
-                                    .unwrap();
+                    BackendMessage::HttpServer(msg) => match msg {
+                        HttpServerMessage::Request(req) => {
+                            tracing::info!("Received HTTP server request: {:?}", req);
 
-                                conn.write_all(&msg).await.unwrap();
+                            if let Some(ref server) = self.http_server {
+                                let resp = server.execute(req).await.unwrap_or_else(|e| {
+                                    HttpServerResponse {
+                                        status: 500,
+                                        headers: vec![],
+                                        body: Some(Bytes::from(e.to_string())),
+                                    }
+                                });
+                                tracing::info!("Sending HTTP server response: {:?}", resp);
 
-                                // 100k
-                                let mut buff: Vec<u8> = Vec::new();
-                                conn.read_to_end(&mut buff).await.unwrap();
-
-                                let resp = BackendMessage::TcpProxy(TcpProxyMessage::Read(buff));
+                                let resp =
+                                    BackendMessage::HttpServer(HttpServerMessage::Response(resp));
                                 let resp_bytes = serde_json::to_vec(&resp).unwrap();
                                 let pubkey = ctx.origin_session_pubkey().unwrap();
 
@@ -80,10 +157,12 @@ impl MessageCallback for Backend {
                                     )
                                     .await
                                     .unwrap();
+                            } else {
+                                tracing::warn!("HTTP server is not configured");
                             }
                         }
-                        TcpProxyMessage::Read(msg) => {
-                            println!("TcpProxyMessage::Read: {:?}", msg);
+                        HttpServerMessage::Response(resp) => {
+                            println!("HttpServerMessage::Response: {:?}", resp);
                         }
                     },
                 }

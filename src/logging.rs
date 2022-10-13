@@ -9,7 +9,7 @@ pub mod node {
     use std::backtrace::Backtrace;
     use std::panic::PanicInfo;
 
-    use clap::ArgEnum;
+    use clap::ValueEnum;
     use opentelemetry::global;
     use opentelemetry::sdk::propagation::TraceContextPropagator;
     use tracing::error;
@@ -18,8 +18,7 @@ pub mod node {
 
     use super::*;
 
-    #[derive(ArgEnum, Debug, Clone)]
-    #[clap(rename_all = "kebab-case")]
+    #[derive(ValueEnum, Debug, Clone)]
     pub enum LogLevel {
         Debug,
         Info,
