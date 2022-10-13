@@ -1,4 +1,4 @@
-//! An efficient way of using ring-node.
+//! An efficient command tool of using ring-node
 use std::sync::Arc;
 
 use bytes::Bytes;

@@ -1,3 +1,4 @@
+/// A "prelude" for users of the ring-network crate.
 pub use jsonrpc_core;
 #[cfg(feature = "node")]
 pub use reqwest;

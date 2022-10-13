@@ -1,3 +1,4 @@
+/// Logging configuration contains `node` and `browser`
 use tracing::Level;
 use tracing_log::LogTracer;
 use tracing_subscriber::layer::SubscriberExt;

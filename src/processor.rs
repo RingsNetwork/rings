@@ -1,5 +1,5 @@
+//! Processor of rings-node jsonrpc-server
 #![warn(missing_docs)]
-//! Processor of rings-node jsonrpc-server.
 use std::str::FromStr;
 use std::sync::Arc;
 

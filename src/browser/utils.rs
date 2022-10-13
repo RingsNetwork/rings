@@ -1,3 +1,30 @@
+/// A parser convert JsValue to jsonrpc_core::Params.
+/// # Examples
+///
+/// ```
+/// let nv = JsValue::null();
+/// match parse_params(nv) {
+///     Ok(v) => {
+///         assert!(v == jsonrpc_core::Params::None, "not null");
+///     }
+///     Err(_) => {
+///         panic!("Exception");
+///     }
+/// }
+///
+/// let arr_v = js_sys::Array::new();
+/// arr_v.push(&JsValue::from_str("test1"));
+/// let jv: &JsValue = arr_v.as_ref();
+/// let value2 = browser::utils::parse_params(jv.clone()).unwrap();
+/// if let jsonrpc_core::Params::Array(v) = value2 {
+///     assert!(v.len() == 1, "value2.len got {}, expect 1", v.len());
+///     let v0 = v.get(0).unwrap();
+///     assert!(v0.is_string(), "v0 not string");
+///     assert!(v0.as_str() == Some("test1"), "v0 value {:?}", v0.as_str());
+/// } else {
+///     panic!("value2 not array");
+/// }
+/// ```
 use crate::error::Error;
 use crate::prelude::js_sys;
 use crate::prelude::wasm_bindgen::prelude::*;

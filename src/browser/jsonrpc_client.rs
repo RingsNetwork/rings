@@ -1,3 +1,4 @@
+/// Simple json rpc client.
 use std::sync::Arc;
 
 use super::utils;
