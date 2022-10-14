@@ -192,23 +192,16 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
         }
     }
 
-    async fn send_message(&self, msg: T, next_hop: Did, destination: Did) -> Result<()> {
-        self.send_payload(MessagePayload::new_send(
-            msg,
-            self.session_manager(),
-            next_hop,
-            destination,
-        )?)
-        .await
+    async fn send_message(&self, msg: T, next_hop: Did, destination: Did) -> Result<uuid::Uuid> {
+        let payload = MessagePayload::new_send(msg, self.session_manager(), next_hop, destination)?;
+        self.send_payload(payload.clone()).await?;
+        Ok(payload.tx_id)
     }
 
-    async fn send_direct_message(&self, msg: T, destination: Did) -> Result<()> {
-        self.send_payload(MessagePayload::new_direct(
-            msg,
-            self.session_manager(),
-            destination,
-        )?)
-        .await
+    async fn send_direct_message(&self, msg: T, destination: Did) -> Result<uuid::Uuid> {
+        let payload = MessagePayload::new_direct(msg, self.session_manager(), destination)?;
+        self.send_payload(payload.clone()).await?;
+        Ok(payload.tx_id)
     }
 
     async fn send_report_message(

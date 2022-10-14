@@ -169,7 +169,8 @@ impl HandleMsg<SyncVNodeWithSuccessor> for MessageHandler {
                         Message::StoreVNode(StoreVNode { data: vec![peer] }),
                         next,
                     )
-                    .await
+                    .await?;
+                    Ok(())
                 }
                 Ok(_) => unreachable!(),
                 Err(e) => Err(e),

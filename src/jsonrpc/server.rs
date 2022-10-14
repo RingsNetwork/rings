@@ -258,8 +258,9 @@ async fn send_message(params: Params, meta: RpcMeta) -> Result<Value> {
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
         .as_str()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
-    meta.processor
+    let tx_id = meta
+        .processor
         .send_message(destination, text.as_bytes())
         .await?;
-    Ok(serde_json::json!({}))
+    Ok(serde_json::json!({"tx_id": tx_id.to_string()}))
 }

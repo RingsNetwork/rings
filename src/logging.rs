@@ -1,6 +1,5 @@
 use tracing::Level;
 use tracing_log::LogTracer;
-use tracing_subscriber::filter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::Registry;
 
@@ -13,6 +12,7 @@ pub mod node {
     use opentelemetry::global;
     use opentelemetry::sdk::propagation::TraceContextPropagator;
     use tracing::error;
+    use tracing_subscriber::filter;
     use tracing_subscriber::fmt;
     use tracing_subscriber::Layer;
 

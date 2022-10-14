@@ -334,7 +334,7 @@ impl Processor {
     }
 
     /// Send custom message to a did.
-    pub async fn send_message(&self, destination: &str, msg: &[u8]) -> Result<()> {
+    pub async fn send_message(&self, destination: &str, msg: &[u8]) -> Result<uuid::Uuid> {
         tracing::info!(
             "send_message, destination: {}, text: {:?}",
             destination,
@@ -343,10 +343,12 @@ impl Processor {
         let destination = Did::from_str(destination).map_err(|_| Error::InvalidDid)?;
         let msg = Message::custom(msg, None).map_err(Error::SendMessage)?;
         // self.swarm.do_send_payload(address, payload)
-        self.swarm
+        let uuid = self
+            .swarm
             .send_direct_message(msg, destination)
             .await
-            .map_err(Error::SendMessage)
+            .map_err(Error::SendMessage)?;
+        Ok(uuid)
     }
 
     /// check local cache of dht

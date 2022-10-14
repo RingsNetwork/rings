@@ -6,9 +6,9 @@ use std::sync::Arc;
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::utils;
-use crate::jsonrpc::method::Method;
-use crate::jsonrpc::server as jsonrpc_server;
+use crate::backend_client::BackendMessage;
+use crate::backend_client::HttpServerMessage;
+use crate::backend_client::HttpServerRequest;
 use crate::jsonrpc::RpcMeta;
 use crate::prelude::js_sys;
 use crate::prelude::rings_core::async_trait;
@@ -538,18 +538,71 @@ impl Client {
         })
     }
 
-    pub fn request(&self, method: String, params: JsValue) -> js_sys::Promise {
-        let meta = self.rpc_meta.clone();
+    /// send http message to node.
+    ///     * destination is the did of node
+    ///     * method:
+    ///         * `GET`
+    ///         * `POST`
+    ///         * `PUT`
+    ///         * `DELETE`
+    ///         * `HEAD`
+    ///         * `OPTIONS`
+    ///         * `CONNECT`
+    ///         * `PATCH`
+    ///         * `TRACE`
+    ///     * path
+    ///     * headers:
+    ///     * body
+    pub fn send_http(
+        &self,
+        destination: String,
+        method: String,
+        path: String,
+        headers: JsValue,
+        body: Option<js_sys::Uint8Array>,
+    ) -> js_sys::Promise {
+        let p = self.processor.clone();
+
         future_to_promise(async move {
-            let params =
-                utils::parse_params(params).map_err(|e| JsError::new(e.to_string().as_str()))?;
-            let method = Method::try_from(method.as_str())
-                .map_err(|e| JsError::new(e.to_string().as_str()))?;
-            let r = jsonrpc_server::handle_request(method, meta, params)
+            let headers = if headers.is_null() {
+                Vec::new()
+            } else if headers.is_object() {
+                let mut header_vec: Vec<(String, String)> = Vec::new();
+                let obj = js_sys::Object::from(headers);
+                let entries = js_sys::Object::entries(&obj);
+                for e in entries.iter() {
+                    if js_sys::Array::is_array(&e) {
+                        let arr = js_sys::Array::from(&e);
+                        if arr.length() != 2 {
+                            continue;
+                        }
+                        let k = arr.get(0);
+                        let v = arr.get(1);
+                        if v.is_string() {
+                            header_vec.push((k.as_string().unwrap(), v.as_string().unwrap()));
+                        }
+                    }
+                }
+                header_vec
+            } else {
+                Vec::new()
+            };
+
+            let body = body.map(|b| bytes::Bytes::from(b.to_vec()));
+
+            let msg = BackendMessage::HttpServer(HttpServerMessage::Request(HttpServerRequest {
+                method,
+                path: path.to_owned(),
+                headers,
+                body,
+            }));
+            let text = serde_json::to_string(&msg).unwrap();
+
+            let tx_id = p
+                .send_message(destination.as_str(), text.as_bytes())
                 .await
                 .map_err(JsError::from)?;
-            let r = JsValue::from_serde(&r).map_err(JsError::from)?;
-            Ok(r)
+            Ok(JsValue::from_str(tx_id.to_string().as_str()))
         })
     }
 }

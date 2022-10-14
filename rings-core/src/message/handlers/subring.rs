@@ -49,7 +49,8 @@ impl SubRingOperator for Swarm {
         match self.dht.join_subring(&self.dht.id, &did).await {
             Ok(PeerRingAction::RemoteAction(next, RemoteAction::FindAndJoinSubRing(rid))) => {
                 self.send_direct_message(Message::JoinSubRing(JoinSubRing { did: rid }), next)
-                    .await
+                    .await?;
+                Ok(())
             }
             Ok(PeerRingAction::None) => Ok(()),
             Ok(act) => Err(Error::PeerRingUnexpectedAction(act)),
