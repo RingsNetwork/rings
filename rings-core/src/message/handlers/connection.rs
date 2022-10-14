@@ -58,10 +58,9 @@ impl HandleMsg<JoinDHT> for MessageHandler {
                         }),
                         next,
                     )
-                    .await
-                } else {
-                    Ok(())
+                    .await?;
                 }
+                Ok(())
             }
             _ => unreachable!(),
         }
@@ -247,7 +246,8 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
                         Message::SyncVNodeWithSuccessor(SyncVNodeWithSuccessor { data }),
                         next,
                     )
-                    .await?
+                    .await?;
+                    return Ok(());
                 }
             }
             _ => {}

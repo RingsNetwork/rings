@@ -78,7 +78,8 @@ impl Stabilization {
                     });
                     self.swarm
                         .send_message(msg.clone(), next, self.swarm.did())
-                        .await
+                        .await?;
+                    Ok(())
                 }
                 _ => {
                     tracing::error!("Invalid PeerRing Action");
