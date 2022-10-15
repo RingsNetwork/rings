@@ -99,6 +99,10 @@ impl MessageHandler {
                 }
                 _ => cb.builtin_message(self, payload).await,
             };
+        } else if let Message::CustomMessage(ref msg) = payload.data {
+            if self.dht.id == payload.relay.destination {
+                tracing::warn!("No callback registered, skip invoke_callback of {:?}", msg);
+            }
         }
         Ok(())
     }
