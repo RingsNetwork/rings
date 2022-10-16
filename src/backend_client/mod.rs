@@ -43,6 +43,7 @@ pub struct Chunk<const MTU: usize> {
     pub data: Vec<u8>,
 }
 
+
 impl<const MTU: usize> Chunk<MTU> {
     pub fn from_bytes(bytes: Vec<u8>) -> Vec<Self> {
         let chunks: Vec<&[u8; MTU]> = bytes.array_chunks::<MTU>().collect();

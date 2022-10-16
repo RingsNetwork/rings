@@ -61,8 +61,10 @@
 
 #![feature(associated_type_defaults)]
 #![feature(async_closure)]
+#![feature(iter_array_chunks)]
 #![feature(box_syntax)]
 #![feature(generators)]
+#![feature(array_chunks)]
 pub mod channels;
 pub mod dht;
 pub mod ecc;
