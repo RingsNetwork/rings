@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use bytes::Bytes;
 use reqwest::header::HeaderMap;
@@ -138,7 +140,7 @@ impl MessageCallback for Backend {
                                 let resp = server.execute(req).await.unwrap_or_else(|e| {
                                     HttpServerResponse {
                                         status: 500,
-                                        headers: vec![],
+                                        headers: HashMap::new(),
                                         body: Some(Bytes::from(e.to_string())),
                                     }
                                 });

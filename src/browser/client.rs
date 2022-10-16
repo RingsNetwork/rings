@@ -1,4 +1,5 @@
 #![allow(non_snake_case, non_upper_case_globals)]
+use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -565,9 +566,9 @@ impl Client {
 
         future_to_promise(async move {
             let headers = if headers.is_null() {
-                Vec::new()
+                HashMap::new()
             } else if headers.is_object() {
-                let mut header_vec: Vec<(String, String)> = Vec::new();
+                let mut header_map: HashMap<String, String> = HashMap::new();
                 let obj = js_sys::Object::from(headers);
                 let entries = js_sys::Object::entries(&obj);
                 for e in entries.iter() {
@@ -579,13 +580,13 @@ impl Client {
                         let k = arr.get(0);
                         let v = arr.get(1);
                         if v.is_string() {
-                            header_vec.push((k.as_string().unwrap(), v.as_string().unwrap()));
+                            header_map.insert(k.as_string().unwrap(), v.as_string().unwrap());
                         }
                     }
                 }
-                header_vec
+                header_map
             } else {
-                Vec::new()
+                HashMap::new()
             };
 
             let body = body.map(|b| bytes::Bytes::from(b.to_vec()));
