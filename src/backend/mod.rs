@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::backend_client::BackendMessage;
+use crate::backend_client::Chunk;
 use crate::backend_client::HttpServerMessage;
 use crate::backend_client::HttpServerRequest;
 use crate::backend_client::HttpServerResponse;
@@ -150,15 +151,19 @@ impl MessageCallback for Backend {
                                     BackendMessage::HttpServer(HttpServerMessage::Response(resp));
                                 let resp_bytes = serde_json::to_vec(&resp).unwrap();
                                 let pubkey = ctx.origin_session_pubkey().unwrap();
-
-                                handler
-                                    .send_report_message(
-                                        Message::custom(&resp_bytes, Some(pubkey)).unwrap(),
-                                        ctx.tx_id,
-                                        relay,
-                                    )
-                                    .await
-                                    .unwrap();
+                                // 256b
+                                let chunks = Chunk::<{ 256 * 4 }>::from_bytes(resp_bytes);
+                                for c in chunks {
+                                    let bytes = serde_json::to_vec(&c).unwrap();
+                                    handler
+                                        .send_report_message(
+                                            Message::custom(&bytes, Some(pubkey)).unwrap(),
+                                            ctx.tx_id,
+                                            relay.clone(),
+                                        )
+                                        .await
+                                        .unwrap();
+                                }
                             } else {
                                 tracing::warn!("HTTP server is not configured");
                             }
