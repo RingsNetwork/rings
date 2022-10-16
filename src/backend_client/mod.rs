@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use bytes::Bytes;
 use serde::Deserialize;
 use serde::Serialize;
@@ -19,13 +21,13 @@ pub enum HttpServerMessage {
 pub struct HttpServerRequest {
     pub method: String,
     pub path: String,
-    pub headers: Vec<(String, String)>,
+    pub headers: HashMap<String, String>,
     pub body: Option<Bytes>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HttpServerResponse {
     pub status: u16,
-    pub headers: Vec<(String, String)>,
+    pub headers: HashMap<String, String>,
     pub body: Option<Bytes>,
 }
