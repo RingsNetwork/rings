@@ -91,7 +91,7 @@ impl<const MTU: usize> ChunkList<MTU> {
             .to_vec()
             .iter()
             .filter(|e| e.meta.id == id)
-            .map(|e| e.clone())
+            .cloned()
             .collect();
         Self::from(chunks).formalize()
     }
@@ -101,7 +101,7 @@ impl<const MTU: usize> ChunkList<MTU> {
         let chunks = self.formalize().to_vec();
         // sample first ele, and chunk size is equal to length of grouped vec
         // we can call `unwrap` here because pre-condition is `lens() > 0 `
-        chunks.len() > 0 && chunks.len() == chunks.first().unwrap().chunk[1]
+        !chunks.is_empty() && chunks.len() == chunks.first().unwrap().chunk[1]
     }
 
     /// if list is completed, withdraw data, or return None
@@ -112,7 +112,7 @@ impl<const MTU: usize> ChunkList<MTU> {
             let data = self.formalize().to_vec();
             let ret: Vec<u8> = data.iter().fold(vec![], |a, b| {
                 let mut rhs = b.data.clone();
-                let mut lhs = a.clone();
+                let mut lhs = a;
                 lhs.append(&mut rhs);
                 lhs
             });
@@ -142,7 +142,7 @@ where T: IntoIterator<Item = u8> + Clone
                 .into_iter()
                 .enumerate()
                 .map(|(i, d)| Chunk {
-                    meta: meta,
+                    meta,
                     chunk: [i, chunks_len],
                     data: d.to_vec(),
                 })
@@ -151,9 +151,9 @@ where T: IntoIterator<Item = u8> + Clone
     }
 }
 
-impl<const MTU: usize> Into<Vec<Chunk<MTU>>> for ChunkList<MTU> {
-    fn into(self) -> Vec<Chunk<MTU>> {
-        self.to_vec()
+impl<const MTU: usize> From<ChunkList<MTU>> for Vec<Chunk<MTU>> {
+    fn from(l: ChunkList<MTU>) -> Self {
+        l.to_vec()
     }
 }
 
