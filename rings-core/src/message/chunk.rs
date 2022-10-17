@@ -194,8 +194,8 @@ mod test {
 
     #[test]
     fn test_data_chunks() {
-        let data: Vec<u8> = repeat("helloworld")
-            .take(1024)
+        let data: Vec<u8> = "helloworld"
+            .repeat(1024)
             .collect::<String>()
             .as_bytes()
             .to_vec();
