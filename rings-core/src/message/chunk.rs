@@ -188,17 +188,11 @@ impl<const MTU: usize> ChunkManager for ChunkList<MTU> {
 
 #[cfg(test)]
 mod test {
-    use core::iter::repeat;
-
     use super::*;
 
     #[test]
     fn test_data_chunks() {
-        let data: Vec<u8> = "helloworld"
-            .repeat(1024)
-            .collect::<String>()
-            .as_bytes()
-            .to_vec();
+        let data: Vec<u8> = "helloworld".repeat(1024).bytes().to_vec();
         let ret: Vec<Chunk<32>> = ChunkList::<32>::from(&data).into();
         assert_eq!(ret.len(), 10 * 1024 / 32);
         assert_eq!(ret[ret.len() - 1].chunk, [319, 320]);
