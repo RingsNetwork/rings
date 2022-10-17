@@ -59,6 +59,8 @@ trait ChunkManager {
     /// get sepc msg via uuid
     /// if a msg is not completed, it will returns None
     fn get(&self, id: Uuid) -> Option<Vec<u8>>;
+    /// delete
+    fn remove(&mut self, id: Uuid);
 }
 
 /// List of Chunk, simply wrapped `Vec<Chunk>`
@@ -74,6 +76,11 @@ impl<const MTU: usize> ChunkList<MTU> {
     /// ChunkList to &Vec
     pub fn as_vec(&self) -> &Vec<Chunk<MTU>> {
         &self.0
+    }
+
+    /// ChunkList to &mut Vec
+    pub fn as_vec_mut(&mut self) -> &mut Vec<Chunk<MTU>> {
+        &mut self.0
     }
 
     /// dedup and sort elements in list
@@ -183,6 +190,11 @@ impl<const MTU: usize> ChunkManager for ChunkList<MTU> {
 
     fn get(&self, id: Uuid) -> Option<Vec<u8>> {
         self.search(id).try_withdraw()
+    }
+
+    fn remove(&mut self, id: Uuid) {
+        //  remove all elements e for where chunk.meta.id == id.
+        self.as_vec_mut().retain(|e| e.meta.id != id)
     }
 }
 
