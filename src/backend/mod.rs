@@ -8,12 +8,12 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::backend_client::BackendMessage;
-use crate::backend_client::Chunk;
 use crate::backend_client::HttpServerMessage;
 use crate::backend_client::HttpServerRequest;
 use crate::backend_client::HttpServerResponse;
 use crate::error::Error;
 use crate::error::Result;
+use crate::prelude::rings_core::message::chunk::ChunkList;
 use crate::prelude::rings_core::message::Message;
 use crate::prelude::*;
 
@@ -152,7 +152,7 @@ impl MessageCallback for Backend {
                                 let resp_bytes = serde_json::to_vec(&resp).unwrap();
                                 let pubkey = ctx.origin_session_pubkey().unwrap();
                                 // 256b
-                                let chunks = Chunk::<{ 256 * 4 }>::from_bytes(resp_bytes);
+                                let chunks = ChunkList::<{ 256 * 4 }>::from(&resp_bytes);
                                 for c in chunks {
                                     let bytes = serde_json::to_vec(&c).unwrap();
                                     handler

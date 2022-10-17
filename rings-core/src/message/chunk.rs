@@ -23,6 +23,7 @@ pub struct Chunk<const MTU: usize> {
 }
 
 impl<const MTU: usize> Chunk<MTU> {
+    /// check two chunks is belongs to same tx
     pub fn tx_eq(a: &Self, b: &Self) -> bool {
         a.meta.id == b.meta.id && a.chunk[1] == b.chunk[1]
     }
