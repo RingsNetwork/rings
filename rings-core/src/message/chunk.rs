@@ -192,9 +192,41 @@ mod test {
 
     #[test]
     fn test_data_chunks() {
-        let data: Vec<u8> = "helloworld".repeat(1024).bytes().to_vec();
-        let ret: Vec<Chunk<32>> = ChunkList::<32>::from(&data).into();
+        let data = "helloworld".repeat(1024);
+        let ret: Vec<Chunk<32>> = ChunkList::<32>::from(&data.bytes()).into();
         assert_eq!(ret.len(), 10 * 1024 / 32);
         assert_eq!(ret[ret.len() - 1].chunk, [319, 320]);
+    }
+
+    #[test]
+    fn test_withdraw() {
+        let data = "helloworld".repeat(1024);
+        let ret: Vec<Chunk<32>> = ChunkList::<32>::from(&data.bytes()).into();
+        let incomp = ret[0.. 30].to_vec();
+        let cl = ChunkList::from(incomp);
+        assert_eq!(cl.is_completed(), false);
+        let wd = ChunkList::from(ret).try_withdraw().unwrap();
+        assert_eq!(wd, data.into_bytes())
+    }
+
+    #[test]
+    fn test_query_complete() {
+        let data1 = "hello".repeat(1024);
+        let data2 = "world".repeat(256);
+        let chunks1: Vec<Chunk<32>> = ChunkList::<32>::from(&data1.bytes()).into();
+        let chunks2: Vec<Chunk<32>> = ChunkList::<32>::from(&data2.bytes()).into();
+
+        let mut part = chunks1[2..5].to_vec();
+        let mut fin = chunks2.clone();
+        fin.append(&mut part);
+
+        let cl = ChunkList::from(fin);
+        let comp = cl.list_completed();
+        assert_eq!(comp.len(), 1);
+        let id = comp[0];
+        assert_eq!(cl.get(id).unwrap(), data2.into_bytes());
+        let pend = cl.list_pending();
+        assert_eq!(pend.len(), 1);
+        assert_eq!(cl.get(pend[0]), None)
     }
 }
