@@ -20,8 +20,7 @@ use crate::err::Error;
 use crate::err::Result;
 use crate::session::SessionManager;
 use crate::utils;
-
-const DEFAULT_TTL_MS: usize = 60 * 1000;
+use crate::consts::DEFAULT_TTL_MS;
 
 pub enum OriginVerificationGen {
     Origin,

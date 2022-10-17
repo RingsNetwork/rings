@@ -65,6 +65,8 @@
 #![feature(box_syntax)]
 #![feature(generators)]
 #![feature(array_chunks)]
+#![feature(drain_filter)]
+#![feature(slice_group_by)]
 pub mod channels;
 pub mod dht;
 pub mod ecc;
@@ -82,3 +84,4 @@ pub mod types;
 pub mod utils;
 pub use async_trait::async_trait;
 pub use futures;
+pub mod consts;
