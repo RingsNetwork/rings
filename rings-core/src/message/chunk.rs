@@ -19,7 +19,7 @@ pub struct Chunk<const MTU: usize> {
     /// bytes
     pub data: Vec<u8>,
     /// meta data of chunk
-    pub meta: ChunkMeta
+    pub meta: ChunkMeta,
 }
 
 impl<const MTU: usize> Chunk<MTU> {
@@ -36,8 +36,7 @@ pub struct ChunkMeta {
     /// Time to live
     pub ttl: Option<usize>,
     /// ts
-    pub ts: Option<u128>
-
+    pub ts: Option<u128>,
 }
 
 impl Default for ChunkMeta {
@@ -45,7 +44,7 @@ impl Default for ChunkMeta {
         Self {
             id: uuid::Uuid::new_v4(),
             ts: None,
-            ttl: None
+            ttl: None,
         }
     }
 }
@@ -87,13 +86,11 @@ impl<const MTU: usize> ChunkList<MTU> {
 
     /// search and formalize
     pub fn search(&self, id: Uuid) -> Self {
-        let chunks: Vec<Chunk<MTU>> = self.to_vec().iter()
-            .filter(|e| {
-                e.meta.id == id
-            })
-            .map(|e| {
-                e.clone()
-            })
+        let chunks: Vec<Chunk<MTU>> = self
+            .to_vec()
+            .iter()
+            .filter(|e| e.meta.id == id)
+            .map(|e| e.clone())
             .collect();
         Self::from(chunks).formalize()
     }
@@ -170,42 +167,38 @@ impl<const MTU: usize> ChunkManager for ChunkList<MTU> {
         // group by msg uuid and chunk size
         self.to_vec()
             .group_by(|a, b| Chunk::tx_eq(a, b))
-            .filter(|e| {
-                ChunkList::<MTU>::from(e.to_vec()).is_completed()
-            })
-            .map(|c| {
-                c.first().unwrap().meta.id
-            })
+            .filter(|e| ChunkList::<MTU>::from(e.to_vec()).is_completed())
+            .map(|c| c.first().unwrap().meta.id)
             .collect()
     }
 
     fn list_pending(&self) -> Vec<Uuid> {
         self.to_vec()
             .group_by(|a, b| Chunk::tx_eq(a, b))
-            .filter(|e| {
-                !ChunkList::<MTU>::from(e.to_vec()).is_completed()
-            })
-            .map(|c| {
-                c.first().unwrap().meta.id
-            })
+            .filter(|e| !ChunkList::<MTU>::from(e.to_vec()).is_completed())
+            .map(|c| c.first().unwrap().meta.id)
             .collect()
     }
 
     fn get(&self, id: Uuid) -> Option<Vec<u8>> {
         self.search(id).try_withdraw()
     }
-
 }
 
 #[cfg(test)]
 mod test {
     use core::iter::repeat;
+
     use super::*;
 
     #[test]
     fn test_data_chunks() {
-        let data: Vec<u8> = repeat("helloworld").take(1024).collect::<String>().as_bytes().to_vec();
-        let ret: Vec<Chunk::<32>> = ChunkList::<32>::from(&data).into();
+        let data: Vec<u8> = repeat("helloworld")
+            .take(1024)
+            .collect::<String>()
+            .as_bytes()
+            .to_vec();
+        let ret: Vec<Chunk<32>> = ChunkList::<32>::from(&data).into();
         assert_eq!(ret.len(), 10 * 1024 / 32);
         assert_eq!(ret[ret.len() - 1].chunk, [319, 320]);
     }
