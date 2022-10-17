@@ -204,7 +204,7 @@ mod test {
         let ret: Vec<Chunk<32>> = ChunkList::<32>::from(&data.bytes()).into();
         let incomp = ret[0.. 30].to_vec();
         let cl = ChunkList::from(incomp);
-        assert_eq!(cl.is_completed(), false);
+        assert!(!cl.is_completed());
         let wd = ChunkList::from(ret).try_withdraw().unwrap();
         assert_eq!(wd, data.into_bytes())
     }
@@ -217,7 +217,7 @@ mod test {
         let chunks2: Vec<Chunk<32>> = ChunkList::<32>::from(&data2.bytes()).into();
 
         let mut part = chunks1[2..5].to_vec();
-        let mut fin = chunks2.clone();
+        let mut fin = chunks2;
         fin.append(&mut part);
 
         let cl = ChunkList::from(fin);
