@@ -202,7 +202,7 @@ mod test {
     fn test_withdraw() {
         let data = "helloworld".repeat(1024);
         let ret: Vec<Chunk<32>> = ChunkList::<32>::from(&data.bytes()).into();
-        let incomp = ret[0.. 30].to_vec();
+        let incomp = ret[0..30].to_vec();
         let cl = ChunkList::from(incomp);
         assert!(!cl.is_completed());
         let wd = ChunkList::from(ret).try_withdraw().unwrap();
