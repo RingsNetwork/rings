@@ -52,6 +52,8 @@ pub enum Error {
     JsError(String),
     #[error("Invalid http request: {0}")]
     HttpRequestError(String),
+    #[error("Invalid message")]
+    InvalidMessage,
 }
 
 impl Error {
@@ -81,6 +83,7 @@ impl Error {
             Error::VNodeError(_) => 21,
             Error::JsError(_) => 22,
             Error::HttpRequestError(_) => 23,
+            Error::InvalidMessage => 24,
         };
         -32000 - code
     }

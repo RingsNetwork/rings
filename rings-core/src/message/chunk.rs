@@ -51,7 +51,7 @@ impl Default for ChunkMeta {
 }
 
 /// A helper for manage chunks and chunk pool
-trait ChunkManager {
+pub trait ChunkManager {
     /// list completed Chunks;
     fn list_completed(&self) -> Vec<Uuid>;
     /// list pending Chunks;
@@ -125,6 +125,12 @@ impl<const MTU: usize> ChunkList<MTU> {
             });
             Some(ret)
         }
+    }
+}
+
+impl<const MTU: usize> Default for ChunkList<MTU> {
+    fn default() -> Self {
+        Self(vec![])
     }
 }
 

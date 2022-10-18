@@ -31,6 +31,7 @@ use crate::prelude::rings_core::types::ice_transport::IceTransportInterface;
 use crate::prelude::rings_core::types::ice_transport::IceTrickleScheme;
 use crate::prelude::vnode;
 use crate::prelude::web3::signing::keccak256;
+use crate::prelude::CustomMessage;
 use crate::prelude::TChordStorage;
 
 /// Processor for rings-node jsonrpc server
@@ -341,7 +342,13 @@ impl Processor {
             msg,
         );
         let destination = Did::from_str(destination).map_err(|_| Error::InvalidDid)?;
-        let msg = Message::custom(msg, None).map_err(Error::SendMessage)?;
+
+        let mut new_msg: Vec<u8> = Vec::with_capacity(msg.len() + 4);
+        new_msg.extend_from_slice(&[0, 0, 0, 0]);
+        new_msg.extend_from_slice(msg);
+
+        let msg = Message::custom(&new_msg, None).map_err(Error::SendMessage)?;
+
         // self.swarm.do_send_payload(address, payload)
         let uuid = self
             .swarm
@@ -398,6 +405,16 @@ impl From<&(Did, Arc<Transport>)> for Peer {
             transport: transport.clone(),
         }
     }
+}
+
+/// unpack custome message to text
+pub fn unpack_text_message(msg: &CustomMessage) -> Result<String> {
+    let (left, right) = msg.0.split_at(4);
+    if left[0] != 0 {
+        return Err(Error::InvalidDid);
+    }
+    let text = String::from_utf8(right.to_vec()).unwrap();
+    Ok(text)
 }
 
 #[cfg(test)]
@@ -537,7 +554,7 @@ mod test {
             msg: &MaybeEncrypted<CustomMessage>,
         ) {
             let msg = handler.decrypt_msg(msg).unwrap();
-            let text = String::from_utf8(msg.0).unwrap();
+            let text = unpack_text_message(&msg).unwrap();
             let mut msgs = self.msgs.try_lock().unwrap();
             msgs.push(text);
         }

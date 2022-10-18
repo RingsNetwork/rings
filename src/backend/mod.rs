@@ -152,12 +152,17 @@ impl MessageCallback for Backend {
                                 let resp_bytes = serde_json::to_vec(&resp).unwrap();
                                 let pubkey = ctx.origin_session_pubkey().unwrap();
                                 // 256b
-                                let chunks = ChunkList::<{ 256 * 4 }>::from(&resp_bytes);
+                                let chunks = ChunkList::<{ 255 * 4 }>::from(&resp_bytes);
                                 for c in chunks {
                                     let bytes = serde_json::to_vec(&c).unwrap();
+                                    let mut new_bytes: Vec<u8> =
+                                        Vec::with_capacity(bytes.len() + 4);
+                                    new_bytes.extend_from_slice(&[1, 1, 0, 0]);
+                                    new_bytes.extend_from_slice(&bytes);
+
                                     handler
                                         .send_report_message(
-                                            Message::custom(&bytes, Some(pubkey)).unwrap(),
+                                            Message::custom(&new_bytes, Some(pubkey)).unwrap(),
                                             ctx.tx_id,
                                             relay.clone(),
                                         )
