@@ -130,55 +130,63 @@ impl MessageCallback for Backend {
         let mut relay = ctx.relay.clone();
         relay.relay(relay.destination, None).unwrap();
 
-        if let Ok(CustomMessage(raw_msg)) = handler.decrypt_msg(msg) {
-            if let Ok(msg) = serde_json::from_slice(&raw_msg) {
-                match msg {
-                    BackendMessage::HttpServer(msg) => match msg {
-                        HttpServerMessage::Request(req) => {
-                            tracing::info!("Received HTTP server request: {:?}", req);
+        let msg = handler.decrypt_msg(msg);
+        if msg.is_err() {
+            return;
+        }
+        let msg = msg.unwrap();
+        let (left, right) = msg.0.split_at(4);
+        if left[0] != 0 {
+            return;
+        }
+        if let Ok(msg) = serde_json::from_slice(right) {
+            match msg {
+                BackendMessage::HttpServer(msg) => match msg {
+                    HttpServerMessage::Request(req) => {
+                        tracing::info!("Received HTTP server request: {:?}", req);
 
-                            if let Some(ref server) = self.http_server {
-                                let resp = server.execute(req).await.unwrap_or_else(|e| {
-                                    HttpServerResponse {
+                        if let Some(ref server) = self.http_server {
+                            let resp =
+                                server
+                                    .execute(req)
+                                    .await
+                                    .unwrap_or_else(|e| HttpServerResponse {
                                         status: 500,
                                         headers: HashMap::new(),
                                         body: Some(Bytes::from(e.to_string())),
-                                    }
-                                });
-                                tracing::info!("Sending HTTP server response: {:?}", resp);
+                                    });
+                            tracing::info!("Sending HTTP server response: {:?}", resp);
 
-                                let resp =
-                                    BackendMessage::HttpServer(HttpServerMessage::Response(resp));
-                                let resp_bytes = serde_json::to_vec(&resp).unwrap();
-                                let pubkey = ctx.origin_session_pubkey().unwrap();
-                                // 256b
-                                let chunks = ChunkList::<{ 255 * 4 }>::from(&resp_bytes);
-                                for c in chunks {
-                                    let bytes = serde_json::to_vec(&c).unwrap();
-                                    let mut new_bytes: Vec<u8> =
-                                        Vec::with_capacity(bytes.len() + 4);
-                                    new_bytes.extend_from_slice(&[1, 1, 0, 0]);
-                                    new_bytes.extend_from_slice(&bytes);
+                            let resp =
+                                BackendMessage::HttpServer(HttpServerMessage::Response(resp));
+                            let resp_bytes = serde_json::to_vec(&resp).unwrap();
+                            let pubkey = ctx.origin_session_pubkey().unwrap();
+                            // 256b
+                            let chunks = ChunkList::<{ 255 * 4 }>::from(&resp_bytes);
+                            for c in chunks {
+                                let bytes = serde_json::to_vec(&c).unwrap();
+                                let mut new_bytes: Vec<u8> = Vec::with_capacity(bytes.len() + 4);
+                                new_bytes.extend_from_slice(&[1, 1, 0, 0]);
+                                new_bytes.extend_from_slice(&bytes);
 
-                                    handler
-                                        .send_report_message(
-                                            Message::custom(&new_bytes, Some(pubkey)).unwrap(),
-                                            ctx.tx_id,
-                                            relay.clone(),
-                                        )
-                                        .await
-                                        .unwrap();
-                                }
-                            } else {
-                                tracing::warn!("HTTP server is not configured");
+                                handler
+                                    .send_report_message(
+                                        Message::custom(&new_bytes, Some(pubkey)).unwrap(),
+                                        ctx.tx_id,
+                                        relay.clone(),
+                                    )
+                                    .await
+                                    .unwrap();
                             }
+                        } else {
+                            tracing::warn!("HTTP server is not configured");
                         }
-                        HttpServerMessage::Response(resp) => {
-                            println!("HttpServerMessage::Response: {:?}", resp);
-                        }
-                    },
-                }
-            }
+                    }
+                    HttpServerMessage::Response(resp) => {
+                        println!("HttpServerMessage::Response: {:?}", resp);
+                    }
+                },
+            };
         }
     }
 
