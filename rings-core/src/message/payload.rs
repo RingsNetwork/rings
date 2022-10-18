@@ -14,14 +14,13 @@ use super::encoder::Encoder;
 use super::protocols::MessageRelay;
 use super::protocols::MessageVerification;
 use super::protocols::RelayMethod;
+use crate::consts::DEFAULT_TTL_MS;
 use crate::dht::Did;
 use crate::ecc::PublicKey;
 use crate::err::Error;
 use crate::err::Result;
 use crate::session::SessionManager;
 use crate::utils;
-
-const DEFAULT_TTL_MS: usize = 60 * 1000;
 
 pub enum OriginVerificationGen {
     Origin,

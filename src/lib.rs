@@ -134,6 +134,7 @@
 //! ```
 
 #![feature(async_closure)]
+#![feature(array_chunks)]
 #[cfg(feature = "node")]
 pub mod backend;
 pub mod backend_client;
