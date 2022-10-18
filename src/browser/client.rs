@@ -664,7 +664,11 @@ impl MessageCallback for MessageCallbackInstance {
                 let mut c = self.chunlist.try_lock().unwrap();
                 c.as_vec_mut()
                     .extend_from_slice(chunk::ChunkList::from(&right_vec).as_vec());
-                c.get(relay.tx_id)
+                let d = c.get(relay.tx_id);
+                if d.is_some() {
+                  c.remove(relay.tx_id);
+                }
+                d
             };
             if let Some(data) = data_opt {
                 let msg_data = data.clone();
