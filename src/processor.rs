@@ -341,7 +341,13 @@ impl Processor {
             msg,
         );
         let destination = Did::from_str(destination).map_err(|_| Error::InvalidDid)?;
-        let msg = Message::custom(msg, None).map_err(Error::SendMessage)?;
+
+        let mut new_msg: Vec<u8> = Vec::with_capacity(msg.len() + 4);
+        new_msg.extend_from_slice(&[0, 0, 0, 0]);
+        new_msg.extend_from_slice(msg);
+
+        let msg = Message::custom(&new_msg, None).map_err(Error::SendMessage)?;
+
         // self.swarm.do_send_payload(address, payload)
         let uuid = self
             .swarm

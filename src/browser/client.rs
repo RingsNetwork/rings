@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -11,6 +12,8 @@ use crate::backend_client::BackendMessage;
 use crate::backend_client::HttpServerMessage;
 use crate::backend_client::HttpServerRequest;
 use crate::jsonrpc::RpcMeta;
+use crate::prelude::chunk;
+use crate::prelude::chunk::ChunkManager;
 use crate::prelude::js_sys;
 use crate::prelude::rings_core::async_trait;
 use crate::prelude::rings_core::dht::Did;
@@ -611,7 +614,9 @@ impl Client {
 #[wasm_bindgen]
 pub struct MessageCallbackInstance {
     custom_message: Arc<js_sys::Function>,
+    http_response_message: Arc<js_sys::Function>,
     builtin_message: Arc<js_sys::Function>,
+    chunlist: Arc<Mutex<chunk::ChunkList<{ 255 * 4 }>>>,
 }
 
 #[wasm_bindgen]
@@ -619,11 +624,14 @@ impl MessageCallbackInstance {
     #[wasm_bindgen(constructor)]
     pub fn new(
         custom_message: &js_sys::Function,
+        http_response_message: &js_sys::Function,
         builtin_message: &js_sys::Function,
     ) -> Result<MessageCallbackInstance, JsError> {
         Ok(MessageCallbackInstance {
             custom_message: Arc::new(custom_message.clone()),
+            http_response_message: Arc::new(http_response_message.clone()),
             builtin_message: Arc::new(builtin_message.clone()),
+            chunlist: Arc::new(Mutex::new(chunk::ChunkList::default())),
         })
     }
 }
@@ -645,14 +653,43 @@ impl MessageCallback for MessageCallbackInstance {
         } else {
             r.unwrap()
         };
-        // let msg = r.unwrap();
+        let msg_body = msg.0;
+        let (left, right) = msg_body.split_at(4);
 
         let this = JsValue::null();
-        let msg = js_sys::Uint8Array::from(&msg.0[..]);
 
-        if let Ok(r) = self
-            .custom_message
-            .call2(&this, &JsValue::from_serde(&relay).unwrap(), &msg)
+        if left[0] == 1 {
+            let right_vec = right.to_vec();
+            let data_opt = {
+                let mut c = self.chunlist.try_lock().unwrap();
+                c.as_vec_mut()
+                    .extend_from_slice(chunk::ChunkList::from(&right_vec).as_vec());
+                c.get(relay.tx_id)
+            };
+            if let Some(data) = data_opt {
+                let msg_data = data.clone();
+                let msg_content = js_sys::Uint8Array::from(msg_data.as_slice());
+                if let Ok(r) = self.http_response_message.call2(
+                    &this,
+                    &JsValue::from_serde(&relay).unwrap(),
+                    &msg_content,
+                ) {
+                    if let Ok(p) = js_sys::Promise::try_from(r) {
+                        if let Err(e) = wasm_bindgen_futures::JsFuture::from(p).await {
+                            log::warn!("invoke on_custom_message error: {:?}", e);
+                        }
+                    }
+                }
+            } else {
+                log::info!("message of {:?} not complete", relay.tx_id);
+            }
+            return;
+        }
+        let msg_content = js_sys::Uint8Array::from(right.to_vec().as_slice());
+
+        if let Ok(r) =
+            self.custom_message
+                .call2(&this, &JsValue::from_serde(&relay).unwrap(), &msg_content)
         {
             if let Ok(p) = js_sys::Promise::try_from(r) {
                 if let Err(e) = wasm_bindgen_futures::JsFuture::from(p).await {
