@@ -12,6 +12,7 @@ use rings_node::prelude::rings_core::transports::manager::TransportManager;
 use rings_node::prelude::web3::contract::tokens::Tokenizable;
 use rings_node::prelude::web_sys::RtcIceConnectionState;
 use rings_node::prelude::*;
+use rings_node::processor;
 use rings_node::processor::*;
 use wasm_bindgen_test::*;
 
@@ -67,7 +68,7 @@ impl MessageCallback for MsgCallbackStruct {
         msg: &MaybeEncrypted<CustomMessage>,
     ) {
         let msg = handler.decrypt_msg(msg).unwrap();
-        let text = String::from_utf8(msg.0).unwrap();
+        let text = processor::unpack_text_message(&msg).unwrap();
         console_log!("msg received: {}", text);
         let mut msgs = self.msgs.try_lock().unwrap();
         msgs.push(text);

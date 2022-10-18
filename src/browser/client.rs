@@ -666,7 +666,7 @@ impl MessageCallback for MessageCallbackInstance {
                     .extend_from_slice(chunk::ChunkList::from(&right_vec).as_vec());
                 let d = c.get(relay.tx_id);
                 if d.is_some() {
-                  c.remove(relay.tx_id);
+                    c.remove(relay.tx_id);
                 }
                 d
             };

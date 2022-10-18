@@ -31,6 +31,7 @@ use crate::prelude::rings_core::types::ice_transport::IceTransportInterface;
 use crate::prelude::rings_core::types::ice_transport::IceTrickleScheme;
 use crate::prelude::vnode;
 use crate::prelude::web3::signing::keccak256;
+use crate::prelude::CustomMessage;
 use crate::prelude::TChordStorage;
 
 /// Processor for rings-node jsonrpc server
@@ -406,6 +407,16 @@ impl From<&(Did, Arc<Transport>)> for Peer {
     }
 }
 
+/// unpack custome message to text
+pub fn unpack_text_message(msg: &CustomMessage) -> Result<String> {
+    let (left, right) = msg.0.split_at(4);
+    if left[0] != 0 {
+        return Err(Error::InvalidDid);
+    }
+    let text = String::from_utf8(right.to_vec()).unwrap();
+    Ok(text)
+}
+
 #[cfg(test)]
 #[cfg(feature = "node")]
 mod test {
@@ -543,7 +554,7 @@ mod test {
             msg: &MaybeEncrypted<CustomMessage>,
         ) {
             let msg = handler.decrypt_msg(msg).unwrap();
-            let text = String::from_utf8(msg.0).unwrap();
+            let text = unpack_text_message(&msg).unwrap();
             let mut msgs = self.msgs.try_lock().unwrap();
             msgs.push(text);
         }
