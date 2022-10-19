@@ -616,7 +616,7 @@ pub struct MessageCallbackInstance {
     custom_message: Arc<js_sys::Function>,
     http_response_message: Arc<js_sys::Function>,
     builtin_message: Arc<js_sys::Function>,
-    chunlist: Arc<Mutex<chunk::ChunkList<1024>>>,
+    chunlist: Arc<Mutex<Vec<chunk::Chunk<1024>>>>,
 }
 
 #[wasm_bindgen]
@@ -631,7 +631,7 @@ impl MessageCallbackInstance {
             custom_message: Arc::new(custom_message.clone()),
             http_response_message: Arc::new(http_response_message.clone()),
             builtin_message: Arc::new(builtin_message.clone()),
-            chunlist: Arc::new(Mutex::new(chunk::ChunkList::default())),
+            chunlist: Arc::new(Mutex::new(Vec::new())),
         })
     }
 }
@@ -657,25 +657,22 @@ impl MessageCallback for MessageCallbackInstance {
         let this = JsValue::null();
 
         if left[0] == 1 {
-            let right_vec = right.to_vec();
             let data_opt = {
                 let mut c = self.chunlist.try_lock().unwrap();
-                c.as_vec_mut()
-                    .extend_from_slice(chunk::ChunkList::from(&right_vec).as_vec());
-                let d = c.get(relay.tx_id);
+                let chunk_item: chunk::Chunk<1024> = chunk::Chunk::from(right);
+                c.push(chunk_item.clone());
+                let chunk_list = chunk::ChunkList::from(c.clone());
+                let d = chunk_list.get(relay.tx_id);
                 if d.is_some() {
-                    c.remove(relay.tx_id);
+                    c.retain(|e| e.meta.id != relay.tx_id);
                 }
+                log::debug!("chunk size: {}, total: {}", c.len(), chunk_item.chunk[1]);
                 d
             };
             log::debug!("chunk message of {:?} received", relay.tx_id);
             if let Some(data) = data_opt {
                 let msg_context = data.as_slice();
-                log::info!(
-                    "chunk message of {:?} received, {:?}",
-                    relay.tx_id,
-                    &msg_context
-                );
+                log::info!("message of {:?} received, {:?}", relay.tx_id, &msg_context);
                 let msg_content = js_sys::Uint8Array::from(msg_context);
                 if let Ok(r) = self.http_response_message.call2(
                     &this,
