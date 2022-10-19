@@ -4,7 +4,6 @@ use serde::Serialize;
 
 use crate::dht::vnode::VirtualNode;
 use crate::dht::Did;
-use crate::ecc::elgamal;
 use crate::ecc::PublicKey;
 use crate::ecc::SecretKey;
 use crate::err::Error;
@@ -93,7 +92,7 @@ pub struct CustomMessage(pub Vec<u8>);
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub enum MaybeEncrypted<T> {
-    Encrypted(Vec<(PublicKey, PublicKey)>),
+    Encrypted(Vec<u8>),
     Plain(T),
 }
 
@@ -154,7 +153,9 @@ where T: Serialize + DeserializeOwned
     pub fn new(data: T, pubkey: Option<PublicKey>) -> Result<Self> {
         if let Some(pubkey) = pubkey {
             let msg = serde_json::to_string(&data).map_err(Error::Serialize)?;
-            let cipher = elgamal::encrypt(&msg, pubkey)?;
+            let pubkey: libsecp256k1::PublicKey = pubkey.try_into()?;
+            let cipher = ecies::encrypt(&pubkey.serialize(), msg.as_bytes())
+                .map_err(Error::MessageEncryptionFailed)?;
             Ok(MaybeEncrypted::Encrypted(cipher))
         } else {
             Ok(MaybeEncrypted::Plain(data))
@@ -165,8 +166,9 @@ where T: Serialize + DeserializeOwned
         match self {
             MaybeEncrypted::Plain(msg) => Ok((msg, false)),
             MaybeEncrypted::Encrypted(cipher) => {
-                let plain = elgamal::decrypt(&cipher, key)?;
-                let msg: T = serde_json::from_str(&plain).map_err(Error::Serialize)?;
+                let plain = ecies::decrypt(&key.serialize(), &cipher)
+                    .map_err(Error::MessageDecryptionFailed)?;
+                let msg: T = serde_json::from_slice(&plain).map_err(Error::Serialize)?;
                 Ok((msg, true))
             }
         }

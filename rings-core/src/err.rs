@@ -297,6 +297,12 @@ pub enum Error {
 
     #[error("Message invalid: {0}")]
     InvalidMessage(String),
+
+    #[error("Message encryption failed")]
+    MessageEncryptionFailed(ecies::SecpError),
+
+    #[error("Message decryption failed")]
+    MessageDecryptionFailed(ecies::SecpError),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
