@@ -662,11 +662,17 @@ impl MessageCallback for MessageCallbackInstance {
                 let chunk_item: chunk::Chunk<1024> = chunk::Chunk::from(right);
                 c.push(chunk_item.clone());
                 let chunk_list = chunk::ChunkList::from(c.clone());
-                let d = chunk_list.get(relay.tx_id);
+                let id = chunk_item.meta.id;
+                let d = chunk_list.get(id.clone());
                 if d.is_some() {
-                    c.retain(|e| e.meta.id != relay.tx_id);
+                    c.retain(|e| e.meta.id != id.clone());
                 }
-                log::debug!("chunk size: {}, total: {}", c.len(), chunk_item.chunk[1]);
+                log::debug!(
+                    "chunk size: {}, total: {}, id: {}",
+                    c.len(),
+                    chunk_item.chunk[1],
+                    id
+                );
                 d
             };
             log::debug!("chunk message of {:?} received", relay.tx_id);
