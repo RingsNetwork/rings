@@ -616,7 +616,7 @@ pub struct MessageCallbackInstance {
     custom_message: Arc<js_sys::Function>,
     http_response_message: Arc<js_sys::Function>,
     builtin_message: Arc<js_sys::Function>,
-    chunlist: Arc<Mutex<chunk::ChunkList<{ 255 * 4 }>>>,
+    chunlist: Arc<Mutex<chunk::ChunkList<32764>>>,
 }
 
 #[wasm_bindgen]
