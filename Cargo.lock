@@ -910,6 +910,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ecies"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e27f6f5b0b545e8c4a4fd1278374f60ed21cdc9e3ad38f2c2d6c50a0e5eaf7c1"
+dependencies = [
+ "aes-gcm 0.9.4",
+ "getrandom 0.2.6",
+ "hkdf",
+ "libsecp256k1",
+ "rand 0.8.5",
+ "sha2 0.9.9",
+ "typenum",
+]
+
+[[package]]
 name = "ed25519"
 version = "1.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1374,6 +1389,16 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
+name = "hkdf"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01706d578d5c281058480e673ae4086a9f4710d8df1ad80a5b03e39ece5f886b"
+dependencies = [
+ "digest 0.9.0",
+ "hmac 0.11.0",
+]
 
 [[package]]
 name = "hmac"
@@ -2628,6 +2653,7 @@ dependencies = [
  "bytes",
  "chrono",
  "dashmap",
+ "ecies",
  "ed25519",
  "ed25519-dalek",
  "flate2",
