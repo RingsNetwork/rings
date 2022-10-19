@@ -7,6 +7,7 @@
 //! to be sent efficiently while not blocking other messages that share
 //! the same connection, or even the same MSRP session.
 
+use itertools::Itertools;
 use serde::Deserialize;
 use serde::Serialize;
 use uuid::Uuid;
@@ -147,7 +148,13 @@ impl<const MTU: usize, T> From<&T> for ChunkList<MTU>
 where T: IntoIterator<Item = u8> + Clone
 {
     fn from(bytes: &T) -> Self {
-        let chunks: Vec<[u8; MTU]> = bytes.clone().into_iter().array_chunks::<MTU>().collect();
+        let chunks: Vec<Vec<u8>> = bytes
+            .clone()
+            .into_iter()
+            .chunks(MTU)
+            .into_iter()
+            .map(|x| x.into_iter().collect::<Vec<_>>())
+            .collect();
         let chunks_len: usize = chunks.len();
         let meta = ChunkMeta::default();
         Self(
@@ -210,6 +217,11 @@ mod test {
 
     #[test]
     fn test_data_chunks() {
+        let data = "helloworld".repeat(2);
+        let ret: Vec<Chunk<32>> = ChunkList::<32>::from(&data.bytes()).into();
+        assert_eq!(ret.len(), 1);
+        assert_eq!(ret[ret.len() - 1].chunk, [0, 1]);
+
         let data = "helloworld".repeat(1024);
         let ret: Vec<Chunk<32>> = ChunkList::<32>::from(&data.bytes()).into();
         assert_eq!(ret.len(), 10 * 1024 / 32);

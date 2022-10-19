@@ -64,8 +64,6 @@
 #![feature(iter_array_chunks)]
 #![feature(box_syntax)]
 #![feature(generators)]
-#![feature(array_chunks)]
-#![feature(drain_filter)]
 #![feature(slice_group_by)]
 pub mod channels;
 pub mod dht;
