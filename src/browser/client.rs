@@ -671,7 +671,11 @@ impl MessageCallback for MessageCallbackInstance {
             log::debug!("chunk message of {:?} received", relay.tx_id);
             if let Some(data) = data_opt {
                 let msg_context = data.as_slice();
-                log::info!("chunk message of {:?} received, {:?}", relay.tx_id, &msg_context);
+                log::info!(
+                    "chunk message of {:?} received, {:?}",
+                    relay.tx_id,
+                    &msg_context
+                );
                 let msg_content = js_sys::Uint8Array::from(msg_context);
                 if let Ok(r) = self.http_response_message.call2(
                     &this,
