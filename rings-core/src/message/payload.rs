@@ -162,7 +162,8 @@ impl<T> Encoder for MessagePayload<T>
 where T: Serialize + DeserializeOwned
 {
     fn encode(&self) -> Result<Encoded> {
-        self.gzip(9)?.encode()
+      self.to_json_vec()?.encode()
+        // self.gzip(9)?.encode()
     }
 }
 
