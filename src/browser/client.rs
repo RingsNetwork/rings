@@ -644,8 +644,6 @@ impl MessageCallback for MessageCallbackInstance {
         relay: &MessagePayload<Message>,
         msg: &MaybeEncrypted<CustomMessage>,
     ) {
-        log::debug!("custom_message received: {:?}", msg);
-
         let r = handler.decrypt_msg(msg);
         let msg = if let Err(e) = r {
             log::error!("custom_message decrypt failed: {:?}", e);
@@ -670,9 +668,11 @@ impl MessageCallback for MessageCallbackInstance {
                 }
                 d
             };
+            log::debug!("chunk message of {:?} received", relay.tx_id);
             if let Some(data) = data_opt {
-                let msg_data = data.clone();
-                let msg_content = js_sys::Uint8Array::from(msg_data.as_slice());
+                let msg_context = data.as_slice();
+                log::info!("chunk message of {:?} received, {:?}", relay.tx_id, &msg_context);
+                let msg_content = js_sys::Uint8Array::from(msg_context);
                 if let Ok(r) = self.http_response_message.call2(
                     &this,
                     &JsValue::from_serde(&relay).unwrap(),
@@ -685,10 +685,11 @@ impl MessageCallback for MessageCallbackInstance {
                     }
                 }
             } else {
-                log::info!("message of {:?} not complete", relay.tx_id);
+                log::info!("chunk message of {:?} not complete", relay.tx_id);
             }
             return;
         }
+        log::debug!("custom_message received: {:?}", right);
         let msg_content = js_sys::Uint8Array::from(right.to_vec().as_slice());
 
         if let Ok(r) =
@@ -706,7 +707,7 @@ impl MessageCallback for MessageCallbackInstance {
 
     async fn builtin_message(&self, _handler: &MessageHandler, relay: &MessagePayload<Message>) {
         let this = JsValue::null();
-        log::debug!("builtin_message received: {:?}", relay);
+        // log::debug!("builtin_message received: {:?}", relay);
         if let Ok(r) = self
             .builtin_message
             .call1(&this, &JsValue::from_serde(&relay).unwrap())
