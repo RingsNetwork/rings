@@ -8,6 +8,7 @@ pub use encoder::Encoder;
 
 mod payload;
 pub use payload::decode_gzip_data;
+pub use payload::encode_data_gzip;
 pub use payload::from_gzipped_data;
 pub use payload::gzip_data;
 pub use payload::MessagePayload;

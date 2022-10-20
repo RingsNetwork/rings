@@ -5,6 +5,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use anyhow::anyhow;
 use rings_core_wasm::message::decode_gzip_data;
 use serde::Deserialize;
 use serde::Serialize;
@@ -617,7 +618,7 @@ pub struct MessageCallbackInstance {
     custom_message: Arc<js_sys::Function>,
     http_response_message: Arc<js_sys::Function>,
     builtin_message: Arc<js_sys::Function>,
-    chunlist: Arc<Mutex<Vec<chunk::Chunk<10240>>>>,
+    chunklist: Arc<Mutex<Vec<chunk::Chunk<10240>>>>,
 }
 
 #[wasm_bindgen]
@@ -632,7 +633,7 @@ impl MessageCallbackInstance {
             custom_message: Arc::new(custom_message.clone()),
             http_response_message: Arc::new(http_response_message.clone()),
             builtin_message: Arc::new(builtin_message.clone()),
-            chunlist: Arc::new(Mutex::new(Vec::new())),
+            chunklist: Arc::new(Mutex::new(Vec::new())),
         })
     }
 }
@@ -655,10 +656,11 @@ impl MessageCallbackInstance {
             relay.tx_id,
             msg_content.len(),
         );
+        let msg_content: BackendMessage = bincode::deserialize(&msg_content)?;
         // let msg_content: BackendMessage = serde_json::from_slice(&msg_content)?;
-        // let msg_content = JsValue::from_serde(&msg_content)?;
+        let msg_content = JsValue::from_serde(&msg_content)?;
         let this = JsValue::null();
-        let msg_content = js_sys::Uint8Array::from(msg_content.as_slice());
+        // let msg_content = js_sys::Uint8Array::from(msg_content.as_slice());
         if let Ok(r) = self.http_response_message.call2(
             &this,
             &JsValue::from_serde(&relay).unwrap(),
@@ -671,6 +673,29 @@ impl MessageCallbackInstance {
             }
         };
         Ok(())
+    }
+
+    fn handle_chunk_data(&self, data: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
+        let c_lock = self.chunklist.try_lock();
+        if c_lock.is_err() {
+            return Err(anyhow!("lock chunklist failed"));
+        }
+        let mut c = c_lock.unwrap();
+        let chunk_item: chunk::Chunk<10240> = bincode::deserialize(data)?;
+        c.push(chunk_item.clone());
+        let chunk_list = chunk::ChunkList::from(c.clone());
+        let id = chunk_item.meta.id;
+        let d = chunk_list.get(id);
+        if d.is_some() {
+            c.retain(|e| e.meta.id != id);
+        }
+        log::debug!(
+            "chunk size: {}, total: {}, id: {}",
+            c.len(),
+            chunk_item.chunk[1],
+            id
+        );
+        Ok(d)
     }
 }
 
@@ -695,26 +720,14 @@ impl MessageCallback for MessageCallbackInstance {
         let this = JsValue::null();
 
         if left[0] == 1 {
-            let data_opt = {
-                let mut c = self.chunlist.try_lock().unwrap();
-                let chunk_item: chunk::Chunk<10240> = chunk::Chunk::from(right);
-                c.push(chunk_item.clone());
-                let chunk_list = chunk::ChunkList::from(c.clone());
-                let id = chunk_item.meta.id;
-                let d = chunk_list.get(id);
-                if d.is_some() {
-                    c.retain(|e| e.meta.id != id);
-                }
-                log::debug!(
-                    "chunk size: {}, total: {}, id: {}",
-                    c.len(),
-                    chunk_item.chunk[1],
-                    id
-                );
-                d
-            };
+            let data = self.handle_chunk_data(right);
+            if let Err(e) = data {
+                log::error!("handle chunk data failed: {}", e);
+                return;
+            }
+            let data = data.unwrap();
             log::debug!("chunk message of {:?} received", relay.tx_id);
-            if let Some(data) = data_opt {
+            if let Some(data) = data {
                 if let Err(e) = self.handle_http_server_msg(relay, &data).await {
                     log::error!("handle http_server_msg failed, {}", e);
                 }

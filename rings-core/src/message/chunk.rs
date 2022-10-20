@@ -177,12 +177,6 @@ impl<const MTU: usize> From<ChunkList<MTU>> for Vec<Chunk<MTU>> {
     }
 }
 
-impl<const MTU: usize> From<&[u8]> for Chunk<MTU> {
-    fn from(src: &[u8]) -> Self {
-        serde_json::from_slice(src).unwrap()
-    }
-}
-
 impl<const MTU: usize> From<Vec<Chunk<MTU>>> for ChunkList<MTU> {
     fn from(data: Vec<Chunk<MTU>>) -> Self {
         Self(data)
