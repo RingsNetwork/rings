@@ -5,6 +5,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use rings_core_wasm::message::decode_gzip_data;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -636,6 +637,43 @@ impl MessageCallbackInstance {
     }
 }
 
+impl MessageCallbackInstance {
+    pub async fn handle_http_server_msg(
+        &self,
+        relay: &MessagePayload<Message>,
+        data: &[u8],
+    ) -> anyhow::Result<()> {
+        let msg_content = data;
+        log::info!(
+            "message of {:?} received, before ungzip: {:?}",
+            relay.tx_id,
+            msg_content.len(),
+        );
+        let msg_content = decode_gzip_data(msg_content).unwrap();
+        log::info!(
+            "message of {:?} received, after ungzip: {:?}",
+            relay.tx_id,
+            msg_content.len(),
+        );
+        // let msg_content: BackendMessage = serde_json::from_slice(&msg_content)?;
+        // let msg_content = JsValue::from_serde(&msg_content)?;
+        let this = JsValue::null();
+        let msg_content = js_sys::Uint8Array::from(msg_content.as_slice());
+        if let Ok(r) = self.http_response_message.call2(
+            &this,
+            &JsValue::from_serde(&relay).unwrap(),
+            &msg_content,
+        ) {
+            if let Ok(p) = js_sys::Promise::try_from(r) {
+                if let Err(e) = wasm_bindgen_futures::JsFuture::from(p).await {
+                    log::warn!("invoke on_custom_message error: {:?}", e);
+                }
+            }
+        };
+        Ok(())
+    }
+}
+
 #[async_trait(?Send)]
 impl MessageCallback for MessageCallbackInstance {
     async fn custom_message(
@@ -663,9 +701,9 @@ impl MessageCallback for MessageCallbackInstance {
                 c.push(chunk_item.clone());
                 let chunk_list = chunk::ChunkList::from(c.clone());
                 let id = chunk_item.meta.id;
-                let d = chunk_list.get(id.clone());
+                let d = chunk_list.get(id);
                 if d.is_some() {
-                    c.retain(|e| e.meta.id != id.clone());
+                    c.retain(|e| e.meta.id != id);
                 }
                 log::debug!(
                     "chunk size: {}, total: {}, id: {}",
@@ -677,19 +715,8 @@ impl MessageCallback for MessageCallbackInstance {
             };
             log::debug!("chunk message of {:?} received", relay.tx_id);
             if let Some(data) = data_opt {
-                let msg_context = data.as_slice();
-                log::info!("message of {:?} received, {:?}", relay.tx_id, &msg_context);
-                let msg_content = js_sys::Uint8Array::from(msg_context);
-                if let Ok(r) = self.http_response_message.call2(
-                    &this,
-                    &JsValue::from_serde(&relay).unwrap(),
-                    &msg_content,
-                ) {
-                    if let Ok(p) = js_sys::Promise::try_from(r) {
-                        if let Err(e) = wasm_bindgen_futures::JsFuture::from(p).await {
-                            log::warn!("invoke on_custom_message error: {:?}", e);
-                        }
-                    }
+                if let Err(e) = self.handle_http_server_msg(relay, &data).await {
+                    log::error!("handle http_server_msg failed, {}", e);
                 }
             } else {
                 log::info!("chunk message of {:?} not complete", relay.tx_id);

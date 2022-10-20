@@ -22,6 +22,31 @@ use crate::err::Result;
 use crate::session::SessionManager;
 use crate::utils;
 
+pub fn gzip_data<T>(data: &T, level: u8) -> Result<Vec<u8>>
+where T: Serialize {
+    let mut ec = GzEncoder::new(Vec::new(), Compression::new(level as u32));
+    let json_bytes = serde_json::to_vec(data).map_err(|_| Error::SerializeToString)?;
+    ec.write_all(json_bytes.as_slice())
+        .map_err(|_| Error::GzipEncode)?;
+    ec.finish().map_err(|_| Error::GzipEncode)
+}
+
+pub fn decode_gzip_data(data: &[u8]) -> Result<Vec<u8>> {
+    let mut writer = Vec::new();
+    let mut decoder = GzDecoder::new(writer);
+    decoder.write_all(data).map_err(|_| Error::GzipDecode)?;
+    decoder.try_finish().map_err(|_| Error::GzipDecode)?;
+    writer = decoder.finish().map_err(|_| Error::GzipDecode)?;
+    Ok(writer)
+}
+
+pub fn from_gzipped_data<T>(data: &[u8]) -> Result<T>
+where T: DeserializeOwned {
+    let data = decode_gzip_data(data)?;
+    let m = serde_json::from_slice(&data).map_err(Error::Deserialize)?;
+    Ok(m)
+}
+
 pub enum OriginVerificationGen {
     Origin,
     Stick(MessageVerification),
@@ -124,22 +149,24 @@ where T: Serialize + DeserializeOwned
     }
 
     pub fn gzip(&self, level: u8) -> Result<Vec<u8>> {
-        let mut ec = GzEncoder::new(Vec::new(), Compression::new(level as u32));
-        let json_str = serde_json::to_string(self).map_err(|_| Error::SerializeToString)?;
-        ec.write_all(json_str.as_bytes())
-            .map_err(|_| Error::GzipEncode)?;
-        ec.finish().map_err(|_| Error::GzipEncode)
+        self::gzip_data(self, level)
+        // let mut ec = GzEncoder::new(Vec::new(), Compression::new(level as u32));
+        // let json_str = serde_json::to_string(self).map_err(|_| Error::SerializeToString)?;
+        // ec.write_all(json_str.as_bytes())
+        //     .map_err(|_| Error::GzipEncode)?;
+        // ec.finish().map_err(|_| Error::GzipEncode)
     }
 
     pub fn from_gzipped(data: &[u8]) -> Result<Self>
     where T: DeserializeOwned {
-        let mut writer = Vec::new();
-        let mut decoder = GzDecoder::new(writer);
-        decoder.write_all(data).map_err(|_| Error::GzipDecode)?;
-        decoder.try_finish().map_err(|_| Error::GzipDecode)?;
-        writer = decoder.finish().map_err(|_| Error::GzipDecode)?;
-        let m = serde_json::from_slice(&writer).map_err(Error::Deserialize)?;
-        Ok(m)
+        self::from_gzipped_data(data)
+        // let mut writer = Vec::new();
+        // let mut decoder = GzDecoder::new(writer);
+        // decoder.write_all(data).map_err(|_| Error::GzipDecode)?;
+        // decoder.try_finish().map_err(|_| Error::GzipDecode)?;
+        // writer = decoder.finish().map_err(|_| Error::GzipDecode)?;
+        // let m = serde_json::from_slice(&writer).map_err(Error::Deserialize)?;
+        // Ok(m)
     }
 
     pub fn from_json(data: &[u8]) -> Result<Self> {
