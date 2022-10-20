@@ -26,6 +26,7 @@ pub fn gzip_data<T>(data: &T, level: u8) -> Result<Vec<u8>>
 where T: Serialize {
     let mut ec = GzEncoder::new(Vec::new(), Compression::new(level as u32));
     let json_bytes = serde_json::to_vec(data).map_err(|_| Error::SerializeToString)?;
+    tracing::info!("json_bytes before gzip len: {}", json_bytes.len());
     ec.write_all(json_bytes.as_slice())
         .map_err(|_| Error::GzipEncode)?;
     ec.finish().map_err(|_| Error::GzipEncode)
