@@ -141,7 +141,8 @@ impl Backend {
 
             let resp = BackendMessage::HttpServer(HttpServerMessage::Response(resp));
             tracing::info!("resp_bytes start gzip");
-            let resp_bytes = message::gzip_data(&resp, 9)?;
+            let json_bytes = bincode::serialize(&resp)?;
+            let resp_bytes = message::encode_data_gzip(&json_bytes, 9)?;
             tracing::info!("resp_bytes gzip_data len: {}", resp_bytes.len());
 
             // 256b

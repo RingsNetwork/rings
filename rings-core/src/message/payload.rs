@@ -22,14 +22,17 @@ use crate::err::Result;
 use crate::session::SessionManager;
 use crate::utils;
 
+pub fn encode_data_gzip(data: &[u8], level: u8) -> Result<Vec<u8>> {
+    let mut ec = GzEncoder::new(Vec::new(), Compression::new(level as u32));
+    tracing::info!("data before gzip len: {}", data.len());
+    ec.write_all(data).map_err(|_| Error::GzipEncode)?;
+    ec.finish().map_err(|_| Error::GzipEncode)
+}
+
 pub fn gzip_data<T>(data: &T, level: u8) -> Result<Vec<u8>>
 where T: Serialize {
-    let mut ec = GzEncoder::new(Vec::new(), Compression::new(level as u32));
     let json_bytes = serde_json::to_vec(data).map_err(|_| Error::SerializeToString)?;
-    tracing::info!("json_bytes before gzip len: {}", json_bytes.len());
-    ec.write_all(json_bytes.as_slice())
-        .map_err(|_| Error::GzipEncode)?;
-    ec.finish().map_err(|_| Error::GzipEncode)
+    encode_data_gzip(&json_bytes, level)
 }
 
 pub fn decode_gzip_data(data: &[u8]) -> Result<Vec<u8>> {
