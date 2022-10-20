@@ -22,7 +22,6 @@ pub use self::rings_core::prelude::async_trait::async_trait;
 pub use self::rings_core::prelude::base58;
 #[cfg(feature = "browser")]
 pub use self::rings_core::prelude::js_sys;
-pub use self::rings_core::prelude::message;
 pub use self::rings_core::prelude::uuid;
 pub use self::rings_core::prelude::vnode;
 #[cfg(feature = "browser")]
@@ -32,7 +31,6 @@ pub use self::rings_core::prelude::wasm_bindgen_futures;
 pub use self::rings_core::prelude::web3;
 #[cfg(feature = "browser")]
 pub use self::rings_core::prelude::web_sys;
-pub use self::rings_core::prelude::MessageRelay;
 pub use self::rings_core::prelude::PersistenceStorage;
 pub use self::rings_core::prelude::RTCIceConnectionState;
 pub use self::rings_core::prelude::TChordStorage;
