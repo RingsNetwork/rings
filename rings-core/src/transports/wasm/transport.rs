@@ -1,9 +1,7 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
-
 use async_trait::async_trait;
-use futures::channel::mpsc;
 use futures::lock::Mutex as FuturesMutex;
 use js_sys::Uint8Array;
 use wasm_bindgen::prelude::*;
@@ -48,7 +46,7 @@ use crate::types::ice_transport::IceTransportCallback;
 use crate::types::ice_transport::IceTransportInterface;
 use crate::types::ice_transport::IceTrickleScheme;
 
-type EventSender = Arc<FuturesMutex<mpsc::Sender<Event>>>;
+type EventSender = <CbChannel<Event> as Channel<Event>>::Sender;
 
 #[derive(Clone)]
 pub struct WasmTransport {

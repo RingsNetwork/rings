@@ -9,8 +9,8 @@ use crate::err::Error;
 use crate::err::Result;
 use crate::types::channel::Channel;
 
-type Sender<T> = Arc<Mutex<mpsc::Sender<T>>>;
-type Receiver<T> = Arc<Mutex<mpsc::Receiver<T>>>;
+type Sender<T> = Arc<Mutex<mpsc::UnboundedSender<T>>>;
+type Receiver<T> = Arc<Mutex<mpsc::UnboundedReceiver<T>>>;
 
 #[derive(Debug)]
 pub struct CbChannel<T> {
@@ -24,7 +24,7 @@ impl<T: Send> Channel<T> for CbChannel<T> {
     type Receiver = Receiver<T>;
 
     fn new() -> Self {
-        let (tx, rx) = mpsc::channel(64);
+        let (tx, rx) = mpsc::unbounded();
         Self {
             sender: Arc::new(Mutex::new(tx)),
             receiver: Arc::new(Mutex::new(rx)),
@@ -41,7 +41,11 @@ impl<T: Send> Channel<T> for CbChannel<T> {
 
     async fn send(sender: &Self::Sender, msg: T) -> Result<()> {
         let mut sender = sender.lock().await;
-        match sender.try_send(msg) {
+        match sender.unbounded_send(msg) {
+            /// Sends a message along this channel.
+            /// This is an unbounded sender, so this function differs from Sink::send
+            /// by ensuring the return type reflects that the channel is always ready to receive messages.
+            /// [WARM] maybe we should do `call_ready` here, but I'm too lazy for now.
             Ok(()) => Ok(()),
             Err(_) => Err(Error::ChannelSendMessageFailed),
         }
