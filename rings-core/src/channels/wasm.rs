@@ -9,7 +9,7 @@ use crate::err::Error;
 use crate::err::Result;
 use crate::types::channel::Channel;
 
-type Sender<T> = Arc<Mutex<mpsc::UnboundedSender<T>>>;
+type Sender<T> = Arc<mpsc::UnboundedSender<T>>;
 type Receiver<T> = Arc<Mutex<mpsc::UnboundedReceiver<T>>>;
 
 #[derive(Debug)]
@@ -26,7 +26,7 @@ impl<T: Send> Channel<T> for CbChannel<T> {
     fn new() -> Self {
         let (tx, rx) = mpsc::unbounded();
         Self {
-            sender: Arc::new(Mutex::new(tx)),
+            sender: Arc::new(tx),
             receiver: Arc::new(Mutex::new(rx)),
         }
     }
@@ -39,13 +39,13 @@ impl<T: Send> Channel<T> for CbChannel<T> {
         self.receiver.clone()
     }
 
+    /// Sends a message along this channel.
+    /// This is an unbounded sender, so this function differs from Sink::send
+    /// by ensuring the return type reflects that the channel is always ready to receive messages.
+    /// Err(TrySendError) can caused by `is_full` or `is_disconnected`
+    /// ref: https://docs.rs/futures/latest/futures/channel/mpsc/struct.UnboundedSender.html
     async fn send(sender: &Self::Sender, msg: T) -> Result<()> {
-        let mut sender = sender.lock().await;
         match sender.unbounded_send(msg) {
-            /// Sends a message along this channel.
-            /// This is an unbounded sender, so this function differs from Sink::send
-            /// by ensuring the return type reflects that the channel is always ready to receive messages.
-            /// [WARM] maybe we should do `call_ready` here, but I'm too lazy for now.
             Ok(()) => Ok(()),
             Err(_) => Err(Error::ChannelSendMessageFailed),
         }
