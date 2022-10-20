@@ -617,7 +617,7 @@ pub struct MessageCallbackInstance {
     custom_message: Arc<js_sys::Function>,
     http_response_message: Arc<js_sys::Function>,
     builtin_message: Arc<js_sys::Function>,
-    chunlist: Arc<Mutex<Vec<chunk::Chunk<1024>>>>,
+    chunlist: Arc<Mutex<Vec<chunk::Chunk<10240>>>>,
 }
 
 #[wasm_bindgen]
@@ -697,7 +697,7 @@ impl MessageCallback for MessageCallbackInstance {
         if left[0] == 1 {
             let data_opt = {
                 let mut c = self.chunlist.try_lock().unwrap();
-                let chunk_item: chunk::Chunk<1024> = chunk::Chunk::from(right);
+                let chunk_item: chunk::Chunk<10240> = chunk::Chunk::from(right);
                 c.push(chunk_item.clone());
                 let chunk_list = chunk::ChunkList::from(c.clone());
                 let id = chunk_item.meta.id;

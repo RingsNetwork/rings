@@ -140,20 +140,24 @@ impl Backend {
             tracing::info!("Sending HTTP server response: {:?}", resp);
 
             let resp = BackendMessage::HttpServer(HttpServerMessage::Response(resp));
+            tracing::info!("resp_bytes start gzip");
             let resp_bytes = message::gzip_data(&resp, 9)?;
+            tracing::info!("resp_bytes gzip_data len: {}", resp_bytes.len());
 
-            let pubkey = ctx.origin_session_pubkey()?;
             // 256b
-            let chunks = ChunkList::<1024>::from(&resp_bytes);
+            let chunks = ChunkList::<10240>::from(&resp_bytes);
             for c in chunks {
-                let bytes = serde_json::to_vec(&c)?;
+                tracing::info!("Chunk data len: {}", c.data.len());
+                // let bytes = serde_json::to_vec(&c)?;
+                let bytes = bincode::serialize(&c).map_err(|e| anyhow::anyhow!(e))?;
+                tracing::info!("Chunk len: {}", bytes.len());
                 let mut new_bytes: Vec<u8> = Vec::with_capacity(bytes.len() + 4);
                 new_bytes.extend_from_slice(&[1, 1, 0, 0]);
                 new_bytes.extend_from_slice(&bytes);
 
                 handler
                     .send_report_message(
-                        Message::custom(&new_bytes, Some(pubkey))?,
+                        Message::custom(&new_bytes, None)?,
                         ctx.tx_id,
                         relay.clone(),
                     )
