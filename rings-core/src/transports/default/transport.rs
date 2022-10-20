@@ -429,7 +429,7 @@ impl IceTrickleScheme for DefaultTransport {
             session_manager,
             session_manager.authorizer()?.to_owned(), // This is a fake destination
         )?;
-        Ok(resp.gzip(9)?.encode()?)
+        Ok(resp.encode()?)
     }
 
     async fn register_remote_info(&self, data: Encoded) -> Result<Did> {

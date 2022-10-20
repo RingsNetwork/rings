@@ -151,9 +151,9 @@ where T: Serialize + DeserializeOwned
     }
 
     pub fn from_auto(data: &[u8]) -> Result<Self> {
-        if let Ok(m) = Self::from_gzipped(data) {
-            return Ok(m);
-        }
+        // if let Ok(m) = Self::from_gzipped(data) {
+        //     return Ok(m);
+        // }
         Self::from_json(data)
     }
 }
