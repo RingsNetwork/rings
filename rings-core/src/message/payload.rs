@@ -152,40 +152,12 @@ where T: Serialize + DeserializeOwned
         self.origin_verification.session_pubkey(&self.data)
     }
 
-    pub fn gzip(&self, level: u8) -> Result<Vec<u8>> {
-        self::gzip_data(self, level)
-        // let mut ec = GzEncoder::new(Vec::new(), Compression::new(level as u32));
-        // let json_str = serde_json::to_string(self).map_err(|_| Error::SerializeToString)?;
-        // ec.write_all(json_str.as_bytes())
-        //     .map_err(|_| Error::GzipEncode)?;
-        // ec.finish().map_err(|_| Error::GzipEncode)
-    }
-
-    pub fn from_gzipped(data: &[u8]) -> Result<Self>
-    where T: DeserializeOwned {
-        self::from_gzipped_data(data)
-        // let mut writer = Vec::new();
-        // let mut decoder = GzDecoder::new(writer);
-        // decoder.write_all(data).map_err(|_| Error::GzipDecode)?;
-        // decoder.try_finish().map_err(|_| Error::GzipDecode)?;
-        // writer = decoder.finish().map_err(|_| Error::GzipDecode)?;
-        // let m = serde_json::from_slice(&writer).map_err(Error::Deserialize)?;
-        // Ok(m)
-    }
-
     pub fn from_json(data: &[u8]) -> Result<Self> {
         serde_json::from_slice(data).map_err(Error::Deserialize)
     }
 
     pub fn to_json_vec(&self) -> Result<Vec<u8>> {
         serde_json::to_vec(self).map_err(Error::Serialize)
-    }
-
-    pub fn from_auto(data: &[u8]) -> Result<Self> {
-        // if let Ok(m) = Self::from_gzipped(data) {
-        //     return Ok(m);
-        // }
-        Self::from_json(data)
     }
 }
 
@@ -194,7 +166,6 @@ where T: Serialize + DeserializeOwned
 {
     fn encode(&self) -> Result<Encoded> {
         self.to_json_vec()?.encode()
-        // self.gzip(9)?.encode()
     }
 }
 
@@ -203,7 +174,7 @@ where T: Serialize + DeserializeOwned
 {
     fn from_encoded(encoded: &Encoded) -> Result<Self> {
         let v: Vec<u8> = encoded.decode()?;
-        Self::from_auto(&v)
+        Self::from_json(&v)
     }
 }
 
@@ -313,14 +284,6 @@ pub mod test {
         .unwrap();
 
         assert!(relaied_payload.verify());
-    }
-
-    #[test]
-    fn test_message_relay_gzip() {
-        let payload = new_test_payload();
-        let gziped = payload.gzip(9).unwrap();
-        let payload2: MessagePayload<TestData> = MessagePayload::from_gzipped(&gziped).unwrap();
-        assert_eq!(payload, payload2);
     }
 
     #[test]
