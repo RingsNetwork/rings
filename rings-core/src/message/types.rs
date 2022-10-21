@@ -152,9 +152,9 @@ where T: Serialize + DeserializeOwned
 {
     pub fn new(data: T, pubkey: Option<PublicKey>) -> Result<Self> {
         if let Some(pubkey) = pubkey {
-            let msg = serde_json::to_string(&data).map_err(Error::Serialize)?;
+            let msg = bincode::serialize(&data).map_err(Error::BincodeSerialize)?;
             let pubkey: libsecp256k1::PublicKey = pubkey.try_into()?;
-            let cipher = ecies::encrypt(&pubkey.serialize(), msg.as_bytes())
+            let cipher = ecies::encrypt(&pubkey.serialize(), &msg)
                 .map_err(Error::MessageEncryptionFailed)?;
             Ok(MaybeEncrypted::Encrypted(cipher))
         } else {
@@ -168,7 +168,7 @@ where T: Serialize + DeserializeOwned
             MaybeEncrypted::Encrypted(cipher) => {
                 let plain = ecies::decrypt(&key.serialize(), &cipher)
                     .map_err(Error::MessageDecryptionFailed)?;
-                let msg: T = serde_json::from_slice(&plain).map_err(Error::Serialize)?;
+                let msg: T = bincode::deserialize(&plain).map_err(Error::BincodeDeserialize)?;
                 Ok((msg, true))
             }
         }

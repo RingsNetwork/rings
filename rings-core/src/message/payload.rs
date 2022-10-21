@@ -152,40 +152,12 @@ where T: Serialize + DeserializeOwned
         self.origin_verification.session_pubkey(&self.data)
     }
 
-    pub fn gzip(&self, level: u8) -> Result<Vec<u8>> {
-        self::gzip_data(self, level)
-        // let mut ec = GzEncoder::new(Vec::new(), Compression::new(level as u32));
-        // let json_str = serde_json::to_string(self).map_err(|_| Error::SerializeToString)?;
-        // ec.write_all(json_str.as_bytes())
-        //     .map_err(|_| Error::GzipEncode)?;
-        // ec.finish().map_err(|_| Error::GzipEncode)
+    pub fn from_bincode(data: &[u8]) -> Result<Self> {
+        bincode::deserialize(data).map_err(Error::BincodeDeserialize)
     }
 
-    pub fn from_gzipped(data: &[u8]) -> Result<Self>
-    where T: DeserializeOwned {
-        self::from_gzipped_data(data)
-        // let mut writer = Vec::new();
-        // let mut decoder = GzDecoder::new(writer);
-        // decoder.write_all(data).map_err(|_| Error::GzipDecode)?;
-        // decoder.try_finish().map_err(|_| Error::GzipDecode)?;
-        // writer = decoder.finish().map_err(|_| Error::GzipDecode)?;
-        // let m = serde_json::from_slice(&writer).map_err(Error::Deserialize)?;
-        // Ok(m)
-    }
-
-    pub fn from_json(data: &[u8]) -> Result<Self> {
-        serde_json::from_slice(data).map_err(Error::Deserialize)
-    }
-
-    pub fn to_json_vec(&self) -> Result<Vec<u8>> {
-        serde_json::to_vec(self).map_err(Error::Serialize)
-    }
-
-    pub fn from_auto(data: &[u8]) -> Result<Self> {
-        // if let Ok(m) = Self::from_gzipped(data) {
-        //     return Ok(m);
-        // }
-        Self::from_json(data)
+    pub fn to_bincode_vec(&self) -> Result<Vec<u8>> {
+        bincode::serialize(self).map_err(Error::BincodeSerialize)
     }
 }
 
@@ -193,8 +165,7 @@ impl<T> Encoder for MessagePayload<T>
 where T: Serialize + DeserializeOwned
 {
     fn encode(&self) -> Result<Encoded> {
-        self.to_json_vec()?.encode()
-        // self.gzip(9)?.encode()
+        self.to_bincode_vec()?.encode()
     }
 }
 
@@ -203,7 +174,7 @@ where T: Serialize + DeserializeOwned
 {
     fn from_encoded(encoded: &Encoded) -> Result<Self> {
         let v: Vec<u8> = encoded.decode()?;
-        Self::from_auto(&v)
+        Self::from_bincode(&v)
     }
 }
 
@@ -267,8 +238,11 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
 
 #[cfg(test)]
 pub mod test {
+    use rand::Rng;
+
     use super::*;
     use crate::ecc::SecretKey;
+    use crate::message::Message;
 
     #[derive(Deserialize, Serialize, PartialEq, Debug, Clone)]
     pub struct TestData {
@@ -279,16 +253,21 @@ pub mod test {
     }
 
     pub fn new_test_payload() -> MessagePayload<TestData> {
-        let key = SecretKey::random();
-        let destination = SecretKey::random().address().into();
-        let session = SessionManager::new_with_seckey(&key, None).unwrap();
         let test_data = TestData {
             a: "hello".to_string(),
             b: 111,
             c: 2.33,
             d: true,
         };
-        MessagePayload::new_direct(test_data, &session, destination).unwrap()
+        new_payload(test_data)
+    }
+
+    pub fn new_payload<T>(data: T) -> MessagePayload<T>
+    where T: Serialize + DeserializeOwned {
+        let key = SecretKey::random();
+        let destination = SecretKey::random().address().into();
+        let session = SessionManager::new_with_seckey(&key, None).unwrap();
+        MessagePayload::new_direct(data, &session, destination).unwrap()
     }
 
     #[test]
@@ -316,22 +295,39 @@ pub mod test {
     }
 
     #[test]
-    fn test_message_relay_gzip() {
-        let payload = new_test_payload();
-        let gziped = payload.gzip(9).unwrap();
-        let payload2: MessagePayload<TestData> = MessagePayload::from_gzipped(&gziped).unwrap();
-        assert_eq!(payload, payload2);
-    }
-
-    #[test]
-    fn test_message_relay_from_auto() {
+    fn test_message_payload_from_auto() {
         let payload = new_test_payload();
         let gziped_encoded_payload = payload.encode().unwrap();
         let payload2: MessagePayload<TestData> = gziped_encoded_payload.decode().unwrap();
         assert_eq!(payload, payload2);
 
-        let ungzip_encoded_payload = payload.to_json_vec().unwrap().encode().unwrap();
-        let payload2: MessagePayload<TestData> = ungzip_encoded_payload.decode().unwrap();
+        let gunzip_encoded_payload = payload.to_bincode_vec().unwrap().encode().unwrap();
+        let payload2: MessagePayload<TestData> = gunzip_encoded_payload.decode().unwrap();
         assert_eq!(payload, payload2);
+    }
+
+    #[test]
+    fn test_message_payload_encode_len() {
+        let data = rand::thread_rng().gen::<[u8; 32]>();
+
+        let data1 = data;
+        let msg1 = Message::custom(&data1, None).unwrap();
+        let payload1 = new_payload(msg1);
+        let bytes1 = payload1.to_bincode_vec().unwrap();
+        let encoded1 = payload1.encode().unwrap();
+        let encoded_bytes1: Vec<u8> = encoded1.into();
+
+        let data2 = data.repeat(2);
+        let msg2 = Message::custom(&data2, None).unwrap();
+        let payload2 = new_payload(msg2);
+        let bytes2 = payload2.to_bincode_vec().unwrap();
+        let encoded2 = payload2.encode().unwrap();
+        let encoded_bytes2: Vec<u8> = encoded2.into();
+
+        assert_eq!(bytes1.len() - data1.len(), bytes2.len() - data2.len());
+        assert_ne!(
+            encoded_bytes1.len() - data1.len(),
+            encoded_bytes2.len() - data2.len()
+        );
     }
 }

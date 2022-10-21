@@ -20,8 +20,6 @@ use crate::err::Error;
 use crate::err::Result;
 use crate::message;
 use crate::message::CallbackFn;
-use crate::message::Decoder;
-use crate::message::Encoder;
 use crate::message::Message;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
@@ -179,7 +177,7 @@ impl Swarm {
 
         match ev {
             Some(Event::DataChannelMessage(msg)) => {
-                let payload = MessagePayload::from_encoded(&msg.try_into()?)?;
+                let payload = MessagePayload::from_bincode(&msg)?;
                 Ok(Some(payload))
             }
             Some(Event::RegisterTransport((did, id))) => {
@@ -358,7 +356,8 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Deb
             payload.relay.next_hop,
             transport.id
         );
-        let data: Vec<u8> = payload.encode()?.into();
+        let data: Vec<u8> = payload.to_bincode_vec()?;
+        tracing::info!("send data len: {}", data.len());
         transport.wait_for_data_channel_open().await?;
         transport.send_message(data.as_slice()).await
     }
