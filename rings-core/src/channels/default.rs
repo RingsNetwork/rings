@@ -13,7 +13,9 @@ pub struct AcChannel<T> {
 }
 
 #[async_trait]
-impl<T: Send> Channel<T> for AcChannel<T> {
+impl<T: Send> Channel<T> for AcChannel<T>
+where T: std::fmt::Debug
+{
     type Sender = Sender<T>;
     type Receiver = Receiver<T>;
 
@@ -34,15 +36,22 @@ impl<T: Send> Channel<T> for AcChannel<T> {
     }
 
     async fn send(sender: &Self::Sender, msg: T) -> Result<()> {
+        tracing::debug!("channel sending message: {:?}", msg);
         match sender.send(msg).await {
-            Ok(_) => Ok(()),
+            Ok(_) => {
+                tracing::debug!("channel send message success");
+                Ok(())
+            }
             Err(_) => Err(Error::ChannelSendMessageFailed),
         }
     }
 
     async fn recv(receiver: &Self::Receiver) -> Result<Option<T>> {
         match receiver.recv().await {
-            Ok(v) => Ok(Some(v)),
+            Ok(v) => {
+                tracing::debug!("channel received message: {:?}", v);
+                Ok(Some(v))
+            }
             Err(_) => Err(Error::ChannelRecvMessageFailed),
         }
     }
