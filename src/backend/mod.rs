@@ -146,7 +146,7 @@ impl Backend {
             tracing::info!("resp_bytes gzip_data len: {}", resp_bytes.len());
 
             // 256b
-            let chunks = ChunkList::<10240>::from(&resp_bytes);
+            let chunks = ChunkList::<60000>::from(&resp_bytes);
             for c in chunks {
                 tracing::info!("Chunk data len: {}", c.data.len());
                 // let bytes = serde_json::to_vec(&c)?;

@@ -618,7 +618,7 @@ pub struct MessageCallbackInstance {
     custom_message: Arc<js_sys::Function>,
     http_response_message: Arc<js_sys::Function>,
     builtin_message: Arc<js_sys::Function>,
-    chunklist: Arc<Mutex<Vec<chunk::Chunk<10240>>>>,
+    chunklist: Arc<Mutex<Vec<chunk::Chunk<60000>>>>,
 }
 
 #[wasm_bindgen]
@@ -681,7 +681,7 @@ impl MessageCallbackInstance {
             return Err(anyhow!("lock chunklist failed"));
         }
         let mut c = c_lock.unwrap();
-        let chunk_item: chunk::Chunk<10240> = bincode::deserialize(data)?;
+        let chunk_item: chunk::Chunk<60000> = bincode::deserialize(data)?;
         c.push(chunk_item.clone());
         let chunk_list = chunk::ChunkList::from(c.clone());
         let id = chunk_item.meta.id;
