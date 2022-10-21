@@ -359,6 +359,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Deb
             transport.id
         );
         let data: Vec<u8> = payload.encode()?.into();
+        tracing::info!("send data len: {}", data.len());
         transport.wait_for_data_channel_open().await?;
         transport.send_message(data.as_slice()).await
     }

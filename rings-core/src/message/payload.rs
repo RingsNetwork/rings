@@ -152,12 +152,12 @@ where T: Serialize + DeserializeOwned
         self.origin_verification.session_pubkey(&self.data)
     }
 
-    pub fn from_json(data: &[u8]) -> Result<Self> {
-        serde_json::from_slice(data).map_err(Error::Deserialize)
+    pub fn from_bincode(data: &[u8]) -> Result<Self> {
+        bincode::deserialize(data).map_err(Error::BincodeDeserialize)
     }
 
-    pub fn to_json_vec(&self) -> Result<Vec<u8>> {
-        serde_json::to_vec(self).map_err(Error::Serialize)
+    pub fn to_bincode_vec(&self) -> Result<Vec<u8>> {
+        bincode::serialize(self).map_err(Error::BincodeSerialize)
     }
 }
 
@@ -165,7 +165,7 @@ impl<T> Encoder for MessagePayload<T>
 where T: Serialize + DeserializeOwned
 {
     fn encode(&self) -> Result<Encoded> {
-        self.to_json_vec()?.encode()
+        self.to_bincode_vec()?.encode()
     }
 }
 
@@ -174,7 +174,7 @@ where T: Serialize + DeserializeOwned
 {
     fn from_encoded(encoded: &Encoded) -> Result<Self> {
         let v: Vec<u8> = encoded.decode()?;
-        Self::from_json(&v)
+        Self::from_bincode(&v)
     }
 }
 
@@ -293,8 +293,8 @@ pub mod test {
         let payload2: MessagePayload<TestData> = gziped_encoded_payload.decode().unwrap();
         assert_eq!(payload, payload2);
 
-        let ungzip_encoded_payload = payload.to_json_vec().unwrap().encode().unwrap();
-        let payload2: MessagePayload<TestData> = ungzip_encoded_payload.decode().unwrap();
+        let gunzip_encoded_payload = payload.to_bincode_vec().unwrap().encode().unwrap();
+        let payload2: MessagePayload<TestData> = gunzip_encoded_payload.decode().unwrap();
         assert_eq!(payload, payload2);
     }
 }
