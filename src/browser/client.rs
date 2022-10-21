@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use anyhow::anyhow;
-use rings_core_wasm::message::decode_gzip_data;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -17,6 +16,7 @@ use crate::jsonrpc::RpcMeta;
 use crate::prelude::chunk;
 use crate::prelude::chunk::ChunkManager;
 use crate::prelude::js_sys;
+use crate::prelude::message;
 use crate::prelude::rings_core::async_trait;
 use crate::prelude::rings_core::dht::Did;
 use crate::prelude::rings_core::dht::Stabilization;
@@ -646,13 +646,13 @@ impl MessageCallbackInstance {
     ) -> anyhow::Result<()> {
         let msg_content = data;
         log::info!(
-            "message of {:?} received, before ungzip: {:?}",
+            "message of {:?} received, before gunzip: {:?}",
             relay.tx_id,
             msg_content.len(),
         );
-        let msg_content = decode_gzip_data(msg_content).unwrap();
+        let msg_content = message::decode_gzip_data(msg_content).unwrap();
         log::info!(
-            "message of {:?} received, after ungzip: {:?}",
+            "message of {:?} received, after gunzip: {:?}",
             relay.tx_id,
             msg_content.len(),
         );
