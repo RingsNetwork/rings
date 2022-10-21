@@ -330,8 +330,8 @@ pub mod test {
         let payload2: MessagePayload<TestData> = gziped_encoded_payload.decode().unwrap();
         assert_eq!(payload, payload2);
 
-        let ungzip_encoded_payload = payload.to_json_vec().unwrap().encode().unwrap();
-        let payload2: MessagePayload<TestData> = ungzip_encoded_payload.decode().unwrap();
+        let gunzip_encoded_payload = payload.to_json_vec().unwrap().encode().unwrap();
+        let payload2: MessagePayload<TestData> = gunzip_encoded_payload.decode().unwrap();
         assert_eq!(payload, payload2);
     }
 }
