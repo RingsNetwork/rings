@@ -238,8 +238,11 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
 
 #[cfg(test)]
 pub mod test {
+    use rand::Rng;
+
     use super::*;
     use crate::ecc::SecretKey;
+    use crate::message::Message;
 
     #[derive(Deserialize, Serialize, PartialEq, Debug, Clone)]
     pub struct TestData {
@@ -250,16 +253,21 @@ pub mod test {
     }
 
     pub fn new_test_payload() -> MessagePayload<TestData> {
-        let key = SecretKey::random();
-        let destination = SecretKey::random().address().into();
-        let session = SessionManager::new_with_seckey(&key, None).unwrap();
         let test_data = TestData {
             a: "hello".to_string(),
             b: 111,
             c: 2.33,
             d: true,
         };
-        MessagePayload::new_direct(test_data, &session, destination).unwrap()
+        new_payload(test_data)
+    }
+
+    pub fn new_payload<T>(data: T) -> MessagePayload<T>
+    where T: Serialize + DeserializeOwned {
+        let key = SecretKey::random();
+        let destination = SecretKey::random().address().into();
+        let session = SessionManager::new_with_seckey(&key, None).unwrap();
+        MessagePayload::new_direct(data, &session, destination).unwrap()
     }
 
     #[test]
@@ -287,7 +295,7 @@ pub mod test {
     }
 
     #[test]
-    fn test_message_relay_from_auto() {
+    fn test_message_payload_from_auto() {
         let payload = new_test_payload();
         let gziped_encoded_payload = payload.encode().unwrap();
         let payload2: MessagePayload<TestData> = gziped_encoded_payload.decode().unwrap();
@@ -296,5 +304,30 @@ pub mod test {
         let gunzip_encoded_payload = payload.to_bincode_vec().unwrap().encode().unwrap();
         let payload2: MessagePayload<TestData> = gunzip_encoded_payload.decode().unwrap();
         assert_eq!(payload, payload2);
+    }
+
+    #[test]
+    fn test_message_payload_encode_len() {
+        let data = rand::thread_rng().gen::<[u8; 32]>();
+
+        let data1 = data;
+        let msg1 = Message::custom(&data1, None).unwrap();
+        let payload1 = new_payload(msg1);
+        let bytes1 = payload1.to_bincode_vec().unwrap();
+        let encoded1 = payload1.encode().unwrap();
+        let encoded_bytes1: Vec<u8> = encoded1.into();
+
+        let data2 = data.repeat(2);
+        let msg2 = Message::custom(&data2, None).unwrap();
+        let payload2 = new_payload(msg2);
+        let bytes2 = payload2.to_bincode_vec().unwrap();
+        let encoded2 = payload2.encode().unwrap();
+        let encoded_bytes2: Vec<u8> = encoded2.into();
+
+        assert_eq!(bytes1.len() - data1.len(), bytes2.len() - data2.len());
+        assert_ne!(
+            encoded_bytes1.len() - data1.len(),
+            encoded_bytes2.len() - data2.len()
+        );
     }
 }
