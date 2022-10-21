@@ -279,8 +279,7 @@ impl IceTransportCallback for DefaultTransport {
                 match cs {
                     RTCIceConnectionState::Connected => {
                         let local_did = public_key.read().await.unwrap().address().into();
-                        if event_sender
-                            .send(Event::RegisterTransport((local_did, id)))
+                        if AcChannel::send(&event_sender, Event::RegisterTransport((local_did, id)))
                             .await
                             .is_err()
                         {
@@ -291,8 +290,7 @@ impl IceTransportCallback for DefaultTransport {
                     | RTCIceConnectionState::Disconnected
                     | RTCIceConnectionState::Closed => {
                         let local_did = public_key.read().await.unwrap().address().into();
-                        if event_sender
-                            .send(Event::ConnectClosed((local_did, id)))
+                        if AcChannel::send(&event_sender, Event::ConnectClosed((local_did, id)))
                             .await
                             .is_err()
                         {
@@ -335,10 +333,12 @@ impl IceTransportCallback for DefaultTransport {
                     tracing::debug!("Message from DataChannel: '{:?}'", msg);
                     let event_sender = event_sender.clone();
                     Box::pin(async move {
-                        if event_sender
-                            .send(Event::DataChannelMessage(msg.data.to_vec()))
-                            .await
-                            .is_err()
+                        if AcChannel::send(
+                            &event_sender,
+                            Event::DataChannelMessage(msg.data.to_vec()),
+                        )
+                        .await
+                        .is_err()
                         {
                             tracing::error!("Failed on handle msg")
                         };
