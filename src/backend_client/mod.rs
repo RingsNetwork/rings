@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use bytes::Bytes;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -22,12 +21,12 @@ pub struct HttpServerRequest {
     pub method: String,
     pub path: String,
     pub headers: HashMap<String, String>,
-    pub body: Option<Bytes>,
+    pub body: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HttpServerResponse {
     pub status: u16,
     pub headers: HashMap<String, String>,
-    pub body: Option<Bytes>,
+    pub body: Option<Vec<u8>>,
 }

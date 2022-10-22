@@ -1,6 +1,7 @@
 //! An Backend HTTP service handle custom message from `MessageHandler` as CallbackFn.
 /// The trait `rings_core::handlers::MessageCallback` is implemented on `Backend` type
 /// To indicate to handle custom message relay, which use as a callbackFn in `MessageHandler`
+pub mod ipfs;
 use std::collections::HashMap;
 
 use async_trait::async_trait;
@@ -10,6 +11,7 @@ use reqwest::header::HeaderName;
 use serde::Deserialize;
 use serde::Serialize;
 
+use self::ipfs::IpfsEndpoint;
 use crate::backend_client::BackendMessage;
 use crate::backend_client::HttpServerMessage;
 use crate::backend_client::HttpServerRequest;
@@ -36,6 +38,7 @@ pub struct HttpServerConfig {
 /// A Backend struct contains http_server.
 pub struct Backend {
     http_server: Option<HttpServer>,
+    ipfs_endpoint: Option<IpfsEndpoint>,
 }
 
 /// A HttpServer using reqwest::Client
@@ -45,9 +48,10 @@ pub struct HttpServer {
 }
 
 impl Backend {
-    pub fn new(config: BackendConfig) -> Self {
+    pub fn new(ipfs_gateway: Option<String>) -> Self {
         Self {
-            http_server: config.http_server.map(HttpServer::new),
+            http_server: None,
+            ipfs_endpoint: ipfs_gateway.map(|s| IpfsEndpoint::new(s.as_str())),
         }
     }
 }

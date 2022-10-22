@@ -7,7 +7,6 @@ use clap::Parser;
 use clap::Subcommand;
 use rings_core::message::CallbackFn;
 use rings_node::backend::Backend;
-use rings_node::backend::BackendConfig;
 use rings_node::cli::Client;
 use rings_node::logging::node::init_logging;
 use rings_node::logging::node::LogLevel;
@@ -20,7 +19,6 @@ use rings_node::prelude::rings_core::types::message::MessageListener;
 use rings_node::processor::Processor;
 use rings_node::service::run_service;
 use rings_node::util;
-use rings_node::util::loader::ResourceLoader;
 
 #[derive(Parser, Debug)]
 #[command(about, version, author)]
@@ -75,8 +73,8 @@ struct DaemonCommand {
     #[arg(long, env, help = "external ip address")]
     pub external_ip: Option<String>,
 
-    #[arg(long, env, help = "backend service config")]
-    pub backend: Option<String>,
+    #[arg(long, env, help = "ipfs ApiGateway")]
+    pub ipfs_gateway: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -265,7 +263,7 @@ async fn daemon_run(
     stuns: &str,
     stabilize_timeout: usize,
     external_ip: Option<String>,
-    backend: Option<String>,
+    ipfs_gateway: Option<String>,
 ) -> anyhow::Result<()> {
     let storage = PersistenceStorage::new().await?;
 
@@ -276,15 +274,7 @@ async fn daemon_run(
             .build()?,
     );
 
-    let callback: Option<CallbackFn> = {
-        if let Some(backend) = backend {
-            let config = BackendConfig::load(&backend).await?;
-            let backend = Backend::new(config);
-            Some(Box::new(backend))
-        } else {
-            None
-        }
-    };
+    let callback: Option<CallbackFn> = Some(Box::new(Backend::new(ipfs_gateway)));
 
     let listen_event = Arc::new(swarm.create_message_handler(callback, None));
     let stabilize = Arc::new(Stabilization::new(swarm.clone(), stabilize_timeout));
@@ -321,7 +311,7 @@ async fn main() -> anyhow::Result<()> {
                 args.ice_servers.as_str(),
                 args.stabilize_timeout,
                 args.external_ip,
-                args.backend,
+                args.ipfs_gateway,
             )
             .await
         }
