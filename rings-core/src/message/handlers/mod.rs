@@ -130,7 +130,7 @@ impl MessageHandler {
         {
             println!("{} got msg {}", self.swarm.did(), &payload.data);
         }
-        tracing::trace!("NEW MESSAGE: {}", &payload.data);
+        tracing::debug!("START HANDLE MESSAGE: {} {}", &payload.tx_id, &payload.data);
 
         self.validate(payload).await?;
 
@@ -166,10 +166,12 @@ impl MessageHandler {
             ))),
         }?;
 
+        tracing::debug!("INVOKE CALLBACK {}", &payload.tx_id);
         if let Err(e) = self.invoke_callback(payload).await {
             tracing::warn!("invoke callback error: {}", e);
         }
 
+        tracing::debug!("FINISH HANDLE MESSAGE {}", &payload.tx_id);
         Ok(())
     }
 

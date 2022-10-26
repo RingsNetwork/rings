@@ -137,21 +137,21 @@ impl Backend {
                         headers: HashMap::new(),
                         body: Some(Bytes::from(e.to_string())),
                     });
-            tracing::info!("Sending HTTP server response: {:?}", resp);
+            tracing::debug!("Sending HTTP server response: {:?}", resp);
 
             let resp = BackendMessage::HttpServer(HttpServerMessage::Response(resp));
-            tracing::info!("resp_bytes start gzip");
+            tracing::debug!("resp_bytes start gzip");
             let json_bytes = bincode::serialize(&resp)?;
             let resp_bytes = message::encode_data_gzip(&json_bytes, 9)?;
-            tracing::info!("resp_bytes gzip_data len: {}", resp_bytes.len());
+            tracing::debug!("resp_bytes gzip_data len: {}", resp_bytes.len());
 
             // 256b
             let chunks = ChunkList::<60000>::from(&resp_bytes);
             for c in chunks {
-                tracing::info!("Chunk data len: {}", c.data.len());
+                tracing::debug!("Chunk data len: {}", c.data.len());
                 // let bytes = serde_json::to_vec(&c)?;
                 let bytes = bincode::serialize(&c).map_err(|e| anyhow::anyhow!(e))?;
-                tracing::info!("Chunk len: {}", bytes.len());
+                tracing::debug!("Chunk len: {}", bytes.len());
                 let mut new_bytes: Vec<u8> = Vec::with_capacity(bytes.len() + 4);
                 new_bytes.extend_from_slice(&[1, 1, 0, 0]);
                 new_bytes.extend_from_slice(&bytes);

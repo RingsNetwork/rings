@@ -178,6 +178,7 @@ impl Swarm {
         match ev {
             Some(Event::DataChannelMessage(msg)) => {
                 let payload = MessagePayload::from_bincode(&msg)?;
+                tracing::debug!("load message from channel: {:?}", payload);
                 Ok(Some(payload))
             }
             Some(Event::RegisterTransport((did, id))) => {
