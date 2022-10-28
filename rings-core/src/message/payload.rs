@@ -141,7 +141,10 @@ where T: Serialize + DeserializeOwned
     }
 
     pub fn verify(&self) -> bool {
+        tracing::debug!("verifying payload: {:?}", self.tx_id);
+
         if self.is_expired() {
+            tracing::warn!("message expired");
             return false;
         }
 

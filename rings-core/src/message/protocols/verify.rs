@@ -21,12 +21,14 @@ impl MessageVerification {
     pub fn verify<T>(&self, data: &T) -> bool
     where T: Serialize {
         if !self.session.verify() {
+            tracing::warn!("session is expired");
             return false;
         }
 
         if let (Ok(did), Ok(msg)) = (self.session.did(), self.msg(data)) {
             signers::default::verify(&msg, &did, &self.sig)
         } else {
+            tracing::warn!("failed to verify message");
             false
         }
     }

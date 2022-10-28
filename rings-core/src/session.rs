@@ -19,7 +19,7 @@ use crate::err::Error;
 use crate::err::Result;
 use crate::utils;
 
-pub const DEFAULT_TTL_MS: usize = 24 * 3600 * 1000;
+pub const DEFAULT_TTL_MS: usize = 30 * 24 * 3600 * 1000;
 
 /// we support both EIP712 and raw ECDSA singing forrmat
 #[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
