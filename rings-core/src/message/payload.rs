@@ -1,6 +1,7 @@
 use std::io::Write;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use flate2::write::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -22,29 +23,29 @@ use crate::err::Result;
 use crate::session::SessionManager;
 use crate::utils;
 
-pub fn encode_data_gzip(data: &[u8], level: u8) -> Result<Vec<u8>> {
+pub fn encode_data_gzip(data: &Bytes, level: u8) -> Result<Bytes> {
     let mut ec = GzEncoder::new(Vec::new(), Compression::new(level as u32));
     tracing::info!("data before gzip len: {}", data.len());
     ec.write_all(data).map_err(|_| Error::GzipEncode)?;
-    ec.finish().map_err(|_| Error::GzipEncode)
+    ec.finish().map(Bytes::from).map_err(|_| Error::GzipEncode)
 }
 
-pub fn gzip_data<T>(data: &T, level: u8) -> Result<Vec<u8>>
+pub fn gzip_data<T>(data: &T, level: u8) -> Result<Bytes>
 where T: Serialize {
     let json_bytes = serde_json::to_vec(data).map_err(|_| Error::SerializeToString)?;
-    encode_data_gzip(&json_bytes, level)
+    encode_data_gzip(&json_bytes.into(), level)
 }
 
-pub fn decode_gzip_data(data: &[u8]) -> Result<Vec<u8>> {
+pub fn decode_gzip_data(data: &Bytes) -> Result<Bytes> {
     let mut writer = Vec::new();
     let mut decoder = GzDecoder::new(writer);
     decoder.write_all(data).map_err(|_| Error::GzipDecode)?;
     decoder.try_finish().map_err(|_| Error::GzipDecode)?;
     writer = decoder.finish().map_err(|_| Error::GzipDecode)?;
-    Ok(writer)
+    Ok(writer.into())
 }
 
-pub fn from_gzipped_data<T>(data: &[u8]) -> Result<T>
+pub fn from_gzipped_data<T>(data: &Bytes) -> Result<T>
 where T: DeserializeOwned {
     let data = decode_gzip_data(data)?;
     let m = serde_json::from_slice(&data).map_err(Error::Deserialize)?;
@@ -159,8 +160,10 @@ where T: Serialize + DeserializeOwned
         bincode::deserialize(data).map_err(Error::BincodeDeserialize)
     }
 
-    pub fn to_bincode_vec(&self) -> Result<Vec<u8>> {
-        bincode::serialize(self).map_err(Error::BincodeSerialize)
+    pub fn to_bincode(&self) -> Result<Bytes> {
+        bincode::serialize(self)
+            .map(Bytes::from)
+            .map_err(Error::BincodeSerialize)
     }
 }
 
@@ -168,7 +171,7 @@ impl<T> Encoder for MessagePayload<T>
 where T: Serialize + DeserializeOwned
 {
     fn encode(&self) -> Result<Encoded> {
-        self.to_bincode_vec()?.encode()
+        self.to_bincode()?.encode()
     }
 }
 
@@ -176,7 +179,7 @@ impl<T> Decoder for MessagePayload<T>
 where T: Serialize + DeserializeOwned
 {
     fn from_encoded(encoded: &Encoded) -> Result<Self> {
-        let v: Vec<u8> = encoded.decode()?;
+        let v: Bytes = encoded.decode()?;
         Self::from_bincode(&v)
     }
 }
@@ -304,7 +307,7 @@ pub mod test {
         let payload2: MessagePayload<TestData> = gziped_encoded_payload.decode().unwrap();
         assert_eq!(payload, payload2);
 
-        let gunzip_encoded_payload = payload.to_bincode_vec().unwrap().encode().unwrap();
+        let gunzip_encoded_payload = payload.to_bincode().unwrap().encode().unwrap();
         let payload2: MessagePayload<TestData> = gunzip_encoded_payload.decode().unwrap();
         assert_eq!(payload, payload2);
     }
@@ -316,14 +319,14 @@ pub mod test {
         let data1 = data;
         let msg1 = Message::custom(&data1, None).unwrap();
         let payload1 = new_payload(msg1);
-        let bytes1 = payload1.to_bincode_vec().unwrap();
+        let bytes1 = payload1.to_bincode().unwrap();
         let encoded1 = payload1.encode().unwrap();
         let encoded_bytes1: Vec<u8> = encoded1.into();
 
         let data2 = data.repeat(2);
         let msg2 = Message::custom(&data2, None).unwrap();
         let payload2 = new_payload(msg2);
-        let bytes2 = payload2.to_bincode_vec().unwrap();
+        let bytes2 = payload2.to_bincode().unwrap();
         let encoded2 = payload2.encode().unwrap();
         let encoded_bytes2: Vec<u8> = encoded2.into();
 

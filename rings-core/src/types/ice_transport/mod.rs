@@ -2,6 +2,7 @@ pub mod ice_server;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -58,7 +59,7 @@ pub trait IceTransportInterface<E: Send, Ch: Channel<E>> {
     async fn is_connected(&self) -> bool;
     async fn is_disconnected(&self) -> bool;
     async fn pubkey(&self) -> PublicKey;
-    async fn send_message(&self, msg: &[u8]) -> Result<()>;
+    async fn send_message(&self, msg: &Bytes) -> Result<()>;
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]

@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use anyhow::anyhow;
+use bytes::Bytes;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -594,7 +595,7 @@ impl Client {
                 HashMap::new()
             };
 
-            let body = body.map(|b| bytes::Bytes::from(b.to_vec()));
+            let body = body.map(|b| Bytes::from(b.to_vec()));
 
             let msg = BackendMessage::HttpServer(HttpServerMessage::Request(HttpServerRequest {
                 method,
@@ -642,7 +643,7 @@ impl MessageCallbackInstance {
     pub async fn handle_http_server_msg(
         &self,
         relay: &MessagePayload<Message>,
-        data: &[u8],
+        data: &Bytes,
     ) -> anyhow::Result<()> {
         let msg_content = data;
         log::info!(
@@ -675,7 +676,7 @@ impl MessageCallbackInstance {
         Ok(())
     }
 
-    fn handle_chunk_data(&self, data: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
+    fn handle_chunk_data(&self, data: &[u8]) -> anyhow::Result<Option<Bytes>> {
         let c_lock = self.chunklist.try_lock();
         if c_lock.is_err() {
             return Err(anyhow!("lock chunklist failed"));
@@ -695,7 +696,7 @@ impl MessageCallbackInstance {
             chunk_item.chunk[1],
             id
         );
-        Ok(d)
+        Ok(d.map(Bytes::from))
     }
 }
 

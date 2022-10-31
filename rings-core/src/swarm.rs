@@ -357,10 +357,10 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Deb
             payload.relay.next_hop,
             transport.id
         );
-        let data: Vec<u8> = payload.to_bincode_vec()?;
+        let data = payload.to_bincode()?;
         tracing::info!("send data len: {}", data.len());
         transport.wait_for_data_channel_open().await?;
-        transport.send_message(data.as_slice()).await
+        transport.send_message(&data).await
     }
 }
 

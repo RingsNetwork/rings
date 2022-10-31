@@ -3,6 +3,7 @@ use std::sync::Mutex;
 use std::sync::RwLock;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use js_sys::Uint8Array;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -247,7 +248,7 @@ impl IceTransportInterface<Event, CbChannel<Event>> for WasmTransport {
         )
     }
 
-    async fn send_message(&self, msg: &[u8]) -> Result<()> {
+    async fn send_message(&self, msg: &Bytes) -> Result<()> {
         match self.get_data_channel().await {
             Some(cnn) => cnn
                 .send_with_u8_array(msg)

@@ -24,6 +24,7 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 
 use crate::channels::Channel as AcChannel;
+use crate::chunk::ChunkList;
 use crate::dht::Did;
 use crate::ecc::PublicKey;
 use crate::err::Error;
@@ -43,6 +44,8 @@ use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
 use crate::types::ice_transport::IceTransportInterface;
 use crate::types::ice_transport::IceTrickleScheme;
+
+const TANSPORT_MTU: usize = 65535;
 
 type EventSender = <AcChannel<Event> as Channel<Event>>::Sender;
 
@@ -234,7 +237,7 @@ impl IceTransportInterface<Event, AcChannel<Event>> for DefaultTransport {
         self.public_key.read().await.unwrap()
     }
 
-    async fn send_message(&self, msg: &[u8]) -> Result<()> {
+    async fn send_message(&self, msg: &Bytes) -> Result<()> {
         let size = msg.len();
         match self.get_data_channel().await {
             Some(cnn) => match cnn.send(&Bytes::from(msg.to_vec())).await {
