@@ -1,9 +1,9 @@
 #![warn(missing_docs)]
 //! SimpleClient for jsonrpc request use reqwest::Client.
-//!
-//! Sample:
-//! let client = Simpleclient::new(reqwest::Client::default(), "http://localhost:5000");
-//! client.call_method("test", params);
+///
+/// Sample:
+/// let client = Simpleclient::new(reqwest::Client::default(), "http://localhost:5000");
+/// client.call_method("test", params);
 use std::sync::Arc;
 
 use jsonrpc_core::Error;

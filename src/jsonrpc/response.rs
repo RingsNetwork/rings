@@ -1,4 +1,4 @@
-//! A JSONRPC response object
+//! A JSONRPC response.
 use std::sync::Arc;
 
 use serde::Deserialize;

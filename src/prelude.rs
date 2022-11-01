@@ -1,4 +1,5 @@
-/// A "prelude" for users of the ring-network crate.
+//! A prelude is provided which imports all the important data types and traits of ring-network.
+/// Use this when you want to quickly bootstrap a new project.
 pub use jsonrpc_core;
 #[cfg(feature = "node")]
 pub use reqwest;

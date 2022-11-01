@@ -1,4 +1,4 @@
-///! JSONRpc client
+//! A jsonrpc-client.
 pub mod client;
 pub mod request;
 

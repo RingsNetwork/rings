@@ -1,3 +1,4 @@
+//! Custom error enums.
 use crate::prelude::rings_core;
 
 pub type Result<T> = std::result::Result<T, Error>;

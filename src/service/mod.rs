@@ -1,5 +1,5 @@
+//! rings-node service run with `Swarm` and chord stabilization.
 #![warn(missing_docs)]
-//! rings-node server
 mod http_error;
 
 use std::sync::Arc;

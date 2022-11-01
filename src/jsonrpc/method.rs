@@ -1,4 +1,4 @@
-//! A JSONRPC `method` enum object
+//! A JSONRPC `method` enum.
 #![warn(missing_docs)]
 use crate::error::Error;
 use crate::error::Result;

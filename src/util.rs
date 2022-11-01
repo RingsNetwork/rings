@@ -1,5 +1,5 @@
-#![warn(missing_docs)]
 //! Utilities for configuration and build.
+#![warn(missing_docs)]
 
 use std::env;
 

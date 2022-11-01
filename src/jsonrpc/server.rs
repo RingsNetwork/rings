@@ -1,6 +1,6 @@
 #![warn(missing_docs)]
-///! jsonrpc-server of rings-node
-///! [JSON-RPC]: https://www.jsonrpc.org/specification
+//! jsonrpc-server of rings-node
+/// [JSON-RPC]: https://www.jsonrpc.org/specification
 use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;

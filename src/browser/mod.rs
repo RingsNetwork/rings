@@ -1,4 +1,4 @@
-//! rings-node browser support.
+/// rings-node browser support.
 #![allow(clippy::unused_unit)]
 #![allow(non_snake_case, non_upper_case_globals)]
 pub mod client;

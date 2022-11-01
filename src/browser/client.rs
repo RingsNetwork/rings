@@ -10,10 +10,10 @@ use bytes::Bytes;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::backend_client::BackendMessage;
-use crate::backend_client::HttpServerMessage;
-use crate::backend_client::HttpServerRequest;
 use crate::consts::BACKEND_MTU;
+use crate::backend::BackendMessage;
+use crate::backend::HttpServerMessage;
+use crate::backend::HttpServerRequest;
 use crate::jsonrpc::RpcMeta;
 use crate::prelude::chunk::Chunk;
 use crate::prelude::chunk::ChunkList;
