@@ -1,3 +1,4 @@
+/// A default transport use for node.
 pub mod transport;
 
 pub use transport::DefaultTransport;

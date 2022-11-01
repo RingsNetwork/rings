@@ -1,3 +1,4 @@
+//! Stabilization wait to notify predecessors and update fingersTable.
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -15,6 +16,9 @@ use crate::message::NotifyPredecessorSend;
 use crate::message::PayloadSender;
 use crate::swarm::Swarm;
 
+/// A combination contains chord and swarm, use to run stabilize.
+/// - swarm: transports communicate with each others.
+/// - chord: fix local fingers table.
 #[derive(Clone)]
 pub struct Stabilization {
     chord: Arc<PeerRing>,
@@ -22,6 +26,7 @@ pub struct Stabilization {
     timeout: usize,
 }
 
+/// A trait with `wait` method.
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait TStabilize {

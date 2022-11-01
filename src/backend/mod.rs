@@ -22,20 +22,24 @@ use crate::prelude::chunk::ChunkList;
 use crate::prelude::rings_core::message::Message;
 use crate::prelude::*;
 
+/// BackendConfig which use to create `http_server`.
 #[derive(Deserialize, Serialize, Debug)]
 pub struct BackendConfig {
     pub http_server: Option<HttpServerConfig>,
 }
 
+/// HTTP Server Config, specific determine port.
 #[derive(Deserialize, Serialize, Debug)]
 pub struct HttpServerConfig {
     pub port: u16,
 }
 
+/// A Backend struct contains http_server.
 pub struct Backend {
     http_server: Option<HttpServer>,
 }
 
+/// A HttpServer using reqwest::Client
 pub struct HttpServer {
     client: reqwest::Client,
     port: u16,

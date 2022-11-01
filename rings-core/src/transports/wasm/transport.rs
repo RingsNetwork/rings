@@ -54,6 +54,7 @@ use crate::types::ice_transport::IceTrickleScheme;
 
 type EventSender = <CbChannel<Event> as Channel<Event>>::Sender;
 
+/// WasmTransport use for brower.
 #[derive(Clone)]
 pub struct WasmTransport {
     pub id: uuid::Uuid,

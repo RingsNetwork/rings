@@ -18,16 +18,20 @@ use crate::prelude::reqwest;
 use crate::seed::Seed;
 use crate::util::loader::ResourceLoader;
 
+/// Alias about Result<ClientOutput<T>, E>.
+type Output<T> = anyhow::Result<ClientOutput<T>>;
+
+/// Wrap json_client send request between nodes or browers.
 #[derive(Clone)]
 pub struct Client {
     client: SimpleClient,
 }
 
+/// Wrap client output contain raw result and humanreadable dispaly.
 pub struct ClientOutput<T> {
     pub result: T,
     display: String,
 }
-type Output<T> = anyhow::Result<ClientOutput<T>>;
 
 impl Client {
     pub async fn new(endpoint_url: &str, signature: &str) -> anyhow::Result<Self> {

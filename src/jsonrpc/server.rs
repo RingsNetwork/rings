@@ -1,5 +1,5 @@
 #![warn(missing_docs)]
-//! jsonrpc-server of rings-node
+//! A jsonrpc-server of rings-node
 /// [JSON-RPC]: https://www.jsonrpc.org/specification
 use std::collections::HashSet;
 use std::str::FromStr;
@@ -30,6 +30,8 @@ use crate::seed::Seed;
 use crate::util::from_rtc_ice_connection_state;
 
 /// RpcMeta basic info struct
+/// * processor: contain `swarm` instance and `stabilization` instance.
+/// * is_auth: is_auth set true after verify.
 #[derive(Clone)]
 pub struct RpcMeta {
     processor: Arc<Processor>,
@@ -55,8 +57,7 @@ impl From<(Arc<Processor>, bool)> for RpcMeta {
     }
 }
 
-/// MetaIoHandler add methods from `super::methods::*` with RpcMeta
-/// which contains `processor` and `is_auth`.
+/// Build handler add method with metadata.
 #[cfg(feature = "node")]
 pub(crate) async fn build_handler(handler: &mut MetaIoHandler<RpcMeta>) {
     handler.add_method_with_meta(Method::ConnectPeerViaHttp.as_str(), connect_peer_via_http);

@@ -7,6 +7,7 @@ use url::Url;
 use crate::err::Error;
 use crate::err::Result;
 
+/// Webrtc IceCredentialType enums.
 #[derive(Deserialize, Serialize, Debug, Clone, Default, PartialEq, Eq)]
 pub enum IceCredentialType {
     Unspecified,
@@ -15,6 +16,7 @@ pub enum IceCredentialType {
     Oauth,
 }
 
+/// Custom webrtc IceServer.
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct IceServer {
     pub urls: Vec<String>,

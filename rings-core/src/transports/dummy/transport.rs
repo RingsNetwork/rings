@@ -29,6 +29,7 @@ use crate::types::ice_transport::IceTrickleScheme;
 
 type EventSender = <AcChannel<Event> as Channel<Event>>::Sender;
 
+/// Dummy transport use for test only.
 #[derive(Default)]
 pub struct DummyTransportHub {
     pub senders: DashMap<uuid::Uuid, EventSender>,

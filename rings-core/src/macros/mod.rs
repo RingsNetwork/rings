@@ -8,71 +8,70 @@
 //! }
 //! set_timeout(func, timeout, func)
 //! ```
+//!
+//! `poll` macro help to implement await operation finish when feature using `wasm`
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use std::sync::Arc;
+//! use std::time::Duration;
+//!
+//! use async_trait::async_trait;
+//! use futures::future::FutureExt;
+//! use futures::pin_mut;
+//! use futures::select;
+//! use futures_timer::Delay;
+//!
+//! use crate::dht::Stabilization;
+//! use crate::dht::TStabilize;
+//!
+//! #[async_trait]
+//! impl TStabilize for Stabilization {
+//!     async fn wait(self: Arc<Self>) {
+//!         loop {
+//!             let timeout = Delay::new(Duration::from_secs(self.timeout as u64)).fuse();
+//!             pin_mut!(timeout);
+//!             select! {
+//!                 _ = timeout => self
+//!                     .stabilize()
+//!                     .await
+//!                     .unwrap_or_else(|e| log::error!("failed to stabilize {:?}", e)),
+//!             }
+//!         }
+//!     }
+//! }
+//! ```
+//! Stabilize function using `futures::select` to await task is finish, but feature wasm not support
+//! Using `poll` can fix this problem.
+//! ```rust,no_run
+//! use std::sync::Arc;
+//!
+//! use async_trait::async_trait;
+//! use wasm_bindgen_futures::spawn_local;
+//!
+//! use super::Stabilization;
+//! use super::TStabilize;
+//! use crate::poll;
+//! #[async_trait(?Send)]
+//! impl TStabilize for Stabilization {
+//!     async fn wait(self: Arc<Self>) {
+//!         let caller = Arc::clone(&self);
+//!         let func = move || {
+//!             let caller = caller.clone();
+//!             spawn_local(Box::pin(async move {
+//!                 caller
+//!                     .stabilize()
+//!                     .await
+//!                     .unwrap_or_else(|e| log::error!("failed to stabilize {:?}", e));
+//!             }))
+//!         };
+//!         poll!(func, 25000);
+//!     }
+//! }
+//! ```
 
-/// `poll` macro help to implement await operation finish when feature using `wasm`
-///
-/// # Example
-///
-/// ```rust,no_run
-/// 
-/// use std::sync::Arc;
-/// use std::time::Duration;
-
-/// use async_trait::async_trait;
-/// use futures::future::FutureExt;
-/// use futures::pin_mut;
-/// use futures::select;
-/// use futures_timer::Delay;
-/// use crate::dht::Stabilization;
-/// use crate::dht::TStabilize;
-///
-/// #[async_trait]
-/// impl TStabilize for Stabilization {
-///     async fn wait(self: Arc<Self>) {
-///         loop {
-///             let timeout = Delay::new(Duration::from_secs(self.timeout as u64)).fuse();
-///             pin_mut!(timeout);
-///             select! {
-///                 _ = timeout => self
-///                     .stabilize()
-///                     .await
-///                     .unwrap_or_else(|e| log::error!("failed to stabilize {:?}", e)),
-///             }
-///         }
-///     }
-/// }
-///
-/// ```
-/// Stabilize function using `futures::select` to await task is finish, but feature wasm not support
-/// Using `poll` can fix this problem.
-/// ```rust,no_run
-/// use std::sync::Arc;
-
-/// use async_trait::async_trait;
-/// use wasm_bindgen_futures::spawn_local;
-
-/// use super::Stabilization;
-/// use super::TStabilize;
-/// use crate::poll;
-
-/// #[async_trait(?Send)]
-/// impl TStabilize for Stabilization {
-///     async fn wait(self: Arc<Self>) {
-///         let caller = Arc::clone(&self);
-///         let func = move || {
-///             let caller = caller.clone();
-///             spawn_local(Box::pin(async move {
-///                 caller
-///                     .stabilize()
-///                     .await
-///                     .unwrap_or_else(|e| log::error!("failed to stabilize {:?}", e));
-///             }))
-///         };
-///         poll!(func, 25000);
-///     }
-/// }
-/// ```
-
+/// poll macro use for wasm futures and wait, act like `async-await`.
 #[macro_export]
 macro_rules! poll {
     ( $func:expr, $ttl:expr ) => {{

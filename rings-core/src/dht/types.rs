@@ -1,3 +1,4 @@
+//! DHT types about `Storage` and `Subring`.
 use async_trait::async_trait;
 
 use super::did::Did;
@@ -5,11 +6,13 @@ use super::subring::SubRing;
 use super::vnode::VirtualNode;
 use crate::err::Result;
 
+/// Trait for DHT implement base method.
 pub trait Chord<A> {
     fn join(&self, id: Did) -> Result<A>;
     fn find_successor(&self, id: Did) -> Result<A>;
 }
 
+/// Trait for DHT stabilization.
 pub trait ChordStabilize<A>: Chord<A> {
     fn closest_preceding_node(&self, id: Did) -> Result<Did>;
     fn check_predecessor(&self) -> Result<A>;

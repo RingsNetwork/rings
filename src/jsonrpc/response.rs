@@ -13,6 +13,7 @@ use crate::prelude::rings_core::prelude::web3::contract::tokens::Tokenizable;
 use crate::prelude::rings_core::transports::Transport;
 use crate::processor;
 
+/// Peer contains transport address and state information.
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct Peer {
     /// a processor' address

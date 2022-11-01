@@ -62,10 +62,15 @@ pub type ValidatorFn = Box<dyn MessageValidator + Send + Sync>;
 pub type ValidatorFn = Box<dyn MessageValidator>;
 
 #[derive(Clone)]
+/// MessageHandler will manage resources.
 pub struct MessageHandler {
+    /// DHT implement chord algorithm.
     dht: Arc<PeerRing>,
+    /// Transport manager and collections.
     swarm: Arc<Swarm>,
+    /// CallbackFn implement `customMessage` and `builtin_message`.
     callback: Arc<Option<CallbackFn>>,
+    /// A specific validator implement ValidatorFn.
     validator: Arc<Option<ValidatorFn>>,
 }
 

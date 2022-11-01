@@ -1,15 +1,14 @@
 //! ECDSA, EdDSA, and ElGamal
 use std::convert::TryFrom;
-use std::fmt::Write;
 use std::ops::Deref;
 
+use crypto::sha1::Sha1;
+use crypto::digest::Digest;
 use hex;
 use rand::SeedableRng;
 use rand_hc::Hc128Rng;
 use serde::Deserialize;
 use serde::Serialize;
-use sha1::Digest;
-use sha1::Sha1;
 use web3::signing::keccak256;
 use web3::types::Address;
 
@@ -21,13 +20,17 @@ mod types;
 pub use types::PublicKey;
 
 /// ref <https://docs.rs/web3/0.18.0/src/web3/signing.rs.html#69>
+///
 /// length r: 32, length s: 32, length v(recovery_id): 1
 pub type SigBytes = [u8; 65];
+/// Alias PublicKey.
 pub type CurveEle = PublicKey;
 
+/// Wrap libsecp256k1::SecretKey.
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub struct SecretKey(libsecp256k1::SecretKey);
 
+/// Wrap String into HashStr.
 #[derive(Deserialize, Serialize, Debug, Clone, Eq, PartialEq)]
 pub struct HashStr(String);
 
@@ -127,13 +130,8 @@ where T: Into<String>
     fn from(s: T) -> Self {
         let inputs = s.into();
         let mut hasher = Sha1::new();
-        hasher.update(inputs.as_bytes());
-        let bytes = hasher.finalize();
-        let mut ret = String::with_capacity(bytes.len() * 2);
-        for &b in &bytes {
-            write!(ret, "{:02x}", b).unwrap();
-        }
-        HashStr(ret)
+        hasher.input_str(inputs.as_str());
+        HashStr(String::from(hasher.result_str()))
     }
 }
 
@@ -222,6 +220,7 @@ impl PublicKey {
     }
 }
 
+/// Recover PublicKey from RawMessage using signature.
 pub fn recover<S>(message: &str, signature: S) -> Result<PublicKey>
 where S: AsRef<[u8]> {
     let sig_bytes: SigBytes = signature.as_ref().try_into()?;
@@ -229,6 +228,7 @@ where S: AsRef<[u8]> {
     recover_hash(&message_hash, &sig_bytes)
 }
 
+/// Recover PublicKey from HashMessage using signature.
 pub fn recover_hash(message_hash: &[u8; 32], sig: &[u8; 65]) -> Result<PublicKey> {
     let r_s_signature: [u8; 64] = sig[..64].try_into()?;
     let recovery_id: u8 = sig[64];

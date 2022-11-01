@@ -10,6 +10,7 @@ use crate::transports::Transport;
 use crate::types::channel::Channel as ChannelTrait;
 use crate::types::ice_transport::IceTransportInterface;
 
+/// TransportManager trait use to manage transports in swarm.
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait TransportManager {

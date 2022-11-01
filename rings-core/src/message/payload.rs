@@ -58,6 +58,7 @@ pub enum OriginVerificationGen {
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
+/// MessagePayload with sequence and verification, contain MessageRealy.
 pub struct MessagePayload<T> {
     pub data: T,
     pub tx_id: uuid::Uuid,

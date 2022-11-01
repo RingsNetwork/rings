@@ -14,7 +14,9 @@ use super::request::parse_response;
 use super::request::RequestBuilder;
 use crate::prelude::reqwest::Client as HttpClient;
 
-/// SimpleClient
+/// Create a new SimpleClient
+/// * client: a instance of reqwest::Client
+/// * url: remote jsonrpc_server url
 #[derive(Clone)]
 pub struct SimpleClient {
     client: Arc<HttpClient>,
@@ -22,9 +24,8 @@ pub struct SimpleClient {
 }
 
 impl SimpleClient {
-    /// Create a new SimpleClient
-    /// * client: a instance of reqwest::Client
-    /// * url: remote jsonrpc_server url
+    /// * client: reqwest::Client handle http request.
+    /// * url: remote json_server url.
     pub fn new(client: Arc<HttpClient>, url: &str) -> Self {
         Self {
             client,

@@ -1,5 +1,6 @@
 //! Error of rings_core
 
+/// Errors collections in ring-core.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
@@ -308,4 +309,5 @@ pub enum Error {
     MessageTooLarge,
 }
 
+/// A Result wrapper contain custom Errors.
 pub type Result<T> = std::result::Result<T, Error>;

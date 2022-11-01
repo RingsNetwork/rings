@@ -13,6 +13,7 @@ use crate::logging::browser::set_panic_hook;
 use crate::prelude::wasm_bindgen;
 use crate::prelude::wasm_bindgen::prelude::*;
 
+/// set panic book for wasm.
 #[wasm_bindgen(start)]
 pub fn start() -> Result<(), JsError> {
     set_panic_hook();

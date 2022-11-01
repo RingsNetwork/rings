@@ -1,4 +1,4 @@
-//! Signer for default ECDSA and EIP712
+//! Signer for default ECDSA and person_sign.
 use web3::signing::keccak256;
 
 use crate::ecc::Address;
@@ -7,7 +7,7 @@ use crate::ecc::SecretKey;
 use crate::err::Result;
 
 pub mod default {
-
+    /// Default method signing using libsecp256k1::SecretKey.
     use super::*;
     pub fn sign_raw(sec: SecretKey, msg: &str) -> [u8; 65] {
         sign(sec, &hash(msg))
@@ -33,7 +33,29 @@ pub mod default {
     }
 }
 
-pub mod eip712 {
+/// EIP712 sign using ethers.provider send `eth_signTypedData` rpc call.
+/// which contains `EIP712Domain` struct
+/// ```
+/// {
+///
+///  EIP712Domain: [
+///      { name: "name", type: "string" },
+///      { name: "version", type: "string" },
+///      { name: "verifyingContract", type: "address" },
+///      { name: "salt", type: "bytes32" },
+///  ]
+/// }
+/// ```
+///
+/// # Specification
+/// `encode(domainSeparator : 𝔹²⁵⁶, message : 𝕊) = "\x19\x01" ‖ domainSeparator ‖ hashStruct(message)`
+/// - data adheres to 𝕊, a structure defined in the rigorous eip-712
+/// - `\x01` is needed to comply with EIP-191
+/// - `domainSeparator` is hashStruct(eip712Domain)
+/// - `hashStruct(s : 𝕊) = keccak256(typeHash ‖ encodeData(s))`
+pub mod eip712 {}
+
+pub mod person_sign {
     use super::*;
 
     pub fn sign_raw(sec: SecretKey, msg: &str) -> [u8; 65] {
@@ -46,6 +68,8 @@ pub mod eip712 {
         sig
     }
     pub fn hash(msg: &str) -> [u8; 32] {
+        //! \x19Ethereum Signed Message\n use for PersionSign, which can send `personalSign` rpc call.
+        //! to encode message.
         let mut prefix_msg = format!("\x19Ethereum Signed Message:\n{}", msg.len()).into_bytes();
         prefix_msg.extend_from_slice(msg.as_bytes());
         keccak256(&prefix_msg)
@@ -116,7 +140,7 @@ mod test {
     }
 
     #[test]
-    fn test_eip712_sign() {
+    fn test_person_sign() {
         use hex::FromHex;
         let key =
             SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0")
@@ -126,12 +150,12 @@ mod test {
         // window.ethereum.request({method: "personal_sign", params: ["test", "0x11E807fcc88dD319270493fB2e822e388Fe36ab0"]})
         let metamask_sig = Vec::from_hex("724fc31d9272b34d8406e2e3a12a182e72510b008de6cc44684577e31e20d9626fb760d6a0badd79a6cf4cd56b2fc0fbd60c438b809aa7d29bfb598c13e7b50e1b").unwrap();
         let msg = "test";
-        let h = eip712::hash(msg);
-        let sig = eip712::sign(key, &h);
+        let h = person_sign::hash(msg);
+        let sig = person_sign::sign(key, &h);
         assert_eq!(metamask_sig.as_slice(), sig);
-        let pubkey = eip712::recover(msg, sig).unwrap();
+        let pubkey = person_sign::recover(msg, sig).unwrap();
         assert_eq!(pubkey.address(), address);
-        assert!(eip712::verify(msg, &address, sig));
+        assert!(person_sign::verify(msg, &address, sig));
     }
 
     #[test]

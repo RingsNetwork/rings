@@ -5,6 +5,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::Registry;
 
 #[cfg(feature = "node")]
+/// logging configuration about node.
 pub mod node {
     use std::backtrace::Backtrace;
     use std::panic::PanicInfo;

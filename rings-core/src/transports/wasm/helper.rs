@@ -8,6 +8,7 @@ use web_sys::RtcSessionDescription;
 use crate::err::Error;
 use crate::err::Result;
 
+/// Wasm sdp types.
 #[derive(Clone, Deserialize, Serialize, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum SdpType {
@@ -40,6 +41,7 @@ impl From<web_sys::RtcSdpType> for SdpType {
     }
 }
 
+/// Wasm sdp wrapper.
 #[derive(Clone, Deserialize, Serialize, Debug)]
 pub struct RtcSessionDescriptionWrapper {
     pub sdp: String,

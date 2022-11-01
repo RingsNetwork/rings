@@ -4,6 +4,7 @@ use serde::Serialize;
 use crate::dht::Did;
 use crate::err::Result;
 
+/// Event message send and recv through Channel.
 #[derive(Debug, PartialEq, Eq, Serialize, Clone)]
 pub enum Event {
     ConnectClosed((Did, uuid::Uuid)),
@@ -11,6 +12,7 @@ pub enum Event {
     RegisterTransport((Did, uuid::Uuid)),
 }
 
+/// Channel trant implement methods.
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait Channel<T: Send> {

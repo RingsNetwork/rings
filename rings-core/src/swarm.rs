@@ -38,6 +38,7 @@ use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransportInterface;
 use crate::types::ice_transport::IceTrickleScheme;
 
+/// Creates a SwarmBuilder to configure a Swarm.
 pub struct SwarmBuilder {
     key: Option<SecretKey>,
     ice_servers: Vec<IceServer>,
@@ -136,6 +137,7 @@ impl SwarmBuilder {
     }
 }
 
+/// The transports and dht management.
 pub struct Swarm {
     pub(crate) pending_transports: Arc<Mutex<Vec<Arc<Transport>>>>,
     pub(crate) transports: MemStorage<Did, Arc<Transport>>,

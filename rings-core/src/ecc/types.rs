@@ -5,7 +5,7 @@ use serde::Serialize;
 use crate::err::Error;
 use crate::err::Result;
 
-/// PublicKey for ECDSA and EdDSA
+/// PublicKey for ECDSA and EdDSA.
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub struct PublicKey(pub [u8; 33]);
 

@@ -10,21 +10,25 @@ use crate::err::Error;
 use crate::err::Result;
 
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
+/// MessageType use to ask for connection, send to remote with transport_uuid and handshake_info.
 pub struct ConnectNodeSend {
     pub transport_uuid: String,
     pub handshake_info: String,
 }
 
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
+/// MessageType report to origin that already connected.
 pub struct AlreadyConnected;
 
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
+/// MessageType report to origin with own transport_uuid and handshake_info.
 pub struct ConnectNodeReport {
     pub transport_uuid: String,
     pub handshake_info: String,
 }
 
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
+/// MessageType use to find successor in a chord ring.
 pub struct FindSuccessorSend {
     pub id: Did,
     pub strict: bool,
@@ -32,65 +36,78 @@ pub struct FindSuccessorSend {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+/// MessageType use to report origin node with report message.
 pub struct FindSuccessorReport {
     pub id: Did,
     pub handler: FindSuccessorReportHandler,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+/// MessageType use to notify predecessor, ask for update finger tables.
 pub struct NotifyPredecessorSend {
     pub id: Did,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+/// MessageType report to origin node.
 pub struct NotifyPredecessorReport {
     pub id: Did,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+/// MessageType use to join chord ring, add did into fingers table.
 pub struct JoinDHT {
     pub id: Did,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+/// MessageType use to leave chord ring.
 pub struct LeaveDHT {
     pub id: Did,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+/// MessageType use to search virtual node.
 pub struct SearchVNode {
     pub id: Did,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+/// MessageType report to origin found virtual node.
 pub struct FoundVNode {
     pub data: Vec<VirtualNode>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+/// MessageType ask to store data/message into virtual node.
 pub struct StoreVNode {
     pub data: Vec<VirtualNode>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+/// MessageType contains multi messages.
 pub struct MultiCall {
     pub messages: Vec<Message>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+/// MessageType after `FindSuccessorSend` and syncing data.
 pub struct SyncVNodeWithSuccessor {
     pub data: Vec<VirtualNode>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+/// MessageType use to join virtual node in subring.
 pub struct JoinSubRing {
     pub did: Did,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+/// MessageType use to customize message, will be handle by `custom_message` method.
 pub struct CustomMessage(pub Vec<u8>);
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
+/// A enum about Encrypted and Plain types.
 pub enum MaybeEncrypted<T> {
     Encrypted(Vec<u8>),
     Plain(T),
@@ -98,12 +115,19 @@ pub enum MaybeEncrypted<T> {
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
+/// MessageType enum Report contain FindSuccessorSend.
 pub enum FindSuccessorThen {
     Report(FindSuccessorReportHandler),
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
+/// MessageType enum handle when meet the last node.
+/// - None: do nothing but return.
+/// - Connect: connect origin node.
+/// - FixFingerTable: update fingers table.
+/// - SyncStorage: syncing data in virtual node.
+/// - CustomCallback: custom callback handle by `custom_message` method.
 pub enum FindSuccessorReportHandler {
     None,
     Connect,
@@ -114,6 +138,7 @@ pub enum FindSuccessorReportHandler {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[non_exhaustive]
+/// A collection MessageType use for unified management.
 pub enum Message {
     MultiCall(MultiCall),
     JoinDHT(JoinDHT),

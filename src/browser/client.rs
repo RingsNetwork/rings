@@ -54,21 +54,23 @@ use crate::prelude::web_sys::RtcIceConnectionState;
 use crate::processor::Processor;
 use crate::util::from_rtc_ice_connection_state;
 
+/// SignerMode enum contains `DEFAULT` and `PersonSign`
 #[wasm_bindgen]
 pub enum SignerMode {
     DEFAULT,
-    EIP712,
+    PersonSign,
 }
 
 impl From<SignerMode> for Signer {
     fn from(v: SignerMode) -> Self {
         match v {
             SignerMode::DEFAULT => Self::DEFAULT,
-            SignerMode::EIP712 => Self::EIP712,
+            SignerMode::PersonSign => Self::PersonSign,
         }
     }
 }
 
+/// AddressType enum contains `DEFAULT` and `ED25519`.
 #[wasm_bindgen]
 pub enum AddressType {
     DEFAULT,
@@ -84,20 +86,24 @@ impl ToString for AddressType {
     }
 }
 
+/// A UnsignedInfo use for wasm.
 #[wasm_bindgen]
 #[derive(Clone)]
 pub struct UnsignedInfo {
+    /// Did indentify
     key_addr: Did,
+    /// auth information
     auth: AuthorizedInfo,
+    /// random secrekey generate by service
     random_key: SecretKey,
 }
 
 #[wasm_bindgen]
 impl UnsignedInfo {
-    /// Create a new `UnsignedInfo` instance with SignerMode::EIP712
+    /// Create a new `UnsignedInfo` instance with SignerMode::PersonSign
     #[wasm_bindgen(constructor)]
     pub fn new(key_addr: String) -> Result<UnsignedInfo, wasm_bindgen::JsError> {
-        Self::new_with_signer(key_addr, SignerMode::EIP712)
+        Self::new_with_signer(key_addr, SignerMode::PersonSign)
     }
 
     /// Create a new `UnsignedInfo` instance
@@ -125,7 +131,7 @@ impl UnsignedInfo {
             AddressType::DEFAULT => {
                 let key_addr = Did::from_str(address.as_str())?;
                 let (auth, random_key) =
-                    SessionManager::gen_unsign_info(key_addr, None, Some(Signer::EIP712));
+                    SessionManager::gen_unsign_info(key_addr, None, Some(Signer::PersonSign));
                 (key_addr, auth, random_key)
             }
             AddressType::ED25519 => {

@@ -1,3 +1,4 @@
+//! A turn server and builder.
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::net::SocketAddr;

@@ -51,6 +51,7 @@ use crate::types::ice_transport::IceTrickleScheme;
 
 type EventSender = <AcChannel<Event> as Channel<Event>>::Sender;
 
+/// DefaultTransport use for node.
 #[derive(Clone)]
 pub struct DefaultTransport {
     /// an unique identity
