@@ -6,9 +6,10 @@ use crate::ecc::PublicKey;
 use crate::ecc::SecretKey;
 use crate::err::Result;
 
+/// Default method signing using libsecp256k1::SecretKey.
 pub mod default {
-    /// Default method signing using libsecp256k1::SecretKey.
     use super::*;
+
     pub fn sign_raw(sec: SecretKey, msg: &str) -> [u8; 65] {
         sign(sec, &hash(msg))
     }
@@ -16,9 +17,11 @@ pub mod default {
     pub fn sign(sec: SecretKey, hash: &[u8; 32]) -> [u8; 65] {
         sec.sign_hash(hash)
     }
+
     pub fn hash(msg: &str) -> [u8; 32] {
         keccak256(msg.as_bytes())
     }
+
     pub fn recover(msg: &str, sig: impl AsRef<[u8]>) -> Result<PublicKey> {
         let sig_byte: [u8; 65] = sig.as_ref().try_into()?;
         crate::ecc::recover(msg, sig_byte)
@@ -37,7 +40,6 @@ pub mod default {
 /// which contains `EIP712Domain` struct
 /// ```
 /// {
-///
 ///  EIP712Domain: [
 ///      { name: "name", type: "string" },
 ///      { name: "version", type: "string" },
@@ -51,36 +53,30 @@ pub mod default {
 /// `encode(domainSeparator : 𝔹²⁵⁶, message : 𝕊) = "\x19\x01" ‖ domainSeparator ‖ hashStruct(message)`
 /// - data adheres to 𝕊, a structure defined in the rigorous eip-712
 /// - `\x01` is needed to comply with EIP-191
-/// - `domainSeparator` is hashStruct(eip712Domain)
+/// - `domainSeparator` is hashStruct(EIP712Domain)
 /// - `hashStruct(s : 𝕊) = keccak256(typeHash ‖ encodeData(s))`
-pub mod eip712 {}
+pub mod eip712 {
+    use ethers::core::types::transaction::eip712::Eip712;
 
-pub mod person_sign {
     use super::*;
 
-    pub fn sign_raw(sec: SecretKey, msg: &str) -> [u8; 65] {
+    pub fn sign_raw<T>(sec: SecretKey, msg: &T) -> [u8; 65]
+    where T: Eip712 {
         sign(sec, &hash(msg))
     }
 
     pub fn sign(sec: SecretKey, hash: &[u8; 32]) -> [u8; 65] {
-        let mut sig = sec.sign_hash(hash);
-        sig[64] += 27;
-        sig
+        sec.sign_hash(hash)
     }
-    pub fn hash(msg: &str) -> [u8; 32] {
-        //! \x19Ethereum Signed Message\n use for PersionSign, which can send `personalSign` rpc call.
-        //! to encode message.
-        let mut prefix_msg = format!("\x19Ethereum Signed Message:\n{}", msg.len()).into_bytes();
-        prefix_msg.extend_from_slice(msg.as_bytes());
-        keccak256(&prefix_msg)
+
+    pub fn hash<T>(msg: &T) -> [u8; 32]
+    where T: Eip712 {
+        msg.encode_eip712().expect("EIP712 encode failed.")
     }
 
     pub fn recover(msg: &str, sig: impl AsRef<[u8]>) -> Result<PublicKey> {
         let sig_byte: [u8; 65] = sig.as_ref().try_into()?;
-        let hash = hash(msg);
-        let mut sig712 = sig_byte;
-        sig712[64] -= 27;
-        crate::ecc::recover_hash(&hash, &sig712)
+        crate::ecc::recover(msg, sig_byte)
     }
 
     pub fn verify(msg: &str, address: &Address, sig: impl AsRef<[u8]>) -> bool {
@@ -92,11 +88,55 @@ pub mod person_sign {
     }
 }
 
+/// PersonSign mod.
+pub mod person_sign {
+    use super::*;
+
+    /// sign function passing raw message parameter.
+    pub fn sign_raw(sec: SecretKey, msg: &str) -> [u8; 65] {
+        sign(sec, &hash(msg))
+    }
+
+    /// sign function with `hash` data.
+    pub fn sign(sec: SecretKey, hash: &[u8; 32]) -> [u8; 65] {
+        let mut sig = sec.sign_hash(hash);
+        sig[64] += 27;
+        sig
+    }
+
+    /// \x19Ethereum Signed Message\n use for PersionSign, which can encode by send `personalSign` rpc call.
+    pub fn hash(msg: &str) -> [u8; 32] {
+        let mut prefix_msg = format!("\x19Ethereum Signed Message:\n{}", msg.len()).into_bytes();
+        prefix_msg.extend_from_slice(msg.as_bytes());
+        keccak256(&prefix_msg)
+    }
+
+    /// recover pubkey according to signature.
+    pub fn recover(msg: &str, sig: impl AsRef<[u8]>) -> Result<PublicKey> {
+        let sig_byte: [u8; 65] = sig.as_ref().try_into()?;
+        let hash = hash(msg);
+        let mut sig712 = sig_byte;
+        sig712[64] -= 27;
+        crate::ecc::recover_hash(&hash, &sig712)
+    }
+
+    /// verify message signed by Ethereum address.
+    pub fn verify(msg: &str, address: &Address, sig: impl AsRef<[u8]>) -> bool {
+        if let Ok(p) = recover(msg, sig) {
+            p.address() == *address
+        } else {
+            false
+        }
+    }
+}
+
+/// ed25519 sign algorithm using ed25519_dalek
 pub mod ed25519 {
     use ed25519_dalek::Verifier;
 
     use super::*;
 
+    /// ref <https://www.rfc-editor.org/rfc/rfc8709>
     pub fn verify(msg: &str, address: &Address, sig: impl AsRef<[u8]>, pubkey: PublicKey) -> bool {
         if pubkey.address() != *address {
             return false;
