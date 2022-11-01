@@ -24,7 +24,11 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 
 use crate::channels::Channel as AcChannel;
+use crate::chunk::Chunk;
 use crate::chunk::ChunkList;
+use crate::chunk::ChunkManager;
+use crate::consts::TRANSPORT_MAX_SIZE;
+use crate::consts::TRANSPORT_MTU;
 use crate::dht::Did;
 use crate::ecc::PublicKey;
 use crate::err::Error;
@@ -45,8 +49,6 @@ use crate::types::ice_transport::IceTransportCallback;
 use crate::types::ice_transport::IceTransportInterface;
 use crate::types::ice_transport::IceTrickleScheme;
 
-const TANSPORT_MTU: usize = 65535;
-
 type EventSender = <AcChannel<Event> as Channel<Event>>::Sender;
 
 #[derive(Clone)]
@@ -57,6 +59,7 @@ pub struct DefaultTransport {
     data_channel: Arc<FuturesMutex<Option<Arc<RTCDataChannel>>>>,
     event_sender: EventSender,
     public_key: Arc<AsyncRwLock<Option<PublicKey>>>,
+    chunk_list: Arc<FuturesMutex<ChunkList<TRANSPORT_MTU>>>,
 }
 
 impl PartialEq for DefaultTransport {
@@ -144,6 +147,7 @@ impl IceTransportInterface<Event, AcChannel<Event>> for DefaultTransport {
             data_channel: Arc::new(FuturesMutex::new(None)),
             public_key: Arc::new(AsyncRwLock::new(None)),
             event_sender,
+            chunk_list: Default::default(),
         }
     }
 
@@ -238,26 +242,40 @@ impl IceTransportInterface<Event, AcChannel<Event>> for DefaultTransport {
     }
 
     async fn send_message(&self, msg: &Bytes) -> Result<()> {
-        let size = msg.len();
-        match self.get_data_channel().await {
-            Some(cnn) => match cnn.send(&Bytes::from(msg.to_vec())).await {
+        if msg.len() > TRANSPORT_MAX_SIZE {
+            return Err(Error::MessageTooLarge);
+        }
+
+        let dc = self
+            .get_data_channel()
+            .await
+            .ok_or(Error::RTCDataChannelNotReady)?;
+
+        let chunks = ChunkList::<TRANSPORT_MTU>::from(msg);
+
+        for c in chunks {
+            tracing::debug!("Transport chunk data len: {}", c.data.len());
+            let bytes = bincode::serialize(&c).map_err(Error::BincodeSerialize)?;
+            tracing::debug!("Transport chunk len: {}", bytes.len());
+
+            let size = bytes.len();
+            match dc.send(&bytes.into()).await {
                 Ok(s) => {
                     if !s == size {
-                        Err(Error::RTCDataChannelMessageIncomplete(s, size))
-                    } else {
-                        Ok(())
+                        return Err(Error::RTCDataChannelMessageIncomplete(s, size));
                     }
                 }
                 Err(e) => {
-                    if cnn.ready_state() != RTCDataChannelState::Open {
-                        Err(Error::RTCDataChannelStateNotOpen)
+                    if dc.ready_state() != RTCDataChannelState::Open {
+                        return Err(Error::RTCDataChannelStateNotOpen);
                     } else {
-                        Err(Error::RTCDataChannelSendTextFailed(e))
+                        return Err(Error::RTCDataChannelSendTextFailed(e));
                     }
                 }
-            },
-            None => Err(Error::RTCDataChannelNotReady),
+            }
         }
+
+        Ok(())
     }
 }
 
@@ -328,20 +346,40 @@ impl IceTransportCallback for DefaultTransport {
 
     async fn on_data_channel(&self) -> Self::OnDataChannelHdlrFn {
         let event_sender = self.event_sender.clone();
+        let chunk_list = self.chunk_list.clone();
 
         box move |d: Arc<RTCDataChannel>| {
             let event_sender = event_sender.clone();
+            let chunk_list = chunk_list.clone();
             Box::pin(async move {
                 d.on_message(Box::new(move |msg: DataChannelMessage| {
                     tracing::debug!("Message from DataChannel: '{:?}'", msg);
                     let event_sender = event_sender.clone();
+                    let chunk_list = chunk_list.clone();
                     Box::pin(async move {
-                        if AcChannel::send(
-                            &event_sender,
-                            Event::DataChannelMessage(msg.data.to_vec()),
-                        )
-                        .await
-                        .is_err()
+                        let mut chunk_list = chunk_list.lock().await;
+
+                        let chunk_item: Result<Chunk<TRANSPORT_MTU>> =
+                            bincode::deserialize(&msg.data).map_err(Error::BincodeDeserialize);
+                        if chunk_item.is_err() {
+                            tracing::error!("Failed to deserialize transport chunk item");
+                            return;
+                        }
+                        let chunk_item = chunk_item.unwrap();
+
+                        chunk_list.as_vec_mut().push(chunk_item.clone());
+                        let id = chunk_item.meta.id;
+                        let data = chunk_list.get(id);
+
+                        if data.is_none() {
+                            return;
+                        }
+                        let data = data.unwrap().into();
+                        tracing::debug!("Complete message from DataChannel: '{:?}'", data);
+
+                        if AcChannel::send(&event_sender, Event::DataChannelMessage(data))
+                            .await
+                            .is_err()
                         {
                             tracing::error!("Failed on handle msg")
                         };
@@ -578,12 +616,14 @@ impl DefaultTransport {
 pub mod tests {
     use std::str::FromStr;
 
+    use async_channel::Receiver;
+
     use super::DefaultTransport as Transport;
     use super::*;
     use crate::ecc::SecretKey;
     use crate::types::ice_transport::IceServer;
 
-    async fn prepare_transport() -> Result<Transport> {
+    async fn prepare_transport() -> Result<(Transport, Receiver<Event>)> {
         let ch = Arc::new(AcChannel::new());
         let mut trans = Transport::new(ch.sender());
 
@@ -593,13 +633,13 @@ pub mod tests {
             .await?
             .apply_callback()
             .await?;
-        Ok(trans)
+        Ok((trans, ch.receiver()))
     }
 
     pub async fn establish_connection(
         transport1: &Transport,
         transport2: &Transport,
-    ) -> Result<()> {
+    ) -> Result<(Did, Did)> {
         assert_eq!(
             transport1.ice_connection_state().await,
             Some(RTCIceConnectionState::New)
@@ -705,16 +745,86 @@ pub mod tests {
             Some(RTCIceConnectionState::Connected)
         );
 
-        Ok(())
+        Ok((key1.address().into(), key2.address().into()))
     }
 
     #[tokio::test]
-    async fn test_ice_connection_establish() -> Result<()> {
-        let transport1 = prepare_transport().await?;
-        let transport2 = prepare_transport().await?;
+    async fn test_ice_connection_establish() {
+        let (transport1, receiver1) = prepare_transport().await.unwrap();
+        let (transport2, receiver2) = prepare_transport().await.unwrap();
 
-        establish_connection(&transport1, &transport2).await?;
+        let (did1, did2) = establish_connection(&transport1, &transport2)
+            .await
+            .unwrap();
 
-        Ok(())
+        assert!(matches!(
+            receiver1.recv().await.unwrap(),
+            Event::RegisterTransport((did, _)) if did == did2
+        ));
+        assert!(matches!(
+            receiver2.recv().await.unwrap(),
+            Event::RegisterTransport((did, _)) if did == did1
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_send_message() {
+        let (transport1, receiver1) = prepare_transport().await.unwrap();
+        let (transport2, receiver2) = prepare_transport().await.unwrap();
+
+        let (did1, did2) = establish_connection(&transport1, &transport2)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            receiver1.recv().await.unwrap(),
+            Event::RegisterTransport((did, _)) if did == did2
+        ));
+        assert!(matches!(
+            receiver2.recv().await.unwrap(),
+            Event::RegisterTransport((did, _)) if did == did1
+        ));
+
+        transport1.wait_for_data_channel_open().await.unwrap();
+        transport2.wait_for_data_channel_open().await.unwrap();
+
+        // Check send message
+        transport1.send_message(&"hello1".into()).await.unwrap();
+        assert!(matches!(
+            receiver2.recv().await.unwrap(),
+            Event::DataChannelMessage(msg) if msg == "hello1".as_bytes()
+        ));
+        transport2.send_message(&"hello2".into()).await.unwrap();
+        assert!(matches!(
+            receiver1.recv().await.unwrap(),
+            Event::DataChannelMessage(msg) if msg == "hello2".as_bytes()
+        ));
+
+        // Check send long message
+        let long_message1: Bytes = (0..TRANSPORT_MAX_SIZE - 1)
+            .map(|_| rand::random::<u8>())
+            .collect();
+        assert_eq!(long_message1.len(), TRANSPORT_MAX_SIZE - 1);
+        transport1.send_message(&long_message1).await.unwrap();
+        assert!(matches!(
+            receiver2.recv().await.unwrap(),
+            Event::DataChannelMessage(msg) if msg == long_message1.to_vec()
+        ));
+        let long_message2: Bytes = (0..TRANSPORT_MAX_SIZE)
+            .map(|_| rand::random::<u8>())
+            .collect();
+        assert_eq!(long_message2.len(), TRANSPORT_MAX_SIZE);
+        transport2.send_message(&long_message2).await.unwrap();
+        assert!(matches!(
+            receiver1.recv().await.unwrap(),
+            Event::DataChannelMessage(msg) if msg == long_message2.to_vec()
+        ));
+
+        // Check send over sized message
+        let oversize_message: Bytes = (0..TRANSPORT_MAX_SIZE + 1)
+            .map(|_| rand::random::<u8>())
+            .collect();
+        assert_eq!(oversize_message.len(), TRANSPORT_MAX_SIZE + 1);
+        assert!(transport1.send_message(&oversize_message).await.is_err());
     }
 }

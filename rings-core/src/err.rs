@@ -303,6 +303,9 @@ pub enum Error {
 
     #[error("Message decryption failed")]
     MessageDecryptionFailed(ecies::SecpError),
+
+    #[error("message too large, consider use ChunkList")]
+    MessageTooLarge,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
