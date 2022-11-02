@@ -13,7 +13,7 @@ use crate::backend_client::HttpServerRequest;
 use crate::backend_client::HttpServerResponse;
 use crate::error::Error;
 use crate::error::Result;
-use crate::prelude::rings_core::message::chunk::ChunkList;
+use crate::prelude::chunk::ChunkList;
 use crate::prelude::rings_core::message::Message;
 use crate::prelude::*;
 
@@ -141,7 +141,7 @@ impl Backend {
 
             let resp = BackendMessage::HttpServer(HttpServerMessage::Response(resp));
             tracing::debug!("resp_bytes start gzip");
-            let json_bytes = bincode::serialize(&resp)?;
+            let json_bytes = bincode::serialize(&resp)?.into();
             let resp_bytes = message::encode_data_gzip(&json_bytes, 9)?;
             tracing::debug!("resp_bytes gzip_data len: {}", resp_bytes.len());
 

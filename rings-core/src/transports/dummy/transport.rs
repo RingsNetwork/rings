@@ -3,6 +3,7 @@ use std::sync::Mutex;
 
 use async_lock::RwLock as AsyncRwLock;
 use async_trait::async_trait;
+use bytes::Bytes;
 use dashmap::DashMap;
 use lazy_static::lazy_static;
 use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
@@ -123,7 +124,7 @@ impl IceTransportInterface<Event, AcChannel<Event>> for DummyTransport {
         self.public_key.read().await.unwrap()
     }
 
-    async fn send_message(&self, msg: &[u8]) -> Result<()> {
+    async fn send_message(&self, msg: &Bytes) -> Result<()> {
         self.remote_sender()
             .send(Event::DataChannelMessage(msg.to_vec()))
             .await

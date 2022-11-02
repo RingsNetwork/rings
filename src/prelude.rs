@@ -8,9 +8,9 @@ pub use rings_core;
 #[cfg(feature = "browser")]
 pub use rings_core_wasm as rings_core;
 
+pub use self::rings_core::chunk;
 pub use self::rings_core::dht::PeerRing;
 pub use self::rings_core::ecc::SecretKey;
-pub use self::rings_core::message::chunk;
 pub use self::rings_core::message::CustomMessage;
 pub use self::rings_core::message::MaybeEncrypted;
 pub use self::rings_core::message::Message;

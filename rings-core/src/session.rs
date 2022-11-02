@@ -11,6 +11,7 @@ use std::sync::RwLock;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::consts::DEFAULT_SESSION_TTL_MS;
 use crate::dht::Did;
 use crate::ecc::signers;
 use crate::ecc::PublicKey;
@@ -18,8 +19,6 @@ use crate::ecc::SecretKey;
 use crate::err::Error;
 use crate::err::Result;
 use crate::utils;
-
-pub const DEFAULT_TTL_MS: usize = 30 * 24 * 3600 * 1000;
 
 /// we support both EIP712 and raw ECDSA singing forrmat
 #[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
@@ -173,7 +172,7 @@ impl SessionManager {
             signer,
             authorizer,
             did: key.address().into(),
-            ttl_ms: ttl.unwrap_or(Ttl::Some(DEFAULT_TTL_MS)),
+            ttl_ms: ttl.unwrap_or(Ttl::Some(DEFAULT_SESSION_TTL_MS)),
             ts_ms: utils::get_epoch_ms(),
         };
         Ok((info, key))
@@ -191,7 +190,7 @@ impl SessionManager {
             signer,
             authorizer,
             did: key.address().into(),
-            ttl_ms: ttl.unwrap_or(Ttl::Some(DEFAULT_TTL_MS)),
+            ttl_ms: ttl.unwrap_or(Ttl::Some(DEFAULT_SESSION_TTL_MS)),
             ts_ms: utils::get_epoch_ms(),
         };
         (info, key)

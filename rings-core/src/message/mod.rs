@@ -1,6 +1,4 @@
 //! Message and MessageHandler
-/// msg chunk and it's helper function
-pub mod chunk;
 mod encoder;
 pub use encoder::Decoder;
 pub use encoder::Encoded;

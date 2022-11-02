@@ -7,7 +7,7 @@
 //! to be sent efficiently while not blocking other messages that share
 //! the same connection, or even the same MSRP session.
 
-use itertools::Itertools;
+use bytes::Bytes;
 use serde::Deserialize;
 use serde::Serialize;
 use uuid::Uuid;
@@ -18,7 +18,7 @@ pub struct Chunk<const MTU: usize> {
     /// chunk info, [position, total chunks]
     pub chunk: [usize; 2],
     /// bytes
-    pub data: Vec<u8>,
+    pub data: Bytes,
     /// meta data of chunk
     pub meta: ChunkMeta,
 }
@@ -59,7 +59,7 @@ pub trait ChunkManager {
     fn list_pending(&self) -> Vec<Uuid>;
     /// get sepc msg via uuid
     /// if a msg is not completed, it will returns None
-    fn get(&self, id: Uuid) -> Option<Vec<u8>>;
+    fn get(&self, id: Uuid) -> Option<Bytes>;
     /// delete
     fn remove(&mut self, id: Uuid);
 }
@@ -113,17 +113,12 @@ impl<const MTU: usize> ChunkList<MTU> {
     }
 
     /// if list is completed, withdraw data, or return None
-    pub fn try_withdraw(&self) -> Option<Vec<u8>> {
+    pub fn try_withdraw(&self) -> Option<Bytes> {
         if !self.is_completed() {
             None
         } else {
             let data = self.formalize().to_vec();
-            let ret: Vec<u8> = data.iter().fold(vec![], |a, b| {
-                let mut rhs = b.data.clone();
-                let mut lhs = a;
-                lhs.append(&mut rhs);
-                lhs
-            });
+            let ret = data.into_iter().flat_map(|c| c.data).collect();
             Some(ret)
         }
     }
@@ -144,27 +139,19 @@ impl<const MTU: usize> IntoIterator for ChunkList<MTU> {
     }
 }
 
-impl<const MTU: usize, T> From<&T> for ChunkList<MTU>
-where T: IntoIterator<Item = u8> + Clone
-{
-    fn from(bytes: &T) -> Self {
-        let chunks: Vec<Vec<u8>> = bytes
-            .clone()
-            .into_iter()
-            .chunks(MTU)
-            .into_iter()
-            .map(|x| x.into_iter().collect::<Vec<_>>())
-            .collect();
+impl<const MTU: usize> From<&Bytes> for ChunkList<MTU> {
+    fn from(bytes: &Bytes) -> Self {
+        let chunks: Vec<Bytes> = bytes.chunks(MTU).map(|c| c.to_vec().into()).collect();
         let chunks_len: usize = chunks.len();
         let meta = ChunkMeta::default();
         Self(
             chunks
                 .into_iter()
                 .enumerate()
-                .map(|(i, d)| Chunk {
+                .map(|(i, data)| Chunk {
                     meta,
                     chunk: [i, chunks_len],
-                    data: d.to_vec(),
+                    data,
                 })
                 .collect::<Vec<Chunk<MTU>>>(),
         )
@@ -201,7 +188,7 @@ impl<const MTU: usize> ChunkManager for ChunkList<MTU> {
             .collect()
     }
 
-    fn get(&self, id: Uuid) -> Option<Vec<u8>> {
+    fn get(&self, id: Uuid) -> Option<Bytes> {
         self.search(id).try_withdraw()
     }
 
@@ -217,34 +204,34 @@ mod test {
 
     #[test]
     fn test_data_chunks() {
-        let data = "helloworld".repeat(2);
-        let ret: Vec<Chunk<32>> = ChunkList::<32>::from(&data.bytes()).into();
+        let data = "helloworld".repeat(2).into();
+        let ret: Vec<Chunk<32>> = ChunkList::<32>::from(&data).into();
         assert_eq!(ret.len(), 1);
         assert_eq!(ret[ret.len() - 1].chunk, [0, 1]);
 
-        let data = "helloworld".repeat(1024);
-        let ret: Vec<Chunk<32>> = ChunkList::<32>::from(&data.bytes()).into();
+        let data = "helloworld".repeat(1024).into();
+        let ret: Vec<Chunk<32>> = ChunkList::<32>::from(&data).into();
         assert_eq!(ret.len(), 10 * 1024 / 32);
         assert_eq!(ret[ret.len() - 1].chunk, [319, 320]);
     }
 
     #[test]
     fn test_withdraw() {
-        let data = "helloworld".repeat(1024);
-        let ret: Vec<Chunk<32>> = ChunkList::<32>::from(&data.bytes()).into();
+        let data = "helloworld".repeat(1024).into();
+        let ret: Vec<Chunk<32>> = ChunkList::<32>::from(&data).into();
         let incomp = ret[0..30].to_vec();
         let cl = ChunkList::from(incomp);
         assert!(!cl.is_completed());
         let wd = ChunkList::from(ret).try_withdraw().unwrap();
-        assert_eq!(wd, data.into_bytes())
+        assert_eq!(wd, data)
     }
 
     #[test]
     fn test_query_complete() {
-        let data1 = "hello".repeat(1024);
-        let data2 = "world".repeat(256);
-        let chunks1: Vec<Chunk<32>> = ChunkList::<32>::from(&data1.bytes()).into();
-        let chunks2: Vec<Chunk<32>> = ChunkList::<32>::from(&data2.bytes()).into();
+        let data1 = "hello".repeat(1024).into();
+        let data2 = "world".repeat(256).into();
+        let chunks1: Vec<Chunk<32>> = ChunkList::<32>::from(&data1).into();
+        let chunks2: Vec<Chunk<32>> = ChunkList::<32>::from(&data2).into();
 
         let mut part = chunks1[2..5].to_vec();
         let mut fin = chunks2;
@@ -254,7 +241,7 @@ mod test {
         let comp = cl.list_completed();
         assert_eq!(comp.len(), 1);
         let id = comp[0];
-        assert_eq!(cl.get(id).unwrap(), data2.into_bytes());
+        assert_eq!(cl.get(id).unwrap(), data2);
         let pend = cl.list_pending();
         assert_eq!(pend.len(), 1);
         assert_eq!(cl.get(pend[0]), None)

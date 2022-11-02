@@ -1,6 +1,7 @@
 use std::ops::Deref;
 
 use base58_monero as b58m;
+use bytes::Bytes;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -68,9 +69,22 @@ impl Encoder for Vec<u8> {
     }
 }
 
+impl Encoder for Bytes {
+    fn encode(&self) -> Result<Encoded> {
+        self.as_ref().encode()
+    }
+}
+
 impl Decoder for Vec<u8> {
     fn from_encoded(encoded: &Encoded) -> Result<Self> {
         b58m::decode_check(encoded.deref()).map_err(|_| Error::Decode)
+    }
+}
+
+impl Decoder for Bytes {
+    fn from_encoded(encoded: &Encoded) -> Result<Self> {
+        let d = Vec::from_encoded(encoded)?;
+        Ok(Bytes::from(d))
     }
 }
 
