@@ -141,6 +141,7 @@ pub mod backend_client;
 pub mod browser;
 #[cfg(feature = "node")]
 pub mod cli;
+pub mod consts;
 pub mod error;
 #[cfg(feature = "node")]
 pub mod ethereum;

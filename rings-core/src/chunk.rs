@@ -12,6 +12,11 @@ use serde::Deserialize;
 use serde::Serialize;
 use uuid::Uuid;
 
+use crate::consts::DEFAULT_TTL_MS;
+use crate::err::Error;
+use crate::err::Result;
+use crate::utils::get_epoch_ms;
+
 /// A data structure to presenting Chunks
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Chunk<const MTU: usize> {
@@ -28,6 +33,18 @@ impl<const MTU: usize> Chunk<MTU> {
     pub fn tx_eq(a: &Self, b: &Self) -> bool {
         a.meta.id == b.meta.id && a.chunk[1] == b.chunk[1]
     }
+
+    /// serelize chunk to bytes
+    pub fn to_bincode(&self) -> Result<Bytes> {
+        bincode::serialize(self)
+            .map(Bytes::from)
+            .map_err(Error::BincodeSerialize)
+    }
+
+    /// deserialize bytes to chunk
+    pub fn from_bincode(data: &[u8]) -> Result<Self> {
+        bincode::deserialize(data).map_err(Error::BincodeDeserialize)
+    }
 }
 
 /// Meta data of a chunk
@@ -35,24 +52,24 @@ impl<const MTU: usize> Chunk<MTU> {
 pub struct ChunkMeta {
     /// uuid of msg
     pub id: uuid::Uuid,
+    /// Created time
+    pub ts_ms: u128,
     /// Time to live
-    pub ttl: Option<usize>,
-    /// ts
-    pub ts: Option<u128>,
+    pub ttl_ms: usize,
 }
 
 impl Default for ChunkMeta {
     fn default() -> Self {
         Self {
             id: uuid::Uuid::new_v4(),
-            ts: None,
-            ttl: None,
+            ts_ms: get_epoch_ms(),
+            ttl_ms: DEFAULT_TTL_MS,
         }
     }
 }
 
 /// A helper for manage chunks and chunk pool
-pub trait ChunkManager {
+pub trait ChunkManager<const MTU: usize> {
     /// list completed Chunks;
     fn list_completed(&self) -> Vec<Uuid>;
     /// list pending Chunks;
@@ -60,8 +77,12 @@ pub trait ChunkManager {
     /// get sepc msg via uuid
     /// if a msg is not completed, it will returns None
     fn get(&self, id: Uuid) -> Option<Bytes>;
-    /// delete
+    ///  remove all chunks of id
     fn remove(&mut self, id: Uuid);
+    /// remove expired chunks by ttl
+    fn remove_expired(&mut self);
+    /// handle a chunk
+    fn handle(&mut self, chunk: Chunk<MTU>) -> Option<Bytes>;
 }
 
 /// List of Chunk, simply wrapped `Vec<Chunk>`
@@ -170,7 +191,7 @@ impl<const MTU: usize> From<Vec<Chunk<MTU>>> for ChunkList<MTU> {
     }
 }
 
-impl<const MTU: usize> ChunkManager for ChunkList<MTU> {
+impl<const MTU: usize> ChunkManager<MTU> for ChunkList<MTU> {
     fn list_completed(&self) -> Vec<Uuid> {
         // group by msg uuid and chunk size
         self.to_vec()
@@ -193,8 +214,25 @@ impl<const MTU: usize> ChunkManager for ChunkList<MTU> {
     }
 
     fn remove(&mut self, id: Uuid) {
-        //  remove all elements e for where chunk.meta.id == id.
         self.as_vec_mut().retain(|e| e.meta.id != id)
+    }
+
+    fn remove_expired(&mut self) {
+        let now = get_epoch_ms();
+        self.as_vec_mut()
+            .retain(|e| e.meta.ts_ms + e.meta.ttl_ms as u128 > now)
+    }
+
+    fn handle(&mut self, chunk: Chunk<MTU>) -> Option<Bytes> {
+        self.as_vec_mut().push(chunk.clone());
+
+        let id = chunk.meta.id;
+        let data = self.get(id)?;
+
+        self.remove(id);
+        self.remove_expired();
+
+        Some(data)
     }
 }
 
@@ -223,7 +261,7 @@ mod test {
         let cl = ChunkList::from(incomp);
         assert!(!cl.is_completed());
         let wd = ChunkList::from(ret).try_withdraw().unwrap();
-        assert_eq!(wd, data)
+        assert_eq!(wd, data);
     }
 
     #[test]

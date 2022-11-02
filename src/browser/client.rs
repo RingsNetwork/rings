@@ -13,6 +13,7 @@ use serde::Serialize;
 use crate::backend_client::BackendMessage;
 use crate::backend_client::HttpServerMessage;
 use crate::backend_client::HttpServerRequest;
+use crate::consts::BACKEND_MTU;
 use crate::jsonrpc::RpcMeta;
 use crate::prelude::chunk;
 use crate::prelude::chunk::ChunkManager;
@@ -619,7 +620,7 @@ pub struct MessageCallbackInstance {
     custom_message: Arc<js_sys::Function>,
     http_response_message: Arc<js_sys::Function>,
     builtin_message: Arc<js_sys::Function>,
-    chunklist: Arc<Mutex<Vec<chunk::Chunk<60000>>>>,
+    chunklist: Arc<Mutex<Vec<chunk::Chunk<BACKEND_MTU>>>>,
 }
 
 #[wasm_bindgen]
@@ -682,21 +683,15 @@ impl MessageCallbackInstance {
             return Err(anyhow!("lock chunklist failed"));
         }
         let mut c = c_lock.unwrap();
-        let chunk_item: chunk::Chunk<60000> = bincode::deserialize(data)?;
-        c.push(chunk_item.clone());
-        let chunk_list = chunk::ChunkList::from(c.clone());
-        let id = chunk_item.meta.id;
-        let d = chunk_list.get(id);
-        if d.is_some() {
-            c.retain(|e| e.meta.id != id);
-        }
-        log::debug!(
-            "chunk size: {}, total: {}, id: {}",
-            c.len(),
-            chunk_item.chunk[1],
-            id
-        );
-        Ok(d.map(Bytes::from))
+
+        let chunk_item = Chunk::from_bincode(data.into())?;
+
+        log::debug!("before handle chunk, chunk list len: {}", c.len());
+        log::debug!("chunk id: {}, total size: {}", chunk_item.meta.id, c.len());
+        let data = c.handle(chunk_item);
+        log::debug!("after handle chunk, chunk list len: {}", c.len());
+
+        Ok(data)
     }
 }
 
