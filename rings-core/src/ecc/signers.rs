@@ -1,4 +1,4 @@
-//! Signer for default ECDSA and eip191.
+//! Signer for default ECDSA and EIP191.
 use web3::signing::keccak256;
 
 use crate::ecc::Address;
@@ -20,58 +20,6 @@ pub mod default {
 
     pub fn hash(msg: &str) -> [u8; 32] {
         keccak256(msg.as_bytes())
-    }
-
-    pub fn recover(msg: &str, sig: impl AsRef<[u8]>) -> Result<PublicKey> {
-        let sig_byte: [u8; 65] = sig.as_ref().try_into()?;
-        crate::ecc::recover(msg, sig_byte)
-    }
-
-    pub fn verify(msg: &str, address: &Address, sig: impl AsRef<[u8]>) -> bool {
-        if let Ok(p) = recover(msg, sig) {
-            p.address() == *address
-        } else {
-            false
-        }
-    }
-}
-
-/// EIP712 sign using ethers.provider send `eth_signTypedData` rpc call.
-/// which contains `EIP712Domain` struct
-/// ```
-/// {
-///  EIP712Domain: [
-///      { name: "name", type: "string" },
-///      { name: "version", type: "string" },
-///      { name: "verifyingContract", type: "address" },
-///      { name: "salt", type: "bytes32" },
-///  ]
-/// }
-/// ```
-///
-/// # Specification
-/// `encode(domainSeparator : 𝔹²⁵⁶, message : 𝕊) = "\x19\x01" ‖ domainSeparator ‖ hashStruct(message)`
-/// - data adheres to 𝕊, a structure defined in the rigorous eip-712
-/// - `\x01` is needed to comply with EIP-191
-/// - `domainSeparator` is hashStruct(EIP712Domain)
-/// - `hashStruct(s : 𝕊) = keccak256(typeHash ‖ encodeData(s))`
-pub mod eip712 {
-    use ethers::core::types::transaction::eip712::Eip712;
-
-    use super::*;
-
-    pub fn sign_raw<T>(sec: SecretKey, msg: &T) -> [u8; 65]
-    where T: Eip712 {
-        sign(sec, &hash(msg))
-    }
-
-    pub fn sign(sec: SecretKey, hash: &[u8; 32]) -> [u8; 65] {
-        sec.sign_hash(hash)
-    }
-
-    pub fn hash<T>(msg: &T) -> [u8; 32]
-    where T: Eip712 {
-        msg.encode_eip712().expect("EIP712 encode failed.")
     }
 
     pub fn recover(msg: &str, sig: impl AsRef<[u8]>) -> Result<PublicKey> {

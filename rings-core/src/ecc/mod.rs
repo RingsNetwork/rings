@@ -2,8 +2,8 @@
 use std::convert::TryFrom;
 use std::ops::Deref;
 
-use crypto::sha1::Sha1;
 use crypto::digest::Digest;
+use crypto::sha1::Sha1;
 use hex;
 use rand::SeedableRng;
 use rand_hc::Hc128Rng;
@@ -131,7 +131,7 @@ where T: Into<String>
         let inputs = s.into();
         let mut hasher = Sha1::new();
         hasher.input_str(inputs.as_str());
-        HashStr(String::from(hasher.result_str()))
+        HashStr(hasher.result_str())
     }
 }
 

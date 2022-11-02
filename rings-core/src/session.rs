@@ -24,11 +24,11 @@ use crate::utils;
 
 pub const DEFAULT_TTL_MS: usize = 30 * 24 * 3600 * 1000;
 
-/// we support both PersonSign and raw ECDSA singing format
+/// we support both EIP191 and raw ECDSA singing format
 #[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
 pub enum Signer {
     DEFAULT,
-    PersonSign,
+    EIP191,
     EdDSA,
 }
 
@@ -119,11 +119,9 @@ impl Session {
                 Signer::DEFAULT => {
                     signers::default::verify(&auth_str, &self.auth.authorizer.did.into(), &self.sig)
                 }
-                Signer::PersonSign => signers::person_sign::verify(
-                    &auth_str,
-                    &self.auth.authorizer.did.into(),
-                    &self.sig,
-                ),
+                Signer::EIP191 => {
+                    signers::eip191::verify(&auth_str, &self.auth.authorizer.did.into(), &self.sig)
+                }
                 Signer::EdDSA => match self.authorizer_pubkey() {
                     Ok(p) => signers::ed25519::verify(
                         &auth_str,
@@ -151,7 +149,7 @@ impl Session {
         let auth = self.auth.to_string()?;
         match self.auth.signer {
             Signer::DEFAULT => signers::default::recover(&auth, &self.sig),
-            Signer::PersonSign => signers::person_sign::recover(&auth, &self.sig),
+            Signer::EIP191 => signers::eip191::recover(&auth, &self.sig),
             Signer::EdDSA => self
                 .auth
                 .authorizer
