@@ -19,7 +19,7 @@ use crate::utils::get_epoch_ms;
 
 /// A data structure to presenting Chunks
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Chunk<const MTU: usize> {
+pub struct Chunk {
     /// chunk info, [position, total chunks]
     pub chunk: [usize; 2],
     /// bytes
@@ -28,7 +28,7 @@ pub struct Chunk<const MTU: usize> {
     pub meta: ChunkMeta,
 }
 
-impl<const MTU: usize> Chunk<MTU> {
+impl Chunk {
     /// check two chunks is belongs to same tx
     pub fn tx_eq(a: &Self, b: &Self) -> bool {
         a.meta.id == b.meta.id && a.chunk[1] == b.chunk[1]
@@ -69,7 +69,7 @@ impl Default for ChunkMeta {
 }
 
 /// A helper for manage chunks and chunk pool
-pub trait ChunkManager<const MTU: usize> {
+pub trait ChunkManager {
     /// list completed Chunks;
     fn list_completed(&self) -> Vec<Uuid>;
     /// list pending Chunks;
@@ -82,26 +82,26 @@ pub trait ChunkManager<const MTU: usize> {
     /// remove expired chunks by ttl
     fn remove_expired(&mut self);
     /// handle a chunk
-    fn handle(&mut self, chunk: Chunk<MTU>) -> Option<Bytes>;
+    fn handle(&mut self, chunk: Chunk) -> Option<Bytes>;
 }
 
 /// List of Chunk, simply wrapped `Vec<Chunk>`
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ChunkList<const MTU: usize>(Vec<Chunk<MTU>>);
+pub struct ChunkList<const MTU: usize>(Vec<Chunk>);
 
 impl<const MTU: usize> ChunkList<MTU> {
     /// ChunkList to Vec
-    pub fn to_vec(&self) -> Vec<Chunk<MTU>> {
+    pub fn to_vec(&self) -> Vec<Chunk> {
         self.0.clone()
     }
 
     /// ChunkList to &Vec
-    pub fn as_vec(&self) -> &Vec<Chunk<MTU>> {
+    pub fn as_vec(&self) -> &Vec<Chunk> {
         &self.0
     }
 
     /// ChunkList to &mut Vec
-    pub fn as_vec_mut(&mut self) -> &mut Vec<Chunk<MTU>> {
+    pub fn as_vec_mut(&mut self) -> &mut Vec<Chunk> {
         &mut self.0
     }
 
@@ -116,7 +116,7 @@ impl<const MTU: usize> ChunkList<MTU> {
 
     /// search and formalize
     pub fn search(&self, id: Uuid) -> Self {
-        let chunks: Vec<Chunk<MTU>> = self
+        let chunks: Vec<Chunk> = self
             .to_vec()
             .iter()
             .filter(|e| e.meta.id == id)
@@ -152,8 +152,8 @@ impl<const MTU: usize> Default for ChunkList<MTU> {
 }
 
 impl<const MTU: usize> IntoIterator for ChunkList<MTU> {
-    type Item = Chunk<MTU>;
-    type IntoIter = std::vec::IntoIter<Chunk<MTU>>;
+    type Item = Chunk;
+    type IntoIter = std::vec::IntoIter<Chunk>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.to_vec().into_iter()
@@ -174,28 +174,28 @@ impl<const MTU: usize> From<&Bytes> for ChunkList<MTU> {
                     chunk: [i, chunks_len],
                     data,
                 })
-                .collect::<Vec<Chunk<MTU>>>(),
+                .collect::<Vec<Chunk>>(),
         )
     }
 }
 
-impl<const MTU: usize> From<ChunkList<MTU>> for Vec<Chunk<MTU>> {
+impl<const MTU: usize> From<ChunkList<MTU>> for Vec<Chunk> {
     fn from(l: ChunkList<MTU>) -> Self {
         l.to_vec()
     }
 }
 
-impl<const MTU: usize> From<Vec<Chunk<MTU>>> for ChunkList<MTU> {
-    fn from(data: Vec<Chunk<MTU>>) -> Self {
+impl<const MTU: usize> From<Vec<Chunk>> for ChunkList<MTU> {
+    fn from(data: Vec<Chunk>) -> Self {
         Self(data)
     }
 }
 
-impl<const MTU: usize> ChunkManager<MTU> for ChunkList<MTU> {
+impl<const MTU: usize> ChunkManager for ChunkList<MTU> {
     fn list_completed(&self) -> Vec<Uuid> {
         // group by msg uuid and chunk size
         self.to_vec()
-            .group_by(|a, b| Chunk::tx_eq(a, b))
+            .group_by(Chunk::tx_eq)
             .filter(|e| ChunkList::<MTU>::from(e.to_vec()).is_completed())
             .map(|c| c.first().unwrap().meta.id)
             .collect()
@@ -203,7 +203,7 @@ impl<const MTU: usize> ChunkManager<MTU> for ChunkList<MTU> {
 
     fn list_pending(&self) -> Vec<Uuid> {
         self.to_vec()
-            .group_by(|a, b| Chunk::tx_eq(a, b))
+            .group_by(Chunk::tx_eq)
             .filter(|e| !ChunkList::<MTU>::from(e.to_vec()).is_completed())
             .map(|c| c.first().unwrap().meta.id)
             .collect()
@@ -223,7 +223,7 @@ impl<const MTU: usize> ChunkManager<MTU> for ChunkList<MTU> {
             .retain(|e| e.meta.ts_ms + e.meta.ttl_ms as u128 > now)
     }
 
-    fn handle(&mut self, chunk: Chunk<MTU>) -> Option<Bytes> {
+    fn handle(&mut self, chunk: Chunk) -> Option<Bytes> {
         self.as_vec_mut().push(chunk.clone());
 
         let id = chunk.meta.id;
@@ -243,12 +243,12 @@ mod test {
     #[test]
     fn test_data_chunks() {
         let data = "helloworld".repeat(2).into();
-        let ret: Vec<Chunk<32>> = ChunkList::<32>::from(&data).into();
+        let ret: Vec<Chunk> = ChunkList::<32>::from(&data).into();
         assert_eq!(ret.len(), 1);
         assert_eq!(ret[ret.len() - 1].chunk, [0, 1]);
 
         let data = "helloworld".repeat(1024).into();
-        let ret: Vec<Chunk<32>> = ChunkList::<32>::from(&data).into();
+        let ret: Vec<Chunk> = ChunkList::<32>::from(&data).into();
         assert_eq!(ret.len(), 10 * 1024 / 32);
         assert_eq!(ret[ret.len() - 1].chunk, [319, 320]);
     }
@@ -256,11 +256,11 @@ mod test {
     #[test]
     fn test_withdraw() {
         let data = "helloworld".repeat(1024).into();
-        let ret: Vec<Chunk<32>> = ChunkList::<32>::from(&data).into();
+        let ret: Vec<Chunk> = ChunkList::<32>::from(&data).into();
         let incomp = ret[0..30].to_vec();
-        let cl = ChunkList::from(incomp);
+        let cl = ChunkList::<32>::from(incomp);
         assert!(!cl.is_completed());
-        let wd = ChunkList::from(ret).try_withdraw().unwrap();
+        let wd = ChunkList::<32>::from(ret).try_withdraw().unwrap();
         assert_eq!(wd, data);
     }
 
@@ -268,14 +268,14 @@ mod test {
     fn test_query_complete() {
         let data1 = "hello".repeat(1024).into();
         let data2 = "world".repeat(256).into();
-        let chunks1: Vec<Chunk<32>> = ChunkList::<32>::from(&data1).into();
-        let chunks2: Vec<Chunk<32>> = ChunkList::<32>::from(&data2).into();
+        let chunks1: Vec<Chunk> = ChunkList::<32>::from(&data1).into();
+        let chunks2: Vec<Chunk> = ChunkList::<32>::from(&data2).into();
 
         let mut part = chunks1[2..5].to_vec();
         let mut fin = chunks2;
         fin.append(&mut part);
 
-        let cl = ChunkList::from(fin);
+        let cl = ChunkList::<32>::from(fin);
         let comp = cl.list_completed();
         assert_eq!(comp.len(), 1);
         let id = comp[0];
