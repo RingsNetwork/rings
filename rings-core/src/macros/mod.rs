@@ -1,7 +1,7 @@
 //! Macro for ring-core
 //!
 //! for impl recursion, we need:
-//! ```
+//! ```no_run
 //! func = fn(func: Function) {
 //!     poll();
 //!     set_timeout(func, timeout, func);
@@ -13,7 +13,7 @@
 //!
 //! # Example
 //!
-//! ```rust,no_run
+//! ```no_run
 //! use std::sync::Arc;
 //! use std::time::Duration;
 //!
@@ -22,9 +22,8 @@
 //! use futures::pin_mut;
 //! use futures::select;
 //! use futures_timer::Delay;
-//!
-//! use crate::dht::Stabilization;
-//! use crate::dht::TStabilize;
+//! use ring_core::dht::Stabilization;
+//! use ring_core::dht::TStabilize;
 //!
 //! #[async_trait]
 //! impl TStabilize for Stabilization {
@@ -42,9 +41,10 @@
 //!     }
 //! }
 //! ```
+//!
 //! Stabilize function using `futures::select` to await task is finish, but feature wasm not support
 //! Using `poll` can fix this problem.
-//! ```rust,no_run
+//! ```no_run
 //! use std::sync::Arc;
 //!
 //! use async_trait::async_trait;
