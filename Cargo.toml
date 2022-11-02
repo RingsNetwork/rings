@@ -16,6 +16,7 @@ members = ["rings-core"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
+doctest = false
 
 [features]
 default = ["node"]

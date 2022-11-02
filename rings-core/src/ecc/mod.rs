@@ -1,14 +1,15 @@
 //! ECDSA, EdDSA, and ElGamal
 use std::convert::TryFrom;
+use std::fmt::Write;
 use std::ops::Deref;
 
-use crypto::digest::Digest;
-use crypto::sha1::Sha1;
 use hex;
 use rand::SeedableRng;
 use rand_hc::Hc128Rng;
 use serde::Deserialize;
 use serde::Serialize;
+use sha1::Digest;
+use sha1::Sha1;
 use web3::signing::keccak256;
 use web3::types::Address;
 
@@ -130,8 +131,13 @@ where T: Into<String>
     fn from(s: T) -> Self {
         let inputs = s.into();
         let mut hasher = Sha1::new();
-        hasher.input_str(inputs.as_str());
-        HashStr(hasher.result_str())
+        hasher.update(inputs.as_bytes());
+        let bytes = hasher.finalize();
+        let mut ret = String::with_capacity(bytes.len() * 2);
+        for &b in &bytes {
+            write!(ret, "{:02x}", b).unwrap();
+        }
+        HashStr(ret)
     }
 }
 
