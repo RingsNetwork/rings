@@ -15,7 +15,8 @@ use crate::backend_client::HttpServerMessage;
 use crate::backend_client::HttpServerRequest;
 use crate::consts::BACKEND_MTU;
 use crate::jsonrpc::RpcMeta;
-use crate::prelude::chunk;
+use crate::prelude::chunk::Chunk;
+use crate::prelude::chunk::ChunkList;
 use crate::prelude::chunk::ChunkManager;
 use crate::prelude::js_sys;
 use crate::prelude::message;
@@ -620,7 +621,7 @@ pub struct MessageCallbackInstance {
     custom_message: Arc<js_sys::Function>,
     http_response_message: Arc<js_sys::Function>,
     builtin_message: Arc<js_sys::Function>,
-    chunklist: Arc<Mutex<Vec<chunk::Chunk<BACKEND_MTU>>>>,
+    chunk_list: Arc<Mutex<ChunkList<BACKEND_MTU>>>,
 }
 
 #[wasm_bindgen]
@@ -635,7 +636,7 @@ impl MessageCallbackInstance {
             custom_message: Arc::new(custom_message.clone()),
             http_response_message: Arc::new(http_response_message.clone()),
             builtin_message: Arc::new(builtin_message.clone()),
-            chunklist: Arc::new(Mutex::new(Vec::new())),
+            chunk_list: Default::default(),
         })
     }
 }
@@ -678,18 +679,29 @@ impl MessageCallbackInstance {
     }
 
     fn handle_chunk_data(&self, data: &[u8]) -> anyhow::Result<Option<Bytes>> {
-        let c_lock = self.chunklist.try_lock();
+        let c_lock = self.chunk_list.try_lock();
         if c_lock.is_err() {
             return Err(anyhow!("lock chunklist failed"));
         }
-        let mut c = c_lock.unwrap();
+        let mut chunk_list = c_lock.unwrap();
 
-        let chunk_item = Chunk::from_bincode(data.into())?;
+        let chunk_item =
+            Chunk::from_bincode(data).map_err(|_| anyhow!("BincodeDeserialize failed"))?;
 
-        log::debug!("before handle chunk, chunk list len: {}", c.len());
-        log::debug!("chunk id: {}, total size: {}", chunk_item.meta.id, c.len());
-        let data = c.handle(chunk_item);
-        log::debug!("after handle chunk, chunk list len: {}", c.len());
+        log::debug!(
+            "before handle chunk, chunk list len: {}",
+            chunk_list.as_vec().len()
+        );
+        log::debug!(
+            "chunk id: {}, total size: {}",
+            chunk_item.meta.id,
+            chunk_item.chunk[1]
+        );
+        let data = chunk_list.handle(chunk_item);
+        log::debug!(
+            "after handle chunk, chunk list len: {}",
+            chunk_list.as_vec().len()
+        );
 
         Ok(data)
     }
