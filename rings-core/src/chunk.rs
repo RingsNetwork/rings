@@ -225,13 +225,12 @@ impl<const MTU: usize> ChunkManager for ChunkList<MTU> {
 
     fn handle(&mut self, chunk: Chunk) -> Option<Bytes> {
         self.as_vec_mut().push(chunk.clone());
+        self.remove_expired();
 
         let id = chunk.meta.id;
         let data = self.get(id)?;
 
         self.remove(id);
-        self.remove_expired();
-
         Some(data)
     }
 }
@@ -283,5 +282,94 @@ mod test {
         let pend = cl.list_pending();
         assert_eq!(pend.len(), 1);
         assert_eq!(cl.get(pend[0]), None)
+    }
+
+    #[test]
+    fn test_handle_chunk_save_or_withdraw() {
+        let data1 = "hello".repeat(1024).into();
+        let data2 = "world".repeat(256).into();
+        let chunks1: Vec<Chunk> = ChunkList::<32>::from(&data1).into();
+        let chunks2: Vec<Chunk> = ChunkList::<32>::from(&data2).into();
+
+        let mut part = chunks1[2..5].to_vec();
+        let mut fin = chunks2.clone();
+        fin.append(&mut part);
+
+        let mut cl = ChunkList::<32>::default();
+        for c in fin {
+            let ret = cl.handle(c);
+            if let Some(data) = ret {
+                assert_eq!(data, data2);
+                assert_eq!(cl.to_vec().len(), 0);
+            }
+        }
+        assert_eq!(cl.to_vec().len(), 3);
+
+        let mut part = chunks1[2..5].to_vec();
+        let mut fin = chunks2;
+        part.append(&mut fin);
+
+        let mut cl = ChunkList::<32>::default();
+        for c in part {
+            let ret = cl.handle(c);
+            if let Some(data) = ret {
+                assert_eq!(data, data2);
+                assert_eq!(cl.to_vec().len(), 3);
+            }
+        }
+        assert_eq!(cl.to_vec().len(), 3);
+    }
+
+    #[test]
+    fn test_handle_chunk_remove_expired_chunks() {
+        let mut cl = ChunkList::<32>::default();
+        assert_eq!(cl.as_vec().len(), 0);
+
+        let now = get_epoch_ms();
+        let regular = Chunk {
+            chunk: [0, 32],
+            data: Bytes::new(),
+            meta: ChunkMeta {
+                id: Uuid::new_v4(),
+                ts_ms: now,
+                ttl_ms: 10000,
+            },
+        };
+        let expired = Chunk {
+            chunk: [0, 32],
+            data: Bytes::new(),
+            meta: ChunkMeta {
+                id: Uuid::new_v4(),
+                ts_ms: now - 1000,
+                ttl_ms: 100,
+            },
+        };
+
+        cl.handle(regular.clone());
+        assert_eq!(cl.as_vec().len(), 1);
+
+        cl.handle(regular.clone());
+        assert_eq!(cl.as_vec().len(), 2);
+
+        cl.handle(expired.clone());
+        assert_eq!(cl.as_vec().len(), 2);
+
+        cl.handle(expired.clone());
+        assert_eq!(cl.as_vec().len(), 2);
+
+        cl.handle(regular.clone());
+        assert_eq!(cl.as_vec().len(), 3);
+
+        cl.handle(regular.clone());
+        assert_eq!(cl.as_vec().len(), 4);
+
+        cl.handle(expired);
+        assert_eq!(cl.as_vec().len(), 4);
+
+        cl.handle(regular.clone());
+        assert_eq!(cl.as_vec().len(), 5);
+
+        cl.handle(regular);
+        assert_eq!(cl.as_vec().len(), 6);
     }
 }
