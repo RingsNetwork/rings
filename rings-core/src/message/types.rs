@@ -9,41 +9,41 @@ use crate::ecc::SecretKey;
 use crate::err::Error;
 use crate::err::Result;
 
-#[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
 /// MessageType use to ask for connection, send to remote with transport_uuid and handshake_info.
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
 pub struct ConnectNodeSend {
     pub transport_uuid: String,
     pub handshake_info: String,
 }
 
-#[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
 /// MessageType report to origin that already connected.
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
 pub struct AlreadyConnected;
 
-#[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
 /// MessageType report to origin with own transport_uuid and handshake_info.
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
 pub struct ConnectNodeReport {
     pub transport_uuid: String,
     pub handshake_info: String,
 }
 
-#[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
 /// MessageType use to find successor in a chord ring.
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
 pub struct FindSuccessorSend {
     pub id: Did,
     pub strict: bool,
     pub then: FindSuccessorThen,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 /// MessageType use to report origin node with report message.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct FindSuccessorReport {
     pub id: Did,
     pub handler: FindSuccessorReportHandler,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 /// MessageType use to notify predecessor, ask for update finger tables.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct NotifyPredecessorSend {
     pub id: Did,
 }
@@ -54,80 +54,80 @@ pub struct NotifyPredecessorReport {
     pub id: Did,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 /// MessageType use to join chord ring, add did into fingers table.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct JoinDHT {
     pub id: Did,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 /// MessageType use to leave chord ring.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct LeaveDHT {
     pub id: Did,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 /// MessageType use to search virtual node.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SearchVNode {
     pub id: Did,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 /// MessageType report to origin found virtual node.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct FoundVNode {
     pub data: Vec<VirtualNode>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 /// MessageType ask to store data/message into virtual node.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct StoreVNode {
     pub data: Vec<VirtualNode>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 /// MessageType contains multi messages.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct MultiCall {
     pub messages: Vec<Message>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 /// MessageType after `FindSuccessorSend` and syncing data.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SyncVNodeWithSuccessor {
     pub data: Vec<VirtualNode>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 /// MessageType use to join virtual node in subring.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct JoinSubRing {
     pub did: Did,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 /// MessageType use to customize message, will be handle by `custom_message` method.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct CustomMessage(pub Vec<u8>);
 
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 /// A enum about Encrypted and Plain types.
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub enum MaybeEncrypted<T> {
     Encrypted(Vec<u8>),
     Plain(T),
 }
 
+/// MessageType enum Report contain FindSuccessorSend.
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-/// MessageType enum Report contain FindSuccessorSend.
 pub enum FindSuccessorThen {
     Report(FindSuccessorReportHandler),
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 /// MessageType enum handle when meet the last node.
 /// - None: do nothing but return.
 /// - Connect: connect origin node.
 /// - FixFingerTable: update fingers table.
 /// - SyncStorage: syncing data in virtual node.
 /// - CustomCallback: custom callback handle by `custom_message` method.
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FindSuccessorReportHandler {
     None,
     Connect,
@@ -136,9 +136,9 @@ pub enum FindSuccessorReportHandler {
     CustomCallback(u8),
 }
 
+/// A collection MessageType use for unified management.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[non_exhaustive]
-/// A collection MessageType use for unified management.
 pub enum Message {
     MultiCall(MultiCall),
     JoinDHT(JoinDHT),

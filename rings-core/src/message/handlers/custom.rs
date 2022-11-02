@@ -16,7 +16,6 @@ use crate::transports::manager::TransportManager;
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<MaybeEncrypted<CustomMessage>> for MessageHandler {
-    ///
     async fn handle(
         &self,
         ctx: &MessagePayload<Message>,

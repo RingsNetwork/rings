@@ -1,4 +1,4 @@
-//! Signer for default ECDSA and person_sign.
+//! Signer for default ECDSA and eip191.
 use web3::signing::keccak256;
 
 use crate::ecc::Address;
@@ -88,8 +88,9 @@ pub mod eip712 {
     }
 }
 
-/// PersonSign mod.
-pub mod person_sign {
+/// eip191.
+/// ref <https://eips.ethereum.org/EIPS/eip-191>
+pub mod eip191 {
     use super::*;
 
     /// sign function passing raw message parameter.
@@ -180,7 +181,7 @@ mod test {
     }
 
     #[test]
-    fn test_person_sign() {
+    fn test_eip191() {
         use hex::FromHex;
         let key =
             SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0")
@@ -190,12 +191,12 @@ mod test {
         // window.ethereum.request({method: "personal_sign", params: ["test", "0x11E807fcc88dD319270493fB2e822e388Fe36ab0"]})
         let metamask_sig = Vec::from_hex("724fc31d9272b34d8406e2e3a12a182e72510b008de6cc44684577e31e20d9626fb760d6a0badd79a6cf4cd56b2fc0fbd60c438b809aa7d29bfb598c13e7b50e1b").unwrap();
         let msg = "test";
-        let h = person_sign::hash(msg);
-        let sig = person_sign::sign(key, &h);
+        let h = eip191::hash(msg);
+        let sig = eip191::sign(key, &h);
         assert_eq!(metamask_sig.as_slice(), sig);
-        let pubkey = person_sign::recover(msg, sig).unwrap();
+        let pubkey = eip191::recover(msg, sig).unwrap();
         assert_eq!(pubkey.address(), address);
-        assert!(person_sign::verify(msg, &address, sig));
+        assert!(eip191::verify(msg, &address, sig));
     }
 
     #[test]
