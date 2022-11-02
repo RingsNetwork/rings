@@ -11,6 +11,7 @@ use crate::backend_client::BackendMessage;
 use crate::backend_client::HttpServerMessage;
 use crate::backend_client::HttpServerRequest;
 use crate::backend_client::HttpServerResponse;
+use crate::consts::BACKEND_MTU;
 use crate::error::Error;
 use crate::error::Result;
 use crate::prelude::chunk::ChunkList;
@@ -145,12 +146,10 @@ impl Backend {
             let resp_bytes = message::encode_data_gzip(&json_bytes, 9)?;
             tracing::debug!("resp_bytes gzip_data len: {}", resp_bytes.len());
 
-            // 256b
-            let chunks = ChunkList::<60000>::from(&resp_bytes);
+            let chunks = ChunkList::<BACKEND_MTU>::from(&resp_bytes);
             for c in chunks {
                 tracing::debug!("Chunk data len: {}", c.data.len());
-                // let bytes = serde_json::to_vec(&c)?;
-                let bytes = bincode::serialize(&c).map_err(|e| anyhow::anyhow!(e))?;
+                let bytes = c.to_bincode()?;
                 tracing::debug!("Chunk len: {}", bytes.len());
                 let mut new_bytes: Vec<u8> = Vec::with_capacity(bytes.len() + 4);
                 new_bytes.extend_from_slice(&[1, 1, 0, 0]);

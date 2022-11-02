@@ -27,6 +27,11 @@ use web_sys::RtcSessionDescriptionInit;
 
 use super::helper::RtcSessionDescriptionWrapper;
 use crate::channels::Channel as CbChannel;
+use crate::chunk::Chunk;
+use crate::chunk::ChunkList;
+use crate::chunk::ChunkManager;
+use crate::consts::TRANSPORT_MAX_SIZE;
+use crate::consts::TRANSPORT_MTU;
 use crate::dht::Did;
 use crate::ecc::PublicKey;
 use crate::err::Error;
@@ -57,6 +62,7 @@ pub struct WasmTransport {
     channel: Option<Arc<RtcDataChannel>>,
     event_sender: EventSender,
     public_key: Arc<RwLock<Option<PublicKey>>>,
+    chunk_list: Arc<Mutex<ChunkList<TRANSPORT_MTU>>>,
 }
 
 impl PartialEq for WasmTransport {
@@ -154,6 +160,7 @@ impl IceTransportInterface<Event, CbChannel<Event>> for WasmTransport {
             channel: None,
             public_key: Arc::new(RwLock::new(None)),
             event_sender,
+            chunk_list: Default::default(),
         }
     }
 
@@ -249,12 +256,24 @@ impl IceTransportInterface<Event, CbChannel<Event>> for WasmTransport {
     }
 
     async fn send_message(&self, msg: &Bytes) -> Result<()> {
-        match self.get_data_channel().await {
-            Some(cnn) => cnn
-                .send_with_u8_array(msg)
-                .map_err(|e| Error::RTCDataChannelSendTextFailed(format!("{:?}", e))),
-            None => Err(Error::RTCDataChannelNotReady),
+        if msg.len() > TRANSPORT_MAX_SIZE {
+            return Err(Error::MessageTooLarge);
         }
+
+        let dc = self
+            .get_data_channel()
+            .await
+            .ok_or(Error::RTCDataChannelNotReady)?;
+
+        let chunks = ChunkList::<TRANSPORT_MTU>::from(msg);
+
+        for c in chunks {
+            let bytes = c.to_bincode()?;
+            dc.send_with_u8_array(&bytes)
+                .map_err(|e| Error::RTCDataChannelSendTextFailed(format!("{:?}", e)))?
+        }
+
+        Ok(())
     }
 }
 
@@ -347,15 +366,18 @@ impl IceTransportCallback for WasmTransport {
 
     async fn on_data_channel(&self) -> Self::OnDataChannelHdlrFn {
         let event_sender = self.event_sender.clone();
+        let chunk_list = self.chunk_list.clone();
 
         box move |ev: RtcDataChannelEvent| {
             tracing::debug!("channel open");
-            let event_sender = Arc::clone(&event_sender);
+            let event_sender = event_sender.clone();
+            let chunk_list = chunk_list.clone();
             let ch = ev.channel();
             let on_message_cb = Closure::wrap(
                 (box move |ev: MessageEvent| {
                     let data = ev.data();
-                    let event_sender = Arc::clone(&event_sender);
+                    let event_sender = event_sender.clone();
+                    let chunk_list = chunk_list.clone();
                     spawn_local(async move {
                         let msg = if data.has_type::<web_sys::Blob>() {
                             let data: web_sys::Blob = data.clone().into();
@@ -372,12 +394,34 @@ impl IceTransportCallback for WasmTransport {
                         } else {
                             Uint8Array::new(data.as_ref()).to_vec()
                         };
+
                         if msg.is_empty() {
                             return;
                         }
-                        let event_sender = Arc::clone(&event_sender);
+
+                        let c_lock = chunk_list.try_lock();
+                        if c_lock.is_err() {
+                            tracing::error!("Failed to lock chunk_list");
+                            return;
+                        }
+                        let mut chunk_list = c_lock.unwrap();
+
+                        let chunk_item = Chunk::from_bincode(&msg);
+                        if chunk_item.is_err() {
+                            tracing::error!("Failed to deserialize transport chunk item");
+                            return;
+                        }
+                        let chunk_item = chunk_item.unwrap();
+
+                        let data = chunk_list.handle(chunk_item);
+                        if data.is_none() {
+                            return;
+                        }
+                        let data = data.unwrap();
+
                         if let Err(e) =
-                            CbChannel::send(&event_sender, Event::DataChannelMessage(msg)).await
+                            CbChannel::send(&event_sender, Event::DataChannelMessage(data.into()))
+                                .await
                         {
                             tracing::error!("Failed on handle msg, {:?}", e);
                         }

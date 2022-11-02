@@ -255,11 +255,11 @@ impl IceTransportInterface<Event, AcChannel<Event>> for DefaultTransport {
 
         for c in chunks {
             tracing::debug!("Transport chunk data len: {}", c.data.len());
-            let bytes = bincode::serialize(&c).map_err(Error::BincodeSerialize)?;
+            let bytes = c.to_bincode()?;
             tracing::debug!("Transport chunk len: {}", bytes.len());
 
             let size = bytes.len();
-            match dc.send(&bytes.into()).await {
+            match dc.send(&bytes).await {
                 Ok(s) => {
                     if !s == size {
                         return Err(Error::RTCDataChannelMessageIncomplete(s, size));
@@ -353,31 +353,27 @@ impl IceTransportCallback for DefaultTransport {
             let chunk_list = chunk_list.clone();
             Box::pin(async move {
                 d.on_message(Box::new(move |msg: DataChannelMessage| {
-                    tracing::debug!("Message from DataChannel: '{:?}'", msg);
+                    tracing::debug!("Chunked message from DataChannel: '{:?}'", msg);
                     let event_sender = event_sender.clone();
                     let chunk_list = chunk_list.clone();
                     Box::pin(async move {
                         let mut chunk_list = chunk_list.lock().await;
 
-                        let chunk_item: Result<Chunk<TRANSPORT_MTU>> =
-                            bincode::deserialize(&msg.data).map_err(Error::BincodeDeserialize);
+                        let chunk_item = Chunk::from_bincode(&msg.data);
                         if chunk_item.is_err() {
                             tracing::error!("Failed to deserialize transport chunk item");
                             return;
                         }
                         let chunk_item = chunk_item.unwrap();
 
-                        chunk_list.as_vec_mut().push(chunk_item.clone());
-                        let id = chunk_item.meta.id;
-                        let data = chunk_list.get(id);
-
+                        let data = chunk_list.handle(chunk_item);
                         if data.is_none() {
                             return;
                         }
-                        let data = data.unwrap().into();
+                        let data = data.unwrap();
                         tracing::debug!("Complete message from DataChannel: '{:?}'", data);
 
-                        if AcChannel::send(&event_sender, Event::DataChannelMessage(data))
+                        if AcChannel::send(&event_sender, Event::DataChannelMessage(data.into()))
                             .await
                             .is_err()
                         {

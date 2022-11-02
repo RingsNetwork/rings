@@ -21,7 +21,7 @@ use crate::ecc::PublicKey;
 use crate::err::Error;
 use crate::err::Result;
 use crate::session::SessionManager;
-use crate::utils;
+use crate::utils::get_epoch_ms;
 
 pub fn encode_data_gzip(data: &Bytes, level: u8) -> Result<Bytes> {
     let mut ec = GzEncoder::new(Vec::new(), Compression::new(level as u32));
@@ -76,7 +76,7 @@ where T: Serialize + DeserializeOwned
         origin_verification_gen: OriginVerificationGen,
         relay: MessageRelay,
     ) -> Result<Self> {
-        let ts_ms = utils::get_epoch_ms();
+        let ts_ms = get_epoch_ms();
         let ttl_ms = DEFAULT_TTL_MS;
         let msg = &MessageVerification::pack_msg(&data, ts_ms, ttl_ms)?;
         let tx_id = uuid::Uuid::new_v4();
@@ -136,7 +136,7 @@ where T: Serialize + DeserializeOwned
     }
 
     pub fn is_expired(&self) -> bool {
-        let now = utils::get_epoch_ms();
+        let now = get_epoch_ms();
         now > self.verification.ts_ms + self.verification.ttl_ms as u128
             && now > self.origin_verification.ts_ms + self.origin_verification.ttl_ms as u128
     }
