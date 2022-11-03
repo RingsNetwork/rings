@@ -16,6 +16,8 @@ use super::protocols::MessageRelay;
 use super::protocols::MessageVerification;
 use super::protocols::RelayMethod;
 use crate::consts::DEFAULT_TTL_MS;
+use crate::consts::MAX_TTL_MS;
+use crate::consts::TS_OFFSET_TOLERANCE_MS;
 use crate::dht::Did;
 use crate::ecc::PublicKey;
 use crate::err::Error;
@@ -139,7 +141,24 @@ where T: Serialize + DeserializeOwned
     }
 
     pub fn is_expired(&self) -> bool {
+        if self.verification.ttl_ms > MAX_TTL_MS {
+            return false;
+        }
+
+        if self.origin_verification.ttl_ms > MAX_TTL_MS {
+            return false;
+        }
+
         let now = get_epoch_ms();
+
+        if self.verification.ts_ms - TS_OFFSET_TOLERANCE_MS > now {
+            return false;
+        }
+
+        if self.origin_verification.ts_ms - TS_OFFSET_TOLERANCE_MS > now {
+            return false;
+        }
+
         now > self.verification.ts_ms + self.verification.ttl_ms as u128
             && now > self.origin_verification.ts_ms + self.origin_verification.ttl_ms as u128
     }

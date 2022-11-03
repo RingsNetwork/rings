@@ -13,6 +13,8 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::consts::DEFAULT_TTL_MS;
+use crate::consts::MAX_TTL_MS;
+use crate::consts::TS_OFFSET_TOLERANCE_MS;
 use crate::err::Error;
 use crate::err::Result;
 use crate::utils::get_epoch_ms;
@@ -224,6 +226,14 @@ impl<const MTU: usize> ChunkManager for ChunkList<MTU> {
     }
 
     fn handle(&mut self, chunk: Chunk) -> Option<Bytes> {
+        if chunk.meta.ttl_ms > MAX_TTL_MS {
+            return None;
+        }
+
+        if chunk.meta.ts_ms - TS_OFFSET_TOLERANCE_MS > get_epoch_ms() {
+            return None;
+        }
+
         self.as_vec_mut().push(chunk.clone());
         self.remove_expired();
 
@@ -332,7 +342,7 @@ mod test {
             meta: ChunkMeta {
                 id: Uuid::new_v4(),
                 ts_ms: now,
-                ttl_ms: 10000,
+                ttl_ms: DEFAULT_TTL_MS,
             },
         };
         let expired = Chunk {
