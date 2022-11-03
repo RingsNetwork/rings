@@ -57,6 +57,16 @@ pub enum Error {
     HttpRequestError(String),
     #[error("Invalid message")]
     InvalidMessage,
+    #[error("Not support message")]
+    NotSupportMessage,
+    #[error("Serialize error.")]
+    SerializeError,
+    #[error("Deserialize error.")]
+    DeserializeError,
+    #[error("invalid url.")]
+    InvalidUrl,
+    #[error("Invalid data")]
+    InvalidData,
 }
 
 impl Error {
@@ -87,6 +97,11 @@ impl Error {
             Error::JsError(_) => 22,
             Error::HttpRequestError(_) => 23,
             Error::InvalidMessage => 24,
+            Error::NotSupportMessage => 25,
+            Error::SerializeError => 26,
+            Error::DeserializeError => 27,
+            Error::InvalidUrl => 28,
+            Error::InvalidData => 29,
         };
         -32000 - code
     }

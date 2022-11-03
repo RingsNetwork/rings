@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use clap::ArgAction;
 use clap::Args;
 use clap::Parser;
 use clap::Subcommand;
@@ -225,7 +224,9 @@ struct PendingCloseTransportCommand {
 #[command(rename_all = "kebab-case")]
 enum SendCommand {
     Raw(SendRawCommand),
-    Http(SendHttpCommand),
+    // Http(SendHttpCommand),
+    Ipfs(SendIpfsCommand),
+    SimpleText(SendSimpleTextCommand),
 }
 
 #[derive(Args, Debug)]
@@ -238,23 +239,46 @@ struct SendRawCommand {
     text: String,
 }
 
+// #[derive(Args, Debug)]
+// struct SendHttpCommand {
+//     #[command(flatten)]
+//     client_args: ClientArgs,
+//
+//     #[arg(long="header", short = 'H', action=ArgAction::Append, help = "headers append to the request")]
+//     headers: Vec<String>,
+//
+//     #[arg(long, help = "set content of http body")]
+//     body: Option<String>,
+//
+//     method: String,
+//
+//     to_did: String,
+//
+//     #[arg(default_value = "/")]
+//     path: String,
+// }
+
 #[derive(Args, Debug)]
-struct SendHttpCommand {
+struct SendIpfsCommand {
     #[command(flatten)]
     client_args: ClientArgs,
 
-    #[arg(long="header", short = 'H', action=ArgAction::Append, help = "headers append to the request")]
-    headers: Vec<String>,
+    to_did: String,
 
-    #[arg(long, help = "set content of http body")]
-    body: Option<String>,
+    url: String,
 
-    method: String,
+    #[arg(default_value = "30000")]
+    timeout: u64,
+}
+
+#[derive(Args, Debug)]
+struct SendSimpleTextCommand {
+    #[command(flatten)]
+    client_args: ClientArgs,
 
     to_did: String,
 
-    #[arg(default_value = "/")]
-    path: String,
+    text: String,
 }
 
 async fn daemon_run(
@@ -414,17 +438,20 @@ async fn main() -> anyhow::Result<()> {
                 .display();
             Ok(())
         }
-        Command::Send(SendCommand::Http(args)) => {
+        Command::Send(SendCommand::Ipfs(args)) => {
             args.client_args
                 .new_client()
                 .await?
-                .send_http(
-                    args.to_did.as_str(),
-                    args.method,
-                    args.path,
-                    args.headers,
-                    args.body,
-                )
+                .send_ipfs_request(args.to_did.as_str(), args.url.as_str(), args.timeout.into())
+                .await?
+                .display();
+            Ok(())
+        }
+        Command::Send(SendCommand::SimpleText(args)) => {
+            args.client_args
+                .new_client()
+                .await?
+                .send_simple_text_message(args.to_did.as_str(), args.text.as_str())
                 .await?
                 .display();
             Ok(())
