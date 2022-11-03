@@ -10,9 +10,9 @@ use bytes::Bytes;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::backend::BackendMessage;
-use crate::backend::HttpServerMessage;
-use crate::backend::HttpServerRequest;
+use crate::backend_client::BackendMessage;
+use crate::backend_client::HttpServerMessage;
+use crate::backend_client::HttpServerRequest;
 use crate::consts::BACKEND_MTU;
 use crate::jsonrpc::RpcMeta;
 use crate::prelude::chunk::Chunk;
@@ -54,18 +54,18 @@ use crate::prelude::web_sys::RtcIceConnectionState;
 use crate::processor::Processor;
 use crate::util::from_rtc_ice_connection_state;
 
-/// SignerMode enum contains `DEFAULT` and `PersonSign`
+/// SignerMode enum contains `DEFAULT` and `EIP191`
 #[wasm_bindgen]
 pub enum SignerMode {
     DEFAULT,
-    PersonSign,
+    EIP191,
 }
 
 impl From<SignerMode> for Signer {
     fn from(v: SignerMode) -> Self {
         match v {
             SignerMode::DEFAULT => Self::DEFAULT,
-            SignerMode::PersonSign => Self::PersonSign,
+            SignerMode::EIP191 => Self::EIP191,
         }
     }
 }
@@ -100,10 +100,10 @@ pub struct UnsignedInfo {
 
 #[wasm_bindgen]
 impl UnsignedInfo {
-    /// Create a new `UnsignedInfo` instance with SignerMode::PersonSign
+    /// Create a new `UnsignedInfo` instance with SignerMode::EIP191
     #[wasm_bindgen(constructor)]
     pub fn new(key_addr: String) -> Result<UnsignedInfo, wasm_bindgen::JsError> {
-        Self::new_with_signer(key_addr, SignerMode::PersonSign)
+        Self::new_with_signer(key_addr, SignerMode::EIP191)
     }
 
     /// Create a new `UnsignedInfo` instance
@@ -131,7 +131,7 @@ impl UnsignedInfo {
             AddressType::DEFAULT => {
                 let key_addr = Did::from_str(address.as_str())?;
                 let (auth, random_key) =
-                    SessionManager::gen_unsign_info(key_addr, None, Some(Signer::PersonSign));
+                    SessionManager::gen_unsign_info(key_addr, None, Some(Signer::EIP191));
                 (key_addr, auth, random_key)
             }
             AddressType::ED25519 => {
