@@ -364,7 +364,7 @@ impl Processor {
         new_msg.extend_from_slice(&[0u8; 3]);
         new_msg.extend_from_slice(msg);
 
-        let msg = Message::custom(msg, None).map_err(Error::SendMessage)?;
+        let msg = Message::custom(&new_msg, None).map_err(Error::SendMessage)?;
 
         // self.swarm.do_send_payload(address, payload)
         let uuid = self
