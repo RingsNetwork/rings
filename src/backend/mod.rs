@@ -1,7 +1,7 @@
+#![allow(clippy::ptr_offset_with_cast)]
 //! An Backend HTTP service handle custom message from `MessageHandler` as CallbackFn.
 /// The trait `rings_core::handlers::MessageCallback` is implemented on `Backend` type
 /// To indicate to handle custom message relay, which use as a callbackFn in `MessageHandler`
-pub mod http_server;
 // pub mod http_server;
 #[cfg(feature = "node")]
 pub mod ipfs;
@@ -10,6 +10,7 @@ pub mod text;
 
 pub mod types;
 
+use arrayref::array_refs;
 #[cfg(feature = "node")]
 use async_trait::async_trait;
 
@@ -67,7 +68,13 @@ impl MessageCallback for Backend {
         }
         let msg = msg.unwrap().0;
 
-        let msg = BackendMessage::try_from(msg.as_slice());
+        let (left, msg) = array_refs![&msg, 4; ..;];
+        let (&[flag], _) = array_refs![left, 1, 3];
+        if flag != 0 {
+            return;
+        }
+
+        let msg = BackendMessage::try_from(msg);
         if let Err(e) = msg {
             tracing::error!("decode custom_message failed: {}", e);
             return;

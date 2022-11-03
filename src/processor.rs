@@ -359,7 +359,7 @@ impl Processor {
         );
         let destination = Did::from_str(destination).map_err(|_| Error::InvalidDid)?;
 
-        let mut new_msg = Vec::with_capacity(msg.len() + 1);
+        let mut new_msg = Vec::with_capacity(msg.len() + 4);
         new_msg.push(if !chunked { 0 } else { 1 });
         new_msg.extend_from_slice(&[0u8; 3]);
         new_msg.extend_from_slice(msg);
@@ -472,7 +472,7 @@ impl From<&(Did, Arc<Transport>)> for Peer {
 pub fn unpack_text_message(msg: &CustomMessage) -> Result<String> {
     let (left, right) = msg.0.split_at(4);
     if left[0] != 0 {
-        return Err(Error::InvalidDid);
+        return Err(Error::InvalidData);
     }
     let text = String::from_utf8(right.to_vec()).unwrap();
     Ok(text)
