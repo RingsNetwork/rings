@@ -1,7 +1,6 @@
 //! An Backend HTTP service handle custom message from `MessageHandler` as CallbackFn.
 /// The trait `rings_core::handlers::MessageCallback` is implemented on `Backend` type
 /// To indicate to handle custom message relay, which use as a callbackFn in `MessageHandler`
-pub mod types;
 use std::collections::HashMap;
 
 use async_trait::async_trait;
@@ -10,11 +9,11 @@ use reqwest::header::HeaderMap;
 use reqwest::header::HeaderName;
 use serde::Deserialize;
 use serde::Serialize;
-pub use types::BackendMessage;
-pub use types::HttpServerMessage;
-pub use types::HttpServerRequest;
-pub use types::HttpServerResponse;
 
+use crate::backend_client::BackendMessage;
+use crate::backend_client::HttpServerMessage;
+use crate::backend_client::HttpServerRequest;
+use crate::backend_client::HttpServerResponse;
 use crate::consts::BACKEND_MTU;
 use crate::error::Error;
 use crate::error::Result;
