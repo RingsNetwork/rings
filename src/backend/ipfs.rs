@@ -1,14 +1,12 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use http::method;
-use serde::Deserialize;
-use serde::Serialize;
 
 use super::types::BackendMessage;
+use super::types::IpfsRequest;
+use super::types::IpfsResponse;
 use super::types::MessageEndpoint;
-use super::types::Timeout;
 use crate::backend::types::send_chunk_report_message;
 use crate::backend::types::MessageType;
 use crate::consts::BACKEND_MTU;
@@ -16,32 +14,6 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::prelude::rings_core::chunk::ChunkList;
 use crate::prelude::*;
-
-/// IpfsRequest
-/// - `url`: ipfs URL
-/// - `timeout`: timeout in milliseconds
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct IpfsRequest {
-    pub url: String,
-    #[serde(default)]
-    pub timeout: Timeout,
-}
-
-impl From<(String, Timeout)> for IpfsRequest {
-    fn from((url, timeout): (String, Timeout)) -> Self {
-        Self { url, timeout }
-    }
-}
-
-/// IpfsResponse
-/// - `status`: Status machine with numbers, like 200, 300, 400, 500.
-/// - `body`: Message chunk split bytes and send back to remote clinet.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct IpfsResponse {
-    pub status: u16,
-    pub headers: HashMap<String, String>,
-    pub body: Option<Bytes>,
-}
 
 #[derive(Debug, Clone)]
 pub struct IpfsEndpoint {

@@ -95,7 +95,7 @@ pub async fn handle_request(method: Method, meta: RpcMeta, params: Params) -> Re
         Method::Disconnect => close_connection(params, meta).await,
         Method::ListPendings => list_pendings(params, meta).await,
         Method::ClosePendingTransport => close_pending_transport(params, meta).await,
-        Method::SendIPfsRequest => send_ipfs_request(params, meta).await,
+        Method::SendIpfsRequest => send_ipfs_request(params, meta).await,
         Method::SendSimpleText => send_simple_text_message(params, meta).await,
     }
 }
@@ -270,7 +270,7 @@ async fn send_message(params: Params, meta: RpcMeta) -> Result<Value> {
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
     let tx_id = meta
         .processor
-        .send_message(destination, text.as_bytes())
+        .send_message(destination, text.as_bytes(), false)
         .await?;
     Ok(serde_json::json!({"tx_id": tx_id.to_string()}))
 }
@@ -292,7 +292,10 @@ async fn send_simple_text_message(params: Params, meta: RpcMeta) -> Result<Value
     let msg: BackendMessage = BackendMessage::new(MessageType::SimpleText, text.as_bytes());
     let msg: Vec<u8> = msg.into();
     // TODO chunk message flag
-    let tx_id = meta.processor.send_message(destination, &msg).await?;
+    let tx_id = meta
+        .processor
+        .send_message(destination, &msg, false)
+        .await?;
     Ok(serde_json::json!({"tx_id": tx_id.to_string()}))
 }
 
@@ -316,7 +319,10 @@ async fn send_ipfs_request(params: Params, meta: RpcMeta) -> Result<Value> {
     ))?;
     let msg: Vec<u8> = msg.into();
     // TODO chunk message flag
-    let tx_id = meta.processor.send_message(destination, &msg).await?;
+    let tx_id = meta
+        .processor
+        .send_message(destination, &msg, false)
+        .await?;
 
     Ok(serde_json::json!({
       "tx_id": tx_id.to_string(),

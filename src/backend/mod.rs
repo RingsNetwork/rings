@@ -2,26 +2,40 @@
 /// The trait `rings_core::handlers::MessageCallback` is implemented on `Backend` type
 /// To indicate to handle custom message relay, which use as a callbackFn in `MessageHandler`
 pub mod http_server;
+// pub mod http_server;
+#[cfg(feature = "node")]
 pub mod ipfs;
+#[cfg(feature = "node")]
 pub mod text;
+
 pub mod types;
 
+#[cfg(feature = "node")]
 use async_trait::async_trait;
 
+#[cfg(feature = "node")]
 use self::ipfs::IpfsEndpoint;
+#[cfg(feature = "node")]
 use self::text::TextEndpoint;
+#[cfg(feature = "node")]
 use self::types::BackendMessage;
+#[cfg(feature = "node")]
 use self::types::MessageEndpoint;
+#[cfg(feature = "node")]
 use self::types::MessageType;
+#[cfg(feature = "node")]
 use crate::prelude::rings_core::message::Message;
+#[cfg(feature = "node")]
 use crate::prelude::*;
 
 /// A Backend struct contains http_server.
+#[cfg(feature = "node")]
 pub struct Backend {
     ipfs_endpoint: Option<IpfsEndpoint>,
     text_endpoint: TextEndpoint,
 }
 
+#[cfg(feature = "node")]
 impl Backend {
     pub fn new(ipfs_gateway: Option<String>) -> Self {
         Self {
@@ -31,6 +45,7 @@ impl Backend {
     }
 }
 
+#[cfg(feature = "node")]
 #[async_trait]
 impl MessageCallback for Backend {
     /// `custom_message` in Backend for now only handle

@@ -187,6 +187,38 @@ pub trait MessageEndpoint {
     ) -> Result<()>;
 }
 
+/// IpfsRequest
+/// - `url`: ipfs URL
+/// - `timeout`: timeout in milliseconds
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct IpfsRequest {
+    pub url: String,
+    #[serde(default)]
+    pub timeout: Timeout,
+}
+
+impl From<(String, Timeout)> for IpfsRequest {
+    fn from((url, timeout): (String, Timeout)) -> Self {
+        Self { url, timeout }
+    }
+}
+
+impl From<(&str, u64)> for IpfsRequest {
+    fn from((url, timeout): (&str, u64)) -> Self {
+        (url.to_owned(), Timeout::from(timeout)).into()
+    }
+}
+
+/// IpfsResponse
+/// - `status`: Status machine with numbers, like 200, 300, 400, 500.
+/// - `body`: Message chunk split bytes and send back to remote clinet.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct IpfsResponse {
+    pub status: u16,
+    pub headers: HashMap<String, String>,
+    pub body: Option<Bytes>,
+}
+
 pub async fn send_chunk_report_message(
     handler: &MessageHandler,
     ctx: &MessagePayload<Message>,
@@ -195,6 +227,7 @@ pub async fn send_chunk_report_message(
 ) -> Result<()> {
     let mut new_bytes: Vec<u8> = Vec::with_capacity(data.len() + 1);
     new_bytes.push(1);
+    new_bytes.extend_from_slice(&[0u8; 3]);
     new_bytes.extend_from_slice(data);
 
     handler

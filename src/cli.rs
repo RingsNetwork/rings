@@ -5,7 +5,7 @@ use jsonrpc_core::Params;
 use jsonrpc_core::Value;
 use serde_json::json;
 
-use crate::backend::ipfs::IpfsRequest;
+use crate::backend::types::IpfsRequest;
 use crate::backend::types::Timeout;
 use crate::jsonrpc;
 use crate::jsonrpc::method::Method;

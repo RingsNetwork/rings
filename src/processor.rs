@@ -6,6 +6,9 @@ use std::sync::Arc;
 #[cfg(feature = "node")]
 use jsonrpc_core::Metadata;
 
+use crate::backend::types::BackendMessage;
+use crate::backend::types::IpfsRequest;
+use crate::backend::types::MessageType;
 use crate::error;
 use crate::error::Error;
 use crate::error::Result;
@@ -343,7 +346,12 @@ impl Processor {
     }
 
     /// Send custom message to a did.
-    pub async fn send_message(&self, destination: &str, msg: &[u8]) -> Result<uuid::Uuid> {
+    pub async fn send_message(
+        &self,
+        destination: &str,
+        msg: &[u8],
+        chunked: bool,
+    ) -> Result<uuid::Uuid> {
         tracing::info!(
             "send_message, destination: {}, text: {:?}",
             destination,
@@ -351,11 +359,12 @@ impl Processor {
         );
         let destination = Did::from_str(destination).map_err(|_| Error::InvalidDid)?;
 
-        let mut new_msg: Vec<u8> = Vec::with_capacity(msg.len() + 4);
-        new_msg.extend_from_slice(&[0, 0, 0, 0]);
+        let mut new_msg = Vec::with_capacity(msg.len() + 1);
+        new_msg.push(if !chunked { 0 } else { 1 });
+        new_msg.extend_from_slice(&[0u8; 3]);
         new_msg.extend_from_slice(msg);
 
-        let msg = Message::custom(&new_msg, None).map_err(Error::SendMessage)?;
+        let msg = Message::custom(msg, None).map_err(Error::SendMessage)?;
 
         // self.swarm.do_send_payload(address, payload)
         let uuid = self
@@ -364,6 +373,50 @@ impl Processor {
             .await
             .map_err(Error::SendMessage)?;
         Ok(uuid)
+    }
+
+    /// send ipfs request message to node
+    /// - destination: did of destination
+    /// - url: ipfs url
+    /// - timeout: timeout in millisecond
+    pub async fn send_ipfs_request_message(
+        &self,
+        destination: &str,
+        url: &str,
+        timeout: u64,
+    ) -> Result<uuid::Uuid> {
+        tracing::info!(
+            "send_ipfs_request_message, destination: {}, url: {:?}, timeout: {:?}",
+            destination,
+            url,
+            timeout,
+        );
+        let msg: BackendMessage = BackendMessage::try_from((
+            MessageType::IpfsRequest,
+            &IpfsRequest::from((url, timeout)),
+        ))?;
+        let msg: Vec<u8> = msg.into();
+
+        self.send_message(destination, &msg, false).await
+    }
+
+    /// send simple text message
+    /// - destination: did of destination
+    /// - text: text message
+    pub async fn send_simple_text_message(
+        &self,
+        destination: &str,
+        text: &str,
+    ) -> Result<uuid::Uuid> {
+        tracing::info!(
+            "send_simple_text_message, destination: {}, text: {:?}",
+            destination,
+            text,
+        );
+
+        let msg: BackendMessage = BackendMessage::new(MessageType::IpfsRequest, text.as_bytes());
+        let msg: Vec<u8> = msg.into();
+        self.send_message(destination, &msg, false).await
     }
 
     /// check local cache of dht
@@ -658,7 +711,7 @@ mod test {
         let test_text2 = "test2";
 
         println!("send_message 1");
-        p1.send_message(did2.as_str(), test_text1.as_bytes())
+        p1.send_message(did2.as_str(), test_text1.as_bytes(), false)
             .await
             .unwrap();
         println!("send_message 1 done");
@@ -666,7 +719,7 @@ mod test {
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
         println!("send_message 2");
-        p2.send_message(did1.as_str(), test_text2.as_bytes())
+        p2.send_message(did1.as_str(), test_text2.as_bytes(), false)
             .await
             .unwrap();
         println!("send_message 2 done");
