@@ -3,11 +3,12 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
+use bytes::Bytes;
 #[cfg(feature = "node")]
 use jsonrpc_core::Metadata;
 
 use crate::backend::types::BackendMessage;
-use crate::backend::types::IpfsRequest;
+use crate::backend::types::HttpRequest;
 use crate::backend::types::MessageType;
 use crate::error;
 use crate::error::Error;
@@ -375,25 +376,28 @@ impl Processor {
         Ok(uuid)
     }
 
-    /// send ipfs request message to node
+    /// send http request message to node
     /// - destination: did of destination
     /// - url: ipfs url
     /// - timeout: timeout in millisecond
-    pub async fn send_ipfs_request_message(
+    pub async fn send_http_request_message(
         &self,
         destination: &str,
+        _method: http::method::Method,
         url: &str,
         timeout: u64,
+        _headers: http::HeaderMap,
+        _body: Option<Bytes>,
     ) -> Result<uuid::Uuid> {
         tracing::info!(
-            "send_ipfs_request_message, destination: {}, url: {:?}, timeout: {:?}",
+            "send_http_request_message, destination: {}, url: {:?}, timeout: {:?}",
             destination,
             url,
             timeout,
         );
         let msg: BackendMessage = BackendMessage::try_from((
-            MessageType::IpfsRequest,
-            &IpfsRequest::from((url, timeout)),
+            MessageType::HttpRequest,
+            &HttpRequest::from((url, timeout)),
         ))?;
         let msg: Vec<u8> = msg.into();
 
@@ -414,7 +418,7 @@ impl Processor {
             text,
         );
 
-        let msg: BackendMessage = BackendMessage::new(MessageType::IpfsRequest, text.as_bytes());
+        let msg: BackendMessage = BackendMessage::new(MessageType::SimpleText, text.as_bytes());
         let msg: Vec<u8> = msg.into();
         self.send_message(destination, &msg, false).await
     }

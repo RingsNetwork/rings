@@ -5,7 +5,7 @@ use jsonrpc_core::Params;
 use jsonrpc_core::Value;
 use serde_json::json;
 
-use crate::backend::types::IpfsRequest;
+use crate::backend::types::HttpRequest;
 use crate::backend::types::Timeout;
 use crate::jsonrpc;
 use crate::jsonrpc::method::Method;
@@ -228,7 +228,7 @@ impl Client {
     }
 
     pub async fn send_ipfs_request(&self, did: &str, url: &str, timeout: Timeout) -> Output<()> {
-        let ipfs_request: IpfsRequest = (url.to_owned(), timeout).into();
+        let ipfs_request: HttpRequest = (url.to_owned(), timeout).into();
         let params2 = serde_json::to_value(ipfs_request).map_err(|e| anyhow::anyhow!(e))?;
         self.client
             .call_method(

@@ -87,7 +87,7 @@ impl MessageCallback for Backend {
                     .handle_message(handler, ctx, &relay, &msg)
                     .await
             }
-            MessageType::IpfsRequest => {
+            MessageType::HttpRequest => {
                 if let Some(ipfs_endpoint) = self.ipfs_endpoint.as_ref() {
                     ipfs_endpoint
                         .handle_message(handler, ctx, &relay, &msg)

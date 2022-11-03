@@ -16,8 +16,8 @@ pub enum MessageType {
     Unknown = 0,
     Empty,
     SimpleText,
-    IpfsRequest,
-    IpfsResponse,
+    HttpRequest,
+    HttpResponse,
 }
 
 impl From<&[u8; 2]> for MessageType {
@@ -31,8 +31,8 @@ impl From<u16> for MessageType {
         match v {
             1 => MessageType::Empty,
             2 => MessageType::SimpleText,
-            3 => MessageType::IpfsRequest,
-            4 => MessageType::IpfsResponse,
+            3 => MessageType::HttpRequest,
+            4 => MessageType::HttpResponse,
             _ => MessageType::Unknown,
         }
     }
@@ -44,8 +44,8 @@ impl From<MessageType> for u16 {
             MessageType::Unknown => 0,
             MessageType::Empty => 1,
             MessageType::SimpleText => 2,
-            MessageType::IpfsRequest => 3,
-            MessageType::IpfsResponse => 4,
+            MessageType::HttpRequest => 3,
+            MessageType::HttpResponse => 4,
         }
     }
 }
@@ -174,8 +174,6 @@ impl From<u64> for Timeout {
     }
 }
 
-/// MessageType
-/// - `tag`: u16
 #[async_trait::async_trait]
 pub trait MessageEndpoint {
     async fn handle_message(
@@ -187,33 +185,33 @@ pub trait MessageEndpoint {
     ) -> Result<()>;
 }
 
-/// IpfsRequest
-/// - `url`: ipfs URL
+/// HttpRequest
+/// - `url`: http URL
 /// - `timeout`: timeout in milliseconds
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct IpfsRequest {
+pub struct HttpRequest {
     pub url: String,
     #[serde(default)]
     pub timeout: Timeout,
 }
 
-impl From<(String, Timeout)> for IpfsRequest {
+impl From<(String, Timeout)> for HttpRequest {
     fn from((url, timeout): (String, Timeout)) -> Self {
         Self { url, timeout }
     }
 }
 
-impl From<(&str, u64)> for IpfsRequest {
+impl From<(&str, u64)> for HttpRequest {
     fn from((url, timeout): (&str, u64)) -> Self {
         (url.to_owned(), Timeout::from(timeout)).into()
     }
 }
 
-/// IpfsResponse
+/// HttpResponse
 /// - `status`: Status machine with numbers, like 200, 300, 400, 500.
 /// - `body`: Message chunk split bytes and send back to remote clinet.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct IpfsResponse {
+pub struct HttpResponse {
     pub status: u16,
     pub headers: HashMap<String, String>,
     pub body: Option<Bytes>,

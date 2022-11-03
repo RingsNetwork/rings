@@ -76,7 +76,7 @@ pub(crate) async fn build_handler(handler: &mut MetaIoHandler<RpcMeta>) {
         close_pending_transport,
     );
     handler.add_method_with_meta(Method::SendTo.as_str(), send_message);
-    handler.add_method_with_meta(Method::SendIpfsRequest.as_str(), send_ipfs_request);
+    handler.add_method_with_meta(Method::SendHttpRequest.as_str(), send_http_request);
     handler.add_method_with_meta(Method::SendSimpleText.as_str(), send_simple_text_message);
 }
 
@@ -95,7 +95,7 @@ pub async fn handle_request(method: Method, meta: RpcMeta, params: Params) -> Re
         Method::Disconnect => close_connection(params, meta).await,
         Method::ListPendings => list_pendings(params, meta).await,
         Method::ClosePendingTransport => close_pending_transport(params, meta).await,
-        Method::SendIpfsRequest => send_ipfs_request(params, meta).await,
+        Method::SendHttpRequest => send_http_request(params, meta).await,
         Method::SendSimpleText => send_simple_text_message(params, meta).await,
     }
 }
@@ -300,7 +300,7 @@ async fn send_simple_text_message(params: Params, meta: RpcMeta) -> Result<Value
 }
 
 /// handle send request ipfs message
-async fn send_ipfs_request(params: Params, meta: RpcMeta) -> Result<Value> {
+async fn send_http_request(params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
     let params: Vec<serde_json::Value> = params.parse()?;
     let destination = params
@@ -314,7 +314,7 @@ async fn send_ipfs_request(params: Params, meta: RpcMeta) -> Result<Value> {
         .to_owned();
 
     let msg: BackendMessage = BackendMessage::try_from((
-        MessageType::IpfsRequest,
+        MessageType::HttpRequest,
         &serde_json::from_value(p2).map_err(|_| Error::new(ErrorCode::InvalidParams))?,
     ))?;
     let msg: Vec<u8> = msg.into();

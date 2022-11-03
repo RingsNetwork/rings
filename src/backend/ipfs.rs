@@ -4,8 +4,8 @@ use bytes::Bytes;
 use http::method;
 
 use super::types::BackendMessage;
-use super::types::IpfsRequest;
-use super::types::IpfsResponse;
+use super::types::HttpRequest;
+use super::types::HttpResponse;
 use super::types::MessageEndpoint;
 use crate::backend::types::send_chunk_report_message;
 use crate::backend::types::MessageType;
@@ -29,10 +29,14 @@ impl IpfsEndpoint {
         }
     }
 
-    pub async fn execute(&self, request: IpfsRequest) -> Result<IpfsResponse> {
-        if !request.url.starts_with("ipfs://") {
+    /// execute ipfs reuqest
+    /// support ipfs:// and ipns:// schema
+    pub async fn execute(&self, request: HttpRequest) -> Result<HttpResponse> {
+        // let request_uri = request.url.parse::<Uri>().map_err(|_| Error::InvalidUrl)?;
+        if !request.url.starts_with("ipfs://") || !request.url.starts_with("ipns://") {
             return Err(Error::InvalidUrl);
         }
+        // TODO fix this request_url
         let request_url = format!(
             "{}/{}",
             self.api_gateway,
@@ -68,7 +72,7 @@ impl IpfsEndpoint {
             .await
             .map_err(|e| Error::HttpRequestError(e.to_string()))?;
 
-        Ok(IpfsResponse {
+        Ok(HttpResponse {
             status,
             headers,
             body: Some(body),
@@ -85,7 +89,7 @@ impl MessageEndpoint for IpfsEndpoint {
         relay: &MessageRelay,
         msg: &BackendMessage,
     ) -> Result<()> {
-        let req: IpfsRequest =
+        let req: HttpRequest =
             bincode::deserialize(msg.data.as_slice()).map_err(|_| Error::DeserializeError)?;
 
         tracing::debug!("Sending IPFS request: {:?}", req);
@@ -99,7 +103,7 @@ impl MessageEndpoint for IpfsEndpoint {
             message::encode_data_gzip(&json_bytes, 9).map_err(|_| Error::EncodedError)?;
 
         let resp_bytes: Bytes =
-            BackendMessage::new(MessageType::IpfsResponse, resp_bytes.to_vec().as_slice()).into();
+            BackendMessage::new(MessageType::HttpResponse, resp_bytes.to_vec().as_slice()).into();
         tracing::debug!("resp_bytes gzip_data len: {}", resp_bytes.len());
 
         let chunks = ChunkList::<BACKEND_MTU>::from(&resp_bytes);

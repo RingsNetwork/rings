@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::backend::types::BackendMessage;
-use crate::backend::types::IpfsResponse;
+use crate::backend::types::HttpResponse;
 use crate::backend::types::MessageType;
 use crate::consts::BACKEND_MTU;
 use crate::jsonrpc::RpcMeta;
@@ -553,10 +553,10 @@ impl Client {
         })
     }
 
-    /// send ipfs request message to remote
-    /// - url: ipfs url like `ipfs://ipfs/abc1234`
+    /// send http request message to remote
+    /// - url: http url like `ipfs://ipfs/abc1234` `ipns://ipns/abc`
     /// - timeout: timeout in milliseconds
-    pub fn send_ipfs_request(
+    pub fn send_http_request(
         &self,
         destination: String,
         url: String,
@@ -566,7 +566,7 @@ impl Client {
 
         future_to_promise(async move {
             let tx_id = p
-                .send_ipfs_request_message(destination.as_str(), url.as_str(), timeout)
+                .send_http_request_message(destination.as_str(), url.as_str(), timeout)
                 .await
                 .map_err(JsError::from)?;
             Ok(JsValue::from_str(tx_id.to_string().as_str()))
@@ -592,7 +592,7 @@ impl Client {
 #[wasm_bindgen]
 pub struct MessageCallbackInstance {
     custom_message: Arc<js_sys::Function>,
-    ipfs_response_message: Arc<js_sys::Function>,
+    http_response_message: Arc<js_sys::Function>,
     builtin_message: Arc<js_sys::Function>,
     chunk_list: Arc<Mutex<ChunkList<BACKEND_MTU>>>,
 }
@@ -602,12 +602,12 @@ impl MessageCallbackInstance {
     #[wasm_bindgen(constructor)]
     pub fn new(
         custom_message: &js_sys::Function,
-        ipfs_response_message: &js_sys::Function,
+        http_response_message: &js_sys::Function,
         builtin_message: &js_sys::Function,
     ) -> Result<MessageCallbackInstance, JsError> {
         Ok(MessageCallbackInstance {
             custom_message: Arc::new(custom_message.clone()),
-            ipfs_response_message: Arc::new(ipfs_response_message.clone()),
+            http_response_message: Arc::new(http_response_message.clone()),
             builtin_message: Arc::new(builtin_message.clone()),
             chunk_list: Default::default(),
         })
@@ -626,8 +626,8 @@ impl MessageCallbackInstance {
                 self.handle_simple_text_message(relay, m.data.as_slice())
                     .await?;
             }
-            MessageType::IpfsResponse => {
-                self.handle_ipfs_response(relay, m.data.as_slice()).await?;
+            MessageType::HttpResponse => {
+                self.handle_http_response(relay, m.data.as_slice()).await?;
             }
             _ => {
                 return Ok(());
@@ -659,7 +659,7 @@ impl MessageCallbackInstance {
         Ok(())
     }
 
-    pub async fn handle_ipfs_response(
+    pub async fn handle_http_response(
         &self,
         relay: &MessagePayload<Message>,
         data: &[u8],
@@ -677,9 +677,9 @@ impl MessageCallbackInstance {
             relay.tx_id,
             msg_content.len(),
         );
-        let ipfs_response: IpfsResponse = bincode::deserialize(&msg_content)?;
-        let msg_content = JsValue::from_serde(&ipfs_response)?;
-        if let Ok(r) = self.ipfs_response_message.call2(
+        let http_response: HttpResponse = bincode::deserialize(&msg_content)?;
+        let msg_content = JsValue::from_serde(&http_response)?;
+        if let Ok(r) = self.http_response_message.call2(
             &this,
             &JsValue::from_serde(&relay).unwrap(),
             &msg_content,
@@ -780,7 +780,7 @@ impl MessageCallback for MessageCallbackInstance {
         //     let data = data.unwrap();
         //     log::debug!("chunk message of {:?} received", relay.tx_id);
         //     if let Some(data) = data {
-        //         if let Err(e) = self.handle_ipfs_response(relay, &data).await {
+        //         if let Err(e) = self.handle_http_response(relay, &data).await {
         //             log::error!("handle http_server_msg failed, {}", e);
         //         }
         //     } else {
