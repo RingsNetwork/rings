@@ -1,4 +1,6 @@
-//! To avoid too frequent signing, and keep the private key safe, we implemented a session protocol for signing/encrypting and verifying message.
+//! Signing/encrypting and verifying message.
+//!
+//! To avoid too frequent signing, and keep the private key safe
 //! - ECDSA Session is based on secp256k1, which create a temporate secret key with one time signing auth
 //! - To create a ECDSA Session, we should generate the unsign_info with our pubkey (Address)
 //! - `SessionManager::gen_unsign_info(addr, ..)`, it will returns the msg needs for sign, and a temporate private key
@@ -20,20 +22,24 @@ use crate::err::Error;
 use crate::err::Result;
 use crate::utils;
 
-/// we support both EIP712 and raw ECDSA singing forrmat
+pub const DEFAULT_TTL_MS: usize = 30 * 24 * 3600 * 1000;
+
+/// we support both EIP191 and raw ECDSA singing format
 #[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
 pub enum Signer {
     DEFAULT,
-    EIP712,
+    EIP191,
     EdDSA,
 }
 
+/// TTl with specific time, or not set.
 #[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
 pub enum Ttl {
     Some(usize),
     Never,
 }
 
+/// Authorizor with unique did and pubkey.
 #[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
 pub struct Authorizer {
     pub did: Did,
@@ -42,6 +48,8 @@ pub struct Authorizer {
     pub pubkey: Option<PublicKey>,
 }
 
+/// AuthorizedInfo need authorizer and signer, and set ttl,
+/// use to verify in session.
 #[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
 pub struct AuthorizedInfo {
     pub authorizer: Authorizer,
@@ -51,18 +59,21 @@ pub struct AuthorizedInfo {
     pub ts_ms: u128,
 }
 
+/// Session contain signature which sign with `Signer`, so need AuthorizedInfo as well.
 #[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
 pub struct Session {
     pub sig: Vec<u8>,
     pub auth: AuthorizedInfo,
 }
 
+/// Session with temp secretKey.
 #[derive(Debug, Clone)]
 pub struct SessionWithKey {
     pub session: Session,
     pub session_key: SecretKey,
 }
 
+/// Manager about Session.
 #[derive(Debug)]
 pub struct SessionManager {
     inner: Arc<RwLock<SessionWithKey>>,
@@ -108,8 +119,8 @@ impl Session {
                 Signer::DEFAULT => {
                     signers::default::verify(&auth_str, &self.auth.authorizer.did.into(), &self.sig)
                 }
-                Signer::EIP712 => {
-                    signers::eip712::verify(&auth_str, &self.auth.authorizer.did.into(), &self.sig)
+                Signer::EIP191 => {
+                    signers::eip191::verify(&auth_str, &self.auth.authorizer.did.into(), &self.sig)
                 }
                 Signer::EdDSA => match self.authorizer_pubkey() {
                     Ok(p) => signers::ed25519::verify(
@@ -138,7 +149,7 @@ impl Session {
         let auth = self.auth.to_string()?;
         match self.auth.signer {
             Signer::DEFAULT => signers::default::recover(&auth, &self.sig),
-            Signer::EIP712 => signers::eip712::recover(&auth, &self.sig),
+            Signer::EIP191 => signers::eip191::recover(&auth, &self.sig),
             Signer::EdDSA => self
                 .auth
                 .authorizer

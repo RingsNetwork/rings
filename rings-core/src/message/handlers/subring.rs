@@ -36,6 +36,7 @@ pub trait SubRingOperator {
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl SubRingOperator for Swarm {
+    /// create subring and store into chord storage.
     async fn subring_create(&self, name: &str) -> Result<()> {
         let subring: SubRing = SubRing::new(name, &self.dht.id)?;
         let vnode: VirtualNode = subring.clone().try_into()?;
@@ -43,6 +44,8 @@ impl SubRingOperator for Swarm {
         self.storage_store(vnode).await
     }
 
+    /// add did into current chord subring.
+    /// send direct message with `JoinSubRing` type, which will handled by `next` node.
     async fn subring_join(&self, name: &str) -> Result<()> {
         let address: HashStr = name.to_owned().into();
         let did = Did::from_str(&address.inner())?;
@@ -62,6 +65,9 @@ impl SubRingOperator for Swarm {
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<JoinSubRing> for MessageHandler {
+    /// handle `JoinSubRing` message. `origin` get the first node of path
+    /// reset destination to `next` if need next_hop and call `transpond_payload`
+    /// otherwise join subring is finished.
     async fn handle(&self, ctx: &MessagePayload<Message>, msg: &JoinSubRing) -> Result<()> {
         let mut relay = ctx.relay.clone();
         let origin = relay.origin();

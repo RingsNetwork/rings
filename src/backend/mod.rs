@@ -1,3 +1,6 @@
+//! An Backend HTTP service handle custom message from `MessageHandler` as CallbackFn.
+/// The trait `rings_core::handlers::MessageCallback` is implemented on `Backend` type
+/// To indicate to handle custom message relay, which use as a callbackFn in `MessageHandler`
 use std::collections::HashMap;
 
 use async_trait::async_trait;
@@ -18,20 +21,24 @@ use crate::prelude::chunk::ChunkList;
 use crate::prelude::rings_core::message::Message;
 use crate::prelude::*;
 
+/// BackendConfig which use to create `http_server`.
 #[derive(Deserialize, Serialize, Debug)]
 pub struct BackendConfig {
     pub http_server: Option<HttpServerConfig>,
 }
 
+/// HTTP Server Config, specific determine port.
 #[derive(Deserialize, Serialize, Debug)]
 pub struct HttpServerConfig {
     pub port: u16,
 }
 
+/// A Backend struct contains http_server.
 pub struct Backend {
     http_server: Option<HttpServer>,
 }
 
+/// A HttpServer using reqwest::Client
 pub struct HttpServer {
     client: reqwest::Client,
     port: u16,
@@ -121,6 +128,8 @@ fn try_into_method(s: &str) -> Result<http::Method> {
 }
 
 impl Backend {
+    /// Backend receive localhost http request and split bytes into chunk
+    /// using `ChunkList`, send_report_message back to `MessageHandler`.
     async fn handle_http_server_request_message(
         &self,
         req: &HttpServerRequest,
@@ -172,6 +181,9 @@ impl Backend {
 
 #[async_trait]
 impl MessageCallback for Backend {
+    /// `custom_message` in Backend for now only handle
+    /// the `Message::CustomMessage` in handler `invoke_callback` function.
+    /// And send http request to localhost through Backend http_request handler.
     async fn custom_message(
         &self,
         handler: &MessageHandler,

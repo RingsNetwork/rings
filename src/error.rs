@@ -1,8 +1,11 @@
+//! A bunch of wrap errors.
 use crate::prelude::rings_core;
 
+/// A wrap `Result` contains custom erros.
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, thiserror::Error)]
+/// Errors enum mapping global custom errors.
 pub enum Error {
     #[error("Connect remote rpc server failed: {0}.")]
     RemoteRpcError(String),

@@ -1,4 +1,4 @@
-//! prelude
+//! Re-exports of important traits, types, and functions used with ring-core.
 
 pub use async_trait;
 pub use base58;

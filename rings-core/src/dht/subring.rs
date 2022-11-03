@@ -20,7 +20,8 @@ use crate::err::Result;
 use crate::storage::PersistenceStorageReadAndWrite;
 // use crate::storage::PersistenceStorageOperation;
 
-/// A SubRing is a full functional Ring, but with a name and it's finger table can be
+/// A SubRing is a full functional Ring.
+/// But with a name and it's finger table can be
 /// stored on Main Rings DHT, For a SubRing, it's virtual address is `sha1(name)`
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubRing {

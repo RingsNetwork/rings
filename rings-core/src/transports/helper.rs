@@ -12,6 +12,7 @@ use crate::err::Error;
 use crate::err::Result;
 use crate::types::ice_transport::IceCandidate;
 
+/// Custom futures state.
 #[derive(Default)]
 pub struct State {
     pub completed: bool,
@@ -19,12 +20,14 @@ pub struct State {
     pub waker: Option<std::task::Waker>,
 }
 
+/// TricklePayload contain webrtc sdp and candidates.
 #[derive(Deserialize, Serialize, Debug)]
 pub struct TricklePayload {
     pub sdp: String,
     pub candidates: Vec<IceCandidate>,
 }
 
+/// Custom futures Promise act like js Promise.
 #[derive(Default)]
 pub struct Promise(pub Arc<Mutex<State>>);
 

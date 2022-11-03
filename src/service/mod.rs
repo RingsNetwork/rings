@@ -1,5 +1,5 @@
+//! rings-node service run with `Swarm` and chord stabilization.
 #![warn(missing_docs)]
-//! rings-node server
 mod http_error;
 
 use std::sync::Arc;
@@ -67,7 +67,6 @@ async fn jsonrpc_io_handler(
     Extension(io_handler): Extension<Arc<MetaIoHandler<RpcMeta>>>,
     Extension(pubkey): Extension<Arc<PublicKey>>,
 ) -> Result<JsonResponse, HttpError> {
-    // let is_auth
     let is_auth = if let Some(signature) = headers.get(header::AUTHORIZATION) {
         Processor::verify_signature(signature.as_bytes(), &pubkey)
             .map_err(|_| HttpError::BadRequest)?

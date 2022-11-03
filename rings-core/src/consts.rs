@@ -1,4 +1,5 @@
-//! consts
+//! Constant variables.
+///
 /// default ttl in ms
 pub const DEFAULT_TTL_MS: usize = 300 * 1000;
 pub const DEFAULT_SESSION_TTL_MS: usize = 30 * 24 * 3600 * 1000;

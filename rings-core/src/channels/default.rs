@@ -1,3 +1,4 @@
+//! Default channel handle for `node` feature.
 use async_channel as ac;
 use async_channel::Receiver;
 use async_channel::Sender;
@@ -7,8 +8,12 @@ use crate::err::Error;
 use crate::err::Result;
 use crate::types::channel::Channel;
 
+/// Channel combine with async_channel::Sender and async_channel::Receiver.
+#[derive(Debug)]
 pub struct AcChannel<T> {
+    /// async channel send `Message` through sender.
     sender: Sender<T>,
+    /// async channel rece `Message` through receiver.
     receiver: Receiver<T>,
 }
 

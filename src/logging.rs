@@ -1,9 +1,11 @@
+//! Logging configuration contains both `node` and `browser`.
 use tracing::Level;
 use tracing_log::LogTracer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::Registry;
 
 #[cfg(feature = "node")]
+/// logging configuration about node.
 pub mod node {
     use std::backtrace::Backtrace;
     use std::panic::PanicInfo;

@@ -1,3 +1,4 @@
+//! Async channel handle for `wasm` features.
 use std::sync::Arc;
 
 /// ref: https://github.com/Ciantic/rust-shared-wasm-experiments/blob/master/src/lib.rs
@@ -12,6 +13,7 @@ use crate::types::channel::Channel;
 type Sender<T> = Arc<mpsc::UnboundedSender<T>>;
 type Receiver<T> = Arc<Mutex<mpsc::UnboundedReceiver<T>>>;
 
+/// Channel combine with mpsc::UnboundedSender and mpsc::UnboundedReceiver.
 #[derive(Debug)]
 pub struct CbChannel<T> {
     sender: Sender<T>,

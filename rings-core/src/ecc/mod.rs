@@ -21,13 +21,17 @@ mod types;
 pub use types::PublicKey;
 
 /// ref <https://docs.rs/web3/0.18.0/src/web3/signing.rs.html#69>
+///
 /// length r: 32, length s: 32, length v(recovery_id): 1
 pub type SigBytes = [u8; 65];
+/// Alias PublicKey.
 pub type CurveEle = PublicKey;
 
+/// Wrap libsecp256k1::SecretKey.
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub struct SecretKey(libsecp256k1::SecretKey);
 
+/// Wrap String into HashStr.
 #[derive(Deserialize, Serialize, Debug, Clone, Eq, PartialEq)]
 pub struct HashStr(String);
 
@@ -222,6 +226,7 @@ impl PublicKey {
     }
 }
 
+/// Recover PublicKey from RawMessage using signature.
 pub fn recover<S>(message: &str, signature: S) -> Result<PublicKey>
 where S: AsRef<[u8]> {
     let sig_bytes: SigBytes = signature.as_ref().try_into()?;
@@ -229,6 +234,7 @@ where S: AsRef<[u8]> {
     recover_hash(&message_hash, &sig_bytes)
 }
 
+/// Recover PublicKey from HashMessage using signature.
 pub fn recover_hash(message_hash: &[u8; 32], sig: &[u8; 65]) -> Result<PublicKey> {
     let r_s_signature: [u8; 64] = sig[..64].try_into()?;
     let recovery_id: u8 = sig[64];

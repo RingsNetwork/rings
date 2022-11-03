@@ -1,3 +1,5 @@
+//! Traits about MemStorage and PersistenceStorage
+
 mod memory;
 pub mod persistence;
 

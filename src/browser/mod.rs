@@ -1,6 +1,6 @@
-//! rings-node browser support.
 #![allow(clippy::unused_unit)]
 #![allow(non_snake_case, non_upper_case_globals)]
+/// rings-node browser support.
 pub mod client;
 pub mod jsonrpc_client;
 pub mod utils;
@@ -13,6 +13,7 @@ use crate::logging::browser::set_panic_hook;
 use crate::prelude::wasm_bindgen;
 use crate::prelude::wasm_bindgen::prelude::*;
 
+/// set panic book for wasm.
 #[wasm_bindgen(start)]
 pub fn start() -> Result<(), JsError> {
     set_panic_hook();

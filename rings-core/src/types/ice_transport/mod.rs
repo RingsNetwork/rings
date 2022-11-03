@@ -1,3 +1,4 @@
+/// Custom webrtc IceServer and configuration.
 pub mod ice_server;
 use std::sync::Arc;
 
@@ -31,6 +32,7 @@ pub struct IceCandidate {
     pub username_fragment: Option<String>,
 }
 
+/// A useful trait implement by IceTransport that we use.
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait IceTransport {
@@ -46,6 +48,7 @@ pub trait IceTransport {
     async fn get_data_channel(&self) -> Option<Arc<Self::DataChannel>>;
 }
 
+/// A custom IceTransportInterface used in ring-core.
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait IceTransportInterface<E: Send, Ch: Channel<E>> {
@@ -62,6 +65,10 @@ pub trait IceTransportInterface<E: Send, Ch: Channel<E>> {
     async fn send_message(&self, msg: &Bytes) -> Result<()>;
 }
 
+/// A IceTransportCallback use to register a callback..
+/// - on_ice_connection_state_change: when ice_connection_state changed.
+/// - on_ice_candidate: when candidate join to this transport.
+/// - on_data_channel: when data received through DataChannel.
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait IceTransportCallback: IceTransport {
@@ -74,6 +81,8 @@ pub trait IceTransportCallback: IceTransport {
     async fn on_data_channel(&self) -> Self::OnDataChannelHdlrFn;
 }
 
+/// IceCandidateGathering use to gathering candidate, add candidate transpor to swarm and set sdp
+/// both remote and local.
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait IceCandidateGathering: IceTransport {
@@ -84,6 +93,7 @@ pub trait IceCandidateGathering: IceTransport {
     where T: Into<Self::Sdp> + Send;
 }
 
+/// IceTrickleScheme use to handle http handshake, register and exchange sdp.
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait IceTrickleScheme {

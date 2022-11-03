@@ -1,5 +1,5 @@
+//! Utilities for configuration and build.
 #![warn(missing_docs)]
-//! Utils for project.
 
 use std::env;
 
