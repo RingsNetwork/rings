@@ -1,6 +1,7 @@
 //! An efficient command tool of using ring-node.
 use std::sync::Arc;
 
+use bytes::Bytes;
 use jsonrpc_core::Params;
 use jsonrpc_core::Value;
 use serde_json::json;
@@ -227,9 +228,18 @@ impl Client {
         ClientOutput::ok("Done.".into(), ())
     }
 
-    pub async fn send_ipfs_request(&self, did: &str, url: &str, timeout: Timeout) -> Output<()> {
-        let ipfs_request: HttpRequest = (url.to_owned(), timeout).into();
-        let params2 = serde_json::to_value(ipfs_request).map_err(|e| anyhow::anyhow!(e))?;
+    pub async fn send_http_request_message(
+        &self,
+        did: &str,
+        method: http::Method,
+        url: &str,
+        timeout: Timeout,
+        headers: &[(&str, &str)],
+        body: Option<String>,
+    ) -> Output<()> {
+        let http_request: HttpRequest =
+            HttpRequest::new(method, url, timeout, headers, body.map(Bytes::from));
+        let params2 = serde_json::to_value(http_request).map_err(|e| anyhow::anyhow!(e))?;
         self.client
             .call_method(
                 Method::SendTo.as_str(),

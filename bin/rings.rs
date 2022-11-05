@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use clap::ArgAction;
 use clap::Args;
 use clap::Parser;
 use clap::Subcommand;
@@ -225,7 +226,8 @@ struct PendingCloseTransportCommand {
 enum SendCommand {
     Raw(SendRawCommand),
     // Http(SendHttpCommand),
-    Ipfs(SendIpfsCommand),
+    #[command(subcommand)]
+    Http(SendHttpCommand),
     SimpleText(SendSimpleTextCommand),
 }
 
@@ -237,6 +239,14 @@ struct SendRawCommand {
     to_did: String,
 
     text: String,
+}
+
+#[derive(Subcommand, Debug)]
+#[command(rename_all = "kebab-case")]
+enum SendHttpCommand {
+    Get(SendHttpGetCommand),
+    // Post(SendHttpPostCommand),
+    //  Put(SendHttpPutCommand),
 }
 
 // #[derive(Args, Debug)]
@@ -259,13 +269,19 @@ struct SendRawCommand {
 // }
 
 #[derive(Args, Debug)]
-struct SendIpfsCommand {
+struct SendHttpGetCommand {
     #[command(flatten)]
     client_args: ClientArgs,
 
     to_did: String,
 
     url: String,
+
+    #[arg(long="header", short = 'H', action=ArgAction::Append, help = "headers append to the request")]
+    headers: Vec<String>,
+
+    #[arg(long, help = "set content of http body")]
+    body: Option<String>,
 
     #[arg(default_value = "30000")]
     timeout: u64,
@@ -438,11 +454,28 @@ async fn main() -> anyhow::Result<()> {
                 .display();
             Ok(())
         }
-        Command::Send(SendCommand::Ipfs(args)) => {
+        Command::Send(SendCommand::Http(SendHttpCommand::Get(args))) => {
             args.client_args
                 .new_client()
                 .await?
-                .send_ipfs_request(args.to_did.as_str(), args.url.as_str(), args.timeout.into())
+                .send_http_request_message(
+                    args.to_did.as_str(),
+                    http::Method::GET,
+                    args.url.as_str(),
+                    args.timeout.into(),
+                    &args
+                        .headers
+                        .iter()
+                        .map(|x| x.split(':').collect::<Vec<&str>>())
+                        .map(|b| {
+                            (
+                                b[0].trim_start_matches(' ').trim_end_matches(' '),
+                                b[1].trim_start_matches(' ').trim_end_matches(' '),
+                            )
+                        })
+                        .collect::<Vec<(_, _)>>(),
+                    args.body,
+                )
                 .await?
                 .display();
             Ok(())

@@ -10,6 +10,7 @@ use jsonrpc_core::Metadata;
 use crate::backend::types::BackendMessage;
 use crate::backend::types::HttpRequest;
 use crate::backend::types::MessageType;
+use crate::backend::types::Timeout;
 use crate::error;
 use crate::error::Error;
 use crate::error::Result;
@@ -380,24 +381,29 @@ impl Processor {
     /// - destination: did of destination
     /// - url: ipfs url
     /// - timeout: timeout in millisecond
-    pub async fn send_http_request_message(
+    pub async fn send_http_request_message<U, T>(
         &self,
         destination: &str,
-        _method: http::method::Method,
-        url: &str,
-        timeout: u64,
-        _headers: http::HeaderMap,
-        _body: Option<Bytes>,
-    ) -> Result<uuid::Uuid> {
+        method: http::Method,
+        url: U,
+        timeout: T,
+        headers: &[(U, U)],
+        body: Option<Bytes>,
+    ) -> Result<uuid::Uuid>
+    where
+        U: ToString,
+        T: Into<Timeout>,
+    {
+        let timeout: Timeout = timeout.into();
         tracing::info!(
             "send_http_request_message, destination: {}, url: {:?}, timeout: {:?}",
             destination,
-            url,
+            url.to_string(),
             timeout,
         );
         let msg: BackendMessage = BackendMessage::try_from((
             MessageType::HttpRequest,
-            &HttpRequest::from((url, timeout)),
+            &HttpRequest::new(method, url, timeout, headers, body),
         ))?;
         let msg: Vec<u8> = msg.into();
 
