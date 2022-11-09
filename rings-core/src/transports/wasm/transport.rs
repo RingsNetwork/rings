@@ -1,9 +1,11 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use itertools::Itertools;
 use js_sys::Uint8Array;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -39,6 +41,7 @@ use crate::err::Result;
 use crate::message::Encoded;
 use crate::message::Encoder;
 use crate::message::MessagePayload;
+use crate::peer::PeerService;
 use crate::session::SessionManager;
 use crate::transports::helper::Promise;
 use crate::transports::helper::TricklePayload;
@@ -63,6 +66,7 @@ pub struct WasmTransport {
     channel: Option<Arc<RtcDataChannel>>,
     event_sender: EventSender,
     public_key: Arc<RwLock<Option<PublicKey>>>,
+    services: Arc<RwLock<Vec<PeerService>>>,
     chunk_list: Arc<Mutex<ChunkList<TRANSPORT_MTU>>>,
 }
 
@@ -160,6 +164,7 @@ impl IceTransportInterface<Event, CbChannel<Event>> for WasmTransport {
             pending_candidates: Arc::new(Mutex::new(vec![])),
             channel: None,
             public_key: Arc::new(RwLock::new(None)),
+            services: Default::default(),
             event_sender,
             chunk_list: Default::default(),
         }
@@ -232,6 +237,10 @@ impl IceTransportInterface<Event, CbChannel<Event>> for WasmTransport {
 
     async fn pubkey(&self) -> PublicKey {
         self.public_key.read().unwrap().unwrap()
+    }
+
+    async fn services(&self) -> Vec<PeerService> {
+        self.services.read().unwrap().clone()
     }
 
     async fn ice_connection_state(&self) -> Option<Self::IceConnectionState> {
@@ -519,6 +528,7 @@ impl IceTrickleScheme for WasmTransport {
         &self,
         session_manager: &SessionManager,
         kind: Self::SdpType,
+        services: HashSet<PeerService>,
     ) -> Result<Encoded> {
         let sdp = match kind {
             RtcSdpType::Answer => self.get_answer().await?,
@@ -542,6 +552,7 @@ impl IceTrickleScheme for WasmTransport {
             sdp: serde_json::to_string(&RtcSessionDescriptionWrapper::from(sdp))
                 .map_err(Error::Deserialize)?,
             candidates: local_candidates_json,
+            services: services.into_iter().collect_vec(),
         };
         tracing::debug!("prepared handshake info :{:?}", data);
         let resp = MessagePayload::new_direct(

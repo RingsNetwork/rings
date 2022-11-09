@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -59,7 +60,7 @@ pub async fn establish_ice_connection(
 
     // Peer 1 try to connect peer 2
     let handshake_info1 = transport1
-        .get_handshake_info(&sm1, RTCSdpType::Offer)
+        .get_handshake_info(&sm1, RTCSdpType::Offer, HashSet::new())
         .await?;
     assert_eq!(
         transport1.ice_connection_state().await,
@@ -76,7 +77,7 @@ pub async fn establish_ice_connection(
 
     // Peer 2 create answer
     let handshake_info2 = transport2
-        .get_handshake_info(&sm2, RTCSdpType::Answer)
+        .get_handshake_info(&sm2, RTCSdpType::Answer, HashSet::new())
         .await
         .unwrap();
 

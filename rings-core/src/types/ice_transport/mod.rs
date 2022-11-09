@@ -1,5 +1,6 @@
 /// Custom webrtc IceServer and configuration.
 pub mod ice_server;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -12,6 +13,7 @@ use crate::dht::Did;
 use crate::ecc::PublicKey;
 use crate::err::Result;
 use crate::message::Encoded;
+use crate::peer::PeerService;
 use crate::session::SessionManager;
 use crate::types::channel::Channel;
 
@@ -62,6 +64,7 @@ pub trait IceTransportInterface<E: Send, Ch: Channel<E>> {
     async fn is_connected(&self) -> bool;
     async fn is_disconnected(&self) -> bool;
     async fn pubkey(&self) -> PublicKey;
+    async fn services(&self) -> Vec<PeerService>;
     async fn send_message(&self, msg: &Bytes) -> Result<()>;
 }
 
@@ -103,6 +106,7 @@ pub trait IceTrickleScheme {
         &self,
         session_manager: &SessionManager,
         kind: Self::SdpType,
+        services: HashSet<PeerService>,
     ) -> Result<Encoded>;
     async fn register_remote_info(&self, data: Encoded) -> Result<Did>;
     async fn wait_for_connected(&self) -> Result<()>;
