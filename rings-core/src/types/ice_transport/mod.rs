@@ -64,7 +64,7 @@ pub trait IceTransportInterface<E: Send, Ch: Channel<E>> {
     async fn is_connected(&self) -> bool;
     async fn is_disconnected(&self) -> bool;
     async fn pubkey(&self) -> PublicKey;
-    async fn services(&self) -> Vec<PeerService>;
+    async fn services(&self) -> HashSet<PeerService>;
     async fn send_message(&self, msg: &Bytes) -> Result<()>;
 }
 

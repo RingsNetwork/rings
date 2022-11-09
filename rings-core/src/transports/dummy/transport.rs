@@ -50,7 +50,7 @@ pub struct DummyTransport {
     event_sender: EventSender,
     ice_connection_state: Arc<Mutex<Option<RTCIceConnectionState>>>,
     public_key: Arc<AsyncRwLock<Option<PublicKey>>>,
-    services: Arc<AsyncRwLock<Vec<PeerService>>>,
+    services: Arc<AsyncRwLock<HashSet<PeerService>>>,
 }
 
 impl PartialEq for DummyTransport {
@@ -130,7 +130,7 @@ impl IceTransportInterface<Event, AcChannel<Event>> for DummyTransport {
         self.public_key.read().await.unwrap()
     }
 
-    async fn services(&self) -> Vec<PeerService> {
+    async fn services(&self) -> HashSet<PeerService> {
         self.services.read().await.clone()
     }
 
@@ -187,7 +187,12 @@ impl IceTrickleScheme for DummyTransport {
                 if let Ok(public_key) = data.origin_verification.session.authorizer_pubkey() {
                     let mut pk = self.public_key.write().await;
                     *pk = Some(public_key);
-                };
+                }
+
+                {
+                    let mut services = self.services.write().await;
+                    *services = data.data.services.into_iter().collect();
+                }
 
                 let local_did = self.pubkey().await.address().into();
                 HUB.dids.insert(self.id, local_did);

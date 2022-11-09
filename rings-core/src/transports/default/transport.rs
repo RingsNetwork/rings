@@ -70,7 +70,7 @@ pub struct DefaultTransport {
     /// node publicKey
     public_key: Arc<AsyncRwLock<Option<PublicKey>>>,
     /// node services
-    services: Arc<AsyncRwLock<Vec<PeerService>>>,
+    services: Arc<AsyncRwLock<HashSet<PeerService>>>,
     chunk_list: Arc<FuturesMutex<ChunkList<TRANSPORT_MTU>>>,
 }
 
@@ -256,7 +256,7 @@ impl IceTransportInterface<Event, AcChannel<Event>> for DefaultTransport {
         self.public_key.read().await.unwrap()
     }
 
-    async fn services(&self) -> Vec<PeerService> {
+    async fn services(&self) -> HashSet<PeerService> {
         self.services.read().await.clone()
     }
 
@@ -512,7 +512,7 @@ impl IceTrickleScheme for DefaultTransport {
                 };
                 {
                     let mut services = self.services.write().await;
-                    *services = data.data.services;
+                    *services = data.data.services.into_iter().collect();
                 }
                 Ok(data.addr)
             }

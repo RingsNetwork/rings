@@ -200,7 +200,7 @@ impl Swarm {
                         let payload = MessagePayload::new_direct(
                             Message::JoinDHT(message::JoinDHT {
                                 id: did,
-                                services: trans.services().await,
+                                services: trans.services().await.into_iter().collect(),
                             }),
                             &self.session_manager,
                             self.dht.id,

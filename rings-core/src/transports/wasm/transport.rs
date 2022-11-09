@@ -66,7 +66,7 @@ pub struct WasmTransport {
     channel: Option<Arc<RtcDataChannel>>,
     event_sender: EventSender,
     public_key: Arc<RwLock<Option<PublicKey>>>,
-    services: Arc<RwLock<Vec<PeerService>>>,
+    services: Arc<RwLock<HashSet<PeerService>>>,
     chunk_list: Arc<Mutex<ChunkList<TRANSPORT_MTU>>>,
 }
 
@@ -239,7 +239,7 @@ impl IceTransportInterface<Event, CbChannel<Event>> for WasmTransport {
         self.public_key.read().unwrap().unwrap()
     }
 
-    async fn services(&self) -> Vec<PeerService> {
+    async fn services(&self) -> HashSet<PeerService> {
         self.services.read().unwrap().clone()
     }
 
@@ -572,7 +572,11 @@ impl IceTrickleScheme for WasmTransport {
                 if let Ok(public_key) = data.origin_verification.session.authorizer_pubkey() {
                     let mut pk = self.public_key.write().unwrap();
                     *pk = Some(public_key);
-                };
+                }
+                {
+                    let mut services = self.services.write().unwrap();
+                    *services = data.data.services.into_iter().collect();
+                }
                 let sdp: RtcSessionDescriptionWrapper = data.data.sdp.try_into()?;
                 self.set_remote_description(sdp.to_owned()).await?;
                 for c in &data.data.candidates {
