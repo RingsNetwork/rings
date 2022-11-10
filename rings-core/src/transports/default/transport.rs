@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_lock::RwLock as AsyncRwLock;
@@ -6,6 +7,7 @@ use bytes::Bytes;
 use futures::future::join_all;
 use futures::future::BoxFuture;
 use futures::lock::Mutex as FuturesMutex;
+use itertools::Itertools;
 use serde_json;
 use webrtc::api::setting_engine::SettingEngine;
 use webrtc::api::APIBuilder;
@@ -36,6 +38,7 @@ use crate::err::Result;
 use crate::message::Encoded;
 use crate::message::Encoder;
 use crate::message::MessagePayload;
+use crate::peer::PeerService;
 use crate::session::SessionManager;
 use crate::transports::helper::Promise;
 use crate::transports::helper::TricklePayload;
@@ -66,6 +69,8 @@ pub struct DefaultTransport {
     event_sender: EventSender,
     /// node publicKey
     public_key: Arc<AsyncRwLock<Option<PublicKey>>>,
+    /// node services
+    services: Arc<AsyncRwLock<HashSet<PeerService>>>,
     chunk_list: Arc<FuturesMutex<ChunkList<TRANSPORT_MTU>>>,
 }
 
@@ -155,6 +160,7 @@ impl IceTransportInterface<Event, AcChannel<Event>> for DefaultTransport {
             pending_candidates: Arc::new(FuturesMutex::new(vec![])),
             data_channel: Arc::new(FuturesMutex::new(None)),
             public_key: Arc::new(AsyncRwLock::new(None)),
+            services: Default::default(),
             event_sender,
             chunk_list: Default::default(),
         }
@@ -248,6 +254,10 @@ impl IceTransportInterface<Event, AcChannel<Event>> for DefaultTransport {
 
     async fn pubkey(&self) -> PublicKey {
         self.public_key.read().await.unwrap()
+    }
+
+    async fn services(&self) -> HashSet<PeerService> {
+        self.services.read().await.clone()
     }
 
     async fn send_message(&self, msg: &Bytes) -> Result<()> {
@@ -443,6 +453,7 @@ impl IceTrickleScheme for DefaultTransport {
         &self,
         session_manager: &SessionManager,
         kind: RTCSdpType,
+        services: HashSet<PeerService>,
     ) -> Result<Encoded> {
         tracing::trace!("prepareing handshake info {:?}", kind);
         let sdp = match kind {
@@ -468,6 +479,7 @@ impl IceTrickleScheme for DefaultTransport {
         let data = TricklePayload {
             sdp: serde_json::to_string(&sdp).unwrap(),
             candidates: local_candidates_json,
+            services: services.into_iter().collect_vec(),
         };
         tracing::trace!("prepared hanshake info :{:?}", data);
         let resp = MessagePayload::new_direct(
@@ -498,6 +510,10 @@ impl IceTrickleScheme for DefaultTransport {
                     let mut pk = self.public_key.write().await;
                     *pk = Some(public_key);
                 };
+                {
+                    let mut services = self.services.write().await;
+                    *services = data.data.services.into_iter().collect();
+                }
                 Ok(data.addr)
             }
             _ => {
@@ -672,7 +688,7 @@ pub mod tests {
 
         // Peer 1 try to connect peer 2
         let handshake_info1 = transport1
-            .get_handshake_info(&sm1, RTCSdpType::Offer)
+            .get_handshake_info(&sm1, RTCSdpType::Offer, HashSet::new())
             .await?;
         assert_eq!(
             transport1.ice_gathering_state().await,
@@ -714,7 +730,7 @@ pub mod tests {
 
         // Peer 2 create answer
         let handshake_info2 = transport2
-            .get_handshake_info(&sm2, RTCSdpType::Answer)
+            .get_handshake_info(&sm2, RTCSdpType::Answer, HashSet::new())
             .await?;
 
         assert_eq!(

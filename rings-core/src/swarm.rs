@@ -1,4 +1,5 @@
 //! Tranposrt managerment
+use std::collections::HashSet;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -25,6 +26,7 @@ use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
 use crate::message::ValidatorFn;
+use crate::peer::PeerService;
 use crate::prelude::RTCSdpType;
 use crate::session::SessionManager;
 use crate::session::Ttl;
@@ -46,10 +48,9 @@ pub struct SwarmBuilder {
     dht_did: Option<Did>,
     dht_succ_max: u8,
     dht_storage: PersistenceStorage,
+    services: HashSet<PeerService>,
     session_manager: Option<SessionManager>,
     session_ttl: Option<Ttl>,
-    /// support forward request to hidden services.
-    hidden_service_port: Option<usize>,
 }
 
 impl SwarmBuilder {
@@ -67,14 +68,14 @@ impl SwarmBuilder {
             dht_did: None,
             dht_succ_max: 3,
             dht_storage,
+            services: HashSet::new(),
             session_manager: None,
             session_ttl: None,
-            hidden_service_port: None,
         }
     }
 
-    pub fn hidden_service(mut self, port: Option<usize>) -> Self {
-        self.hidden_service_port = port;
+    pub fn service(mut self, service: PeerService) -> Self {
+        self.services.insert(service);
         self
     }
 
@@ -131,8 +132,8 @@ impl SwarmBuilder {
             ice_servers: self.ice_servers,
             external_address: self.external_address,
             dht: Arc::new(dht),
+            services: self.services,
             session_manager,
-            hidden_service_port: self.hidden_service_port,
         })
     }
 }
@@ -145,8 +146,7 @@ pub struct Swarm {
     pub(crate) transport_event_channel: Channel<Event>,
     pub(crate) external_address: Option<String>,
     pub(crate) dht: Arc<PeerRing>,
-    /// support forward request to hidden services.
-    pub hidden_service_port: Option<usize>,
+    pub(crate) services: HashSet<PeerService>,
     session_manager: SessionManager,
 }
 
@@ -161,6 +161,10 @@ impl Swarm {
 
     pub fn session_manager(&self) -> &SessionManager {
         &self.session_manager
+    }
+
+    pub fn services(&self) -> HashSet<PeerService> {
+        self.services.clone()
     }
 
     pub fn create_message_handler(
@@ -192,9 +196,12 @@ impl Swarm {
                     self.pop_pending_transport(id)?;
                 }
                 match self.get_transport(did) {
-                    Some(_) => {
+                    Some(trans) => {
                         let payload = MessagePayload::new_direct(
-                            Message::JoinDHT(message::JoinDHT { id: did }),
+                            Message::JoinDHT(message::JoinDHT {
+                                id: did,
+                                services: trans.services().await.into_iter().collect(),
+                            }),
                             &self.session_manager,
                             self.dht.id,
                         )?;
@@ -309,7 +316,7 @@ impl Swarm {
 
         let transport = self.new_transport().await?;
         let handshake_info = transport
-            .get_handshake_info(self.session_manager(), RTCSdpType::Offer)
+            .get_handshake_info(self.session_manager(), RTCSdpType::Offer, self.services())
             .await?;
         self.push_pending_transport(&transport)?;
 

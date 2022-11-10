@@ -102,7 +102,11 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
                         .register_remote_info(msg.handshake_info.to_owned().into())
                         .await?;
                     let handshake_info = trans
-                        .get_handshake_info(self.swarm.session_manager(), RTCSdpType::Answer)
+                        .get_handshake_info(
+                            self.swarm.session_manager(),
+                            RTCSdpType::Answer,
+                            self.swarm.services(),
+                        )
                         .await?
                         .to_string();
                     self.send_report_message(
@@ -685,13 +689,13 @@ pub mod tests {
         let ev_1 = node1.listen_once().await.unwrap();
         assert_eq!(ev_1.addr, did1);
         assert_eq!(ev_1.relay.path, vec![did1]);
-        assert!(matches!(ev_1.data, Message::JoinDHT(JoinDHT{id}) if id == did2));
+        assert!(matches!(ev_1.data, Message::JoinDHT(JoinDHT{id, ..}) if id == did2));
 
         // 2 JoinDHT
         let ev_2 = node2.listen_once().await.unwrap();
         assert_eq!(ev_2.addr, did2);
         assert_eq!(ev_2.relay.path, vec![did2]);
-        assert!(matches!(ev_2.data, Message::JoinDHT(JoinDHT{id}) if id == did1));
+        assert!(matches!(ev_2.data, Message::JoinDHT(JoinDHT{id, ..}) if id == did1));
 
         // 1->2 FindSuccessorSend
         let ev_1 = node1.listen_once().await.unwrap();
@@ -804,13 +808,13 @@ pub mod tests {
         let ev_1 = node1.listen_once().await.unwrap();
         assert_eq!(ev_1.addr, did1);
         assert_eq!(ev_1.relay.path, vec![did1]);
-        assert!(matches!(ev_1.data, Message::JoinDHT(JoinDHT{id}) if id == did3));
+        assert!(matches!(ev_1.data, Message::JoinDHT(JoinDHT{id, ..}) if id == did3));
 
         // 3 JoinDHT
         let ev_3 = node3.listen_once().await.unwrap();
         assert_eq!(ev_3.addr, did3);
         assert_eq!(ev_3.relay.path, vec![did3]);
-        assert!(matches!(ev_3.data, Message::JoinDHT(JoinDHT{id}) if id == did1));
+        assert!(matches!(ev_3.data, Message::JoinDHT(JoinDHT{id, ..}) if id == did1));
 
         // 3->1 FindSuccessorSend
         let ev_1 = node1.listen_once().await.unwrap();

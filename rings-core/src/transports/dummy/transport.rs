@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -5,6 +6,7 @@ use async_lock::RwLock as AsyncRwLock;
 use async_trait::async_trait;
 use bytes::Bytes;
 use dashmap::DashMap;
+use itertools::Itertools;
 use lazy_static::lazy_static;
 use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
@@ -17,6 +19,7 @@ use crate::err::Result;
 use crate::message::Encoded;
 use crate::message::Encoder;
 use crate::message::MessagePayload;
+use crate::peer::PeerService;
 use crate::session::SessionManager;
 use crate::transports::helper::Promise;
 use crate::transports::helper::State;
@@ -47,6 +50,7 @@ pub struct DummyTransport {
     event_sender: EventSender,
     ice_connection_state: Arc<Mutex<Option<RTCIceConnectionState>>>,
     public_key: Arc<AsyncRwLock<Option<PublicKey>>>,
+    services: Arc<AsyncRwLock<HashSet<PeerService>>>,
 }
 
 impl PartialEq for DummyTransport {
@@ -66,6 +70,7 @@ impl IceTransportInterface<Event, AcChannel<Event>> for DummyTransport {
             event_sender,
             ice_connection_state: Arc::new(Mutex::new(None)),
             public_key: Arc::new(AsyncRwLock::new(None)),
+            services: Default::default(),
         }
     }
 
@@ -125,6 +130,10 @@ impl IceTransportInterface<Event, AcChannel<Event>> for DummyTransport {
         self.public_key.read().await.unwrap()
     }
 
+    async fn services(&self) -> HashSet<PeerService> {
+        self.services.read().await.clone()
+    }
+
     async fn send_message(&self, msg: &Bytes) -> Result<()> {
         self.remote_sender()
             .send(Event::DataChannelMessage(msg.to_vec()))
@@ -146,10 +155,12 @@ impl IceTrickleScheme for DummyTransport {
         &self,
         session_manager: &SessionManager,
         _kind: RTCSdpType,
+        services: HashSet<PeerService>,
     ) -> Result<Encoded> {
         let data = TricklePayload {
             sdp: serde_json::to_string(&self.id).unwrap(),
             candidates: vec![],
+            services: services.into_iter().collect_vec(),
         };
         let resp =
             MessagePayload::new_direct(data, session_manager, session_manager.authorizer()?)?;
@@ -176,7 +187,12 @@ impl IceTrickleScheme for DummyTransport {
                 if let Ok(public_key) = data.origin_verification.session.authorizer_pubkey() {
                     let mut pk = self.public_key.write().await;
                     *pk = Some(public_key);
-                };
+                }
+
+                {
+                    let mut services = self.services.write().await;
+                    *services = data.data.services.into_iter().collect();
+                }
 
                 let local_did = self.pubkey().await.address().into();
                 HUB.dids.insert(self.id, local_did);
@@ -276,7 +292,7 @@ pub mod tests {
 
         // Peer 1 try to connect peer 2
         let handshake_info1 = transport1
-            .get_handshake_info(&sm1, RTCSdpType::Offer)
+            .get_handshake_info(&sm1, RTCSdpType::Offer, HashSet::new())
             .await?;
 
         // Peer 2 got offer then register
@@ -285,7 +301,7 @@ pub mod tests {
 
         // Peer 2 create answer
         let handshake_info2 = transport2
-            .get_handshake_info(&sm2, RTCSdpType::Answer)
+            .get_handshake_info(&sm2, RTCSdpType::Answer, HashSet::new())
             .await?;
 
         // Peer 1 got answer then register

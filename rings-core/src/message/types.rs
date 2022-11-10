@@ -8,6 +8,7 @@ use crate::ecc::PublicKey;
 use crate::ecc::SecretKey;
 use crate::err::Error;
 use crate::err::Result;
+use crate::peer::PeerService;
 
 /// MessageType use to ask for connection, send to remote with transport_uuid and handshake_info.
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
@@ -58,6 +59,7 @@ pub struct NotifyPredecessorReport {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct JoinDHT {
     pub id: Did,
+    pub services: Vec<PeerService>,
 }
 
 /// MessageType use to leave chord ring.
