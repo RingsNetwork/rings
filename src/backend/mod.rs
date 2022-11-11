@@ -12,10 +12,12 @@ pub mod text;
 
 pub mod types;
 
+#[cfg(feature = "node")]
 use arrayref::array_refs;
 #[cfg(feature = "node")]
 use async_trait::async_trait;
 
+#[cfg(feature = "node")]
 use self::http_server::HttpServer;
 #[cfg(feature = "node")]
 use self::ipfs::IpfsEndpoint;

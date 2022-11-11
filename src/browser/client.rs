@@ -559,14 +559,56 @@ impl Client {
     pub fn send_http_request(
         &self,
         destination: String,
+        method: String,
         url: String,
         timeout: u64,
+        headers: JsValue,
+        body: Option<js_sys::Uint8Array>,
     ) -> js_sys::Promise {
         let p = self.processor.clone();
 
         future_to_promise(async move {
+            let method = http::Method::from_str(method.as_str()).map_err(JsError::from)?;
+
+            let headers: Vec<(String, String)> = if headers.is_null() {
+                Vec::new()
+            } else if headers.is_object() {
+                let mut header_vec: Vec<(String, String)> = Vec::new();
+                let obj = js_sys::Object::from(headers);
+                let entries = js_sys::Object::entries(&obj);
+                for e in entries.iter() {
+                    if js_sys::Array::is_array(&e) {
+                        let arr = js_sys::Array::from(&e);
+                        if arr.length() != 2 {
+                            continue;
+                        }
+                        let k = arr.get(0).as_string().unwrap();
+                        let v = arr.get(1);
+                        if v.is_string() {
+                            let v = v.as_string().unwrap();
+                            header_vec.push((k, v))
+                        }
+                    }
+                }
+                header_vec
+            } else {
+                Vec::new()
+            };
+
+            let b = body.map(|item| Bytes::from(item.to_vec()));
+
             let tx_id = p
-                .send_http_request_message(destination.as_str(), url.as_str(), timeout)
+                .send_http_request_message(
+                    destination.as_str(),
+                    method,
+                    url.as_str(),
+                    timeout,
+                    &headers
+                        .iter()
+                        .map(|(k, v)| (k.as_str(), v.as_str()))
+                        .collect::<Vec<(&str, &str)>>(),
+                    b,
+                )
                 .await
                 .map_err(JsError::from)?;
             Ok(JsValue::from_str(tx_id.to_string().as_str()))
