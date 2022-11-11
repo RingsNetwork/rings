@@ -280,9 +280,8 @@ struct SendHttpGetCommand {
     #[arg(long="header", short = 'H', action=ArgAction::Append, help = "headers append to the request")]
     headers: Vec<String>,
 
-    #[arg(long, help = "set content of http body")]
-    body: Option<String>,
-
+    // #[arg(long, help = "set content of http body")]
+    // body: Option<String>,
     #[arg(default_value = "30000")]
     timeout: u64,
 }
@@ -474,7 +473,7 @@ async fn main() -> anyhow::Result<()> {
                             )
                         })
                         .collect::<Vec<(_, _)>>(),
-                    args.body,
+                    None,
                 )
                 .await?
                 .display();
