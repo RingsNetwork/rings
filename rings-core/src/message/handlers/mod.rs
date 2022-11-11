@@ -1,3 +1,5 @@
+#![warn(missing_docs)]
+
 use std::sync::Arc;
 
 use async_recursion::async_recursion;
@@ -27,21 +29,26 @@ pub mod storage;
 /// Operator and Handler for SubRing
 pub mod subring;
 
+/// Trait of message callback.
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait MessageCallback {
+    /// Message handler for custom message
     async fn custom_message(
         &self,
         handler: &MessageHandler,
         ctx: &MessagePayload<Message>,
         msg: &MaybeEncrypted<CustomMessage>,
     );
+    /// Message handler for builtin message
     async fn builtin_message(&self, handler: &MessageHandler, ctx: &MessagePayload<Message>);
 }
 
+/// Trait of message validator.
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait MessageValidator {
+    /// Externality validator
     async fn validate(
         &self,
         handler: &MessageHandler,
@@ -49,20 +56,24 @@ pub trait MessageValidator {
     ) -> Option<String>;
 }
 
+/// Boxed Callback, for non-wasm, it should be Sized, Send and Sync.
 #[cfg(not(feature = "wasm"))]
 pub type CallbackFn = Box<dyn MessageCallback + Send + Sync>;
 
+/// Boxed Callback
 #[cfg(feature = "wasm")]
 pub type CallbackFn = Box<dyn MessageCallback>;
 
+/// Boxed Validator
 #[cfg(not(feature = "wasm"))]
 pub type ValidatorFn = Box<dyn MessageValidator + Send + Sync>;
 
+/// Boxed Validator, for non-wasm, it should be Sized, Send and Sync.
 #[cfg(feature = "wasm")]
 pub type ValidatorFn = Box<dyn MessageValidator>;
 
-#[derive(Clone)]
 /// MessageHandler will manage resources.
+#[derive(Clone)]
 pub struct MessageHandler {
     /// DHT implement chord algorithm.
     dht: Arc<PeerRing>,
@@ -74,13 +85,16 @@ pub struct MessageHandler {
     validator: Arc<Option<ValidatorFn>>,
 }
 
+/// Generic trait for handle message ,inspired by Actor-Model.
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait HandleMsg<T> {
+    /// Message handler.
     async fn handle(&self, ctx: &MessagePayload<Message>, msg: &T) -> Result<()>;
 }
 
 impl MessageHandler {
+    /// Create a new MessageHandler Instance.
     pub fn new(
         swarm: Arc<Swarm>,
         callback: Option<CallbackFn>,
@@ -94,6 +108,7 @@ impl MessageHandler {
         }
     }
 
+    /// Invoke callback, which will be call after builtin handler.
     async fn invoke_callback(&self, payload: &MessagePayload<Message>) -> Result<()> {
         if let Some(ref cb) = *self.callback {
             match payload.data {
@@ -112,6 +127,7 @@ impl MessageHandler {
         Ok(())
     }
 
+    /// Validate message.
     async fn validate(&self, payload: &MessagePayload<Message>) -> Result<()> {
         if let Some(ref v) = *self.validator {
             v.validate(self, payload)
@@ -122,12 +138,14 @@ impl MessageHandler {
         Ok(())
     }
 
+    /// Decrypt message.
     pub fn decrypt_msg(&self, msg: &MaybeEncrypted<CustomMessage>) -> Result<CustomMessage> {
         let key = self.swarm.session_manager().session_key()?;
         let (decrypt_msg, _) = msg.to_owned().decrypt(key)?;
         Ok(decrypt_msg)
     }
 
+    /// Handle builtin message.
     #[cfg_attr(feature = "wasm", async_recursion(?Send))]
     #[cfg_attr(not(feature = "wasm"), async_recursion)]
     pub async fn handle_payload(&self, payload: &MessagePayload<Message>) -> Result<()> {
