@@ -1,5 +1,7 @@
 #![allow(clippy::ptr_offset_with_cast)]
 //! An Backend HTTP service handle custom message from `MessageHandler` as CallbackFn.
+#[cfg(feature = "node")]
+pub mod http_server;
 /// The trait `rings_core::handlers::MessageCallback` is implemented on `Backend` type
 /// To indicate to handle custom message relay, which use as a callbackFn in `MessageHandler`
 // pub mod http_server;
@@ -14,6 +16,7 @@ use arrayref::array_refs;
 #[cfg(feature = "node")]
 use async_trait::async_trait;
 
+use self::http_server::HttpServer;
 #[cfg(feature = "node")]
 use self::ipfs::IpfsEndpoint;
 #[cfg(feature = "node")]
@@ -32,7 +35,7 @@ use crate::prelude::*;
 /// A Backend struct contains http_server.
 #[cfg(feature = "node")]
 pub struct Backend {
-    ipfs_endpoint: Option<IpfsEndpoint>,
+    http_server: HttpServer,
     text_endpoint: TextEndpoint,
 }
 
@@ -40,7 +43,9 @@ pub struct Backend {
 impl Backend {
     pub fn new(ipfs_gateway: Option<String>) -> Self {
         Self {
-            ipfs_endpoint: ipfs_gateway.map(|s| IpfsEndpoint::new(s.as_str())),
+            http_server: HttpServer {
+                ipfs_endpoint: ipfs_gateway.map(|s| IpfsEndpoint::new(s.as_str())),
+            },
             text_endpoint: TextEndpoint::default(),
         }
     }
@@ -88,13 +93,9 @@ impl MessageCallback for Backend {
                     .await
             }
             MessageType::HttpRequest => {
-                if let Some(ipfs_endpoint) = self.ipfs_endpoint.as_ref() {
-                    ipfs_endpoint
-                        .handle_message(handler, ctx, &relay, &msg)
-                        .await
-                } else {
-                    return;
-                }
+                self.http_server
+                    .handle_message(handler, ctx, &relay, &msg)
+                    .await
             }
             _ => {
                 tracing::debug!(

@@ -242,7 +242,7 @@ impl Client {
         let params2 = serde_json::to_value(http_request).map_err(|e| anyhow::anyhow!(e))?;
         self.client
             .call_method(
-                Method::SendTo.as_str(),
+                Method::SendHttpRequest.as_str(),
                 Params::Array(vec![json!(did), params2]),
             )
             .await
@@ -253,7 +253,7 @@ impl Client {
     pub async fn send_simple_text_message(&self, did: &str, text: &str) -> Output<()> {
         self.client
             .call_method(
-                Method::SendTo.as_str(),
+                Method::SendSimpleText.as_str(),
                 Params::Array(vec![json!(did), json!(text)]),
             )
             .await

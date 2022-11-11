@@ -1,150 +1,82 @@
-use reqwest::header::HeaderMap;
-use reqwest::header::HeaderName;
-use serde::Deserialize;
-use serde::Serialize;
+use std::collections::HashMap;
 
-use super::types::HttpServerRequest;
-use super::types::HttpServerResponse;
+use bytes::Bytes;
+
+use super::ipfs::IpfsEndpoint;
+use super::types::BackendMessage;
+use super::types::HttpResponse;
+use super::types::MessageEndpoint;
+use crate::backend::types::send_chunk_report_message;
+use crate::backend::types::HttpRequest;
+use crate::backend::types::MessageType;
+use crate::consts::BACKEND_MTU;
 use crate::error::Error;
 use crate::error::Result;
+use crate::prelude::rings_core::chunk::ChunkList;
 use crate::prelude::*;
 
-#[derive(Deserialize, Serialize, Debug)]
-pub struct BackendConfig {
-    pub http_server: Option<HttpServerConfig>,
-}
-
-#[derive(Deserialize, Serialize, Debug)]
-pub struct HttpServerConfig {
-    pub port: u16,
-}
-
 pub struct HttpServer {
-    client: reqwest::Client,
-    port: u16,
+    pub ipfs_endpoint: Option<IpfsEndpoint>,
 }
 
 impl HttpServer {
-    pub fn new(config: HttpServerConfig) -> Self {
-        Self {
-            client: reqwest::Client::new(),
-            port: config.port,
+    pub fn default_resp() -> HttpResponse {
+        HttpResponse {
+            status: http::StatusCode::METHOD_NOT_ALLOWED.as_u16(),
+            headers: HashMap::new(),
+            body: None,
         }
-    }
-
-    pub async fn execute(&self, request: HttpServerRequest) -> Result<HttpServerResponse> {
-        let url = format!(
-            "http://localhost:{}/{}",
-            self.port,
-            request.path.trim_start_matches('/')
-        );
-        let method = try_into_method(&request.method)?;
-
-        let mut headers = HeaderMap::new();
-        for (name, value) in request.headers {
-            headers.insert(
-                name.parse::<HeaderName>().map_err(|_| {
-                    Error::HttpRequestError(format!("Invalid header name: {}", &name))
-                })?,
-                value.parse().map_err(|_| {
-                    Error::HttpRequestError(format!("Invalid header value: {}", &value))
-                })?,
-            );
-        }
-
-        let req = self
-            .client
-            .request(method, &url)
-            .headers(headers)
-            .timeout(std::time::Duration::from_secs(15));
-        let req = request
-            .body
-            .map_or(req.try_clone().unwrap(), |body| req.body(body));
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| Error::HttpRequestError(e.to_string()))?;
-
-        let status = resp.status().as_u16();
-        let headers = resp
-            .headers()
-            .iter()
-            .map(|(key, value)| (key.to_string(), value.to_str().unwrap().to_string()))
-            .collect();
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| Error::HttpRequestError(e.to_string()))?;
-
-        Ok(HttpServerResponse {
-            status,
-            headers,
-            body: Some(body),
-        })
     }
 }
 
-fn try_into_method(s: &str) -> Result<http::Method> {
-    match s.to_uppercase().as_str() {
-        "GET" => Ok(http::Method::GET),
-        "POST" => Ok(http::Method::POST),
-        "PUT" => Ok(http::Method::PUT),
-        "DELETE" => Ok(http::Method::DELETE),
-        "HEAD" => Ok(http::Method::HEAD),
-        "OPTIONS" => Ok(http::Method::OPTIONS),
-        "TRACE" => Ok(http::Method::TRACE),
-        "CONNECT" => Ok(http::Method::CONNECT),
-        "PATCH" => Ok(http::Method::PATCH),
-        _ => Err(Error::HttpRequestError("Invalid HTTP method".to_string())),
+#[async_trait::async_trait]
+impl MessageEndpoint for HttpServer {
+    async fn handle_message(
+        &self,
+        handler: &MessageHandler,
+        ctx: &MessagePayload<Message>,
+        relay: &MessageRelay,
+        msg: &BackendMessage,
+    ) -> Result<()> {
+        let req: HttpRequest =
+            bincode::deserialize(msg.data.as_slice()).map_err(|_| Error::DeserializeError)?;
+
+        let uri = req
+            .url
+            .parse::<http::Uri>()
+            .map_err(|_| Error::InvalidUrl)?;
+        tracing::debug!("Sending HTTP request: {:?}", req);
+        let schema = uri.scheme().ok_or(Error::InvalidUrl)?;
+        let resp = if schema.as_str().eq_ignore_ascii_case("ipfs")
+            || schema.as_str().eq_ignore_ascii_case("ipns")
+        {
+            if let Some(ipfs_endpoint) = self.ipfs_endpoint.as_ref() {
+                ipfs_endpoint.execute(req).await?
+            } else {
+                HttpServer::default_resp()
+            }
+        } else {
+            HttpServer::default_resp()
+        };
+        tracing::debug!("Sending HTTP response: {:?}", resp);
+        tracing::debug!("resp_bytes start gzip");
+        let json_bytes = bincode::serialize(&resp)
+            .map_err(|_| Error::JsonSerializeError)?
+            .into();
+        let resp_bytes =
+            message::encode_data_gzip(&json_bytes, 9).map_err(|_| Error::EncodedError)?;
+
+        let resp_bytes: Bytes =
+            BackendMessage::new(MessageType::HttpResponse, resp_bytes.to_vec().as_slice()).into();
+        tracing::debug!("resp_bytes gzip_data len: {}", resp_bytes.len());
+
+        let chunks = ChunkList::<BACKEND_MTU>::from(&resp_bytes);
+        for c in chunks {
+            tracing::debug!("Chunk data len: {}", c.data.len());
+            let bytes = c.to_bincode().map_err(|_| Error::SerializeError)?;
+            tracing::debug!("Chunk len: {}", bytes.len());
+            send_chunk_report_message(handler, ctx, relay, bytes.to_vec().as_slice()).await?;
+        }
+        Ok(())
     }
 }
-
-// impl super::Backend {
-//     pub async fn handle_http_server_request_message(
-//         &self,
-//         req: &HttpServerRequest,
-//         handler: &MessageHandler,
-//         ctx: &MessagePayload<Message>,
-//         relay: &MessageRelay,
-//     ) -> anyhow::Result<()> {
-//         if let Some(ref server) = self.http_server {
-//             let resp =
-//                 server
-//                     .execute(req.to_owned())
-//                     .await
-//                     .unwrap_or_else(|e| HttpServerResponse {
-//                         status: 500,
-//                         headers: HashMap::new(),
-//                         body: Some(Bytes::from(e.to_string())),
-//                     });
-//             tracing::debug!("Sending HTTP server response: {:?}", resp);
-//
-//             let resp = BackendMessage::HttpServer(HttpServerMessage::Response(resp));
-//             tracing::debug!("resp_bytes start gzip");
-//             let json_bytes = bincode::serialize(&resp)?.into();
-//             let resp_bytes = message::encode_data_gzip(&json_bytes, 9)?;
-//             tracing::debug!("resp_bytes gzip_data len: {}", resp_bytes.len());
-//
-//             let chunks = ChunkList::<BACKEND_MTU>::from(&resp_bytes);
-//             for c in chunks {
-//                 tracing::debug!("Chunk data len: {}", c.data.len());
-//                 let bytes = c.to_bincode()?;
-//                 tracing::debug!("Chunk len: {}", bytes.len());
-//                 let mut new_bytes: Vec<u8> = Vec::with_capacity(bytes.len() + 4);
-//                 new_bytes.extend_from_slice(&[1, 1, 0, 0]);
-//                 new_bytes.extend_from_slice(&bytes);
-//
-//                 handler
-//                     .send_report_message(
-//                         Message::custom(&new_bytes, None)?,
-//                         ctx.tx_id,
-//                         relay.clone(),
-//                     )
-//                     .await?;
-//             }
-//         } else {
-//             tracing::warn!("HTTP server is not configured");
-//         }
-//         Ok(())
-//     }
-// }
