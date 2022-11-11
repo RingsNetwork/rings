@@ -1,5 +1,12 @@
 #![warn(missing_docs)]
-
+/// Message Flow:
+/// +---------+    +--------------------------------+
+/// | Message | -> | MessageHandler.handler_payload |
+/// +---------+    +--------------------------------+
+///                 ||                            ||
+///     +--------------------------+  +--------------------------+
+///     | Builtin Message Callback |  |  Custom Message Callback |
+///     +--------------------------+  +--------------------------+
 use std::sync::Arc;
 
 use async_recursion::async_recursion;
