@@ -1,3 +1,5 @@
+#![warn(missing_docs)]
+//! http server handler
 use std::collections::HashMap;
 
 use bytes::Bytes;
@@ -15,12 +17,16 @@ use crate::error::Result;
 use crate::prelude::rings_core::chunk::ChunkList;
 use crate::prelude::*;
 
+/// HttpServer struct
+/// * ipfs_endpoint
 pub struct HttpServer {
+    /// ipfs_endpoint to serve ipfs request
     pub ipfs_endpoint: Option<IpfsEndpoint>,
 }
 
 impl HttpServer {
-    pub fn default_resp() -> HttpResponse {
+    /// not allowd response
+    pub fn not_allowed_resp() -> HttpResponse {
         HttpResponse {
             status: http::StatusCode::METHOD_NOT_ALLOWED.as_u16(),
             headers: HashMap::new(),
@@ -53,10 +59,10 @@ impl MessageEndpoint for HttpServer {
             if let Some(ipfs_endpoint) = self.ipfs_endpoint.as_ref() {
                 ipfs_endpoint.execute(req).await?
             } else {
-                HttpServer::default_resp()
+                HttpServer::not_allowed_resp()
             }
         } else {
-            HttpServer::default_resp()
+            HttpServer::not_allowed_resp()
         };
         tracing::debug!("Sending HTTP response: {:?}", resp);
         tracing::debug!("resp_bytes start gzip");

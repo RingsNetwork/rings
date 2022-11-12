@@ -1,4 +1,5 @@
 #![allow(clippy::ptr_offset_with_cast)]
+#![warn(missing_docs)]
 //! An Backend HTTP service handle custom message from `MessageHandler` as CallbackFn.
 #[cfg(feature = "node")]
 pub mod http_server;
@@ -43,6 +44,8 @@ pub struct Backend {
 
 #[cfg(feature = "node")]
 impl Backend {
+    /// new backend
+    /// - `ipfs_gateway`
     pub fn new(ipfs_gateway: Option<String>) -> Self {
         Self {
             http_server: HttpServer {

@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 //! Backend Message Types.
 use std::collections::HashMap;
 use std::time::Duration;
@@ -13,10 +14,15 @@ use crate::prelude::*;
 /// Enum MessageType of BackendMessage.
 #[derive(Debug, Clone)]
 pub enum MessageType {
+    /// unknown
     Unknown = 0,
+    /// empty
     Empty,
+    /// simple texte
     SimpleText,
+    /// http reuqest
     HttpRequest,
+    /// http response
     HttpResponse,
 }
 
@@ -51,14 +57,25 @@ impl From<MessageType> for u16 {
 }
 
 /// BackendMessage struct for CustomMessage.
+/// A backend message body's length at least is 32bytes;
+/// - `message_type`: [u8;2]
+/// - `extra data`: [u8;30]
+/// - `message data`: [u8]
 #[derive(Debug, Clone)]
 pub struct BackendMessage {
+    /// message_type
     pub message_type: MessageType,
+    /// extra bytes
     pub extra: [u8; 30],
+    /// data body
     pub data: Vec<u8>,
 }
 
 impl BackendMessage {
+    /// generate new BackendMessage with
+    /// - `message_type`
+    /// - `data`
+    /// extra will be [0u8;30]
     pub fn new(message_type: MessageType, data: &[u8]) -> Self {
         Self {
             message_type,
@@ -124,7 +141,9 @@ impl From<BackendMessage> for Vec<u8> {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HttpServerMessage {
+    /// Request Http Message
     Request(HttpServerRequest),
+    /// Response Http Message
     Response(HttpServerResponse),
 }
 
@@ -135,10 +154,10 @@ pub enum HttpServerMessage {
 /// - `body`:  Message chunk split into bytes and send to remote client.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HttpServerRequest {
-    pub method: String,
-    pub path: String,
-    pub headers: HashMap<String, String>,
-    pub body: Option<Bytes>,
+    method: String,
+    path: String,
+    headers: HashMap<String, String>,
+    body: Option<Bytes>,
 }
 
 /// HttpServerResponse
@@ -147,9 +166,9 @@ pub struct HttpServerRequest {
 /// - `body`:  Message chunk split into bytes and send back to remote client.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HttpServerResponse {
-    pub status: u16,
-    pub headers: HashMap<String, String>,
-    pub body: Option<Bytes>,
+    status: u16,
+    headers: HashMap<String, String>,
+    body: Option<Bytes>,
 }
 
 /// Timeout in milliseconds.
@@ -174,8 +193,10 @@ impl From<u64> for Timeout {
     }
 }
 
+/// Message Endpoint trait
 #[async_trait::async_trait]
 pub trait MessageEndpoint {
+    /// handle_message
     async fn handle_message(
         &self,
         handler: &MessageHandler,
@@ -203,11 +224,16 @@ fn default_http_request_body() -> Option<Bytes> {
 /// - `timeout`: timeout in milliseconds
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HttpRequest {
+    /// method
     pub method: String,
+    /// url
     pub url: String,
+    /// timeout
     #[serde(default)]
     pub timeout: Timeout,
+    /// headers
     pub headers: HashMap<String, String>,
+    /// body
     #[serde(default = "default_http_request_body")]
     pub body: Option<Bytes>,
 }
@@ -231,6 +257,12 @@ impl From<(http::Method, &str, u64)> for HttpRequest {
 }
 
 impl HttpRequest {
+    /// new HttpRequest
+    /// - `method`
+    /// - `url`
+    /// - `timeout`
+    /// - `headers`
+    /// - `body`: optional
     pub fn new<U>(
         method: http::Method,
         url: U,
@@ -252,6 +284,13 @@ impl HttpRequest {
             body,
         }
     }
+
+    /// new `GET` HttpRequest
+    /// - `method`
+    /// - `url`
+    /// - `timeout`
+    /// - `headers`
+    /// - `body`: optional
     pub fn get<U>(url: U, timeout: Timeout, headers: &[(U, U)], body: Option<Bytes>) -> Self
     where U: ToString {
         Self::new(http::Method::GET, url, timeout, headers, body)
@@ -263,11 +302,19 @@ impl HttpRequest {
 /// - `body`: Message chunk split bytes and send back to remote clinet.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HttpResponse {
+    /// status
     pub status: u16,
+    /// headers
     pub headers: HashMap<String, String>,
+    /// body: optional
     pub body: Option<Bytes>,
 }
 
+/// send chunk report message
+/// - `handler`
+/// - `ctx`
+/// - `relay`
+/// - `data`
 pub async fn send_chunk_report_message(
     handler: &MessageHandler,
     ctx: &MessagePayload<Message>,

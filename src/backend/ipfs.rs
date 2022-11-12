@@ -1,3 +1,9 @@
+#![warn(missing_docs)]
+//! ipfs endpoint
+//! handle ipfs reuqest
+//! support schemas:
+//! * ipfs://
+//! * ipns://
 use std::sync::Arc;
 
 use http::method;
@@ -8,6 +14,9 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::prelude::*;
 
+/// ipfs endpoint struct
+/// * client: http client
+/// * ipfs api gateway url
 #[derive(Debug, Clone)]
 pub struct IpfsEndpoint {
     client: Arc<reqwest::Client>,
@@ -15,6 +24,7 @@ pub struct IpfsEndpoint {
 }
 
 impl IpfsEndpoint {
+    /// new IpfsEndpoint by ipfs api_gateway
     pub fn new(api_gateway: &str) -> Self {
         Self {
             client: Arc::new(reqwest::Client::new()),

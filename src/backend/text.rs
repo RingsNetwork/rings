@@ -1,3 +1,5 @@
+#![warn(missing_docs)]
+//! handle simple text message
 use std::str;
 
 use async_trait::async_trait;
@@ -8,6 +10,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::prelude::*;
 
+/// SimpleTextEndpoint
 #[derive(Clone, Debug, Default)]
 pub struct TextEndpoint;
 

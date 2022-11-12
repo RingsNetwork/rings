@@ -73,7 +73,7 @@ struct DaemonCommand {
     #[arg(long, env, help = "external ip address")]
     pub external_ip: Option<String>,
 
-    #[arg(long, env, help = "ipfs ApiGateway")]
+    #[arg(long, env, help = "ipfs api-gateway")]
     pub ipfs_gateway: Option<String>,
 }
 
