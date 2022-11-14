@@ -1,5 +1,5 @@
 //! Tranposrt managerment
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -48,7 +48,7 @@ pub struct SwarmBuilder {
     dht_did: Option<Did>,
     dht_succ_max: u8,
     dht_storage: PersistenceStorage,
-    services: HashSet<PeerService>,
+    services: BTreeSet<PeerService>,
     session_manager: Option<SessionManager>,
     session_ttl: Option<Ttl>,
 }
@@ -68,7 +68,7 @@ impl SwarmBuilder {
             dht_did: None,
             dht_succ_max: 3,
             dht_storage,
-            services: HashSet::new(),
+            services: BTreeSet::new(),
             session_manager: None,
             session_ttl: None,
         }
@@ -146,7 +146,7 @@ pub struct Swarm {
     pub(crate) transport_event_channel: Channel<Event>,
     pub(crate) external_address: Option<String>,
     pub(crate) dht: Arc<PeerRing>,
-    pub(crate) services: HashSet<PeerService>,
+    pub(crate) services: BTreeSet<PeerService>,
     session_manager: SessionManager,
 }
 
@@ -163,7 +163,7 @@ impl Swarm {
         &self.session_manager
     }
 
-    pub fn services(&self) -> HashSet<PeerService> {
+    pub fn services(&self) -> BTreeSet<PeerService> {
         self.services.clone()
     }
 
@@ -200,7 +200,7 @@ impl Swarm {
                         let payload = MessagePayload::new_direct(
                             Message::JoinDHT(message::JoinDHT {
                                 id: did,
-                                services: trans.services().await.into_iter().collect(),
+                                services: trans.services().await,
                             }),
                             &self.session_manager,
                             self.dht.id,

@@ -1,11 +1,10 @@
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use itertools::Itertools;
 use js_sys::Uint8Array;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -66,7 +65,7 @@ pub struct WasmTransport {
     channel: Option<Arc<RtcDataChannel>>,
     event_sender: EventSender,
     public_key: Arc<RwLock<Option<PublicKey>>>,
-    services: Arc<RwLock<HashSet<PeerService>>>,
+    services: Arc<RwLock<BTreeSet<PeerService>>>,
     chunk_list: Arc<Mutex<ChunkList<TRANSPORT_MTU>>>,
 }
 
@@ -239,7 +238,7 @@ impl IceTransportInterface<Event, CbChannel<Event>> for WasmTransport {
         self.public_key.read().unwrap().unwrap()
     }
 
-    async fn services(&self) -> HashSet<PeerService> {
+    async fn services(&self) -> BTreeSet<PeerService> {
         self.services.read().unwrap().clone()
     }
 
@@ -528,7 +527,7 @@ impl IceTrickleScheme for WasmTransport {
         &self,
         session_manager: &SessionManager,
         kind: Self::SdpType,
-        services: HashSet<PeerService>,
+        services: BTreeSet<PeerService>,
     ) -> Result<Encoded> {
         let sdp = match kind {
             RtcSdpType::Answer => self.get_answer().await?,
@@ -552,7 +551,7 @@ impl IceTrickleScheme for WasmTransport {
             sdp: serde_json::to_string(&RtcSessionDescriptionWrapper::from(sdp))
                 .map_err(Error::Deserialize)?,
             candidates: local_candidates_json,
-            services: services.into_iter().collect_vec(),
+            services,
         };
         tracing::debug!("prepared handshake info :{:?}", data);
         let resp = MessagePayload::new_direct(
@@ -575,7 +574,7 @@ impl IceTrickleScheme for WasmTransport {
                 }
                 {
                     let mut services = self.services.write().unwrap();
-                    *services = data.data.services.into_iter().collect();
+                    *services = data.data.services;
                 }
                 let sdp: RtcSessionDescriptionWrapper = data.data.sdp.try_into()?;
                 self.set_remote_description(sdp.to_owned()).await?;

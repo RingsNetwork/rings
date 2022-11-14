@@ -42,7 +42,7 @@ impl HandleMsg<JoinDHT> for MessageHandler {
         // here is two situation.
         // finger table just have no other node(beside next), it will be a `create` op
         // otherwise, it will be a `send` op
-        match self.dht.join(msg.id)? {
+        match self.dht.join(msg.id, msg.services.clone())? {
             PeerRingAction::None => Ok(()),
             PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessor(id)) => {
                 // if there is only two nodes A, B, it may cause recursion

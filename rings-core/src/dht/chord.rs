@@ -1,5 +1,6 @@
 //! Chord algorithm implement.
 #![warn(missing_docs)]
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
@@ -20,6 +21,7 @@ use super::FingerTable;
 use crate::dht::Did;
 use crate::err::Error;
 use crate::err::Result;
+use crate::peer::PeerService;
 use crate::storage::MemStorage;
 use crate::storage::PersistenceStorage;
 use crate::storage::PersistenceStorageReadAndWrite;
@@ -204,13 +206,13 @@ impl PeerRing {
 
 impl Chord<PeerRingAction> for PeerRing {
     /// join a PeerRing ring containing node id .
-    fn join(&self, id: Did) -> Result<PeerRingAction> {
+    fn join(&self, id: Did, services: BTreeSet<PeerService>) -> Result<PeerRingAction> {
         let mut finger = self.lock_finger()?;
         let mut successor = self.lock_successor()?;
         if id == self.id {
             return Ok(PeerRingAction::None);
         }
-        finger.join(id);
+        finger.join(id, services);
         if self.bias(id) < self.bias(successor.max()) || successor.is_none() {
             // 1) id should follows self.id
             // 2) #fff should follow #001 because id space is a Finate Ring
@@ -480,10 +482,10 @@ mod tests {
             node_a.lock_successor()?.list()
         );
         // for increase seq join
-        node_a.join(a)?;
+        node_a.join(a, BTreeSet::new())?;
         // Node A wont add self to finder
         assert!(node_a.lock_finger()?.is_empty());
-        node_a.join(b)?;
+        node_a.join(b, BTreeSet::new())?;
         // b is very far away from a
         // a.finger should store did as range
         // [(a, a+2), (a+2, a+4), (a+4, a+8), ..., (a+2^159, a + 2^160)]
@@ -507,13 +509,13 @@ mod tests {
 
         // Node A starts to query node b for it's successor
         assert_eq!(
-            node_a.join(b)?,
+            node_a.join(b, BTreeSet::new())?,
             PeerRingAction::RemoteAction(b, RemoteAction::FindSuccessor(a))
         );
         assert!(node_a.lock_successor()?.list().contains(&b));
         // Node A keep querying node b for it's successor
         assert_eq!(
-            node_a.join(c)?,
+            node_a.join(c, BTreeSet::new())?,
             PeerRingAction::RemoteAction(c, RemoteAction::FindSuccessor(a))
         );
 
@@ -545,22 +547,22 @@ mod tests {
         // for decrease seq join
         let node_d = PeerRing::new_with_storage(d, 3, db_2);
         assert_eq!(
-            node_d.join(c)?,
+            node_d.join(c, BTreeSet::new())?,
             PeerRingAction::RemoteAction(c, RemoteAction::FindSuccessor(d))
         );
         assert_eq!(
-            node_d.join(b)?,
+            node_d.join(b, BTreeSet::new())?,
             PeerRingAction::RemoteAction(b, RemoteAction::FindSuccessor(d))
         );
         assert_eq!(
-            node_d.join(a)?,
+            node_d.join(a, BTreeSet::new())?,
             PeerRingAction::RemoteAction(a, RemoteAction::FindSuccessor(d))
         );
 
         // for over half ring join
         let node_d = PeerRing::new_with_storage(d, 3, db_3);
         assert_eq!(
-            node_d.join(a)?,
+            node_d.join(a, BTreeSet::new())?,
             PeerRingAction::RemoteAction(a, RemoteAction::FindSuccessor(d))
         );
         // for a ring a, a is over 2^152 far away from d
@@ -572,7 +574,7 @@ mod tests {
         assert_eq!(node_d.lock_finger()?[0], Some(a));
         // when b insearted a is still more close to d
         assert_eq!(
-            node_d.join(b)?,
+            node_d.join(b, BTreeSet::new())?,
             PeerRingAction::RemoteAction(b, RemoteAction::FindSuccessor(d))
         );
         assert!(d + Did::from(BigUint::from(2u16).pow(159)) > b);
@@ -602,8 +604,8 @@ mod tests {
         let node1 = PeerRing::new_with_storage(did1, 3, db_1);
         let node2 = PeerRing::new_with_storage(did2, 3, db_2);
 
-        node1.join(did2)?;
-        node2.join(did1)?;
+        node1.join(did2, BTreeSet::new())?;
+        node2.join(did1, BTreeSet::new())?;
         assert!(node1.lock_successor()?.list().contains(&did2));
         assert!(node2.lock_successor()?.list().contains(&did1));
 
@@ -642,8 +644,8 @@ mod tests {
         let node1 = PeerRing::new_with_storage(did1, 3, db_1);
         let node2 = PeerRing::new_with_storage(did2, 3, db_2);
 
-        node1.join(did2)?;
-        node2.join(did1)?;
+        node1.join(did2, BTreeSet::new())?;
+        node2.join(did1, BTreeSet::new())?;
         assert!(node1.lock_successor()?.list().contains(&did2));
         assert!(node2.lock_successor()?.list().contains(&did1));
         let pos_159 = did2 + Did::from(BigUint::from(2u16).pow(159));

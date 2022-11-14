@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 /// Used to describe what services peer offers
-#[derive(Debug, Serialize, Deserialize, Eq, PartialEq, Hash, Clone)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, PartialOrd, Eq, Ord, Hash, Clone)]
 pub enum PeerService {
     /// Services defined externally
     Custom(String),

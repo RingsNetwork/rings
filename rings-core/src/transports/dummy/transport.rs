@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -6,7 +6,6 @@ use async_lock::RwLock as AsyncRwLock;
 use async_trait::async_trait;
 use bytes::Bytes;
 use dashmap::DashMap;
-use itertools::Itertools;
 use lazy_static::lazy_static;
 use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
@@ -50,7 +49,7 @@ pub struct DummyTransport {
     event_sender: EventSender,
     ice_connection_state: Arc<Mutex<Option<RTCIceConnectionState>>>,
     public_key: Arc<AsyncRwLock<Option<PublicKey>>>,
-    services: Arc<AsyncRwLock<HashSet<PeerService>>>,
+    services: Arc<AsyncRwLock<BTreeSet<PeerService>>>,
 }
 
 impl PartialEq for DummyTransport {
@@ -130,7 +129,7 @@ impl IceTransportInterface<Event, AcChannel<Event>> for DummyTransport {
         self.public_key.read().await.unwrap()
     }
 
-    async fn services(&self) -> HashSet<PeerService> {
+    async fn services(&self) -> BTreeSet<PeerService> {
         self.services.read().await.clone()
     }
 
@@ -155,12 +154,12 @@ impl IceTrickleScheme for DummyTransport {
         &self,
         session_manager: &SessionManager,
         _kind: RTCSdpType,
-        services: HashSet<PeerService>,
+        services: BTreeSet<PeerService>,
     ) -> Result<Encoded> {
         let data = TricklePayload {
             sdp: serde_json::to_string(&self.id).unwrap(),
             candidates: vec![],
-            services: services.into_iter().collect_vec(),
+            services,
         };
         let resp =
             MessagePayload::new_direct(data, session_manager, session_manager.authorizer()?)?;
@@ -191,7 +190,7 @@ impl IceTrickleScheme for DummyTransport {
 
                 {
                     let mut services = self.services.write().await;
-                    *services = data.data.services.into_iter().collect();
+                    *services = data.data.services;
                 }
 
                 let local_did = self.pubkey().await.address().into();
@@ -292,7 +291,7 @@ pub mod tests {
 
         // Peer 1 try to connect peer 2
         let handshake_info1 = transport1
-            .get_handshake_info(&sm1, RTCSdpType::Offer, HashSet::new())
+            .get_handshake_info(&sm1, RTCSdpType::Offer, BTreeSet::new())
             .await?;
 
         // Peer 2 got offer then register
@@ -301,7 +300,7 @@ pub mod tests {
 
         // Peer 2 create answer
         let handshake_info2 = transport2
-            .get_handshake_info(&sm2, RTCSdpType::Answer, HashSet::new())
+            .get_handshake_info(&sm2, RTCSdpType::Answer, BTreeSet::new())
             .await?;
 
         // Peer 1 got answer then register

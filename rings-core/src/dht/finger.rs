@@ -1,4 +1,6 @@
 #![warn(missing_docs)]
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::ops::Index;
 
 use num_bigint::BigUint;
@@ -8,6 +10,7 @@ use serde::Serialize;
 use super::did::BiasId;
 use crate::dht::Did;
 use crate::err::Result;
+use crate::peer::PeerService;
 
 /// Finger table of Chord DHT
 /// Ring's finger table is implemented with BiasRing
@@ -16,6 +19,7 @@ pub struct FingerTable {
     id: Did,
     size: usize,
     finger: Vec<Option<Did>>,
+    services: BTreeMap<Did, BTreeSet<PeerService>>,
     pub(super) fix_finger_index: u8,
 }
 
@@ -26,6 +30,7 @@ impl FingerTable {
             id,
             size,
             finger: vec![None; size],
+            services: BTreeMap::new(),
             fix_finger_index: 0,
         }
     }
@@ -99,10 +104,12 @@ impl FingerTable {
                 self.finger[idx] = fix_id
             }
         }
+
+        self.services.remove(&id);
     }
 
     /// Join FingerTable
-    pub fn join(&mut self, id: Did) {
+    pub fn join(&mut self, id: Did, services: BTreeSet<PeerService>) {
         let bid: BiasId = id.bias(&self.id);
 
         for k in 0u32..self.size as u32 {
@@ -129,6 +136,8 @@ impl FingerTable {
                 }
             }
         }
+
+        self.services.insert(id, services);
     }
 
     /// Check finger is contains some node
@@ -159,6 +168,17 @@ impl FingerTable {
     /// get finger list
     pub fn list(&self) -> &Vec<Option<Did>> {
         &self.finger
+    }
+
+    /// filter peers by service then generate a new table
+    pub fn filter(&self, service: PeerService) -> Self {
+        let mut ft = FingerTable::new(self.id, self.size);
+        for (id, services) in self.services.iter() {
+            if services.contains(&service) {
+                ft.join(*id, services.clone());
+            }
+        }
+        ft
     }
 
     #[cfg(test)]
@@ -388,4 +408,7 @@ mod test {
             None
         ]);
     }
+
+    #[test]
+    fn test_filter() {}
 }

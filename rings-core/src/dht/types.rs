@@ -1,14 +1,17 @@
 //! DHT types about `Storage` and `Subring`.
+use std::collections::BTreeSet;
+
 use async_trait::async_trait;
 
 use super::did::Did;
 use super::subring::SubRing;
 use super::vnode::VirtualNode;
 use crate::err::Result;
+use crate::peer::PeerService;
 
 /// Trait for DHT implement base method.
 pub trait Chord<A> {
-    fn join(&self, id: Did) -> Result<A>;
+    fn join(&self, id: Did, services: BTreeSet<PeerService>) -> Result<A>;
     fn find_successor(&self, id: Did) -> Result<A>;
 }
 

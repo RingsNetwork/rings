@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
@@ -59,7 +61,7 @@ pub struct NotifyPredecessorReport {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct JoinDHT {
     pub id: Did,
-    pub services: Vec<PeerService>,
+    pub services: BTreeSet<PeerService>,
 }
 
 /// MessageType use to leave chord ring.

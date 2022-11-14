@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use async_lock::RwLock as AsyncRwLock;
@@ -7,7 +7,6 @@ use bytes::Bytes;
 use futures::future::join_all;
 use futures::future::BoxFuture;
 use futures::lock::Mutex as FuturesMutex;
-use itertools::Itertools;
 use serde_json;
 use webrtc::api::setting_engine::SettingEngine;
 use webrtc::api::APIBuilder;
@@ -70,7 +69,7 @@ pub struct DefaultTransport {
     /// node publicKey
     public_key: Arc<AsyncRwLock<Option<PublicKey>>>,
     /// node services
-    services: Arc<AsyncRwLock<HashSet<PeerService>>>,
+    services: Arc<AsyncRwLock<BTreeSet<PeerService>>>,
     chunk_list: Arc<FuturesMutex<ChunkList<TRANSPORT_MTU>>>,
 }
 
@@ -256,7 +255,7 @@ impl IceTransportInterface<Event, AcChannel<Event>> for DefaultTransport {
         self.public_key.read().await.unwrap()
     }
 
-    async fn services(&self) -> HashSet<PeerService> {
+    async fn services(&self) -> BTreeSet<PeerService> {
         self.services.read().await.clone()
     }
 
@@ -453,7 +452,7 @@ impl IceTrickleScheme for DefaultTransport {
         &self,
         session_manager: &SessionManager,
         kind: RTCSdpType,
-        services: HashSet<PeerService>,
+        services: BTreeSet<PeerService>,
     ) -> Result<Encoded> {
         tracing::trace!("prepareing handshake info {:?}", kind);
         let sdp = match kind {
@@ -479,7 +478,7 @@ impl IceTrickleScheme for DefaultTransport {
         let data = TricklePayload {
             sdp: serde_json::to_string(&sdp).unwrap(),
             candidates: local_candidates_json,
-            services: services.into_iter().collect_vec(),
+            services,
         };
         tracing::trace!("prepared hanshake info :{:?}", data);
         let resp = MessagePayload::new_direct(
@@ -512,7 +511,7 @@ impl IceTrickleScheme for DefaultTransport {
                 };
                 {
                     let mut services = self.services.write().await;
-                    *services = data.data.services.into_iter().collect();
+                    *services = data.data.services;
                 }
                 Ok(data.addr)
             }
@@ -688,7 +687,7 @@ pub mod tests {
 
         // Peer 1 try to connect peer 2
         let handshake_info1 = transport1
-            .get_handshake_info(&sm1, RTCSdpType::Offer, HashSet::new())
+            .get_handshake_info(&sm1, RTCSdpType::Offer, BTreeSet::new())
             .await?;
         assert_eq!(
             transport1.ice_gathering_state().await,
@@ -730,7 +729,7 @@ pub mod tests {
 
         // Peer 2 create answer
         let handshake_info2 = transport2
-            .get_handshake_info(&sm2, RTCSdpType::Answer, HashSet::new())
+            .get_handshake_info(&sm2, RTCSdpType::Answer, BTreeSet::new())
             .await?;
 
         assert_eq!(

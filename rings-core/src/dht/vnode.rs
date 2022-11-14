@@ -1,4 +1,5 @@
 #![warn(missing_docs)]
+use std::collections::BTreeSet;
 use std::str::FromStr;
 
 use num_bigint::BigUint;
@@ -109,7 +110,7 @@ impl VirtualNode {
                     serde_json::from_str(&decoded_a).map_err(Error::Deserialize)?;
                 let subring_b: SubRing =
                     serde_json::from_str(&decoded_b).map_err(Error::Deserialize)?;
-                subring_a.finger.join(subring_b.creator);
+                subring_a.finger.join(subring_b.creator, BTreeSet::new());
                 subring_a.try_into()
             }
         }

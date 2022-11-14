@@ -1,4 +1,5 @@
 #![warn(missing_docs)]
+use std::collections::BTreeSet;
 use std::str::FromStr;
 
 use async_trait::async_trait;
@@ -46,7 +47,7 @@ impl SubRingManager<PeerRingAction> for PeerRing {
                 let id = id.to_owned();
                 if let Ok(subring) = self.get_subring(rid).await {
                     let mut sr = subring;
-                    sr.finger.join(id);
+                    sr.finger.join(id, BTreeSet::new());
                     self.store_subring(&sr).await?;
                 }
                 Ok(PeerRingAction::None)

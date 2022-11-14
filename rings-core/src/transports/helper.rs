@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -26,7 +27,7 @@ pub struct State {
 pub struct TricklePayload {
     pub sdp: String,
     pub candidates: Vec<IceCandidate>,
-    pub services: Vec<PeerService>,
+    pub services: BTreeSet<PeerService>,
 }
 
 /// Custom futures Promise act like js Promise.
