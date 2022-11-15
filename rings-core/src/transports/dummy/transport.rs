@@ -162,7 +162,7 @@ impl IceTrickleScheme for DummyTransport {
             services,
         };
         let resp =
-            MessagePayload::new_direct(data, session_manager, session_manager.authorizer()?)?;
+            MessagePayload::new_send(data, session_manager, None, session_manager.authorizer()?)?;
         Ok(resp.encode()?)
     }
 

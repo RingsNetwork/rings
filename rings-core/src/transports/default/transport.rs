@@ -481,9 +481,10 @@ impl IceTrickleScheme for DefaultTransport {
             services,
         };
         tracing::trace!("prepared hanshake info :{:?}", data);
-        let resp = MessagePayload::new_direct(
+        let resp = MessagePayload::new_send(
             data,
             session_manager,
+            None,                                     // This is a fake next_hop
             session_manager.authorizer()?.to_owned(), // This is a fake destination
         )?;
         Ok(resp.encode()?)

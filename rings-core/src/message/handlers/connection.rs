@@ -50,7 +50,7 @@ impl HandleMsg<JoinDHT> for MessageHandler {
                 // B.successor == A
                 // A.find_successor(B)
                 if next != ctx.addr {
-                    self.send_direct_message(
+                    self.send_message(
                         Message::FindSuccessorSend(FindSuccessorSend {
                             id,
                             strict: false,
@@ -246,7 +246,7 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
                     PeerRingRemoteAction::SyncVNodeWithSuccessor(data),
                 )) = self.dht.sync_with_successor(msg.id).await
                 {
-                    self.send_direct_message(
+                    self.send_message(
                         Message::SyncVNodeWithSuccessor(SyncVNodeWithSuccessor { data }),
                         next,
                     )

@@ -193,7 +193,6 @@ async fn test_handle_notify_predecessor() -> Result<()> {
                         id: key1.address().into(),
                     }),
                     swarm2.did(),
-                    swarm2.did(),
                 )
                 .await
                 .unwrap();
@@ -252,7 +251,6 @@ async fn test_handle_find_successor_increase() -> Result<()> {
                         id: swarm1.did(),
                     }),
                     swarm2.did(),
-                    swarm2.did(),
                 )
                 .await
                 .unwrap();
@@ -272,7 +270,6 @@ async fn test_handle_find_successor_increase() -> Result<()> {
                         then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect),
                         strict: true
                     }),
-                    swarm1.did(),
                     swarm1.did(),
                 )
                 .await
@@ -339,7 +336,6 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
                         id: swarm1.did(),
                     }),
                     swarm2.did(),
-                    swarm2.did(),
                 )
                 .await
                 .unwrap();
@@ -358,7 +354,6 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
                         then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect),
                         strict: true
                     }),
-                    swarm1.did(),
                     swarm1.did(),
                 )
                 .await
@@ -428,7 +423,6 @@ async fn test_handle_storage() -> Result<()> {
                          id: swarm1.did()
                      }),
                      swarm2.did(),
-                     swarm2.did(),
                  )
                  .await
                  .unwrap();
@@ -445,7 +439,6 @@ async fn test_handle_storage() -> Result<()> {
                  Message::StoreVNode(message::StoreVNode {
                      data: vec![vnode.clone()]
                  }),
-                 swarm2.did(),
                  swarm2.did(),
              )
              .await

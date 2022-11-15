@@ -360,7 +360,7 @@ impl Processor {
         // self.swarm.do_send_payload(address, payload)
         let uuid = self
             .swarm
-            .send_direct_message(msg, destination)
+            .send_message(msg, destination)
             .await
             .map_err(Error::SendMessage)?;
         Ok(uuid)

@@ -1,8 +1,8 @@
 #![warn(missing_docs)]
 /// Message Flow:
-/// +---------+    +--------------------------------+
-/// | Message | -> | MessageHandler.handler_payload |
-/// +---------+    +--------------------------------+
+/// +---------+    +-------------------------------+
+/// | Message | -> | MessageHandler.handle_payload |
+/// +---------+    +-------------------------------+
 ///                 ||                            ||
 ///     +--------------------------+  +--------------------------+
 ///     | Builtin Message Callback |  |  Custom Message Callback |
@@ -236,6 +236,10 @@ impl PayloadSender<Message> for MessageHandler {
     async fn do_send_payload(&self, did: Did, payload: MessagePayload<Message>) -> Result<()> {
         self.swarm.do_send_payload(did, payload).await
     }
+
+    async fn find_next_hop(&self, destination: Did) -> Result<Option<Did>> {
+        PayloadSender::<Message>::find_next_hop(self.swarm.as_ref(), destination).await
+    }
 }
 
 #[cfg(not(feature = "wasm"))]
@@ -363,7 +367,7 @@ pub mod tests {
         let handler2 = swarm2.create_message_handler(Some(cb2), None);
 
         handler1
-            .send_direct_message(
+            .send_message(
                 Message::custom("Hello world 1 to 2 - 1".as_bytes(), None)?,
                 did2,
             )
@@ -371,7 +375,7 @@ pub mod tests {
             .unwrap();
 
         handler1
-            .send_direct_message(
+            .send_message(
                 Message::custom("Hello world 1 to 2 - 2".as_bytes(), None)?,
                 did2,
             )
@@ -379,7 +383,7 @@ pub mod tests {
             .unwrap();
 
         handler2
-            .send_direct_message(
+            .send_message(
                 Message::custom("Hello world 2 to 1 - 1".as_bytes(), None)?,
                 did1,
             )
@@ -387,7 +391,7 @@ pub mod tests {
             .unwrap();
 
         handler1
-            .send_direct_message(
+            .send_message(
                 Message::custom("Hello world 1 to 2 - 3".as_bytes(), None)?,
                 did2,
             )
@@ -395,7 +399,7 @@ pub mod tests {
             .unwrap();
 
         handler2
-            .send_direct_message(
+            .send_message(
                 Message::custom("Hello world 2 to 1 - 2".as_bytes(), None)?,
                 did1,
             )

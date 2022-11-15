@@ -49,7 +49,7 @@ impl TChordStorage for Swarm {
             }
             PeerRingAction::None => Ok(()),
             PeerRingAction::RemoteAction(next, _) => {
-                self.send_direct_message(Message::SearchVNode(SearchVNode { id: *id }), next)
+                self.send_message(Message::SearchVNode(SearchVNode { id: *id }), next)
                     .await?;
                 Ok(())
             }
@@ -62,7 +62,7 @@ impl TChordStorage for Swarm {
         match self.dht.store(vnode).await? {
             PeerRingAction::None => Ok(()),
             PeerRingAction::RemoteAction(target, PeerRingRemoteAction::FindAndStore(vnode)) => {
-                self.send_direct_message(
+                self.send_message(
                     Message::StoreVNode(StoreVNode { data: vec![vnode] }),
                     target,
                 )
@@ -165,11 +165,8 @@ impl HandleMsg<SyncVNodeWithSuccessor> for MessageHandler {
                     next,
                     PeerRingRemoteAction::FindAndStore(peer),
                 )) => {
-                    self.send_direct_message(
-                        Message::StoreVNode(StoreVNode { data: vec![peer] }),
-                        next,
-                    )
-                    .await?;
+                    self.send_message(Message::StoreVNode(StoreVNode { data: vec![peer] }), next)
+                        .await?;
                     Ok(())
                 }
                 Ok(_) => unreachable!(),

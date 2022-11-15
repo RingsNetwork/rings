@@ -109,14 +109,14 @@ where T: Serialize + DeserializeOwned
     pub fn new_send(
         data: T,
         session_manager: &SessionManager,
-        next_hop: Did,
+        next_hop: Option<Did>,
         destination: Did,
     ) -> Result<Self> {
         let relay = MessageRelay::new(
             RelayMethod::SEND,
             vec![session_manager.authorizer()?],
             None,
-            Some(next_hop),
+            next_hop,
             destination,
         );
         Self::new(data, session_manager, OriginVerificationGen::Origin, relay)
@@ -132,12 +132,6 @@ where T: Serialize + DeserializeOwned
         let mut pl = Self::new(data, session_manager, OriginVerificationGen::Origin, relay)?;
         pl.tx_id = tx_id;
         Ok(pl)
-    }
-
-    /// new_direct is A specific new_send, with same next_hop and destination
-    /// just like a normal server-client base model.
-    pub fn new_direct(data: T, session_manager: &SessionManager, destination: Did) -> Result<Self> {
-        Self::new_send(data, session_manager, destination, destination)
     }
 
     pub fn is_expired(&self) -> bool {
@@ -213,8 +207,15 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
 {
     fn session_manager(&self) -> &SessionManager;
     async fn do_send_payload(&self, did: Did, payload: MessagePayload<T>) -> Result<()>;
+    async fn find_next_hop(&self, destination: Did) -> Result<Option<Did>>;
 
     async fn send_payload(&self, payload: MessagePayload<T>) -> Result<()> {
+        let mut payload = payload;
+
+        if payload.relay.next_hop.is_none() {
+            payload.relay.next_hop = self.find_next_hop(payload.relay.destination).await?;
+        }
+
         if let Some(did) = payload.relay.next_hop {
             self.do_send_payload(did, payload).await
         } else {
@@ -222,14 +223,8 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
         }
     }
 
-    async fn send_message(&self, msg: T, next_hop: Did, destination: Did) -> Result<uuid::Uuid> {
-        let payload = MessagePayload::new_send(msg, self.session_manager(), next_hop, destination)?;
-        self.send_payload(payload.clone()).await?;
-        Ok(payload.tx_id)
-    }
-
-    async fn send_direct_message(&self, msg: T, destination: Did) -> Result<uuid::Uuid> {
-        let payload = MessagePayload::new_direct(msg, self.session_manager(), destination)?;
+    async fn send_message(&self, msg: T, destination: Did) -> Result<uuid::Uuid> {
+        let payload = MessagePayload::new_send(msg, self.session_manager(), None, destination)?;
         self.send_payload(payload.clone()).await?;
         Ok(payload.tx_id)
     }
@@ -295,7 +290,7 @@ pub mod test {
         let key = SecretKey::random();
         let destination = SecretKey::random().address().into();
         let session = SessionManager::new_with_seckey(&key, None).unwrap();
-        MessagePayload::new_direct(data, &session, destination).unwrap()
+        MessagePayload::new_send(data, &session, Some(destination), destination).unwrap()
     }
 
     #[test]

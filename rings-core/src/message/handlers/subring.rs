@@ -51,7 +51,7 @@ impl SubRingOperator for Swarm {
         let did = Did::from_str(&address.inner())?;
         match self.dht.join_subring(&self.dht.id, &did).await {
             Ok(PeerRingAction::RemoteAction(next, RemoteAction::FindAndJoinSubRing(rid))) => {
-                self.send_direct_message(Message::JoinSubRing(JoinSubRing { did: rid }), next)
+                self.send_message(Message::JoinSubRing(JoinSubRing { did: rid }), next)
                     .await?;
                 Ok(())
             }

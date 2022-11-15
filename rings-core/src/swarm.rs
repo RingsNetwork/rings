@@ -197,12 +197,13 @@ impl Swarm {
                 }
                 match self.get_transport(did) {
                     Some(trans) => {
-                        let payload = MessagePayload::new_direct(
+                        let payload = MessagePayload::new_send(
                             Message::JoinDHT(message::JoinDHT {
                                 id: did,
                                 services: trans.services().await,
                             }),
                             &self.session_manager,
+                            Some(self.dht.id),
                             self.dht.id,
                         )?;
                         Ok(Some(payload))
@@ -221,9 +222,10 @@ impl Swarm {
                 if let Some(t) = self.get_transport(did) {
                     if t.id == uuid && self.remove_transport(did).is_some() {
                         tracing::info!("[Swarm::ConnectClosed] transport {:?} closed", uuid);
-                        let payload = MessagePayload::new_direct(
+                        let payload = MessagePayload::new_send(
                             Message::LeaveDHT(message::LeaveDHT { id: did }),
                             &self.session_manager,
+                            Some(self.dht.id),
                             self.dht.id,
                         )?;
                         return Ok(Some(payload));
@@ -324,16 +326,7 @@ impl Swarm {
             transport_uuid: transport.id.to_string(),
             handshake_info: handshake_info.to_string(),
         });
-        let next_hop = {
-            match self.dht.find_successor(did)? {
-                PeerRingAction::Some(node) => Some(node),
-                PeerRingAction::RemoteAction(node, _) => Some(node),
-                _ => None,
-            }
-        }
-        .ok_or(Error::NoNextHop)?;
-        tracing::debug!("next_hop: {:?}", next_hop);
-        self.send_message(connect_msg, next_hop, did).await?;
+        self.send_message(connect_msg, did).await?;
         Ok(transport)
     }
 }
@@ -370,6 +363,22 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Deb
         tracing::info!("send data len: {}", data.len());
         transport.wait_for_data_channel_open().await?;
         transport.send_message(&data).await
+    }
+
+    async fn find_next_hop(&self, destination: Did) -> Result<Option<Did>> {
+        let next_hop = {
+            if self.get_transport(destination).is_some() {
+                Some(destination)
+            } else {
+                match self.dht.find_successor(destination)? {
+                    PeerRingAction::Some(node) => Some(node),
+                    PeerRingAction::RemoteAction(node, _) => Some(node),
+                    _ => None,
+                }
+            }
+        };
+        tracing::debug!("next_hop: {:?}", next_hop);
+        Ok(next_hop)
     }
 }
 
