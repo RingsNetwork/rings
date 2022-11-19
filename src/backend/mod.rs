@@ -3,11 +3,6 @@
 //! An Backend HTTP service handle custom message from `MessageHandler` as CallbackFn.
 #[cfg(feature = "node")]
 pub mod http_server;
-/// The trait `rings_core::handlers::MessageCallback` is implemented on `Backend` type
-/// To indicate to handle custom message relay, which use as a callbackFn in `MessageHandler`
-// pub mod http_server;
-#[cfg(feature = "node")]
-pub mod ipfs;
 #[cfg(feature = "node")]
 pub mod text;
 
@@ -17,11 +12,15 @@ pub mod types;
 use arrayref::array_refs;
 #[cfg(feature = "node")]
 use async_trait::async_trait;
+#[cfg(feature = "node")]
+use serde::Deserialize;
+#[cfg(feature = "node")]
+use serde::Serialize;
 
 #[cfg(feature = "node")]
 use self::http_server::HttpServer;
 #[cfg(feature = "node")]
-use self::ipfs::IpfsEndpoint;
+use self::http_server::HttpServerConfig;
 #[cfg(feature = "node")]
 use self::text::TextEndpoint;
 #[cfg(feature = "node")]
@@ -38,19 +37,25 @@ use crate::prelude::*;
 /// A Backend struct contains http_server.
 #[cfg(feature = "node")]
 pub struct Backend {
-    http_server: HttpServer,
+    http_server: Option<HttpServer>,
     text_endpoint: TextEndpoint,
+}
+
+/// BackendConfig
+#[cfg(feature = "node")]
+#[derive(Deserialize, Serialize, Debug)]
+pub struct BackendConfig {
+    /// http_server
+    pub http_server: Option<HttpServerConfig>,
 }
 
 #[cfg(feature = "node")]
 impl Backend {
     /// new backend
     /// - `ipfs_gateway`
-    pub fn new(ipfs_gateway: Option<String>) -> Self {
+    pub fn new(http_server_config: Option<HttpServerConfig>) -> Self {
         Self {
-            http_server: HttpServer {
-                ipfs_endpoint: ipfs_gateway.map(|s| IpfsEndpoint::new(s.as_str())),
-            },
+            http_server: http_server_config.map(|c| c.into()),
             text_endpoint: TextEndpoint::default(),
         }
     }
@@ -98,9 +103,11 @@ impl MessageCallback for Backend {
                     .await
             }
             MessageType::HttpRequest => {
-                self.http_server
-                    .handle_message(handler, ctx, &relay, &msg)
-                    .await
+                if let Some(server) = self.http_server.as_ref() {
+                    server.handle_message(handler, ctx, &relay, &msg).await
+                } else {
+                    Ok(())
+                }
             }
             _ => {
                 tracing::debug!(

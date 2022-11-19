@@ -220,14 +220,14 @@ fn default_http_request_body() -> Option<Bytes> {
 ///    * HEAD
 ///    * TRACE
 ///    * CONNECT
-/// - `url`: http URL
+/// - `path`: hidden service path
 /// - `timeout`: timeout in milliseconds
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HttpRequest {
     /// method
     pub method: String,
     /// url
-    pub url: String,
+    pub path: String,
     /// timeout
     #[serde(default)]
     pub timeout: Timeout,
@@ -239,10 +239,10 @@ pub struct HttpRequest {
 }
 
 impl From<(http::Method, String, Timeout)> for HttpRequest {
-    fn from((method, url, timeout): (http::Method, String, Timeout)) -> Self {
+    fn from((method, path, timeout): (http::Method, String, Timeout)) -> Self {
         Self {
             method: method.to_string(),
-            url,
+            path,
             timeout,
             headers: HashMap::new(),
             body: None,
@@ -265,7 +265,7 @@ impl HttpRequest {
     /// - `body`: optional
     pub fn new<U>(
         method: http::Method,
-        url: U,
+        path: U,
         timeout: Timeout,
         headers: &[(U, U)],
         body: Option<Bytes>,
@@ -275,7 +275,7 @@ impl HttpRequest {
     {
         Self {
             method: method.to_string(),
-            url: url.to_string(),
+            path: path.to_string(),
             timeout,
             headers: headers
                 .iter()

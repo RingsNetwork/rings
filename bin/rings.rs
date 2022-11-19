@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use clap::ArgAction;
@@ -7,6 +8,7 @@ use clap::Parser;
 use clap::Subcommand;
 use rings_core::message::CallbackFn;
 use rings_node::backend::Backend;
+use rings_node::backend::BackendConfig;
 use rings_node::cli::Client;
 use rings_node::logging::node::init_logging;
 use rings_node::logging::node::LogLevel;
@@ -19,6 +21,7 @@ use rings_node::prelude::rings_core::types::message::MessageListener;
 use rings_node::processor::Processor;
 use rings_node::service::run_service;
 use rings_node::util;
+use rings_node::util::loader::ResourceLoader;
 
 #[derive(Parser, Debug)]
 #[command(about, version, author)]
@@ -73,8 +76,8 @@ struct DaemonCommand {
     #[arg(long, env, help = "external ip address")]
     pub external_ip: Option<String>,
 
-    #[arg(long, env, help = "ipfs api-gateway")]
-    pub ipfs_gateway: Option<String>,
+    #[arg(long, env, help = "backend service config")]
+    pub backend: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -225,8 +228,6 @@ struct PendingCloseTransportCommand {
 #[command(rename_all = "kebab-case")]
 enum SendCommand {
     Raw(SendRawCommand),
-    // Http(SendHttpCommand),
-    #[command(subcommand)]
     Http(SendHttpCommand),
     SimpleText(SendSimpleTextCommand),
 }
@@ -241,35 +242,30 @@ struct SendRawCommand {
     text: String,
 }
 
-#[derive(Subcommand, Debug)]
-#[command(rename_all = "kebab-case")]
-enum SendHttpCommand {
-    Get(SendHttpGetCommand),
-    // Post(SendHttpPostCommand),
-    //  Put(SendHttpPutCommand),
+#[derive(Args, Debug)]
+struct SendHttpCommand {
+    #[command(flatten)]
+    client_args: ClientArgs,
+
+    to_did: String,
+
+    #[arg(default_value = "/")]
+    path: String,
+
+    #[arg(default_value = "get")]
+    method: String,
+
+    #[arg(long="header", short = 'H', action=ArgAction::Append, help = "headers append to the request")]
+    headers: Vec<String>,
+
+    // #[arg(long, help = "set content of http body")]
+    // body: Option<String>,
+    #[arg(default_value = "30000")]
+    timeout: u64,
 }
 
-// #[derive(Args, Debug)]
-// struct SendHttpCommand {
-//     #[command(flatten)]
-//     client_args: ClientArgs,
-//
-//     #[arg(long="header", short = 'H', action=ArgAction::Append, help = "headers append to the request")]
-//     headers: Vec<String>,
-//
-//     #[arg(long, help = "set content of http body")]
-//     body: Option<String>,
-//
-//     method: String,
-//
-//     to_did: String,
-//
-//     #[arg(default_value = "/")]
-//     path: String,
-// }
-
 #[derive(Args, Debug)]
-struct SendHttpGetCommand {
+struct SendHttpPostCommand {
     #[command(flatten)]
     client_args: ClientArgs,
 
@@ -302,7 +298,7 @@ async fn daemon_run(
     stuns: &str,
     stabilize_timeout: usize,
     external_ip: Option<String>,
-    ipfs_gateway: Option<String>,
+    backend: Option<String>,
 ) -> anyhow::Result<()> {
     let storage = PersistenceStorage::new().await?;
 
@@ -313,7 +309,12 @@ async fn daemon_run(
             .build()?,
     );
 
-    let callback: Option<CallbackFn> = Some(Box::new(Backend::new(ipfs_gateway)));
+    let callback: Option<CallbackFn> = if let Some(backend) = backend {
+        let config = BackendConfig::load(&backend).await?;
+        Some(Box::new(Backend::new(config.http_server)))
+    } else {
+        None
+    };
 
     let listen_event = Arc::new(swarm.create_message_handler(callback, None));
     let stabilize = Arc::new(Stabilization::new(swarm.clone(), stabilize_timeout));
@@ -350,7 +351,7 @@ async fn main() -> anyhow::Result<()> {
                 args.ice_servers.as_str(),
                 args.stabilize_timeout,
                 args.external_ip,
-                args.ipfs_gateway,
+                args.backend,
             )
             .await
         }
@@ -453,14 +454,14 @@ async fn main() -> anyhow::Result<()> {
                 .display();
             Ok(())
         }
-        Command::Send(SendCommand::Http(SendHttpCommand::Get(args))) => {
+        Command::Send(SendCommand::Http(args)) => {
             args.client_args
                 .new_client()
                 .await?
                 .send_http_request_message(
                     args.to_did.as_str(),
-                    http::Method::GET,
-                    args.url.as_str(),
+                    http::Method::from_str(args.method.as_str())?,
+                    args.path.as_str(),
                     args.timeout.into(),
                     &args
                         .headers
