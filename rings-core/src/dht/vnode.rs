@@ -18,34 +18,32 @@ use crate::message::MessagePayload;
 /// VNode Types
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VNodeType {
-    /// Data: Encoded data stored in DHT
+    /// Encoded data stored in DHT
     Data,
-    /// SubRing: Finger table of a SubRing
+    /// Finger table of a SubRing
     SubRing,
-    /// RelayMessage: A Relayed but unreach message, which is stored on it's successor
+    /// A relayed but unreached message, which should be stored on
+    /// the successor of the destination Did.
     RelayMessage,
 }
 
-/// A Virtual Node is a Node that dont have real network address.
-/// The Address of a Virtual Node is virutal,
-/// For Encoded Data, it's sha1 of data, for a SubRing, it's sha1 of SubRing's name,
-/// and for the RelayedMessage, it's the target address of message plus 1 (for ensure that the message is
-/// sent to the successor of target), thus while target Node going online, it will sync from it's successor.
+/// A `VirtualNode` is a piece of data with [VNodeType] and [Did]. You can save it to
+/// [PeerRing](super::PeerRing) by [ChordStorage](super::ChordStorage) protocol.
+///
+/// The Did of a Virtual Node is in the following format:
+/// * If type value is [VNodeType::Data], it's sha1 of data field.
+/// * If type value is [VNodeType::SubRing], it's sha1 of SubRing name.
+/// * If type value is [VNodeType::RelayMessage], it's the destination Did of
+/// message plus 1 (to ensure that the message is sent to the successor of destination),
+/// thus while destination node going online, it will sync message from its successor.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VirtualNode {
-    /// address of vnode
-    pub address: Did,
-    /// all data of vnode should be encoded
+    /// The did of `VirtualNode` make it unique, and can be stored and retrieved on DHT.
+    pub did: Did,
+    /// The data entity of `VirtualNode`, encoded by [Encoder].
     pub data: Vec<Encoded>,
-    /// vnode type
+    /// The type indicates how the data is encoded and how the Did is generated.
     pub kind: VNodeType,
-}
-
-impl VirtualNode {
-    /// VirtualNode should have it's virtual address.
-    pub fn did(&self) -> Did {
-        self.address
-    }
 }
 
 impl<T> TryFrom<MessagePayload<T>> for VirtualNode
@@ -53,10 +51,10 @@ where T: Serialize + DeserializeOwned
 {
     type Error = Error;
     fn try_from(msg: MessagePayload<T>) -> Result<Self> {
-        let address = BigUint::from(msg.addr) + BigUint::from(1u16);
+        let did = BigUint::from(msg.addr) + BigUint::from(1u16);
         let data = msg.encode()?;
         Ok(Self {
-            address: address.into(),
+            did: did.into(),
             data: vec![data],
             kind: VNodeType::RelayMessage,
         })
@@ -66,9 +64,9 @@ where T: Serialize + DeserializeOwned
 impl TryFrom<Encoded> for VirtualNode {
     type Error = Error;
     fn try_from(e: Encoded) -> Result<Self> {
-        let address: HashStr = e.value().into();
+        let did: HashStr = e.value().into();
         Ok(Self {
-            address: Did::from_str(&address.inner())?,
+            did: Did::from_str(&did.inner())?,
             data: vec![e],
             kind: VNodeType::Data,
         })
@@ -85,16 +83,16 @@ impl TryFrom<String> for VirtualNode {
 
 impl VirtualNode {
     /// concat data of a virtual Node
-    /// We do not needs to check the type of VNode because two VNode with same address but
+    /// We do not needs to check the type of VNode because two VNode with same did but
     /// has different Type is incapable
     pub fn concat(a: &Self, b: &Self) -> Result<Self> {
         match &a.kind {
             VNodeType::RelayMessage => {
-                if a.address != b.address {
+                if a.did != b.did {
                     Err(Error::DidNotEqual)
                 } else {
                     Ok(Self {
-                        address: a.address,
+                        did: a.did,
                         data: [&a.data[..], &b.data[..]].concat(),
                         kind: a.kind.clone(),
                     })

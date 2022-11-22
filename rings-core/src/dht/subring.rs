@@ -147,7 +147,7 @@ impl TryFrom<SubRing> for VirtualNode {
     fn try_from(ring: SubRing) -> Result<Self> {
         let data = serde_json::to_string(&ring).map_err(|_| Error::SerializeToString)?;
         Ok(Self {
-            address: ring.did,
+            did: ring.did,
             data: vec![data.into()],
             kind: VNodeType::SubRing,
         })

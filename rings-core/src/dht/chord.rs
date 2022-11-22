@@ -44,6 +44,21 @@ pub struct PeerRing {
     pub cache: Arc<MemStorage<Did, VirtualNode>>,
 }
 
+/// Result of PeerRing algorithm
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum PeerRingAction {
+    /// Do noting
+    None,
+    /// Found some VNode
+    SomeVNode(VirtualNode),
+    /// Found some node
+    Some(Did),
+    /// Trigger remote action
+    RemoteAction(Did, RemoteAction),
+    /// Trigger Multiple Actions at sametime
+    MultiActions(Vec<PeerRingAction>),
+}
+
 /// Remote actions
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
@@ -64,21 +79,6 @@ pub enum RemoteAction {
     FindSuccessorForFix(Did),
     /// Check predecessor
     CheckPredecessor,
-}
-
-/// Result of PeerRing algorithm
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum PeerRingAction {
-    /// Do noting
-    None,
-    /// Found some VNode
-    SomeVNode(VirtualNode),
-    /// Found some node
-    Some(Did),
-    /// Trigger remote action
-    RemoteAction(Did, RemoteAction),
-    /// Trigger Multiple Actions at sametime
-    MultiActions(Vec<PeerRingAction>),
 }
 
 impl PeerRingAction {
@@ -360,20 +360,20 @@ impl ChordStorage<PeerRingAction> for PeerRing {
         }
     }
 
-    /// When a vnode data is fetched from remote, it should be cache at local
-    fn cache(&self, vnode: VirtualNode) {
-        self.cache.set(&vnode.did(), vnode);
+    /// When a vnode data is fetched from remote, cache it locally.
+    fn local_cache_set(&self, vnode: VirtualNode) {
+        self.cache.set(&vnode.did.clone(), vnode);
     }
 
-    /// When a VNode data is fetched from remote, it should be cache at local
-    fn fetch_cache(&self, id: &Did) -> Option<VirtualNode> {
+    /// Get vnode from local cache.
+    fn local_cache_get(&self, id: &Did) -> Option<VirtualNode> {
         self.cache.get(id)
     }
 
     /// If address of VNode is in range(self, successor), it should store locally,
     /// otherwise, it should on remote successor
     async fn store(&self, peer: VirtualNode) -> Result<PeerRingAction> {
-        let vid = peer.did();
+        let vid = peer.did;
         // find VNode's closest successor
         match self.find_successor(vid) {
             // if vid is in range(self, successor)

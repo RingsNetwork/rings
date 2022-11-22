@@ -14,14 +14,11 @@ use crate::err::Result;
 /// A basic usage of Chord in rings network is to assist the nodes in passing messages
 /// so that they can forward data with fewer connections. In this situation, the key
 /// of Chord is the unique identifier of a node, which we call [Did]. Then if we connect
-/// all the nodes in the finger table, we can construct a [PeerRing](super::PeerRing).
-/// It's the basic construction of the rings network. On every connected node, we can
-/// simply use `find_successor` to find the next node that is responsible for passing
-/// a message. And it takes O(log n) time complexity and O(log n) connections to pass
-/// a message from one node to destination node.
-///
-/// This trait defines interfaces for Chord.
-/// The implementation of Chord is in [PeerRing](super::PeerRing).
+/// all the nodes in the finger table for every node, we construct a [PeerRing](super::PeerRing).
+/// It's the basic construction of the rings network. When passing a message to a
+/// destination node, we can simply use `find_successor` to find the next node that is
+/// responsible for passing a message. And it takes O(log n) time complexity and O(log n)
+/// connections to pass a message from one node to destination node.
 ///
 /// Some methods return an `Action` which is used to tell outer the extra action to take
 /// after handling datas inside the struct. It's useful since the struct may not work
@@ -34,7 +31,7 @@ pub trait Chord<Action> {
     /// recorded in another node.
     fn find_successor(&self, id: Did) -> Result<Action>;
 
-    //TODO: why closest_preceding_node and check_predecessor is not using.
+    //TODO: Why `closest_preceding_node` and `check_predecessor` is not using?
 
     /// Find the predecessor of the DHT.
     fn closest_preceding_node(&self, id: Did) -> Result<Did>;
@@ -53,25 +50,39 @@ pub trait Chord<Action> {
     fn fix_fingers(&self) -> Result<Action>;
 }
 
-/// Protocol for Storage Data on Chord
+/// ChordStorage is a distributed storage protocol based on Chord algorithm.
+///
+/// The core concept is to find the node that is responsible for storing a resource. In
+/// ChordStorage protocol, we will generate a Did for a resource. Then find the node whose
+/// Did is the successor of that resource's Did. Save the resource in its successor node.
+/// To accomplish this, all resources stored by this protocol will be wrapped in
+/// [VirtualNode](super::vnode::VirtualNode).
+///
+/// Known that although the Did of a `VirtualNode` has the same data type as the Did of a
+/// node (they both can be used as key for the DHT), since the `VirtualNode` is only a
+/// logical node, it will not be selected to be connected as a real node, but will only
+/// be classified as the predecessor of a real node.
+///
+/// Some methods return an `Action`. It's because the real storing node may not be this
+/// node. The outer should take the action to forward the request to the real storing
+/// node.
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait ChordStorage<Action>: Chord<Action> {
-    /// look up a resouce
+    /// Look up a VirtualNode by its Did.
     async fn lookup(&self, id: &Did) -> Result<Action>;
-    /// Cache, cache fetched Data locally
-    fn cache(&self, vnode: VirtualNode);
-    /// Check localCache
-    fn fetch_cache(&self, id: &Did) -> Option<VirtualNode>;
-    /// store VNode to it's successor
-    /// A VNode's successor should store the data
+    /// Store VirtualNode to its successor.
     async fn store(&self, peer: VirtualNode) -> Result<Action>;
-    /// Batch store
+    /// Batch store.
     async fn store_vec(&self, peer: Vec<VirtualNode>) -> Result<Action>;
-    /// When A Node's successor is updated, it should check the storage that
-    /// if exist some VNode's address is in (self.id, new_successor), then
-    /// sync the data to the new successor
+    /// When a node's successor is updated, it needs to check if there are some
+    /// `VirtualNodes` between (node.did, new_successor.did) and if so, sync them to the
+    /// new successor.
     async fn sync_with_successor(&self, new_successor: Did) -> Result<Action>;
+    /// Cache fetched data locally
+    fn local_cache_set(&self, vnode: VirtualNode);
+    /// Get local cache
+    fn local_cache_get(&self, id: &Did) -> Option<VirtualNode>;
 }
 
 /// Trait for how dht manage SubRing
