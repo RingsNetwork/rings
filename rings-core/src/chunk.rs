@@ -1,6 +1,6 @@
 #![warn(missing_docs)]
 //! A Framing and Message chucking implementation
-//! defined in RFC4917(https://www.rfc-editor.org/rfc/rfc4975#page-9)
+//! defined in RFC4917<https://www.rfc-editor.org/rfc/rfc4975#page-9>
 //! This chunking mechanism allows a sender to interrupt a chunk part of
 //! the way through sending it.  The ability to interrupt messages allows
 //! multiple sessions to share a TCP connection, and for large messages

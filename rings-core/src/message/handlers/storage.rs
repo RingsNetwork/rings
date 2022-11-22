@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 use async_trait::async_trait;
 
 use crate::dht::vnode::VirtualNode;

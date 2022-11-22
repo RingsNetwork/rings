@@ -13,7 +13,6 @@ use serde::Serialize;
 use super::did::BiasId;
 use super::successor::Successor;
 use super::types::Chord;
-use super::types::ChordStabilize;
 use super::types::ChordStorage;
 use super::vnode::VirtualNode;
 use super::FingerTable;
@@ -23,8 +22,27 @@ use crate::err::Result;
 use crate::storage::MemStorage;
 use crate::storage::PersistenceStorage;
 use crate::storage::PersistenceStorageReadAndWrite;
-// use crate::storage::PersistenceStorageOperation;
 use crate::storage::PersistenceStorageRemove;
+
+/// PeerRing is a ring of peers.
+/// PeerRing implemented [Chord] algorithm.
+/// PeerRing implemented [ChordStorage] protocol.
+#[derive(Clone)]
+pub struct PeerRing {
+    /// PeerRing's id is address of Node
+    pub id: Did,
+    /// first node on circle that succeeds (n + 2 ^(k-1) ) mod 2^m , 1 <= k<= m
+    /// for index start with 0, it should be (n+2^k) mod 2^m
+    pub finger: Arc<Mutex<FingerTable>>,
+    /// The next node on the identifier circle; finger\[1\].node
+    pub successor: Arc<Mutex<Successor>>,
+    /// The previous node on the identifier circle
+    pub predecessor: Arc<Mutex<Option<Did>>>,
+    /// LocalStorage for DHT Query
+    pub storage: Arc<PersistenceStorage>,
+    /// LocalCache
+    pub cache: Arc<MemStorage<Did, VirtualNode>>,
+}
 
 /// Remote actions
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,7 +82,7 @@ pub enum PeerRingAction {
 }
 
 impl PeerRingAction {
-    /// action is Self::None
+    /// Returns `ture` if the action is a [PeerRingAction::None] value.
     pub fn is_none(&self) -> bool {
         if let Self::None = self {
             return true;
@@ -72,7 +90,7 @@ impl PeerRingAction {
         false
     }
 
-    /// Action is Self::Some
+    /// Returns `ture` if the action is a [PeerRingAction::Some] value.
     pub fn is_some(&self) -> bool {
         if let Self::Some(_) = self {
             return true;
@@ -80,7 +98,7 @@ impl PeerRingAction {
         false
     }
 
-    /// Action is Self::RemoteAction
+    /// Returns `ture` if the action is a [PeerRingAction::RemoteAction] value.
     pub fn is_remote(&self) -> bool {
         if let Self::RemoteAction(..) = self {
             return true;
@@ -88,31 +106,13 @@ impl PeerRingAction {
         false
     }
 
-    /// Action is Self::MultiActions
+    /// Returns `ture` if the action is a [PeerRingAction::MultiActions] value.
     pub fn is_multi(&self) -> bool {
         if let Self::MultiActions(..) = self {
             return true;
         }
         false
     }
-}
-
-/// Implementation of PeerRing
-#[derive(Clone)]
-pub struct PeerRing {
-    /// PeerRing's id is address of Node
-    pub id: Did,
-    /// first node on circle that succeeds (n + 2 ^(k-1) ) mod 2^m , 1 <= k<= m
-    /// for index start with 0, it should be (n+2^k) mod 2^m
-    pub finger: Arc<Mutex<FingerTable>>,
-    /// The next node on the identifier circle; finger\[1\].node
-    pub successor: Arc<Mutex<Successor>>,
-    /// The previous node on the identifier circle
-    pub predecessor: Arc<Mutex<Option<Did>>>,
-    /// LocalStorage for DHT Query
-    pub storage: Arc<PersistenceStorage>,
-    /// LocalCache
-    pub cache: Arc<MemStorage<Did, VirtualNode>>,
 }
 
 impl PeerRing {
@@ -248,9 +248,7 @@ impl Chord<PeerRingAction> for PeerRing {
             }
         }
     }
-}
 
-impl ChordStabilize<PeerRingAction> for PeerRing {
     /// n' thinks it might be our predecessor.
     fn notify(&self, id: Did) -> Result<Option<Did>> {
         let mut predecessor = self.lock_predecessor()?;
