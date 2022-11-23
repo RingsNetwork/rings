@@ -133,27 +133,27 @@ async fn test_processor_handshake_and_msg() {
     listen(&p1, Some(callback1)).await;
     listen(&p2, Some(callback2)).await;
 
-    p1.send_message(p2_addr.as_str(), test_text1.as_bytes(), false)
+    p1.send_message(p2_addr.as_str(), test_text1.as_bytes())
         .await
         .unwrap();
     console_log!("send test_text1 done");
 
-    p2.send_message(p1_addr.as_str(), test_text2.as_bytes(), false)
+    p2.send_message(p1_addr.as_str(), test_text2.as_bytes())
         .await
         .unwrap();
     console_log!("send test_text2 done");
 
-    p2.send_message(p1_addr.as_str(), test_text3.as_bytes(), false)
+    p2.send_message(p1_addr.as_str(), test_text3.as_bytes())
         .await
         .unwrap();
     console_log!("send test_text3 done");
 
-    p1.send_message(p2_addr.as_str(), test_text4.as_bytes(), false)
+    p1.send_message(p2_addr.as_str(), test_text4.as_bytes())
         .await
         .unwrap();
     console_log!("send test_text4 done");
 
-    p2.send_message(p1_addr.as_str(), test_text5.as_bytes(), false)
+    p2.send_message(p1_addr.as_str(), test_text5.as_bytes())
         .await
         .unwrap();
     console_log!("send test_text5 done");
