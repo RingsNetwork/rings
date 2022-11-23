@@ -795,9 +795,6 @@ impl MessageCallback for MessageCallbackInstance {
             let data = data.unwrap();
             log::debug!("chunk message of {:?} received", relay.tx_id);
             if let Some(data) = data {
-                // if let Err(e) = self.handle_message_data(relay, &data).await {
-                //     log::error!("handle http_server_msg failed, {}", e);
-                // }
                 data
             } else {
                 log::info!("chunk message of {:?} not complete", relay.tx_id);
@@ -812,37 +809,6 @@ impl MessageCallback for MessageCallbackInstance {
         if let Err(e) = self.handle_message_data(relay, &data).await {
             log::error!("handle http_server_msg failed, {}", e);
         }
-
-        // if left[0] == 1 {
-        //     let data = self.handle_chunk_data(right);
-        //     if let Err(e) = data {
-        //         log::error!("handle chunk data failed: {}", e);
-        //         return;
-        //     }
-        //     let data = data.unwrap();
-        //     log::debug!("chunk message of {:?} received", relay.tx_id);
-        //     if let Some(data) = data {
-        //         if let Err(e) = self.handle_http_response(relay, &data).await {
-        //             log::error!("handle http_server_msg failed, {}", e);
-        //         }
-        //     } else {
-        //         log::info!("chunk message of {:?} not complete", relay.tx_id);
-        //     }
-        //     return;
-        // }
-        // log::debug!("custom_message received: {:?}", right);
-        // let msg_content = js_sys::Uint8Array::from(right.to_vec().as_slice());
-
-        // if let Ok(r) =
-        //     self.custom_message
-        //         .call2(&this, &JsValue::from_serde(&relay).unwrap(), &msg_content)
-        // {
-        //     if let Ok(p) = js_sys::Promise::try_from(r) {
-        //         if let Err(e) = wasm_bindgen_futures::JsFuture::from(p).await {
-        //             log::warn!("invoke on_custom_message error: {:?}", e);
-        //         }
-        //     }
-        // }
     }
 
     async fn builtin_message(&self, _handler: &MessageHandler, relay: &MessagePayload<Message>) {
