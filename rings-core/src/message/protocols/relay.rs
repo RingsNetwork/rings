@@ -14,7 +14,7 @@ use crate::err::Result;
 pub enum RelayMethod {
     /// When a node want to send message to another node, it will send a message with SEND method.
     SEND,
-    /// A node that got a SEND message will either transpond it to another node or respond with a REPORT message.
+    /// A node that got a SEND message will either forward it to another node or respond with a REPORT message.
     REPORT,
 }
 

@@ -81,7 +81,7 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
                 .is_some()
             {
                 relay.relay(self.dht.id, Some(relay.destination))?;
-                return self.transpond_payload(ctx, relay).await;
+                return self.forward_payload(ctx, relay).await;
             } else {
                 let next_node = match self.dht.find_successor(relay.destination)? {
                     PeerRingAction::Some(node) => Some(node),
@@ -90,7 +90,7 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
                 }
                 .ok_or(Error::MessageHandlerMissNextNode)?;
                 relay.relay(self.dht.id, Some(next_node))?;
-                return self.transpond_payload(ctx, relay).await;
+                return self.forward_payload(ctx, relay).await;
             }
         } else {
             // self is dest
@@ -143,7 +143,7 @@ impl HandleMsg<ConnectNodeReport> for MessageHandler {
 
         relay.relay(self.dht.id, None)?;
         if relay.next_hop.is_some() {
-            self.transpond_payload(ctx, relay).await
+            self.forward_payload(ctx, relay).await
         } else {
             let transport = self
                 .swarm
@@ -168,7 +168,7 @@ impl HandleMsg<AlreadyConnected> for MessageHandler {
 
         relay.relay(self.dht.id, None)?;
         if relay.next_hop.is_some() {
-            self.transpond_payload(ctx, relay).await
+            self.forward_payload(ctx, relay).await
         } else {
             self.swarm
                 .get_and_check_transport(relay.sender())
@@ -204,7 +204,7 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
                     }
                 } else if self.swarm.get_and_check_transport(msg.id).await.is_some() {
                     relay.relay(self.dht.id, Some(relay.destination))?;
-                    return self.transpond_payload(ctx, relay).await;
+                    return self.forward_payload(ctx, relay).await;
                 } else {
                     return Err(Error::MessageHandlerMissNextNode);
                 }
@@ -212,7 +212,7 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
             PeerRingAction::RemoteAction(next, _) => {
                 relay.relay(self.dht.id, Some(next))?;
                 relay.reset_destination(next)?;
-                self.transpond_payload(ctx, relay).await
+                self.forward_payload(ctx, relay).await
             }
             act => Err(Error::PeerRingUnexpectedAction(act)),
         }
@@ -227,7 +227,7 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
 
         relay.relay(self.dht.id, None)?;
         if relay.next_hop.is_some() {
-            return self.transpond_payload(ctx, relay).await;
+            return self.forward_payload(ctx, relay).await;
         }
 
         match &msg.handler {

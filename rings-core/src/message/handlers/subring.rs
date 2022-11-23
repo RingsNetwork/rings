@@ -66,7 +66,7 @@ impl SubRingOperator for Swarm {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<JoinSubRing> for MessageHandler {
     /// handle `JoinSubRing` message. `origin` get the first node of path
-    /// reset destination to `next` if need next_hop and call `transpond_payload`
+    /// reset destination to `next` if need next_hop and call `forward_payload`
     /// otherwise join subring is finished.
     async fn handle(&self, ctx: &MessagePayload<Message>, msg: &JoinSubRing) -> Result<()> {
         let mut relay = ctx.relay.clone();
@@ -75,7 +75,7 @@ impl HandleMsg<JoinSubRing> for MessageHandler {
             Ok(PeerRingAction::RemoteAction(next, RemoteAction::FindAndJoinSubRing(_))) => {
                 relay.relay(self.dht.id, Some(next))?;
                 relay.reset_destination(next)?;
-                self.transpond_payload(ctx, relay).await
+                self.forward_payload(ctx, relay).await
             }
             Ok(PeerRingAction::None) => Ok(()),
             Ok(act) => Err(Error::PeerRingUnexpectedAction(act)),

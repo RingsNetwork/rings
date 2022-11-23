@@ -97,7 +97,7 @@ impl HandleMsg<SearchVNode> for MessageHandler {
                 }
                 PeerRingAction::RemoteAction(next, _) => {
                     relay.relay(self.dht.id, Some(next))?;
-                    self.transpond_payload(ctx, relay).await
+                    self.forward_payload(ctx, relay).await
                 }
                 act => Err(Error::PeerRingUnexpectedAction(act)),
             },
@@ -114,7 +114,7 @@ impl HandleMsg<FoundVNode> for MessageHandler {
 
         relay.relay(self.dht.id, None)?;
         if relay.next_hop.is_some() {
-            self.transpond_payload(ctx, relay).await
+            self.forward_payload(ctx, relay).await
         } else {
             // When query successor, store in local cache
             for datum in msg.data.iter().cloned() {
@@ -138,7 +138,7 @@ impl HandleMsg<StoreVNode> for MessageHandler {
                         let mut relay = ctx.relay.clone();
                         relay.reset_destination(next)?;
                         relay.relay(self.dht.id, Some(next))?;
-                        self.transpond_payload(ctx, relay).await
+                        self.forward_payload(ctx, relay).await
                     }
                     act => Err(Error::PeerRingUnexpectedAction(act)),
                 },
