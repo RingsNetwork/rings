@@ -137,40 +137,6 @@ impl From<BackendMessage> for Vec<u8> {
     }
 }
 
-/// Enum HttpServerRequest with Request, and HttpServerResponse with Response.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HttpServerMessage {
-    /// Request Http Message
-    Request(HttpServerRequest),
-    /// Response Http Message
-    Response(HttpServerResponse),
-}
-
-/// HttpServerRequest
-/// - `method`: GET, POST, DELETE, PUT, OPTION, HEAD.
-/// - `path`: URI and URL
-/// - `headers`: HashMap contains like `Context-Type: application/json`.
-/// - `body`:  Message chunk split into bytes and send to remote client.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct HttpServerRequest {
-    method: String,
-    path: String,
-    headers: HashMap<String, String>,
-    body: Option<Bytes>,
-}
-
-/// HttpServerResponse
-/// - `status`: Status machine with numbers, like 200, 300, 400, 500.
-/// - `headers`: HashMap contains like `Context-Type: application/json`.
-/// - `body`:  Message chunk split into bytes and send back to remote client.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct HttpServerResponse {
-    status: u16,
-    headers: HashMap<String, String>,
-    body: Option<Bytes>,
-}
-
 /// Timeout in milliseconds.
 #[derive(Deserialize, Debug, Serialize, Clone)]
 pub struct Timeout(u64);
@@ -308,31 +274,4 @@ pub struct HttpResponse {
     pub headers: HashMap<String, String>,
     /// body: optional
     pub body: Option<Bytes>,
-}
-
-/// send chunk report message
-/// - `handler`
-/// - `ctx`
-/// - `relay`
-/// - `data`
-pub async fn send_chunk_report_message(
-    handler: &MessageHandler,
-    ctx: &MessagePayload<Message>,
-    relay: &MessageRelay,
-    data: &[u8],
-) -> Result<()> {
-    let mut new_bytes: Vec<u8> = Vec::with_capacity(data.len() + 1);
-    new_bytes.push(1);
-    new_bytes.extend_from_slice(&[0u8; 3]);
-    new_bytes.extend_from_slice(data);
-
-    handler
-        .send_report_message(
-            Message::custom(&new_bytes, None).map_err(|_| Error::InvalidMessage)?,
-            ctx.tx_id,
-            relay.clone(),
-        )
-        .await
-        .map_err(Error::SendMessage)?;
-    Ok(())
 }

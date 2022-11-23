@@ -348,12 +348,7 @@ impl Processor {
     }
 
     /// Send custom message to a did.
-    pub async fn send_message(
-        &self,
-        destination: &str,
-        msg: &[u8],
-        chunked: bool,
-    ) -> Result<uuid::Uuid> {
+    pub async fn send_message(&self, destination: &str, msg: &[u8]) -> Result<uuid::Uuid> {
         tracing::info!(
             "send_message, destination: {}, text: {:?}",
             destination,
@@ -361,12 +356,7 @@ impl Processor {
         );
         let destination = Did::from_str(destination).map_err(|_| Error::InvalidDid)?;
 
-        let mut new_msg = Vec::with_capacity(msg.len() + 4);
-        new_msg.push(if !chunked { 0 } else { 1 });
-        new_msg.extend_from_slice(&[0u8; 3]);
-        new_msg.extend_from_slice(msg);
-
-        let msg = Message::custom(&new_msg, None).map_err(Error::SendMessage)?;
+        let msg = Message::custom(msg, None).map_err(Error::SendMessage)?;
 
         // self.swarm.do_send_payload(address, payload)
         let uuid = self
@@ -407,7 +397,7 @@ impl Processor {
         ))?;
         let msg: Vec<u8> = msg.into();
 
-        self.send_message(destination, &msg, false).await
+        self.send_message(destination, &msg).await
     }
 
     /// send simple text message
@@ -426,7 +416,7 @@ impl Processor {
 
         let msg: BackendMessage = BackendMessage::new(MessageType::SimpleText, text.as_bytes());
         let msg: Vec<u8> = msg.into();
-        self.send_message(destination, &msg, false).await
+        self.send_message(destination, &msg).await
     }
 
     /// check local cache of dht
@@ -721,7 +711,7 @@ mod test {
         let test_text2 = "test2";
 
         println!("send_message 1");
-        p1.send_message(did2.as_str(), test_text1.as_bytes(), false)
+        p1.send_message(did2.as_str(), test_text1.as_bytes())
             .await
             .unwrap();
         println!("send_message 1 done");
@@ -729,7 +719,7 @@ mod test {
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
         println!("send_message 2");
-        p2.send_message(did1.as_str(), test_text2.as_bytes(), false)
+        p2.send_message(did1.as_str(), test_text2.as_bytes())
             .await
             .unwrap();
         println!("send_message 2 done");

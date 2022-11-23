@@ -311,7 +311,8 @@ async fn daemon_run(
 
     let callback: Option<CallbackFn> = if let Some(backend) = backend {
         let config = BackendConfig::load(&backend).await?;
-        Some(Box::new(Backend::new(config.http_server)))
+        let backend = Backend::new(config.http_server);
+        Some(Box::new(backend))
     } else {
         None
     };

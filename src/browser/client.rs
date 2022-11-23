@@ -454,7 +454,7 @@ impl Client {
     pub fn send_message(&self, destination: String, msg: js_sys::Uint8Array) -> js_sys::Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
-            p.send_message(destination.as_str(), &msg.to_vec(), false)
+            p.send_message(destination.as_str(), &msg.to_vec())
                 .await
                 .map_err(JsError::from)?;
             Ok(JsValue::from_bool(true))
