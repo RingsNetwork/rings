@@ -1023,7 +1023,7 @@ impl VirtualNode {
 impl From<vnode::VirtualNode> for VirtualNode {
     fn from(v: vnode::VirtualNode) -> Self {
         Self {
-            address: v.address.into_token().to_string(),
+            address: v.did.into_token().to_string(),
             kind: VNodeType::Data,
             data: v.data.iter().map(|x| x.to_string()).collect(),
         }

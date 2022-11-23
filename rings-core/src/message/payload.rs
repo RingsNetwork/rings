@@ -249,7 +249,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
         .await
     }
 
-    async fn transpond_payload(
+    async fn forward_payload(
         &self,
         payload: &MessagePayload<T>,
         relay: MessageRelay,

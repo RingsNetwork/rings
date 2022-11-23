@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::dht::ChordStabilize;
+use crate::dht::Chord;
 use crate::dht::ChordStorage;
 use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;

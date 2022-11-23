@@ -26,7 +26,7 @@ impl HandleMsg<MaybeEncrypted<CustomMessage>> for MessageHandler {
         if self.dht.id != relay.destination {
             if self.swarm.get_transport(relay.destination).is_some() {
                 relay.relay(self.dht.id, Some(relay.destination))?;
-                return self.transpond_payload(ctx, relay).await;
+                return self.forward_payload(ctx, relay).await;
             } else {
                 let next_node = match self.dht.find_successor(relay.destination)? {
                     PeerRingAction::Some(node) => Some(node),
@@ -35,7 +35,7 @@ impl HandleMsg<MaybeEncrypted<CustomMessage>> for MessageHandler {
                 }
                 .ok_or(Error::MessageHandlerMissNextNode)?;
                 relay.relay(self.dht.id, Some(next_node))?;
-                return self.transpond_payload(ctx, relay).await;
+                return self.forward_payload(ctx, relay).await;
             }
         }
 

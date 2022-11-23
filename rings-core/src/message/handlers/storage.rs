@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 use async_trait::async_trait;
 
 use crate::dht::vnode::VirtualNode;
@@ -35,7 +36,7 @@ pub trait TChordStorage {
 impl TChordStorage for Swarm {
     /// Check local cache
     async fn storage_check_cache(&self, id: &Did) -> Option<VirtualNode> {
-        self.dht.fetch_cache(id)
+        self.dht.local_cache_get(id)
     }
 
     /// Fetch virtual node, if exist in localstoreage, copy it to the cache,
@@ -44,7 +45,7 @@ impl TChordStorage for Swarm {
         // If peer found that data is on it's localstore, copy it to the cache
         match self.dht.lookup(id).await? {
             PeerRingAction::SomeVNode(v) => {
-                self.dht.cache(v);
+                self.dht.local_cache_set(v);
                 Ok(())
             }
             PeerRingAction::None => Ok(()),
@@ -96,7 +97,7 @@ impl HandleMsg<SearchVNode> for MessageHandler {
                 }
                 PeerRingAction::RemoteAction(next, _) => {
                     relay.relay(self.dht.id, Some(next))?;
-                    self.transpond_payload(ctx, relay).await
+                    self.forward_payload(ctx, relay).await
                 }
                 act => Err(Error::PeerRingUnexpectedAction(act)),
             },
@@ -113,11 +114,11 @@ impl HandleMsg<FoundVNode> for MessageHandler {
 
         relay.relay(self.dht.id, None)?;
         if relay.next_hop.is_some() {
-            self.transpond_payload(ctx, relay).await
+            self.forward_payload(ctx, relay).await
         } else {
             // When query successor, store in local cache
             for datum in msg.data.iter().cloned() {
-                self.dht.cache(datum);
+                self.dht.local_cache_set(datum);
             }
             Ok(())
         }
@@ -137,7 +138,7 @@ impl HandleMsg<StoreVNode> for MessageHandler {
                         let mut relay = ctx.relay.clone();
                         relay.reset_destination(next)?;
                         relay.relay(self.dht.id, Some(next))?;
-                        self.transpond_payload(ctx, relay).await
+                        self.forward_payload(ctx, relay).await
                     }
                     act => Err(Error::PeerRingUnexpectedAction(act)),
                 },
@@ -201,7 +202,7 @@ mod test {
         // now we store adata on ndoe 2 and query it from node 1
         let data = "Across the Great Wall we can reach every corner in the world.".to_string();
         let vnode: VirtualNode = data.try_into().unwrap();
-        let vid = vnode.did();
+        let vid = vnode.did;
         assert!(dht1.cache.is_empty());
         assert!(dht2.cache.is_empty());
         assert!(swarm1.storage_check_cache(&vid).await.is_none());
@@ -214,7 +215,7 @@ mod test {
             // vnode should stored in node2
             let ev = node2.listen_once().await.unwrap();
             if let Message::StoreVNode(x) = ev.data {
-                assert_eq!(x.data[0].did(), vid);
+                assert_eq!(x.data[0].did, vid);
             } else {
                 panic!();
             }
@@ -224,7 +225,7 @@ mod test {
             // vnode should stored in node1
             let ev = node1.listen_once().await.unwrap();
             if let Message::StoreVNode(x) = ev.data {
-                assert_eq!(x.data[0].did(), vid);
+                assert_eq!(x.data[0].did, vid);
             } else {
                 panic!();
             }
@@ -253,7 +254,7 @@ mod test {
             }
             let ev = node1.listen_once().await.unwrap();
             if let Message::FoundVNode(x) = ev.data {
-                assert_eq!(x.data[0].did(), vid);
+                assert_eq!(x.data[0].did, vid);
             } else {
                 panic!();
             }
@@ -270,7 +271,7 @@ mod test {
             }
             let ev = node2.listen_once().await.unwrap();
             if let Message::FoundVNode(x) = ev.data {
-                assert_eq!(x.data[0].did(), vid);
+                assert_eq!(x.data[0].did, vid);
             } else {
                 panic!();
             }
