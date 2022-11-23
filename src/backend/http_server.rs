@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use bytes::Bytes;
+use rings_core::chunk::ChunkList;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -12,6 +14,7 @@ use super::types::HttpResponse;
 use super::types::MessageEndpoint;
 use crate::backend::types::HttpRequest;
 use crate::backend::types::MessageType;
+use crate::consts::BACKEND_MTU;
 use crate::error::Error;
 use crate::error::Result;
 use crate::prelude::*;
@@ -120,19 +123,18 @@ impl MessageEndpoint for HttpServer {
         let resp_bytes =
             message::encode_data_gzip(&json_bytes, 9).map_err(|_| Error::EncodedError)?;
 
-        let resp_bytes: Vec<u8> =
+        let resp_bytes: Bytes =
             BackendMessage::new(MessageType::HttpResponse, resp_bytes.to_vec().as_slice()).into();
         tracing::debug!("resp_bytes gzip_data len: {}", resp_bytes.len());
 
-        handler
-            .send_report_message(
-                Message::custom(&resp_bytes, None).map_err(|_| Error::InvalidMessage)?,
-                ctx.tx_id,
-                relay.clone(),
-            )
-            .await
-            .map_err(Error::SendMessage)?;
-
+        let chunks = ChunkList::<BACKEND_MTU>::from(&resp_bytes);
+        for c in chunks {
+            tracing::debug!("Chunk data len: {}", c.data.len());
+            let bytes = c.to_bincode().map_err(|_| Error::SerializeError)?;
+            tracing::debug!("Chunk len: {}", bytes.len());
+            super::types::send_chunk_report_message(handler, ctx, relay, bytes.to_vec().as_slice())
+                .await?;
+        }
         Ok(())
     }
 }
