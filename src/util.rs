@@ -97,6 +97,6 @@ pub mod loader {
         }
     }
 
-    impl ResourceLoader for BackendConfig {}
     impl ResourceLoader for Seed {}
+    impl ResourceLoader for BackendConfig {}
 }

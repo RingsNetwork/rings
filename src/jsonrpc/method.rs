@@ -28,6 +28,10 @@ pub enum Method {
     ListPendings,
     /// Close pending connect
     ClosePendingTransport,
+    /// Send ipfs request message
+    SendHttpRequest,
+    /// Send simple text message
+    SendSimpleText,
 }
 
 impl Method {
@@ -45,6 +49,8 @@ impl Method {
             Method::AcceptAnswer => "acceptAnswer",
             Method::ListPendings => "listPendings",
             Method::ClosePendingTransport => "closePendingTransport",
+            Method::SendHttpRequest => "sendHttpRequest",
+            Method::SendSimpleText => "sendSimpleText",
         }
     }
 }
@@ -71,6 +77,8 @@ impl TryFrom<&str> for Method {
             "acceptAnswer" => Self::AcceptAnswer,
             "listPendings" => Self::ListPendings,
             "closePendingTransport" => Self::ClosePendingTransport,
+            "sendHttpRequest" => Self::SendHttpRequest,
+            "sendSimpleText" => Self::SendSimpleText,
             _ => return Err(Error::InvalidMethod),
         })
     }

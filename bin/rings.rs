@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use clap::ArgAction;
@@ -228,6 +229,7 @@ struct PendingCloseTransportCommand {
 enum SendCommand {
     Raw(SendRawCommand),
     Http(SendHttpCommand),
+    SimpleText(SendSimpleTextCommand),
 }
 
 #[derive(Args, Debug)]
@@ -245,18 +247,49 @@ struct SendHttpCommand {
     #[command(flatten)]
     client_args: ClientArgs,
 
-    #[arg(long="header", short = 'H', action=ArgAction::Append, help = "headers append to the request")]
-    headers: Vec<String>,
-
-    #[arg(long, help = "set content of http body")]
-    body: Option<String>,
-
-    method: String,
-
     to_did: String,
 
     #[arg(default_value = "/")]
     path: String,
+
+    #[arg(default_value = "get")]
+    method: String,
+
+    #[arg(long="header", short = 'H', action=ArgAction::Append, help = "headers append to the request")]
+    headers: Vec<String>,
+
+    // #[arg(long, help = "set content of http body")]
+    // body: Option<String>,
+    #[arg(default_value = "30000")]
+    timeout: u64,
+}
+
+#[derive(Args, Debug)]
+struct SendHttpPostCommand {
+    #[command(flatten)]
+    client_args: ClientArgs,
+
+    to_did: String,
+
+    url: String,
+
+    #[arg(long="header", short = 'H', action=ArgAction::Append, help = "headers append to the request")]
+    headers: Vec<String>,
+
+    // #[arg(long, help = "set content of http body")]
+    // body: Option<String>,
+    #[arg(default_value = "30000")]
+    timeout: u64,
+}
+
+#[derive(Args, Debug)]
+struct SendSimpleTextCommand {
+    #[command(flatten)]
+    client_args: ClientArgs,
+
+    to_did: String,
+
+    text: String,
 }
 
 async fn daemon_run(
@@ -276,14 +309,12 @@ async fn daemon_run(
             .build()?,
     );
 
-    let callback: Option<CallbackFn> = {
-        if let Some(backend) = backend {
-            let config = BackendConfig::load(&backend).await?;
-            let backend = Backend::new(config);
-            Some(Box::new(backend))
-        } else {
-            None
-        }
+    let callback: Option<CallbackFn> = if let Some(backend) = backend {
+        let config = BackendConfig::load(&backend).await?;
+        let backend = Backend::new(config.http_server);
+        Some(Box::new(backend))
+    } else {
+        None
     };
 
     let listen_event = Arc::new(swarm.create_message_handler(callback, None));
@@ -428,13 +459,33 @@ async fn main() -> anyhow::Result<()> {
             args.client_args
                 .new_client()
                 .await?
-                .send_http(
+                .send_http_request_message(
                     args.to_did.as_str(),
-                    args.method,
-                    args.path,
-                    args.headers,
-                    args.body,
+                    http::Method::from_str(args.method.as_str())?,
+                    args.path.as_str(),
+                    args.timeout.into(),
+                    &args
+                        .headers
+                        .iter()
+                        .map(|x| x.split(':').collect::<Vec<&str>>())
+                        .map(|b| {
+                            (
+                                b[0].trim_start_matches(' ').trim_end_matches(' '),
+                                b[1].trim_start_matches(' ').trim_end_matches(' '),
+                            )
+                        })
+                        .collect::<Vec<(_, _)>>(),
+                    None,
                 )
+                .await?
+                .display();
+            Ok(())
+        }
+        Command::Send(SendCommand::SimpleText(args)) => {
+            args.client_args
+                .new_client()
+                .await?
+                .send_simple_text_message(args.to_did.as_str(), args.text.as_str())
                 .await?
                 .display();
             Ok(())

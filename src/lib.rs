@@ -134,9 +134,7 @@
 //! ```
 
 #![feature(async_closure)]
-#[cfg(feature = "node")]
 pub mod backend;
-pub mod backend_client;
 #[cfg(feature = "browser")]
 pub mod browser;
 #[cfg(feature = "node")]

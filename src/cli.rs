@@ -6,9 +6,8 @@ use jsonrpc_core::Params;
 use jsonrpc_core::Value;
 use serde_json::json;
 
-use crate::backend_client::BackendMessage;
-use crate::backend_client::HttpServerMessage;
-use crate::backend_client::HttpServerRequest;
+use crate::backend::types::HttpRequest;
+use crate::backend::types::Timeout;
 use crate::jsonrpc;
 use crate::jsonrpc::method::Method;
 use crate::jsonrpc::response::Peer;
@@ -229,38 +228,34 @@ impl Client {
         ClientOutput::ok("Done.".into(), ())
     }
 
-    pub async fn send_http(
+    pub async fn send_http_request_message(
         &self,
         did: &str,
-        method: String,
-        path: String,
-        headers: Vec<String>,
+        method: http::Method,
+        url: &str,
+        timeout: Timeout,
+        headers: &[(&str, &str)],
         body: Option<String>,
     ) -> Output<()> {
-        let headers = headers
-            .iter()
-            .map(|header| {
-                let mut split = header.split(':');
-                let name = split.next().unwrap().trim().to_string();
-                let value = split.next().unwrap().trim().to_string();
-                (name, value)
-            })
-            .collect();
-
-        let msg = BackendMessage::HttpServer(HttpServerMessage::Request(HttpServerRequest {
-            method,
-            path,
-            headers,
-            body: body.map(Bytes::from),
-        }));
-
-        let text = serde_json::to_string(&msg).unwrap();
-
-        let mut params = serde_json::Map::new();
-        params.insert("destination".to_owned(), json!(did));
-        params.insert("text".to_owned(), json!(text));
+        let http_request: HttpRequest =
+            HttpRequest::new(method, url, timeout, headers, body.map(Bytes::from));
+        let params2 = serde_json::to_value(http_request).map_err(|e| anyhow::anyhow!(e))?;
         self.client
-            .call_method(Method::SendTo.as_str(), Params::Map(params))
+            .call_method(
+                Method::SendHttpRequest.as_str(),
+                Params::Array(vec![json!(did), params2]),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        ClientOutput::ok("Done.".into(), ())
+    }
+
+    pub async fn send_simple_text_message(&self, did: &str, text: &str) -> Output<()> {
+        self.client
+            .call_method(
+                Method::SendSimpleText.as_str(),
+                Params::Array(vec![json!(did), json!(text)]),
+            )
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         ClientOutput::ok("Done.".into(), ())

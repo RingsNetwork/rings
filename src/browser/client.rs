@@ -1,18 +1,18 @@
-#![allow(non_snake_case, non_upper_case_globals)]
-use std::collections::HashMap;
+#![allow(non_snake_case, non_upper_case_globals, clippy::ptr_offset_with_cast)]
 use std::convert::TryFrom;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
 
 use anyhow::anyhow;
+use arrayref::array_refs;
 use bytes::Bytes;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::backend_client::BackendMessage;
-use crate::backend_client::HttpServerMessage;
-use crate::backend_client::HttpServerRequest;
+use crate::backend::types::BackendMessage;
+use crate::backend::types::HttpResponse;
+use crate::backend::types::MessageType;
 use crate::consts::BACKEND_MTU;
 use crate::jsonrpc::RpcMeta;
 use crate::prelude::chunk::Chunk;
@@ -553,36 +553,27 @@ impl Client {
         })
     }
 
-    /// send http message to node.
-    ///     * destination is the did of node
-    ///     * method:
-    ///         * `GET`
-    ///         * `POST`
-    ///         * `PUT`
-    ///         * `DELETE`
-    ///         * `HEAD`
-    ///         * `OPTIONS`
-    ///         * `CONNECT`
-    ///         * `PATCH`
-    ///         * `TRACE`
-    ///     * path
-    ///     * headers:
-    ///     * body
-    pub fn send_http(
+    /// send http request message to remote
+    /// - url: http url like `ipfs://ipfs/abc1234` `ipns://ipns/abc`
+    /// - timeout: timeout in milliseconds
+    pub fn send_http_request(
         &self,
         destination: String,
         method: String,
-        path: String,
+        url: String,
+        timeout: u64,
         headers: JsValue,
         body: Option<js_sys::Uint8Array>,
     ) -> js_sys::Promise {
         let p = self.processor.clone();
 
         future_to_promise(async move {
-            let headers = if headers.is_null() {
-                HashMap::new()
+            let method = http::Method::from_str(method.as_str()).map_err(JsError::from)?;
+
+            let headers: Vec<(String, String)> = if headers.is_null() {
+                Vec::new()
             } else if headers.is_object() {
-                let mut header_map: HashMap<String, String> = HashMap::new();
+                let mut header_vec: Vec<(String, String)> = Vec::new();
                 let obj = js_sys::Object::from(headers);
                 let entries = js_sys::Object::entries(&obj);
                 for e in entries.iter() {
@@ -591,30 +582,48 @@ impl Client {
                         if arr.length() != 2 {
                             continue;
                         }
-                        let k = arr.get(0);
+                        let k = arr.get(0).as_string().unwrap();
                         let v = arr.get(1);
                         if v.is_string() {
-                            header_map.insert(k.as_string().unwrap(), v.as_string().unwrap());
+                            let v = v.as_string().unwrap();
+                            header_vec.push((k, v))
                         }
                     }
                 }
-                header_map
+                header_vec
             } else {
-                HashMap::new()
+                Vec::new()
             };
 
-            let body = body.map(|b| Bytes::from(b.to_vec()));
-
-            let msg = BackendMessage::HttpServer(HttpServerMessage::Request(HttpServerRequest {
-                method,
-                path: path.to_owned(),
-                headers,
-                body,
-            }));
-            let text = serde_json::to_string(&msg).unwrap();
+            let b = body.map(|item| Bytes::from(item.to_vec()));
 
             let tx_id = p
-                .send_message(destination.as_str(), text.as_bytes())
+                .send_http_request_message(
+                    destination.as_str(),
+                    method,
+                    url.as_str(),
+                    timeout,
+                    &headers
+                        .iter()
+                        .map(|(k, v)| (k.as_str(), v.as_str()))
+                        .collect::<Vec<(&str, &str)>>(),
+                    b,
+                )
+                .await
+                .map_err(JsError::from)?;
+            Ok(JsValue::from_str(tx_id.to_string().as_str()))
+        })
+    }
+
+    /// send simple text message to remote
+    /// - destination: A did of destination
+    /// - text: text message
+    pub fn send_simple_text_message(&self, destination: String, text: String) -> js_sys::Promise {
+        let p = self.processor.clone();
+
+        future_to_promise(async move {
+            let tx_id = p
+                .send_simple_text_message(destination.as_str(), text.as_str())
                 .await
                 .map_err(JsError::from)?;
             Ok(JsValue::from_str(tx_id.to_string().as_str()))
@@ -648,10 +657,54 @@ impl MessageCallbackInstance {
 }
 
 impl MessageCallbackInstance {
-    pub async fn handle_http_server_msg(
+    pub async fn handle_message_data(
         &self,
         relay: &MessagePayload<Message>,
         data: &Bytes,
+    ) -> anyhow::Result<()> {
+        let m = BackendMessage::try_from(data.to_vec()).map_err(|e| anyhow::anyhow!("{}", e))?;
+        match m.message_type {
+            MessageType::SimpleText => {
+                self.handle_simple_text_message(relay, m.data.as_slice())
+                    .await?;
+            }
+            MessageType::HttpResponse => {
+                self.handle_http_response(relay, m.data.as_slice()).await?;
+            }
+            _ => {
+                return Ok(());
+            }
+        };
+        Ok(())
+    }
+
+    pub async fn handle_simple_text_message(
+        &self,
+        relay: &MessagePayload<Message>,
+        data: &[u8],
+    ) -> anyhow::Result<()> {
+        log::debug!("custom_message received: {:?}", data);
+        let msg_content = js_sys::Uint8Array::from(data);
+
+        let this = JsValue::null();
+        if let Ok(r) =
+            self.custom_message
+                .call2(&this, &JsValue::from_serde(&relay).unwrap(), &msg_content)
+        {
+            if let Ok(p) = js_sys::Promise::try_from(r) {
+                if let Err(e) = wasm_bindgen_futures::JsFuture::from(p).await {
+                    log::warn!("invoke on_custom_message error: {:?}", e);
+                    return Err(anyhow::anyhow!("{:?}", e));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn handle_http_response(
+        &self,
+        relay: &MessagePayload<Message>,
+        data: &[u8],
     ) -> anyhow::Result<()> {
         let msg_content = data;
         log::info!(
@@ -659,17 +712,15 @@ impl MessageCallbackInstance {
             relay.tx_id,
             msg_content.len(),
         );
-        let msg_content = message::decode_gzip_data(msg_content).unwrap();
+        let this = JsValue::null();
+        let msg_content = message::decode_gzip_data(&Bytes::from(data.to_vec())).unwrap();
         log::info!(
             "message of {:?} received, after gunzip: {:?}",
             relay.tx_id,
             msg_content.len(),
         );
-        let msg_content: BackendMessage = bincode::deserialize(&msg_content)?;
-        // let msg_content: BackendMessage = serde_json::from_slice(&msg_content)?;
-        let msg_content = JsValue::from_serde(&msg_content)?;
-        let this = JsValue::null();
-        // let msg_content = js_sys::Uint8Array::from(msg_content.as_slice());
+        let http_response: HttpResponse = bincode::deserialize(&msg_content)?;
+        let msg_content = JsValue::from_serde(&http_response)?;
         if let Ok(r) = self.http_response_message.call2(
             &this,
             &JsValue::from_serde(&relay).unwrap(),
@@ -728,12 +779,14 @@ impl MessageCallback for MessageCallbackInstance {
         } else {
             r.unwrap()
         };
-        let msg_body = msg.0;
-        let (left, right) = msg_body.split_at(4);
+        if msg.0.len() < 2 {
+            return;
+        }
 
-        let this = JsValue::null();
+        let (left, right) = array_refs![&msg.0, 4; ..;];
+        let (&[tag], _) = array_refs![left, 1, 3];
 
-        if left[0] == 1 {
+        let data = if tag == 1 {
             let data = self.handle_chunk_data(right);
             if let Err(e) = data {
                 log::error!("handle chunk data failed: {}", e);
@@ -742,28 +795,20 @@ impl MessageCallback for MessageCallbackInstance {
             let data = data.unwrap();
             log::debug!("chunk message of {:?} received", relay.tx_id);
             if let Some(data) = data {
-                if let Err(e) = self.handle_http_server_msg(relay, &data).await {
-                    log::error!("handle http_server_msg failed, {}", e);
-                }
+                data
             } else {
                 log::info!("chunk message of {:?} not complete", relay.tx_id);
+                return;
             }
+        } else if tag == 0 {
+            Bytes::from(right.to_vec())
+        } else {
+            log::error!("invalid message tag: {}", tag);
             return;
+        };
+        if let Err(e) = self.handle_message_data(relay, &data).await {
+            log::error!("handle http_server_msg failed, {}", e);
         }
-        log::debug!("custom_message received: {:?}", right);
-        let msg_content = js_sys::Uint8Array::from(right.to_vec().as_slice());
-
-        if let Ok(r) =
-            self.custom_message
-                .call2(&this, &JsValue::from_serde(&relay).unwrap(), &msg_content)
-        {
-            if let Ok(p) = js_sys::Promise::try_from(r) {
-                if let Err(e) = wasm_bindgen_futures::JsFuture::from(p).await {
-                    log::warn!("invoke on_custom_message error: {:?}", e);
-                }
-            }
-        }
-        //let a = wasm_bindgen_futures::JsFuture::from(self.on_cutom_message.as_ref().clone()).await;
     }
 
     async fn builtin_message(&self, _handler: &MessageHandler, relay: &MessagePayload<Message>) {

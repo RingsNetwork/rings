@@ -3,9 +3,14 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
+use bytes::Bytes;
 #[cfg(feature = "node")]
 use jsonrpc_core::Metadata;
 
+use crate::backend::types::BackendMessage;
+use crate::backend::types::HttpRequest;
+use crate::backend::types::MessageType;
+use crate::backend::types::Timeout;
 use crate::error;
 use crate::error::Error;
 use crate::error::Result;
@@ -351,8 +356,10 @@ impl Processor {
         );
         let destination = Did::from_str(destination).map_err(|_| Error::InvalidDid)?;
 
-        let mut new_msg: Vec<u8> = Vec::with_capacity(msg.len() + 4);
-        new_msg.extend_from_slice(&[0, 0, 0, 0]);
+        let mut new_msg = Vec::with_capacity(msg.len() + 4);
+        // chunked mark
+        new_msg.push(0);
+        new_msg.extend_from_slice(&[0u8; 3]);
         new_msg.extend_from_slice(msg);
 
         let msg = Message::custom(&new_msg, None).map_err(Error::SendMessage)?;
@@ -364,6 +371,58 @@ impl Processor {
             .await
             .map_err(Error::SendMessage)?;
         Ok(uuid)
+    }
+
+    /// send http request message to node
+    /// - destination: did of destination
+    /// - url: ipfs url
+    /// - timeout: timeout in millisecond
+    pub async fn send_http_request_message<U, T>(
+        &self,
+        destination: &str,
+        method: http::Method,
+        url: U,
+        timeout: T,
+        headers: &[(U, U)],
+        body: Option<Bytes>,
+    ) -> Result<uuid::Uuid>
+    where
+        U: ToString,
+        T: Into<Timeout>,
+    {
+        let timeout: Timeout = timeout.into();
+        tracing::info!(
+            "send_http_request_message, destination: {}, url: {:?}, timeout: {:?}",
+            destination,
+            url.to_string(),
+            timeout,
+        );
+        let msg: BackendMessage = BackendMessage::try_from((
+            MessageType::HttpRequest,
+            &HttpRequest::new(method, url, timeout, headers, body),
+        ))?;
+        let msg: Vec<u8> = msg.into();
+
+        self.send_message(destination, &msg).await
+    }
+
+    /// send simple text message
+    /// - destination: did of destination
+    /// - text: text message
+    pub async fn send_simple_text_message(
+        &self,
+        destination: &str,
+        text: &str,
+    ) -> Result<uuid::Uuid> {
+        tracing::info!(
+            "send_simple_text_message, destination: {}, text: {:?}",
+            destination,
+            text,
+        );
+
+        let msg: BackendMessage = BackendMessage::new(MessageType::SimpleText, text.as_bytes());
+        let msg: Vec<u8> = msg.into();
+        self.send_message(destination, &msg).await
     }
 
     /// check local cache of dht
@@ -419,7 +478,7 @@ impl From<&(Did, Arc<Transport>)> for Peer {
 pub fn unpack_text_message(msg: &CustomMessage) -> Result<String> {
     let (left, right) = msg.0.split_at(4);
     if left[0] != 0 {
-        return Err(Error::InvalidDid);
+        return Err(Error::InvalidData);
     }
     let text = String::from_utf8(right.to_vec()).unwrap();
     Ok(text)

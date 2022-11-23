@@ -20,6 +20,8 @@ use super::method::Method;
 use super::response;
 use super::response::Peer;
 use super::response::TransportAndIce;
+use crate::backend::types::BackendMessage;
+use crate::backend::types::MessageType;
 use crate::error::Error as ServerError;
 use crate::prelude::rings_core::dht::Did;
 use crate::prelude::rings_core::transports::manager::TransportManager;
@@ -74,6 +76,8 @@ pub(crate) async fn build_handler(handler: &mut MetaIoHandler<RpcMeta>) {
         close_pending_transport,
     );
     handler.add_method_with_meta(Method::SendTo.as_str(), send_message);
+    handler.add_method_with_meta(Method::SendHttpRequest.as_str(), send_http_request);
+    handler.add_method_with_meta(Method::SendSimpleText.as_str(), send_simple_text_message);
 }
 
 #[cfg(feature = "browser")]
@@ -91,6 +95,8 @@ pub async fn handle_request(method: Method, meta: RpcMeta, params: Params) -> Re
         Method::Disconnect => close_connection(params, meta).await,
         Method::ListPendings => list_pendings(params, meta).await,
         Method::ClosePendingTransport => close_pending_transport(params, meta).await,
+        Method::SendHttpRequest => send_http_request(params, meta).await,
+        Method::SendSimpleText => send_simple_text_message(params, meta).await,
     }
 }
 
@@ -267,4 +273,52 @@ async fn send_message(params: Params, meta: RpcMeta) -> Result<Value> {
         .send_message(destination, text.as_bytes())
         .await?;
     Ok(serde_json::json!({"tx_id": tx_id.to_string()}))
+}
+
+async fn send_simple_text_message(params: Params, meta: RpcMeta) -> Result<Value> {
+    meta.require_authed()?;
+    let params: Vec<serde_json::Value> = params.parse()?;
+    let destination = params
+        .get(0)
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
+        .as_str()
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
+    let text = params
+        .get(1)
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
+        .as_str()
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
+
+    let msg: BackendMessage = BackendMessage::new(MessageType::SimpleText, text.as_bytes());
+    let msg: Vec<u8> = msg.into();
+    // TODO chunk message flag
+    let tx_id = meta.processor.send_message(destination, &msg).await?;
+    Ok(serde_json::json!({"tx_id": tx_id.to_string()}))
+}
+
+/// handle send request ipfs message
+async fn send_http_request(params: Params, meta: RpcMeta) -> Result<Value> {
+    meta.require_authed()?;
+    let params: Vec<serde_json::Value> = params.parse()?;
+    let destination = params
+        .get(0)
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
+        .as_str()
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
+    let p2 = params
+        .get(1)
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
+        .to_owned();
+
+    let msg: BackendMessage = BackendMessage::try_from((
+        MessageType::HttpRequest,
+        &serde_json::from_value(p2).map_err(|_| Error::new(ErrorCode::InvalidParams))?,
+    ))?;
+    let msg: Vec<u8> = msg.into();
+    // TODO chunk message flag
+    let tx_id = meta.processor.send_message(destination, &msg).await?;
+
+    Ok(serde_json::json!({
+      "tx_id": tx_id.to_string(),
+    }))
 }

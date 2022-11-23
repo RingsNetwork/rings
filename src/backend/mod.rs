@@ -1,184 +1,67 @@
+#![allow(clippy::ptr_offset_with_cast)]
+#![warn(missing_docs)]
 //! An Backend HTTP service handle custom message from `MessageHandler` as CallbackFn.
-/// The trait `rings_core::handlers::MessageCallback` is implemented on `Backend` type
-/// To indicate to handle custom message relay, which use as a callbackFn in `MessageHandler`
-use std::collections::HashMap;
+#[cfg(feature = "node")]
+pub mod http_server;
+#[cfg(feature = "node")]
+pub mod text;
 
+pub mod types;
+
+#[cfg(feature = "node")]
+use arrayref::array_refs;
+#[cfg(feature = "node")]
 use async_trait::async_trait;
-use bytes::Bytes;
-use reqwest::header::HeaderMap;
-use reqwest::header::HeaderName;
+#[cfg(feature = "node")]
 use serde::Deserialize;
+#[cfg(feature = "node")]
 use serde::Serialize;
 
-use crate::backend_client::BackendMessage;
-use crate::backend_client::HttpServerMessage;
-use crate::backend_client::HttpServerRequest;
-use crate::backend_client::HttpServerResponse;
-use crate::consts::BACKEND_MTU;
-use crate::error::Error;
-use crate::error::Result;
-use crate::prelude::chunk::ChunkList;
+#[cfg(feature = "node")]
+use self::http_server::HttpServer;
+#[cfg(feature = "node")]
+use self::http_server::HttpServerConfig;
+#[cfg(feature = "node")]
+use self::text::TextEndpoint;
+#[cfg(feature = "node")]
+use self::types::BackendMessage;
+#[cfg(feature = "node")]
+use self::types::MessageEndpoint;
+#[cfg(feature = "node")]
+use self::types::MessageType;
+#[cfg(feature = "node")]
 use crate::prelude::rings_core::message::Message;
+#[cfg(feature = "node")]
 use crate::prelude::*;
 
-/// BackendConfig which use to create `http_server`.
+/// A Backend struct contains http_server.
+#[cfg(feature = "node")]
+pub struct Backend {
+    http_server: Option<HttpServer>,
+    text_endpoint: TextEndpoint,
+}
+
+/// BackendConfig
+#[cfg(feature = "node")]
 #[derive(Deserialize, Serialize, Debug)]
 pub struct BackendConfig {
+    /// http_server
     pub http_server: Option<HttpServerConfig>,
 }
 
-/// HTTP Server Config, specific determine port.
-#[derive(Deserialize, Serialize, Debug)]
-pub struct HttpServerConfig {
-    pub port: u16,
-}
-
-/// A Backend struct contains http_server.
-pub struct Backend {
-    http_server: Option<HttpServer>,
-}
-
-/// A HttpServer using reqwest::Client
-pub struct HttpServer {
-    client: reqwest::Client,
-    port: u16,
-}
-
+#[cfg(feature = "node")]
 impl Backend {
-    pub fn new(config: BackendConfig) -> Self {
+    /// new backend
+    /// - `ipfs_gateway`
+    pub fn new(http_server_config: Option<HttpServerConfig>) -> Self {
         Self {
-            http_server: config.http_server.map(HttpServer::new),
+            http_server: http_server_config.map(|c| c.into()),
+            text_endpoint: TextEndpoint::default(),
         }
     }
 }
 
-impl HttpServer {
-    pub fn new(config: HttpServerConfig) -> Self {
-        Self {
-            client: reqwest::Client::new(),
-            port: config.port,
-        }
-    }
-
-    pub async fn execute(&self, request: HttpServerRequest) -> Result<HttpServerResponse> {
-        let url = format!(
-            "http://localhost:{}/{}",
-            self.port,
-            request.path.trim_start_matches('/')
-        );
-        let method = try_into_method(&request.method)?;
-
-        let mut headers = HeaderMap::new();
-        for (name, value) in request.headers {
-            headers.insert(
-                name.parse::<HeaderName>().map_err(|_| {
-                    Error::HttpRequestError(format!("Invalid header name: {}", &name))
-                })?,
-                value.parse().map_err(|_| {
-                    Error::HttpRequestError(format!("Invalid header value: {}", &value))
-                })?,
-            );
-        }
-
-        let req = self
-            .client
-            .request(method, &url)
-            .headers(headers)
-            .timeout(std::time::Duration::from_secs(15));
-        let req = request
-            .body
-            .map_or(req.try_clone().unwrap(), |body| req.body(body));
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| Error::HttpRequestError(e.to_string()))?;
-
-        let status = resp.status().as_u16();
-        let headers = resp
-            .headers()
-            .iter()
-            .map(|(key, value)| (key.to_string(), value.to_str().unwrap().to_string()))
-            .collect();
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| Error::HttpRequestError(e.to_string()))?;
-
-        Ok(HttpServerResponse {
-            status,
-            headers,
-            body: Some(body),
-        })
-    }
-}
-
-fn try_into_method(s: &str) -> Result<http::Method> {
-    match s.to_uppercase().as_str() {
-        "GET" => Ok(http::Method::GET),
-        "POST" => Ok(http::Method::POST),
-        "PUT" => Ok(http::Method::PUT),
-        "DELETE" => Ok(http::Method::DELETE),
-        "HEAD" => Ok(http::Method::HEAD),
-        "OPTIONS" => Ok(http::Method::OPTIONS),
-        "TRACE" => Ok(http::Method::TRACE),
-        "CONNECT" => Ok(http::Method::CONNECT),
-        "PATCH" => Ok(http::Method::PATCH),
-        _ => Err(Error::HttpRequestError("Invalid HTTP method".to_string())),
-    }
-}
-
-impl Backend {
-    /// Backend receive localhost http request and split bytes into chunk
-    /// using `ChunkList`, send_report_message back to `MessageHandler`.
-    async fn handle_http_server_request_message(
-        &self,
-        req: &HttpServerRequest,
-        handler: &MessageHandler,
-        ctx: &MessagePayload<Message>,
-        relay: &MessageRelay,
-    ) -> anyhow::Result<()> {
-        if let Some(ref server) = self.http_server {
-            let resp =
-                server
-                    .execute(req.to_owned())
-                    .await
-                    .unwrap_or_else(|e| HttpServerResponse {
-                        status: 500,
-                        headers: HashMap::new(),
-                        body: Some(Bytes::from(e.to_string())),
-                    });
-            tracing::debug!("Sending HTTP server response: {:?}", resp);
-
-            let resp = BackendMessage::HttpServer(HttpServerMessage::Response(resp));
-            tracing::debug!("resp_bytes start gzip");
-            let json_bytes = bincode::serialize(&resp)?.into();
-            let resp_bytes = message::encode_data_gzip(&json_bytes, 9)?;
-            tracing::debug!("resp_bytes gzip_data len: {}", resp_bytes.len());
-
-            let chunks = ChunkList::<BACKEND_MTU>::from(&resp_bytes);
-            for c in chunks {
-                tracing::debug!("Chunk data len: {}", c.data.len());
-                let bytes = c.to_bincode()?;
-                tracing::debug!("Chunk len: {}", bytes.len());
-                let mut new_bytes: Vec<u8> = Vec::with_capacity(bytes.len() + 4);
-                new_bytes.extend_from_slice(&[1, 1, 0, 0]);
-                new_bytes.extend_from_slice(&bytes);
-
-                handler
-                    .send_report_message(
-                        Message::custom(&new_bytes, None)?,
-                        ctx.tx_id,
-                        relay.clone(),
-                    )
-                    .await?;
-            }
-        } else {
-            tracing::warn!("HTTP server is not configured");
-        }
-        Ok(())
-    }
-}
-
+#[cfg(feature = "node")]
 #[async_trait]
 impl MessageCallback for Backend {
     /// `custom_message` in Backend for now only handle
@@ -194,31 +77,48 @@ impl MessageCallback for Backend {
         relay.relay(relay.destination, None).unwrap();
 
         let msg = handler.decrypt_msg(msg);
-        if msg.is_err() {
+        if let Err(e) = msg {
+            tracing::error!("decrypt custom_message failed: {}", e);
+            return;
+        }
+        let msg = msg.unwrap().0;
+
+        let (left, msg) = array_refs![&msg, 4; ..;];
+        let (&[flag], _) = array_refs![left, 1, 3];
+        if flag != 0 {
+            return;
+        }
+
+        let msg = BackendMessage::try_from(msg);
+        if let Err(e) = msg {
+            tracing::error!("decode custom_message failed: {}", e);
             return;
         }
         let msg = msg.unwrap();
-        let (left, right) = msg.0.split_at(4);
-        if left[0] != 0 {
-            return;
-        }
-        if let Ok(msg) = serde_json::from_slice(right) {
-            match msg {
-                BackendMessage::HttpServer(msg) => match msg {
-                    HttpServerMessage::Request(req) => {
-                        tracing::info!("Received HTTP server request: {:?}", req);
-                        if let Err(e) = self
-                            .handle_http_server_request_message(&req, handler, ctx, &relay)
-                            .await
-                        {
-                            tracing::error!("Handle HttpServerRequest msg failed: {:?}", e);
-                        }
-                    }
-                    HttpServerMessage::Response(resp) => {
-                        println!("HttpServerMessage::Response: {:?}", resp);
-                    }
-                },
-            };
+
+        let result = match msg.message_type {
+            MessageType::SimpleText => {
+                self.text_endpoint
+                    .handle_message(handler, ctx, &relay, &msg)
+                    .await
+            }
+            MessageType::HttpRequest => {
+                if let Some(server) = self.http_server.as_ref() {
+                    server.handle_message(handler, ctx, &relay, &msg).await
+                } else {
+                    Ok(())
+                }
+            }
+            _ => {
+                tracing::debug!(
+                    "custom_message handle unsupport, tag: {:?}",
+                    msg.message_type
+                );
+                return;
+            }
+        };
+        if let Err(e) = result {
+            tracing::error!("handle custom_message failed: {}", e);
         }
     }
 
