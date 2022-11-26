@@ -8,6 +8,7 @@ pub mod text;
 
 pub mod types;
 
+#[cfg(feature = "node")]
 use std::sync::Arc;
 
 #[cfg(feature = "node")]
