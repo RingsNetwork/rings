@@ -21,9 +21,12 @@ use crate::prelude::*;
 
 /// HTTP Server Config, specific determine port.
 #[derive(Deserialize, Serialize, Debug)]
-pub struct HttpServerConfig {
-    /// port of service
-    pub port: u16,
+pub struct HiddenServerConfig {
+    /// name of hidden service
+    pub name: String,
+
+    /// prefix of hidden service
+    pub prefix: String,
 }
 
 /// HttpServer struct
@@ -31,25 +34,21 @@ pub struct HttpServerConfig {
 pub struct HttpServer {
     /// http client
     pub client: Arc<reqwest::Client>,
-    /// ipfs_endpoint to serve ipfs request
-    pub port: u16,
+
+    /// hidden services
+    pub services: Vec<HiddenServerConfig>,
 }
 
-impl From<HttpServerConfig> for HttpServer {
-    fn from(config: HttpServerConfig) -> Self {
-        Self::new(config.port)
+impl From<Vec<HiddenServerConfig>> for HttpServer {
+    fn from(configs: Vec<HiddenServerConfig>) -> Self {
+        Self {
+            client: Arc::new(reqwest::Client::new()),
+            services: configs,
+        }
     }
 }
 
 impl HttpServer {
-    /// new HttpServer from port
-    pub fn new(port: u16) -> Self {
-        Self {
-            client: Arc::new(reqwest::Client::new()),
-            port,
-        }
-    }
-
     /// not allowd response
     pub fn not_allowed_resp() -> HttpResponse {
         HttpResponse {
@@ -61,9 +60,15 @@ impl HttpServer {
 
     /// execute http request
     pub async fn execute(&self, request: &HttpRequest) -> Result<HttpResponse> {
+        let service = self
+            .services
+            .iter()
+            .find(|x| x.name.eq_ignore_ascii_case(request.name.as_str()))
+            .ok_or(Error::InvalidService)?;
+
         let url = format!(
-            "http://localhost:{}/{}",
-            self.port,
+            "{}/{}",
+            service.prefix,
             request.path.trim_start_matches('/')
         );
 

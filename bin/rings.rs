@@ -249,6 +249,8 @@ struct SendHttpCommand {
 
     to_did: String,
 
+    name: String,
+
     #[arg(default_value = "/")]
     path: String,
 
@@ -258,8 +260,9 @@ struct SendHttpCommand {
     #[arg(long="header", short = 'H', action=ArgAction::Append, help = "headers append to the request")]
     headers: Vec<String>,
 
-    // #[arg(long, help = "set content of http body")]
-    // body: Option<String>,
+    #[arg(long, help = "set content of http body")]
+    body: Option<String>,
+
     #[arg(default_value = "30000")]
     timeout: u64,
 }
@@ -311,7 +314,7 @@ async fn daemon_run(
 
     let callback: Option<CallbackFn> = if let Some(backend) = backend {
         let config = BackendConfig::load(&backend).await?;
-        let backend = Backend::new(config.http_server);
+        let backend = Backend::new(config);
         Some(Box::new(backend))
     } else {
         None
@@ -460,6 +463,7 @@ async fn main() -> anyhow::Result<()> {
                 .new_client()
                 .await?
                 .send_http_request_message(
+                    args.name.as_str(),
                     args.to_did.as_str(),
                     http::Method::from_str(args.method.as_str())?,
                     args.path.as_str(),
@@ -475,7 +479,7 @@ async fn main() -> anyhow::Result<()> {
                             )
                         })
                         .collect::<Vec<(_, _)>>(),
-                    None,
+                    args.body,
                 )
                 .await?
                 .display();

@@ -190,6 +190,8 @@ fn default_http_request_body() -> Option<Bytes> {
 /// - `timeout`: timeout in milliseconds
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HttpRequest {
+    /// service name
+    pub name: String,
     /// method
     pub method: String,
     /// url
@@ -204,9 +206,10 @@ pub struct HttpRequest {
     pub body: Option<Bytes>,
 }
 
-impl From<(http::Method, String, Timeout)> for HttpRequest {
-    fn from((method, path, timeout): (http::Method, String, Timeout)) -> Self {
+impl From<(String, http::Method, String, Timeout)> for HttpRequest {
+    fn from((name, method, path, timeout): (String, http::Method, String, Timeout)) -> Self {
         Self {
+            name,
             method: method.to_string(),
             path,
             timeout,
@@ -216,20 +219,28 @@ impl From<(http::Method, String, Timeout)> for HttpRequest {
     }
 }
 
-impl From<(http::Method, &str, u64)> for HttpRequest {
-    fn from((method, url, timeout): (http::Method, &str, u64)) -> Self {
-        (method, url.to_owned(), Timeout::from(timeout)).into()
+impl From<(&str, http::Method, &str, u64)> for HttpRequest {
+    fn from((name, method, url, timeout): (&str, http::Method, &str, u64)) -> Self {
+        (
+            name.to_owned(),
+            method,
+            url.to_owned(),
+            Timeout::from(timeout),
+        )
+            .into()
     }
 }
 
 impl HttpRequest {
     /// new HttpRequest
+    /// - `name`
     /// - `method`
     /// - `url`
     /// - `timeout`
     /// - `headers`
     /// - `body`: optional
     pub fn new<U>(
+        name: U,
         method: http::Method,
         path: U,
         timeout: Timeout,
@@ -240,6 +251,7 @@ impl HttpRequest {
         U: ToString,
     {
         Self {
+            name: name.to_string(),
             method: method.to_string(),
             path: path.to_string(),
             timeout,
@@ -252,14 +264,23 @@ impl HttpRequest {
     }
 
     /// new `GET` HttpRequest
+    /// - `name`
     /// - `method`
     /// - `url`
     /// - `timeout`
     /// - `headers`
     /// - `body`: optional
-    pub fn get<U>(url: U, timeout: Timeout, headers: &[(U, U)], body: Option<Bytes>) -> Self
-    where U: ToString {
-        Self::new(http::Method::GET, url, timeout, headers, body)
+    pub fn get<U>(
+        name: U,
+        url: U,
+        timeout: Timeout,
+        headers: &[(U, U)],
+        body: Option<Bytes>,
+    ) -> Self
+    where
+        U: ToString,
+    {
+        Self::new(name, http::Method::GET, url, timeout, headers, body)
     }
 }
 

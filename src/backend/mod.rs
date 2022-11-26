@@ -8,6 +8,8 @@ pub mod text;
 
 pub mod types;
 
+use std::sync::Arc;
+
 #[cfg(feature = "node")]
 use arrayref::array_refs;
 #[cfg(feature = "node")]
@@ -18,9 +20,9 @@ use serde::Deserialize;
 use serde::Serialize;
 
 #[cfg(feature = "node")]
-use self::http_server::HttpServer;
+use self::http_server::HiddenServerConfig;
 #[cfg(feature = "node")]
-use self::http_server::HttpServerConfig;
+use self::http_server::HttpServer;
 #[cfg(feature = "node")]
 use self::text::TextEndpoint;
 #[cfg(feature = "node")]
@@ -37,7 +39,7 @@ use crate::prelude::*;
 /// A Backend struct contains http_server.
 #[cfg(feature = "node")]
 pub struct Backend {
-    http_server: Option<HttpServer>,
+    http_server: Arc<HttpServer>,
     text_endpoint: TextEndpoint,
 }
 
@@ -46,16 +48,16 @@ pub struct Backend {
 #[derive(Deserialize, Serialize, Debug)]
 pub struct BackendConfig {
     /// http_server
-    pub http_server: Option<HttpServerConfig>,
+    pub hidden_servers: Vec<HiddenServerConfig>,
 }
 
 #[cfg(feature = "node")]
 impl Backend {
     /// new backend
     /// - `ipfs_gateway`
-    pub fn new(http_server_config: Option<HttpServerConfig>) -> Self {
+    pub fn new(config: BackendConfig) -> Self {
         Self {
-            http_server: http_server_config.map(|c| c.into()),
+            http_server: Arc::new(HttpServer::from(config.hidden_servers)),
             text_endpoint: TextEndpoint::default(),
         }
     }
@@ -103,11 +105,9 @@ impl MessageCallback for Backend {
                     .await
             }
             MessageType::HttpRequest => {
-                if let Some(server) = self.http_server.as_ref() {
-                    server.handle_message(handler, ctx, &relay, &msg).await
-                } else {
-                    Ok(())
-                }
+                self.http_server
+                    .handle_message(handler, ctx, &relay, &msg)
+                    .await
             }
             _ => {
                 tracing::debug!(
