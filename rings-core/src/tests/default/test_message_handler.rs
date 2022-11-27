@@ -190,7 +190,7 @@ async fn test_handle_notify_predecessor() -> Result<()> {
             handler1
                 .send_message(
                     Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
-                        id: key1.address().into(),
+                        did: key1.address().into(),
                     }),
                     swarm2.did(),
                     swarm2.did(),
@@ -249,7 +249,7 @@ async fn test_handle_find_successor_increase() -> Result<()> {
             handler1
                 .send_message(
                     Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
-                        id: swarm1.did(),
+                        did: swarm1.did(),
                     }),
                     swarm2.did(),
                     swarm2.did(),
@@ -268,7 +268,7 @@ async fn test_handle_find_successor_increase() -> Result<()> {
             handler2
                 .send_message(
                     Message::FindSuccessorSend(message::FindSuccessorSend {
-                        id: swarm2.did(),
+                        did: swarm2.did(),
                         then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect),
                         strict: true
                     }),
@@ -336,7 +336,7 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
             handler1
                 .send_message(
                     Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
-                        id: swarm1.did(),
+                        did: swarm1.did(),
                     }),
                     swarm2.did(),
                     swarm2.did(),
@@ -354,7 +354,7 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
             handler2
                 .send_message(
                     Message::FindSuccessorSend(message::FindSuccessorSend {
-                        id: swarm2.did(),
+                        did: swarm2.did(),
                         then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect),
                         strict: true
                     }),
@@ -425,7 +425,7 @@ async fn test_handle_storage() -> Result<()> {
              handler1
                  .send_message(
                      Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
-                         id: swarm1.did()
+                         did: swarm1.did()
                      }),
                      swarm2.did(),
                      swarm2.did(),

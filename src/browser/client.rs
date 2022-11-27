@@ -523,7 +523,7 @@ impl Client {
         let p = self.processor.clone();
         future_to_promise(async move {
             let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
-            let v_node = p.check_cache(&did).await;
+            let v_node = p.check_cache(did).await;
             if let Some(v) = v_node {
                 let wasm_vnode = VirtualNode::from(v);
                 let data = JsValue::from_serde(&wasm_vnode).map_err(JsError::from)?;
@@ -538,7 +538,7 @@ impl Client {
         let p = self.processor.clone();
         future_to_promise(async move {
             let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
-            p.fetch(&did).await.map_err(JsError::from)?;
+            p.fetch(did).await.map_err(JsError::from)?;
             Ok(JsValue::null())
         })
     }

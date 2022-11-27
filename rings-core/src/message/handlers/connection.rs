@@ -31,7 +31,7 @@ use crate::types::ice_transport::IceTrickleScheme;
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<LeaveDHT> for MessageHandler {
     async fn handle(&self, _ctx: &MessagePayload<Message>, msg: &LeaveDHT) -> Result<()> {
-        self.swarm.disconnect(msg.id).await
+        self.swarm.disconnect(msg.did).await
     }
 }
 
@@ -42,9 +42,9 @@ impl HandleMsg<JoinDHT> for MessageHandler {
         // here is two situation.
         // finger table just have no other node(beside next), it will be a `create` op
         // otherwise, it will be a `send` op
-        match self.dht.join(msg.id)? {
+        match self.dht.join(msg.did)? {
             PeerRingAction::None => Ok(()),
-            PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessor(id)) => {
+            PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessor(did)) => {
                 // if there is only two nodes A, B, it may cause recursion
                 // A.successor == B
                 // B.successor == A
@@ -52,7 +52,7 @@ impl HandleMsg<JoinDHT> for MessageHandler {
                 if next != ctx.addr {
                     self.send_direct_message(
                         Message::FindSuccessorSend(FindSuccessorSend {
-                            id,
+                            did,
                             strict: false,
                             then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect),
                         }),
@@ -73,14 +73,14 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload<Message>, msg: &ConnectNodeSend) -> Result<()> {
         let mut relay = ctx.relay.clone();
         // if id is not dest
-        if self.dht.id != relay.destination {
+        if self.dht.did != relay.destination {
             if self
                 .swarm
                 .get_and_check_transport(relay.destination)
                 .await
                 .is_some()
             {
-                relay.relay(self.dht.id, Some(relay.destination))?;
+                relay.relay(self.dht.did, Some(relay.destination))?;
                 return self.forward_payload(ctx, relay).await;
             } else {
                 let next_node = match self.dht.find_successor(relay.destination)? {
@@ -89,12 +89,12 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
                     _ => None,
                 }
                 .ok_or(Error::MessageHandlerMissNextNode)?;
-                relay.relay(self.dht.id, Some(next_node))?;
+                relay.relay(self.dht.did, Some(next_node))?;
                 return self.forward_payload(ctx, relay).await;
             }
         } else {
             // self is dest
-            relay.relay(self.dht.id, None)?;
+            relay.relay(self.dht.did, None)?;
             match self.swarm.get_and_check_transport(relay.sender()).await {
                 None => {
                     let trans = self.swarm.new_transport().await?;
@@ -141,7 +141,7 @@ impl HandleMsg<ConnectNodeReport> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload<Message>, msg: &ConnectNodeReport) -> Result<()> {
         let mut relay = ctx.relay.clone();
 
-        relay.relay(self.dht.id, None)?;
+        relay.relay(self.dht.did, None)?;
         if relay.next_hop.is_some() {
             self.forward_payload(ctx, relay).await
         } else {
@@ -166,7 +166,7 @@ impl HandleMsg<AlreadyConnected> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload<Message>, _msg: &AlreadyConnected) -> Result<()> {
         let mut relay = ctx.relay.clone();
 
-        relay.relay(self.dht.id, None)?;
+        relay.relay(self.dht.did, None)?;
         if relay.next_hop.is_some() {
             self.forward_payload(ctx, relay).await
         } else {
@@ -185,15 +185,15 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload<Message>, msg: &FindSuccessorSend) -> Result<()> {
         let mut relay = ctx.relay.clone();
 
-        match self.dht.find_successor(msg.id)? {
-            PeerRingAction::Some(id) => {
-                if !msg.strict || self.dht.id == msg.id {
+        match self.dht.find_successor(msg.did)? {
+            PeerRingAction::Some(did) => {
+                if !msg.strict || self.dht.did == msg.did {
                     match &msg.then {
                         FindSuccessorThen::Report(handler) => {
-                            relay.relay(self.dht.id, None)?;
+                            relay.relay(self.dht.did, None)?;
                             self.send_report_message(
                                 Message::FindSuccessorReport(FindSuccessorReport {
-                                    id,
+                                    did,
                                     handler: handler.clone(),
                                 }),
                                 ctx.tx_id,
@@ -202,15 +202,15 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
                             .await
                         }
                     }
-                } else if self.swarm.get_and_check_transport(msg.id).await.is_some() {
-                    relay.relay(self.dht.id, Some(relay.destination))?;
+                } else if self.swarm.get_and_check_transport(msg.did).await.is_some() {
+                    relay.relay(self.dht.did, Some(relay.destination))?;
                     return self.forward_payload(ctx, relay).await;
                 } else {
                     return Err(Error::MessageHandlerMissNextNode);
                 }
             }
             PeerRingAction::RemoteAction(next, _) => {
-                relay.relay(self.dht.id, Some(next))?;
+                relay.relay(self.dht.did, Some(next))?;
                 relay.reset_destination(next)?;
                 self.forward_payload(ctx, relay).await
             }
@@ -225,26 +225,27 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload<Message>, msg: &FindSuccessorReport) -> Result<()> {
         let mut relay = ctx.relay.clone();
 
-        relay.relay(self.dht.id, None)?;
+        relay.relay(self.dht.did, None)?;
         if relay.next_hop.is_some() {
             return self.forward_payload(ctx, relay).await;
         }
 
         match &msg.handler {
-            FindSuccessorReportHandler::FixFingerTable => self.dht.lock_finger()?.set_fix(msg.id),
+            // TODO: hove to prevent `fix_finger_index` before got `FixFingerTable`?
+            FindSuccessorReportHandler::FixFingerTable => self.dht.lock_finger()?.set_fix(msg.did),
             FindSuccessorReportHandler::Connect => {
-                if self.swarm.get_and_check_transport(msg.id).await.is_none()
-                    && msg.id != self.swarm.did()
+                if self.swarm.get_and_check_transport(msg.did).await.is_none()
+                    && msg.did != self.swarm.did()
                 {
-                    self.swarm.connect(msg.id).await?;
+                    self.swarm.connect(msg.did).await?;
                 }
             }
             FindSuccessorReportHandler::SyncStorage => {
-                self.dht.lock_successor()?.update(msg.id);
+                self.dht.lock_successor()?.update(msg.did);
                 if let Ok(PeerRingAction::RemoteAction(
                     next,
                     PeerRingRemoteAction::SyncVNodeWithSuccessor(data),
-                )) = self.dht.sync_with_successor(msg.id).await
+                )) = self.dht.sync_with_successor(msg.did).await
                 {
                     self.send_direct_message(
                         Message::SyncVNodeWithSuccessor(SyncVNodeWithSuccessor { data }),
@@ -441,7 +442,7 @@ pub mod tests {
         assert_eq!(ev_3.relay.path, vec![did3, did2]);
         assert!(matches!(
             ev_3.data,
-            Message::FindSuccessorReport(FindSuccessorReport{id, handler: FindSuccessorReportHandler::Connect}) if id == did3
+            Message::FindSuccessorReport(FindSuccessorReport{did, handler: FindSuccessorReportHandler::Connect}) if did == did3
         ));
         // dht3 won't set did3 as successor
         assert!(!dht3.lock_successor()?.list().contains(&did3));
@@ -454,7 +455,7 @@ pub mod tests {
         // node3 is only aware of node2, so it respond node2
         assert!(matches!(
             ev_2.data,
-            Message::FindSuccessorReport(FindSuccessorReport{id, handler: FindSuccessorReportHandler::Connect}) if id == did2
+            Message::FindSuccessorReport(FindSuccessorReport{did, handler: FindSuccessorReportHandler::Connect}) if did == did2
         ));
         // dht2 won't set did2 as successor
         assert!(!dht2.lock_successor()?.list().contains(&did2));
@@ -481,7 +482,7 @@ pub mod tests {
         assert_eq!(ev_2.relay.path, vec![did3, did1]);
         assert!(matches!(
             ev_2.data,
-            Message::FindSuccessorSend(FindSuccessorSend{id, strict: false, then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect)}) if id == did3
+            Message::FindSuccessorSend(FindSuccessorSend{did, strict: false, then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect)}) if did == did3
         ));
 
         // 3->1 FindSuccessorReport
@@ -491,7 +492,7 @@ pub mod tests {
         assert_eq!(ev_1.relay.path, vec![did1, did3]);
         assert!(matches!(
             ev_1.data,
-            Message::FindSuccessorReport(FindSuccessorReport{id, handler: FindSuccessorReportHandler::Connect}) if id == did1
+            Message::FindSuccessorReport(FindSuccessorReport{did, handler: FindSuccessorReportHandler::Connect}) if did == did1
         ));
         // dht1 won't set did1 as successor
         assert!(!dht1.lock_successor()?.list().contains(&did1));
@@ -507,7 +508,7 @@ pub mod tests {
         assert_eq!(ev_3.relay.path, vec![did3, did1, did2]);
         assert!(matches!(
             ev_3.data,
-            Message::FindSuccessorReport(FindSuccessorReport{id, handler: FindSuccessorReportHandler::Connect}) if id == did3
+            Message::FindSuccessorReport(FindSuccessorReport{did, handler: FindSuccessorReportHandler::Connect}) if did == did3
         ));
         // dht3 won't set did3 as successor
         assert!(!dht3.lock_successor()?.list().contains(&did3));
@@ -572,7 +573,7 @@ pub mod tests {
         assert_eq!(ev_1.relay.path, vec![did3, did2]);
         assert!(matches!(
             ev_1.data,
-            Message::FindSuccessorSend(FindSuccessorSend{id, strict: false, then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect)}) if id == did3
+            Message::FindSuccessorSend(FindSuccessorSend{did, strict: false, then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect)}) if did == did3
         ));
 
         // 3->2 FindSuccessorReport
@@ -583,7 +584,7 @@ pub mod tests {
         // node3 is only aware of node2, so it respond node2
         assert!(matches!(
             ev_2.data,
-            Message::FindSuccessorReport(FindSuccessorReport{id, handler: FindSuccessorReportHandler::Connect}) if id == did2
+            Message::FindSuccessorReport(FindSuccessorReport{did, handler: FindSuccessorReportHandler::Connect}) if did == did2
         ));
         // dht2 won't set did2 as successor
         assert!(!dht2.lock_successor()?.list().contains(&did2));
@@ -597,7 +598,7 @@ pub mod tests {
         // node1 is only aware of node2, so it respond node2
         assert!(matches!(
             ev_2.data,
-            Message::FindSuccessorReport(FindSuccessorReport{id, handler: FindSuccessorReportHandler::Connect}) if id == did2
+            Message::FindSuccessorReport(FindSuccessorReport{did, handler: FindSuccessorReportHandler::Connect}) if did == did2
         ));
 
         // 1->2->3 FindSuccessorReport
@@ -608,7 +609,7 @@ pub mod tests {
         assert_eq!(ev_3.relay.path_end_cursor, 1);
         assert!(matches!(
             ev_3.data,
-            Message::FindSuccessorReport(FindSuccessorReport{id, handler: FindSuccessorReportHandler::Connect}) if id == did2
+            Message::FindSuccessorReport(FindSuccessorReport{did, handler: FindSuccessorReportHandler::Connect}) if did == did2
         ));
 
         println!("=== Check state before connect via DHT ===");
@@ -633,7 +634,7 @@ pub mod tests {
         assert_eq!(ev_2.relay.path, vec![did1, did3]);
         assert!(matches!(
             ev_2.data,
-            Message::FindSuccessorSend(FindSuccessorSend{id,  strict: false, then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect)}) if id == did1
+            Message::FindSuccessorSend(FindSuccessorSend{did,  strict: false, then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect)}) if did == did1
         ));
 
         // 1->3 FindSuccessorReport
@@ -643,7 +644,7 @@ pub mod tests {
         assert_eq!(ev_3.relay.path, vec![did3, did1]);
         assert!(matches!(
             ev_3.data,
-            Message::FindSuccessorReport(FindSuccessorReport{id, handler: FindSuccessorReportHandler::Connect}) if id == did3
+            Message::FindSuccessorReport(FindSuccessorReport{did, handler: FindSuccessorReportHandler::Connect}) if did == did3
         ));
         // dht3 won't set did3 as successor
         assert!(!node3.dht.lock_successor()?.list().contains(&did3));
@@ -659,7 +660,7 @@ pub mod tests {
         assert_eq!(ev_1.relay.path, vec![did1, did3, did2]);
         assert!(matches!(
             ev_1.data,
-            Message::FindSuccessorReport(FindSuccessorReport{id, handler: FindSuccessorReportHandler::Connect}) if id == did1
+            Message::FindSuccessorReport(FindSuccessorReport{did, handler: FindSuccessorReportHandler::Connect}) if did == did1
         ));
         // dht1 won't set did1 as successor
         assert!(!node1.dht.lock_successor()?.list().contains(&did1));
@@ -689,13 +690,13 @@ pub mod tests {
         let ev_1 = node1.listen_once().await.unwrap();
         assert_eq!(ev_1.addr, did1);
         assert_eq!(ev_1.relay.path, vec![did1]);
-        assert!(matches!(ev_1.data, Message::JoinDHT(JoinDHT{id, ..}) if id == did2));
+        assert!(matches!(ev_1.data, Message::JoinDHT(JoinDHT{did, ..}) if did == did2));
 
         // 2 JoinDHT
         let ev_2 = node2.listen_once().await.unwrap();
         assert_eq!(ev_2.addr, did2);
         assert_eq!(ev_2.relay.path, vec![did2]);
-        assert!(matches!(ev_2.data, Message::JoinDHT(JoinDHT{id, ..}) if id == did1));
+        assert!(matches!(ev_2.data, Message::JoinDHT(JoinDHT{did, ..}) if did == did1));
 
         // 1->2 FindSuccessorSend
         let ev_1 = node1.listen_once().await.unwrap();
@@ -703,7 +704,7 @@ pub mod tests {
         assert_eq!(ev_1.relay.path, vec![did2]);
         assert!(matches!(
             ev_1.data,
-            Message::FindSuccessorSend(FindSuccessorSend{id, then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect), strict: false}) if id == did2
+            Message::FindSuccessorSend(FindSuccessorSend{did, then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect), strict: false}) if did == did2
         ));
 
         // 2->1 FindSuccessorSend
@@ -712,7 +713,7 @@ pub mod tests {
         assert_eq!(ev_2.relay.path, vec![did1]);
         assert!(matches!(
             ev_2.data,
-            Message::FindSuccessorSend(FindSuccessorSend{id, then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect), strict: false}) if id == did1
+            Message::FindSuccessorSend(FindSuccessorSend{did, then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect), strict: false}) if did == did1
         ));
 
         Ok(())
@@ -738,7 +739,7 @@ pub mod tests {
         // node2 is only aware of node1, so it respond node1
         assert!(matches!(
             ev_1.data,
-            Message::FindSuccessorReport(FindSuccessorReport{id, handler: FindSuccessorReportHandler::Connect}) if id == did1
+            Message::FindSuccessorReport(FindSuccessorReport{did, handler: FindSuccessorReportHandler::Connect}) if did == did1
         ));
         // dht1 won't set did1 as successor
         assert!(!dht1.lock_successor()?.list().contains(&did1));
@@ -751,7 +752,7 @@ pub mod tests {
         // node1 is only aware of node2, so it respond node2
         assert!(matches!(
             ev_2.data,
-            Message::FindSuccessorReport(FindSuccessorReport{id, handler: FindSuccessorReportHandler::Connect}) if id == did2
+            Message::FindSuccessorReport(FindSuccessorReport{did, handler: FindSuccessorReportHandler::Connect}) if did == did2
         ));
         // dht2 won't set did2 as successor
         assert!(!dht2.lock_successor()?.list().contains(&did2));
@@ -808,13 +809,13 @@ pub mod tests {
         let ev_1 = node1.listen_once().await.unwrap();
         assert_eq!(ev_1.addr, did1);
         assert_eq!(ev_1.relay.path, vec![did1]);
-        assert!(matches!(ev_1.data, Message::JoinDHT(JoinDHT{id, ..}) if id == did3));
+        assert!(matches!(ev_1.data, Message::JoinDHT(JoinDHT{did, ..}) if did == did3));
 
         // 3 JoinDHT
         let ev_3 = node3.listen_once().await.unwrap();
         assert_eq!(ev_3.addr, did3);
         assert_eq!(ev_3.relay.path, vec![did3]);
-        assert!(matches!(ev_3.data, Message::JoinDHT(JoinDHT{id, ..}) if id == did1));
+        assert!(matches!(ev_3.data, Message::JoinDHT(JoinDHT{did, ..}) if did == did1));
 
         // 3->1 FindSuccessorSend
         let ev_1 = node1.listen_once().await.unwrap();
@@ -822,7 +823,7 @@ pub mod tests {
         assert_eq!(ev_1.relay.path, vec![did3]);
         assert!(matches!(
             ev_1.data,
-            Message::FindSuccessorSend(FindSuccessorSend{id, strict: false, then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect)}) if id == did3
+            Message::FindSuccessorSend(FindSuccessorSend{did, strict: false, then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect)}) if did == did3
         ));
 
         // 1->3 FindSuccessorSend
@@ -831,7 +832,7 @@ pub mod tests {
         assert_eq!(ev_3.relay.path, vec![did1]);
         assert!(matches!(
             ev_3.data,
-            Message::FindSuccessorSend(FindSuccessorSend{id, strict: false, then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect)}) if id == did1
+            Message::FindSuccessorSend(FindSuccessorSend{did, strict: false, then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect)}) if did == did1
         ));
 
         Ok(())
@@ -978,7 +979,7 @@ pub mod tests {
         }
         let ev2 = node2.listen_once().await.unwrap();
         assert_eq!(ev2.addr, did2);
-        assert!(matches!(ev2.data, Message::LeaveDHT(LeaveDHT{id}) if id == did1));
+        assert!(matches!(ev2.data, Message::LeaveDHT(LeaveDHT{did}) if did == did1));
 
         assert_no_more_msg(&node1, &node2, &node3).await;
 

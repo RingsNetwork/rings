@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use super::did::BiasId;
-use super::successor::Successor;
+use super::successor::SuccessorSeq;
 use super::types::Chord;
 use super::types::ChordStorage;
 use super::vnode::VirtualNode;
@@ -24,59 +24,73 @@ use crate::storage::PersistenceStorage;
 use crate::storage::PersistenceStorageReadAndWrite;
 use crate::storage::PersistenceStorageRemove;
 
-/// PeerRing is a ring of peers.
+/// PeerRing is used to help a node interact with other nodes.
+/// All nodes in rings network form a clockwise ring in the order of Did.
+/// This struct takes its name from that.
 /// PeerRing implemented [Chord] algorithm.
 /// PeerRing implemented [ChordStorage] protocol.
 #[derive(Clone)]
 pub struct PeerRing {
-    /// PeerRing's id is address of Node
-    pub id: Did,
-    /// first node on circle that succeeds (n + 2 ^(k-1) ) mod 2^m , 1 <= k<= m
-    /// for index start with 0, it should be (n+2^k) mod 2^m
+    /// The did of current node.
+    pub did: Did,
+    /// [FingerTable] help node to find successor quickly.
     pub finger: Arc<Mutex<FingerTable>>,
-    /// The next node on the identifier circle; finger\[1\].node
-    pub successor: Arc<Mutex<Successor>>,
-    /// The previous node on the identifier circle
+    /// The next node on the ring.
+    /// The [SuccessorSeq] may contain multiple node dids for fault tolerance.
+    /// The min did should be same as the first element in finger table.
+    pub successor_seq: Arc<Mutex<SuccessorSeq>>,
+    /// The did of previous node on the ring.
     pub predecessor: Arc<Mutex<Option<Did>>>,
-    /// LocalStorage for DHT Query
+    /// Local storage for [ChordStorage].
     pub storage: Arc<PersistenceStorage>,
-    /// LocalCache
+    /// Local cache for [ChordStorage].
     pub cache: Arc<MemStorage<Did, VirtualNode>>,
 }
 
-/// Result of PeerRing algorithm
+/// `PeerRing` use this to describe the result of [Chord] algorithm. Sometimes it's a
+/// direct result, sometimes it's an action that is continued externally.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum PeerRingAction {
-    /// Do noting
+    /// No result, the whole manipulation is done internally.
     None,
-    /// Found some VNode
+    /// Found some VirtualNode.
     SomeVNode(VirtualNode),
-    /// Found some node
+    /// Found some node.
     Some(Did),
-    /// Trigger remote action
+    /// Trigger a remote action.
     RemoteAction(Did, RemoteAction),
-    /// Trigger Multiple Actions at sametime
+    /// Trigger multiple remote actions.
     MultiActions(Vec<PeerRingAction>),
 }
 
-/// Remote actions
+/// Some of the process needs to be done remotely. This enum is used to describe that.
+/// Don't worry about leaving the context. There will be callback machinisim externally
+/// that will invoke appropriate methods in `PeerRing` to continue the process.
+///
+/// To avoid ambiguity, in the following comments, `did_a` is the Did declared in
+/// [PeerRingAction::RemoteAction]. Other dids are the fields declared in `RemoteAction`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum RemoteAction {
-    /// Ask did_a to find did_b
+    /// Need `did_a` to find `did_b`.
     FindSuccessor(Did),
-    /// Ask did_a to find virtual node did_b
+    /// Need `did_a` to find virtual node `did_b`.
     FindVNode(Did),
-    /// Ask did_a to find virtual peer for storage
+    /// Need `did_a` to find node for storage.
     FindAndStore(VirtualNode),
-    /// Ask did_a to find virtual peer for subring joining
+    /// Need `did_a` to find virtual peer for subring joining.
     FindAndJoinSubRing(Did),
-    /// Ask Did_a to notify(did_b)
+    /// Let `did_a` [notify](Chord::notify) `did_b`.
     Notify(Did),
-    /// Async data with it's successor
+    /// Let `did_a` sync data with it's successor.
     SyncVNodeWithSuccessor(Vec<VirtualNode>),
-    /// Find a successor and fix the finger table
+
+    // TODO: Only find_successor method can return FindSuccessor, otherwise should give
+    // a FindSuccessor with flag. Such as `FindSuccessorForFix`.
+    /// Need `did_a` to find `did_b` then send back with `for finger table fixing` flag.
     FindSuccessorForFix(Did),
+
+    // TODO: The check_processor method is not using. Cannot give correct description.
     /// Check predecessor
     CheckPredecessor,
 }
@@ -117,71 +131,67 @@ impl PeerRingAction {
 
 impl PeerRing {
     /// Create a new Chord ring.
-    pub async fn new(id: Did) -> Result<Self> {
-        Self::new_with_config(id, 3).await
+    pub async fn new(did: Did) -> Result<Self> {
+        Self::new_with_config(did, 3).await
     }
 
-    /// Create a new Chord Ring with given successor_max, and finger_size
-    pub async fn new_with_config(id: Did, succ_max: u8) -> Result<Self> {
+    /// Create a new Chord Ring with given successor_seq max num, and finger_size.
+    pub async fn new_with_config(did: Did, succ_max: u8) -> Result<Self> {
         Ok(Self {
-            successor: Arc::new(Mutex::new(Successor::new(id, succ_max))),
+            successor_seq: Arc::new(Mutex::new(SuccessorSeq::new(did, succ_max))),
             predecessor: Arc::new(Mutex::new(None)),
             // for Eth address, it's 160
-            finger: Arc::new(Mutex::new(FingerTable::new(id, 160))),
-            id,
+            finger: Arc::new(Mutex::new(FingerTable::new(did, 160))),
+            did,
             storage: Arc::new(PersistenceStorage::new().await?),
             cache: Arc::new(MemStorage::<Did, VirtualNode>::new()),
         })
     }
 
-    /// Init with given Storage
-    pub fn new_with_storage(id: Did, succ_max: u8, storage: PersistenceStorage) -> Self {
+    /// Same as new with config, but with a given storage.
+    pub fn new_with_storage(did: Did, succ_max: u8, storage: PersistenceStorage) -> Self {
         Self {
-            successor: Arc::new(Mutex::new(Successor::new(id, succ_max))),
+            successor_seq: Arc::new(Mutex::new(SuccessorSeq::new(did, succ_max))),
             predecessor: Arc::new(Mutex::new(None)),
             // for Eth address, it's 160
-            finger: Arc::new(Mutex::new(FingerTable::new(id, 160))),
+            finger: Arc::new(Mutex::new(FingerTable::new(did, 160))),
             storage: Arc::new(storage),
             cache: Arc::new(MemStorage::<Did, VirtualNode>::new()),
-            id,
+            did,
         }
     }
 
-    /// Lock and return MutexGuard of Successor
-    pub fn lock_successor(&self) -> Result<MutexGuard<Successor>> {
-        self.successor.lock().map_err(|_| Error::DHTSyncLockError)
+    /// Lock and return MutexGuard of successor sequence.
+    pub fn lock_successor(&self) -> Result<MutexGuard<SuccessorSeq>> {
+        self.successor_seq
+            .lock()
+            .map_err(|_| Error::DHTSyncLockError)
     }
 
-    /// Lock and return MutexGuard of Finger Table
+    /// Lock and return MutexGuard of finger table.
     pub fn lock_finger(&self) -> Result<MutexGuard<FingerTable>> {
         self.finger.lock().map_err(|_| Error::DHTSyncLockError)
     }
 
-    /// Lock and return MutexGuard of Predecessor
+    /// Lock and return MutexGuard of predecessor.
     pub fn lock_predecessor(&self) -> Result<MutexGuard<Option<Did>>> {
         self.predecessor.lock().map_err(|_| Error::DHTSyncLockError)
     }
 
-    /// Get first element from Finger Table
-    pub fn first(&self) -> Result<Option<Did>> {
-        let finger = self.lock_finger()?;
-        Ok(finger.first())
-    }
-
-    /// remove a node from dht finger table
-    /// remove a node from dht successor table
-    /// if suuccessor is empty, set it to the cloest node
-    pub fn remove(&self, id: Did) -> Result<()> {
+    /// Remove a node from finger table.
+    /// Also remove it from successor sequence.
+    /// If successor_seq become empty, try setting the cloest node to it.
+    pub fn remove(&self, did: Did) -> Result<()> {
         let mut finger = self.lock_finger()?;
         let mut successor = self.lock_successor()?;
         let mut predecessor = self.lock_predecessor()?;
         if let Some(pid) = *predecessor {
-            if pid == id {
+            if pid == did {
                 *predecessor = None;
             }
         }
-        finger.remove(id);
-        successor.remove(id);
+        finger.remove(did);
+        successor.remove(did);
         if successor.is_none() {
             if let Some(x) = finger.first() {
                 successor.update(x);
@@ -190,106 +200,103 @@ impl PeerRing {
         Ok(())
     }
 
-    /// Calculate Bias of the Did on the Ring
-    pub fn bias(&self, id: Did) -> BiasId {
-        BiasId::new(&self.id, &id)
-    }
-
-    /// finger length
-    pub fn number_of_fingers(&self) -> Result<usize> {
-        let finger = self.lock_finger()?;
-        Ok(finger.len())
+    /// Calculate bias of the Did on the ring.
+    pub fn bias(&self, did: Did) -> BiasId {
+        BiasId::new(self.did, did)
     }
 }
 
 impl Chord<PeerRingAction> for PeerRing {
-    /// join a PeerRing ring containing node id .
-    fn join(&self, id: Did) -> Result<PeerRingAction> {
-        let mut finger = self.lock_finger()?;
-        let mut successor = self.lock_successor()?;
-        if id == self.id {
+    /// Join another Did into the ring.
+    fn join(&self, did: Did) -> Result<PeerRingAction> {
+        if did == self.did {
             return Ok(PeerRingAction::None);
         }
-        finger.join(id);
-        if self.bias(id) < self.bias(successor.max()) || successor.is_none() {
+
+        let mut finger = self.lock_finger()?;
+        let mut successor = self.lock_successor()?;
+
+        finger.join(did);
+
+        if self.bias(did) < self.bias(successor.max()) || successor.is_none() {
             // 1) id should follows self.id
             // 2) #fff should follow #001 because id space is a Finate Ring
             // 3) #001 - #fff = #001 + -(#fff) = #001
-            successor.update(id);
-            // only triger if successor is updated
+            successor.update(did);
         }
+
         Ok(PeerRingAction::RemoteAction(
-            id,
-            RemoteAction::FindSuccessor(self.id),
+            did,
+            // TODO: should be `FindSuccessorForConnect`.
+            RemoteAction::FindSuccessor(self.did),
         ))
     }
 
-    /// Fig.5 n.find_successor(id)
-    fn find_successor(&self, id: Did) -> Result<PeerRingAction> {
+    /// Find the successor of a Did.
+    /// May return a remote action for the successor is recorded in another node.
+    fn find_successor(&self, did: Did) -> Result<PeerRingAction> {
         let successor = self.lock_successor()?;
         let finger = self.lock_finger()?;
-        // if (id \in (n; successor]); return successor
-        // if ID = N63, Successor = N10
-        // N9
-        if self.bias(id) <= self.bias(successor.min()) || successor.is_none() {
-            //if self.id < id && id <= self.successor {
-            // response the closest one
+
+        if successor.is_none() || self.bias(did) <= self.bias(successor.min()) {
+            // If the did is closer to self than successor, return successor as the
+            // successor of that did.
             Ok(PeerRingAction::Some(successor.min()))
         } else {
-            // n = closest preceding node(id);
-            // return n.find_successor(id);
-            let closest = finger.closest(id);
-            match closest {
-                Ok(n) => Ok(PeerRingAction::RemoteAction(
-                    n,
-                    RemoteAction::FindSuccessor(id),
-                )),
-                Err(e) => Err(e),
-            }
+            // Otherwise, find the closest preceding node and ask it to find the successor.
+            let closest = finger.closest(did);
+            Ok(PeerRingAction::RemoteAction(
+                closest,
+                RemoteAction::FindSuccessor(did),
+            ))
         }
     }
 
-    /// n' thinks it might be our predecessor.
-    fn notify(&self, id: Did) -> Result<Option<Did>> {
+    /// Handle notification from a node that thinks it is the predecessor of current node.
+    /// The `did` in parameters is the Did of that node.
+    /// If that node is closer to current node or current node has no predecessor, set it to the did.
+    /// This method will return that did if it is set to the predecessor.
+    fn notify(&self, did: Did) -> Result<Option<Did>> {
         let mut predecessor = self.lock_predecessor()?;
-        let predecessor_value = *predecessor;
-        // if (predecessor is nil or n' /in (predecessor; n)); predecessor = n';
-        match predecessor_value {
+
+        match *predecessor {
             Some(pre) => {
-                // if id <- [pre, self]
-                if self.bias(pre) < self.bias(id) {
-                    *predecessor = Some(id);
-                    Ok(Some(id))
+                // If the did is closer to self than predecessor, set it to the predecessor.
+                if self.bias(pre) < self.bias(did) {
+                    *predecessor = Some(did);
+                    Ok(Some(did))
                 } else {
                     Ok(None)
                 }
             }
             None => {
-                *predecessor = Some(id);
-                Ok(Some(id))
+                // Self has no predecessor, set it to the did directly.
+                *predecessor = Some(did);
+                Ok(Some(did))
             }
         }
     }
 
-    /// called periodically. refreshes finger table entries.
-    /// next stores the index of the next finger to fix.
+    /// Fix finger table by finding the successor for each finger.
+    /// According to the paper, this method should be called periodically.
+    /// According to the paper, only one finger should be fixed at a time.
     fn fix_fingers(&self) -> Result<PeerRingAction> {
         let mut fix_finger_index = self.lock_finger()?.fix_finger_index;
 
-        // next = next + 1;
-        //if (next > m) next = 1;
-        // finger[next] = find_successor(n + 2^(next-1) );
-        // for index start with 0
-        // finger[next] = find_successor(n + 2^(next) );
+        // Only one finger should be fixed at a time.
         fix_finger_index += 1;
         if fix_finger_index >= 159 {
             fix_finger_index = 0;
         }
 
-        let did: BigUint = (BigUint::from(self.id)
+        // Get finger did.
+        let did: BigUint = (BigUint::from(self.did)
             + BigUint::from(2u16).pow(fix_finger_index.into()))
             % BigUint::from(2u16).pow(160);
 
+        // Caution here that there is also lock in find_successor.
+        // You cannot lock finger table before calling find_successor.
+        // Have to lock_finger in each branch of the match.
         match self.find_successor(did.into()) {
             Ok(res) => match res {
                 PeerRingAction::Some(v) => {
@@ -329,26 +336,16 @@ impl Chord<PeerRingAction> for PeerRing {
             None => PeerRingAction::None,
         })
     }
-
-    /// Fig.5. n.cloest_preceding_node(id)
-    /// for i = m downto1
-    ///    if (finger\[i\] <- (n, id))
-    ///        return finger\[i\]
-    /// return n
-    fn closest_preceding_node(&self, id: Did) -> Result<Did> {
-        let finger = self.lock_finger()?;
-        finger.closest(id)
-    }
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl ChordStorage<PeerRingAction> for PeerRing {
     /// lookup always check data via finger table
-    async fn lookup(&self, vid: &Did) -> Result<PeerRingAction> {
-        match self.find_successor(*vid) {
-            // if vid is in [self, successor]
-            Ok(PeerRingAction::Some(_)) => match self.storage.get(vid).await {
+    async fn lookup(&self, vid: Did) -> Result<PeerRingAction> {
+        match self.find_successor(vid) {
+            // if did is in [self, successor]
+            Ok(PeerRingAction::Some(_)) => match self.storage.get(&vid).await {
                 Ok(v) => Ok(PeerRingAction::SomeVNode(v)),
                 Err(_) => Ok(PeerRingAction::None),
             },
@@ -366,33 +363,33 @@ impl ChordStorage<PeerRingAction> for PeerRing {
     }
 
     /// Get vnode from local cache.
-    fn local_cache_get(&self, id: &Did) -> Option<VirtualNode> {
-        self.cache.get(id)
+    fn local_cache_get(&self, vid: Did) -> Option<VirtualNode> {
+        self.cache.get(&vid)
     }
 
     /// If address of VNode is in range(self, successor), it should store locally,
     /// otherwise, it should on remote successor
-    async fn store(&self, peer: VirtualNode) -> Result<PeerRingAction> {
-        let vid = peer.did;
+    async fn store(&self, vnode: VirtualNode) -> Result<PeerRingAction> {
+        let did = vnode.did;
         // find VNode's closest successor
-        match self.find_successor(vid) {
-            // if vid is in range(self, successor)
+        match self.find_successor(did) {
+            // if did is in range(self, successor)
             // self should store it
-            Ok(PeerRingAction::Some(_)) => match self.storage.get(&vid).await {
+            Ok(PeerRingAction::Some(_)) => match self.storage.get(&did).await {
                 Ok(v) => {
                     let _ = self
                         .storage
-                        .put(&vid, &VirtualNode::concat(&v, &peer)?)
+                        .put(&did, &VirtualNode::concat(&v, &vnode)?)
                         .await?;
                     Ok(PeerRingAction::None)
                 }
                 Err(_) => {
-                    let _ = self.storage.put(&vid, &peer).await?;
+                    let _ = self.storage.put(&did, &vnode).await?;
                     Ok(PeerRingAction::None)
                 }
             },
             Ok(PeerRingAction::RemoteAction(n, RemoteAction::FindSuccessor(_))) => Ok(
-                PeerRingAction::RemoteAction(n, RemoteAction::FindAndStore(peer)),
+                PeerRingAction::RemoteAction(n, RemoteAction::FindAndStore(vnode)),
             ),
             Ok(a) => Err(Error::PeerRingUnexpectedAction(a)),
             Err(e) => Err(e),
@@ -400,9 +397,9 @@ impl ChordStorage<PeerRingAction> for PeerRing {
     }
 
     /// store a vec of data
-    async fn store_vec(&self, vps: Vec<VirtualNode>) -> Result<PeerRingAction> {
+    async fn store_vec(&self, vnodes: Vec<VirtualNode>) -> Result<PeerRingAction> {
         let acts: Vec<PeerRingAction> =
-            futures::future::join_all(vps.iter().map(|v| self.store(v.clone())).collect_vec())
+            futures::future::join_all(vnodes.iter().map(|v| self.store(v.clone())).collect_vec())
                 .await
                 .into_iter()
                 // ignore faiure here

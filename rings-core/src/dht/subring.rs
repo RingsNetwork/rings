@@ -40,37 +40,27 @@ pub struct SubRing {
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl SubRingManager<PeerRingAction> for PeerRing {
-    async fn join_subring(&self, id: &Did, rid: &Did) -> Result<PeerRingAction> {
-        match self.find_successor(*rid) {
+    async fn join_subring(&self, did: Did, rid: Did) -> Result<PeerRingAction> {
+        match self.find_successor(rid) {
             Ok(PeerRingAction::Some(_)) => {
-                let id = id.to_owned();
                 if let Ok(subring) = self.get_subring(rid).await {
                     let mut sr = subring;
-                    sr.finger.join(id);
+                    sr.finger.join(did);
                     self.store_subring(&sr).await?;
                 }
                 Ok(PeerRingAction::None)
             }
             Ok(PeerRingAction::RemoteAction(n, RemoteAction::FindSuccessor(_))) => Ok(
-                PeerRingAction::RemoteAction(n, RemoteAction::FindAndJoinSubRing(*rid)),
+                PeerRingAction::RemoteAction(n, RemoteAction::FindAndJoinSubRing(rid)),
             ),
             Ok(a) => Err(Error::PeerRingUnexpectedAction(a)),
             Err(e) => Err(e),
         }
     }
 
-    async fn cloest_preceding_node_for_subring(&self, id: &Did, rid: &Did) -> Option<Result<Did>> {
-        let id = id.to_owned();
-        if let Ok(subring) = self.get_subring(rid).await {
-            Some(subring.finger.closest(id))
-        } else {
-            None
-        }
-    }
-
-    async fn get_subring(&self, id: &Did) -> Result<SubRing> {
-        let vn: VirtualNode = self.storage.get(id).await?;
-        Ok(vn.try_into()?)
+    async fn get_subring(&self, rid: Did) -> Result<SubRing> {
+        let vnode: VirtualNode = self.storage.get(&rid).await?;
+        Ok(vnode.try_into()?)
     }
 
     async fn store_subring(&self, subring: &SubRing) -> Result<()> {
@@ -84,12 +74,12 @@ impl SubRingManager<PeerRingAction> for PeerRing {
         let address: HashStr = name.to_owned().into();
         // trans Result to Option here
         let did = Did::from_str(&address.inner())?;
-        self.get_subring(&did).await
+        self.get_subring(did).await
     }
     // get subring, update and putback
     // async fn get_subring_for_update(
     //     &self,
-    //     id: &Did,
+    //     id: Did,
     //     callback: Arc<dyn FnOnce(SubRing) -> SubRing>,
     // ) -> Result<bool> {
     //     if let Ok(subring) = self.get_subring(id).await {
@@ -115,7 +105,7 @@ impl SubRingManager<PeerRingAction> for PeerRing {
 
 impl SubRing {
     /// Create a new SubRing
-    pub fn new(name: &str, creator: &Did) -> Result<Self> {
+    pub fn new(name: &str, creator: Did) -> Result<Self> {
         let address: HashStr = name.to_owned().into();
         let did = Did::from_str(&address.inner())?;
         Ok(Self {
@@ -123,7 +113,7 @@ impl SubRing {
             did,
             finger: FingerTable::new(did, 1),
             admin: None,
-            creator: *creator,
+            creator,
         })
     }
 
@@ -137,7 +127,7 @@ impl SubRing {
             did,
             finger: (*finger).clone(),
             admin: None,
-            creator: ring.id,
+            creator: ring.did,
         })
     }
 }

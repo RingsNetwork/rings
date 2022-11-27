@@ -52,8 +52,10 @@ impl Stabilization {
             (successor.min(), successor.list())
         };
 
-        let msg = Message::NotifyPredecessorSend(NotifyPredecessorSend { id: self.chord.id });
-        if self.chord.id != successor_min {
+        let msg = Message::NotifyPredecessorSend(NotifyPredecessorSend {
+            did: self.chord.did,
+        });
+        if self.chord.did != successor_min {
             for s in successor_list {
                 self.swarm
                     .send_message(msg.clone(), s, self.swarm.did())
@@ -77,7 +79,7 @@ impl Stabilization {
                     PeerRingRemoteAction::FindSuccessorForFix(current),
                 ) => {
                     let msg = Message::FindSuccessorSend(FindSuccessorSend {
-                        id: current,
+                        did: current,
                         then: FindSuccessorThen::Report(FindSuccessorReportHandler::FixFingerTable),
                         strict: true,
                     });

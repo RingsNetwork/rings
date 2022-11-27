@@ -120,14 +120,14 @@ impl MessageHandler {
         if let Some(ref cb) = *self.callback {
             match payload.data {
                 Message::CustomMessage(ref msg) => {
-                    if self.dht.id == payload.relay.destination {
+                    if self.dht.did == payload.relay.destination {
                         cb.custom_message(self, payload, msg).await
                     }
                 }
                 _ => cb.builtin_message(self, payload).await,
             };
         } else if let Message::CustomMessage(ref msg) = payload.data {
-            if self.dht.id == payload.relay.destination {
+            if self.dht.did == payload.relay.destination {
                 tracing::warn!("No callback registered, skip invoke_callback of {:?}", msg);
             }
         }

@@ -25,29 +25,26 @@ use crate::err::Result;
 /// for managing whole datas but for giving strategies by datas inside.
 pub trait Chord<Action> {
     /// Join another Did into the DHT.
-    fn join(&self, id: Did) -> Result<Action>;
+    fn join(&self, did: Did) -> Result<Action>;
 
-    /// Ask DHT for the successor of Did. May return a remote action for the successor is
-    /// recorded in another node.
-    fn find_successor(&self, id: Did) -> Result<Action>;
-
-    //TODO: Why `closest_preceding_node` and `check_predecessor` is not using?
-
-    /// Find the predecessor of the DHT.
-    fn closest_preceding_node(&self, id: Did) -> Result<Did>;
-
-    /// Check if predecessor is alive.
-    /// According to the paper, this method should be called periodically.
-    fn check_predecessor(&self) -> Result<Action>;
+    /// Ask DHT for the successor of Did.
+    /// May return a remote action for the successor is recorded in another node.
+    fn find_successor(&self, did: Did) -> Result<Action>;
 
     /// Notify the DHT that a node is its predecessor.
     /// According to the paper, this method should be called periodically.
-    fn notify(&self, id: Did) -> Result<Option<Did>>;
+    fn notify(&self, did: Did) -> Result<Option<Did>>;
 
     /// Fix finger table by finding the successor for each finger.
     /// According to the paper, this method should be called periodically.
     /// According to the paper, only one finger should be fixed at a time.
     fn fix_fingers(&self) -> Result<Action>;
+
+    //TODO: Why `check_predecessor` is not using?
+
+    /// Check if predecessor is alive.
+    /// According to the paper, this method should be called periodically.
+    fn check_predecessor(&self) -> Result<Action>;
 }
 
 /// ChordStorage is a distributed storage protocol based on Chord algorithm.
@@ -70,11 +67,11 @@ pub trait Chord<Action> {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait ChordStorage<Action>: Chord<Action> {
     /// Look up a VirtualNode by its Did.
-    async fn lookup(&self, id: &Did) -> Result<Action>;
+    async fn lookup(&self, vid: Did) -> Result<Action>;
     /// Store VirtualNode to its successor.
-    async fn store(&self, peer: VirtualNode) -> Result<Action>;
+    async fn store(&self, vnode: VirtualNode) -> Result<Action>;
     /// Batch store.
-    async fn store_vec(&self, peer: Vec<VirtualNode>) -> Result<Action>;
+    async fn store_vec(&self, vnodes: Vec<VirtualNode>) -> Result<Action>;
     /// When a node's successor is updated, it needs to check if there are some
     /// `VirtualNodes` between (node.did, new_successor.did) and if so, sync them to the
     /// new successor.
@@ -82,7 +79,7 @@ pub trait ChordStorage<Action>: Chord<Action> {
     /// Cache fetched data locally
     fn local_cache_set(&self, vnode: VirtualNode);
     /// Get local cache
-    fn local_cache_get(&self, id: &Did) -> Option<VirtualNode>;
+    fn local_cache_get(&self, vid: Did) -> Option<VirtualNode>;
 }
 
 /// Trait for how dht manage SubRing
@@ -90,7 +87,7 @@ pub trait ChordStorage<Action>: Chord<Action> {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait SubRingManager<Action>: ChordStorage<Action> {
     /// get subring from storage by id
-    async fn get_subring(&self, id: &Did) -> Result<SubRing>;
+    async fn get_subring(&self, rid: Did) -> Result<SubRing>;
     /// get subring from storage by name
     async fn get_subring_by_name(&self, name: &str) -> Result<SubRing>;
     /// store a subring to storage
@@ -98,7 +95,7 @@ pub trait SubRingManager<Action>: ChordStorage<Action> {
     /// get a subring for update
     // async fn get_subring_for_update(
     //     &self,
-    //     id: &Did,
+    //     did: Did,
     //     callback: Arc<dyn FnOnce(SubRing) -> SubRing>,
     // ) -> Result<bool>;
     // /// get a subring for update by name
@@ -113,8 +110,5 @@ pub trait SubRingManager<Action>: ChordStorage<Action> {
     /// A send JoinSubRing to Address C, Node B got the Message And
     /// Update the Chord Finger Table, then, Node B Response it's finger table to A
     /// And Noti closest preceding node that A is Joined
-    async fn join_subring(&self, id: &Did, rid: &Did) -> Result<Action>;
-
-    /// search a cloest preceding node
-    async fn cloest_preceding_node_for_subring(&self, id: &Did, rid: &Did) -> Option<Result<Did>>;
+    async fn join_subring(&self, did: Did, rid: Did) -> Result<Action>;
 }
