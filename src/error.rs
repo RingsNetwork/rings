@@ -67,6 +67,8 @@ pub enum Error {
     InvalidUrl,
     #[error("Invalid data")]
     InvalidData,
+    #[error("Invalid service")]
+    InvalidService,
 }
 
 impl Error {
@@ -102,6 +104,7 @@ impl Error {
             Error::DeserializeError => 27,
             Error::InvalidUrl => 28,
             Error::InvalidData => 29,
+            Error::InvalidService => 30,
         };
         -32000 - code
     }

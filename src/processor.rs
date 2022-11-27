@@ -377,9 +377,11 @@ impl Processor {
     /// - destination: did of destination
     /// - url: ipfs url
     /// - timeout: timeout in millisecond
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_http_request_message<U, T>(
         &self,
         destination: &str,
+        name: U,
         method: http::Method,
         url: U,
         timeout: T,
@@ -399,7 +401,7 @@ impl Processor {
         );
         let msg: BackendMessage = BackendMessage::try_from((
             MessageType::HttpRequest,
-            &HttpRequest::new(method, url, timeout, headers, body),
+            &HttpRequest::new(name, method, url, timeout, headers, body),
         ))?;
         let msg: Vec<u8> = msg.into();
 

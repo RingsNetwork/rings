@@ -554,11 +554,18 @@ impl Client {
     }
 
     /// send http request message to remote
-    /// - url: http url like `ipfs://ipfs/abc1234` `ipns://ipns/abc`
+    /// - destination: did
+    /// - name: service name
+    /// - method: http method
+    /// - url: http url like `/ipfs/abc1234` `/ipns/abc`
     /// - timeout: timeout in milliseconds
+    /// - headers: headers of request
+    /// - body: body of request
+    #[allow(clippy::too_many_arguments)]
     pub fn send_http_request(
         &self,
         destination: String,
+        name: String,
         method: String,
         url: String,
         timeout: u64,
@@ -600,6 +607,7 @@ impl Client {
             let tx_id = p
                 .send_http_request_message(
                     destination.as_str(),
+                    name.as_str(),
                     method,
                     url.as_str(),
                     timeout,

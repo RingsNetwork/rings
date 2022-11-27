@@ -228,9 +228,11 @@ impl Client {
         ClientOutput::ok("Done.".into(), ())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_http_request_message(
         &self,
         did: &str,
+        name: &str,
         method: http::Method,
         url: &str,
         timeout: Timeout,
@@ -238,7 +240,7 @@ impl Client {
         body: Option<String>,
     ) -> Output<()> {
         let http_request: HttpRequest =
-            HttpRequest::new(method, url, timeout, headers, body.map(Bytes::from));
+            HttpRequest::new(name, method, url, timeout, headers, body.map(Bytes::from));
         let params2 = serde_json::to_value(http_request).map_err(|e| anyhow::anyhow!(e))?;
         self.client
             .call_method(
