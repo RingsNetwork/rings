@@ -152,7 +152,7 @@ pub struct Swarm {
 
 impl Swarm {
     pub fn did(&self) -> Did {
-        self.dht.id
+        self.dht.did
     }
 
     pub fn dht(&self) -> Arc<PeerRing> {
@@ -199,11 +199,11 @@ impl Swarm {
                     Some(trans) => {
                         let payload = MessagePayload::new_direct(
                             Message::JoinDHT(message::JoinDHT {
-                                id: did,
+                                did,
                                 services: trans.services().await.into_iter().collect(),
                             }),
                             &self.session_manager,
-                            self.dht.id,
+                            self.dht.did,
                         )?;
                         Ok(Some(payload))
                     }
@@ -222,9 +222,9 @@ impl Swarm {
                     if t.id == uuid && self.remove_transport(did).is_some() {
                         tracing::info!("[Swarm::ConnectClosed] transport {:?} closed", uuid);
                         let payload = MessagePayload::new_direct(
-                            Message::LeaveDHT(message::LeaveDHT { id: did }),
+                            Message::LeaveDHT(message::LeaveDHT { did }),
                             &self.session_manager,
-                            self.dht.id,
+                            self.dht.did,
                         )?;
                         return Ok(Some(payload));
                     }
@@ -351,7 +351,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Deb
         #[cfg(test)]
         {
             println!("+++++++++++++++++++++++++++++++++");
-            println!("node {:?}", self.dht.id);
+            println!("node {:?}", self.dht.did);
             println!("Sent {:?}", payload.clone());
             println!("node {:?}", payload.relay.next_hop);
             println!("+++++++++++++++++++++++++++++++++");

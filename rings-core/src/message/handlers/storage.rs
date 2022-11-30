@@ -24,9 +24,9 @@ use crate::swarm::Swarm;
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait TChordStorage {
     /// check local cache of dht
-    async fn storage_check_cache(&self, id: &Did) -> Option<VirtualNode>;
+    async fn storage_check_cache(&self, vid: Did) -> Option<VirtualNode>;
     /// fetch virtual node from DHT
-    async fn storage_fetch(&self, id: &Did) -> Result<()>;
+    async fn storage_fetch(&self, vid: Did) -> Result<()>;
     /// store virtual node on DHT
     async fn storage_store(&self, vnode: VirtualNode) -> Result<()>;
 }
@@ -35,22 +35,22 @@ pub trait TChordStorage {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl TChordStorage for Swarm {
     /// Check local cache
-    async fn storage_check_cache(&self, id: &Did) -> Option<VirtualNode> {
-        self.dht.local_cache_get(id)
+    async fn storage_check_cache(&self, vid: Did) -> Option<VirtualNode> {
+        self.dht.local_cache_get(vid)
     }
 
     /// Fetch virtual node, if exist in localstoreage, copy it to the cache,
     /// else Query Remote Node
-    async fn storage_fetch(&self, id: &Did) -> Result<()> {
+    async fn storage_fetch(&self, vid: Did) -> Result<()> {
         // If peer found that data is on it's localstore, copy it to the cache
-        match self.dht.lookup(id).await? {
+        match self.dht.lookup(vid).await? {
             PeerRingAction::SomeVNode(v) => {
                 self.dht.local_cache_set(v);
                 Ok(())
             }
             PeerRingAction::None => Ok(()),
             PeerRingAction::RemoteAction(next, _) => {
-                self.send_direct_message(Message::SearchVNode(SearchVNode { id: *id }), next)
+                self.send_direct_message(Message::SearchVNode(SearchVNode { vid }), next)
                     .await?;
                 Ok(())
             }
@@ -83,11 +83,11 @@ impl HandleMsg<SearchVNode> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload<Message>, msg: &SearchVNode) -> Result<()> {
         let mut relay = ctx.relay.clone();
 
-        match self.dht.lookup(&msg.id).await {
+        match self.dht.lookup(msg.vid).await {
             Ok(action) => match action {
                 PeerRingAction::None => Ok(()),
                 PeerRingAction::SomeVNode(v) => {
-                    relay.relay(self.dht.id, None)?;
+                    relay.relay(self.dht.did, None)?;
                     self.send_report_message(
                         Message::FoundVNode(FoundVNode { data: vec![v] }),
                         ctx.tx_id,
@@ -96,7 +96,7 @@ impl HandleMsg<SearchVNode> for MessageHandler {
                     .await
                 }
                 PeerRingAction::RemoteAction(next, _) => {
-                    relay.relay(self.dht.id, Some(next))?;
+                    relay.relay(self.dht.did, Some(next))?;
                     self.forward_payload(ctx, relay).await
                 }
                 act => Err(Error::PeerRingUnexpectedAction(act)),
@@ -112,7 +112,7 @@ impl HandleMsg<FoundVNode> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload<Message>, msg: &FoundVNode) -> Result<()> {
         let mut relay = ctx.relay.clone();
 
-        relay.relay(self.dht.id, None)?;
+        relay.relay(self.dht.did, None)?;
         if relay.next_hop.is_some() {
             self.forward_payload(ctx, relay).await
         } else {
@@ -137,7 +137,7 @@ impl HandleMsg<StoreVNode> for MessageHandler {
                     PeerRingAction::RemoteAction(next, _) => {
                         let mut relay = ctx.relay.clone();
                         relay.reset_destination(next)?;
-                        relay.relay(self.dht.id, Some(next))?;
+                        relay.relay(self.dht.did, Some(next))?;
                         self.forward_payload(ctx, relay).await
                     }
                     act => Err(Error::PeerRingUnexpectedAction(act)),
@@ -205,8 +205,8 @@ mod test {
         let vid = vnode.did;
         assert!(dht1.cache.is_empty());
         assert!(dht2.cache.is_empty());
-        assert!(swarm1.storage_check_cache(&vid).await.is_none());
-        assert!(swarm2.storage_check_cache(&vid).await.is_none());
+        assert!(swarm1.storage_check_cache(vid).await.is_none());
+        assert!(swarm2.storage_check_cache(vid).await.is_none());
 
         // test remote store
         if vid.in_range(&did2, &did2, &did1) {
@@ -230,8 +230,8 @@ mod test {
                 panic!();
             }
         }
-        assert!(swarm1.storage_check_cache(&vid).await.is_none());
-        assert!(swarm2.storage_check_cache(&vid).await.is_none());
+        assert!(swarm1.storage_check_cache(vid).await.is_none());
+        assert!(swarm2.storage_check_cache(vid).await.is_none());
         if vid.in_range(&did2, &did2, &did1) {
             assert!(dht1.storage.count().await.unwrap() == 0);
             assert!(dht2.storage.count().await.unwrap() != 0);
@@ -243,12 +243,12 @@ mod test {
         if vid.in_range(&did2, &did2, &did1) {
             // vid is in node 2
             println!("vid is on node 2 {:?}", &did2);
-            swarm1.storage_fetch(&vid).await.unwrap();
+            swarm1.storage_fetch(vid).await.unwrap();
             // it will send reqeust to node 2
             let ev = node2.listen_once().await.unwrap();
             // node 2 received search vnode request
             if let Message::SearchVNode(x) = ev.data {
-                assert_eq!(x.id, vid);
+                assert_eq!(x.vid, vid);
             } else {
                 panic!();
             }
@@ -258,14 +258,14 @@ mod test {
             } else {
                 panic!();
             }
-            assert!(swarm1.storage_check_cache(&vid).await.is_some());
+            assert!(swarm1.storage_check_cache(vid).await.is_some());
         } else {
             // vid is in node 1
             println!("vid is on node 1 {:?}", &did1);
-            swarm2.storage_fetch(&vid).await.unwrap();
+            swarm2.storage_fetch(vid).await.unwrap();
             let ev = node1.listen_once().await.unwrap();
             if let Message::SearchVNode(x) = ev.data {
-                assert_eq!(x.id, vid);
+                assert_eq!(x.vid, vid);
             } else {
                 panic!();
             }
@@ -275,7 +275,7 @@ mod test {
             } else {
                 panic!();
             }
-            assert!(swarm2.storage_check_cache(&vid).await.is_some());
+            assert!(swarm2.storage_check_cache(vid).await.is_some());
         }
 
         tokio::fs::remove_dir_all("./tmp").await.ok();

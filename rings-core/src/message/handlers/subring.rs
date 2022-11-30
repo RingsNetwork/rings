@@ -38,7 +38,7 @@ pub trait SubRingOperator {
 impl SubRingOperator for Swarm {
     /// create subring and store into chord storage.
     async fn subring_create(&self, name: &str) -> Result<()> {
-        let subring: SubRing = SubRing::new(name, &self.dht.id)?;
+        let subring: SubRing = SubRing::new(name, self.dht.did)?;
         let vnode: VirtualNode = subring.clone().try_into()?;
         self.dht.store_subring(&subring.clone()).await?;
         self.storage_store(vnode).await
@@ -49,9 +49,9 @@ impl SubRingOperator for Swarm {
     async fn subring_join(&self, name: &str) -> Result<()> {
         let address: HashStr = name.to_owned().into();
         let did = Did::from_str(&address.inner())?;
-        match self.dht.join_subring(&self.dht.id, &did).await {
+        match self.dht.join_subring(self.dht.did, did).await {
             Ok(PeerRingAction::RemoteAction(next, RemoteAction::FindAndJoinSubRing(rid))) => {
-                self.send_direct_message(Message::JoinSubRing(JoinSubRing { did: rid }), next)
+                self.send_direct_message(Message::JoinSubRing(JoinSubRing { rid }), next)
                     .await?;
                 Ok(())
             }
@@ -71,9 +71,9 @@ impl HandleMsg<JoinSubRing> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload<Message>, msg: &JoinSubRing) -> Result<()> {
         let mut relay = ctx.relay.clone();
         let origin = relay.origin();
-        match self.dht.join_subring(&origin, &msg.did).await {
+        match self.dht.join_subring(origin, msg.rid).await {
             Ok(PeerRingAction::RemoteAction(next, RemoteAction::FindAndJoinSubRing(_))) => {
-                relay.relay(self.dht.id, Some(next))?;
+                relay.relay(self.dht.did, Some(next))?;
                 relay.reset_destination(next)?;
                 self.forward_payload(ctx, relay).await
             }

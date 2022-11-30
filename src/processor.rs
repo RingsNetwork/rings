@@ -428,14 +428,14 @@ impl Processor {
     }
 
     /// check local cache of dht
-    pub async fn check_cache(&self, id: &Did) -> Option<vnode::VirtualNode> {
-        self.swarm.storage_check_cache(id).await
+    pub async fn check_cache(&self, did: Did) -> Option<vnode::VirtualNode> {
+        self.swarm.storage_check_cache(did).await
     }
 
     /// fetch virtual node from DHT
-    pub async fn fetch(&self, id: &Did) -> Result<()> {
+    pub async fn fetch(&self, did: Did) -> Result<()> {
         self.swarm
-            .storage_fetch(id)
+            .storage_fetch(did)
             .await
             .map_err(error::Error::VNodeError)
     }

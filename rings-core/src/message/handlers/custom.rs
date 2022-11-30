@@ -23,9 +23,9 @@ impl HandleMsg<MaybeEncrypted<CustomMessage>> for MessageHandler {
     ) -> Result<()> {
         let mut relay = ctx.relay.clone();
 
-        if self.dht.id != relay.destination {
+        if self.dht.did != relay.destination {
             if self.swarm.get_transport(relay.destination).is_some() {
-                relay.relay(self.dht.id, Some(relay.destination))?;
+                relay.relay(self.dht.did, Some(relay.destination))?;
                 return self.forward_payload(ctx, relay).await;
             } else {
                 let next_node = match self.dht.find_successor(relay.destination)? {
@@ -34,7 +34,7 @@ impl HandleMsg<MaybeEncrypted<CustomMessage>> for MessageHandler {
                     _ => None,
                 }
                 .ok_or(Error::MessageHandlerMissNextNode)?;
-                relay.relay(self.dht.id, Some(next_node))?;
+                relay.relay(self.dht.did, Some(next_node))?;
                 return self.forward_payload(ctx, relay).await;
             }
         }

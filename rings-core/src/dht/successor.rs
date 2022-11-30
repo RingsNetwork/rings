@@ -1,22 +1,25 @@
-//! Successor for Chord
+//! Successor for PeerRing
 use crate::dht::did::SortRing;
 use crate::dht::Did;
 
+/// A sequence of successors for a node in the ring.
+/// It's nessessary to have multiple successors to prevent a single point of failure.
+/// Note the successors are in order of a clockwise distance from the node.
+/// See also [super::did::BiasId].
 #[derive(Debug, Clone)]
-pub struct Successor {
-    /// self id
-    id: Did,
-    /// max successor
+pub struct SuccessorSeq {
+    /// Node did
+    did: Did,
+    /// Max successor num
     max: u8,
-    /// successor's list
+    /// Successors
     successors: Vec<Did>,
 }
 
-impl Successor {
-    /// create a new Successor instance
-    pub fn new(id: Did, max: u8) -> Self {
+impl SuccessorSeq {
+    pub fn new(did: Did, max: u8) -> Self {
         Self {
-            id,
+            did,
             max,
             successors: vec![],
         }
@@ -28,7 +31,7 @@ impl Successor {
 
     pub fn min(&self) -> Did {
         if self.is_none() {
-            self.id
+            self.did
         } else {
             self.successors[0]
         }
@@ -36,18 +39,18 @@ impl Successor {
 
     pub fn max(&self) -> Did {
         if self.is_none() {
-            self.id
+            self.did
         } else {
             self.successors[self.successors.len() - 1]
         }
     }
 
     pub fn update(&mut self, successor: Did) {
-        if self.successors.contains(&successor) || successor == self.id {
+        if self.successors.contains(&successor) || successor == self.did {
             return;
         }
         self.successors.push(successor);
-        self.successors.sort(self.id);
+        self.successors.sort(self.did); // TODO: should sort by bias?
         self.successors.truncate(self.max.into());
     }
 
@@ -55,8 +58,8 @@ impl Successor {
         self.successors.clone()
     }
 
-    pub fn remove(&mut self, id: Did) {
-        self.successors.retain(|&v| v != id);
+    pub fn remove(&mut self, did: Did) {
+        self.successors.retain(|&v| v != did);
     }
 }
 
@@ -69,7 +72,7 @@ mod tests {
     fn test_successor_update() {
         let dids = gen_ordered_dids(6);
 
-        let mut succ = Successor::new(dids[0], 3);
+        let mut succ = SuccessorSeq::new(dids[0], 3);
         assert!(succ.is_none());
 
         succ.update(dids[2]);
@@ -92,7 +95,7 @@ mod tests {
     fn test_successor_remove() {
         let dids = gen_ordered_dids(4);
 
-        let mut succ = Successor::new(dids[0], 3);
+        let mut succ = SuccessorSeq::new(dids[0], 3);
         assert!(succ.is_none());
 
         succ.update(dids[1]);

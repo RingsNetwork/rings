@@ -26,13 +26,13 @@ impl HandleMsg<NotifyPredecessorSend> for MessageHandler {
         let mut relay = ctx.relay.clone();
         let predecessor = { *self.dht.lock_predecessor()? };
 
-        relay.relay(self.dht.id, None)?;
-        self.dht.notify(msg.id)?;
-        if let Some(id) = predecessor {
-            if id != relay.origin() {
+        relay.relay(self.dht.did, None)?;
+        self.dht.notify(msg.did)?;
+        if let Some(did) = predecessor {
+            if did != relay.origin() {
                 return self
                     .send_report_message(
-                        Message::NotifyPredecessorReport(NotifyPredecessorReport { id }),
+                        Message::NotifyPredecessorReport(NotifyPredecessorReport { did }),
                         ctx.tx_id,
                         relay,
                     )
@@ -53,17 +53,18 @@ impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
     ) -> Result<()> {
         // if successor: predecessor is between (id, successor]
         // then update local successor
-        if self.swarm.get_and_check_transport(msg.id).await.is_none() && msg.id != self.swarm.did()
+        if self.swarm.get_and_check_transport(msg.did).await.is_none()
+            && msg.did != self.swarm.did()
         {
-            self.swarm.connect(msg.id).await?;
+            self.swarm.connect(msg.did).await?;
         } else {
             {
-                self.dht.lock_successor()?.update(msg.id)
+                self.dht.lock_successor()?.update(msg.did)
             }
             if let Ok(PeerRingAction::RemoteAction(
                 next,
                 PeerRingRemoteAction::SyncVNodeWithSuccessor(data),
-            )) = self.dht.sync_with_successor(msg.id).await
+            )) = self.dht.sync_with_successor(msg.did).await
             {
                 self.send_direct_message(
                     Message::SyncVNodeWithSuccessor(SyncVNodeWithSuccessor { data }),
@@ -182,7 +183,7 @@ mod test {
         assert_eq!(ev1.relay.path, vec![did2]);
         assert!(matches!(
             ev1.data,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{id}) if id == did2
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did2
         ));
 
         // node1 notify node2
@@ -191,7 +192,7 @@ mod test {
         assert_eq!(ev2.relay.path, vec![did1]);
         assert!(matches!(
             ev2.data,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{id}) if id == did1
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did1
         ));
 
         // node2 notify node3
@@ -200,7 +201,7 @@ mod test {
         assert_eq!(ev3.relay.path, vec![did2]);
         assert!(matches!(
             ev3.data,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{id}) if id == did2
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did2
         ));
 
         // node3 notify node2
@@ -209,7 +210,7 @@ mod test {
         assert_eq!(ev2.relay.path, vec![did3]);
         assert!(matches!(
             ev2.data,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{id}) if id == did3
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did3
         ));
 
         // node2 report node3
@@ -218,7 +219,7 @@ mod test {
         assert_eq!(ev3.relay.path, vec![did3, did2]);
         assert!(matches!(
             ev3.data,
-            Message::NotifyPredecessorReport(NotifyPredecessorReport{id}) if id == did1
+            Message::NotifyPredecessorReport(NotifyPredecessorReport{did}) if did == did1
         ));
 
         // handle messages of connection after stabilization
@@ -265,7 +266,7 @@ mod test {
         assert_eq!(ev3.relay.path, vec![did2]);
         assert!(matches!(
             ev3.data,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{id}) if id == did2
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did2
         ));
 
         // node2 notify node1
@@ -274,7 +275,7 @@ mod test {
         assert_eq!(ev1.relay.path, vec![did2]);
         assert!(matches!(
             ev1.data,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{id}) if id == did2
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did2
         ));
 
         // node3 notify node1
@@ -283,7 +284,7 @@ mod test {
         assert_eq!(ev1.relay.path, vec![did3]);
         assert!(matches!(
             ev1.data,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{id}) if id == did3
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did3
         ));
 
         // node1 notify node2
@@ -292,7 +293,7 @@ mod test {
         assert_eq!(ev2.relay.path, vec![did1]);
         assert!(matches!(
             ev2.data,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{id}) if id == did1
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did1
         ));
 
         // node3 notify node2
@@ -301,7 +302,7 @@ mod test {
         assert_eq!(ev2.relay.path, vec![did3]);
         assert!(matches!(
             ev2.data,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{id}) if id == did3
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did3
         ));
 
         // node1 report node3
@@ -310,7 +311,7 @@ mod test {
         assert_eq!(ev3.relay.path, vec![did3, did1]);
         assert!(matches!(
             ev3.data,
-            Message::NotifyPredecessorReport(NotifyPredecessorReport{id}) if id == did2
+            Message::NotifyPredecessorReport(NotifyPredecessorReport{did}) if did == did2
         ));
 
         // node2 report node3
@@ -319,7 +320,7 @@ mod test {
         assert_eq!(ev3.relay.path, vec![did3, did2]);
         assert!(matches!(
             ev3.data,
-            Message::NotifyPredecessorReport(NotifyPredecessorReport{id}) if id == did1
+            Message::NotifyPredecessorReport(NotifyPredecessorReport{did}) if did == did1
         ));
 
         assert_no_more_msg(&node1, &node2, &node3).await;
@@ -390,7 +391,7 @@ mod test {
         assert_eq!(ev1.relay.path, vec![did2]);
         assert!(matches!(
             ev1.data,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{id}) if id == did2
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did2
         ));
 
         // node1 notify node2
@@ -399,7 +400,7 @@ mod test {
         assert_eq!(ev2.relay.path, vec![did1]);
         assert!(matches!(
             ev2.data,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{id}) if id == did1
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did1
         ));
 
         // node3 notify node2
@@ -408,7 +409,7 @@ mod test {
         assert_eq!(ev2.relay.path, vec![did3]);
         assert!(matches!(
             ev2.data,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{id}) if id == did3
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did3
         ));
 
         // node2 report node3
@@ -417,7 +418,7 @@ mod test {
         assert_eq!(ev3.relay.path, vec![did3, did2]);
         assert!(matches!(
             ev3.data,
-            Message::NotifyPredecessorReport(NotifyPredecessorReport{id}) if id == did1
+            Message::NotifyPredecessorReport(NotifyPredecessorReport{did}) if did == did1
         ));
 
         // handle messages of connection after stabilization
@@ -463,7 +464,7 @@ mod test {
         assert_eq!(ev1.relay.path, vec![did2]);
         assert!(matches!(
             ev1.data,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{id}) if id == did2
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did2
         ));
 
         // node1 notify node2
@@ -472,7 +473,7 @@ mod test {
         assert_eq!(ev2.relay.path, vec![did1]);
         assert!(matches!(
             ev2.data,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{id}) if id == did1
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did1
         ));
 
         // node3 notify node2
@@ -481,7 +482,7 @@ mod test {
         assert_eq!(ev2.relay.path, vec![did3]);
         assert!(matches!(
             ev2.data,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{id}) if id == did3
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did3
         ));
 
         // node2 report node1
@@ -490,7 +491,7 @@ mod test {
         assert_eq!(ev1.relay.path, vec![did1, did2]);
         assert!(matches!(
             ev1.data,
-            Message::NotifyPredecessorReport(NotifyPredecessorReport{id}) if id == did3
+            Message::NotifyPredecessorReport(NotifyPredecessorReport{did}) if did == did3
         ));
 
         // node1 notify node3
@@ -499,7 +500,7 @@ mod test {
         assert_eq!(ev3.relay.path, vec![did1]);
         assert!(matches!(
             ev3.data,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{id}) if id == did1
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did1
         ));
 
         assert_no_more_msg(&node1, &node2, &node3).await;

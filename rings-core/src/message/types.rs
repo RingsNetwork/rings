@@ -31,7 +31,7 @@ pub struct ConnectNodeReport {
 /// MessageType use to find successor in a chord ring.
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
 pub struct FindSuccessorSend {
-    pub id: Did,
+    pub did: Did,
     pub strict: bool,
     pub then: FindSuccessorThen,
 }
@@ -39,39 +39,39 @@ pub struct FindSuccessorSend {
 /// MessageType use to report origin node with report message.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct FindSuccessorReport {
-    pub id: Did,
+    pub did: Did,
     pub handler: FindSuccessorReportHandler,
 }
 
 /// MessageType use to notify predecessor, ask for update finger tables.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct NotifyPredecessorSend {
-    pub id: Did,
+    pub did: Did,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 /// MessageType report to origin node.
 pub struct NotifyPredecessorReport {
-    pub id: Did,
+    pub did: Did,
 }
 
 /// MessageType use to join chord ring, add did into fingers table.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct JoinDHT {
-    pub id: Did,
+    pub did: Did,
     pub services: Vec<PeerService>,
 }
 
 /// MessageType use to leave chord ring.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct LeaveDHT {
-    pub id: Did,
+    pub did: Did,
 }
 
 /// MessageType use to search virtual node.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SearchVNode {
-    pub id: Did,
+    pub vid: Did,
 }
 
 /// MessageType report to origin found virtual node.
@@ -101,7 +101,7 @@ pub struct SyncVNodeWithSuccessor {
 /// MessageType use to join virtual node in subring.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct JoinSubRing {
-    pub did: Did,
+    pub rid: Did,
 }
 
 /// MessageType use to customize message, will be handle by `custom_message` method.

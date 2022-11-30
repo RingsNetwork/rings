@@ -34,10 +34,10 @@ pub struct BiasId {
 }
 
 impl BiasId {
-    pub fn new(bias: &Did, id: &Did) -> BiasId {
+    pub fn new(bias: Did, did: Did) -> BiasId {
         BiasId {
-            bias: *bias,
-            did: *id - *bias,
+            bias,
+            did: did - bias,
         }
     }
 
@@ -54,7 +54,7 @@ impl PartialOrd for BiasId {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         if other.bias != self.bias {
             let did: Did = other.into();
-            let bid = BiasId::new(&self.bias, &did);
+            let bid = BiasId::new(self.bias, did);
             self.did.partial_cmp(&bid.did)
         } else {
             self.did.partial_cmp(&other.did)
@@ -73,7 +73,7 @@ impl Ord for BiasId {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         if other.bias != self.bias {
             let did: Did = other.into();
-            let bid = BiasId::new(&self.bias, &did);
+            let bid = BiasId::new(self.bias, did);
             self.did.cmp(&bid.did)
         } else {
             self.did.cmp(&other.did)
@@ -108,19 +108,19 @@ impl Did {
     }
 
     // Transform Did to BiasDid
-    pub fn bias(&self, id: &Self) -> BiasId {
-        BiasId::new(id, self)
+    pub fn bias(&self, did: Self) -> BiasId {
+        BiasId::new(did, *self)
     }
 }
 
 pub trait SortRing {
-    fn sort(&mut self, id: Did);
+    fn sort(&mut self, did: Did);
 }
 
 impl SortRing for Vec<Did> {
-    fn sort(&mut self, id: Did) {
+    fn sort(&mut self, did: Did) {
         self.sort_by(|a, b| {
-            let (da, db) = (*a - id, *b - id);
+            let (da, db) = (*a - did, *b - did);
             (da).partial_cmp(&db).unwrap()
         });
     }
