@@ -50,8 +50,10 @@ pub trait Chord<Action> {
 /// ChordStorage is a distributed storage protocol based on Chord algorithm.
 ///
 /// The core concept is to find the node that is responsible for storing a resource. In
-/// ChordStorage protocol, we will generate a Did for a resource. Then find the node whose
-/// Did is the successor of that resource's Did. Save the resource in its successor node.
+/// ChordStorage protocol, we will generate a Did for a resource. Then find the node
+/// whose Did is the predecessor of that resource's Did. Save the resource in its
+/// predecessor node.
+///
 /// To accomplish this, all resources stored by this protocol will be wrapped in
 /// [VirtualNode](super::vnode::VirtualNode).
 ///
@@ -67,18 +69,18 @@ pub trait Chord<Action> {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait ChordStorage<Action>: Chord<Action> {
     /// Look up a VirtualNode by its Did.
+    /// Always finds resource by DHT, ignoring the local cache.
     async fn lookup(&self, vid: Did) -> Result<Action>;
-    /// Store VirtualNode to its successor.
+    /// Store `vnode` if it's between current node and the successor of current node,
+    /// otherwise find the responsible node and return as Action.
     async fn store(&self, vnode: VirtualNode) -> Result<Action>;
-    /// Batch store.
-    async fn store_vec(&self, vnodes: Vec<VirtualNode>) -> Result<Action>;
-    /// When a node's successor is updated, it needs to check if there are some
-    /// `VirtualNodes` between (node.did, new_successor.did) and if so, sync them to the
-    /// new successor.
+    /// When the successor of a node is updated, it needs to check if there are
+    /// `VirtualNode`s that are no longer between current node and `new_successor`,
+    /// and sync them to the new successor.
     async fn sync_with_successor(&self, new_successor: Did) -> Result<Action>;
-    /// Cache fetched data locally
+    /// Cache fetched resource locally.
     fn local_cache_set(&self, vnode: VirtualNode);
-    /// Get local cache
+    /// Get local cache.
     fn local_cache_get(&self, vid: Did) -> Option<VirtualNode>;
 }
 

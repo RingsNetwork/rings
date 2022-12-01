@@ -5,7 +5,6 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 
 use async_trait::async_trait;
-use itertools::Itertools;
 use num_bigint::BigUint;
 use serde::Deserialize;
 use serde::Serialize;
@@ -294,7 +293,7 @@ impl Chord<PeerRingAction> for PeerRing {
             + BigUint::from(2u16).pow(fix_finger_index.into()))
             % BigUint::from(2u16).pow(160);
 
-        // Caution here that there is also lock in find_successor.
+        // Caution here that there are also locks in find_successor.
         // You cannot lock finger table before calling find_successor.
         // Have to lock_finger in each branch of the match.
         match self.find_successor(did.into()) {
@@ -341,14 +340,19 @@ impl Chord<PeerRingAction> for PeerRing {
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl ChordStorage<PeerRingAction> for PeerRing {
-    /// lookup always check data via finger table
+    /// Look up a VirtualNode by its Did.
+    /// Always finds resource by finger table, ignoring the local cache.
+    /// If the `vid` is between current node and its successor, its resource should be
+    /// stored in current node.
     async fn lookup(&self, vid: Did) -> Result<PeerRingAction> {
         match self.find_successor(vid) {
-            // if did is in [self, successor]
+            // Resource should be stored in current node.
             Ok(PeerRingAction::Some(_)) => match self.storage.get(&vid).await {
                 Ok(v) => Ok(PeerRingAction::SomeVNode(v)),
                 Err(_) => Ok(PeerRingAction::None),
             },
+            // Resource is stored in other nodes.
+            // Return an action to describe how to find it.
             Ok(PeerRingAction::RemoteAction(n, RemoteAction::FindSuccessor(id))) => {
                 Ok(PeerRingAction::RemoteAction(n, RemoteAction::FindVNode(id)))
             }
@@ -357,37 +361,27 @@ impl ChordStorage<PeerRingAction> for PeerRing {
         }
     }
 
-    /// When a vnode data is fetched from remote, cache it locally.
-    fn local_cache_set(&self, vnode: VirtualNode) {
-        self.cache.set(&vnode.did.clone(), vnode);
-    }
-
-    /// Get vnode from local cache.
-    fn local_cache_get(&self, vid: Did) -> Option<VirtualNode> {
-        self.cache.get(&vid)
-    }
-
-    /// If address of VNode is in range(self, successor), it should store locally,
-    /// otherwise, it should on remote successor
+    /// Store `vnode` if it's between current node and the successor of current node,
+    /// otherwise find the responsible node and return as Action.
     async fn store(&self, vnode: VirtualNode) -> Result<PeerRingAction> {
-        let did = vnode.did;
-        // find VNode's closest successor
-        match self.find_successor(did) {
-            // if did is in range(self, successor)
-            // self should store it
-            Ok(PeerRingAction::Some(_)) => match self.storage.get(&did).await {
+        let vid = vnode.did;
+        match self.find_successor(vid) {
+            // `vnode` should be stored in current node.
+            Ok(PeerRingAction::Some(_)) => match self.storage.get(&vid).await {
                 Ok(v) => {
                     let _ = self
                         .storage
-                        .put(&did, &VirtualNode::concat(&v, &vnode)?)
+                        .put(&vid, &VirtualNode::concat(&v, &vnode)?)
                         .await?;
                     Ok(PeerRingAction::None)
                 }
                 Err(_) => {
-                    let _ = self.storage.put(&did, &vnode).await?;
+                    let _ = self.storage.put(&vid, &vnode).await?;
                     Ok(PeerRingAction::None)
                 }
             },
+            // `vnode` should be stored in other nodes.
+            // Return an action to describe how to store it.
             Ok(PeerRingAction::RemoteAction(n, RemoteAction::FindSuccessor(_))) => Ok(
                 PeerRingAction::RemoteAction(n, RemoteAction::FindAndStore(vnode)),
             ),
@@ -396,42 +390,39 @@ impl ChordStorage<PeerRingAction> for PeerRing {
         }
     }
 
-    /// store a vec of data
-    async fn store_vec(&self, vnodes: Vec<VirtualNode>) -> Result<PeerRingAction> {
-        let acts: Vec<PeerRingAction> =
-            futures::future::join_all(vnodes.iter().map(|v| self.store(v.clone())).collect_vec())
-                .await
-                .into_iter()
-                // ignore faiure here
-                //.filter(|v| v.is_ok())
-                .flatten()
-                //.map(|v| v.unwrap())
-                //.filter(|v| !v.is_none())
-                .collect();
-        match acts.len() {
-            0 => Ok(PeerRingAction::None),
-            _ => Ok(PeerRingAction::MultiActions(acts)),
-        }
-    }
-
-    /// This function should call when successor is updated
+    /// When the successor of a node is updated, it needs to check if there are
+    /// `VirtualNode`s that are no longer between current node and `new_successor`,
+    /// and sync them to the new successor.
     async fn sync_with_successor(&self, new_successor: Did) -> Result<PeerRingAction> {
         let mut data = Vec::<VirtualNode>::new();
         let all_items: Vec<(Did, VirtualNode)> = self.storage.get_all().await?;
-        for (k, v) in all_items.iter() {
-            // k < self.successor
-            if self.bias(*k) < self.bias(new_successor) && self.storage.remove(k).await.is_ok() {
-                data.push(v.clone());
+
+        // Pop out all items that are not between current node and `new_successor`.
+        for (vid, vnode) in all_items.iter() {
+            if self.bias(*vid) < self.bias(new_successor) && self.storage.remove(vid).await.is_ok()
+            {
+                data.push(vnode.clone());
             }
         }
+
         if !data.is_empty() {
             Ok(PeerRingAction::RemoteAction(
                 new_successor,
-                RemoteAction::SyncVNodeWithSuccessor(data),
+                RemoteAction::SyncVNodeWithSuccessor(data), // TODO: This might be too large.
             ))
         } else {
             Ok(PeerRingAction::None)
         }
+    }
+
+    /// Cache fetched `vnode` locally.
+    fn local_cache_set(&self, vnode: VirtualNode) {
+        self.cache.set(&vnode.did.clone(), vnode);
+    }
+
+    /// Get vnode from local cache.
+    fn local_cache_get(&self, vid: Did) -> Option<VirtualNode> {
+        self.cache.get(&vid)
     }
 }
 
