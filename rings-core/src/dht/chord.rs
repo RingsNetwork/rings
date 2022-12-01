@@ -399,7 +399,7 @@ impl ChordStorage<PeerRingAction> for PeerRing {
 
         // Pop out all items that are not between current node and `new_successor`.
         for (vid, vnode) in all_items.iter() {
-            if self.bias(*vid) < self.bias(new_successor) && self.storage.remove(vid).await.is_ok()
+            if self.bias(*vid) > self.bias(new_successor) && self.storage.remove(vid).await.is_ok()
             {
                 data.push(vnode.clone());
             }
