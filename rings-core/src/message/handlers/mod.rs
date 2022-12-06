@@ -121,6 +121,7 @@ impl MessageHandler {
             match payload.data {
                 Message::CustomMessage(ref msg) => {
                     if self.dht.did == payload.relay.destination {
+                        tracing::debug!("INVOKE CUSTOM MESSAGE CALLBACK {}", &payload.tx_id);
                         cb.custom_message(self, payload, msg).await
                     }
                 }

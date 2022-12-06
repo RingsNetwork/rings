@@ -89,6 +89,7 @@ impl MessageCallback for Backend {
         let (left, msg) = array_refs![&msg, 4; ..;];
         let (&[flag], _) = array_refs![left, 1, 3];
         if flag != 0 {
+            tracing::warn!("invalid custom_message flag");
             return;
         }
 
@@ -98,6 +99,7 @@ impl MessageCallback for Backend {
             return;
         }
         let msg = msg.unwrap();
+        tracing::debug!("receive custom_message: {:?}", msg);
 
         let result = match msg.message_type {
             MessageType::SimpleText => {

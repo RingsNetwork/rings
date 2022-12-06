@@ -251,37 +251,19 @@ struct SendHttpCommand {
 
     name: String,
 
-    #[arg(default_value = "/")]
-    path: String,
-
     #[arg(default_value = "get")]
     method: String,
 
-    #[arg(long="header", short = 'H', action=ArgAction::Append, help = "headers append to the request")]
+    #[arg(default_value = "/")]
+    path: String,
+
+    #[arg(long = "header", short = 'H', action = ArgAction::Append, help = "headers append to the request")]
     headers: Vec<String>,
 
     #[arg(long, help = "set content of http body")]
     body: Option<String>,
 
-    #[arg(default_value = "30000")]
-    timeout: u64,
-}
-
-#[derive(Args, Debug)]
-struct SendHttpPostCommand {
-    #[command(flatten)]
-    client_args: ClientArgs,
-
-    to_did: String,
-
-    url: String,
-
-    #[arg(long="header", short = 'H', action=ArgAction::Append, help = "headers append to the request")]
-    headers: Vec<String>,
-
-    // #[arg(long, help = "set content of http body")]
-    // body: Option<String>,
-    #[arg(default_value = "30000")]
+    #[arg(long, default_value = "30000")]
     timeout: u64,
 }
 
@@ -463,8 +445,8 @@ async fn main() -> anyhow::Result<()> {
                 .new_client()
                 .await?
                 .send_http_request_message(
-                    args.name.as_str(),
                     args.to_did.as_str(),
+                    args.name.as_str(),
                     http::Method::from_str(args.method.as_str())?,
                     args.path.as_str(),
                     args.timeout.into(),

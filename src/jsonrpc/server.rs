@@ -21,6 +21,7 @@ use super::response;
 use super::response::Peer;
 use super::response::TransportAndIce;
 use crate::backend::types::BackendMessage;
+use crate::backend::types::HttpRequest;
 use crate::backend::types::MessageType;
 use crate::error::Error as ServerError;
 use crate::prelude::rings_core::dht::Did;
@@ -309,11 +310,10 @@ async fn send_http_request(params: Params, meta: RpcMeta) -> Result<Value> {
         .get(1)
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
         .to_owned();
+    let http_request: HttpRequest =
+        serde_json::from_value(p2).map_err(|_| Error::new(ErrorCode::InvalidParams))?;
 
-    let msg: BackendMessage = BackendMessage::try_from((
-        MessageType::HttpRequest,
-        &serde_json::from_value(p2).map_err(|_| Error::new(ErrorCode::InvalidParams))?,
-    ))?;
+    let msg: BackendMessage = (MessageType::HttpRequest, &http_request).try_into()?;
     let msg: Vec<u8> = msg.into();
     // TODO chunk message flag
     let tx_id = meta.processor.send_message(destination, &msg).await?;
