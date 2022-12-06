@@ -1,6 +1,5 @@
 #![warn(missing_docs)]
 //! http server handler
-use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -49,15 +48,6 @@ impl From<Vec<HiddenServerConfig>> for HttpServer {
 }
 
 impl HttpServer {
-    /// not allowd response
-    pub fn not_allowed_resp() -> HttpResponse {
-        HttpResponse {
-            status: http::StatusCode::METHOD_NOT_ALLOWED.as_u16(),
-            headers: HashMap::new(),
-            body: None,
-        }
-    }
-
     /// execute http request
     pub async fn execute(&self, request: &HttpRequest) -> Result<HttpResponse> {
         let service = self
