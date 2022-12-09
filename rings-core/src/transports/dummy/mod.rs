@@ -10,9 +10,9 @@ impl From<RTCIceCandidateInit> for IceCandidate {
     fn from(cand: RTCIceCandidateInit) -> Self {
         Self {
             candidate: cand.candidate.clone(),
-            sdp_mid: Some(cand.sdp_mid.clone()),
-            sdp_m_line_index: Some(cand.sdp_mline_index),
-            username_fragment: Some(cand.username_fragment),
+            sdp_mid: cand.sdp_mid.clone(),
+            sdp_m_line_index: cand.sdp_mline_index,
+            username_fragment: cand.username_fragment,
         }
     }
 }
