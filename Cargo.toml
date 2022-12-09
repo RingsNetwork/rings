@@ -70,14 +70,14 @@ hyper = { version = "0.14.14", features = ["full"], optional = true }
 opentelemetry = { version = "0.18.0", default-features = false, features = ["trace", "rt-tokio"], optional = true }
 opentelemetry-jaeger = { version = "0.17.0", features = ["rt-tokio"], optional = true }
 pin-project = { version = "1", optional = true }
-reqwest = { version = "0.11", features = ["json"], optional = true }
+reqwest = { version = "0.11", features = ["json", "rustls-tls"], optional = true, default-features = false}
 rings-core = { package = "rings-core", path = "./rings-core", optional = true, version = "0.2.1" }
 tokio = { version = "1.13.0", features = ["full"], optional = true }
 tower-http = { version = "0.3.4", features = ["cors"], optional = true }
 
 # browser
 console_error_panic_hook = { version = "0.1.1", optional = true }
-reqwest-wasm = { version = "0.11", features = ["json"], optional = true }
+reqwest-wasm = { version = "0.11", features = ["json", "rustls-tls"], optional = true, default-features = false }
 rings-core-wasm = { package = "rings-core", path = "./rings-core", features = ["wasm"], default-features = false, optional = true, version = "0.2.1" }
 tracing-wasm = { version = "0.2.1", optional = true }
 
