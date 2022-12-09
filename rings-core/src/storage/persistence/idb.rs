@@ -138,9 +138,11 @@ where
         let (tx, store) = self.get_tx_store(TransactionMode::ReadWrite)?;
         let k: JsValue = JsValue::from(key.to_string());
         let v = store.get(&k).await.map_err(Error::IDBError)?;
+        #[allow(deprecated)]
         let mut v: DataStruct<V> = v.into_serde().map_err(Error::Deserialize)?;
         v.last_visit_time = chrono::Utc::now().timestamp_millis();
         v.visit_count += 1;
+        #[allow(deprecated)]
         store
             .put(
                 &JsValue::from_serde(&v).map_err(Error::Serialize)?,
@@ -159,6 +161,8 @@ where
             .get_all(None, None, None, None)
             .await
             .map_err(Error::IDBError)?;
+
+        #[allow(deprecated)]
         Ok(entries
             .iter()
             .filter_map(|(k, v)| {
@@ -173,6 +177,7 @@ where
     async fn put(&self, key: &K, entry: &V) -> Result<()> {
         self.prune().await?;
         let (tx, store) = self.get_tx_store(TransactionMode::ReadWrite)?;
+        #[allow(deprecated)]
         store
             .put(
                 &JsValue::from_serde(&DataStruct::new(key.to_string().as_str(), entry))
@@ -254,6 +259,8 @@ impl PersistenceStorageOperation for IDBStorage {
             .await
             .map_err(Error::IDBError)?;
         tracing::debug!("entries: {:?}", entries);
+
+        #[allow(deprecated)]
         if let Some((_k, value)) = entries.first() {
             let data_entry: DataStruct<serde_json::Value> =
                 value.into_serde().map_err(Error::Serialize)?;
