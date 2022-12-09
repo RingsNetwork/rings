@@ -141,8 +141,6 @@ pub mod browser;
 pub mod cli;
 pub mod consts;
 pub mod error;
-#[cfg(feature = "node")]
-pub mod ethereum;
 pub mod jsonrpc;
 pub mod jsonrpc_client;
 pub mod logging;
