@@ -205,15 +205,10 @@ impl IceTransportInterface<Event, AcChannel<Event>> for DefaultTransport {
         let on_ice_connection_state_change_callback = self.on_ice_connection_state_change().await;
         match self.get_peer_connection().await {
             Some(peer_connection) => {
+                peer_connection.on_ice_candidate(on_ice_candidate_callback);
+                peer_connection.on_data_channel(on_data_channel_callback);
                 peer_connection
-                    .on_ice_candidate(on_ice_candidate_callback)
-                    .await;
-                peer_connection
-                    .on_data_channel(on_data_channel_callback)
-                    .await;
-                peer_connection
-                    .on_ice_connection_state_change(on_ice_connection_state_change_callback)
-                    .await;
+                    .on_ice_connection_state_change(on_ice_connection_state_change_callback);
                 Ok(self)
             }
             None => Err(Error::RTCPeerConnectionNotEstablish),
@@ -399,8 +394,7 @@ impl IceTransportCallback for DefaultTransport {
                             tracing::error!("Failed on handle msg")
                         };
                     })
-                }))
-                .await;
+                }));
             })
         }
     }
@@ -470,7 +464,7 @@ impl IceTrickleScheme for DefaultTransport {
                 .lock()
                 .await
                 .iter()
-                .map(async move |c| c.clone().to_json().await.unwrap().into()),
+                .map(async move |c| c.clone().to_json().unwrap().into()),
         )
         .await;
         if local_candidates_json.is_empty() {
@@ -571,8 +565,7 @@ impl DefaultTransport {
                                 w.wake();
                             }
                         })
-                    })
-                    .await;
+                    });
                     promise.await
                 }
             }
@@ -589,34 +582,32 @@ impl DefaultTransport {
                 let promise = Promise::default();
                 let state = Arc::clone(&promise.state());
                 let state_clone = Arc::clone(&state);
-                peer_connection
-                    .on_peer_connection_state_change(box move |st| {
-                        let state = Arc::clone(&state);
-                        Box::pin(async move {
-                            match st {
-                                RTCPeerConnectionState::Connected => {
-                                    let mut s = state.lock().unwrap();
-                                    if let Some(w) = s.waker.take() {
-                                        s.completed = true;
-                                        s.successed = Some(true);
-                                        w.wake();
-                                    }
-                                }
-                                RTCPeerConnectionState::Failed => {
-                                    let mut s = state.lock().unwrap();
-                                    if let Some(w) = s.waker.take() {
-                                        s.completed = true;
-                                        s.successed = Some(false);
-                                        w.wake();
-                                    }
-                                }
-                                _ => {
-                                    tracing::trace!("Connect State changed to {:?}", st);
+                peer_connection.on_peer_connection_state_change(box move |st| {
+                    let state = Arc::clone(&state);
+                    Box::pin(async move {
+                        match st {
+                            RTCPeerConnectionState::Connected => {
+                                let mut s = state.lock().unwrap();
+                                if let Some(w) = s.waker.take() {
+                                    s.completed = true;
+                                    s.successed = Some(true);
+                                    w.wake();
                                 }
                             }
-                        })
+                            RTCPeerConnectionState::Failed => {
+                                let mut s = state.lock().unwrap();
+                                if let Some(w) = s.waker.take() {
+                                    s.completed = true;
+                                    s.successed = Some(false);
+                                    w.wake();
+                                }
+                            }
+                            _ => {
+                                tracing::trace!("Connect State changed to {:?}", st);
+                            }
+                        }
                     })
-                    .await;
+                });
                 let current_state = peer_connection.connection_state();
                 if RTCPeerConnectionState::Connected == current_state {
                     let mut s = state_clone.lock().unwrap();

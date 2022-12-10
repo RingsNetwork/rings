@@ -537,6 +537,8 @@ impl IceTrickleScheme for WasmTransport {
                 return Err(Error::RTCSdpTypeNotMatch);
             }
         };
+
+        #[allow(deprecated)]
         let local_candidates_json: Vec<IceCandidate> = self
             .get_pending_candidates()
             .await
