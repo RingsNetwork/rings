@@ -143,7 +143,7 @@ pub struct CallMessage {
 pub struct NotifyMessage {
     /// The RPC method name.
     pub method: String,
-    /// The RPC method paramters.
+    /// The RPC method parameters.
     pub params: Params,
 }
 

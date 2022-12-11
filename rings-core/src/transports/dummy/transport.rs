@@ -217,7 +217,7 @@ impl DummyTransport {
     pub async fn connect_success_promise(&self) -> Result<Promise> {
         let state = State {
             completed: true,
-            successed: Some(true),
+            succeeded: Some(true),
             ..Default::default()
         };
         let promise = Promise(Arc::new(Mutex::new(state)));

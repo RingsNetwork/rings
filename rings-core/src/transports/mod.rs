@@ -5,7 +5,7 @@ pub mod default;
 /// Dummy transport use for test.
 #[cfg(all(not(feature = "wasm"), feature = "dummy"))]
 pub mod dummy;
-/// Wasm transport use for brower.
+/// Wasm transport use for browser.
 #[cfg(feature = "wasm")]
 pub mod wasm;
 

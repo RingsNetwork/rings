@@ -80,7 +80,7 @@ impl MessageRelay {
     pub fn relay(&mut self, current: Did, next_hop: Option<Did>) -> Result<()> {
         self.validate()?;
 
-        // If self.next_hop is setted, it should be current
+        // If self.next_hop is set, it should be current
         if self.next_hop.is_some() && self.next_hop.unwrap() != current {
             return Err(Error::InvalidNextHop);
         }

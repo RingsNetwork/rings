@@ -60,7 +60,7 @@ pub enum OriginVerificationGen {
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
-/// MessagePayload with sequence and verification, contain MessageRealy.
+/// MessagePayload with sequence and verification, contain MessageRelay.
 pub struct MessagePayload<T> {
     pub data: T,
     pub tx_id: uuid::Uuid,
@@ -325,8 +325,8 @@ pub mod test {
     #[test]
     fn test_message_payload_from_auto() {
         let payload = new_test_payload();
-        let gziped_encoded_payload = payload.encode().unwrap();
-        let payload2: MessagePayload<TestData> = gziped_encoded_payload.decode().unwrap();
+        let gzipped_encoded_payload = payload.encode().unwrap();
+        let payload2: MessagePayload<TestData> = gzipped_encoded_payload.decode().unwrap();
         assert_eq!(payload, payload2);
 
         let gunzip_encoded_payload = payload.to_bincode().unwrap().encode().unwrap();

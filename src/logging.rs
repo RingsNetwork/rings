@@ -113,7 +113,7 @@ pub mod node {
         };
 
         // Enable log compatible layer to convert log record to tracing span.
-        // We will ignore any errors that returned by this fucntions.
+        // We will ignore any errors that returned by this functions.
         let _ = LogTracer::init();
 
         // Ignore errors returned by set_global_default.
@@ -153,7 +153,7 @@ pub mod browser {
         //TODO: Jaeger in browser. How to setup agent endpoint?
 
         // Enable log compatible layer to convert log record to tracing span.
-        // We will ignore any errors that returned by this fucntions.
+        // We will ignore any errors that returned by this functions.
         let _ = LogTracer::init();
 
         // Ignore errors returned by set_global_default.

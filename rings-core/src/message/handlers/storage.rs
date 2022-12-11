@@ -58,7 +58,7 @@ impl TChordStorage for Swarm {
         }
     }
 
-    /// Store VirtualNode, TryInto<VirtualNode> is implementated for alot of types
+    /// Store VirtualNode, TryInto<VirtualNode> is implemented for alot of types
     async fn storage_store(&self, vnode: VirtualNode) -> Result<()> {
         match self.dht.store(vnode).await? {
             PeerRingAction::None => Ok(()),
@@ -244,7 +244,7 @@ mod test {
             // vid is in node 2
             println!("vid is on node 2 {:?}", &did2);
             swarm1.storage_fetch(vid).await.unwrap();
-            // it will send reqeust to node 2
+            // it will send request to node 2
             let ev = node2.listen_once().await.unwrap();
             // node 2 received search vnode request
             if let Message::SearchVNode(x) = ev.data {

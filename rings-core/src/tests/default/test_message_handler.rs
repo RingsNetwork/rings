@@ -377,7 +377,7 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
 
 #[tokio::test]
 async fn test_handle_storage() -> Result<()> {
-    // random key may faile here, because if key1 is more close to virtual_peer
+    // random key may failed here, because if key1 is more close to virtual_peer
     // key2 will try send msg back to key1
     let key1 =
         SecretKey::from_str("ff3e0ea83de6909db79f3452764a24efb25c86c1e85c7c453d903c0cf462df07")

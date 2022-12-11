@@ -853,7 +853,7 @@ pub mod tests {
 
     fn assert_transports(swarm: Arc<Swarm>, addresses: Vec<Did>) {
         println!(
-            "Check tranport of {:?}: {:?} for addresses {:?}",
+            "Check transport of {:?}: {:?} for addresses {:?}",
             swarm.did(),
             swarm.get_dids(),
             addresses

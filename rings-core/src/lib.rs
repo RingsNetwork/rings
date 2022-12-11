@@ -1,4 +1,4 @@
-//! Rings: Chord based P2P implentation over WebRTC and ElGamal.
+//! Rings: Chord based P2P implementation over WebRTC and ElGamal.
 //! --------------
 //! - [Chord](crate::dht::PeerRing) is a structured p2p network based on Chord protocol and expanded with secp256k1 based Did support.
 //! - [ElGamal](crate::ecc::elgamal) provides End2End encryption based on Chord Did.

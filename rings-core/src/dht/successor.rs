@@ -3,7 +3,7 @@ use crate::dht::did::SortRing;
 use crate::dht::Did;
 
 /// A sequence of successors for a node in the ring.
-/// It's nessessary to have multiple successors to prevent a single point of failure.
+/// It's necessary to have multiple successors to prevent a single point of failure.
 /// Note the successors are in order of a clockwise distance from the node.
 /// See also [super::did::BiasId].
 #[derive(Debug, Clone)]

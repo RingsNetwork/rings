@@ -44,7 +44,7 @@ use crate::prelude::TChordStorage;
 pub struct Processor {
     /// a swarm instance
     pub swarm: Arc<Swarm>,
-    /// a stabilization instane,
+    /// a stabilization instance,
     pub stabilization: Arc<Stabilization>,
 }
 
@@ -476,7 +476,7 @@ impl From<&(Did, Arc<Transport>)> for Peer {
     }
 }
 
-/// unpack custome message to text
+/// unpack custom message to text
 pub fn unpack_text_message(msg: &CustomMessage) -> Result<String> {
     let (left, right) = msg.0.split_at(4);
     if left[0] != 0 {

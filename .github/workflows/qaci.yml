@@ -87,6 +87,9 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
+      - name: Check typos
+        uses: crate-ci/typos@master
+
       - name: Setup rust toolchain
         run: rustup show
 
