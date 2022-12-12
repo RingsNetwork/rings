@@ -57,7 +57,7 @@ use crate::types::ice_transport::IceTrickleScheme;
 
 type EventSender = <CbChannel<Event> as Channel<Event>>::Sender;
 
-/// WasmTransport use for brower.
+/// WasmTransport use for browser.
 #[derive(Clone)]
 pub struct WasmTransport {
     pub id: uuid::Uuid,
@@ -478,7 +478,7 @@ impl IceCandidateGathering for WasmTransport {
 
                 match JsFuture::from(promise).await {
                     Ok(_) => {
-                        tracing::debug!("set remote sdp successed");
+                        tracing::debug!("set remote sdp success");
                         Ok(())
                     }
                     Err(e) => {
@@ -582,9 +582,9 @@ impl IceTrickleScheme for WasmTransport {
                 let sdp: RtcSessionDescriptionWrapper = data.data.sdp.try_into()?;
                 self.set_remote_description(sdp.to_owned()).await?;
                 for c in &data.data.candidates {
-                    tracing::debug!("add remote candiates: {:?}", c);
+                    tracing::debug!("add remote candidates: {:?}", c);
                     if self.add_ice_candidate(c.clone()).await.is_err() {
-                        tracing::warn!("failed on add add candiates: {:?}", c.clone());
+                        tracing::warn!("failed on add add candidates: {:?}", c.clone());
                     };
                 }
                 Ok(data.addr)
@@ -626,7 +626,7 @@ impl WasmTransport {
                             if let Some(w) = s.waker.take() {
                                 w.wake();
                                 s.completed = true;
-                                s.successed = Some(true);
+                                s.succeeded = Some(true);
                             }
                         }
                         x => {
@@ -660,7 +660,7 @@ impl WasmTransport {
                             if let Some(w) = s.waker.take() {
                                 w.wake();
                                 s.completed = true;
-                                s.successed = Some(true);
+                                s.succeeded = Some(true);
                             }
                         }
                         x => {
@@ -686,7 +686,7 @@ impl WasmTransport {
                         if let Some(w) = s.waker.take() {
                             w.wake();
                             s.completed = true;
-                            s.successed = Some(true);
+                            s.succeeded = Some(true);
                         }
                     }
                     RtcIceConnectionState::Failed => {
@@ -694,7 +694,7 @@ impl WasmTransport {
                         if let Some(w) = s.waker.take() {
                             w.wake();
                             s.completed = true;
-                            s.successed = Some(false);
+                            s.succeeded = Some(false);
                         }
                     }
                     _ => {

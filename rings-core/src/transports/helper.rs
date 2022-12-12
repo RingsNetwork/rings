@@ -17,7 +17,7 @@ use crate::types::ice_transport::IceCandidate;
 #[derive(Default)]
 pub struct State {
     pub completed: bool,
-    pub successed: Option<bool>,
+    pub succeeded: Option<bool>,
     pub waker: Option<std::task::Waker>,
 }
 
@@ -44,7 +44,7 @@ impl Future for Promise {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut state = self.0.lock().unwrap();
         if state.completed {
-            match &state.successed {
+            match &state.succeeded {
                 Some(true) => Poll::Ready(Ok(())),
                 _ => Poll::Ready(Err(Error::PromiseStateFailed)),
             }

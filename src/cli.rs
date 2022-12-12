@@ -20,13 +20,13 @@ use crate::util::loader::ResourceLoader;
 /// Alias about Result<ClientOutput<T>, E>.
 type Output<T> = anyhow::Result<ClientOutput<T>>;
 
-/// Wrap json_client send request between nodes or browers.
+/// Wrap json_client send request between nodes or browsers.
 #[derive(Clone)]
 pub struct Client {
     client: SimpleClient,
 }
 
-/// Wrap client output contain raw result and humanreadable dispaly.
+/// Wrap client output contain raw result and humanreadable display.
 pub struct ClientOutput<T> {
     pub result: T,
     display: String,
@@ -62,7 +62,7 @@ impl Client {
 
         let transport_id = resp
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Unexpect response"))?;
+            .ok_or_else(|| anyhow::anyhow!("Unexpected response"))?;
 
         ClientOutput::ok(
             format!("Succeed, Your transport_id: {}", transport_id),

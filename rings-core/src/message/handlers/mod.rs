@@ -191,7 +191,7 @@ impl MessageHandler {
                 }
                 Ok(())
             }
-            x => Err(Error::MessageHandlerUnsupportMessageType(format!(
+            x => Err(Error::MessageHandlerUnsupportedMessageType(format!(
                 "{:?}",
                 x
             ))),

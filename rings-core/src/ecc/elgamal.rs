@@ -1,4 +1,4 @@
-//! Elgamal Crypto Implentation
+//! Elgamal Crypto Implementation
 //! ----------------
 //! Algorithm Description
 //! # Encrypt

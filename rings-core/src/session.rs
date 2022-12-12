@@ -207,7 +207,7 @@ impl SessionManager {
         (info, key)
     }
 
-    /// sig: Sigature of AuthorizedInfo
+    /// sig: Signature of AuthorizedInfo
     /// auth_info: generated from `gen_unsign_info`
     /// session_key: temp key from gen_unsign_info
     pub fn new(sig: &[u8], auth_info: &AuthorizedInfo, session_key: &SecretKey) -> Self {

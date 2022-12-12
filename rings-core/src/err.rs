@@ -22,7 +22,7 @@ pub enum Error {
     #[error("InvalidPublicKey")]
     InvalidPublicKey,
 
-    #[error("Did of Vritual Peer not equal")]
+    #[error("Did of Virtual Peer not equal")]
     DidNotEqual,
 
     #[error("Encode a byte vector into a base58-check string, adds 4 bytes checksum")]
@@ -76,7 +76,7 @@ pub enum Error {
     #[error("Gzip decode error.")]
     GzipDecode,
 
-    #[error("Failed on promise, state not successed")]
+    #[error("Failed on promise, state is not succeeded")]
     PromiseStateFailed,
 
     #[error("Ice server scheme {0} has not supported yet")]
@@ -97,8 +97,8 @@ pub enum Error {
     #[error("Libsecp256k1 recover failed")]
     Libsecp256k1Recover,
 
-    #[error("Unsupport message type, {0}")]
-    MessageHandlerUnsupportMessageType(String),
+    #[error("Unsupported message type, {0}")]
+    MessageHandlerUnsupportedMessageType(String),
 
     #[error("Cannot find next node by local DHT")]
     MessageHandlerMissNextNode,
@@ -127,8 +127,8 @@ pub enum Error {
     #[error("PeerRing findsuccessor error, {0}")]
     PeerRingFindSuccessor(String),
 
-    #[error("PeerRing cannot find cloest preceding node")]
-    PeerRingNotFindCloestNode,
+    #[error("PeerRing cannot find closest preceding node")]
+    PeerRingNotFindClosestNode,
 
     #[error("PeerRing RWLock unlock failed")]
     PeerRingUnlockFailed,
@@ -234,7 +234,7 @@ pub enum Error {
     #[error("RTC peer_connection failed to close it")]
     RTCPeerConnectionCloseFailed(#[source] webrtc::Error),
 
-    #[error("RTC unsupport sdp type")]
+    #[error("RTC unsupported sdp type")]
     RTCSdpTypeNotMatch,
 
     #[error("Transport not Found")]

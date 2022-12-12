@@ -4,5 +4,5 @@
 pub mod channel;
 /// Custom webrtc ice_server and traits.
 pub mod ice_transport;
-/// MessageListener trait use for MessageHander.
+/// MessageListener trait use for MessageHandler.
 pub mod message;

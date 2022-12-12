@@ -1,7 +1,7 @@
 //! A bunch of wrap errors.
 use crate::prelude::rings_core;
 
-/// A wrap `Result` contains custom erros.
+/// A wrap `Result` contains custom errors.
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, thiserror::Error)]
@@ -43,7 +43,7 @@ pub enum Error {
     ConnectWithDidError(rings_core::err::Error),
     #[error("Connect error, {0}")]
     ConnectError(rings_core::err::Error),
-    #[error("Send mesage error: {0}")]
+    #[error("Send message error: {0}")]
     SendMessage(rings_core::err::Error),
     #[error("Build message body error: {0}")]
     MessagePayload(rings_core::err::Error),

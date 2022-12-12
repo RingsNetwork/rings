@@ -475,7 +475,7 @@ impl IceTrickleScheme for DefaultTransport {
             candidates: local_candidates_json,
             services: services.into_iter().collect_vec(),
         };
-        tracing::trace!("prepared hanshake info :{:?}", data);
+        tracing::trace!("prepared handshake info :{:?}", data);
         let resp = MessagePayload::new_direct(
             data,
             session_manager,
@@ -495,9 +495,9 @@ impl IceTrickleScheme for DefaultTransport {
                 self.set_remote_description(sdp).await?;
                 tracing::trace!("setting remote candidate");
                 for c in &data.data.candidates {
-                    tracing::trace!("add candiates: {:?}", c);
+                    tracing::trace!("add candidates: {:?}", c);
                     if self.add_ice_candidate(c.clone()).await.is_err() {
-                        tracing::warn!("failed on add add candiates: {:?}", c.clone());
+                        tracing::warn!("failed on add add candidates: {:?}", c.clone());
                     };
                 }
                 if let Ok(public_key) = data.origin_verification.session.authorizer_pubkey() {
@@ -561,7 +561,7 @@ impl DefaultTransport {
                             let mut s = state.lock().unwrap();
                             if let Some(w) = s.waker.take() {
                                 s.completed = true;
-                                s.successed = Some(true);
+                                s.succeeded = Some(true);
                                 w.wake();
                             }
                         })
@@ -590,7 +590,7 @@ impl DefaultTransport {
                                 let mut s = state.lock().unwrap();
                                 if let Some(w) = s.waker.take() {
                                     s.completed = true;
-                                    s.successed = Some(true);
+                                    s.succeeded = Some(true);
                                     w.wake();
                                 }
                             }
@@ -598,7 +598,7 @@ impl DefaultTransport {
                                 let mut s = state.lock().unwrap();
                                 if let Some(w) = s.waker.take() {
                                     s.completed = true;
-                                    s.successed = Some(false);
+                                    s.succeeded = Some(false);
                                     w.wake();
                                 }
                             }
@@ -613,7 +613,7 @@ impl DefaultTransport {
                     let mut s = state_clone.lock().unwrap();
                     if let Some(w) = s.waker.take() {
                         s.completed = true;
-                        s.successed = Some(true);
+                        s.succeeded = Some(true);
                         w.wake();
                     }
                 };

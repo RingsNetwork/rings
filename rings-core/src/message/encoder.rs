@@ -140,13 +140,13 @@ mod test {
         let test1 = vec![1, 2, 3, 4];
 
         let encoded1 = test1.encode().unwrap();
-        let resut1: Vec<u8> = encoded1.decode().unwrap();
-        assert_eq!(test1, resut1);
+        let result1: Vec<u8> = encoded1.decode().unwrap();
+        assert_eq!(test1, result1);
 
         let test1 = test1.as_slice();
         let encoded1 = test1.encode().unwrap();
-        let resut1: Vec<u8> = encoded1.decode().unwrap();
-        assert_eq!(test1, resut1);
+        let result1: Vec<u8> = encoded1.decode().unwrap();
+        assert_eq!(test1, result1);
 
         let test2 = "abc";
         let encoded2 = test2.encode().unwrap();

@@ -56,7 +56,7 @@ pub fn parse_params(params: JsValue) -> Result<jsonrpc_core::Params, Error> {
         }
         jsonrpc_core::Params::Map(s_map)
     } else {
-        return Err(Error::JsError("unsupport params".to_owned()));
+        return Err(Error::JsError("unsupported params".to_owned()));
     };
     Ok(params)
 }

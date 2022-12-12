@@ -114,7 +114,7 @@ impl MessageCallback for Backend {
             }
             _ => {
                 tracing::debug!(
-                    "custom_message handle unsupport, tag: {:?}",
+                    "custom_message handle unsupported, tag: {:?}",
                     msg.message_type
                 );
                 return;

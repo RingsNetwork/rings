@@ -90,7 +90,7 @@ impl ToString for AddressType {
 #[wasm_bindgen]
 #[derive(Clone)]
 pub struct UnsignedInfo {
-    /// Did indentify
+    /// Did identify
     key_addr: Did,
     /// auth information
     auth: AuthorizedInfo,
@@ -229,7 +229,7 @@ impl Client {
         })
     }
 
-    /// start backgroud listener without custom callback
+    /// start background listener without custom callback
     pub fn start(&self) -> js_sys::Promise {
         let p = self.processor.clone();
 
@@ -450,7 +450,7 @@ impl Client {
         })
     }
 
-    /// send custome message to peer.
+    /// send custom message to peer.
     pub fn send_message(&self, destination: String, msg: js_sys::Uint8Array) -> js_sys::Promise {
         let p = self.processor.clone();
         future_to_promise(async move {

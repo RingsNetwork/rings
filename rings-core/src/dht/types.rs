@@ -21,8 +21,8 @@ use crate::err::Result;
 /// connections to pass a message from one node to destination node.
 ///
 /// Some methods return an `Action` which is used to tell outer the extra action to take
-/// after handling datas inside the struct. It's useful since the struct may not work
-/// for managing whole datas but for giving strategies by datas inside.
+/// after handling data inside the struct. It's useful since the struct may not work
+/// for managing whole data but for giving strategies by data inside.
 pub trait Chord<Action> {
     /// Join another Did into the DHT.
     fn join(&self, did: Did) -> Result<Action>;

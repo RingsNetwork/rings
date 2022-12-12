@@ -95,7 +95,7 @@ pub enum RemoteAction {
 }
 
 impl PeerRingAction {
-    /// Returns `ture` if the action is a [PeerRingAction::None] value.
+    /// Returns `true` if the action is a [PeerRingAction::None] value.
     pub fn is_none(&self) -> bool {
         if let Self::None = self {
             return true;
@@ -103,7 +103,7 @@ impl PeerRingAction {
         false
     }
 
-    /// Returns `ture` if the action is a [PeerRingAction::Some] value.
+    /// Returns `true` if the action is a [PeerRingAction::Some] value.
     pub fn is_some(&self) -> bool {
         if let Self::Some(_) = self {
             return true;
@@ -111,7 +111,7 @@ impl PeerRingAction {
         false
     }
 
-    /// Returns `ture` if the action is a [PeerRingAction::RemoteAction] value.
+    /// Returns `true` if the action is a [PeerRingAction::RemoteAction] value.
     pub fn is_remote(&self) -> bool {
         if let Self::RemoteAction(..) = self {
             return true;
@@ -119,7 +119,7 @@ impl PeerRingAction {
         false
     }
 
-    /// Returns `ture` if the action is a [PeerRingAction::MultiActions] value.
+    /// Returns `true` if the action is a [PeerRingAction::MultiActions] value.
     pub fn is_multi(&self) -> bool {
         if let Self::MultiActions(..) = self {
             return true;
@@ -179,7 +179,7 @@ impl PeerRing {
 
     /// Remove a node from finger table.
     /// Also remove it from successor sequence.
-    /// If successor_seq become empty, try setting the cloest node to it.
+    /// If successor_seq become empty, try setting the closest node to it.
     pub fn remove(&self, did: Did) -> Result<()> {
         let mut finger = self.lock_finger()?;
         let mut successor = self.lock_successor()?;

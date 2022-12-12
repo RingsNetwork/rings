@@ -20,7 +20,7 @@ pub enum MessageType {
     Empty,
     /// simple texte
     SimpleText,
-    /// http reuqest
+    /// http request
     HttpRequest,
     /// http response
     HttpResponse,
@@ -286,7 +286,7 @@ impl HttpRequest {
 
 /// HttpResponse
 /// - `status`: Status machine with numbers, like 200, 300, 400, 500.
-/// - `body`: Message chunk split bytes and send back to remote clinet.
+/// - `body`: Message chunk split bytes and send back to remote client.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HttpResponse {
     /// status
