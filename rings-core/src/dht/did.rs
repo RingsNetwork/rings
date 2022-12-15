@@ -41,8 +41,8 @@ impl BiasId {
         }
     }
 
-    pub fn to_did(bid: &BiasId) -> Did {
-        bid.did + bid.bias
+    pub fn to_did(self) -> Did {
+        self.did + self.bias
     }
 
     pub fn pos(&self) -> Did {
@@ -83,13 +83,13 @@ impl Ord for BiasId {
 
 impl From<BiasId> for Did {
     fn from(id: BiasId) -> Did {
-        BiasId::to_did(&id)
+        BiasId::to_did(id)
     }
 }
 
 impl From<&BiasId> for Did {
     fn from(id: &BiasId) -> Did {
-        BiasId::to_did(id)
+        BiasId::to_did(*id)
     }
 }
 

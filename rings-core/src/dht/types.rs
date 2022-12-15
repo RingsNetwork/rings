@@ -24,7 +24,7 @@ use crate::err::Result;
 /// after handling data inside the struct. It's useful since the struct may not work
 /// for managing whole data but for giving strategies by data inside.
 pub trait Chord<Action> {
-    /// Join another Did into the DHT.
+    /// Join a DHT containing a node identified by `did`.
     fn join(&self, did: Did) -> Result<Action>;
 
     /// Ask DHT for the successor of Did.

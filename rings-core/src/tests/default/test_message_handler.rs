@@ -325,10 +325,10 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
             assert!(swarm2.dht().lock_successor()?.list().contains(&key1.address().into()));
             assert!(swarm1.dht()
                 .lock_finger()?
-                .contains(&Some(key2.address().into())));
+                .contains(Some(key2.address().into())));
             assert!(swarm2.dht()
                 .lock_finger()?
-                .contains(&Some(key1.address().into())));
+                .contains(Some(key1.address().into())));
             assert_eq!(
                 transport_1_to_2.ice_connection_state().await,
                 Some(RTCIceConnectionState::Connected)
