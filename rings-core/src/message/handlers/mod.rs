@@ -421,4 +421,32 @@ pub mod tests {
 
         Ok(())
     }
+
+    pub async fn assert_no_more_msg(
+        node1: &MessageHandler,
+        node2: &MessageHandler,
+        node3: &MessageHandler,
+    ) {
+        tokio::select! {
+            _ = node1.listen_once() => unreachable!("node1 should not receive any message"),
+            _ = node2.listen_once() => unreachable!("node2 should not receive any message"),
+            _ = node3.listen_once() => unreachable!("node3 should not receive any message"),
+            _ = sleep(Duration::from_secs(3)) => {}
+        }
+    }
+
+    pub async fn wait_for_msgs(
+        node1: &MessageHandler,
+        node2: &MessageHandler,
+        node3: &MessageHandler,
+    ) {
+        loop {
+            tokio::select! {
+                _ = node1.listen_once() => {}
+                _ = node2.listen_once() => {}
+                _ = node3.listen_once() => {}
+                _ = sleep(Duration::from_secs(3)) => break
+            }
+        }
+    }
 }

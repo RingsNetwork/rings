@@ -278,6 +278,7 @@ pub mod tests {
     use crate::dht::Did;
     use crate::ecc::tests::gen_ordered_keys;
     use crate::ecc::SecretKey;
+    use crate::message::handlers::tests::assert_no_more_msg;
     use crate::message::MessageHandler;
     use crate::swarm::Swarm;
     use crate::tests::default::prepare_node;
@@ -839,19 +840,6 @@ pub mod tests {
         ));
 
         Ok(())
-    }
-
-    pub async fn assert_no_more_msg(
-        node1: &MessageHandler,
-        node2: &MessageHandler,
-        node3: &MessageHandler,
-    ) {
-        tokio::select! {
-            _ = node1.listen_once() => unreachable!("node1 should not receive any message"),
-            _ = node2.listen_once() => unreachable!("node2 should not receive any message"),
-            _ = node3.listen_once() => unreachable!("node3 should not receive any message"),
-            _ = sleep(Duration::from_secs(3)) => {}
-        }
     }
 
     fn assert_transports(swarm: Arc<Swarm>, addresses: Vec<Did>) {
