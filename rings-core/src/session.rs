@@ -73,7 +73,7 @@ pub struct AuthorizedInfo {
 pub struct Session {
     /// Signature
     pub sig: Vec<u8>,
-    /// Infomation for verify Session signature
+    /// Information for verify Session signature
     pub auth: AuthorizedInfo,
 }
 
@@ -108,7 +108,7 @@ impl AuthorizedInfo {
 }
 
 impl Session {
-    /// Generate new session via given sigature and auth info.
+    /// Generate new session via given signature and auth info.
     pub fn new(sig: &[u8], auth_info: &AuthorizedInfo) -> Self {
         Self {
             sig: sig.to_vec(),
@@ -208,7 +208,7 @@ impl SessionManager {
         Ok((info, key))
     }
 
-    /// Gnerate unsigned info with.
+    /// Generate unsigned info with.
     pub fn gen_unsign_info(
         did: Did,
         ttl: Option<Ttl>,
