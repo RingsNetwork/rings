@@ -2,7 +2,7 @@
 
 //! Signing/encrypting and verifying message.
 //!
-//! To avoid too frequent signing, and keep the private key safe
+//! To avoid frequent signing, and keep the private key safe
 //! - ECDSA Session is based on secp256k1, which create a temporate secret key with one time signing auth
 //! - To create a ECDSA Session, we should generate the unsign_info with our pubkey (Address)
 //! - `SessionManager::gen_unsign_info(addr, ..)`, it will returns the msg needs for sign, and a temporate private key
@@ -36,6 +36,8 @@ pub enum Signer {
 }
 
 /// TTl with specific time, or not set.
+/// which specifies the length of time that the session will remain active.
+/// Once the TTL expires, the session is expired and a new session must be established.
 #[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
 pub enum Ttl {
     /// Session's lifetime, (ms)
