@@ -21,6 +21,7 @@ use super::PersistenceStorageReadAndWrite;
 use super::PersistenceStorageRemove;
 use crate::err::Error;
 use crate::err::Result;
+use crate::utils::wasm;
 
 /// Default IndexedDB database and storage name
 pub const DEFAULT_REXIE_STORE_NAME: &str = "rings-storage";
@@ -138,21 +139,26 @@ where
         let (tx, store) = self.get_tx_store(TransactionMode::ReadWrite)?;
         let k: JsValue = JsValue::from(key.to_string());
         let v = store.get(&k).await.map_err(Error::IDBError)?;
-        #[allow(deprecated)]
-        let mut v: DataStruct<V> = v.into_serde().map_err(Error::Deserialize)?;
-        v.last_visit_time = chrono::Utc::now().timestamp_millis();
-        v.visit_count += 1;
-        #[allow(deprecated)]
+
+        // #[allow(deprecated)]
+        // let mut v: DataStruct<V> = v.into_serde().map_err(Error::Deserialize)?;
+        let current_count = wasm::js_get::<i32>(&v, "visit_count")?;
+        let data = wasm::js_get::<V>(&v, "data")?;
+        wasm::js_set(
+            &v,
+            "last_visit_time".to_string(),
+            chrono::Utc::now().timestamp_millis(),
+        )?;
+        wasm::js_set(&v, "visit_count".to_string(), current_count + 1)?;
         store
             .put(
-                &JsValue::from_serde(&v).map_err(Error::Serialize)?,
-                //Some(&k),
+                &v, //Some(&k),
                 None,
             )
             .await
             .map_err(Error::IDBError)?;
         tx.done().await.map_err(Error::IDBError)?;
-        Ok(v.data)
+        Ok(data)
     }
 
     async fn get_all(&self) -> Result<Vec<(K, V)>> {
