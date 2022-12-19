@@ -59,13 +59,15 @@ pub struct Authorizer {
 #[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
 pub struct AuthorizedInfo {
     /// Authorizer of session.
-    pub authorizer: Authorizer,
+    authorizer: Authorizer,
     /// Signing method of the session.
-    pub signer: Signer,
+    signer: Signer,
     /// Session's lifetime
-    pub ttl_ms: Ttl,
+    ttl_ms: Ttl,
     /// Timestamp when session created
-    pub ts_ms: u128,
+    ts_ms: u128,
+    /// Did of session.
+    session_id: Did
 }
 
 /// Session contain signature which sign with `Signer`, so need AuthorizedInfo as well.
@@ -79,11 +81,11 @@ pub struct Session {
 
 /// Session with temp secretKey.
 #[derive(Debug, Clone)]
-pub struct SessionWithKey {
+struct SessionWithKey {
     /// Session
-    pub session: Session,
+    session: Session,
     /// The private key for session.
-    pub session_key: SecretKey,
+    session_key: SecretKey,
 }
 
 /// Manager about Session.
@@ -159,7 +161,7 @@ impl Session {
         if !self.verify() {
             Err(Error::VerifySignatureFailed)
         } else {
-            Ok(self.auth.authorizer.did)
+            Ok(self.auth.session_id)
         }
     }
 
@@ -202,6 +204,7 @@ impl SessionManager {
         let info = AuthorizedInfo {
             signer,
             authorizer,
+            session_id: key.address().into(),
             ttl_ms: ttl.unwrap_or(Ttl::Some(DEFAULT_SESSION_TTL_MS)),
             ts_ms: utils::get_epoch_ms(),
         };
@@ -220,6 +223,7 @@ impl SessionManager {
         let info = AuthorizedInfo {
             signer,
             authorizer,
+            session_id: key.address().into(),
             ttl_ms: ttl.unwrap_or(Ttl::Some(DEFAULT_SESSION_TTL_MS)),
             ts_ms: utils::get_epoch_ms(),
         };
