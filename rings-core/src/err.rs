@@ -307,6 +307,12 @@ pub enum Error {
 
     #[error("message too large, consider use ChunkList")]
     MessageTooLarge,
+
+    #[error("Cannot get property {0} from JsValue")]
+    FailedOnGetProperty(String),
+
+    #[error("Cannot set property {0} from JsValue")]
+    FailedOnSetProperty(String),
 }
 
 /// A Result wrapper contain custom Errors.

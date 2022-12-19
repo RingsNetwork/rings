@@ -5,3 +5,25 @@ use chrono::Utc;
 pub fn get_epoch_ms() -> u128 {
     Utc::now().timestamp_millis() as u128
 }
+
+#[cfg(feature = "wasm")]
+/// Toolset for wasm
+pub mod wasm {
+    use js_sys::Reflect;
+    use wasm_bindgen::JsValue;
+
+    use crate::err::Error;
+    use crate::err::Result;
+
+    /// Get property from a JsValue.
+    pub fn get_property(obj: &JsValue, key: String) -> Result<JsValue> {
+        Reflect::get(&obj, &JsValue::from(key.clone()))
+            .map_err(|_| Error::FailedOnGetProperty(key.clone()))
+    }
+
+    /// Set Property to a JsValue.
+    pub fn set_property(obj: &JsValue, key: String, value: impl Into<JsValue>) -> Result<bool> {
+        Reflect::set(&obj, &JsValue::from(key.clone()), &value.into())
+            .map_err(|_| Error::FailedOnSetProperty(key.clone()))
+    }
+}
