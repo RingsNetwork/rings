@@ -67,7 +67,7 @@ pub struct AuthorizedInfo {
     /// Timestamp when session created
     ts_ms: u128,
     /// Did of session.
-    session_id: Did
+    session_id: Did,
 }
 
 /// Session contain signature which sign with `Signer`, so need AuthorizedInfo as well.
