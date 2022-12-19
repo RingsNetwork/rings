@@ -2,7 +2,7 @@
 use crate::dht::did::SortRing;
 use crate::dht::Did;
 
-/// A sequence of successors for a node in the ring.
+/// A sequence of successors for a node on the ring.
 /// It's necessary to have multiple successors to prevent a single point of failure.
 /// Note the successors are in order of a clockwise distance from the node.
 /// See also [super::did::BiasId].
@@ -25,12 +25,16 @@ impl SuccessorSeq {
         }
     }
 
-    pub fn is_none(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.successors.is_empty()
     }
 
+    pub fn is_full(&self) -> bool {
+        self.successors.len() as u8 >= self.max
+    }
+
     pub fn min(&self) -> Did {
-        if self.is_none() {
+        if self.is_empty() {
             self.did
         } else {
             self.successors[0]
@@ -38,7 +42,7 @@ impl SuccessorSeq {
     }
 
     pub fn max(&self) -> Did {
-        if self.is_none() {
+        if self.is_empty() {
             self.did
         } else {
             self.successors[self.successors.len() - 1]
@@ -73,7 +77,7 @@ mod tests {
         let dids = gen_ordered_dids(6);
 
         let mut succ = SuccessorSeq::new(dids[0], 3);
-        assert!(succ.is_none());
+        assert!(succ.is_empty());
 
         succ.update(dids[2]);
         assert_eq!(succ.list(), dids[2..3]);
@@ -96,7 +100,7 @@ mod tests {
         let dids = gen_ordered_dids(4);
 
         let mut succ = SuccessorSeq::new(dids[0], 3);
-        assert!(succ.is_none());
+        assert!(succ.is_empty());
 
         succ.update(dids[1]);
         succ.update(dids[2]);

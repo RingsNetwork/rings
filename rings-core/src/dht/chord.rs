@@ -84,8 +84,9 @@ pub enum RemoteAction {
     /// Let `did_a` sync data with it's successor.
     SyncVNodeWithSuccessor(Vec<VirtualNode>),
 
-    // TODO: Only find_successor method can return FindSuccessor, otherwise should give
-    // a FindSuccessor with flag. Such as `FindSuccessorForFix`.
+    /// Need `did_a` to find `did_b` then send back with `for connect` flag.
+    FindSuccessorForConnect(Did),
+
     /// Need `did_a` to find `did_b` then send back with `for finger table fixing` flag.
     FindSuccessorForFix(Did),
 
@@ -191,7 +192,7 @@ impl PeerRing {
         }
         finger.remove(did);
         successor.remove(did);
-        if successor.is_none() {
+        if successor.is_empty() {
             if let Some(x) = finger.first() {
                 successor.update(x);
             }
@@ -206,7 +207,13 @@ impl PeerRing {
 }
 
 impl Chord<PeerRingAction> for PeerRing {
-    /// Join another Did into the ring.
+    /// Join a ring containing a node identified by `did`.
+    /// This method is usually invoked to maintain successor sequence and finger table
+    /// after connect to another node.
+    ///
+    /// This method will return a [RemoteAction::FindSuccessorForConnect] to the caller.
+    /// The caller will send it to the node identified by `did`, and let the node find
+    /// the successor of current node and make current node connect to that successor.
     fn join(&self, did: Did) -> Result<PeerRingAction> {
         if did == self.did {
             return Ok(PeerRingAction::None);
@@ -217,7 +224,7 @@ impl Chord<PeerRingAction> for PeerRing {
 
         finger.join(did);
 
-        if self.bias(did) < self.bias(successor.max()) || successor.is_none() {
+        if self.bias(did) < self.bias(successor.max()) || !successor.is_full() {
             // 1) id should follows self.id
             // 2) #fff should follow #001 because id space is a Finate Ring
             // 3) #001 - #fff = #001 + -(#fff) = #001
@@ -226,8 +233,7 @@ impl Chord<PeerRingAction> for PeerRing {
 
         Ok(PeerRingAction::RemoteAction(
             did,
-            // TODO: should be `FindSuccessorForConnect`.
-            RemoteAction::FindSuccessor(self.did),
+            RemoteAction::FindSuccessorForConnect(self.did),
         ))
     }
 
@@ -237,7 +243,7 @@ impl Chord<PeerRingAction> for PeerRing {
         let successor = self.lock_successor()?;
         let finger = self.lock_finger()?;
 
-        if successor.is_none() || self.bias(did) <= self.bias(successor.min()) {
+        if successor.is_empty() || self.bias(did) <= self.bias(successor.min()) {
             // If the did is closer to self than successor, return successor as the
             // successor of that did.
             Ok(PeerRingAction::Some(successor.min()))
@@ -429,6 +435,7 @@ impl ChordStorage<PeerRingAction> for PeerRing {
 #[cfg(not(feature = "wasm"))]
 #[cfg(test)]
 mod tests {
+    use std::iter::repeat;
     use std::str::FromStr;
 
     use super::*;
@@ -439,10 +446,6 @@ mod tests {
         let db_path_a = PersistenceStorage::random_path("./tmp");
         let db_path_b = PersistenceStorage::random_path("./tmp");
         let db_path_c = PersistenceStorage::random_path("./tmp");
-        let a = Did::from_str("0x00E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
-        let b = Did::from_str("0x119999cf1046e68e36E1aA2E0E07105eDDD1f08E").unwrap();
-        let c = Did::from_str("0xccffee254729296a45a3885639AC7E10F9d54979").unwrap();
-        let d = Did::from_str("0xffffee254729296a45a3885639AC7E10F9d54979").unwrap();
 
         let db_1 = PersistenceStorage::new_with_path(db_path_a.as_str())
             .await
@@ -454,117 +457,173 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(a < b && b < c);
-        // distence between (a, d) is less than (b, d)
-        assert!((a - d) < (b - d));
+        // Setup did a, b, c, d in a clockwise order.
+        let a = Did::from_str("0x00E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
+        let b = Did::from_str("0x119999cf1046e68e36E1aA2E0E07105eDDD1f08E").unwrap();
+        let c = Did::from_str("0xccffee254729296a45a3885639AC7E10F9d54979").unwrap();
+        let d = Did::from_str("0xffffee254729296a45a3885639AC7E10F9d54979").unwrap();
 
+        // This assertion tells you the order of a, b, c, d on the ring.
+        // Note that this vec only describes the order, not the absolute position.
+        // Since they are all on the ring, you cannot say a is the first element or d is
+        // the last. You can only describe their bias based on the same node and a
+        // clockwise order.
+        //
+        // a --> b --> c --> d
+        // ^                 |
+        // |-----------------|
+        //
+        let mut seq = vec![a, b, c, d];
+        seq.sort();
+        assert_eq!(seq, vec![a, b, c, d]);
+
+        // Setup node_a and ensure its successor sequence and finger table is empty.
         let node_a = PeerRing::new_with_storage(a, 3, db_1);
-        assert_eq!(
-            node_a.lock_successor()?.list(),
-            vec![],
-            "{:?}",
-            node_a.lock_successor()?.list()
-        );
-        // for increase seq join
-        node_a.join(a)?;
-        // Node A wont add self to finder
+        assert!(node_a.lock_successor()?.is_empty());
         assert!(node_a.lock_finger()?.is_empty());
-        node_a.join(b)?;
-        // b is very far away from a
-        // a.finger should store did as range
-        // [(a, a+2), (a+2, a+4), (a+4, a+8), ..., (a+2^159, a + 2^160)]
-        // b is in range(a+2^156, a+2^157)
+
+        // Test a node won't set itself to successor sequence and finger table.
+        assert_eq!(node_a.join(a)?, PeerRingAction::None);
+        assert!(node_a.lock_successor()?.is_empty());
+        assert!(node_a.lock_finger()?.is_empty());
+
+        // Test join ring with node_b.
+        // We don't need to setup node_b here, we just use its did.
+        let result = node_a.join(b)?;
+
+        // After join, node_a should ask node_b to find its successor on the ring for
+        // connecting.
+        assert_eq!(
+            result,
+            PeerRingAction::RemoteAction(b, RemoteAction::FindSuccessorForConnect(a))
+        );
+
+        // This assertion tells you the position of node_b on the ring.
+        // Hint: The Did type is a 160-bit unsigned integer.
         assert!(BigUint::from(b) > BigUint::from(2u16).pow(156));
         assert!(BigUint::from(b) < BigUint::from(2u16).pow(157));
-        // Node A's finter should be [None, .., B]
-        assert!(node_a.lock_finger()?.contains(&Some(b)));
-        assert!(
-            node_a.lock_finger()?.contains(&None),
-            "{:?}",
-            node_a.lock_finger()?.list()
+
+        // After join, the finger table of node_a should be like:
+        // [b] * 157 + [None] * 3
+        let mut expected_finger_list = repeat(Some(b)).take(157).collect::<Vec<_>>();
+        expected_finger_list.extend(repeat(None).take(3));
+        assert_eq!(node_a.lock_finger()?.list(), &expected_finger_list);
+
+        // After join, the successor sequence of node_a should be [b].
+        assert_eq!(node_a.lock_successor()?.list(), vec![b]);
+
+        // Test repeated join.
+        node_a.join(b)?;
+        assert_eq!(node_a.lock_finger()?.list(), &expected_finger_list);
+        assert_eq!(node_a.lock_successor()?.list(), vec![b]);
+        node_a.join(b)?;
+        assert_eq!(node_a.lock_finger()?.list(), &expected_finger_list);
+        assert_eq!(node_a.lock_successor()?.list(), vec![b]);
+
+        // Test join ring with node_c.
+        // We don't need to setup node_c here, we just use its did.
+        let result = node_a.join(c)?;
+
+        // Again, after join, node_a should ask node_c to find its successor on the ring
+        // for connecting.
+        assert_eq!(
+            result,
+            PeerRingAction::RemoteAction(c, RemoteAction::FindSuccessorForConnect(a))
         );
 
-        assert_eq!(
-            node_a.lock_successor()?.list(),
-            vec![b],
-            "{:?}",
-            node_a.lock_successor()?.list()
-        );
-
-        // Node A starts to query node b for it's successor
-        assert_eq!(
-            node_a.join(b)?,
-            PeerRingAction::RemoteAction(b, RemoteAction::FindSuccessor(a))
-        );
-        assert!(node_a.lock_successor()?.list().contains(&b));
-        // Node A keep querying node b for it's successor
-        assert_eq!(
-            node_a.join(c)?,
-            PeerRingAction::RemoteAction(c, RemoteAction::FindSuccessor(a))
-        );
-
-        // Node A's finter should be [None, ..B, C]
-        assert!(
-            node_a.lock_finger()?.contains(&Some(c)),
-            "{:?}",
-            node_a.finger
-        );
-        // c is in range(a+2^159, a+2^160)
+        // This assertion tells you the position of node_c on the ring.
+        // Hint: The Did type is a 160-bit unsigned integer.
         assert!(BigUint::from(c) > BigUint::from(2u16).pow(159));
         assert!(BigUint::from(c) < BigUint::from(2u16).pow(160));
 
-        assert_eq!(node_a.lock_finger()?[158], Some(c));
-        assert_eq!(node_a.lock_finger()?[155], Some(b));
-        assert_eq!(node_a.lock_finger()?[156], Some(b));
+        // After join, the finger table of node_a should be like:
+        // [b] * 157 + [c] * 3
+        let mut expected_finger_list = repeat(Some(b)).take(157).collect::<Vec<_>>();
+        expected_finger_list.extend(repeat(Some(c)).take(3));
+        assert_eq!(node_a.lock_finger()?.list(), &expected_finger_list);
 
-        assert!(node_a.lock_successor()?.list().contains(&b));
-        // Node A will query c to find d
+        // After join, the successor sequence of node_a should be [b, c].
+        // Because although node_b is closer to node_a, the sequence is not full.
+        assert_eq!(node_a.lock_successor()?.list(), vec![b, c]);
+
+        // When try to find_successor of node_d, node_a will send query to node_c.
         assert_eq!(
             node_a.find_successor(d).unwrap(),
             PeerRingAction::RemoteAction(c, RemoteAction::FindSuccessor(d))
         );
+        // When try to find_successor of node_c, node_a will send query to node_b.
         assert_eq!(
             node_a.find_successor(c).unwrap(),
             PeerRingAction::RemoteAction(b, RemoteAction::FindSuccessor(c))
         );
 
-        // for decrease seq join
-        let node_d = PeerRing::new_with_storage(d, 3, db_2);
+        // Since the test above is clockwise, we need to test anti-clockwise situation.
+        let node_a = PeerRing::new_with_storage(a, 3, db_2);
+
+        // Test join ring with node_c.
         assert_eq!(
-            node_d.join(c)?,
-            PeerRingAction::RemoteAction(c, RemoteAction::FindSuccessor(d))
+            node_a.join(c)?,
+            PeerRingAction::RemoteAction(c, RemoteAction::FindSuccessorForConnect(a))
         );
+        let expected_finger_list = repeat(Some(c)).take(160).collect::<Vec<_>>();
+        assert_eq!(node_a.lock_finger()?.list(), &expected_finger_list);
+        assert_eq!(node_a.lock_successor()?.list(), vec![c]);
+
+        // Test join ring with node_b.
         assert_eq!(
-            node_d.join(b)?,
-            PeerRingAction::RemoteAction(b, RemoteAction::FindSuccessor(d))
+            node_a.join(b)?,
+            PeerRingAction::RemoteAction(b, RemoteAction::FindSuccessorForConnect(a))
         );
+        let mut expected_finger_list = repeat(Some(b)).take(157).collect::<Vec<_>>();
+        expected_finger_list.extend(repeat(Some(c)).take(3));
+        assert_eq!(node_a.lock_finger()?.list(), &expected_finger_list);
+        assert_eq!(node_a.lock_successor()?.list(), vec![b, c]);
+
+        // Test join over half ring.
+        let node_d = PeerRing::new_with_storage(d, 1, db_3);
         assert_eq!(
             node_d.join(a)?,
-            PeerRingAction::RemoteAction(a, RemoteAction::FindSuccessor(d))
+            PeerRingAction::RemoteAction(a, RemoteAction::FindSuccessorForConnect(d))
         );
 
-        // for over half ring join
-        let node_d = PeerRing::new_with_storage(d, 3, db_3);
-        assert_eq!(
-            node_d.join(a)?,
-            PeerRingAction::RemoteAction(a, RemoteAction::FindSuccessor(d))
-        );
-        // for a ring a, a is over 2^152 far away from d
-        assert!(d + Did::from(BigUint::from(2u16).pow(152)) > a);
+        // This assertion tells you that node_a is over 2^151 far away from node_d.
+        // And node_a is also less than 2^152 far away from node_d.
         assert!(d + Did::from(BigUint::from(2u16).pow(151)) < a);
-        assert!(node_d.lock_finger()?.contains(&Some(a)));
-        assert_eq!(node_d.lock_finger()?[151], Some(a));
-        assert_eq!(node_d.lock_finger()?[152], None);
-        assert_eq!(node_d.lock_finger()?[0], Some(a));
-        // when b insearted a is still more close to d
+        assert!(d + Did::from(BigUint::from(2u16).pow(152)) > a);
+
+        // After join, the finger table of node_d should be like:
+        // [a] * 152 + [None] * 8
+        let mut expected_finger_list = repeat(Some(a)).take(152).collect::<Vec<_>>();
+        expected_finger_list.extend(repeat(None).take(8));
+        assert_eq!(node_d.lock_finger()?.list(), &expected_finger_list);
+
+        // After join, the successor sequence of node_a should be [a].
+        assert_eq!(node_d.lock_successor()?.list(), vec![a]);
+
+        // Test join ring with node_b.
         assert_eq!(
             node_d.join(b)?,
-            PeerRingAction::RemoteAction(b, RemoteAction::FindSuccessor(d))
+            PeerRingAction::RemoteAction(b, RemoteAction::FindSuccessorForConnect(d))
         );
-        assert!(d + Did::from(BigUint::from(2u16).pow(159)) > b);
-        assert!(node_d.lock_successor()?.list().contains(&a));
-        tokio::fs::remove_dir_all("./tmp").await.ok();
 
+        // This assertion tells you that node_b is over 2^156 far away from node_d.
+        // And node_b is also less than 2^157 far away from node_d.
+        assert!(d + Did::from(BigUint::from(2u16).pow(156)) < b);
+        assert!(d + Did::from(BigUint::from(2u16).pow(157)) > b);
+
+        // After join, the finger table of node_d should be like:
+        // [a] * 152 + [b] * 5 + [None] * 3
+        let mut expected_finger_list = repeat(Some(a)).take(152).collect::<Vec<_>>();
+        expected_finger_list.extend(repeat(Some(b)).take(5));
+        expected_finger_list.extend(repeat(None).take(3));
+        assert_eq!(node_d.lock_finger()?.list(), &expected_finger_list);
+
+        // Note the max successor sequence size of node_d is set to 1 when created.
+        // After join, the successor sequence of node_a should still be [a].
+        // Because node_a is closer to node_d, and the sequence is full.
+        assert_eq!(node_d.lock_successor()?.list(), vec![a]);
+
+        tokio::fs::remove_dir_all("./tmp").await.ok();
         Ok(())
     }
 
@@ -594,13 +653,13 @@ mod tests {
         assert!(node2.lock_successor()?.list().contains(&did1));
 
         assert!(
-            node1.lock_finger()?.contains(&Some(did2)),
+            node1.lock_finger()?.contains(Some(did2)),
             "did1:{:?}; did2:{:?}",
             did1,
             did2
         );
         assert!(
-            node2.lock_finger()?.contains(&Some(did1)),
+            node2.lock_finger()?.contains(Some(did1)),
             "did1:{:?}; did2:{:?}",
             did1,
             did2
@@ -640,13 +699,13 @@ mod tests {
         assert!(pos_160 > did1);
 
         assert!(
-            node1.lock_finger()?.contains(&Some(did2)),
+            node1.lock_finger()?.contains(Some(did2)),
             "did1:{:?}; did2:{:?}",
             did1,
             did2
         );
         assert!(
-            node2.lock_finger()?.contains(&Some(did1)),
+            node2.lock_finger()?.contains(Some(did1)),
             "did2:{:?} dont contains did1:{:?}",
             did2,
             did1

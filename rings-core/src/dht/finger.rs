@@ -47,7 +47,15 @@ impl FingerTable {
     }
 
     /// getter
-    pub fn get(&self, index: usize) -> &Option<Did> {
+    pub fn get(&self, index: usize) -> Option<Did> {
+        if index >= self.finger.len() {
+            return None;
+        }
+        self.finger[index]
+    }
+
+    /// ref getter
+    pub fn get_ref(&self, index: usize) -> &Option<Did> {
         if index >= self.finger.len() {
             return &None;
         }
@@ -131,8 +139,8 @@ impl FingerTable {
     }
 
     /// Check finger is contains some node
-    pub fn contains(&self, v: &Option<Did>) -> bool {
-        self.finger.contains(v)
+    pub fn contains(&self, v: Option<Did>) -> bool {
+        self.finger.contains(&v)
     }
 
     /// closest_preceding_node
@@ -174,7 +182,7 @@ impl FingerTable {
 impl Index<usize> for FingerTable {
     type Output = Option<Did>;
     fn index(&self, index: usize) -> &Self::Output {
-        self.get(index)
+        self.get_ref(index)
     }
 }
 
@@ -209,7 +217,7 @@ mod test {
         assert_eq!(table.finger.len(), 3);
 
         assert!(
-            *table.get(0) == Some(id1),
+            table.get(0) == Some(id1),
             "expect value at index 0 is {:?}, got {:?}",
             Some(id1),
             table.get(0)
@@ -220,7 +228,7 @@ mod test {
             table.get(1)
         );
         assert!(
-            *table.get(2) == Some(id3),
+            table.get(2) == Some(id3),
             "expect value at index 2 is {:?}, got {:?}",
             Some(id3),
             table.get(2)
@@ -241,7 +249,7 @@ mod test {
             table.get(0)
         );
         assert!(
-            *table.get(2) == Some(id3),
+            table.get(2) == Some(id3),
             "expect value at index 2 is {:?}, got {:?}",
             Some(id3),
             table.get(2)
@@ -251,19 +259,19 @@ mod test {
         table.set(0, id1);
         table.set(1, id2);
         assert!(
-            *table.get(0) == Some(id1),
+            table.get(0) == Some(id1),
             "expect value at index 0 is {:?}, got {:?}",
             Some(id1),
             table.get(0)
         );
         assert!(
-            *table.get(1) == Some(id2),
+            table.get(1) == Some(id2),
             "expect value at index 1 is {:?}, got {:?}",
             Some(id2),
             table.get(1)
         );
         assert!(
-            *table.get(2) == Some(id3),
+            table.get(2) == Some(id3),
             "expect value at index 2 is {:?}, got {:?}",
             Some(id3),
             table.get(2)
@@ -273,13 +281,13 @@ mod test {
         assert_eq!(table.len(), 3);
         assert_eq!(table.finger.len(), 3);
         assert!(
-            *table.get(0) == Some(id2),
+            table.get(0) == Some(id2),
             "expect value at index 0 is {:?}, got {:?}",
             id2,
             table.get(0)
         );
         assert!(
-            *table.get(1) == Some(id2),
+            table.get(1) == Some(id2),
             "expect value at index 1 is {:?}, got {:?}",
             Some(id2),
             table.get(1),

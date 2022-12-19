@@ -44,7 +44,10 @@ impl HandleMsg<JoinDHT> for MessageHandler {
         // otherwise, it will be a `send` op
         match self.dht.join(msg.did)? {
             PeerRingAction::None => Ok(()),
-            PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessor(did)) => {
+            PeerRingAction::RemoteAction(
+                next,
+                PeerRingRemoteAction::FindSuccessorForConnect(did),
+            ) => {
                 // if there is only two nodes A, B, it may cause recursion
                 // A.successor == B
                 // B.successor == A
@@ -231,7 +234,7 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
         }
 
         match &msg.handler {
-            // TODO: hove to prevent `fix_finger_index` before got `FixFingerTable`?
+            // TODO: how to prevent `fix_finger_index` before got `FixFingerTable`?
             FindSuccessorReportHandler::FixFingerTable => self.dht.lock_finger()?.set_fix(msg.did),
             FindSuccessorReportHandler::Connect => {
                 if self.swarm.get_and_check_transport(msg.did).await.is_none()
@@ -275,6 +278,7 @@ pub mod tests {
     use crate::dht::Did;
     use crate::ecc::tests::gen_ordered_keys;
     use crate::ecc::SecretKey;
+    use crate::message::handlers::tests::assert_no_more_msg;
     use crate::message::MessageHandler;
     use crate::swarm::Swarm;
     use crate::tests::default::prepare_node;
@@ -519,7 +523,7 @@ pub mod tests {
         assert_transports(swarm1, vec![did2, did3]);
         assert_transports(swarm2, vec![did1, did3]);
         assert_transports(swarm3, vec![did1, did2]);
-        assert_eq!(dht1.lock_successor()?.list(), vec![did2]);
+        assert_eq!(dht1.lock_successor()?.list(), vec![did2, did3]);
         assert_eq!(dht2.lock_successor()?.list(), vec![did3, did1]);
         assert_eq!(dht3.lock_successor()?.list(), vec![did1, did2]);
         tokio::fs::remove_dir_all("./tmp").await.ok();
@@ -553,7 +557,7 @@ pub mod tests {
         test_listen_join_and_init_find_succeesor(&node3, &node2).await?;
 
         assert_eq!(dht1.lock_successor()?.list(), vec![did2]);
-        assert_eq!(dht2.lock_successor()?.list(), vec![did1]);
+        assert_eq!(dht2.lock_successor()?.list(), vec![did1, did3]);
         assert_eq!(dht3.lock_successor()?.list(), vec![did2]);
 
         // 3->2->1 FindSuccessorSend
@@ -617,7 +621,7 @@ pub mod tests {
         assert_transports(swarm2.clone(), vec![did1, did3]);
         assert_transports(swarm3.clone(), vec![did2]);
         assert_eq!(dht1.lock_successor()?.list(), vec![did2]);
-        assert_eq!(dht2.lock_successor()?.list(), vec![did1]);
+        assert_eq!(dht2.lock_successor()?.list(), vec![did1, did3]);
         assert_eq!(dht3.lock_successor()?.list(), vec![did2]);
 
         println!("=============================================");
@@ -672,8 +676,8 @@ pub mod tests {
         assert_transports(swarm2, vec![did1, did3]);
         assert_transports(swarm3, vec![did1, did2]);
         assert_eq!(dht1.lock_successor()?.list(), vec![did3, did2]);
-        assert_eq!(dht2.lock_successor()?.list(), vec![did1]);
-        assert_eq!(dht3.lock_successor()?.list(), vec![did2]);
+        assert_eq!(dht2.lock_successor()?.list(), vec![did1, did3]);
+        assert_eq!(dht3.lock_successor()?.list(), vec![did2, did1]);
 
         tokio::fs::remove_dir_all("./tmp").await.ok();
         Ok((node1, node2, node3))
@@ -836,19 +840,6 @@ pub mod tests {
         ));
 
         Ok(())
-    }
-
-    pub async fn assert_no_more_msg(
-        node1: &MessageHandler,
-        node2: &MessageHandler,
-        node3: &MessageHandler,
-    ) {
-        tokio::select! {
-            _ = node1.listen_once() => unreachable!(),
-            _ = node2.listen_once() => unreachable!(),
-            _ = node3.listen_once() => unreachable!(),
-            _ = sleep(Duration::from_secs(3)) => {}
-        }
     }
 
     fn assert_transports(swarm: Arc<Swarm>, addresses: Vec<Did>) {

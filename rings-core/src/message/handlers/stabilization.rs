@@ -86,9 +86,10 @@ mod test {
     use crate::dht::Stabilization;
     use crate::ecc::tests::gen_ordered_keys;
     use crate::ecc::SecretKey;
-    use crate::message::handlers::connection::tests::assert_no_more_msg;
     use crate::message::handlers::connection::tests::test_listen_join_and_init_find_succeesor;
     use crate::message::handlers::connection::tests::test_only_two_nodes_establish_connection;
+    use crate::message::handlers::tests::assert_no_more_msg;
+    use crate::message::handlers::tests::wait_for_msgs;
     use crate::swarm::Swarm;
     use crate::tests::default::prepare_node;
     use crate::tests::manually_establish_connection;
@@ -245,7 +246,7 @@ mod test {
         // node1's pre is node2, node1's successor is node2
         // node2's pre is node1, node2's successor is node3
         // node3's pre is node2, node3's successor is node1
-        assert_eq!(dht1.lock_successor()?.list(), vec![did2]);
+        assert_eq!(dht1.lock_successor()?.list(), vec![did2, did3]);
         assert_eq!(dht2.lock_successor()?.list(), vec![did3, did1]);
         assert_eq!(dht3.lock_successor()?.list(), vec![did1, did2]);
         assert_eq!(*dht1.lock_predecessor()?, Some(did2));
@@ -260,13 +261,13 @@ mod test {
         run_stabilize_once(swarm2.clone()).await?;
         run_stabilize_once(swarm3.clone()).await?;
 
-        // node2 notify node3
+        // node1 notify node3
         let ev3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev3.addr, did2);
-        assert_eq!(ev3.relay.path, vec![did2]);
+        assert_eq!(ev3.addr, did1);
+        assert_eq!(ev3.relay.path, vec![did1]);
         assert!(matches!(
             ev3.data,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did2
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did1
         ));
 
         // node2 notify node1
@@ -305,6 +306,15 @@ mod test {
             Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did3
         ));
 
+        // node2 notify node3
+        let ev3 = node3.listen_once().await.unwrap();
+        assert_eq!(ev3.addr, did2);
+        assert_eq!(ev3.relay.path, vec![did2]);
+        assert!(matches!(
+            ev2.data,
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did3
+        ));
+
         // node1 report node3
         let ev3 = node3.listen_once().await.unwrap();
         assert_eq!(ev3.addr, did1);
@@ -323,6 +333,15 @@ mod test {
             Message::NotifyPredecessorReport(NotifyPredecessorReport{did}) if did == did1
         ));
 
+        // node3 report node1
+        let ev1 = node1.listen_once().await.unwrap();
+        assert_eq!(ev1.addr, did3);
+        assert_eq!(ev1.relay.path, vec![did1, did3]);
+        assert!(matches!(
+            ev1.data,
+            Message::NotifyPredecessorReport(NotifyPredecessorReport{did}) if did == did2
+        ));
+
         assert_no_more_msg(&node1, &node2, &node3).await;
 
         println!("=== Check state after second stabilization ===");
@@ -332,7 +351,7 @@ mod test {
         // node1's pre is node3, node1's successor is node2
         // node2's pre is node1, node2's successor is node3
         // node3's pre is node2, node3's successor is node1
-        assert_eq!(dht1.lock_successor()?.list(), vec![did2]);
+        assert_eq!(dht1.lock_successor()?.list(), vec![did2, did3]);
         assert_eq!(dht2.lock_successor()?.list(), vec![did3, did1]);
         assert_eq!(dht3.lock_successor()?.list(), vec![did1, did2]);
         assert_eq!(*dht1.lock_predecessor()?, Some(did3));
@@ -371,7 +390,7 @@ mod test {
 
         println!("=== Check state before stabilization ===");
         assert_eq!(dht1.lock_successor()?.list(), vec![did2]);
-        assert_eq!(dht2.lock_successor()?.list(), vec![did1]);
+        assert_eq!(dht2.lock_successor()?.list(), vec![did1, did3]);
         assert_eq!(dht3.lock_successor()?.list(), vec![did2]);
         assert!(dht1.lock_predecessor()?.is_none());
         assert!(dht2.lock_predecessor()?.is_none());
@@ -412,6 +431,15 @@ mod test {
             Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did3
         ));
 
+        // node2 notify node3
+        let ev3 = node3.listen_once().await.unwrap();
+        assert_eq!(ev3.addr, did2);
+        assert_eq!(ev3.relay.path, vec![did2]);
+        assert!(matches!(
+            ev3.data,
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did2
+        ));
+
         // node2 report node3
         let ev3 = node3.listen_once().await.unwrap();
         assert_eq!(ev3.addr, did2);
@@ -444,11 +472,11 @@ mod test {
         // node1's pre is node2, node1's successor is node2
         // node2's pre is node3, node2's successor is node1
         assert_eq!(dht1.lock_successor()?.list(), vec![did3, did2]);
-        assert_eq!(dht2.lock_successor()?.list(), vec![did1]);
-        assert_eq!(dht3.lock_successor()?.list(), vec![did2]);
+        assert_eq!(dht2.lock_successor()?.list(), vec![did1, did3]);
+        assert_eq!(dht3.lock_successor()?.list(), vec![did2, did1]);
         assert_eq!(*dht1.lock_predecessor()?, Some(did2));
         assert_eq!(*dht2.lock_predecessor()?, Some(did3));
-        assert!(dht3.lock_predecessor()?.is_none());
+        assert_eq!(*dht3.lock_predecessor()?, Some(did2));
 
         println!("=========================================");
         println!("||  now we start second stabilization  ||");
@@ -458,51 +486,9 @@ mod test {
         run_stabilize_once(swarm2.clone()).await?;
         run_stabilize_once(swarm3.clone()).await?;
 
-        // node2 notify node1
-        let ev1 = node1.listen_once().await.unwrap();
-        assert_eq!(ev1.addr, did2);
-        assert_eq!(ev1.relay.path, vec![did2]);
-        assert!(matches!(
-            ev1.data,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did2
-        ));
+        // TODO: should impl assert_receive by callback like elixir here
 
-        // node1 notify node2
-        let ev2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev2.addr, did1);
-        assert_eq!(ev2.relay.path, vec![did1]);
-        assert!(matches!(
-            ev2.data,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did1
-        ));
-
-        // node3 notify node2
-        let ev2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev2.addr, did3);
-        assert_eq!(ev2.relay.path, vec![did3]);
-        assert!(matches!(
-            ev2.data,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did3
-        ));
-
-        // node2 report node1
-        let ev1 = node1.listen_once().await.unwrap();
-        assert_eq!(ev1.addr, did2);
-        assert_eq!(ev1.relay.path, vec![did1, did2]);
-        assert!(matches!(
-            ev1.data,
-            Message::NotifyPredecessorReport(NotifyPredecessorReport{did}) if did == did3
-        ));
-
-        // node1 notify node3
-        let ev3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev3.addr, did1);
-        assert_eq!(ev3.relay.path, vec![did1]);
-        assert!(matches!(
-            ev3.data,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did1
-        ));
-
+        wait_for_msgs(&node1, &node2, &node3).await;
         assert_no_more_msg(&node1, &node2, &node3).await;
 
         println!("=== Check state after second stabilization ===");
@@ -513,8 +499,8 @@ mod test {
         // node2's pre is node3, node2's successor is node1
         // node3's pre is none1, node3's successor is node2
         assert_eq!(dht1.lock_successor()?.list(), vec![did3, did2]);
-        assert_eq!(dht2.lock_successor()?.list(), vec![did1]);
-        assert_eq!(dht3.lock_successor()?.list(), vec![did2]);
+        assert_eq!(dht2.lock_successor()?.list(), vec![did1, did3]);
+        assert_eq!(dht3.lock_successor()?.list(), vec![did2, did1]);
         assert_eq!(*dht1.lock_predecessor()?, Some(did2));
         assert_eq!(*dht2.lock_predecessor()?, Some(did3));
         assert_eq!(*dht3.lock_predecessor()?, Some(did1));
