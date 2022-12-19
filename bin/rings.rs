@@ -52,6 +52,8 @@ enum Command {
     Pending(PendingCommand),
     #[command(subcommand)]
     Send(SendCommand),
+    #[command(about = "Like a chat room but on the Rings Network")]
+    Pubsub(PubsubCommand),
 }
 
 #[derive(Args, Debug)]
@@ -268,6 +270,13 @@ struct SendHttpCommand {
 }
 
 #[derive(Args, Debug)]
+struct PubsubCommand {
+    #[command(flatten)]
+    client_args: ClientArgs,
+    topic: String,
+}
+
+#[derive(Args, Debug)]
 struct SendSimpleTextCommand {
     #[command(flatten)]
     client_args: ClientArgs,
@@ -479,6 +488,10 @@ async fn main() -> anyhow::Result<()> {
         Command::NewSecretKey => {
             let k = SecretKey::random();
             println!("New secretKey: {}", k.to_string());
+            Ok(())
+        }
+        Command::Pubsub(args) => {
+            dbg!(args);
             Ok(())
         }
     }
