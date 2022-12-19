@@ -16,9 +16,12 @@ pub mod wasm {
     use crate::err::Result;
 
     /// Get property from a JsValue.
-    pub fn get_property(obj: &JsValue, key: String) -> Result<JsValue> {
-        Reflect::get(&obj, &JsValue::from(key.clone()))
-            .map_err(|_| Error::FailedOnGetProperty(key.clone()))
+    pub fn get_property<T>(obj: &JsValue, key: String) -> Result<T>
+        where T: From<JsValue>
+    {
+        let value = Reflect::get(&obj, &JsValue::from(key.clone()))
+            .map_err(|_| Error::FailedOnGetProperty(key.clone()))?;
+        Ok::<T, Error>(value.into())
     }
 
     /// Set Property to a JsValue.
