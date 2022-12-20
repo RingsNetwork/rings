@@ -168,13 +168,12 @@ where
             .await
             .map_err(Error::IDBError)?;
 
-        #[allow(deprecated)]
         Ok(entries
             .iter()
             .filter_map(|(k, v)| {
                 Some((
                     K::from_str(k.as_string().unwrap().as_str()).ok()?,
-                    v.into_serde::<DataStruct<V>>().unwrap().data,
+                    wasm::js_get::<V>(v, "data")?,
                 ))
             })
             .collect::<Vec<(K, V)>>())

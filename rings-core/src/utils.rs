@@ -19,9 +19,9 @@ pub mod wasm {
     /// Get property from a JsValue.
     pub fn js_get<T: DeserializeOwned>(obj: &JsValue, key: impl Into<String>) -> Result<T> {
         let key = key.into();
-        let value = Reflect::get(&obj, &JsValue::from(key.clone()))
+        let value = Reflect::get(obj, &JsValue::from(key.clone()))
             .map_err(|_| Error::FailedOnGetProperty(key.clone()))?;
-        serde_wasm_bindgen::from_value(value).map_err(|e| Error::SerdeWasmBindgenError(e))
+        serde_wasm_bindgen::from_value(value).map_err(Error::SerdeWasmBindgenError)
     }
 
     /// Set Property to a JsValue.
@@ -31,7 +31,7 @@ pub mod wasm {
         value: impl Into<JsValue>,
     ) -> Result<bool> {
         let key = key.into();
-        Reflect::set(&obj, &JsValue::from(key.clone()), &value.into())
+        Reflect::set(obj, &JsValue::from(key.clone()), &value.into())
             .map_err(|_| Error::FailedOnSetProperty(key.clone()))
     }
 }
