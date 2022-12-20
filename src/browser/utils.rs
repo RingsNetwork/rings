@@ -27,6 +27,7 @@
 /// ```
 use crate::error::Error;
 use crate::prelude::js_sys;
+use crate::prelude::rings_core::utils::js_value;
 use crate::prelude::wasm_bindgen::prelude::*;
 
 pub fn parse_params(params: JsValue) -> Result<jsonrpc_core::Params, Error> {
@@ -36,7 +37,7 @@ pub fn parse_params(params: JsValue) -> Result<jsonrpc_core::Params, Error> {
         let arr = js_sys::Array::from(&params);
         let v = arr
             .iter()
-            .flat_map(|x| x.into_serde::<serde_json::Value>().ok())
+            .flat_map(|x| js_value::deserialize::<serde_json::Value>(&x).ok())
             .collect::<Vec<serde_json::Value>>();
         jsonrpc_core::Params::Array(v)
     } else if params.is_object() {
@@ -51,7 +52,7 @@ pub fn parse_params(params: JsValue) -> Result<jsonrpc_core::Params, Error> {
                 }
                 let k = arr.get(0);
                 let v = arr.get(1);
-                s_map.insert(k.as_string().unwrap(), v.into_serde().unwrap());
+                s_map.insert(k.as_string().unwrap(), js_value::deserialize(&v).unwrap());
             }
         }
         jsonrpc_core::Params::Map(s_map)

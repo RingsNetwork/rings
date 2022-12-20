@@ -45,6 +45,7 @@ use crate::prelude::rings_core::transports::manager::TransportManager;
 use crate::prelude::rings_core::transports::Transport;
 use crate::prelude::rings_core::types::ice_transport::IceTransportInterface;
 use crate::prelude::rings_core::types::message::MessageListener;
+use crate::prelude::rings_core::utils::js_value;
 use crate::prelude::wasm_bindgen;
 use crate::prelude::wasm_bindgen::prelude::*;
 use crate::prelude::wasm_bindgen_futures;
@@ -494,7 +495,7 @@ impl Client {
                 .ice_connection_state()
                 .await
                 .map(from_rtc_ice_connection_state);
-            Ok(JsValue::from_serde(&state).map_err(JsError::from)?)
+            Ok(js_value::serialize(&state).map_err(JsError::from)?)
         })
     }
 
@@ -526,7 +527,7 @@ impl Client {
             let v_node = p.check_cache(did).await;
             if let Some(v) = v_node {
                 let wasm_vnode = VirtualNode::from(v);
-                let data = JsValue::from_serde(&wasm_vnode).map_err(JsError::from)?;
+                let data = js_value::serialize(&wasm_vnode).map_err(JsError::from)?;
                 Ok(data)
             } else {
                 Ok(JsValue::null())
@@ -697,7 +698,7 @@ impl MessageCallbackInstance {
         let this = JsValue::null();
         if let Ok(r) =
             self.custom_message
-                .call2(&this, &JsValue::from_serde(&relay).unwrap(), &msg_content)
+                .call2(&this, &js_value::serialize(&relay).unwrap(), &msg_content)
         {
             if let Ok(p) = js_sys::Promise::try_from(r) {
                 if let Err(e) = wasm_bindgen_futures::JsFuture::from(p).await {
@@ -728,10 +729,11 @@ impl MessageCallbackInstance {
             msg_content.len(),
         );
         let http_response: HttpResponse = bincode::deserialize(&msg_content)?;
-        let msg_content = JsValue::from_serde(&http_response)?;
+        let msg_content = js_value::serialize(&http_response)
+            .map_err(|_| anyhow!("Failed on serialize message"))?;
         if let Ok(r) = self.http_response_message.call2(
             &this,
-            &JsValue::from_serde(&relay).unwrap(),
+            &js_value::serialize(&relay).map_err(|_| anyhow!("Failed on serialize message"))?,
             &msg_content,
         ) {
             if let Ok(p) = js_sys::Promise::try_from(r) {
@@ -824,7 +826,7 @@ impl MessageCallback for MessageCallbackInstance {
         // log::debug!("builtin_message received: {:?}", relay);
         if let Ok(r) = self
             .builtin_message
-            .call1(&this, &JsValue::from_serde(&relay).unwrap())
+            .call1(&this, &js_value::serialize(&relay).unwrap())
         {
             if let Ok(p) = js_sys::Promise::try_from(r) {
                 if let Err(e) = wasm_bindgen_futures::JsFuture::from(p).await {
@@ -889,7 +891,7 @@ impl TryFrom<&Peer> for JsValue {
     type Error = JsError;
 
     fn try_from(value: &Peer) -> Result<Self, Self::Error> {
-        JsValue::from_serde(value).map_err(JsError::from)
+        js_value::serialize(value).map_err(JsError::from)
     }
 }
 
@@ -930,7 +932,7 @@ impl TryFrom<&TransportAndIce> for JsValue {
     type Error = JsError;
 
     fn try_from(value: &TransportAndIce) -> Result<Self, Self::Error> {
-        JsValue::from_serde(value).map_err(JsError::from)
+        js_value::serialize(value).map_err(JsError::from)
     }
 }
 
