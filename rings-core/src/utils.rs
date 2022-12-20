@@ -8,7 +8,7 @@ pub fn get_epoch_ms() -> u128 {
 
 #[cfg(feature = "wasm")]
 /// Toolset for wasm
-pub mod wasm {
+pub mod js_value {
     use js_sys::Reflect;
     use serde::de::DeserializeOwned;
     use serde::Serialize;
@@ -18,7 +18,7 @@ pub mod wasm {
     use crate::err::Result;
 
     /// Get property from a JsValue.
-    pub fn js_get<T: DeserializeOwned>(obj: &JsValue, key: impl Into<String>) -> Result<T> {
+    pub fn get<T: DeserializeOwned>(obj: &JsValue, key: impl Into<String>) -> Result<T> {
         let key = key.into();
         let value = Reflect::get(obj, &JsValue::from(key.clone()))
             .map_err(|_| Error::FailedOnGetProperty(key.clone()))?;
@@ -26,11 +26,7 @@ pub mod wasm {
     }
 
     /// Set Property to a JsValue.
-    pub fn js_set(
-        obj: &JsValue,
-        key: impl Into<String>,
-        value: impl Into<JsValue>,
-    ) -> Result<bool> {
+    pub fn set(obj: &JsValue, key: impl Into<String>, value: impl Into<JsValue>) -> Result<bool> {
         let key = key.into();
         Reflect::set(obj, &JsValue::from(key.clone()), &value.into())
             .map_err(|_| Error::FailedOnSetProperty(key.clone()))

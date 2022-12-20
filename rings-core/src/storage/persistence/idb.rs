@@ -21,7 +21,7 @@ use super::PersistenceStorageReadAndWrite;
 use super::PersistenceStorageRemove;
 use crate::err::Error;
 use crate::err::Result;
-use crate::utils::wasm;
+use crate::utils::js_value;
 
 /// Default IndexedDB database and storage name
 pub const DEFAULT_REXIE_STORE_NAME: &str = "rings-storage";
@@ -139,12 +139,12 @@ where
         let (tx, store) = self.get_tx_store(TransactionMode::ReadWrite)?;
         let k: JsValue = JsValue::from(key.to_string());
         let v = store.get(&k).await.map_err(Error::IDBError)?;
-        let mut v: DataStruct<V> = wasm::deserialize(&v)?;
+        let mut v: DataStruct<V> = js_value::deserialize(&v)?;
         v.last_visit_time = chrono::Utc::now().timestamp_millis();
         v.visit_count += 1;
         store
             .put(
-                &wasm::serialize(&v)?,
+                &js_value::serialize(&v)?,
                 //Some(&k),
                 None,
             )
@@ -166,7 +166,7 @@ where
             .filter_map(|(k, v)| {
                 Some((
                     K::from_str(k.as_string().unwrap().as_str()).ok()?,
-                    wasm::deserialize::<DataStruct<V>>(&v).unwrap().data,
+                    js_value::deserialize::<DataStruct<V>>(&v).unwrap().data,
                 ))
             })
             .collect::<Vec<(K, V)>>())
@@ -177,7 +177,7 @@ where
         let (tx, store) = self.get_tx_store(TransactionMode::ReadWrite)?;
         store
             .put(
-                &wasm::serialize(&DataStruct::new(key.to_string().as_str(), entry))?,
+                &js_value::serialize(&DataStruct::new(key.to_string().as_str(), entry))?,
                 //Some(&key.into()),
                 None,
             )
@@ -257,8 +257,7 @@ impl PersistenceStorageOperation for IDBStorage {
         tracing::debug!("entries: {:?}", entries);
 
         if let Some((_k, value)) = entries.first() {
-            let data_entry: DataStruct<serde_json::Value> =
-                wasm::deserialize(&value)?;
+            let data_entry: DataStruct<serde_json::Value> = js_value::deserialize(&value)?;
             store
                 .delete(&JsValue::from(&data_entry.key))
                 .await

@@ -54,7 +54,7 @@ use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
 use crate::types::ice_transport::IceTransportInterface;
 use crate::types::ice_transport::IceTrickleScheme;
-use crate::utils::wasm;
+use crate::utils::js_value;
 
 type EventSender = <CbChannel<Event> as Channel<Event>>::Sender;
 
@@ -543,7 +543,7 @@ impl IceTrickleScheme for WasmTransport {
             .get_pending_candidates()
             .await
             .iter()
-            .map(|c| wasm::deserialize::<IceCandidate>(&c.clone().to_json()).unwrap())
+            .map(|c| js_value::deserialize::<IceCandidate>(&c.clone().to_json()).unwrap())
             .collect();
 
         if local_candidates_json.is_empty() {
