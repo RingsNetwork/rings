@@ -27,6 +27,8 @@ pub enum Error {
     CreateOffer(rings_core::err::Error),
     #[error("Create answer info failed: {0}.")]
     CreateAnswer(rings_core::err::Error),
+    #[error("Failed on parse params")]
+    ParseParams(rings_core::err::Error),
     #[error("Invalid transport id.")]
     InvalidTransportId,
     #[error("Invalid did.")]
@@ -105,6 +107,7 @@ impl Error {
             Error::InvalidUrl => 28,
             Error::InvalidData => 29,
             Error::InvalidService => 30,
+            Error::ParseParams(_) => 31,
         };
         -32000 - code
     }

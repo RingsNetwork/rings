@@ -2,6 +2,7 @@
 use std::sync::Arc;
 
 use super::utils;
+use crate::prelude::rings_core::utils::js_value;
 use crate::prelude::wasm_bindgen;
 use crate::prelude::wasm_bindgen::prelude::*;
 use crate::prelude::*;
@@ -30,7 +31,7 @@ impl JsonRpcClient {
                 .call_method(method.as_str(), params)
                 .await
                 .map_err(JsError::from)?;
-            let result = wasm_bindgen::JsValue::from_serde(&resp).map_err(JsError::from)?;
+            let result = js_value::serialize(&resp).map_err(JsError::from)?;
             Ok(result)
         })
     }
