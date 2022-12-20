@@ -6,8 +6,6 @@ use std::sync::MutexGuard;
 
 use async_trait::async_trait;
 use num_bigint::BigUint;
-use serde::Deserialize;
-use serde::Serialize;
 
 use super::did::BiasId;
 use super::successor::SuccessorSeq;
@@ -48,7 +46,7 @@ pub struct PeerRing {
 
 /// `PeerRing` use this to describe the result of [Chord] algorithm. Sometimes it's a
 /// direct result, sometimes it's an action that is continued externally.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum PeerRingAction {
     /// No result, the whole manipulation is done internally.
     None,
@@ -68,8 +66,7 @@ pub enum PeerRingAction {
 ///
 /// To avoid ambiguity, in the following comments, `did_a` is the Did declared in
 /// [PeerRingAction::RemoteAction]. Other dids are the fields declared in `RemoteAction`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data")]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RemoteAction {
     /// Need `did_a` to find `did_b`.
     FindSuccessor(Did),
