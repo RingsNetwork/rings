@@ -307,6 +307,18 @@ pub enum Error {
 
     #[error("message too large, consider use ChunkList")]
     MessageTooLarge,
+
+    #[cfg(feature = "wasm")]
+    #[error("Cannot get property {0} from JsValue")]
+    FailedOnGetProperty(String),
+
+    #[cfg(feature = "wasm")]
+    #[error("Cannot set property {0} from JsValue")]
+    FailedOnSetProperty(String),
+
+    #[cfg(feature = "wasm")]
+    #[error("Error on ser/der JsValue")]
+    SerdeWasmBindgenError(#[from] serde_wasm_bindgen::Error),
 }
 
 /// A Result wrapper contain custom Errors.

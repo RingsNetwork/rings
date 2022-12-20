@@ -21,6 +21,7 @@ use super::PersistenceStorageReadAndWrite;
 use super::PersistenceStorageRemove;
 use crate::err::Error;
 use crate::err::Result;
+use crate::utils::js_value;
 
 /// Default IndexedDB database and storage name
 pub const DEFAULT_REXIE_STORE_NAME: &str = "rings-storage";
@@ -138,14 +139,12 @@ where
         let (tx, store) = self.get_tx_store(TransactionMode::ReadWrite)?;
         let k: JsValue = JsValue::from(key.to_string());
         let v = store.get(&k).await.map_err(Error::IDBError)?;
-        #[allow(deprecated)]
-        let mut v: DataStruct<V> = v.into_serde().map_err(Error::Deserialize)?;
+        let mut v: DataStruct<V> = js_value::deserialize(&v)?;
         v.last_visit_time = chrono::Utc::now().timestamp_millis();
         v.visit_count += 1;
-        #[allow(deprecated)]
         store
             .put(
-                &JsValue::from_serde(&v).map_err(Error::Serialize)?,
+                &js_value::serialize(&v)?,
                 //Some(&k),
                 None,
             )
@@ -162,13 +161,12 @@ where
             .await
             .map_err(Error::IDBError)?;
 
-        #[allow(deprecated)]
         Ok(entries
             .iter()
             .filter_map(|(k, v)| {
                 Some((
                     K::from_str(k.as_string().unwrap().as_str()).ok()?,
-                    v.into_serde::<DataStruct<V>>().unwrap().data,
+                    js_value::deserialize::<DataStruct<V>>(&v).unwrap().data,
                 ))
             })
             .collect::<Vec<(K, V)>>())
@@ -177,11 +175,9 @@ where
     async fn put(&self, key: &K, entry: &V) -> Result<()> {
         self.prune().await?;
         let (tx, store) = self.get_tx_store(TransactionMode::ReadWrite)?;
-        #[allow(deprecated)]
         store
             .put(
-                &JsValue::from_serde(&DataStruct::new(key.to_string().as_str(), entry))
-                    .map_err(Error::Serialize)?,
+                &js_value::serialize(&DataStruct::new(key.to_string().as_str(), entry))?,
                 //Some(&key.into()),
                 None,
             )
@@ -260,10 +256,8 @@ impl PersistenceStorageOperation for IDBStorage {
             .map_err(Error::IDBError)?;
         tracing::debug!("entries: {:?}", entries);
 
-        #[allow(deprecated)]
         if let Some((_k, value)) = entries.first() {
-            let data_entry: DataStruct<serde_json::Value> =
-                value.into_serde().map_err(Error::Serialize)?;
+            let data_entry: DataStruct<serde_json::Value> = js_value::deserialize(&value)?;
             store
                 .delete(&JsValue::from(&data_entry.key))
                 .await
