@@ -37,7 +37,12 @@ pub mod wasm {
     }
 
     /// From serde to JsValue
-    pub fn from_serde(obj: impl Serialize) -> Result<JsValue> {
+    pub fn serialize(obj: impl Serialize) -> Result<JsValue> {
         serde_wasm_bindgen::to_value(&obj).map_err(Error::SerdeWasmBindgenError)
+    }
+
+    /// From JsValue to serde
+    pub fn deserialize<T: DeserializeOwned>(obj: impl Into<JsValue>) -> Result<T> {
+        serde_wasm_bindgen::from_value(obj.into()).map_err(Error::SerdeWasmBindgenError)
     }
 }

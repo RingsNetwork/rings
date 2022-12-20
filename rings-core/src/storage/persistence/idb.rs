@@ -184,7 +184,7 @@ where
         let (tx, store) = self.get_tx_store(TransactionMode::ReadWrite)?;
         store
             .put(
-                &wasm::from_serde(&DataStruct::new(key.to_string().as_str(), entry))?,
+                &wasm::serialize(&DataStruct::new(key.to_string().as_str(), entry))?,
                 //Some(&key.into()),
                 None,
             )
