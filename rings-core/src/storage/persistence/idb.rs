@@ -173,7 +173,7 @@ where
             .filter_map(|(k, v)| {
                 Some((
                     K::from_str(k.as_string().unwrap().as_str()).ok()?,
-                    wasm::js_get::<V>(v, "data")?,
+                    wasm::js_get::<V>(v, "data").ok()?,
                 ))
             })
             .collect::<Vec<(K, V)>>())
@@ -182,11 +182,9 @@ where
     async fn put(&self, key: &K, entry: &V) -> Result<()> {
         self.prune().await?;
         let (tx, store) = self.get_tx_store(TransactionMode::ReadWrite)?;
-        #[allow(deprecated)]
         store
             .put(
-                &JsValue::from_serde(&DataStruct::new(key.to_string().as_str(), entry))
-                    .map_err(Error::Serialize)?,
+                &wasm::from_serde(&DataStruct::new(key.to_string().as_str(), entry))?,
                 //Some(&key.into()),
                 None,
             )
@@ -265,12 +263,10 @@ impl PersistenceStorageOperation for IDBStorage {
             .map_err(Error::IDBError)?;
         tracing::debug!("entries: {:?}", entries);
 
-        #[allow(deprecated)]
         if let Some((_k, value)) = entries.first() {
-            let data_entry: DataStruct<serde_json::Value> =
-                value.into_serde().map_err(Error::Serialize)?;
+            let key = wasm::js_get::<String>(value, "key")?;
             store
-                .delete(&JsValue::from(&data_entry.key))
+                .delete(&JsValue::from(&key))
                 .await
                 .map_err(Error::IDBError)?;
         }

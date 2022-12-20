@@ -11,6 +11,7 @@ pub fn get_epoch_ms() -> u128 {
 pub mod wasm {
     use js_sys::Reflect;
     use serde::de::DeserializeOwned;
+    use serde::Serialize;
     use wasm_bindgen::JsValue;
 
     use crate::err::Error;
@@ -33,5 +34,10 @@ pub mod wasm {
         let key = key.into();
         Reflect::set(obj, &JsValue::from(key.clone()), &value.into())
             .map_err(|_| Error::FailedOnSetProperty(key.clone()))
+    }
+
+    /// From serde to JsValue
+    pub fn from_serde(obj: impl Serialize) -> Result<JsValue> {
+        serde_wasm_bindgen::to_value(&obj).map_err(Error::SerdeWasmBindgenError)
     }
 }
