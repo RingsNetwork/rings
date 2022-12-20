@@ -13,18 +13,12 @@ use crate::logging::browser::set_panic_hook;
 use crate::prelude::wasm_bindgen;
 use crate::prelude::wasm_bindgen::prelude::*;
 
-/// set panic book for wasm.
-#[wasm_bindgen(start)]
-pub fn start() -> Result<(), JsError> {
-    set_panic_hook();
-    Ok(())
-}
-
 /// set debug for wasm.
 /// if `true` will print `Debug` message in console,
 /// otherwise only print `error` message
 #[wasm_bindgen]
 pub fn debug(value: bool) {
+    set_panic_hook();
     if value {
         init_logging(tracing::Level::DEBUG);
     } else {
