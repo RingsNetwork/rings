@@ -139,26 +139,19 @@ where
         let (tx, store) = self.get_tx_store(TransactionMode::ReadWrite)?;
         let k: JsValue = JsValue::from(key.to_string());
         let v = store.get(&k).await.map_err(Error::IDBError)?;
-
-        // #[allow(deprecated)]
-        // let mut v: DataStruct<V> = v.into_serde().map_err(Error::Deserialize)?;
-        let current_count = wasm::js_get::<i32>(&v, "visit_count")?;
-        let data = wasm::js_get::<V>(&v, "data")?;
-        wasm::js_set(
-            &v,
-            "last_visit_time".to_string(),
-            chrono::Utc::now().timestamp_millis(),
-        )?;
-        wasm::js_set(&v, "visit_count".to_string(), current_count + 1)?;
+        let mut v: DataStruct<V> = wasm::deserialize(&v)?;
+        v.last_visit_time = chrono::Utc::now().timestamp_millis();
+        v.visit_count += 1;
         store
             .put(
-                &v, //Some(&k),
+                &wasm::serialize(&v)?,
+                //Some(&k),
                 None,
             )
             .await
             .map_err(Error::IDBError)?;
         tx.done().await.map_err(Error::IDBError)?;
-        Ok(data)
+        Ok(v.data)
     }
 
     async fn get_all(&self) -> Result<Vec<(K, V)>> {
@@ -173,7 +166,7 @@ where
             .filter_map(|(k, v)| {
                 Some((
                     K::from_str(k.as_string().unwrap().as_str()).ok()?,
-                    wasm::js_get::<V>(v, "data").ok()?,
+                    wasm::deserialize::<DataStruct<V>>(&v).unwrap().data,
                 ))
             })
             .collect::<Vec<(K, V)>>())
@@ -264,9 +257,10 @@ impl PersistenceStorageOperation for IDBStorage {
         tracing::debug!("entries: {:?}", entries);
 
         if let Some((_k, value)) = entries.first() {
-            let key = wasm::js_get::<String>(value, "key")?;
+            let data_entry: DataStruct<serde_json::Value> =
+                wasm::deserialize(&value)?;
             store
-                .delete(&JsValue::from(&key))
+                .delete(&JsValue::from(&data_entry.key))
                 .await
                 .map_err(Error::IDBError)?;
         }
