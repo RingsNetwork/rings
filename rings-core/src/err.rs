@@ -22,8 +22,17 @@ pub enum Error {
     #[error("InvalidPublicKey")]
     InvalidPublicKey,
 
-    #[error("Did of Virtual Peer not equal")]
-    DidNotEqual,
+    #[error("VirtualNode kind not equal when overwriting")]
+    VNodeKindNotEqual,
+
+    #[error("Did of VirtualNode not equal")]
+    VNodeDidNotEqual,
+
+    #[error("The type of VirtualNode is not allowed to be overwritten")]
+    VNodeNotOverwritable,
+
+    #[error("The type of VirtualNode is not allowed to be appended")]
+    VNodeNotAppendable,
 
     #[error("Encode a byte vector into a base58-check string, adds 4 bytes checksum")]
     Encode,

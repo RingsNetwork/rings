@@ -4,6 +4,7 @@ use async_trait::async_trait;
 
 use super::did::Did;
 use super::subring::SubRing;
+use super::vnode::VNodeOperation;
 use super::vnode::VirtualNode;
 use crate::err::Result;
 
@@ -70,14 +71,14 @@ pub trait Chord<Action> {
 pub trait ChordStorage<Action>: Chord<Action> {
     /// Look up a VirtualNode by its Did.
     /// Always finds resource by DHT, ignoring the local cache.
-    async fn lookup(&self, vid: Did) -> Result<Action>;
+    async fn vnode_lookup(&self, vid: Did) -> Result<Action>;
     /// Store `vnode` if it's between current node and the successor of current node,
     /// otherwise find the responsible node and return as Action.
-    async fn store(&self, vnode: VirtualNode) -> Result<Action>;
+    async fn vnode_operate(&self, op: VNodeOperation) -> Result<Action>;
     /// When the successor of a node is updated, it needs to check if there are
     /// `VirtualNode`s that are no longer between current node and `new_successor`,
     /// and sync them to the new successor.
-    async fn sync_with_successor(&self, new_successor: Did) -> Result<Action>;
+    async fn sync_vnode_with_successor(&self, new_successor: Did) -> Result<Action>;
     /// Cache fetched resource locally.
     fn local_cache_set(&self, vnode: VirtualNode);
     /// Get local cache.

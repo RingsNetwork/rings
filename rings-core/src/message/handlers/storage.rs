@@ -11,12 +11,13 @@ use crate::err::Result;
 use crate::message::types::FoundVNode;
 use crate::message::types::Message;
 use crate::message::types::SearchVNode;
-use crate::message::types::StoreVNode;
 use crate::message::types::SyncVNodeWithSuccessor;
+use crate::message::Encoded;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
+use crate::prelude::vnode::VNodeOperation;
 use crate::swarm::Swarm;
 
 /// TChordStorage should imply necessary method for DHT storage
@@ -29,6 +30,10 @@ pub trait TChordStorage {
     async fn storage_fetch(&self, vid: Did) -> Result<()>;
     /// store virtual node on DHT
     async fn storage_store(&self, vnode: VirtualNode) -> Result<()>;
+    /// initialize a Data type virtual node on DHT
+    async fn declare_data(&self, topic: &str) -> Result<()>;
+    /// append data to Data type virtual node
+    async fn append_data(&self, topic: &str, data: Encoded) -> Result<()>;
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
@@ -43,12 +48,12 @@ impl TChordStorage for Swarm {
     /// else Query Remote Node
     async fn storage_fetch(&self, vid: Did) -> Result<()> {
         // If peer found that data is on it's localstore, copy it to the cache
-        match self.dht.lookup(vid).await? {
+        match self.dht.vnode_lookup(vid).await? {
+            PeerRingAction::None => Ok(()),
             PeerRingAction::SomeVNode(v) => {
                 self.dht.local_cache_set(v);
                 Ok(())
             }
-            PeerRingAction::None => Ok(()),
             PeerRingAction::RemoteAction(next, _) => {
                 self.send_direct_message(Message::SearchVNode(SearchVNode { vid }), next)
                     .await?;
@@ -60,14 +65,32 @@ impl TChordStorage for Swarm {
 
     /// Store VirtualNode, TryInto<VirtualNode> is implemented for alot of types
     async fn storage_store(&self, vnode: VirtualNode) -> Result<()> {
-        match self.dht.store(vnode).await? {
+        let op = VNodeOperation::Overwrite(vnode);
+        match self.dht.vnode_operate(op).await? {
             PeerRingAction::None => Ok(()),
-            PeerRingAction::RemoteAction(target, PeerRingRemoteAction::FindAndStore(vnode)) => {
-                self.send_direct_message(
-                    Message::StoreVNode(StoreVNode { data: vec![vnode] }),
-                    target,
-                )
-                .await?;
+            PeerRingAction::RemoteAction(target, PeerRingRemoteAction::FindVNodeForOperate(op)) => {
+                self.send_direct_message(Message::OperateVNode(op), target)
+                    .await?;
+                Ok(())
+            }
+            act => Err(Error::PeerRingUnexpectedAction(act)),
+        }
+    }
+
+    async fn declare_data(&self, topic: &str) -> Result<()> {
+        let vnode = topic.to_string().try_into()?;
+        self.storage_store(vnode).await
+    }
+
+    async fn append_data(&self, topic: &str, data: Encoded) -> Result<()> {
+        let vnode = (topic.to_string(), data).try_into()?;
+        let op = VNodeOperation::Extend(vnode);
+
+        match self.dht.vnode_operate(op).await? {
+            PeerRingAction::None => Ok(()),
+            PeerRingAction::RemoteAction(target, PeerRingRemoteAction::FindVNodeForOperate(op)) => {
+                self.send_direct_message(Message::OperateVNode(op), target)
+                    .await?;
                 Ok(())
             }
             act => Err(Error::PeerRingUnexpectedAction(act)),
@@ -83,7 +106,7 @@ impl HandleMsg<SearchVNode> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload<Message>, msg: &SearchVNode) -> Result<()> {
         let mut relay = ctx.relay.clone();
 
-        match self.dht.lookup(msg.vid).await {
+        match self.dht.vnode_lookup(msg.vid).await {
             Ok(action) => match action {
                 PeerRingAction::None => Ok(()),
                 PeerRingAction::SomeVNode(v) => {
@@ -127,24 +150,21 @@ impl HandleMsg<FoundVNode> for MessageHandler {
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-impl HandleMsg<StoreVNode> for MessageHandler {
-    async fn handle(&self, ctx: &MessagePayload<Message>, msg: &StoreVNode) -> Result<()> {
-        let virtual_peer = msg.data.clone();
-        for p in virtual_peer {
-            match self.dht.store(p).await {
-                Ok(action) => match action {
-                    PeerRingAction::None => Ok(()),
-                    PeerRingAction::RemoteAction(next, _) => {
-                        let mut relay = ctx.relay.clone();
-                        relay.reset_destination(next)?;
-                        relay.relay(self.dht.did, Some(next))?;
-                        self.forward_payload(ctx, relay).await
-                    }
-                    act => Err(Error::PeerRingUnexpectedAction(act)),
-                },
-                Err(e) => Err(e),
-            }?;
-        }
+impl HandleMsg<VNodeOperation> for MessageHandler {
+    async fn handle(&self, ctx: &MessagePayload<Message>, msg: &VNodeOperation) -> Result<()> {
+        match self.dht.vnode_operate(msg.clone()).await {
+            Ok(action) => match action {
+                PeerRingAction::None => Ok(()),
+                PeerRingAction::RemoteAction(next, _) => {
+                    let mut relay = ctx.relay.clone();
+                    relay.reset_destination(next)?;
+                    relay.relay(self.dht.did, Some(next))?;
+                    self.forward_payload(ctx, relay).await
+                }
+                act => Err(Error::PeerRingUnexpectedAction(act)),
+            },
+            Err(e) => Err(e),
+        }?;
         Ok(())
     }
 }
@@ -160,22 +180,7 @@ impl HandleMsg<SyncVNodeWithSuccessor> for MessageHandler {
     ) -> Result<()> {
         for data in msg.data.iter().cloned() {
             // only simply store here
-            match self.dht.store(data).await {
-                Ok(PeerRingAction::None) => Ok(()),
-                Ok(PeerRingAction::RemoteAction(
-                    next,
-                    PeerRingRemoteAction::FindAndStore(peer),
-                )) => {
-                    self.send_direct_message(
-                        Message::StoreVNode(StoreVNode { data: vec![peer] }),
-                        next,
-                    )
-                    .await?;
-                    Ok(())
-                }
-                Ok(_) => unreachable!(),
-                Err(e) => Err(e),
-            }?;
+            self.swarm.storage_store(data).await?;
         }
         Ok(())
     }
@@ -214,8 +219,8 @@ mod test {
             // if vnode in range [node2, node1]
             // vnode should stored in node2
             let ev = node2.listen_once().await.unwrap();
-            if let Message::StoreVNode(x) = ev.data {
-                assert_eq!(x.data[0].did, vid);
+            if let Message::OperateVNode(VNodeOperation::Overwrite(x)) = ev.data {
+                assert_eq!(x.did, vid);
             } else {
                 panic!();
             }
@@ -224,8 +229,8 @@ mod test {
             // if vnode in range [node2, node1]
             // vnode should stored in node1
             let ev = node1.listen_once().await.unwrap();
-            if let Message::StoreVNode(x) = ev.data {
-                assert_eq!(x.data[0].did, vid);
+            if let Message::OperateVNode(VNodeOperation::Overwrite(x)) = ev.data {
+                assert_eq!(x.did, vid);
             } else {
                 panic!();
             }

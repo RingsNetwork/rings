@@ -11,6 +11,7 @@ use super::did::BiasId;
 use super::successor::SuccessorSeq;
 use super::types::Chord;
 use super::types::ChordStorage;
+use super::vnode::VNodeOperation;
 use super::vnode::VirtualNode;
 use super::FingerTable;
 use crate::dht::Did;
@@ -72,8 +73,8 @@ pub enum RemoteAction {
     FindSuccessor(Did),
     /// Need `did_a` to find virtual node `did_b`.
     FindVNode(Did),
-    /// Need `did_a` to find node for storage.
-    FindAndStore(VirtualNode),
+    /// Need `did_a` to find VirtualNode for operating.
+    FindVNodeForOperate(VNodeOperation),
     /// Need `did_a` to find virtual peer for subring joining.
     FindAndJoinSubRing(Did),
     /// Let `did_a` [notify](Chord::notify) `did_b`.
@@ -347,7 +348,7 @@ impl ChordStorage<PeerRingAction> for PeerRing {
     /// Always finds resource by finger table, ignoring the local cache.
     /// If the `vid` is between current node and its successor, its resource should be
     /// stored in current node.
-    async fn lookup(&self, vid: Did) -> Result<PeerRingAction> {
+    async fn vnode_lookup(&self, vid: Did) -> Result<PeerRingAction> {
         match self.find_successor(vid) {
             // Resource should be stored in current node.
             Ok(PeerRingAction::Some(_)) => match self.storage.get(&vid).await {
@@ -364,29 +365,30 @@ impl ChordStorage<PeerRingAction> for PeerRing {
         }
     }
 
-    /// Store `vnode` if it's between current node and the successor of current node,
-    /// otherwise find the responsible node and return as Action.
-    async fn store(&self, vnode: VirtualNode) -> Result<PeerRingAction> {
-        let vid = vnode.did;
+    /// Handle [VNodeOperation] if the target vnode between current node and the
+    /// successor of current node, otherwise find the responsible node and return
+    /// as Action.
+    async fn vnode_operate(&self, op: VNodeOperation) -> Result<PeerRingAction> {
+        let vid = op.did();
+        let op1 = op.clone();
         match self.find_successor(vid) {
-            // `vnode` should be stored in current node.
-            Ok(PeerRingAction::Some(_)) => match self.storage.get(&vid).await {
-                Ok(v) => {
-                    let _ = self
-                        .storage
-                        .put(&vid, &VirtualNode::concat(&v, &vnode)?)
-                        .await?;
-                    Ok(PeerRingAction::None)
-                }
-                Err(_) => {
-                    let _ = self.storage.put(&vid, &vnode).await?;
-                    Ok(PeerRingAction::None)
-                }
-            },
-            // `vnode` should be stored in other nodes.
+            // `vnode` should be on current node.
+            Ok(PeerRingAction::Some(_)) => {
+                let this = self
+                    .storage
+                    .get(&vid)
+                    .await
+                    .unwrap_or_else(|_| op1.gen_default_vnode());
+
+                let vnode = this.operate(op)?;
+                self.storage.put(&vid, &vnode).await?;
+
+                Ok(PeerRingAction::None)
+            }
+            // `vnode` should be on other nodes.
             // Return an action to describe how to store it.
             Ok(PeerRingAction::RemoteAction(n, RemoteAction::FindSuccessor(_))) => Ok(
-                PeerRingAction::RemoteAction(n, RemoteAction::FindAndStore(vnode)),
+                PeerRingAction::RemoteAction(n, RemoteAction::FindVNodeForOperate(op)),
             ),
             Ok(a) => Err(Error::PeerRingUnexpectedAction(a)),
             Err(e) => Err(e),
@@ -396,7 +398,7 @@ impl ChordStorage<PeerRingAction> for PeerRing {
     /// When the successor of a node is updated, it needs to check if there are
     /// `VirtualNode`s that are no longer between current node and `new_successor`,
     /// and sync them to the new successor.
-    async fn sync_with_successor(&self, new_successor: Did) -> Result<PeerRingAction> {
+    async fn sync_vnode_with_successor(&self, new_successor: Did) -> Result<PeerRingAction> {
         let mut data = Vec::<VirtualNode>::new();
         let all_items: Vec<(Did, VirtualNode)> = self.storage.get_all().await?;
 
