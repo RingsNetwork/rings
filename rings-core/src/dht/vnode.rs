@@ -97,19 +97,6 @@ where T: Serialize + DeserializeOwned
     }
 }
 
-impl TryFrom<String> for VirtualNode {
-    type Error = Error;
-    fn try_from(topic: String) -> Result<Self> {
-        let hash: HashStr = topic.into();
-        let did = Did::from_str(&hash.inner())?;
-        Ok(Self {
-            did,
-            data: vec![],
-            kind: VNodeType::Data,
-        })
-    }
-}
-
 impl TryFrom<(String, Encoded)> for VirtualNode {
     type Error = Error;
     fn try_from((topic, e): (String, Encoded)) -> Result<Self> {
@@ -128,6 +115,13 @@ impl TryFrom<(String, String)> for VirtualNode {
     fn try_from((topic, s): (String, String)) -> Result<Self> {
         let encoded_message = s.encode()?;
         (topic, encoded_message).try_into()
+    }
+}
+
+impl TryFrom<String> for VirtualNode {
+    type Error = Error;
+    fn try_from(topic: String) -> Result<Self> {
+        (topic.clone(), topic).try_into()
     }
 }
 

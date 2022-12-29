@@ -102,9 +102,9 @@ impl TryFrom<HashStr> for Did {
 
 impl Did {
     // Test x <- (a, b)
-    pub fn in_range(&self, id: &Self, a: &Self, b: &Self) -> bool {
+    pub fn in_range(&self, base_id: Self, a: Self, b: Self) -> bool {
         // Test x > a && b > x
-        *self - *id > *a - *id && *b - *id > *self - *id
+        *self - base_id > a - base_id && b - base_id > *self - base_id
     }
 
     // Transform Did to BiasDid
