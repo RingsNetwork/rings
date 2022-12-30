@@ -15,8 +15,6 @@ use jsonrpc_core::Metadata;
 use jsonrpc_core::Params;
 use jsonrpc_core::Result;
 use jsonrpc_core::Value;
-use rings_core::message::Encoder;
-use rings_core::prelude::vnode::VirtualNode;
 
 use super::method::Method;
 use super::response;
@@ -27,6 +25,8 @@ use crate::backend::types::HttpRequest;
 use crate::backend::types::MessageType;
 use crate::error::Error as ServerError;
 use crate::prelude::rings_core::dht::Did;
+use crate::prelude::rings_core::message::Encoder;
+use crate::prelude::rings_core::prelude::vnode::VirtualNode;
 use crate::prelude::rings_core::transports::manager::TransportManager;
 use crate::prelude::rings_core::types::ice_transport::IceTransportInterface;
 use crate::processor;

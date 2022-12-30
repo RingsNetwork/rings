@@ -520,11 +520,15 @@ impl Client {
         })
     }
 
-    pub fn check_cache(&self, address: String, addr_type: Option<AddressType>) -> js_sys::Promise {
+    pub fn storage_check_cache(
+        &self,
+        address: String,
+        addr_type: Option<AddressType>,
+    ) -> js_sys::Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
             let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
-            let v_node = p.check_cache(did).await;
+            let v_node = p.storage_check_cache(did).await;
             if let Some(v) = v_node {
                 let wasm_vnode = VirtualNode::from(v);
                 let data = js_value::serialize(&wasm_vnode).map_err(JsError::from)?;
@@ -535,21 +539,25 @@ impl Client {
         })
     }
 
-    pub fn fetch(&self, address: String, addr_type: Option<AddressType>) -> js_sys::Promise {
+    pub fn storage_fetch(
+        &self,
+        address: String,
+        addr_type: Option<AddressType>,
+    ) -> js_sys::Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
             let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
-            p.fetch(did).await.map_err(JsError::from)?;
+            p.storage_fetch(did).await.map_err(JsError::from)?;
             Ok(JsValue::null())
         })
     }
 
     /// store virtual node on DHT
-    pub fn store(&self, data: String) -> js_sys::Promise {
+    pub fn storage_store(&self, data: String) -> js_sys::Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
             let vnode_info = vnode::VirtualNode::try_from(data).map_err(JsError::from)?;
-            p.store(vnode_info).await.map_err(JsError::from)?;
+            p.storage_store(vnode_info).await.map_err(JsError::from)?;
             Ok(JsValue::null())
         })
     }
