@@ -1,7 +1,14 @@
 //! An efficient command tool of using ring-node.
 use std::sync::Arc;
+use std::time::Duration;
 
+use async_stream::stream;
 use bytes::Bytes;
+use futures::pin_mut;
+use futures::select;
+use futures::FutureExt;
+use futures::Stream;
+use futures_timer::Delay;
 use jsonrpc_core::Params;
 use jsonrpc_core::Value;
 use serde_json::json;
@@ -261,6 +268,60 @@ impl Client {
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         ClientOutput::ok("Done.".into(), ())
+    }
+
+    pub async fn publish_message_to_topic(&self, topic: &str, data: &str) -> Output<()> {
+        self.client
+            .call_method(
+                Method::PublishMessageToTopic.as_str(),
+                Params::Array(vec![json!(topic), json!(data)]),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        ClientOutput::ok("Done.".into(), ())
+    }
+
+    pub async fn subscribe_topic<'a, 'b>(
+        &'a self,
+        topic: String,
+    ) -> impl Stream<Item = String> + 'b
+    where
+        'a: 'b,
+    {
+        let mut index = 0;
+
+        stream! {
+            loop {
+
+                let timeout = Delay::new(Duration::from_secs(5)).fuse();
+                pin_mut!(timeout);
+
+                select! {
+                    _ = timeout => {
+                        let result = self.client.call_method(
+                            Method::FetchMessagesOfTopic.as_str(),
+                            Params::Array(vec![json!(topic), json!(index)]),
+                        ).await;
+
+                        let Ok(resp) = result else {
+                            tracing::error!("Failed to fetch messages of topic: {}", topic);
+                            continue;
+                        };
+
+                        let Ok(messages): Result<Vec<String>, _> = serde_json::from_value(resp) else {
+                            tracing::error!("Failed to parse messages of topic: {}", topic);
+                            continue;
+                        };
+
+                        for msg in messages.iter().cloned() {
+                            yield msg
+                        }
+
+                        index += messages.len();
+                    }
+                }
+            }
+        }
     }
 }
 

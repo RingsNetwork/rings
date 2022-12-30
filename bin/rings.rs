@@ -6,6 +6,8 @@ use clap::ArgAction;
 use clap::Args;
 use clap::Parser;
 use clap::Subcommand;
+use futures::pin_mut;
+use futures::StreamExt;
 use rings_core::message::CallbackFn;
 use rings_node::backend::Backend;
 use rings_node::backend::BackendConfig;
@@ -22,6 +24,8 @@ use rings_node::processor::Processor;
 use rings_node::service::run_service;
 use rings_node::util;
 use rings_node::util::loader::ResourceLoader;
+use tokio::io;
+use tokio::io::AsyncBufReadExt;
 
 #[derive(Parser, Debug)]
 #[command(about, version, author)]
@@ -42,6 +46,8 @@ enum Command {
     NewSecretKey,
     #[command(about = "Start a long-running node daemon")]
     Daemon(DaemonCommand),
+    #[command(about = "Like a chat room but on the Rings Network")]
+    Pubsub(PubsubCommand),
     #[command(subcommand)]
     Connect(ConnectCommand),
     #[command(subcommand)]
@@ -52,8 +58,6 @@ enum Command {
     Pending(PendingCommand),
     #[command(subcommand)]
     Send(SendCommand),
-    #[command(about = "Like a chat room but on the Rings Network")]
-    Pubsub(PubsubCommand),
 }
 
 #[derive(Args, Debug)]
@@ -325,6 +329,27 @@ async fn daemon_run(
     Ok(())
 }
 
+async fn pubsub_run(client_args: ClientArgs, topic: String) -> anyhow::Result<()> {
+    let mut stdin = io::BufReader::new(io::stdin()).lines();
+
+    let client = client_args.new_client().await?;
+    let stream = client.subscribe_topic(topic.clone()).await;
+    pin_mut!(stream);
+
+    loop {
+        tokio::select! {
+            line = stdin.next_line() => {
+                let line = line?.expect("stdin closed");
+                client.publish_message_to_topic(&topic, &line).await?;
+            }
+            msg = stream.next() => {
+                let msg = msg.expect("sub stream closed");
+                println!("{}", msg);
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenv::dotenv().ok();
@@ -350,6 +375,7 @@ async fn main() -> anyhow::Result<()> {
             )
             .await
         }
+        Command::Pubsub(args) => pubsub_run(args.client_args, args.topic).await,
         Command::Connect(ConnectCommand::Node(args)) => {
             args.client_args
                 .new_client()
@@ -488,10 +514,6 @@ async fn main() -> anyhow::Result<()> {
         Command::NewSecretKey => {
             let k = SecretKey::random();
             println!("New secretKey: {}", k.to_string());
-            Ok(())
-        }
-        Command::Pubsub(args) => {
-            dbg!(args);
             Ok(())
         }
     }

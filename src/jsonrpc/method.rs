@@ -32,6 +32,10 @@ pub enum Method {
     SendHttpRequest,
     /// Send simple text message
     SendSimpleText,
+    /// Append data to topic
+    PublishMessageToTopic,
+    /// Fetch data of topic
+    FetchMessagesOfTopic,
 }
 
 impl Method {
@@ -51,6 +55,8 @@ impl Method {
             Method::ClosePendingTransport => "closePendingTransport",
             Method::SendHttpRequest => "sendHttpRequest",
             Method::SendSimpleText => "sendSimpleText",
+            Method::PublishMessageToTopic => "publishMessageToTopic",
+            Method::FetchMessagesOfTopic => "fetchMessagesOfTopic",
         }
     }
 }
@@ -79,6 +85,8 @@ impl TryFrom<&str> for Method {
             "closePendingTransport" => Self::ClosePendingTransport,
             "sendHttpRequest" => Self::SendHttpRequest,
             "sendSimpleText" => Self::SendSimpleText,
+            "publishMessageToTopic" => Method::PublishMessageToTopic,
+            "fetchMessagesOfTopic" => Method::FetchMessagesOfTopic,
             _ => return Err(Error::InvalidMethod),
         })
     }
