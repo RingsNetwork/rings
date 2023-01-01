@@ -177,7 +177,7 @@ impl MessageHandler {
             Message::NotifyPredecessorReport(ref msg) => self.handle(payload, msg).await,
             Message::SearchVNode(ref msg) => self.handle(payload, msg).await,
             Message::FoundVNode(ref msg) => self.handle(payload, msg).await,
-            Message::StoreVNode(ref msg) => self.handle(payload, msg).await,
+            Message::OperateVNode(ref msg) => self.handle(payload, msg).await,
             Message::CustomMessage(ref msg) => self.handle(payload, msg).await,
             Message::MultiCall(ref msg) => {
                 for message in msg.messages.iter().cloned() {

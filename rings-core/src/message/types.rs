@@ -2,6 +2,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::dht::vnode::VNodeOperation;
 use crate::dht::vnode::VirtualNode;
 use crate::dht::Did;
 use crate::ecc::PublicKey;
@@ -80,12 +81,6 @@ pub struct FoundVNode {
     pub data: Vec<VirtualNode>,
 }
 
-/// MessageType ask to store data/message into virtual node.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct StoreVNode {
-    pub data: Vec<VirtualNode>,
-}
-
 /// MessageType contains multi messages.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct MultiCall {
@@ -154,7 +149,7 @@ pub enum Message {
     NotifyPredecessorReport(NotifyPredecessorReport),
     SearchVNode(SearchVNode),
     FoundVNode(FoundVNode),
-    StoreVNode(StoreVNode),
+    OperateVNode(VNodeOperation),
     SyncVNodeWithSuccessor(SyncVNodeWithSuccessor),
     JoinSubRing(JoinSubRing),
     CustomMessage(MaybeEncrypted<CustomMessage>),

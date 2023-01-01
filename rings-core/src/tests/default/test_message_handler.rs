@@ -17,6 +17,7 @@ use crate::message::FindSuccessorReportHandler;
 use crate::message::FindSuccessorThen;
 use crate::message::Message;
 use crate::message::PayloadSender;
+use crate::prelude::vnode::VNodeOperation;
 use crate::storage::PersistenceStorageOperation;
 use crate::storage::PersistenceStorageReadAndWrite;
 use crate::swarm::tests::new_swarm;
@@ -440,11 +441,9 @@ async fn test_handle_storage() -> Result<()> {
              let message = String::from("this is a test string");
              let encoded_message = message.encode().unwrap();
              // the vid is hash of string
-             let vnode: VirtualNode = encoded_message.try_into().unwrap();
+             let vnode: VirtualNode = (message.clone(), encoded_message).try_into().unwrap();
              handler1.send_message(
-                 Message::StoreVNode(message::StoreVNode {
-                     data: vec![vnode.clone()]
-                 }),
+                 Message::OperateVNode(VNodeOperation::Overwrite(vnode.clone())),
                  swarm2.did(),
                  swarm2.did(),
              )

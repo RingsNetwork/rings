@@ -25,6 +25,8 @@ use crate::backend::types::HttpRequest;
 use crate::backend::types::MessageType;
 use crate::error::Error as ServerError;
 use crate::prelude::rings_core::dht::Did;
+use crate::prelude::rings_core::message::Encoder;
+use crate::prelude::rings_core::prelude::vnode::VirtualNode;
 use crate::prelude::rings_core::transports::manager::TransportManager;
 use crate::prelude::rings_core::types::ice_transport::IceTransportInterface;
 use crate::processor;
@@ -79,6 +81,14 @@ pub(crate) async fn build_handler(handler: &mut MetaIoHandler<RpcMeta>) {
     handler.add_method_with_meta(Method::SendTo.as_str(), send_message);
     handler.add_method_with_meta(Method::SendHttpRequest.as_str(), send_http_request);
     handler.add_method_with_meta(Method::SendSimpleText.as_str(), send_simple_text_message);
+    handler.add_method_with_meta(
+        Method::PublishMessageToTopic.as_str(),
+        publish_message_to_topic,
+    );
+    handler.add_method_with_meta(
+        Method::FetchMessagesOfTopic.as_str(),
+        fetch_messages_of_topic,
+    );
 }
 
 #[cfg(feature = "browser")]
@@ -98,6 +108,8 @@ pub async fn handle_request(method: Method, meta: RpcMeta, params: Params) -> Re
         Method::ClosePendingTransport => close_pending_transport(params, meta).await,
         Method::SendHttpRequest => send_http_request(params, meta).await,
         Method::SendSimpleText => send_simple_text_message(params, meta).await,
+        Method::PublishMessageToTopic => publish_message_to_topic(params, meta).await,
+        Method::FetchMessagesOfTopic => fetch_messages_of_topic(params, meta).await,
     }
 }
 
@@ -321,4 +333,61 @@ async fn send_http_request(params: Params, meta: RpcMeta) -> Result<Value> {
     Ok(serde_json::json!({
       "tx_id": tx_id.to_string(),
     }))
+}
+
+async fn publish_message_to_topic(params: Params, meta: RpcMeta) -> Result<Value> {
+    meta.require_authed()?;
+    let params: Vec<serde_json::Value> = params.parse()?;
+    let topic = params
+        .get(0)
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
+        .as_str()
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
+    let data = params
+        .get(1)
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
+        .as_str()
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
+        .to_string()
+        .encode()
+        .map_err(|_| Error::new(ErrorCode::InvalidParams))?;
+
+    meta.processor.storage_append_data(topic, data).await?;
+
+    Ok(serde_json::json!({}))
+}
+
+async fn fetch_messages_of_topic(params: Params, meta: RpcMeta) -> Result<Value> {
+    meta.require_authed()?;
+    let params: Vec<serde_json::Value> = params.parse()?;
+    let topic = params
+        .get(0)
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
+        .as_str()
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
+    let index = params
+        .get(1)
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
+        .as_i64()
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
+    let vnode: VirtualNode = topic
+        .to_string()
+        .try_into()
+        .map_err(|_| Error::new(ErrorCode::InvalidParams))?;
+
+    meta.processor.storage_fetch(vnode.did).await?;
+    let messages = meta.processor.storage_check_cache(vnode.did).await;
+
+    if let Some(vnode) = messages {
+        let messages = vnode
+            .data
+            .iter()
+            .skip(index as usize)
+            .map(|v| v.decode())
+            .filter_map(|v| v.ok())
+            .collect::<Vec<String>>();
+        Ok(serde_json::json!(messages))
+    } else {
+        Ok(serde_json::json!(Vec::<String>::new()))
+    }
 }

@@ -6,7 +6,6 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::dht::subring::SubRing;
 use crate::dht::Did;
 use crate::ecc::HashStr;
 use crate::err::Error;
@@ -16,7 +15,7 @@ use crate::message::Encoder;
 use crate::message::MessagePayload;
 
 /// VNode Types
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VNodeType {
     /// Encoded data stored in DHT
     Data,
@@ -27,11 +26,21 @@ pub enum VNodeType {
     RelayMessage,
 }
 
+/// VNode Operations
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VNodeOperation {
+    /// Create or update a VirtualNode
+    Overwrite(VirtualNode),
+    /// Extend data to a Data type VirtualNode.
+    /// This operation will not append data to not existed VirtualNode.
+    Extend(VirtualNode),
+}
+
 /// A `VirtualNode` is a piece of data with [VNodeType] and [Did]. You can save it to
 /// [PeerRing](super::PeerRing) by [ChordStorage](super::ChordStorage) protocol.
 ///
 /// The Did of a Virtual Node is in the following format:
-/// * If type value is [VNodeType::Data], it's sha1 of data field.
+/// * If type value is [VNodeType::Data], it's sha1 of data topic.
 /// * If type value is [VNodeType::SubRing], it's sha1 of SubRing name.
 /// * If type value is [VNodeType::RelayMessage], it's the destination Did of
 /// message plus 1 (to ensure that the message is sent to the successor of destination),
@@ -44,6 +53,33 @@ pub struct VirtualNode {
     pub data: Vec<Encoded>,
     /// The type indicates how the data is encoded and how the Did is generated.
     pub kind: VNodeType,
+}
+
+impl VNodeOperation {
+    /// Extract the did of target VirtualNode.
+    pub fn did(&self) -> Did {
+        match self {
+            VNodeOperation::Overwrite(vnode) => vnode.did,
+            VNodeOperation::Extend(vnode) => vnode.did,
+        }
+    }
+
+    /// Extract the kind of target VirtualNode.
+    pub fn kind(&self) -> VNodeType {
+        match self {
+            VNodeOperation::Overwrite(vnode) => vnode.kind,
+            VNodeOperation::Extend(vnode) => vnode.kind,
+        }
+    }
+
+    /// Generate a target VirtualNode when it is not existed.
+    pub fn gen_default_vnode(self) -> VirtualNode {
+        VirtualNode {
+            did: self.did(),
+            data: vec![],
+            kind: self.kind(),
+        }
+    }
 }
 
 impl<T> TryFrom<MessagePayload<T>> for VirtualNode
@@ -61,55 +97,73 @@ where T: Serialize + DeserializeOwned
     }
 }
 
-impl TryFrom<Encoded> for VirtualNode {
+impl TryFrom<(String, Encoded)> for VirtualNode {
     type Error = Error;
-    fn try_from(e: Encoded) -> Result<Self> {
-        let did: HashStr = e.value().into();
+    fn try_from((topic, e): (String, Encoded)) -> Result<Self> {
+        let hash: HashStr = topic.into();
+        let did = Did::from_str(&hash.inner())?;
         Ok(Self {
-            did: Did::from_str(&did.inner())?,
+            did,
             data: vec![e],
             kind: VNodeType::Data,
         })
     }
 }
 
+impl TryFrom<(String, String)> for VirtualNode {
+    type Error = Error;
+    fn try_from((topic, s): (String, String)) -> Result<Self> {
+        let encoded_message = s.encode()?;
+        (topic, encoded_message).try_into()
+    }
+}
+
 impl TryFrom<String> for VirtualNode {
     type Error = Error;
-    fn try_from(s: String) -> Result<Self> {
-        let encoded_message = s.encode()?;
-        encoded_message.try_into()
+    fn try_from(topic: String) -> Result<Self> {
+        (topic.clone(), topic).try_into()
     }
 }
 
 impl VirtualNode {
-    /// concat data of a virtual Node
-    /// We do not needs to check the type of VNode because two VNode with same did but
-    /// has different Type is incapable
-    pub fn concat(a: &Self, b: &Self) -> Result<Self> {
-        match &a.kind {
-            VNodeType::RelayMessage => {
-                if a.did != b.did {
-                    Err(Error::DidNotEqual)
-                } else {
-                    Ok(Self {
-                        did: a.did,
-                        data: [&a.data[..], &b.data[..]].concat(),
-                        kind: a.kind.clone(),
-                    })
-                }
-            }
-            VNodeType::Data => Ok(a.clone()),
-            VNodeType::SubRing => {
-                // if subring exists, just join creator to new subring
-                let decoded_a: String = a.data[0].decode()?;
-                let decoded_b: String = a.data[0].decode()?;
-                let mut subring_a: SubRing =
-                    serde_json::from_str(&decoded_a).map_err(Error::Deserialize)?;
-                let subring_b: SubRing =
-                    serde_json::from_str(&decoded_b).map_err(Error::Deserialize)?;
-                subring_a.finger.join(subring_b.creator);
-                subring_a.try_into()
-            }
+    /// The entry point of VNode operations.
+    /// Will dispatch to different operation handlers according to the variant.
+    pub fn operate(&self, op: VNodeOperation) -> Result<Self> {
+        match op {
+            VNodeOperation::Overwrite(vnode) => self.overwrite(vnode),
+            VNodeOperation::Extend(vnode) => self.extend(vnode),
         }
+    }
+
+    /// Overwrite current data with new data
+    pub fn overwrite(&self, other: Self) -> Result<Self> {
+        if self.kind != VNodeType::Data {
+            return Err(Error::VNodeNotOverwritable);
+        }
+        if self.kind != other.kind {
+            return Err(Error::VNodeKindNotEqual);
+        }
+        if self.did != other.did {
+            return Err(Error::VNodeDidNotEqual);
+        }
+        Ok(other)
+    }
+
+    /// This method is used to extend data to a Data type VNode.
+    pub fn extend(&self, other: Self) -> Result<Self> {
+        if self.kind != VNodeType::Data {
+            return Err(Error::VNodeNotAppendable);
+        }
+        if self.kind != other.kind {
+            return Err(Error::VNodeKindNotEqual);
+        }
+        if self.did != other.did {
+            return Err(Error::VNodeDidNotEqual);
+        }
+        Ok(Self {
+            did: self.did,
+            data: [&self.data[..], &other.data[..]].concat(),
+            kind: self.kind,
+        })
     }
 }

@@ -64,7 +64,7 @@ impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
             if let Ok(PeerRingAction::RemoteAction(
                 next,
                 PeerRingRemoteAction::SyncVNodeWithSuccessor(data),
-            )) = self.dht.sync_with_successor(msg.did).await
+            )) = self.dht.sync_vnode_with_successor(msg.did).await
             {
                 self.send_direct_message(
                     Message::SyncVNodeWithSuccessor(SyncVNodeWithSuccessor { data }),

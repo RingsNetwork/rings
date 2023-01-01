@@ -2887,6 +2887,7 @@ version = "0.2.2"
 dependencies = [
  "anyhow",
  "arrayref",
+ "async-stream",
  "async-trait",
  "axum",
  "base64",
@@ -2899,6 +2900,7 @@ dependencies = [
  "fluvio-wasm-timer",
  "form_urlencoded",
  "futures",
+ "futures-timer",
  "http",
  "hyper",
  "jsonrpc-core",

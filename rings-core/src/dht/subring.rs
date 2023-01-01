@@ -106,10 +106,10 @@ impl SubRingManager<PeerRingAction> for PeerRing {
 impl SubRing {
     /// Create a new SubRing
     pub fn new(name: &str, creator: Did) -> Result<Self> {
-        let address: HashStr = name.to_owned().into();
-        let did = Did::from_str(&address.inner())?;
+        let hash: HashStr = name.to_string().into();
+        let did = Did::from_str(&hash.inner())?;
         Ok(Self {
-            name: name.to_owned(),
+            name: name.to_string(),
             did,
             finger: FingerTable::new(did, 1),
             admin: None,
