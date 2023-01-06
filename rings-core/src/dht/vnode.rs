@@ -1,4 +1,5 @@
 #![warn(missing_docs)]
+use std::cmp::max;
 use std::str::FromStr;
 
 use num_bigint::BigUint;
@@ -6,6 +7,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::consts::VNODE_DATA_MAX_LEN;
 use crate::dht::Did;
 use crate::ecc::HashStr;
 use crate::err::Error;
@@ -160,10 +162,66 @@ impl VirtualNode {
         if self.did != other.did {
             return Err(Error::VNodeDidNotEqual);
         }
+
+        let trim_num = max(
+            0,
+            (self.data.len() + other.data.len()) as i64 - VNODE_DATA_MAX_LEN as i64,
+        ) as usize;
+
+        let mut data = self.data.iter().skip(trim_num).cloned().collect::<Vec<_>>();
+        data.extend_from_slice(&other.data);
+
         Ok(Self {
             did: self.did,
-            data: [&self.data[..], &other.data[..]].concat(),
+            data,
             kind: self.kind,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_vnode_extend_over_max_len() {
+        let topic = "test0".to_string();
+        let mut vnode: VirtualNode = topic.clone().try_into().unwrap();
+        assert_eq!(vnode.data.len(), 1);
+
+        for i in 1..VNODE_DATA_MAX_LEN {
+            let topic = topic.clone();
+            let data = format!("test{}", i);
+
+            let other = (topic, data).try_into().unwrap();
+            vnode = vnode.extend(other).unwrap();
+
+            assert_eq!(vnode.data.len(), i + 1);
+        }
+
+        for i in VNODE_DATA_MAX_LEN..VNODE_DATA_MAX_LEN + 10 {
+            let topic = topic.clone();
+            let data = format!("test{}", i);
+
+            let other = (topic, data.clone()).try_into().unwrap();
+            vnode = vnode.extend(other).unwrap();
+
+            // The length should be trimmed to max length.
+            assert_eq!(vnode.data.len(), VNODE_DATA_MAX_LEN);
+
+            // The first data should be trimmed.
+            assert_eq!(
+                vnode.data[0].decode::<String>().unwrap(),
+                format!("test{}", i - VNODE_DATA_MAX_LEN + 1)
+            );
+
+            // The last data should be the latest one.
+            assert_eq!(
+                vnode.data[VNODE_DATA_MAX_LEN - 1]
+                    .decode::<String>()
+                    .unwrap(),
+                data
+            );
+        }
     }
 }
