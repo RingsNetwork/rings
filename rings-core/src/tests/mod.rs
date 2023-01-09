@@ -15,13 +15,11 @@ pub async fn manually_establish_connection(swarm1: &Swarm, swarm2: &Swarm) -> Re
     assert!(swarm2.get_transport(swarm1.did()).is_none());
 
     let sm1 = swarm1.session_manager();
-    let svc1 = swarm1.services();
     let sm2 = swarm2.session_manager();
-    let svc2 = swarm2.services();
 
     let transport1 = swarm1.new_transport().await.unwrap();
     let handshake_info1 = transport1
-        .get_handshake_info(sm1, RTCSdpType::Offer, svc1)
+        .get_handshake_info(sm1, RTCSdpType::Offer)
         .await?;
 
     let transport2 = swarm2.new_transport().await.unwrap();
@@ -30,7 +28,7 @@ pub async fn manually_establish_connection(swarm1: &Swarm, swarm2: &Swarm) -> Re
     assert_eq!(addr1, swarm1.did());
 
     let handshake_info2 = transport2
-        .get_handshake_info(sm2, RTCSdpType::Answer, svc2)
+        .get_handshake_info(sm2, RTCSdpType::Answer)
         .await?;
 
     let addr2 = transport1.register_remote_info(handshake_info2).await?;

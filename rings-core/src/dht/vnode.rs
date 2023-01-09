@@ -7,6 +7,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
 
+use super::subring::Subring;
 use crate::consts::VNODE_DATA_MAX_LEN;
 use crate::dht::Did;
 use crate::ecc::HashStr;
@@ -21,8 +22,8 @@ use crate::message::MessagePayload;
 pub enum VNodeType {
     /// Encoded data stored in DHT
     Data,
-    /// Finger table of a SubRing
-    SubRing,
+    /// Finger table of a Subring
+    Subring,
     /// A relayed but unreached message, which should be stored on
     /// the successor of the destination Did.
     RelayMessage,
@@ -36,6 +37,8 @@ pub enum VNodeOperation {
     /// Extend data to a Data type VirtualNode.
     /// This operation will not append data to not existed VirtualNode.
     Extend(VirtualNode),
+    /// Join subring.
+    JoinSubring(String, Did),
 }
 
 /// A `VirtualNode` is a piece of data with [VNodeType] and [Did]. You can save it to
@@ -43,7 +46,7 @@ pub enum VNodeOperation {
 ///
 /// The Did of a Virtual Node is in the following format:
 /// * If type value is [VNodeType::Data], it's sha1 of data topic.
-/// * If type value is [VNodeType::SubRing], it's sha1 of SubRing name.
+/// * If type value is [VNodeType::Subring], it's sha1 of Subring name.
 /// * If type value is [VNodeType::RelayMessage], it's the destination Did of
 /// message plus 1 (to ensure that the message is sent to the successor of destination),
 /// thus while destination node going online, it will sync message from its successor.
@@ -57,13 +60,22 @@ pub struct VirtualNode {
     pub kind: VNodeType,
 }
 
+impl VirtualNode {
+    /// Generate did from topic.
+    pub fn gen_did(topic: &str) -> Result<Did> {
+        let hash: HashStr = topic.into();
+        Did::from_str(&hash.inner())
+    }
+}
+
 impl VNodeOperation {
     /// Extract the did of target VirtualNode.
-    pub fn did(&self) -> Did {
-        match self {
+    pub fn did(&self) -> Result<Did> {
+        Ok(match self {
             VNodeOperation::Overwrite(vnode) => vnode.did,
             VNodeOperation::Extend(vnode) => vnode.did,
-        }
+            VNodeOperation::JoinSubring(name, _) => VirtualNode::gen_did(name)?,
+        })
     }
 
     /// Extract the kind of target VirtualNode.
@@ -71,15 +83,19 @@ impl VNodeOperation {
         match self {
             VNodeOperation::Overwrite(vnode) => vnode.kind,
             VNodeOperation::Extend(vnode) => vnode.kind,
+            VNodeOperation::JoinSubring(..) => VNodeType::Subring,
         }
     }
 
     /// Generate a target VirtualNode when it is not existed.
-    pub fn gen_default_vnode(self) -> VirtualNode {
-        VirtualNode {
-            did: self.did(),
-            data: vec![],
-            kind: self.kind(),
+    pub fn gen_default_vnode(self) -> Result<VirtualNode> {
+        match self {
+            VNodeOperation::JoinSubring(name, did) => Subring::new(&name, did)?.try_into(),
+            _ => Ok(VirtualNode {
+                did: self.did()?,
+                data: vec![],
+                kind: self.kind(),
+            }),
         }
     }
 }
@@ -102,10 +118,8 @@ where T: Serialize + DeserializeOwned
 impl TryFrom<(String, Encoded)> for VirtualNode {
     type Error = Error;
     fn try_from((topic, e): (String, Encoded)) -> Result<Self> {
-        let hash: HashStr = topic.into();
-        let did = Did::from_str(&hash.inner())?;
         Ok(Self {
-            did,
+            did: Self::gen_did(&topic)?,
             data: vec![e],
             kind: VNodeType::Data,
         })
@@ -134,6 +148,7 @@ impl VirtualNode {
         match op {
             VNodeOperation::Overwrite(vnode) => self.overwrite(vnode),
             VNodeOperation::Extend(vnode) => self.extend(vnode),
+            VNodeOperation::JoinSubring(_, did) => self.join_subring(did),
         }
     }
 
@@ -176,6 +191,17 @@ impl VirtualNode {
             data,
             kind: self.kind,
         })
+    }
+
+    /// This method is used to join a subring.
+    pub fn join_subring(&self, did: Did) -> Result<Self> {
+        if self.kind != VNodeType::Subring {
+            return Err(Error::VNodeNotJoinable);
+        }
+
+        let mut subring: Subring = self.clone().try_into()?;
+        subring.finger.join(did);
+        subring.try_into()
     }
 }
 

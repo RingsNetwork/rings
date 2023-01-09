@@ -36,8 +36,9 @@ use crate::prelude::rings_core::types::ice_transport::IceTransportInterface;
 use crate::prelude::rings_core::types::ice_transport::IceTrickleScheme;
 use crate::prelude::vnode;
 use crate::prelude::web3::signing::keccak256;
+use crate::prelude::ChordStorageInterface;
 use crate::prelude::CustomMessage;
-use crate::prelude::TChordStorage;
+use crate::prelude::SubringInterface;
 
 /// Processor for rings-node jsonrpc server
 #[derive(Clone)]
@@ -107,11 +108,7 @@ impl Processor {
         let transport_cloned = transport.clone();
         let task = async move {
             let hs_info = transport_cloned
-                .get_handshake_info(
-                    self.swarm.session_manager(),
-                    RTCSdpType::Offer,
-                    self.swarm.services(),
-                )
+                .get_handshake_info(self.swarm.session_manager(), RTCSdpType::Offer)
                 .await
                 .map_err(Error::CreateOffer)?;
             self.swarm
@@ -240,11 +237,7 @@ impl Processor {
             .map_err(Error::RegisterIceError)?;
 
         let hs_info = transport
-            .get_handshake_info(
-                self.swarm.session_manager(),
-                RTCSdpType::Answer,
-                self.swarm.services(),
-            )
+            .get_handshake_info(self.swarm.session_manager(), RTCSdpType::Answer)
             .await
             .map_err(Error::CreateAnswer)?;
         tracing::debug!("answer hs_info: {:?}", hs_info);
@@ -454,6 +447,14 @@ impl Processor {
             .storage_append_data(topic, data)
             .await
             .map_err(error::Error::VNodeError)
+    }
+
+    /// join to a subring
+    pub async fn subring_join(&self, name: &str) -> Result<()> {
+        self.swarm
+            .subring_join(name)
+            .await
+            .map_err(error::Error::SubringError)
     }
 }
 

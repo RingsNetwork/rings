@@ -24,6 +24,7 @@ use crate::backend::types::BackendMessage;
 use crate::backend::types::HttpRequest;
 use crate::backend::types::MessageType;
 use crate::error::Error as ServerError;
+use crate::prelude::rings_core::dht::subring::Subring;
 use crate::prelude::rings_core::dht::Did;
 use crate::prelude::rings_core::message::Encoder;
 use crate::prelude::rings_core::prelude::vnode::VirtualNode;
@@ -89,6 +90,8 @@ pub(crate) async fn build_handler(handler: &mut MetaIoHandler<RpcMeta>) {
         Method::FetchMessagesOfTopic.as_str(),
         fetch_messages_of_topic,
     );
+    handler.add_method_with_meta(Method::RegisterService.as_str(), register_service);
+    handler.add_method_with_meta(Method::LookupService.as_str(), lookup_service);
 }
 
 #[cfg(feature = "browser")]
@@ -110,6 +113,8 @@ pub async fn handle_request(method: Method, meta: RpcMeta, params: Params) -> Re
         Method::SendSimpleText => send_simple_text_message(params, meta).await,
         Method::PublishMessageToTopic => publish_message_to_topic(params, meta).await,
         Method::FetchMessagesOfTopic => fetch_messages_of_topic(params, meta).await,
+        Method::RegisterService => register_service(params, meta).await,
+        Method::LookupService => lookup_service(params, meta).await,
     }
 }
 
@@ -370,15 +375,13 @@ async fn fetch_messages_of_topic(params: Params, meta: RpcMeta) -> Result<Value>
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
         .as_i64()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
-    let vnode: VirtualNode = topic
-        .to_string()
-        .try_into()
-        .map_err(|_| Error::new(ErrorCode::InvalidParams))?;
 
-    meta.processor.storage_fetch(vnode.did).await?;
-    let messages = meta.processor.storage_check_cache(vnode.did).await;
+    let vid = VirtualNode::gen_did(topic).map_err(|_| Error::new(ErrorCode::InvalidParams))?;
 
-    if let Some(vnode) = messages {
+    meta.processor.storage_fetch(vid).await?;
+    let result = meta.processor.storage_check_cache(vid).await;
+
+    if let Some(vnode) = result {
         let messages = vnode
             .data
             .iter()
@@ -389,5 +392,41 @@ async fn fetch_messages_of_topic(params: Params, meta: RpcMeta) -> Result<Value>
         Ok(serde_json::json!(messages))
     } else {
         Ok(serde_json::json!(Vec::<String>::new()))
+    }
+}
+
+async fn register_service(params: Params, meta: RpcMeta) -> Result<Value> {
+    meta.require_authed()?;
+    let params: Vec<serde_json::Value> = params.parse()?;
+    let name = params
+        .get(0)
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
+        .as_str()
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
+    meta.processor.subring_join(name).await?;
+    Ok(serde_json::json!({}))
+}
+
+async fn lookup_service(params: Params, meta: RpcMeta) -> Result<Value> {
+    meta.require_authed()?;
+    let params: Vec<serde_json::Value> = params.parse()?;
+    let name = params
+        .get(0)
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
+        .as_str()
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
+
+    let rid = VirtualNode::gen_did(name).map_err(|_| Error::new(ErrorCode::InvalidParams))?;
+
+    meta.processor.storage_fetch(rid).await?;
+    let result = meta.processor.storage_check_cache(rid).await;
+
+    if let Some(vnode) = result {
+        let subring: Subring = vnode
+            .try_into()
+            .map_err(|_| Error::new(ErrorCode::InvalidParams))?;
+        Ok(serde_json::json!({ "subring": subring }))
+    } else {
+        Ok(serde_json::json!({ "subring": None::<Subring> }))
     }
 }

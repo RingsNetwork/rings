@@ -105,11 +105,7 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
                         .register_remote_info(msg.handshake_info.to_owned().into())
                         .await?;
                     let handshake_info = trans
-                        .get_handshake_info(
-                            self.swarm.session_manager(),
-                            RTCSdpType::Answer,
-                            self.swarm.services(),
-                        )
+                        .get_handshake_info(self.swarm.session_manager(), RTCSdpType::Answer)
                         .await?
                         .to_string();
                     self.send_report_message(

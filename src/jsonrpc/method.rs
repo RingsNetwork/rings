@@ -36,6 +36,10 @@ pub enum Method {
     PublishMessageToTopic,
     /// Fetch data of topic
     FetchMessagesOfTopic,
+    /// Register service
+    RegisterService,
+    /// Lookup service
+    LookupService,
 }
 
 impl Method {
@@ -57,6 +61,8 @@ impl Method {
             Method::SendSimpleText => "sendSimpleText",
             Method::PublishMessageToTopic => "publishMessageToTopic",
             Method::FetchMessagesOfTopic => "fetchMessagesOfTopic",
+            Method::RegisterService => "registerService",
+            Method::LookupService => "lookupService",
         }
     }
 }
@@ -87,6 +93,8 @@ impl TryFrom<&str> for Method {
             "sendSimpleText" => Self::SendSimpleText,
             "publishMessageToTopic" => Method::PublishMessageToTopic,
             "fetchMessagesOfTopic" => Method::FetchMessagesOfTopic,
+            "registerService" => Method::RegisterService,
+            "lookupService" => Method::LookupService,
             _ => return Err(Error::InvalidMethod),
         })
     }

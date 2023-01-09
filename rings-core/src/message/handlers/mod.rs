@@ -33,7 +33,7 @@ pub mod custom;
 pub mod stabilization;
 /// Operator and Handler for Storage
 pub mod storage;
-/// Operator and Handler for SubRing
+/// Operator and Handler for Subring
 pub mod subring;
 
 /// Trait of message callback.

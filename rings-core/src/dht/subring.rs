@@ -1,156 +1,60 @@
 #![warn(missing_docs)]
-use std::str::FromStr;
 
-use async_trait::async_trait;
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::chord::PeerRing;
-use super::chord::PeerRingAction;
-use super::chord::RemoteAction;
-use super::types::Chord;
-use super::types::SubRingManager;
 use super::vnode::VNodeType;
 use super::vnode::VirtualNode;
 use super::FingerTable;
 use crate::dht::Did;
-use crate::ecc::HashStr;
 use crate::err::Error;
 use crate::err::Result;
-use crate::storage::PersistenceStorageReadAndWrite;
-// use crate::storage::PersistenceStorageOperation;
 
-/// A SubRing is a full functional Ring.
-/// But with a name and it's finger table can be
-/// stored on Main Rings DHT, For a SubRing, it's virtual address is `sha1(name)`
+/// A Subring is like a [PeerRing] without storage functional.
+/// Subring also have two extra fields: `name` and `creator`.
+/// Subring can be stored on the a [PeerRing].
+/// The did of a subring is the hash of its name.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SubRing {
+pub struct Subring {
     /// name of subring
     pub name: String,
-    /// did of subring, generate with hash(name)
-    pub did: Did,
     /// finger table
     pub finger: FingerTable,
-    /// admin of ring, for verify that a message is come from ring
-    pub admin: Option<Did>,
     /// creator
     pub creator: Did,
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
-impl SubRingManager<PeerRingAction> for PeerRing {
-    async fn join_subring(&self, did: Did, rid: Did) -> Result<PeerRingAction> {
-        match self.find_successor(rid) {
-            Ok(PeerRingAction::Some(_)) => {
-                if let Ok(subring) = self.get_subring(rid).await {
-                    let mut sr = subring;
-                    sr.finger.join(did);
-                    self.store_subring(&sr).await?;
-                }
-                Ok(PeerRingAction::None)
-            }
-            Ok(PeerRingAction::RemoteAction(n, RemoteAction::FindSuccessor(_))) => Ok(
-                PeerRingAction::RemoteAction(n, RemoteAction::FindAndJoinSubRing(rid)),
-            ),
-            Ok(a) => Err(Error::PeerRingUnexpectedAction(a)),
-            Err(e) => Err(e),
-        }
-    }
-
-    async fn get_subring(&self, rid: Did) -> Result<SubRing> {
-        let vnode: VirtualNode = self.storage.get(&rid).await?;
-        Ok(vnode.try_into()?)
-    }
-
-    async fn store_subring(&self, subring: &SubRing) -> Result<()> {
-        let id = subring.did;
-        let vn: VirtualNode = subring.clone().try_into()?;
-        self.storage.put(&id, &vn).await?;
-        Ok(())
-    }
-
-    async fn get_subring_by_name(&self, name: &str) -> Result<SubRing> {
-        let address: HashStr = name.to_owned().into();
-        // trans Result to Option here
-        let did = Did::from_str(&address.inner())?;
-        self.get_subring(did).await
-    }
-    // get subring, update and putback
-    // async fn get_subring_for_update(
-    //     &self,
-    //     id: Did,
-    //     callback: Arc<dyn FnOnce(SubRing) -> SubRing>,
-    // ) -> Result<bool> {
-    //     if let Ok(subring) = self.get_subring(id).await {
-    //         let sr = callback(subring);
-    //         self.store_subring(&sr).await?;
-    //         Ok(true)
-    //     } else {
-    //         Ok(false)
-    //     }
-    // }
-
-    // /// get subring, update and putback
-    // async fn get_subring_for_update_by_name(
-    //     &self,
-    //     name: &str,
-    //     callback: Box<dyn FnOnce(SubRing) -> SubRing>,
-    // ) -> Result<bool> {
-    //     let address: HashStr = name.to_owned().into();
-    //     let did = Did::from_str(&address.inner())?;
-    //     self.get_subring_for_update(&did, callback)
-    // }
-}
-
-impl SubRing {
-    /// Create a new SubRing
+impl Subring {
+    /// Create a new Subring
     pub fn new(name: &str, creator: Did) -> Result<Self> {
-        let hash: HashStr = name.to_string().into();
-        let did = Did::from_str(&hash.inner())?;
+        let did = VirtualNode::gen_did(name)?;
         Ok(Self {
             name: name.to_string(),
-            did,
             finger: FingerTable::new(did, 1),
-            admin: None,
             creator,
         })
     }
-
-    /// Create a SubRing from Ring
-    pub fn from_ring(name: &str, ring: &PeerRing) -> Result<Self> {
-        let address: HashStr = name.to_owned().into();
-        let did = Did::from_str(&address.inner())?;
-        let finger = ring.lock_finger()?;
-        Ok(Self {
-            name: name.to_owned(),
-            did,
-            finger: (*finger).clone(),
-            admin: None,
-            creator: ring.did,
-        })
-    }
 }
 
-impl TryFrom<SubRing> for VirtualNode {
+impl TryFrom<Subring> for VirtualNode {
     type Error = Error;
-    fn try_from(ring: SubRing) -> Result<Self> {
+    fn try_from(ring: Subring) -> Result<Self> {
         let data = serde_json::to_string(&ring).map_err(|_| Error::SerializeToString)?;
         Ok(Self {
-            did: ring.did,
+            did: Self::gen_did(&ring.name)?,
             data: vec![data.into()],
-            kind: VNodeType::SubRing,
+            kind: VNodeType::Subring,
         })
     }
 }
 
-impl TryFrom<VirtualNode> for SubRing {
+impl TryFrom<VirtualNode> for Subring {
     type Error = Error;
     fn try_from(vnode: VirtualNode) -> Result<Self> {
         match &vnode.kind {
-            VNodeType::SubRing => {
+            VNodeType::Subring => {
                 let decoded: String = vnode.data[0].decode()?;
-                let subring: SubRing =
+                let subring: Subring =
                     serde_json::from_str(&decoded).map_err(Error::Deserialize)?;
                 Ok(subring)
             }

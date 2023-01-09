@@ -34,6 +34,9 @@ pub enum Error {
     #[error("The type of VirtualNode is not allowed to be appended")]
     VNodeNotAppendable,
 
+    #[error("The type of VirtualNode is not allowed to be joined as a subring")]
+    VNodeNotJoinable,
+
     #[error("Encode a byte vector into a base58-check string, adds 4 bytes checksum")]
     Encode,
 

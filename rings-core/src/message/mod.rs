@@ -17,7 +17,8 @@ mod types;
 pub use types::*;
 
 mod handlers;
-pub use handlers::storage::TChordStorage;
+pub use handlers::storage::ChordStorageInterface;
+pub use handlers::subring::SubringInterface;
 pub use handlers::CallbackFn;
 pub use handlers::HandleMsg;
 pub use handlers::MessageCallback;
