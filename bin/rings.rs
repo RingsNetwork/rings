@@ -86,6 +86,17 @@ struct DaemonCommand {
 
     #[arg(long, env, help = "backend service config")]
     pub backend: Option<String>,
+
+    #[arg(long, env, default_value = "./data", help = "storage path")]
+    pub storage_path: String,
+
+    #[arg(
+        long,
+        env,
+        default_value = "200000000",
+        help = "storage capcity, count"
+    )]
+    pub storage_capacity: usize,
 }
 
 #[derive(Args, Debug)]
@@ -315,15 +326,21 @@ struct ServiceLookupCommand {
     name: String,
 }
 
-async fn daemon_run(
+#[allow(clippy::too_many_arguments)]
+async fn daemon_run<P>(
     http_addr: String,
     key: SecretKey,
     stuns: &str,
     stabilize_timeout: usize,
     external_ip: Option<String>,
     backend: Option<String>,
-) -> anyhow::Result<()> {
-    let storage = PersistenceStorage::new().await?;
+    storage_capacity: usize,
+    storage_path: P,
+) -> anyhow::Result<()>
+where
+    P: AsRef<std::path::Path>,
+{
+    let storage = PersistenceStorage::new_with_cap_and_path(storage_capacity, storage_path).await?;
 
     let swarm = Arc::new(
         SwarmBuilder::new(stuns, storage)
@@ -397,6 +414,8 @@ async fn main() -> anyhow::Result<()> {
                 args.stabilize_timeout,
                 args.external_ip,
                 args.backend,
+                args.storage_capacity,
+                args.storage_path,
             )
             .await
         }
