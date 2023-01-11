@@ -24,7 +24,6 @@ use crate::backend::types::BackendMessage;
 use crate::backend::types::HttpRequest;
 use crate::backend::types::MessageType;
 use crate::error::Error as ServerError;
-use crate::prelude::rings_core::dht::subring::Subring;
 use crate::prelude::rings_core::dht::Did;
 use crate::prelude::rings_core::message::Encoder;
 use crate::prelude::rings_core::prelude::vnode::VirtualNode;
@@ -403,7 +402,7 @@ async fn register_service(params: Params, meta: RpcMeta) -> Result<Value> {
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
         .as_str()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
-    meta.processor.subring_join(name).await?;
+    meta.processor.register_service(name).await?;
     Ok(serde_json::json!({}))
 }
 
@@ -422,11 +421,14 @@ async fn lookup_service(params: Params, meta: RpcMeta) -> Result<Value> {
     let result = meta.processor.storage_check_cache(rid).await;
 
     if let Some(vnode) = result {
-        let subring: Subring = vnode
-            .try_into()
-            .map_err(|_| Error::new(ErrorCode::InvalidParams))?;
-        Ok(serde_json::json!({ "subring": subring }))
+        let messages = vnode
+            .data
+            .iter()
+            .map(|v| v.decode())
+            .filter_map(|v| v.ok())
+            .collect::<Vec<String>>();
+        Ok(serde_json::json!(messages))
     } else {
-        Ok(serde_json::json!({ "subring": None::<Subring> }))
+        Ok(serde_json::json!(Vec::<String>::new()))
     }
 }

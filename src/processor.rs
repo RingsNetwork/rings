@@ -22,6 +22,7 @@ use crate::prelude::rings_core::dht::Stabilization;
 use crate::prelude::rings_core::ecc::PublicKey;
 use crate::prelude::rings_core::ecc::SecretKey;
 use crate::prelude::rings_core::message::Encoded;
+use crate::prelude::rings_core::message::Encoder;
 use crate::prelude::rings_core::message::Message;
 use crate::prelude::rings_core::message::PayloadSender;
 use crate::prelude::rings_core::prelude::libsecp256k1;
@@ -38,7 +39,6 @@ use crate::prelude::vnode;
 use crate::prelude::web3::signing::keccak256;
 use crate::prelude::ChordStorageInterface;
 use crate::prelude::CustomMessage;
-use crate::prelude::SubringInterface;
 
 /// Processor for rings-node jsonrpc server
 #[derive(Clone)]
@@ -449,12 +449,17 @@ impl Processor {
             .map_err(error::Error::VNodeError)
     }
 
-    /// join to a subring
-    pub async fn subring_join(&self, name: &str) -> Result<()> {
+    /// register service
+    pub async fn register_service(&self, name: &str) -> Result<()> {
+        let encoded_did = self
+            .did()
+            .to_string()
+            .encode()
+            .map_err(Error::ServiceRegisterError)?;
         self.swarm
-            .subring_join(name)
+            .storage_append_data(name, encoded_did)
             .await
-            .map_err(error::Error::SubringError)
+            .map_err(error::Error::ServiceRegisterError)
     }
 }
 

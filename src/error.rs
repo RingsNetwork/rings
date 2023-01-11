@@ -51,8 +51,8 @@ pub enum Error {
     NoPermission,
     #[error("vnode action error: {0}")]
     VNodeError(rings_core::err::Error),
-    #[error("subring action error: {0}")]
-    SubringError(rings_core::err::Error),
+    #[error("service register action error: {0}")]
+    ServiceRegisterError(rings_core::err::Error),
     #[error("JsError: {0}")]
     JsError(String),
     #[error("Invalid http request: {0}")]
@@ -107,7 +107,7 @@ impl Error {
             Error::InvalidUrl => 28,
             Error::InvalidData => 29,
             Error::InvalidService => 30,
-            Error::SubringError(_) => 31,
+            Error::ServiceRegisterError(_) => 31,
         };
         -32000 - code
     }
