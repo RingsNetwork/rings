@@ -270,6 +270,33 @@ impl Client {
         ClientOutput::ok("Done.".into(), ())
     }
 
+    pub async fn register_service(&self, name: &str) -> Output<()> {
+        self.client
+            .call_method(
+                Method::RegisterService.as_str(),
+                Params::Array(vec![json!(name)]),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        ClientOutput::ok("Done.".into(), ())
+    }
+
+    pub async fn lookup_service(&self, name: &str) -> Output<()> {
+        let resp = self
+            .client
+            .call_method(
+                Method::LookupService.as_str(),
+                Params::Array(vec![json!(name)]),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        let dids: Vec<String> =
+            serde_json::from_value(resp).map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        ClientOutput::ok(dids.join("\n"), ())
+    }
+
     pub async fn publish_message_to_topic(&self, topic: &str, data: &str) -> Output<()> {
         self.client
             .call_method(

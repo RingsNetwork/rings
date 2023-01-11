@@ -20,10 +20,10 @@ use crate::message::PayloadSender;
 use crate::prelude::vnode::VNodeOperation;
 use crate::swarm::Swarm;
 
-/// TChordStorage should imply necessary method for DHT storage
+/// ChordStorageInterface should imply necessary method for DHT storage
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-pub trait TChordStorage {
+pub trait ChordStorageInterface {
     /// check local cache of dht
     async fn storage_check_cache(&self, vid: Did) -> Option<VirtualNode>;
     /// fetch virtual node from DHT
@@ -36,7 +36,7 @@ pub trait TChordStorage {
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-impl TChordStorage for Swarm {
+impl ChordStorageInterface for Swarm {
     /// Check local cache
     async fn storage_check_cache(&self, vid: Did) -> Option<VirtualNode> {
         self.dht.local_cache_get(vid)

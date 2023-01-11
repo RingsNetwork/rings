@@ -9,7 +9,6 @@ use crate::ecc::PublicKey;
 use crate::ecc::SecretKey;
 use crate::err::Error;
 use crate::err::Result;
-use crate::peer::PeerService;
 
 /// MessageType use to ask for connection, send to remote with transport_uuid and handshake_info.
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
@@ -60,7 +59,6 @@ pub struct NotifyPredecessorReport {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct JoinDHT {
     pub did: Did,
-    pub services: Vec<PeerService>,
 }
 
 /// MessageType use to leave chord ring.
@@ -91,12 +89,6 @@ pub struct MultiCall {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SyncVNodeWithSuccessor {
     pub data: Vec<VirtualNode>,
-}
-
-/// MessageType use to join virtual node in subring.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct JoinSubRing {
-    pub rid: Did,
 }
 
 /// MessageType use to customize message, will be handle by `custom_message` method.
@@ -151,7 +143,6 @@ pub enum Message {
     FoundVNode(FoundVNode),
     OperateVNode(VNodeOperation),
     SyncVNodeWithSuccessor(SyncVNodeWithSuccessor),
-    JoinSubRing(JoinSubRing),
     CustomMessage(MaybeEncrypted<CustomMessage>),
 }
 

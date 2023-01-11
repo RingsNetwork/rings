@@ -992,8 +992,8 @@ pub fn get_did(address: &str, addr_type: AddressType) -> Result<Did, JsError> {
 pub enum VNodeType {
     /// Data: Encoded data stored in DHT
     Data,
-    /// SubRing: Finger table of a SubRing
-    SubRing,
+    /// Subring: Finger table of a Subring
+    Subring,
     /// RelayMessage: A Relayed but unreach message, which is stored on it's successor
     RelayMessage,
 }
@@ -1002,7 +1002,7 @@ impl From<vnode::VNodeType> for VNodeType {
     fn from(v: vnode::VNodeType) -> Self {
         match v {
             vnode::VNodeType::Data => Self::Data,
-            vnode::VNodeType::SubRing => Self::SubRing,
+            vnode::VNodeType::Subring => Self::Subring,
             vnode::VNodeType::RelayMessage => Self::RelayMessage,
         }
     }

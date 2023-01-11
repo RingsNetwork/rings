@@ -75,8 +75,6 @@ pub enum RemoteAction {
     FindVNode(Did),
     /// Need `did_a` to find VirtualNode for operating.
     FindVNodeForOperate(VNodeOperation),
-    /// Need `did_a` to find virtual peer for subring joining.
-    FindAndJoinSubRing(Did),
     /// Let `did_a` [notify](Chord::notify) `did_b`.
     Notify(Did),
     /// Let `did_a` sync data with it's successor.
@@ -369,7 +367,7 @@ impl ChordStorage<PeerRingAction> for PeerRing {
     /// successor of current node, otherwise find the responsible node and return
     /// as Action.
     async fn vnode_operate(&self, op: VNodeOperation) -> Result<PeerRingAction> {
-        let vid = op.did();
+        let vid = op.did()?;
         let op1 = op.clone();
         match self.find_successor(vid) {
             // `vnode` should be on current node.
@@ -378,7 +376,7 @@ impl ChordStorage<PeerRingAction> for PeerRing {
                     .storage
                     .get(&vid)
                     .await
-                    .unwrap_or_else(|_| op1.gen_default_vnode());
+                    .or_else(|_| op1.gen_default_vnode())?;
 
                 let vnode = this.operate(op)?;
                 self.storage.put(&vid, &vnode).await?;

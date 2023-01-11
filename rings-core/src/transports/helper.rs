@@ -10,7 +10,6 @@ use serde::Serialize;
 
 use crate::err::Error;
 use crate::err::Result;
-use crate::peer::PeerService;
 use crate::types::ice_transport::IceCandidate;
 
 /// Custom futures state.
@@ -26,7 +25,6 @@ pub struct State {
 pub struct TricklePayload {
     pub sdp: String,
     pub candidates: Vec<IceCandidate>,
-    pub services: Vec<PeerService>,
 }
 
 /// Custom futures Promise act like js Promise.

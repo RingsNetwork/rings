@@ -58,6 +58,8 @@ enum Command {
     Pending(PendingCommand),
     #[command(subcommand)]
     Send(SendCommand),
+    #[command(subcommand)]
+    Service(ServiceCommand),
 }
 
 #[derive(Args, Debug)]
@@ -290,6 +292,29 @@ struct SendSimpleTextCommand {
     text: String,
 }
 
+#[derive(Subcommand, Debug)]
+#[command(rename_all = "kebab-case")]
+enum ServiceCommand {
+    Register(ServiceRegisterCommand),
+    Lookup(ServiceLookupCommand),
+}
+
+#[derive(Args, Debug)]
+struct ServiceRegisterCommand {
+    #[command(flatten)]
+    client_args: ClientArgs,
+
+    name: String,
+}
+
+#[derive(Args, Debug)]
+struct ServiceLookupCommand {
+    #[command(flatten)]
+    client_args: ClientArgs,
+
+    name: String,
+}
+
 async fn daemon_run(
     http_addr: String,
     key: SecretKey,
@@ -507,6 +532,24 @@ async fn main() -> anyhow::Result<()> {
                 .new_client()
                 .await?
                 .send_simple_text_message(args.to_did.as_str(), args.text.as_str())
+                .await?
+                .display();
+            Ok(())
+        }
+        Command::Service(ServiceCommand::Register(args)) => {
+            args.client_args
+                .new_client()
+                .await?
+                .register_service(args.name.as_str())
+                .await?
+                .display();
+            Ok(())
+        }
+        Command::Service(ServiceCommand::Lookup(args)) => {
+            args.client_args
+                .new_client()
+                .await?
+                .lookup_service(args.name.as_str())
                 .await?
                 .display();
             Ok(())

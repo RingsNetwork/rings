@@ -1,9 +1,8 @@
-//! DHT types about `Storage` and `Subring`.
+//! DHT types about `Storage` and `PeerRing`.
 #![warn(missing_docs)]
 use async_trait::async_trait;
 
 use super::did::Did;
-use super::subring::SubRing;
 use super::vnode::VNodeOperation;
 use super::vnode::VirtualNode;
 use crate::err::Result;
@@ -83,35 +82,4 @@ pub trait ChordStorage<Action>: Chord<Action> {
     fn local_cache_set(&self, vnode: VirtualNode);
     /// Get local cache.
     fn local_cache_get(&self, vid: Did) -> Option<VirtualNode>;
-}
-
-/// Trait for how dht manage SubRing
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
-pub trait SubRingManager<Action>: ChordStorage<Action> {
-    /// get subring from storage by id
-    async fn get_subring(&self, rid: Did) -> Result<SubRing>;
-    /// get subring from storage by name
-    async fn get_subring_by_name(&self, name: &str) -> Result<SubRing>;
-    /// store a subring to storage
-    async fn store_subring(&self, subring: &SubRing) -> Result<()>;
-    /// get a subring for update
-    // async fn get_subring_for_update(
-    //     &self,
-    //     did: Did,
-    //     callback: Arc<dyn FnOnce(SubRing) -> SubRing>,
-    // ) -> Result<bool>;
-    // /// get a subring for update by name
-    // async fn get_subring_for_update_by_name(
-    //     &self,
-    //     name: &str,
-    //     callback: Box<dyn FnOnce(SubRing) -> SubRing>,
-    // ) -> Result<bool>;
-
-    /// join a node to subring via given name
-    /// When Node A join Channel C which's vnode is stored on Node B
-    /// A send JoinSubRing to Address C, Node B got the Message And
-    /// Update the Chord Finger Table, then, Node B Response it's finger table to A
-    /// And Noti closest preceding node that A is Joined
-    async fn join_subring(&self, did: Did, rid: Did) -> Result<Action>;
 }
