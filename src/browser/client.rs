@@ -852,10 +852,10 @@ impl MessageCallback for MessageCallbackInstance {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Peer {
-    address: String,
-    transport_pubkey: String,
-    transport_id: String,
-    state: Option<String>,
+    pub address: String,
+    pub transport_pubkey: String,
+    pub transport_id: String,
+    pub state: Option<String>,
 }
 
 impl From<(Option<RtcIceConnectionState>, Token, Uuid, PublicKey)> for Peer {
@@ -886,8 +886,8 @@ impl TryFrom<&Peer> for JsValue {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TransportAndIce {
-    transport_id: String,
-    ice: String,
+    pub transport_id: String,
+    pub ice: String,
 }
 
 impl TransportAndIce {
