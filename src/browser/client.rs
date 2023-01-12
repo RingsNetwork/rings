@@ -58,8 +58,12 @@ use crate::util::from_rtc_ice_connection_state;
 /// SignerMode enum contains `DEFAULT` and `EIP191`
 #[wasm_bindgen]
 pub enum SignerMode {
+    /// ecdsa
     DEFAULT,
+    /// ref: https://eips.ethereum.org/EIPS/eip-191
     EIP191,
+    /// ed25519
+    EdDSA,
 }
 
 impl From<SignerMode> for Signer {
@@ -67,6 +71,7 @@ impl From<SignerMode> for Signer {
         match v {
             SignerMode::DEFAULT => Self::DEFAULT,
             SignerMode::EIP191 => Self::EIP191,
+            SignerMode::EdDSA => Self::EdDSA,
         }
     }
 }
@@ -313,6 +318,7 @@ impl Client {
                 .await
                 .map_err(JsError::from)?;
             let state = peer.transport.ice_connection_state().await;
+
             Ok(JsValue::try_from(&Peer::from((
                 state,
                 peer.did,
@@ -530,8 +536,7 @@ impl Client {
             let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
             let v_node = p.storage_check_cache(did).await;
             if let Some(v) = v_node {
-                let wasm_vnode = VirtualNode::from(v);
-                let data = js_value::serialize(&wasm_vnode).map_err(JsError::from)?;
+                let data = js_value::serialize(&v).map_err(JsError::from)?;
                 Ok(data)
             } else {
                 Ok(JsValue::null())
@@ -845,36 +850,12 @@ impl MessageCallback for MessageCallbackInstance {
     }
 }
 
-#[wasm_bindgen]
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Peer {
     address: String,
     transport_pubkey: String,
     transport_id: String,
     state: Option<String>,
-}
-
-#[wasm_bindgen]
-impl Peer {
-    #[wasm_bindgen(getter)]
-    pub fn address(&self) -> String {
-        self.address.to_owned()
-    }
-
-    #[wasm_bindgen(getter)]
-    pub fn transport_id(&self) -> String {
-        self.transport_id.to_owned()
-    }
-
-    #[wasm_bindgen(getter)]
-    pub fn state(&self) -> Option<String> {
-        self.state.to_owned()
-    }
-
-    #[wasm_bindgen(getter)]
-    pub fn transport_pubkey(&self) -> String {
-        self.transport_pubkey.to_owned()
-    }
 }
 
 impl From<(Option<RtcIceConnectionState>, Token, Uuid, PublicKey)> for Peer {
@@ -903,30 +884,18 @@ impl TryFrom<&Peer> for JsValue {
     }
 }
 
-#[wasm_bindgen]
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TransportAndIce {
     transport_id: String,
     ice: String,
 }
 
-#[wasm_bindgen]
 impl TransportAndIce {
     pub fn new(transport_id: &str, ice: &str) -> Self {
         Self {
             transport_id: transport_id.to_owned(),
             ice: ice.to_owned(),
         }
-    }
-
-    #[wasm_bindgen(getter)]
-    pub fn transport_id(&self) -> String {
-        self.transport_id.to_owned()
-    }
-
-    #[wasm_bindgen(getter)]
-    pub fn ice(&self) -> String {
-        self.ice.to_owned()
     }
 }
 
@@ -945,8 +914,8 @@ impl TryFrom<&TransportAndIce> for JsValue {
 }
 
 #[wasm_bindgen]
-#[derive(Debug, Clone)]
 #[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 /// Internal Info struct
 pub struct InternalInfo {
     build_version: String,
@@ -985,65 +954,4 @@ pub fn get_did(address: &str, addr_type: AddressType) -> Result<Did, JsError> {
             .into(),
     };
     Ok(did)
-}
-
-#[wasm_bindgen]
-#[derive(Clone, Serialize, Deserialize)]
-pub enum VNodeType {
-    /// Data: Encoded data stored in DHT
-    Data,
-    /// Subring: Finger table of a Subring
-    Subring,
-    /// RelayMessage: A Relayed but unreach message, which is stored on it's successor
-    RelayMessage,
-}
-
-impl From<vnode::VNodeType> for VNodeType {
-    fn from(v: vnode::VNodeType) -> Self {
-        match v {
-            vnode::VNodeType::Data => Self::Data,
-            vnode::VNodeType::Subring => Self::Subring,
-            vnode::VNodeType::RelayMessage => Self::RelayMessage,
-        }
-    }
-}
-
-#[wasm_bindgen]
-#[derive(Clone, Serialize, Deserialize)]
-pub struct VirtualNode {
-    address: String,
-    data: Vec<String>,
-    kind: VNodeType,
-}
-
-#[wasm_bindgen]
-impl VirtualNode {
-    #[wasm_bindgen(getter)]
-    pub fn address(&self) -> String {
-        self.address.to_owned()
-    }
-
-    #[wasm_bindgen(getter)]
-    pub fn kind(&self) -> VNodeType {
-        self.kind.to_owned()
-    }
-
-    #[wasm_bindgen(getter)]
-    pub fn data(&self) -> js_sys::Array {
-        let array_data = js_sys::Array::new();
-        for d in self.data.iter() {
-            array_data.push(&JsValue::from_str(d));
-        }
-        array_data
-    }
-}
-
-impl From<vnode::VirtualNode> for VirtualNode {
-    fn from(v: vnode::VirtualNode) -> Self {
-        Self {
-            address: v.did.into_token().to_string(),
-            kind: VNodeType::Data,
-            data: v.data.iter().map(|x| x.to_string()).collect(),
-        }
-    }
 }
