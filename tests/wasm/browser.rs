@@ -2,6 +2,7 @@ use js_sys::Uint8Array;
 use rings_node::browser;
 use rings_node::browser::Peer;
 use rings_node::browser::TransportAndIce;
+use rings_node::prelude::rings_core::utils::js_value;
 use rings_node::prelude::wasm_bindgen::convert::FromWasmAbi;
 use rings_node::prelude::wasm_bindgen::JsValue;
 use rings_node::prelude::wasm_bindgen_futures::JsFuture;
@@ -56,14 +57,14 @@ async fn new_client() -> (browser::Client, String) {
 
 async fn create_connection(client1: &browser::Client, client2: &browser::Client) {
     let offer = JsFuture::from(client1.create_offer()).await.unwrap();
-    let offer: TransportAndIce = offer.into_serde().unwrap();
-    let answer = JsFuture::from(client2.answer_offer(offer.ice()))
+    let offer: TransportAndIce = js_value::deserialize(&offer).unwrap();
+    let answer = JsFuture::from(client2.answer_offer(offer.ice))
         .await
         .ok()
         .unwrap();
     console_log!("answer: {:?}", answer.as_string());
-    let answer: TransportAndIce = answer.into_serde().unwrap();
-    let _peer = JsFuture::from(client1.accept_answer(offer.transport_id(), answer.ice()))
+    let answer: TransportAndIce = js_value::deserialize(&answer).unwrap();
+    let _peer = JsFuture::from(client1.accept_answer(offer.transport_id, answer.ice))
         .await
         .ok()
         .unwrap();
@@ -74,7 +75,7 @@ async fn get_peers(client: &browser::Client) -> Vec<browser::Peer> {
     let peers: js_sys::Array = peers.into();
     let peers: Vec<browser::Peer> = peers
         .iter()
-        .flat_map(|x| x.into_serde().ok())
+        .flat_map(|x| js_value::deserialize(&x).ok())
         .collect::<Vec<_>>();
     peers
 }
@@ -95,16 +96,17 @@ async fn test_two_client_connect_and_list() {
     assert!(peers.len() == 1, "peers len should be 1");
     let peer1 = peers.get(0).unwrap();
     console_log!("wait for data channel open");
-    JsFuture::from(client1.wait_for_data_channel_open(peer1.address(), None))
+    JsFuture::from(client1.wait_for_data_channel_open(peer1.address.clone(), None))
         .await
         .unwrap();
     console_log!("get peer");
-    let peer1: Peer = JsFuture::from(client1.get_peer(peer1.address(), None))
-        .await
-        .unwrap()
-        .into_serde()
-        .unwrap();
-    let peer1_state = JsFuture::from(client1.transport_state(peer1.address(), None))
+    let peer1: Peer = js_value::deserialize(
+        &JsFuture::from(client1.get_peer(peer1.address.clone(), None))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let peer1_state = JsFuture::from(client1.transport_state(peer1.address.clone(), None))
         .await
         .unwrap();
     assert!(
@@ -112,7 +114,7 @@ async fn test_two_client_connect_and_list() {
         "peer1 state got {:?}",
         peer1_state,
     );
-    JsFuture::from(client1.disconnect(peer1.address(), None))
+    JsFuture::from(client1.disconnect(peer1.address.clone(), None))
         .await
         .unwrap();
     let peers = get_peers(&client1).await;
