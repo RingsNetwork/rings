@@ -457,7 +457,7 @@ impl Processor {
             .encode()
             .map_err(Error::ServiceRegisterError)?;
         self.swarm
-            .storage_append_data(name, encoded_did)
+            .storage_touch_data(name, encoded_did)
             .await
             .map_err(error::Error::ServiceRegisterError)
     }

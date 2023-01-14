@@ -14,6 +14,7 @@ use rings_node::backend::BackendConfig;
 use rings_node::cli::Client;
 use rings_node::logging::node::init_logging;
 use rings_node::logging::node::LogLevel;
+use rings_node::prelude::rings_core::dht::Did;
 use rings_node::prelude::rings_core::dht::Stabilization;
 use rings_node::prelude::rings_core::dht::TStabilize;
 use rings_node::prelude::rings_core::ecc::SecretKey;
@@ -340,6 +341,9 @@ async fn daemon_run<P>(
 where
     P: AsRef<std::path::Path>,
 {
+    let did: Did = key.address().into();
+    println!("Did: {}", did);
+
     let storage = PersistenceStorage::new_with_cap_and_path(storage_capacity, storage_path).await?;
 
     let swarm = Arc::new(

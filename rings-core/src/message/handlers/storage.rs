@@ -32,6 +32,8 @@ pub trait ChordStorageInterface {
     async fn storage_store(&self, vnode: VirtualNode) -> Result<()>;
     /// append data to Data type virtual node
     async fn storage_append_data(&self, topic: &str, data: Encoded) -> Result<()>;
+    /// append data to Data type virtual node uniquely
+    async fn storage_touch_data(&self, topic: &str, data: Encoded) -> Result<()>;
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
@@ -78,6 +80,21 @@ impl ChordStorageInterface for Swarm {
     async fn storage_append_data(&self, topic: &str, data: Encoded) -> Result<()> {
         let vnode = (topic.to_string(), data).try_into()?;
         let op = VNodeOperation::Extend(vnode);
+
+        match self.dht.vnode_operate(op).await? {
+            PeerRingAction::None => Ok(()),
+            PeerRingAction::RemoteAction(target, PeerRingRemoteAction::FindVNodeForOperate(op)) => {
+                self.send_direct_message(Message::OperateVNode(op), target)
+                    .await?;
+                Ok(())
+            }
+            act => Err(Error::PeerRingUnexpectedAction(act)),
+        }
+    }
+
+    async fn storage_touch_data(&self, topic: &str, data: Encoded) -> Result<()> {
+        let vnode = (topic.to_string(), data).try_into()?;
+        let op = VNodeOperation::Touch(vnode);
 
         match self.dht.vnode_operate(op).await? {
             PeerRingAction::None => Ok(()),

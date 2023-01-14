@@ -35,8 +35,12 @@ pub enum VNodeOperation {
     /// Create or update a VirtualNode
     Overwrite(VirtualNode),
     /// Extend data to a Data type VirtualNode.
-    /// This operation will not append data to not existed VirtualNode.
+    /// This operation will create VirtualNode if it's not existed.
     Extend(VirtualNode),
+    /// Extend data to a Data type VirtualNode uniquely.
+    /// If any element is already existed, move it to the end of the data vector.
+    /// This operation will create VirtualNode if it's not existed.
+    Touch(VirtualNode),
     /// Join subring.
     JoinSubring(String, Did),
 }
@@ -74,6 +78,7 @@ impl VNodeOperation {
         Ok(match self {
             VNodeOperation::Overwrite(vnode) => vnode.did,
             VNodeOperation::Extend(vnode) => vnode.did,
+            VNodeOperation::Touch(vnode) => vnode.did,
             VNodeOperation::JoinSubring(name, _) => VirtualNode::gen_did(name)?,
         })
     }
@@ -83,6 +88,7 @@ impl VNodeOperation {
         match self {
             VNodeOperation::Overwrite(vnode) => vnode.kind,
             VNodeOperation::Extend(vnode) => vnode.kind,
+            VNodeOperation::Touch(vnode) => vnode.kind,
             VNodeOperation::JoinSubring(..) => VNodeType::Subring,
         }
     }
@@ -142,17 +148,19 @@ impl TryFrom<String> for VirtualNode {
 }
 
 impl VirtualNode {
-    /// The entry point of VNode operations.
+    /// The entry point of [VNodeOperation].
     /// Will dispatch to different operation handlers according to the variant.
     pub fn operate(&self, op: VNodeOperation) -> Result<Self> {
         match op {
             VNodeOperation::Overwrite(vnode) => self.overwrite(vnode),
             VNodeOperation::Extend(vnode) => self.extend(vnode),
+            VNodeOperation::Touch(vnode) => self.touch(vnode),
             VNodeOperation::JoinSubring(_, did) => self.join_subring(did),
         }
     }
 
-    /// Overwrite current data with new data
+    /// Overwrite current data with new data.
+    /// The handler of [VNodeOperation::Overwrite].
     pub fn overwrite(&self, other: Self) -> Result<Self> {
         if self.kind != VNodeType::Data {
             return Err(Error::VNodeNotOverwritable);
@@ -166,7 +174,8 @@ impl VirtualNode {
         Ok(other)
     }
 
-    /// This method is used to extend data to a Data type VNode.
+    /// This method is used to extend data to a Data type VirtualNode.
+    /// The handler of [VNodeOperation::Extend].
     pub fn extend(&self, other: Self) -> Result<Self> {
         if self.kind != VNodeType::Data {
             return Err(Error::VNodeNotAppendable);
@@ -193,7 +202,47 @@ impl VirtualNode {
         })
     }
 
+    /// This method is used to extend data to a Data type VirtualNode uniquely.
+    /// If any element is already existed, move it to the end of the data vector.
+    /// The handler of [VNodeOperation::Touch].
+    pub fn touch(&self, other: Self) -> Result<Self> {
+        if self.kind != VNodeType::Data {
+            return Err(Error::VNodeNotAppendable);
+        }
+        if self.kind != other.kind {
+            return Err(Error::VNodeKindNotEqual);
+        }
+        if self.did != other.did {
+            return Err(Error::VNodeDidNotEqual);
+        }
+
+        let remains = self
+            .data
+            .iter()
+            .filter(|e| !other.data.contains(e))
+            .collect::<Vec<_>>();
+
+        let trim_num = max(
+            0,
+            (remains.len() + other.data.len()) as i64 - VNODE_DATA_MAX_LEN as i64,
+        ) as usize;
+
+        let mut data = remains
+            .into_iter()
+            .skip(trim_num)
+            .cloned()
+            .collect::<Vec<_>>();
+        data.extend_from_slice(&other.data);
+
+        Ok(Self {
+            did: self.did,
+            data,
+            kind: self.kind,
+        })
+    }
+
     /// This method is used to join a subring.
+    /// The handler of [VNodeOperation::JoinSubring].
     pub fn join_subring(&self, did: Did) -> Result<Self> {
         if self.kind != VNodeType::Subring {
             return Err(Error::VNodeNotJoinable);
