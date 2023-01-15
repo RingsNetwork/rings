@@ -71,6 +71,14 @@ pub enum Error {
     InvalidData,
     #[error("Invalid service")]
     InvalidService,
+    #[error("Invalid address")]
+    InvalidAddress,
+    #[error("Invalid auth data")]
+    InvalidAuthData,
+    #[error("Storage Error: {0}")]
+    Storage(rings_core::err::Error),
+    #[error("Swarm Error: {0}")]
+    Swarm(rings_core::err::Error),
 }
 
 impl Error {
@@ -108,6 +116,10 @@ impl Error {
             Error::InvalidData => 29,
             Error::InvalidService => 30,
             Error::ServiceRegisterError(_) => 31,
+            Error::InvalidAddress => 32,
+            Error::InvalidAuthData => 33,
+            Error::Storage(_) => 34,
+            Error::Swarm(_) => 35,
         };
         -32000 - code
     }

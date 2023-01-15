@@ -4,6 +4,7 @@
 pub mod client;
 pub mod jsonrpc_client;
 pub mod utils;
+pub mod async_client;
 use std::str::FromStr;
 
 pub use self::client::*;

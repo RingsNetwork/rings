@@ -176,7 +176,6 @@ impl UnsignedInfo {
 #[allow(dead_code)]
 pub struct Client {
     processor: Arc<Processor>,
-    unsigned_info: UnsignedInfo,
     signed_data: Vec<u8>,
     stuns: String,
     rpc_meta: RpcMeta,
@@ -229,7 +228,6 @@ impl Client {
             let rpc_meta = (processor.clone(), false).into();
             Ok(JsValue::from(Client {
                 processor,
-                unsigned_info: unsigned_info.clone(),
                 signed_data,
                 stuns,
                 rpc_meta,
