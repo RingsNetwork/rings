@@ -421,13 +421,13 @@ async fn lookup_service(params: Params, meta: RpcMeta) -> Result<Value> {
     let result = meta.processor.storage_check_cache(rid).await;
 
     if let Some(vnode) = result {
-        let messages = vnode
+        let dids = vnode
             .data
             .iter()
             .map(|v| v.decode())
             .filter_map(|v| v.ok())
             .collect::<Vec<String>>();
-        Ok(serde_json::json!(messages))
+        Ok(serde_json::json!(dids))
     } else {
         Ok(serde_json::json!(Vec::<String>::new()))
     }
