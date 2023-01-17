@@ -35,6 +35,7 @@ use crate::prelude::rings_core::message::MessageHandler;
 use crate::prelude::rings_core::message::MessagePayload;
 use crate::prelude::rings_core::prelude::uuid::Uuid;
 use crate::prelude::rings_core::prelude::vnode;
+use crate::prelude::rings_core::prelude::vnode::VirtualNode;
 use crate::prelude::rings_core::prelude::web3::ethabi::Token;
 use crate::prelude::rings_core::session::AuthorizedInfo;
 use crate::prelude::rings_core::session::SessionManager;
@@ -45,6 +46,7 @@ use crate::prelude::rings_core::transports::manager::TransportManager;
 use crate::prelude::rings_core::transports::Transport;
 use crate::prelude::rings_core::types::ice_transport::IceTransportInterface;
 use crate::prelude::rings_core::types::message::MessageListener;
+use crate::prelude::rings_core::utils::js_utils;
 use crate::prelude::rings_core::utils::js_value;
 use crate::prelude::wasm_bindgen;
 use crate::prelude::wasm_bindgen::prelude::*;
@@ -649,6 +651,33 @@ impl Client {
                 .await
                 .map_err(JsError::from)?;
             Ok(JsValue::from_str(tx_id.to_string().as_str()))
+        })
+    }
+
+    /// lookup service did on DHT by its name
+    /// - name: The name of service
+    pub fn lookup_service(&self, name: String) -> js_sys::Promise {
+        let p = self.processor.clone();
+
+        future_to_promise(async move {
+            let rid = VirtualNode::gen_did(&name).map_err(JsError::from)?;
+
+            p.storage_fetch(rid).await.map_err(JsError::from)?;
+            js_utils::window_sleep(500).await?;
+            let result = p.storage_check_cache(rid).await;
+
+            if let Some(vnode) = result {
+                let dids = vnode
+                    .data
+                    .iter()
+                    .map(|v| v.decode())
+                    .filter_map(|v| v.ok())
+                    .map(|x: String| JsValue::from_str(x.as_str()))
+                    .collect::<js_sys::Array>();
+                Ok(JsValue::from(dids))
+            } else {
+                Ok(JsValue::from(js_sys::Array::new()))
+            }
         })
     }
 }

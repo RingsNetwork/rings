@@ -43,3 +43,28 @@ pub mod js_value {
         serde_wasm_bindgen::from_value(value).map_err(Error::SerdeWasmBindgenError)
     }
 }
+
+#[cfg(feature = "wasm")]
+pub mod js_utils {
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::JsValue;
+
+    pub fn window_sleep(millis: i32) -> wasm_bindgen_futures::JsFuture {
+        let window = web_sys::window().unwrap();
+
+        let promise = js_sys::Promise::new(&mut |resolve, _| {
+            let func = Closure::once_into_js(move || {
+                resolve.call0(&JsValue::NULL).unwrap();
+            });
+            window
+                .set_timeout_with_callback_and_timeout_and_arguments_0(
+                    func.as_ref().unchecked_ref(),
+                    millis,
+                )
+                .unwrap();
+        });
+
+        wasm_bindgen_futures::JsFuture::from(promise)
+    }
+}
