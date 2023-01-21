@@ -1,6 +1,6 @@
 [package]
 name = "rings-node"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 default-run = "rings"
 authors = ["RND <dev@ringsnetwork.io>"]
