@@ -18,7 +18,7 @@ members = ["rings-core"]
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["browser"]
+default = ["node"]
 node = [
     "tokio",
     "hyper",

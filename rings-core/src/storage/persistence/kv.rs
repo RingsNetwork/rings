@@ -45,6 +45,13 @@ impl KvStorage {
         })
     }
 
+    /// New KvStorage
+    /// * cap: max_size in bytes
+    /// * name: db file location
+    pub async fn new_with_cap_and_name(cap: usize, name: &str) -> Result<Self> {
+        Self::new_with_cap_and_path(cap, name).await
+    }
+
     /// New KvStorage with default path
     /// default_path is `./`
     pub async fn new_with_cap(cap: usize) -> Result<Self> {

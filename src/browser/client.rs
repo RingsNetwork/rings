@@ -14,7 +14,6 @@ use crate::backend::types::BackendMessage;
 use crate::backend::types::HttpResponse;
 use crate::backend::types::MessageType;
 use crate::consts::BACKEND_MTU;
-use crate::jsonrpc::RpcMeta;
 use crate::prelude::chunk::Chunk;
 use crate::prelude::chunk::ChunkList;
 use crate::prelude::chunk::ChunkManager;
@@ -22,10 +21,7 @@ use crate::prelude::js_sys;
 use crate::prelude::message;
 use crate::prelude::rings_core::async_trait;
 use crate::prelude::rings_core::dht::Did;
-use crate::prelude::rings_core::dht::Stabilization;
-use crate::prelude::rings_core::dht::TStabilize;
 use crate::prelude::rings_core::ecc::PublicKey;
-use crate::prelude::rings_core::ecc::SecretKey;
 use crate::prelude::rings_core::message::CustomMessage;
 use crate::prelude::rings_core::message::Encoded;
 use crate::prelude::rings_core::message::MaybeEncrypted;
@@ -37,15 +33,9 @@ use crate::prelude::rings_core::prelude::uuid::Uuid;
 use crate::prelude::rings_core::prelude::vnode;
 use crate::prelude::rings_core::prelude::vnode::VirtualNode;
 use crate::prelude::rings_core::prelude::web3::ethabi::Token;
-use crate::prelude::rings_core::session::AuthorizedInfo;
-use crate::prelude::rings_core::session::SessionManager;
-use crate::prelude::rings_core::session::Signer;
-use crate::prelude::rings_core::storage::PersistenceStorage;
-use crate::prelude::rings_core::swarm::SwarmBuilder;
 use crate::prelude::rings_core::transports::manager::TransportManager;
 use crate::prelude::rings_core::transports::Transport;
 use crate::prelude::rings_core::types::ice_transport::IceTransportInterface;
-use crate::prelude::rings_core::types::message::MessageListener;
 use crate::prelude::rings_core::utils::js_utils;
 use crate::prelude::rings_core::utils::js_value;
 use crate::prelude::wasm_bindgen;
@@ -54,6 +44,8 @@ use crate::prelude::wasm_bindgen_futures;
 use crate::prelude::wasm_bindgen_futures::future_to_promise;
 use crate::prelude::web3::contract::tokens::Tokenizable;
 use crate::prelude::web_sys::RtcIceConnectionState;
+use crate::prelude::Signer;
+use crate::processor;
 use crate::processor::Processor;
 use crate::util::from_rtc_ice_connection_state;
 
@@ -85,6 +77,15 @@ pub enum AddressType {
     ED25519,
 }
 
+impl From<AddressType> for processor::AddressType {
+    fn from(v: AddressType) -> Self {
+        match v {
+            AddressType::DEFAULT => Self::DEFAULT,
+            AddressType::ED25519 => Self::ED25519,
+        }
+    }
+}
+
 impl ToString for AddressType {
     fn to_string(&self) -> String {
         match self {
@@ -98,12 +99,13 @@ impl ToString for AddressType {
 #[wasm_bindgen]
 #[derive(Clone)]
 pub struct UnsignedInfo {
-    /// Did identify
-    key_addr: Did,
-    /// auth information
-    auth: AuthorizedInfo,
-    /// random secrekey generate by service
-    random_key: SecretKey,
+    inner: processor::UnsignedInfo,
+}
+
+impl From<processor::UnsignedInfo> for UnsignedInfo {
+    fn from(v: processor::UnsignedInfo) -> Self {
+        Self { inner: v }
+    }
 }
 
 #[wasm_bindgen]
@@ -111,22 +113,20 @@ impl UnsignedInfo {
     /// Create a new `UnsignedInfo` instance with SignerMode::EIP191
     #[wasm_bindgen(constructor)]
     pub fn new(key_addr: String) -> Result<UnsignedInfo, wasm_bindgen::JsError> {
-        Self::new_with_signer(key_addr, SignerMode::EIP191)
+        Ok(processor::UnsignedInfo::new(key_addr)
+            .map_err(JsError::from)?
+            .into())
     }
 
     /// Create a new `UnsignedInfo` instance
     ///   * key_addr: wallet address
     ///   * signer: `SignerMode`
     pub fn new_with_signer(key_addr: String, signer: SignerMode) -> Result<UnsignedInfo, JsError> {
-        let key_addr = Did::from_str(key_addr.as_str())?;
-        let (auth, random_key) =
-            SessionManager::gen_unsign_info(key_addr, None, Some(signer.into()));
-
-        Ok(UnsignedInfo {
-            auth,
-            random_key,
-            key_addr,
-        })
+        Ok(
+            processor::UnsignedInfo::new_with_signer(key_addr, signer.into())
+                .map_err(JsError::from)?
+                .into(),
+        )
     }
 
     /// Create a new `UnsignedInfo` instance
@@ -135,30 +135,16 @@ impl UnsignedInfo {
         address: String,
         addr_type: AddressType,
     ) -> Result<UnsignedInfo, JsError> {
-        let (key_addr, auth, random_key) = match addr_type {
-            AddressType::DEFAULT => {
-                let key_addr = Did::from_str(address.as_str())?;
-                let (auth, random_key) =
-                    SessionManager::gen_unsign_info(key_addr, None, Some(Signer::EIP191));
-                (key_addr, auth, random_key)
-            }
-            AddressType::ED25519 => {
-                let pubkey = PublicKey::try_from_b58t(&address).map_err(JsError::from)?;
-                let (auth, random_key) =
-                    SessionManager::gen_unsign_info_with_ed25519_pubkey(None, pubkey)?;
-                (pubkey.address().into(), auth, random_key)
-            }
-        };
-        Ok(UnsignedInfo {
-            auth,
-            random_key,
-            key_addr,
-        })
+        Ok(
+            processor::UnsignedInfo::new_with_address(address, addr_type.into())
+                .map_err(JsError::from)?
+                .into(),
+        )
     }
 
     #[wasm_bindgen(getter)]
     pub fn auth(&self) -> Result<String, JsError> {
-        let s = self.auth.to_string()?;
+        let s = self.inner.auth().map_err(JsError::from)?;
         Ok(s)
     }
 }
@@ -176,9 +162,9 @@ impl UnsignedInfo {
 #[allow(dead_code)]
 pub struct Client {
     processor: Arc<Processor>,
-    signed_data: Vec<u8>,
-    stuns: String,
-    rpc_meta: RpcMeta,
+    // signed_data: Vec<u8>,
+    // stuns: String,
+    // rpc_meta: RpcMeta,
 }
 
 #[wasm_bindgen]
@@ -205,32 +191,15 @@ impl Client {
         stuns: String,
         storage_name: String,
     ) -> js_sys::Promise {
-        let unsigned_info = unsigned_info.clone();
+        let unsigned_info = unsigned_info.inner.clone();
         let signed_data = signed_data.to_vec();
         future_to_promise(async move {
-            let storage = PersistenceStorage::new_with_cap_and_name(50000, storage_name.as_str())
-                .await
-                .map_err(JsError::from)?;
-
-            let random_key = unsigned_info.random_key;
-            let session_manager =
-                SessionManager::new(&signed_data, &unsigned_info.auth, &random_key);
-
-            let swarm = Arc::new(
-                SwarmBuilder::new(&stuns, storage)
-                    .session_manager(unsigned_info.key_addr, session_manager)
-                    .build()
-                    .map_err(JsError::from)?,
-            );
-
-            let stabilization = Arc::new(Stabilization::new(swarm.clone(), 20));
-            let processor = Arc::new(Processor::from((swarm, stabilization)));
-            let rpc_meta = (processor.clone(), false).into();
+            let proc =
+                Processor::new_with_storage(&unsigned_info, &signed_data[..], stuns, storage_name)
+                    .await
+                    .map_err(JsError::from)?;
             Ok(JsValue::from(Client {
-                processor,
-                signed_data,
-                stuns,
-                rpc_meta,
+                processor: Arc::new(proc),
             }))
         })
     }
@@ -240,16 +209,7 @@ impl Client {
         let p = self.processor.clone();
 
         future_to_promise(async move {
-            let h = Arc::new(p.swarm.create_message_handler(None, None));
-            let s = Arc::clone(&p.stabilization);
-            futures::join!(
-                async {
-                    h.listen().await;
-                },
-                async {
-                    s.wait().await;
-                }
-            );
+            p.listen(None).await;
             Ok(JsValue::null())
         })
     }
@@ -276,16 +236,7 @@ impl Client {
         let cb = Box::new(callback);
 
         future_to_promise(async move {
-            let h = Arc::new(p.swarm.create_message_handler(Some(cb), None));
-            let s = Arc::clone(&p.stabilization);
-            futures::join!(
-                async {
-                    h.listen().await;
-                },
-                async {
-                    s.wait().await;
-                }
-            );
+            p.listen(Some(cb)).await;
             Ok(JsValue::null())
         })
     }

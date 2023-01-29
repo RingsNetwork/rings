@@ -4,6 +4,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use futures::future::Join;
+use futures::Future;
 #[cfg(feature = "node")]
 use jsonrpc_core::Metadata;
 
@@ -19,9 +21,9 @@ use crate::jsonrpc::response::TransportAndIce;
 use crate::jsonrpc_client::SimpleClient;
 use crate::prelude::rings_core::dht::Did;
 use crate::prelude::rings_core::dht::Stabilization;
+use crate::prelude::rings_core::dht::TStabilize;
 use crate::prelude::rings_core::ecc::PublicKey;
 use crate::prelude::rings_core::ecc::SecretKey;
-use crate::prelude::rings_core::message::CallbackFn;
 use crate::prelude::rings_core::message::Encoded;
 use crate::prelude::rings_core::message::Encoder;
 use crate::prelude::rings_core::message::Message;
@@ -33,7 +35,6 @@ use crate::prelude::rings_core::prelude::web3::ethabi::Token;
 use crate::prelude::rings_core::prelude::RTCSdpType;
 use crate::prelude::rings_core::session::AuthorizedInfo;
 use crate::prelude::rings_core::session::SessionManager;
-use crate::prelude::rings_core::session::Signer;
 use crate::prelude::rings_core::storage::PersistenceStorage;
 use crate::prelude::rings_core::swarm::Swarm;
 use crate::prelude::rings_core::swarm::SwarmBuilder;
@@ -41,14 +42,19 @@ use crate::prelude::rings_core::transports::manager::TransportManager;
 use crate::prelude::rings_core::transports::Transport;
 use crate::prelude::rings_core::types::ice_transport::IceTransportInterface;
 use crate::prelude::rings_core::types::ice_transport::IceTrickleScheme;
+use crate::prelude::rings_core::types::message::MessageListener;
 use crate::prelude::vnode;
 use crate::prelude::web3::signing::keccak256;
+use crate::prelude::CallbackFn;
 use crate::prelude::ChordStorageInterface;
 use crate::prelude::CustomMessage;
+use crate::prelude::Signer;
 
 /// AddressType enum contains `DEFAULT` and `ED25519`.
 pub enum AddressType {
+    /// default address type
     DEFAULT,
+    /// ED25519 address type
     ED25519,
 }
 
@@ -109,6 +115,7 @@ impl UnsignedInfo {
         })
     }
 
+    /// Get auth string
     pub fn auth(&self) -> Result<String> {
         let s = self.auth.to_string().map_err(|_| Error::InvalidAuthData)?;
         Ok(s)
@@ -155,6 +162,7 @@ impl Processor {
     ) -> Result<Self> {
         let unsigned_info = unsigned_info.clone();
         let signed_data = signed_data.to_vec();
+
         let storage = PersistenceStorage::new_with_cap_and_name(50000, storage_name.as_str())
             .await
             .map_err(Error::Storage)?;
@@ -174,10 +182,12 @@ impl Processor {
     }
 
     /// Listen processor message
-    pub fn listen(&self, callback: CallbackFn) -> Result<()> {
-        let message_handler = Arc::new(self.swarm.create_message_handler(Some(callback), None));
+    pub fn listen(&self, callback: Option<CallbackFn>) -> Join<impl Future, impl Future> {
+        let message_handler = Arc::new(self.swarm.create_message_handler(callback, None));
         let stab = Arc::clone(&self.stabilization);
-        Ok(())
+        futures::future::join(async { message_handler.listen().await }, async {
+            stab.wait().await
+        })
     }
 }
 
