@@ -17,21 +17,17 @@ use tower_http::cors::CorsLayer;
 
 use self::http_error::HttpError;
 use crate::jsonrpc::RpcMeta;
-use crate::prelude::rings_core::dht::Stabilization;
 use crate::prelude::rings_core::ecc::PublicKey;
-use crate::prelude::rings_core::swarm::Swarm;
 use crate::processor::Processor;
 
 /// Run a web server to handle jsonrpc request
 pub async fn run_service(
     addr: String,
-    swarm: Arc<Swarm>,
-    stabilization: Arc<Stabilization>,
+    processor: Arc<Processor>,
     pubkey: Arc<PublicKey>,
 ) -> anyhow::Result<()> {
     let binding_addr = addr.parse().unwrap();
 
-    let processor = Arc::new(Processor::from((swarm, stabilization)));
     let processor_layer = Extension(processor);
 
     let mut jsonrpc_handler: MetaIoHandler<RpcMeta> = MetaIoHandler::default();

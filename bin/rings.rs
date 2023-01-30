@@ -16,11 +16,9 @@ use rings_node::logging::node::init_logging;
 use rings_node::logging::node::LogLevel;
 use rings_node::prelude::rings_core::dht::Did;
 use rings_node::prelude::rings_core::dht::Stabilization;
-use rings_node::prelude::rings_core::dht::TStabilize;
 use rings_node::prelude::rings_core::ecc::SecretKey;
-use rings_node::prelude::rings_core::storage::PersistenceStorage;
-use rings_node::prelude::rings_core::swarm::SwarmBuilder;
-use rings_node::prelude::rings_core::types::message::MessageListener;
+use rings_node::prelude::PersistenceStorage;
+use rings_node::prelude::SwarmBuilder;
 use rings_node::processor::Processor;
 use rings_node::service::run_service;
 use rings_node::util;
@@ -361,15 +359,15 @@ where
         None
     };
 
-    let listen_event = Arc::new(swarm.create_message_handler(callback, None));
     let stabilize = Arc::new(Stabilization::new(swarm.clone(), stabilize_timeout));
-    let swarm_clone = swarm.clone();
+    let processor = Arc::new(Processor::from((swarm, stabilize)));
+    let processor_clone = processor.clone();
+
     let pubkey = Arc::new(key.pubkey());
 
-    let (_, _, _) = futures::join!(
-        listen_event.listen(),
-        run_service(http_addr.to_owned(), swarm_clone, stabilize.clone(), pubkey),
-        stabilize.wait(),
+    let _ = futures::join!(
+        processor.listen(callback),
+        run_service(http_addr.to_owned(), processor_clone, pubkey),
     );
 
     Ok(())
