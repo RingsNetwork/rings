@@ -9,8 +9,8 @@ use clap::Subcommand;
 use futures::pin_mut;
 use futures::StreamExt;
 use rings_core::message::CallbackFn;
-use rings_node::backend::Backend;
-use rings_node::backend::BackendConfig;
+use rings_node::backend::service::Backend;
+use rings_node::backend::service::BackendConfig;
 use rings_node::cli::Client;
 use rings_node::logging::node::init_logging;
 use rings_node::logging::node::LogLevel;
@@ -351,13 +351,13 @@ where
             .build()?,
     );
 
-    let callback: Option<CallbackFn> = if let Some(backend) = backend {
+    let callback: Option<CallbackFn> = Some(if let Some(backend) = backend {
         let config = BackendConfig::load(&backend).await?;
         let backend = Backend::new(config);
-        Some(Box::new(backend))
+        Box::new(backend)
     } else {
-        None
-    };
+        Box::new(Backend::default())
+    });
 
     let stabilize = Arc::new(Stabilization::new(swarm.clone(), stabilize_timeout));
     let processor = Arc::new(Processor::from((swarm, stabilize)));

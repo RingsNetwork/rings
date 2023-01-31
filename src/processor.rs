@@ -9,10 +9,10 @@ use futures::Future;
 #[cfg(feature = "node")]
 use jsonrpc_core::Metadata;
 
-use crate::backend::types::BackendMessage;
-use crate::backend::types::HttpRequest;
-use crate::backend::types::MessageType;
-use crate::backend::types::Timeout;
+use crate::backend::message::BackendMessage;
+use crate::backend::message::HttpRequest;
+use crate::backend::message::MessageType;
+use crate::backend::message::Timeout;
 use crate::error;
 use crate::error::Error;
 use crate::error::Result;

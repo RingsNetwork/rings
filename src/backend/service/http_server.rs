@@ -8,11 +8,11 @@ use rings_core::chunk::ChunkList;
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::types::BackendMessage;
-use super::types::HttpResponse;
-use super::types::MessageEndpoint;
-use crate::backend::types::HttpRequest;
-use crate::backend::types::MessageType;
+use super::backend_message::BackendMessage;
+use super::backend_message::HttpRequest;
+use super::backend_message::HttpResponse;
+use super::backend_message::MessageEndpoint;
+use super::backend_message::MessageType;
 use crate::consts::BACKEND_MTU;
 use crate::error::Error;
 use crate::error::Result;
@@ -36,6 +36,15 @@ pub struct HttpServer {
 
     /// hidden services
     pub services: Vec<HiddenServerConfig>,
+}
+
+impl Default for HttpServer {
+    fn default() -> Self {
+        Self {
+            client: Arc::new(reqwest::Client::new()),
+            services: Default::default(),
+        }
+    }
 }
 
 impl From<Vec<HiddenServerConfig>> for HttpServer {
@@ -127,7 +136,7 @@ impl MessageEndpoint for HttpServer {
             tracing::debug!("Chunk data len: {}", c.data.len());
             let bytes = c.to_bincode().map_err(|_| Error::SerializeError)?;
             tracing::debug!("Chunk len: {}", bytes.len());
-            super::types::send_chunk_report_message(handler, ctx, relay, bytes.to_vec().as_slice())
+            super::utils::send_chunk_report_message(handler, ctx, relay, bytes.to_vec().as_slice())
                 .await?;
         }
         Ok(())

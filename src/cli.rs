@@ -13,8 +13,8 @@ use jsonrpc_core::Params;
 use jsonrpc_core::Value;
 use serde_json::json;
 
-use crate::backend::types::HttpRequest;
-use crate::backend::types::Timeout;
+use crate::backend::message::HttpRequest;
+use crate::backend::message::Timeout;
 use crate::jsonrpc;
 use crate::jsonrpc::method::Method;
 use crate::jsonrpc::response::Peer;
