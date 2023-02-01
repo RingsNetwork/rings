@@ -10,9 +10,9 @@ use bytes::Bytes;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::backend::message::BackendMessage;
-use crate::backend::message::HttpResponse;
-use crate::backend::message::MessageType;
+use crate::backend::types::BackendMessage;
+use crate::backend::types::HttpResponse;
+use crate::backend::types::MessageType;
 use crate::consts::BACKEND_MTU;
 use crate::prelude::chunk::Chunk;
 use crate::prelude::chunk::ChunkList;

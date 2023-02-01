@@ -15,10 +15,10 @@ use serde::Serialize;
 use self::http_server::HiddenServerConfig;
 use self::http_server::HttpServer;
 use self::text::TextEndpoint;
-use crate::backend::message as backend_message;
-use crate::backend::message::BackendMessage;
-use crate::backend::message::MessageEndpoint;
-use crate::backend::message::MessageType;
+use crate::backend;
+use crate::backend::types::BackendMessage;
+use crate::backend::types::MessageEndpoint;
+use crate::backend::types::MessageType;
 use crate::prelude::rings_core::message::Message;
 use crate::prelude::*;
 

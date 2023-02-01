@@ -4,8 +4,8 @@ use std::str;
 
 use async_trait::async_trait;
 
-use super::backend_message::BackendMessage;
-use super::backend_message::MessageEndpoint;
+use super::backend::MessageEndpoint;
+use super::BackendMessage;
 use crate::error::Error;
 use crate::error::Result;
 use crate::prelude::*;
