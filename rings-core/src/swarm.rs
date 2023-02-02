@@ -18,6 +18,8 @@ use crate::dht::PeerRingAction;
 use crate::ecc::SecretKey;
 use crate::err::Error;
 use crate::err::Result;
+use crate::measure::Measure;
+use crate::measure::MeasureCounter;
 use crate::message;
 use crate::message::CallbackFn;
 use crate::message::Message;
@@ -117,12 +119,13 @@ impl SwarmBuilder {
         let dht = PeerRing::new_with_storage(dht_did, self.dht_succ_max, self.dht_storage);
 
         Ok(Swarm {
-            pending_transports: Arc::new(Mutex::new(vec![])),
+            pending_transports: Mutex::new(vec![]),
             transports: MemStorage::new(),
             transport_event_channel: Channel::new(),
             ice_servers: self.ice_servers,
             external_address: self.external_address,
             dht: Arc::new(dht),
+            measure: Measure::default(),
             session_manager,
         })
     }
@@ -130,12 +133,13 @@ impl SwarmBuilder {
 
 /// The transports and dht management.
 pub struct Swarm {
-    pub(crate) pending_transports: Arc<Mutex<Vec<Arc<Transport>>>>,
+    pub(crate) pending_transports: Mutex<Vec<Arc<Transport>>>,
     pub(crate) transports: MemStorage<Did, Arc<Transport>>,
     pub(crate) ice_servers: Vec<IceServer>,
     pub(crate) transport_event_channel: Channel<Event>,
     pub(crate) external_address: Option<String>,
     pub(crate) dht: Arc<PeerRing>,
+    pub(crate) measure: Measure,
     session_manager: SessionManager,
 }
 
@@ -338,20 +342,34 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Deb
             println!("node {:?}", payload.relay.next_hop);
             println!("+++++++++++++++++++++++++++++++++");
         }
+
         let transport = self
             .get_and_check_transport(did)
             .await
             .ok_or(Error::SwarmMissDidInTable(did))?;
+
         tracing::trace!(
             "SENT {:?}, to node {:?} via transport {:?}",
             payload.clone(),
             payload.relay.next_hop,
             transport.id
         );
+
         let data = payload.to_bincode()?;
         tracing::info!("send data len: {}", data.len());
+
         transport.wait_for_data_channel_open().await?;
-        transport.send_message(&data).await
+        let result = transport.send_message(&data).await;
+
+        if let Some(did) = payload.relay.next_hop {
+            if result.is_ok() {
+                self.measure.incr(did, MeasureCounter::Sent)
+            } else {
+                self.measure.incr(did, MeasureCounter::FailedToSend)
+            }
+        }
+
+        result
     }
 }
 

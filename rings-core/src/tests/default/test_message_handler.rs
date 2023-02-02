@@ -35,7 +35,7 @@ async fn test_handle_join() -> Result<()> {
     manually_establish_connection(&swarm1, &swarm2).await?;
     let handle1 = swarm1.create_message_handler(None, None);
     let payload = swarm1.poll_message().await.unwrap();
-    match handle1.handle_payload(&payload).await {
+    match handle1.handle_message(&payload).await {
         Ok(_) => assert_eq!(true, true),
         Err(e) => {
             println!("{:?}", e);

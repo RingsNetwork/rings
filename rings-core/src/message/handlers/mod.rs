@@ -22,6 +22,7 @@ use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::err::Error;
 use crate::err::Result;
+use crate::measure::MeasureCounter;
 use crate::session::SessionManager;
 use crate::swarm::Swarm;
 
@@ -156,7 +157,7 @@ impl MessageHandler {
     /// Handle builtin message.
     #[cfg_attr(feature = "wasm", async_recursion(?Send))]
     #[cfg_attr(not(feature = "wasm"), async_recursion)]
-    pub async fn handle_payload(&self, payload: &MessagePayload<Message>) -> Result<()> {
+    pub async fn handle_message(&self, payload: &MessagePayload<Message>) -> Result<()> {
         #[cfg(test)]
         {
             println!("{} got msg {}", self.swarm.did(), &payload.data);
@@ -187,7 +188,7 @@ impl MessageHandler {
                         OriginVerificationGen::Stick(payload.origin_verification.clone()),
                         payload.relay.clone(),
                     )?;
-                    self.handle_payload(&payload).await.unwrap_or(());
+                    self.handle_message(&payload).await.unwrap_or(());
                 }
                 Ok(())
             }
@@ -206,24 +207,39 @@ impl MessageHandler {
         Ok(())
     }
 
+    /// Verify then handle message. Also count to measure.
+    pub async fn handle_payload(&self, payload: &MessagePayload<Message>) -> Option<()> {
+        if !payload.verify() {
+            tracing::error!("Cannot verify msg or it's expired: {:?}", payload);
+            // Cannot count here, because the addr may be an impostor since we cannot verify it.
+            // self.swarm.measure.incr(payload.addr, MeasureCounter::FailedToReceive);
+            return None;
+        }
+
+        if let Err(e) = self.handle_message(payload).await {
+            tracing::error!("Error in handle_message: {}", e);
+            self.swarm
+                .measure
+                .incr(payload.addr, MeasureCounter::FailedToReceive);
+            #[cfg(test)]
+            {
+                println!("Error in handle_message: {}", e);
+            }
+            return None;
+        }
+
+        self.swarm
+            .measure
+            .incr(payload.addr, MeasureCounter::Received);
+        Some(())
+    }
+
     /// This method is required because web-sys components is not `Send`
     /// which means a listening loop cannot running concurrency.
     pub async fn listen_once(&self) -> Option<MessagePayload<Message>> {
-        if let Some(payload) = self.swarm.poll_message().await {
-            if !payload.verify() {
-                tracing::error!("Cannot verify msg or it's expired: {:?}", payload);
-            }
-            if let Err(e) = self.handle_payload(&payload).await {
-                tracing::error!("Error in handle_message: {}", e);
-                #[cfg(test)]
-                {
-                    println!("Error in handle_message: {}", e);
-                }
-            }
-            Some(payload)
-        } else {
-            None
-        }
+        let Some(payload) = self.swarm.poll_message().await else {return None};
+        let Some(()) = self.handle_payload(&payload).await else {return None};
+        Some(payload)
     }
 }
 
@@ -256,14 +272,7 @@ mod listener {
             let payloads = self.swarm.iter_messages().await;
             pin_mut!(payloads);
             while let Some(payload) = payloads.next().await {
-                if !payload.verify() {
-                    tracing::error!("Cannot verify msg or it's expired: {:?}", payload);
-                    continue;
-                }
-                if let Err(e) = self.handle_payload(&payload).await {
-                    tracing::error!("Error in handle_message: {}", e);
-                    continue;
-                }
+                self.handle_payload(&payload).await;
             }
         }
     }
