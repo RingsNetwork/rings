@@ -64,7 +64,7 @@ impl From<MessageType> for u16 {
 #[derive(Debug, Clone)]
 pub struct BackendMessage {
     /// message_type
-    pub message_type: MessageType,
+    pub message_type: u16,
     /// extra bytes
     pub extra: [u8; 30],
     /// data body
@@ -76,7 +76,7 @@ impl BackendMessage {
     /// - `message_type`
     /// - `data`
     /// extra will be [0u8;30]
-    pub fn new(message_type: MessageType, data: &[u8]) -> Self {
+    pub fn new(message_type: u16, data: &[u8]) -> Self {
         Self {
             message_type,
             extra: [0u8; 30],
@@ -92,7 +92,7 @@ where T: Serialize
 
     fn try_from((message_type, data): (MessageType, &T)) -> std::result::Result<Self, Self::Error> {
         let bytes = bincode::serialize(data).map_err(|_| Error::SerializeError)?;
-        Ok(Self::new(message_type, &bytes))
+        Ok(Self::new(message_type.into(), &bytes))
     }
 }
 
@@ -107,7 +107,7 @@ impl TryFrom<&[u8]> for BackendMessage {
         let (left, right) = arrayref::array_refs![value, 32; ..;];
         let (message_type, _) = arrayref::array_refs![left, 2; ..;];
 
-        Ok(Self::new(message_type.into(), right))
+        Ok(Self::new(u16::from_le_bytes(*message_type), right))
     }
 }
 
@@ -129,7 +129,7 @@ impl From<BackendMessage> for Bytes {
 impl From<BackendMessage> for Vec<u8> {
     fn from(v: BackendMessage) -> Self {
         let mut data = Vec::new();
-        let t: u16 = v.message_type.into();
+        let t: u16 = v.message_type;
         data.extend_from_slice(&t.to_le_bytes());
         data.extend_from_slice(&v.extra);
         data.extend_from_slice(&v.data);

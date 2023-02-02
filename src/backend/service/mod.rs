@@ -11,6 +11,7 @@ use arrayref::array_refs;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde::Serialize;
+use tokio::sync::broadcast::Sender;
 
 use self::http_server::HiddenServerConfig;
 use self::http_server::HttpServer;
@@ -26,10 +27,11 @@ use crate::prelude::*;
 pub struct Backend {
     http_server: Arc<HttpServer>,
     text_endpoint: TextEndpoint,
+    sender: Sender<BackendMessage>,
 }
 
 /// BackendConfig
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Default)]
 pub struct BackendConfig {
     /// http_server
     pub hidden_servers: Vec<HiddenServerConfig>,
@@ -39,19 +41,11 @@ pub struct BackendConfig {
 impl Backend {
     /// new backend
     /// - `ipfs_gateway`
-    pub fn new(config: BackendConfig) -> Self {
+    pub fn new(config: BackendConfig, sender: Sender<BackendMessage>) -> Self {
         Self {
             http_server: Arc::new(HttpServer::from(config.hidden_servers)),
             text_endpoint: TextEndpoint::default(),
-        }
-    }
-}
-
-impl Default for Backend {
-    fn default() -> Self {
-        Self {
-            http_server: Arc::new(HttpServer::default()),
-            text_endpoint: TextEndpoint::default(),
+            sender,
         }
     }
 }
@@ -93,7 +87,7 @@ impl MessageCallback for Backend {
         let msg = msg.unwrap();
         tracing::debug!("receive custom_message: {:?}", msg);
 
-        let result = match msg.message_type {
+        let result = match msg.message_type.into() {
             MessageType::SimpleText => {
                 self.text_endpoint
                     .handle_message(handler, ctx, &relay, &msg)
@@ -109,9 +103,12 @@ impl MessageCallback for Backend {
                     "custom_message handle unsupported, tag: {:?}",
                     msg.message_type
                 );
-                return;
+                Ok(())
             }
         };
+        if let Err(e) = self.sender.send(msg) {
+            tracing::error!("broadcast backend_message failed, {}", e);
+        }
         if let Err(e) = result {
             tracing::error!("handle custom_message failed: {}", e);
         }

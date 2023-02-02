@@ -351,13 +351,15 @@ where
             .build()?,
     );
 
-    let callback: Option<CallbackFn> = Some(if let Some(backend) = backend {
-        let config = BackendConfig::load(&backend).await?;
-        let backend = Backend::new(config);
-        Box::new(backend)
+    let backend_config = if let Some(backend) = backend {
+        BackendConfig::load(&backend).await?
     } else {
-        Box::new(Backend::default())
-    });
+        BackendConfig::default()
+    };
+
+    let (sender, _receiver) = tokio::sync::broadcast::channel(1024);
+
+    let callback: Option<CallbackFn> = Some(Box::new(Backend::new(backend_config, sender)));
 
     let stabilize = Arc::new(Stabilization::new(swarm.clone(), stabilize_timeout));
     let processor = Arc::new(Processor::from((swarm, stabilize)));

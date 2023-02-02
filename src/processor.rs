@@ -545,7 +545,8 @@ impl Processor {
             text,
         );
 
-        let msg: BackendMessage = BackendMessage::new(MessageType::SimpleText, text.as_bytes());
+        let msg: BackendMessage =
+            BackendMessage::new(MessageType::SimpleText.into(), text.as_bytes());
         let msg: Vec<u8> = msg.into();
         self.send_message(destination, &msg).await
     }

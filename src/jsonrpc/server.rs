@@ -306,7 +306,7 @@ async fn send_simple_text_message(params: Params, meta: RpcMeta) -> Result<Value
         .as_str()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
 
-    let msg: BackendMessage = BackendMessage::new(MessageType::SimpleText, text.as_bytes());
+    let msg: BackendMessage = BackendMessage::new(MessageType::SimpleText.into(), text.as_bytes());
     let msg: Vec<u8> = msg.into();
     // TODO chunk message flag
     let tx_id = meta.processor.send_message(destination, &msg).await?;

@@ -663,7 +663,7 @@ impl MessageCallbackInstance {
         data: &Bytes,
     ) -> anyhow::Result<()> {
         let m = BackendMessage::try_from(data.to_vec()).map_err(|e| anyhow::anyhow!("{}", e))?;
-        match m.message_type {
+        match m.message_type.into() {
             MessageType::SimpleText => {
                 self.handle_simple_text_message(relay, m.data.as_slice())
                     .await?;
