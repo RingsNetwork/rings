@@ -357,7 +357,7 @@ where
         BackendConfig::default()
     };
 
-    let (sender, _receiver) = tokio::sync::broadcast::channel(1024);
+    let (sender, receiver) = tokio::sync::broadcast::channel(1024);
 
     let callback: Option<CallbackFn> = Some(Box::new(Backend::new(backend_config, sender)));
 
@@ -369,7 +369,7 @@ where
 
     let _ = futures::join!(
         processor.listen(callback),
-        run_service(http_addr.to_owned(), processor_clone, pubkey),
+        run_service(http_addr.to_owned(), processor_clone, pubkey, receiver),
     );
 
     Ok(())

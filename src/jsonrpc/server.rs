@@ -15,6 +15,7 @@ use jsonrpc_core::Metadata;
 use jsonrpc_core::Params;
 use jsonrpc_core::Result;
 use jsonrpc_core::Value;
+use tokio::sync::broadcast::Receiver;
 
 use super::method::Method;
 use super::response;
@@ -40,6 +41,7 @@ use crate::util::from_rtc_ice_connection_state;
 #[derive(Clone)]
 pub struct RpcMeta {
     processor: Arc<Processor>,
+    receiver: Arc<Receiver<BackendMessage>>,
     is_auth: bool,
 }
 
@@ -56,9 +58,15 @@ impl RpcMeta {
 #[cfg(feature = "node")]
 impl Metadata for RpcMeta {}
 
-impl From<(Arc<Processor>, bool)> for RpcMeta {
-    fn from((processor, is_auth): (Arc<Processor>, bool)) -> Self {
-        Self { processor, is_auth }
+impl From<(Arc<Processor>, Arc<Receiver<BackendMessage>>, bool)> for RpcMeta {
+    fn from(
+        (processor, receiver, is_auth): (Arc<Processor>, Arc<Receiver<BackendMessage>>, bool),
+    ) -> Self {
+        Self {
+            processor,
+            receiver,
+            is_auth,
+        }
     }
 }
 

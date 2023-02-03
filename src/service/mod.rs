@@ -13,9 +13,11 @@ use http::header;
 use http::header::HeaderValue;
 use http::HeaderMap;
 use jsonrpc_core::MetaIoHandler;
+use tokio::sync::broadcast::Receiver;
 use tower_http::cors::CorsLayer;
 
 use self::http_error::HttpError;
+use crate::backend::types::BackendMessage;
 use crate::jsonrpc::RpcMeta;
 use crate::prelude::rings_core::ecc::PublicKey;
 use crate::processor::Processor;
@@ -25,6 +27,7 @@ pub async fn run_service(
     addr: String,
     processor: Arc<Processor>,
     pubkey: Arc<PublicKey>,
+    receiver: Receiver<BackendMessage>,
 ) -> anyhow::Result<()> {
     let binding_addr = addr.parse().unwrap();
 
@@ -42,7 +45,8 @@ pub async fn run_service(
             post(jsonrpc_io_handler)
                 .layer(&processor_layer)
                 .layer(&jsonrpc_handler_layer)
-                .layer(&pubkey_layer),
+                .layer(&pubkey_layer)
+                .layer(&Extension(Arc::new(receiver))),
         )
         .route("/status", get(status_handler))
         .layer(CorsLayer::permissive())
@@ -62,6 +66,7 @@ async fn jsonrpc_io_handler(
     Extension(processor): Extension<Arc<Processor>>,
     Extension(io_handler): Extension<Arc<MetaIoHandler<RpcMeta>>>,
     Extension(pubkey): Extension<Arc<PublicKey>>,
+    Extension(receiver): Extension<Arc<Receiver<BackendMessage>>>,
 ) -> Result<JsonResponse, HttpError> {
     let is_auth = if let Some(signature) = headers.get(header::AUTHORIZATION) {
         Processor::verify_signature(signature.as_bytes(), &pubkey)
@@ -70,7 +75,7 @@ async fn jsonrpc_io_handler(
         false
     };
     let r = io_handler
-        .handle_request(&body, (processor, is_auth).into())
+        .handle_request(&body, (processor, receiver, is_auth).into())
         .await
         .ok_or(HttpError::BadRequest)?;
     Ok(JsonResponse(r))
