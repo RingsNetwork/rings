@@ -235,6 +235,22 @@ impl Client {
         ClientOutput::ok("Done.".into(), ())
     }
 
+    pub async fn send_custom_message(
+        &self,
+        did: &str,
+        message_type: u16,
+        data: &str,
+    ) -> Output<()> {
+        self.client
+            .call_method(
+                Method::SendCustomMessage.as_str(),
+                Params::Array(vec![json!(did), json!(message_type), json!(data)]),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        ClientOutput::ok("Done.".into(), ())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn send_http_request_message(
         &self,
@@ -251,7 +267,7 @@ impl Client {
         let params2 = serde_json::to_value(http_request).map_err(|e| anyhow::anyhow!(e))?;
         self.client
             .call_method(
-                Method::SendHttpRequest.as_str(),
+                Method::SendHttpRequestMessage.as_str(),
                 Params::Array(vec![json!(did), params2]),
             )
             .await

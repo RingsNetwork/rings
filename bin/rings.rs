@@ -248,6 +248,7 @@ enum SendCommand {
     Raw(SendRawCommand),
     Http(SendHttpCommand),
     SimpleText(SendSimpleTextCommand),
+    Custom(SendCustomMessageCommand),
 }
 
 #[derive(Args, Debug)]
@@ -296,10 +297,17 @@ struct PubsubCommand {
 struct SendSimpleTextCommand {
     #[command(flatten)]
     client_args: ClientArgs,
-
     to_did: String,
-
     text: String,
+}
+
+#[derive(Args, Debug)]
+struct SendCustomMessageCommand {
+    #[command(flatten)]
+    client_args: ClientArgs,
+    to_did: String,
+    message_type: u16,
+    data: String,
 }
 
 #[derive(Subcommand, Debug)]
@@ -555,6 +563,15 @@ async fn main() -> anyhow::Result<()> {
                 .new_client()
                 .await?
                 .send_simple_text_message(args.to_did.as_str(), args.text.as_str())
+                .await?
+                .display();
+            Ok(())
+        }
+        Command::Send(SendCommand::Custom(args)) => {
+            args.client_args
+                .new_client()
+                .await?
+                .send_custom_message(args.to_did.as_str(), args.message_type, args.data.as_str())
                 .await?
                 .display();
             Ok(())

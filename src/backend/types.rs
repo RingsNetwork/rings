@@ -76,12 +76,18 @@ impl BackendMessage {
     /// - `message_type`
     /// - `data`
     /// extra will be [0u8;30]
-    pub fn new(message_type: u16, data: &[u8]) -> Self {
+    pub fn new(message_type: u16, extra: [u8; 30], data: &[u8]) -> Self {
         Self {
             message_type,
-            extra: [0u8; 30],
+            extra,
             data: data.to_vec(),
         }
+    }
+}
+
+impl From<(u16, &[u8])> for BackendMessage {
+    fn from((message_type, data): (u16, &[u8])) -> Self {
+        Self::new(message_type, [0u8; 30], data)
     }
 }
 
@@ -92,7 +98,7 @@ where T: Serialize
 
     fn try_from((message_type, data): (MessageType, &T)) -> std::result::Result<Self, Self::Error> {
         let bytes = bincode::serialize(data).map_err(|_| Error::SerializeError)?;
-        Ok(Self::new(message_type.into(), &bytes))
+        Ok(Self::new(message_type.into(), [0u8; 30], &bytes))
     }
 }
 
@@ -107,7 +113,11 @@ impl TryFrom<&[u8]> for BackendMessage {
         let (left, right) = arrayref::array_refs![value, 32; ..;];
         let (message_type, _) = arrayref::array_refs![left, 2; ..;];
 
-        Ok(Self::new(u16::from_le_bytes(*message_type), right))
+        Ok(Self::new(
+            u16::from_le_bytes(*message_type),
+            [0u8; 30],
+            right,
+        ))
     }
 }
 

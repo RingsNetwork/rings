@@ -28,10 +28,12 @@ pub enum Method {
     ListPendings,
     /// Close pending connect
     ClosePendingTransport,
-    /// Send ipfs request message
-    SendHttpRequest,
     /// Send simple text message
     SendSimpleText,
+    /// SendHttpRequestMessage,
+    SendHttpRequestMessage,
+    /// SendCustomMessage,
+    SendCustomMessage,
     /// Append data to topic
     PublishMessageToTopic,
     /// Fetch data of topic
@@ -59,8 +61,9 @@ impl Method {
             Method::AcceptAnswer => "acceptAnswer",
             Method::ListPendings => "listPendings",
             Method::ClosePendingTransport => "closePendingTransport",
-            Method::SendHttpRequest => "sendHttpRequest",
             Method::SendSimpleText => "sendSimpleText",
+            Method::SendHttpRequestMessage => "sendHttpRequestMessage",
+            Method::SendCustomMessage => "sendCustomMessage",
             Method::PublishMessageToTopic => "publishMessageToTopic",
             Method::FetchMessagesOfTopic => "fetchMessagesOfTopic",
             Method::RegisterService => "registerService",
@@ -92,8 +95,9 @@ impl TryFrom<&str> for Method {
             "acceptAnswer" => Self::AcceptAnswer,
             "listPendings" => Self::ListPendings,
             "closePendingTransport" => Self::ClosePendingTransport,
-            "sendHttpRequest" => Self::SendHttpRequest,
             "sendSimpleText" => Self::SendSimpleText,
+            "sendHttpRequestMessage" => Self::SendHttpRequestMessage,
+            "sendCustomMessage" => Self::SendCustomMessage,
             "publishMessageToTopic" => Method::PublishMessageToTopic,
             "fetchMessagesOfTopic" => Method::FetchMessagesOfTopic,
             "registerService" => Method::RegisterService,

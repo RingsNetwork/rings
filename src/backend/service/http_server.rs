@@ -127,10 +127,10 @@ impl MessageEndpoint for HttpServer {
         let resp_bytes =
             message::encode_data_gzip(&json_bytes, 9).map_err(|_| Error::EncodedError)?;
 
-        let resp_bytes: Bytes = BackendMessage::new(
+        let resp_bytes: Bytes = BackendMessage::from((
             MessageType::HttpResponse.into(),
             resp_bytes.to_vec().as_slice(),
-        )
+        ))
         .into();
         tracing::debug!("resp_bytes gzip_data len: {}", resp_bytes.len());
 

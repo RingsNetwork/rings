@@ -546,9 +546,32 @@ impl Processor {
         );
 
         let msg: BackendMessage =
-            BackendMessage::new(MessageType::SimpleText.into(), text.as_bytes());
+            BackendMessage::from((MessageType::SimpleText.into(), text.as_bytes()));
         let msg: Vec<u8> = msg.into();
         self.send_message(destination, &msg).await
+    }
+
+    /// send custom message
+    /// - destination: did of destination
+    /// - message_type: custom message type u16
+    /// - extra: extra data
+    /// - data: payload data
+    pub async fn send_custom_message(
+        &self,
+        destination: &str,
+        message_type: u16,
+        data: Vec<u8>,
+        extra: [u8; 30],
+    ) -> Result<uuid::Uuid> {
+        tracing::info!(
+            "send_custom_message, destination: {}, message_type: {}",
+            destination,
+            message_type,
+        );
+
+        let msg: BackendMessage = BackendMessage::new(message_type, extra, data.as_ref());
+        let msg: Vec<u8> = msg.into();
+        self.send_message(destination, &msg[..]).await
     }
 
     /// check local cache of dht
