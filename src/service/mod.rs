@@ -14,6 +14,7 @@ use http::header::HeaderValue;
 use http::HeaderMap;
 use jsonrpc_core::MetaIoHandler;
 use tokio::sync::broadcast::Receiver;
+use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
 
 use self::http_error::HttpError;
@@ -46,7 +47,7 @@ pub async fn run_service(
                 .layer(&processor_layer)
                 .layer(&jsonrpc_handler_layer)
                 .layer(&pubkey_layer)
-                .layer(&Extension(Arc::new(receiver))),
+                .layer(&Extension(Arc::new(Mutex::new(receiver)))),
         )
         .route("/status", get(status_handler))
         .layer(CorsLayer::permissive())
@@ -66,7 +67,7 @@ async fn jsonrpc_io_handler(
     Extension(processor): Extension<Arc<Processor>>,
     Extension(io_handler): Extension<Arc<MetaIoHandler<RpcMeta>>>,
     Extension(pubkey): Extension<Arc<PublicKey>>,
-    Extension(receiver): Extension<Arc<Receiver<BackendMessage>>>,
+    Extension(receiver): Extension<Arc<Mutex<Receiver<BackendMessage>>>>,
 ) -> Result<JsonResponse, HttpError> {
     let is_auth = if let Some(signature) = headers.get(header::AUTHORIZATION) {
         Processor::verify_signature(signature.as_bytes(), &pubkey)

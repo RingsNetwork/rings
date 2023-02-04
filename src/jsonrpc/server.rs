@@ -8,14 +8,13 @@ use std::sync::Arc;
 use futures::future::join_all;
 use jsonrpc_core::Error;
 use jsonrpc_core::ErrorCode;
-#[cfg(feature = "node")]
 use jsonrpc_core::MetaIoHandler;
-#[cfg(feature = "node")]
 use jsonrpc_core::Metadata;
 use jsonrpc_core::Params;
 use jsonrpc_core::Result;
 use jsonrpc_core::Value;
 use tokio::sync::broadcast::Receiver;
+use tokio::sync::Mutex;
 
 use super::method::Method;
 use super::response;
@@ -41,7 +40,7 @@ use crate::util::from_rtc_ice_connection_state;
 #[derive(Clone)]
 pub struct RpcMeta {
     processor: Arc<Processor>,
-    receiver: Arc<Receiver<BackendMessage>>,
+    receiver: Arc<Mutex<Receiver<BackendMessage>>>,
     is_auth: bool,
 }
 
@@ -58,9 +57,13 @@ impl RpcMeta {
 #[cfg(feature = "node")]
 impl Metadata for RpcMeta {}
 
-impl From<(Arc<Processor>, Arc<Receiver<BackendMessage>>, bool)> for RpcMeta {
+impl From<(Arc<Processor>, Arc<Mutex<Receiver<BackendMessage>>>, bool)> for RpcMeta {
     fn from(
-        (processor, receiver, is_auth): (Arc<Processor>, Arc<Receiver<BackendMessage>>, bool),
+        (processor, receiver, is_auth): (
+            Arc<Processor>,
+            Arc<Mutex<Receiver<BackendMessage>>>,
+            bool,
+        ),
     ) -> Self {
         Self {
             processor,
@@ -99,30 +102,7 @@ pub(crate) async fn build_handler(handler: &mut MetaIoHandler<RpcMeta>) {
     );
     handler.add_method_with_meta(Method::RegisterService.as_str(), register_service);
     handler.add_method_with_meta(Method::LookupService.as_str(), lookup_service);
-}
-
-#[cfg(feature = "browser")]
-/// handle jsonrpc method request for browser
-pub async fn handle_request(method: Method, meta: RpcMeta, params: Params) -> Result<Value> {
-    match method {
-        Method::ConnectPeerViaHttp => connect_peer_via_http(params, meta).await,
-        Method::ConnectWithDid => connect_with_did(params, meta).await,
-        Method::ConnectWithSeed => connect_with_seed(params, meta).await,
-        Method::ListPeers => list_peers(params, meta).await,
-        Method::CreateOffer => create_offer(params, meta).await,
-        Method::AnswerOffer => answer_offer(params, meta).await,
-        Method::AcceptAnswer => accept_answer(params, meta).await,
-        Method::SendTo => send_message(params, meta).await,
-        Method::Disconnect => close_connection(params, meta).await,
-        Method::ListPendings => list_pendings(params, meta).await,
-        Method::ClosePendingTransport => close_pending_transport(params, meta).await,
-        Method::SendHttpRequest => send_http_request(params, meta).await,
-        Method::SendSimpleText => send_simple_text_message(params, meta).await,
-        Method::PublishMessageToTopic => publish_message_to_topic(params, meta).await,
-        Method::FetchMessagesOfTopic => fetch_messages_of_topic(params, meta).await,
-        Method::RegisterService => register_service(params, meta).await,
-        Method::LookupService => lookup_service(params, meta).await,
-    }
+    handler.add_method_with_meta(Method::PollMessage.as_str(), poll_message);
 }
 
 /// Connect Peer VIA http
@@ -439,4 +419,28 @@ async fn lookup_service(params: Params, meta: RpcMeta) -> Result<Value> {
     } else {
         Ok(serde_json::json!(Vec::<String>::new()))
     }
+}
+
+#[cfg(feature = "node")]
+async fn poll_message(params: Params, meta: RpcMeta) -> Result<Value> {
+    let params: serde_json::Map<String, serde_json::Value> = params.parse()?;
+    let wait_recv = params
+        .get("wait")
+        .map_or(false, |v| v.as_bool().unwrap_or(false));
+    let message = if wait_recv {
+        let mut recv = meta.receiver.lock().await;
+        recv.recv().await.ok()
+    } else {
+        let mut recv = meta.receiver.lock().await;
+        recv.try_recv().ok()
+    };
+
+    let message = if let Some(msg) = message {
+        serde_json::to_value(&msg).map_err(|_| Error::from(ServerError::JsonSerializeError))?
+    } else {
+        serde_json::Value::Null
+    };
+    Ok(serde_json::json!({
+      "message": message,
+    }))
 }
