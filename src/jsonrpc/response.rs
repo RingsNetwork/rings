@@ -5,6 +5,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 
+use crate::backend;
 use crate::error::Error;
 use crate::error::Result;
 use crate::prelude::rings_core::dht::Did;
@@ -114,6 +115,21 @@ impl From<(Arc<Transport>, Encoded)> for TransportAndIce {
         Self {
             transport_id: transport.id.to_string(),
             ice: handshake_info.to_string(),
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct CustomBackendMessage {
+    message_type: u16,
+    data: String,
+}
+
+impl From<backend::types::BackendMessage> for CustomBackendMessage {
+    fn from(v: backend::types::BackendMessage) -> Self {
+        Self {
+            message_type: v.message_type,
+            data: base64::encode(v.data),
         }
     }
 }

@@ -18,6 +18,7 @@ use tokio::sync::Mutex;
 
 use super::method::Method;
 use super::response;
+use super::response::CustomBackendMessage;
 use super::response::Peer;
 use super::response::TransportAndIce;
 use crate::backend::types::BackendMessage;
@@ -461,10 +462,11 @@ async fn lookup_service(params: Params, meta: RpcMeta) -> Result<Value> {
 }
 
 async fn poll_message(params: Params, meta: RpcMeta) -> Result<Value> {
-    let params: serde_json::Map<String, serde_json::Value> = params.parse()?;
+    let params: Vec<serde_json::Value> = params.parse()?;
     let wait_recv = params
-        .get("wait")
-        .map_or(false, |v| v.as_bool().unwrap_or(false));
+        .get(0)
+        .map(|v| v.as_bool().unwrap_or(false))
+        .unwrap_or(false);
     let message = if wait_recv {
         let mut recv = meta.receiver.lock().await;
         recv.recv().await.ok()
@@ -474,7 +476,8 @@ async fn poll_message(params: Params, meta: RpcMeta) -> Result<Value> {
     };
 
     let message = if let Some(msg) = message {
-        serde_json::to_value(&msg).map_err(|_| Error::from(ServerError::JsonSerializeError))?
+        serde_json::to_value(&CustomBackendMessage::from(msg))
+            .map_err(|_| Error::from(ServerError::JsonSerializeError))?
     } else {
         serde_json::Value::Null
     };
