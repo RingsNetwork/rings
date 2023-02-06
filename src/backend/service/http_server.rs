@@ -8,11 +8,11 @@ use rings_core::chunk::ChunkList;
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::types::BackendMessage;
-use super::types::HttpResponse;
-use super::types::MessageEndpoint;
-use crate::backend::types::HttpRequest;
-use crate::backend::types::MessageType;
+use super::backend::types::BackendMessage;
+use super::backend::types::HttpRequest;
+use super::backend::types::HttpResponse;
+use super::backend::MessageEndpoint;
+use super::backend::MessageType;
 use crate::consts::BACKEND_MTU;
 use crate::error::Error;
 use crate::error::Result;
@@ -36,6 +36,15 @@ pub struct HttpServer {
 
     /// hidden services
     pub services: Vec<HiddenServerConfig>,
+}
+
+impl Default for HttpServer {
+    fn default() -> Self {
+        Self {
+            client: Arc::new(reqwest::Client::new()),
+            services: Default::default(),
+        }
+    }
 }
 
 impl From<Vec<HiddenServerConfig>> for HttpServer {
@@ -118,8 +127,11 @@ impl MessageEndpoint for HttpServer {
         let resp_bytes =
             message::encode_data_gzip(&json_bytes, 9).map_err(|_| Error::EncodedError)?;
 
-        let resp_bytes: Bytes =
-            BackendMessage::new(MessageType::HttpResponse, resp_bytes.to_vec().as_slice()).into();
+        let resp_bytes: Bytes = BackendMessage::from((
+            MessageType::HttpResponse.into(),
+            resp_bytes.to_vec().as_slice(),
+        ))
+        .into();
         tracing::debug!("resp_bytes gzip_data len: {}", resp_bytes.len());
 
         let chunks = ChunkList::<BACKEND_MTU>::from(&resp_bytes);
@@ -127,7 +139,7 @@ impl MessageEndpoint for HttpServer {
             tracing::debug!("Chunk data len: {}", c.data.len());
             let bytes = c.to_bincode().map_err(|_| Error::SerializeError)?;
             tracing::debug!("Chunk len: {}", bytes.len());
-            super::types::send_chunk_report_message(handler, ctx, relay, bytes.to_vec().as_slice())
+            super::utils::send_chunk_report_message(handler, ctx, relay, bytes.to_vec().as_slice())
                 .await?;
         }
         Ok(())

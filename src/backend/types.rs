@@ -61,10 +61,10 @@ impl From<MessageType> for u16 {
 /// - `message_type`: [u8;2]
 /// - `extra data`: [u8;30]
 /// - `message data`: [u8]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackendMessage {
     /// message_type
-    pub message_type: MessageType,
+    pub message_type: u16,
     /// extra bytes
     pub extra: [u8; 30],
     /// data body
@@ -76,12 +76,18 @@ impl BackendMessage {
     /// - `message_type`
     /// - `data`
     /// extra will be [0u8;30]
-    pub fn new(message_type: MessageType, data: &[u8]) -> Self {
+    pub fn new(message_type: u16, extra: [u8; 30], data: &[u8]) -> Self {
         Self {
             message_type,
-            extra: [0u8; 30],
+            extra,
             data: data.to_vec(),
         }
+    }
+}
+
+impl From<(u16, &[u8])> for BackendMessage {
+    fn from((message_type, data): (u16, &[u8])) -> Self {
+        Self::new(message_type, [0u8; 30], data)
     }
 }
 
@@ -92,7 +98,7 @@ where T: Serialize
 
     fn try_from((message_type, data): (MessageType, &T)) -> std::result::Result<Self, Self::Error> {
         let bytes = bincode::serialize(data).map_err(|_| Error::SerializeError)?;
-        Ok(Self::new(message_type, &bytes))
+        Ok(Self::new(message_type.into(), [0u8; 30], &bytes))
     }
 }
 
@@ -107,7 +113,11 @@ impl TryFrom<&[u8]> for BackendMessage {
         let (left, right) = arrayref::array_refs![value, 32; ..;];
         let (message_type, _) = arrayref::array_refs![left, 2; ..;];
 
-        Ok(Self::new(message_type.into(), right))
+        Ok(Self::new(
+            u16::from_le_bytes(*message_type),
+            [0u8; 30],
+            right,
+        ))
     }
 }
 
@@ -129,7 +139,7 @@ impl From<BackendMessage> for Bytes {
 impl From<BackendMessage> for Vec<u8> {
     fn from(v: BackendMessage) -> Self {
         let mut data = Vec::new();
-        let t: u16 = v.message_type.into();
+        let t: u16 = v.message_type;
         data.extend_from_slice(&t.to_le_bytes());
         data.extend_from_slice(&v.extra);
         data.extend_from_slice(&v.data);
@@ -295,31 +305,4 @@ pub struct HttpResponse {
     pub headers: HashMap<String, String>,
     /// body: optional
     pub body: Option<Bytes>,
-}
-
-/// send chunk report message
-/// - `handler`
-/// - `ctx`
-/// - `relay`
-/// - `data`
-pub async fn send_chunk_report_message(
-    handler: &MessageHandler,
-    ctx: &MessagePayload<Message>,
-    relay: &MessageRelay,
-    data: &[u8],
-) -> Result<()> {
-    let mut new_bytes: Vec<u8> = Vec::with_capacity(data.len() + 1);
-    new_bytes.push(1);
-    new_bytes.extend_from_slice(&[0u8; 3]);
-    new_bytes.extend_from_slice(data);
-
-    handler
-        .send_report_message(
-            Message::custom(&new_bytes, None).map_err(|_| Error::InvalidMessage)?,
-            ctx.tx_id,
-            relay.clone(),
-        )
-        .await
-        .map_err(Error::SendMessage)?;
-    Ok(())
 }

@@ -8,21 +8,22 @@ use std::sync::Arc;
 use futures::future::join_all;
 use jsonrpc_core::Error;
 use jsonrpc_core::ErrorCode;
-#[cfg(feature = "node")]
 use jsonrpc_core::MetaIoHandler;
-#[cfg(feature = "node")]
 use jsonrpc_core::Metadata;
 use jsonrpc_core::Params;
 use jsonrpc_core::Result;
 use jsonrpc_core::Value;
+use tokio::sync::broadcast::Receiver;
+use tokio::sync::Mutex;
 
 use super::method::Method;
 use super::response;
+use super::response::CustomBackendMessage;
 use super::response::Peer;
 use super::response::TransportAndIce;
 use crate::backend::types::BackendMessage;
 use crate::backend::types::HttpRequest;
-use crate::backend::types::MessageType;
+use crate::backend::MessageType;
 use crate::error::Error as ServerError;
 use crate::prelude::rings_core::dht::Did;
 use crate::prelude::rings_core::message::Encoder;
@@ -40,6 +41,7 @@ use crate::util::from_rtc_ice_connection_state;
 #[derive(Clone)]
 pub struct RpcMeta {
     processor: Arc<Processor>,
+    receiver: Arc<Mutex<Receiver<BackendMessage>>>,
     is_auth: bool,
 }
 
@@ -53,17 +55,25 @@ impl RpcMeta {
 }
 
 /// MetaIoHandler<T>, T: Metadata
-#[cfg(feature = "node")]
 impl Metadata for RpcMeta {}
 
-impl From<(Arc<Processor>, bool)> for RpcMeta {
-    fn from((processor, is_auth): (Arc<Processor>, bool)) -> Self {
-        Self { processor, is_auth }
+impl From<(Arc<Processor>, Arc<Mutex<Receiver<BackendMessage>>>, bool)> for RpcMeta {
+    fn from(
+        (processor, receiver, is_auth): (
+            Arc<Processor>,
+            Arc<Mutex<Receiver<BackendMessage>>>,
+            bool,
+        ),
+    ) -> Self {
+        Self {
+            processor,
+            receiver,
+            is_auth,
+        }
     }
 }
 
 /// Build handler add method with metadata.
-#[cfg(feature = "node")]
 pub(crate) async fn build_handler(handler: &mut MetaIoHandler<RpcMeta>) {
     handler.add_method_with_meta(Method::ConnectPeerViaHttp.as_str(), connect_peer_via_http);
     handler.add_method_with_meta(Method::ConnectWithSeed.as_str(), connect_with_seed);
@@ -78,9 +88,13 @@ pub(crate) async fn build_handler(handler: &mut MetaIoHandler<RpcMeta>) {
         Method::ClosePendingTransport.as_str(),
         close_pending_transport,
     );
-    handler.add_method_with_meta(Method::SendTo.as_str(), send_message);
-    handler.add_method_with_meta(Method::SendHttpRequest.as_str(), send_http_request);
+    handler.add_method_with_meta(Method::SendTo.as_str(), send_raw_message);
+    handler.add_method_with_meta(
+        Method::SendHttpRequestMessage.as_str(),
+        send_http_request_message,
+    );
     handler.add_method_with_meta(Method::SendSimpleText.as_str(), send_simple_text_message);
+    handler.add_method_with_meta(Method::SendCustomMessage.as_str(), send_custom_message);
     handler.add_method_with_meta(
         Method::PublishMessageToTopic.as_str(),
         publish_message_to_topic,
@@ -91,30 +105,7 @@ pub(crate) async fn build_handler(handler: &mut MetaIoHandler<RpcMeta>) {
     );
     handler.add_method_with_meta(Method::RegisterService.as_str(), register_service);
     handler.add_method_with_meta(Method::LookupService.as_str(), lookup_service);
-}
-
-#[cfg(feature = "browser")]
-/// handle jsonrpc method request for browser
-pub async fn handle_request(method: Method, meta: RpcMeta, params: Params) -> Result<Value> {
-    match method {
-        Method::ConnectPeerViaHttp => connect_peer_via_http(params, meta).await,
-        Method::ConnectWithDid => connect_with_did(params, meta).await,
-        Method::ConnectWithSeed => connect_with_seed(params, meta).await,
-        Method::ListPeers => list_peers(params, meta).await,
-        Method::CreateOffer => create_offer(params, meta).await,
-        Method::AnswerOffer => answer_offer(params, meta).await,
-        Method::AcceptAnswer => accept_answer(params, meta).await,
-        Method::SendTo => send_message(params, meta).await,
-        Method::Disconnect => close_connection(params, meta).await,
-        Method::ListPendings => list_pendings(params, meta).await,
-        Method::ClosePendingTransport => close_pending_transport(params, meta).await,
-        Method::SendHttpRequest => send_http_request(params, meta).await,
-        Method::SendSimpleText => send_simple_text_message(params, meta).await,
-        Method::PublishMessageToTopic => publish_message_to_topic(params, meta).await,
-        Method::FetchMessagesOfTopic => fetch_messages_of_topic(params, meta).await,
-        Method::RegisterService => register_service(params, meta).await,
-        Method::LookupService => lookup_service(params, meta).await,
-    }
+    handler.add_method_with_meta(Method::PollMessage.as_str(), poll_message);
 }
 
 /// Connect Peer VIA http
@@ -272,7 +263,7 @@ async fn close_pending_transport(params: Params, meta: RpcMeta) -> Result<Value>
 }
 
 /// Handle send message
-async fn send_message(params: Params, meta: RpcMeta) -> Result<Value> {
+async fn send_raw_message(params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
     let params: serde_json::Map<String, Value> = params.parse()?;
     let destination = params
@@ -292,6 +283,42 @@ async fn send_message(params: Params, meta: RpcMeta) -> Result<Value> {
     Ok(serde_json::json!({"tx_id": tx_id.to_string()}))
 }
 
+/// send custom message to specifice destination
+/// * Params
+///   - destination:  destination did
+///   - message_type: u16
+///   - data: base64 of [u8]
+async fn send_custom_message(params: Params, meta: RpcMeta) -> Result<Value> {
+    meta.require_authed()?;
+    let params: Vec<serde_json::Value> = params.parse()?;
+    let destination = params
+        .get(0)
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
+        .as_str()
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
+
+    let message_type: u16 = params
+        .get(1)
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
+        .as_u64()
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
+        .try_into()
+        .map_err(|_| Error::new(ErrorCode::InvalidParams))?;
+
+    let data = params
+        .get(2)
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
+        .as_str()
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
+
+    let data = base64::decode(data).map_err(|_| Error::new(ErrorCode::InvalidParams))?;
+
+    let msg: BackendMessage = BackendMessage::from((message_type, data.as_ref()));
+    let msg: Vec<u8> = msg.into();
+    let tx_id = meta.processor.send_message(destination, &msg).await?;
+    Ok(serde_json::json!({"tx_id": tx_id.to_string()}))
+}
+
 async fn send_simple_text_message(params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
     let params: Vec<serde_json::Value> = params.parse()?;
@@ -306,15 +333,16 @@ async fn send_simple_text_message(params: Params, meta: RpcMeta) -> Result<Value
         .as_str()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
 
-    let msg: BackendMessage = BackendMessage::new(MessageType::SimpleText, text.as_bytes());
+    let msg: BackendMessage =
+        BackendMessage::from((MessageType::SimpleText.into(), text.as_bytes()));
     let msg: Vec<u8> = msg.into();
     // TODO chunk message flag
     let tx_id = meta.processor.send_message(destination, &msg).await?;
     Ok(serde_json::json!({"tx_id": tx_id.to_string()}))
 }
 
-/// handle send request ipfs message
-async fn send_http_request(params: Params, meta: RpcMeta) -> Result<Value> {
+/// handle send http request message
+async fn send_http_request_message(params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
     let params: Vec<serde_json::Value> = params.parse()?;
     let destination = params
@@ -431,4 +459,29 @@ async fn lookup_service(params: Params, meta: RpcMeta) -> Result<Value> {
     } else {
         Ok(serde_json::json!(Vec::<String>::new()))
     }
+}
+
+async fn poll_message(params: Params, meta: RpcMeta) -> Result<Value> {
+    let params: Vec<serde_json::Value> = params.parse()?;
+    let wait_recv = params
+        .get(0)
+        .map(|v| v.as_bool().unwrap_or(false))
+        .unwrap_or(false);
+    let message = if wait_recv {
+        let mut recv = meta.receiver.lock().await;
+        recv.recv().await.ok()
+    } else {
+        let mut recv = meta.receiver.lock().await;
+        recv.try_recv().ok()
+    };
+
+    let message = if let Some(msg) = message {
+        serde_json::to_value(&CustomBackendMessage::from(msg))
+            .map_err(|_| Error::from(ServerError::JsonSerializeError))?
+    } else {
+        serde_json::Value::Null
+    };
+    Ok(serde_json::json!({
+      "message": message,
+    }))
 }

@@ -603,6 +603,27 @@ impl Client {
         })
     }
 
+    /// send custom message to remote
+    /// - destination: A did of destination
+    /// - message_type: u16
+    /// - data: uint8Array
+    pub fn send_custom_message(
+        &self,
+        destination: String,
+        message_type: u16,
+        data: js_sys::Uint8Array,
+    ) -> js_sys::Promise {
+        let p = self.processor.clone();
+
+        future_to_promise(async move {
+            let tx_id = p
+                .send_custom_message(destination.as_str(), message_type, data.to_vec(), [0u8; 30])
+                .await
+                .map_err(JsError::from)?;
+            Ok(JsValue::from_str(tx_id.to_string().as_str()))
+        })
+    }
+
     /// lookup service did on DHT by its name
     /// - name: The name of service
     pub fn lookup_service(&self, name: String) -> js_sys::Promise {
@@ -663,7 +684,7 @@ impl MessageCallbackInstance {
         data: &Bytes,
     ) -> anyhow::Result<()> {
         let m = BackendMessage::try_from(data.to_vec()).map_err(|e| anyhow::anyhow!("{}", e))?;
-        match m.message_type {
+        match m.message_type.into() {
             MessageType::SimpleText => {
                 self.handle_simple_text_message(relay, m.data.as_slice())
                     .await?;
