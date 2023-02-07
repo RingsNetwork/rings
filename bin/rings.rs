@@ -14,6 +14,7 @@ use rings_node::backend::service::BackendConfig;
 use rings_node::cli::Client;
 use rings_node::logging::node::init_logging;
 use rings_node::logging::node::LogLevel;
+use rings_node::measure::PeriodicMeasure;
 use rings_node::prelude::rings_core::dht::Did;
 use rings_node::prelude::rings_core::dht::Stabilization;
 use rings_node::prelude::rings_core::ecc::SecretKey;
@@ -351,11 +352,13 @@ where
     println!("Did: {}", did);
 
     let storage = PersistenceStorage::new_with_cap_and_path(storage_capacity, storage_path).await?;
+    let measure = PeriodicMeasure::default();
 
     let swarm = Arc::new(
         SwarmBuilder::new(stuns, storage)
             .key(key)
             .external_address(external_ip)
+            .measure(Box::new(measure))
             .build()?,
     );
 

@@ -40,6 +40,12 @@ use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransportInterface;
 use crate::types::ice_transport::IceTrickleScheme;
 
+#[cfg(not(feature = "wasm"))]
+pub type MeasureImpl = Box<dyn Measure + Send + Sync>;
+
+#[cfg(feature = "wasm")]
+pub type MeasureImpl = Box<dyn Measure>;
+
 /// Creates a SwarmBuilder to configure a Swarm.
 pub struct SwarmBuilder {
     key: Option<SecretKey>,
@@ -50,6 +56,7 @@ pub struct SwarmBuilder {
     dht_storage: PersistenceStorage,
     session_manager: Option<SessionManager>,
     session_ttl: Option<Ttl>,
+    measure: Option<MeasureImpl>,
 }
 
 impl SwarmBuilder {
@@ -69,6 +76,7 @@ impl SwarmBuilder {
             dht_storage,
             session_manager: None,
             session_ttl: None,
+            measure: None,
         }
     }
 
@@ -99,6 +107,11 @@ impl SwarmBuilder {
         self
     }
 
+    pub fn measure(mut self, implement: MeasureImpl) -> Self {
+        self.measure = Some(implement);
+        self
+    }
+
     pub fn build(self) -> Result<Swarm> {
         let session_manager = {
             if self.session_manager.is_some() {
@@ -125,7 +138,7 @@ impl SwarmBuilder {
             ice_servers: self.ice_servers,
             external_address: self.external_address,
             dht: Arc::new(dht),
-            measure: Measure::default(),
+            measure: self.measure,
             session_manager,
         })
     }
@@ -139,7 +152,7 @@ pub struct Swarm {
     pub(crate) transport_event_channel: Channel<Event>,
     pub(crate) external_address: Option<String>,
     pub(crate) dht: Arc<PeerRing>,
-    pub(crate) measure: Measure,
+    pub(crate) measure: Option<MeasureImpl>,
     session_manager: SessionManager,
 }
 
@@ -361,11 +374,11 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Deb
         transport.wait_for_data_channel_open().await?;
         let result = transport.send_message(&data).await;
 
-        if let Some(did) = payload.relay.next_hop {
+        if let (Some(measure), Some(did)) = (&self.measure, payload.relay.next_hop) {
             if result.is_ok() {
-                self.measure.incr(did, MeasureCounter::Sent)
+                measure.incr(did, MeasureCounter::Sent)
             } else {
-                self.measure.incr(did, MeasureCounter::FailedToSend)
+                measure.incr(did, MeasureCounter::FailedToSend)
             }
         }
 

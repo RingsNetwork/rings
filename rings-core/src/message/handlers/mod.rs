@@ -218,19 +218,23 @@ impl MessageHandler {
 
         if let Err(e) = self.handle_message(payload).await {
             tracing::error!("Error in handle_message: {}", e);
-            self.swarm
-                .measure
-                .incr(payload.addr, MeasureCounter::FailedToReceive);
+
             #[cfg(test)]
             {
                 println!("Error in handle_message: {}", e);
             }
+
+            if let Some(measure) = &self.swarm.measure {
+                measure.incr(payload.addr, MeasureCounter::FailedToReceive);
+            }
+
             return None;
         }
 
-        self.swarm
-            .measure
-            .incr(payload.addr, MeasureCounter::Received);
+        if let Some(measure) = &self.swarm.measure {
+            measure.incr(payload.addr, MeasureCounter::Received);
+        }
+
         Some(())
     }
 
