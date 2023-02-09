@@ -38,6 +38,7 @@ pub use self::rings_core::prelude::web_sys;
 pub use self::rings_core::prelude::ChordStorageInterface;
 pub use self::rings_core::prelude::MessageRelay;
 pub use self::rings_core::prelude::PersistenceStorage;
+pub use self::rings_core::prelude::PersistenceStorageReadAndWrite;
 pub use self::rings_core::prelude::RTCIceConnectionState;
 pub use self::rings_core::prelude::SubringInterface;
 pub use self::rings_core::session::Session;

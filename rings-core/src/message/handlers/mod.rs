@@ -212,7 +212,6 @@ impl MessageHandler {
         if !payload.verify() {
             tracing::error!("Cannot verify msg or it's expired: {:?}", payload);
             // Cannot count here, because the addr may be an impostor since we cannot verify it.
-            // self.swarm.measure.incr(payload.addr, MeasureCounter::FailedToReceive);
             return None;
         }
 
@@ -225,14 +224,16 @@ impl MessageHandler {
             }
 
             if let Some(measure) = &self.swarm.measure {
-                measure.incr(payload.addr, MeasureCounter::FailedToReceive);
+                measure
+                    .incr(payload.addr, MeasureCounter::FailedToReceive)
+                    .await
             }
 
             return None;
         }
 
         if let Some(measure) = &self.swarm.measure {
-            measure.incr(payload.addr, MeasureCounter::Received);
+            measure.incr(payload.addr, MeasureCounter::Received).await;
         }
 
         Some(())
