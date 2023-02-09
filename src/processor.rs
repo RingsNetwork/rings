@@ -19,6 +19,7 @@ use crate::error::Result;
 use crate::jsonrpc::method;
 use crate::jsonrpc::response::TransportAndIce;
 use crate::jsonrpc_client::SimpleClient;
+use crate::measure::PeriodicMeasure;
 use crate::prelude::rings_core::dht::Did;
 use crate::prelude::rings_core::dht::Stabilization;
 use crate::prelude::rings_core::dht::TStabilize;
@@ -163,9 +164,17 @@ impl Processor {
         let unsigned_info = unsigned_info.clone();
         let signed_data = signed_data.to_vec();
 
-        let storage = PersistenceStorage::new_with_cap_and_name(50000, storage_name.as_str())
+        let storage_path = storage_name.as_str();
+        let measure_path = [storage_path, "measure"].join("/");
+
+        let storage = PersistenceStorage::new_with_cap_and_name(50000, storage_path)
             .await
             .map_err(Error::Storage)?;
+
+        let ms = PersistenceStorage::new_with_cap_and_path(50000, measure_path)
+            .await
+            .map_err(Error::Storage)?;
+        let measure = PeriodicMeasure::new(ms);
 
         let random_key = unsigned_info.random_key;
         let session_manager = SessionManager::new(&signed_data, &unsigned_info.auth, &random_key);
@@ -173,6 +182,7 @@ impl Processor {
         let swarm = Arc::new(
             SwarmBuilder::new(&stuns, storage)
                 .session_manager(unsigned_info.key_addr, session_manager)
+                .measure(Box::new(measure))
                 .build()
                 .map_err(Error::Swarm)?,
         );
