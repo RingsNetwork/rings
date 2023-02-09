@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -335,7 +336,7 @@ struct ServiceLookupCommand {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn daemon_run<P>(
+async fn daemon_run(
     http_addr: String,
     key: SecretKey,
     stuns: &str,
@@ -343,16 +344,18 @@ async fn daemon_run<P>(
     external_ip: Option<String>,
     backend: Option<String>,
     storage_capacity: usize,
-    storage_path: P,
-) -> anyhow::Result<()>
-where
-    P: AsRef<std::path::Path>,
-{
+    storage_path: String,
+) -> anyhow::Result<()> {
     let did: Did = key.address().into();
     println!("Did: {}", did);
 
+    let storage_path = Path::new(&storage_path);
+    let measure_path = storage_path.join("measure");
+
     let storage = PersistenceStorage::new_with_cap_and_path(storage_capacity, storage_path).await?;
-    let measure = PeriodicMeasure::default();
+
+    let ms = PersistenceStorage::new_with_cap_and_path(storage_capacity, measure_path).await?;
+    let measure = PeriodicMeasure::new(ms);
 
     let swarm = Arc::new(
         SwarmBuilder::new(stuns, storage)

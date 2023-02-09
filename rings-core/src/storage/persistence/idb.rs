@@ -272,3 +272,12 @@ impl PersistenceStorageOperation for IDBStorage {
         Ok(())
     }
 }
+
+impl std::fmt::Debug for IDBStorage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IDBStorage")
+            .field("storage_name", &self.storage_name)
+            .field("cap", &self.cap)
+            .finish()
+    }
+}

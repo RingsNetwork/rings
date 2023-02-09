@@ -376,9 +376,9 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Deb
 
         if let (Some(measure), Some(did)) = (&self.measure, payload.relay.next_hop) {
             if result.is_ok() {
-                measure.incr(did, MeasureCounter::Sent)
+                measure.incr(did, MeasureCounter::Sent).await
             } else {
-                measure.incr(did, MeasureCounter::FailedToSend)
+                measure.incr(did, MeasureCounter::FailedToSend).await
             }
         }
 
