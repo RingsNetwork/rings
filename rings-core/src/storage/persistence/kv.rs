@@ -184,6 +184,15 @@ where
     }
 }
 
+impl std::fmt::Debug for KvStorage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KvStorage")
+            .field("cap", &self.cap)
+            .field("path", &self.path)
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod test {
     use serde::Deserialize;

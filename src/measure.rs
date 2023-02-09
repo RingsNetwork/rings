@@ -24,6 +24,7 @@ const DURATION: u64 = 60 * 60;
 /// `PeriodicMeasure` is used to assess the reliability of peers by counting their behaviour.
 /// It currently count the number of sent and received messages in a given period (1 hour).
 /// The method [incr] should be called in the proper places.
+#[derive(Debug)]
 pub struct PeriodicMeasure {
     storage: Arc<PersistenceStorage>,
     counters: DashMap<(Did, MeasureCounter), Mutex<PeriodicCounter>>,
@@ -226,5 +227,41 @@ mod tests {
         // Will take previous count.
         assert_eq!(measure.get_count(did, MeasureCounter::Sent).await, 0);
         assert_eq!(measure.get_count(did, MeasureCounter::Received).await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_measure_storage() {
+        let ms_path = PersistenceStorage::random_path("./tmp");
+        let ms = PersistenceStorage::new_with_path(ms_path.as_str())
+            .await
+            .unwrap();
+
+        let did = Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
+        let measure = PeriodicMeasure::new(ms);
+        assert_eq!(measure.get_count(did, MeasureCounter::Sent).await, 0);
+        assert_eq!(measure.get_count(did, MeasureCounter::Received).await, 0);
+
+        measure.incr(did, MeasureCounter::Sent).await;
+        measure.incr(did, MeasureCounter::Sent).await;
+        measure.incr(did, MeasureCounter::Received).await;
+
+        tokio::time::sleep(std::time::Duration::from_secs(DURATION)).await;
+
+        // Flush to storage.
+        measure.get_count(did, MeasureCounter::Sent).await;
+        measure.get_count(did, MeasureCounter::Received).await;
+
+        // Release lock of measure storage.
+        drop(measure);
+
+        // Create new measure.
+        let ms2 = PersistenceStorage::new_with_path(ms_path.as_str())
+            .await
+            .unwrap();
+        let measure2 = PeriodicMeasure::new(ms2);
+
+        // Will take previous count from storage.
+        assert_eq!(measure2.get_count(did, MeasureCounter::Sent).await, 2);
+        assert_eq!(measure2.get_count(did, MeasureCounter::Received).await, 1);
     }
 }
