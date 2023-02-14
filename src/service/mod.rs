@@ -4,14 +4,14 @@ mod http_error;
 
 use std::sync::Arc;
 
-use axum::extract::Extension;
+use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::routing::post;
 use axum::Router;
 use http::header;
-use http::header::HeaderValue;
 use http::HeaderMap;
+use http::HeaderValue;
 use jsonrpc_core::MetaIoHandler;
 use tokio::sync::broadcast::Receiver;
 use tokio::sync::Mutex;
@@ -23,6 +23,14 @@ use crate::jsonrpc::RpcMeta;
 use crate::prelude::rings_core::ecc::PublicKey;
 use crate::processor::Processor;
 
+#[derive(Clone)]
+struct JsonrpcState {
+    processor: Arc<Processor>,
+    io_handler: Arc<MetaIoHandler<RpcMeta>>,
+    pubkey: Arc<PublicKey>,
+    receiver: Arc<Mutex<Receiver<BackendMessage>>>,
+}
+
 /// Run a web server to handle jsonrpc request
 pub async fn run_service(
     addr: String,
@@ -32,23 +40,20 @@ pub async fn run_service(
 ) -> anyhow::Result<()> {
     let binding_addr = addr.parse().unwrap();
 
-    let processor_layer = Extension(processor);
-
     let mut jsonrpc_handler: MetaIoHandler<RpcMeta> = MetaIoHandler::default();
     crate::jsonrpc::build_handler(&mut jsonrpc_handler).await;
-    let jsonrpc_handler_layer = Extension(Arc::new(jsonrpc_handler));
+    let jsonrpc_handler_layer = Arc::new(jsonrpc_handler);
+    let receiver = Arc::new(Mutex::new(receiver));
 
-    let pubkey_layer = Extension(pubkey);
+    let jsonrpc_state = Arc::new(JsonrpcState {
+        processor,
+        io_handler: jsonrpc_handler_layer,
+        pubkey,
+        receiver,
+    });
 
     let axum_make_service = Router::new()
-        .route(
-            "/",
-            post(jsonrpc_io_handler)
-                .layer(&processor_layer)
-                .layer(&jsonrpc_handler_layer)
-                .layer(&pubkey_layer)
-                .layer(&Extension(Arc::new(Mutex::new(receiver)))),
-        )
+        .route("/", post(jsonrpc_io_handler).with_state(jsonrpc_state))
         .route("/status", get(status_handler))
         .layer(CorsLayer::permissive())
         .layer(axum::middleware::from_fn(node_info_header))
@@ -62,21 +67,22 @@ pub async fn run_service(
 }
 
 async fn jsonrpc_io_handler(
+    State(state): State<Arc<JsonrpcState>>,
+    headermap: HeaderMap,
     body: String,
-    headers: HeaderMap,
-    Extension(processor): Extension<Arc<Processor>>,
-    Extension(io_handler): Extension<Arc<MetaIoHandler<RpcMeta>>>,
-    Extension(pubkey): Extension<Arc<PublicKey>>,
-    Extension(receiver): Extension<Arc<Mutex<Receiver<BackendMessage>>>>,
 ) -> Result<JsonResponse, HttpError> {
-    let is_auth = if let Some(signature) = headers.get(header::AUTHORIZATION) {
-        Processor::verify_signature(signature.as_bytes(), &pubkey)
+    let is_auth = if let Some(signature) = headermap.get("X-SIGNATURE") {
+        Processor::verify_signature(signature.as_bytes(), &state.pubkey)
             .map_err(|_| HttpError::BadRequest)?
     } else {
         false
     };
-    let r = io_handler
-        .handle_request(&body, (processor, receiver, is_auth).into())
+    let r = state
+        .io_handler
+        .handle_request(
+            &body,
+            (state.processor.clone(), state.receiver.clone(), is_auth).into(),
+        )
         .await
         .ok_or(HttpError::BadRequest)?;
     Ok(JsonResponse(r))
