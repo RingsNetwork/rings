@@ -8,6 +8,7 @@
 //! the same connection, or even the same MSRP session.
 
 use bytes::Bytes;
+use itertools::Itertools;
 use serde::Deserialize;
 use serde::Serialize;
 use uuid::Uuid;
@@ -46,6 +47,12 @@ impl Chunk {
     /// deserialize bytes to chunk
     pub fn from_bincode(data: &[u8]) -> Result<Self> {
         bincode::deserialize(data).map_err(Error::BincodeDeserialize)
+    }
+}
+
+impl PartialEq for Chunk {
+    fn eq(&self, other: &Self) -> bool {
+        Self::tx_eq(self, other)
     }
 }
 
@@ -153,6 +160,15 @@ impl<const MTU: usize> Default for ChunkList<MTU> {
     }
 }
 
+impl<const MTU: usize> IntoIterator for &ChunkList<MTU> {
+    type Item = Chunk;
+    type IntoIter = std::vec::IntoIter<Chunk>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.to_vec().into_iter()
+    }
+}
+
 impl<const MTU: usize> IntoIterator for ChunkList<MTU> {
     type Item = Chunk;
     type IntoIter = std::vec::IntoIter<Chunk>;
@@ -196,19 +212,31 @@ impl<const MTU: usize> From<Vec<Chunk>> for ChunkList<MTU> {
 impl<const MTU: usize> ChunkManager for ChunkList<MTU> {
     fn list_completed(&self) -> Vec<Uuid> {
         // group by msg uuid and chunk size
-        self.to_vec()
-            .group_by(Chunk::tx_eq)
-            .filter(|e| ChunkList::<MTU>::from(e.to_vec()).is_completed())
-            .map(|c| c.first().unwrap().meta.id)
-            .collect()
+        self.into_iter()
+            .group_by(|item| item.clone())
+            .into_iter()
+            .filter_map(|(c, g)| {
+                if ChunkList::<MTU>::from(g.collect_vec()).is_completed() {
+                    Some(c.meta.id)
+                } else {
+                    None
+                }
+            })
+            .collect_vec()
     }
 
     fn list_pending(&self) -> Vec<Uuid> {
-        self.to_vec()
-            .group_by(Chunk::tx_eq)
-            .filter(|e| !ChunkList::<MTU>::from(e.to_vec()).is_completed())
-            .map(|c| c.first().unwrap().meta.id)
-            .collect()
+        self.into_iter()
+            .group_by(|item| item.clone())
+            .into_iter()
+            .filter_map(|(c, g)| {
+                if !ChunkList::<MTU>::from(g.collect_vec()).is_completed() {
+                    Some(c.meta.id)
+                } else {
+                    None
+                }
+            })
+            .collect_vec()
     }
 
     fn get(&self, id: Uuid) -> Option<Bytes> {

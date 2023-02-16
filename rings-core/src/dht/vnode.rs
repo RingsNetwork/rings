@@ -107,7 +107,8 @@ impl VNodeOperation {
 }
 
 impl<T> TryFrom<MessagePayload<T>> for VirtualNode
-where T: Serialize + DeserializeOwned
+where
+    T: Serialize + DeserializeOwned,
 {
     type Error = Error;
     fn try_from(msg: MessagePayload<T>) -> Result<Self> {

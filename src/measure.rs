@@ -124,8 +124,12 @@ impl Measure for PeriodicMeasure {
     async fn incr(&self, did: Did, counter: MeasureCounter) {
         let (count, is_refreshed) = {
             let c = self.ensure_counter(did, counter).await;
-            let Ok(mut c) = c.lock() else {return};
-            c.incr()
+            let result = if let Ok(mut c) = c.lock() {
+                c.incr()
+            } else {
+                return;
+            };
+            result
         };
         if is_refreshed {
             self.save_counter(did, counter, count).await;
@@ -136,8 +140,12 @@ impl Measure for PeriodicMeasure {
     async fn get_count(&self, did: Did, counter: MeasureCounter) -> u64 {
         let (count, is_refreshed) = {
             let c = self.ensure_counter(did, counter).await;
-            let Ok(mut c) = c.lock() else {return 0};
-            c.get()
+            let result = if let Ok(mut c) = c.lock() {
+                c.get()
+            } else {
+                return 0;
+            };
+            result
         };
         if is_refreshed {
             self.save_counter(did, counter, count).await;

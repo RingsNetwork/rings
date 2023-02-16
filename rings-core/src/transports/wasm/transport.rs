@@ -299,7 +299,7 @@ impl IceTransportCallback for WasmTransport {
         let peer_connection = self.get_peer_connection().await;
         let id = self.id;
         let public_key = Arc::clone(&self.public_key);
-        box move |ev: web_sys::Event| {
+        Box::new(move |ev: web_sys::Event| {
             let mut peer_connection = peer_connection.clone();
             let event_sender = Arc::clone(&event_sender);
             let public_key = Arc::clone(&public_key);
@@ -346,14 +346,14 @@ impl IceTransportCallback for WasmTransport {
                     }
                 })
             }
-        }
+        })
     }
 
     async fn on_ice_candidate(&self) -> Self::OnLocalCandidateHdlrFn {
         let peer_connection = self.get_peer_connection().await;
         let pending_candidates = Arc::clone(&self.pending_candidates);
         tracing::debug!("binding ice candidate callback");
-        box move |ev: RtcPeerConnectionIceEvent| {
+        Box::new(move |ev: RtcPeerConnectionIceEvent| {
             tracing::info!("ice_Candidate {:?}", ev.candidate());
             let mut candidates = pending_candidates.lock().unwrap();
             let peer_connection = peer_connection.clone();
@@ -363,20 +363,20 @@ impl IceTransportCallback for WasmTransport {
                     println!("Candidates Number: {:?}", candidates.len());
                 }
             }
-        }
+        })
     }
 
     async fn on_data_channel(&self) -> Self::OnDataChannelHdlrFn {
         let event_sender = self.event_sender.clone();
         let chunk_list = self.chunk_list.clone();
 
-        box move |ev: RtcDataChannelEvent| {
+        Box::new(move |ev: RtcDataChannelEvent| {
             tracing::debug!("channel open");
             let event_sender = event_sender.clone();
             let chunk_list = chunk_list.clone();
             let ch = ev.channel();
             let on_message_cb = Closure::wrap(
-                (box move |ev: MessageEvent| {
+                (Box::new(move |ev: MessageEvent| {
                     let data = ev.data();
                     let event_sender = event_sender.clone();
                     let chunk_list = chunk_list.clone();
@@ -428,18 +428,20 @@ impl IceTransportCallback for WasmTransport {
                             tracing::error!("Failed on handle msg, {:?}", e);
                         }
                     });
-                }) as Box<dyn FnMut(MessageEvent)>,
+                })) as Box<dyn FnMut(MessageEvent)>,
             );
             ch.set_onmessage(Some(on_message_cb.as_ref().unchecked_ref()));
             on_message_cb.forget();
-        }
+        })
     }
 }
 
 #[async_trait(?Send)]
 impl IceCandidateGathering for WasmTransport {
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
-    where T: Into<RtcSessionDescription> {
+    where
+        T: Into<RtcSessionDescription>,
+    {
         match &self.get_peer_connection().await {
             Some(c) => {
                 let sdp: RtcSessionDescription = desc.into();
@@ -459,7 +461,9 @@ impl IceCandidateGathering for WasmTransport {
     }
 
     async fn set_remote_description<T>(&self, desc: T) -> Result<()>
-    where T: Into<RtcSessionDescription> {
+    where
+        T: Into<RtcSessionDescription>,
+    {
         match &self.get_peer_connection().await {
             Some(c) => {
                 let sdp: RtcSessionDescription = desc.into();

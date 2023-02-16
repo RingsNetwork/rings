@@ -80,7 +80,7 @@ macro_rules! poll {
         use wasm_bindgen::JsCast;
         let window = web_sys::window().unwrap();
         let func = wasm_bindgen::prelude::Closure::wrap(
-            (box move |func: js_sys::Function| {
+            (Box::new(move |func: js_sys::Function| {
                 $func();
                 let window = web_sys::window().unwrap();
                 window
@@ -90,7 +90,7 @@ macro_rules! poll {
                         &js_sys::Array::of1(&func),
                     )
                     .unwrap();
-            }) as Box<dyn FnMut(js_sys::Function)>,
+            })) as Box<dyn FnMut(js_sys::Function)>,
         );
         window
             .set_timeout_with_callback_and_timeout_and_arguments(

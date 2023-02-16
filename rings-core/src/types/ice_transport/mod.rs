@@ -88,9 +88,11 @@ pub trait IceTransportCallback: IceTransport {
 pub trait IceCandidateGathering: IceTransport {
     async fn add_ice_candidate(&self, candidate: IceCandidate) -> Result<()>;
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
-    where T: Into<Self::Sdp> + Send;
+    where
+        T: Into<Self::Sdp> + Send;
     async fn set_remote_description<T>(&self, desc: T) -> Result<()>
-    where T: Into<Self::Sdp> + Send;
+    where
+        T: Into<Self::Sdp> + Send;
 }
 
 /// IceTrickleScheme use to handle http handshake, register and exchange sdp.

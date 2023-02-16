@@ -19,7 +19,8 @@ pub struct AcChannel<T> {
 
 #[async_trait]
 impl<T: Send> Channel<T> for AcChannel<T>
-where T: std::fmt::Debug
+where
+    T: std::fmt::Debug,
 {
     type Sender = Sender<T>;
     type Receiver = Receiver<T>;

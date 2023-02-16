@@ -7,7 +7,7 @@ use tracing_subscriber::Registry;
 #[cfg(feature = "node")]
 /// logging configuration about node.
 pub mod node {
-    use std::backtrace::Backtrace;
+    use backtrace::Backtrace;
     use std::panic::PanicInfo;
 
     use clap::ValueEnum;
@@ -42,7 +42,7 @@ pub mod node {
     }
 
     fn log_panic(panic: &PanicInfo) {
-        let backtrace = Backtrace::force_capture();
+        let backtrace = Backtrace::new();
         let backtrace = format!("{:?}", backtrace);
         if let Some(location) = panic.location() {
             error!(

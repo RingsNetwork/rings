@@ -161,7 +161,8 @@ impl Message {
 }
 
 impl<T> MaybeEncrypted<T>
-where T: Serialize + DeserializeOwned
+where
+    T: Serialize + DeserializeOwned,
 {
     pub fn new(data: T, pubkey: Option<PublicKey>) -> Result<Self> {
         if let Some(pubkey) = pubkey {

@@ -126,7 +126,8 @@ impl From<SecretKey> for PublicKey {
 }
 
 impl<T> From<T> for HashStr
-where T: Into<String>
+where
+    T: Into<String>,
 {
     fn from(s: T) -> Self {
         let inputs = s.into();
@@ -228,7 +229,9 @@ impl PublicKey {
 
 /// Recover PublicKey from RawMessage using signature.
 pub fn recover<S>(message: &str, signature: S) -> Result<PublicKey>
-where S: AsRef<[u8]> {
+where
+    S: AsRef<[u8]>,
+{
     let sig_bytes: SigBytes = signature.as_ref().try_into()?;
     let message_hash: [u8; 32] = keccak256(message.as_bytes());
     recover_hash(&message_hash, &sig_bytes)
