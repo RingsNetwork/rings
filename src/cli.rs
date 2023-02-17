@@ -9,6 +9,7 @@ use futures::select;
 use futures::FutureExt;
 use futures::Stream;
 use futures_timer::Delay;
+use http::header;
 use jsonrpc_core::Params;
 use jsonrpc_core::Value;
 use serde_json::json;
@@ -42,10 +43,7 @@ pub struct ClientOutput<T> {
 impl Client {
     pub async fn new(endpoint_url: &str, signature: &str) -> anyhow::Result<Self> {
         let mut default_headers = reqwest::header::HeaderMap::default();
-        default_headers.insert(
-            reqwest::header::AUTHORIZATION,
-            reqwest::header::HeaderValue::from_str(signature)?,
-        );
+        default_headers.insert("X-SIGNATURE", header::HeaderValue::from_str(signature)?);
         let client = SimpleClient::new(
             Arc::new(
                 reqwest::Client::builder()
