@@ -13,7 +13,9 @@ struct PublicKeyVisitor;
 // /// twist from https://docs.rs/libsecp256k1/latest/src/libsecp256k1/lib.rs.html#335-344
 impl Serialize for PublicKey {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where S: serde::ser::Serializer {
+    where
+        S: serde::ser::Serializer,
+    {
         serializer.serialize_str(
             &base58_monero::encode_check(&self.0[..]).map_err(serde::ser::Error::custom)?,
         )
@@ -71,14 +73,18 @@ impl<'de> serde::de::Visitor<'de> for PublicKeyVisitor {
         formatter.write_str("a bytestring of in length 33")
     }
     fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
-    where E: serde::de::Error {
+    where
+        E: serde::de::Error,
+    {
         PublicKey::try_from_b58m(value).map_err(|e| E::custom(e))
     }
 }
 
 impl<'de> Deserialize<'de> for PublicKey {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where D: serde::de::Deserializer<'de> {
+    where
+        D: serde::de::Deserializer<'de>,
+    {
         deserializer.deserialize_str(PublicKeyVisitor)
     }
 }

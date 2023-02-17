@@ -179,27 +179,39 @@ async fn test_idb_prune() {
     let key4 = "4".to_string();
     let key5 = "5".to_string();
     instance
-        .put(&key1, &TestDataStruct {
-            content: "test1".to_owned(),
-        })
+        .put(
+            &key1,
+            &TestDataStruct {
+                content: "test1".to_owned(),
+            },
+        )
         .await
         .unwrap();
     instance
-        .put(&key2, &TestDataStruct {
-            content: "test2".to_owned(),
-        })
+        .put(
+            &key2,
+            &TestDataStruct {
+                content: "test2".to_owned(),
+            },
+        )
         .await
         .unwrap();
     instance
-        .put(&key3, &TestDataStruct {
-            content: "test3".to_owned(),
-        })
+        .put(
+            &key3,
+            &TestDataStruct {
+                content: "test3".to_owned(),
+            },
+        )
         .await
         .unwrap();
     instance
-        .put(&key4, &TestDataStruct {
-            content: "test4".to_owned(),
-        })
+        .put(
+            &key4,
+            &TestDataStruct {
+                content: "test4".to_owned(),
+            },
+        )
         .await
         .unwrap();
 
@@ -213,9 +225,12 @@ async fn test_idb_prune() {
     tracing::debug!("d2, {:?}", d2);
 
     instance
-        .put(&key5, &TestDataStruct {
-            content: "test5".to_owned(),
-        })
+        .put(
+            &key5,
+            &TestDataStruct {
+                content: "test5".to_owned(),
+            },
+        )
         .await
         .unwrap();
 

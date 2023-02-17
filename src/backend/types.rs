@@ -92,7 +92,8 @@ impl From<(u16, &[u8])> for BackendMessage {
 }
 
 impl<T> TryFrom<(MessageType, &T)> for BackendMessage
-where T: Serialize
+where
+    T: Serialize,
 {
     type Error = Error;
 

@@ -242,8 +242,8 @@ impl MessageHandler {
     /// This method is required because web-sys components is not `Send`
     /// which means a listening loop cannot running concurrency.
     pub async fn listen_once(&self) -> Option<MessagePayload<Message>> {
-        let Some(payload) = self.swarm.poll_message().await else {return None};
-        let Some(()) = self.handle_payload(&payload).await else {return None};
+        let payload = self.swarm.poll_message().await?;
+        self.handle_payload(&payload).await?;
         Some(payload)
     }
 }
@@ -422,16 +422,22 @@ pub mod tests {
 
         sleep(Duration::from_secs(5)).await;
 
-        assert_eq!(msg_callback1.handler_messages.lock().await.as_slice(), &[
-            (did2, "Hello world 2 to 1 - 1".as_bytes().to_vec()),
-            (did2, "Hello world 2 to 1 - 2".as_bytes().to_vec())
-        ]);
+        assert_eq!(
+            msg_callback1.handler_messages.lock().await.as_slice(),
+            &[
+                (did2, "Hello world 2 to 1 - 1".as_bytes().to_vec()),
+                (did2, "Hello world 2 to 1 - 2".as_bytes().to_vec())
+            ]
+        );
 
-        assert_eq!(msg_callback2.handler_messages.lock().await.as_slice(), &[
-            (did1, "Hello world 1 to 2 - 1".as_bytes().to_vec()),
-            (did1, "Hello world 1 to 2 - 2".as_bytes().to_vec()),
-            (did1, "Hello world 1 to 2 - 3".as_bytes().to_vec())
-        ]);
+        assert_eq!(
+            msg_callback2.handler_messages.lock().await.as_slice(),
+            &[
+                (did1, "Hello world 1 to 2 - 1".as_bytes().to_vec()),
+                (did1, "Hello world 1 to 2 - 2".as_bytes().to_vec()),
+                (did1, "Hello world 1 to 2 - 3".as_bytes().to_vec())
+            ]
+        );
 
         Ok(())
     }

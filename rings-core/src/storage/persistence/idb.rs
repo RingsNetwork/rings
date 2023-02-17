@@ -79,7 +79,9 @@ impl IDBStorage {
     /// * cap: max_size in bytes
     /// * path: db file location
     pub async fn new_with_cap_and_path<P>(cap: usize, _path: P) -> Result<Self>
-    where P: AsRef<std::path::Path> {
+    where
+        P: AsRef<std::path::Path>,
+    {
         Self::new_with_cap(cap).await
     }
 

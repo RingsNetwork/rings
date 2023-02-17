@@ -25,5 +25,6 @@ pub struct SeedPeer {
 #[cfg_attr(feature = "browser", async_trait(?Send))]
 pub trait SourceLoader {
     async fn load(source: &str) -> anyhow::Result<Self>
-    where Self: Sized;
+    where
+        Self: Sized;
 }

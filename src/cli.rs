@@ -322,43 +322,44 @@ impl Client {
         ClientOutput::ok("Done.".into(), ())
     }
 
-    pub async fn subscribe_topic<'a, 'b>(
-        &'a self,
-        topic: String,
-    ) -> impl Stream<Item = String> + 'b
+    pub async fn subscribe_topic<'a, 'b>(&'a self, topic: String) -> impl Stream<Item = String> + 'b
     where
         'a: 'b,
     {
         let mut index = 0;
 
         stream! {
-            loop {
+        loop {
+            let timeout = Delay::new(Duration::from_secs(5)).fuse();
+            pin_mut!(timeout);
 
-                let timeout = Delay::new(Duration::from_secs(5)).fuse();
-                pin_mut!(timeout);
-
-                select! {
-                    _ = timeout => {
-                        let result = self.client.call_method(
+            select! {
+                _ = timeout => {
+                    let result = self
+                        .client
+                        .call_method(
                             Method::FetchMessagesOfTopic.as_str(),
                             Params::Array(vec![json!(topic), json!(index)]),
-                        ).await;
+                        )
+                        .await;
 
-                        let Ok(resp) = result else {
-                            tracing::error!("Failed to fetch messages of topic: {}", topic);
-                            continue;
-                        };
+                    if let Err(e) = result {
+                        tracing::error!("Failed to fetch messages of topic: {}, {}", topic, e);
+                        continue;
+                    }
+                    let resp = result.unwrap();
 
-                        let Ok(messages): Result<Vec<String>, _> = serde_json::from_value(resp) else {
-                            tracing::error!("Failed to parse messages of topic: {}", topic);
-                            continue;
-                        };
+                    let messages = serde_json::from_value(resp);
+                    if let Err(e) = messages {
+                        tracing::error!("Failed to parse messages of topic: {}, {}", topic, e);
+                        continue;
+                    }
+                    let messages: Vec<String> = messages.unwrap();
 
-                        for msg in messages.iter().cloned() {
-                            yield msg
-                        }
-
-                        index += messages.len();
+                    for msg in messages.iter().cloned() {
+                        yield msg
+                    }
+                    index += messages.len();
                     }
                 }
             }

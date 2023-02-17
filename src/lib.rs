@@ -133,7 +133,6 @@
 //! +-----------------------------------------------------------------------------------------+
 //! ```
 
-#![feature(async_closure)]
 pub mod backend;
 #[cfg(feature = "browser")]
 pub mod browser;

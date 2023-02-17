@@ -3,7 +3,6 @@ use std::sync::Arc;
 use async_lock::RwLock as AsyncRwLock;
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::future::join_all;
 use futures::future::BoxFuture;
 use futures::lock::Mutex as FuturesMutex;
 use serde_json;
@@ -296,7 +295,7 @@ impl IceTransportCallback for DefaultTransport {
         let event_sender = self.event_sender.clone();
         let public_key = Arc::clone(&self.public_key);
         let id = self.id;
-        box move |cs: RTCIceConnectionState| {
+        Box::new(move |cs: RTCIceConnectionState| {
             let event_sender = event_sender.clone();
             let public_key = Arc::clone(&public_key);
             let id = id;
@@ -327,14 +326,14 @@ impl IceTransportCallback for DefaultTransport {
                     }
                 }
             })
-        }
+        })
     }
 
     async fn on_ice_candidate(&self) -> Self::OnLocalCandidateHdlrFn {
         let pending_candidates = Arc::clone(&self.pending_candidates);
         let peer_connection = self.get_peer_connection().await;
 
-        box move |c: Option<RTCIceCandidate>| {
+        Box::new(move |c: Option<RTCIceCandidate>| {
             let pending_candidates = Arc::clone(&pending_candidates);
             let peer_connection = peer_connection.clone();
             Box::pin(async move {
@@ -345,14 +344,14 @@ impl IceTransportCallback for DefaultTransport {
                     }
                 }
             })
-        }
+        })
     }
 
     async fn on_data_channel(&self) -> Self::OnDataChannelHdlrFn {
         let event_sender = self.event_sender.clone();
         let chunk_list = self.chunk_list.clone();
 
-        box move |d: Arc<RTCDataChannel>| {
+        Box::new(move |d: Arc<RTCDataChannel>| {
             let event_sender = event_sender.clone();
             let chunk_list = chunk_list.clone();
             Box::pin(async move {
@@ -386,7 +385,7 @@ impl IceTransportCallback for DefaultTransport {
                     })
                 }));
             })
-        }
+        })
     }
 }
 
@@ -403,7 +402,9 @@ impl IceCandidateGathering for DefaultTransport {
     }
 
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
-    where T: Into<RTCSessionDescription> + Send {
+    where
+        T: Into<RTCSessionDescription> + Send,
+    {
         match self.get_peer_connection().await {
             Some(peer_connection) => peer_connection
                 .set_local_description(desc.into())
@@ -414,7 +415,9 @@ impl IceCandidateGathering for DefaultTransport {
     }
 
     async fn set_remote_description<T>(&self, desc: T) -> Result<()>
-    where T: Into<RTCSessionDescription> + Send {
+    where
+        T: Into<RTCSessionDescription> + Send,
+    {
         match self.get_peer_connection().await {
             Some(peer_connection) => peer_connection
                 .set_remote_description(desc.into())
@@ -448,14 +451,13 @@ impl IceTrickleScheme for DefaultTransport {
                 sdp
             }
         };
-        let local_candidates_json = join_all(
-            self.pending_candidates
-                .lock()
-                .await
-                .iter()
-                .map(async move |c| c.clone().to_json().unwrap().into()),
-        )
-        .await;
+        let local_candidates_json = self
+            .pending_candidates
+            .lock()
+            .await
+            .iter()
+            .map(|c| c.clone().to_json().unwrap().into())
+            .collect::<Vec<_>>();
         if local_candidates_json.is_empty() {
             return Err(Error::FailedOnGatherLocalCandidate);
         }
@@ -539,7 +541,7 @@ impl DefaultTransport {
                 } else {
                     let promise = Promise::default();
                     let state = Arc::clone(&promise.state());
-                    dc.on_open(box move || {
+                    dc.on_open(Box::new(move || {
                         let state = Arc::clone(&state);
                         Box::pin(async move {
                             let mut s = state.lock().unwrap();
@@ -549,7 +551,7 @@ impl DefaultTransport {
                                 w.wake();
                             }
                         })
-                    });
+                    }));
                     promise.await
                 }
             }
@@ -566,7 +568,7 @@ impl DefaultTransport {
                 let promise = Promise::default();
                 let state = Arc::clone(&promise.state());
                 let state_clone = Arc::clone(&state);
-                peer_connection.on_peer_connection_state_change(box move |st| {
+                peer_connection.on_peer_connection_state_change(Box::new(move |st| {
                     let state = Arc::clone(&state);
                     Box::pin(async move {
                         match st {
@@ -591,7 +593,7 @@ impl DefaultTransport {
                             }
                         }
                     })
-                });
+                }));
                 let current_state = peer_connection.connection_state();
                 if RTCPeerConnectionState::Connected == current_state {
                     let mut s = state_clone.lock().unwrap();

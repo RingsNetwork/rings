@@ -246,10 +246,10 @@ impl Swarm {
         }
     }
 
-    pub async fn iter_messages<'a, 'b>(
-        &'a self,
-    ) -> impl Stream<Item = MessagePayload<Message>> + 'b
-    where 'a: 'b {
+    pub async fn iter_messages<'a, 'b>(&'a self) -> impl Stream<Item = MessagePayload<Message>> + 'b
+    where
+        'a: 'b,
+    {
         stream! {
             let receiver = &self.transport_event_channel.receiver();
             loop {
@@ -340,7 +340,8 @@ impl Swarm {
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl<T> PayloadSender<T> for Swarm
-where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Debug
+where
+    T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Debug,
 {
     fn session_manager(&self) -> &SessionManager {
         Swarm::session_manager(self)
