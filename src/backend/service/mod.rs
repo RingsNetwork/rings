@@ -37,6 +37,12 @@ pub struct BackendConfig {
     pub hidden_servers: Vec<HiddenServerConfig>,
 }
 
+impl From<Vec<HiddenServerConfig>> for BackendConfig {
+    fn from(v: Vec<HiddenServerConfig>) -> Self {
+        Self { hidden_servers: v }
+    }
+}
+
 #[cfg(feature = "node")]
 impl Backend {
     /// new backend

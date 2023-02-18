@@ -79,6 +79,10 @@ pub enum Error {
     Storage(rings_core::err::Error),
     #[error("Swarm Error: {0}")]
     Swarm(rings_core::err::Error),
+    #[error("Create File Error: {0}")]
+    CreateFileError(String),
+    #[error("Open File Error: {0}")]
+    OpenFileError(String),
 }
 
 impl Error {
@@ -120,6 +124,8 @@ impl Error {
             Error::InvalidAuthData => 33,
             Error::Storage(_) => 34,
             Error::Swarm(_) => 35,
+            Error::CreateFileError(_) => 36,
+            Error::OpenFileError(_) => 37,
         };
         -32000 - code
     }

@@ -180,8 +180,8 @@ where
         match self {
             MaybeEncrypted::Plain(msg) => Ok((msg, false)),
             MaybeEncrypted::Encrypted(cipher) => {
-                let plain = ecies::decrypt(&key.serialize(), &cipher)
-                    .map_err(Error::MessageDecryptionFailed)?;
+                let plain =
+                    ecies::decrypt(&key.ser(), &cipher).map_err(Error::MessageDecryptionFailed)?;
                 let msg: T = bincode::deserialize(&plain).map_err(Error::BincodeDeserialize)?;
                 Ok((msg, true))
             }

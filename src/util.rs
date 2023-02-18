@@ -69,7 +69,6 @@ pub mod loader {
     use reqwest::Url;
     use serde::de::DeserializeOwned;
 
-    use crate::backend::service::BackendConfig;
     use crate::seed::Seed;
 
     /// Load config from local file or remote url.
@@ -100,5 +99,4 @@ pub mod loader {
     }
 
     impl ResourceLoader for Seed {}
-    impl ResourceLoader for BackendConfig {}
 }

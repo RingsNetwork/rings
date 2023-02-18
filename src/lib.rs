@@ -138,6 +138,8 @@ pub mod backend;
 pub mod browser;
 #[cfg(feature = "node")]
 pub mod cli;
+#[cfg(not(feature = "browser"))]
+pub mod config;
 pub mod consts;
 pub mod error;
 pub mod jsonrpc;
