@@ -2,18 +2,20 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::prelude::rings_core::ecc::SecretKey;
 use serde::{Deserialize, Serialize};
+use std::env;
 use std::fs;
 use std::io;
+use std::path::PathBuf;
 
 use crate::backend::service::http_server::HiddenServerConfig;
 
 lazy_static::lazy_static! {
   static ref DEFAULT_DATA_STORAGE_CONFIG: StorageConfig = StorageConfig {
-    path: "~/.local/share/rings/data".to_string(),
+    path: get_storage_location(".rings", "data"),
     capacity: DEFAULT_STORAGE_CAPACITY,
   };
   static ref DEFAULT_MEASURE_STORAGE_CONFIG: StorageConfig = StorageConfig {
-    path: "~/.local/share/rings/measure".to_string(),
+    path: get_storage_location(".rings", "measure"),
     capacity: DEFAULT_STORAGE_CAPACITY,
   };
 }
@@ -23,6 +25,18 @@ pub const DEFAULT_ENDPOINT_URL: &str = "http://127.0.0.1:50000";
 pub const DEFAULT_ICE_SERVERS: &str = "stun://stun.l.google.com:19302";
 pub const DEFAULT_STABILIZE_TIMEOUT: usize = 20;
 pub const DEFAULT_STORAGE_CAPACITY: usize = 200000000;
+
+pub fn get_storage_location<P>(prefix: P, path: P) -> String
+where
+    P: AsRef<std::path::Path>,
+{
+    let home_dir = env::var_os("HOME").map(PathBuf::from);
+    let expect = match home_dir {
+        Some(dir) => dir.join(prefix).join(path),
+        None => std::path::Path::new("data").join(prefix).join(path),
+    };
+    expect.to_str().unwrap().to_string()
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
@@ -57,6 +71,21 @@ impl Config {
     where
         P: AsRef<std::path::Path>,
     {
+        let path = match path.as_ref().strip_prefix("~") {
+            Ok(stripped) => {
+                let home_dir = env::var_os("HOME").map(PathBuf::from);
+                home_dir.map(|mut p| {
+                    p.push(stripped);
+                    p
+                })
+            }
+            Err(_) => Some(path.as_ref().to_owned()),
+        }
+        .unwrap();
+        let parent = path.parent().expect("no parent directory");
+        if !parent.is_dir() {
+            fs::create_dir_all(parent).map_err(|e| Error::CreateFileError(e.to_string()))?;
+        };
         let f = fs::File::create(path).map_err(|e| Error::CreateFileError(e.to_string()))?;
         let f_writer = io::BufWriter::new(f);
         serde_yaml::to_writer(f_writer, self).map_err(|_| Error::SerializeError)?;
@@ -67,6 +96,18 @@ impl Config {
     where
         P: AsRef<std::path::Path>,
     {
+        let path = match path.as_ref().strip_prefix("~") {
+            Ok(stripped) => {
+                let home_dir = env::var_os("HOME").map(PathBuf::from);
+                home_dir.map(|mut p| {
+                    p.push(stripped);
+                    p
+                })
+            }
+            Err(_) => Some(path.as_ref().to_owned()),
+        }
+        .unwrap();
+        println!("Read config from: {:?}", path);
         let f = fs::File::open(path).map_err(|e| Error::OpenFileError(e.to_string()))?;
         let f_rdr = io::BufReader::new(f);
         serde_yaml::from_reader(f_rdr).map_err(|_| Error::DeserializeError)
