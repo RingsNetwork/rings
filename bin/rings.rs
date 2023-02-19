@@ -11,7 +11,7 @@ use futures::StreamExt;
 use rings_core::message::CallbackFn;
 use rings_node::backend::service::Backend;
 use rings_node::cli::Client;
-use rings_node::config::config;
+use rings_node::config;
 use rings_node::logging::node::init_logging;
 use rings_node::logging::node::LogLevel;
 use rings_node::measure::PeriodicMeasure;
@@ -31,7 +31,7 @@ struct Cli {
     #[command(subcommand)]
     command: Command,
 
-    #[arg(long, default_value_t = LogLevel::Info, value_enum)]
+    #[arg(long, default_value_t = LogLevel::Info, value_enum, env)]
     log_level: LogLevel,
 }
 
