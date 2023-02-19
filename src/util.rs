@@ -1,8 +1,6 @@
 //! Utilities for configuration and build.
 #![warn(missing_docs)]
 
-use std::env;
-
 use crate::prelude::RTCIceConnectionState;
 
 /// build_version of program
@@ -15,20 +13,6 @@ pub fn build_version() -> String {
         infos.push(git_hash);
     }
     infos.join("-")
-}
-
-/// load_config env file from path if available
-pub fn load_config() {
-    let mut v = env::args();
-    while let Some(item) = v.next() {
-        if item.eq("-c") || item.eq("--config_file") {
-            let config = v.next();
-            if let Some(c) = config {
-                dotenv::from_path(c).ok();
-            }
-            break;
-        }
-    }
 }
 
 /// convert RTCIceConnectionState to string
@@ -69,7 +53,6 @@ pub mod loader {
     use reqwest::Url;
     use serde::de::DeserializeOwned;
 
-    use crate::backend::service::BackendConfig;
     use crate::seed::Seed;
 
     /// Load config from local file or remote url.
@@ -100,5 +83,4 @@ pub mod loader {
     }
 
     impl ResourceLoader for Seed {}
-    impl ResourceLoader for BackendConfig {}
 }

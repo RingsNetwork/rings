@@ -2,6 +2,7 @@
 use std::convert::TryFrom;
 use std::fmt::Write;
 use std::ops::Deref;
+use std::str::FromStr;
 
 use hash_sha1::Digest;
 use hash_sha1::Sha1;
@@ -164,7 +165,41 @@ impl std::str::FromStr for SecretKey {
 
 impl ToString for SecretKey {
     fn to_string(&self) -> String {
-        hex::encode(self.serialize())
+        hex::encode(self.0.serialize())
+    }
+}
+
+struct SecretKeyVisitor;
+
+impl<'de> serde::de::Visitor<'de> for SecretKeyVisitor {
+    type Value = SecretKey;
+
+    fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
+        formatter.write_str("SecretKey deserializer")
+    }
+    fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        SecretKey::from_str(value).map_err(|e| serde::de::Error::custom(e))
+    }
+}
+
+impl<'de> Deserialize<'de> for SecretKey {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_str(SecretKeyVisitor)
+    }
+}
+
+impl Serialize for SecretKey {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.to_string().as_str())
     }
 }
 
@@ -218,6 +253,10 @@ impl SecretKey {
 
     pub fn pubkey(&self) -> PublicKey {
         libsecp256k1::PublicKey::from_secret_key(&(*self).into()).into()
+    }
+
+    pub fn ser(&self) -> [u8; libsecp256k1::util::SECRET_KEY_SIZE] {
+        self.0.serialize()
     }
 }
 

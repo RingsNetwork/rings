@@ -70,7 +70,7 @@ impl Client {
             .ok_or_else(|| anyhow::anyhow!("Unexpected response"))?;
 
         ClientOutput::ok(
-            format!("Succeed, Your transport_id: {}", transport_id),
+            format!("Your transport_id: {}", transport_id),
             transport_id.to_string(),
         )
     }
@@ -104,10 +104,7 @@ impl Client {
             serde_json::from_value(resp).map_err(|e| anyhow::anyhow!("{}", e))?;
 
         ClientOutput::ok(
-            format!(
-                "Successful!\ntransport_id: {}\nice: {}",
-                info.transport_id, info.ice,
-            ),
+            format!("transport_id: {}\nice: {}", info.transport_id, info.ice,),
             info,
         )
     }
@@ -134,10 +131,7 @@ impl Client {
             serde_json::from_value(resp).map_err(|e| anyhow::anyhow!("{}", e))?;
 
         ClientOutput::ok(
-            format!(
-                "Successful!\ntransport_id: {}\nice: {}",
-                info.transport_id, info.ice
-            ),
+            format!("\ntransport_id: {}\nice: {}", info.transport_id, info.ice),
             info,
         )
     }
@@ -154,10 +148,7 @@ impl Client {
 
         let peer: Peer = serde_json::from_value(resp).map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        ClientOutput::ok(
-            format!("Successful, transport_id: {}", peer.transport_id),
-            peer,
-        )
+        ClientOutput::ok(format!("transport_id: {}", peer.transport_id), peer)
     }
 
     pub async fn list_peers(&mut self) -> Output<()> {
@@ -171,7 +162,6 @@ impl Client {
             serde_json::from_value(resp).map_err(|e| anyhow::anyhow!("{}", e))?;
 
         let mut display = String::new();
-        display.push_str("Successful\n");
         display.push_str("Did, TransportId, Status\n");
         display.push_str(
             peers
@@ -203,7 +193,6 @@ impl Client {
         let resp: Vec<jsonrpc::response::TransportInfo> =
             serde_json::from_value(resp).map_err(|e| anyhow::anyhow!("{}", e))?;
         let mut display = String::new();
-        display.push_str("Successful\n");
         display.push_str("TransportId, Status\n");
         for item in resp.iter() {
             display.push_str(format!("{}, {}", item.transport_id, item.state).as_str())

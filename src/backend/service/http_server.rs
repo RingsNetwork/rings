@@ -19,7 +19,7 @@ use crate::error::Result;
 use crate::prelude::*;
 
 /// HTTP Server Config, specific determine port.
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Clone, Serialize, Debug)]
 pub struct HiddenServerConfig {
     /// name of hidden service
     pub name: String,
