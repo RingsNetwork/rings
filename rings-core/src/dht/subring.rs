@@ -10,9 +10,9 @@ use crate::dht::Did;
 use crate::err::Error;
 use crate::err::Result;
 
-/// A Subring is like a [PeerRing] without storage functional.
+/// A Subring is like a [super::PeerRing] without storage functional.
 /// Subring also have two extra fields: `name` and `creator`.
-/// Subring can be stored on the a [PeerRing].
+/// Subring can be stored on the a [super::PeerRing].
 /// The did of a subring is the hash of its name.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Subring {

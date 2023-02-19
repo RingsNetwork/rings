@@ -1,10 +1,11 @@
 //! rings-node
 //! ===============
-
 //! [![rings-node](https://github.com/RingsNetwork/rings-node/actions/workflows/rings-node.yml/badge.svg)](https://github.com/RingsNetwork/rings-node/actions/workflows/rings-node.yml)
 //! [![cargo](https://img.shields.io/crates/v/rings-node.svg)](https://crates.io/crates/rings-node)
 //! [![docs](https://docs.rs/rings-node/badge.svg)](https://docs.rs/rings-node/0.1.0/rings_node/)
-
+//!
+//! Rings Network is a decentralized peer-to-peer network that has built a more decentralized, anonymous and privacy-oriented data sovereignty network based on Chord computation. Rings Network is built with a communication layer based on WebAssembly, which allows it to run directly in the browser and connect directly between browsers via the webRTC protocol, further solving the problem of the modern Internet being controlled by centralized entities. Rings Network supports the use of elliptic curves as DIDs for proofs, and its stability is sufficient to support a large number of nodes and efficient lookups, making the connection and data exchange between sovereign entities more secure, efficient, and direct. This paper introduces the four-layer architecture of Rings Network and analyzes Rings Network from various aspects, including network, traffic, orderer, security, and shows the unlimited possibilities of Rings Network itself and as an application platform.
+//!
 //! ### ICE Scheme:
 
 //! 1. Peer A:

@@ -8,8 +8,8 @@ use rand::SeedableRng;
 use rand_hc::Hc128Rng;
 use serde::Deserialize;
 use serde::Serialize;
-use sha1::Digest;
-use sha1::Sha1;
+use hash_sha1::Digest;
+use hash_sha1::Sha1;
 use web3::signing::keccak256;
 use web3::types::Address;
 

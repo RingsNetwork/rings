@@ -2,12 +2,12 @@
 //!
 //! which is based on CHORD, ref: <https://pdos.csail.mit.edu/papers/ton:chord/paper-ton.pdf>
 //! With high probability, the number of nodes that must be contacted to find a successor in an N-node network is O(log N).
-mod did;
+pub mod did;
 pub use did::Did;
 mod chord;
 /// Finger table for Rings
 pub mod finger;
-mod successor;
+pub mod successor;
 mod types;
 pub use chord::PeerRing;
 pub use chord::PeerRingAction;
