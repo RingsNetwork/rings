@@ -22,19 +22,17 @@ use rings_node::prelude::PersistenceStorage;
 use rings_node::prelude::SwarmBuilder;
 use rings_node::processor::Processor;
 use rings_node::service::run_service;
-use rings_node::util;
-use serde::Deserialize;
 use tokio::io;
 use tokio::io::AsyncBufReadExt;
 
 #[derive(Parser, Debug)]
 #[command(about, version, author)]
 struct Cli {
-    #[arg(long, default_value_t = LogLevel::Info, value_enum, env)]
-    log_level: LogLevel,
-
     #[command(subcommand)]
     command: Command,
+
+    #[arg(long, default_value_t = LogLevel::Info, value_enum)]
+    log_level: LogLevel,
 }
 
 #[derive(Subcommand, Debug)]
@@ -61,10 +59,22 @@ enum Command {
 }
 
 #[derive(Args, Debug)]
+struct ConfigArgs {
+    #[arg(
+        long,
+        short = 'c',
+        env,
+        default_value = "~/.rings/config.yaml",
+        help = "Config file location"
+    )]
+    pub config: String,
+}
+
+#[derive(Args, Debug)]
 struct InitCommand {
     #[arg(
         long,
-        default_value = "~/.config/rings/config.yaml",
+        default_value = "~/.rings/config.yaml",
         help = "The location of config file"
     )]
     pub location: String,
@@ -82,78 +92,88 @@ struct RunCommand {
     #[arg(
         long,
         short = 'b',
-        help = "Rings node listen address. If not provided, use bind_addr in config file or 127.0.0.1:50000"
+        help = "Rings node listen address. If not provided, use bind_addr in config file or 127.0.0.1:50000",
+        env
     )]
     pub http_addr: Option<String>,
 
     #[arg(
         long,
         short = 's',
-        help = "ICE server list. If not provided, use ice_servers in config file or stun://stun.l.google.com:19302"
+        help = "ICE server list. If not provided, use ice_servers in config file or stun://stun.l.google.com:19302",
+        env
     )]
     pub ice_servers: Option<String>,
 
     #[arg(
         long = "key",
         short = 'k',
-        help = "Your ECDSA key. If not provided, use ecdsa_key in config file"
+        help = "Your ECDSA key. If not provided, use ECDSA_KEY in env or ecdsa_key in config file",
+        env
     )]
     pub ecdsa_key: Option<SecretKey>,
 
     #[arg(
         long,
-        help = "Stabilize service timeout. If not provided, use stabilize_timeout in config file or 20"
+        help = "Stabilize service timeout. If not provided, use stabilize_timeout in config file or 20",
+        env
     )]
     pub stabilize_timeout: Option<usize>,
 
-    #[arg(long, help = "external ip address")]
+    #[arg(long, help = "external ip address", env)]
     pub external_ip: Option<String>,
 
     #[arg(
         long,
-        help = "Storage files location. If not provided, use storage.path in config file or ~/.local/share/rings"
+        help = "Storage files location. If not provided, use storage.path in config file or ~/.local/share/rings",
+        env
     )]
     pub storage_path: Option<String>,
 
     #[arg(
         long,
         default_value = "200000000",
-        help = "Storage capcity. If not provider, use storage.capacity in config file or 200000000"
+        help = "Storage capcity. If not provider, use storage.capacity in config file or 200000000",
+        env
     )]
     pub storage_capacity: Option<usize>,
 
-    #[arg(
-        long,
-        short = 'c',
-        env,
-        default_value = "~/.config/rings/config.yaml",
-        help = "Config file location"
-    )]
-    pub config: String,
+    #[command(flatten)]
+    config_args: ConfigArgs,
 }
 
-#[derive(Args, Debug, Deserialize)]
+#[derive(Args, Debug)]
 struct ClientArgs {
-    #[serde(rename = "endpoint")]
     #[arg(
         long,
         short = 'u',
-        default_value = "http://127.0.0.1:50000",
-        help = "rings-node endpoint url.",
+        help = "rings-node endpoint url. If not provided, use endpoint_url in config file or http://127.0.0.1:50000",
         env
     )]
-    endpoint_url: String,
+    endpoint_url: Option<String>,
 
-    #[serde(rename = "ecdsa_key")]
-    #[arg(long = "key", short = 'k', env)]
-    pub ecdsa_key: SecretKey,
+    #[arg(
+        long = "key",
+        short = 'k',
+        env,
+        help = "Your ECDSA key. If not provided, use ECDSA_KEY in env or ecdsa_key in config file"
+    )]
+    pub ecdsa_key: Option<SecretKey>,
+
+    #[command(flatten)]
+    config_args: ConfigArgs,
 }
 
 impl ClientArgs {
     async fn new_client(&self) -> anyhow::Result<Client> {
+        let c = config::Config::read_fs(self.config_args.config.as_str())?;
+
+        let endpoint_url = self.endpoint_url.as_ref().unwrap_or(&c.endpoint_url);
+        let ecdsa_key = self.ecdsa_key.unwrap_or(c.ecdsa_key);
+
         Client::new(
-            self.endpoint_url.as_str(),
-            Processor::generate_signature(&self.ecdsa_key).as_str(),
+            endpoint_url.as_str(),
+            Processor::generate_signature(&ecdsa_key).as_str(),
         )
         .await
     }
@@ -369,18 +389,15 @@ struct ServiceLookupCommand {
     name: String,
 }
 
-fn get_value<V>(v1: V, v2: Option<V>) -> V {
-    if let Some(v) = v2 {
-        return v;
-    }
-    v1
+fn get_value<V>(value: Option<V>, default_value: V) -> V {
+    value.unwrap_or(default_value)
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
-    let c = config::Config::read_fs(args.config)?;
+    let c = config::Config::read_fs(args.config_args.config)?;
 
-    let key = get_value(c.ecdsa_key, args.ecdsa_key);
+    let key = get_value(args.ecdsa_key, c.ecdsa_key);
     let did: Did = key.address().into();
     println!("Did: {}", did);
 
@@ -407,15 +424,9 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
 
     let measure = PeriodicMeasure::new(per_measure_storage);
 
-    let stuns = get_value(c.ice_servers, args.ice_servers);
+    let stuns = get_value(args.ice_servers, c.ice_servers);
 
-    let external_ip = if let Some(ext) = args.external_ip {
-        Some(ext)
-    } else if let Some(ext) = c.external_ip {
-        Some(ext)
-    } else {
-        None
-    };
+    let external_ip = args.external_ip.map(Some).unwrap_or(c.external_ip);
 
     let swarm = Arc::new(
         SwarmBuilder::new(stuns.as_str(), per_data_storage)
@@ -431,7 +442,7 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
 
     let callback: Option<CallbackFn> = Some(Box::new(Backend::new(backend_config, sender)));
 
-    let stabilize_timeout = get_value(c.stabilize_timeout, args.stabilize_timeout);
+    let stabilize_timeout = get_value(args.stabilize_timeout, c.stabilize_timeout);
 
     let stabilize = Arc::new(Stabilization::new(swarm.clone(), stabilize_timeout));
     let processor = Arc::new(Processor::from((swarm, stabilize)));
@@ -439,7 +450,7 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
 
     let pubkey = Arc::new(key.pubkey());
 
-    let bind_addr = get_value(c.http_addr, args.http_addr);
+    let bind_addr = get_value(args.http_addr, c.http_addr);
 
     let _ = futures::join!(
         processor.listen(callback),
@@ -474,14 +485,8 @@ async fn pubsub_run(client_args: ClientArgs, topic: String) -> anyhow::Result<()
 async fn main() -> anyhow::Result<()> {
     dotenv::dotenv().ok();
 
-    util::load_config();
-
     let cli = Cli::parse();
     init_logging(cli.log_level.into());
-    // if config file was set, it should override existing .env
-    // if let Some(conf) = cli.config_file {
-    //     dotenv::from_path(std::path::Path::new(&conf)).ok();
-    // }
 
     match cli.command {
         Command::Run(args) => daemon_run(args).await,
@@ -654,8 +659,8 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 config::Config::default()
             };
-            config.write_fs(args.location.as_str())?;
-            println!("Your config file has saved to: {}", args.location);
+            let p = config.write_fs(args.location.as_str())?;
+            println!("Your config file has saved to: {}", p);
             Ok(())
         }
     }

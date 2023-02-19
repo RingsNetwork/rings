@@ -67,7 +67,7 @@ impl Config {
         }
     }
 
-    pub fn write_fs<P>(&self, path: P) -> Result<()>
+    pub fn write_fs<P>(&self, path: P) -> Result<String>
     where
         P: AsRef<std::path::Path>,
     {
@@ -86,10 +86,11 @@ impl Config {
         if !parent.is_dir() {
             fs::create_dir_all(parent).map_err(|e| Error::CreateFileError(e.to_string()))?;
         };
-        let f = fs::File::create(path).map_err(|e| Error::CreateFileError(e.to_string()))?;
+        let f =
+            fs::File::create(path.as_path()).map_err(|e| Error::CreateFileError(e.to_string()))?;
         let f_writer = io::BufWriter::new(f);
         serde_yaml::to_writer(f_writer, self).map_err(|_| Error::SerializeError)?;
-        Ok(())
+        Ok(path.to_str().unwrap().to_owned())
     }
 
     pub fn read_fs<P>(path: P) -> Result<Config>
@@ -107,7 +108,7 @@ impl Config {
             Err(_) => Some(path.as_ref().to_owned()),
         }
         .unwrap();
-        println!("Read config from: {:?}", path);
+        tracing::debug!("Read config from: {:?}", path);
         let f = fs::File::open(path).map_err(|e| Error::OpenFileError(e.to_string()))?;
         let f_rdr = io::BufReader::new(f);
         serde_yaml::from_reader(f_rdr).map_err(|_| Error::DeserializeError)

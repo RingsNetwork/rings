@@ -1,7 +1,7 @@
 rings-node
 ===============
 
-[![rings-node](https://github.com/RingsNetwork/rings-node/actions/workflows/rings-node.yml/badge.svg)](https://github.com/RingsNetwork/rings-node/actions/workflows/rings-node.yml)
+[![rings-node](https://github.com/RingsNetwork/rings-node/actions/workflows/auto-release.yml/badge.svg)](https://github.com/RingsNetwork/rings-node/actions/workflows/auto-release.yml)
 [![cargo](https://img.shields.io/crates/v/rings-node.svg)](https://crates.io/crates/rings-node)
 [![docs](https://docs.rs/rings-node/badge.svg)](https://docs.rs/rings-node/latest/rings_node/)
 
@@ -24,16 +24,17 @@ cargo install --path .
 
 ### Usage
 
-* Create a ECDSA secret key. And put it to `.env` file:
+* Create default config file:
 
-	`rings-node new-secret-key`
+	`rings init`
 
-	`echo <your security key> >> .env`
+* Run rings-node as daemon;
 
-* Run rings-node as daemon
+	`rings run`
 
+* Get help message:
 
-	`rings-node-daemon run`
+  `rings help`
 
 ### ICE Scheme:
 
