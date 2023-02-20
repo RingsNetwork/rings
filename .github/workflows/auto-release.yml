@@ -6,10 +6,13 @@ on:
       - "master"
 
 jobs:
-  pre_release_linux:
-    name: Pre Release Linux
+  build:
+    name: pre build binary
     timeout-minutes: 20
-    runs-on: "ubuntu-22.04"
+    strategy:
+      matrix:
+        os: ["ubuntu-20.04", "ubuntu-22.04", "macos-latest"]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v3
         with:
@@ -24,9 +27,70 @@ jobs:
           sharedKey: pre-release-v1
 
       - name: Build
-        run: cargo build --features node --no-default-features --verbose --release
+        run: |
+          cargo build --features node --no-default-features --release
+          zip rings-${{ matrix.os }}.zip ./target/release/rings
+
+      - uses: actions/upload-artifact@v3
+        name: Upload artifacts
+        with:
+          name: rings-${{ matrix.os }}
+          path: rings-${{ matrix.os }}.zip
+          retention-days: 1
+
+  build-linux-musl:
+    name: pre build linux musl binary
+    timeout-minutes: 20
+    runs-on: "ubuntu-latest"
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Install musl-tools
+        run: |
+          set -ex
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Setup rust toolchain
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          rustup show
+
+      # If you need to reset the cache version, increment the number after `v`
+      - uses: Swatinem/rust-cache@v1
+        with:
+          sharedKey: pre-release-v1
+
+      - name: Build
+        run: |
+          cargo build --features node --no-default-features --release --target x86_64-unknown-linux-musl
+          zip rings-linux-musl.zip ./target/x86_64-unknown-linux-musl/release/rings
+
+      - uses: actions/upload-artifact@v3
+        name: Upload artifacts
+        with:
+          name: rings-linux-musl
+          path: rings-linux-musl.zip
+          retention-days: 1
+
+  release:
+    needs: [build, build-linux-musl]
+    runs-on: ubuntu-latest
+    steps:
+
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v2
+
+      - name: Display fetched artifacts
+        run: ls -R
 
       - uses: "marvinpinto/action-automatic-releases@latest"
+        name: Emit a Github Release
         with:
           repo_token: "${{ secrets.GITHUB_TOKEN }}"
           automatic_release_tag: latest
@@ -34,4 +98,7 @@ jobs:
           title: "Development Build"
           files: |
             LICENSE
-            target/release/rings
+            rings-linux-ubuntu-22.04/*.zip
+            rings-linux-ubuntu-20.04/*.zip
+            rings-linux-macos-latest/*.zip
+            rings-linux-musl/*.zip
