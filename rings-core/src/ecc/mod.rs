@@ -4,13 +4,13 @@ use std::fmt::Write;
 use std::ops::Deref;
 use std::str::FromStr;
 
-use sha1::Digest;
-use sha1::Sha1;
 use hex;
 use rand::SeedableRng;
 use rand_hc::Hc128Rng;
 use serde::Deserialize;
 use serde::Serialize;
+use sha1::Digest;
+use sha1::Sha1;
 use web3::signing::keccak256;
 use web3::types::Address;
 
