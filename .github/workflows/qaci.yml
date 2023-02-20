@@ -45,8 +45,7 @@ jobs:
       - name: Run tests
         uses: GabrielBB/xvfb-action@v1
         with:
-          working-directory: ./rings-core
-          run: cargo test --target=wasm32-unknown-unknown --features wasm --no-default-features
+          run: cargo test -p rings-core --target=wasm32-unknown-unknown --features wasm --no-default-features
 
       - name: Run rings-node test
         uses: GabrielBB/xvfb-action@v1
