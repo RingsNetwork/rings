@@ -4,8 +4,8 @@ use std::fmt::Write;
 use std::ops::Deref;
 use std::str::FromStr;
 
-use hash_sha1::Digest;
-use hash_sha1::Sha1;
+use sha1::Digest;
+use sha1::Sha1;
 use hex;
 use rand::SeedableRng;
 use rand_hc::Hc128Rng;
