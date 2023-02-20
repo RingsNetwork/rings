@@ -6,80 +6,104 @@ on:
       - "master"
 
 jobs:
-  build:
-    name: pre build binary
-    timeout-minutes: 20
+  prebuild_macos:
+    name: pre build macos version binary
+    timeout-minutes: 25
+    runs-on: macos-11
     strategy:
       matrix:
-        os: ["ubuntu-20.04", "ubuntu-22.04", "macos-latest"]
-    runs-on: ${{ matrix.os }}
+        arch:
+          - x86_64
+          - aarch64
     steps:
       - uses: actions/checkout@v3
         with:
           fetch-depth: 0
 
-      - name: Setup rust toolchain
-        run: rustup show
+      - name: Get target
+        id: target
+        run: echo 'target=${{ matrix.arch }}-apple-darwin' >> $GITHUB_OUTPUT
 
-      # If you need to reset the cache version, increment the number after `v`
-      - uses: Swatinem/rust-cache@v1
-        with:
-          sharedKey: pre-release-v1
-
-      - name: Build
+      - name: Add target
         run: |
-          cargo build --features node --no-default-features --release
-          zip rings-${{ matrix.os }}.zip ./target/release/rings
-
-      - uses: actions/upload-artifact@v3
-        name: Upload artifacts
-        with:
-          name: rings-${{ matrix.os }}
-          path: rings-${{ matrix.os }}.zip
-          retention-days: 1
-
-  build-linux-musl:
-    name: pre build linux musl binary
-    timeout-minutes: 20
-    runs-on: "ubuntu-latest"
-    steps:
-      - uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
-
-      - name: Install musl-tools
-        run: |
-          set -ex
-          sudo apt-get update
-          sudo apt-get install -y musl-tools
+          rustup target add ${{ steps.target.outputs.target }}
 
       - name: Setup rust toolchain
         run: |
-          rustup target add x86_64-unknown-linux-musl
           rustup show
 
       # If you need to reset the cache version, increment the number after `v`
       - uses: Swatinem/rust-cache@v1
         with:
-          sharedKey: pre-release-v1
+          sharedKey: pre-release-${{ steps.target.outputs.target }}-v1
 
       - name: Build
         run: |
-          cargo build --features node --no-default-features --release --target x86_64-unknown-linux-musl
-          zip rings-linux-musl.zip ./target/x86_64-unknown-linux-musl/release/rings
+          cargo build --features node --no-default-features --release --target ${{ steps.target.outputs.target }}
+          zip -j rings-${{ steps.target.outputs.target }}.zip ./target/${{ steps.target.outputs.target }}/release/rings
 
       - uses: actions/upload-artifact@v3
         name: Upload artifacts
         with:
-          name: rings-linux-musl
-          path: rings-linux-musl.zip
+          name: rings-${{ steps.target.outputs.target }}
+          path: rings-${{ steps.target.outputs.target }}.zip
+          retention-days: 1
+
+  prebuild_linux:
+    name: pre build linux version binary
+    timeout-minutes: 25
+    runs-on: "ubuntu-latest"
+    strategy:
+      matrix:
+        arch:
+          - x86_64
+        platform:
+          - musl
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Get target
+        id: target
+        run: echo 'target=${{ matrix.arch }}-unknown-linux-${{ matrix.platform }}' >> $GITHUB_OUTPUT
+
+      - name: Add target
+        run: |
+          rustup target add ${{ steps.target.outputs.target }}
+
+      - name: Setup rust toolchain
+        run: |
+          rustup show
+
+      - name: Install musl-tools
+        if: matrix.platform == 'musl'
+        run: |
+          set -ex
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      # If you need to reset the cache version, increment the number after `v`
+      - uses: Swatinem/rust-cache@v1
+        with:
+          sharedKey: pre-release-${{ steps.target.outputs.target }}-v1
+
+      - name: Build
+        run: |
+          cargo build --features node --no-default-features --release --target ${{ steps.target.outputs.target }}
+          zip -j rings-${{ steps.target.outputs.target }}.zip ./target/${{ steps.target.outputs.target }}/release/rings
+
+      - uses: actions/upload-artifact@v3
+        name: Upload artifacts
+        with:
+          name: rings-${{ steps.target.outputs.target }}
+          path: rings-${{ steps.target.outputs.target }}.zip
           retention-days: 1
 
   release:
-    needs: [build, build-linux-musl]
+    needs: [prebuild_macos, prebuild_linux]
     runs-on: ubuntu-latest
     steps:
-
       - uses: actions/checkout@v3
         with:
           fetch-depth: 0
@@ -98,7 +122,6 @@ jobs:
           title: "Development Build"
           files: |
             LICENSE
-            rings-linux-ubuntu-22.04/*.zip
-            rings-linux-ubuntu-20.04/*.zip
-            rings-linux-macos-latest/*.zip
-            rings-linux-musl/*.zip
+            rings-x86_64-unknown-linux-musl/*.zip
+            rings-x86_64-apple-darwin/*.zip
+            rings-aarch64-apple-darwin/*.zip
