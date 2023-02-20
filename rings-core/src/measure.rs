@@ -20,7 +20,7 @@ pub enum MeasureCounter {
 
 /// `Measure` is used to assess the reliability of peers by counting their behaviour.
 /// It currently count the number of sent and received messages in a given period (1 hour).
-/// The method [incr] should be called in the proper places.
+/// The method [Measure::incr] should be called in the proper places.
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait Measure {

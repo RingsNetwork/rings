@@ -58,9 +58,9 @@ impl From<MessageType> for u16 {
 
 /// BackendMessage struct for CustomMessage.
 /// A backend message body's length at least is 32bytes;
-/// - `message_type`: [u8;2]
-/// - `extra data`: [u8;30]
-/// - `message data`: [u8]
+/// - `message_type`: `[u8;2]`
+/// - `extra data`: `[u8;30]`
+/// - `message data`: `[u8]`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackendMessage {
     /// message_type
@@ -75,7 +75,7 @@ impl BackendMessage {
     /// generate new BackendMessage with
     /// - `message_type`
     /// - `data`
-    /// extra will be [0u8;30]
+    /// extra will be `[0u8;30]`
     pub fn new(message_type: u16, extra: [u8; 30], data: &[u8]) -> Self {
         Self {
             message_type,

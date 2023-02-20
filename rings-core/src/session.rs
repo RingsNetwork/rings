@@ -29,7 +29,7 @@ use crate::utils;
 pub enum Signer {
     /// ecdsa
     DEFAULT,
-    /// ref: https://eips.ethereum.org/EIPS/eip-191
+    /// ref: <https://eips.ethereum.org/EIPS/eip-191>
     EIP191,
     /// ed25519
     EdDSA,

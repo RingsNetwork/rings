@@ -54,7 +54,7 @@ impl RpcMeta {
     }
 }
 
-/// MetaIoHandler<T>, T: Metadata
+/// `MetaIoHandler<T>, T: Metadata`
 impl Metadata for RpcMeta {}
 
 impl From<(Arc<Processor>, Arc<Mutex<Receiver<BackendMessage>>>, bool)> for RpcMeta {

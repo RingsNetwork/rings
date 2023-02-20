@@ -63,7 +63,7 @@ impl ChordStorageInterface for Swarm {
         }
     }
 
-    /// Store VirtualNode, TryInto<VirtualNode> is implemented for alot of types
+    /// Store VirtualNode, `TryInto<VirtualNode>` is implemented for alot of types
     async fn storage_store(&self, vnode: VirtualNode) -> Result<()> {
         let op = VNodeOperation::Overwrite(vnode);
         match self.dht.vnode_operate(op).await? {
