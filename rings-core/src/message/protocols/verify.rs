@@ -19,9 +19,7 @@ pub struct MessageVerification {
 
 impl MessageVerification {
     pub fn verify<T>(&self, data: &T) -> bool
-    where
-        T: Serialize,
-    {
+    where T: Serialize {
         if !self.session.verify() {
             tracing::warn!("session is expired");
             return false;
@@ -36,26 +34,20 @@ impl MessageVerification {
     }
 
     pub fn session_pubkey<T>(&self, data: &T) -> Result<PublicKey>
-    where
-        T: Serialize,
-    {
+    where T: Serialize {
         let msg = self.msg(data)?;
         signers::default::recover(&msg, &self.sig)
     }
 
     pub fn pack_msg<T>(data: &T, ts_ms: u128, ttl_ms: usize) -> Result<String>
-    where
-        T: Serialize,
-    {
+    where T: Serialize {
         let mut msg = serde_json::to_string(data).map_err(|_| Error::SerializeToString)?;
         write!(msg, "\n{}\n{}", ts_ms, ttl_ms).map_err(|_| Error::SerializeToString)?;
         Ok(msg)
     }
 
     fn msg<T>(&self, data: &T) -> Result<String>
-    where
-        T: Serialize,
-    {
+    where T: Serialize {
         Self::pack_msg(data, self.ts_ms, self.ttl_ms)
     }
 }

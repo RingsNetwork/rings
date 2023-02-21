@@ -1,13 +1,15 @@
-use crate::error::Error;
-use crate::error::Result;
-use crate::prelude::rings_core::ecc::SecretKey;
-use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
 
+use serde::Deserialize;
+use serde::Serialize;
+
 use crate::backend::service::http_server::HiddenServerConfig;
+use crate::error::Error;
+use crate::error::Result;
+use crate::prelude::rings_core::ecc::SecretKey;
 
 lazy_static::lazy_static! {
   static ref DEFAULT_DATA_STORAGE_CONFIG: StorageConfig = StorageConfig {
@@ -27,9 +29,7 @@ pub const DEFAULT_STABILIZE_TIMEOUT: usize = 20;
 pub const DEFAULT_STORAGE_CAPACITY: usize = 200000000;
 
 pub fn get_storage_location<P>(prefix: P, path: P) -> String
-where
-    P: AsRef<std::path::Path>,
-{
+where P: AsRef<std::path::Path> {
     let home_dir = env::var_os("HOME").map(PathBuf::from);
     let expect = match home_dir {
         Some(dir) => dir.join(prefix).join(path),
@@ -71,9 +71,7 @@ impl Config {
     }
 
     pub fn write_fs<P>(&self, path: P) -> Result<String>
-    where
-        P: AsRef<std::path::Path>,
-    {
+    where P: AsRef<std::path::Path> {
         let path = match path.as_ref().strip_prefix("~") {
             Ok(stripped) => {
                 let home_dir = env::var_os("HOME").map(PathBuf::from);
@@ -97,9 +95,7 @@ impl Config {
     }
 
     pub fn read_fs<P>(path: P) -> Result<Config>
-    where
-        P: AsRef<std::path::Path>,
-    {
+    where P: AsRef<std::path::Path> {
         let path = match path.as_ref().strip_prefix("~") {
             Ok(stripped) => {
                 let home_dir = env::var_os("HOME").map(PathBuf::from);

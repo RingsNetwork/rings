@@ -439,9 +439,7 @@ impl IceTransportCallback for WasmTransport {
 #[async_trait(?Send)]
 impl IceCandidateGathering for WasmTransport {
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
-    where
-        T: Into<RtcSessionDescription>,
-    {
+    where T: Into<RtcSessionDescription> {
         match &self.get_peer_connection().await {
             Some(c) => {
                 let sdp: RtcSessionDescription = desc.into();
@@ -461,9 +459,7 @@ impl IceCandidateGathering for WasmTransport {
     }
 
     async fn set_remote_description<T>(&self, desc: T) -> Result<()>
-    where
-        T: Into<RtcSessionDescription>,
-    {
+    where T: Into<RtcSessionDescription> {
         match &self.get_peer_connection().await {
             Some(c) => {
                 let sdp: RtcSessionDescription = desc.into();

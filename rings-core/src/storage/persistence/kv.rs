@@ -31,9 +31,7 @@ impl KvStorage {
     /// * cap: max_size in bytes
     /// * path: db file location
     pub async fn new_with_cap_and_path<P>(cap: usize, path: P) -> Result<Self>
-    where
-        P: AsRef<std::path::Path>,
-    {
+    where P: AsRef<std::path::Path> {
         let db = sled::Config::new()
             .path(path.as_ref())
             .mode(sled::Mode::HighThroughput)
@@ -63,9 +61,7 @@ impl KvStorage {
     /// New KvStorage with default capacity and specific path
     /// * path: db file location
     pub async fn new_with_path<P>(path: P) -> Result<Self>
-    where
-        P: AsRef<std::path::Path>,
-    {
+    where P: AsRef<std::path::Path> {
         Self::new_with_cap_and_path(200000000, path).await
     }
 

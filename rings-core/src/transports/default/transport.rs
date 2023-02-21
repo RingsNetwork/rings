@@ -402,9 +402,7 @@ impl IceCandidateGathering for DefaultTransport {
     }
 
     async fn set_local_description<T>(&self, desc: T) -> Result<()>
-    where
-        T: Into<RTCSessionDescription> + Send,
-    {
+    where T: Into<RTCSessionDescription> + Send {
         match self.get_peer_connection().await {
             Some(peer_connection) => peer_connection
                 .set_local_description(desc.into())
@@ -415,9 +413,7 @@ impl IceCandidateGathering for DefaultTransport {
     }
 
     async fn set_remote_description<T>(&self, desc: T) -> Result<()>
-    where
-        T: Into<RTCSessionDescription> + Send,
-    {
+    where T: Into<RTCSessionDescription> + Send {
         match self.get_peer_connection().await {
             Some(peer_connection) => peer_connection
                 .set_remote_description(desc.into())
