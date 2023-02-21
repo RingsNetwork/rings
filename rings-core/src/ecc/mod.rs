@@ -127,8 +127,7 @@ impl From<SecretKey> for PublicKey {
 }
 
 impl<T> From<T> for HashStr
-where
-    T: Into<String>,
+where T: Into<String>
 {
     fn from(s: T) -> Self {
         let inputs = s.into();
@@ -178,27 +177,21 @@ impl<'de> serde::de::Visitor<'de> for SecretKeyVisitor {
         formatter.write_str("SecretKey deserializer")
     }
     fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
-    where
-        E: serde::de::Error,
-    {
+    where E: serde::de::Error {
         SecretKey::from_str(value).map_err(|e| serde::de::Error::custom(e))
     }
 }
 
 impl<'de> Deserialize<'de> for SecretKey {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
+    where D: serde::Deserializer<'de> {
         deserializer.deserialize_str(SecretKeyVisitor)
     }
 }
 
 impl Serialize for SecretKey {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
+    where S: serde::Serializer {
         serializer.serialize_str(self.to_string().as_str())
     }
 }
@@ -268,9 +261,7 @@ impl PublicKey {
 
 /// Recover PublicKey from RawMessage using signature.
 pub fn recover<S>(message: &str, signature: S) -> Result<PublicKey>
-where
-    S: AsRef<[u8]>,
-{
+where S: AsRef<[u8]> {
     let sig_bytes: SigBytes = signature.as_ref().try_into()?;
     let message_hash: [u8; 32] = keccak256(message.as_bytes());
     recover_hash(&message_hash, &sig_bytes)

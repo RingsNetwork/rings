@@ -7,9 +7,9 @@ use tracing_subscriber::Registry;
 #[cfg(feature = "node")]
 /// logging configuration about node.
 pub mod node {
-    use backtrace::Backtrace;
     use std::panic::PanicInfo;
 
+    use backtrace::Backtrace;
     use clap::ValueEnum;
     use opentelemetry::global;
     use opentelemetry::sdk::propagation::TraceContextPropagator;

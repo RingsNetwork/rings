@@ -311,7 +311,10 @@ impl Client {
         ClientOutput::ok("Done.".into(), ())
     }
 
-    pub async fn subscribe_topic<'a, 'b>(&'a self, topic: String) -> impl Stream<Item = String> + 'b
+    pub async fn subscribe_topic<'a, 'b>(
+        &'a self,
+        topic: String,
+    ) -> impl Stream<Item = String> + 'b
     where
         'a: 'b,
     {

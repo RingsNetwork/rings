@@ -91,7 +91,10 @@ jobs:
         uses: crate-ci/typos@master
 
       - name: Setup rust toolchain
-        run: rustup show
+        run: |
+          rustup install nightly
+          rustup component add rustfmt --toolchain nightly
+          rustup show
 
       # If you need to reset the cache version, increment the number after `v`
       - uses: Swatinem/rust-cache@v1
@@ -102,7 +105,7 @@ jobs:
         run: cargo clippy --all --tests -- -D warnings
 
       - name: Check formating
-        run: cargo fmt --all -- --check
+        run: cargo +nightly fmt --all -- --check
 
       - name: Install taplo
         run: cargo install taplo-cli
