@@ -61,9 +61,7 @@ pub mod loader {
     pub trait ResourceLoader {
         /// Load config from local file or remote url.
         async fn load(source: &str) -> anyhow::Result<Self>
-        where
-            Self: Sized + DeserializeOwned,
-        {
+        where Self: Sized + DeserializeOwned {
             let url = Url::parse(source).map_err(|e| anyhow::anyhow!("{}", e))?;
 
             if let Ok(path) = url.to_file_path() {

@@ -207,9 +207,7 @@ impl MessageRelay {
 const INFINITE_LOOP_TOLERANCE: usize = 3;
 
 fn has_infinite_loop<T>(path: &[T]) -> bool
-where
-    T: PartialEq + std::fmt::Debug,
-{
+where T: PartialEq + std::fmt::Debug {
     if let Some(last) = path.last() {
         let indexes = path
             .iter()
@@ -318,18 +316,24 @@ mod test {
         send_relay.relay(next_hop2, None).unwrap();
         send_relay.relay(next_hop3, None).unwrap();
         send_relay.relay(next_hop4, None).unwrap();
-        assert_eq!(
-            send_relay.path,
-            vec![origin_sender, next_hop1, next_hop2, next_hop3, next_hop4]
-        );
+        assert_eq!(send_relay.path, vec![
+            origin_sender,
+            next_hop1,
+            next_hop2,
+            next_hop3,
+            next_hop4
+        ]);
         assert_eq!(send_relay.path_end_cursor, 0);
 
         // Node4 make REPORT, destination is node0.
         let mut report_relay = send_relay.report().unwrap();
-        assert_eq!(
-            report_relay.path,
-            vec![origin_sender, next_hop1, next_hop2, next_hop3, next_hop4]
-        );
+        assert_eq!(report_relay.path, vec![
+            origin_sender,
+            next_hop1,
+            next_hop2,
+            next_hop3,
+            next_hop4
+        ]);
         assert_eq!(report_relay.next_hop, Some(next_hop3));
         assert_eq!(report_relay.path_end_cursor, 0);
 
@@ -339,10 +343,13 @@ mod test {
         // And node2 find that node0 is connected, so it will skip node1 and will jump to node0.
         // node0 -> node1 -> node2 -> node3 -> node4 -> node2
         report_relay.relay(next_hop2, Some(origin_sender)).unwrap();
-        assert_eq!(
-            report_relay.path,
-            vec![origin_sender, next_hop1, next_hop2, next_hop3, next_hop4]
-        );
+        assert_eq!(report_relay.path, vec![
+            origin_sender,
+            next_hop1,
+            next_hop2,
+            next_hop3,
+            next_hop4
+        ]);
         assert_eq!(report_relay.next_hop, Some(origin_sender));
         assert_eq!(report_relay.path_end_cursor, 2);
 

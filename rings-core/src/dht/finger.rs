@@ -325,10 +325,13 @@ mod test {
         table.set(3, did4);
         table.set(4, did5);
         table.remove(did1);
-        assert_eq!(
-            table.finger,
-            [Some(did2), Some(did2), Some(did3), Some(did4), Some(did5),]
-        );
+        assert_eq!(table.finger, [
+            Some(did2),
+            Some(did2),
+            Some(did3),
+            Some(did4),
+            Some(did5),
+        ]);
 
         // [did1, did2, did3, did4, did5] - did2 = [did1, did3, did3, did4, did5]
         table.reset_finger();
@@ -338,10 +341,13 @@ mod test {
         table.set(3, did4);
         table.set(4, did5);
         table.remove(did2);
-        assert_eq!(
-            table.finger,
-            [Some(did1), Some(did3), Some(did3), Some(did4), Some(did5),]
-        );
+        assert_eq!(table.finger, [
+            Some(did1),
+            Some(did3),
+            Some(did3),
+            Some(did4),
+            Some(did5),
+        ]);
 
         // [did1, None, did3, did4, did5] - did1 = [None, None, did3, did4, did5]
         table.reset_finger();
@@ -350,10 +356,13 @@ mod test {
         table.set(3, did4);
         table.set(4, did5);
         table.remove(did1);
-        assert_eq!(
-            table.finger,
-            [None, None, Some(did3), Some(did4), Some(did5),]
-        );
+        assert_eq!(table.finger, [
+            None,
+            None,
+            Some(did3),
+            Some(did4),
+            Some(did5),
+        ]);
 
         // [did1, None, did3, did4, did5] - did3 = [did1, None, did4, did4, did5]
         table.reset_finger();
@@ -362,10 +371,13 @@ mod test {
         table.set(3, did4);
         table.set(4, did5);
         table.remove(did3);
-        assert_eq!(
-            table.finger,
-            [Some(did1), None, Some(did4), Some(did4), Some(did5),]
-        );
+        assert_eq!(table.finger, [
+            Some(did1),
+            None,
+            Some(did4),
+            Some(did4),
+            Some(did5),
+        ]);
 
         // [did1, did2, did3, did4, did5] - did5 = [did1, did2, did4, did4, None]
         table.reset_finger();
@@ -375,9 +387,12 @@ mod test {
         table.set(3, did4);
         table.set(4, did5);
         table.remove(did5);
-        assert_eq!(
-            table.finger,
-            [Some(did1), Some(did2), Some(did3), Some(did4), None]
-        );
+        assert_eq!(table.finger, [
+            Some(did1),
+            Some(did2),
+            Some(did3),
+            Some(did4),
+            None
+        ]);
     }
 }

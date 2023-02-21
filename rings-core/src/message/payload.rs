@@ -33,9 +33,7 @@ pub fn encode_data_gzip(data: &Bytes, level: u8) -> Result<Bytes> {
 }
 
 pub fn gzip_data<T>(data: &T, level: u8) -> Result<Bytes>
-where
-    T: Serialize,
-{
+where T: Serialize {
     let json_bytes = serde_json::to_vec(data).map_err(|_| Error::SerializeToString)?;
     encode_data_gzip(&json_bytes.into(), level)
 }
@@ -50,9 +48,7 @@ pub fn decode_gzip_data(data: &Bytes) -> Result<Bytes> {
 }
 
 pub fn from_gzipped_data<T>(data: &Bytes) -> Result<T>
-where
-    T: DeserializeOwned,
-{
+where T: DeserializeOwned {
     let data = decode_gzip_data(data)?;
     let m = serde_json::from_slice(&data).map_err(Error::Deserialize)?;
     Ok(m)
@@ -75,8 +71,7 @@ pub struct MessagePayload<T> {
 }
 
 impl<T> MessagePayload<T>
-where
-    T: Serialize + DeserializeOwned,
+where T: Serialize + DeserializeOwned
 {
     pub fn new(
         data: T,
@@ -195,8 +190,7 @@ where
 }
 
 impl<T> Encoder for MessagePayload<T>
-where
-    T: Serialize + DeserializeOwned,
+where T: Serialize + DeserializeOwned
 {
     fn encode(&self) -> Result<Encoded> {
         self.to_bincode()?.encode()
@@ -204,8 +198,7 @@ where
 }
 
 impl<T> Decoder for MessagePayload<T>
-where
-    T: Serialize + DeserializeOwned,
+where T: Serialize + DeserializeOwned
 {
     fn from_encoded(encoded: &Encoded) -> Result<Self> {
         let v: Bytes = encoded.decode()?;
@@ -216,8 +209,7 @@ where
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait PayloadSender<T>
-where
-    T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static,
+where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
 {
     fn session_manager(&self) -> &SessionManager;
     async fn do_send_payload(&self, did: Did, payload: MessagePayload<T>) -> Result<()>;
@@ -299,9 +291,7 @@ pub mod test {
     }
 
     pub fn new_payload<T>(data: T) -> MessagePayload<T>
-    where
-        T: Serialize + DeserializeOwned,
-    {
+    where T: Serialize + DeserializeOwned {
         let key = SecretKey::random();
         let destination = SecretKey::random().address().into();
         let session = SessionManager::new_with_seckey(&key, None).unwrap();

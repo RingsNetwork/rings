@@ -422,22 +422,16 @@ pub mod tests {
 
         sleep(Duration::from_secs(5)).await;
 
-        assert_eq!(
-            msg_callback1.handler_messages.lock().await.as_slice(),
-            &[
-                (did2, "Hello world 2 to 1 - 1".as_bytes().to_vec()),
-                (did2, "Hello world 2 to 1 - 2".as_bytes().to_vec())
-            ]
-        );
+        assert_eq!(msg_callback1.handler_messages.lock().await.as_slice(), &[
+            (did2, "Hello world 2 to 1 - 1".as_bytes().to_vec()),
+            (did2, "Hello world 2 to 1 - 2".as_bytes().to_vec())
+        ]);
 
-        assert_eq!(
-            msg_callback2.handler_messages.lock().await.as_slice(),
-            &[
-                (did1, "Hello world 1 to 2 - 1".as_bytes().to_vec()),
-                (did1, "Hello world 1 to 2 - 2".as_bytes().to_vec()),
-                (did1, "Hello world 1 to 2 - 3".as_bytes().to_vec())
-            ]
-        );
+        assert_eq!(msg_callback2.handler_messages.lock().await.as_slice(), &[
+            (did1, "Hello world 1 to 2 - 1".as_bytes().to_vec()),
+            (did1, "Hello world 1 to 2 - 2".as_bytes().to_vec()),
+            (did1, "Hello world 1 to 2 - 3".as_bytes().to_vec())
+        ]);
 
         Ok(())
     }
