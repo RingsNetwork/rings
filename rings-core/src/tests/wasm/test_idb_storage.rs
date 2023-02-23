@@ -62,7 +62,7 @@ async fn test_create_put_data() {
         real_value_data_1.content
     );
 
-    let r: TestDataStruct = instance.get(&key).await.unwrap();
+    let r: TestDataStruct = instance.get(&key).await.unwrap().unwrap();
     tracing::debug!("{:?}", r);
     assert_eq!(r.content, value.content);
 
@@ -203,13 +203,13 @@ async fn test_idb_prune() {
         .await
         .unwrap();
 
-    let d3: TestDataStruct = instance.get(&key3).await.unwrap();
+    let d3: TestDataStruct = instance.get(&key3).await.unwrap().unwrap();
     tracing::debug!("d3, {:?}", d3);
-    let d3: TestDataStruct = instance.get(&key3).await.unwrap();
+    let d3: TestDataStruct = instance.get(&key3).await.unwrap().unwrap();
     tracing::debug!("d3, {:?}", d3);
-    let d1: TestDataStruct = instance.get(&key1).await.unwrap();
+    let d1: TestDataStruct = instance.get(&key1).await.unwrap().unwrap();
     tracing::debug!("d1, {:?}", d1);
-    let d2: TestDataStruct = instance.get(&key2).await.unwrap();
+    let d2: TestDataStruct = instance.get(&key2).await.unwrap().unwrap();
     tracing::debug!("d2, {:?}", d2);
 
     instance
