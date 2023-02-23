@@ -100,10 +100,15 @@ impl PeriodicMeasure {
         counter: MeasureCounter,
     ) -> RefMut<'_, (Did, MeasureCounter), Mutex<PeriodicCounter>> {
         let k = Self::gen_storage_key(did, counter);
-        let count = self.storage.get(&k).await.unwrap_or_else(|e| {
-            log::error!("Failed to get counter: {:?}", e);
-            0
-        });
+        let count = self
+            .storage
+            .get(&k)
+            .await
+            .unwrap_or_else(|e| {
+                log::error!("Failed to get counter: {:?}", e);
+                Some(0)
+            })
+            .unwrap_or(0);
         self.counters
             .entry((did, counter))
             .or_insert_with(|| Mutex::new(PeriodicCounter::new(DURATION, count)))
@@ -256,8 +261,10 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_secs(DURATION)).await;
 
         // Flush to storage.
-        measure.get_count(did, MeasureCounter::Sent).await;
-        measure.get_count(did, MeasureCounter::Received).await;
+        let c1 = measure.get_count(did, MeasureCounter::Sent).await;
+        assert_eq!(c1, 2);
+        let c2 = measure.get_count(did, MeasureCounter::Received).await;
+        assert_eq!(c2, 1);
 
         // Release lock of measure storage.
         drop(measure);
@@ -266,6 +273,10 @@ mod tests {
         let ms2 = PersistenceStorage::new_with_path(ms_path.as_str())
             .await
             .unwrap();
+        // let k = PeriodicMeasure::gen_storage_key(did, MeasureCounter::Sent);
+        // let c2: u64 = ms2.get(&k).await.unwrap().unwrap();
+        // assert!(c2 == 2, "c2 not 2");
+        //.unwrap().unwrap();
         let measure2 = PeriodicMeasure::new(ms2);
 
         // Will take previous count from storage.

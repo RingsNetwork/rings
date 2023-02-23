@@ -452,9 +452,9 @@ async fn test_handle_storage() -> Result<()> {
              sleep(Duration::from_millis(5000)).await;
              assert!(swarm1.dht().storage.count().await.unwrap() == 0);
              assert!(swarm2.dht().storage.count().await.unwrap() > 0);
-             let data: Result<VirtualNode> = swarm2.dht().storage.get(&(vnode.did)).await;
+             let data: Result<Option<VirtualNode>> = swarm2.dht().storage.get(&(vnode.did)).await;
              assert!(data.is_ok(), "vnode: {:?} not in", vnode.did);
-             let data = data.unwrap();
+             let data = data.unwrap().unwrap();
              assert_eq!(data.data[0].clone().decode::<String>().unwrap(), message);
              Ok::<(), Error>(())
          } => {}

@@ -135,21 +135,24 @@ where
     I: PersistenceStorageOperation + std::marker::Sync + KvStorageBasic,
 {
     /// Get a cache entry by `key`.
-    async fn get(&self, key: &K) -> Result<V> {
+    async fn get(&self, key: &K) -> Result<Option<V>> {
         let k = key.to_string();
         let k = k.as_bytes();
-        let v = self
-            .get_db()
-            .get(k)
-            .map_err(Error::SledError)?
-            .ok_or(Error::EntryNotFound)?;
-        bincode::deserialize(v.as_ref()).map_err(Error::BincodeDeserialize)
+        let v = self.get_db().get(k).map_err(Error::SledError)?;
+        if let Some(v) = v {
+            let v = v.as_ref();
+            return bincode::deserialize(v)
+                .map_err(Error::BincodeDeserialize)
+                .map(|r| Some(r));
+        }
+        Ok(None)
     }
 
     /// Put `entry` in the cache under `key`.
     async fn put(&self, key: &K, value: &V) -> Result<()> {
         self.prune().await?;
         let data = bincode::serialize(value).map_err(Error::BincodeSerialize)?;
+        println!("insert v: {:?}", data);
         self.get_db()
             .insert(key.to_string().as_bytes(), data)
             .map_err(Error::SledError)?;
@@ -217,7 +220,7 @@ mod test {
         storage.put(&key1, &data1).await.unwrap();
         let count1 = storage.count().await.unwrap();
         assert!(count1 == 1, "expect count1.1 is {}, got {}", 1, count1);
-        let got_v1: TestStorageStruct = storage.get(&key1).await.unwrap();
+        let got_v1: TestStorageStruct = storage.get(&key1).await.unwrap().unwrap();
         assert!(
             got_v1.content.eq(data1.content.as_str()),
             "expect value1 is {}, got {}",
@@ -251,7 +254,11 @@ mod test {
                 .any(|(k, v)| { keys.contains(k) && values.contains(&v.content) }),
             "not found items"
         );
-
+        let data3: u64 = 101;
+        let key3 = "key3".to_owned();
+        storage.put(&key3, &data3).await.unwrap();
+        let got_d3: u64 = storage.get(&key3).await.unwrap().unwrap();
+        assert!(data3 == got_d3, "expect {}, got {}", data3, got_d3);
         storage.clear().await.unwrap();
         let count1 = storage.count().await.unwrap();
         assert!(count1 == 0, "expect count1.2 is {}, got {}", 0, count1);

@@ -350,7 +350,8 @@ impl ChordStorage<PeerRingAction> for PeerRing {
         match self.find_successor(vid) {
             // Resource should be stored in current node.
             Ok(PeerRingAction::Some(_)) => match self.storage.get(&vid).await {
-                Ok(v) => Ok(PeerRingAction::SomeVNode(v)),
+                Ok(Some(v)) => Ok(PeerRingAction::SomeVNode(v)),
+                Ok(None) => Ok(PeerRingAction::None),
                 Err(_) => Ok(PeerRingAction::None),
             },
             // Resource is stored in other nodes.
@@ -372,12 +373,11 @@ impl ChordStorage<PeerRingAction> for PeerRing {
         match self.find_successor(vid) {
             // `vnode` should be on current node.
             Ok(PeerRingAction::Some(_)) => {
-                let this = self
-                    .storage
-                    .get(&vid)
-                    .await
-                    .or_else(|_| op1.gen_default_vnode())?;
-
+                let this = if let Ok(Some(this)) = self.storage.get(&vid).await {
+                    Ok(this)
+                } else {
+                    op1.gen_default_vnode()
+                }?;
                 let vnode = this.operate(op)?;
                 self.storage.put(&vid, &vnode).await?;
 
