@@ -5,10 +5,7 @@ pub use jsonrpc_core;
 pub use reqwest;
 #[cfg(feature = "browser")]
 pub use reqwest_wasm as reqwest;
-#[cfg(feature = "node")]
 pub use rings_core;
-#[cfg(feature = "browser")]
-pub use rings_core_wasm as rings_core;
 
 pub use self::rings_core::chunk;
 pub use self::rings_core::dht::PeerRing;

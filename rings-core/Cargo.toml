@@ -11,9 +11,30 @@ keywords = ["Chord", "DHT", "Web3", "P2P", "WASM"]
 categories = ["network-programming", "cryptography", "wasm"]
 
 [features]
-default = ["webrtc", "async-channel", "sled"]
-dummy = ["webrtc", "async-channel", "sled", "lazy_static"]
-wasm = ["web-sys", "wasm-bindgen", "js-sys", "wasm-bindgen-futures", "rexie", "serde-wasm-bindgen"]
+default = ["std"]
+std = [
+    "webrtc",
+    "async-channel",
+    "sled",
+    "web3/http-rustls-tls",
+    "futures/default",
+    "uuid/v4",
+    "uuid/serde",
+]
+dummy = ["std", "lazy_static"]
+wasm = [
+    "web-sys",
+    "wasm-bindgen",
+    "js-sys",
+    "wasm-bindgen-futures",
+    "rexie",
+    "serde-wasm-bindgen",
+    "web3/wasm",
+    "futures",
+    "uuid/wasm-bindgen",
+    "uuid/v4",
+    "uuid/serde",
+]
 browser_chrome_test = ["wasm"]
 
 [dependencies]
@@ -48,6 +69,10 @@ thiserror = "1"
 tracing = "0.1.37"
 url = { version = "2", features = ["serde"] }
 
+futures = { version = "0.3.21", default-features = false, optional = true }
+uuid = { version = "0.8.2", optional = true }
+web3 = { version = "0.18.0", default-features = false, optional = true }
+
 # default and dummy
 async-channel = { version = "1.6.1", optional = true }
 sled = { version = "0.34.7", optional = true }
@@ -62,8 +87,7 @@ rexie = { version = "0.4.1", optional = true }
 serde-wasm-bindgen = { version = "0.4.5", optional = true }
 wasm-bindgen = { version = "0.2.83", features = ["serde-serialize"], optional = true }
 wasm-bindgen-futures = { version = "0.4.33", optional = true }
-[dependencies.web-sys]
-features = [
+web-sys = { version = "0.3.56", optional = true, features = [
     "Window",
     "Navigator",
     "MessageEvent",
@@ -88,19 +112,7 @@ features = [
     "RtcLifecycleEvent",
     "console",
     "Blob",
-]
-optional = true
-version = "0.3.56"
-
-[target.'cfg(target_family="wasm")'.dependencies]
-web3 = { package = "web3", version = "0.18.0", features = ["wasm"], default-features = false }
-futures = { package = "futures", version = "0.3.21", default-features = false }
-uuid = { package = "uuid", version = "0.8.2", features = ["wasm-bindgen", "v4", "serde"] }
-
-[target.'cfg(not(target_family="wasm"))'.dependencies]
-web3 = { package = "web3", version = "0.18.0", features = ["http-rustls-tls"], default-features = false }
-futures = { package = "futures", version = "0.3.21" }
-uuid = { package = "uuid", version = "0.8.2", features = ["v4", "serde"] }
+] }
 
 [dev-dependencies]
 tracing-wasm = "0.2.1"
