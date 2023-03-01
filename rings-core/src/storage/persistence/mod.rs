@@ -15,7 +15,7 @@ use crate::err::Result;
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait PersistenceStorageReadAndWrite<K, V>: PersistenceStorageOperation {
     /// Get a cache entry by `key`.
-    async fn get(&self, key: &K) -> Result<V>;
+    async fn get(&self, key: &K) -> Result<Option<V>>;
 
     /// Put `entry` in the cache under `key`.
     async fn put(&self, key: &K, entry: &V) -> Result<()>;

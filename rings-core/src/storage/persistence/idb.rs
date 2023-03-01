@@ -135,23 +135,26 @@ where
     V: DeserializeOwned + Serialize + Sized,
     I: PersistenceStorageOperation + IDBStorageBasic,
 {
-    async fn get(&self, key: &K) -> Result<V> {
+    async fn get(&self, key: &K) -> Result<Option<V>> {
         let (tx, store) = self.get_tx_store(TransactionMode::ReadWrite)?;
         let k: JsValue = JsValue::from(key.to_string());
         let v = store.get(&k).await.map_err(Error::IDBError)?;
-        let mut v: DataStruct<V> = js_value::deserialize(&v)?;
-        v.last_visit_time = chrono::Utc::now().timestamp_millis();
-        v.visit_count += 1;
-        store
-            .put(
-                &js_value::serialize(&v)?,
-                //Some(&k),
-                None,
-            )
-            .await
-            .map_err(Error::IDBError)?;
-        tx.done().await.map_err(Error::IDBError)?;
-        Ok(v.data)
+        let v: Option<DataStruct<V>> = js_value::deserialize(&v)?;
+        if let Some(mut v) = v {
+            v.last_visit_time = chrono::Utc::now().timestamp_millis();
+            v.visit_count += 1;
+            store
+                .put(
+                    &js_value::serialize(&v)?,
+                    //Some(&k),
+                    None,
+                )
+                .await
+                .map_err(Error::IDBError)?;
+            tx.done().await.map_err(Error::IDBError)?;
+            return Ok(Some(v.data));
+        }
+        Ok(None)
     }
 
     async fn get_all(&self) -> Result<Vec<(K, V)>> {
