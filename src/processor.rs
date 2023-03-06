@@ -820,6 +820,28 @@ mod test {
         println!("p1_did: {}", did1);
         println!("p2_did: {}", did2);
 
+        let msgs1: Arc<Mutex<Vec<String>>> = Default::default();
+        let msgs2: Arc<Mutex<Vec<String>>> = Default::default();
+        let callback1 = Box::new(MsgCallbackStruct {
+            msgs: msgs1.clone(),
+        });
+        let callback2 = Box::new(MsgCallbackStruct {
+            msgs: msgs2.clone(),
+        });
+        let msg_handler_1 = Arc::new(p1.swarm.create_message_handler(Some(callback1), None));
+        let msg_handler_2 = Arc::new(p2.swarm.create_message_handler(Some(callback2), None));
+
+        tokio::spawn(async move {
+            tokio::join!(
+                async {
+                    msg_handler_1.clone().listen().await;
+                },
+                async {
+                    msg_handler_2.clone().listen().await;
+                }
+            );
+        });
+
         let (transport_1, offer) = p1.create_offer().await.unwrap();
 
         let pendings_1 = p1.swarm.pending_transports().await.unwrap();
@@ -881,18 +903,6 @@ mod test {
             "p2 transport not connected"
         );
 
-        let msgs1: Arc<Mutex<Vec<String>>> = Default::default();
-        let msgs2: Arc<Mutex<Vec<String>>> = Default::default();
-        let callback1 = Box::new(MsgCallbackStruct {
-            msgs: msgs1.clone(),
-        });
-        let callback2 = Box::new(MsgCallbackStruct {
-            msgs: msgs2.clone(),
-        });
-
-        let msg_handler_1 = Arc::new(p1.swarm.create_message_handler(Some(callback1), None));
-        let msg_handler_2 = Arc::new(p2.swarm.create_message_handler(Some(callback2), None));
-
         let test_text1 = "test1";
         let test_text2 = "test2";
 
@@ -909,17 +919,6 @@ mod test {
             .await
             .unwrap();
         println!("send_message 2 done");
-
-        tokio::spawn(async move {
-            tokio::join!(
-                async {
-                    msg_handler_1.clone().listen().await;
-                },
-                async {
-                    msg_handler_2.clone().listen().await;
-                }
-            );
-        });
 
         tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
 
