@@ -11,10 +11,8 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use crate::channels::Channel;
-use crate::dht::Chord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
-use crate::dht::PeerRingAction;
 use crate::ecc::SecretKey;
 use crate::err::Error;
 use crate::err::Result;
@@ -199,9 +197,10 @@ impl Swarm {
                 }
                 match self.get_transport(did) {
                     Some(_) => {
-                        let payload = MessagePayload::new_direct(
+                        let payload = MessagePayload::new_send(
                             Message::JoinDHT(message::JoinDHT { did }),
                             &self.session_manager,
+                            self.dht.did,
                             self.dht.did,
                         )?;
                         Ok(Some(payload))
@@ -220,9 +219,10 @@ impl Swarm {
                 if let Some(t) = self.get_transport(did) {
                     if t.id == uuid && self.remove_transport(did).is_some() {
                         tracing::info!("[Swarm::ConnectClosed] transport {:?} closed", uuid);
-                        let payload = MessagePayload::new_direct(
+                        let payload = MessagePayload::new_send(
                             Message::LeaveDHT(message::LeaveDHT { did }),
                             &self.session_manager,
+                            self.dht.did,
                             self.dht.did,
                         )?;
                         return Ok(Some(payload));
@@ -323,16 +323,7 @@ impl Swarm {
             transport_uuid: transport.id.to_string(),
             handshake_info: handshake_info.to_string(),
         });
-        let next_hop = {
-            match self.dht.find_successor(did)? {
-                PeerRingAction::Some(node) => Some(node),
-                PeerRingAction::RemoteAction(node, _) => Some(node),
-                _ => None,
-            }
-        }
-        .ok_or(Error::NoNextHop)?;
-        tracing::debug!("next_hop: {:?}", next_hop);
-        self.send_message(connect_msg, next_hop, did).await?;
+        self.send_message(connect_msg, did).await?;
         Ok(transport)
     }
 }
@@ -344,6 +335,10 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Deb
 {
     fn session_manager(&self) -> &SessionManager {
         Swarm::session_manager(self)
+    }
+
+    fn dht(&self) -> Arc<PeerRing> {
+        Swarm::dht(self)
     }
 
     async fn do_send_payload(&self, did: Did, payload: MessagePayload<T>) -> Result<()> {

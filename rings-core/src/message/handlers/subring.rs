@@ -29,8 +29,7 @@ impl SubringInterface for Swarm {
         match self.dht.vnode_operate(op).await? {
             PeerRingAction::None => Ok(()),
             PeerRingAction::RemoteAction(target, PeerRingRemoteAction::FindVNodeForOperate(op)) => {
-                self.send_direct_message(Message::OperateVNode(op), target)
-                    .await?;
+                self.send_message(Message::OperateVNode(op), target).await?;
                 Ok(())
             }
             act => Err(Error::PeerRingUnexpectedAction(act)),

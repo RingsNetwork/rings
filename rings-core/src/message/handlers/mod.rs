@@ -255,6 +255,10 @@ impl PayloadSender<Message> for MessageHandler {
         self.swarm.session_manager()
     }
 
+    fn dht(&self) -> Arc<PeerRing> {
+        self.swarm.dht()
+    }
+
     async fn do_send_payload(&self, did: Did, payload: MessagePayload<Message>) -> Result<()> {
         self.swarm.do_send_payload(did, payload).await
     }
@@ -382,40 +386,35 @@ pub mod tests {
                 Message::custom("Hello world 1 to 2 - 1".as_bytes(), None)?,
                 did2,
             )
-            .await
-            .unwrap();
+            .await?;
 
         handler1
             .send_direct_message(
                 Message::custom("Hello world 1 to 2 - 2".as_bytes(), None)?,
                 did2,
             )
-            .await
-            .unwrap();
+            .await?;
 
         handler2
             .send_direct_message(
                 Message::custom("Hello world 2 to 1 - 1".as_bytes(), None)?,
                 did1,
             )
-            .await
-            .unwrap();
+            .await?;
 
         handler1
             .send_direct_message(
                 Message::custom("Hello world 1 to 2 - 3".as_bytes(), None)?,
                 did2,
             )
-            .await
-            .unwrap();
+            .await?;
 
         handler2
             .send_direct_message(
                 Message::custom("Hello world 2 to 1 - 2".as_bytes(), None)?,
                 did1,
             )
-            .await
-            .unwrap();
+            .await?;
 
         tokio::spawn(async { Arc::new(handler1).listen().await });
         tokio::spawn(async { Arc::new(handler2).listen().await });

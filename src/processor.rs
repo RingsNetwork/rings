@@ -497,10 +497,9 @@ impl Processor {
 
         let msg = Message::custom(&new_msg, None).map_err(Error::SendMessage)?;
 
-        // self.swarm.do_send_payload(address, payload)
         let uuid = self
             .swarm
-            .send_direct_message(msg, destination)
+            .send_message(msg, destination)
             .await
             .map_err(Error::SendMessage)?;
         Ok(uuid)
@@ -820,6 +819,28 @@ mod test {
         println!("p1_did: {}", did1);
         println!("p2_did: {}", did2);
 
+        let msgs1: Arc<Mutex<Vec<String>>> = Default::default();
+        let msgs2: Arc<Mutex<Vec<String>>> = Default::default();
+        let callback1 = Box::new(MsgCallbackStruct {
+            msgs: msgs1.clone(),
+        });
+        let callback2 = Box::new(MsgCallbackStruct {
+            msgs: msgs2.clone(),
+        });
+
+        let msg_handler_1 = Arc::new(p1.swarm.create_message_handler(Some(callback1), None));
+        let msg_handler_2 = Arc::new(p2.swarm.create_message_handler(Some(callback2), None));
+        tokio::spawn(async move {
+            tokio::join!(
+                async {
+                    msg_handler_1.clone().listen().await;
+                },
+                async {
+                    msg_handler_2.clone().listen().await;
+                }
+            );
+        });
+
         let (transport_1, offer) = p1.create_offer().await.unwrap();
 
         let pendings_1 = p1.swarm.pending_transports().await.unwrap();
@@ -881,45 +902,27 @@ mod test {
             "p2 transport not connected"
         );
 
-        let msgs1: Arc<Mutex<Vec<String>>> = Default::default();
-        let msgs2: Arc<Mutex<Vec<String>>> = Default::default();
-        let callback1 = Box::new(MsgCallbackStruct {
-            msgs: msgs1.clone(),
-        });
-        let callback2 = Box::new(MsgCallbackStruct {
-            msgs: msgs2.clone(),
-        });
-
-        let msg_handler_1 = Arc::new(p1.swarm.create_message_handler(Some(callback1), None));
-        let msg_handler_2 = Arc::new(p2.swarm.create_message_handler(Some(callback2), None));
+        println!("waiting for data channel ready");
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
 
         let test_text1 = "test1";
         let test_text2 = "test2";
 
         println!("send_message 1");
-        p1.send_message(did2.as_str(), test_text1.as_bytes())
+        let uuid1 = p1
+            .send_message(did2.as_str(), test_text1.as_bytes())
             .await
             .unwrap();
-        println!("send_message 1 done");
+        println!("send_message 1 done, msg id: {}", uuid1);
 
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
         println!("send_message 2");
-        p2.send_message(did1.as_str(), test_text2.as_bytes())
+        let uuid2 = p2
+            .send_message(did1.as_str(), test_text2.as_bytes())
             .await
             .unwrap();
-        println!("send_message 2 done");
-
-        tokio::spawn(async move {
-            tokio::join!(
-                async {
-                    msg_handler_1.clone().listen().await;
-                },
-                async {
-                    msg_handler_2.clone().listen().await;
-                }
-            );
-        });
+        println!("send_message 2 done, msg id: {}", uuid2);
 
         tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
 

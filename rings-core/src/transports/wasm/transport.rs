@@ -546,11 +546,8 @@ impl IceTrickleScheme for WasmTransport {
             candidates: local_candidates_json,
         };
         tracing::debug!("prepared handshake info :{:?}", data);
-        let resp = MessagePayload::new_direct(
-            data,
-            session_manager,
-            session_manager.authorizer()?.to_owned(), // This is a fake destination
-        )?;
+        let fake_did = session_manager.authorizer()?.to_owned();
+        let resp = MessagePayload::new_send(data, session_manager, fake_did, fake_did)?;
         Ok(resp.encode()?)
     }
 
