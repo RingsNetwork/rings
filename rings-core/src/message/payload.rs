@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -18,7 +19,10 @@ use super::protocols::RelayMethod;
 use crate::consts::DEFAULT_TTL_MS;
 use crate::consts::MAX_TTL_MS;
 use crate::consts::TS_OFFSET_TOLERANCE_MS;
+use crate::dht::Chord;
 use crate::dht::Did;
+use crate::dht::PeerRing;
+use crate::dht::PeerRingAction;
 use crate::ecc::PublicKey;
 use crate::err::Error;
 use crate::err::Result;
@@ -134,12 +138,6 @@ where T: Serialize + DeserializeOwned
         Ok(pl)
     }
 
-    /// new_direct is A specific new_send, with same next_hop and destination
-    /// just like a normal server-client base model.
-    pub fn new_direct(data: T, session_manager: &SessionManager, destination: Did) -> Result<Self> {
-        Self::new_send(data, session_manager, destination, destination)
-    }
-
     pub fn is_expired(&self) -> bool {
         if self.verification.ttl_ms > MAX_TTL_MS {
             return false;
@@ -212,6 +210,7 @@ pub trait PayloadSender<T>
 where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
 {
     fn session_manager(&self) -> &SessionManager;
+    fn dht(&self) -> Arc<PeerRing>;
     async fn do_send_payload(&self, did: Did, payload: MessagePayload<T>) -> Result<()>;
 
     async fn send_payload(&self, payload: MessagePayload<T>) -> Result<()> {
@@ -222,14 +221,21 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
         }
     }
 
-    async fn send_message(&self, msg: T, next_hop: Did, destination: Did) -> Result<uuid::Uuid> {
+    async fn send_message(&self, msg: T, destination: Did) -> Result<uuid::Uuid> {
+        let next_hop = match self.dht().find_successor(destination)? {
+            PeerRingAction::Some(did) => did,
+            PeerRingAction::RemoteAction(did, _) => did,
+            _ => return Err(Error::NoNextHop),
+        };
+
         let payload = MessagePayload::new_send(msg, self.session_manager(), next_hop, destination)?;
         self.send_payload(payload.clone()).await?;
         Ok(payload.tx_id)
     }
 
     async fn send_direct_message(&self, msg: T, destination: Did) -> Result<uuid::Uuid> {
-        let payload = MessagePayload::new_direct(msg, self.session_manager(), destination)?;
+        let payload =
+            MessagePayload::new_send(msg, self.session_manager(), destination, destination)?;
         self.send_payload(payload.clone()).await?;
         Ok(payload.tx_id)
     }
@@ -295,7 +301,7 @@ pub mod test {
         let key = SecretKey::random();
         let destination = SecretKey::random().address().into();
         let session = SessionManager::new_with_seckey(&key, None).unwrap();
-        MessagePayload::new_direct(data, &session, destination).unwrap()
+        MessagePayload::new_send(data, &session, destination, destination).unwrap()
     }
 
     #[test]

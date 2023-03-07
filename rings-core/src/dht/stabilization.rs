@@ -12,6 +12,7 @@ use crate::message::FindSuccessorReportHandler;
 use crate::message::FindSuccessorSend;
 use crate::message::FindSuccessorThen;
 use crate::message::Message;
+use crate::message::MessagePayload;
 use crate::message::NotifyPredecessorSend;
 use crate::message::PayloadSender;
 use crate::swarm::Swarm;
@@ -57,9 +58,13 @@ impl Stabilization {
         });
         if self.chord.did != successor_min {
             for s in successor_list {
-                self.swarm
-                    .send_message(msg.clone(), s, self.swarm.did())
-                    .await?;
+                let payload = MessagePayload::new_send(
+                    msg.clone(),
+                    self.swarm.session_manager(),
+                    s,
+                    self.swarm.did(),
+                )?;
+                self.swarm.send_payload(payload).await?;
             }
             Ok(())
         } else {
@@ -83,9 +88,13 @@ impl Stabilization {
                         then: FindSuccessorThen::Report(FindSuccessorReportHandler::FixFingerTable),
                         strict: true,
                     });
-                    self.swarm
-                        .send_message(msg.clone(), next, self.swarm.did())
-                        .await?;
+                    let payload = MessagePayload::new_send(
+                        msg.clone(),
+                        self.swarm.session_manager(),
+                        next,
+                        self.swarm.did(),
+                    )?;
+                    self.swarm.send_payload(payload).await?;
                     Ok(())
                 }
                 _ => {

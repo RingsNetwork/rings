@@ -151,8 +151,8 @@ impl IceTrickleScheme for DummyTransport {
             sdp: serde_json::to_string(&self.id).unwrap(),
             candidates: vec![],
         };
-        let resp =
-            MessagePayload::new_direct(data, session_manager, session_manager.authorizer()?)?;
+        let fake_did = session_manager.authorizer()?;
+        let resp = MessagePayload::new_send(data, session_manager, fake_did, fake_did)?;
         Ok(resp.encode()?)
     }
 

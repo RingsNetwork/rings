@@ -55,7 +55,7 @@ impl ChordStorageInterface for Swarm {
                 Ok(())
             }
             PeerRingAction::RemoteAction(next, _) => {
-                self.send_direct_message(Message::SearchVNode(SearchVNode { vid }), next)
+                self.send_message(Message::SearchVNode(SearchVNode { vid }), next)
                     .await?;
                 Ok(())
             }
@@ -69,8 +69,7 @@ impl ChordStorageInterface for Swarm {
         match self.dht.vnode_operate(op).await? {
             PeerRingAction::None => Ok(()),
             PeerRingAction::RemoteAction(target, PeerRingRemoteAction::FindVNodeForOperate(op)) => {
-                self.send_direct_message(Message::OperateVNode(op), target)
-                    .await?;
+                self.send_message(Message::OperateVNode(op), target).await?;
                 Ok(())
             }
             act => Err(Error::PeerRingUnexpectedAction(act)),
@@ -84,8 +83,7 @@ impl ChordStorageInterface for Swarm {
         match self.dht.vnode_operate(op).await? {
             PeerRingAction::None => Ok(()),
             PeerRingAction::RemoteAction(target, PeerRingRemoteAction::FindVNodeForOperate(op)) => {
-                self.send_direct_message(Message::OperateVNode(op), target)
-                    .await?;
+                self.send_message(Message::OperateVNode(op), target).await?;
                 Ok(())
             }
             act => Err(Error::PeerRingUnexpectedAction(act)),
@@ -99,8 +97,7 @@ impl ChordStorageInterface for Swarm {
         match self.dht.vnode_operate(op).await? {
             PeerRingAction::None => Ok(()),
             PeerRingAction::RemoteAction(target, PeerRingRemoteAction::FindVNodeForOperate(op)) => {
-                self.send_direct_message(Message::OperateVNode(op), target)
-                    .await?;
+                self.send_message(Message::OperateVNode(op), target).await?;
                 Ok(())
             }
             act => Err(Error::PeerRingUnexpectedAction(act)),

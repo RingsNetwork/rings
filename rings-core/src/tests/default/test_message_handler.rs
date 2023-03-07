@@ -194,7 +194,6 @@ async fn test_handle_notify_predecessor() -> Result<()> {
                         did: key1.address().into(),
                     }),
                     swarm2.did(),
-                    swarm2.did(),
                 )
                 .await
                 .unwrap();
@@ -253,7 +252,6 @@ async fn test_handle_find_successor_increase() -> Result<()> {
                         did: swarm1.did(),
                     }),
                     swarm2.did(),
-                    swarm2.did(),
                 )
                 .await
                 .unwrap();
@@ -273,7 +271,6 @@ async fn test_handle_find_successor_increase() -> Result<()> {
                         then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect),
                         strict: true
                     }),
-                    swarm1.did(),
                     swarm1.did(),
                 )
                 .await
@@ -340,7 +337,6 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
                         did: swarm1.did(),
                     }),
                     swarm2.did(),
-                    swarm2.did(),
                 )
                 .await
                 .unwrap();
@@ -359,7 +355,6 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
                         then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect),
                         strict: true
                     }),
-                    swarm1.did(),
                     swarm1.did(),
                 )
                 .await
@@ -429,7 +424,6 @@ async fn test_handle_storage() -> Result<()> {
                          did: swarm1.did()
                      }),
                      swarm2.did(),
-                     swarm2.did(),
                  )
                  .await
                  .unwrap();
@@ -444,7 +438,6 @@ async fn test_handle_storage() -> Result<()> {
              let vnode: VirtualNode = (message.clone(), encoded_message).try_into().unwrap();
              handler1.send_message(
                  Message::OperateVNode(VNodeOperation::Overwrite(vnode.clone())),
-                 swarm2.did(),
                  swarm2.did(),
              )
              .await

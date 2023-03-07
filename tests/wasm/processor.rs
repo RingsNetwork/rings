@@ -107,8 +107,6 @@ async fn test_processor_handshake_and_msg() {
     let p1 = new_processor().await;
     let p2 = new_processor().await;
 
-    create_connection(&p1, &p2).await;
-
     let msgs1: Arc<Mutex<Vec<String>>> = Default::default();
     let msgs2: Arc<Mutex<Vec<String>>> = Default::default();
     let callback1 = Box::new(MsgCallbackStruct {
@@ -132,6 +130,12 @@ async fn test_processor_handshake_and_msg() {
     console_log!("listen");
     listen(&p1, Some(callback1)).await;
     listen(&p2, Some(callback2)).await;
+
+    create_connection(&p1, &p2).await;
+
+    fluvio_wasm_timer::Delay::new(Duration::from_secs(2))
+        .await
+        .unwrap();
 
     p1.send_message(p2_addr.as_str(), test_text1.as_bytes())
         .await
