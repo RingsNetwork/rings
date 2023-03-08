@@ -73,14 +73,23 @@ impl HttpServer {
 
         let request_url = url.parse::<http::Uri>().unwrap();
 
-        let resp = self
+        let request_builder = self
             .client
             .request(
                 http::Method::from_str(request.method.as_str()).unwrap(),
                 request_url.to_string(),
             )
             .headers((&request.headers).try_into().unwrap())
-            .timeout(request.timeout.clone().into())
+            .timeout(request.timeout.clone().into());
+
+        let request_builder = if let Some(body) = request.body.as_ref() {
+            let body = body.to_vec();
+            request_builder.body(body)
+        } else {
+            request_builder
+        };
+
+        let resp = request_builder
             .send()
             .await
             .map_err(|e| Error::HttpRequestError(e.to_string()))?;

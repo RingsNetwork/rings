@@ -326,7 +326,7 @@ struct SendHttpCommand {
 
     name: String,
 
-    #[arg(default_value = "get")]
+    #[arg(default_value = "get", long, short = 'X', help = "request method")]
     method: String,
 
     #[arg(default_value = "/")]
@@ -335,7 +335,7 @@ struct SendHttpCommand {
     #[arg(long = "header", short = 'H', action = ArgAction::Append, help = "headers append to the request")]
     headers: Vec<String>,
 
-    #[arg(long, help = "set content of http body")]
+    #[arg(long, short = 'b', help = "set content of http body")]
     body: Option<String>,
 
     #[arg(long, default_value = "30000")]
