@@ -830,16 +830,8 @@ mod test {
 
         let msg_handler_1 = Arc::new(p1.swarm.create_message_handler(Some(callback1), None));
         let msg_handler_2 = Arc::new(p2.swarm.create_message_handler(Some(callback2), None));
-        tokio::spawn(async move {
-            tokio::join!(
-                async {
-                    msg_handler_1.clone().listen().await;
-                },
-                async {
-                    msg_handler_2.clone().listen().await;
-                }
-            );
-        });
+        tokio::spawn(async { msg_handler_1.listen().await });
+        tokio::spawn(async { msg_handler_2.listen().await });
 
         let (transport_1, offer) = p1.create_offer().await.unwrap();
 
