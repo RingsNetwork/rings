@@ -260,13 +260,14 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
         payload: &MessagePayload<T>,
         relay: MessageRelay,
     ) -> Result<()> {
-        self.send_payload(MessagePayload::new(
+        let mut new_pl = MessagePayload::new(
             payload.data.clone(),
             self.session_manager(),
             OriginVerificationGen::Stick(payload.origin_verification.clone()),
             relay,
-        )?)
-        .await
+        )?;
+        new_pl.tx_id = payload.tx_id;
+        self.send_payload(new_pl).await
     }
 }
 
