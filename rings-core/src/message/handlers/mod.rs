@@ -378,46 +378,53 @@ pub mod tests {
         let cb1: CallbackFn = Box::new(msg_callback1.clone());
         let cb2: CallbackFn = Box::new(msg_callback2.clone());
 
-        let handler1 = swarm1.create_message_handler(Some(cb1), None);
-        let handler2 = swarm2.create_message_handler(Some(cb2), None);
+        let handler1 = Arc::new(swarm1.create_message_handler(Some(cb1), None));
+        let handler2 = Arc::new(swarm2.create_message_handler(Some(cb2), None));
 
+        let h1 = handler1.clone();
+        let h2 = handler2.clone();
+        tokio::spawn(async { h1.listen().await });
+        tokio::spawn(async { h2.listen().await });
+
+        println!("waiting for data channel ready");
+        sleep(Duration::from_secs(5)).await;
+
+        println!("sending messages");
         handler1
-            .send_direct_message(
+            .send_message(
                 Message::custom("Hello world 1 to 2 - 1".as_bytes(), None)?,
                 did2,
             )
-            .await?;
+            .await
+            .unwrap();
 
         handler1
-            .send_direct_message(
+            .send_message(
                 Message::custom("Hello world 1 to 2 - 2".as_bytes(), None)?,
                 did2,
             )
             .await?;
 
         handler2
-            .send_direct_message(
+            .send_message(
                 Message::custom("Hello world 2 to 1 - 1".as_bytes(), None)?,
                 did1,
             )
             .await?;
 
         handler1
-            .send_direct_message(
+            .send_message(
                 Message::custom("Hello world 1 to 2 - 3".as_bytes(), None)?,
                 did2,
             )
             .await?;
 
         handler2
-            .send_direct_message(
+            .send_message(
                 Message::custom("Hello world 2 to 1 - 2".as_bytes(), None)?,
                 did1,
             )
             .await?;
-
-        tokio::spawn(async { Arc::new(handler1).listen().await });
-        tokio::spawn(async { Arc::new(handler2).listen().await });
 
         sleep(Duration::from_secs(5)).await;
 
