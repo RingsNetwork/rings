@@ -217,8 +217,11 @@ struct ConnectWithSeedCommand {
 #[derive(Subcommand, Debug)]
 #[command(rename_all = "kebab-case")]
 enum SdpCommand {
+    #[command(about="Create SDP offer")]
     Offer(SdpOfferCommand),
+    #[command(about="Create SDP answer")]
     Answer(SdpAnswerCommand),
+    #[command(about="Accept a SDP answer")]
     AcceptAnswer(SdpAcceptAnswerCommand),
 }
 
@@ -259,7 +262,9 @@ struct SdpAcceptAnswerCommand {
 #[derive(Subcommand, Debug)]
 #[command(rename_all = "kebab-case")]
 enum PeerCommand {
+    #[command(about="List peers")]
     List(PeerListCommand),
+    #[command(about="Disconnect peer")]
     Disconnect(PeerDisconnectCommand),
 }
 
@@ -280,7 +285,9 @@ struct PeerDisconnectCommand {
 #[derive(Subcommand, Debug)]
 #[command(rename_all = "kebab-case")]
 enum PendingCommand {
+    #[command(about="List pending peers")]
     List(PendingListCommand),
+    #[command(about="Close pending peer")]
     Close(PendingCloseTransportCommand),
 }
 
@@ -301,9 +308,13 @@ struct PendingCloseTransportCommand {
 #[derive(Subcommand, Debug)]
 #[command(rename_all = "kebab-case")]
 enum SendCommand {
+    #[command(about="Send raw message")]
     Raw(SendRawCommand),
+    #[command(about="Send HTTP request message")]
     Http(SendHttpCommand),
+    #[command(about="Send simple text message")]
     SimpleText(SendSimpleTextCommand),
+    #[command(about="Send custom message")]
     Custom(SendCustomMessageCommand),
 }
 
