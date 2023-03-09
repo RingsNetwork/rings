@@ -182,11 +182,11 @@ impl ClientArgs {
 #[derive(Subcommand, Debug)]
 #[command(rename_all = "kebab-case")]
 enum ConnectCommand {
-    #[command(about = "Connect with Node url")]
+    #[command(about = "Connects to a node using its URL.")]
     Node(ConnectUrlCommand),
-    #[command(about = "Connect with Did via DHT")]
+    #[command(about = "Connects to a node using its DID via DHT.")]
     Did(ConnectWithDidCommand),
-    #[command(about = "Connect with seed from url or file")]
+    #[command(about = "Connects to a node using its seed from a URL or file.")]
     Seed(ConnectWithSeedCommand),
 }
 
@@ -217,11 +217,11 @@ struct ConnectWithSeedCommand {
 #[derive(Subcommand, Debug)]
 #[command(rename_all = "kebab-case")]
 enum SdpCommand {
-    #[command(about = "Create SDP offer")]
+    #[command(about = "Creates an SDP offer.")]
     Offer(SdpOfferCommand),
-    #[command(about = "Create SDP answer")]
+    #[command(about = "Creates an SDP answer.")]
     Answer(SdpAnswerCommand),
-    #[command(about = "Accept a SDP answer")]
+    #[command(about = "Accepts an SDP answer.")]
     AcceptAnswer(SdpAcceptAnswerCommand),
 }
 
@@ -308,13 +308,13 @@ struct PendingCloseTransportCommand {
 #[derive(Subcommand, Debug)]
 #[command(rename_all = "kebab-case")]
 enum SendCommand {
-    #[command(about = "Send raw message")]
+    #[command(about = "Sends a raw message.")]
     Raw(SendRawCommand),
-    #[command(about = "Send HTTP request message")]
+    #[command(about = "Sends an HTTP request message.")]
     Http(SendHttpCommand),
-    #[command(about = "Send simple text message")]
+    #[command(about = "Sends a simple text message.")]
     SimpleText(SendSimpleTextCommand),
-    #[command(about = "Send custom message")]
+    #[command(about = "Sends a custom message.")]
     Custom(SendCustomMessageCommand),
 }
 
