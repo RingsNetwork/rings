@@ -19,11 +19,3 @@ pub struct SeedPeer {
     /// remote client endpoint
     pub endpoint: String,
 }
-
-/// implement load method.
-#[cfg_attr(feature = "node", async_trait)]
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-pub trait SourceLoader {
-    async fn load(source: &str) -> anyhow::Result<Self>
-    where Self: Sized;
-}

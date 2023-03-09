@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 //! An efficient command tool of using ring-node.
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,11 +37,13 @@ pub struct Client {
 
 /// Wrap client output contain raw result and humanreadable display.
 pub struct ClientOutput<T> {
+    /// Output data.
     pub result: T,
     display: String,
 }
 
 impl Client {
+    /// Creates a new Client instance with the specified endpoint URL and signature.
     pub async fn new(endpoint_url: &str, signature: &str) -> anyhow::Result<Self> {
         let mut default_headers = reqwest::header::HeaderMap::default();
         default_headers.insert("X-SIGNATURE", header::HeaderValue::from_str(signature)?);
@@ -55,6 +58,14 @@ impl Client {
         Ok(Self { client })
     }
 
+    /// Establishes a WebRTC connection with a remote peer using HTTP as the signaling channel.
+    ///
+    /// This function allows two peers to establish a WebRTC connection using HTTP,
+    /// which can be useful in scenarios where a direct peer-to-peer connection is not possible due to firewall restrictions or other network issues.
+    /// The function sends ICE candidates and Session Description Protocol (SDP) messages over HTTP as a form of signaling to establish the connection.
+    ///
+    /// Takes a URL for an HTTP server that will be used as the signaling channel to exchange ICE candidates and SDP with the remote peer.
+    /// Returns a transport ID that can be used to refer to this connection in subsequent WebRTC operations.
     pub async fn connect_peer_via_http(&mut self, http_url: &str) -> Output<String> {
         let resp = self
             .client
@@ -75,6 +86,7 @@ impl Client {
         )
     }
 
+    /// Attempts to connect to a peer using a seed file located at the specified source path.
     pub async fn connect_with_seed(&mut self, source: &str) -> Output<()> {
         let seed = Seed::load(source).await?;
         let seed_v = serde_json::to_value(seed).map_err(|_| anyhow::anyhow!("serialize failed"))?;
