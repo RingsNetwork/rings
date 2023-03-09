@@ -1,5 +1,22 @@
 #![warn(missing_docs)]
-//! An efficient command tool of using ring-node.
+//! # ring-node-client
+//!
+//! ring-node-client is a command-line tool for interacting with the Ring Node backend API. It allows users to establish WebRTC connections with remote peers, send and receive messages, and publish and subscribe to topics.
+//!
+//! ## Usage
+//!
+//! To use ring-node-client, simply create a new instance of the Client struct, passing in the endpoint URL and signature as arguments. Then, use the various methods on the Client instance to perform the desired actions.
+//!
+//! # Features
+//!
+//! - Establish WebRTC connections with remote peers using HTTP as a signaling channel.
+//! - Send and receive messages using WebRTC.
+//! - Publish and subscribe to topics.
+//! - Register and lookup DIDs of services.
+//! - Send HTTP requests to remote peers.
+//! - Load a seed file to establish a connection with a remote peer.
+//!
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -102,6 +119,12 @@ impl Client {
         ClientOutput::ok("Successful!".to_string(), ())
     }
 
+
+    /// Answers a WebRTC offer by providing ICE candidate information to the remote peer.
+    ///
+    /// The ice_info parameter is a string containing the ICE candidate information provided by the remote peer as part of the offer.
+    ///
+    /// Returns an Output containing a TransportAndIce struct if successful, or an anyhow::Error if an error occurred.
     pub async fn answer_offer(&mut self, ice_info: &str) -> Output<TransportAndIce> {
         let resp = self
             .client
@@ -121,6 +144,7 @@ impl Client {
         )
     }
 
+    /// Attempts to connect to a peer using a DID stored in a Distributed Hash Table (DHT).
     pub async fn connect_with_did(&mut self, did: &str) -> Output<()> {
         self.client
             .call_method(
@@ -132,6 +156,7 @@ impl Client {
         ClientOutput::ok("Successful!".to_owned(), ())
     }
 
+    /// Creates a WebRTC offer to establish a connection with a remote peer.
     pub async fn create_offer(&mut self) -> Output<TransportAndIce> {
         let resp = self
             .client
@@ -148,6 +173,7 @@ impl Client {
         )
     }
 
+    /// Accepts a WebRTC answer from a remote peer, providing the transport_id and ICE candidate information needed to establish the connection.
     pub async fn accept_answer(&mut self, transport_id: &str, ice: &str) -> Output<Peer> {
         let resp = self
             .client
@@ -163,6 +189,9 @@ impl Client {
         ClientOutput::ok(format!("transport_id: {}", peer.transport_id), peer)
     }
 
+    /// Lists all connected peers and their status.
+    ///
+    /// Returns an Output containing a formatted string representation of the list of peers if successful, or an anyhow::Error if an error occurred.
     pub async fn list_peers(&mut self) -> Output<()> {
         let resp = self
             .client
@@ -187,6 +216,7 @@ impl Client {
         ClientOutput::ok(display, ())
     }
 
+    /// Disconnects from the peer with the specified DID.
     pub async fn disconnect(&mut self, did: &str) -> Output<()> {
         self.client
             .call_method(Method::Disconnect.as_str(), Params::Array(vec![json!(did)]))
@@ -196,6 +226,7 @@ impl Client {
         ClientOutput::ok("Done.".into(), ())
     }
 
+    /// Lists all pending transports and their status.
     pub async fn list_pendings(&self) -> Output<()> {
         let resp = self
             .client
@@ -212,6 +243,7 @@ impl Client {
         ClientOutput::ok(display, ())
     }
 
+    /// Closes the pending transport with the specified transport ID.
     pub async fn close_pending_transport(&self, transport_id: &str) -> Output<()> {
         self.client
             .call_method(
@@ -223,6 +255,7 @@ impl Client {
         ClientOutput::ok("Done.".into(), ())
     }
 
+    /// Sends a message to the specified peer.
     pub async fn send_message(&self, did: &str, text: &str) -> Output<()> {
         let mut params = serde_json::Map::new();
         params.insert("destination".to_owned(), json!(did));
@@ -234,6 +267,7 @@ impl Client {
         ClientOutput::ok("Done.".into(), ())
     }
 
+    /// Sends a custom message to the specified peer.
     pub async fn send_custom_message(
         &self,
         did: &str,
@@ -250,6 +284,7 @@ impl Client {
         ClientOutput::ok("Done.".into(), ())
     }
 
+    /// Sends an HTTP request message to the specified peer.
     #[allow(clippy::too_many_arguments)]
     pub async fn send_http_request_message(
         &self,
@@ -274,6 +309,7 @@ impl Client {
         ClientOutput::ok("Done.".into(), ())
     }
 
+    /// Sends a simple text message to the specified peer.
     pub async fn send_simple_text_message(&self, did: &str, text: &str) -> Output<()> {
         self.client
             .call_method(
@@ -285,6 +321,7 @@ impl Client {
         ClientOutput::ok("Done.".into(), ())
     }
 
+    /// Registers a new service with the given name.
     pub async fn register_service(&self, name: &str) -> Output<()> {
         self.client
             .call_method(
@@ -296,6 +333,7 @@ impl Client {
         ClientOutput::ok("Done.".into(), ())
     }
 
+    /// Looks up the DIDs of services registered with the given name.
     pub async fn lookup_service(&self, name: &str) -> Output<()> {
         let resp = self
             .client
@@ -312,6 +350,7 @@ impl Client {
         ClientOutput::ok(dids.join("\n"), ())
     }
 
+    /// Publishes a message to the specified topic.
     pub async fn publish_message_to_topic(&self, topic: &str, data: &str) -> Output<()> {
         self.client
             .call_method(
@@ -323,6 +362,7 @@ impl Client {
         ClientOutput::ok("Done.".into(), ())
     }
 
+    /// Subscribes to the specified topic and returns a stream of messages published to the topic.
     pub async fn subscribe_topic<'a, 'b>(
         &'a self,
         topic: String,
@@ -372,11 +412,12 @@ impl Client {
 }
 
 impl<T> ClientOutput<T> {
-    // Put display ahead to avoid moved value error.
+    /// Put display ahead to avoid moved value error.
     pub fn ok(display: String, result: T) -> anyhow::Result<Self> {
         Ok(Self { result, display })
     }
 
+    /// Prints the display value of this ClientOutput instance to the console.
     pub fn display(&self) {
         println!("{}", self.display);
     }
