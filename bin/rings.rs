@@ -38,23 +38,23 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 #[command(rename_all = "kebab-case")]
 enum Command {
-    #[command(about = "Init rings node config")]
+    #[command(about = "Initializes a node with the given configuration.")]
     Init(InitCommand),
-    #[command(about = "Start a long-running node daemon")]
+    #[command(about = "Starts a long-running node daemon.")]
     Run(RunCommand),
-    #[command(about = "Like a chat room but on the Rings Network")]
+    #[command(about = "Provides chat room-like functionality on the Rings Network.")]
     Pubsub(PubsubCommand),
-    #[command(subcommand)]
+    #[command(about = "Connects to a remote peer.", subcommand)]
     Connect(ConnectCommand),
-    #[command(subcommand)]
+    #[command(about = "Generates a SDP message.", subcommand)]
     Sdp(SdpCommand),
-    #[command(subcommand)]
+    #[command(about = "Manages peers on the network.", subcommand)]
     Peer(PeerCommand),
-    #[command(subcommand)]
+    #[command(about = "Manages pending peers on the network.", subcommand)]
     Pending(PendingCommand),
-    #[command(subcommand)]
+    #[command(about = "Sends a message to another peer.", subcommand)]
     Send(SendCommand),
-    #[command(subcommand)]
+    #[command(about = "Registers or looks up a service on the network.", subcommand)]
     Service(ServiceCommand),
 }
 
@@ -182,11 +182,11 @@ impl ClientArgs {
 #[derive(Subcommand, Debug)]
 #[command(rename_all = "kebab-case")]
 enum ConnectCommand {
-    #[command(about = "Connect with Node url")]
+    #[command(about = "Connects to a node using its URL.")]
     Node(ConnectUrlCommand),
-    #[command(about = "Connect with Did via DHT")]
+    #[command(about = "Connects to a node using its DID via DHT.")]
     Did(ConnectWithDidCommand),
-    #[command(about = "Connect with seed from url or file")]
+    #[command(about = "Connects to a node using its seed from a URL or file.")]
     Seed(ConnectWithSeedCommand),
 }
 
@@ -217,8 +217,11 @@ struct ConnectWithSeedCommand {
 #[derive(Subcommand, Debug)]
 #[command(rename_all = "kebab-case")]
 enum SdpCommand {
+    #[command(about = "Creates an SDP offer.")]
     Offer(SdpOfferCommand),
+    #[command(about = "Creates an SDP answer.")]
     Answer(SdpAnswerCommand),
+    #[command(about = "Accepts an SDP answer.")]
     AcceptAnswer(SdpAcceptAnswerCommand),
 }
 
@@ -259,7 +262,9 @@ struct SdpAcceptAnswerCommand {
 #[derive(Subcommand, Debug)]
 #[command(rename_all = "kebab-case")]
 enum PeerCommand {
+    #[command(about = "List peers")]
     List(PeerListCommand),
+    #[command(about = "Disconnect peer")]
     Disconnect(PeerDisconnectCommand),
 }
 
@@ -280,7 +285,9 @@ struct PeerDisconnectCommand {
 #[derive(Subcommand, Debug)]
 #[command(rename_all = "kebab-case")]
 enum PendingCommand {
+    #[command(about = "List pending peers")]
     List(PendingListCommand),
+    #[command(about = "Close pending peer")]
     Close(PendingCloseTransportCommand),
 }
 
@@ -301,9 +308,13 @@ struct PendingCloseTransportCommand {
 #[derive(Subcommand, Debug)]
 #[command(rename_all = "kebab-case")]
 enum SendCommand {
+    #[command(about = "Sends a raw message.")]
     Raw(SendRawCommand),
+    #[command(about = "Sends an HTTP request message.")]
     Http(SendHttpCommand),
+    #[command(about = "Sends a simple text message.")]
     SimpleText(SendSimpleTextCommand),
+    #[command(about = "Sends a custom message.")]
     Custom(SendCustomMessageCommand),
 }
 
