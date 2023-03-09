@@ -147,7 +147,7 @@ impl FingerTable {
     pub fn closest(&self, did: Did) -> Did {
         let bid: BiasId = did.bias(self.did);
         for i in (0..self.size).rev() {
-            if let Some(v) = self.finger[i as usize] {
+            if let Some(v) = self.finger[i] {
                 if v.bias(self.did) < bid {
                     // after bias v > self.id
                     // check a recorded did x in (self.id, target_id)
@@ -160,7 +160,7 @@ impl FingerTable {
 
     /// get length of finger
     pub fn len(&self) -> usize {
-        self.finger.iter().flatten().count() as usize
+        self.finger.iter().flatten().count()
     }
 
     /// get finger list

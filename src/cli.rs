@@ -15,7 +15,6 @@
 //! - Register and lookup DIDs of services.
 //! - Send HTTP requests to remote peers.
 //! - Load a seed file to establish a connection with a remote peer.
-//!
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -118,7 +117,6 @@ impl Client {
 
         ClientOutput::ok("Successful!".to_string(), ())
     }
-
 
     /// Answers a WebRTC offer by providing ICE candidate information to the remote peer.
     ///
