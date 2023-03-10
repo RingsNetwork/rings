@@ -139,8 +139,6 @@ Assuming Node A and Node B want to create a WebRTC connection, they would need t
 
 The Rings Network is a structured peer-to-peer network that incorporates a distributed hash table (DHT) to facilitate efficient and scalable lookups. The Chord algorithm is utilized to implement the lookup function within the DHT, thereby enabling effective routing of messages and storage of key-value pairs in a peer-to-peer setting. The use of a DHT, incorporating the Chord algorithm, guarantees high availability in the Rings Network, which is critical for handling the substantial number of nodes and requests typically present in large-scale peer-to-peer networks.
 
-Each node in the Rings Network is assigned a range of keys and maintains a finger table containing information about other nodes in the network. This allows for quick determination of the node responsible for a given key and facilitates the forwarding of queries to the appropriate node. The nodes and keys within the network are arranged in an identifier ring, which has at most $2^m$ nodes, ranging from 0 to $2^m-1$. The identifier ring provides a convenient method for mapping keys to nodes, and each node in the identifier ring has a successor and a predecessor. The successor of a node is the next node in the identifier ring in a clockwise direction, while the predecessor is the previous node in a counter-clockwise direction.
-
 
 ### Protocol Layer
 
