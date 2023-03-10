@@ -6,6 +6,7 @@ rings-node
 [![docs](https://docs.rs/rings-node/badge.svg)](https://docs.rs/rings-node/latest/rings_node/)
 [![npm version](https://badge.fury.io/js/@ringsnetwork%2Frings-node.svg)](https://badge.fury.io/js/@ringsnetwork%2Frings-node)
 ![GitHub](https://img.shields.io/github/license/RingsNetwork/rings-node)
+
 Rings is a structured peer-to-peer network implementation using WebRTC, Chord algorithm, and full WebAssembly (WASM) support.
 
 For more details you can check our [Rings Whitepaper](https://raw.githubusercontent.com/RingsNetwork/whitepaper/master/rings.pdf).
