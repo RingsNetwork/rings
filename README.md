@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://static.ringsnetwork.io/ringsnetwork_logo.png">
+  <img alt="Rings Network" src="https://static.ringsnetwork.io/ringsnetwork_logo.png">
+</picture>
+
 rings-node
 ===============
 
