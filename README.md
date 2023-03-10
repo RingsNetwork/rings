@@ -5,38 +5,118 @@ rings-node
 [![cargo](https://img.shields.io/crates/v/rings-node.svg)](https://crates.io/crates/rings-node)
 [![docs](https://docs.rs/rings-node/badge.svg)](https://docs.rs/rings-node/latest/rings_node/)
 
-### Installation
+Rings is a structured peer-to-peer network implementation using WebRTC, Chord algorithm, and full WebAssembly (WASM) support.
 
-#### from cargo
+For more details you can check our [Rings Whitepaper](https://raw.githubusercontent.com/RingsNetwork/whitepaper/master/rings.pdf).
 
-```
+
+## Installation
+
+You can install rings-node either from Cargo or from source.
+
+### from cargo
+
+To install rings-node from Cargo, run the following command:
+
+```sh
 cargo install rings-node
 ```
 
-#### from source
+### from source
 
-```
+To install rings-node from source, follow these steps:
+
+```sh
 git clone git@github.com:RingsNetwork/rings-node.git
 cd ./rings-node
 cargo install --path .
 ```
 
+### Build for WebAssembly
 
-### Usage
 
-* Create default config file:
+To build Rings Network for WebAssembly, run the following commands:
 
-	`rings init`
+```
+cargo build --release --target wasm32-unknown-unknown --no-default-features --features browser
+wasm-bindgen --out-dir pkg --target web ./target/wasm32-unknown-unknown/release/rings_node.wasm
+```
 
-* Run rings-node as daemon;
+Or build with `wasm-pack`
 
-	`rings run`
+```sh
+wasm-pack build --scope ringsnetwork -t web --no-default-features --features browser --features console_error_panic_hook
+```
 
-* Get help message:
 
-  `rings help`
+## Usage
 
-### ICE Scheme:
+```
+rings <command> [options]
+```
+
+### Commands
+
+- `help`: displays the usage information.
+- `init`: creates a default configuration file named "config.toml" in the current directory. This file can be edited to customize the behavior of the rings-node daemon.
+- `run`: runs the rings-node daemon. This command starts the daemon process, which will validate transactions, maintain the blockchain, and participate in consensus to earn rewards. By default, the daemon will use the "config.toml" file in the current directory for configuration. Use the "-c" or "--config" option to specify a custom configuration file.
+
+### Options
+
+- `-c, --config <FILE>`: specifies a custom configuration file to use instead of the default "config.toml". The configuration file is used to specify the network configuration, account settings, and other parameters that control the behavior of the rings-node daemon.
+- `-h, --help`: displays the usage information.
+- `-V, --version`: displays the version information for rings-node.
+
+
+
+## Architecture
+
+The Rings Network architecture is streamlined into five distinct layers.
+
+```
++-----------------------------------------------------------------------------------------+
+|                                         RINGS                                           |
++-----------------------------------------------------------------------------------------+
+|   Encrypted IM / Secret Sharing Storage / Distributed Content / Secret Data Exchange    |
++-----------------------------------------------------------------------------------------+
+|                  SSSS                  |  Perdson Commitment/zkPod/ Secret Sharing      |
++-----------------------------------------------------------------------------------------+
+|                     |       dDNS       |                 Sigma Protocol                 |
++      K-V Storage    +------------------+------------------------------------------------+
+|                     |  Peer LOOKUP     |          MSRP        |  End-to-End Encryption  |
++----------------------------------------+------------------------------------------------+
+|            Peer-to-Peer Network        |                                                |
+|----------------------------------------+               DID / Resource ID                |
+|                 Chord DHT              |                                                |
++----------------------------------------+------------------------------------------------+
+|                Trickle SDP             |        ElGamal        | Persistence Storage    |
++----------------------------------------+-----------------------+------------------------+
+|            STUN  | SDP  | ICE          |  Crosschain Binding   | Smart Contract Binding |
++----------------------------------------+------------------------------------------------+
+|             SCTP | UDP | TCP           |             Finate Pubkey Group                |
++----------------------------------------+------------------------------------------------+
+|   WASM Runtime    |                    |                                                |
++-------------------|  Operation System  |                   ECDSA                        |
+|     Browser       |                    |                                                |
++-----------------------------------------------------------------------------------------+
+```
+
+
+### Runtime Layer
+
+The design goal of Rings Network is to enable nodes to run in any environment, including browsers, mobile devices, Linux, Mac, Windows, etc. To achieve this, we have adopted a cross platform compile approach to build the code. For non-browser environments, we use pure Rust implementation that is independent of any system APIs, making our native implementation system agnostic. For browser environments, we compile the pure Rust implementation to WebAssembly (Wasm) and use web-sys, js-sys, and wasm-bindgen to glue it together, making our nodes fully functional in the browser.
+
+
+### Transport Layer
+
+ The implementation of WebRTC and WebAssembly in Rings Network provides several advantages for users. Firstly, the browser-based approach means that users do not need to install any additional software or plugins to participate in the network. Secondly, the use of WebRTC and WebAssembly enables the network to have a low latency and high throughput, making it suitable for real-time communication and data transfer.
+
+ WebRTC, or Web Real-Time Communication, provides browsers and mobile apps with real-time communication capabilities through simple APIs. With WebRTC, users can easily send audio, video, and data streams directly between browsers, without the need for any plug-ins or extra software.
+At the same time, the Rings Network has some special optimizations for the WebRTC handshakes process.
+
+Assuming Node A and Node B want to create a WebRTC connection, they would need to exchange a minimum of three messages with each other:
+
+#### ICE Scheme:
 
 1. Peer A:
 {
@@ -55,10 +135,26 @@ cargo install --path .
    Set receiveed answer as remote description
 }
 
+### Network Layer
 
-### Keywords
+The Rings Network is a structured peer-to-peer network that incorporates a distributed hash table (DHT) to facilitate efficient and scalable lookups. The Chord algorithm is utilized to implement the lookup function within the DHT, thereby enabling effective routing of messages and storage of key-value pairs in a peer-to-peer setting. The use of a DHT, incorporating the Chord algorithm, guarantees high availability in the Rings Network, which is critical for handling the substantial number of nodes and requests typically present in large-scale peer-to-peer networks.
 
-* Candidate
+Each node in the Rings Network is assigned a range of keys and maintains a finger table containing information about other nodes in the network. This allows for quick determination of the node responsible for a given key and facilitates the forwarding of queries to the appropriate node. The nodes and keys within the network are arranged in an identifier ring, which has at most $2^m$ nodes, ranging from 0 to $2^m-1$. The identifier ring provides a convenient method for mapping keys to nodes, and each node in the identifier ring has a successor and a predecessor. The successor of a node is the next node in the identifier ring in a clockwise direction, while the predecessor is the previous node in a counter-clockwise direction.
+
+
+### Protocol Layer
+
+In the protocol layer, the central design concept revolves around the utilization of a Decentralized Identifier (DID), which constitutes a finite ring in abstract algebra. The DID is a $2^{160}$-bit identifier that enables the construction of a mathematical structure that encompasses the characteristics of both a group and a field. It is comprised of a set of elements with two binary operations, addition and multiplication, which satisfy a set of axioms such as associativity, commutativity, and distributivity. The ring is deemed finite due to its having a finite number of elements. Finite rings are widely employed in various domains of mathematics and computer science, including cryptography and coding theory.
+
+
+### Application Layer
+
+The nucleus of Rings Network is similar to the Actor Model\cite{Actor_Model}, and it requires that each message type possess a Handler Trait. This allows for the separation of processing system messages, network messages, internal messages, and application-layer messages.
+
+
+## Keywords
+
+### Candidate
 
 	- A CANDIDATE is a transport address -- a combination of IP address and port for a particular transport protocol (with only UDP specified here).
 
@@ -100,7 +196,7 @@ cargo install --path .
 
 ```
 
-* Channel
+### Channel
 
 In the WebRTC framework, communication between the parties consists of media (for example, audio and video) and non-media data.
 
@@ -138,40 +234,24 @@ The encapsulation of SCTP over DTLS (see [RFC8261]) over ICE/UDP (see [RFC8445])
 ```
 
 
-### Architecture
+## Contributing
+
+We welcome contributions to rings-node!
+
+If you have a bug report or feature request, please open an issue on GitHub.
+
+If you'd like to contribute code, please follow these steps:
+
+    Fork the repository on GitHub.
+    Create a new branch for your changes.
+    Make your changes and commit them with descriptive commit messages.
+    Push your changes to your fork.
+    Create a pull request from your branch to the main repository.
+
+We'll review your pull request as soon as we can, and we appreciate your contributions!
 
 
-```
-+-----------------------------------------------------------------------------------------+
-|                                         RINGS                                           |
-+-----------------------------------------------------------------------------------------+
-|   Encrypted IM / Secret Sharing Storage / Distributed Content / Secret Data Exchange    |
-+-----------------------------------------------------------------------------------------+
-|                  SSSS                  |  Perdson Commitment/zkPod/ Secret Sharing      |
-+-----------------------------------------------------------------------------------------+
-|                     |       dDNS       |                 Sigma Protocol                 |
-+      K-V Storage    +------------------+------------------------------------------------+
-|                     |  Peer LOOKUP     |          MSRP        |  End-to-End Encryption  |
-+----------------------------------------+------------------------------------------------+
-|            Peer-to-Peer Network        |                                                |
-|----------------------------------------+               DID / Resource ID                |
-|                 Chord DHT              |                                                |
-+----------------------------------------+------------------------------------------------+
-|                Trickle SDP             |        ElGamal        | Persistence Storage    |
-+----------------------------------------+-----------------------+------------------------+
-|            STUN  | SDP  | ICE          |  Crosschain Binding   | Smart Contract Binding |
-+----------------------------------------+------------------------------------------------+
-|             SCTP | UDP | TCP           |             Finate Pubkey Group                |
-+----------------------------------------+------------------------------------------------+
-|   WASM Runtime    |                    |                                                |
-+-------------------|  Operation System  |                   ECDSA                        |
-|     Browser       |                    |                                                |
-+-----------------------------------------------------------------------------------------+
-```
-
-
-
-### Ref:
+## Ref:
 
 1. https://datatracker.ietf.org/doc/html/rfc5245
 
