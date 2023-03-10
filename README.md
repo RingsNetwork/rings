@@ -149,7 +149,7 @@ In the protocol layer, the central design concept revolves around the utilizatio
 
 ### Application Layer
 
-The nucleus of Rings Network is similar to the Actor Model\cite{Actor_Model}, and it requires that each message type possess a Handler Trait. This allows for the separation of processing system messages, network messages, internal messages, and application-layer messages.
+The nucleus of Rings Network is similar to the Actor Model, and it requires that each message type possess a Handler Trait. This allows for the separation of processing system messages, network messages, internal messages, and application-layer messages.
 
 
 ## Keywords
