@@ -1,4 +1,9 @@
-rings-node
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://static.ringsnetwork.io/ringsnetwork_logo.png">
+  <img alt="Rings Network" src="https://static.ringsnetwork.io/ringsnetwork_logo.png">
+</picture>
+
+Rings Node (The node service of Rings Network)
 ===============
 
 [![rings-node](https://github.com/RingsNetwork/rings-node/actions/workflows/auto-release.yml/badge.svg)](https://github.com/RingsNetwork/rings-node/actions/workflows/auto-release.yml)
@@ -10,6 +15,8 @@ rings-node
 Rings is a structured peer-to-peer network implementation using WebRTC, Chord algorithm, and full WebAssembly (WASM) support.
 
 For more details you can check our [Rings Whitepaper](https://raw.githubusercontent.com/RingsNetwork/whitepaper/master/rings.pdf).
+
+You can also visit [Rings Network's homepage](https;//ringsnetwork.io) to get more project info.
 
 
 ## Installation
