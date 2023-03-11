@@ -16,7 +16,7 @@ Rings is a structured peer-to-peer network implementation using WebRTC, Chord al
 
 For more details you can check our [Rings Whitepaper](https://raw.githubusercontent.com/RingsNetwork/whitepaper/master/rings.pdf).
 
-You can also visit [Rings Network's homepage](https;//ringsnetwork.io) to get more project info.
+You can also visit [Rings Network's homepage](https://ringsnetwork.io) to get more project info.
 
 
 ## Installation
