@@ -81,7 +81,7 @@ impl MessageCallback for Backend {
         let (left, msg) = array_refs![&msg, 4; ..;];
         let (&[flag], _) = array_refs![left, 1, 3];
         if flag != 0 {
-            tracing::warn!("invalid custom_message flag");
+            tracing::warn!("invalid custom_message flag: {}", flag);
             return;
         }
 

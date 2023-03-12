@@ -1,10 +1,12 @@
 //! rings-node service run with `Swarm` and chord stabilization.
 #![warn(missing_docs)]
 mod http_error;
+mod ws;
 
 use std::sync::Arc;
 
 use axum::extract::State;
+use axum::extract::WebSocketUpgrade;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::routing::post;
@@ -23,10 +25,20 @@ use crate::jsonrpc::RpcMeta;
 use crate::prelude::rings_core::ecc::PublicKey;
 use crate::processor::Processor;
 
+/// Jsonrpc state
 #[derive(Clone)]
-struct JsonrpcState {
+pub struct JsonrpcState {
     processor: Arc<Processor>,
     io_handler: Arc<MetaIoHandler<RpcMeta>>,
+    pubkey: Arc<PublicKey>,
+    receiver: Arc<Mutex<Receiver<BackendMessage>>>,
+}
+
+/// websocket state
+#[derive(Clone)]
+#[allow(dead_code)]
+pub struct WsState {
+    processor: Arc<Processor>,
     pubkey: Arc<PublicKey>,
     receiver: Arc<Mutex<Receiver<BackendMessage>>>,
 }
@@ -37,23 +49,34 @@ pub async fn run_service(
     processor: Arc<Processor>,
     pubkey: Arc<PublicKey>,
     receiver: Receiver<BackendMessage>,
+    receiver2: Receiver<BackendMessage>,
 ) -> anyhow::Result<()> {
     let binding_addr = addr.parse().unwrap();
 
     let mut jsonrpc_handler: MetaIoHandler<RpcMeta> = MetaIoHandler::default();
     crate::jsonrpc::build_handler(&mut jsonrpc_handler).await;
     let jsonrpc_handler_layer = Arc::new(jsonrpc_handler);
-    let receiver = Arc::new(Mutex::new(receiver));
+    // let receiver = Arc::new(Mutex::new(receiver));
 
     let jsonrpc_state = Arc::new(JsonrpcState {
-        processor,
+        processor: processor.clone(),
         io_handler: jsonrpc_handler_layer,
+        pubkey: pubkey.clone(),
+        receiver: Arc::new(Mutex::new(receiver)),
+    });
+
+    let ws_state = Arc::new(WsState {
+        processor,
         pubkey,
-        receiver,
+        receiver: Arc::new(Mutex::new(receiver2)),
     });
 
     let axum_make_service = Router::new()
-        .route("/", post(jsonrpc_io_handler).with_state(jsonrpc_state))
+        .route(
+            "/",
+            post(jsonrpc_io_handler).with_state(jsonrpc_state.clone()),
+        )
+        .route("/ws", get(ws_handler).with_state(ws_state))
         .route("/status", get(status_handler))
         .layer(CorsLayer::permissive())
         .layer(axum::middleware::from_fn(node_info_header))
@@ -122,4 +145,16 @@ impl IntoResponse for JsonResponse {
         )
             .into_response()
     }
+}
+
+async fn ws_handler(
+    State(state): State<Arc<WsState>>,
+    ws: WebSocketUpgrade,
+    // ConnectInfo(addr): ConnectInfo<SocketAddr>,
+) -> impl IntoResponse {
+    // tracing::info!("ws at {addr} connected.");
+    tracing::info!("ws connected.");
+    // finalize the upgrade process by returning upgrade callback.
+    // we can customize the callback by sending additional info such as address.
+    ws.on_upgrade(move |socket| self::ws::handle_socket(state, socket))
 }

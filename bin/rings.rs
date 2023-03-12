@@ -450,6 +450,7 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     let backend_config = c.backend.into();
 
     let (sender, receiver) = tokio::sync::broadcast::channel(1024);
+    let receiver2 = sender.subscribe();
 
     let callback: Option<CallbackFn> = Some(Box::new(Backend::new(backend_config, sender)));
 
@@ -465,7 +466,7 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
 
     let _ = futures::join!(
         processor.listen(callback),
-        run_service(bind_addr, processor_clone, pubkey, receiver),
+        run_service(bind_addr, processor_clone, pubkey, receiver, receiver2),
     );
 
     Ok(())

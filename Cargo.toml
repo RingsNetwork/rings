@@ -24,7 +24,6 @@ default = ["node"]
 node = [
     "tokio",
     "hyper",
-    "axum",
     "tower-http",
     "clap",
     "reqwest",
@@ -37,6 +36,8 @@ node = [
     "backtrace",
     "serde_yaml",
     "lazy_static",
+    "axum/ws",
+    "axum/headers",
 ]
 browser = [
     "console_error_panic_hook",
@@ -55,7 +56,7 @@ bincode = "1.3.3"
 bytes = { version = "1.2.1", features = ["serde"] }
 chrono = "0.4.23"
 dotenv = "0.15.0"
-futures = "0.3.21"
+futures = { version = "0.3.21", features = ["alloc"] }
 futures-timer = "3.0.2"
 http = { version = "0.2.6" }
 jsonrpc-core = { version = "18.0.0" }
@@ -72,11 +73,11 @@ tracing-subscriber = { version = "0.3.15", features = ["ansi"] }
 
 # node
 async-stream = { version = "0.3.2", optional = true }
-axum = { version = "0.6.6", optional = true }
+axum = { version = "0.6.10", optional = true }
 backtrace = { version = "0.3.6", optional = true }
 clap = { version = "4.0.14", features = ["derive", "env"], optional = true }
 form_urlencoded = { version = "1.0.1", optional = true }
-hyper = { version = "0.14.14", features = ["full"], optional = true }
+hyper = { version = "0.14.25", features = ["full"], optional = true }
 lazy_static = { version = "1.4.0", optional = true }
 opentelemetry = { version = "0.18.0", default-features = false, features = ["trace", "rt-tokio"], optional = true }
 opentelemetry-jaeger = { version = "0.17.0", features = ["rt-tokio"], optional = true }
