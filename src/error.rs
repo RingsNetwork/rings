@@ -83,6 +83,8 @@ pub enum Error {
     CreateFileError(String),
     #[error("Open File Error: {0}")]
     OpenFileError(String),
+    #[error("acquire lock failed")]
+    Lock,
 }
 
 impl Error {
@@ -126,6 +128,7 @@ impl Error {
             Error::Swarm(_) => 35,
             Error::CreateFileError(_) => 36,
             Error::OpenFileError(_) => 37,
+            Error::Lock => 38,
         };
         -32000 - code
     }

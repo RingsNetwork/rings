@@ -1,6 +1,7 @@
 //! A JSONRPC response.
 use std::sync::Arc;
 
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
@@ -116,6 +117,20 @@ impl From<(Arc<Transport>, Encoded)> for TransportAndIce {
             transport_id: transport.id.to_string(),
             ice: handshake_info.to_string(),
         }
+    }
+}
+
+#[derive(Deserialize, Serialize, Clone)]
+pub struct BaseResponse<T> {
+    method: String,
+    result: T,
+}
+
+impl<T> BaseResponse<T>
+where T: DeserializeOwned + Serialize + Clone
+{
+    pub fn new(method: String, result: T) -> Self {
+        Self { method, result }
     }
 }
 

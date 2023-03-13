@@ -6,6 +6,7 @@ use futures::SinkExt;
 use futures::StreamExt;
 
 use super::WsState;
+use crate::jsonrpc::response::BaseResponse;
 use crate::jsonrpc::response::CustomBackendMessage;
 
 /// Actual websocket statemachine (one will be spawned per connection)
@@ -15,9 +16,18 @@ pub async fn handle_socket(ws_state: Arc<WsState>, socket: WebSocket) {
     let mut send_task = tokio::spawn(async move {
         loop {
             if let Ok(data) = ws_state.receiver.lock().await.recv().await {
-                if let Ok(data) = serde_json::to_value(&CustomBackendMessage::from(data)) {
-                    if let Ok(data) = serde_json::to_string(&data) {
-                        sender.send(Message::Text(data)).await;
+                let data = BaseResponse::new(
+                    "custom_message".to_owned(),
+                    CustomBackendMessage::from(data),
+                );
+                let data = serde_json::to_value(&data);
+                if data.is_err() {
+                    continue;
+                }
+                let data = data.unwrap();
+                if let Ok(data) = serde_json::to_string(&data) {
+                    if let Err(e) = sender.send(Message::Text(data)).await {
+                        tracing::error!("send_custom_message_to_ws_failed: {}", e);
                     }
                 }
             }
