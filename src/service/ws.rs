@@ -15,7 +15,9 @@ pub async fn handle_socket(ws_state: Arc<WsState>, socket: WebSocket) {
 
     let mut send_task = tokio::spawn(async move {
         loop {
-            if let Ok(data) = ws_state.receiver.lock().await.recv().await {
+            let mut receiver = ws_state.receiver.resubscribe();
+            tracing::debug!("after resubscribe receiver");
+            if let Ok(data) = receiver.recv().await {
                 let data = BaseResponse::new(
                     "custom_message".to_owned(),
                     CustomBackendMessage::from(data),
@@ -31,7 +33,6 @@ pub async fn handle_socket(ws_state: Arc<WsState>, socket: WebSocket) {
                     }
                 }
             }
-            // tokio::time::sleep(time::Duration::new(100, 0)).await;
         }
     });
     let mut recv_task = tokio::spawn(async move {

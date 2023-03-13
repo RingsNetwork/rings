@@ -40,7 +40,7 @@ pub struct JsonrpcState {
 pub struct WsState {
     processor: Arc<Processor>,
     pubkey: Arc<PublicKey>,
-    receiver: Arc<Mutex<Receiver<BackendMessage>>>,
+    receiver: Arc<Receiver<BackendMessage>>,
 }
 
 /// Run a web server to handle jsonrpc request
@@ -49,7 +49,6 @@ pub async fn run_service(
     processor: Arc<Processor>,
     pubkey: Arc<PublicKey>,
     receiver: Receiver<BackendMessage>,
-    receiver2: Receiver<BackendMessage>,
 ) -> anyhow::Result<()> {
     let binding_addr = addr.parse().unwrap();
 
@@ -62,13 +61,13 @@ pub async fn run_service(
         processor: processor.clone(),
         io_handler: jsonrpc_handler_layer,
         pubkey: pubkey.clone(),
-        receiver: Arc::new(Mutex::new(receiver)),
+        receiver: Arc::new(Mutex::new(receiver.resubscribe())),
     });
 
     let ws_state = Arc::new(WsState {
         processor,
         pubkey,
-        receiver: Arc::new(Mutex::new(receiver2)),
+        receiver: Arc::new(receiver.resubscribe()),
     });
 
     let axum_make_service = Router::new()
