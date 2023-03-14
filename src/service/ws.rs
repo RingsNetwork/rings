@@ -32,6 +32,7 @@ pub async fn handle_socket(ws_state: Arc<WsState>, socket: WebSocket) {
                     }
                 }
             }
+            drop(receiver);
         }
     });
     let mut recv_task = tokio::spawn(async move {

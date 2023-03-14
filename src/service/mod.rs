@@ -3,8 +3,10 @@
 mod http_error;
 mod ws;
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
+use axum::extract::ConnectInfo;
 use axum::extract::State;
 use axum::extract::WebSocketUpgrade;
 use axum::response::IntoResponse;
@@ -78,7 +80,7 @@ pub async fn run_service(
         .route("/status", get(status_handler))
         .layer(CorsLayer::permissive())
         .layer(axum::middleware::from_fn(node_info_header))
-        .into_make_service();
+        .into_make_service_with_connect_info::<SocketAddr>();
 
     println!("Server listening on http://{}", addr);
     axum::Server::bind(&binding_addr)
@@ -148,11 +150,8 @@ impl IntoResponse for JsonResponse {
 async fn ws_handler(
     State(state): State<Arc<WsState>>,
     ws: WebSocketUpgrade,
-    // ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> impl IntoResponse {
-    // tracing::info!("ws at {addr} connected.");
-    tracing::info!("ws connected.");
-    // finalize the upgrade process by returning upgrade callback.
-    // we can customize the callback by sending additional info such as address.
+    tracing::info!("ws connected, remote: {}", addr);
     ws.on_upgrade(move |socket| self::ws::handle_socket(state, socket))
 }
