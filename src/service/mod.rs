@@ -55,7 +55,6 @@ pub async fn run_service(
     let mut jsonrpc_handler: MetaIoHandler<RpcMeta> = MetaIoHandler::default();
     crate::jsonrpc::build_handler(&mut jsonrpc_handler).await;
     let jsonrpc_handler_layer = Arc::new(jsonrpc_handler);
-    // let receiver = Arc::new(Mutex::new(receiver));
 
     let jsonrpc_state = Arc::new(JsonrpcState {
         processor: processor.clone(),

@@ -16,7 +16,6 @@ pub async fn handle_socket(ws_state: Arc<WsState>, socket: WebSocket) {
     let mut send_task = tokio::spawn(async move {
         loop {
             let mut receiver = ws_state.receiver.resubscribe();
-            tracing::debug!("after resubscribe receiver");
             if let Ok(data) = receiver.recv().await {
                 let data = BaseResponse::new(
                     "custom_message".to_owned(),

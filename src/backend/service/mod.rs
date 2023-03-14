@@ -99,7 +99,6 @@ impl MessageCallback for Backend {
         let (&[flag], _) = array_refs![left, 1, 3];
 
         let msg = if flag == 1 {
-            // TODO save data
             let data = self.handle_chunk_data(msg).await;
             if let Err(e) = data {
                 tracing::error!("handle_chunk_data failed: {}", e);
