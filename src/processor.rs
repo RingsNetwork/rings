@@ -8,6 +8,8 @@ use futures::future::Join;
 use futures::Future;
 #[cfg(feature = "node")]
 use jsonrpc_core::Metadata;
+use serde::Deserialize;
+use serde::Serialize;
 
 use crate::backend::types::BackendMessage;
 use crate::backend::types::HttpRequest;
@@ -50,6 +52,13 @@ use crate::prelude::CallbackFn;
 use crate::prelude::ChordStorageInterface;
 use crate::prelude::CustomMessage;
 use crate::prelude::Signer;
+
+/// NodeInfo struct
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NodeInfo {
+    /// node version
+    pub version: String,
+}
 
 /// AddressType enum contains `DEFAULT` and `ED25519`.
 pub enum AddressType {
@@ -623,6 +632,13 @@ impl Processor {
             .storage_touch_data(name, encoded_did)
             .await
             .map_err(error::Error::ServiceRegisterError)
+    }
+
+    /// get node info
+    pub async fn get_node_info(&self) -> Result<NodeInfo> {
+        Ok(NodeInfo {
+            version: crate::util::build_version(),
+        })
     }
 }
 
