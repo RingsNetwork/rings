@@ -44,6 +44,8 @@ pub enum Method {
     LookupService,
     /// Poll message
     PollMessage,
+    /// Retrieve Node info
+    NodeInfo,
 }
 
 impl Method {
@@ -69,6 +71,7 @@ impl Method {
             Method::RegisterService => "registerService",
             Method::LookupService => "lookupService",
             Method::PollMessage => "pollMessage",
+            Method::NodeInfo => "nodeInfo",
         }
     }
 }
@@ -103,6 +106,7 @@ impl TryFrom<&str> for Method {
             "registerService" => Method::RegisterService,
             "lookupService" => Method::LookupService,
             "pollMessage" => Method::PollMessage,
+            "nodeInfo" => Method::NodeInfo,
             _ => return Err(Error::InvalidMethod),
         })
     }

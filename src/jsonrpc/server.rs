@@ -106,6 +106,16 @@ pub(crate) async fn build_handler(handler: &mut MetaIoHandler<RpcMeta>) {
     handler.add_method_with_meta(Method::RegisterService.as_str(), register_service);
     handler.add_method_with_meta(Method::LookupService.as_str(), lookup_service);
     handler.add_method_with_meta(Method::PollMessage.as_str(), poll_message);
+    handler.add_method_with_meta(Method::NodeInfo.as_str(), node_info);
+}
+
+async fn node_info(_: Params, meta: RpcMeta) -> Result<Value> {
+    let node_info = meta
+        .processor
+        .get_node_info()
+        .await
+        .map_err(|_| Error::new(ErrorCode::InternalError))?;
+    serde_json::to_value(node_info).map_err(|_| Error::new(ErrorCode::ParseError))
 }
 
 /// Connect Peer VIA http
