@@ -14,7 +14,7 @@ keywords = ["Chord", "DHT", "Web3", "P2P", "WASM"]
 categories = ["network-programming", "cryptography", "wasm"]
 
 [workspace]
-members = ["rings-core"]
+members = ["core"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
