@@ -228,11 +228,11 @@ impl Processor {
         Ok(libsecp256k1::verify(
             &libsecp256k1::Message::parse(&keccak256(message.as_bytes())),
             &libsecp256k1::Signature::parse_standard_slice(
-                &base64::decode(signature).map_err(|_| Error::DecodedError)?,
+                &base64::decode(signature).map_err(|_| Error::DecodeError)?,
             )
-            .map_err(|_| Error::DecodedError)?,
+            .map_err(|_| Error::DecodeError)?,
             &TryInto::<libsecp256k1::PublicKey>::try_into(*public_key)
-                .map_err(|_| Error::DecodedError)?,
+                .map_err(|_| Error::DecodeError)?,
         ))
     }
 
@@ -302,7 +302,7 @@ impl Processor {
                 .await
                 .map_err(|e| Error::RemoteRpcError(e.to_string()))?;
             let info: TransportAndIce =
-                serde_json::from_value(resp).map_err(|_| Error::JsonDeserializeError)?;
+                serde_json::from_value(resp).map_err(|_| Error::EncodeError)?;
             let did = transport
                 .register_remote_info(Encoded::from_encoded_str(info.ice.as_str()))
                 .await
@@ -356,17 +356,13 @@ impl Processor {
     /// 2. PeerC has a connection with PeerB.
     /// 3. PeerC can connect PeerA with PeerA's web3 address.
     pub async fn connect_with_did(&self, did: Did, wait_for_open: bool) -> Result<Peer> {
-        let transport = self
-            .swarm
-            .connect(did)
-            .await
-            .map_err(Error::ConnectWithDidError)?;
+        let transport = self.swarm.connect(did).await.map_err(Error::ConnectError)?;
         tracing::debug!("wait for transport connected");
         if wait_for_open {
             transport
                 .wait_for_data_channel_open()
                 .await
-                .map_err(Error::ConnectWithDidError)?;
+                .map_err(Error::ConnectError)?;
         }
         Ok(Peer::from((did, transport)))
     }

@@ -125,16 +125,16 @@ impl MessageEndpoint for HttpServer {
         msg: &BackendMessage,
     ) -> Result<()> {
         let req: HttpRequest =
-            bincode::deserialize(msg.data.as_slice()).map_err(|_| Error::DeserializeError)?;
+            bincode::deserialize(msg.data.as_slice()).map_err(|_| Error::DecodeError)?;
 
         let resp = self.execute(&req).await?;
         tracing::debug!("Sending HTTP response: {:?}", resp);
         tracing::debug!("resp_bytes start gzip");
         let json_bytes = bincode::serialize(&resp)
-            .map_err(|_| Error::JsonSerializeError)?
+            .map_err(|_| Error::EncodeError)?
             .into();
         let resp_bytes =
-            message::encode_data_gzip(&json_bytes, 9).map_err(|_| Error::EncodedError)?;
+            message::encode_data_gzip(&json_bytes, 9).map_err(|_| Error::EncodeError)?;
 
         let resp_bytes: Bytes = BackendMessage::from((
             MessageType::HttpResponse.into(),
@@ -146,7 +146,7 @@ impl MessageEndpoint for HttpServer {
         let chunks = ChunkList::<BACKEND_MTU>::from(&resp_bytes);
         for c in chunks {
             tracing::debug!("Chunk data len: {}", c.data.len());
-            let bytes = c.to_bincode().map_err(|_| Error::SerializeError)?;
+            let bytes = c.to_bincode().map_err(|_| Error::EncodeError)?;
             tracing::debug!("Chunk len: {}", bytes.len());
             super::utils::send_chunk_report_message(handler, ctx, relay, bytes.to_vec().as_slice())
                 .await?;
