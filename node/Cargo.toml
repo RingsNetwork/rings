@@ -13,9 +13,6 @@ readme = "README.md"
 keywords = ["Chord", "DHT", "Web3", "P2P", "WASM"]
 categories = ["network-programming", "cryptography", "wasm"]
 
-[workspace]
-members = ["core"]
-
 [lib]
 crate-type = ["cdylib", "rlib"]
 
@@ -62,7 +59,7 @@ http = { version = "0.2.6" }
 jsonrpc-core = { version = "18.0.0" }
 jsonrpc-pubsub = { version = "18.0.0" }
 log = { version = "0.4", features = ["std"] }
-rings-core = { package = "rings-core", path = "./core", optional = true, default-features = false, version = "0.2.4" }
+rings-core = { package = "rings-core", path = "../core", optional = true, default-features = false, version = "0.2.4" }
 serde = { version = "1.0.136", features = ["derive"] }
 serde_json = "1.0.70"
 thiserror = "1"
@@ -98,5 +95,5 @@ wasm-bindgen-test = { version = "0.3.0" }
 
 [[bin]]
 name = "rings"
-path = "bin/rings.rs"
+path = "../bin/rings.rs"
 required-features = ["node"]

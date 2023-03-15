@@ -2889,6 +2889,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rings"
+version = "0.2.4"
+
+[[package]]
 name = "rings-core"
 version = "0.2.4"
 dependencies = [
