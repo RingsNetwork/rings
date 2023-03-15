@@ -465,7 +465,7 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
 
     let _ = futures::join!(
         processor.listen(callback),
-        run_service(bind_addr, processor_clone, pubkey, receiver),
+        run_service(bind_addr, processor_clone, pubkey, receiver,),
     );
 
     Ok(())
