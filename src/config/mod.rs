@@ -90,7 +90,7 @@ impl Config {
         let f =
             fs::File::create(path.as_path()).map_err(|e| Error::CreateFileError(e.to_string()))?;
         let f_writer = io::BufWriter::new(f);
-        serde_yaml::to_writer(f_writer, self).map_err(|_| Error::SerializeError)?;
+        serde_yaml::to_writer(f_writer, self).map_err(|_| Error::EncodeError)?;
         Ok(path.to_str().unwrap().to_owned())
     }
 
@@ -110,7 +110,7 @@ impl Config {
         tracing::debug!("Read config from: {:?}", path);
         let f = fs::File::open(path).map_err(|e| Error::OpenFileError(e.to_string()))?;
         let f_rdr = io::BufReader::new(f);
-        serde_yaml::from_reader(f_rdr).map_err(|_| Error::DeserializeError)
+        serde_yaml::from_reader(f_rdr).map_err(|_| Error::EncodeError)
     }
 }
 
