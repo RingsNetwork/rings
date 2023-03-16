@@ -4,7 +4,9 @@ version = "0.2.5"
 edition = "2021"
 default-run = "rings"
 authors = ["RND <dev@ringsnetwork.io>"]
-description = "Implementation of Rings Node and WASM support."
+description = """
+Rings is a structured peer-to-peer network implementation using WebRTC, Chord algorithm, and full WebAssembly (WASM) support.
+"""
 repository = "https://github.com/RingsNetwork/rings-node"
 license = "GPL-3.0"
 readme = "README.md"
