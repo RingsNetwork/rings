@@ -1,3 +1,4 @@
 [workspace]
 members = ["core", "node"]
-default-members = ["node"]
+
+resolver = "2"
