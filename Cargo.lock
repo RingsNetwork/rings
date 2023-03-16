@@ -2890,11 +2890,11 @@ dependencies = [
 
 [[package]]
 name = "rings"
-version = "0.2.4"
+version = "0.2.5"
 
 [[package]]
 name = "rings-core"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "arrayref",
  "async-channel",
@@ -2945,7 +2945,7 @@ dependencies = [
 
 [[package]]
 name = "rings-node"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "anyhow",
  "arrayref",
