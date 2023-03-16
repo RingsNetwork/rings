@@ -30,10 +30,10 @@ use crate::prelude::rings_core::message::Encoder;
 use crate::prelude::rings_core::prelude::vnode::VirtualNode;
 use crate::prelude::rings_core::transports::manager::TransportManager;
 use crate::prelude::rings_core::types::ice_transport::IceTransportInterface;
+use crate::prelude::rings_core::utils::from_rtc_ice_connection_state;
 use crate::processor;
 use crate::processor::Processor;
 use crate::seed::Seed;
-use crate::util::from_rtc_ice_connection_state;
 
 /// RpcMeta basic info struct
 /// * processor: contain `swarm` instance and `stabilization` instance.

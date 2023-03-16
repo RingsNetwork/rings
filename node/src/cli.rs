@@ -39,6 +39,8 @@ use crate::jsonrpc::response::Peer;
 use crate::jsonrpc::response::TransportAndIce;
 use crate::jsonrpc_client::SimpleClient;
 use crate::prelude::reqwest;
+use crate::prelude::rings_core::inspect::SwarmInspect;
+use crate::processor::NodeInfo;
 use crate::seed::Seed;
 use crate::util::loader::ResourceLoader;
 
@@ -406,6 +408,21 @@ impl Client {
                 }
             }
         }
+    }
+
+    /// Query for swarm inspect info.
+    pub async fn inspect(&self) -> Output<SwarmInspect> {
+        let resp = self
+            .client
+            .call_method(Method::NodeInfo.as_str(), Params::None)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        let info: NodeInfo = serde_json::from_value(resp).map_err(|e| anyhow::anyhow!("{}", e))?;
+        let display =
+            serde_json::to_string_pretty(&info.swarm).map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        ClientOutput::ok(display, info.swarm)
     }
 }
 
