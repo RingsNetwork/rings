@@ -66,7 +66,7 @@ impl Backend {
     }
 
     async fn handle_chunk_data(&self, data: &[u8]) -> Result<Option<Bytes>> {
-        let chunk_item = Chunk::from_bincode(data).map_err(|_| Error::DecodedError)?;
+        let chunk_item = Chunk::from_bincode(data).map_err(|_| Error::DecodeError)?;
         let mut chunk_list = self.chunk_list.lock().await;
         let data = chunk_list.handle(chunk_item);
         Ok(data)

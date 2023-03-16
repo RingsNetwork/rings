@@ -97,7 +97,7 @@ where T: Serialize
     type Error = Error;
 
     fn try_from((message_type, data): (MessageType, &T)) -> std::result::Result<Self, Self::Error> {
-        let bytes = bincode::serialize(data).map_err(|_| Error::SerializeError)?;
+        let bytes = bincode::serialize(data).map_err(|_| Error::EncodeError)?;
         Ok(Self::new(message_type.into(), [0u8; 30], &bytes))
     }
 }
@@ -108,7 +108,7 @@ impl TryFrom<&[u8]> for BackendMessage {
     #[allow(clippy::ptr_offset_with_cast)]
     fn try_from(value: &[u8]) -> std::result::Result<Self, Self::Error> {
         if value.len() < 32 {
-            return Err(Error::NotSupportMessage);
+            return Err(Error::InvalidMessage);
         }
         let (left, right) = arrayref::array_refs![value, 32; ..;];
         let (message_type, _) = arrayref::array_refs![left, 2; ..;];
