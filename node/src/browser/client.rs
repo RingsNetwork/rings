@@ -373,6 +373,15 @@ impl Client {
         })
     }
 
+    pub fn get_node_info(&self) -> js_sys::Promise {
+        let p = self.processor.clone();
+        future_to_promise(async move {
+            let info = p.get_node_info().await.map_err(JsError::from)?;
+            let v = serde_wasm_bindgen::to_value(&info).map_err(JsError::from)?;
+            Ok(v)
+        })
+    }
+
     /// disconnect a peer with web3 address
     pub fn disconnect(&self, address: String, addr_type: Option<AddressType>) -> js_sys::Promise {
         let p = self.processor.clone();
