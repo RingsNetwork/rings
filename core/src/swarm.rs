@@ -16,6 +16,7 @@ use crate::dht::PeerRing;
 use crate::ecc::SecretKey;
 use crate::err::Error;
 use crate::err::Result;
+use crate::inspect::SwarmInspect;
 use crate::measure::Measure;
 use crate::measure::MeasureCounter;
 use crate::message;
@@ -325,6 +326,10 @@ impl Swarm {
         });
         self.send_message(connect_msg, did).await?;
         Ok(transport)
+    }
+
+    pub async fn inspect(&self) -> SwarmInspect {
+        SwarmInspect::inspect(self).await
     }
 }
 

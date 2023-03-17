@@ -27,6 +27,7 @@ use crate::prelude::rings_core::dht::Stabilization;
 use crate::prelude::rings_core::dht::TStabilize;
 use crate::prelude::rings_core::ecc::PublicKey;
 use crate::prelude::rings_core::ecc::SecretKey;
+use crate::prelude::rings_core::inspect::SwarmInspect;
 use crate::prelude::rings_core::message::Encoded;
 use crate::prelude::rings_core::message::Encoder;
 use crate::prelude::rings_core::message::Message;
@@ -58,6 +59,8 @@ use crate::prelude::Signer;
 pub struct NodeInfo {
     /// node version
     pub version: String,
+    /// swarm inspect info
+    pub swarm: SwarmInspect,
 }
 
 /// AddressType enum contains `DEFAULT` and `ED25519`.
@@ -634,6 +637,7 @@ impl Processor {
     pub async fn get_node_info(&self) -> Result<NodeInfo> {
         Ok(NodeInfo {
             version: crate::util::build_version(),
+            swarm: self.swarm.inspect().await,
         })
     }
 }

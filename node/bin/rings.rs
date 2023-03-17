@@ -56,6 +56,10 @@ enum Command {
     Send(SendCommand),
     #[command(about = "Registers or looks up a service on the network.", subcommand)]
     Service(ServiceCommand),
+    #[command(
+        about = "Show information of swarm. Include transport table, successors, predecessor, and finger table."
+    )]
+    Inspect(InspectCommand),
 }
 
 #[derive(Args, Debug)]
@@ -400,6 +404,12 @@ struct ServiceLookupCommand {
     name: String,
 }
 
+#[derive(Args, Debug)]
+struct InspectCommand {
+    #[command(flatten)]
+    client_args: ClientArgs,
+}
+
 fn get_value<V>(value: Option<V>, default_value: V) -> V {
     value.unwrap_or(default_value)
 }
@@ -672,6 +682,15 @@ async fn main() -> anyhow::Result<()> {
             };
             let p = config.write_fs(args.location.as_str())?;
             println!("Your config file has saved to: {}", p);
+            Ok(())
+        }
+        Command::Inspect(args) => {
+            args.client_args
+                .new_client()
+                .await?
+                .inspect()
+                .await?
+                .display();
             Ok(())
         }
     }

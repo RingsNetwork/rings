@@ -41,6 +41,7 @@ browser = [
     "tracing-wasm",
     "reqwest-wasm",
     "rings-core/wasm",
+    "serde-wasm-bindgen",
 ]
 browser_chrome_test = ["browser"]
 
@@ -87,6 +88,7 @@ tower-http = { version = "0.3.4", features = ["cors"], optional = true }
 # browser
 console_error_panic_hook = { version = "0.1.1", optional = true }
 reqwest-wasm = { version = "0.11", features = ["json", "rustls-tls"], optional = true, default-features = false }
+serde-wasm-bindgen = { version = "0.5.0", optional = true }
 tracing-wasm = { version = "0.2.1", optional = true }
 
 [dev-dependencies]

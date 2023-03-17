@@ -36,6 +36,7 @@ use crate::prelude::rings_core::prelude::web3::ethabi::Token;
 use crate::prelude::rings_core::transports::manager::TransportManager;
 use crate::prelude::rings_core::transports::Transport;
 use crate::prelude::rings_core::types::ice_transport::IceTransportInterface;
+use crate::prelude::rings_core::utils::from_rtc_ice_connection_state;
 use crate::prelude::rings_core::utils::js_utils;
 use crate::prelude::rings_core::utils::js_value;
 use crate::prelude::wasm_bindgen;
@@ -47,7 +48,6 @@ use crate::prelude::web_sys::RtcIceConnectionState;
 use crate::prelude::Signer;
 use crate::processor;
 use crate::processor::Processor;
-use crate::util::from_rtc_ice_connection_state;
 
 /// SignerMode enum contains `DEFAULT` and `EIP191`
 #[wasm_bindgen]
@@ -370,6 +370,15 @@ impl Client {
                 JsValue::try_from(&Peer::from((*y, x.did.clone(), x.transport.id, *z)))
             }));
             Ok(js_array.into())
+        })
+    }
+
+    pub fn get_node_info(&self) -> js_sys::Promise {
+        let p = self.processor.clone();
+        future_to_promise(async move {
+            let info = p.get_node_info().await.map_err(JsError::from)?;
+            let v = serde_wasm_bindgen::to_value(&info).map_err(JsError::from)?;
+            Ok(v)
         })
     }
 
