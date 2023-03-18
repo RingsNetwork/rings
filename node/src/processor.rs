@@ -205,11 +205,13 @@ impl Processor {
 
     /// Listen processor message
     pub fn listen(&self, callback: Option<CallbackFn>) -> Join<impl Future, impl Future> {
-        let message_handler = Arc::new(self.swarm.create_message_handler(callback, None));
-        let stab = Arc::clone(&self.stabilization);
-        futures::future::join(async { message_handler.listen().await }, async {
-            stab.wait().await
-        })
+        let hdl = Arc::new(self.swarm.create_message_handler(callback, None));
+        let message_handler = async { hdl.listen().await };
+
+        let stb = self.stabilization.clone();
+        let stabilization = async { stb.wait().await };
+
+        futures::future::join(message_handler, stabilization)
     }
 }
 
