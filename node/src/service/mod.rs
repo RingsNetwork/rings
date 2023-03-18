@@ -25,6 +25,7 @@ use self::http_error::HttpError;
 use crate::backend::types::BackendMessage;
 use crate::jsonrpc::RpcMeta;
 use crate::prelude::rings_core::ecc::PublicKey;
+use crate::processor::NodeInfo;
 use crate::processor::Processor;
 
 /// Jsonrpc state
@@ -43,6 +44,12 @@ pub struct WsState {
     processor: Arc<Processor>,
     pubkey: Arc<PublicKey>,
     receiver: Arc<Receiver<BackendMessage>>,
+}
+
+/// Status state
+#[derive(Clone)]
+pub struct StatusState {
+    processor: Arc<Processor>,
 }
 
 /// Run a web server to handle jsonrpc request
@@ -66,10 +73,12 @@ pub async fn run_service(
     });
 
     let ws_state = Arc::new(WsState {
-        processor,
+        processor: processor.clone(),
         pubkey,
         receiver: Arc::new(receiver.resubscribe()),
     });
+
+    let status_state = Arc::new(StatusState { processor });
 
     let axum_make_service = Router::new()
         .route(
@@ -77,7 +86,7 @@ pub async fn run_service(
             post(jsonrpc_io_handler).with_state(jsonrpc_state.clone()),
         )
         .route("/ws", get(ws_handler).with_state(ws_state))
-        .route("/status", get(status_handler))
+        .route("/status", get(status_handler).with_state(status_state))
         .layer(CorsLayer::permissive())
         .layer(axum::middleware::from_fn(node_info_header))
         .into_make_service_with_connect_info::<SocketAddr>();
@@ -124,10 +133,15 @@ async fn node_info_header<B>(
     res
 }
 
-async fn status_handler() -> Result<axum::extract::Json<serde_json::Value>, HttpError> {
-    Ok(axum::extract::Json(serde_json::json!({
-        "node_version": crate::util::build_version()
-    })))
+async fn status_handler(
+    State(state): State<Arc<StatusState>>,
+) -> Result<axum::Json<NodeInfo>, HttpError> {
+    let info = state
+        .processor
+        .get_node_info()
+        .await
+        .map_err(|_| HttpError::Internal)?;
+    Ok(axum::Json(info))
 }
 
 /// JSON response struct
