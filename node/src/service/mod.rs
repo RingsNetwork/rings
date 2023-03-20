@@ -91,7 +91,8 @@ pub async fn run_service(
         .layer(axum::middleware::from_fn(node_info_header))
         .into_make_service_with_connect_info::<SocketAddr>();
 
-    println!("Server listening on http://{}", addr);
+    println!("JSON-RPC endpoint: http://{}", addr);
+    println!("WebSocket endpoint: http://{}/ws", addr);
     axum::Server::bind(&binding_addr)
         .serve(axum_make_service)
         .await?;
