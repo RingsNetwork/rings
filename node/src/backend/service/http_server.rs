@@ -24,6 +24,9 @@ pub struct HiddenServerConfig {
     /// name of hidden service
     pub name: String,
 
+    /// will register to storage if provided
+    pub register_service: Option<String>,
+
     /// prefix of hidden service
     pub prefix: String,
 }

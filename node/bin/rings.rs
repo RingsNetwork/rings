@@ -1,17 +1,21 @@
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::ArgAction;
 use clap::Args;
 use clap::Parser;
 use clap::Subcommand;
+use futures::future::FutureExt;
 use futures::pin_mut;
+use futures::select;
 use futures::StreamExt;
-use rings_core::message::CallbackFn;
+use futures_timer::Delay;
 use rings_node::backend::service::Backend;
 use rings_node::cli::Client;
 use rings_node::config;
+use rings_node::endpoint::run_http_api;
 use rings_node::logging::node::init_logging;
 use rings_node::logging::node::LogLevel;
 use rings_node::measure::PeriodicMeasure;
@@ -21,7 +25,6 @@ use rings_node::prelude::rings_core::ecc::SecretKey;
 use rings_node::prelude::PersistenceStorage;
 use rings_node::prelude::SwarmBuilder;
 use rings_node::processor::Processor;
-use rings_node::service::run_service;
 use tokio::io;
 use tokio::io::AsyncBufReadExt;
 
@@ -457,27 +460,26 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
             .build()?,
     );
 
-    let backend_config = c.backend.into();
-
     let (sender, receiver) = tokio::sync::broadcast::channel(1024);
-
-    let callback: Option<CallbackFn> = Some(Box::new(Backend::new(backend_config, sender)));
+    let backend_config = c.backend.into();
+    let backend = Backend::new(backend_config, sender);
+    let backend_service_names = backend.service_names();
 
     let stabilize_timeout = get_value(args.stabilize_timeout, c.stabilize_timeout);
-
     let stabilize = Arc::new(Stabilization::new(swarm.clone(), stabilize_timeout));
+
     let processor = Arc::new(Processor::from((swarm, stabilize)));
     let processor_clone = processor.clone();
 
     let pubkey = Arc::new(key.pubkey());
-
     println!("Signautre: {}", Processor::generate_signature(&key));
 
     let bind_addr = get_value(args.http_addr, c.http_addr);
 
     let _ = futures::join!(
-        processor.listen(callback),
-        run_service(bind_addr, processor_clone, pubkey, receiver,),
+        processor.listen(Some(Box::new(backend))),
+        service_loop_register(&processor, backend_service_names),
+        run_http_api(bind_addr, processor_clone, pubkey, receiver,),
     );
 
     Ok(())
@@ -694,6 +696,29 @@ async fn main() -> anyhow::Result<()> {
                 .await?
                 .display();
             Ok(())
+        }
+    }
+}
+
+async fn register_services(processor: &Processor, names: Vec<String>) -> anyhow::Result<()> {
+    let jobs = names.iter().map(|n| processor.register_service(n));
+    let results = futures::future::join_all(jobs).await;
+
+    for r in results {
+        if let Err(e) = r {
+            tracing::error!("register service error: {}", e);
+        }
+    }
+
+    Ok(())
+}
+
+async fn service_loop_register(processor: &Processor, names: Vec<String>) {
+    loop {
+        let timeout = Delay::new(Duration::from_secs(30)).fuse();
+        pin_mut!(timeout);
+        select! {
+            _ = timeout => register_services(processor, names.clone()).await.unwrap_or_else(|e| eprintln!("Error: {}", e)),
         }
     }
 }
