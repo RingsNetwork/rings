@@ -471,6 +471,8 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
 
     let pubkey = Arc::new(key.pubkey());
 
+    println!("Signautre: {}", Processor::generate_signature(&key));
+
     let bind_addr = get_value(args.http_addr, c.http_addr);
 
     let _ = futures::join!(
