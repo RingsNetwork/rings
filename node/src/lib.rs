@@ -142,6 +142,8 @@ pub mod cli;
 #[cfg(not(feature = "browser"))]
 pub mod config;
 pub mod consts;
+#[cfg(feature = "node")]
+pub mod endpoint;
 pub mod error;
 pub mod jsonrpc;
 pub mod jsonrpc_client;
@@ -150,6 +152,4 @@ pub mod measure;
 pub mod prelude;
 pub mod processor;
 pub mod seed;
-#[cfg(feature = "node")]
-pub mod service;
 pub mod util;

@@ -61,10 +61,7 @@ impl Config {
             ice_servers: DEFAULT_ICE_SERVERS.to_string(),
             stabilize_timeout: DEFAULT_STABILIZE_TIMEOUT,
             external_ip: None,
-            backend: vec![HiddenServerConfig {
-                name: "ipfs".to_string(),
-                prefix: "ipfs://".to_string(),
-            }],
+            backend: vec![],
             data_storage: DEFAULT_DATA_STORAGE_CONFIG.clone(),
             measure_storage: DEFAULT_MEASURE_STORAGE_CONFIG.clone(),
         }

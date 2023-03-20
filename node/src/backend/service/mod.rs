@@ -71,6 +71,16 @@ impl Backend {
         let data = chunk_list.handle(chunk_item);
         Ok(data)
     }
+
+    /// Get service names from http_server config for storage register.
+    pub fn service_names(&self) -> Vec<String> {
+        self.http_server
+            .services
+            .iter()
+            .cloned()
+            .filter_map(|b| b.register_service)
+            .collect::<Vec<_>>()
+    }
 }
 
 #[cfg(feature = "node")]

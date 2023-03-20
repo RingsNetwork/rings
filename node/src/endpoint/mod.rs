@@ -53,7 +53,7 @@ pub struct StatusState {
 }
 
 /// Run a web server to handle jsonrpc request
-pub async fn run_service(
+pub async fn run_http_api(
     addr: String,
     processor: Arc<Processor>,
     pubkey: Arc<PublicKey>,
