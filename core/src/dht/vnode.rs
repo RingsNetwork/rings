@@ -68,7 +68,9 @@ impl VirtualNode {
     /// Generate did from topic.
     pub fn gen_did(topic: &str) -> Result<Did> {
         let hash: HashStr = topic.into();
-        Did::from_str(&hash.inner())
+        let did = Did::from_str(&hash.inner());
+        tracing::debug!("gen_did: topic: {}, did: {:?}", topic, did);
+        did
     }
 }
 

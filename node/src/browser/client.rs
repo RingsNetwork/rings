@@ -641,7 +641,9 @@ impl Client {
         future_to_promise(async move {
             let rid = VirtualNode::gen_did(&name).map_err(JsError::from)?;
 
+            tracing::debug!("browser lookup_service storage_fetch: {}", rid);
             p.storage_fetch(rid).await.map_err(JsError::from)?;
+            tracing::debug!("browser lookup_service finish storage_fetch: {}", rid);
             js_utils::window_sleep(500).await?;
             let result = p.storage_check_cache(rid).await;
 
