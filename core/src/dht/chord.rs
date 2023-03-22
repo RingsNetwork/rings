@@ -349,9 +349,20 @@ impl ChordStorage<PeerRingAction> for PeerRing {
     async fn vnode_lookup(&self, vid: Did) -> Result<PeerRingAction> {
         match self.find_successor(vid) {
             // Resource should be stored in current node.
-            Ok(PeerRingAction::Some(_)) => match self.storage.get(&vid).await {
+            Ok(PeerRingAction::Some(succ)) => match self.storage.get(&vid).await {
                 Ok(Some(v)) => Ok(PeerRingAction::SomeVNode(v)),
-                Ok(None) => Ok(PeerRingAction::None),
+                Ok(None) => {
+                    // If cannot find and has successor, try to query it from successor.
+                    // This is useful when the node is just joined and has not stabilized yet.
+                    if succ == self.did {
+                        Ok(PeerRingAction::None)
+                    } else {
+                        Ok(PeerRingAction::RemoteAction(
+                            succ,
+                            RemoteAction::FindVNode(vid),
+                        ))
+                    }
+                }
                 Err(_) => Ok(PeerRingAction::None),
             },
             // Resource is stored in other nodes.
