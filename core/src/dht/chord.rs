@@ -256,8 +256,8 @@ impl Chord<PeerRingAction> for PeerRing {
 
         tracing::debug!(
             "find_successor: self: {}, did: {}, successor: {:?}, result: {:?}",
-            did,
             self.did,
+            did,
             successor,
             succ
         );
