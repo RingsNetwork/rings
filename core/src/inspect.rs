@@ -9,6 +9,7 @@ use crate::utils::from_rtc_ice_connection_state;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SwarmInspect {
     pub successors: Vec<String>,
+    #[serde(default)]
     pub predecessor: Option<String>,
     pub transports: Vec<TransportInspect>,
     pub finger_table: Vec<(Option<String>, usize, usize)>,
