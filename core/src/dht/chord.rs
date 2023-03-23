@@ -239,18 +239,30 @@ impl Chord<PeerRingAction> for PeerRing {
         let successor = self.lock_successor()?;
         let finger = self.lock_finger()?;
 
-        if successor.is_empty() || self.bias(did) <= self.bias(successor.min()) {
-            // If the did is closer to self than successor, return successor as the
-            // successor of that did.
-            Ok(PeerRingAction::Some(successor.min()))
-        } else {
-            // Otherwise, find the closest preceding node and ask it to find the successor.
-            let closest = finger.closest(did);
-            Ok(PeerRingAction::RemoteAction(
-                closest,
-                RemoteAction::FindSuccessor(did),
-            ))
-        }
+        let succ = {
+            if successor.is_empty() || self.bias(did) <= self.bias(successor.min()) {
+                // If the did is closer to self than successor, return successor as the
+                // successor of that did.
+                Ok(PeerRingAction::Some(successor.min()))
+            } else {
+                // Otherwise, find the closest preceding node and ask it to find the successor.
+                let closest = finger.closest(did);
+                Ok(PeerRingAction::RemoteAction(
+                    closest,
+                    RemoteAction::FindSuccessor(did),
+                ))
+            }
+        };
+
+        tracing::debug!(
+            "find_successor: self: {}, did: {}, successor: {:?}, result: {:?}",
+            did,
+            self.did,
+            successor,
+            succ
+        );
+
+        succ
     }
 
     /// Handle notification from a node that thinks it is the predecessor of current node.
@@ -352,6 +364,9 @@ impl ChordStorage<PeerRingAction> for PeerRing {
             Ok(PeerRingAction::Some(succ)) => match self.storage.get(&vid).await {
                 Ok(Some(v)) => Ok(PeerRingAction::SomeVNode(v)),
                 Ok(None) => {
+                    tracing::debug!(
+                        "Cannot find vnode in local storage, try to query from successor"
+                    );
                     // If cannot find and has successor, try to query it from successor.
                     // This is useful when the node is just joined and has not stabilized yet.
                     if succ == self.did {

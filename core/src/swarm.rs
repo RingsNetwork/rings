@@ -361,7 +361,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Deb
             .await
             .ok_or(Error::SwarmMissDidInTable(did))?;
 
-        tracing::trace!(
+        tracing::debug!(
             "SENT {:?}, to node {:?} via transport {:?}",
             payload.clone(),
             payload.relay.next_hop,
@@ -369,7 +369,6 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Deb
         );
 
         let data = payload.to_bincode()?;
-        tracing::info!("send data len: {}", data.len());
 
         transport.wait_for_data_channel_open().await?;
         let result = transport.send_message(&data).await;

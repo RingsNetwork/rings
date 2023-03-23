@@ -66,6 +66,7 @@ impl FingerTable {
     pub fn set(&mut self, index: usize, did: Did) {
         tracing::debug!("set finger table index: {} did: {}", index, did);
         if index >= self.finger.len() {
+            tracing::error!("set finger index out of range, index: {}", index);
             return;
         }
         self.finger[index] = Some(did);

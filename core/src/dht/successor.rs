@@ -54,7 +54,7 @@ impl SuccessorSeq {
             return;
         }
         self.successors.push(successor);
-        self.successors.sort(self.did); // TODO: should sort by bias?
+        self.successors.sort(self.did);
         self.successors.truncate(self.max.into());
     }
 

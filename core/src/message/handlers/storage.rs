@@ -55,6 +55,11 @@ impl ChordStorageInterface for Swarm {
                 Ok(())
             }
             PeerRingAction::RemoteAction(next, _) => {
+                tracing::debug!(
+                    "storage_fetch send_message: SearchVNode({:?}) to {:?}",
+                    vid,
+                    next
+                );
                 self.send_message(Message::SearchVNode(SearchVNode { vid }), next)
                     .await?;
                 Ok(())
