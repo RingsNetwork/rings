@@ -82,7 +82,7 @@ impl SwarmInspect {
     }
 }
 
-fn compress_iter<T>(iter: impl Iterator<Item = T>) -> Vec<(T, usize, usize)>
+pub fn compress_iter<T>(iter: impl Iterator<Item = T>) -> Vec<(T, usize, usize)>
 where T: PartialEq {
     let mut result = vec![];
     let mut start = 0;

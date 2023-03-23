@@ -178,6 +178,7 @@ impl MessageHandler {
             Message::NotifyPredecessorReport(ref msg) => self.handle(payload, msg).await,
             Message::SearchVNode(ref msg) => self.handle(payload, msg).await,
             Message::FoundVNode(ref msg) => self.handle(payload, msg).await,
+            Message::SyncVNodeWithSuccessor(ref msg) => self.handle(payload, msg).await,
             Message::OperateVNode(ref msg) => self.handle(payload, msg).await,
             Message::CustomMessage(ref msg) => self.handle(payload, msg).await,
             Message::MultiCall(ref msg) => {
@@ -192,10 +193,6 @@ impl MessageHandler {
                 }
                 Ok(())
             }
-            x => Err(Error::MessageHandlerUnsupportedMessageType(format!(
-                "{:?}",
-                x
-            ))),
         }?;
 
         tracing::debug!("INVOKE CALLBACK {}", &payload.tx_id);

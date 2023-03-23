@@ -109,9 +109,6 @@ pub enum Error {
     #[error("Libsecp256k1 recover failed")]
     Libsecp256k1Recover,
 
-    #[error("Unsupported message type, {0}")]
-    MessageHandlerUnsupportedMessageType(String),
-
     #[error("Cannot find next node by local DHT")]
     MessageHandlerMissNextNode,
 
