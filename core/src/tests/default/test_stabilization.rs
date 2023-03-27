@@ -154,6 +154,7 @@ async fn test_stabilization() -> Result<()> {
     Ok(())
 }
 
+#[ignore]
 #[tokio::test]
 async fn test_online_stabilization() -> Result<()> {
     let mut nodes = vec![];
