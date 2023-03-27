@@ -171,13 +171,14 @@ async fn test_online_stabilization() -> Result<()> {
         manually_establish_connection(&swarm1, swarm).await.unwrap();
     }
 
-    tokio::time::sleep(Duration::from_secs(15)).await;
+    tokio::time::sleep(Duration::from_secs(8)).await;
 
     for node in nodes.iter() {
         let dht = gen_pure_dht(node.did()).await.unwrap();
         for other in nodes.iter() {
-            if node.did() != other.did() {
+            if dht.did != other.did() {
                 dht.join(other.did()).unwrap();
+                dht.notify(other.did()).unwrap();
             }
         }
 

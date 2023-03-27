@@ -18,11 +18,21 @@ pub async fn manually_establish_connection(swarm1: &Swarm, swarm2: &Swarm) -> Re
     let sm2 = swarm2.session_manager();
 
     let transport1 = swarm1.new_transport().await.unwrap();
+    swarm1
+        .register(swarm2.did(), transport1.clone())
+        .await
+        .unwrap();
+
     let handshake_info1 = transport1
         .get_handshake_info(sm1, RTCSdpType::Offer)
         .await?;
 
     let transport2 = swarm2.new_transport().await.unwrap();
+    swarm2
+        .register(swarm1.did(), transport2.clone())
+        .await
+        .unwrap();
+
     let addr1 = transport2.register_remote_info(handshake_info1).await?;
 
     assert_eq!(addr1, swarm1.did());
@@ -42,16 +52,6 @@ pub async fn manually_establish_connection(swarm1: &Swarm, swarm2: &Swarm) -> Re
         promise_1.await?;
         promise_2.await?;
     }
-
-    swarm2
-        .register(swarm1.did(), transport2.clone())
-        .await
-        .unwrap();
-
-    swarm1
-        .register(swarm2.did(), transport1.clone())
-        .await
-        .unwrap();
 
     assert!(swarm1.get_transport(swarm2.did()).is_some());
     assert!(swarm2.get_transport(swarm1.did()).is_some());
