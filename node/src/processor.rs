@@ -59,8 +59,6 @@ use crate::prelude::Signer;
 pub struct NodeInfo {
     /// node version
     pub version: String,
-    /// node did
-    pub did: String,
     /// swarm inspect info
     pub swarm: SwarmInspect,
 }
@@ -641,7 +639,6 @@ impl Processor {
     pub async fn get_node_info(&self) -> Result<NodeInfo> {
         Ok(NodeInfo {
             version: crate::util::build_version(),
-            did: self.swarm.did().to_string(),
             swarm: self.swarm.inspect().await,
         })
     }

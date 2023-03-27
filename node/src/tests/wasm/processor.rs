@@ -2,19 +2,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::lock::Mutex;
-use rings_node::prelude::rings_core::async_trait;
-use rings_node::prelude::rings_core::dht::Stabilization;
-use rings_node::prelude::rings_core::dht::TStabilize;
-use rings_node::prelude::rings_core::message::CallbackFn;
-use rings_node::prelude::rings_core::message::MessageCallback;
-use rings_node::prelude::rings_core::storage::PersistenceStorage;
-use rings_node::prelude::rings_core::transports::manager::TransportManager;
-use rings_node::prelude::web3::contract::tokens::Tokenizable;
-use rings_node::prelude::web_sys::RtcIceConnectionState;
-use rings_node::prelude::*;
-use rings_node::processor;
-use rings_node::processor::*;
 use wasm_bindgen_test::*;
+
+use crate::prelude::rings_core::async_trait;
+use crate::prelude::rings_core::dht::Stabilization;
+use crate::prelude::rings_core::dht::TStabilize;
+use crate::prelude::rings_core::message::CallbackFn;
+use crate::prelude::rings_core::message::MessageCallback;
+use crate::prelude::rings_core::storage::PersistenceStorage;
+use crate::prelude::rings_core::transports::manager::TransportManager;
+use crate::prelude::web3::contract::tokens::Tokenizable;
+use crate::prelude::web_sys::RtcIceConnectionState;
+use crate::prelude::*;
+use crate::processor;
+use crate::processor::*;
 
 async fn new_processor() -> Processor {
     let key = SecretKey::random();

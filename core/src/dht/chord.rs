@@ -126,24 +126,6 @@ impl PeerRingAction {
 }
 
 impl PeerRing {
-    /// Create a new Chord ring.
-    pub async fn new(did: Did) -> Result<Self> {
-        Self::new_with_config(did, 3).await
-    }
-
-    /// Create a new Chord Ring with given successor_seq max num, and finger_size.
-    pub async fn new_with_config(did: Did, succ_max: u8) -> Result<Self> {
-        Ok(Self {
-            successor_seq: Arc::new(Mutex::new(SuccessorSeq::new(did, succ_max))),
-            predecessor: Arc::new(Mutex::new(None)),
-            // for Eth address, it's 160
-            finger: Arc::new(Mutex::new(FingerTable::new(did, 160))),
-            did,
-            storage: Arc::new(PersistenceStorage::new().await?),
-            cache: Arc::new(MemStorage::<Did, VirtualNode>::new()),
-        })
-    }
-
     /// Same as new with config, but with a given storage.
     pub fn new_with_storage(did: Did, succ_max: u8, storage: PersistenceStorage) -> Self {
         Self {
@@ -246,9 +228,9 @@ impl Chord<PeerRingAction> for PeerRing {
                 Ok(PeerRingAction::Some(successor.min()))
             } else {
                 // Otherwise, find the closest preceding node and ask it to find the successor.
-                let closest = finger.closest(did);
+                let closest_predecessor = finger.closest_predecessor(did);
                 Ok(PeerRingAction::RemoteAction(
-                    closest,
+                    closest_predecessor,
                     RemoteAction::FindSuccessor(did),
                 ))
             }

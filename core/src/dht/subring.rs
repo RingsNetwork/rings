@@ -14,7 +14,7 @@ use crate::err::Result;
 /// Subring also have two extra fields: `name` and `creator`.
 /// Subring can be stored on the a [super::PeerRing].
 /// The did of a subring is the hash of its name.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Subring {
     /// name of subring
     pub name: String,

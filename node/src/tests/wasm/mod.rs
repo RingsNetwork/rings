@@ -1,8 +1,9 @@
 pub mod browser;
 pub mod processor;
 
-use rings_node::logging::browser::init_logging;
 use wasm_bindgen_test::wasm_bindgen_test_configure;
+
+use crate::logging::browser::init_logging;
 
 wasm_bindgen_test_configure!(run_in_browser);
 

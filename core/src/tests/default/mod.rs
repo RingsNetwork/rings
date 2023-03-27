@@ -9,7 +9,7 @@ use crate::swarm::Swarm;
 use crate::swarm::SwarmBuilder;
 
 mod test_message_handler;
-mod test_stabilize;
+mod test_stabilization;
 
 pub async fn prepare_node(
     key: SecretKey,
@@ -23,10 +23,10 @@ pub async fn prepare_node(
 
     let swarm = Arc::new(SwarmBuilder::new(stun, storage).key(key).build().unwrap());
     let dht = swarm.dht();
-    let node = swarm.create_message_handler(None, None);
+    let handler = swarm.create_message_handler(None, None);
 
     println!("key: {:?}", key.to_string());
     println!("did: {:?}", did);
 
-    (did, dht, swarm, node, path)
+    (did, dht, swarm, handler, path)
 }

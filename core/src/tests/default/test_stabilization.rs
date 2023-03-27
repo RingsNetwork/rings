@@ -3,10 +3,18 @@ use std::sync::Arc;
 use tokio::time::sleep;
 use tokio::time::Duration;
 
+use super::prepare_node;
+use crate::dht::Chord;
+use crate::dht::Did;
+use crate::dht::PeerRing;
 use crate::dht::Stabilization;
+use crate::dht::TStabilize;
 use crate::ecc::SecretKey;
 use crate::err::Error;
 use crate::err::Result;
+use crate::inspect::DHTInspect;
+use crate::message::MessageHandler;
+use crate::storage::PersistenceStorage;
 use crate::swarm::tests::new_swarm;
 use crate::swarm::Swarm;
 use crate::tests::manually_establish_connection;
@@ -29,6 +37,21 @@ async fn run_stabilize(swarm: Arc<Swarm>) {
             }
         }
     }
+}
+
+async fn run_node(swarm: Arc<Swarm>, handler: MessageHandler) {
+    let message_handler = async { Arc::new(handler).listen().await };
+
+    let stb = Stabilization::new(swarm, 1);
+    let stabilization = async { Arc::new(stb).wait().await };
+
+    futures::future::join(message_handler, stabilization).await;
+}
+
+async fn gen_pure_dht(did: Did) -> Result<PeerRing> {
+    let db_path = PersistenceStorage::random_path("./tmp");
+    let db = PersistenceStorage::new_with_path(db_path.as_str()).await?;
+    Ok(PeerRing::new_with_storage(did, 3, db))
 }
 
 #[tokio::test]
@@ -128,5 +151,38 @@ async fn test_stabilization() -> Result<()> {
         } => {}
     }
     tokio::fs::remove_dir_all("./tmp").await.ok();
+    Ok(())
+}
+
+#[ignore]
+#[tokio::test]
+async fn test_online_stabilization() -> Result<()> {
+    let mut nodes = vec![];
+
+    for _ in 0..6 {
+        let key = SecretKey::random();
+        let (_, _, swarm, handler, _) = prepare_node(key).await;
+        nodes.push(swarm.clone());
+        tokio::spawn(async { run_node(swarm, handler).await });
+    }
+
+    let swarm1 = Arc::clone(&nodes[0]);
+    for swarm in nodes.iter().skip(1) {
+        manually_establish_connection(&swarm1, swarm).await.unwrap();
+    }
+
+    tokio::time::sleep(Duration::from_secs(15)).await;
+
+    for node in nodes.iter() {
+        let dht = gen_pure_dht(node.did()).await.unwrap();
+        for other in nodes.iter() {
+            if node.did() != other.did() {
+                dht.join(other.did()).unwrap();
+            }
+        }
+
+        assert_eq!(DHTInspect::inspect(&node.dht()), DHTInspect::inspect(&dht));
+    }
+
     Ok(())
 }
