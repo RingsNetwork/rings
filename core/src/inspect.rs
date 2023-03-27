@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::dht::PeerRing;
 use crate::swarm::Swarm;
 use crate::transports::manager::TransportManager;
 use crate::types::ice_transport::IceTransportInterface;
@@ -8,11 +9,8 @@ use crate::utils::from_rtc_ice_connection_state;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SwarmInspect {
-    pub successors: Vec<String>,
-    #[serde(default)]
-    pub predecessor: Option<String>,
     pub transports: Vec<TransportInspect>,
-    pub finger_table: Vec<(Option<String>, usize, usize)>,
+    pub dht: DHTInspect,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,40 +20,18 @@ pub struct TransportInspect {
     pub state: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DHTInspect {
+    pub did: String,
+    pub successors: Vec<String>,
+    #[serde(default)]
+    pub predecessor: Option<String>,
+    pub finger_table: Vec<(Option<String>, usize, usize)>,
+}
+
 impl SwarmInspect {
     pub async fn inspect(swarm: &Swarm) -> Self {
-        let successors = {
-            swarm
-                .dht
-                .lock_successor()
-                .map(|ss| ss.list())
-                .unwrap_or_default()
-                .into_iter()
-                .map(|s| s.to_string())
-                .collect()
-        };
-
-        let predecessor = {
-            swarm
-                .dht
-                .lock_predecessor()
-                .map(|x| *x)
-                .ok()
-                .flatten()
-                .map(|x| x.to_string())
-        };
-
-        let finger_table = {
-            swarm
-                .dht
-                .lock_finger()
-                .map(|ft| {
-                    let finger = ft.list().iter().map(|x| x.map(|did| did.to_string()));
-                    compress_iter(finger)
-                })
-                .unwrap_or_default()
-        };
-
+        let dht = DHTInspect::inspect(&swarm.dht());
         let transports = {
             let transports = swarm.get_transports();
 
@@ -73,11 +49,44 @@ impl SwarmInspect {
                 .collect()
         };
 
+        Self { transports, dht }
+    }
+}
+
+impl DHTInspect {
+    pub fn inspect(dht: &PeerRing) -> Self {
+        let did = dht.did.to_string();
+        let successors = {
+            dht.lock_successor()
+                .map(|ss| ss.list())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect()
+        };
+
+        let predecessor = {
+            dht.lock_predecessor()
+                .map(|x| *x)
+                .ok()
+                .flatten()
+                .map(|x| x.to_string())
+        };
+
+        let finger_table = {
+            dht.lock_finger()
+                .map(|ft| {
+                    let finger = ft.list().iter().map(|x| x.map(|did| did.to_string()));
+                    compress_iter(finger)
+                })
+                .unwrap_or_default()
+        };
+
         Self {
+            did,
             successors,
             predecessor,
             finger_table,
-            transports,
         }
     }
 }
