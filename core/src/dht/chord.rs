@@ -246,9 +246,9 @@ impl Chord<PeerRingAction> for PeerRing {
                 Ok(PeerRingAction::Some(successor.min()))
             } else {
                 // Otherwise, find the closest preceding node and ask it to find the successor.
-                let closest = finger.closest(did);
+                let closest_predecessor = finger.closest_predecessor(did);
                 Ok(PeerRingAction::RemoteAction(
-                    closest,
+                    closest_predecessor,
                     RemoteAction::FindSuccessor(did),
                 ))
             }

@@ -122,7 +122,7 @@ struct RunCommand {
 
     #[arg(
         long,
-        help = "Stabilize service timeout. If not provided, use stabilize_timeout in config file or 20",
+        help = "Stabilize service timeout. If not provided, use stabilize_timeout in config file or 3",
         env
     )]
     pub stabilize_timeout: Option<usize>,

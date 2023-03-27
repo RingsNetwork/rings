@@ -1,20 +1,22 @@
 #![warn(missing_docs)]
 use std::ops::Index;
 
+use derivative::Derivative;
 use num_bigint::BigUint;
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::did::BiasId;
 use crate::dht::Did;
 
 /// Finger table of Chord DHT
 /// Ring's finger table is implemented with BiasRing
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Derivative, Clone, Debug, Serialize, Deserialize)]
+#[derivative(PartialEq)]
 pub struct FingerTable {
     did: Did,
     size: usize,
     finger: Vec<Option<Did>>,
+    #[derivative(PartialEq = "ignore")]
     pub(super) fix_finger_index: u8,
 }
 
@@ -112,31 +114,22 @@ impl FingerTable {
 
     /// Join FingerTable
     pub fn join(&mut self, did: Did) {
-        let bid = did.bias(self.did);
+        let bias = did.bias(self.did);
 
         for k in 0u32..self.size as u32 {
-            // (n + 2^k) % 2^m >= n
-            // pos >= id
-            // from n to n + 2^160
             let pos = Did::from(BigUint::from(2u16).pow(k));
-            // pos less than id
-            if bid.pos() >= pos {
-                // if pos <= id - self.id {
-                match self.finger[k as usize] {
-                    Some(v) => {
-                        // for a existed value v
-                        // if id is more close to self.id than v
-                        if bid < v.bias(self.did) {
-                            // if id < v || id > -v {
-                            self.finger[k as usize] = Some(did);
-                            // if id is more close to successor
-                        }
-                    }
-                    None => {
-                        self.finger[k as usize] = Some(did);
-                    }
+
+            if bias.pos() < pos {
+                continue;
+            }
+
+            if let Some(v) = self.finger[k as usize] {
+                if bias > v.bias(self.did) {
+                    continue;
                 }
             }
+
+            self.finger[k as usize] = Some(did);
         }
     }
 
@@ -145,18 +138,18 @@ impl FingerTable {
         self.finger.contains(&v)
     }
 
-    /// closest_preceding_node
-    pub fn closest(&self, did: Did) -> Did {
-        let bid: BiasId = did.bias(self.did);
+    /// get closest predecessor
+    pub fn closest_predecessor(&self, did: Did) -> Did {
+        let bias = did.bias(self.did);
+
         for i in (0..self.size).rev() {
             if let Some(v) = self.finger[i] {
-                if v.bias(self.did) < bid {
-                    // after bias v > self.id
-                    // check a recorded did x in (self.id, target_id)
+                if v.bias(self.did) < bias {
                     return v;
                 }
             }
         }
+
         self.did
     }
 

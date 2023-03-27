@@ -25,7 +25,7 @@ lazy_static::lazy_static! {
 pub const DEFAULT_BIND_ADDRESS: &str = "127.0.0.1:50000";
 pub const DEFAULT_ENDPOINT_URL: &str = "http://127.0.0.1:50000";
 pub const DEFAULT_ICE_SERVERS: &str = "stun://stun.l.google.com:19302";
-pub const DEFAULT_STABILIZE_TIMEOUT: usize = 20;
+pub const DEFAULT_STABILIZE_TIMEOUT: usize = 3;
 pub const DEFAULT_STORAGE_CAPACITY: usize = 200000000;
 
 pub fn get_storage_location<P>(prefix: P, path: P) -> String

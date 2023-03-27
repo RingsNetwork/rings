@@ -9,7 +9,7 @@ use crate::swarm::Swarm;
 use crate::swarm::SwarmBuilder;
 
 mod test_message_handler;
-mod test_stabilize;
+mod test_stabilization;
 
 pub async fn prepare_node(
     key: SecretKey,

@@ -1,14 +1,15 @@
 use js_sys::Uint8Array;
-use rings_node::browser;
-use rings_node::browser::Peer;
-use rings_node::browser::TransportAndIce;
-use rings_node::prelude::rings_core::utils::js_value;
-use rings_node::prelude::wasm_bindgen::convert::FromWasmAbi;
-use rings_node::prelude::wasm_bindgen::JsValue;
-use rings_node::prelude::wasm_bindgen_futures::JsFuture;
-use rings_node::prelude::web3::contract::tokens::Tokenizable;
-use rings_node::prelude::*;
 use wasm_bindgen_test::*;
+
+use crate::browser;
+use crate::browser::Peer;
+use crate::browser::TransportAndIce;
+use crate::prelude::rings_core::utils::js_value;
+use crate::prelude::wasm_bindgen::convert::FromWasmAbi;
+use crate::prelude::wasm_bindgen::JsValue;
+use crate::prelude::wasm_bindgen_futures::JsFuture;
+use crate::prelude::web3::contract::tokens::Tokenizable;
+use crate::prelude::*;
 wasm_bindgen_test_configure!(run_in_browser);
 
 pub fn generic_of_jsval<T: FromWasmAbi<Abi = u32>>(

@@ -152,4 +152,6 @@ pub mod measure;
 pub mod prelude;
 pub mod processor;
 pub mod seed;
+#[cfg(test)]
+mod tests;
 pub mod util;
