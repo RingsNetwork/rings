@@ -9,6 +9,7 @@ use lazy_static::lazy_static;
 use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 
+use super::consts;
 use crate::channels::Channel as AcChannel;
 use crate::dht::Did;
 use crate::ecc::PublicKey;
@@ -126,6 +127,9 @@ impl IceTransportInterface<Event, AcChannel<Event>> for DummyTransport {
     }
 
     async fn send_message(&self, msg: &Bytes) -> Result<()> {
+        if consts::SEND_MESSAGE_DELAY {
+            super::random_delay().await;
+        }
         self.remote_sender()
             .send(Event::DataChannelMessage(msg.to_vec()))
             .await
@@ -209,6 +213,9 @@ impl DummyTransport {
     }
 
     pub async fn wait_for_data_channel_open(&self) -> Result<()> {
+        if consts::CHANNEL_OPEN_DELAY {
+            super::random_delay().await;
+        }
         Ok(())
     }
 
