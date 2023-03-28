@@ -42,7 +42,7 @@ async fn run_stabilize(swarm: Arc<Swarm>) {
 async fn run_node(swarm: Arc<Swarm>, handler: MessageHandler) {
     let message_handler = async { Arc::new(handler).listen().await };
 
-    let stb = Stabilization::new(swarm, 1);
+    let stb = Stabilization::new(swarm, 3);
     let stabilization = async { Arc::new(stb).wait().await };
 
     futures::future::join(message_handler, stabilization).await;
@@ -171,8 +171,9 @@ async fn test_online_stabilization() -> Result<()> {
         manually_establish_connection(&swarm1, swarm).await.unwrap();
     }
 
-    tokio::time::sleep(Duration::from_secs(18)).await;
+    tokio::time::sleep(Duration::from_secs(30)).await;
 
+    let mut expected_dhts = vec![];
     for node in nodes.iter() {
         let dht = gen_pure_dht(node.did()).await.unwrap();
         for other in nodes.iter() {
@@ -182,8 +183,15 @@ async fn test_online_stabilization() -> Result<()> {
             }
         }
 
-        assert_eq!(DHTInspect::inspect(&node.dht()), DHTInspect::inspect(&dht));
+        expected_dhts.push(DHTInspect::inspect(&dht));
     }
+
+    let mut current_dhts = vec![];
+    for node in nodes.iter() {
+        current_dhts.push(DHTInspect::inspect(&node.dht()));
+    }
+
+    assert_eq!(expected_dhts, current_dhts);
 
     Ok(())
 }

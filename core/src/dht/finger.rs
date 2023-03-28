@@ -71,6 +71,10 @@ impl FingerTable {
             tracing::error!("set finger index out of range, index: {}", index);
             return;
         }
+        if did == self.did {
+            tracing::info!("set finger table with self did, ignore it");
+            return;
+        }
         self.finger[index] = Some(did);
     }
 

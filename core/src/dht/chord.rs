@@ -279,20 +279,15 @@ impl Chord<PeerRingAction> for PeerRing {
         let mut fix_finger_index = self.lock_finger()?.fix_finger_index;
 
         // Only one finger should be fixed at a time.
-        fix_finger_index += 1;
-        if fix_finger_index >= 159 {
-            fix_finger_index = 0;
-        }
+        fix_finger_index = (fix_finger_index + 1) % 160;
 
         // Get finger did.
-        let did: BigUint = (BigUint::from(self.did)
-            + BigUint::from(2u16).pow(fix_finger_index.into()))
-            % BigUint::from(2u16).pow(160);
+        let finger_did = Did::from(BigUint::from(2u16).pow(fix_finger_index as u32));
 
         // Caution here that there are also locks in find_successor.
         // You cannot lock finger table before calling find_successor.
         // Have to lock_finger in each branch of the match.
-        match self.find_successor(did.into()) {
+        match self.find_successor(finger_did) {
             Ok(res) => match res {
                 PeerRingAction::Some(v) => {
                     let mut finger = self.lock_finger()?;
@@ -300,17 +295,18 @@ impl Chord<PeerRingAction> for PeerRing {
                     finger.set_fix(v);
                     Ok(PeerRingAction::None)
                 }
-                PeerRingAction::RemoteAction(a, RemoteAction::FindSuccessor(b)) => {
+                PeerRingAction::RemoteAction(
+                    closest_predecessor,
+                    RemoteAction::FindSuccessor(finger_did),
+                ) => {
                     let mut finger = self.lock_finger()?;
                     finger.fix_finger_index = fix_finger_index;
                     Ok(PeerRingAction::RemoteAction(
-                        a,
-                        RemoteAction::FindSuccessorForFix(b),
+                        closest_predecessor,
+                        RemoteAction::FindSuccessorForFix(finger_did),
                     ))
                 }
                 _ => {
-                    let mut finger = self.lock_finger()?;
-                    finger.fix_finger_index = fix_finger_index;
                     tracing::error!("Invalid PeerRing Action");
                     Err(Error::PeerRingInvalidAction)
                 }

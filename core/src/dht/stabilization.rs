@@ -76,24 +76,21 @@ impl Stabilization {
     async fn fix_fingers(&self) -> Result<()> {
         match self.chord.fix_fingers() {
             Ok(action) => match action {
-                PeerRingAction::None => {
-                    // tracing::debug!("wait to next round");
-                    Ok(())
-                }
+                PeerRingAction::None => Ok(()),
                 PeerRingAction::RemoteAction(
-                    next,
-                    PeerRingRemoteAction::FindSuccessorForFix(current),
+                    closest_predecessor,
+                    PeerRingRemoteAction::FindSuccessorForFix(finger_did),
                 ) => {
-                    tracing::info!("STABILIZATION fix_fingers: {:?}", current);
+                    tracing::info!("STABILIZATION fix_fingers: {:?}", finger_did);
                     let msg = Message::FindSuccessorSend(FindSuccessorSend {
-                        did: current,
+                        did: finger_did,
                         then: FindSuccessorThen::Report(FindSuccessorReportHandler::FixFingerTable),
-                        strict: true,
+                        strict: false,
                     });
                     let payload = MessagePayload::new_send(
                         msg.clone(),
                         self.swarm.session_manager(),
-                        next,
+                        closest_predecessor,
                         self.swarm.did(),
                     )?;
                     self.swarm.send_payload(payload).await?;
