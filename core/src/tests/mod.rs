@@ -10,6 +10,15 @@ pub mod wasm;
 #[cfg(all(not(feature = "wasm")))]
 pub mod default;
 
+#[allow(dead_code)]
+pub fn setup_tracing() {
+    let subscriber = tracing_subscriber::FmtSubscriber::builder()
+        .with_max_level(tracing::Level::DEBUG)
+        .finish();
+
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+}
+
 pub async fn manually_establish_connection(swarm1: &Swarm, swarm2: &Swarm) -> Result<()> {
     assert!(swarm1.get_transport(swarm2.did()).is_none());
     assert!(swarm2.get_transport(swarm1.did()).is_none());
