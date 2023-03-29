@@ -78,27 +78,73 @@
 macro_rules! poll {
     ( $func:expr, $ttl:expr ) => {{
         use wasm_bindgen::JsCast;
-        let window = web_sys::window().unwrap();
+	use crate::utils::js_utils::{Global, global};
         let func = wasm_bindgen::prelude::Closure::wrap(
             (Box::new(move |func: js_sys::Function| {
                 $func();
-                let window = web_sys::window().unwrap();
-                window
-                    .set_timeout_with_callback_and_timeout_and_arguments(
-                        func.unchecked_ref(),
-                        $ttl,
-                        &js_sys::Array::of1(&func),
-                    )
-                    .unwrap();
+                match global().unwrap() {
+                    Global::Window(window) => {
+                        window
+                            .set_timeout_with_callback_and_timeout_and_arguments(
+                                func.unchecked_ref(),
+                                $ttl,
+                                &js_sys::Array::of1(&func),
+                            )
+                            .unwrap();
+                    }
+                    Global::WorkerGlobal(window) => {
+                        window
+                            .set_timeout_with_callback_and_timeout_and_arguments(
+                                func.unchecked_ref(),
+                                $ttl,
+                                &js_sys::Array::of1(&func),
+                            )
+                            .unwrap();
+                    }
+                    Global::ServiceWorkerGlobal(window) => {
+                        window
+                            .set_timeout_with_callback_and_timeout_and_arguments(
+                                func.unchecked_ref(),
+                                $ttl,
+                                &js_sys::Array::of1(&func),
+                            )
+                            .unwrap();
+                    }
+                }
             })) as Box<dyn FnMut(js_sys::Function)>,
         );
-        window
-            .set_timeout_with_callback_and_timeout_and_arguments(
-                &func.as_ref().unchecked_ref(),
-                $ttl,
-                &js_sys::Array::of1(&func.as_ref().unchecked_ref()),
-            )
-            .unwrap();
-        func.forget();
-    }};
+                match global().unwrap() {
+                    Global::Window(window) => {
+			window
+			    .set_timeout_with_callback_and_timeout_and_arguments(
+				&func.as_ref().unchecked_ref(),
+				$ttl,
+				&js_sys::Array::of1(&func.as_ref().unchecked_ref()),
+			    )
+			    .unwrap();
+			func.forget();
+                    }
+                    Global::WorkerGlobal(window) => {
+			window
+			    .set_timeout_with_callback_and_timeout_and_arguments(
+				&func.as_ref().unchecked_ref(),
+				$ttl,
+				&js_sys::Array::of1(&func.as_ref().unchecked_ref()),
+			    )
+			    .unwrap();
+			func.forget();
+                    }
+                    Global::ServiceWorkerGlobal(window) => {
+			window
+			    .set_timeout_with_callback_and_timeout_and_arguments(
+				&func.as_ref().unchecked_ref(),
+				$ttl,
+				&js_sys::Array::of1(&func.as_ref().unchecked_ref()),
+			    )
+			    .unwrap();
+			func.forget();
+                    }
+                }
+
+    }}
 }
