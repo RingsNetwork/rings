@@ -78,7 +78,7 @@
 macro_rules! poll {
     ( $func:expr, $ttl:expr ) => {{
         use wasm_bindgen::JsCast;
-	use crate::utils::js_utils::{Global, global};
+	use $crate::utils::js_utils::{Global, global};
         let func = wasm_bindgen::prelude::Closure::wrap(
             (Box::new(move |func: js_sys::Function| {
                 $func();
