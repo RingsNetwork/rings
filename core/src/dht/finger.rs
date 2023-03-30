@@ -120,7 +120,7 @@ impl FingerTable {
 
     /// Join FingerTable
     pub fn join(&mut self, did: Did) {
-        let ret = self.dry_join(did).to_owned();
+        let ret = self.dry_join(did);
         for i in ret.0 {
             self.finger[i.to_owned()] = Some(did);
         }
@@ -206,8 +206,8 @@ impl Fixable for FingerTable {
         let mut ret: Vec<Did> = vec![];
         for i in self.list() {
             if let Some(did) = i {
-                if self.dry_join(*did).0.len() != 0 {
-                    ret.push(did.clone());
+                if !self.dry_join(*did).0.is_empty() {
+                    ret.push(*did);
                 }
             }
         }
@@ -217,7 +217,7 @@ impl Fixable for FingerTable {
     fn fix(&mut self) {
         for i in self.list().clone() {
             if let Some(did) = i {
-                self.join(did.clone());
+                self.join(did);
             }
         }
     }

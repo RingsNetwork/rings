@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! Core traits, including Channel, IceTransport
 
 use crate::err::Result;
