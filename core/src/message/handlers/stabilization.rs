@@ -510,6 +510,7 @@ mod test {
     }
 
     async fn run_stabilize_once(swarm: Arc<Swarm>) -> Result<()> {
-        Stabilization::new(swarm, 5).stabilize().await
+        let stab = Stabilization::new(swarm, 5);
+        stab.notify_predecessor().await
     }
 }

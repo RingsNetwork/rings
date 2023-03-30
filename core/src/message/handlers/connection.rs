@@ -230,8 +230,15 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
         }
 
         match &msg.handler {
-            // TODO: how to prevent `fix_finger_index` before got `FixFingerTable`?
-            FindSuccessorReportHandler::FixFingerTable => self.dht.lock_finger()?.set_fix(msg.did),
+            FindSuccessorReportHandler::FixFingerTable => {
+                if self.swarm.get_and_check_transport(msg.did).await.is_none()
+                    && msg.did != self.swarm.did()
+                {
+                    self.swarm.connect(msg.did).await?;
+                } else {
+                    self.dht.join(msg.did)?;
+                }
+            }
             FindSuccessorReportHandler::Connect => {
                 if self.swarm.get_and_check_transport(msg.did).await.is_none()
                     && msg.did != self.swarm.did()
