@@ -47,7 +47,7 @@ impl Stabilization {
         self.timeout
     }
 
-    async fn notify_predecessor(&self) -> Result<()> {
+    pub async fn notify_predecessor(&self) -> Result<()> {
         let (successor_min, successor_list) = {
             let successor = self.chord.lock_successor()?;
             (successor.min(), successor.list())
