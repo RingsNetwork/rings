@@ -328,6 +328,10 @@ pub enum Error {
     #[cfg(feature = "wasm")]
     #[error("Error on ser/der JsValue")]
     SerdeWasmBindgenError(#[from] serde_wasm_bindgen::Error),
+
+    #[cfg(feature = "wasm")]
+    #[error("Error create RTC connection: {0}")]
+    CreateConnectionError(String),
 }
 
 /// A Result wrapper contain custom Errors.
