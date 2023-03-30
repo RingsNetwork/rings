@@ -204,21 +204,17 @@ impl Fixable for FingerTable {
 
     fn verify(&self) -> Result<Vec<Did>> {
         let mut ret: Vec<Did> = vec![];
-        for i in self.list() {
-            if let Some(did) = i {
-                if !self.dry_join(*did).0.is_empty() {
-                    ret.push(*did);
-                }
+        for did in self.list().iter().flatten() {
+            if !self.dry_join(*did).0.is_empty() {
+                ret.push(*did);
             }
         }
         Ok(ret)
     }
 
     fn fix(&mut self) {
-        for i in self.list().clone() {
-            if let Some(did) = i {
-                self.join(did);
-            }
+        for did in self.list().clone().iter().flatten() {
+            self.join(did.clone());
         }
     }
 }
