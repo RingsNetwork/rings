@@ -214,7 +214,7 @@ impl Fixable for FingerTable {
 
     fn fix(&mut self) {
         for did in self.list().clone().iter().flatten() {
-            self.join(did.clone());
+            self.join(*did);
         }
     }
 }
