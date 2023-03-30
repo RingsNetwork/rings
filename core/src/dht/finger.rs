@@ -7,6 +7,8 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::dht::Did;
+use crate::err::Result;
+use crate::types::Fixable;
 
 /// Finger table of Chord DHT
 /// Ring's finger table is implemented with BiasRing
@@ -118,6 +120,16 @@ impl FingerTable {
 
     /// Join FingerTable
     pub fn join(&mut self, did: Did) {
+        let ret = self.dry_join(did).to_owned();
+        for i in ret.0 {
+            self.finger[i.to_owned()] = Some(did);
+        }
+    }
+
+    /// Simulate joining fingertable but do nothing
+    pub fn dry_join(&self, did: Did) -> (Vec<usize>, Vec<Did>) {
+        let mut ret_pos = vec![];
+        let mut ret_did = vec![];
         let bias = did.bias(self.did);
 
         for k in 0u32..self.size as u32 {
@@ -130,11 +142,13 @@ impl FingerTable {
             if let Some(v) = self.finger[k as usize] {
                 if bias > v.bias(self.did) {
                     continue;
+                } else {
+                    ret_did.push(v);
                 }
             }
-
-            self.finger[k as usize] = Some(did);
+            ret_pos.push(k as usize);
         }
+        (ret_pos, ret_did)
     }
 
     /// Check finger is contains some node
@@ -182,6 +196,30 @@ impl Index<usize> for FingerTable {
     type Output = Option<Did>;
     fn index(&self, index: usize) -> &Self::Output {
         self.get_ref(index)
+    }
+}
+
+impl Fixable for FingerTable {
+    type Data = Vec<Did>;
+
+    fn verify(&self) -> Result<Vec<Did>> {
+        let mut ret: Vec<Did> = vec![];
+        for i in self.list() {
+            if let Some(did) = i {
+                if self.dry_join(*did).0.len() != 0 {
+                    ret.push(did.clone());
+                }
+            }
+        }
+        Ok(ret)
+    }
+
+    fn fix(&mut self) {
+        for i in self.list().clone() {
+            if let Some(did) = i {
+                self.join(did.clone());
+            }
+        }
     }
 }
 
