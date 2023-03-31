@@ -189,10 +189,12 @@ impl IceTransportInterface<Event, CbChannel<Event>> for WasmTransport {
             "setting properties should never fail on our dictionary objects"
         );
 
-        self.connection = RtcPeerConnection::new_with_configuration(&config)
-            .ok()
-            .as_ref()
-            .map(|c| Arc::new(c.to_owned()));
+        self.connection = Some(Arc::new(
+            RtcPeerConnection::new_with_configuration(&config).map_err(|e| {
+                tracing::error!("create RtcPeerConnection failed: {:?}", e);
+                Error::RTCPeerConnectionCreateFailed
+            })?,
+        ));
         self.setup_channel("rings").await;
         return Ok(self);
     }

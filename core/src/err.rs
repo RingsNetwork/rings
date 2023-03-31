@@ -182,6 +182,10 @@ pub enum Error {
     #[error("RTC peer_connection not establish")]
     RTCPeerConnectionNotEstablish,
 
+    #[cfg(feature = "wasm")]
+    #[error("Create RtcPeerConnection failed")]
+    RTCPeerConnectionCreateFailed,
+
     #[cfg(not(feature = "wasm"))]
     #[error("RTC peer_connection fail to create offer")]
     RTCPeerConnectionCreateOfferFailed(#[source] webrtc::Error),
