@@ -447,16 +447,10 @@ impl Processor {
 
     /// Disconnect a peer with web3 did.
     pub async fn disconnect(&self, did: Did) -> Result<()> {
-        let transport = self
-            .swarm
-            .get_transport(did)
-            .ok_or(Error::TransportNotFound)?;
-        transport
-            .close()
+        self.swarm
+            .disconnect(did)
             .await
-            .map_err(Error::CloseTransportError)?;
-        self.swarm.remove_transport(did);
-        Ok(())
+            .map_err(Error::CloseTransportError)
     }
 
     /// List all pending transport.
