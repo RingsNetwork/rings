@@ -11,10 +11,12 @@ use serde::Deserialize;
 use serde::Serialize;
 use web3::contract::tokens::Tokenizable;
 use web3::types::H160;
-
 use crate::ecc::HashStr;
 use crate::err::Error;
 use crate::err::Result;
+use std::ops::Shr;
+use std::ops::Shl;
+
 
 /// Did is a finate Ring R(P) where P = 2^160, wrap H160.
 #[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd, Debug, Serialize, Deserialize, Hash)]
@@ -32,6 +34,39 @@ pub struct BiasId {
     bias: Did,
     did: Did,
 }
+
+/// The `Affine` trait represents an affine transformation for values
+/// in a finite ring. It defines a method `trans` which allows applying
+/// the transformation to the implementing type.
+pub trait Affine<Rhs = u32> {
+    type Output;
+    fn trans(&self, shift: Rhs) -> Self::Output;
+}
+
+impl Affine<u32> for Did {
+    type Output = Self;
+    fn trans(&self, shift: u32) -> Self::Output {
+	*self + Did::from(BigUint::from(2u16).pow(shift))
+    }
+}
+
+/// Did >> a means Did + 2^a
+impl Shr<u32> for Did {
+    type Output = Self;
+    fn shr(self, rhs: u32) -> Self::Output {
+	self.trans(rhs)
+    }
+}
+
+/// Did >> a means Did - 2^a
+impl Shl<u32> for Did {
+    type Output = Self;
+    fn shl(self, lhs: u32) -> Self::Output {
+	self.trans(0 - lhs)
+    }
+}
+
+
 
 impl BiasId {
     pub fn new(bias: Did, did: Did) -> BiasId {
@@ -90,6 +125,12 @@ impl From<BiasId> for Did {
 impl From<&BiasId> for Did {
     fn from(id: &BiasId) -> Did {
         BiasId::to_did(*id)
+    }
+}
+
+impl From<u32> for Did {
+    fn from(id: u32) -> Did {
+	Self::from(BigUint::from(id))
     }
 }
 
@@ -178,6 +219,15 @@ impl Neg for Did {
     }
 }
 
+impl<'a> Neg for &'a Did {
+    type Output = Did;
+
+    fn neg(self) -> Self::Output {
+	(*self).neg()
+    }
+}
+
+
 impl Add for Did {
     type Output = Self;
     fn add(self, rhs: Self) -> Self {
@@ -191,6 +241,7 @@ impl Sub for Did {
         self + (-rhs)
     }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -229,5 +280,26 @@ mod tests {
         assert_eq!(v, vec![c, d, a, b]);
         v.sort(d);
         assert_eq!(v, vec![d, a, b, c]);
+    }
+
+    #[test]
+    fn affine_transformation() {
+        let did = Did::from(10u32);
+        let result = did.trans(3);
+        assert_eq!(result, Did::from(18u32));
+    }
+
+    #[test]
+    fn right_shift() {
+        let did = Did::from(10u32);
+        let result: Did = did >> 3;
+        assert_eq!(result, Did::from(18u32));
+    }
+
+    #[test]
+    fn left_shift() {
+        let did = Did::from(18u32);
+        let result: Did = did << 3;
+        assert_eq!(result, Did::from(10u32));
     }
 }
