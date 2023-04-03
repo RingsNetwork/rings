@@ -50,19 +50,32 @@ impl Affine<u32> for Did {
     }
 }
 
-/// Did >> a means Did + 2^a
-impl Shr<u32> for Did {
+impl Affine<i32> for Did {
     type Output = Self;
-    fn shr(self, rhs: u32) -> Self::Output {
-	self.trans(rhs)
+    fn trans(&self, shift: i32) -> Self::Output {
+	if shift > 0 {
+	    *self + Did::from(BigUint::from(2u16).pow(shift.abs() as u32))
+	} else {
+	    *self - Did::from(BigUint::from(2u16).pow(shift.abs() as u32))
+	}
+    }
+}
+
+
+
+/// Did >> a means Did + 2^a
+impl Shr<u16> for Did {
+    type Output = Self;
+    fn shr(self, rhs: u16) -> Self::Output {
+	self.trans(rhs as i32)
     }
 }
 
 /// Did >> a means Did - 2^a
-impl Shl<u32> for Did {
+impl Shl<u16> for Did {
     type Output = Self;
-    fn shl(self, lhs: u32) -> Self::Output {
-	self.trans(0 - lhs)
+    fn shl(self, lhs: u16) -> Self::Output {
+	self.trans(-(lhs as i32))
     }
 }
 
