@@ -1,7 +1,12 @@
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::dht::vnode::VirtualNode;
+use crate::dht::Did;
 use crate::dht::PeerRing;
+use crate::storage::MemStorage;
+use crate::storage::PersistenceStorage;
+use crate::storage::PersistenceStorageReadAndWrite;
 use crate::swarm::Swarm;
 use crate::transports::manager::TransportManager;
 use crate::types::ice_transport::IceTransportInterface;
@@ -11,6 +16,8 @@ use crate::utils::from_rtc_ice_connection_state;
 pub struct SwarmInspect {
     pub transports: Vec<TransportInspect>,
     pub dht: DHTInspect,
+    pub persistence_storage: StorageInspect,
+    pub cache_storage: StorageInspect,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +34,11 @@ pub struct DHTInspect {
     #[serde(default)]
     pub predecessor: Option<String>,
     pub finger_table: Vec<(Option<String>, usize, usize)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageInspect {
+    pub items: Vec<(String, VirtualNode)>,
 }
 
 impl SwarmInspect {
@@ -48,8 +60,16 @@ impl SwarmInspect {
                 })
                 .collect()
         };
+        let persistence_storage =
+            StorageInspect::inspect_persistence_storage(&swarm.dht().storage).await;
+        let cache_storage = StorageInspect::inspect_mem_storage(&swarm.dht().cache);
 
-        Self { transports, dht }
+        Self {
+            transports,
+            dht,
+            persistence_storage,
+            cache_storage,
+        }
     }
 }
 
@@ -87,6 +107,28 @@ impl DHTInspect {
             successors,
             predecessor,
             finger_table,
+        }
+    }
+}
+
+impl StorageInspect {
+    pub async fn inspect_persistence_storage(storage: &PersistenceStorage) -> Self {
+        Self {
+            items: storage
+                .get_all()
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .collect(),
+        }
+    }
+    pub fn inspect_mem_storage(storage: &MemStorage<Did, VirtualNode>) -> Self {
+        Self {
+            items: storage
+                .items()
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
         }
     }
 }
