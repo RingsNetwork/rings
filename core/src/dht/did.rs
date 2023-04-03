@@ -3,7 +3,6 @@ use std::cmp::PartialEq;
 use std::ops::Add;
 use std::ops::Deref;
 use std::ops::Neg;
-use std::ops::Shr;
 use std::ops::Sub;
 use std::str::FromStr;
 
@@ -47,14 +46,6 @@ impl Rotate<u16> for Did {
     fn rotate(&self, angle: u16) -> Self::Output {
         *self
             + Did::from(BigUint::from(2u16).pow(160) * BigUint::from(angle) / BigUint::from(360u32))
-    }
-}
-
-/// Did >> a means Did + 2^a
-impl Shr<u16> for Did {
-    type Output = Self;
-    fn shr(self, rhs: u16) -> Self::Output {
-        self.rotate(rhs)
     }
 }
 
@@ -147,7 +138,7 @@ impl Did {
     // affine x, n = [x + rotate(360/n)]
     pub fn rotate_affine(&self, scalar: u16) -> Vec<Did> {
         let angle = 360 / scalar;
-        (0..scalar).map(|i| *self >> (i * angle)).collect()
+        (0..scalar).map(|i| (*self).rotate(i * angle)).collect()
     }
 }
 
@@ -288,7 +279,7 @@ mod tests {
     #[test]
     fn right_shift() {
         let did = Did::from(10u32);
-        let ret: Did = did >> 180;
+        let ret: Did = did.rotate(180);
         assert_eq!(ret, did + Did::from(BigUint::from(2u16).pow(159)));
     }
 
@@ -297,9 +288,9 @@ mod tests {
         let did = Did::from(10u32);
         let affine_dids = did.rotate_affine(4);
         assert_eq!(affine_dids.len(), 4);
-        assert_eq!(affine_dids[0], did >> 0);
-        assert_eq!(affine_dids[1], did >> 90);
-        assert_eq!(affine_dids[2], did >> 180);
-        assert_eq!(affine_dids[3], did >> 270);
+        assert_eq!(affine_dids[0], did.rotate(0));
+        assert_eq!(affine_dids[1], did.rotate(90));
+        assert_eq!(affine_dids[2], did.rotate(180));
+        assert_eq!(affine_dids[3], did.rotate(270));
     }
 }
