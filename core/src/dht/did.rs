@@ -3,6 +3,8 @@ use std::cmp::PartialEq;
 use std::ops::Add;
 use std::ops::Deref;
 use std::ops::Neg;
+use std::ops::Shl;
+use std::ops::Shr;
 use std::ops::Sub;
 use std::str::FromStr;
 
@@ -11,12 +13,10 @@ use serde::Deserialize;
 use serde::Serialize;
 use web3::contract::tokens::Tokenizable;
 use web3::types::H160;
+
 use crate::ecc::HashStr;
 use crate::err::Error;
 use crate::err::Result;
-use std::ops::Shr;
-use std::ops::Shl;
-
 
 /// Did is a finate Ring R(P) where P = 2^160, wrap H160.
 #[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd, Debug, Serialize, Deserialize, Hash)]
@@ -46,28 +46,26 @@ pub trait Affine<Rhs = u32> {
 impl Affine<u32> for Did {
     type Output = Self;
     fn trans(&self, shift: u32) -> Self::Output {
-	*self + Did::from(BigUint::from(2u16).pow(shift))
+        *self + Did::from(BigUint::from(2u16).pow(shift))
     }
 }
 
 impl Affine<i32> for Did {
     type Output = Self;
     fn trans(&self, shift: i32) -> Self::Output {
-	if shift > 0 {
-	    *self + Did::from(BigUint::from(2u16).pow(shift.abs() as u32))
-	} else {
-	    *self - Did::from(BigUint::from(2u16).pow(shift.abs() as u32))
-	}
+        if shift > 0 {
+            *self + Did::from(BigUint::from(2u16).pow(shift.abs() as u32))
+        } else {
+            *self - Did::from(BigUint::from(2u16).pow(shift.abs() as u32))
+        }
     }
 }
-
-
 
 /// Did >> a means Did + 2^a
 impl Shr<u16> for Did {
     type Output = Self;
     fn shr(self, rhs: u16) -> Self::Output {
-	self.trans(rhs as i32)
+        self.trans(rhs as i32)
     }
 }
 
@@ -75,11 +73,9 @@ impl Shr<u16> for Did {
 impl Shl<u16> for Did {
     type Output = Self;
     fn shl(self, lhs: u16) -> Self::Output {
-	self.trans(-(lhs as i32))
+        self.trans(-(lhs as i32))
     }
 }
-
-
 
 impl BiasId {
     pub fn new(bias: Did, did: Did) -> BiasId {
@@ -143,7 +139,7 @@ impl From<&BiasId> for Did {
 
 impl From<u32> for Did {
     fn from(id: u32) -> Did {
-	Self::from(BigUint::from(id))
+        Self::from(BigUint::from(id))
     }
 }
 
@@ -236,10 +232,9 @@ impl<'a> Neg for &'a Did {
     type Output = Did;
 
     fn neg(self) -> Self::Output {
-	(*self).neg()
+        (*self).neg()
     }
 }
-
 
 impl Add for Did {
     type Output = Self;
@@ -254,7 +249,6 @@ impl Sub for Did {
         self + (-rhs)
     }
 }
-
 
 #[cfg(test)]
 mod tests {
