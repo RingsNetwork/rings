@@ -202,6 +202,20 @@ impl MessageRelay {
     }
 }
 
+impl std::fmt::Display for MessageRelay {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "MessageRelay {{ method: {:?}, path: {:?}, path_end_cursor: {}, next_hop: {:?}, destination: {} }}",
+            self.method,
+            self.path,
+            self.path_end_cursor,
+            self.next_hop,
+            self.destination,
+        )
+    }
+}
+
 // Since rust cannot zip N iterators, when you change this number,
 // you should also change the code of `has_infinite_loop` below.
 const INFINITE_LOOP_TOLERANCE: usize = 3;
