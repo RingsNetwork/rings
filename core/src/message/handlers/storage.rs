@@ -1,7 +1,7 @@
 #![warn(missing_docs)]
 use async_trait::async_trait;
 
-use crate::consts::VNODE_DATA_REDUDANT;
+use crate::consts::VNODE_DATA_REDUNDANT;
 use crate::dht::vnode::VirtualNode;
 use crate::dht::ChordStorage;
 use crate::dht::Did;
@@ -49,8 +49,8 @@ impl ChordStorageInterface for Swarm {
     /// else Query Remote Node
     async fn storage_fetch(&self, vid: Did) -> Result<()> {
         // If peer found that data is on it's localstore, copy it to the cache
-        if VNODE_DATA_REDUDANT > 1 {
-            for vid in vid.rotate_affine(VNODE_DATA_REDUDANT) {
+        if VNODE_DATA_REDUNDANT > 1 {
+            for vid in vid.rotate_affine(VNODE_DATA_REDUNDANT) {
                 self.storage_fetch(vid).await?;
             }
             return Ok(());
@@ -77,8 +77,8 @@ impl ChordStorageInterface for Swarm {
 
     /// Store VirtualNode, `TryInto<VirtualNode>` is implemented for alot of types
     async fn storage_store(&self, vnode: VirtualNode) -> Result<()> {
-        if VNODE_DATA_REDUDANT > 1 {
-            for vnode in vnode.affine(VNODE_DATA_REDUDANT) {
+        if VNODE_DATA_REDUNDANT > 1 {
+            for vnode in vnode.affine(VNODE_DATA_REDUNDANT) {
                 self.storage_store(vnode).await?;
             }
             return Ok(());
@@ -98,8 +98,8 @@ impl ChordStorageInterface for Swarm {
     async fn storage_append_data(&self, topic: &str, data: Encoded) -> Result<()> {
         let vnode: VirtualNode = (topic.to_string(), data).try_into()?;
 
-        if VNODE_DATA_REDUDANT > 1 {
-            for vnode in vnode.affine(VNODE_DATA_REDUDANT) {
+        if VNODE_DATA_REDUNDANT > 1 {
+            for vnode in vnode.affine(VNODE_DATA_REDUNDANT) {
                 storage_append_vnode(self, vnode).await?;
             }
             return Ok(());
@@ -126,8 +126,8 @@ impl ChordStorageInterface for Swarm {
     async fn storage_touch_data(&self, topic: &str, data: Encoded) -> Result<()> {
         let vnode: VirtualNode = (topic.to_string(), data).try_into()?;
 
-        if VNODE_DATA_REDUDANT > 1 {
-            for vnode in vnode.affine(VNODE_DATA_REDUDANT) {
+        if VNODE_DATA_REDUNDANT > 1 {
+            for vnode in vnode.affine(VNODE_DATA_REDUNDANT) {
                 storage_touch_vnode(self, vnode).await?;
             }
             return Ok(());
