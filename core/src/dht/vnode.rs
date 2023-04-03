@@ -150,6 +150,22 @@ impl TryFrom<String> for VirtualNode {
 }
 
 impl VirtualNode {
+    /// Affine Transport vnode to a list of affined did
+    pub fn affine(&self, scalar: u16) -> Vec<VirtualNode> {
+        self.did
+            .rotate_affine(scalar)
+            .iter()
+            .map(|did| self.clone_with_did(did.to_owned()))
+            .collect()
+    }
+
+    /// Clone and setup with new DID
+    pub fn clone_with_did(&self, did: Did) -> Self {
+        let mut vnode = self.clone();
+        vnode.did = did;
+        vnode
+    }
+
     /// The entry point of [VNodeOperation].
     /// Will dispatch to different operation handlers according to the variant.
     pub fn operate(&self, op: VNodeOperation) -> Result<Self> {

@@ -1,6 +1,7 @@
 #![warn(missing_docs)]
 use async_trait::async_trait;
 
+use crate::consts::VNODE_DATA_REDUDANT;
 use crate::dht::vnode::VirtualNode;
 use crate::dht::ChordStorage;
 use crate::dht::Did;
@@ -48,6 +49,12 @@ impl ChordStorageInterface for Swarm {
     /// else Query Remote Node
     async fn storage_fetch(&self, vid: Did) -> Result<()> {
         // If peer found that data is on it's localstore, copy it to the cache
+        if VNODE_DATA_REDUDANT > 1 {
+            for vid in vid.rotate_affine(VNODE_DATA_REDUDANT) {
+                self.storage_fetch(vid).await?;
+            }
+            return Ok(());
+        }
         match self.dht.vnode_lookup(vid).await? {
             PeerRingAction::None => Ok(()),
             PeerRingAction::SomeVNode(v) => {
@@ -70,6 +77,13 @@ impl ChordStorageInterface for Swarm {
 
     /// Store VirtualNode, `TryInto<VirtualNode>` is implemented for alot of types
     async fn storage_store(&self, vnode: VirtualNode) -> Result<()> {
+        if VNODE_DATA_REDUDANT > 1 {
+            for vnode in vnode.affine(VNODE_DATA_REDUDANT) {
+                self.storage_store(vnode).await?;
+            }
+            return Ok(());
+        }
+
         let op = VNodeOperation::Overwrite(vnode);
         match self.dht.vnode_operate(op).await? {
             PeerRingAction::None => Ok(()),
@@ -82,31 +96,59 @@ impl ChordStorageInterface for Swarm {
     }
 
     async fn storage_append_data(&self, topic: &str, data: Encoded) -> Result<()> {
-        let vnode = (topic.to_string(), data).try_into()?;
-        let op = VNodeOperation::Extend(vnode);
+        let vnode: VirtualNode = (topic.to_string(), data).try_into()?;
 
-        match self.dht.vnode_operate(op).await? {
-            PeerRingAction::None => Ok(()),
-            PeerRingAction::RemoteAction(target, PeerRingRemoteAction::FindVNodeForOperate(op)) => {
-                self.send_message(Message::OperateVNode(op), target).await?;
-                Ok(())
+        if VNODE_DATA_REDUDANT > 1 {
+            for vnode in vnode.affine(VNODE_DATA_REDUDANT) {
+                storage_append_vnode(self, vnode).await?;
             }
-            act => Err(Error::PeerRingUnexpectedAction(act)),
+            return Ok(());
         }
+
+        async fn storage_append_vnode(ins: &Swarm, vnode: VirtualNode) -> Result<()> {
+            let op = VNodeOperation::Extend(vnode);
+
+            match ins.dht.vnode_operate(op).await? {
+                PeerRingAction::None => Ok(()),
+                PeerRingAction::RemoteAction(
+                    target,
+                    PeerRingRemoteAction::FindVNodeForOperate(op),
+                ) => {
+                    ins.send_message(Message::OperateVNode(op), target).await?;
+                    Ok(())
+                }
+                act => Err(Error::PeerRingUnexpectedAction(act)),
+            }
+        }
+        storage_append_vnode(self, vnode).await
     }
 
     async fn storage_touch_data(&self, topic: &str, data: Encoded) -> Result<()> {
-        let vnode = (topic.to_string(), data).try_into()?;
-        let op = VNodeOperation::Touch(vnode);
+        let vnode: VirtualNode = (topic.to_string(), data).try_into()?;
 
-        match self.dht.vnode_operate(op).await? {
-            PeerRingAction::None => Ok(()),
-            PeerRingAction::RemoteAction(target, PeerRingRemoteAction::FindVNodeForOperate(op)) => {
-                self.send_message(Message::OperateVNode(op), target).await?;
-                Ok(())
+        if VNODE_DATA_REDUDANT > 1 {
+            for vnode in vnode.affine(VNODE_DATA_REDUDANT) {
+                storage_touch_vnode(self, vnode).await?;
             }
-            act => Err(Error::PeerRingUnexpectedAction(act)),
+            return Ok(());
         }
+
+        async fn storage_touch_vnode(ins: &Swarm, vnode: VirtualNode) -> Result<()> {
+            let op = VNodeOperation::Touch(vnode);
+
+            match ins.dht.vnode_operate(op).await? {
+                PeerRingAction::None => Ok(()),
+                PeerRingAction::RemoteAction(
+                    target,
+                    PeerRingRemoteAction::FindVNodeForOperate(op),
+                ) => {
+                    ins.send_message(Message::OperateVNode(op), target).await?;
+                    Ok(())
+                }
+                act => Err(Error::PeerRingUnexpectedAction(act)),
+            }
+        }
+        storage_touch_vnode(self, vnode).await
     }
 }
 
