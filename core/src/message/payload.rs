@@ -204,6 +204,21 @@ where T: Serialize + DeserializeOwned
     }
 }
 
+impl<T> std::fmt::Display for MessagePayload<T>
+where T: Serialize
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "MessagePayload {{ tx_id: {}, addr: {}, relay: {}, data: {} }}",
+            self.tx_id,
+            self.addr,
+            self.relay,
+            serde_json::to_string(&self.data).unwrap_or_else(|_| "invalid json".to_string())
+        )
+    }
+}
+
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait PayloadSender<T>
