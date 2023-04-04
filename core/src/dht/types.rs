@@ -2,6 +2,7 @@
 #![warn(missing_docs)]
 use async_trait::async_trait;
 
+use super::chord::TopoInfo;
 use super::did::Did;
 use super::vnode::VNodeOperation;
 use super::vnode::VirtualNode;
@@ -82,4 +83,18 @@ pub trait ChordStorage<Action>: Chord<Action> {
     fn local_cache_set(&self, vnode: VirtualNode);
     /// Get local cache.
     fn local_cache_get(&self, vid: Did) -> Option<VirtualNode>;
+}
+
+/// Chord implementation from Pamela Zave's work.
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+pub trait CorrectChord<Action>: Chord<Action> {
+    /// Join Operation
+    async fn join_then_sync(&self, did: Did) -> Result<Action>;
+    /// Rectify Operation
+    async fn rectify(&self, pred: Did) -> Result<()>;
+    /// Steps before stablize
+    async fn pre_stablize(&self) -> Result<Action>;
+    /// Stabilize operation for successor list
+    async fn stabilize(&self, succ: TopoInfo) -> Result<()>;
 }

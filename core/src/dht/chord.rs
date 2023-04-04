@@ -11,6 +11,7 @@ use super::did::BiasId;
 use super::successor::SuccessorSeq;
 use super::types::Chord;
 use super::types::ChordStorage;
+use super::types::CorrectChord;
 use super::vnode::VNodeOperation;
 use super::vnode::VirtualNode;
 use super::FingerTable;
@@ -89,6 +90,27 @@ pub enum RemoteAction {
     // TODO: The check_processor method is not using. Cannot give correct description.
     /// Check predecessor
     CheckPredecessor,
+
+    /// Fetch successor_list from successor
+    QueryForSuccessorList,
+    /// Fetch successor_list and pred from successor
+    QueryForSuccessorListAndPred,
+}
+
+/// Infomation about successor and predecessor
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TopoInfo {
+    succ_list: Vec<Did>,
+    pred: Option<Did>,
+}
+
+impl TryInto<TopoInfo> for PeerRing {
+    type Error = Error;
+    fn try_into(self) -> Result<TopoInfo> {
+        let succ_list = self.lock_successor()?.list();
+        let pred = self.lock_predecessor()?.clone();
+        Ok(TopoInfo { succ_list, pred })
+    }
 }
 
 impl PeerRingAction {
@@ -430,6 +452,48 @@ impl ChordStorage<PeerRingAction> for PeerRing {
     /// Get vnode from local cache.
     fn local_cache_get(&self, vid: Did) -> Option<VirtualNode> {
         self.cache.get(&vid)
+    }
+}
+
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl CorrectChord<PeerRingAction> for PeerRing {
+    /// Join Operation
+    async fn join_then_sync(&self, did: Did) -> Result<PeerRingAction> {
+        let act = self.join(did)?;
+        Ok(PeerRingAction::MultiActions(vec![
+            act,
+            PeerRingAction::RemoteAction(did, RemoteAction::QueryForSuccessorList),
+        ]))
+    }
+
+    /// Rectify Operation, should precheck that Did is connected
+    async fn rectify(&self, pred: Did) -> Result<()> {
+        self.notify(pred)?;
+        Ok(())
+    }
+
+    async fn pre_stablize(&self) -> Result<PeerRingAction> {
+        let successor = self.lock_successor()?;
+        let head = successor.min();
+        Ok(PeerRingAction::RemoteAction(
+            head,
+            RemoteAction::QueryForSuccessorListAndPred,
+        ))
+    }
+
+    /// Stabilize operation for successor list
+    async fn stabilize(&self, succ: TopoInfo) -> Result<()> {
+        let successors = self.lock_successor()?;
+        let but_last = &succ.succ_list[..succ.succ_list.len() - 1];
+        let mut new_succ_list = vec![successors.min().clone()];
+        new_succ_list.extend(but_last);
+        if let Some(new_succ) = succ.pred {
+            if self.bias(new_succ) < self.bias(successors.min()) {
+                // query newSucc for newSucc.succList
+            }
+        }
+        unimplemented!();
     }
 }
 
