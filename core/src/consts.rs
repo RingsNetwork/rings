@@ -8,3 +8,4 @@ pub const DEFAULT_SESSION_TTL_MS: usize = 30 * 24 * 3600 * 1000;
 pub const TRANSPORT_MTU: usize = 60000;
 pub const TRANSPORT_MAX_SIZE: usize = TRANSPORT_MTU * 16;
 pub const VNODE_DATA_MAX_LEN: usize = 1024;
+pub const VNODE_DATA_REDUNDANT: u16 = 1;

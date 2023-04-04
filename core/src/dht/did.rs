@@ -33,6 +33,22 @@ pub struct BiasId {
     did: Did,
 }
 
+/// The `Rotate` trait represents a affine transformation for values
+/// in a finite ring. It defines a method `rotate` which allows applying
+/// the transformation to the implementing type.
+pub trait Rotate<Rhs = u16> {
+    type Output;
+    fn rotate(&self, angle: Rhs) -> Self::Output;
+}
+
+impl Rotate<u16> for Did {
+    type Output = Self;
+    fn rotate(&self, angle: u16) -> Self::Output {
+        *self
+            + Did::from(BigUint::from(2u16).pow(160) * BigUint::from(angle) / BigUint::from(360u32))
+    }
+}
+
 impl BiasId {
     pub fn new(bias: Did, did: Did) -> BiasId {
         BiasId {
@@ -93,6 +109,12 @@ impl From<&BiasId> for Did {
     }
 }
 
+impl From<u32> for Did {
+    fn from(id: u32) -> Did {
+        Self::from(BigUint::from(id))
+    }
+}
+
 impl TryFrom<HashStr> for Did {
     type Error = Error;
     fn try_from(s: HashStr) -> Result<Self> {
@@ -110,6 +132,13 @@ impl Did {
     // Transform Did to BiasDid
     pub fn bias(&self, did: Self) -> BiasId {
         BiasId::new(did, *self)
+    }
+
+    // Rotate Transport did to a list of affined did
+    // affine x, n = [x + rotate(360/n)]
+    pub fn rotate_affine(&self, scalar: u16) -> Vec<Did> {
+        let angle = 360 / scalar;
+        (0..scalar).map(|i| (*self).rotate(i * angle)).collect()
     }
 }
 
@@ -178,6 +207,14 @@ impl Neg for Did {
     }
 }
 
+impl<'a> Neg for &'a Did {
+    type Output = Did;
+
+    fn neg(self) -> Self::Output {
+        (*self).neg()
+    }
+}
+
 impl Add for Did {
     type Output = Self;
     fn add(self, rhs: Self) -> Self {
@@ -229,5 +266,31 @@ mod tests {
         assert_eq!(v, vec![c, d, a, b]);
         v.sort(d);
         assert_eq!(v, vec![d, a, b, c]);
+    }
+
+    #[test]
+    fn rotate_transformation() {
+        assert_eq!(Did::from(0u32), Did::from(BigUint::from(2u16).pow(160)));
+        let did = Did::from(10u32);
+        let result = did.rotate(360);
+        assert_eq!(result, did);
+    }
+
+    #[test]
+    fn right_shift() {
+        let did = Did::from(10u32);
+        let ret: Did = did.rotate(180);
+        assert_eq!(ret, did + Did::from(BigUint::from(2u16).pow(159)));
+    }
+
+    #[test]
+    fn test_did_affine() {
+        let did = Did::from(10u32);
+        let affine_dids = did.rotate_affine(4);
+        assert_eq!(affine_dids.len(), 4);
+        assert_eq!(affine_dids[0], did.rotate(0));
+        assert_eq!(affine_dids[1], did.rotate(90));
+        assert_eq!(affine_dids[2], did.rotate(180));
+        assert_eq!(affine_dids[3], did.rotate(270));
     }
 }
