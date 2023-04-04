@@ -473,7 +473,7 @@ impl CorrectChord<PeerRingAction> for PeerRing {
         Ok(())
     }
 
-    async fn pre_stablize(&self) -> Result<PeerRingAction> {
+    async fn pre_stabilize(&self) -> Result<PeerRingAction> {
         let successor = self.lock_successor()?;
         let head = successor.min();
         Ok(PeerRingAction::RemoteAction(
