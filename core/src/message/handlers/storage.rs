@@ -253,11 +253,13 @@ mod test {
         assert!(swarm2.storage_check_cache(vid).await.is_none());
 
         swarm1.storage_store(vnode.clone()).await.unwrap();
-        let ev = node2.listen_once().await.unwrap();
-        assert!(matches!(
+        for i in vid.rotate_affine(VNODE_DATA_REDUNDANT) {
+            let ev = node2.listen_once().await.unwrap();
+            assert!(matches!(
             ev.data,
-            Message::OperateVNode(VNodeOperation::Overwrite(x)) if x.did == vid
-        ));
+            Message::OperateVNode(VNodeOperation::Overwrite(x)) if x.did == i
+                ));
+        }
 
         assert!(swarm1.storage_check_cache(vid).await.is_none());
         assert!(swarm2.storage_check_cache(vid).await.is_none());
@@ -269,18 +271,22 @@ mod test {
         swarm1.storage_fetch(vid).await.unwrap();
 
         // it will send request to node2
-        let ev = node2.listen_once().await.unwrap();
-        // node2 received search vnode request
-        assert!(matches!(
+        for i in vid.rotate_affine(VNODE_DATA_REDUNDANT) {
+            let ev = node2.listen_once().await.unwrap();
+            // node2 received search vnode request
+            assert!(matches!(
             ev.data,
-            Message::SearchVNode(x) if x.vid == vid
-        ));
+            Message::SearchVNode(x) if x.vid == i
+                ));
+        }
 
-        let ev = node1.listen_once().await.unwrap();
-        assert!(matches!(
+        for i in vid.rotate_affine(VNODE_DATA_REDUNDANT) {
+            let ev = node1.listen_once().await.unwrap();
+            assert!(matches!(
             ev.data,
-            Message::FoundVNode(x) if x.data[0].did == vid
-        ));
+            Message::FoundVNode(x) if x.data[0].did == i
+                ));
+        }
 
         assert_eq!(
             swarm1.storage_check_cache(vid).await,
