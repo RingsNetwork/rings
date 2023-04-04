@@ -148,6 +148,7 @@ impl HandleMsg<SearchVNode> for MessageHandler {
                 }
                 PeerRingAction::RemoteAction(next, _) => {
                     relay.relay(self.dht.did, Some(next))?;
+                    relay.reset_destination(next)?;
                     self.forward_payload(ctx, relay).await
                 }
                 act => Err(Error::PeerRingUnexpectedAction(act)),
