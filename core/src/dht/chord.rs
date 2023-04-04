@@ -97,7 +97,7 @@ pub enum RemoteAction {
     QueryForSuccessorListAndPred,
 }
 
-/// Infomation about successor and predecessor
+/// Information about successor and predecessor
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TopoInfo {
     succ_list: Vec<Did>,
