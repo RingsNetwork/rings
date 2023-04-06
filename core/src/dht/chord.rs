@@ -475,6 +475,9 @@ impl CorrectChord<PeerRingAction> for PeerRing {
 
     async fn pre_stabilize(&self) -> Result<PeerRingAction> {
         let successor = self.lock_successor()?;
+        if successor.is_empty() {
+            return Ok(PeerRingAction::None);
+        }
         let head = successor.min();
         Ok(PeerRingAction::RemoteAction(
             head,
@@ -483,17 +486,30 @@ impl CorrectChord<PeerRingAction> for PeerRing {
     }
 
     /// Stabilize operation for successor list
-    async fn stabilize(&self, succ: TopoInfo) -> Result<()> {
-        let successors = self.lock_successor()?;
-        let but_last = &succ.succ_list[..succ.succ_list.len() - 1];
-        let mut new_succ_list = vec![successors.min().clone()];
-        new_succ_list.extend(but_last);
+    async fn stabilize(&self, succ: TopoInfo) -> Result<PeerRingAction> {
+        let mut ret = vec![];
+        let mut successors = self.lock_successor()?;
+        let but_last = &succ.succ_list[..succ.succ_list.len() - 1].to_vec();
+        if let Some(new_succ) = succ.pred {
+            successors.update(new_succ);
+        }
+
+        successors.extend(but_last);
+        // between(myIdent, newSucc, head(succList))
         if let Some(new_succ) = succ.pred {
             if self.bias(new_succ) < self.bias(successors.min()) {
                 // query newSucc for newSucc.succList
+                ret.push(PeerRingAction::RemoteAction(
+                    new_succ,
+                    RemoteAction::QueryForSuccessorList,
+                ));
             }
+            ret.push(PeerRingAction::RemoteAction(
+                successors.min(),
+                RemoteAction::Notify(self.did),
+            ));
         }
-        unimplemented!();
+        Ok(PeerRingAction::MultiActions(ret))
     }
 }
 

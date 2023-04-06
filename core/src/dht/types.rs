@@ -96,5 +96,5 @@ pub trait CorrectChord<Action>: Chord<Action> {
     /// Steps before stabilize
     async fn pre_stabilize(&self) -> Result<Action>;
     /// Stabilize operation for successor list
-    async fn stabilize(&self, succ: TopoInfo) -> Result<()>;
+    async fn stabilize(&self, succ: TopoInfo) -> Result<Action>;
 }
