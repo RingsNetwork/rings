@@ -132,25 +132,14 @@ impl HandleMsg<SearchVNode> for MessageHandler {
     /// Search VNode via successor
     /// If a VNode is storead local, it will response immediately.
     async fn handle(&self, ctx: &MessagePayload<Message>, msg: &SearchVNode) -> Result<()> {
-        let mut relay = ctx.relay.clone();
-
         match self.dht.vnode_lookup(msg.vid).await {
             Ok(action) => match action {
                 PeerRingAction::None => Ok(()),
                 PeerRingAction::SomeVNode(v) => {
-                    relay.relay(self.dht.did, None)?;
-                    self.send_report_message(
-                        Message::FoundVNode(FoundVNode { data: vec![v] }),
-                        ctx.tx_id,
-                        relay,
-                    )
-                    .await
+                    self.send_report_message(ctx, Message::FoundVNode(FoundVNode { data: vec![v] }))
+                        .await
                 }
-                PeerRingAction::RemoteAction(next, _) => {
-                    relay.relay(self.dht.did, Some(next))?;
-                    relay.reset_destination(next)?;
-                    self.forward_payload(ctx, relay).await
-                }
+                PeerRingAction::RemoteAction(next, _) => self.reset_destination(ctx, next).await,
                 act => Err(Error::PeerRingUnexpectedAction(act)),
             },
             Err(e) => Err(e),
@@ -162,18 +151,13 @@ impl HandleMsg<SearchVNode> for MessageHandler {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<FoundVNode> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload<Message>, msg: &FoundVNode) -> Result<()> {
-        let mut relay = ctx.relay.clone();
-
-        relay.relay(self.dht.did, None)?;
-        if relay.next_hop.is_some() {
-            self.forward_payload(ctx, relay).await
-        } else {
-            // When query successor, store in local cache
-            for datum in msg.data.iter().cloned() {
-                self.dht.local_cache_set(datum);
-            }
-            Ok(())
+        if self.dht.did != ctx.relay.destination {
+            return self.forward_payload(ctx, None).await;
         }
+        for data in msg.data.iter().cloned() {
+            self.dht.local_cache_set(data);
+        }
+        Ok(())
     }
 }
 
@@ -184,17 +168,11 @@ impl HandleMsg<VNodeOperation> for MessageHandler {
         match self.dht.vnode_operate(msg.clone()).await {
             Ok(action) => match action {
                 PeerRingAction::None => Ok(()),
-                PeerRingAction::RemoteAction(next, _) => {
-                    let mut relay = ctx.relay.clone();
-                    relay.reset_destination(next)?;
-                    relay.relay(self.dht.did, Some(next))?;
-                    self.forward_payload(ctx, relay).await
-                }
+                PeerRingAction::RemoteAction(next, _) => self.reset_destination(ctx, next).await,
                 act => Err(Error::PeerRingUnexpectedAction(act)),
             },
             Err(e) => Err(e),
-        }?;
-        Ok(())
+        }
     }
 }
 

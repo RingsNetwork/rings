@@ -95,9 +95,6 @@ impl MessageCallback for Backend {
         ctx: &MessagePayload<Message>,
         msg: &MaybeEncrypted<CustomMessage>,
     ) {
-        let mut relay = ctx.relay.clone();
-        relay.relay(relay.destination, None).unwrap();
-
         let msg = handler.decrypt_msg(msg);
         if let Err(e) = msg {
             tracing::error!("decrypt custom_message failed: {}", e);
@@ -135,16 +132,8 @@ impl MessageCallback for Backend {
         tracing::debug!("receive custom_message: {:?}", msg);
 
         let result = match msg.message_type.into() {
-            MessageType::SimpleText => {
-                self.text_endpoint
-                    .handle_message(handler, ctx, &relay, &msg)
-                    .await
-            }
-            MessageType::HttpRequest => {
-                self.http_server
-                    .handle_message(handler, ctx, &relay, &msg)
-                    .await
-            }
+            MessageType::SimpleText => self.text_endpoint.handle_message(handler, ctx, &msg).await,
+            MessageType::HttpRequest => self.http_server.handle_message(handler, ctx, &msg).await,
             _ => {
                 tracing::debug!(
                     "custom_message handle unsupported, tag: {:?}",

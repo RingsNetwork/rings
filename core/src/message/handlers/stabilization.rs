@@ -23,18 +23,15 @@ impl HandleMsg<NotifyPredecessorSend> for MessageHandler {
         ctx: &MessagePayload<Message>,
         msg: &NotifyPredecessorSend,
     ) -> Result<()> {
-        let mut relay = ctx.relay.clone();
         let predecessor = { *self.dht.lock_predecessor()? };
-
-        relay.relay(self.dht.did, None)?;
         self.dht.notify(msg.did)?;
+
         if let Some(did) = predecessor {
-            if did != relay.origin() {
+            if did != ctx.relay.sender() {
                 return self
                     .send_report_message(
+                        ctx,
                         Message::NotifyPredecessorReport(NotifyPredecessorReport { did }),
-                        ctx.tx_id,
-                        relay,
                     )
                     .await;
             }

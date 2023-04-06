@@ -19,12 +19,11 @@ impl MessageEndpoint for TextEndpoint {
     async fn handle_message(
         &self,
         _handler: &MessageHandler,
-        _ctx: &MessagePayload<Message>,
-        relay: &MessageRelay,
+        ctx: &MessagePayload<Message>,
         data: &BackendMessage,
     ) -> Result<()> {
         let text = str::from_utf8(data.data.as_slice()).map_err(|_| Error::InvalidMessage)?;
-        tracing::info!("SimpleText, From: {}, Text: {}", relay.sender(), text);
+        tracing::info!("SimpleText, From: {}, Text: {}", ctx.relay.sender(), text);
         Ok(())
     }
 }
