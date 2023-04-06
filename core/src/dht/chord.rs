@@ -108,7 +108,7 @@ impl TryInto<TopoInfo> for PeerRing {
     type Error = Error;
     fn try_into(self) -> Result<TopoInfo> {
         let succ_list = self.lock_successor()?.list();
-        let pred = self.lock_predecessor()?.clone();
+        let pred = *self.lock_predecessor()?;
         Ok(TopoInfo { succ_list, pred })
     }
 }

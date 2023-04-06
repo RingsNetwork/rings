@@ -60,7 +60,7 @@ impl SuccessorSeq {
 
     pub fn extend(&mut self, succ_list: &Vec<Did>) {
         for s in succ_list {
-            self.update(s.clone())
+            self.update(*s)
         }
     }
 
