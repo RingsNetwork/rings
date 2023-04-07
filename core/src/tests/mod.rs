@@ -1,5 +1,8 @@
+use crate::dht::Did;
+use crate::dht::PeerRing;
 use crate::err::Result;
 use crate::prelude::RTCSdpType;
+use crate::storage::PersistenceStorage;
 use crate::swarm::Swarm;
 use crate::transports::manager::TransportManager;
 use crate::types::ice_transport::IceTrickleScheme;
@@ -66,4 +69,10 @@ pub async fn manually_establish_connection(swarm1: &Swarm, swarm2: &Swarm) -> Re
     assert!(swarm2.get_transport(swarm1.did()).is_some());
 
     Ok(())
+}
+
+pub async fn gen_pure_dht(did: Did) -> Result<PeerRing> {
+    let db_path = PersistenceStorage::random_path("./tmp");
+    let db = PersistenceStorage::new_with_path(db_path.as_str()).await?;
+    Ok(PeerRing::new_with_storage(did, 3, db))
 }

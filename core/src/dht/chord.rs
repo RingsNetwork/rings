@@ -795,4 +795,18 @@ mod tests {
 
         Ok(())
     }
+
+    /// Test Correct Chord implementation
+    #[tokio::test]
+    async fn test_correct_chord_impl() -> Result<()> {
+        let mut keys = vec![
+            SecretKey::random(),
+            SecretKey::random(),
+            SecretKey::random(),
+            SecretKey::random(),
+        ];
+        keys.sort_by(|a, b| a.address().cmp(&b.address()));
+
+        Ok(())
+    }
 }

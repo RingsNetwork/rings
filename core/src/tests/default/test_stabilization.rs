@@ -17,6 +17,7 @@ use crate::message::MessageHandler;
 use crate::storage::PersistenceStorage;
 use crate::swarm::tests::new_swarm;
 use crate::swarm::Swarm;
+use crate::tests::gen_pure_dht;
 use crate::tests::manually_establish_connection;
 use crate::transports::manager::TransportManager;
 use crate::types::message::MessageListener;
@@ -46,12 +47,6 @@ async fn run_node(swarm: Arc<Swarm>, handler: MessageHandler) {
     let stabilization = async { Arc::new(stb).wait().await };
 
     futures::future::join(message_handler, stabilization).await;
-}
-
-async fn gen_pure_dht(did: Did) -> Result<PeerRing> {
-    let db_path = PersistenceStorage::random_path("./tmp");
-    let db = PersistenceStorage::new_with_path(db_path.as_str()).await?;
-    Ok(PeerRing::new_with_storage(did, 3, db))
 }
 
 #[tokio::test]
