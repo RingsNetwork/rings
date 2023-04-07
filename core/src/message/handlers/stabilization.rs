@@ -214,7 +214,7 @@ mod test {
         // node2 report node3
         let ev3 = node3.listen_once().await.unwrap();
         assert_eq!(ev3.addr, did2);
-        assert_eq!(ev3.relay.path, vec![did3, did2]);
+        assert_eq!(ev3.relay.path, vec![did2]);
         assert!(matches!(
             ev3.data,
             Message::NotifyPredecessorReport(NotifyPredecessorReport{did}) if did == did1
@@ -315,7 +315,7 @@ mod test {
         // node1 report node3
         let ev3 = node3.listen_once().await.unwrap();
         assert_eq!(ev3.addr, did1);
-        assert_eq!(ev3.relay.path, vec![did3, did1]);
+        assert_eq!(ev3.relay.path, vec![did1]);
         assert!(matches!(
             ev3.data,
             Message::NotifyPredecessorReport(NotifyPredecessorReport{did}) if did == did2
@@ -324,7 +324,7 @@ mod test {
         // node2 report node3
         let ev3 = node3.listen_once().await.unwrap();
         assert_eq!(ev3.addr, did2);
-        assert_eq!(ev3.relay.path, vec![did3, did2]);
+        assert_eq!(ev3.relay.path, vec![did2]);
         assert!(matches!(
             ev3.data,
             Message::NotifyPredecessorReport(NotifyPredecessorReport{did}) if did == did1
@@ -333,7 +333,7 @@ mod test {
         // node3 report node1
         let ev1 = node1.listen_once().await.unwrap();
         assert_eq!(ev1.addr, did3);
-        assert_eq!(ev1.relay.path, vec![did1, did3]);
+        assert_eq!(ev1.relay.path, vec![did3]);
         assert!(matches!(
             ev1.data,
             Message::NotifyPredecessorReport(NotifyPredecessorReport{did}) if did == did2
@@ -440,7 +440,7 @@ mod test {
         // node2 report node3
         let ev3 = node3.listen_once().await.unwrap();
         assert_eq!(ev3.addr, did2);
-        assert_eq!(ev3.relay.path, vec![did3, did2]);
+        assert_eq!(ev3.relay.path, vec![did2]);
         assert!(matches!(
             ev3.data,
             Message::NotifyPredecessorReport(NotifyPredecessorReport{did}) if did == did1

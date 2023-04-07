@@ -293,34 +293,33 @@ pub mod test {
         d: bool,
     }
 
-    pub fn new_test_payload() -> MessagePayload<TestData> {
+    pub fn new_test_payload(next_hop: Did) -> MessagePayload<TestData> {
         let test_data = TestData {
             a: "hello".to_string(),
             b: 111,
             c: 2.33,
             d: true,
         };
-        new_payload(test_data)
+        new_payload(test_data, next_hop)
     }
 
-    pub fn new_payload<T>(data: T) -> MessagePayload<T>
+    pub fn new_payload<T>(data: T, next_hop: Did) -> MessagePayload<T>
     where T: Serialize + DeserializeOwned {
         let key = SecretKey::random();
         let destination = SecretKey::random().address().into();
         let session = SessionManager::new_with_seckey(&key, None).unwrap();
-        MessagePayload::new_send(data, &session, destination, destination).unwrap()
+        MessagePayload::new_send(data, &session, next_hop, destination).unwrap()
     }
 
     #[test]
     fn new_then_verify() {
-        let payload = new_test_payload();
-        assert!(payload.verify());
-
         let key2 = SecretKey::random();
         let did2 = key2.address().into();
         let session2 = SessionManager::new_with_seckey(&key2, None).unwrap();
-
         let did3 = SecretKey::random().address().into();
+
+        let payload = new_test_payload(did2);
+        assert!(payload.verify());
 
         let relaied_payload = MessagePayload::new(
             payload.data.clone(),
@@ -335,7 +334,9 @@ pub mod test {
 
     #[test]
     fn test_message_payload_from_auto() {
-        let payload = new_test_payload();
+        let next_hop = SecretKey::random().address().into();
+
+        let payload = new_test_payload(next_hop);
         let gzipped_encoded_payload = payload.encode().unwrap();
         let payload2: MessagePayload<TestData> = gzipped_encoded_payload.decode().unwrap();
         assert_eq!(payload, payload2);
@@ -347,18 +348,19 @@ pub mod test {
 
     #[test]
     fn test_message_payload_encode_len() {
+        let next_hop = SecretKey::random().address().into();
         let data = rand::thread_rng().gen::<[u8; 32]>();
 
         let data1 = data;
         let msg1 = Message::custom(&data1, None).unwrap();
-        let payload1 = new_payload(msg1);
+        let payload1 = new_payload(msg1, next_hop);
         let bytes1 = payload1.to_bincode().unwrap();
         let encoded1 = payload1.encode().unwrap();
         let encoded_bytes1: Vec<u8> = encoded1.into();
 
         let data2 = data.repeat(2);
         let msg2 = Message::custom(&data2, None).unwrap();
-        let payload2 = new_payload(msg2);
+        let payload2 = new_payload(msg2, next_hop);
         let bytes2 = payload2.to_bincode().unwrap();
         let encoded2 = payload2.encode().unwrap();
         let encoded_bytes2: Vec<u8> = encoded2.into();
