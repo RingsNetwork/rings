@@ -124,7 +124,6 @@ impl MessageEndpoint for HttpServer {
         &self,
         handler: &MessageHandler,
         ctx: &MessagePayload<Message>,
-        relay: &MessageRelay,
         msg: &BackendMessage,
     ) -> Result<()> {
         let req: HttpRequest =
@@ -151,7 +150,7 @@ impl MessageEndpoint for HttpServer {
             tracing::debug!("Chunk data len: {}", c.data.len());
             let bytes = c.to_bincode().map_err(|_| Error::EncodeError)?;
             tracing::debug!("Chunk len: {}", bytes.len());
-            super::utils::send_chunk_report_message(handler, ctx, relay, bytes.to_vec().as_slice())
+            super::utils::send_chunk_report_message(handler, ctx, bytes.to_vec().as_slice())
                 .await?;
         }
         Ok(())

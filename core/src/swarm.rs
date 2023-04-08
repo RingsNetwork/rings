@@ -373,7 +373,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Deb
         transport.wait_for_data_channel_open().await?;
         let result = transport.send_message(&data).await;
 
-        if let (Some(measure), Some(did)) = (&self.measure, payload.relay.next_hop) {
+        if let (Some(measure), did) = (&self.measure, payload.relay.next_hop) {
             if result.is_ok() {
                 measure.incr(did, MeasureCounter::Sent).await
             } else {

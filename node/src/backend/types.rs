@@ -177,7 +177,6 @@ pub trait MessageEndpoint {
         &self,
         handler: &MessageHandler,
         ctx: &MessagePayload<Message>,
-        relay: &MessageRelay,
         data: &BackendMessage,
     ) -> Result<()>;
 }

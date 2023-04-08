@@ -91,7 +91,7 @@ impl Stabilization {
                         msg.clone(),
                         self.swarm.session_manager(),
                         closest_predecessor,
-                        self.swarm.did(),
+                        closest_predecessor,
                     )?;
                     self.swarm.send_payload(payload).await?;
                     Ok(())

@@ -1,8 +1,5 @@
 use async_trait::async_trait;
 
-use crate::dht::Chord;
-use crate::dht::PeerRingAction;
-use crate::err::Error;
 use crate::err::Result;
 use crate::message::types::CustomMessage;
 use crate::message::types::MaybeEncrypted;
@@ -21,21 +18,16 @@ impl HandleMsg<MaybeEncrypted<CustomMessage>> for MessageHandler {
         ctx: &MessagePayload<Message>,
         _: &MaybeEncrypted<CustomMessage>,
     ) -> Result<()> {
-        let mut relay = ctx.relay.clone();
-
-        if self.dht.did != relay.destination {
-            if self.swarm.get_transport(relay.destination).is_some() {
-                relay.relay(self.dht.did, Some(relay.destination))?;
-                return self.forward_payload(ctx, relay).await;
+        if self.dht.did != ctx.relay.destination {
+            if self
+                .swarm
+                .get_and_check_transport(ctx.relay.destination)
+                .await
+                .is_some()
+            {
+                return self.forward_payload(ctx, Some(ctx.relay.destination)).await;
             } else {
-                let next_node = match self.dht.find_successor(relay.destination)? {
-                    PeerRingAction::Some(node) => Some(node),
-                    PeerRingAction::RemoteAction(node, _) => Some(node),
-                    _ => None,
-                }
-                .ok_or(Error::MessageHandlerMissNextNode)?;
-                relay.relay(self.dht.did, Some(next_node))?;
-                return self.forward_payload(ctx, relay).await;
+                return self.forward_payload(ctx, None).await;
             }
         }
 
