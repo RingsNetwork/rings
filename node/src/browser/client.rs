@@ -393,6 +393,14 @@ impl Client {
         })
     }
 
+    pub fn disconnect_all(&self) -> js_sys::Promise {
+        let p = self.processor.clone();
+        future_to_promise(async move {
+            p.disconnect_all().await;
+            Ok(JsValue::from_str("ok"))
+        })
+    }
+
     pub fn list_pendings(&self) -> js_sys::Promise {
         let p = self.processor.clone();
         future_to_promise(async move {

@@ -453,6 +453,18 @@ impl Processor {
             .map_err(Error::CloseTransportError)
     }
 
+    /// Disconnect all connections.
+    pub async fn disconnect_all(&self) {
+        let transports = self.swarm.get_transports();
+
+        let close_async = transports
+            .iter()
+            .map(|(_, t)| t.close())
+            .collect::<Vec<_>>();
+
+        futures::future::join_all(close_async).await;
+    }
+
     /// List all pending transport.
     pub async fn list_pendings(&self) -> Result<Vec<Arc<Transport>>> {
         let pendings = self

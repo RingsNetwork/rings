@@ -225,7 +225,8 @@ impl IceTransportInterface<Event, CbChannel<Event>> for WasmTransport {
 
     async fn close(&self) -> Result<()> {
         if let Some(pc) = self.get_peer_connection().await {
-            pc.close()
+            pc.close();
+            tracing::info!("close transport {}", self.id);
         }
         Ok(())
     }
