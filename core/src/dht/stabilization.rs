@@ -16,6 +16,8 @@ use crate::message::MessagePayload;
 use crate::message::NotifyPredecessorSend;
 use crate::message::PayloadSender;
 use crate::swarm::Swarm;
+use crate::transports::manager::TransportManager;
+use crate::types::ice_transport::IceTransportInterface;
 
 /// A combination contains chord and swarm, use to run stabilize.
 /// - swarm: transports communicate with each others.
@@ -45,6 +47,19 @@ impl Stabilization {
 
     pub fn get_timeout(&self) -> usize {
         self.timeout
+    }
+
+    pub async fn clean_unavailable_transports(&self) -> Result<()> {
+        let transports = self.swarm.get_transports();
+
+        for (did, t) in transports.into_iter() {
+            if t.is_disconnected().await {
+                tracing::info!("STABILIZATION clean_unavailable_transports: {:?}", did);
+                self.swarm.disconnect(did).await?;
+            }
+        }
+
+        Ok(())
     }
 
     pub async fn notify_predecessor(&self) -> Result<()> {
@@ -119,6 +134,11 @@ impl Stabilization {
             tracing::error!("[stabilize] Failed on fix_finger {:?}", e);
         }
         tracing::debug!("STABILIZATION fix_fingers end");
+        tracing::debug!("STABILIZATION clean_unavailable_transports start");
+        if let Err(e) = self.clean_unavailable_transports().await {
+            tracing::error!("[stabilize] Failed on clean unavailable transports {:?}", e);
+        }
+        tracing::debug!("STABILIZATION clean_unavailable_transports end");
         Ok(())
     }
 }
