@@ -210,9 +210,14 @@ impl IceTransportInterface<Event, AcChannel<Event>> for DefaultTransport {
 
     async fn close(&self) -> Result<()> {
         if let Some(pc) = self.get_peer_connection().await {
-            pc.close()
+            let result = pc
+                .close()
                 .await
-                .map_err(Error::RTCPeerConnectionCloseFailed)?;
+                .map_err(Error::RTCPeerConnectionCloseFailed);
+
+            tracing::info!("close transport {} result: {:?}", self.id, result);
+
+            result?
         }
 
         Ok(())
