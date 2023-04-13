@@ -1,7 +1,7 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::time::sleep;
-use tokio::time::Duration;
 
 use super::prepare_node;
 use crate::dht::Chord;
@@ -171,7 +171,7 @@ async fn test_online_stabilization() -> Result<()> {
         manually_establish_connection(&swarm1, swarm).await.unwrap();
     }
 
-    tokio::time::sleep(Duration::from_secs(30)).await;
+    sleep(Duration::from_secs(30)).await;
 
     let mut expected_dhts = vec![];
     for node in nodes.iter() {
