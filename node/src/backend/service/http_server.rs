@@ -76,13 +76,18 @@ impl HttpServer {
 
         let request_url = url.parse::<http::Uri>().unwrap();
 
+        let request_method =
+            http::Method::from_str(request.method.as_str()).map_err(|_| Error::InvalidMethod)?;
+
+        let headers = (&request.headers).try_into().map_err(|e| {
+            tracing::info!("invalid_headers: {}", e);
+            Error::InvalidHeaders
+        })?;
+
         let request_builder = self
             .client
-            .request(
-                http::Method::from_str(request.method.as_str()).unwrap(),
-                request_url.to_string(),
-            )
-            .headers((&request.headers).try_into().unwrap())
+            .request(request_method, request_url.to_string())
+            .headers(headers)
             .timeout(request.timeout.clone().into());
 
         let request_builder = if let Some(body) = request.body.as_ref() {
