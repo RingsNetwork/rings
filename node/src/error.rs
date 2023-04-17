@@ -69,6 +69,8 @@ pub enum Error {
     OpenFileError(String),
     #[error("acquire lock failed")]
     Lock,
+    #[error("invalid headers")]
+    InvalidHeaders,
 }
 
 impl Error {
@@ -98,6 +100,7 @@ impl Error {
             Error::InvalidService => 20,
             Error::InvalidAddress => 21,
             Error::InvalidAuthData => 22,
+            Error::InvalidHeaders => 23,
             Error::InternalError => 0,
             Error::CreateFileError(_) => 0,
             Error::OpenFileError(_) => 0,
