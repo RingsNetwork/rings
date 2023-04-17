@@ -202,3 +202,85 @@ mod stabilizer {
         }
     }
 }
+
+#[cfg(not(any(feature = "wasm", feature = "dummy")))]
+#[cfg(test)]
+pub mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::ecc::SecretKey;
+    use crate::prelude::RTCIceConnectionState;
+    use crate::tests::default::prepare_node;
+    use crate::tests::manually_establish_connection;
+
+    #[tokio::test]
+    async fn test_clean_unavailable_transports() {
+        let key1 = SecretKey::random();
+        let key2 = SecretKey::random();
+        let key3 = SecretKey::random();
+        let (did1, _, swarm1, _, _) = prepare_node(key1).await;
+        let (did2, _, swarm2, _, _) = prepare_node(key2).await;
+        let (did3, _, swarm3, _, _) = prepare_node(key3).await;
+
+        // Shouldn't listen to message handler here,
+        // otherwise it will automatically remove disconnected transport.
+
+        manually_establish_connection(&swarm1, &swarm2)
+            .await
+            .unwrap();
+        manually_establish_connection(&swarm1, &swarm3)
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        assert_eq!(
+            swarm1
+                .get_transport(did2)
+                .unwrap()
+                .ice_connection_state()
+                .await
+                .unwrap(),
+            RTCIceConnectionState::Connected
+        );
+        assert_eq!(
+            swarm1
+                .get_transport(did3)
+                .unwrap()
+                .ice_connection_state()
+                .await
+                .unwrap(),
+            RTCIceConnectionState::Connected
+        );
+
+        swarm2.disconnect(did1).await.unwrap();
+        swarm3.disconnect(did1).await.unwrap();
+
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        assert_eq!(
+            swarm1
+                .get_transport(did2)
+                .unwrap()
+                .ice_connection_state()
+                .await
+                .unwrap(),
+            RTCIceConnectionState::Disconnected
+        );
+        assert_eq!(
+            swarm1
+                .get_transport(did3)
+                .unwrap()
+                .ice_connection_state()
+                .await
+                .unwrap(),
+            RTCIceConnectionState::Disconnected
+        );
+
+        let stb = Stabilization::new(swarm1.clone(), 3);
+        stb.clean_unavailable_transports().await.unwrap();
+
+        assert!(swarm1.get_transport(did2).is_none());
+        assert!(swarm1.get_transport(did3).is_none());
+    }
+}
