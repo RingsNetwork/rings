@@ -5,8 +5,6 @@ use tokio::time::sleep;
 
 use super::prepare_node;
 use crate::dht::Chord;
-
-
 use crate::dht::Stabilization;
 use crate::dht::TStabilize;
 use crate::ecc::SecretKey;
@@ -14,7 +12,6 @@ use crate::err::Error;
 use crate::err::Result;
 use crate::inspect::DHTInspect;
 use crate::message::MessageHandler;
-
 use crate::swarm::tests::new_swarm;
 use crate::swarm::Swarm;
 use crate::tests::gen_pure_dht;
