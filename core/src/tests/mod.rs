@@ -71,12 +71,14 @@ pub async fn manually_establish_connection(swarm1: &Swarm, swarm2: &Swarm) -> Re
     Ok(())
 }
 
+#[cfg(all(not(feature = "wasm")))]
 pub async fn gen_pure_dht(did: Did) -> Result<PeerRing> {
     let db_path = PersistenceStorage::random_path("./tmp");
     let db = PersistenceStorage::new_with_path(db_path.as_str()).await?;
     Ok(PeerRing::new_with_storage(did, 3, db))
 }
 
+#[cfg(all(not(feature = "wasm")))]
 pub async fn gen_sorted_dht(s: usize) -> Vec<PeerRing> {
     let mut keys: Vec<crate::ecc::SecretKey> = vec![];
     for _i in 0..s {
