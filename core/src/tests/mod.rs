@@ -79,14 +79,13 @@ pub async fn gen_pure_dht(did: Did) -> Result<PeerRing> {
 
 pub async fn gen_sorted_dht(s: usize) -> Vec<PeerRing> {
     let mut keys: Vec<crate::ecc::SecretKey> = vec![];
-    for i in 0..s {
+    for _i in 0..s {
         keys.push(crate::ecc::SecretKey::random());
     }
-    keys.sort_by(|a, b| a.address().cmp(&b.address()));
+    keys.sort_by_key(|a| a.address());
     let dids: Vec<crate::dht::Did> = keys
         .iter()
-        .map(|sk| crate::dht::Did::from(sk.address()))
-        .collect();
+	.map(|sk| crate::dht::Did::from(sk.address()));
     let mut iter = dids.into_iter();
     let mut ret: Vec<crate::dht::PeerRing> = vec![];
     for _ in 0..s {

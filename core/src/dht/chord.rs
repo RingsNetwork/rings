@@ -108,7 +108,7 @@ impl TryFrom<PeerRing> for TopoInfo {
     type Error = Error;
     fn try_from(dht: PeerRing) -> Result<TopoInfo> {
         let succ_list = dht.lock_successor()?.list();
-        let pred = dht.lock_predecessor()?.clone();
+        let pred = *dht.lock_predecessor()?;
         Ok(TopoInfo { succ_list, pred })
     }
 }
@@ -117,7 +117,7 @@ impl TryFrom<&PeerRing> for TopoInfo {
     type Error = Error;
     fn try_from(dht: &PeerRing) -> Result<TopoInfo> {
         let succ_list = dht.lock_successor()?.list();
-        let pred = dht.lock_predecessor()?.clone();
+        let pred = *dht.lock_predecessor()?;
         Ok(TopoInfo { succ_list, pred })
     }
 }
@@ -816,7 +816,7 @@ mod tests {
     async fn test_correct_chord_impl() -> Result<()> {
         fn assert_successor(dht: &PeerRing, did: &Did) -> bool {
             let succ_list = dht.lock_successor().unwrap();
-            succ_list.list().contains(&did)
+            succ_list.list().contains(did)
         }
 
         /// check that two dht is mutual successors
@@ -846,21 +846,21 @@ mod tests {
         // n1 < n2 < n3 < n4
 
         // n1 join n2
-        n1.join(n2.did.clone()).unwrap();
-        n2.join(n1.did.clone()).unwrap();
+        n1.join(n2.did).unwrap();
+        n2.join(n1.did).unwrap();
         // for now n1, n2 are `mutual successors`.
         check_is_mutual_successors(&n1, &n2);
         // n1 join n3
 
-        n1.join(n3.did.clone()).unwrap();
-        n1.join(n4.did.clone()).unwrap();
+        n1.join(n3.did).unwrap();
+        n1.join(n4.did).unwrap();
         // for now n1's successor should include n1 and n3
-        check_succ_is_including(&n1, vec![n2.did.clone(), n3.did.clone(), n4.did.clone()]);
+        check_succ_is_including(&n1, vec![n2.did, n3.did, n4.did]);
 
-        n1.join(n5.did.clone()).unwrap();
+        n1.join(n5.did).unwrap();
         // n5 is not in n1's successor list
         assert!(!assert_successor(&n1, &n5.did));
-        if let PeerRingAction::MultiActions(rets) = n5.join_then_sync(n1.did.clone()).unwrap() {
+        if let PeerRingAction::MultiActions(rets) = n5.join_then_sync(n1.did).unwrap() {
             for r in rets {
                 if let PeerRingAction::RemoteAction(t, _) = r {
                     assert_eq!(t, n1.did.clone())
