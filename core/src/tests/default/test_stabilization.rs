@@ -14,7 +14,7 @@ use crate::inspect::DHTInspect;
 use crate::message::MessageHandler;
 use crate::swarm::tests::new_swarm;
 use crate::swarm::Swarm;
-use crate::tests::gen_pure_dht;
+use crate::tests::default::gen_pure_dht;
 use crate::tests::manually_establish_connection;
 use crate::transports::manager::TransportManager;
 use crate::types::message::MessageListener;

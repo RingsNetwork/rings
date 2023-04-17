@@ -1,8 +1,8 @@
-use crate::dht::Did;
-use crate::dht::PeerRing;
+
+
 use crate::err::Result;
 use crate::prelude::RTCSdpType;
-use crate::storage::PersistenceStorage;
+
 use crate::swarm::Swarm;
 use crate::transports::manager::TransportManager;
 use crate::types::ice_transport::IceTrickleScheme;
@@ -69,37 +69,4 @@ pub async fn manually_establish_connection(swarm1: &Swarm, swarm2: &Swarm) -> Re
     assert!(swarm2.get_transport(swarm1.did()).is_some());
 
     Ok(())
-}
-
-#[cfg(all(not(feature = "wasm")))]
-pub async fn gen_pure_dht(did: Did) -> Result<PeerRing> {
-    let db_path = PersistenceStorage::random_path("./tmp");
-    let db = PersistenceStorage::new_with_path(db_path.as_str()).await?;
-    Ok(PeerRing::new_with_storage(did, 3, db))
-}
-
-#[cfg(all(not(feature = "wasm")))]
-pub async fn gen_sorted_dht(s: usize) -> Vec<PeerRing> {
-    let mut keys: Vec<crate::ecc::SecretKey> = vec![];
-    for _i in 0..s {
-        keys.push(crate::ecc::SecretKey::random());
-    }
-    keys.sort_by_key(|a| a.address());
-
-    #[allow(clippy::needless_collect)]
-    let dids: Vec<crate::dht::Did> = keys
-        .iter()
-        .map(|sk| crate::dht::Did::from(sk.address()))
-        .collect();
-
-    let mut iter = dids.into_iter();
-    let mut ret: Vec<crate::dht::PeerRing> = vec![];
-    for _ in 0..s {
-        ret.push(
-            crate::tests::gen_pure_dht(iter.next().unwrap())
-                .await
-                .unwrap(),
-        )
-    }
-    ret
 }

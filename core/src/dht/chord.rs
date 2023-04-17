@@ -535,7 +535,7 @@ mod tests {
 
     use super::*;
     use crate::ecc::SecretKey;
-    use crate::tests::gen_sorted_dht;
+    use crate::tests::default::gen_sorted_dht;
 
     #[tokio::test]
     async fn test_chord_finger() -> Result<()> {
