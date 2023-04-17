@@ -86,15 +86,15 @@ pub trait ChordStorage<Action>: Chord<Action> {
 }
 
 /// Chord implementation from Pamela Zave's work.
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait CorrectChord<Action>: Chord<Action> {
     /// Join Operation
-    async fn join_then_sync(&self, did: Did) -> Result<Action>;
+    fn join_then_sync(&self, did: Did) -> Result<Action>;
     /// Rectify Operation
-    async fn rectify(&self, pred: Did) -> Result<()>;
+    fn rectify(&self, pred: Did) -> Result<()>;
     /// Steps before stabilize
-    async fn pre_stabilize(&self) -> Result<Action>;
+    fn pre_stabilize(&self) -> Result<Action>;
     /// Stabilize operation for successor list
-    async fn stabilize(&self, succ: TopoInfo) -> Result<Action>;
+    fn stabilize(&self, succ: TopoInfo) -> Result<Action>;
+    /// Get topologic info from chord
+    fn topoinfo(&self) -> Result<TopoInfo>;
 }

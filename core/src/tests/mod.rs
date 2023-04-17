@@ -76,3 +76,25 @@ pub async fn gen_pure_dht(did: Did) -> Result<PeerRing> {
     let db = PersistenceStorage::new_with_path(db_path.as_str()).await?;
     Ok(PeerRing::new_with_storage(did, 3, db))
 }
+
+pub async fn gen_sorted_dht(s: usize) -> Vec<PeerRing> {
+    let mut keys: Vec<crate::ecc::SecretKey> = vec![];
+    for i in 0..s {
+        keys.push(crate::ecc::SecretKey::random());
+    }
+    keys.sort_by(|a, b| a.address().cmp(&b.address()));
+    let dids: Vec<crate::dht::Did> = keys
+        .iter()
+        .map(|sk| crate::dht::Did::from(sk.address()))
+        .collect();
+    let mut iter = dids.into_iter();
+    let mut ret: Vec<crate::dht::PeerRing> = vec![];
+    for _ in 0..s {
+        ret.push(
+            crate::tests::gen_pure_dht(iter.next().unwrap())
+                .await
+                .unwrap(),
+        )
+    }
+    ret
+}

@@ -104,11 +104,20 @@ pub struct TopoInfo {
     pred: Option<Did>,
 }
 
-impl TryInto<TopoInfo> for PeerRing {
+impl TryFrom<PeerRing> for TopoInfo {
     type Error = Error;
-    fn try_into(self) -> Result<TopoInfo> {
-        let succ_list = self.lock_successor()?.list();
-        let pred = *self.lock_predecessor()?;
+    fn try_from(dht: PeerRing) -> Result<TopoInfo> {
+        let succ_list = dht.lock_successor()?.list();
+        let pred = dht.lock_predecessor()?.clone();
+        Ok(TopoInfo { succ_list, pred })
+    }
+}
+
+impl TryFrom<&PeerRing> for TopoInfo {
+    type Error = Error;
+    fn try_from(dht: &PeerRing) -> Result<TopoInfo> {
+        let succ_list = dht.lock_successor()?.list();
+        let pred = dht.lock_predecessor()?.clone();
         Ok(TopoInfo { succ_list, pred })
     }
 }
@@ -459,7 +468,7 @@ impl ChordStorage<PeerRingAction> for PeerRing {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl CorrectChord<PeerRingAction> for PeerRing {
     /// Join Operation
-    async fn join_then_sync(&self, did: Did) -> Result<PeerRingAction> {
+    fn join_then_sync(&self, did: Did) -> Result<PeerRingAction> {
         let act = self.join(did)?;
         Ok(PeerRingAction::MultiActions(vec![
             act,
@@ -468,12 +477,12 @@ impl CorrectChord<PeerRingAction> for PeerRing {
     }
 
     /// Rectify Operation, should precheck that Did is connected
-    async fn rectify(&self, pred: Did) -> Result<()> {
+    fn rectify(&self, pred: Did) -> Result<()> {
         self.notify(pred)?;
         Ok(())
     }
 
-    async fn pre_stabilize(&self) -> Result<PeerRingAction> {
+    fn pre_stabilize(&self) -> Result<PeerRingAction> {
         let successor = self.lock_successor()?;
         if successor.is_empty() {
             return Ok(PeerRingAction::None);
@@ -485,8 +494,13 @@ impl CorrectChord<PeerRingAction> for PeerRing {
         ))
     }
 
+    /// Get topologic info
+    fn topoinfo(&self) -> Result<TopoInfo> {
+        self.try_into()
+    }
+
     /// Stabilize operation for successor list
-    async fn stabilize(&self, succ: TopoInfo) -> Result<PeerRingAction> {
+    fn stabilize(&self, succ: TopoInfo) -> Result<PeerRingAction> {
         let mut ret = vec![];
         let mut successors = self.lock_successor()?;
         let but_last = &succ.succ_list[..succ.succ_list.len() - 1].to_vec();
@@ -521,6 +535,7 @@ mod tests {
 
     use super::*;
     use crate::ecc::SecretKey;
+    use crate::tests::gen_sorted_dht;
 
     #[tokio::test]
     async fn test_chord_finger() -> Result<()> {
@@ -799,14 +814,63 @@ mod tests {
     /// Test Correct Chord implementation
     #[tokio::test]
     async fn test_correct_chord_impl() -> Result<()> {
-        let mut keys = vec![
-            SecretKey::random(),
-            SecretKey::random(),
-            SecretKey::random(),
-            SecretKey::random(),
-        ];
-        keys.sort_by(|a, b| a.address().cmp(&b.address()));
+        fn assert_successor(dht: &PeerRing, did: &Did) -> bool {
+            let succ_list = dht.lock_successor().unwrap();
+            succ_list.list().contains(&did)
+        }
 
+        /// check that two dht is mutual successors
+        fn check_is_mutual_successors(dht1: &PeerRing, dht2: &PeerRing) {
+            let succ_list_1 = dht1.lock_successor().unwrap();
+            let succ_list_2 = dht2.lock_successor().unwrap();
+            assert_eq!(succ_list_1.min(), dht2.did);
+            assert_eq!(succ_list_2.min(), dht1.did);
+        }
+
+        fn check_succ_is_including(dht: &PeerRing, dids: Vec<Did>) {
+            let succ_list = dht.lock_successor().unwrap();
+            for did in dids {
+                assert!(succ_list.list().contains(&did));
+            }
+        }
+
+        let dhts = gen_sorted_dht(5).await;
+        let (n1, n2, n3, n4, n5) = (
+            dhts[0].clone(),
+            dhts[1].clone(),
+            dhts[2].clone(),
+            dhts[3].clone(),
+            dhts[4].clone(),
+        );
+        // we now have:
+        // n1 < n2 < n3 < n4
+
+        // n1 join n2
+        n1.join(n2.did.clone()).unwrap();
+        n2.join(n1.did.clone()).unwrap();
+        // for now n1, n2 are `mutual successors`.
+        check_is_mutual_successors(&n1, &n2);
+        // n1 join n3
+
+        n1.join(n3.did.clone()).unwrap();
+        n1.join(n4.did.clone()).unwrap();
+        // for now n1's successor should include n1 and n3
+        check_succ_is_including(&n1, vec![n2.did.clone(), n3.did.clone(), n4.did.clone()]);
+
+        n1.join(n5.did.clone()).unwrap();
+        // n5 is not in n1's successor list
+        assert!(!assert_successor(&n1, &n5.did));
+        if let PeerRingAction::MultiActions(rets) = n5.join_then_sync(n1.did.clone()).unwrap() {
+            for r in rets {
+                if let PeerRingAction::RemoteAction(t, _) = r {
+                    assert_eq!(t, n1.did.clone())
+                } else {
+                    panic!("wrong remote");
+                }
+            }
+        } else {
+            panic!("Wrong ret");
+        }
         Ok(())
     }
 }
