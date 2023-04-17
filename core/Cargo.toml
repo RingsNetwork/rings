@@ -12,6 +12,7 @@ categories = ["network-programming", "cryptography", "wasm"]
 
 [features]
 default = ["std"]
+redundant = []
 std = [
     "webrtc",
     "async-channel",
