@@ -5,4 +5,5 @@ build-docker-image:
 fmt:
 	cargo +nightly fmt -p rings-core
 	cargo +nightly fmt -p rings-node
+	cargo clippy --fix --allow-dirty
 	taplo format

@@ -85,10 +85,13 @@ pub async fn gen_sorted_dht(s: usize) -> Vec<PeerRing> {
         keys.push(crate::ecc::SecretKey::random());
     }
     keys.sort_by_key(|a| a.address());
+
+    #[allow(clippy::needless_collect)]
     let dids: Vec<crate::dht::Did> = keys
         .iter()
         .map(|sk| crate::dht::Did::from(sk.address()))
         .collect();
+
     let mut iter = dids.into_iter();
     let mut ret: Vec<crate::dht::PeerRing> = vec![];
     for _ in 0..s {
