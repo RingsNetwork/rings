@@ -86,7 +86,7 @@ pub trait ChordStorage<Action>: Chord<Action> {
 }
 
 /// Chord implementation from Pamela Zave's work.
-/// The trait defines three operators which are refered to algorithm descripted in the paper
+/// The trait defines three operators which are referred to algorithm descripted in the paper
 /// Join Operation, Rectify Operation, Stabilize Operation
 /// The "pre_stabilize" is a precondition for the Stabilize Operation.
 /// And topoinfo is a help function.
