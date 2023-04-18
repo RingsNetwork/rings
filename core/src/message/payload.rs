@@ -141,7 +141,7 @@ where T: Serialize + DeserializeOwned
         Self::new(data, session_manager, OriginVerificationGen::Origin, relay)
     }
 
-    /// Check that the payload is expired
+    /// Checks whether the payload is expired.
     pub fn is_expired(&self) -> bool {
         if self.verification.ttl_ms > MAX_TTL_MS {
             return false;
