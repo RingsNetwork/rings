@@ -62,6 +62,9 @@ where T: DeserializeOwned {
     Ok(m)
 }
 
+/// Verification can be Stick Verification or origin verification.
+/// When MessagePayload created, Origin Verification is always generated.
+/// and if OriginVerificationGen is stick, it can including existing stick ov
 pub enum OriginVerificationGen {
     Origin,
     Stick(MessageVerification),
@@ -71,13 +74,20 @@ pub enum OriginVerificationGen {
 #[derivative(Debug)]
 /// MessagePayload with sequence and verification, contain MessageRelay.
 pub struct MessagePayload<T> {
+    /// Payload data
     pub data: T,
+    /// Transaction id of payload
     pub tx_id: uuid::Uuid,
+    /// Address from payload authorizer
     pub addr: Did,
+    /// Relay messages
     pub relay: MessageRelay,
-
+    /// Signature and other messages for verification
     #[derivative(Debug = "ignore")]
     pub verification: MessageVerification,
+    /// Signature and other messages for verification,
+    /// if the payload is not stick node, `origin_verificationgen` ashould equal to
+    /// `verification`
     #[derivative(Debug = "ignore")]
     pub origin_verification: MessageVerification,
 }
@@ -85,6 +95,7 @@ pub struct MessagePayload<T> {
 impl<T> MessagePayload<T>
 where T: Serialize + DeserializeOwned
 {
+    /// Create new instance
     pub fn new(
         data: T,
         session_manager: &SessionManager,
@@ -102,7 +113,7 @@ where T: Serialize + DeserializeOwned
             ttl_ms,
             ts_ms,
         };
-
+        // If origin_verification_gen is set to Origin, simply clone it into.
         let origin_verification = match origin_verification_gen {
             OriginVerificationGen::Origin => verification.clone(),
             OriginVerificationGen::Stick(ov) => ov,
@@ -118,6 +129,7 @@ where T: Serialize + DeserializeOwned
         })
     }
 
+    /// Create new Payload for send
     pub fn new_send(
         data: T,
         session_manager: &SessionManager,
@@ -128,6 +140,7 @@ where T: Serialize + DeserializeOwned
         Self::new(data, session_manager, OriginVerificationGen::Origin, relay)
     }
 
+    /// Check that the payload is expired
     pub fn is_expired(&self) -> bool {
         if self.verification.ttl_ms > MAX_TTL_MS {
             return false;
@@ -151,6 +164,7 @@ where T: Serialize + DeserializeOwned
             && now > self.origin_verification.ts_ms + self.origin_verification.ttl_ms as u128
     }
 
+    /// Verify payload is not expired and signature is valid
     pub fn verify(&self) -> bool {
         tracing::debug!("verifying payload: {:?}", self.tx_id);
 
@@ -162,14 +176,17 @@ where T: Serialize + DeserializeOwned
         self.verification.verify(&self.data) && self.origin_verification.verify(&self.data)
     }
 
+    /// Recover pubkey from origin verification
     pub fn origin_session_pubkey(&self) -> Result<PublicKey> {
         self.origin_verification.session_pubkey(&self.data)
     }
 
+    /// Decode from bin code
     pub fn from_bincode(data: &[u8]) -> Result<Self> {
         bincode::deserialize(data).map_err(Error::BincodeDeserialize)
     }
 
+    /// Encode into bincode
     pub fn to_bincode(&self) -> Result<Bytes> {
         bincode::serialize(self)
             .map(Bytes::from)
@@ -194,15 +211,19 @@ where T: Serialize + DeserializeOwned
     }
 }
 
+/// Trait of PayloadSender
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait PayloadSender<T>
 where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
 {
+    /// Get session manager
     fn session_manager(&self) -> &SessionManager;
+    /// Get access to DHT.
     fn dht(&self) -> Arc<PeerRing>;
+    /// Send message payload.
     async fn do_send_payload(&self, did: Did, payload: MessagePayload<T>) -> Result<()>;
-
+    /// infer next hop by dht.find_successor().
     fn infer_next_hop(&self, next_hop: Option<Did>, destination: Did) -> Result<Did> {
         if let Some(next_hop) = next_hop {
             return Ok(next_hop);
@@ -214,11 +235,12 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
             _ => Err(Error::NoNextHop),
         }
     }
-
+    /// Alias of do_send_payload, but set next hop defaultly to payload.relay.next_hop
     async fn send_payload(&self, payload: MessagePayload<T>) -> Result<()> {
         self.do_send_payload(payload.relay.next_hop, payload).await
     }
 
+    /// Send message to distination
     async fn send_message(&self, msg: T, destination: Did) -> Result<uuid::Uuid> {
         let next_hop = self.infer_next_hop(None, destination)?;
         let payload = MessagePayload::new_send(msg, self.session_manager(), next_hop, destination)?;
@@ -226,6 +248,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
         Ok(payload.tx_id)
     }
 
+    /// Send dirrect message to destination
     async fn send_direct_message(&self, msg: T, destination: Did) -> Result<uuid::Uuid> {
         let payload =
             MessagePayload::new_send(msg, self.session_manager(), destination, destination)?;
@@ -233,6 +256,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
         Ok(payload.tx_id)
     }
 
+    // Send report message to distination
     async fn send_report_message(&self, payload: &MessagePayload<T>, msg: T) -> Result<()> {
         let relay = payload.relay.report(self.dht().did)?;
 
@@ -247,6 +271,8 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
         self.send_payload(pl).await
     }
 
+    /// Forward a payload message by relay,
+    /// It just create a new payload, cloned data, resigned with session and send
     async fn forward_by_relay(
         &self,
         payload: &MessagePayload<T>,
@@ -262,6 +288,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
         self.send_payload(new_pl).await
     }
 
+    /// Forward a payload message, next hop is infered by dht.
     async fn forward_payload(
         &self,
         payload: &MessagePayload<T>,
@@ -272,6 +299,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
         self.forward_by_relay(payload, relay).await
     }
 
+    /// Reset destination to secp DID
     async fn reset_destination(&self, payload: &MessagePayload<T>, next_hop: Did) -> Result<()> {
         let relay = payload
             .relay
