@@ -1,4 +1,4 @@
-//! Implementation of Message Verfication
+//! Implementation of Message Verification.
 #![warn(missing_docs)]
 
 use std::fmt::Write;
