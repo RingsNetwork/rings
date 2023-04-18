@@ -165,7 +165,7 @@ where T: Serialize + DeserializeOwned
             && now > self.origin_verification.ts_ms + self.origin_verification.ttl_ms as u128
     }
 
-    /// Verify payload is not expired and signature is valid
+    /// Verifies that the payload is not expired and that the signature is valid.
     pub fn verify(&self) -> bool {
         tracing::debug!("verifying payload: {:?}", self.tx_id);
 
@@ -177,17 +177,17 @@ where T: Serialize + DeserializeOwned
         self.verification.verify(&self.data) && self.origin_verification.verify(&self.data)
     }
 
-    /// Recover pubkey from origin verification
+    /// Recovers the public key from the origin verification.
     pub fn origin_session_pubkey(&self) -> Result<PublicKey> {
         self.origin_verification.session_pubkey(&self.data)
     }
 
-    /// Decode from bin code
+    /// Deserializes a `MessagePayload` instance from the given binary data.
     pub fn from_bincode(data: &[u8]) -> Result<Self> {
         bincode::deserialize(data).map_err(Error::BincodeDeserialize)
     }
 
-    /// Encode into bincode
+    /// Serializes the `MessagePayload` instance into binary data.
     pub fn to_bincode(&self) -> Result<Bytes> {
         bincode::serialize(self)
             .map(Bytes::from)
@@ -218,13 +218,13 @@ where T: Serialize + DeserializeOwned
 pub trait PayloadSender<T>
 where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
 {
-    /// Get session manager
+    /// Get the session manager
     fn session_manager(&self) -> &SessionManager;
     /// Get access to DHT.
     fn dht(&self) -> Arc<PeerRing>;
-    /// Send message payload.
+    /// Send a message payload to a specified DID.
     async fn do_send_payload(&self, did: Did, payload: MessagePayload<T>) -> Result<()>;
-    /// infer next hop by dht.find_successor().
+    /// Infer the next hop for a message by calling `dht.find_successor()`.
     fn infer_next_hop(&self, next_hop: Option<Did>, destination: Did) -> Result<Did> {
         if let Some(next_hop) = next_hop {
             return Ok(next_hop);
@@ -236,12 +236,12 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
             _ => Err(Error::NoNextHop),
         }
     }
-    /// Alias of do_send_payload, but set next hop defaultly to payload.relay.next_hop
+    /// Alias for `do_send_payload` that sets the next hop to `payload.relay.next_hop`.
     async fn send_payload(&self, payload: MessagePayload<T>) -> Result<()> {
         self.do_send_payload(payload.relay.next_hop, payload).await
     }
 
-    /// Send message to distination
+    /// Send a message to a specified destination.
     async fn send_message(&self, msg: T, destination: Did) -> Result<uuid::Uuid> {
         let next_hop = self.infer_next_hop(None, destination)?;
         let payload = MessagePayload::new_send(msg, self.session_manager(), next_hop, destination)?;
@@ -249,7 +249,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
         Ok(payload.tx_id)
     }
 
-    /// Send dirrect message to destination
+    /// Send a direct message to a specified destination.
     async fn send_direct_message(&self, msg: T, destination: Did) -> Result<uuid::Uuid> {
         let payload =
             MessagePayload::new_send(msg, self.session_manager(), destination, destination)?;
@@ -257,7 +257,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
         Ok(payload.tx_id)
     }
 
-    // Send report message to distination
+    /// Send a report message to a specified destination.
     async fn send_report_message(&self, payload: &MessagePayload<T>, msg: T) -> Result<()> {
         let relay = payload.relay.report(self.dht().did)?;
 
@@ -272,7 +272,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
         self.send_payload(pl).await
     }
 
-    /// Forward a payload message by relay,
+    /// Forward a payload message by relay.
     /// It just create a new payload, cloned data, resigned with session and send
     async fn forward_by_relay(
         &self,
@@ -289,7 +289,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
         self.send_payload(new_pl).await
     }
 
-    /// Forward a payload message, next hop is inferred by dht.
+    /// Forward a payload message, with the next hop inferred by the DHT.
     async fn forward_payload(
         &self,
         payload: &MessagePayload<T>,
@@ -300,7 +300,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
         self.forward_by_relay(payload, relay).await
     }
 
-    /// Reset destination to secp DID
+    /// Reset the destination to a secp DID.
     async fn reset_destination(&self, payload: &MessagePayload<T>, next_hop: Did) -> Result<()> {
         let relay = payload
             .relay
