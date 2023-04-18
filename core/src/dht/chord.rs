@@ -511,10 +511,10 @@ impl CorrectChord<PeerRingAction> for PeerRing {
             successors.update(new_succ);
         }
         successors.extend(but_last);
-        // Check if the new successor is between myIdent, newSucc, head(succList).
+        // Check if the new successor is between  new_succ and head(successors).
         if let Some(new_succ) = info.predecessor {
             if self.bias(new_succ) < self.bias(successors.min()) {
-                // If newSucc is between myIdent and the head of the successor list,
+                // If new_succ is between self.did and the head of the successor list,
                 // query newSucc for its successor list.
                 ret.push(PeerRingAction::RemoteAction(
                     new_succ,
