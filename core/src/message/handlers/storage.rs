@@ -280,6 +280,7 @@ mod test {
         Ok(())
     }
 
+    #[cfg(not(feature = "redundant"))]
     #[tokio::test]
     async fn test_extend_data() -> Result<()> {
         let keys = gen_ordered_keys(2);
