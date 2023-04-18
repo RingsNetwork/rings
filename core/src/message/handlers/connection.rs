@@ -73,7 +73,7 @@ impl HandleMsg<JoinDHT> for MessageHandler {
         // finger table just have no other node(beside next), it will be a `create` op
         // otherwise, it will be a `send` op
         let act = self.dht.join(msg.did)?;
-        handle_join_dht(self, act, &ctx).await
+        handle_join_dht(self, act, ctx).await
     }
 }
 
