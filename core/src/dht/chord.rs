@@ -461,7 +461,9 @@ impl ChordStorage<PeerRingAction> for PeerRing {
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl CorrectChord<PeerRingAction> for PeerRing {
-    /// Join Operation
+    /// Join Operation:
+    /// The difference between the original Chord paper and Zave's work is that
+    /// after a node joins the network, it should synchronize its successors from remote nodes.
     fn join_then_sync(&self, did: Did) -> Result<PeerRingAction> {
         let act = self.join(did)?;
         Ok(PeerRingAction::MultiActions(vec![
@@ -470,12 +472,16 @@ impl CorrectChord<PeerRingAction> for PeerRing {
         ]))
     }
 
-    /// Rectify Operation, should precheck that Did is connected
+    /// Rectify Operation:
+    /// It should precheck that the predecessor node's ID (Did) is connected.
     fn rectify(&self, pred: Did) -> Result<()> {
         self.notify(pred)?;
         Ok(())
     }
 
+    /// Pre-Stabilize Operation:
+    /// Before stabilizing, the node should query its first successor for TopoInfo.
+    /// If there are no successors, return PeerRingAction::None.
     fn pre_stabilize(&self) -> Result<PeerRingAction> {
         let successor = self.lock_successor()?;
         if successor.is_empty() {
@@ -488,12 +494,14 @@ impl CorrectChord<PeerRingAction> for PeerRing {
         ))
     }
 
-    /// Get topologic info
-    fn topoinfo(&self) -> Result<TopoInfo> {
+    /// TopoInfo Operation:
+    /// Get the topological information of self.
+    fn topo_info(&self) -> Result<TopoInfo> {
         self.try_into()
     }
 
-    /// Stabilize operation for successor list
+    /// Stabilize Operation:
+    /// Perform stabilization for the successor list.
     fn stabilize(&self, info: TopoInfo) -> Result<PeerRingAction> {
         let mut ret = vec![];
         let mut successors = self.lock_successor()?;
@@ -502,17 +510,18 @@ impl CorrectChord<PeerRingAction> for PeerRing {
         if let Some(new_succ) = info.predecessor {
             successors.update(new_succ);
         }
-
         successors.extend(but_last);
-        // between(myIdent, newSucc, head(succList))
+        // Check if the new successor is between myIdent, newSucc, head(succList).
         if let Some(new_succ) = info.predecessor {
             if self.bias(new_succ) < self.bias(successors.min()) {
-                // query newSucc for newSucc.succList
+                // If newSucc is between myIdent and the head of the successor list,
+                // query newSucc for its successor list.
                 ret.push(PeerRingAction::RemoteAction(
                     new_succ,
                     RemoteAction::QueryForSuccessorList,
                 ));
             }
+            // Notify the node's minimum successor of its existence.
             ret.push(PeerRingAction::RemoteAction(
                 successors.min(),
                 RemoteAction::Notify(self.did),

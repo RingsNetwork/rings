@@ -86,15 +86,19 @@ pub trait ChordStorage<Action>: Chord<Action> {
 }
 
 /// Chord implementation from Pamela Zave's work.
+/// The trait defines three operators which are refered to algorithm descripted in the paper
+/// Join Operation, Rectify Operation, Stabilize Operation
+/// The "pre_stabilize" is a precondition for the Stabilize Operation.
+/// And topoinfo is a help function.
 pub trait CorrectChord<Action>: Chord<Action> {
     /// Join Operation
     fn join_then_sync(&self, did: Did) -> Result<Action>;
     /// Rectify Operation
     fn rectify(&self, pred: Did) -> Result<()>;
-    /// Steps before stabilize
+    /// Steps before stabilize Operation
     fn pre_stabilize(&self) -> Result<Action>;
     /// Stabilize operation for successor list
     fn stabilize(&self, succ: TopoInfo) -> Result<Action>;
-    /// Get topologic info from chord
-    fn topoinfo(&self) -> Result<TopoInfo>;
+    /// Help function, get topologic info from chord
+    fn topo_info(&self) -> Result<TopoInfo>;
 }
