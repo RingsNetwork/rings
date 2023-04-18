@@ -27,6 +27,36 @@ use crate::prelude::RTCSdpType;
 use crate::transports::manager::TransportManager;
 use crate::types::ice_transport::IceTrickleScheme;
 
+async fn handle_after_join_dht(
+    handler: &MessageHandler,
+    act: PeerRingAction,
+    ctx: &MessagePayload<Message>,
+) -> Result<()> {
+    match act {
+        PeerRingAction::None => Ok(()),
+        PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessorForConnect(did)) => {
+            // if there is only two nodes A, B, it may cause recursion
+            // A.successor == B
+            // B.successor == A
+            // A.find_successor(B)
+            if next != ctx.addr {
+                handler
+                    .send_direct_message(
+                        Message::FindSuccessorSend(FindSuccessorSend {
+                            did,
+                            strict: false,
+                            then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect),
+                        }),
+                        next,
+                    )
+                    .await?;
+            }
+            Ok(())
+        }
+        _ => unreachable!(),
+    }
+}
+
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<LeaveDHT> for MessageHandler {
@@ -42,31 +72,8 @@ impl HandleMsg<JoinDHT> for MessageHandler {
         // here is two situation.
         // finger table just have no other node(beside next), it will be a `create` op
         // otherwise, it will be a `send` op
-        match self.dht.join(msg.did)? {
-            PeerRingAction::None => Ok(()),
-            PeerRingAction::RemoteAction(
-                next,
-                PeerRingRemoteAction::FindSuccessorForConnect(did),
-            ) => {
-                // if there is only two nodes A, B, it may cause recursion
-                // A.successor == B
-                // B.successor == A
-                // A.find_successor(B)
-                if next != ctx.addr {
-                    self.send_direct_message(
-                        Message::FindSuccessorSend(FindSuccessorSend {
-                            did,
-                            strict: false,
-                            then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect),
-                        }),
-                        next,
-                    )
-                    .await?;
-                }
-                Ok(())
-            }
-            _ => unreachable!(),
-        }
+        let act = self.dht.join(msg.did)?;
+        handle_after_join_dht(&self, act, &ctx).await
     }
 }
 

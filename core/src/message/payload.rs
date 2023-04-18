@@ -29,6 +29,7 @@ use crate::err::Result;
 use crate::session::SessionManager;
 use crate::utils::get_epoch_ms;
 
+/// Encode with gzip
 pub fn encode_data_gzip(data: &Bytes, level: u8) -> Result<Bytes> {
     let mut ec = GzEncoder::new(Vec::new(), Compression::new(level as u32));
     tracing::info!("data before gzip len: {}", data.len());
@@ -36,12 +37,14 @@ pub fn encode_data_gzip(data: &Bytes, level: u8) -> Result<Bytes> {
     ec.finish().map(Bytes::from).map_err(|_| Error::GzipEncode)
 }
 
+/// gzip data
 pub fn gzip_data<T>(data: &T, level: u8) -> Result<Bytes>
 where T: Serialize {
     let json_bytes = serde_json::to_vec(data).map_err(|_| Error::SerializeToString)?;
     encode_data_gzip(&json_bytes.into(), level)
 }
 
+/// decode gzip data
 pub fn decode_gzip_data(data: &Bytes) -> Result<Bytes> {
     let mut writer = Vec::new();
     let mut decoder = GzDecoder::new(writer);
@@ -51,6 +54,7 @@ pub fn decode_gzip_data(data: &Bytes) -> Result<Bytes> {
     Ok(writer.into())
 }
 
+/// From gzip data to deserialized
 pub fn from_gzipped_data<T>(data: &Bytes) -> Result<T>
 where T: DeserializeOwned {
     let data = decode_gzip_data(data)?;
