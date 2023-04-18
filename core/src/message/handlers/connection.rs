@@ -27,7 +27,7 @@ use crate::prelude::RTCSdpType;
 use crate::transports::manager::TransportManager;
 use crate::types::ice_transport::IceTrickleScheme;
 
-async fn handle_after_join_dht(
+async fn handle_join_dht(
     handler: &MessageHandler,
     act: PeerRingAction,
     ctx: &MessagePayload<Message>,
@@ -73,7 +73,7 @@ impl HandleMsg<JoinDHT> for MessageHandler {
         // finger table just have no other node(beside next), it will be a `create` op
         // otherwise, it will be a `send` op
         let act = self.dht.join(msg.did)?;
-        handle_after_join_dht(self, act, ctx).await
+        handle_join_dht(self, act, &ctx).await
     }
 }
 
