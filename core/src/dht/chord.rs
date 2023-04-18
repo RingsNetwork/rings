@@ -100,25 +100,19 @@ pub enum RemoteAction {
 /// Information about successor and predecessor
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TopoInfo {
-    succ_list: Vec<Did>,
-    pred: Option<Did>,
-}
-
-impl TryFrom<PeerRing> for TopoInfo {
-    type Error = Error;
-    fn try_from(dht: PeerRing) -> Result<TopoInfo> {
-        let succ_list = dht.lock_successor()?.list();
-        let pred = *dht.lock_predecessor()?;
-        Ok(TopoInfo { succ_list, pred })
-    }
+    successors: Vec<Did>,
+    predecessor: Option<Did>,
 }
 
 impl TryFrom<&PeerRing> for TopoInfo {
     type Error = Error;
     fn try_from(dht: &PeerRing) -> Result<TopoInfo> {
-        let succ_list = dht.lock_successor()?.list();
-        let pred = *dht.lock_predecessor()?;
-        Ok(TopoInfo { succ_list, pred })
+        let successors = dht.lock_successor()?.list();
+        let predecessor = *dht.lock_predecessor()?;
+        Ok(TopoInfo {
+            successors,
+            predecessor,
+        })
     }
 }
 
@@ -500,17 +494,18 @@ impl CorrectChord<PeerRingAction> for PeerRing {
     }
 
     /// Stabilize operation for successor list
-    fn stabilize(&self, succ: TopoInfo) -> Result<PeerRingAction> {
+    fn stabilize(&self, info: TopoInfo) -> Result<PeerRingAction> {
         let mut ret = vec![];
         let mut successors = self.lock_successor()?;
-        let but_last = &succ.succ_list[..succ.succ_list.len() - 1].to_vec();
-        if let Some(new_succ) = succ.pred {
+        let succ_len = info.successors.len();
+        let but_last = &info.successors[..succ_len - 1].to_vec();
+        if let Some(new_succ) = info.predecessor {
             successors.update(new_succ);
         }
 
         successors.extend(but_last);
         // between(myIdent, newSucc, head(succList))
-        if let Some(new_succ) = succ.pred {
+        if let Some(new_succ) = info.predecessor {
             if self.bias(new_succ) < self.bias(successors.min()) {
                 // query newSucc for newSucc.succList
                 ret.push(PeerRingAction::RemoteAction(

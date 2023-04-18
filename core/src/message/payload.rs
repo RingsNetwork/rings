@@ -29,7 +29,7 @@ use crate::err::Result;
 use crate::session::SessionManager;
 use crate::utils::get_epoch_ms;
 
-/// Encode with gzip
+/// Compresses the given data byte slice using the gzip algorithm with the specified compression level.
 pub fn encode_data_gzip(data: &Bytes, level: u8) -> Result<Bytes> {
     let mut ec = GzEncoder::new(Vec::new(), Compression::new(level as u32));
     tracing::info!("data before gzip len: {}", data.len());
@@ -37,14 +37,14 @@ pub fn encode_data_gzip(data: &Bytes, level: u8) -> Result<Bytes> {
     ec.finish().map(Bytes::from).map_err(|_| Error::GzipEncode)
 }
 
-/// gzip data
+/// Serializes the given data using JSON and compresses it with gzip using the specified compression level.
 pub fn gzip_data<T>(data: &T, level: u8) -> Result<Bytes>
 where T: Serialize {
     let json_bytes = serde_json::to_vec(data).map_err(|_| Error::SerializeToString)?;
     encode_data_gzip(&json_bytes.into(), level)
 }
 
-/// decode gzip data
+/// Decompresses the given gzip-compressed byte slice and returns the decompressed byte slice.
 pub fn decode_gzip_data(data: &Bytes) -> Result<Bytes> {
     let mut writer = Vec::new();
     let mut decoder = GzDecoder::new(writer);
@@ -62,6 +62,7 @@ where T: DeserializeOwned {
     Ok(m)
 }
 
+/// An enumeration of options for generating origin verification or stick verification.
 /// Verification can be Stick Verification or origin verification.
 /// When MessagePayload created, Origin Verification is always generated.
 /// and if OriginVerificationGen is stick, it can including existing stick ov
@@ -76,7 +77,7 @@ pub enum OriginVerificationGen {
 pub struct MessagePayload<T> {
     /// Payload data
     pub data: T,
-    /// Transaction id of payload
+    /// The transaction ID of payload
     pub tx_id: uuid::Uuid,
     /// Address from payload authorizer
     pub addr: Did,
