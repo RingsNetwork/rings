@@ -288,7 +288,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
         self.send_payload(new_pl).await
     }
 
-    /// Forward a payload message, next hop is infered by dht.
+    /// Forward a payload message, next hop is inferred by dht.
     async fn forward_payload(
         &self,
         payload: &MessagePayload<T>,
