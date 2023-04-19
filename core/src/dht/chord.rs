@@ -67,7 +67,7 @@ pub enum PeerRingAction {
 /// that will invoke appropriate methods in `PeerRing` to continue the process.
 ///
 /// To avoid ambiguity, in the following comments, `did_a` is the Did declared in
-/// [PeerRingAction::RemoteAction]. Other dids are the fields declared in `RemoteAction`.
+/// [PeerRingAction]. Other dids are the fields declared in this [RemoteAction].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RemoteAction {
     /// Need `did_a` to find `did_b`.
@@ -343,15 +343,6 @@ impl Chord<PeerRingAction> for PeerRing {
             }
         }
     }
-
-    /// called periodically. checks whether predecessor has failed.
-    fn check_predecessor(&self) -> Result<PeerRingAction> {
-        let predecessor = *self.lock_predecessor()?;
-        Ok(match predecessor {
-            Some(p) => PeerRingAction::RemoteAction(p, RemoteAction::CheckPredecessor),
-            None => PeerRingAction::None,
-        })
-    }
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
@@ -461,9 +452,9 @@ impl ChordStorage<PeerRingAction> for PeerRing {
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl CorrectChord<PeerRingAction> for PeerRing {
-    /// Join Operation:
-    /// The difference between the original Chord paper and Zave's work is that
-    /// after a node joins the network, it should synchronize its successors from remote nodes.
+    /// Join Operation in the paper.
+    /// Zave's work differs from the original Chord paper in that it requires
+    /// a newly joined node to synchronize its successors from remote nodes.
     fn join_then_sync(&self, did: Did) -> Result<PeerRingAction> {
         let act = self.join(did)?;
         Ok(PeerRingAction::MultiActions(vec![
@@ -472,8 +463,9 @@ impl CorrectChord<PeerRingAction> for PeerRing {
         ]))
     }
 
-    /// Rectify Operation:
-    /// It should precheck that the predecessor node's ID (Did) is connected.
+    /// TODO: Please check this functin and make sure it is correct.
+    /// TODO: Please recomment this with clear description.
+    /// Rectify Operation in the paper.
     fn rectify(&self, pred: Did) -> Result<()> {
         self.notify(pred)?;
         Ok(())
@@ -492,12 +484,6 @@ impl CorrectChord<PeerRingAction> for PeerRing {
             head,
             RemoteAction::QueryForSuccessorListAndPred,
         ))
-    }
-
-    /// TopoInfo Operation:
-    /// Get the topological information of self.
-    fn topo_info(&self) -> Result<TopoInfo> {
-        self.try_into()
     }
 
     /// Stabilize Operation:
@@ -528,6 +514,11 @@ impl CorrectChord<PeerRingAction> for PeerRing {
             ));
         }
         Ok(PeerRingAction::MultiActions(ret))
+    }
+
+    /// A function to provide topological information about the chord.
+    fn topo_info(&self) -> Result<TopoInfo> {
+        self.try_into()
     }
 }
 
