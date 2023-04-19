@@ -29,6 +29,7 @@ use crate::err::Result;
 use crate::session::SessionManager;
 use crate::utils::get_epoch_ms;
 
+/// Compresses the given data byte slice using the gzip algorithm with the specified compression level.
 pub fn encode_data_gzip(data: &Bytes, level: u8) -> Result<Bytes> {
     let mut ec = GzEncoder::new(Vec::new(), Compression::new(level as u32));
     tracing::info!("data before gzip len: {}", data.len());
@@ -36,12 +37,14 @@ pub fn encode_data_gzip(data: &Bytes, level: u8) -> Result<Bytes> {
     ec.finish().map(Bytes::from).map_err(|_| Error::GzipEncode)
 }
 
+/// Serializes the given data using JSON and compresses it with gzip using the specified compression level.
 pub fn gzip_data<T>(data: &T, level: u8) -> Result<Bytes>
 where T: Serialize {
     let json_bytes = serde_json::to_vec(data).map_err(|_| Error::SerializeToString)?;
     encode_data_gzip(&json_bytes.into(), level)
 }
 
+/// Decompresses the given gzip-compressed byte slice and returns the decompressed byte slice.
 pub fn decode_gzip_data(data: &Bytes) -> Result<Bytes> {
     let mut writer = Vec::new();
     let mut decoder = GzDecoder::new(writer);
@@ -51,6 +54,7 @@ pub fn decode_gzip_data(data: &Bytes) -> Result<Bytes> {
     Ok(writer.into())
 }
 
+/// From gzip data to deserialized
 pub fn from_gzipped_data<T>(data: &Bytes) -> Result<T>
 where T: DeserializeOwned {
     let data = decode_gzip_data(data)?;
@@ -58,6 +62,10 @@ where T: DeserializeOwned {
     Ok(m)
 }
 
+/// An enumeration of options for generating origin verification or stick verification.
+/// Verification can be Stick Verification or origin verification.
+/// When MessagePayload created, Origin Verification is always generated.
+/// and if OriginVerificationGen is stick, it can including existing stick ov
 pub enum OriginVerificationGen {
     Origin,
     Stick(MessageVerification),
@@ -67,13 +75,20 @@ pub enum OriginVerificationGen {
 #[derivative(Debug)]
 /// MessagePayload with sequence and verification, contain MessageRelay.
 pub struct MessagePayload<T> {
+    /// Payload data
     pub data: T,
+    /// The transaction ID of payload
     pub tx_id: uuid::Uuid,
+    /// Address from payload authorizer
     pub addr: Did,
+    /// Relay messages
     pub relay: MessageRelay,
-
+    /// Signature and other messages for verification
     #[derivative(Debug = "ignore")]
     pub verification: MessageVerification,
+    /// Signature and other messages for verification,
+    /// if the payload is not stick node, `origin_verificationgen` ashould equal to
+    /// `verification`
     #[derivative(Debug = "ignore")]
     pub origin_verification: MessageVerification,
 }
@@ -81,6 +96,7 @@ pub struct MessagePayload<T> {
 impl<T> MessagePayload<T>
 where T: Serialize + DeserializeOwned
 {
+    /// Create new instance
     pub fn new(
         data: T,
         session_manager: &SessionManager,
@@ -98,7 +114,7 @@ where T: Serialize + DeserializeOwned
             ttl_ms,
             ts_ms,
         };
-
+        // If origin_verification_gen is set to Origin, simply clone it into.
         let origin_verification = match origin_verification_gen {
             OriginVerificationGen::Origin => verification.clone(),
             OriginVerificationGen::Stick(ov) => ov,
@@ -114,6 +130,7 @@ where T: Serialize + DeserializeOwned
         })
     }
 
+    /// Create new Payload for send
     pub fn new_send(
         data: T,
         session_manager: &SessionManager,
@@ -124,6 +141,7 @@ where T: Serialize + DeserializeOwned
         Self::new(data, session_manager, OriginVerificationGen::Origin, relay)
     }
 
+    /// Checks whether the payload is expired.
     pub fn is_expired(&self) -> bool {
         if self.verification.ttl_ms > MAX_TTL_MS {
             return false;
@@ -147,6 +165,7 @@ where T: Serialize + DeserializeOwned
             && now > self.origin_verification.ts_ms + self.origin_verification.ttl_ms as u128
     }
 
+    /// Verifies that the payload is not expired and that the signature is valid.
     pub fn verify(&self) -> bool {
         tracing::debug!("verifying payload: {:?}", self.tx_id);
 
@@ -158,14 +177,17 @@ where T: Serialize + DeserializeOwned
         self.verification.verify(&self.data) && self.origin_verification.verify(&self.data)
     }
 
+    /// Recovers the public key from the origin verification.
     pub fn origin_session_pubkey(&self) -> Result<PublicKey> {
         self.origin_verification.session_pubkey(&self.data)
     }
 
+    /// Deserializes a `MessagePayload` instance from the given binary data.
     pub fn from_bincode(data: &[u8]) -> Result<Self> {
         bincode::deserialize(data).map_err(Error::BincodeDeserialize)
     }
 
+    /// Serializes the `MessagePayload` instance into binary data.
     pub fn to_bincode(&self) -> Result<Bytes> {
         bincode::serialize(self)
             .map(Bytes::from)
@@ -190,15 +212,19 @@ where T: Serialize + DeserializeOwned
     }
 }
 
+/// Trait of PayloadSender
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait PayloadSender<T>
 where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
 {
+    /// Get the session manager
     fn session_manager(&self) -> &SessionManager;
+    /// Get access to DHT.
     fn dht(&self) -> Arc<PeerRing>;
+    /// Send a message payload to a specified DID.
     async fn do_send_payload(&self, did: Did, payload: MessagePayload<T>) -> Result<()>;
-
+    /// Infer the next hop for a message by calling `dht.find_successor()`.
     fn infer_next_hop(&self, next_hop: Option<Did>, destination: Did) -> Result<Did> {
         if let Some(next_hop) = next_hop {
             return Ok(next_hop);
@@ -210,11 +236,12 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
             _ => Err(Error::NoNextHop),
         }
     }
-
+    /// Alias for `do_send_payload` that sets the next hop to `payload.relay.next_hop`.
     async fn send_payload(&self, payload: MessagePayload<T>) -> Result<()> {
         self.do_send_payload(payload.relay.next_hop, payload).await
     }
 
+    /// Send a message to a specified destination.
     async fn send_message(&self, msg: T, destination: Did) -> Result<uuid::Uuid> {
         let next_hop = self.infer_next_hop(None, destination)?;
         let payload = MessagePayload::new_send(msg, self.session_manager(), next_hop, destination)?;
@@ -222,6 +249,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
         Ok(payload.tx_id)
     }
 
+    /// Send a direct message to a specified destination.
     async fn send_direct_message(&self, msg: T, destination: Did) -> Result<uuid::Uuid> {
         let payload =
             MessagePayload::new_send(msg, self.session_manager(), destination, destination)?;
@@ -229,6 +257,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
         Ok(payload.tx_id)
     }
 
+    /// Send a report message to a specified destination.
     async fn send_report_message(&self, payload: &MessagePayload<T>, msg: T) -> Result<()> {
         let relay = payload.relay.report(self.dht().did)?;
 
@@ -243,6 +272,8 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
         self.send_payload(pl).await
     }
 
+    /// Forward a payload message by relay.
+    /// It just create a new payload, cloned data, resigned with session and send
     async fn forward_by_relay(
         &self,
         payload: &MessagePayload<T>,
@@ -258,6 +289,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
         self.send_payload(new_pl).await
     }
 
+    /// Forward a payload message, with the next hop inferred by the DHT.
     async fn forward_payload(
         &self,
         payload: &MessagePayload<T>,
@@ -268,6 +300,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
         self.forward_by_relay(payload, relay).await
     }
 
+    /// Reset the destination to a secp DID.
     async fn reset_destination(&self, payload: &MessagePayload<T>, next_hop: Did) -> Result<()> {
         let relay = payload
             .relay

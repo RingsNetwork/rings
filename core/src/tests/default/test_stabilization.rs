@@ -5,8 +5,6 @@ use tokio::time::sleep;
 
 use super::prepare_node;
 use crate::dht::Chord;
-use crate::dht::Did;
-use crate::dht::PeerRing;
 use crate::dht::Stabilization;
 use crate::dht::TStabilize;
 use crate::ecc::SecretKey;
@@ -14,9 +12,9 @@ use crate::err::Error;
 use crate::err::Result;
 use crate::inspect::DHTInspect;
 use crate::message::MessageHandler;
-use crate::storage::PersistenceStorage;
 use crate::swarm::tests::new_swarm;
 use crate::swarm::Swarm;
+use crate::tests::default::gen_pure_dht;
 use crate::tests::manually_establish_connection;
 use crate::transports::manager::TransportManager;
 use crate::types::message::MessageListener;
@@ -46,12 +44,6 @@ async fn run_node(swarm: Arc<Swarm>, handler: MessageHandler) {
     let stabilization = async { Arc::new(stb).wait().await };
 
     futures::future::join(message_handler, stabilization).await;
-}
-
-async fn gen_pure_dht(did: Did) -> Result<PeerRing> {
-    let db_path = PersistenceStorage::random_path("./tmp");
-    let db = PersistenceStorage::new_with_path(db_path.as_str()).await?;
-    Ok(PeerRing::new_with_storage(did, 3, db))
 }
 
 #[tokio::test]

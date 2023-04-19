@@ -6,3 +6,6 @@ fmt:
 	cargo +nightly fmt -p rings-core
 	cargo +nightly fmt -p rings-node
 	taplo format
+
+clippy:
+	cargo clippy --fix --allow-dirty

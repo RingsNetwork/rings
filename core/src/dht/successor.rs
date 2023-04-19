@@ -58,6 +58,12 @@ impl SuccessorSeq {
         self.successors.truncate(self.max.into());
     }
 
+    pub fn extend(&mut self, succ_list: &Vec<Did>) {
+        for s in succ_list {
+            self.update(*s)
+        }
+    }
+
     pub fn list(&self) -> Vec<Did> {
         self.successors.clone()
     }

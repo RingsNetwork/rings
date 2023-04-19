@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::ecc::SecretKey;
+use crate::err::Result;
 use crate::message::MessageHandler;
 use crate::storage::PersistenceStorage;
 use crate::swarm::Swarm;
@@ -29,4 +30,35 @@ pub async fn prepare_node(
     println!("did: {:?}", did);
 
     (did, dht, swarm, handler, path)
+}
+
+pub async fn gen_pure_dht(did: Did) -> Result<PeerRing> {
+    let db_path = PersistenceStorage::random_path("./tmp");
+    let db = PersistenceStorage::new_with_path(db_path.as_str()).await?;
+    Ok(PeerRing::new_with_storage(did, 3, db))
+}
+
+pub async fn gen_sorted_dht(s: usize) -> Vec<PeerRing> {
+    let mut keys: Vec<crate::ecc::SecretKey> = vec![];
+    for _i in 0..s {
+        keys.push(crate::ecc::SecretKey::random());
+    }
+    keys.sort_by_key(|a| a.address());
+
+    #[allow(clippy::needless_collect)]
+    let dids: Vec<crate::dht::Did> = keys
+        .iter()
+        .map(|sk| crate::dht::Did::from(sk.address()))
+        .collect();
+
+    let mut iter = dids.into_iter();
+    let mut ret: Vec<crate::dht::PeerRing> = vec![];
+    for _ in 0..s {
+        ret.push(
+            crate::tests::default::gen_pure_dht(iter.next().unwrap())
+                .await
+                .unwrap(),
+        )
+    }
+    ret
 }

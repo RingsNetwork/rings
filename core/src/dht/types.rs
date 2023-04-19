@@ -2,6 +2,7 @@
 #![warn(missing_docs)]
 use async_trait::async_trait;
 
+use super::chord::TopoInfo;
 use super::did::Did;
 use super::vnode::VNodeOperation;
 use super::vnode::VirtualNode;
@@ -39,12 +40,6 @@ pub trait Chord<Action> {
     /// According to the paper, this method should be called periodically.
     /// According to the paper, only one finger should be fixed at a time.
     fn fix_fingers(&self) -> Result<Action>;
-
-    //TODO: Why `check_predecessor` is not using?
-
-    /// Check if predecessor is alive.
-    /// According to the paper, this method should be called periodically.
-    fn check_predecessor(&self) -> Result<Action>;
 }
 
 /// ChordStorage is a distributed storage protocol based on Chord algorithm.
@@ -82,4 +77,33 @@ pub trait ChordStorage<Action>: Chord<Action> {
     fn local_cache_set(&self, vnode: VirtualNode);
     /// Get local cache.
     fn local_cache_get(&self, vid: Did) -> Option<VirtualNode>;
+}
+
+/// Chord online correction that inspired by Pamela Zave's work.
+///
+/// TODO: Comment out why do we need those operations. What problems do they solve? And how?
+///
+/// This trait defines three operations which are referred in the paper:
+/// - Join Operation
+/// - Rectify Operation
+/// - Stabilize Operation
+///
+/// This trait also defines two more methods:
+/// - The `pre_stabilize` is the precondition of Stabilize Operation.
+/// - And `topo_info` is a help function to get the topological info of the chord.
+///
+/// Some methods return an `Action`. And the reason is same as [Chord].
+pub trait CorrectChord<Action>: Chord<Action> {
+    /// Join Operation in the paper.
+    /// Zave's work differs from the original Chord paper in that it requires
+    /// a newly joined node to synchronize its successors from remote nodes.
+    fn join_then_sync(&self, did: Did) -> Result<Action>;
+    /// Rectify Operation in the paper.
+    fn rectify(&self, pred: Did) -> Result<()>;
+    /// Steps before Stabilize Operation.
+    fn pre_stabilize(&self) -> Result<Action>;
+    /// Stabilize operation in the paper.
+    fn stabilize(&self, succ: TopoInfo) -> Result<Action>;
+    /// A help function to get the topological info about the chord.
+    fn topo_info(&self) -> Result<TopoInfo>;
 }

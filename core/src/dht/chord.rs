@@ -11,6 +11,7 @@ use super::did::BiasId;
 use super::successor::SuccessorSeq;
 use super::types::Chord;
 use super::types::ChordStorage;
+use super::types::CorrectChord;
 use super::vnode::VNodeOperation;
 use super::vnode::VirtualNode;
 use super::FingerTable;
@@ -66,7 +67,7 @@ pub enum PeerRingAction {
 /// that will invoke appropriate methods in `PeerRing` to continue the process.
 ///
 /// To avoid ambiguity, in the following comments, `did_a` is the Did declared in
-/// [PeerRingAction::RemoteAction]. Other dids are the fields declared in `RemoteAction`.
+/// [PeerRingAction]. Other dids are the fields declared in this [RemoteAction].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RemoteAction {
     /// Need `did_a` to find `did_b`.
@@ -89,6 +90,30 @@ pub enum RemoteAction {
     // TODO: The check_processor method is not using. Cannot give correct description.
     /// Check predecessor
     CheckPredecessor,
+
+    /// Fetch successor_list from successor
+    QueryForSuccessorList,
+    /// Fetch successor_list and pred from successor
+    QueryForSuccessorListAndPred,
+}
+
+/// Information about successor and predecessor
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TopoInfo {
+    successors: Vec<Did>,
+    predecessor: Option<Did>,
+}
+
+impl TryFrom<&PeerRing> for TopoInfo {
+    type Error = Error;
+    fn try_from(dht: &PeerRing) -> Result<TopoInfo> {
+        let successors = dht.lock_successor()?.list();
+        let predecessor = *dht.lock_predecessor()?;
+        Ok(TopoInfo {
+            successors,
+            predecessor,
+        })
+    }
 }
 
 impl PeerRingAction {
@@ -318,15 +343,6 @@ impl Chord<PeerRingAction> for PeerRing {
             }
         }
     }
-
-    /// called periodically. checks whether predecessor has failed.
-    fn check_predecessor(&self) -> Result<PeerRingAction> {
-        let predecessor = *self.lock_predecessor()?;
-        Ok(match predecessor {
-            Some(p) => PeerRingAction::RemoteAction(p, RemoteAction::CheckPredecessor),
-            None => PeerRingAction::None,
-        })
-    }
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
@@ -433,6 +449,79 @@ impl ChordStorage<PeerRingAction> for PeerRing {
     }
 }
 
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl CorrectChord<PeerRingAction> for PeerRing {
+    /// Join Operation in the paper.
+    /// Zave's work differs from the original Chord paper in that it requires
+    /// a newly joined node to synchronize its successors from remote nodes.
+    fn join_then_sync(&self, did: Did) -> Result<PeerRingAction> {
+        let act = self.join(did)?;
+        Ok(PeerRingAction::MultiActions(vec![
+            act,
+            PeerRingAction::RemoteAction(did, RemoteAction::QueryForSuccessorList),
+        ]))
+    }
+
+    /// TODO: Please check this function and make sure it is correct.
+    /// TODO: Please comment this with clear description.
+    /// Rectify Operation in the paper.
+    fn rectify(&self, pred: Did) -> Result<()> {
+        self.notify(pred)?;
+        Ok(())
+    }
+
+    /// Pre-Stabilize Operation:
+    /// Before stabilizing, the node should query its first successor for TopoInfo.
+    /// If there are no successors, return PeerRingAction::None.
+    fn pre_stabilize(&self) -> Result<PeerRingAction> {
+        let successor = self.lock_successor()?;
+        if successor.is_empty() {
+            return Ok(PeerRingAction::None);
+        }
+        let head = successor.min();
+        Ok(PeerRingAction::RemoteAction(
+            head,
+            RemoteAction::QueryForSuccessorListAndPred,
+        ))
+    }
+
+    /// Stabilize Operation:
+    /// Perform stabilization for the successor list.
+    fn stabilize(&self, info: TopoInfo) -> Result<PeerRingAction> {
+        let mut ret = vec![];
+        let mut successors = self.lock_successor()?;
+        let succ_len = info.successors.len();
+        let but_last = &info.successors[..succ_len - 1].to_vec();
+        if let Some(new_succ) = info.predecessor {
+            successors.update(new_succ);
+        }
+        successors.extend(but_last);
+        // Check if the new successor is between  new_succ and head(successors).
+        if let Some(new_succ) = info.predecessor {
+            if self.bias(new_succ) < self.bias(successors.min()) {
+                // If new_succ is between self.did and the head of the successor list,
+                // query newSucc for its successor list.
+                ret.push(PeerRingAction::RemoteAction(
+                    new_succ,
+                    RemoteAction::QueryForSuccessorList,
+                ));
+            }
+            // Notify the node's minimum successor of its existence.
+            ret.push(PeerRingAction::RemoteAction(
+                successors.min(),
+                RemoteAction::Notify(self.did),
+            ));
+        }
+        Ok(PeerRingAction::MultiActions(ret))
+    }
+
+    /// A function to provide topological information about the chord.
+    fn topo_info(&self) -> Result<TopoInfo> {
+        self.try_into()
+    }
+}
+
 #[cfg(not(feature = "wasm"))]
 #[cfg(test)]
 mod tests {
@@ -441,6 +530,7 @@ mod tests {
 
     use super::*;
     use crate::ecc::SecretKey;
+    use crate::tests::default::gen_sorted_dht;
 
     #[tokio::test]
     async fn test_chord_finger() -> Result<()> {
@@ -713,6 +803,69 @@ mod tests {
         );
         tokio::fs::remove_dir_all("./tmp").await.ok();
 
+        Ok(())
+    }
+
+    /// Test Correct Chord implementation
+    #[tokio::test]
+    async fn test_correct_chord_impl() -> Result<()> {
+        fn assert_successor(dht: &PeerRing, did: &Did) -> bool {
+            let succ_list = dht.lock_successor().unwrap();
+            succ_list.list().contains(did)
+        }
+
+        /// check that two dht is mutual successors
+        fn check_is_mutual_successors(dht1: &PeerRing, dht2: &PeerRing) {
+            let succ_list_1 = dht1.lock_successor().unwrap();
+            let succ_list_2 = dht2.lock_successor().unwrap();
+            assert_eq!(succ_list_1.min(), dht2.did);
+            assert_eq!(succ_list_2.min(), dht1.did);
+        }
+
+        fn check_succ_is_including(dht: &PeerRing, dids: Vec<Did>) {
+            let succ_list = dht.lock_successor().unwrap();
+            for did in dids {
+                assert!(succ_list.list().contains(&did));
+            }
+        }
+
+        let dhts = gen_sorted_dht(5).await;
+        let (n1, n2, n3, n4, n5) = (
+            dhts[0].clone(),
+            dhts[1].clone(),
+            dhts[2].clone(),
+            dhts[3].clone(),
+            dhts[4].clone(),
+        );
+        // we now have:
+        // n1 < n2 < n3 < n4
+
+        // n1 join n2
+        n1.join(n2.did).unwrap();
+        n2.join(n1.did).unwrap();
+        // for now n1, n2 are `mutual successors`.
+        check_is_mutual_successors(&n1, &n2);
+        // n1 join n3
+
+        n1.join(n3.did).unwrap();
+        n1.join(n4.did).unwrap();
+        // for now n1's successor should include n1 and n3
+        check_succ_is_including(&n1, vec![n2.did, n3.did, n4.did]);
+
+        n1.join(n5.did).unwrap();
+        // n5 is not in n1's successor list
+        assert!(!assert_successor(&n1, &n5.did));
+        if let PeerRingAction::MultiActions(rets) = n5.join_then_sync(n1.did).unwrap() {
+            for r in rets {
+                if let PeerRingAction::RemoteAction(t, _) = r {
+                    assert_eq!(t, n1.did.clone())
+                } else {
+                    panic!("wrong remote");
+                }
+            }
+        } else {
+            panic!("Wrong ret");
+        }
         Ok(())
     }
 }
