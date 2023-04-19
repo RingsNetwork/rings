@@ -362,7 +362,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Deb
             .ok_or(Error::SwarmMissDidInTable(did))?;
 
         tracing::debug!(
-            "SENT {:?}, to node {:?} via transport {:?}",
+            "Try send {:?}, to node {:?} via transport {:?}",
             payload.clone(),
             payload.relay.next_hop,
             transport.id
@@ -372,6 +372,13 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Deb
 
         transport.wait_for_data_channel_open().await?;
         let result = transport.send_message(&data).await;
+
+        tracing::debug!(
+            "Sent {:?}, to node {:?} via transport {:?}",
+            payload.clone(),
+            payload.relay.next_hop,
+            transport.id
+        );
 
         if let (Some(measure), did) = (&self.measure, payload.relay.next_hop) {
             if result.is_ok() {
