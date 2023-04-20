@@ -12,21 +12,16 @@ use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 use super::consts;
 use crate::channels::Channel as AcChannel;
 use crate::dht::Did;
-use crate::ecc::PublicKey;
 use crate::err::Error;
 use crate::err::Result;
-use crate::message::Encoded;
-use crate::message::Encoder;
-use crate::message::MessagePayload;
-use crate::session::SessionManager;
 use crate::transports::helper::Promise;
 use crate::transports::helper::State;
-use crate::transports::helper::TricklePayload;
 use crate::types::channel::Channel;
 use crate::types::channel::Event;
 use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransportInterface;
 use crate::types::ice_transport::IceTrickleScheme;
+use crate::types::ice_transport::Trickle;
 
 type EventSender = <AcChannel<Event> as Channel<Event>>::Sender;
 
@@ -34,7 +29,6 @@ type EventSender = <AcChannel<Event> as Channel<Event>>::Sender;
 #[derive(Default)]
 pub struct DummyTransportHub {
     pub senders: DashMap<uuid::Uuid, EventSender>,
-    pub dids: DashMap<uuid::Uuid, Did>,
 }
 
 lazy_static! {
@@ -47,12 +41,18 @@ pub struct DummyTransport {
     remote_id: Arc<Mutex<Option<uuid::Uuid>>>,
     event_sender: EventSender,
     ice_connection_state: Arc<Mutex<Option<RTCIceConnectionState>>>,
-    public_key: Arc<AsyncRwLock<Option<PublicKey>>>,
+    remote_did: Arc<AsyncRwLock<Option<Did>>>,
 }
 
 impl PartialEq for DummyTransport {
     fn eq(&self, other: &Self) -> bool {
         self.id.eq(&other.id)
+    }
+}
+
+impl DummyTransport {
+    async fn remote_did(&self) -> Did {
+        self.remote_did.read().await.unwrap()
     }
 }
 
@@ -66,7 +66,7 @@ impl IceTransportInterface<Event, AcChannel<Event>> for DummyTransport {
             remote_id: Arc::new(Mutex::new(None)),
             event_sender,
             ice_connection_state: Arc::new(Mutex::new(None)),
-            public_key: Arc::new(AsyncRwLock::new(None)),
+            remote_did: Arc::new(AsyncRwLock::new(None)),
         }
     }
 
@@ -92,10 +92,7 @@ impl IceTransportInterface<Event, AcChannel<Event>> for DummyTransport {
         }
 
         self.event_sender
-            .send(Event::ConnectClosed((
-                self.pubkey().await.address().into(),
-                self.id,
-            )))
+            .send(Event::ConnectClosed((self.remote_did().await, self.id)))
             .await
             .unwrap();
 
@@ -122,10 +119,6 @@ impl IceTransportInterface<Event, AcChannel<Event>> for DummyTransport {
             .unwrap_or(false)
     }
 
-    async fn pubkey(&self) -> PublicKey {
-        self.public_key.read().await.unwrap()
-    }
-
     async fn send_message(&self, msg: &Bytes) -> Result<()> {
         if consts::SEND_MESSAGE_DELAY {
             super::random_delay().await;
@@ -146,53 +139,38 @@ impl IceTrickleScheme for DummyTransport {
 
     type SdpType = RTCSdpType;
 
-    async fn get_handshake_info(
-        &self,
-        session_manager: &SessionManager,
-        _kind: RTCSdpType,
-    ) -> Result<Encoded> {
-        let data = TricklePayload {
+    async fn get_handshake_info(&self, _kind: RTCSdpType) -> Result<Trickle> {
+        Ok(Trickle {
             sdp: serde_json::to_string(&self.id).unwrap(),
             candidates: vec![],
-        };
-        let fake_did = session_manager.authorizer()?;
-        let resp = MessagePayload::new_send(data, session_manager, fake_did, fake_did)?;
-        Ok(resp.encode()?)
+        })
     }
 
-    async fn register_remote_info(&self, data: Encoded) -> Result<Did> {
-        let data: MessagePayload<TricklePayload> = data.decode()?;
-        match data.verify() {
-            true => {
-                {
-                    let sdp = serde_json::from_str::<uuid::Uuid>(&data.data.sdp)
-                        .map_err(Error::Deserialize)?;
+    async fn register_remote_info(&self, data: &Trickle, did: Did) -> Result<()> {
+        {
+            let sdp = serde_json::from_str::<uuid::Uuid>(&data.sdp).map_err(Error::Deserialize)?;
 
-                    let mut remote_id = self.remote_id.lock().unwrap();
-                    *remote_id = Some(sdp);
-                }
-
-                {
-                    let mut ice_connection_state = self.ice_connection_state.lock().unwrap();
-                    *ice_connection_state = Some(RTCIceConnectionState::Connected);
-                }
-
-                if let Ok(public_key) = data.origin_verification.session.authorizer_pubkey() {
-                    let mut pk = self.public_key.write().await;
-                    *pk = Some(public_key);
-                }
-
-                let local_did = self.pubkey().await.address().into();
-                HUB.dids.insert(self.id, local_did);
-                self.event_sender
-                    .send(Event::RegisterTransport((local_did, self.id)))
-                    .await
-                    .unwrap_or_else(|e| tracing::warn!("failed to send register event: {:?}", e));
-
-                Ok(data.addr)
-            }
-            _ => Err(Error::VerifySignatureFailed),
+            let mut remote_id = self.remote_id.lock().unwrap();
+            *remote_id = Some(sdp);
         }
+
+        {
+            let mut ice_connection_state = self.ice_connection_state.lock().unwrap();
+            *ice_connection_state = Some(RTCIceConnectionState::Connected);
+        }
+
+        {
+            let mut remote_did = self.remote_did.write().await;
+            *remote_did = Some(did);
+        }
+
+        let remote_did = self.remote_did().await;
+        self.event_sender
+            .send(Event::RegisterTransport((remote_did, self.id)))
+            .await
+            .unwrap_or_else(|e| tracing::warn!("failed to send register event: {:?}", e));
+
+        Ok(())
     }
 
     async fn wait_for_connected(&self) -> Result<()> {
@@ -235,7 +213,6 @@ pub mod tests {
     use super::DummyTransport as Transport;
     use super::*;
     use crate::ecc::SecretKey;
-    use crate::session::SessionManager;
     use crate::types::ice_transport::IceServer;
 
     async fn prepare_transport() -> Result<Transport> {
@@ -264,40 +241,25 @@ pub mod tests {
             Some(RTCIceConnectionState::New)
         );
 
-        // Generate key pairs for signing and verification
+        // Generate key pairs for did register
         let key1 = SecretKey::random();
         let key2 = SecretKey::random();
 
-        // Generate Session associated to Keys
-        let sm1 = SessionManager::new_with_seckey(&key1, None)?;
-        let sm2 = SessionManager::new_with_seckey(&key2, None)?;
-
-        assert_eq!(
-            transport1.ice_connection_state().await,
-            Some(RTCIceConnectionState::New)
-        );
-        assert_eq!(
-            transport2.ice_connection_state().await,
-            Some(RTCIceConnectionState::New)
-        );
-
         // Peer 1 try to connect peer 2
-        let handshake_info1 = transport1
-            .get_handshake_info(&sm1, RTCSdpType::Offer)
-            .await?;
+        let handshake_info1 = transport1.get_handshake_info(RTCSdpType::Offer).await?;
 
         // Peer 2 got offer then register
-        let addr1 = transport2.register_remote_info(handshake_info1).await?;
-        assert_eq!(addr1, key1.address().into());
-
-        // Peer 2 create answer
-        let handshake_info2 = transport2
-            .get_handshake_info(&sm2, RTCSdpType::Answer)
+        transport2
+            .register_remote_info(&handshake_info1, key1.address().into())
             .await?;
 
+        // Peer 2 create answer
+        let handshake_info2 = transport2.get_handshake_info(RTCSdpType::Answer).await?;
+
         // Peer 1 got answer then register
-        let addr2 = transport1.register_remote_info(handshake_info2).await?;
-        assert_eq!(addr2, key2.address().into());
+        transport1
+            .register_remote_info(&handshake_info2, key2.address().into())
+            .await?;
 
         let promise_1 = transport1.connect_success_promise().await?;
         let promise_2 = transport2.connect_success_promise().await?;

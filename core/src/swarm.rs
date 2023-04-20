@@ -26,18 +26,17 @@ use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
 use crate::message::ValidatorFn;
-use crate::prelude::RTCSdpType;
 use crate::session::SessionManager;
 use crate::session::Ttl;
 use crate::storage::MemStorage;
 use crate::storage::PersistenceStorage;
+use crate::transports::manager::TransportHandshake;
 use crate::transports::manager::TransportManager;
 use crate::transports::Transport;
 use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::Event;
 use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransportInterface;
-use crate::types::ice_transport::IceTrickleScheme;
 
 #[cfg(not(feature = "wasm"))]
 pub type MeasureImpl = Box<dyn Measure + Send + Sync>;
@@ -314,17 +313,11 @@ impl Swarm {
             return Ok(t);
         }
 
-        let transport = self.new_transport().await?;
-        let handshake_info = transport
-            .get_handshake_info(self.session_manager(), RTCSdpType::Offer)
-            .await?;
-        self.push_pending_transport(&transport)?;
+        let (transport, offer_msg) = self.prepare_transport_offer().await?;
 
-        let connect_msg = Message::ConnectNodeSend(message::ConnectNodeSend {
-            transport_uuid: transport.id.to_string(),
-            handshake_info: handshake_info.to_string(),
-        });
-        self.send_message(connect_msg, did).await?;
+        self.send_message(Message::ConnectNodeSend(offer_msg), did)
+            .await?;
+
         Ok(transport)
     }
 

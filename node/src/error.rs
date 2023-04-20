@@ -13,20 +13,20 @@ pub enum Error {
     PendingTransport(rings_core::err::Error),
     #[error("Transport not found.")]
     TransportNotFound,
-    #[error("Create Transport error.")]
-    NewTransportError,
+    #[error("Create Transport error: {0}.")]
+    NewTransportError(rings_core::err::Error),
     #[error("Close Transport error: {0}.")]
     CloseTransportError(rings_core::err::Error),
     #[error("Decode error.")]
     DecodeError,
     #[error("Encode error.")]
     EncodeError,
-    #[error("Register ICE error: {0}.")]
-    RegisterIceError(rings_core::err::Error),
     #[error("Create offer info failed: {0}.")]
     CreateOffer(rings_core::err::Error),
-    #[error("Create answer info failed: {0}.")]
-    CreateAnswer(rings_core::err::Error),
+    #[error("Answer offer info failed: {0}.")]
+    AnswerOffer(rings_core::err::Error),
+    #[error("Accept answer info failed: {0}.")]
+    AcceptAnswer(rings_core::err::Error),
     #[error("Invalid transport id.")]
     InvalidTransportId,
     #[error("Invalid did.")]
@@ -71,6 +71,8 @@ pub enum Error {
     Lock,
     #[error("invalid headers")]
     InvalidHeaders,
+    #[error("serde json error: {0}")]
+    SerdeJsonError(#[from] serde_json::Error),
 }
 
 impl Error {
@@ -81,13 +83,13 @@ impl Error {
             Error::HttpRequestError(_) => 1,
             Error::PendingTransport(_) => 2,
             Error::TransportNotFound => 3,
-            Error::NewTransportError => 4,
+            Error::NewTransportError(_) => 4,
             Error::CloseTransportError(_) => 5,
             Error::EncodeError => 6,
             Error::DecodeError => 7,
-            Error::RegisterIceError(_) => 8,
-            Error::CreateOffer(_) => 9,
-            Error::CreateAnswer(_) => 10,
+            Error::CreateOffer(_) => 8,
+            Error::AnswerOffer(_) => 9,
+            Error::AcceptAnswer(_) => 10,
             Error::InvalidTransportId => 11,
             Error::InvalidDid => 12,
             Error::InvalidMethod => 13,
@@ -101,6 +103,7 @@ impl Error {
             Error::InvalidAddress => 21,
             Error::InvalidAuthData => 22,
             Error::InvalidHeaders => 23,
+            Error::SerdeJsonError(_) => 24,
             Error::InternalError => 0,
             Error::CreateFileError(_) => 0,
             Error::OpenFileError(_) => 0,

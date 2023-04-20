@@ -9,12 +9,13 @@ use crate::ecc::PublicKey;
 use crate::ecc::SecretKey;
 use crate::err::Error;
 use crate::err::Result;
+use crate::types::ice_transport::Trickle;
 
 /// MessageType use to ask for connection, send to remote with transport_uuid and handshake_info.
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
 pub struct ConnectNodeSend {
     pub transport_uuid: String,
-    pub handshake_info: String,
+    pub offer: Trickle,
 }
 
 /// MessageType report to origin that already connected.
@@ -25,7 +26,7 @@ pub struct AlreadyConnected;
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
 pub struct ConnectNodeReport {
     pub transport_uuid: String,
-    pub handshake_info: String,
+    pub answer: Trickle,
 }
 
 /// MessageType use to find successor in a chord ring.

@@ -3,7 +3,6 @@ use wasm_bindgen_test::*;
 
 use crate::browser;
 use crate::browser::Peer;
-use crate::browser::TransportAndIce;
 use crate::prelude::rings_core::utils;
 use crate::prelude::rings_core::utils::js_value;
 use crate::prelude::wasm_bindgen::convert::FromWasmAbi;
@@ -57,15 +56,20 @@ async fn new_client() -> (browser::Client, String) {
 }
 
 async fn create_connection(client1: &browser::Client, client2: &browser::Client) {
-    let offer = JsFuture::from(client1.create_offer()).await.unwrap();
-    let offer: TransportAndIce = js_value::deserialize(&offer).unwrap();
-    let answer = JsFuture::from(client2.answer_offer(offer.ice))
+    let offer = JsFuture::from(client1.create_offer())
+        .await
+        .unwrap()
+        .as_string()
+        .unwrap();
+    console_log!("offer: {:?}", offer);
+    let answer = JsFuture::from(client2.answer_offer(offer))
         .await
         .ok()
+        .unwrap()
+        .as_string()
         .unwrap();
-    console_log!("answer: {:?}", answer.as_string());
-    let answer: TransportAndIce = js_value::deserialize(&answer).unwrap();
-    let _peer = JsFuture::from(client1.accept_answer(offer.transport_id, answer.ice))
+    console_log!("answer: {:?}", answer);
+    JsFuture::from(client1.accept_answer(answer))
         .await
         .ok()
         .unwrap();
@@ -92,31 +96,32 @@ async fn test_two_client_connect_and_list() {
         JsFuture::from(client2.start()),
     )
     .unwrap();
+
     create_connection(&client1, &client2).await;
+    console_log!("wait for register");
+    utils::js_utils::window_sleep(1000).await.unwrap();
+
     let peers = get_peers(&client1).await;
     assert!(peers.len() == 1, "peers len should be 1");
-    let peer1 = peers.get(0).unwrap();
-    console_log!("wait for data channel open");
-    utils::js_utils::window_sleep(1000).await.unwrap();
-    JsFuture::from(client1.wait_for_connected(peer1.address.clone(), None))
-        .await
-        .unwrap();
+    let peer2 = peers.get(0).unwrap();
+
     console_log!("get peer");
-    let peer1: Peer = js_value::deserialize(
-        &JsFuture::from(client1.get_peer(peer1.address.clone(), None))
+    let peer2: Peer = js_value::deserialize(
+        &JsFuture::from(client1.get_peer(peer2.address.clone(), None))
             .await
             .unwrap(),
     )
     .unwrap();
-    let peer1_state = JsFuture::from(client1.transport_state(peer1.address.clone(), None))
+    let peer2_state = JsFuture::from(client1.transport_state(peer2.address.clone(), None))
         .await
         .unwrap();
     assert!(
-        peer1_state.eq("connected"),
-        "peer1 state got {:?}",
-        peer1_state,
+        peer2_state.eq("connected"),
+        "peer2 state got {:?}",
+        peer2_state,
     );
-    JsFuture::from(client1.disconnect(peer1.address.clone(), None))
+
+    JsFuture::from(client1.disconnect(peer2.address.clone(), None))
         .await
         .unwrap();
     let peers = get_peers(&client1).await;

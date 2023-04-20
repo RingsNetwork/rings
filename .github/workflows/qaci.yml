@@ -36,21 +36,21 @@ jobs:
         with:
           sharedKey: wasm-v1
 
-      - name: Run clippy for wasm
+      - name: Run clippy for core wasm
         run: cargo clippy -p rings-core --features wasm --no-deps --no-default-features --target=wasm32-unknown-unknown --tests -- -D warnings
 
-      - name: Build
-        run: cargo build -p rings-core --target=wasm32-unknown-unknown --features wasm --no-default-features
+      - name: Run clippy for node browser
+        run: cargo clippy -p rings-node --features browser --no-deps --no-default-features --target=wasm32-unknown-unknown --tests -- -D warnings
 
-      - name: Run tests
+      - name: Run core wasm tests
         uses: GabrielBB/xvfb-action@v1
         with:
           run: cargo test -p rings-core --target=wasm32-unknown-unknown --features wasm --no-default-features
 
-      - name: Run rings-node test
+      - name: Run node browser tests
         uses: GabrielBB/xvfb-action@v1
         with:
-          run: cargo test --target=wasm32-unknown-unknown --features browser --no-default-features
+          run: cargo test -p rings-node --target=wasm32-unknown-unknown --features browser --no-default-features
 
   build:
     name: Build and test

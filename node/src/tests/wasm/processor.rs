@@ -10,6 +10,7 @@ use crate::prelude::rings_core::dht::TStabilize;
 use crate::prelude::rings_core::message::CallbackFn;
 use crate::prelude::rings_core::message::MessageCallback;
 use crate::prelude::rings_core::storage::PersistenceStorage;
+use crate::prelude::rings_core::transports::manager::TransportHandshake;
 use crate::prelude::rings_core::transports::manager::TransportManager;
 use crate::prelude::rings_core::types::ice_transport::IceTrickleScheme;
 use crate::prelude::rings_core::utils;
@@ -82,7 +83,7 @@ impl MessageCallback for MsgCallbackStruct {
 
 async fn create_connection(p1: &Processor, p2: &Processor) {
     console_log!("create_offer");
-    let (transport_1, offer) = p1.create_offer().await.unwrap();
+    let (transport_1, offer) = p1.swarm.create_offer().await.unwrap();
     let pendings_1 = p1.swarm.pending_transports().await.unwrap();
     assert_eq!(pendings_1.len(), 1);
     assert_eq!(
@@ -91,17 +92,11 @@ async fn create_connection(p1: &Processor, p2: &Processor) {
     );
 
     console_log!("answer_offer");
-    let (transport_2, answer) = p2.answer_offer(offer.to_string().as_str()).await.unwrap();
+    let (transport_2, answer) = p2.swarm.answer_offer(offer).await.unwrap();
     console_log!("accept_answer");
-    let peer = p1
-        .accept_answer(
-            transport_1.id.to_string().as_str(),
-            answer.to_string().as_str(),
-        )
-        .await
-        .unwrap();
+    let peer = p1.swarm.accept_answer(answer).await.unwrap();
     utils::js_utils::window_sleep(1000).await.unwrap();
-    assert!(peer.transport.id.eq(&transport_1.id), "transport not same");
+    assert!(peer.1.id.eq(&transport_1.id), "transport not same");
     futures::try_join!(
         async {
             if transport_1.is_connected().await {

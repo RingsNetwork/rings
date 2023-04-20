@@ -112,6 +112,9 @@ pub enum Error {
     #[error("Cannot find next node by local DHT")]
     MessageHandlerMissNextNode,
 
+    #[error("Found existing transport when answer offer from remote node")]
+    AlreadyConnected,
+
     #[error("Receive `AlreadyConnected`` but cannot get transport")]
     MessageHandlerMissTransportAlreadyConnected,
 

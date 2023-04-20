@@ -9,10 +9,7 @@ use serde::Serialize;
 
 pub use self::ice_server::IceServer;
 use crate::dht::Did;
-use crate::ecc::PublicKey;
 use crate::err::Result;
-use crate::message::Encoded;
-use crate::session::SessionManager;
 use crate::types::channel::Channel;
 
 /// Struct From [webrtc-rs](https://docs.rs/webrtc/latest/webrtc/ice_transport/ice_candidate/struct.RTCIceCandidateInit.html)
@@ -23,13 +20,20 @@ use crate::types::channel::Channel;
 ///  unsigned short? sdpMLineIndex = null;
 ///  DOMString? usernameFragment = null;
 /// };
-#[derive(Deserialize, Serialize, Debug, Clone, Default)]
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct IceCandidate {
     pub candidate: String,
     pub sdp_mid: Option<String>,
     pub sdp_m_line_index: Option<u16>,
     pub username_fragment: Option<String>,
+}
+
+/// Trickle payload contain webrtc sdp and candidates.
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
+pub struct Trickle {
+    pub sdp: String,
+    pub candidates: Vec<IceCandidate>,
 }
 
 /// A useful trait implement by IceTransport that we use.
@@ -61,7 +65,6 @@ pub trait IceTransportInterface<E: Send, Ch: Channel<E>> {
     async fn ice_connection_state(&self) -> Option<Self::IceConnectionState>;
     async fn is_connected(&self) -> bool;
     async fn is_disconnected(&self) -> bool;
-    async fn pubkey(&self) -> PublicKey;
     async fn send_message(&self, msg: &Bytes) -> Result<()>;
 }
 
@@ -99,11 +102,7 @@ pub trait IceCandidateGathering: IceTransport {
 pub trait IceTrickleScheme {
     type SdpType;
 
-    async fn get_handshake_info(
-        &self,
-        session_manager: &SessionManager,
-        kind: Self::SdpType,
-    ) -> Result<Encoded>;
-    async fn register_remote_info(&self, data: Encoded) -> Result<Did>;
+    async fn get_handshake_info(&self, kind: Self::SdpType) -> Result<Trickle>;
+    async fn register_remote_info(&self, data: &Trickle, did: Did) -> Result<()>;
     async fn wait_for_connected(&self) -> Result<()>;
 }

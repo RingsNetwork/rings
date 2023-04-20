@@ -11,7 +11,6 @@ use crate::channels::Channel as CbChannel;
 use crate::ecc::SecretKey;
 use crate::err::Result;
 use crate::prelude::RTCSdpType;
-use crate::session::SessionManager;
 use crate::tests::manually_establish_connection;
 use crate::transports::Transport;
 use crate::types::channel::Channel;
@@ -50,17 +49,6 @@ pub async fn establish_ice_connection(
     transport1: &Transport,
     transport2: &Transport,
 ) -> Result<()> {
-    // Generate key pairs for signing and verification
-    let key1 = SecretKey::random();
-    let key2 = SecretKey::random();
-
-    let sm1 = SessionManager::new_with_seckey(&key1, None)?;
-    let sm2 = SessionManager::new_with_seckey(&key2, None)?;
-
-    // Peer 1 try to connect peer 2
-    let handshake_info1 = transport1
-        .get_handshake_info(&sm1, RTCSdpType::Offer)
-        .await?;
     assert_eq!(
         transport1.ice_connection_state().await,
         Some(RtcIceConnectionState::New)
@@ -70,22 +58,29 @@ pub async fn establish_ice_connection(
         Some(RtcIceConnectionState::New)
     );
 
+    // Generate key pairs for did register
+    let key1 = SecretKey::random();
+    let key2 = SecretKey::random();
+
+    // Peer 1 try to connect peer 2
+    let handshake_info1 = transport1.get_handshake_info(RTCSdpType::Offer).await?;
+
     // Peer 2 got offer then register
-    let addr1 = transport2.register_remote_info(handshake_info1).await?;
-    assert_eq!(addr1, key1.address().into());
+    transport2
+        .register_remote_info(&handshake_info1, key1.address().into())
+        .await?;
 
     // Peer 2 create answer
     let handshake_info2 = transport2
-        .get_handshake_info(&sm2, RTCSdpType::Answer)
+        .get_handshake_info(RTCSdpType::Answer)
         .await
         .unwrap();
 
     // Peer 1 got answer then register
-    let addr2 = transport1
-        .register_remote_info(handshake_info2)
+    transport1
+        .register_remote_info(&handshake_info2, key2.address().into())
         .await
         .unwrap();
-    assert_eq!(addr2, key2.address().into());
 
     #[cfg(feature = "browser_chrome_test")]
     {
