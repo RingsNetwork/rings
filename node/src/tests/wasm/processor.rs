@@ -11,6 +11,8 @@ use crate::prelude::rings_core::message::CallbackFn;
 use crate::prelude::rings_core::message::MessageCallback;
 use crate::prelude::rings_core::storage::PersistenceStorage;
 use crate::prelude::rings_core::transports::manager::TransportManager;
+use crate::prelude::rings_core::types::ice_transport::IceTrickleScheme;
+use crate::prelude::rings_core::utils;
 use crate::prelude::web3::contract::tokens::Tokenizable;
 use crate::prelude::web_sys::RtcIceConnectionState;
 use crate::prelude::*;
@@ -79,6 +81,7 @@ impl MessageCallback for MsgCallbackStruct {
 }
 
 async fn create_connection(p1: &Processor, p2: &Processor) {
+    console_log!("create_offer");
     let (transport_1, offer) = p1.create_offer().await.unwrap();
     let pendings_1 = p1.swarm.pending_transports().await.unwrap();
     assert_eq!(pendings_1.len(), 1);
@@ -87,7 +90,10 @@ async fn create_connection(p1: &Processor, p2: &Processor) {
         transport_1.id.to_string()
     );
 
+    console_log!("answer_offer");
     let (transport_2, answer) = p2.answer_offer(offer.to_string().as_str()).await.unwrap();
+    utils::js_utils::window_sleep(2000).await.unwrap();
+    console_log!("accept_answer");
     let peer = p1
         .accept_answer(
             transport_1.id.to_string().as_str(),
@@ -96,9 +102,20 @@ async fn create_connection(p1: &Processor, p2: &Processor) {
         .await
         .unwrap();
     assert!(peer.transport.id.eq(&transport_1.id), "transport not same");
+    utils::js_utils::window_sleep(2000).await.unwrap();
     futures::try_join!(
-        async { transport_1.wait_for_data_channel_open().await },
-        async { transport_2.wait_for_data_channel_open().await }
+        async {
+            if transport_1.is_connected().await {
+                return Ok(());
+            }
+            transport_1.wait_for_connected().await
+        },
+        async {
+            if transport_2.is_connected().await {
+                return Ok(());
+            }
+            transport_2.wait_for_connected().await
+        }
     )
     .unwrap();
 }
@@ -132,12 +149,14 @@ async fn test_processor_handshake_and_msg() {
     listen(&p1, Some(callback1)).await;
     listen(&p2, Some(callback2)).await;
 
+    console_log!("processor_hs_connect_1_2");
     create_connection(&p1, &p2).await;
 
     fluvio_wasm_timer::Delay::new(Duration::from_secs(2))
         .await
         .unwrap();
 
+    console_log!("processor_send_test_text_messages");
     p1.send_message(p2_addr.as_str(), test_text1.as_bytes())
         .await
         .unwrap();
@@ -163,6 +182,7 @@ async fn test_processor_handshake_and_msg() {
         .unwrap();
     console_log!("send test_text5 done");
 
+    utils::js_utils::window_sleep(2000).await.unwrap();
     fluvio_wasm_timer::Delay::new(Duration::from_secs(4))
         .await
         .unwrap();
@@ -186,6 +206,7 @@ async fn test_processor_handshake_and_msg() {
     assert_eq!(msgs1, expect1);
     assert_eq!(msgs2, expect2);
 
+    console_log!("processor_hs_close_all_transport");
     futures::join!(close_all_transport(&p1), close_all_transport(&p2),);
 }
 
@@ -203,12 +224,12 @@ async fn test_processor_connect_with_did() {
     listen(&p2, None).await;
     listen(&p3, None).await;
 
-    console_log!("connect p1 and p2");
+    console_log!("processor_connect_p1_and_p2");
     create_connection(&p1, &p2).await;
-    console_log!("connect p1 and p2, done");
-    console_log!("connect p2 and p3");
+    console_log!("processor_connect_p1_and_p2, done");
+    console_log!("processor_connect_p2_and_p3");
     create_connection(&p2, &p3).await;
-    console_log!("connect p2 and p3, done");
+    console_log!("processor_connect_p2_and_p3, done");
 
     let p1_peers = p1.list_peers().await.unwrap();
     assert!(
@@ -225,15 +246,18 @@ async fn test_processor_connect_with_did() {
     console_log!("connect p1 and p3");
     // p1 create connect with p3's address
     let peer3 = p1.connect_with_did(p3.did(), true).await.unwrap();
-    console_log!("transport connected");
+    console_log!("processor_p1_p3_conntected");
+    utils::js_utils::window_sleep(1000).await.unwrap();
     fluvio_wasm_timer::Delay::new(Duration::from_millis(1000))
         .await
         .unwrap();
+    console_log!("processor_detect_connection_state");
     assert_eq!(
         peer3.transport.ice_connection_state().await.unwrap(),
         RtcIceConnectionState::Connected
     );
 
+    console_log!("check peers");
     let peers = p1.list_peers().await.unwrap();
     assert!(
         peers.iter().any(|p| p
@@ -242,6 +266,7 @@ async fn test_processor_connect_with_did() {
             .eq(p3.did().into_token().to_string().as_str())),
         "peer list dose NOT contains p3 address"
     );
+    console_log!("processor_close_all_transport");
     futures::join!(
         close_all_transport(&p1),
         close_all_transport(&p2),
