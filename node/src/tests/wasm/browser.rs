@@ -97,7 +97,7 @@ async fn test_two_client_connect_and_list() {
     assert!(peers.len() == 1, "peers len should be 1");
     let peer1 = peers.get(0).unwrap();
     console_log!("wait for data channel open");
-    JsFuture::from(client1.wait_for_data_channel_open(peer1.address.clone(), None))
+    JsFuture::from(client1.wait_for_connected(peer1.address.clone(), None))
         .await
         .unwrap();
     console_log!("get peer");
