@@ -30,7 +30,8 @@ use crate::transports::manager::TransportHandshake;
 use crate::transports::manager::TransportManager;
 use crate::types::ice_transport::IceTrickleScheme;
 
-#[async_recursion]
+#[cfg_attr(feature = "wasm", async_recursion(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_recursion)]
 async fn handle_join_dht(
     handler: &MessageHandler,
     act: PeerRingAction,
