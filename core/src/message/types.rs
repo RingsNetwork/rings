@@ -50,10 +50,22 @@ pub struct NotifyPredecessorSend {
     pub did: Did,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 /// MessageType report to origin node.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct NotifyPredecessorReport {
     pub did: Did,
+}
+
+/// MessageType for handle [RemoteAction::Queryforsuccessorlist]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct QueryForSuccessorListSend {
+    pub did: Did,
+}
+
+/// MessageType for handle [RemoteAction::Queryforsuccessorlist]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct QueryForSuccessorListReport {
+    pub did: Vec<Did>,
 }
 
 /// MessageType use to join chord ring, add did into fingers table.
@@ -145,6 +157,8 @@ pub enum Message {
     OperateVNode(VNodeOperation),
     SyncVNodeWithSuccessor(SyncVNodeWithSuccessor),
     CustomMessage(MaybeEncrypted<CustomMessage>),
+    QueryForSuccessorListSend(QueryForSuccessorListSend),
+    QueryForSuccessorListReport(QueryForSuccessorListReport),
 }
 
 impl std::fmt::Display for Message {

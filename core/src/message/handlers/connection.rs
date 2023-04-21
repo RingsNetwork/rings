@@ -1,5 +1,6 @@
 use std::str::FromStr;
 
+use async_recursion::async_recursion;
 use async_trait::async_trait;
 
 use crate::dht::Chord;
@@ -15,6 +16,8 @@ use crate::message::types::FindSuccessorReport;
 use crate::message::types::FindSuccessorSend;
 use crate::message::types::JoinDHT;
 use crate::message::types::Message;
+use crate::message::types::QueryForSuccessorListReport;
+use crate::message::types::QueryForSuccessorListSend;
 use crate::message::types::SyncVNodeWithSuccessor;
 use crate::message::FindSuccessorReportHandler;
 use crate::message::FindSuccessorThen;
@@ -27,6 +30,7 @@ use crate::transports::manager::TransportHandshake;
 use crate::transports::manager::TransportManager;
 use crate::types::ice_transport::IceTrickleScheme;
 
+#[async_recursion]
 async fn handle_join_dht(
     handler: &MessageHandler,
     act: PeerRingAction,
@@ -53,7 +57,46 @@ async fn handle_join_dht(
             }
             Ok(())
         }
+        PeerRingAction::RemoteAction(next, PeerRingRemoteAction::QueryForSuccessorList) => {
+            handler
+                .send_direct_message(
+                    Message::QueryForSuccessorListSend(QueryForSuccessorListSend { did: next }),
+                    next,
+                )
+                .await?;
+            Ok(())
+        }
+        PeerRingAction::MultiActions(acts) => {
+            for act in acts {
+                handle_join_dht(handler, act, ctx).await?;
+            }
+            Ok(())
+        }
         _ => unreachable!(),
+    }
+}
+
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl HandleMsg<QueryForSuccessorListSend> for MessageHandler {
+    async fn handle(
+        &self,
+        _ctx: &MessagePayload<Message>,
+        msg: &QueryForSuccessorListSend,
+    ) -> Result<()> {
+        unimplemented!()
+    }
+}
+
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl HandleMsg<QueryForSuccessorListReport> for MessageHandler {
+    async fn handle(
+        &self,
+        _ctx: &MessagePayload<Message>,
+        msg: &QueryForSuccessorListReport,
+    ) -> Result<()> {
+        unimplemented!()
     }
 }
 
