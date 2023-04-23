@@ -4,6 +4,7 @@ use wasm_bindgen_test::*;
 use crate::browser;
 use crate::browser::Peer;
 use crate::browser::TransportAndIce;
+use crate::prelude::rings_core::utils;
 use crate::prelude::rings_core::utils::js_value;
 use crate::prelude::wasm_bindgen::convert::FromWasmAbi;
 use crate::prelude::wasm_bindgen::JsValue;
@@ -30,7 +31,6 @@ pub fn generic_of_jsval<T: FromWasmAbi<Abi = u32>>(
     }
 }
 
-#[allow(dead_code)]
 async fn new_client() -> (browser::Client, String) {
     let key = SecretKey::random();
     let unsigned_info = browser::UnsignedInfo::new_with_signer(
@@ -97,7 +97,8 @@ async fn test_two_client_connect_and_list() {
     assert!(peers.len() == 1, "peers len should be 1");
     let peer1 = peers.get(0).unwrap();
     console_log!("wait for data channel open");
-    JsFuture::from(client1.wait_for_data_channel_open(peer1.address.clone(), None))
+    utils::js_utils::window_sleep(1000).await.unwrap();
+    JsFuture::from(client1.wait_for_connected(peer1.address.clone(), None))
         .await
         .unwrap();
     console_log!("get peer");

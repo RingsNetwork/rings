@@ -36,6 +36,7 @@ use crate::prelude::rings_core::prelude::web3::ethabi::Token;
 use crate::prelude::rings_core::transports::manager::TransportManager;
 use crate::prelude::rings_core::transports::Transport;
 use crate::prelude::rings_core::types::ice_transport::IceTransportInterface;
+use crate::prelude::rings_core::types::ice_transport::IceTrickleScheme;
 use crate::prelude::rings_core::utils::from_rtc_ice_connection_state;
 use crate::prelude::rings_core::utils::js_utils;
 use crate::prelude::rings_core::utils::js_value;
@@ -473,6 +474,30 @@ impl Client {
         })
     }
 
+    /// wait for transport connected
+    /// * address: peer's address
+    pub fn wait_for_connected(
+        &self,
+        address: String,
+        addr_type: Option<AddressType>,
+    ) -> js_sys::Promise {
+        let p = self.processor.clone();
+        future_to_promise(async move {
+            let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
+            let peer = p.get_peer(did).await.map_err(JsError::from)?;
+            log::debug!("wait_for_data_channel_connected start");
+            if peer.transport.is_connected().await {
+                return Ok(JsValue::null());
+            }
+            if let Err(e) = peer.transport.wait_for_connected().await {
+                log::warn!("wait_for_data_channel_connected failed: {}", e);
+            }
+            //.map_err(JsError::from)?;
+            log::debug!("wait_for_data_channel_connected done");
+            Ok(JsValue::null())
+        })
+    }
+
     /// wait for data channel open
     ///   * address: peer's address
     pub fn wait_for_data_channel_open(
@@ -485,6 +510,9 @@ impl Client {
             let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
             let peer = p.get_peer(did).await.map_err(JsError::from)?;
             log::debug!("wait for data channel open start");
+            if peer.transport.is_connected().await {
+                return Ok(JsValue::null());
+            }
             if let Err(e) = peer.transport.wait_for_data_channel_open().await {
                 log::warn!("wait_for_data_channel failed: {}", e);
             }

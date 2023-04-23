@@ -8,6 +8,6 @@ use crate::logging::browser::init_logging;
 wasm_bindgen_test_configure!(run_in_browser);
 
 pub fn setup_log() {
-    init_logging(tracing::Level::TRACE);
+    init_logging(tracing::Level::INFO);
     tracing::debug!("test")
 }
