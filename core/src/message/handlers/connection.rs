@@ -77,15 +77,25 @@ async fn handle_join_dht(
     }
 }
 
+/// QueryForSuccessorListSend is direct message
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<QueryForSuccessorListSend> for MessageHandler {
     async fn handle(
         &self,
-        _ctx: &MessagePayload<Message>,
-        msg: &QueryForSuccessorListSend,
+        ctx: &MessagePayload<Message>,
+        _msg: &QueryForSuccessorListSend,
     ) -> Result<()> {
-        unimplemented!()
+	let succs = self.dht.lock_successor()?;
+	self.send_report_message(
+	    ctx,
+	    Message::QueryForSuccessorListReport(
+		QueryForSuccessorListReport {
+		    did: succs.list()
+		}
+	    )
+	).await;
+	Ok(())
     }
 }
 
