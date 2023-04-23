@@ -93,11 +93,11 @@ async fn test_two_client_connect_and_list() {
     )
     .unwrap();
     create_connection(&client1, &client2).await;
-    _ = utils::js_utils::window_sleep(1000).await;
     let peers = get_peers(&client1).await;
     assert!(peers.len() == 1, "peers len should be 1");
     let peer1 = peers.get(0).unwrap();
     console_log!("wait for data channel open");
+    utils::js_utils::window_sleep(1000).await.unwrap();
     JsFuture::from(client1.wait_for_connected(peer1.address.clone(), None))
         .await
         .unwrap();

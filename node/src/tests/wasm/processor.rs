@@ -92,7 +92,6 @@ async fn create_connection(p1: &Processor, p2: &Processor) {
 
     console_log!("answer_offer");
     let (transport_2, answer) = p2.answer_offer(offer.to_string().as_str()).await.unwrap();
-    utils::js_utils::window_sleep(2000).await.unwrap();
     console_log!("accept_answer");
     let peer = p1
         .accept_answer(
@@ -101,8 +100,8 @@ async fn create_connection(p1: &Processor, p2: &Processor) {
         )
         .await
         .unwrap();
+    utils::js_utils::window_sleep(1000).await.unwrap();
     assert!(peer.transport.id.eq(&transport_1.id), "transport not same");
-    utils::js_utils::window_sleep(2000).await.unwrap();
     futures::try_join!(
         async {
             if transport_1.is_connected().await {
@@ -182,7 +181,6 @@ async fn test_processor_handshake_and_msg() {
         .unwrap();
     console_log!("send test_text5 done");
 
-    utils::js_utils::window_sleep(2000).await.unwrap();
     fluvio_wasm_timer::Delay::new(Duration::from_secs(4))
         .await
         .unwrap();
@@ -247,7 +245,6 @@ async fn test_processor_connect_with_did() {
     // p1 create connect with p3's address
     let peer3 = p1.connect_with_did(p3.did(), true).await.unwrap();
     console_log!("processor_p1_p3_conntected");
-    utils::js_utils::window_sleep(1000).await.unwrap();
     fluvio_wasm_timer::Delay::new(Duration::from_millis(1000))
         .await
         .unwrap();
