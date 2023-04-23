@@ -532,6 +532,10 @@ impl DefaultTransport {
     }
 
     pub async fn wait_for_data_channel_open(&self) -> Result<()> {
+        if self.is_disconnected().await {
+            return Err(Error::RTCPeerConnectionNotEstablish);
+        }
+
         match self.get_data_channel().await {
             Some(dc) => {
                 if dc.ready_state() == RTCDataChannelState::Open {

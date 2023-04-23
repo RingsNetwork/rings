@@ -587,6 +587,10 @@ impl IceTrickleScheme for WasmTransport {
 
 impl WasmTransport {
     pub async fn wait_for_data_channel_open(&self) -> Result<()> {
+        if self.is_disconnected().await {
+            return Err(Error::RTCPeerConnectionNotEstablish);
+        }
+
         let dc = self.get_data_channel().await;
         match dc {
             Some(dc) => {
