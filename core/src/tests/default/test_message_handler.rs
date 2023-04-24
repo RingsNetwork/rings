@@ -44,8 +44,8 @@ async fn test_handle_join() -> Result<()> {
     };
     assert!(swarm1
         .dht()
-        .lock_successor()?
-        .list()
+        .successors()
+        .list()?
         .contains(&key2.address().into()));
     tokio::fs::remove_dir_all("./tmp").await.ok();
     Ok(())
@@ -92,26 +92,26 @@ async fn test_handle_connect_node() -> Result<()> {
             println!("swarm2 key address: {:?}", swarm2.did());
             println!("swarm3 key address: {:?}", swarm3.did());
             {
-                let dht1_successor = dht1.lock_successor()?;
-                let dht2_successor = dht2.lock_successor()?;
-                let dht3_successor = dht3.lock_successor()?;
+                let dht1_successor = dht1.successors();
+                let dht2_successor = dht2.successors();
+                let dht3_successor = dht3.successors();
                 println!("dht1 successor: {:?}", dht1_successor);
                 println!("dht2 successor: {:?}", dht2_successor);
                 println!("dht3 successor: {:?}", dht3_successor);
 
                 assert!(
-                    dht1_successor.list().contains(
+                    dht1_successor.list()?.contains(
                         &key2.address().into()
                     ),
                     "Expect dht1 successor is key2, Found: {:?}",
                     dht1_successor.list()
                 );
                 assert!(
-                    dht2_successor.list().contains(
+                    dht2_successor.list()?.contains(
                         &key3.address().into()
                     ), "{:?}", dht2_successor.list());
                 assert!(
-                    dht3_successor.list().contains(
+                    dht3_successor.list()?.contains(
                         &key2.address().into()
                     ),
                     "dht3 successor is key2"
@@ -182,8 +182,8 @@ async fn test_handle_notify_predecessor() -> Result<()> {
             let transport_1_to_2 = swarm1.get_transport(swarm2.did()).unwrap();
             sleep(Duration::from_millis(1000)).await;
             transport_1_to_2.wait_for_data_channel_open().await.unwrap();
-            assert!(swarm1.dht().lock_successor()?.list().contains(&key2.address().into()));
-            assert!(swarm2.dht().lock_successor()?.list().contains(&key1.address().into()));
+            assert!(swarm1.dht().successors().list()?.contains(&key2.address().into()));
+            assert!(swarm2.dht().successors().list()?.contains(&key1.address().into()));
             assert_eq!(
                 transport_1_to_2.ice_connection_state().await,
                 Some(RTCIceConnectionState::Connected)
@@ -199,7 +199,7 @@ async fn test_handle_notify_predecessor() -> Result<()> {
                 .unwrap();
             sleep(Duration::from_millis(1000)).await;
             assert_eq!(*swarm2.dht().lock_predecessor()?, Some(key1.address().into()));
-            assert!(swarm1.dht().lock_successor()?.list().contains(&key2.address().into()));
+            assert!(swarm1.dht().successors().list()?.contains(&key2.address().into()));
             Ok::<(), Error>(())
         } => {}
     }
@@ -240,8 +240,8 @@ async fn test_handle_find_successor_increase() -> Result<()> {
             let transport_1_to_2 = swarm1.get_transport(swarm2.did()).unwrap();
             sleep(Duration::from_millis(1000)).await;
             transport_1_to_2.wait_for_data_channel_open().await.unwrap();
-            assert!(swarm1.dht().lock_successor()?.list().contains(&key2.address().into()), "{:?}", swarm1.dht().lock_successor()?.list());
-            assert!(swarm2.dht().lock_successor()?.list().contains(&key1.address().into()));
+            assert!(swarm1.dht().successors().list()?.contains(&key2.address().into()), "{:?}", swarm1.dht().successors().list()?);
+            assert!(swarm2.dht().successors().list()?.contains(&key1.address().into()));
             assert_eq!(
                 transport_1_to_2.ice_connection_state().await,
                 Some(RTCIceConnectionState::Connected)
@@ -257,7 +257,7 @@ async fn test_handle_find_successor_increase() -> Result<()> {
                 .unwrap();
             sleep(Duration::from_millis(1000)).await;
             assert_eq!(*swarm2.dht().lock_predecessor()?, Some(key1.address().into()));
-            assert!(swarm1.dht().lock_successor()?.list().contains(&key2.address().into()));
+            assert!(swarm1.dht().successors().list()?.contains(&key2.address().into()));
 
             println!(
                 "swarm1: {:?}, swarm2: {:?}",
@@ -276,8 +276,8 @@ async fn test_handle_find_successor_increase() -> Result<()> {
                 .await
                 .unwrap();
             sleep(Duration::from_millis(1000)).await;
-            assert!(swarm2.dht().lock_successor()?.list().contains(&key1.address().into()));
-            assert!(swarm1.dht().lock_successor()?.list().contains(&key2.address().into()));
+            assert!(swarm2.dht().successors().list()?.contains(&key1.address().into()));
+            assert!(swarm1.dht().successors().list()?.contains(&key2.address().into()));
             Ok::<(), Error>(())
         } => {}
     }
@@ -319,8 +319,8 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
             let transport_1_to_2 = swarm1.get_transport(swarm2.did()).unwrap();
             sleep(Duration::from_millis(1000)).await;
             transport_1_to_2.wait_for_data_channel_open().await.unwrap();
-            assert!(swarm1.dht().lock_successor()?.list().contains(&key2.address().into()));
-            assert!(swarm2.dht().lock_successor()?.list().contains(&key1.address().into()));
+            assert!(swarm1.dht().successors().list()?.contains(&key2.address().into()));
+            assert!(swarm2.dht().successors().list()?.contains(&key1.address().into()));
             assert!(swarm1.dht()
                 .lock_finger()?
                 .contains(Some(key2.address().into())));
@@ -342,7 +342,7 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
                 .unwrap();
             sleep(Duration::from_millis(1000)).await;
             assert_eq!(*swarm2.dht().lock_predecessor()?, Some(key1.address().into()));
-            assert!(swarm1.dht().lock_successor()?.list().contains(&key2.address().into()));
+            assert!(swarm1.dht().successors().list()?.contains(&key2.address().into()));
             println!(
                 "swarm1: {:?}, swarm2: {:?}",
                 swarm1.did(),
@@ -360,10 +360,10 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
                 .await
                 .unwrap();
             sleep(Duration::from_millis(1000)).await;
-            let dht1_successor = swarm1.dht().lock_successor()?.clone();
-            let dht2_successor = swarm2.dht().lock_successor()?.clone();
-            assert!(dht2_successor.list().contains(&key1.address().into()));
-            assert!(dht1_successor.list().contains(&key2.address().into()));
+            let dht1_successor = swarm1.dht().successors();
+            let dht2_successor = swarm2.dht().successors();
+            assert!(dht2_successor.list()?.contains(&key1.address().into()));
+            assert!(dht1_successor.list()?.contains(&key2.address().into()));
             Ok::<(), Error>(())
         } => {}
     };
@@ -412,8 +412,8 @@ async fn test_handle_storage() -> Result<()> {
              transport_1_to_2.wait_for_data_channel_open().await.unwrap();
              // dht1's successor is dht2
              // dht2's successor is dht1
-             assert!(swarm1.dht().lock_successor()?.list().contains(&key2.address().into()));
-             assert!(swarm2.dht().lock_successor()?.list().contains(&key1.address().into()));
+             assert!(swarm1.dht().successors().list()?.contains(&key2.address().into()));
+             assert!(swarm2.dht().successors().list()?.contains(&key1.address().into()));
              assert_eq!(
                  transport_1_to_2.ice_connection_state().await,
                  Some(RTCIceConnectionState::Connected)
@@ -429,7 +429,7 @@ async fn test_handle_storage() -> Result<()> {
                  .unwrap();
              sleep(Duration::from_millis(1000)).await;
              assert_eq!(*swarm2.dht().lock_predecessor()?, Some(key1.address().into()));
-             assert!(swarm1.dht().lock_successor()?.list().contains(&key2.address().into()));
+             assert!(swarm1.dht().successors().list()?.contains(&key2.address().into()));
 
              assert!(swarm2.dht().storage.count().await.unwrap() == 0);
              let message = String::from("this is a test string");

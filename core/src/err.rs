@@ -139,6 +139,12 @@ pub enum Error {
     #[error("PeerRing findsuccessor error, {0}")]
     PeerRingFindSuccessor(String),
 
+    #[error("Failed on read successors")]
+    FailedToReadSuccessors,
+
+    #[error("Failed on write successors")]
+    FailedToWriteSuccessors,
+
     #[error("PeerRing cannot find closest preceding node")]
     PeerRingNotFindClosestNode,
 

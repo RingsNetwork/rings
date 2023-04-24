@@ -64,8 +64,8 @@ impl Stabilization {
 
     pub async fn notify_predecessor(&self) -> Result<()> {
         let (successor_min, successor_list) = {
-            let successor = self.chord.lock_successor()?;
-            (successor.min(), successor.list())
+            let successor = self.chord.successors();
+            (successor.min()?, successor.list()?)
         };
 
         let msg = Message::NotifyPredecessorSend(NotifyPredecessorSend {

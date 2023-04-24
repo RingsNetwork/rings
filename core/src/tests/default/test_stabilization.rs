@@ -80,13 +80,13 @@ async fn test_stabilization_once() -> Result<()> {
             let transport_1_to_2 = swarm1.get_transport(swarm2.did()).unwrap();
             sleep(Duration::from_millis(1000)).await;
             transport_1_to_2.wait_for_data_channel_open().await.unwrap();
-            assert!(swarm1.dht().lock_successor()?.list().contains(&key2.address().into()));
-            assert!(swarm2.dht().lock_successor()?.list().contains(&key1.address().into()));
+            assert!(swarm1.dht().successors().list()?.contains(&key2.address().into()));
+            assert!(swarm2.dht().successors().list()?.contains(&key1.address().into()));
             let stabilization = Stabilization::new(Arc::clone(&swarm1), 5usize);
             let _ = stabilization.stabilize().await;
             sleep(Duration::from_millis(10000)).await;
             assert_eq!(*swarm2.dht().lock_predecessor()?, Some(key1.address().into()));
-            assert!(swarm1.dht().lock_successor()?.list().contains(&key2.address().into()));
+            assert!(swarm1.dht().successors().list()?.contains(&key2.address().into()));
 
             Ok::<(), Error>(())
         } => {}
@@ -134,8 +134,8 @@ async fn test_stabilization() -> Result<()> {
             let transport_1_to_2 = swarm1.get_transport(swarm2.did()).unwrap();
             sleep(Duration::from_millis(1000)).await;
             transport_1_to_2.wait_for_data_channel_open().await.unwrap();
-            assert!(swarm1.dht().lock_successor()?.list().contains(&key2.address().into()));
-            assert!(swarm2.dht().lock_successor()?.list().contains(&key1.address().into()));
+            assert!(swarm1.dht().successors().list()?.contains(&key2.address().into()));
+            assert!(swarm2.dht().successors().list()?.contains(&key1.address().into()));
             sleep(Duration::from_millis(10000)).await;
             assert_eq!(*swarm2.dht().lock_predecessor()?, Some(key1.address().into()));
             assert_eq!(*swarm1.dht().lock_predecessor()?, Some(key2.address().into()));

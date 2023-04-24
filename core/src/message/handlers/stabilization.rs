@@ -56,7 +56,7 @@ impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
             self.swarm.connect(msg.did).await?;
         } else {
             {
-                self.dht.lock_successor()?.update(msg.did)
+                self.dht.successors().update(msg.did)?
             }
             if let Ok(PeerRingAction::RemoteAction(
                 next,
@@ -160,9 +160,9 @@ mod test {
         assert_no_more_msg(&node1, &node2, &node3).await;
 
         println!("=== Check state before stabilization ===");
-        assert_eq!(dht1.lock_successor()?.list(), vec![did2]);
-        assert_eq!(dht2.lock_successor()?.list(), vec![did3, did1]);
-        assert_eq!(dht3.lock_successor()?.list(), vec![did2]);
+        assert_eq!(dht1.successors().list()?, vec![did2]);
+        assert_eq!(dht2.successors().list()?, vec![did3, did1]);
+        assert_eq!(dht3.successors().list()?, vec![did2]);
         assert!(dht1.lock_predecessor()?.is_none());
         assert!(dht2.lock_predecessor()?.is_none());
         assert!(dht3.lock_predecessor()?.is_none());
@@ -243,9 +243,9 @@ mod test {
         // node1's pre is node2, node1's successor is node2
         // node2's pre is node1, node2's successor is node3
         // node3's pre is node2, node3's successor is node1
-        assert_eq!(dht1.lock_successor()?.list(), vec![did2, did3]);
-        assert_eq!(dht2.lock_successor()?.list(), vec![did3, did1]);
-        assert_eq!(dht3.lock_successor()?.list(), vec![did1, did2]);
+        assert_eq!(dht1.successors().list()?, vec![did2, did3]);
+        assert_eq!(dht2.successors().list()?, vec![did3, did1]);
+        assert_eq!(dht3.successors().list()?, vec![did1, did2]);
         assert_eq!(*dht1.lock_predecessor()?, Some(did2));
         assert_eq!(*dht2.lock_predecessor()?, Some(did1));
         assert_eq!(*dht3.lock_predecessor()?, Some(did2));
@@ -348,9 +348,9 @@ mod test {
         // node1's pre is node3, node1's successor is node2
         // node2's pre is node1, node2's successor is node3
         // node3's pre is node2, node3's successor is node1
-        assert_eq!(dht1.lock_successor()?.list(), vec![did2, did3]);
-        assert_eq!(dht2.lock_successor()?.list(), vec![did3, did1]);
-        assert_eq!(dht3.lock_successor()?.list(), vec![did1, did2]);
+        assert_eq!(dht1.successors().list()?, vec![did2, did3]);
+        assert_eq!(dht2.successors().list()?, vec![did3, did1]);
+        assert_eq!(dht3.successors().list()?, vec![did1, did2]);
         assert_eq!(*dht1.lock_predecessor()?, Some(did3));
         assert_eq!(*dht2.lock_predecessor()?, Some(did1));
         assert_eq!(*dht3.lock_predecessor()?, Some(did2));
@@ -386,9 +386,9 @@ mod test {
         assert_no_more_msg(&node1, &node2, &node3).await;
 
         println!("=== Check state before stabilization ===");
-        assert_eq!(dht1.lock_successor()?.list(), vec![did2]);
-        assert_eq!(dht2.lock_successor()?.list(), vec![did1, did3]);
-        assert_eq!(dht3.lock_successor()?.list(), vec![did2]);
+        assert_eq!(dht1.successors().list()?, vec![did2]);
+        assert_eq!(dht2.successors().list()?, vec![did1, did3]);
+        assert_eq!(dht3.successors().list()?, vec![did2]);
         assert!(dht1.lock_predecessor()?.is_none());
         assert!(dht2.lock_predecessor()?.is_none());
         assert!(dht3.lock_predecessor()?.is_none());
@@ -468,9 +468,9 @@ mod test {
         //   |-----------------|
         // node1's pre is node2, node1's successor is node2
         // node2's pre is node3, node2's successor is node1
-        assert_eq!(dht1.lock_successor()?.list(), vec![did3, did2]);
-        assert_eq!(dht2.lock_successor()?.list(), vec![did1, did3]);
-        assert_eq!(dht3.lock_successor()?.list(), vec![did2, did1]);
+        assert_eq!(dht1.successors().list()?, vec![did3, did2]);
+        assert_eq!(dht2.successors().list()?, vec![did1, did3]);
+        assert_eq!(dht3.successors().list()?, vec![did2, did1]);
         assert_eq!(*dht1.lock_predecessor()?, Some(did2));
         assert_eq!(*dht2.lock_predecessor()?, Some(did3));
         assert_eq!(*dht3.lock_predecessor()?, Some(did2));
@@ -495,9 +495,9 @@ mod test {
         // node1's pre is node2, node1's successor is node3
         // node2's pre is node3, node2's successor is node1
         // node3's pre is none1, node3's successor is node2
-        assert_eq!(dht1.lock_successor()?.list(), vec![did3, did2]);
-        assert_eq!(dht2.lock_successor()?.list(), vec![did1, did3]);
-        assert_eq!(dht3.lock_successor()?.list(), vec![did2, did1]);
+        assert_eq!(dht1.successors().list()?, vec![did3, did2]);
+        assert_eq!(dht2.successors().list()?, vec![did1, did3]);
+        assert_eq!(dht3.successors().list()?, vec![did2, did1]);
         assert_eq!(*dht1.lock_predecessor()?, Some(did2));
         assert_eq!(*dht2.lock_predecessor()?, Some(did3));
         assert_eq!(*dht3.lock_predecessor()?, Some(did1));

@@ -77,8 +77,8 @@ impl DHTInspect {
     pub fn inspect(dht: &PeerRing) -> Self {
         let did = dht.did.to_string();
         let successors = {
-            dht.lock_successor()
-                .map(|ss| ss.list())
+            dht.successors()
+                .list()
                 .unwrap_or_default()
                 .into_iter()
                 .map(|s| s.to_string())
