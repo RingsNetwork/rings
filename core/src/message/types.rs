@@ -65,7 +65,7 @@ pub struct QueryForSuccessorListSend {
 /// MessageType for handle [RemoteAction::Queryforsuccessorlist]
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct QueryForSuccessorListReport {
-    pub did: Vec<Did>,
+    pub successors: Vec<Did>,
 }
 
 /// MessageType use to join chord ring, add did into fingers table.

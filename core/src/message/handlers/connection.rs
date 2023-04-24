@@ -84,16 +84,18 @@ impl HandleMsg<QueryForSuccessorListSend> for MessageHandler {
     async fn handle(
         &self,
         ctx: &MessagePayload<Message>,
-        _msg: &QueryForSuccessorListSend,
+        msg: &QueryForSuccessorListSend,
     ) -> Result<()> {
         let succs = self.dht.successors();
-        self.send_report_message(
-            ctx,
-            Message::QueryForSuccessorListReport(QueryForSuccessorListReport {
-                did: succs.list()?,
-            }),
-        )
-        .await?;
+	if msg.did == self.dht.did {
+	    self.send_report_message(
+		ctx,
+		Message::QueryForSuccessorListReport(QueryForSuccessorListReport {
+                    successors: succs.list()?,
+		}),
+            )
+		.await?;
+	}
         Ok(())
     }
 }
@@ -104,9 +106,11 @@ impl HandleMsg<QueryForSuccessorListReport> for MessageHandler {
     async fn handle(
         &self,
         _ctx: &MessagePayload<Message>,
-        _msg: &QueryForSuccessorListReport,
+        msg: &QueryForSuccessorListReport,
     ) -> Result<()> {
-        unimplemented!()
+	let succ = self.dht.successors();
+	succ.extend(&msg.successors)?;
+	Ok(())
     }
 }
 
