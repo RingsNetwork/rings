@@ -80,8 +80,19 @@ pub trait ChordStorage<Action>: Chord<Action> {
 }
 
 /// Chord online correction that inspired by Pamela Zave's work.
+/// Ref: [How to Make Chord Correct](https://arxiv.org/pdf/1502.06461.pdf)
 ///
-/// TODO: Comment out why do we need those operations. What problems do they solve? And how?
+/// Correct Chord reveals two fact
+/// 1). Chord must be initialized with a ring containing a minimum of r +1 nodes,
+/// where r is the length of each node’s list of successors. In fact, to be proven correct,
+/// a Chord network must maintain a “stable base” of r + 1 nodes that remain members of
+/// the network throughout its lifetime.
+///
+/// 2). The Chord Paper defined the maintenance and use of ﬁnger tables,
+/// which improve lookup speed by providing pointers that cross the ring like chords of a circle.
+/// Because ﬁnger tables are an optimization and they are built from successors and predecessors, correctness does not depend on them.
+///
+/// Based on above facts, Correctchord only focus on handle join & stablization oepration of Chord
 ///
 /// This trait defines three operations which are referred in the paper:
 /// - Join Operation
@@ -95,14 +106,24 @@ pub trait ChordStorage<Action>: Chord<Action> {
 /// Some methods return an `Action`. And the reason is same as [Chord].
 pub trait CorrectChord<Action>: Chord<Action> {
     /// Join Operation in the paper.
-    /// Zave's work differs from the original Chord paper in that it requires
-    /// a newly joined node to synchronize its successors from remote nodes.
+    /// First, the node asks the known node to look up the node’s did and get its proper successor,
+    /// storing the value as new successor.
+    /// The node then queries new successor for its successor list (same as the original Chord)
+    /// Finally the node constructs its own successor list by concatenating new successor and
+    /// new successor ’s successor list, with the last element of the list trimmed off to produce a result of fix length.
     fn join_then_sync(&self, did: Did) -> Result<Action>;
     /// Rectify Operation in the paper.
+    /// A node rectifies when it is notified.
     fn rectify(&self, pred: Did) -> Result<()>;
     /// Steps before Stabilize Operation.
+    /// When a node fails or leaves, it ceases to stabilize, notify, or respond to queries from other nodes. When a node rejoins, it re-initializes its Chord variables
+    /// The node (self) queries its successor for its successor’s predecessor and successor list
     fn pre_stabilize(&self) -> Result<Action>;
     /// Stabilize operation in the paper.
+    /// The node first updates its successor list with its successor’s list.
+    /// It then checks to see if the new pointer it has learned, its successor’s predecessor, is an improved successor.
+    /// If so, and if new successor is live, it adopts newSucc as its new successor. Thus the stabilize operation requires one or two queries for each traversal of the outer loop.
+    /// Whether or not there is a live improved successor, the node notifies its successor of its own identity.
     fn stabilize(&self, succ: TopoInfo) -> Result<Action>;
     /// A help function to get the topological info about the chord.
     fn topo_info(&self) -> Result<TopoInfo>;

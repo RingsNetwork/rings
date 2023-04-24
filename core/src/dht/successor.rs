@@ -149,7 +149,7 @@ mod tests {
         succ.update(dids[3])?;
         assert_eq!(succ.list()?, dids[1..4]);
 
-        succ.remove(dids[2]);
+        succ.remove(dids[2])?;
         assert_eq!(succ.list()?, vec![dids[1], dids[3]]);
         Ok(())
     }
