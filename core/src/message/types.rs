@@ -5,6 +5,7 @@ use serde::Serialize;
 use crate::dht::vnode::VNodeOperation;
 use crate::dht::vnode::VirtualNode;
 use crate::dht::Did;
+use crate::dht::TopoInfo;
 use crate::ecc::PublicKey;
 use crate::ecc::SecretKey;
 use crate::err::Error;
@@ -58,14 +59,14 @@ pub struct NotifyPredecessorReport {
 
 /// MessageType for handle [RemoteAction::Queryforsuccessorlist]
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct QueryForSuccessorListSend {
+pub struct QueryForTopoInfoSend {
     pub did: Did,
 }
 
 /// MessageType for handle [RemoteAction::Queryforsuccessorlist]
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct QueryForSuccessorListReport {
-    pub successors: Vec<Did>,
+pub struct QueryForTopoInfoReport {
+    pub info: TopoInfo,
 }
 
 /// MessageType use to join chord ring, add did into fingers table.

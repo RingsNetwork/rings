@@ -16,8 +16,8 @@ use crate::message::types::FindSuccessorReport;
 use crate::message::types::FindSuccessorSend;
 use crate::message::types::JoinDHT;
 use crate::message::types::Message;
-use crate::message::types::QueryForSuccessorListReport;
-use crate::message::types::QueryForSuccessorListSend;
+use crate::message::types::QueryForTopoInfoReport;
+use crate::message::types::QueryForTopoInfoSend;
 use crate::message::types::SyncVNodeWithSuccessor;
 use crate::message::FindSuccessorReportHandler;
 use crate::message::FindSuccessorThen;
@@ -61,7 +61,7 @@ async fn handle_join_dht(
         PeerRingAction::RemoteAction(next, PeerRingRemoteAction::QueryForSuccessorList) => {
             handler
                 .send_direct_message(
-                    Message::QueryForSuccessorListSend(QueryForSuccessorListSend { did: next }),
+                    Message::QueryForSuccessorListSend(QueryForTopoInfoSend { did: next }),
                     next,
                 )
                 .await?;
@@ -80,18 +80,17 @@ async fn handle_join_dht(
 /// QueryForSuccessorListSend is direct message
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-impl HandleMsg<QueryForSuccessorListSend> for MessageHandler {
+impl HandleMsg<QueryForTopoInfoSend> for MessageHandler {
     async fn handle(
         &self,
         ctx: &MessagePayload<Message>,
-        msg: &QueryForSuccessorListSend,
+        msg: &QueryForTopoInfoSend,
     ) -> Result<()> {
-        let succs = self.dht.successors();
         if msg.did == self.dht.did {
             self.send_report_message(
                 ctx,
-                Message::QueryForSuccessorListReport(QueryForSuccessorListReport {
-                    successors: succs.list()?,
+                Message::QueryForSuccessorListReport(QueryForTopoInfoReport {
+                    info: self.dht.into(),
                 }),
             )
             .await?;
@@ -102,14 +101,14 @@ impl HandleMsg<QueryForSuccessorListSend> for MessageHandler {
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-impl HandleMsg<QueryForSuccessorListReport> for MessageHandler {
+impl HandleMsg<QueryForTopoInfoReport> for MessageHandler {
     async fn handle(
         &self,
         _ctx: &MessagePayload<Message>,
-        msg: &QueryForSuccessorListReport,
+        msg: &QueryForTopoInfoReport,
     ) -> Result<()> {
         let succ = self.dht.successors();
-        succ.extend(&msg.successors)?;
+        succ.extend(&msg.info.successors)?;
         Ok(())
     }
 }
