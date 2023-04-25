@@ -23,7 +23,7 @@ use crate::jsonrpc_client::SimpleClient;
 use crate::measure::PeriodicMeasure;
 use crate::prelude::rings_core::dht::Did;
 use crate::prelude::rings_core::dht::Stabilization;
-use crate::prelude::rings_core::dht::TStabilize;
+use crate::prelude::rings_core::dht::TStabilizeWait;
 use crate::prelude::rings_core::ecc::PublicKey;
 use crate::prelude::rings_core::ecc::SecretKey;
 use crate::prelude::rings_core::inspect::SwarmInspect;

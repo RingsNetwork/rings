@@ -12,12 +12,15 @@ mod types;
 pub use chord::PeerRing;
 pub use chord::PeerRingAction;
 pub use chord::RemoteAction as PeerRingRemoteAction;
+pub use chord::TopoInfo;
 pub use finger::FingerTable;
 pub use types::Chord;
 pub use types::ChordStorage;
 mod stabilization;
 pub use stabilization::Stabilization;
-pub use stabilization::TStabilize;
+pub use stabilization::TStabilizeExecute;
+pub use stabilization::TStabilizeWait;
+
 /// Implement Subring with VNode
 pub mod subring;
 /// VNode is a special node that only has virtual address

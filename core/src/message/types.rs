@@ -158,8 +158,8 @@ pub enum Message {
     OperateVNode(VNodeOperation),
     SyncVNodeWithSuccessor(SyncVNodeWithSuccessor),
     CustomMessage(MaybeEncrypted<CustomMessage>),
-    QueryForSuccessorListSend(QueryForSuccessorListSend),
-    QueryForSuccessorListReport(QueryForSuccessorListReport),
+    QueryForTopoInfoSend(QueryForTopoInfoSend),
+    QueryForTopoInfoReport(QueryForTopoInfoReport),
 }
 
 impl std::fmt::Display for Message {

@@ -1,3 +1,4 @@
+use std::ops::Deref;
 use std::str::FromStr;
 
 use async_recursion::async_recursion;
@@ -7,6 +8,7 @@ use crate::dht::Chord;
 use crate::dht::ChordStorage;
 use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
+use crate::dht::TopoInfo;
 use crate::err::Error;
 use crate::err::Result;
 use crate::message::types::AlreadyConnected;
@@ -61,7 +63,7 @@ async fn handle_join_dht(
         PeerRingAction::RemoteAction(next, PeerRingRemoteAction::QueryForSuccessorList) => {
             handler
                 .send_direct_message(
-                    Message::QueryForSuccessorListSend(QueryForTopoInfoSend { did: next }),
+                    Message::QueryForTopoInfoSend(QueryForTopoInfoSend { did: next }),
                     next,
                 )
                 .await?;
@@ -77,7 +79,7 @@ async fn handle_join_dht(
     }
 }
 
-/// QueryForSuccessorListSend is direct message
+/// QueryForTopoInfoSend is direct message
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<QueryForTopoInfoSend> for MessageHandler {
@@ -86,12 +88,11 @@ impl HandleMsg<QueryForTopoInfoSend> for MessageHandler {
         ctx: &MessagePayload<Message>,
         msg: &QueryForTopoInfoSend,
     ) -> Result<()> {
+        let info: TopoInfo = TopoInfo::try_from(self.dht.deref())?;
         if msg.did == self.dht.did {
             self.send_report_message(
                 ctx,
-                Message::QueryForSuccessorListReport(QueryForTopoInfoReport {
-                    info: self.dht.into(),
-                }),
+                Message::QueryForTopoInfoReport(QueryForTopoInfoReport { info }),
             )
             .await?;
         }

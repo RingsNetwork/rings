@@ -29,10 +29,17 @@ pub struct Stabilization {
     timeout: usize,
 }
 
+/// A trait with `stabilize` method.
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+pub trait TStabilizeExecute {
+    async fn stabilize(&self) -> Result<()>;
+}
+
 /// A trait with `wait` method.
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-pub trait TStabilize {
+pub trait TStabilizeWait: TStabilizeExecute {
     async fn wait(self: Arc<Self>);
 }
 
@@ -122,8 +129,12 @@ impl Stabilization {
             }
         }
     }
+}
 
-    pub async fn stabilize(&self) -> Result<()> {
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl TStabilizeExecute for Stabilization {
+    async fn stabilize(&self) -> Result<()> {
         tracing::debug!("STABILIZATION notify_predecessor start");
         if let Err(e) = self.notify_predecessor().await {
             tracing::error!("[stabilize] Failed on notify predecessor {:?}", e);
@@ -155,10 +166,11 @@ mod stabilizer {
     use futures_timer::Delay;
 
     use super::Stabilization;
-    use super::TStabilize;
+    use super::TStabilizeExecute;
+    use super::TStabilizeWait;
 
     #[async_trait]
-    impl TStabilize for Stabilization {
+    impl TStabilizeWait for Stabilization {
         async fn wait(self: Arc<Self>) {
             loop {
                 let timeout = Delay::new(Duration::from_secs(self.timeout as u64)).fuse();
@@ -182,11 +194,12 @@ mod stabilizer {
     use wasm_bindgen_futures::spawn_local;
 
     use super::Stabilization;
-    use super::TStabilize;
+    use super::TStabilizeExecute;
+    use super::TStabilizeWait;
     use crate::poll;
 
     #[async_trait(?Send)]
-    impl TStabilize for Stabilization {
+    impl TStabilizeWait for Stabilization {
         async fn wait(self: Arc<Self>) {
             let caller = Arc::clone(&self);
             let func = move || {

@@ -6,6 +6,8 @@ use std::sync::MutexGuard;
 
 use async_trait::async_trait;
 use num_bigint::BigUint;
+use serde::Deserialize;
+use serde::Serialize;
 
 use super::did::BiasId;
 use super::successor::SuccessorSeq;
@@ -98,10 +100,12 @@ pub enum RemoteAction {
 }
 
 /// Information about successor and predecessor
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
 pub struct TopoInfo {
-    successors: Vec<Did>,
-    predecessor: Option<Did>,
+    /// Successor list
+    pub successors: Vec<Did>,
+    /// Predecessor
+    pub predecessor: Option<Did>,
 }
 
 impl TryFrom<&PeerRing> for TopoInfo {

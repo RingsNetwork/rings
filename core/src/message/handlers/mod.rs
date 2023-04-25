@@ -181,8 +181,8 @@ impl MessageHandler {
             Message::SyncVNodeWithSuccessor(ref msg) => self.handle(payload, msg).await,
             Message::OperateVNode(ref msg) => self.handle(payload, msg).await,
             Message::CustomMessage(ref msg) => self.handle(payload, msg).await,
-            Message::QueryForSuccessorListSend(ref msg) => self.handle(payload, msg).await,
-            Message::QueryForSuccessorListReport(ref msg) => self.handle(payload, msg).await,
+            Message::QueryForTopoInfoSend(ref msg) => self.handle(payload, msg).await,
+            Message::QueryForTopoInfoReport(ref msg) => self.handle(payload, msg).await,
             Message::MultiCall(ref msg) => {
                 for message in msg.messages.iter().cloned() {
                     let payload = MessagePayload::new(
