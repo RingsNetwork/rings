@@ -6,8 +6,10 @@ use async_trait::async_trait;
 
 use crate::dht::Chord;
 use crate::dht::ChordStorage;
+use crate::dht::CorrectChord;
 use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
+use crate::dht::SuccessorReader;
 use crate::dht::TopoInfo;
 use crate::err::Error;
 use crate::err::Result;
@@ -31,6 +33,34 @@ use crate::message::PayloadSender;
 use crate::transports::manager::TransportHandshake;
 use crate::transports::manager::TransportManager;
 use crate::types::ice_transport::IceTrickleScheme;
+
+#[cfg_attr(feature = "wasm", async_recursion(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_recursion)]
+pub async fn handle_update_successor(
+    handler: &MessageHandler,
+    act: PeerRingAction,
+    ctx: &MessagePayload<Message>,
+) -> Result<()> {
+    match act {
+        PeerRingAction::None => Ok(()),
+        PeerRingAction::RemoteAction(next, PeerRingRemoteAction::QueryForSuccessorList) => {
+            handler
+                .send_direct_message(
+                    Message::QueryForTopoInfoSend(QueryForTopoInfoSend { did: next }),
+                    next,
+                )
+                .await?;
+            Ok(())
+        }
+        PeerRingAction::MultiActions(acts) => {
+            for act in acts {
+                handle_update_successor(handler, act, ctx).await?;
+            }
+            Ok(())
+        }
+        _ => unreachable!(),
+    }
+}
 
 #[cfg_attr(feature = "wasm", async_recursion(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_recursion)]
@@ -105,11 +135,11 @@ impl HandleMsg<QueryForTopoInfoSend> for MessageHandler {
 impl HandleMsg<QueryForTopoInfoReport> for MessageHandler {
     async fn handle(
         &self,
-        _ctx: &MessagePayload<Message>,
+        ctx: &MessagePayload<Message>,
         msg: &QueryForTopoInfoReport,
     ) -> Result<()> {
-        let succ = self.dht.successors();
-        succ.extend(&msg.info.successors)?;
+        let act = self.dht.extend_successor(&msg.info.successors)?;
+        handle_update_successor(self, act, ctx).await?;
         Ok(())
     }
 }
@@ -283,7 +313,8 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
                 }
             }
             FindSuccessorReportHandler::SyncStorage => {
-                self.dht.successors().update(msg.did)?;
+                let updated_act = self.dht.update_successor(msg.did)?;
+                handle_update_successor(self, updated_act, ctx).await?;
                 if let Ok(PeerRingAction::RemoteAction(
                     next,
                     PeerRingRemoteAction::SyncVNodeWithSuccessor(data),

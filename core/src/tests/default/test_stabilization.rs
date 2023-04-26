@@ -4,6 +4,7 @@ use std::time::Duration;
 use tokio::time::sleep;
 
 use super::prepare_node;
+use crate::dht::successor::SuccessorReader;
 use crate::dht::Chord;
 use crate::dht::Stabilization;
 use crate::dht::TStabilizeExecute;

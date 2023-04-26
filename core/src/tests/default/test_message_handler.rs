@@ -7,6 +7,7 @@ use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 
 use super::prepare_node;
 use crate::dht::vnode::VirtualNode;
+use crate::dht::SuccessorReader;
 use crate::ecc::tests::gen_ordered_keys;
 use crate::ecc::SecretKey;
 use crate::err::Error;

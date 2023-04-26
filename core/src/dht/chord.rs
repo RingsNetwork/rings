@@ -18,6 +18,8 @@ use super::vnode::VNodeOperation;
 use super::vnode::VirtualNode;
 use super::FingerTable;
 use crate::dht::Did;
+use crate::dht::SuccessorReader;
+use crate::dht::SuccessorWriter;
 use crate::err::Error;
 use crate::err::Result;
 use crate::storage::MemStorage;
@@ -460,6 +462,36 @@ impl ChordStorage<PeerRingAction> for PeerRing {
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl CorrectChord<PeerRingAction> for PeerRing {
+    /// When Chord have a new successor, ask the new successor for successor list
+    fn update_successor(&self, did: Did) -> Result<PeerRingAction> {
+        if let Some(new_succ) = self.successors().update(did)? {
+            Ok(PeerRingAction::RemoteAction(
+                new_succ,
+                RemoteAction::QueryForSuccessorList,
+            ))
+        } else {
+            Ok(PeerRingAction::None)
+        }
+    }
+
+    fn extend_successor(&self, did: &Vec<Did>) -> Result<PeerRingAction> {
+        let new_succs = self.successors().extend(did)?;
+        if new_succs.len() > 0 {
+            let acts: Vec<PeerRingAction> = new_succs
+                .iter()
+                .map(|new_succ| {
+                    PeerRingAction::RemoteAction(
+                        new_succ.clone(),
+                        RemoteAction::QueryForSuccessorList,
+                    )
+                })
+                .collect();
+            Ok(PeerRingAction::MultiActions(acts))
+        } else {
+            Ok(PeerRingAction::None)
+        }
+    }
+
     /// Join Operation in the paper.
     /// Zave's work differs from the original Chord paper in that it requires
     /// a newly joined node to synchronize its successors from remote nodes.

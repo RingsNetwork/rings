@@ -4,6 +4,7 @@ use serde::Serialize;
 use crate::dht::vnode::VirtualNode;
 use crate::dht::Did;
 use crate::dht::PeerRing;
+use crate::dht::SuccessorReader;
 use crate::storage::MemStorage;
 use crate::storage::PersistenceStorage;
 use crate::storage::PersistenceStorageReadAndWrite;

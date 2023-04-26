@@ -7,6 +7,7 @@ use crate::dht::Chord;
 use crate::dht::PeerRing;
 use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
+use crate::dht::SuccessorReader;
 use crate::err::Result;
 use crate::message::FindSuccessorReportHandler;
 use crate::message::FindSuccessorSend;

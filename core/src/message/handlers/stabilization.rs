@@ -1,9 +1,12 @@
 use async_trait::async_trait;
 
+use super::connection::handle_update_successor;
 use crate::dht::Chord;
 use crate::dht::ChordStorage;
+use crate::dht::CorrectChord;
 use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
+use crate::dht::SuccessorReader;
 use crate::err::Result;
 use crate::message::types::Message;
 use crate::message::types::NotifyPredecessorReport;
@@ -45,7 +48,7 @@ impl HandleMsg<NotifyPredecessorSend> for MessageHandler {
 impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
     async fn handle(
         &self,
-        _ctx: &MessagePayload<Message>,
+        ctx: &MessagePayload<Message>,
         msg: &NotifyPredecessorReport,
     ) -> Result<()> {
         // if successor: predecessor is between (id, successor]
@@ -56,7 +59,8 @@ impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
             self.swarm.connect(msg.did).await?;
         } else {
             {
-                self.dht.successors().update(msg.did)?
+                let act = self.dht.update_successor(msg.did)?;
+                handle_update_successor(self, act, ctx).await?;
             }
             if let Ok(PeerRingAction::RemoteAction(
                 next,

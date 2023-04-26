@@ -144,4 +144,9 @@ pub trait CorrectChord<Action>: Chord<Action> {
     /// A helper function to get the topological
     /// info about the chord.
     fn topo_info(&self) -> Result<TopoInfo>;
+
+    /// Hook of updating successor
+    fn update_successor(&self, did: Did) -> Result<Action>;
+    /// Hook of updating successor
+    fn extend_successor(&self, did: &Vec<Did>) -> Result<Action>;
 }

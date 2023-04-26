@@ -22,6 +22,22 @@ pub struct SuccessorSeq {
     successors: Arc<RwLock<Vec<Did>>>,
 }
 
+pub trait SuccessorReader {
+    fn is_empty(&self) -> Result<bool>;
+    fn is_full(&self) -> Result<bool>;
+    fn get(&self, index: usize) -> Result<Did>;
+    fn len(&self) -> Result<usize>;
+    fn min(&self) -> Result<Did>;
+    fn max(&self) -> Result<Did>;
+    fn list(&self) -> Result<Vec<Did>>;
+}
+
+pub trait SuccessorWriter {
+    fn update(&self, successor: Did) -> Result<Option<Did>>;
+    fn extend(&self, succ_list: &Vec<Did>) -> Result<Vec<Did>>;
+    fn remove(&self, did: Did) -> Result<()>;
+}
+
 impl SuccessorSeq {
     pub fn new(did: Did, max: u8) -> Self {
         Self {
@@ -36,28 +52,30 @@ impl SuccessorSeq {
             .read()
             .map_err(|_| Error::FailedToReadSuccessors)
     }
+}
 
-    pub fn is_empty(&self) -> Result<bool> {
+impl SuccessorReader for SuccessorSeq {
+    fn is_empty(&self) -> Result<bool> {
         let succs = self.successors()?;
         Ok(succs.is_empty())
     }
 
-    pub fn is_full(&self) -> Result<bool> {
+    fn is_full(&self) -> Result<bool> {
         let succs = self.successors()?;
         Ok(succs.len() as u8 >= self.max)
     }
 
-    pub fn get(&self, index: usize) -> Result<Did> {
+    fn get(&self, index: usize) -> Result<Did> {
         let succs = self.successors()?;
         Ok(succs[index])
     }
 
-    pub fn len(&self) -> Result<usize> {
+    fn len(&self) -> Result<usize> {
         let succs = self.successors()?;
         Ok(succs.len())
     }
 
-    pub fn min(&self) -> Result<Did> {
+    fn min(&self) -> Result<Did> {
         if self.is_empty()? {
             Ok(self.did)
         } else {
@@ -65,7 +83,7 @@ impl SuccessorSeq {
         }
     }
 
-    pub fn max(&self) -> Result<Did> {
+    fn max(&self) -> Result<Did> {
         if self.is_empty()? {
             Ok(self.did)
         } else {
@@ -73,33 +91,42 @@ impl SuccessorSeq {
         }
     }
 
-    pub fn list(&self) -> Result<Vec<Did>> {
+    fn list(&self) -> Result<Vec<Did>> {
         let succs = self.successors()?;
         Ok(succs.clone())
     }
+}
 
-    pub fn update(&self, successor: Did) -> Result<()> {
+impl SuccessorWriter for SuccessorSeq {
+    fn update(&self, successor: Did) -> Result<Option<Did>> {
         let mut succs = self
             .successors
             .write()
             .map_err(|_| Error::FailedToWriteSuccessors)?;
         if succs.contains(&successor) || successor == self.did {
-            return Ok(());
+            return Ok(None);
         }
         succs.push(successor);
         succs.sort(self.did);
         succs.truncate(self.max.into());
-        Ok(())
-    }
-
-    pub fn extend(&self, succ_list: &Vec<Did>) -> Result<()> {
-        for s in succ_list {
-            self.update(*s)?;
+        if succs.contains(&successor) {
+            Ok(Some(successor))
+        } else {
+            Ok(None)
         }
-        Ok(())
     }
 
-    pub fn remove(&self, did: Did) -> Result<()> {
+    fn extend(&self, succ_list: &Vec<Did>) -> Result<Vec<Did>> {
+        let mut ret = vec![];
+        for s in succ_list {
+            if let Some(r) = self.update(*s)? {
+                ret.push(r);
+            }
+        }
+        Ok(ret)
+    }
+
+    fn remove(&self, did: Did) -> Result<()> {
         let mut succs = self
             .successors
             .write()
