@@ -6,7 +6,6 @@ use crate::dht::ChordStorage;
 use crate::dht::CorrectChord;
 use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
-use crate::dht::SuccessorReader;
 use crate::err::Result;
 use crate::message::types::Message;
 use crate::message::types::NotifyPredecessorReport;
@@ -84,6 +83,7 @@ mod test {
     use std::sync::Arc;
 
     use super::*;
+    use crate::dht::successor::SuccessorReader;
     use crate::dht::Stabilization;
     use crate::ecc::tests::gen_ordered_keys;
     use crate::ecc::SecretKey;

@@ -12,6 +12,7 @@ categories = ["network-programming", "cryptography", "wasm"]
 
 [features]
 default = ["std"]
+experimental = []
 redundant = []
 std = [
     "webrtc",

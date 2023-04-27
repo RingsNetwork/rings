@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::RwLockReadGuard;
 
+use crate::dht::did::BiasId;
 use crate::dht::did::SortRing;
 use crate::dht::Did;
 use crate::err::Error;
@@ -30,6 +31,7 @@ pub trait SuccessorReader {
     fn min(&self) -> Result<Did>;
     fn max(&self) -> Result<Did>;
     fn list(&self) -> Result<Vec<Did>>;
+    fn contains(&self, did: &Did) -> Result<bool>;
 }
 
 pub trait SuccessorWriter {
@@ -52,9 +54,19 @@ impl SuccessorSeq {
             .read()
             .map_err(|_| Error::FailedToReadSuccessors)
     }
+
+    /// Calculate bias of the Did on the ring.
+    pub fn bias(&self, did: Did) -> BiasId {
+        BiasId::new(self.did, did)
+    }
 }
 
 impl SuccessorReader for SuccessorSeq {
+    fn contains(&self, did: &Did) -> Result<bool> {
+        let succs = self.successors()?;
+        Ok(succs.contains(&did))
+    }
+
     fn is_empty(&self) -> Result<bool> {
         let succs = self.successors()?;
         Ok(succs.is_empty())
@@ -99,13 +111,23 @@ impl SuccessorReader for SuccessorSeq {
 
 impl SuccessorWriter for SuccessorSeq {
     fn update(&self, successor: Did) -> Result<Option<Did>> {
+        // if successor in successor list
+        // or successor is self
+        // or list is full
+        // or successor is bigger than successor.max()
+        if (self.contains(&successor)?) || (successor == self.did) {
+            return Ok(None);
+        }
+
+        if self.bias(successor) >= self.bias(self.max()?) && self.is_full()? {
+            return Ok(None);
+        }
+
         let mut succs = self
             .successors
             .write()
             .map_err(|_| Error::FailedToWriteSuccessors)?;
-        if succs.contains(&successor) || successor == self.did {
-            return Ok(None);
-        }
+
         succs.push(successor);
         succs.sort(self.did);
         succs.truncate(self.max.into());
@@ -171,9 +193,9 @@ mod tests {
         let succ = SuccessorSeq::new(dids[0], 3);
         assert!(succ.is_empty()?);
 
-        succ.update(dids[1])?;
-        succ.update(dids[2])?;
-        succ.update(dids[3])?;
+        succ.update(dids[1])?.unwrap();
+        succ.update(dids[2])?.unwrap();
+        succ.update(dids[3])?.unwrap();
         assert_eq!(succ.list()?, dids[1..4]);
 
         succ.remove(dids[2])?;

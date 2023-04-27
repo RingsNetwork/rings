@@ -9,7 +9,6 @@ use crate::dht::ChordStorage;
 use crate::dht::CorrectChord;
 use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
-use crate::dht::SuccessorReader;
 use crate::dht::TopoInfo;
 use crate::err::Error;
 use crate::err::Result;
@@ -159,8 +158,17 @@ impl HandleMsg<JoinDHT> for MessageHandler {
         // here is two situation.
         // finger table just have no other node(beside next), it will be a `create` op
         // otherwise, it will be a `send` op
-        let act = self.dht.join(msg.did)?;
-        handle_join_dht(self, act, ctx).await
+        #[cfg(feature = "experimental")]
+        {
+            let act = self.dht.join_then_sync(msg.did)?;
+            handle_join_dht(self, act, ctx).await
+        }
+
+        #[cfg(not(feature = "experimental"))]
+        {
+            let act = self.dht.join(msg.did)?;
+            handle_join_dht(self, act, ctx).await
+        }
     }
 }
 
@@ -345,6 +353,7 @@ pub mod tests {
     use tokio::time::Duration;
 
     use super::*;
+    use crate::dht::successor::SuccessorReader;
     use crate::dht::Did;
     use crate::ecc::tests::gen_ordered_keys;
     use crate::ecc::SecretKey;
@@ -770,14 +779,38 @@ pub mod tests {
         assert_eq!(ev_2.relay.path, vec![did2]);
         assert!(matches!(ev_2.data, Message::JoinDHT(JoinDHT{did, ..}) if did == did1));
 
+        #[cfg(feature = "experimental")]
+        {
+            // 1->2 QueryforTopoInfo
+            let ev_1 = node1.listen_once().await.unwrap();
+            assert!(matches!(
+            ev_1.data,
+            Message::QueryForTopoInfoSend(QueryForTopoInfoSend{did}) if did == did1
+                ));
+        }
+
         // 1->2 FindSuccessorSend
         let ev_1 = node1.listen_once().await.unwrap();
         assert_eq!(ev_1.addr, did2);
         assert_eq!(ev_1.relay.path, vec![did2]);
-        assert!(matches!(
-            ev_1.data,
-            Message::FindSuccessorSend(FindSuccessorSend{did, then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect), strict: false}) if did == did2
-        ));
+        assert!(
+            matches!(
+                ev_1.data,
+                Message::FindSuccessorSend(FindSuccessorSend{did, then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect), strict: false}) if did == did2
+            ),
+            "{:?}",
+            ev_1.data
+        );
+
+        #[cfg(feature = "experimental")]
+        {
+            // 2->1 QueryforTopoInfo
+            let ev_2 = node2.listen_once().await.unwrap();
+            assert!(matches!(
+            ev_2.data,
+            Message::QueryForTopoInfoSend(QueryForTopoInfoSend{did}) if did == did2
+                ));
+        }
 
         // 2->1 FindSuccessorSend
         let ev_2 = node2.listen_once().await.unwrap();
@@ -787,7 +820,6 @@ pub mod tests {
             ev_2.data,
             Message::FindSuccessorSend(FindSuccessorSend{did, then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect), strict: false}) if did == did1
         ));
-
         Ok(())
     }
 
@@ -803,18 +835,48 @@ pub mod tests {
         manually_establish_connection(&node1.swarm, &node2.swarm).await?;
         test_listen_join_and_init_find_succeesor(node1, node2).await?;
 
+        #[cfg(feature = "experimental")]
+        {
+            // 2->1 QueryForTopoInfoReport
+            let ev_1 = node1.listen_once().await.unwrap();
+            assert!(matches!(
+            ev_1.data,
+            Message::QueryForTopoInfoReport(QueryForTopoInfoReport{info}) if info.successors == dht2.successors().list()?
+                ));
+        }
+
         // 2->1 FindSuccessorReport
         // node2 report node1 as node1's successor to node1
         let ev_1 = node1.listen_once().await.unwrap();
         assert_eq!(ev_1.addr, did2);
         assert_eq!(ev_1.relay.path, vec![did2]);
         // node2 is only aware of node1, so it respond node1
-        assert!(matches!(
-            ev_1.data,
-            Message::FindSuccessorReport(FindSuccessorReport{did, handler: FindSuccessorReportHandler::Connect}) if did == did1
-        ));
+        assert!(
+            matches!(
+                ev_1.data,
+                Message::FindSuccessorReport(FindSuccessorReport{did, handler: FindSuccessorReportHandler::Connect}) if did == did1
+            ),
+            "{:?}",
+            ev_1.data
+        );
         // dht1 won't set did1 as successor
         assert!(!dht1.successors().list()?.contains(&did1));
+
+        #[cfg(feature = "experimental")]
+        {
+            // 1->2 QueryForTopoInfoReport
+            let ev_2 = node2.listen_once().await.unwrap();
+            if let Message::QueryForTopoInfoReport(resp) = ev_2.data {
+                // if dht1's successor is not updated
+                if dht1.successors().len()? == 1 {
+                    assert_eq!(resp.info.successors, dht1.successors().list()?);
+                } else {
+                    assert_ne!(resp.info.successors, dht1.successors().list()?);
+                }
+            } else {
+                panic!();
+            }
+        }
 
         // 1->2 FindSuccessorReport
         // node1 report node2 as node2's successor to node2

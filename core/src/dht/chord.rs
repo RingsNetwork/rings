@@ -233,17 +233,10 @@ impl Chord<PeerRingAction> for PeerRing {
         }
 
         let mut finger = self.lock_finger()?;
-        let successor = self.successors();
 
         finger.join(did);
-
-        if self.bias(did) < self.bias(successor.max()?) || !successor.is_full()? {
-            // 1) id should follows self.id
-            // 2) #fff should follow #001 because id space is a Finate Ring
-            // 3) #001 - #fff = #001 + -(#fff) = #001
-            successor.update(did)?;
-        }
-
+        // Always try update
+        self.successors().update(did)?;
         Ok(PeerRingAction::RemoteAction(
             did,
             RemoteAction::FindSuccessorForConnect(self.did),
@@ -496,11 +489,16 @@ impl CorrectChord<PeerRingAction> for PeerRing {
     /// Zave's work differs from the original Chord paper in that it requires
     /// a newly joined node to synchronize its successors from remote nodes.
     fn join_then_sync(&self, did: Did) -> Result<PeerRingAction> {
-        let act = self.join(did)?;
-        Ok(PeerRingAction::MultiActions(vec![
-            act,
-            PeerRingAction::RemoteAction(did, RemoteAction::QueryForSuccessorList),
-        ]))
+        let mut ret: Vec<PeerRingAction> = vec![];
+
+        let succ_act = self.update_successor(did)?;
+        if succ_act.is_remote() {
+            ret.push(succ_act)
+        }
+        let join_act = self.join(did)?;
+        ret.push(join_act);
+
+        Ok(PeerRingAction::MultiActions(ret))
     }
 
     /// TODO: Please check this function and make sure it is correct.
