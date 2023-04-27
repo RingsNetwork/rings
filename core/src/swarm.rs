@@ -3,6 +3,7 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::Weak;
 
 use async_stream::stream;
 use async_trait::async_trait;
@@ -12,6 +13,7 @@ use serde::Serialize;
 
 use crate::channels::Channel;
 use crate::dht::Did;
+use crate::dht::LiveDid;
 use crate::dht::PeerRing;
 use crate::ecc::SecretKey;
 use crate::err::Error;
@@ -37,6 +39,38 @@ use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::Event;
 use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransportInterface;
+
+#[derive(Clone)]
+pub struct LiveNode {
+    did: Did,
+    transport: Weak<Transport>,
+}
+
+impl From<LiveNode> for Did {
+    fn from(node: LiveNode) -> Did {
+        node.did
+    }
+}
+
+impl LiveNode {
+    pub fn new(swarm: &Swarm, did: Did) -> Option<Self> {
+        swarm.get_transport(did).map(|trans| Self {
+            did,
+            transport: Arc::downgrade(&trans),
+        })
+    }
+}
+
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl LiveDid for LiveNode {
+    async fn live(&self) -> bool {
+        match self.transport.upgrade() {
+            None => false,
+            Some(t) => t.is_connected().await,
+        }
+    }
+}
 
 #[cfg(not(feature = "wasm"))]
 pub type MeasureImpl = Box<dyn Measure + Send + Sync>;

@@ -32,11 +32,12 @@ pub trait SuccessorReader {
     fn max(&self) -> Result<Did>;
     fn list(&self) -> Result<Vec<Did>>;
     fn contains(&self, did: &Did) -> Result<bool>;
+    fn update_dry(&self, did: &[Did]) -> Result<Vec<Did>>;
 }
 
 pub trait SuccessorWriter {
     fn update(&self, successor: Did) -> Result<Option<Did>>;
-    fn extend(&self, succ_list: &Vec<Did>) -> Result<Vec<Did>>;
+    fn extend(&self, succ_list: &[Did]) -> Result<Vec<Did>>;
     fn remove(&self, did: Did) -> Result<()>;
 }
 
@@ -59,12 +60,24 @@ impl SuccessorSeq {
     pub fn bias(&self, did: Did) -> BiasId {
         BiasId::new(self.did, did)
     }
+
+    /// Verify a given Did is fit successors protocol.
+    pub fn should_insert(&self, did: Did) -> Result<bool> {
+        if (self.contains(&did)?) || (did == self.did) {
+            return Ok(false);
+        }
+
+        if self.bias(did) >= self.bias(self.max()?) && self.is_full()? {
+            return Ok(false);
+        }
+        Ok(true)
+    }
 }
 
 impl SuccessorReader for SuccessorSeq {
     fn contains(&self, did: &Did) -> Result<bool> {
         let succs = self.successors()?;
-        Ok(succs.contains(&did))
+        Ok(succs.contains(did))
     }
 
     fn is_empty(&self) -> Result<bool> {
@@ -107,22 +120,23 @@ impl SuccessorReader for SuccessorSeq {
         let succs = self.successors()?;
         Ok(succs.clone())
     }
+
+    fn update_dry(&self, dids: &[Did]) -> Result<Vec<Did>> {
+        let mut ret = vec![];
+        for did in dids {
+            if self.should_insert(*did)? {
+                ret.push(*did)
+            }
+        }
+        Ok(ret)
+    }
 }
 
 impl SuccessorWriter for SuccessorSeq {
     fn update(&self, successor: Did) -> Result<Option<Did>> {
-        // if successor in successor list
-        // or successor is self
-        // or list is full
-        // or successor is bigger than successor.max()
-        if (self.contains(&successor)?) || (successor == self.did) {
+        if !(self.should_insert(successor)?) {
             return Ok(None);
         }
-
-        if self.bias(successor) >= self.bias(self.max()?) && self.is_full()? {
-            return Ok(None);
-        }
-
         let mut succs = self
             .successors
             .write()
@@ -138,7 +152,7 @@ impl SuccessorWriter for SuccessorSeq {
         }
     }
 
-    fn extend(&self, succ_list: &Vec<Did>) -> Result<Vec<Did>> {
+    fn extend(&self, succ_list: &[Did]) -> Result<Vec<Did>> {
         let mut ret = vec![];
         for s in succ_list {
             if let Some(r) = self.update(*s)? {

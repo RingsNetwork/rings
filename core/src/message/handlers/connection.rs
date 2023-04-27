@@ -30,6 +30,7 @@ use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
 use crate::transports::manager::TransportHandshake;
+use crate::swarm::LiveNode;
 use crate::transports::manager::TransportManager;
 use crate::types::ice_transport::IceTrickleScheme;
 
@@ -137,7 +138,15 @@ impl HandleMsg<QueryForTopoInfoReport> for MessageHandler {
         ctx: &MessagePayload<Message>,
         msg: &QueryForTopoInfoReport,
     ) -> Result<()> {
-        let act = self.dht.extend_successor(&msg.info.successors)?;
+        let successors: Vec<LiveNode> = msg
+            .info
+            .successors
+            .iter()
+            .map(|did| LiveNode::new(&self.swarm, did.clone()))
+            .filter(|x| x.is_some())
+            .map(|x| x.unwrap())
+            .collect();
+        let act = self.dht.extend_successor(&successors).await?;
         handle_update_successor(self, act, ctx).await?;
         Ok(())
     }
@@ -160,10 +169,12 @@ impl HandleMsg<JoinDHT> for MessageHandler {
         // otherwise, it will be a `send` op
         #[cfg(feature = "experimental")]
         {
-            let act = self.dht.join_then_sync(msg.did)?;
-            handle_join_dht(self, act, ctx).await
+            if let Some(l_node) = LiveNode::new(&self.swarm, msg.did) {
+                let act = self.dht.join_then_sync(l_node).await?;
+                handle_join_dht(self, act, ctx).await?;
+            }
+            Ok(())
         }
-
         #[cfg(not(feature = "experimental"))]
         {
             let act = self.dht.join(msg.did)?;
@@ -321,8 +332,10 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
                 }
             }
             FindSuccessorReportHandler::SyncStorage => {
-                let updated_act = self.dht.update_successor(msg.did)?;
-                handle_update_successor(self, updated_act, ctx).await?;
+                if let Some(l_node) = LiveNode::new(&self.swarm, msg.did) {
+                    let updated_act = self.dht.update_successor(l_node).await?;
+                    handle_update_successor(self, updated_act, ctx).await?;
+                }
                 if let Ok(PeerRingAction::RemoteAction(
                     next,
                     PeerRingRemoteAction::SyncVNodeWithSuccessor(data),
@@ -767,6 +780,10 @@ pub mod tests {
         let did1 = node1.swarm.did();
         let did2 = node2.swarm.did();
 
+        // check status of successors before join
+        let should_update_succ2 = node1.dht.successors().should_insert(did2)?;
+        let should_update_succ1 = node2.dht.successors().should_insert(did1)?;
+
         // 1 JoinDHT
         let ev_1 = node1.listen_once().await.unwrap();
         assert_eq!(ev_1.addr, did1);
@@ -782,11 +799,15 @@ pub mod tests {
         #[cfg(feature = "experimental")]
         {
             // 1->2 QueryforTopoInfo
-            let ev_1 = node1.listen_once().await.unwrap();
-            assert!(matches!(
-            ev_1.data,
-            Message::QueryForTopoInfoSend(QueryForTopoInfoSend{did}) if did == did1
-                ));
+            // if node 2 will insert did1 to it's successor list,
+            // It will send query message to node1
+            if should_update_succ1 {
+                let ev_1 = node1.listen_once().await.unwrap();
+                assert!(matches!(
+                ev_1.data,
+                Message::QueryForTopoInfoSend(QueryForTopoInfoSend{did}) if did == did1
+                    ));
+            }
         }
 
         // 1->2 FindSuccessorSend
@@ -805,11 +826,13 @@ pub mod tests {
         #[cfg(feature = "experimental")]
         {
             // 2->1 QueryforTopoInfo
-            let ev_2 = node2.listen_once().await.unwrap();
-            assert!(matches!(
-            ev_2.data,
-            Message::QueryForTopoInfoSend(QueryForTopoInfoSend{did}) if did == did2
-                ));
+            if should_update_succ2 {
+                let ev_2 = node2.listen_once().await.unwrap();
+                assert!(matches!(
+                ev_2.data,
+                Message::QueryForTopoInfoSend(QueryForTopoInfoSend{did}) if did == did2
+                    ));
+            }
         }
 
         // 2->1 FindSuccessorSend
@@ -832,17 +855,22 @@ pub mod tests {
         let dht1 = node1.swarm.dht();
         let dht2 = node2.swarm.dht();
 
+        let should_update_succ2 = node1.dht.successors().should_insert(did2)?;
+        let should_update_succ1 = node2.dht.successors().should_insert(did1)?;
+
         manually_establish_connection(&node1.swarm, &node2.swarm).await?;
         test_listen_join_and_init_find_succeesor(node1, node2).await?;
 
         #[cfg(feature = "experimental")]
         {
             // 2->1 QueryForTopoInfoReport
-            let ev_1 = node1.listen_once().await.unwrap();
-            assert!(matches!(
-            ev_1.data,
-            Message::QueryForTopoInfoReport(QueryForTopoInfoReport{info}) if info.successors == dht2.successors().list()?
-                ));
+            if should_update_succ2 {
+                let ev_1 = node1.listen_once().await.unwrap();
+                assert!(matches!(
+                ev_1.data,
+                Message::QueryForTopoInfoReport(QueryForTopoInfoReport{info}) if info.successors == dht2.successors().list()?
+                    ));
+            }
         }
 
         // 2->1 FindSuccessorReport
@@ -864,17 +892,13 @@ pub mod tests {
 
         #[cfg(feature = "experimental")]
         {
-            // 1->2 QueryForTopoInfoReport
-            let ev_2 = node2.listen_once().await.unwrap();
-            if let Message::QueryForTopoInfoReport(resp) = ev_2.data {
-                // if dht1's successor is not updated
-                if dht1.successors().len()? == 1 {
-                    assert_eq!(resp.info.successors, dht1.successors().list()?);
-                } else {
-                    assert_ne!(resp.info.successors, dht1.successors().list()?);
-                }
-            } else {
-                panic!();
+            if should_update_succ1 {
+                // 1->2 QueryForTopoInfoReport
+                let ev_2 = node2.listen_once().await.unwrap();
+                assert!(matches!(
+                ev_2.data,
+                Message::QueryForTopoInfoReport(QueryForTopoInfoReport{info}) if info.successors == dht1.successors().list()?
+                    ));
             }
         }
 

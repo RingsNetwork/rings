@@ -18,6 +18,7 @@ use super::vnode::VNodeOperation;
 use super::vnode::VirtualNode;
 use super::FingerTable;
 use crate::dht::Did;
+use crate::dht::LiveDid;
 use crate::dht::SuccessorReader;
 use crate::dht::SuccessorWriter;
 use crate::err::Error;
@@ -456,8 +457,12 @@ impl ChordStorage<PeerRingAction> for PeerRing {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl CorrectChord<PeerRingAction> for PeerRing {
     /// When Chord have a new successor, ask the new successor for successor list
-    fn update_successor(&self, did: Did) -> Result<PeerRingAction> {
-        if let Some(new_succ) = self.successors().update(did)? {
+    async fn update_successor(&self, did: impl LiveDid) -> Result<PeerRingAction> {
+        let is_live = did.live().await;
+        if !is_live {
+            return Ok(PeerRingAction::None);
+        }
+        if let Some(new_succ) = self.successors().update(did.into())? {
             Ok(PeerRingAction::RemoteAction(
                 new_succ,
                 RemoteAction::QueryForSuccessorList,
@@ -467,35 +472,31 @@ impl CorrectChord<PeerRingAction> for PeerRing {
         }
     }
 
-    fn extend_successor(&self, did: &Vec<Did>) -> Result<PeerRingAction> {
-        let new_succs = self.successors().extend(did)?;
-        if new_succs.len() > 0 {
-            let acts: Vec<PeerRingAction> = new_succs
-                .iter()
-                .map(|new_succ| {
-                    PeerRingAction::RemoteAction(
-                        new_succ.clone(),
-                        RemoteAction::QueryForSuccessorList,
-                    )
-                })
-                .collect();
-            Ok(PeerRingAction::MultiActions(acts))
-        } else {
-            Ok(PeerRingAction::None)
+    async fn extend_successor(&self, dids: &[impl LiveDid]) -> Result<PeerRingAction> {
+        let mut ret: Vec<PeerRingAction> = vec![];
+        for did in dids {
+            if let PeerRingAction::RemoteAction(r, act) = self.update_successor(did.clone()).await?
+            {
+                ret.push(PeerRingAction::RemoteAction(r, act))
+            }
         }
+        Ok(PeerRingAction::MultiActions(ret))
     }
 
     /// Join Operation in the paper.
     /// Zave's work differs from the original Chord paper in that it requires
     /// a newly joined node to synchronize its successors from remote nodes.
-    fn join_then_sync(&self, did: Did) -> Result<PeerRingAction> {
+    async fn join_then_sync(&self, did: impl LiveDid) -> Result<PeerRingAction> {
+        let is_live = did.live().await;
+        if !is_live {
+            return Ok(PeerRingAction::None);
+        }
         let mut ret: Vec<PeerRingAction> = vec![];
-
-        let succ_act = self.update_successor(did)?;
+        let succ_act = self.update_successor(did.clone()).await?;
         if succ_act.is_remote() {
             ret.push(succ_act)
         }
-        let join_act = self.join(did)?;
+        let join_act = self.join(did.into())?;
         ret.push(join_act);
 
         Ok(PeerRingAction::MultiActions(ret))
@@ -893,7 +894,16 @@ mod tests {
         n1.join(n5.did).unwrap();
         // n5 is not in n1's successor list
         assert!(!assert_successor(&n1, &n5.did));
-        if let PeerRingAction::MultiActions(rets) = n5.join_then_sync(n1.did).unwrap() {
+
+        #[cfg_attr(feature = "wasm", async_trait(?Send))]
+        #[cfg_attr(not(feature = "wasm"), async_trait)]
+        impl LiveDid for Did {
+            async fn live(&self) -> bool {
+                true
+            }
+        }
+
+        if let PeerRingAction::MultiActions(rets) = n5.join_then_sync(n1.did).await.unwrap() {
             for r in rets {
                 if let PeerRingAction::RemoteAction(t, _) = r {
                     assert_eq!(t, n1.did.clone())

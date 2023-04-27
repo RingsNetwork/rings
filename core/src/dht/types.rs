@@ -109,6 +109,8 @@ pub trait ChordStorage<Action>: Chord<Action> {
 /// - `topo_info` is a helper function to get the topological info of the chord.
 ///
 /// Some methods return an `Action`. The reason is the same as [Chord].
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait CorrectChord<Action>: Chord<Action> {
     /// Join Operation in the paper.
     ///
@@ -117,7 +119,7 @@ pub trait CorrectChord<Action>: Chord<Action> {
     /// for its successor list (same as the original Chord). Finally, the node constructs
     /// its own successor list by concatenating new successor and new successor's successor
     /// list, with the last element of the list trimmed off to produce a result of fixed length.
-    fn join_then_sync(&self, did: Did) -> Result<Action>;
+    async fn join_then_sync(&self, did: impl LiveDid) -> Result<Action>;
 
     /// Rectify Operation in the paper.
     ///
@@ -146,7 +148,18 @@ pub trait CorrectChord<Action>: Chord<Action> {
     fn topo_info(&self) -> Result<TopoInfo>;
 
     /// Hook of updating successor
-    fn update_successor(&self, did: Did) -> Result<Action>;
+    async fn update_successor(&self, did: impl LiveDid) -> Result<Action>;
     /// Hook of updating successor
-    fn extend_successor(&self, did: &Vec<Did>) -> Result<Action>;
+    async fn extend_successor(&self, did: &[impl LiveDid]) -> Result<Action>;
+}
+
+/// Trait `LiveDid` defines a wrapper for `Did` that can check whether the `Did` is live or not.
+///
+/// Implementors of this trait must also be convertible into a `Did` type using the `Into` trait, and
+/// must satisfy some additional constraints (see below).
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+pub trait LiveDid: Into<Did> + Send + Sync + Clone {
+    /// Necessary method, should return true if a wrapped did is live.
+    async fn live(&self) -> bool;
 }
