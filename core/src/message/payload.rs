@@ -253,9 +253,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
     /// Send a message to a specified destination.
     async fn send_message(&self, msg: T, destination: Did) -> Result<uuid::Uuid> {
         let next_hop = self.infer_next_hop(None, destination)?;
-        let payload = MessagePayload::new_send(msg, self.session_manager(), next_hop, destination)?;
-        self.send_payload(payload.clone()).await?;
-        Ok(payload.tx_id)
+	self.send_message_by_hop(msg, destination, next_hop).await
     }
 
     /// Send a direct message to a specified destination.
@@ -265,6 +263,14 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
         self.send_payload(payload.clone()).await?;
         Ok(payload.tx_id)
     }
+
+    /// Send a message to a specified destination by specified next hop.
+    async fn send_message_by_hop(&self, msg: T, destination: Did, next_hop: Did) -> Result<uuid::Uuid> {
+        let payload = MessagePayload::new_send(msg, self.session_manager(), next_hop, destination)?;
+        self.send_payload(payload.clone()).await?;
+        Ok(payload.tx_id)
+    }
+
 
     /// Send a report message to a specified destination.
     async fn send_report_message(&self, payload: &MessagePayload<T>, msg: T) -> Result<()> {

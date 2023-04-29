@@ -15,7 +15,7 @@ use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
-use crate::swarm::LiveNode;
+use crate::swarm::WrappedDid;
 use crate::transports::manager::TransportManager;
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
@@ -59,10 +59,9 @@ impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
             self.swarm.connect(msg.did).await?;
         } else {
             {
-                if let Some(l_node) = LiveNode::new(&self.swarm, msg.did) {
-                    let act = self.dht.update_successor(l_node).await?;
-                    handle_update_successor(self, act, ctx).await?;
-                }
+                let w_did = WrappedDid::new(&self.swarm, msg.did);
+                let act = self.dht.update_successor(w_did).await?;
+                handle_update_successor(self, act, ctx).await?;
             }
             if let Ok(PeerRingAction::RemoteAction(
                 next,

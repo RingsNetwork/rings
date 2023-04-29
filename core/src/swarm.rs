@@ -40,34 +40,57 @@ use crate::types::channel::Event;
 use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransportInterface;
 
+/// WrappedDid is a DID wrapped by Swarm and bound to a weak reference of a Transport,
+/// which enables checking whether the WrappedDid is live or not.
 #[derive(Clone)]
-pub struct LiveNode {
+pub struct WrappedDid {
     did: Did,
-    transport: Weak<Transport>,
+    transport: Option<Weak<Transport>>,
 }
 
-impl From<LiveNode> for Did {
-    fn from(node: LiveNode) -> Did {
+impl WrappedDid {
+    /// Creates a new WrappedDid using the provided Swarm instance and DID.
+    pub fn new(swarm: &Swarm, did: Did) -> Self {
+        // Try to get the Transport for the provided DID from the Swarm.
+        match swarm.get_transport(did) {
+            Some(t) => Self {
+                did,
+                // If the Transport is found, create a weak reference to it and store it in the WrappedDid.
+                transport: Some(Arc::downgrade(&t)),
+            },
+            None => Self {
+                did,
+                transport: None,
+            },
+        }
+    }
+}
+
+impl From<WrappedDid> for Did {
+    /// Implements the From trait to allow conversion from WrappedDid to Did.
+    fn from(node: WrappedDid) -> Did {
         node.did
     }
 }
 
-impl LiveNode {
-    pub fn new(swarm: &Swarm, did: Did) -> Option<Self> {
-        swarm.get_transport(did).map(|trans| Self {
-            did,
-            transport: Arc::downgrade(&trans),
-        })
-    }
-}
-
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
-impl LiveDid for LiveNode {
+#[async_trait]
+impl LiveDid for WrappedDid {
+    /// Implements the LiveDid trait for WrappedDid, which checks if the DID is live or not.
+    /// If the Transport is not present, has been dropped, or is not connected, returns false.
+    /// If the Transport is present and connected, returns true.
     async fn live(&self) -> bool {
-        match self.transport.upgrade() {
+        match &self.transport {
+            Some(t) => {
+                if let Some(transport) = t.upgrade() {
+                    // If the weak reference can be upgraded to a strong reference, check if it's connected.
+                    transport.is_connected().await
+                } else {
+                    // If the weak reference cannot be upgraded,
+		    // the Transport has been dropped, so return false.
+                    false
+                }
+            }
             None => false,
-            Some(t) => t.is_connected().await,
         }
     }
 }
@@ -354,6 +377,21 @@ impl Swarm {
 
         Ok(transport)
     }
+
+    /// Connect a node though a hop
+    pub async fn connect_via(&self, did: Did, next_hop: Did) -> Result<Arc<Transport>> {
+        if let Some(t) = self.get_and_check_transport(did).await {
+            return Ok(t);
+        }
+
+        let (transport, offer_msg) = self.prepare_transport_offer().await?;
+
+        self.send_message_by_hop(Message::ConnectNodeSend(offer_msg), did, next_hop)
+            .await?;
+
+        Ok(transport)
+    }
+
 
     pub async fn inspect(&self) -> SwarmInspect {
         SwarmInspect::inspect(self).await

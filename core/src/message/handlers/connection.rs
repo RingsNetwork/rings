@@ -30,7 +30,7 @@ use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
 use crate::transports::manager::TransportHandshake;
-use crate::swarm::LiveNode;
+use crate::swarm::WrappedDid;
 use crate::transports::manager::TransportManager;
 use crate::types::ice_transport::IceTrickleScheme;
 
@@ -58,6 +58,10 @@ pub async fn handle_update_successor(
             }
             Ok(())
         }
+	PeerRingAction::RemoteAction(did, PeerRingRemoteAction::TryConnect) => {
+	    handler.swarm.connect_via(did, ctx.relay.sender()).await?;
+	    Ok(())
+	}
         _ => unreachable!(),
     }
 }
@@ -138,13 +142,11 @@ impl HandleMsg<QueryForTopoInfoReport> for MessageHandler {
         ctx: &MessagePayload<Message>,
         msg: &QueryForTopoInfoReport,
     ) -> Result<()> {
-        let successors: Vec<LiveNode> = msg
+        let successors: Vec<WrappedDid> = msg
             .info
             .successors
             .iter()
-            .map(|did| LiveNode::new(&self.swarm, did.clone()))
-            .filter(|x| x.is_some())
-            .map(|x| x.unwrap())
+            .map(|did| WrappedDid::new(&self.swarm, did.clone()))
             .collect();
         let act = self.dht.extend_successor(&successors).await?;
         handle_update_successor(self, act, ctx).await?;
@@ -169,10 +171,9 @@ impl HandleMsg<JoinDHT> for MessageHandler {
         // otherwise, it will be a `send` op
         #[cfg(feature = "experimental")]
         {
-            if let Some(l_node) = LiveNode::new(&self.swarm, msg.did) {
-                let act = self.dht.join_then_sync(l_node).await?;
-                handle_join_dht(self, act, ctx).await?;
-            }
+            let w_did = WrappedDid::new(&self.swarm, msg.did);
+            let act = self.dht.join_then_sync(w_did).await?;
+            handle_join_dht(self, act, ctx).await?;
             Ok(())
         }
         #[cfg(not(feature = "experimental"))]
@@ -332,10 +333,9 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
                 }
             }
             FindSuccessorReportHandler::SyncStorage => {
-                if let Some(l_node) = LiveNode::new(&self.swarm, msg.did) {
-                    let updated_act = self.dht.update_successor(l_node).await?;
-                    handle_update_successor(self, updated_act, ctx).await?;
-                }
+                let w_did = WrappedDid::new(&self.swarm, msg.did);
+                let updated_act = self.dht.update_successor(w_did).await?;
+                handle_update_successor(self, updated_act, ctx).await?;
                 if let Ok(PeerRingAction::RemoteAction(
                     next,
                     PeerRingRemoteAction::SyncVNodeWithSuccessor(data),
