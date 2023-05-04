@@ -34,6 +34,7 @@ use crate::err::Result;
 use crate::transports::helper::Promise;
 use crate::types::channel::Channel;
 use crate::types::channel::Event;
+use crate::types::ice_transport::HandshakeInfo;
 use crate::types::ice_transport::IceCandidate;
 use crate::types::ice_transport::IceCandidateGathering;
 use crate::types::ice_transport::IceServer;
@@ -41,7 +42,6 @@ use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
 use crate::types::ice_transport::IceTransportInterface;
 use crate::types::ice_transport::IceTrickleScheme;
-use crate::types::ice_transport::Trickle;
 
 type EventSender = <AcChannel<Event> as Channel<Event>>::Sender;
 
@@ -430,7 +430,7 @@ impl IceTrickleScheme for DefaultTransport {
 
     type SdpType = RTCSdpType;
 
-    async fn get_handshake_info(&self, kind: RTCSdpType) -> Result<Trickle> {
+    async fn get_handshake_info(&self, kind: RTCSdpType) -> Result<HandshakeInfo> {
         tracing::trace!("prepareing handshake info {:?}", kind);
         let sdp = match kind {
             RTCSdpType::Answer => self.get_answer().await?,
@@ -451,7 +451,7 @@ impl IceTrickleScheme for DefaultTransport {
         if local_candidates_json.is_empty() {
             return Err(Error::FailedOnGatherLocalCandidate);
         }
-        let data = Trickle {
+        let data = HandshakeInfo {
             sdp: serde_json::to_string(&sdp).unwrap(),
             candidates: local_candidates_json,
         };
@@ -459,7 +459,7 @@ impl IceTrickleScheme for DefaultTransport {
         Ok(data)
     }
 
-    async fn register_remote_info(&self, data: &Trickle, did: Did) -> Result<()> {
+    async fn register_remote_info(&self, data: &HandshakeInfo, did: Did) -> Result<()> {
         tracing::trace!("register remote info: {:?}", data);
 
         let sdp =

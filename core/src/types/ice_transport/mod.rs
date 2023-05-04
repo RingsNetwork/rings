@@ -31,7 +31,7 @@ pub struct IceCandidate {
 
 /// Trickle payload contain webrtc sdp and candidates.
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
-pub struct Trickle {
+pub struct HandshakeInfo {
     pub sdp: String,
     pub candidates: Vec<IceCandidate>,
 }
@@ -102,7 +102,7 @@ pub trait IceCandidateGathering: IceTransport {
 pub trait IceTrickleScheme {
     type SdpType;
 
-    async fn get_handshake_info(&self, kind: Self::SdpType) -> Result<Trickle>;
-    async fn register_remote_info(&self, data: &Trickle, did: Did) -> Result<()>;
+    async fn get_handshake_info(&self, kind: Self::SdpType) -> Result<HandshakeInfo>;
+    async fn register_remote_info(&self, data: &HandshakeInfo, did: Did) -> Result<()>;
     async fn wait_for_connected(&self) -> Result<()>;
 }

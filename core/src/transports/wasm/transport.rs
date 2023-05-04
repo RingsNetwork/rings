@@ -38,6 +38,7 @@ use crate::err::Result;
 use crate::transports::helper::Promise;
 use crate::types::channel::Channel;
 use crate::types::channel::Event;
+use crate::types::ice_transport::HandshakeInfo;
 use crate::types::ice_transport::IceCandidate;
 use crate::types::ice_transport::IceCandidateGathering;
 use crate::types::ice_transport::IceServer;
@@ -45,7 +46,6 @@ use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
 use crate::types::ice_transport::IceTransportInterface;
 use crate::types::ice_transport::IceTrickleScheme;
-use crate::types::ice_transport::Trickle;
 use crate::utils::js_value;
 
 type EventSender = <CbChannel<Event> as Channel<Event>>::Sender;
@@ -510,7 +510,7 @@ impl IceTrickleScheme for WasmTransport {
 
     type SdpType = RtcSdpType;
 
-    async fn get_handshake_info(&self, kind: Self::SdpType) -> Result<Trickle> {
+    async fn get_handshake_info(&self, kind: Self::SdpType) -> Result<HandshakeInfo> {
         let sdp = match kind {
             RtcSdpType::Answer => self.get_answer().await?,
             RtcSdpType::Offer => self.get_offer().await?,
@@ -530,7 +530,7 @@ impl IceTrickleScheme for WasmTransport {
             return Err(Error::FailedOnGatherLocalCandidate);
         }
 
-        let data = Trickle {
+        let data = HandshakeInfo {
             sdp: serde_json::to_string(&RtcSessionDescriptionWrapper::from(sdp))
                 .map_err(Error::Deserialize)?,
             candidates: local_candidates_json,
@@ -539,7 +539,7 @@ impl IceTrickleScheme for WasmTransport {
         Ok(data)
     }
 
-    async fn register_remote_info(&self, data: &Trickle, did: Did) -> Result<()> {
+    async fn register_remote_info(&self, data: &HandshakeInfo, did: Did) -> Result<()> {
         tracing::debug!("register remote info: {:?}", data);
 
         {

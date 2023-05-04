@@ -18,10 +18,10 @@ use crate::transports::helper::Promise;
 use crate::transports::helper::State;
 use crate::types::channel::Channel;
 use crate::types::channel::Event;
+use crate::types::ice_transport::HandshakeInfo;
 use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransportInterface;
 use crate::types::ice_transport::IceTrickleScheme;
-use crate::types::ice_transport::Trickle;
 
 type EventSender = <AcChannel<Event> as Channel<Event>>::Sender;
 
@@ -139,14 +139,14 @@ impl IceTrickleScheme for DummyTransport {
 
     type SdpType = RTCSdpType;
 
-    async fn get_handshake_info(&self, _kind: RTCSdpType) -> Result<Trickle> {
-        Ok(Trickle {
+    async fn get_handshake_info(&self, _kind: RTCSdpType) -> Result<HandshakeInfo> {
+        Ok(HandshakeInfo {
             sdp: serde_json::to_string(&self.id).unwrap(),
             candidates: vec![],
         })
     }
 
-    async fn register_remote_info(&self, data: &Trickle, did: Did) -> Result<()> {
+    async fn register_remote_info(&self, data: &HandshakeInfo, did: Did) -> Result<()> {
         {
             let sdp = serde_json::from_str::<uuid::Uuid>(&data.sdp).map_err(Error::Deserialize)?;
 
