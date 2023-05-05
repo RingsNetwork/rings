@@ -68,6 +68,7 @@ rand_hc = "0.3.1"
 serde = { version = "1.0.130", features = ["derive"] }
 serde_json = { version = "1.0.70" }
 sha1 = "0.10.1"
+sha2 = "0.10.6"
 thiserror = "1"
 tracing = "0.1.37"
 url = { version = "2", features = ["serde"] }
@@ -121,7 +122,7 @@ web-sys = { version = "0.3.56", optional = true, features = [
 ] }
 
 [dev-dependencies]
-base64 = { version = "0.13.0" }
+base64 = { version = "0.21.0" }
 tracing-subscriber = { version = "0.3.15", features = ["ansi"] }
 tracing-wasm = "0.2.1"
 wasm-bindgen-test = "0.3.0"

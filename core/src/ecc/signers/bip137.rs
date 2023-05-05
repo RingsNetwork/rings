@@ -1,12 +1,19 @@
 //! BIP137 Signer
 
+use sha2::Digest;
+use sha2::Sha256;
+
 use crate::ecc::Address;
 use crate::ecc::PublicKey;
 use crate::err::Result;
 
 /// recover pubkey according to signature.
 pub fn recover(msg: &str, sig: impl AsRef<[u8]>) -> Result<PublicKey> {
-    super::eip191::recover(msg, sig)
+    let sig_byte: [u8; 65] = sig.as_ref().try_into()?;
+    let hash = self::magic_hash(msg);
+    let mut sig712 = sig_byte;
+    sig712[64] -= 27;
+    crate::ecc::recover_hash(&hash, &sig712)
 }
 
 /// verify message signed by Ethereum address.
@@ -16,6 +23,40 @@ pub fn verify(msg: &str, address: &Address, sig: impl AsRef<[u8]>) -> bool {
     } else {
         false
     }
+}
+
+fn varint_buf_num(n: u64) -> Vec<u8> {
+    if n < 253 {
+        vec![n as u8]
+    } else if n < 0x10000 {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&[253u8]);
+        buf.extend_from_slice(&(n as u16).to_le_bytes());
+        buf
+    } else if n < 0x100000000 {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&[254u8]);
+        buf.extend_from_slice(&(n as u32).to_le_bytes());
+        buf
+    } else {
+        let mut buf = vec![255u8, 0, 0, 0, 0, 0, 0, 0, 0];
+        buf[1..5].copy_from_slice(&n.to_le_bytes()[..4]);
+        buf[5..9].copy_from_slice(&((n >> 32) as u32).to_le_bytes()[..4]);
+        buf.truncate(1 + 8);
+        buf
+    }
+}
+
+pub fn magic_hash(msg: &str) -> [u8; 32] {
+    let magic_bytes = "Bitcoin Signed Message:\n".as_bytes();
+    let msg_bytes = msg.as_bytes();
+    let mut buf = Vec::new();
+    buf.extend_from_slice(varint_buf_num(magic_bytes.len() as u64).as_slice());
+    buf.extend_from_slice(magic_bytes);
+    buf.extend_from_slice(varint_buf_num(msg_bytes.len() as u64).as_slice());
+    buf.extend_from_slice(msg_bytes);
+    let hash = Sha256::digest(&Sha256::digest(&buf));
+    hash.into()
 }
 
 #[cfg(test)]
@@ -45,6 +86,7 @@ mod test {
         sig.rotate_left(1);
         assert_eq!(sig[64], 27);
         let pk = self::recover(msg, sig).unwrap();
+        assert_eq!(pk, pubkey);
         assert_eq!(pk.address(), pubkey.address());
     }
 }

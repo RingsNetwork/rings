@@ -59,6 +59,8 @@ pub enum SignerMode {
     EIP191,
     /// ed25519
     EdDSA,
+    /// bitcoin bip137 ref: <https://github.com/bitcoin/bips/blob/master/bip-0137.mediawiki>
+    BIP137,
 }
 
 impl From<SignerMode> for Signer {
@@ -67,6 +69,7 @@ impl From<SignerMode> for Signer {
             SignerMode::DEFAULT => Self::DEFAULT,
             SignerMode::EIP191 => Self::EIP191,
             SignerMode::EdDSA => Self::EdDSA,
+            SignerMode::BIP137 => Self::BIP137,
         }
     }
 }
