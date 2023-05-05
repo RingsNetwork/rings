@@ -61,7 +61,6 @@ hex = "0.4.3"
 itertools = "0.10.3"
 libsecp256k1 = "0.7.0"
 num-bigint = "0.4.3"
-num-integer = "0.1.45"
 rand = { version = "0.8.5", features = ["getrandom"] }
 rand_core = { version = "0.6.3", features = ["getrandom"] }
 rand_hc = "0.3.1"

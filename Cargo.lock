@@ -2918,7 +2918,6 @@ dependencies = [
  "lazy_static",
  "libsecp256k1",
  "num-bigint",
- "num-integer",
  "rand 0.8.5",
  "rand_core 0.6.4",
  "rand_hc 0.3.1",
