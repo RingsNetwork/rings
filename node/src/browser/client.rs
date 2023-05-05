@@ -321,7 +321,7 @@ impl Client {
     pub fn answer_offer(&self, offer_payload: String) -> js_sys::Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
-            let offer_payload = js_value::deserialize(&offer_payload).map_err(JsError::from)?;
+            let offer_payload = serde_json::from_str(&offer_payload).map_err(JsError::from)?;
             let (_, answer_payload) = p
                 .swarm
                 .answer_offer(offer_payload)
@@ -336,7 +336,7 @@ impl Client {
     pub fn accept_answer(&self, answer_payload: String) -> js_sys::Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
-            let answer_payload = js_value::deserialize(&answer_payload).map_err(JsError::from)?;
+            let answer_payload = serde_json::from_str(&answer_payload).map_err(JsError::from)?;
             let (did, transport) = p
                 .swarm
                 .accept_answer(answer_payload)
