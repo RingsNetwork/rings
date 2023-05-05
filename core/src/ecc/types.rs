@@ -1,4 +1,5 @@
 #![warn(missing_docs)]
+
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -61,6 +62,12 @@ impl PublicKey {
     /// convert pubkey to base58_string
     pub fn to_base58_string(&self) -> Result<String> {
         Ok(base58::ToBase58::to_base58(&self.0[..]))
+    }
+
+    /// convert public_key from hex string
+    pub fn from_hex_string(value: &str) -> Result<Self> {
+        let v = hex::decode(value)?;
+        Self::from_u8(v.as_slice())
     }
 }
 
