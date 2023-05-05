@@ -1,0 +1,1 @@
+//! rings-rpc client

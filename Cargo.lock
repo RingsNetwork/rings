@@ -2963,10 +2963,7 @@ dependencies = [
  "form_urlencoded",
  "futures",
  "futures-timer",
- "http",
  "hyper",
- "jsonrpc-core",
- "jsonrpc-pubsub",
  "lazy_static",
  "log",
  "opentelemetry",
@@ -2975,6 +2972,7 @@ dependencies = [
  "reqwest",
  "reqwest-wasm",
  "rings-core",
+ "rings-rpc",
  "serde",
  "serde-wasm-bindgen 0.5.0",
  "serde_json",
@@ -2988,6 +2986,21 @@ dependencies = [
  "tracing-subscriber",
  "tracing-wasm",
  "wasm-bindgen-test",
+]
+
+[[package]]
+name = "rings-rpc"
+version = "0.2.5"
+dependencies = [
+ "http",
+ "jsonrpc-core",
+ "jsonrpc-pubsub",
+ "reqwest",
+ "reqwest-wasm",
+ "rings-core",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]

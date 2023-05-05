@@ -19,9 +19,14 @@ use crate::backend::types::Timeout;
 use crate::consts::DATA_REDUNDANT;
 use crate::error::Error;
 use crate::error::Result;
-use crate::jsonrpc::method;
-use crate::jsonrpc_client::SimpleClient;
+// use crate::jsonrpc::method;
+// use crate::jsonrpc_client::SimpleClient;
 use crate::measure::PeriodicMeasure;
+use crate::prelude::http;
+use crate::prelude::jsonrpc_client::SimpleClient;
+use crate::prelude::jsonrpc_core;
+// #[cfg(feature = "node")]
+// use crate::prelude::jsonrpc_core::Metadata;
 use crate::prelude::rings_core::dht::Did;
 use crate::prelude::rings_core::dht::Stabilization;
 use crate::prelude::rings_core::dht::TStabilize;
@@ -46,6 +51,7 @@ use crate::prelude::rings_core::transports::manager::TransportManager;
 use crate::prelude::rings_core::transports::Transport;
 use crate::prelude::rings_core::types::ice_transport::IceTransportInterface;
 use crate::prelude::rings_core::types::message::MessageListener;
+use crate::prelude::rings_rpc::method;
 use crate::prelude::vnode;
 use crate::prelude::web3::signing::keccak256;
 use crate::prelude::CallbackFn;
@@ -573,6 +579,17 @@ impl From<&(Did, Arc<Transport>)> for Peer {
         Self {
             did: did.into_token(),
             transport: transport.clone(),
+        }
+    }
+}
+
+impl Peer {
+    /// convert peer to response peer
+    pub fn into_response_peer(&self, state: Option<String>) -> rings_rpc::response::Peer {
+        rings_rpc::response::Peer {
+            did: self.did.clone().into_token().to_string(),
+            transport_id: self.transport.id.to_string(),
+            state: state.unwrap_or_else(|| "Unknown".to_owned()),
         }
     }
 }

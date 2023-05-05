@@ -6,8 +6,8 @@ use futures::SinkExt;
 use futures::StreamExt;
 
 use super::WsState;
-use crate::jsonrpc::response::BaseResponse;
-use crate::jsonrpc::response::CustomBackendMessage;
+use crate::prelude::rings_rpc::response::BaseResponse;
+use crate::prelude::rings_rpc::response::CustomBackendMessage;
 
 /// Actual websocket statemachine (one will be spawned per connection)
 pub async fn handle_socket(ws_state: Arc<WsState>, socket: WebSocket) {

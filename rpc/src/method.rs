@@ -1,7 +1,7 @@
 //! A JSONRPC `method` enum.
 #![warn(missing_docs)]
-use crate::error::Error;
-use crate::error::Result;
+use super::error::Error;
+use super::error::Result;
 
 /// supported methods.
 #[derive(Debug, Clone)]

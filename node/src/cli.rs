@@ -26,19 +26,19 @@ use futures::select;
 use futures::FutureExt;
 use futures::Stream;
 use futures_timer::Delay;
-use http::header;
-use jsonrpc_core::Params;
-use jsonrpc_core::Value;
 use serde_json::json;
 
 use crate::backend::types::HttpRequest;
 use crate::backend::types::Timeout;
-use crate::jsonrpc;
-use crate::jsonrpc::method::Method;
-use crate::jsonrpc::response::Peer;
-use crate::jsonrpc_client::SimpleClient;
+use crate::prelude::http;
+use crate::prelude::http::header;
+use crate::prelude::jsonrpc_client::SimpleClient;
+use crate::prelude::jsonrpc_core::Params;
+use crate::prelude::jsonrpc_core::Value;
 use crate::prelude::reqwest;
 use crate::prelude::rings_core::inspect::SwarmInspect;
+use crate::prelude::rings_rpc::method::Method;
+use crate::prelude::rings_rpc::response::Peer;
 use crate::processor::NodeInfo;
 use crate::seed::Seed;
 use crate::util::loader::ResourceLoader;
@@ -175,7 +175,7 @@ impl Client {
             .call_method(Method::ListPendings.as_str(), Params::Array(vec![]))
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let resp: Vec<jsonrpc::response::TransportInfo> =
+        let resp: Vec<crate::prelude::rings_rpc::response::TransportInfo> =
             serde_json::from_value(resp).map_err(|e| anyhow::anyhow!("{}", e))?;
         let mut display = String::new();
         display.push_str("TransportId, Status\n");

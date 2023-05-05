@@ -17,6 +17,7 @@ use crate::consts::BACKEND_MTU;
 use crate::prelude::chunk::Chunk;
 use crate::prelude::chunk::ChunkList;
 use crate::prelude::chunk::ChunkManager;
+use crate::prelude::http;
 use crate::prelude::js_sys;
 use crate::prelude::message;
 use crate::prelude::rings_core::async_trait;

@@ -1,4 +1,4 @@
 [workspace]
-members = ["core", "node"]
+members = ["core", "node", "rpc"]
 
 resolver = "2"

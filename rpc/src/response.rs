@@ -6,13 +6,10 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 
-use crate::backend;
 use crate::error::Error;
 use crate::error::Result;
 use crate::prelude::rings_core::dht::Did;
-use crate::prelude::rings_core::prelude::web3::contract::tokens::Tokenizable;
 use crate::prelude::rings_core::transports::Transport;
-use crate::processor;
 
 /// Peer contains transport address and state information.
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -33,11 +30,6 @@ impl Peer {
     pub fn to_json_obj(&self) -> Result<JsonValue> {
         serde_json::to_value(self).map_err(|_| Error::EncodeError)
     }
-
-    #[cfg(feature = "node")]
-    pub fn base64_encode(&self) -> Result<String> {
-        Ok(base64::encode(self.to_json_vec()?))
-    }
 }
 
 impl From<(Did, &Arc<Transport>, Option<String>)> for Peer {
@@ -45,16 +37,6 @@ impl From<(Did, &Arc<Transport>, Option<String>)> for Peer {
         Self {
             did: did.to_string(),
             transport_id: transport.id.to_string(),
-            state: state.unwrap_or_else(|| "Unknown".to_owned()),
-        }
-    }
-}
-
-impl From<(&processor::Peer, Option<String>)> for Peer {
-    fn from((p, state): (&processor::Peer, Option<String>)) -> Self {
-        Self {
-            did: p.did.clone().into_token().to_string(),
-            transport_id: p.transport.id.to_string(),
             state: state.unwrap_or_else(|| "Unknown".to_owned()),
         }
     }
@@ -102,11 +84,8 @@ pub struct CustomBackendMessage {
     data: String,
 }
 
-impl From<backend::types::BackendMessage> for CustomBackendMessage {
-    fn from(v: backend::types::BackendMessage) -> Self {
-        Self {
-            message_type: v.message_type,
-            data: base64::encode(v.data),
-        }
+impl From<(u16, String)> for CustomBackendMessage {
+    fn from((message_type, data): (u16, String)) -> Self {
+        Self { message_type, data }
     }
 }

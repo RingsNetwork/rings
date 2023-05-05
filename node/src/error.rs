@@ -1,4 +1,5 @@
 //! A bunch of wrap errors.
+use crate::prelude::jsonrpc_core;
 use crate::prelude::rings_core;
 
 /// A wrap `Result` contains custom errors.
@@ -125,6 +126,16 @@ impl From<Error> for jsonrpc_core::Error {
             code: jsonrpc_core::ErrorCode::ServerError(e.code()),
             message: e.to_string(),
             data: None,
+        }
+    }
+}
+
+impl From<crate::prelude::rings_rpc::error::Error> for Error {
+    fn from(e: crate::prelude::rings_rpc::error::Error) -> Self {
+        match e {
+            rings_rpc::error::Error::DecodeError => Error::DecodeError,
+            rings_rpc::error::Error::EncodeError => Error::EncodeError,
+            rings_rpc::error::Error::InvalidMethod => Error::InvalidMethod,
         }
     }
 }

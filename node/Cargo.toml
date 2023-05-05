@@ -35,12 +35,14 @@ node = [
     "lazy_static",
     "axum/ws",
     "axum/headers",
+    "rings-rpc/std",
 ]
 browser = [
     "console_error_panic_hook",
     "tracing-wasm",
     "reqwest-wasm",
     "rings-core/wasm",
+    "rings-rpc/wasm",
     "serde-wasm-bindgen",
 ]
 browser_chrome_test = ["browser"]
@@ -56,11 +58,10 @@ chrono = "0.4.23"
 dotenv = "0.15.0"
 futures = { version = "0.3.21", features = ["alloc"] }
 futures-timer = "3.0.2"
-http = { version = "0.2.6" }
-jsonrpc-core = { version = "18.0.0" }
-jsonrpc-pubsub = { version = "18.0.0" }
+# http = { version = "0.2.6" }
 log = { version = "0.4", features = ["std"] }
 rings-core = { package = "rings-core", path = "../core", optional = true, default-features = false, version = "0.2.5" }
+rings-rpc = { package = "rings-rpc", path = "../rpc", optional = true, default-features = false, version = "0.2.5" }
 serde = { version = "1.0.136", features = ["derive"] }
 serde_json = "1.0.70"
 thiserror = "1"
