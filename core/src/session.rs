@@ -33,6 +33,8 @@ pub enum Signer {
     EIP191,
     /// ed25519
     EdDSA,
+    /// bitcoin bip137 ref: <https://github.com/bitcoin/bips/blob/master/bip-0137.mediawiki>
+    BIP137,
 }
 
 /// TTl with specific time, or not set.
@@ -152,6 +154,9 @@ impl Session {
                     ),
                     Err(_) => false,
                 },
+                Signer::BIP137 => {
+                    signers::bip137::verify(&auth_str, &self.auth.authorizer.did.into(), &self.sig)
+                }
             }
         } else {
             false
@@ -172,6 +177,7 @@ impl Session {
         let auth = self.auth.to_string()?;
         match self.auth.signer {
             Signer::DEFAULT => signers::default::recover(&auth, &self.sig),
+            Signer::BIP137 => signers::bip137::recover(&auth, &self.sig),
             Signer::EIP191 => signers::eip191::recover(&auth, &self.sig),
             Signer::EdDSA => self
                 .auth
