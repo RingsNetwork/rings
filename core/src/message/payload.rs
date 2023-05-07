@@ -23,7 +23,6 @@ use crate::dht::Chord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::dht::PeerRingAction;
-use crate::ecc::PublicKey;
 use crate::err::Error;
 use crate::err::Result;
 use crate::session::SessionManager;
@@ -174,12 +173,22 @@ where T: Serialize + DeserializeOwned
             return false;
         }
 
+        if Some(self.relay.sender()) != self.origin_authorizer_did().ok() {
+            tracing::warn!("sender is not origin_verification generator");
+            return false;
+        }
+
         self.verification.verify(&self.data) && self.origin_verification.verify(&self.data)
     }
 
     /// Recovers the public key from the origin verification.
-    pub fn origin_session_pubkey(&self) -> Result<PublicKey> {
-        self.origin_verification.session_pubkey(&self.data)
+    pub fn origin_authorizer_did(&self) -> Result<Did> {
+        Ok(self
+            .origin_verification
+            .session
+            .authorizer_pubkey()?
+            .address()
+            .into())
     }
 
     /// Deserializes a `MessagePayload` instance from the given binary data.
@@ -348,21 +357,9 @@ pub mod test {
     fn new_then_verify() {
         let key2 = SecretKey::random();
         let did2 = key2.address().into();
-        let session2 = SessionManager::new_with_seckey(&key2, None).unwrap();
-        let did3 = SecretKey::random().address().into();
 
         let payload = new_test_payload(did2);
         assert!(payload.verify());
-
-        let relaied_payload = MessagePayload::new(
-            payload.data.clone(),
-            &session2,
-            OriginVerificationGen::Stick(payload.origin_verification),
-            payload.relay.forward(did2, did3).unwrap(),
-        )
-        .unwrap();
-
-        assert!(relaied_payload.verify());
     }
 
     #[test]

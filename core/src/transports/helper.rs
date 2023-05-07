@@ -5,12 +5,8 @@ use std::sync::Mutex;
 use std::task::Context;
 use std::task::Poll;
 
-use serde::Deserialize;
-use serde::Serialize;
-
 use crate::err::Error;
 use crate::err::Result;
-use crate::types::ice_transport::IceCandidate;
 
 /// Custom futures state.
 #[derive(Default)]
@@ -18,13 +14,6 @@ pub struct State {
     pub completed: bool,
     pub succeeded: Option<bool>,
     pub waker: Option<std::task::Waker>,
-}
-
-/// TricklePayload contain webrtc sdp and candidates.
-#[derive(Deserialize, Serialize, Debug)]
-pub struct TricklePayload {
-    pub sdp: String,
-    pub candidates: Vec<IceCandidate>,
 }
 
 /// Custom futures Promise act like js Promise.

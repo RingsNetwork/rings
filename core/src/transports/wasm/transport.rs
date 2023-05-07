@@ -33,17 +33,12 @@ use crate::chunk::ChunkManager;
 use crate::consts::TRANSPORT_MAX_SIZE;
 use crate::consts::TRANSPORT_MTU;
 use crate::dht::Did;
-use crate::ecc::PublicKey;
 use crate::err::Error;
 use crate::err::Result;
-use crate::message::Encoded;
-use crate::message::Encoder;
-use crate::message::MessagePayload;
-use crate::session::SessionManager;
 use crate::transports::helper::Promise;
-use crate::transports::helper::TricklePayload;
 use crate::types::channel::Channel;
 use crate::types::channel::Event;
+use crate::types::ice_transport::HandshakeInfo;
 use crate::types::ice_transport::IceCandidate;
 use crate::types::ice_transport::IceCandidateGathering;
 use crate::types::ice_transport::IceServer;
@@ -63,7 +58,7 @@ pub struct WasmTransport {
     pending_candidates: Arc<Mutex<Vec<RtcIceCandidate>>>,
     channel: Option<Arc<RtcDataChannel>>,
     event_sender: EventSender,
-    public_key: Arc<RwLock<Option<PublicKey>>>,
+    remote_did: Arc<RwLock<Option<Did>>>,
     chunk_list: Arc<Mutex<ChunkList<TRANSPORT_MTU>>>,
 }
 
@@ -160,7 +155,7 @@ impl IceTransportInterface<Event, CbChannel<Event>> for WasmTransport {
             connection: None,
             pending_candidates: Arc::new(Mutex::new(vec![])),
             channel: None,
-            public_key: Arc::new(RwLock::new(None)),
+            remote_did: Arc::new(RwLock::new(None)),
             event_sender,
             chunk_list: Default::default(),
         }
@@ -231,10 +226,6 @@ impl IceTransportInterface<Event, CbChannel<Event>> for WasmTransport {
         Ok(())
     }
 
-    async fn pubkey(&self) -> PublicKey {
-        self.public_key.read().unwrap().unwrap()
-    }
-
     async fn ice_connection_state(&self) -> Option<Self::IceConnectionState> {
         self.get_peer_connection()
             .await
@@ -298,11 +289,11 @@ impl IceTransportCallback for WasmTransport {
         let event_sender = self.event_sender.clone();
         let peer_connection = self.get_peer_connection().await;
         let id = self.id;
-        let public_key = Arc::clone(&self.public_key);
+        let remote_did = self.remote_did.clone();
         Box::new(move |ev: web_sys::Event| {
             let mut peer_connection = peer_connection.clone();
             let event_sender = Arc::clone(&event_sender);
-            let public_key = Arc::clone(&public_key);
+            let remote_did = remote_did.clone();
             let id = id;
 
             // tracing::debug!("got state event {:?}", ev.type_());
@@ -318,10 +309,10 @@ impl IceTransportCallback for WasmTransport {
                     let event_sender = Arc::clone(&event_sender);
                     match ice_connection_state {
                         RtcIceConnectionState::Connected => {
-                            let local_did = (*public_key.read().unwrap()).unwrap().address().into();
+                            let remote_did = remote_did.read().unwrap().unwrap();
                             if CbChannel::send(
                                 &event_sender,
-                                Event::RegisterTransport((local_did, id)),
+                                Event::RegisterTransport((remote_did, id)),
                             )
                             .await
                             .is_err()
@@ -332,10 +323,13 @@ impl IceTransportCallback for WasmTransport {
                         RtcIceConnectionState::Failed
                         | RtcIceConnectionState::Disconnected
                         | RtcIceConnectionState::Closed => {
-                            let local_did = (*public_key.read().unwrap()).unwrap().address().into();
-                            if CbChannel::send(&event_sender, Event::ConnectClosed((local_did, id)))
-                                .await
-                                .is_err()
+                            let remote_did = remote_did.read().unwrap().unwrap();
+                            if CbChannel::send(
+                                &event_sender,
+                                Event::ConnectClosed((remote_did, id)),
+                            )
+                            .await
+                            .is_err()
                             {
                                 tracing::error!("Failed when send ConnectFailed");
                             }
@@ -516,11 +510,7 @@ impl IceTrickleScheme for WasmTransport {
 
     type SdpType = RtcSdpType;
 
-    async fn get_handshake_info(
-        &self,
-        session_manager: &SessionManager,
-        kind: Self::SdpType,
-    ) -> Result<Encoded> {
+    async fn get_handshake_info(&self, kind: Self::SdpType) -> Result<HandshakeInfo> {
         let sdp = match kind {
             RtcSdpType::Answer => self.get_answer().await?,
             RtcSdpType::Offer => self.get_offer().await?,
@@ -540,42 +530,33 @@ impl IceTrickleScheme for WasmTransport {
             return Err(Error::FailedOnGatherLocalCandidate);
         }
 
-        let data = TricklePayload {
+        let data = HandshakeInfo {
             sdp: serde_json::to_string(&RtcSessionDescriptionWrapper::from(sdp))
                 .map_err(Error::Deserialize)?,
             candidates: local_candidates_json,
         };
         tracing::debug!("prepared handshake info :{:?}", data);
-        let fake_did = session_manager.authorizer()?.to_owned();
-        let resp = MessagePayload::new_send(data, session_manager, fake_did, fake_did)?;
-        Ok(resp.encode()?)
+        Ok(data)
     }
 
-    async fn register_remote_info(&self, data: Encoded) -> Result<Did> {
-        let data: MessagePayload<TricklePayload> = data.decode()?;
-        tracing::debug!("register remote info: {:?}", &data);
+    async fn register_remote_info(&self, data: &HandshakeInfo, did: Did) -> Result<()> {
+        tracing::debug!("register remote info: {:?}", data);
 
-        match data.verify() {
-            true => {
-                if let Ok(public_key) = data.origin_verification.session.authorizer_pubkey() {
-                    let mut pk = self.public_key.write().unwrap();
-                    *pk = Some(public_key);
-                }
-                let sdp: RtcSessionDescriptionWrapper = data.data.sdp.try_into()?;
-                self.set_remote_description(sdp.to_owned()).await?;
-                for c in &data.data.candidates {
-                    tracing::debug!("add remote candidates: {:?}", c);
-                    if self.add_ice_candidate(c.clone()).await.is_err() {
-                        tracing::warn!("failed on add add candidates: {:?}", c.clone());
-                    };
-                }
-                Ok(data.addr)
-            }
-            _ => {
-                tracing::error!("cannot verify message sig");
-                return Err(Error::VerifySignatureFailed);
-            }
+        {
+            let mut remote_did = self.remote_did.write().unwrap();
+            *remote_did = Some(did);
         }
+
+        let sdp: RtcSessionDescriptionWrapper = data.sdp.clone().try_into()?;
+        self.set_remote_description(sdp.to_owned()).await?;
+        for c in &data.candidates {
+            tracing::debug!("add remote candidates: {:?}", c);
+            if self.add_ice_candidate(c.clone()).await.is_err() {
+                tracing::warn!("failed on add add candidates: {:?}", c.clone());
+            };
+        }
+
+        Ok(())
     }
 
     async fn wait_for_connected(&self) -> Result<()> {

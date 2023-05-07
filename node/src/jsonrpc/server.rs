@@ -20,7 +20,6 @@ use super::method::Method;
 use super::response;
 use super::response::CustomBackendMessage;
 use super::response::Peer;
-use super::response::TransportAndIce;
 use crate::backend::types::BackendMessage;
 use crate::backend::types::HttpRequest;
 use crate::backend::MessageType;
@@ -28,6 +27,7 @@ use crate::error::Error as ServerError;
 use crate::prelude::rings_core::dht::Did;
 use crate::prelude::rings_core::message::Encoder;
 use crate::prelude::rings_core::prelude::vnode::VirtualNode;
+use crate::prelude::rings_core::transports::manager::TransportHandshake;
 use crate::prelude::rings_core::transports::manager::TransportManager;
 use crate::prelude::rings_core::types::ice_transport::IceTransportInterface;
 use crate::prelude::rings_core::utils::from_rtc_ice_connection_state;
@@ -124,12 +124,12 @@ async fn connect_peer_via_http(params: Params, meta: RpcMeta) -> Result<Value> {
     let peer_url = p
         .first()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
-    let transport = meta
+    let peer = meta
         .processor
         .connect_peer_via_http(peer_url)
         .await
         .map_err(Error::from)?;
-    Ok(Value::String(transport.id.to_string()))
+    Ok(Value::String(peer.transport.id.to_string()))
 }
 
 /// Connect Peer with seed
@@ -158,21 +158,6 @@ async fn connect_with_seed(params: Params, meta: RpcMeta) -> Result<Value> {
     Ok(Value::Null)
 }
 
-/// Handle Answer Offer
-async fn answer_offer(params: Params, meta: RpcMeta) -> Result<Value> {
-    let p: Vec<String> = params.parse()?;
-    let ice_info = p
-        .first()
-        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
-    let r = meta
-        .processor
-        .answer_offer(ice_info)
-        .await
-        .map_err(Error::from)?;
-    tracing::debug!("connect_peer_via_ice response: {:?}", r.1);
-    TransportAndIce::from(r).to_json_obj().map_err(Error::from)
-}
-
 /// Handle Connect with DID
 async fn connect_with_did(params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
@@ -193,24 +178,67 @@ async fn connect_with_did(params: Params, meta: RpcMeta) -> Result<Value> {
 /// Handle create offer
 async fn create_offer(_params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
-    let r = meta.processor.create_offer().await.map_err(Error::from)?;
-    TransportAndIce::from(r).to_json_obj().map_err(Error::from)
+    let (_, offer_payload) = meta
+        .processor
+        .swarm
+        .create_offer()
+        .await
+        .map_err(ServerError::CreateOffer)
+        .map_err(Error::from)?;
+
+    serde_json::to_value(offer_payload)
+        .map_err(ServerError::SerdeJsonError)
+        .map_err(Error::from)
+}
+
+/// Handle Answer Offer
+async fn answer_offer(params: Params, meta: RpcMeta) -> Result<Value> {
+    let p: Vec<String> = params.parse()?;
+    let offer_payload_str = p
+        .first()
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
+
+    let offer_payload = serde_json::from_str(offer_payload_str)
+        .map_err(|_| Error::new(ErrorCode::InvalidParams))?;
+
+    let (_, answer_payload) = meta
+        .processor
+        .swarm
+        .answer_offer(offer_payload)
+        .await
+        .map_err(ServerError::AnswerOffer)
+        .map_err(Error::from)?;
+
+    tracing::debug!("connect_peer_via_ice response: {:?}", answer_payload);
+    serde_json::to_value(answer_payload)
+        .map_err(ServerError::SerdeJsonError)
+        .map_err(Error::from)
 }
 
 /// Handle accept answer
 async fn accept_answer(params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
-    let params: Vec<String> = params.parse()?;
-    if let ([transport_id, ice], _) = params.split_at(2) {
-        let p: processor::Peer = meta
-            .processor
-            .accept_answer(transport_id.as_str(), ice.as_str())
-            .await?;
-        let state = p.transport.ice_connection_state().await;
-        let r: Peer = (&p, state.map(from_rtc_ice_connection_state)).into();
-        return r.to_json_obj().map_err(Error::from);
-    };
-    Err(Error::new(ErrorCode::InvalidParams))
+
+    let p: Vec<String> = params.parse()?;
+    let answer_payload_str = p
+        .first()
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
+
+    let answer_payload = serde_json::from_str(answer_payload_str)
+        .map_err(|_| Error::new(ErrorCode::InvalidParams))?;
+
+    let p: processor::Peer = meta
+        .processor
+        .swarm
+        .accept_answer(answer_payload)
+        .await
+        .map_err(ServerError::AcceptAnswer)
+        .map_err(Error::from)?
+        .into();
+
+    let state = p.transport.ice_connection_state().await;
+    let r: Peer = (&p, state.map(from_rtc_ice_connection_state)).into();
+    r.to_json_obj().map_err(Error::from)
 }
 
 /// Handle list peers

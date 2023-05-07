@@ -1,11 +1,16 @@
-GIT_COMMIT := $(shell git rev-parse --short HEAD)
-build-docker-image:
-	docker build --build-arg GIT_SHORT_HASH=$(GIT_COMMIT) -t rings-network/rings-node -f ./docker/alpinelinux/Dockerfile ./
-
 fmt:
 	cargo +nightly fmt -p rings-core
 	cargo +nightly fmt -p rings-node
 	taplo format
 
-clippy:
+clippy-fix:
 	cargo clippy --fix --allow-dirty
+
+build-browser-pack:
+	wasm-pack build --scope ringsnetwork -t web --no-default-features --features browser --features console_error_panic_hook -p rings-node
+
+test-core-wasm:
+	cd core; wasm-pack test --chrome --features browser_chrome_test --no-default-features
+
+test-node-browser:
+	cd node; wasm-pack test --chrome --features browser_chrome_test --no-default-features

@@ -23,18 +23,11 @@ pub async fn manually_establish_connection(swarm1: &Swarm, swarm2: &Swarm) -> Re
     assert!(swarm1.get_transport(swarm2.did()).is_none());
     assert!(swarm2.get_transport(swarm1.did()).is_none());
 
-    let sm1 = swarm1.session_manager();
-    let sm2 = swarm2.session_manager();
-
     let transport1 = swarm1.new_transport().await.unwrap();
     swarm1
         .register(swarm2.did(), transport1.clone())
         .await
         .unwrap();
-
-    let handshake_info1 = transport1
-        .get_handshake_info(sm1, RTCSdpType::Offer)
-        .await?;
 
     let transport2 = swarm2.new_transport().await.unwrap();
     swarm2
@@ -42,17 +35,15 @@ pub async fn manually_establish_connection(swarm1: &Swarm, swarm2: &Swarm) -> Re
         .await
         .unwrap();
 
-    let addr1 = transport2.register_remote_info(handshake_info1).await?;
-
-    assert_eq!(addr1, swarm1.did());
-
-    let handshake_info2 = transport2
-        .get_handshake_info(sm2, RTCSdpType::Answer)
+    let handshake_info1 = transport1.get_handshake_info(RTCSdpType::Offer).await?;
+    transport2
+        .register_remote_info(&handshake_info1, swarm1.did())
         .await?;
 
-    let addr2 = transport1.register_remote_info(handshake_info2).await?;
-
-    assert_eq!(addr2, swarm2.did());
+    let handshake_info2 = transport2.get_handshake_info(RTCSdpType::Answer).await?;
+    transport1
+        .register_remote_info(&handshake_info2, swarm2.did())
+        .await?;
 
     #[cfg(all(not(feature = "wasm")))]
     {

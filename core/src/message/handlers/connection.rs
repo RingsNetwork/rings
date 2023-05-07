@@ -23,7 +23,7 @@ use crate::message::LeaveDHT;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
-use crate::prelude::RTCSdpType;
+use crate::transports::manager::TransportHandshake;
 use crate::transports::manager::TransportManager;
 use crate::types::ice_transport::IceTrickleScheme;
 
@@ -94,32 +94,22 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
             }
         }
 
-        match self.swarm.get_and_check_transport(ctx.relay.sender()).await {
-            None => {
-                let trans = self.swarm.new_transport().await?;
-                trans
-                    .register_remote_info(msg.handshake_info.to_owned().into())
-                    .await?;
-                let handshake_info = trans
-                    .get_handshake_info(self.swarm.session_manager(), RTCSdpType::Answer)
-                    .await?
-                    .to_string();
-                self.send_report_message(
-                    ctx,
-                    Message::ConnectNodeReport(ConnectNodeReport {
-                        transport_uuid: msg.transport_uuid.clone(),
-                        handshake_info,
-                    }),
-                )
-                .await?;
-                self.swarm.push_pending_transport(&trans)?;
-                Ok(())
+        match self
+            .swarm
+            .answer_remote_transport(ctx.relay.sender(), msg)
+            .await
+        {
+            Ok((_, msg)) => {
+                self.send_report_message(ctx, Message::ConnectNodeReport(msg))
+                    .await
             }
 
-            _ => {
+            Err(Error::AlreadyConnected) => {
                 self.send_report_message(ctx, Message::AlreadyConnected(AlreadyConnected))
                     .await
             }
+
+            Err(e) => Result::Err(e),
         }
     }
 }
@@ -149,7 +139,7 @@ impl HandleMsg<ConnectNodeReport> for MessageHandler {
             )?
             .ok_or(Error::MessageHandlerMissTransportConnectedNode)?;
         transport
-            .register_remote_info(msg.handshake_info.clone().into())
+            .register_remote_info(&msg.answer, ctx.relay.sender())
             .await?;
         Ok(())
     }

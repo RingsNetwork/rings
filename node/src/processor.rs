@@ -8,6 +8,7 @@ use futures::future::Join;
 use futures::Future;
 #[cfg(feature = "node")]
 use jsonrpc_core::Metadata;
+use rings_core::message::MessagePayload;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -15,11 +16,9 @@ use crate::backend::types::BackendMessage;
 use crate::backend::types::HttpRequest;
 use crate::backend::types::MessageType;
 use crate::backend::types::Timeout;
-use crate::error;
 use crate::error::Error;
 use crate::error::Result;
 use crate::jsonrpc::method;
-use crate::jsonrpc::response::TransportAndIce;
 use crate::jsonrpc_client::SimpleClient;
 use crate::measure::PeriodicMeasure;
 use crate::prelude::rings_core::dht::Did;
@@ -36,16 +35,15 @@ use crate::prelude::rings_core::prelude::libsecp256k1;
 use crate::prelude::rings_core::prelude::uuid;
 use crate::prelude::rings_core::prelude::web3::contract::tokens::Tokenizable;
 use crate::prelude::rings_core::prelude::web3::ethabi::Token;
-use crate::prelude::rings_core::prelude::RTCSdpType;
 use crate::prelude::rings_core::session::AuthorizedInfo;
 use crate::prelude::rings_core::session::SessionManager;
 use crate::prelude::rings_core::storage::PersistenceStorage;
 use crate::prelude::rings_core::swarm::Swarm;
 use crate::prelude::rings_core::swarm::SwarmBuilder;
+use crate::prelude::rings_core::transports::manager::TransportHandshake;
 use crate::prelude::rings_core::transports::manager::TransportManager;
 use crate::prelude::rings_core::transports::Transport;
 use crate::prelude::rings_core::types::ice_transport::IceTransportInterface;
-use crate::prelude::rings_core::types::ice_transport::IceTrickleScheme;
 use crate::prelude::rings_core::types::message::MessageListener;
 use crate::prelude::vnode;
 use crate::prelude::web3::signing::keccak256;
@@ -246,113 +244,39 @@ impl Processor {
         self.swarm.did()
     }
 
-    /// Create an Offer and waiting for connection.
-    /// The process of manually handshake is:
-    /// 1. PeerA: create_offer
-    /// 2. PeerA: send the handshake info to PeerB.
-    /// 3. PeerB: answer_offer
-    /// 4. PeerB: send the handshake info to PeerA.
-    /// 5. PeerA: accept_answer.
-    pub async fn create_offer(&self) -> Result<(Arc<Transport>, Encoded)> {
-        let transport = self
-            .swarm
-            .new_transport()
-            .await
-            .map_err(|_| Error::NewTransportError)?;
-        let transport_cloned = transport.clone();
-        let task = async move {
-            let hs_info = transport_cloned
-                .get_handshake_info(self.swarm.session_manager(), RTCSdpType::Offer)
-                .await
-                .map_err(Error::CreateOffer)?;
-            self.swarm
-                .push_pending_transport(&transport_cloned)
-                .map_err(Error::PendingTransport)?;
-            Ok(hs_info)
-        };
-        let hs_info = match task.await {
-            Ok(hs_info) => (transport, hs_info),
-            Err(e) => {
-                transport.close().await.ok();
-                return Err(e);
-            }
-        };
-        Ok(hs_info)
-    }
-
     /// Connect peer with remote rings-node jsonrpc server.
     /// * peer_url: the remote rings-node jsonrpc server url.
-    pub async fn connect_peer_via_http(&self, peer_url: &str) -> Result<Arc<Transport>> {
+    pub async fn connect_peer_via_http(&self, peer_url: &str) -> Result<Peer> {
         // request remote offer and sand answer to remote
         tracing::debug!("connect_peer_via_http: {}", peer_url);
-        let (transport, _hs_info) = self.do_connect_peer_via_http(peer_url).await?;
-        Ok(transport)
-    }
 
-    async fn do_connect_peer_via_http(&self, node_url: &str) -> Result<(Arc<Transport>, String)> {
-        let client = SimpleClient::new_with_url(node_url);
-        let (transport, hs_info) = self.create_offer().await?;
-        tracing::debug!(
-            "sending offer and candidate {:?} to {:?}",
-            hs_info.to_owned(),
-            node_url,
-        );
+        let client = SimpleClient::new_with_url(peer_url);
 
-        let addr_result = {
-            let resp = client
-                .call_method(
-                    method::Method::AnswerOffer.as_str(),
-                    jsonrpc_core::Params::Array(vec![serde_json::json!(hs_info)]),
-                )
-                .await
-                .map_err(|e| Error::RemoteRpcError(e.to_string()))?;
-            let info: TransportAndIce =
-                serde_json::from_value(resp).map_err(|_| Error::EncodeError)?;
-            let did = transport
-                .register_remote_info(Encoded::from_encoded_str(info.ice.as_str()))
-                .await
-                .map_err(Error::RegisterIceError)?;
-            self.swarm
-                .register(did, transport.clone())
-                .await
-                .map_err(Error::RegisterIceError)?;
-            Ok(did)
-        };
-        if let Err(e) = addr_result {
-            if let Err(close_e) = transport.close().await {
-                tracing::warn!(
-                    "connect_peer_via_http failed, close tranposrt error: {}",
-                    close_e
-                );
-            }
-            return Err(e);
-        }
-        Ok((transport, addr_result.unwrap().to_string()))
-    }
+        let (_, offer) = self
+            .swarm
+            .create_offer()
+            .await
+            .map_err(Error::CreateOffer)?;
+        tracing::debug!("sending offer {:?} to {}", offer, peer_url);
 
-    /// Answer an Offer.
-    /// The process of manually handshake is:
-    /// 1. PeerA: create_offer
-    /// 2. PeerA: send the handshake info to PeerB.
-    /// 3. PeerB: answer_offer
-    /// 4. PeerB: send the handshake info to PeerA.
-    /// 5. PeerA: accept_answer.
-    pub async fn answer_offer(&self, ice_info: &str) -> Result<(Arc<Transport>, Encoded)> {
-        tracing::info!("connect peer via ice: {}", ice_info);
-        let transport = self.swarm.new_transport().await.map_err(|e| {
-            tracing::error!("new_transport failed: {}", e);
-            Error::NewTransportError
-        })?;
-        match self.handshake(&transport, ice_info).await {
-            Ok(v) => Ok((transport, v)),
-            Err(e) => {
-                transport
-                    .close()
-                    .await
-                    .map_err(Error::CloseTransportError)?;
-                Err(e)
-            }
-        }
+        let resp = client
+            .call_method(
+                method::Method::AnswerOffer.as_str(),
+                jsonrpc_core::Params::Array(vec![serde_json::json!(offer)]),
+            )
+            .await
+            .map_err(|e| Error::RemoteRpcError(e.to_string()))?;
+
+        let answer_payload: MessagePayload<Message> =
+            serde_json::from_value(resp).map_err(|_| Error::EncodeError)?;
+
+        let (did, transport) = self
+            .swarm
+            .accept_answer(answer_payload)
+            .await
+            .map_err(Error::AcceptAnswer)?;
+
+        Ok(Peer::from((did, transport)))
     }
 
     /// Connect peer with web3 did.
@@ -369,59 +293,6 @@ impl Processor {
                 .await
                 .map_err(Error::ConnectError)?;
         }
-        Ok(Peer::from((did, transport)))
-    }
-
-    async fn handshake(&self, transport: &Arc<Transport>, data: &str) -> Result<Encoded> {
-        // get offer from remote and send answer back
-        let hs_info = Encoded::from_encoded_str(data);
-        let did = transport
-            .register_remote_info(hs_info.to_owned())
-            .await
-            .map_err(Error::RegisterIceError)?;
-
-        tracing::debug!("register: {}", did);
-        self.swarm
-            .register(did, Arc::clone(transport))
-            .await
-            .map_err(Error::RegisterIceError)?;
-
-        let hs_info = transport
-            .get_handshake_info(self.swarm.session_manager(), RTCSdpType::Answer)
-            .await
-            .map_err(Error::CreateAnswer)?;
-        tracing::debug!("answer hs_info: {:?}", hs_info);
-        Ok(hs_info)
-    }
-
-    /// Accept an answer of a connection.
-    /// The process of manually handshake is:
-    /// 1. PeerA: create_offer
-    /// 2. PeerA: send the handshake info to PeerB.
-    /// 3. PeerB: answer_offer
-    /// 4. PeerB: send the handshake info to PeerA.
-    /// 5. PeerA: accept_answer.
-    pub async fn accept_answer(&self, transport_id: &str, ice: &str) -> Result<Peer> {
-        let ice = Encoded::from_encoded_str(ice);
-        tracing::debug!("accept_answer/ice: {:?}, uuid: {}", ice, transport_id);
-        let transport_id =
-            uuid::Uuid::from_str(transport_id).map_err(|_| Error::InvalidTransportId)?;
-        let transport = self
-            .swarm
-            .find_pending_transport(transport_id)
-            .map_err(Error::PendingTransport)?
-            .ok_or(Error::TransportNotFound)?;
-        let did = transport
-            .register_remote_info(ice)
-            .await
-            .map_err(Error::RegisterIceError)?;
-        self.swarm
-            .register(did, transport.clone())
-            .await
-            .map_err(Error::RegisterIceError)?;
-        if let Err(e) = self.swarm.pop_pending_transport(transport.id) {
-            tracing::warn!("pop_pending_transport err: {}", e)
-        };
         Ok(Peer::from((did, transport)))
     }
 
@@ -609,7 +480,7 @@ impl Processor {
         self.swarm
             .storage_fetch(did)
             .await
-            .map_err(error::Error::VNodeError)
+            .map_err(Error::VNodeError)
     }
 
     /// store virtual node on DHT
@@ -617,7 +488,7 @@ impl Processor {
         self.swarm
             .storage_store(vnode)
             .await
-            .map_err(error::Error::VNodeError)
+            .map_err(Error::VNodeError)
     }
 
     /// append data to a virtual node on DHT
@@ -625,7 +496,7 @@ impl Processor {
         self.swarm
             .storage_append_data(topic, data)
             .await
-            .map_err(error::Error::VNodeError)
+            .map_err(Error::VNodeError)
     }
 
     /// register service
@@ -638,7 +509,7 @@ impl Processor {
         self.swarm
             .storage_touch_data(name, encoded_did)
             .await
-            .map_err(error::Error::ServiceRegisterError)
+            .map_err(Error::ServiceRegisterError)
     }
 
     /// get node info
@@ -716,7 +587,7 @@ mod test {
     #[tokio::test]
     async fn test_processor_create_offer() {
         let (processor, path) = new_processor().await;
-        let ti = processor.create_offer().await.unwrap();
+        let ti = processor.swarm.create_offer().await.unwrap();
         let pendings = processor.swarm.pending_transports().await.unwrap();
         assert_eq!(pendings.len(), 1);
         assert_eq!(pendings.get(0).unwrap().id.to_string(), ti.0.id.to_string());
@@ -726,8 +597,8 @@ mod test {
     #[tokio::test]
     async fn test_processor_list_pendings() {
         let (processor, path) = new_processor().await;
-        let ti0 = processor.create_offer().await.unwrap();
-        let ti1 = processor.create_offer().await.unwrap();
+        let ti0 = processor.swarm.create_offer().await.unwrap();
+        let ti1 = processor.swarm.create_offer().await.unwrap();
         let pendings = processor.swarm.pending_transports().await.unwrap();
         assert_eq!(pendings.len(), 2);
         let pending_ids = processor.list_pendings().await.unwrap();
@@ -746,9 +617,9 @@ mod test {
     #[tokio::test]
     async fn test_processor_close_pending_transport() {
         let (processor, path) = new_processor().await;
-        let ti0 = processor.create_offer().await.unwrap();
-        let _ti1 = processor.create_offer().await.unwrap();
-        let ti2 = processor.create_offer().await.unwrap();
+        let ti0 = processor.swarm.create_offer().await.unwrap();
+        let _ti1 = processor.swarm.create_offer().await.unwrap();
+        let ti2 = processor.swarm.create_offer().await.unwrap();
         let pendings = processor.swarm.pending_transports().await.unwrap();
         assert_eq!(pendings.len(), 3);
         assert!(
@@ -857,7 +728,7 @@ mod test {
         tokio::spawn(async { msg_handler_1.listen().await });
         tokio::spawn(async { msg_handler_2.listen().await });
 
-        let (transport_1, offer) = p1.create_offer().await.unwrap();
+        let (transport_1, offer) = p1.swarm.create_offer().await.unwrap();
 
         let pendings_1 = p1.swarm.pending_transports().await.unwrap();
         assert_eq!(pendings_1.len(), 1);
@@ -866,17 +737,14 @@ mod test {
             transport_1.id.to_string()
         );
 
-        let (transport_2, answer) = p2.answer_offer(offer.as_str()).await.unwrap();
-        let peer = p1
-            .accept_answer(transport_1.id.to_string().as_str(), answer.as_str())
-            .await
-            .unwrap();
+        let (transport_2, answer) = p2.swarm.answer_offer(offer).await.unwrap();
+        let (peer_did, peer_transport) = p1.swarm.accept_answer(answer).await.unwrap();
 
-        assert!(peer.transport.id.eq(&transport_1.id), "transport not same");
+        assert!(peer_transport.id.eq(&transport_1.id), "transport not same");
         assert!(
-            peer.did.to_string().eq(&did2),
+            peer_did.to_string().eq(&did2),
             "peer.address got {}, expect: {}",
-            peer.did,
+            peer_did,
             did2
         );
         println!("waiting for connection");

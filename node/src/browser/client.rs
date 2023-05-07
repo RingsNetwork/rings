@@ -23,7 +23,6 @@ use crate::prelude::rings_core::async_trait;
 use crate::prelude::rings_core::dht::Did;
 use crate::prelude::rings_core::ecc::PublicKey;
 use crate::prelude::rings_core::message::CustomMessage;
-use crate::prelude::rings_core::message::Encoded;
 use crate::prelude::rings_core::message::MaybeEncrypted;
 use crate::prelude::rings_core::message::Message;
 use crate::prelude::rings_core::message::MessageCallback;
@@ -33,8 +32,8 @@ use crate::prelude::rings_core::prelude::uuid::Uuid;
 use crate::prelude::rings_core::prelude::vnode;
 use crate::prelude::rings_core::prelude::vnode::VirtualNode;
 use crate::prelude::rings_core::prelude::web3::ethabi::Token;
+use crate::prelude::rings_core::transports::manager::TransportHandshake;
 use crate::prelude::rings_core::transports::manager::TransportManager;
-use crate::prelude::rings_core::transports::Transport;
 use crate::prelude::rings_core::types::ice_transport::IceTransportInterface;
 use crate::prelude::rings_core::types::ice_transport::IceTrickleScheme;
 use crate::prelude::rings_core::utils::from_rtc_ice_connection_state;
@@ -253,7 +252,8 @@ impl Client {
             let transport = p
                 .connect_peer_via_http(remote_url.as_str())
                 .await
-                .map_err(JsError::from)?;
+                .map_err(JsError::from)?
+                .transport;
             log::debug!("connect_peer_via_http transport_id: {:?}", transport.id);
             Ok(JsValue::from_str(transport.id.to_string().as_str()))
         })
@@ -278,7 +278,6 @@ impl Client {
                 state,
                 peer.did,
                 peer.transport.id,
-                peer.transport.pubkey().await,
             )))?)
         })
     }
@@ -307,7 +306,6 @@ impl Client {
                 state,
                 peer.did,
                 peer.transport.id,
-                peer.transport.pubkey().await,
             )))?)
         })
     }
@@ -316,40 +314,42 @@ impl Client {
     pub fn create_offer(&self) -> js_sys::Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
-            let peer = p.create_offer().await.map_err(JsError::from)?;
-            Ok(JsValue::try_from(&TransportAndIce::from(peer))?)
+            let (_, offer_payload) = p.swarm.create_offer().await.map_err(JsError::from)?;
+            let s = serde_json::to_string(&offer_payload).map_err(JsError::from)?;
+            Ok(s.into())
         })
     }
 
     /// Manually make handshake with remote peer
-    pub fn answer_offer(&self, ice_info: String) -> js_sys::Promise {
+    pub fn answer_offer(&self, offer_payload: String) -> js_sys::Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
-            let (transport, handshake_info) = p
-                .answer_offer(ice_info.as_str())
+            let offer_payload = serde_json::from_str(&offer_payload).map_err(JsError::from)?;
+            let (_, answer_payload) = p
+                .swarm
+                .answer_offer(offer_payload)
                 .await
                 .map_err(JsError::from)?;
-            Ok(JsValue::try_from(&TransportAndIce::from((
-                transport,
-                handshake_info,
-            )))?)
+            let s = serde_json::to_string(&answer_payload).map_err(JsError::from)?;
+            Ok(s.into())
         })
     }
 
     /// Manually make handshake with remote peer
-    pub fn accept_answer(&self, transport_id: String, ice: String) -> js_sys::Promise {
+    pub fn accept_answer(&self, answer_payload: String) -> js_sys::Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
-            let peer = p
-                .accept_answer(transport_id.as_str(), ice.as_str())
+            let answer_payload = serde_json::from_str(&answer_payload).map_err(JsError::from)?;
+            let (did, transport) = p
+                .swarm
+                .accept_answer(answer_payload)
                 .await
                 .map_err(JsError::from)?;
-            let state = peer.transport.ice_connection_state().await;
+            let state = transport.ice_connection_state().await;
             Ok(JsValue::try_from(&Peer::from((
                 state,
-                peer.did,
-                peer.transport.id,
-                peer.transport.pubkey().await,
+                did.into_token(),
+                transport.id,
             )))?)
         })
     }
@@ -361,17 +361,12 @@ impl Client {
             let peers = p.list_peers().await.map_err(JsError::from)?;
             let states_async = peers
                 .iter()
-                .map(|x| async {
-                    (
-                        x.transport.ice_connection_state().await,
-                        x.transport.pubkey().await,
-                    )
-                })
+                .map(|x| async { x.transport.ice_connection_state().await })
                 .collect::<Vec<_>>();
             let states = futures::future::join_all(states_async).await;
             let mut js_array = js_sys::Array::new();
-            js_array.extend(peers.iter().zip(states.iter()).flat_map(|(x, (y, z))| {
-                JsValue::try_from(&Peer::from((*y, x.did.clone(), x.transport.id, *z)))
+            js_array.extend(peers.iter().zip(states.iter()).flat_map(|(x, y)| {
+                JsValue::try_from(&Peer::from((*y, x.did.clone(), x.transport.id)))
             }));
             Ok(js_array.into())
         })
@@ -381,7 +376,7 @@ impl Client {
         let p = self.processor.clone();
         future_to_promise(async move {
             let info = p.get_node_info().await.map_err(JsError::from)?;
-            let v = serde_wasm_bindgen::to_value(&info).map_err(JsError::from)?;
+            let v = js_value::serialize(&info).map_err(JsError::from)?;
             Ok(v)
         })
     }
@@ -451,7 +446,6 @@ impl Client {
                 state,
                 peer.did,
                 peer.transport.id,
-                peer.transport.pubkey().await,
             )))?)
         })
     }
@@ -902,23 +896,14 @@ impl MessageCallback for MessageCallbackInstance {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Peer {
     pub address: String,
-    pub transport_pubkey: String,
     pub transport_id: String,
     pub state: Option<String>,
 }
 
-impl From<(Option<RtcIceConnectionState>, Token, Uuid, PublicKey)> for Peer {
-    fn from(
-        (st, address, transport_id, transport_pubkey): (
-            Option<RtcIceConnectionState>,
-            Token,
-            Uuid,
-            PublicKey,
-        ),
-    ) -> Self {
+impl From<(Option<RtcIceConnectionState>, Token, Uuid)> for Peer {
+    fn from((st, address, transport_id): (Option<RtcIceConnectionState>, Token, Uuid)) -> Self {
         Self {
             address: address.to_string(),
-            transport_pubkey: Result::unwrap_or(transport_pubkey.to_base58_string(), "".to_owned()),
             transport_id: transport_id.to_string(),
             state: st.map(from_rtc_ice_connection_state),
         }
@@ -929,35 +914,6 @@ impl TryFrom<&Peer> for JsValue {
     type Error = JsError;
 
     fn try_from(value: &Peer) -> Result<Self, Self::Error> {
-        js_value::serialize(value).map_err(JsError::from)
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct TransportAndIce {
-    pub transport_id: String,
-    pub ice: String,
-}
-
-impl TransportAndIce {
-    pub fn new(transport_id: &str, ice: &str) -> Self {
-        Self {
-            transport_id: transport_id.to_owned(),
-            ice: ice.to_owned(),
-        }
-    }
-}
-
-impl From<(Arc<Transport>, Encoded)> for TransportAndIce {
-    fn from((transport, ice): (Arc<Transport>, Encoded)) -> Self {
-        Self::new(transport.id.to_string().as_str(), ice.to_string().as_str())
-    }
-}
-
-impl TryFrom<&TransportAndIce> for JsValue {
-    type Error = JsError;
-
-    fn try_from(value: &TransportAndIce) -> Result<Self, Self::Error> {
         js_value::serialize(value).map_err(JsError::from)
     }
 }

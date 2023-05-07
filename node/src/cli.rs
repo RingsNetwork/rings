@@ -36,7 +36,6 @@ use crate::backend::types::Timeout;
 use crate::jsonrpc;
 use crate::jsonrpc::method::Method;
 use crate::jsonrpc::response::Peer;
-use crate::jsonrpc::response::TransportAndIce;
 use crate::jsonrpc_client::SimpleClient;
 use crate::prelude::reqwest;
 use crate::prelude::rings_core::inspect::SwarmInspect;
@@ -120,30 +119,6 @@ impl Client {
         ClientOutput::ok("Successful!".to_string(), ())
     }
 
-    /// Answers a WebRTC offer by providing ICE candidate information to the remote peer.
-    ///
-    /// The ice_info parameter is a string containing the ICE candidate information provided by the remote peer as part of the offer.
-    ///
-    /// Returns an Output containing a TransportAndIce struct if successful, or an anyhow::Error if an error occurred.
-    pub async fn answer_offer(&mut self, ice_info: &str) -> Output<TransportAndIce> {
-        let resp = self
-            .client
-            .call_method(
-                Method::AnswerOffer.as_str(),
-                Params::Array(vec![Value::String(ice_info.to_owned())]),
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-
-        let info: TransportAndIce =
-            serde_json::from_value(resp).map_err(|e| anyhow::anyhow!("{}", e))?;
-
-        ClientOutput::ok(
-            format!("transport_id: {}\nice: {}", info.transport_id, info.ice,),
-            info,
-        )
-    }
-
     /// Attempts to connect to a peer using a DID stored in a Distributed Hash Table (DHT).
     pub async fn connect_with_did(&mut self, did: &str) -> Output<()> {
         self.client
@@ -154,39 +129,6 @@ impl Client {
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         ClientOutput::ok("Successful!".to_owned(), ())
-    }
-
-    /// Creates a WebRTC offer to establish a connection with a remote peer.
-    pub async fn create_offer(&mut self) -> Output<TransportAndIce> {
-        let resp = self
-            .client
-            .call_method(Method::CreateOffer.as_str(), Params::Array(vec![]))
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-
-        let info: TransportAndIce =
-            serde_json::from_value(resp).map_err(|e| anyhow::anyhow!("{}", e))?;
-
-        ClientOutput::ok(
-            format!("\ntransport_id: {}\nice: {}", info.transport_id, info.ice),
-            info,
-        )
-    }
-
-    /// Accepts a WebRTC answer from a remote peer, providing the transport_id and ICE candidate information needed to establish the connection.
-    pub async fn accept_answer(&mut self, transport_id: &str, ice: &str) -> Output<Peer> {
-        let resp = self
-            .client
-            .call_method(
-                Method::AcceptAnswer.as_str(),
-                Params::Array(vec![json!(transport_id), json!(ice)]),
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-
-        let peer: Peer = serde_json::from_value(resp).map_err(|e| anyhow::anyhow!("{}", e))?;
-
-        ClientOutput::ok(format!("transport_id: {}", peer.transport_id), peer)
     }
 
     /// Lists all connected peers and their status.

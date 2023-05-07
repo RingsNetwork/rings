@@ -10,7 +10,6 @@ use crate::backend;
 use crate::error::Error;
 use crate::error::Result;
 use crate::prelude::rings_core::dht::Did;
-use crate::prelude::rings_core::message::Encoded;
 use crate::prelude::rings_core::prelude::web3::contract::tokens::Tokenizable;
 use crate::prelude::rings_core::transports::Transport;
 use crate::processor;
@@ -80,43 +79,6 @@ impl TransportInfo {
 impl From<(&Arc<Transport>, Option<String>)> for TransportInfo {
     fn from((transport, state): (&Arc<Transport>, Option<String>)) -> Self {
         Self::new(transport.id.to_string(), state)
-    }
-}
-
-#[derive(Deserialize, Serialize, Clone, Debug)]
-pub struct TransportAndIce {
-    pub transport_id: String,
-    pub ice: String,
-}
-
-impl TransportAndIce {
-    pub fn new(transport_id: &str, ice: &str) -> Self {
-        Self {
-            transport_id: transport_id.to_owned(),
-            ice: ice.to_owned(),
-        }
-    }
-
-    pub fn to_json_vec(&self) -> Result<Vec<u8>> {
-        serde_json::to_vec(self).map_err(|_| Error::EncodeError)
-    }
-
-    pub fn to_json_obj(&self) -> Result<JsonValue> {
-        serde_json::to_value(self).map_err(|_| Error::EncodeError)
-    }
-
-    #[cfg(feature = "node")]
-    pub fn base64_encode(&self) -> Result<String> {
-        Ok(base64::encode(self.to_json_vec()?))
-    }
-}
-
-impl From<(Arc<Transport>, Encoded)> for TransportAndIce {
-    fn from((transport, handshake_info): (Arc<Transport>, Encoded)) -> Self {
-        Self {
-            transport_id: transport.id.to_string(),
-            ice: handshake_info.to_string(),
-        }
     }
 }
 

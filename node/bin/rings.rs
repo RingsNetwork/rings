@@ -49,8 +49,6 @@ enum Command {
     Pubsub(PubsubCommand),
     #[command(about = "Connects to a remote peer.", subcommand)]
     Connect(ConnectCommand),
-    #[command(about = "Generates a SDP message.", subcommand)]
-    Sdp(SdpCommand),
     #[command(about = "Manages peers on the network.", subcommand)]
     Peer(PeerCommand),
     #[command(about = "Manages pending peers on the network.", subcommand)]
@@ -219,17 +217,6 @@ struct ConnectWithSeedCommand {
     client_args: ClientArgs,
 
     source: String,
-}
-
-#[derive(Subcommand, Debug)]
-#[command(rename_all = "kebab-case")]
-enum SdpCommand {
-    #[command(about = "Creates an SDP offer.")]
-    Offer(SdpOfferCommand),
-    #[command(about = "Creates an SDP answer.")]
-    Answer(SdpAnswerCommand),
-    #[command(about = "Accepts an SDP answer.")]
-    AcceptAnswer(SdpAcceptAnswerCommand),
 }
 
 #[derive(Args, Debug)]
@@ -539,33 +526,6 @@ async fn main() -> anyhow::Result<()> {
                 .new_client()
                 .await?
                 .connect_with_seed(args.source.as_str())
-                .await?
-                .display();
-            Ok(())
-        }
-        Command::Sdp(SdpCommand::Offer(args)) => {
-            args.client_args
-                .new_client()
-                .await?
-                .create_offer()
-                .await?
-                .display();
-            Ok(())
-        }
-        Command::Sdp(SdpCommand::Answer(args)) => {
-            args.client_args
-                .new_client()
-                .await?
-                .answer_offer(args.ice.as_str())
-                .await?
-                .display();
-            Ok(())
-        }
-        Command::Sdp(SdpCommand::AcceptAnswer(args)) => {
-            args.client_args
-                .new_client()
-                .await?
-                .accept_answer(args.transport_id.as_str(), args.ice.as_str())
                 .await?
                 .display();
             Ok(())
