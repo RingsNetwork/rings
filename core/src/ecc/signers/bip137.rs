@@ -86,7 +86,7 @@ mod test {
         sig.rotate_left(1);
         assert_eq!(sig[64], 27);
         let pk = self::recover(msg, sig).unwrap();
-        assert_eq!(pk, pubkey);
         assert_eq!(pk.address(), pubkey.address());
+        assert_eq!(pk, pubkey);
     }
 }
