@@ -29,8 +29,8 @@ use crate::message::LeaveDHT;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
-use crate::transports::manager::TransportHandshake;
 use crate::swarm::WrappedDid;
+use crate::transports::manager::TransportHandshake;
 use crate::transports::manager::TransportManager;
 use crate::types::ice_transport::IceTrickleScheme;
 
@@ -58,10 +58,10 @@ pub async fn handle_update_successor(
             }
             Ok(())
         }
-	PeerRingAction::RemoteAction(did, PeerRingRemoteAction::TryConnect) => {
-	    handler.swarm.connect_via(did, ctx.relay.sender()).await?;
-	    Ok(())
-	}
+        PeerRingAction::RemoteAction(did, PeerRingRemoteAction::TryConnect) => {
+            handler.swarm.connect_via(did, ctx.relay.sender()).await?;
+            Ok(())
+        }
         _ => unreachable!(),
     }
 }
@@ -490,11 +490,35 @@ pub mod tests {
         Ok(())
     }
 
+    async fn check_update_successor(
+        node: &MessageHandler,
+        expect_successors: Option<&Vec<Did>>,
+    ) -> Result<()> {
+        let ev = node.listen_once().await.unwrap();
+        if let Message::QueryForTopoInfoReport(rep) = ev.data {
+            if let Some(succs) = expect_successors {
+                assert!(&rep.info.successors == succs);
+            }
+            for did in rep.info.successors {
+                if node.swarm.get_transport(did).is_none() {
+                    println!("TODO: May send connect message here");
+                }
+            }
+        } else {
+            panic!("unexpected message");
+        }
+        Ok(())
+    }
+
     async fn test_triple_ordered_nodes_connection(
         key1: SecretKey,
         key2: SecretKey,
         key3: SecretKey,
     ) -> Result<(MessageHandler, MessageHandler, MessageHandler)> {
+        println!("========================================");
+        println!("FN test_triple_ordered_nodes_connection BEGIN");
+        println!("========================================");
+
         let (did1, dht1, swarm1, node1, _path1) = prepare_node(key1).await;
         let (did2, dht2, swarm2, node2, _path2) = prepare_node(key2).await;
         let (did3, dht3, swarm3, node3, _path3) = prepare_node(key3).await;
@@ -619,6 +643,10 @@ pub mod tests {
         assert_eq!(dht2.successors().list()?, vec![did3, did1]);
         assert_eq!(dht3.successors().list()?, vec![did1, did2]);
         tokio::fs::remove_dir_all("./tmp").await.ok();
+        println!("========================================");
+        println!("FN test_triple_ordered_nodes_connection END");
+        println!("========================================");
+
         Ok((node1, node2, node3))
     }
 
@@ -770,6 +798,7 @@ pub mod tests {
         assert_eq!(dht3.successors().list()?, vec![did2, did1]);
 
         tokio::fs::remove_dir_all("./tmp").await.ok();
+
         Ok((node1, node2, node3))
     }
 
@@ -777,6 +806,10 @@ pub mod tests {
         node1: &MessageHandler,
         node2: &MessageHandler,
     ) -> Result<()> {
+        println!("========================================");
+        println!("FN test_listen_join_and_init_find_successor BEGIN");
+        println!("========================================");
+
         let did1 = node1.swarm.did();
         let did2 = node2.swarm.did();
 
@@ -843,6 +876,10 @@ pub mod tests {
             ev_2.data,
             Message::FindSuccessorSend(FindSuccessorSend{did, then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect), strict: false}) if did == did1
         ));
+        println!("========================================");
+        println!("FN test_listen_join_and_init_find_successor END");
+        println!("========================================");
+
         Ok(())
     }
 
@@ -855,6 +892,10 @@ pub mod tests {
         let dht1 = node1.swarm.dht();
         let dht2 = node2.swarm.dht();
 
+        println!("========================================");
+        println!("FN test_only_two_nodes_establish_connection BEGIN");
+        println!("========================================");
+
         let should_update_succ2 = node1.dht.successors().should_insert(did2)?;
         let should_update_succ1 = node2.dht.successors().should_insert(did1)?;
 
@@ -865,11 +906,7 @@ pub mod tests {
         {
             // 2->1 QueryForTopoInfoReport
             if should_update_succ2 {
-                let ev_1 = node1.listen_once().await.unwrap();
-                assert!(matches!(
-                ev_1.data,
-                Message::QueryForTopoInfoReport(QueryForTopoInfoReport{info}) if info.successors == dht2.successors().list()?
-                    ));
+                check_update_successor(&node1, Some(&dht2.successors().list()?)).await;
             }
         }
 
@@ -894,11 +931,7 @@ pub mod tests {
         {
             if should_update_succ1 {
                 // 1->2 QueryForTopoInfoReport
-                let ev_2 = node2.listen_once().await.unwrap();
-                assert!(matches!(
-                ev_2.data,
-                Message::QueryForTopoInfoReport(QueryForTopoInfoReport{info}) if info.successors == dht1.successors().list()?
-                    ));
+                check_update_successor(&node2, Some(&dht1.successors().list()?)).await;
             }
         }
 
@@ -914,6 +947,10 @@ pub mod tests {
         ));
         // dht2 won't set did2 as successor
         assert!(!dht2.successors().list()?.contains(&did2));
+
+        println!("========================================");
+        println!("FN test_only_two_nodes_establish_connection END");
+        println!("========================================");
 
         Ok(())
     }

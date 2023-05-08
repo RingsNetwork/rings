@@ -101,7 +101,7 @@ pub enum RemoteAction {
     /// Fetch successor_list and pred from successor
     QueryForSuccessorListAndPred,
     /// Try connect to a Node
-    TryConnect
+    TryConnect,
 }
 
 /// Information about successor and predecessor
@@ -463,9 +463,9 @@ impl CorrectChord<PeerRingAction> for PeerRing {
         let is_live = did.live().await;
         if !is_live {
             return Ok(PeerRingAction::RemoteAction(
-		did.into(),
-		RemoteAction::TryConnect
-	    ))
+                did.into(),
+                RemoteAction::TryConnect,
+            ));
         }
         if let Some(new_succ) = self.successors().update(did.into())? {
             Ok(PeerRingAction::RemoteAction(

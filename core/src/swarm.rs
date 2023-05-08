@@ -86,7 +86,7 @@ impl LiveDid for WrappedDid {
                     transport.is_connected().await
                 } else {
                     // If the weak reference cannot be upgraded,
-		    // the Transport has been dropped, so return false.
+                    // the Transport has been dropped, so return false.
                     false
                 }
             }
@@ -391,7 +391,6 @@ impl Swarm {
 
         Ok(transport)
     }
-
 
     pub async fn inspect(&self) -> SwarmInspect {
         SwarmInspect::inspect(self).await
