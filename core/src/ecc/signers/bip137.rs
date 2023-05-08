@@ -55,7 +55,7 @@ pub fn magic_hash(msg: &str) -> [u8; 32] {
     buf.extend_from_slice(magic_bytes);
     buf.extend_from_slice(varint_buf_num(msg_bytes.len() as u64).as_slice());
     buf.extend_from_slice(msg_bytes);
-    let hash = Sha256::digest(&Sha256::digest(&buf));
+    let hash = Sha256::digest(Sha256::digest(&buf));
     hash.into()
 }
 

@@ -262,7 +262,9 @@ impl Processor {
         let resp = client
             .call_method(
                 method::Method::AnswerOffer.as_str(),
-                jsonrpc_core::Params::Array(vec![serde_json::json!(offer)]),
+                jsonrpc_core::Params::Array(vec![serde_json::json!(serde_json::to_string(
+                    &offer
+                )?)]),
             )
             .await
             .map_err(|e| Error::RemoteRpcError(e.to_string()))?;

@@ -219,40 +219,6 @@ struct ConnectWithSeedCommand {
     source: String,
 }
 
-#[derive(Args, Debug)]
-struct SdpOfferCommand {
-    #[command(flatten)]
-    client_args: ClientArgs,
-
-    #[arg(
-        long,
-        short = 's',
-        default_value = "stun://stun.l.google.com:19302",
-        env
-    )]
-    pub ice_server: String,
-}
-
-#[derive(Args, Debug)]
-struct SdpAnswerCommand {
-    #[command(flatten)]
-    client_args: ClientArgs,
-
-    ice: String,
-}
-
-#[derive(Args, Debug)]
-struct SdpAcceptAnswerCommand {
-    #[command(flatten)]
-    client_args: ClientArgs,
-
-    #[arg(help = "transport_id of pending transport.")]
-    transport_id: String,
-
-    #[arg(help = "ice from remote.")]
-    ice: String,
-}
-
 #[derive(Subcommand, Debug)]
 #[command(rename_all = "kebab-case")]
 enum PeerCommand {
