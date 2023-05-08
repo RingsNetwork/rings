@@ -133,6 +133,27 @@ impl UnsignedInfo {
     }
 
     /// Create a new `UnsignedInfo` instance
+    ///   * pubkey: wallet pubkey hex string
+    ///   * signer: `SignerMode`
+    pub fn new_with_pubkey(pubkey: String, signer: SignerMode) -> Result<UnsignedInfo, JsError> {
+        let pubkey = PublicKey::from_hex_string(pubkey.as_str()).map_err(JsError::from)?;
+        Ok(
+            processor::UnsignedInfo::new_with_pubkey(pubkey, signer.into())
+                .map_err(JsError::from)?
+                .into(),
+        )
+    }
+
+    /// Get address from hex pubkey
+    ///  * pubkey: hex pubkey
+    pub fn get_address_from_hex_pubkey(pubkey: String) -> Result<String, JsError> {
+        Ok(PublicKey::from_hex_string(pubkey.as_str())
+            .map_err(JsError::from)?
+            .address()
+            .to_string())
+    }
+
+    /// Create a new `UnsignedInfo` instance
     ///   * pubkey: solana wallet pubkey
     pub fn new_with_address(
         address: String,

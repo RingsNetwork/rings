@@ -101,6 +101,20 @@ impl UnsignedInfo {
     }
 
     /// Create a new `UnsignedInfo` instance
+    ///   * pubkey: public key
+    ///   * signer: `SignerMode`
+    pub fn new_with_pubkey(pubkey: PublicKey, signer: Signer) -> Result<Self> {
+        let key_addr = pubkey.address().into();
+        let (auth, random_key) = SessionManager::gen_unsign_info(key_addr, None, Some(signer));
+
+        Ok(UnsignedInfo {
+            auth,
+            random_key,
+            key_addr,
+        })
+    }
+
+    /// Create a new `UnsignedInfo` instance
     ///   * pubkey: solana wallet pubkey
     pub fn new_with_address(address: String, addr_type: AddressType) -> Result<Self> {
         let (key_addr, auth, random_key) = match addr_type {
