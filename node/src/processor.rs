@@ -185,6 +185,13 @@ impl Processor {
         stuns: String,
         storage_name: String,
     ) -> Result<Self> {
+        let verified = SessionManager::verify(&unsigned_info.auth, signed_data)
+            .map_err(|e| Error::VerifyError(e.to_string()))?;
+
+        if !verified {
+            return Err(Error::VerifyError("not verified".to_string()));
+        }
+
         let unsigned_info = unsigned_info.clone();
         let signed_data = signed_data.to_vec();
 
