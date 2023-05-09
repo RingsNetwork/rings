@@ -3,6 +3,7 @@ use crate::prelude::RTCSdpType;
 use crate::swarm::Swarm;
 use crate::transports::manager::TransportManager;
 use crate::types::ice_transport::IceTrickleScheme;
+use std::collections::HashMap;
 
 #[cfg(feature = "wasm")]
 pub mod wasm;
@@ -18,6 +19,9 @@ pub fn setup_tracing() {
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 }
+
+/// Context for unitest to store nodes
+pub type TestContext<'a> = HashMap<crate::dht::Did, &'a crate::message::MessageHandler>;
 
 pub async fn manually_establish_connection(swarm1: &Swarm, swarm2: &Swarm) -> Result<()> {
     assert!(swarm1.get_transport(swarm2.did()).is_none());

@@ -377,6 +377,7 @@ pub mod tests {
     use crate::tests::manually_establish_connection;
     use crate::transports::manager::TransportManager;
     use crate::types::ice_transport::IceTransportInterface;
+    use crate::tests::TestContext;
 
     // ndoe1.key < node2.key < node3.key
     //
@@ -423,7 +424,7 @@ pub mod tests {
     async fn test_triple_nodes_connection_1_2_3() -> Result<()> {
         let keys = gen_ordered_keys(3);
         let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
-        test_triple_ordered_nodes_connection(key1, key2, key3).await?;
+        test_triple_ordered_nodes_connection(key1, key2, key3, None).await?;
         Ok(())
     }
 
@@ -432,7 +433,7 @@ pub mod tests {
     async fn test_triple_nodes_connection_2_3_1() -> Result<()> {
         let keys = gen_ordered_keys(3);
         let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
-        test_triple_ordered_nodes_connection(key2, key3, key1).await?;
+        test_triple_ordered_nodes_connection(key2, key3, key1, None).await?;
         Ok(())
     }
 
@@ -441,7 +442,7 @@ pub mod tests {
     async fn test_triple_nodes_connection_3_1_2() -> Result<()> {
         let keys = gen_ordered_keys(3);
         let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
-        test_triple_ordered_nodes_connection(key3, key1, key2).await?;
+        test_triple_ordered_nodes_connection(key3, key1, key2, None).await?;
         Ok(())
     }
 
@@ -493,6 +494,7 @@ pub mod tests {
     async fn check_update_successor(
         node: &MessageHandler,
         expect_successors: Option<&Vec<Did>>,
+	ctx: Option<&TestContext<'_>>
     ) -> Result<()> {
         let ev = node.listen_once().await.unwrap();
         if let Message::QueryForTopoInfoReport(rep) = ev.data {
@@ -514,6 +516,7 @@ pub mod tests {
         key1: SecretKey,
         key2: SecretKey,
         key3: SecretKey,
+	ctx: Option<&TestContext<'_>>
     ) -> Result<(MessageHandler, MessageHandler, MessageHandler)> {
         println!("========================================");
         println!("FN test_triple_ordered_nodes_connection BEGIN");
@@ -527,7 +530,7 @@ pub mod tests {
         println!("||  now we connect node1 and node2    ||");
         println!("========================================");
 
-        test_only_two_nodes_establish_connection(&node1, &node2).await?;
+        test_only_two_nodes_establish_connection(&node1, &node2, ctx).await?;
 
         assert_eq!(dht1.successors().list()?, vec![did2]);
         assert_eq!(dht2.successors().list()?, vec![did1]);
@@ -663,7 +666,7 @@ pub mod tests {
         println!("||  now we connect node1 and node2    ||");
         println!("========================================");
 
-        test_only_two_nodes_establish_connection(&node1, &node2).await?;
+        test_only_two_nodes_establish_connection(&node1, &node2, None).await?;
 
         assert_eq!(dht1.successors().list()?, vec![did2]);
         assert_eq!(dht2.successors().list()?, vec![did1]);
@@ -886,6 +889,7 @@ pub mod tests {
     pub async fn test_only_two_nodes_establish_connection(
         node1: &MessageHandler,
         node2: &MessageHandler,
+	ctx: Option<&TestContext<'_>>
     ) -> Result<()> {
         let did1 = node1.swarm.did();
         let did2 = node2.swarm.did();
@@ -906,7 +910,7 @@ pub mod tests {
         {
             // 2->1 QueryForTopoInfoReport
             if should_update_succ2 {
-                check_update_successor(&node1, Some(&dht2.successors().list()?)).await;
+                check_update_successor(&node1, Some(&dht2.successors().list()?), ctx).await;
             }
         }
 
@@ -931,7 +935,7 @@ pub mod tests {
         {
             if should_update_succ1 {
                 // 1->2 QueryForTopoInfoReport
-                check_update_successor(&node2, Some(&dht1.successors().list()?)).await;
+                check_update_successor(&node2, Some(&dht1.successors().list()?), ctx).await;
             }
         }
 
@@ -1048,16 +1052,24 @@ pub mod tests {
 
     #[tokio::test]
     async fn test_quadra_desc_node_connection() -> Result<()> {
+	// prepare ctx
+	let mut ctx = TestContext::new();
+
         // 1. node1 to node2
         // 2. node 3 to node 2
         let keys = gen_ordered_keys(4);
         let (key1, key2, key3, key4) = (keys[0], keys[1], keys[2], keys[3]);
-        let (node1, node2, node3) = test_triple_ordered_nodes_connection(key1, key2, key3).await?;
+        let (node1, node2, node3) = test_triple_ordered_nodes_connection(key1, key2, key3, Some(&ctx)).await?;
         // we now have triple connected node
 
         let did1 = node1.swarm.did();
         let did2 = node2.swarm.did();
         let did3 = node3.swarm.did();
+
+	ctx.insert(did1, &node1);
+	ctx.insert(did2, &node2);
+	ctx.insert(did3, &node3);
+
 
         let (did4, _, swarm4, node4, _path4) = prepare_node(key4).await;
         // connect node 4 to node2
@@ -1120,7 +1132,7 @@ pub mod tests {
             assert!(dht1.lock_finger()?.is_empty());
         }
 
-        test_only_two_nodes_establish_connection(&node1, &node2).await?;
+        test_only_two_nodes_establish_connection(&node1, &node2, None).await?;
         assert_no_more_msg(&node1, &node2, &node3).await;
 
         assert_transports(swarm1.clone(), vec![did2]);
@@ -1185,10 +1197,10 @@ pub mod tests {
         let (did1, _dht1, swarm1, node1, _path1) = prepare_node(key1).await;
         let (_did2, _dht2, _swarm2, node2, _path2) = prepare_node(key2).await;
         let (did3, _dht3, swarm3, node3, _path3) = prepare_node(key3).await;
-        test_only_two_nodes_establish_connection(&node1, &node2).await?;
+        test_only_two_nodes_establish_connection(&node1, &node2, None).await?;
         assert_no_more_msg(&node1, &node2, &node3).await;
 
-        test_only_two_nodes_establish_connection(&node3, &node2).await?;
+        test_only_two_nodes_establish_connection(&node3, &node2, None).await?;
         assert_no_more_msg(&node1, &node2, &node3).await;
         // Node 1 -- Node 2 -- Node 3
         println!("node1 connect node2 twice here");

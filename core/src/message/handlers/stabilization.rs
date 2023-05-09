@@ -153,7 +153,7 @@ mod test {
         println!("||  now we connect node1 and node2    ||");
         println!("========================================");
 
-        test_only_two_nodes_establish_connection(&node1, &node2).await?;
+        test_only_two_nodes_establish_connection(&node1, &node2, None).await?;
 
         println!("========================================");
         println!("||  now we start join node3 to node2  ||");
@@ -377,7 +377,7 @@ mod test {
         println!("||  now we connect node1 and node2    ||");
         println!("========================================");
 
-        test_only_two_nodes_establish_connection(&node1, &node2).await?;
+        test_only_two_nodes_establish_connection(&node1, &node2, None).await?;
 
         println!("========================================");
         println!("||  now we start join node3 to node2  ||");

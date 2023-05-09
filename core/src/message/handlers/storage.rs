@@ -210,7 +210,7 @@ mod test {
         let (key1, key2) = (keys[0], keys[1]);
         let (did1, dht1, swarm1, node1, _path1) = prepare_node(key1).await;
         let (did2, dht2, swarm2, node2, _path2) = prepare_node(key2).await;
-        test_only_two_nodes_establish_connection(&node1, &node2).await?;
+        test_only_two_nodes_establish_connection(&node1, &node2, None).await?;
 
         // Now, node1 is the successor of node2, and node2 is the successor of node1.
         // Following tests storing data on ndoe2 and query it from node1.
@@ -287,7 +287,7 @@ mod test {
         let (key1, key2) = (keys[0], keys[1]);
         let (did1, dht1, swarm1, node1, _path1) = prepare_node(key1).await;
         let (did2, dht2, swarm2, node2, _path2) = prepare_node(key2).await;
-        test_only_two_nodes_establish_connection(&node1, &node2).await?;
+        test_only_two_nodes_establish_connection(&node1, &node2, None).await?;
 
         // Now, node1 is the successor of node2, and node2 is the successor of node1.
         // Following tests storing data on ndoe2 and query it from node1.
