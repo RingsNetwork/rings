@@ -2900,7 +2900,6 @@ dependencies = [
  "async-trait",
  "base58",
  "base58-monero",
- "base64 0.21.0",
  "bincode",
  "bytes",
  "chrono",

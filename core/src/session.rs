@@ -113,6 +113,27 @@ impl AuthorizedInfo {
     }
 }
 
+impl SessionManager {
+    /// Verify auth info with signature.
+    pub fn verify(auth: &AuthorizedInfo, sig: &[u8]) -> Result<bool> {
+        let auth_str = auth.to_string()?;
+        Ok(match auth.signer {
+            Signer::DEFAULT => {
+                signers::default::verify(&auth_str, &auth.authorizer.did.into(), sig)
+            }
+            Signer::EIP191 => signers::eip191::verify(&auth_str, &auth.authorizer.did.into(), sig),
+            Signer::EdDSA => {
+                let pk = auth
+                    .authorizer
+                    .pubkey
+                    .ok_or(Error::EdDSAPublicKeyNotFound)?;
+                signers::ed25519::verify(&auth_str, &auth.authorizer.did.into(), sig, pk)
+            }
+            Signer::BIP137 => signers::bip137::verify(&auth_str, &auth.authorizer.did.into(), sig),
+        })
+    }
+}
+
 impl Session {
     /// Generate new session via given signature and auth info.
     pub fn new(sig: &[u8], auth_info: &AuthorizedInfo) -> Self {
@@ -137,30 +158,7 @@ impl Session {
         if self.is_expired() {
             return false;
         }
-        if let Ok(auth_str) = self.auth.to_string() {
-            match self.auth.signer {
-                Signer::DEFAULT => {
-                    signers::default::verify(&auth_str, &self.auth.authorizer.did.into(), &self.sig)
-                }
-                Signer::EIP191 => {
-                    signers::eip191::verify(&auth_str, &self.auth.authorizer.did.into(), &self.sig)
-                }
-                Signer::EdDSA => match self.authorizer_pubkey() {
-                    Ok(p) => signers::ed25519::verify(
-                        &auth_str,
-                        &self.auth.authorizer.did.into(),
-                        &self.sig,
-                        p,
-                    ),
-                    Err(_) => false,
-                },
-                Signer::BIP137 => {
-                    signers::bip137::verify(&auth_str, &self.auth.authorizer.did.into(), &self.sig)
-                }
-            }
-        } else {
-            false
-        }
+        SessionManager::verify(&self.auth, &self.sig).unwrap_or(false)
     }
 
     /// Get delegated DID from session.

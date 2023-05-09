@@ -73,6 +73,8 @@ pub enum Error {
     InvalidHeaders,
     #[error("serde json error: {0}")]
     SerdeJsonError(#[from] serde_json::Error),
+    #[error("verify error: {0}")]
+    VerifyError(String),
 }
 
 impl Error {
@@ -110,6 +112,7 @@ impl Error {
             Error::JsError(_) => 0,
             Error::Swarm(_) => 0,
             Error::Storage(_) => 0,
+            Error::VerifyError(_) => 0,
             Error::Lock => 0,
         };
         -32000 - code
