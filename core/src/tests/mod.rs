@@ -1,9 +1,10 @@
+use std::collections::HashMap;
+
 use crate::err::Result;
 use crate::prelude::RTCSdpType;
 use crate::swarm::Swarm;
 use crate::transports::manager::TransportManager;
 use crate::types::ice_transport::IceTrickleScheme;
-use std::collections::HashMap;
 
 #[cfg(feature = "wasm")]
 pub mod wasm;
@@ -21,6 +22,7 @@ pub fn setup_tracing() {
 }
 
 /// Context for unitest to store nodes
+#[allow(dead_code)]
 pub type TestContext<'a> = HashMap<crate::dht::Did, &'a crate::message::MessageHandler>;
 
 pub async fn manually_establish_connection(swarm1: &Swarm, swarm2: &Swarm) -> Result<()> {

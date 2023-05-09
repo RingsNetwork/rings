@@ -157,9 +157,20 @@ pub trait CorrectChord<Action>: Chord<Action> {
 ///
 /// Implementors of this trait must also be convertible into a `Did` type using the `Into` trait, and
 /// must satisfy some additional constraints (see below).
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
-pub trait LiveDid: Into<Did> + Send + Sync + Clone {
+#[cfg(feature = "wasm")]
+#[async_trait(?Send)]
+pub trait LiveDid: Into<Did> + Clone {
+    /// Necessary method, should return true if a wrapped did is live.
+    async fn live(&self) -> bool;
+}
+
+/// Trait `LiveDid` defines a wrapper for `Did` that can check whether the `Did` is live or not.
+///
+/// Implementors of this trait must also be convertible into a `Did` type using the `Into` trait, and
+/// must satisfy some additional constraints (see below).
+#[cfg(not(feature = "wasm"))]
+#[async_trait]
+pub trait LiveDid: Into<Did> + Clone + Send + Sync {
     /// Necessary method, should return true if a wrapped did is live.
     async fn live(&self) -> bool;
 }

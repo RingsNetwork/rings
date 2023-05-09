@@ -6,7 +6,7 @@ use wasm_bindgen_test::*;
 
 use crate::prelude::rings_core::async_trait;
 use crate::prelude::rings_core::dht::Stabilization;
-use crate::prelude::rings_core::dht::TStabilize;
+use crate::prelude::rings_core::dht::TStabilizeWait;
 use crate::prelude::rings_core::message::CallbackFn;
 use crate::prelude::rings_core::message::MessageCallback;
 use crate::prelude::rings_core::storage::PersistenceStorage;

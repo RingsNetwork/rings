@@ -73,7 +73,8 @@ impl From<WrappedDid> for Did {
     }
 }
 
-#[async_trait]
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
 impl LiveDid for WrappedDid {
     /// Implements the LiveDid trait for WrappedDid, which checks if the DID is live or not.
     /// If the Transport is not present, has been dropped, or is not connected, returns false.
