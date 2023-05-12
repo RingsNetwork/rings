@@ -91,6 +91,9 @@ pub enum Error {
     #[error("Failed on promise, state is not succeeded")]
     PromiseStateFailed,
 
+    #[error("promise timeout, state is not succeeded")]
+    PromiseStateTimeout,
+
     #[error("Ice server scheme {0} has not supported yet")]
     IceServerSchemeNotSupport(String),
 
