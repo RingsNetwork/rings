@@ -349,7 +349,6 @@ mod test {
         )
         .await
         .unwrap();
-
         let ev = node2.listen_once().await.unwrap();
         assert!(matches!(
             ev.data,
@@ -360,7 +359,6 @@ mod test {
         assert!(swarm2.storage_check_cache(vid).await.is_none());
         assert!(dht1.storage.count().await.unwrap() == 0);
         assert!(dht2.storage.count().await.unwrap() != 0);
-
         // test remote query
         println!("vid is on node2 {:?}", &did2);
         <Swarm as ChordStorageInterface<1>>::storage_fetch(&swarm1, vid)
@@ -369,13 +367,14 @@ mod test {
 
         // it will send request to node2
         let ev = node2.listen_once().await.unwrap();
+
         // node2 received search vnode request
         assert!(matches!(
             ev.data,
             Message::SearchVNode(x) if x.vid == vid
         ));
-
         let ev = node1.listen_once().await.unwrap();
+
         assert!(matches!(
             ev.data,
             Message::FoundVNode(x) if x.data[0].did == vid

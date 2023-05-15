@@ -135,6 +135,14 @@ impl PeerRingAction {
         false
     }
 
+    /// Returns `true` if the action is a [PeerRingAction::SomeVnode] value.
+    pub fn is_some_vnode(&self) -> bool {
+        if let Self::SomeVNode(_) = self {
+            return true;
+        }
+        false
+    }
+
     /// Returns `true` if the action is a [PeerRingAction::RemoteAction] value.
     pub fn is_remote(&self) -> bool {
         if let Self::RemoteAction(..) = self {
@@ -401,7 +409,7 @@ impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing 
                     ret.push(act.clone());
                 } else {
                     // If found vnode, break and return directly
-                    if act.is_some() {
+                    if act.is_some_vnode() {
                         return Ok(act);
                     }
                 }
