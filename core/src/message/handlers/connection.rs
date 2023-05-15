@@ -3,7 +3,7 @@ use std::str::FromStr;
 use async_trait::async_trait;
 
 use crate::dht::Chord;
-use crate::dht::ChordStorage;
+use crate::dht::ChordStorageSync;
 use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
 use crate::err::Error;

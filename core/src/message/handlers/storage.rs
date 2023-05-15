@@ -1,10 +1,12 @@
 #![warn(missing_docs)]
+use async_recursion::async_recursion;
 use async_trait::async_trait;
 
-use crate::consts::VNODE_DATA_REDUNDANT;
 use crate::dht::vnode::VirtualNode;
 use crate::dht::ChordStorage;
+use crate::dht::ChordStorageCache;
 use crate::dht::Did;
+use crate::dht::PeerRing;
 use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
 use crate::err::Error;
@@ -24,9 +26,7 @@ use crate::swarm::Swarm;
 /// ChordStorageInterface should imply necessary method for DHT storage
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-pub trait ChordStorageInterface {
-    /// check local cache of dht
-    async fn storage_check_cache(&self, vid: Did) -> Option<VirtualNode>;
+pub trait ChordStorageInterface<const REDUNDANT: u16> {
     /// fetch virtual node from DHT
     async fn storage_fetch(&self, vid: Did) -> Result<()>;
     /// store virtual node on DHT
@@ -37,91 +37,110 @@ pub trait ChordStorageInterface {
     async fn storage_touch_data(&self, topic: &str, data: Encoded) -> Result<()>;
 }
 
+/// ChordStorageInterfaceCacheChecker defines the interface for checking the local cache of the DHT.
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-impl ChordStorageInterface for Swarm {
+pub trait ChordStorageInterfaceCacheChecker {
+    // Check the local cache of the DHT for a specific virtual node identifier (vid).
+    ///
+    /// Returns an optional `VirtualNode` representing the cached data, or `None` if it is not found.
+    async fn storage_check_cache(&self, vid: Did) -> Option<VirtualNode>;
+}
+
+/// Handle the storage fetch action of the peer ring.
+#[cfg_attr(feature = "wasm", async_recursion(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_recursion)]
+async fn handle_storage_fetch_act(swarm: &Swarm, act: PeerRingAction) -> Result<()> {
+    match act {
+        PeerRingAction::None => (),
+        PeerRingAction::SomeVNode(v) => {
+            swarm.dht.local_cache_set(v);
+        }
+        PeerRingAction::RemoteAction(next, dht_act) => {
+            if let PeerRingRemoteAction::FindVNode(vid) = dht_act {
+                tracing::debug!(
+                    "storage_fetch send_message: SearchVNode({:?}) to {:?}",
+                    vid,
+                    next
+                );
+                swarm
+                    .send_message(Message::SearchVNode(SearchVNode { vid }), next)
+                    .await?;
+            }
+        }
+        PeerRingAction::MultiActions(acts) => {
+            for act in acts {
+                handle_storage_fetch_act(swarm, act).await?;
+            }
+        }
+        act => return Err(Error::PeerRingUnexpectedAction(act)),
+    }
+    Ok(())
+}
+
+/// Handle the storage store operations of the peer ring.
+#[cfg_attr(feature = "wasm", async_recursion(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_recursion)]
+pub(super) async fn handle_storage_store_act(swarm: &Swarm, act: PeerRingAction) -> Result<()> {
+    match act {
+        PeerRingAction::None => (),
+        PeerRingAction::RemoteAction(target, PeerRingRemoteAction::FindVNodeForOperate(op)) => {
+            swarm
+                .send_message(Message::OperateVNode(op), target)
+                .await?;
+        }
+        PeerRingAction::MultiActions(acts) => {
+            for act in acts {
+                handle_storage_store_act(swarm, act).await?;
+            }
+        }
+        act => return Err(Error::PeerRingUnexpectedAction(act)),
+    }
+    Ok(())
+}
+
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl ChordStorageInterfaceCacheChecker for Swarm {
     /// Check local cache
     async fn storage_check_cache(&self, vid: Did) -> Option<VirtualNode> {
         self.dht.local_cache_get(vid)
     }
+}
 
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl<const REDUNDANT: u16> ChordStorageInterface<REDUNDANT> for Swarm {
     /// Fetch virtual node, if exist in localstoreage, copy it to the cache,
     /// else Query Remote Node
     async fn storage_fetch(&self, vid: Did) -> Result<()> {
         // If peer found that data is on it's localstore, copy it to the cache
-        for vid in vid.rotate_affine(VNODE_DATA_REDUNDANT) {
-            match self.dht.vnode_lookup(vid).await? {
-                PeerRingAction::None => (),
-                PeerRingAction::SomeVNode(v) => {
-                    self.dht.local_cache_set(v);
-                }
-                PeerRingAction::RemoteAction(next, _) => {
-                    tracing::debug!(
-                        "storage_fetch send_message: SearchVNode({:?}) to {:?}",
-                        vid,
-                        next
-                    );
-                    self.send_message(Message::SearchVNode(SearchVNode { vid }), next)
-                        .await?;
-                }
-                act => return Err(Error::PeerRingUnexpectedAction(act)),
-            }
-        }
+        let act = <PeerRing as ChordStorage<_, REDUNDANT>>::vnode_lookup(&self.dht, vid).await?;
+        handle_storage_fetch_act(self, act).await?;
         Ok(())
     }
 
     /// Store VirtualNode, `TryInto<VirtualNode>` is implemented for alot of types
     async fn storage_store(&self, vnode: VirtualNode) -> Result<()> {
-        for vnode in vnode.affine(VNODE_DATA_REDUNDANT) {
-            let op = VNodeOperation::Overwrite(vnode);
-            match self.dht.vnode_operate(op).await? {
-                PeerRingAction::None => (),
-                PeerRingAction::RemoteAction(
-                    target,
-                    PeerRingRemoteAction::FindVNodeForOperate(op),
-                ) => {
-                    self.send_message(Message::OperateVNode(op), target).await?;
-                }
-                act => return Err(Error::PeerRingUnexpectedAction(act)),
-            }
-        }
+        let op = VNodeOperation::Overwrite(vnode);
+        let act = <PeerRing as ChordStorage<_, REDUNDANT>>::vnode_operate(&self.dht, op).await?;
+        handle_storage_store_act(self, act).await?;
         Ok(())
     }
 
     async fn storage_append_data(&self, topic: &str, data: Encoded) -> Result<()> {
         let vnode: VirtualNode = (topic.to_string(), data).try_into()?;
-        for vnode in vnode.affine(VNODE_DATA_REDUNDANT) {
-            let op = VNodeOperation::Extend(vnode);
-            match self.dht.vnode_operate(op).await? {
-                PeerRingAction::None => (),
-                PeerRingAction::RemoteAction(
-                    target,
-                    PeerRingRemoteAction::FindVNodeForOperate(op),
-                ) => {
-                    self.send_message(Message::OperateVNode(op), target).await?;
-                }
-                act => return Err(Error::PeerRingUnexpectedAction(act)),
-            }
-        }
-        return Ok(());
+        let op = VNodeOperation::Extend(vnode);
+        let act = <PeerRing as ChordStorage<_, REDUNDANT>>::vnode_operate(&self.dht, op).await?;
+        handle_storage_store_act(self, act).await?;
+        Ok(())
     }
 
     async fn storage_touch_data(&self, topic: &str, data: Encoded) -> Result<()> {
         let vnode: VirtualNode = (topic.to_string(), data).try_into()?;
-        for vnode in vnode.affine(VNODE_DATA_REDUNDANT) {
-            let op = VNodeOperation::Touch(vnode);
-
-            match self.dht.vnode_operate(op).await? {
-                PeerRingAction::None => (),
-                PeerRingAction::RemoteAction(
-                    target,
-                    PeerRingRemoteAction::FindVNodeForOperate(op),
-                ) => {
-                    self.send_message(Message::OperateVNode(op), target).await?;
-                }
-                act => return Err(Error::PeerRingUnexpectedAction(act)),
-            }
-        }
+        let op = VNodeOperation::Touch(vnode);
+        let act = <PeerRing as ChordStorage<_, REDUNDANT>>::vnode_operate(&self.dht, op).await?;
+        handle_storage_store_act(self, act).await?;
         Ok(())
     }
 }
@@ -130,9 +149,10 @@ impl ChordStorageInterface for Swarm {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<SearchVNode> for MessageHandler {
     /// Search VNode via successor
-    /// If a VNode is storead local, it will response immediately.
+    /// If a VNode is storead local, it will response immediately.(See Chordstorageinterface::storage_fetch)
     async fn handle(&self, ctx: &MessagePayload<Message>, msg: &SearchVNode) -> Result<()> {
-        match self.dht.vnode_lookup(msg.vid).await {
+        // For relay message, set redundant to 1
+        match <PeerRing as ChordStorage<_, 1>>::vnode_lookup(&self.dht, msg.vid).await {
             Ok(action) => match action {
                 PeerRingAction::None => Ok(()),
                 PeerRingAction::SomeVNode(v) => {
@@ -165,7 +185,8 @@ impl HandleMsg<FoundVNode> for MessageHandler {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<VNodeOperation> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload<Message>, msg: &VNodeOperation) -> Result<()> {
-        match self.dht.vnode_operate(msg.clone()).await {
+        // For relay message, set redundant to 1
+        match <PeerRing as ChordStorage<_, 1>>::vnode_operate(&self.dht, msg.clone()).await {
             Ok(action) => match action {
                 PeerRingAction::None => Ok(()),
                 PeerRingAction::RemoteAction(next, _) => self.reset_destination(ctx, next).await,
@@ -187,7 +208,8 @@ impl HandleMsg<SyncVNodeWithSuccessor> for MessageHandler {
     ) -> Result<()> {
         for data in msg.data.iter().cloned() {
             // only simply store here
-            self.swarm.storage_store(data).await?;
+            // For relay message, set redundant to 1
+            <Swarm as ChordStorageInterface<1>>::storage_store(&self.swarm, data).await?;
         }
         Ok(())
     }
@@ -231,14 +253,14 @@ mod test {
         assert!(swarm1.storage_check_cache(vid).await.is_none());
         assert!(swarm2.storage_check_cache(vid).await.is_none());
 
-        swarm1.storage_store(vnode.clone()).await.unwrap();
-        for i in vid.rotate_affine(VNODE_DATA_REDUNDANT) {
-            let ev = node2.listen_once().await.unwrap();
-            assert!(matches!(
+        <Swarm as ChordStorageInterface<1>>::storage_store(&swarm1, vnode.clone())
+            .await
+            .unwrap();
+        let ev = node2.listen_once().await.unwrap();
+        assert!(matches!(
             ev.data,
-            Message::OperateVNode(VNodeOperation::Overwrite(x)) if x.did == i
-                ));
-        }
+            Message::OperateVNode(VNodeOperation::Overwrite(x)) if x.did == vid
+        ));
 
         assert!(swarm1.storage_check_cache(vid).await.is_none());
         assert!(swarm2.storage_check_cache(vid).await.is_none());
@@ -247,25 +269,23 @@ mod test {
 
         // test remote query
         println!("vid is on node2 {:?}", &did2);
-        swarm1.storage_fetch(vid).await.unwrap();
+        <Swarm as ChordStorageInterface<1>>::storage_fetch(&swarm1, vid)
+            .await
+            .unwrap();
 
         // it will send request to node2
-        for i in vid.rotate_affine(VNODE_DATA_REDUNDANT) {
-            let ev = node2.listen_once().await.unwrap();
-            // node2 received search vnode request
-            assert!(matches!(
+        let ev = node2.listen_once().await.unwrap();
+        // node2 received search vnode request
+        assert!(matches!(
             ev.data,
-            Message::SearchVNode(x) if x.vid == i
-                ));
-        }
+            Message::SearchVNode(x) if x.vid == vid
+        ));
 
-        for i in vid.rotate_affine(VNODE_DATA_REDUNDANT) {
-            let ev = node1.listen_once().await.unwrap();
-            assert!(matches!(
+        let ev = node1.listen_once().await.unwrap();
+        assert!(matches!(
             ev.data,
-            Message::FoundVNode(x) if x.data[0].did == i
-                ));
-        }
+            Message::FoundVNode(x) if x.data[0].did == vid
+        ));
 
         assert_eq!(
             swarm1.storage_check_cache(vid).await,
@@ -308,32 +328,34 @@ mod test {
         assert!(swarm1.storage_check_cache(vid).await.is_none());
         assert!(swarm2.storage_check_cache(vid).await.is_none());
 
-        swarm1
-            .storage_append_data(&topic, "111".to_string().encode()?)
-            .await
-            .unwrap();
+        <Swarm as ChordStorageInterface<1>>::storage_append_data(
+            &swarm1,
+            &topic,
+            "111".to_string().encode()?,
+        )
+        .await
+        .unwrap();
 
-        for i in vid.rotate_affine(VNODE_DATA_REDUNDANT) {
-            let ev = node2.listen_once().await.unwrap();
-            assert!(matches!(
+        let ev = node2.listen_once().await.unwrap();
+        assert!(matches!(
             ev.data,
             Message::OperateVNode(VNodeOperation::Extend(VirtualNode { did, data, kind: VNodeType::Data }))
-                if did == i && data == vec!["111".to_string().encode()?]
-                ));
-        }
-        swarm1
-            .storage_append_data(&topic, "222".to_string().encode()?)
-            .await
-            .unwrap();
+                if did == vid && data == vec!["111".to_string().encode()?]
+        ));
+        <Swarm as ChordStorageInterface<1>>::storage_append_data(
+            &swarm1,
+            &topic,
+            "222".to_string().encode()?,
+        )
+        .await
+        .unwrap();
 
-        for i in vid.rotate_affine(VNODE_DATA_REDUNDANT) {
-            let ev = node2.listen_once().await.unwrap();
-            assert!(matches!(
+        let ev = node2.listen_once().await.unwrap();
+        assert!(matches!(
             ev.data,
             Message::OperateVNode(VNodeOperation::Extend(VirtualNode { did, data, kind: VNodeType::Data }))
-                if did == i && data == vec!["222".to_string().encode()?]
-                ));
-        }
+                if did == vid && data == vec!["222".to_string().encode()?]
+        ));
         assert!(swarm1.storage_check_cache(vid).await.is_none());
         assert!(swarm2.storage_check_cache(vid).await.is_none());
         assert!(dht1.storage.count().await.unwrap() == 0);
@@ -341,25 +363,23 @@ mod test {
 
         // test remote query
         println!("vid is on node2 {:?}", &did2);
-        swarm1.storage_fetch(vid).await.unwrap();
+        <Swarm as ChordStorageInterface<1>>::storage_fetch(&swarm1, vid)
+            .await
+            .unwrap();
 
         // it will send request to node2
-        for i in vid.rotate_affine(VNODE_DATA_REDUNDANT) {
-            let ev = node2.listen_once().await.unwrap();
-            // node2 received search vnode request
-            assert!(matches!(
+        let ev = node2.listen_once().await.unwrap();
+        // node2 received search vnode request
+        assert!(matches!(
             ev.data,
-            Message::SearchVNode(x) if x.vid == i
-                ));
-        }
+            Message::SearchVNode(x) if x.vid == vid
+        ));
 
-        for i in vid.rotate_affine(VNODE_DATA_REDUNDANT) {
-            let ev = node1.listen_once().await.unwrap();
-            assert!(matches!(
+        let ev = node1.listen_once().await.unwrap();
+        assert!(matches!(
             ev.data,
-            Message::FoundVNode(x) if x.data[0].did == i
-                ));
-        }
+            Message::FoundVNode(x) if x.data[0].did == vid
+        ));
 
         assert_eq!(
             swarm1.storage_check_cache(vid).await,
@@ -371,41 +391,40 @@ mod test {
         );
 
         // Append more data
-        swarm1
-            .storage_append_data(&topic, "333".to_string().encode()?)
-            .await
-            .unwrap();
+        <Swarm as ChordStorageInterface<1>>::storage_append_data(
+            &swarm1,
+            &topic,
+            "333".to_string().encode()?,
+        )
+        .await
+        .unwrap();
 
-        for i in vid.rotate_affine(VNODE_DATA_REDUNDANT) {
-            let ev = node2.listen_once().await.unwrap();
-            assert!(matches!(
+        let ev = node2.listen_once().await.unwrap();
+        assert!(matches!(
             ev.data,
             Message::OperateVNode(VNodeOperation::Extend(VirtualNode { did, data, kind: VNodeType::Data }))
-                if did == i && data == vec!["333".to_string().encode()?]
-                ));
-        }
+                if did == vid && data == vec!["333".to_string().encode()?]
+        ));
 
         // test remote query agagin
         println!("vid is on node2 {:?}", &did2);
-        swarm1.storage_fetch(vid).await.unwrap();
+        <Swarm as ChordStorageInterface<1>>::storage_fetch(&swarm1, vid)
+            .await
+            .unwrap();
 
         // it will send request to node2
-        for i in vid.rotate_affine(VNODE_DATA_REDUNDANT) {
-            let ev = node2.listen_once().await.unwrap();
-            // node2 received search vnode request
-            assert!(matches!(
+        let ev = node2.listen_once().await.unwrap();
+        // node2 received search vnode request
+        assert!(matches!(
             ev.data,
-            Message::SearchVNode(x) if x.vid == i
-                ));
-        }
+            Message::SearchVNode(x) if x.vid == vid
+        ));
 
-        for i in vid.rotate_affine(VNODE_DATA_REDUNDANT) {
-            let ev = node1.listen_once().await.unwrap();
-            assert!(matches!(
+        let ev = node1.listen_once().await.unwrap();
+        assert!(matches!(
             ev.data,
-            Message::FoundVNode(x) if x.data[0].did == i
-                ));
-        }
+            Message::FoundVNode(x) if x.data[0].did == vid
+        ));
 
         assert_eq!(
             swarm1.storage_check_cache(vid).await,

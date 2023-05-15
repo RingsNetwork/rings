@@ -15,6 +15,8 @@ pub use chord::RemoteAction as PeerRingRemoteAction;
 pub use finger::FingerTable;
 pub use types::Chord;
 pub use types::ChordStorage;
+pub use types::ChordStorageCache;
+pub use types::ChordStorageSync;
 mod stabilization;
 pub use stabilization::Stabilization;
 pub use stabilization::TStabilize;

@@ -18,6 +18,7 @@ pub use types::*;
 
 mod handlers;
 pub use handlers::storage::ChordStorageInterface;
+pub use handlers::storage::ChordStorageInterfaceCacheChecker;
 pub use handlers::subring::SubringInterface;
 pub use handlers::CallbackFn;
 pub use handlers::HandleMsg;
