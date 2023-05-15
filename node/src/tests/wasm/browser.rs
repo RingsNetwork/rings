@@ -151,3 +151,47 @@ async fn test_client_parse_params() {
         panic!("value2 not array");
     }
 }
+
+#[wasm_bindgen_test]
+async fn test_get_address_from_hex_pubkey() {
+    let pk = "02c0eeef8d136b10b862a0ac979eac2ad036f9902d87963ddf0fa108f1e275b9c7";
+
+    let addr_result = browser::get_address_from_hex_pubkey(pk.to_string());
+    assert!(addr_result.is_ok(), "addr_result is error");
+    let addr = addr_result.ok().unwrap();
+    assert!(
+        addr.eq_ignore_ascii_case("fada88633e01d2f6704a7f2a6ebc57263aca6978"),
+        "got addr {:?}",
+        addr
+    );
+}
+
+#[wasm_bindgen_test]
+async fn test_get_address() {
+    let expect_address = "8b98cf912975b4b6b67ce94882fc25c210a60a60";
+    let got_address = browser::get_address(
+        "9z1ZTaGocNSAu3DSqGKR6Dqt214X4dXucVd6C53EgqBK",
+        browser::AddressType::ED25519,
+    )
+    .ok()
+    .unwrap();
+    assert!(
+        expect_address.eq_ignore_ascii_case(got_address.as_str()),
+        "got address: {}, expect: {}",
+        got_address,
+        expect_address
+    );
+    let got_address = browser::get_address(
+        format!("0x{}", expect_address).as_str(),
+        browser::AddressType::DEFAULT,
+    )
+    .ok()
+    .unwrap();
+
+    assert!(
+        got_address.eq_ignore_ascii_case(expect_address),
+        "got address: {}, expect: {}",
+        got_address,
+        expect_address
+    )
+}

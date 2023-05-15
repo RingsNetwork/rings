@@ -144,15 +144,6 @@ impl UnsignedInfo {
         )
     }
 
-    /// Get address from hex pubkey
-    ///  * pubkey: hex pubkey
-    pub fn get_address_from_hex_pubkey(pubkey: String) -> Result<String, JsError> {
-        Ok(PublicKey::from_hex_string(pubkey.as_str())
-            .map_err(JsError::from)?
-            .address()
-            .to_string())
-    }
-
     /// Create a new `UnsignedInfo` instance
     ///   * pubkey: solana wallet pubkey
     pub fn new_with_address(
@@ -980,4 +971,23 @@ pub fn get_did(address: &str, addr_type: AddressType) -> Result<Did, JsError> {
             .into(),
     };
     Ok(did)
+}
+
+/// Get address from hex pubkey
+///  * pubkey: hex pubkey
+#[wasm_bindgen]
+pub fn get_address_from_hex_pubkey(pubkey: String) -> Result<String, JsError> {
+    Ok(PublicKey::from_hex_string(pubkey.as_str())
+        .map_err(JsError::from)?
+        .address()
+        .into_token()
+        .to_string())
+}
+
+/// Get address from other address
+///   * address: source address
+///   * addr_type: source address type
+#[wasm_bindgen]
+pub fn get_address(address: &str, addr_type: AddressType) -> Result<String, JsError> {
+    Ok(get_did(address, addr_type)?.into_token().to_string())
 }
