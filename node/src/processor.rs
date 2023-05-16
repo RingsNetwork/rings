@@ -16,6 +16,7 @@ use crate::backend::types::BackendMessage;
 use crate::backend::types::HttpRequest;
 use crate::backend::types::MessageType;
 use crate::backend::types::Timeout;
+use crate::consts::DATA_REDUNDANT;
 use crate::error::Error;
 use crate::error::Result;
 use crate::jsonrpc::method;
@@ -49,6 +50,7 @@ use crate::prelude::vnode;
 use crate::prelude::web3::signing::keccak256;
 use crate::prelude::CallbackFn;
 use crate::prelude::ChordStorageInterface;
+use crate::prelude::ChordStorageInterfaceCacheChecker;
 use crate::prelude::CustomMessage;
 use crate::prelude::Signer;
 
@@ -500,26 +502,27 @@ impl Processor {
 
     /// fetch virtual node from DHT
     pub async fn storage_fetch(&self, did: Did) -> Result<()> {
-        self.swarm
-            .storage_fetch(did)
+        <Swarm as ChordStorageInterface<DATA_REDUNDANT>>::storage_fetch(&self.swarm, did)
             .await
             .map_err(Error::VNodeError)
     }
 
     /// store virtual node on DHT
     pub async fn storage_store(&self, vnode: vnode::VirtualNode) -> Result<()> {
-        self.swarm
-            .storage_store(vnode)
+        <Swarm as ChordStorageInterface<DATA_REDUNDANT>>::storage_store(&self.swarm, vnode)
             .await
             .map_err(Error::VNodeError)
     }
 
     /// append data to a virtual node on DHT
     pub async fn storage_append_data(&self, topic: &str, data: Encoded) -> Result<()> {
-        self.swarm
-            .storage_append_data(topic, data)
-            .await
-            .map_err(Error::VNodeError)
+        <Swarm as ChordStorageInterface<DATA_REDUNDANT>>::storage_append_data(
+            &self.swarm,
+            topic,
+            data,
+        )
+        .await
+        .map_err(Error::VNodeError)
     }
 
     /// register service
@@ -529,10 +532,13 @@ impl Processor {
             .to_string()
             .encode()
             .map_err(Error::ServiceRegisterError)?;
-        self.swarm
-            .storage_touch_data(name, encoded_did)
-            .await
-            .map_err(Error::ServiceRegisterError)
+        <Swarm as ChordStorageInterface<DATA_REDUNDANT>>::storage_touch_data(
+            &self.swarm,
+            name,
+            encoded_did,
+        )
+        .await
+        .map_err(Error::ServiceRegisterError)
     }
 
     /// get node info

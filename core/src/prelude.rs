@@ -35,6 +35,7 @@ pub use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 pub use crate::dht::vnode;
 pub use crate::message;
 pub use crate::message::ChordStorageInterface;
+pub use crate::message::ChordStorageInterfaceCacheChecker;
 pub use crate::message::MessageRelay;
 pub use crate::message::SubringInterface;
 pub use crate::storage::PersistenceStorage;

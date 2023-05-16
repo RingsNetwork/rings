@@ -62,17 +62,29 @@ pub trait Chord<Action> {
 /// node.
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-pub trait ChordStorage<Action>: Chord<Action> {
+pub trait ChordStorage<Action, const REDUNDANT: u16>: Chord<Action> {
     /// Look up a VirtualNode by its Did.
     /// Always finds resource by DHT, ignoring the local cache.
     async fn vnode_lookup(&self, vid: Did) -> Result<Action>;
     /// Store `vnode` if it's between current node and the successor of current node,
     /// otherwise find the responsible node and return as Action.
     async fn vnode_operate(&self, op: VNodeOperation) -> Result<Action>;
+}
+
+/// ChordStorageSync defines the synchronous vnode storage behavior.
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+pub trait ChordStorageSync<Action>: Chord<Action> {
     /// When the successor of a node is updated, it needs to check if there are
     /// `VirtualNode`s that are no longer between current node and `new_successor`,
     /// and sync them to the new successor.
     async fn sync_vnode_with_successor(&self, new_successor: Did) -> Result<Action>;
+}
+
+/// ChordStorageCache defines the basic API for getting and setting DHT cache storage.
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+pub trait ChordStorageCache<Action>: Chord<Action> {
     /// Cache fetched resource locally.
     fn local_cache_set(&self, vnode: VirtualNode);
     /// Get local cache.

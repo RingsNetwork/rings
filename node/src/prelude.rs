@@ -33,6 +33,7 @@ pub use self::rings_core::prelude::web3;
 #[cfg(feature = "browser")]
 pub use self::rings_core::prelude::web_sys;
 pub use self::rings_core::prelude::ChordStorageInterface;
+pub use self::rings_core::prelude::ChordStorageInterfaceCacheChecker;
 pub use self::rings_core::prelude::MessageRelay;
 pub use self::rings_core::prelude::PersistenceStorage;
 pub use self::rings_core::prelude::PersistenceStorageReadAndWrite;
