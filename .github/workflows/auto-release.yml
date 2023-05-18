@@ -2,12 +2,59 @@ name: Auto Release
 
 on:
   push:
+    tags:
+      - "v*"
     branches:
       - "master"
+  workflow_dispatch:
+    inputs:
+      tags:
+        description: The tags to be released. If not give, will use prerelease.
+        required: false
+        type: string
 
 jobs:
-  prebuild_macos:
-    name: pre build macos version binary
+  gen_version:
+    name: generate version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.generated-tag.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      - name: Get latest tag
+        id: get-latest-tag
+        run: |
+          echo "tag=`gh release list -L 1 | cut -f 1`" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Bump version
+        id: generated-tag
+        uses: actions/github-script@v6
+        with:
+          script: |
+            if (context.ref.startsWith("refs/tags/")) {
+              let tag = context.ref.replace("refs/tags/", "");
+              core.setOutput('tag', tag);
+              console.log(`This event pushed a tag ${tag}, return directly.`)
+              return
+            }
+
+            if ("${{ github.event.inputs.tags }}") {
+              let tag = "${{ github.event.inputs.tags }}";
+              core.setOutput('tag', tag);
+              console.log(`This event triggered by workflow_dispatch with a tag ${tag}, return directly.`)
+              return
+            }
+
+            console.log('Use default tag "prerelease".')
+            core.setOutput('tag', 'prerelease');
+
+  build_macos:
+    needs: gen_version
+    name: build macos version binary
     timeout-minutes: 25
     runs-on: macos-11
     strategy:
@@ -35,22 +82,23 @@ jobs:
       # If you need to reset the cache version, increment the number after `v`
       - uses: Swatinem/rust-cache@v1
         with:
-          sharedKey: pre-release-${{ steps.target.outputs.target }}-v1
+          sharedKey: auto-release-${{ steps.target.outputs.target }}-v1
 
       - name: Build
         run: |
           cargo build --features node --no-default-features --release --target ${{ steps.target.outputs.target }}
-          zip -j rings-${{ steps.target.outputs.target }}.zip ./target/${{ steps.target.outputs.target }}/release/rings
+          zip -j rings-${{ needs.gen_version.outputs.version }}-${{ steps.target.outputs.target }}.zip ./target/${{ steps.target.outputs.target }}/release/rings
 
       - uses: actions/upload-artifact@v3
         name: Upload artifacts
         with:
-          name: rings-${{ steps.target.outputs.target }}
-          path: rings-${{ steps.target.outputs.target }}.zip
+          name: rings-${{ needs.gen_version.outputs.version }}-${{ steps.target.outputs.target }}
+          path: rings-${{ needs.gen_version.outputs.version }}-${{ steps.target.outputs.target }}.zip
           retention-days: 1
 
-  prebuild_linux:
-    name: pre build linux version binary
+  build_linux:
+    needs: gen_version
+    name: build linux version binary
     timeout-minutes: 25
     runs-on: "ubuntu-latest"
     strategy:
@@ -86,22 +134,22 @@ jobs:
       # If you need to reset the cache version, increment the number after `v`
       - uses: Swatinem/rust-cache@v1
         with:
-          sharedKey: pre-release-${{ steps.target.outputs.target }}-v1
+          sharedKey: auto-release-${{ steps.target.outputs.target }}-v1
 
       - name: Build
         run: |
           cargo build --features node --no-default-features --release --target ${{ steps.target.outputs.target }}
-          zip -j rings-${{ steps.target.outputs.target }}.zip ./target/${{ steps.target.outputs.target }}/release/rings
+          zip -j rings-${{ needs.gen_version.outputs.version }}-${{ steps.target.outputs.target }}.zip ./target/${{ steps.target.outputs.target }}/release/rings
 
       - uses: actions/upload-artifact@v3
         name: Upload artifacts
         with:
-          name: rings-${{ steps.target.outputs.target }}
-          path: rings-${{ steps.target.outputs.target }}.zip
+          name: rings-${{ needs.gen_version.outputs.version }}-${{ steps.target.outputs.target }}
+          path: rings-${{ needs.gen_version.outputs.version }}-${{ steps.target.outputs.target }}.zip
           retention-days: 1
 
   release:
-    needs: [prebuild_macos, prebuild_linux]
+    needs: [gen_version, build_macos, build_linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
@@ -117,11 +165,11 @@ jobs:
         name: Emit a Github Release
         with:
           repo_token: "${{ secrets.GITHUB_TOKEN }}"
-          automatic_release_tag: latest
-          prerelease: true
-          title: "Development Build"
+          automatic_release_tag: ${{ needs.gen_version.outputs.version }}
+          prerelease: ${{ needs.gen_version.outputs.version == 'prerelease' }}
+          title: ${{ needs.gen_version.outputs.version }}
           files: |
             LICENSE
-            rings-x86_64-unknown-linux-musl/*.zip
-            rings-x86_64-apple-darwin/*.zip
-            rings-aarch64-apple-darwin/*.zip
+            rings-${{ needs.gen_version.outputs.version }}-x86_64-unknown-linux-musl/*.zip
+            rings-${{ needs.gen_version.outputs.version }}-x86_64-apple-darwin/*.zip
+            rings-${{ needs.gen_version.outputs.version }}-aarch64-apple-darwin/*.zip
