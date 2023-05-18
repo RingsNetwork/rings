@@ -49,7 +49,7 @@ jobs:
               return
             }
 
-            console.log('This event triggered by push to master, use "prerelease" as tag.')
+            console.log('Use default tag "prerelease".')
             core.setOutput('tag', 'prerelease');
 
   build_macos:
