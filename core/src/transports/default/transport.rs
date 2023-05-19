@@ -33,7 +33,7 @@ use crate::err::Error;
 use crate::err::Result;
 use crate::transports::helper::Promise;
 use crate::types::channel::Channel;
-use crate::types::channel::Event;
+use crate::types::channel::TransportEvent;
 use crate::types::ice_transport::HandshakeInfo;
 use crate::types::ice_transport::IceCandidate;
 use crate::types::ice_transport::IceCandidateGathering;
@@ -43,7 +43,7 @@ use crate::types::ice_transport::IceTransportCallback;
 use crate::types::ice_transport::IceTransportInterface;
 use crate::types::ice_transport::IceTrickleScheme;
 
-type EventSender = <AcChannel<Event> as Channel<Event>>::Sender;
+type EventSender = <AcChannel<TransportEvent> as Channel<TransportEvent>>::Sender;
 
 /// DefaultTransport use for node.
 #[derive(Clone)]
@@ -138,7 +138,7 @@ impl IceTransport for DefaultTransport {
 }
 
 #[async_trait]
-impl IceTransportInterface<Event, AcChannel<Event>> for DefaultTransport {
+impl IceTransportInterface<TransportEvent, AcChannel<TransportEvent>> for DefaultTransport {
     type IceConnectionState = RTCIceConnectionState;
 
     fn new(event_sender: EventSender) -> Self {
@@ -300,7 +300,7 @@ impl IceTransportCallback for DefaultTransport {
                         let remote_did = remote_did.read().await.unwrap();
                         if AcChannel::send(
                             &event_sender,
-                            Event::RegisterTransport((remote_did, id)),
+                            TransportEvent::RegisterTransport((remote_did, id)),
                         )
                         .await
                         .is_err()
@@ -312,9 +312,12 @@ impl IceTransportCallback for DefaultTransport {
                     | RTCIceConnectionState::Disconnected
                     | RTCIceConnectionState::Closed => {
                         let remote_did = remote_did.read().await.unwrap();
-                        if AcChannel::send(&event_sender, Event::ConnectClosed((remote_did, id)))
-                            .await
-                            .is_err()
+                        if AcChannel::send(
+                            &event_sender,
+                            TransportEvent::ConnectClosed((remote_did, id)),
+                        )
+                        .await
+                        .is_err()
                         {
                             tracing::error!("Failed when send RegisterTransport");
                         }
@@ -374,9 +377,12 @@ impl IceTransportCallback for DefaultTransport {
                         let data = data.unwrap();
                         tracing::debug!("Complete message from DataChannel: '{:?}'", data);
 
-                        if AcChannel::send(&event_sender, Event::DataChannelMessage(data.into()))
-                            .await
-                            .is_err()
+                        if AcChannel::send(
+                            &event_sender,
+                            TransportEvent::DataChannelMessage(data.into()),
+                        )
+                        .await
+                        .is_err()
                         {
                             tracing::error!("Failed on handle msg")
                         };
@@ -604,7 +610,7 @@ pub mod tests {
     use crate::ecc::SecretKey;
     use crate::types::ice_transport::IceServer;
 
-    async fn prepare_transport() -> Result<(Transport, Receiver<Event>)> {
+    async fn prepare_transport() -> Result<(Transport, Receiver<TransportEvent>)> {
         let ch = Arc::new(AcChannel::new());
         let mut trans = Transport::new(ch.sender());
 
@@ -734,11 +740,11 @@ pub mod tests {
 
         assert!(matches!(
             receiver1.recv().await.unwrap(),
-            Event::RegisterTransport((did, _)) if did == did2
+            TransportEvent::RegisterTransport((did, _)) if did == did2
         ));
         assert!(matches!(
             receiver2.recv().await.unwrap(),
-            Event::RegisterTransport((did, _)) if did == did1
+            TransportEvent::RegisterTransport((did, _)) if did == did1
         ));
     }
 
@@ -753,11 +759,11 @@ pub mod tests {
 
         assert!(matches!(
             receiver1.recv().await.unwrap(),
-            Event::RegisterTransport((did, _)) if did == did2
+            TransportEvent::RegisterTransport((did, _)) if did == did2
         ));
         assert!(matches!(
             receiver2.recv().await.unwrap(),
-            Event::RegisterTransport((did, _)) if did == did1
+            TransportEvent::RegisterTransport((did, _)) if did == did1
         ));
 
         transport1.wait_for_data_channel_open().await.unwrap();
@@ -767,12 +773,12 @@ pub mod tests {
         transport1.send_message(&"hello1".into()).await.unwrap();
         assert!(matches!(
             receiver2.recv().await.unwrap(),
-            Event::DataChannelMessage(msg) if msg == "hello1".as_bytes()
+            TransportEvent::DataChannelMessage(msg) if msg == "hello1".as_bytes()
         ));
         transport2.send_message(&"hello2".into()).await.unwrap();
         assert!(matches!(
             receiver1.recv().await.unwrap(),
-            Event::DataChannelMessage(msg) if msg == "hello2".as_bytes()
+            TransportEvent::DataChannelMessage(msg) if msg == "hello2".as_bytes()
         ));
 
         // Check send long message
@@ -783,7 +789,7 @@ pub mod tests {
         transport1.send_message(&long_message1).await.unwrap();
         assert!(matches!(
             receiver2.recv().await.unwrap(),
-            Event::DataChannelMessage(msg) if msg == long_message1.to_vec()
+            TransportEvent::DataChannelMessage(msg) if msg == long_message1.to_vec()
         ));
         let long_message2: Bytes = (0..TRANSPORT_MAX_SIZE)
             .map(|_| rand::random::<u8>())
@@ -792,7 +798,7 @@ pub mod tests {
         transport2.send_message(&long_message2).await.unwrap();
         assert!(matches!(
             receiver1.recv().await.unwrap(),
-            Event::DataChannelMessage(msg) if msg == long_message2.to_vec()
+            TransportEvent::DataChannelMessage(msg) if msg == long_message2.to_vec()
         ));
 
         // Check send over sized message

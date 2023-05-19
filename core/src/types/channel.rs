@@ -6,7 +6,7 @@ use crate::err::Result;
 
 /// Event message send and recv through Channel.
 #[derive(Debug, PartialEq, Eq, Serialize, Clone)]
-pub enum Event {
+pub enum TransportEvent {
     ConnectClosed((Did, uuid::Uuid)),
     DataChannelMessage(Vec<u8>),
     RegisterTransport((Did, uuid::Uuid)),

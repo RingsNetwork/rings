@@ -11,7 +11,7 @@ use crate::swarm::Swarm;
 use crate::transports::manager::TransportManager;
 use crate::transports::Transport;
 use crate::types::channel::Channel;
-use crate::types::channel::Event;
+use crate::types::channel::TransportEvent;
 use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransportCallback;
 use crate::types::ice_transport::IceTransportInterface;
@@ -33,10 +33,10 @@ fn new_swarm(key: &SecretKey) -> Swarm {
     Swarm::new(stun, key.address(), session)
 }
 
-async fn prepare_transport(channel: Option<Arc<CbChannel<Event>>>) -> Result<Transport> {
+async fn prepare_transport(channel: Option<Arc<CbChannel<TransportEvent>>>) -> Result<Transport> {
     let ch = match channel {
         Some(c) => Arc::clone(&c),
-        None => Arc::new(<CbChannel<Event> as Channel<Event>>::new(1)),
+        None => Arc::new(<CbChannel<TransportEvent> as Channel<TransportEvent>>::new(1)),
     };
     let mut trans = Transport::new(ch.sender());
     let stun = IceServer::from_str("stun://stun.l.google.com:19302").unwrap();

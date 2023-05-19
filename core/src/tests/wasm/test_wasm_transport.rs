@@ -14,7 +14,7 @@ use crate::prelude::RTCSdpType;
 use crate::tests::manually_establish_connection;
 use crate::transports::Transport;
 use crate::types::channel::Channel;
-use crate::types::channel::Event;
+use crate::types::channel::TransportEvent;
 use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransportInterface;
 use crate::types::ice_transport::IceTrickleScheme;
@@ -33,10 +33,10 @@ async fn get_fake_permission() {
     JsFuture::from(promise).await.unwrap();
 }
 
-async fn prepare_transport(channel: Option<Arc<CbChannel<Event>>>) -> Result<Transport> {
+async fn prepare_transport(channel: Option<Arc<CbChannel<TransportEvent>>>) -> Result<Transport> {
     let ch = match channel {
         Some(c) => Arc::clone(&c),
-        None => Arc::new(<CbChannel<Event> as Channel<Event>>::new()),
+        None => Arc::new(<CbChannel<TransportEvent> as Channel<TransportEvent>>::new()),
     };
     let mut trans = Transport::new(ch.sender());
     let stun = IceServer::from_str("stun://stun.l.google.com:19302").unwrap();

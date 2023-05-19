@@ -34,7 +34,7 @@ use crate::transports::manager::TransportHandshake;
 use crate::transports::manager::TransportManager;
 use crate::transports::Transport;
 use crate::types::channel::Channel as ChannelTrait;
-use crate::types::channel::Event;
+use crate::types::channel::TransportEvent;
 use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransportInterface;
 
@@ -147,7 +147,7 @@ pub struct Swarm {
     pub(crate) pending_transports: Mutex<Vec<Arc<Transport>>>,
     pub(crate) transports: MemStorage<Did, Arc<Transport>>,
     pub(crate) ice_servers: Vec<IceServer>,
-    pub(crate) transport_event_channel: Channel<Event>,
+    pub(crate) transport_event_channel: Channel<TransportEvent>,
     pub(crate) external_address: Option<String>,
     pub(crate) dht: Arc<PeerRing>,
     pub(crate) measure: Option<MeasureImpl>,
@@ -177,17 +177,17 @@ impl Swarm {
 
     async fn load_message(
         &self,
-        ev: Result<Option<Event>>,
+        ev: Result<Option<TransportEvent>>,
     ) -> Result<Option<MessagePayload<Message>>> {
         let ev = ev?;
 
         match ev {
-            Some(Event::DataChannelMessage(msg)) => {
+            Some(TransportEvent::DataChannelMessage(msg)) => {
                 let payload = MessagePayload::from_bincode(&msg)?;
                 tracing::debug!("load message from channel: {:?}", payload);
                 Ok(Some(payload))
             }
-            Some(Event::RegisterTransport((did, id))) => {
+            Some(TransportEvent::RegisterTransport((did, id))) => {
                 // if transport is still pending
                 if let Ok(Some(t)) = self.find_pending_transport(id) {
                     tracing::debug!("transport is inside pending list, mov to swarm transports");
@@ -208,7 +208,7 @@ impl Swarm {
                     None => Err(Error::SwarmMissTransport(did)),
                 }
             }
-            Some(Event::ConnectClosed((did, uuid))) => {
+            Some(TransportEvent::ConnectClosed((did, uuid))) => {
                 if self.pop_pending_transport(uuid).is_ok() {
                     tracing::info!(
                         "[Swarm::ConnectClosed] Pending transport {:?} dropped",
