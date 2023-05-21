@@ -18,6 +18,7 @@ use crate::message::types::SyncVNodeWithSuccessor;
 use crate::message::Encoded;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
+use crate::message::MessageHandlerEvent;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
 use crate::prelude::vnode::VNodeOperation;
@@ -150,16 +151,21 @@ impl<const REDUNDANT: u16> ChordStorageInterface<REDUNDANT> for Swarm {
 impl HandleMsg<SearchVNode> for MessageHandler {
     /// Search VNode via successor
     /// If a VNode is storead local, it will response immediately.(See Chordstorageinterface::storage_fetch)
-    async fn handle(&self, ctx: &MessagePayload<Message>, msg: &SearchVNode) -> Result<()> {
+    async fn handle(
+        &self,
+        ctx: &MessagePayload<Message>,
+        msg: &SearchVNode,
+    ) -> Result<Vec<MessageHandlerEvent>> {
         // For relay message, set redundant to 1
         match <PeerRing as ChordStorage<_, 1>>::vnode_lookup(&self.dht, msg.vid).await {
             Ok(action) => match action {
-                PeerRingAction::None => Ok(()),
-                PeerRingAction::SomeVNode(v) => {
-                    self.send_report_message(ctx, Message::FoundVNode(FoundVNode { data: vec![v] }))
-                        .await
+                PeerRingAction::None => Ok(vec![]),
+                PeerRingAction::SomeVNode(v) => Ok(vec![MessageHandlerEvent::SendReportMessage(
+                    Message::FoundVNode(FoundVNode { data: vec![v] }),
+                )]),
+                PeerRingAction::RemoteAction(next, _) => {
+                    Ok(vec![MessageHandlerEvent::ResetDestination(next)])
                 }
-                PeerRingAction::RemoteAction(next, _) => self.reset_destination(ctx, next).await,
                 act => Err(Error::PeerRingUnexpectedAction(act)),
             },
             Err(e) => Err(e),
@@ -170,26 +176,36 @@ impl HandleMsg<SearchVNode> for MessageHandler {
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<FoundVNode> for MessageHandler {
-    async fn handle(&self, ctx: &MessagePayload<Message>, msg: &FoundVNode) -> Result<()> {
+    async fn handle(
+        &self,
+        ctx: &MessagePayload<Message>,
+        msg: &FoundVNode,
+    ) -> Result<Vec<MessageHandlerEvent>> {
         if self.dht.did != ctx.relay.destination {
-            return self.forward_payload(ctx, None).await;
+            return Ok(vec![MessageHandlerEvent::ForwardPayload]);
         }
         for data in msg.data.iter().cloned() {
             self.dht.local_cache_set(data);
         }
-        Ok(())
+        Ok(vec![])
     }
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<VNodeOperation> for MessageHandler {
-    async fn handle(&self, ctx: &MessagePayload<Message>, msg: &VNodeOperation) -> Result<()> {
+    async fn handle(
+        &self,
+        ctx: &MessagePayload<Message>,
+        msg: &VNodeOperation,
+    ) -> Result<Vec<MessageHandlerEvent>> {
         // For relay message, set redundant to 1
         match <PeerRing as ChordStorage<_, 1>>::vnode_operate(&self.dht, msg.clone()).await {
             Ok(action) => match action {
-                PeerRingAction::None => Ok(()),
-                PeerRingAction::RemoteAction(next, _) => self.reset_destination(ctx, next).await,
+                PeerRingAction::None => Ok(vec![]),
+                PeerRingAction::RemoteAction(next, _) => {
+                    Ok(vec![MessageHandlerEvent::ResetDestination(next)])
+                }
                 act => Err(Error::PeerRingUnexpectedAction(act)),
             },
             Err(e) => Err(e),
@@ -205,13 +221,14 @@ impl HandleMsg<SyncVNodeWithSuccessor> for MessageHandler {
         &self,
         _ctx: &MessagePayload<Message>,
         msg: &SyncVNodeWithSuccessor,
-    ) -> Result<()> {
+    ) -> Result<Vec<MessageHandlerEvent>> {
+        let events = vec![];
         for data in msg.data.iter().cloned() {
             // only simply store here
             // For relay message, set redundant to 1
-            <Swarm as ChordStorageInterface<1>>::storage_store(&self.swarm, data).await?;
+            events.push(MessageHandlerEvent::StorageStore(data));
         }
-        Ok(())
+        Ok(events)
     }
 }
 

@@ -4,9 +4,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use async_stream::stream;
 use async_trait::async_trait;
-use futures::Stream;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
@@ -23,6 +21,7 @@ use crate::message;
 use crate::message::CallbackFn;
 use crate::message::Message;
 use crate::message::MessageHandler;
+use crate::message::MessageHandlerEvent;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
 use crate::message::ValidatorFn;
@@ -167,14 +166,6 @@ impl Swarm {
         &self.session_manager
     }
 
-    pub fn create_message_handler(
-        self: &Arc<Self>,
-        callback: Option<CallbackFn>,
-        validator: Option<ValidatorFn>,
-    ) -> MessageHandler {
-        MessageHandler::new(self.clone(), callback, validator)
-    }
-
     async fn load_message(
         &self,
         ev: Result<Option<TransportEvent>>,
@@ -246,20 +237,31 @@ impl Swarm {
         }
     }
 
-    pub async fn iter_messages<'a, 'b>(
-        &'a self,
-    ) -> impl Stream<Item = MessagePayload<Message>> + 'b
-    where 'a: 'b {
-        stream! {
-            let receiver = &self.transport_event_channel.receiver();
-            loop {
-                let ev = Channel::recv(receiver).await;
-                if let Ok(Some(msg)) = self.load_message(ev).await {
-                    yield msg
-                }
+    pub async fn loop_forever(
+        &self,
+        callback: Option<CallbackFn>,
+        validator: Option<ValidatorFn>,
+    ) -> MessageHandler {
+        let receiver = &self.transport_event_channel.receiver();
+        let mh = MessageHandler::new(self.dht(), callback, validator);
+        loop {
+            let t_ev = Channel::recv(receiver).await;
+
+            let Ok(Some(msg)) = self.load_message(t_ev).await else {
+                continue;
+            };
+
+            let Ok(mh_evs) = mh.handle_message(&msg).await else {
+                continue;
+            };
+
+            for ev in mh_evs {
+                self.handle_message_handler_event(&ev).await;
             }
         }
     }
+
+    pub async fn handle_message_handler_event(&self, event: &MessageHandlerEvent) {}
 
     pub fn push_pending_transport(&self, transport: &Arc<Transport>) -> Result<()> {
         let mut pending = self

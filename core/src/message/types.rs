@@ -18,10 +18,6 @@ pub struct ConnectNodeSend {
     pub offer: HandshakeInfo,
 }
 
-/// MessageType report to origin that already connected.
-#[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
-pub struct AlreadyConnected;
-
 /// MessageType report to origin with own transport_uuid and handshake_info.
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
 pub struct ConnectNodeReport {
@@ -80,12 +76,6 @@ pub struct FoundVNode {
     pub data: Vec<VirtualNode>,
 }
 
-/// MessageType contains multi messages.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct MultiCall {
-    pub messages: Vec<Message>,
-}
-
 /// MessageType after `FindSuccessorSend` and syncing data.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SyncVNodeWithSuccessor {
@@ -130,11 +120,9 @@ pub enum FindSuccessorReportHandler {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Message {
-    MultiCall(MultiCall),
     JoinDHT(JoinDHT),
     LeaveDHT(LeaveDHT),
     ConnectNodeSend(ConnectNodeSend),
-    AlreadyConnected(AlreadyConnected),
     ConnectNodeReport(ConnectNodeReport),
     FindSuccessorSend(FindSuccessorSend),
     FindSuccessorReport(FindSuccessorReport),

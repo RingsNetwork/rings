@@ -16,15 +16,11 @@ use super::CustomMessage;
 use super::MaybeEncrypted;
 use super::Message;
 use super::MessagePayload;
-use super::OriginVerificationGen;
-use super::PayloadSender;
+use crate::dht::vnode::VirtualNode;
 use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::err::Error;
 use crate::err::Result;
-use crate::measure::MeasureCounter;
-use crate::session::SessionManager;
-use crate::swarm::Swarm;
 
 /// Operator and Handler for Connection
 pub mod connection;
@@ -80,13 +76,28 @@ pub type ValidatorFn = Box<dyn MessageValidator + Send + Sync>;
 #[cfg(feature = "wasm")]
 pub type ValidatorFn = Box<dyn MessageValidator>;
 
+/// MessageHandlerEvent that will be handled by Swarm.
+#[derive(Debug)]
+pub enum MessageHandlerEvent {
+    Connect(Did),
+    Disconnect(Did),
+    AnswerOffer,
+    AcceptAnswer,
+    ForwardPayload,
+    JoinDHT(Did),
+    SendDirectMessage(Message, Did),
+    SendMessage(Message, Did),
+    SendReportMessage(Message),
+    ResetDestination(Did),
+    SyncVNodeWithSuccessor(Did),
+    StorageStore(VirtualNode),
+}
+
 /// MessageHandler will manage resources.
 #[derive(Clone)]
 pub struct MessageHandler {
     /// DHT implement chord algorithm.
     dht: Arc<PeerRing>,
-    /// Transport manager and collections.
-    swarm: Arc<Swarm>,
     /// CallbackFn implement `customMessage` and `builtin_message`.
     callback: Arc<Option<CallbackFn>>,
     /// A specific validator implement ValidatorFn.
@@ -98,19 +109,22 @@ pub struct MessageHandler {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait HandleMsg<T> {
     /// Message handler.
-    async fn handle(&self, ctx: &MessagePayload<Message>, msg: &T) -> Result<()>;
+    async fn handle(
+        &self,
+        ctx: &MessagePayload<Message>,
+        msg: &T,
+    ) -> Result<Vec<MessageHandlerEvent>>;
 }
 
 impl MessageHandler {
     /// Create a new MessageHandler Instance.
     pub fn new(
-        swarm: Arc<Swarm>,
+        dht: Arc<PeerRing>,
         callback: Option<CallbackFn>,
         validator: Option<ValidatorFn>,
     ) -> Self {
         Self {
-            dht: swarm.dht(),
-            swarm,
+            dht,
             callback: Arc::new(callback),
             validator: Arc::new(validator),
         }
@@ -147,31 +161,31 @@ impl MessageHandler {
         Ok(())
     }
 
-    /// Decrypt message.
-    pub fn decrypt_msg(&self, msg: &MaybeEncrypted<CustomMessage>) -> Result<CustomMessage> {
-        let key = self.swarm.session_manager().session_key()?;
-        let (decrypt_msg, _) = msg.to_owned().decrypt(key)?;
-        Ok(decrypt_msg)
-    }
-
     /// Handle builtin message.
     #[cfg_attr(feature = "wasm", async_recursion(?Send))]
     #[cfg_attr(not(feature = "wasm"), async_recursion)]
-    pub async fn handle_message(&self, payload: &MessagePayload<Message>) -> Result<()> {
+    pub async fn handle_message(
+        &self,
+        payload: &MessagePayload<Message>,
+    ) -> Result<Vec<MessageHandlerEvent>> {
+        if !payload.verify() {
+            tracing::error!("Cannot verify msg or it's expired: {:?}", payload);
+            return Err(Error::VerifySignatureFailed);
+        }
+
         #[cfg(test)]
         {
-            println!("{} got msg {}", self.swarm.did(), &payload.data);
+            println!("{} got msg {}", self.dht.did, &payload.data);
         }
         tracing::debug!("START HANDLE MESSAGE: {} {}", &payload.tx_id, &payload.data);
 
         self.validate(payload).await?;
 
-        match &payload.data {
+        let mut events = match &payload.data {
             Message::JoinDHT(ref msg) => self.handle(payload, msg).await,
             Message::LeaveDHT(ref msg) => self.handle(payload, msg).await,
             Message::ConnectNodeSend(ref msg) => self.handle(payload, msg).await,
             Message::ConnectNodeReport(ref msg) => self.handle(payload, msg).await,
-            Message::AlreadyConnected(ref msg) => self.handle(payload, msg).await,
             Message::FindSuccessorSend(ref msg) => self.handle(payload, msg).await,
             Message::FindSuccessorReport(ref msg) => self.handle(payload, msg).await,
             Message::NotifyPredecessorSend(ref msg) => self.handle(payload, msg).await,
@@ -181,18 +195,6 @@ impl MessageHandler {
             Message::SyncVNodeWithSuccessor(ref msg) => self.handle(payload, msg).await,
             Message::OperateVNode(ref msg) => self.handle(payload, msg).await,
             Message::CustomMessage(ref msg) => self.handle(payload, msg).await,
-            Message::MultiCall(ref msg) => {
-                for message in msg.messages.iter().cloned() {
-                    let payload = MessagePayload::new(
-                        message,
-                        self.swarm.session_manager(),
-                        OriginVerificationGen::Stick(payload.origin_verification.clone()),
-                        payload.relay.clone(),
-                    )?;
-                    self.handle_message(&payload).await.unwrap_or(());
-                }
-                Ok(())
-            }
         }?;
 
         tracing::debug!("INVOKE CALLBACK {}", &payload.tx_id);
@@ -201,112 +203,7 @@ impl MessageHandler {
         }
 
         tracing::debug!("FINISH HANDLE MESSAGE {}", &payload.tx_id);
-        Ok(())
-    }
-
-    /// Verify then handle message. Also count to measure.
-    pub async fn handle_payload(&self, payload: &MessagePayload<Message>) -> Option<()> {
-        if !payload.verify() {
-            tracing::error!("Cannot verify msg or it's expired: {:?}", payload);
-            // Cannot count here, because the addr may be an impostor since we cannot verify it.
-            return None;
-        }
-
-        if let Err(e) = self.handle_message(payload).await {
-            tracing::error!("Error in handle_message: {}", e);
-
-            #[cfg(test)]
-            {
-                println!("Error in handle_message: {}", e);
-            }
-
-            if let Some(measure) = &self.swarm.measure {
-                measure
-                    .incr(payload.addr, MeasureCounter::FailedToReceive)
-                    .await
-            }
-
-            return None;
-        }
-
-        if let Some(measure) = &self.swarm.measure {
-            measure.incr(payload.addr, MeasureCounter::Received).await;
-        }
-
-        Some(())
-    }
-
-    /// This method is required because web-sys components is not `Send`
-    /// which means a listening loop cannot running concurrency.
-    pub async fn listen_once(&self) -> Option<MessagePayload<Message>> {
-        let payload = self.swarm.poll_message().await?;
-        self.handle_payload(&payload).await?;
-        Some(payload)
-    }
-}
-
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
-impl PayloadSender<Message> for MessageHandler {
-    fn session_manager(&self) -> &SessionManager {
-        self.swarm.session_manager()
-    }
-
-    fn dht(&self) -> Arc<PeerRing> {
-        self.swarm.dht()
-    }
-
-    async fn do_send_payload(&self, did: Did, payload: MessagePayload<Message>) -> Result<()> {
-        self.swarm.do_send_payload(did, payload).await
-    }
-}
-
-#[cfg(not(feature = "wasm"))]
-mod listener {
-    use std::sync::Arc;
-
-    use async_trait::async_trait;
-    use futures::pin_mut;
-    use futures::stream::StreamExt;
-
-    use super::MessageHandler;
-    use crate::types::message::MessageListener;
-
-    #[async_trait]
-    impl MessageListener for MessageHandler {
-        async fn listen(self: Arc<Self>) {
-            let payloads = self.swarm.iter_messages().await;
-            pin_mut!(payloads);
-            while let Some(payload) = payloads.next().await {
-                self.handle_payload(&payload).await;
-            }
-        }
-    }
-}
-
-#[cfg(feature = "wasm")]
-mod listener {
-    use std::sync::Arc;
-
-    use async_trait::async_trait;
-    use wasm_bindgen_futures::spawn_local;
-
-    use super::MessageHandler;
-    use crate::poll;
-    use crate::types::message::MessageListener;
-
-    #[async_trait(?Send)]
-    impl MessageListener for MessageHandler {
-        async fn listen(self: Arc<Self>) {
-            let handler = Arc::clone(&self);
-            let func = move || {
-                let handler = handler.clone();
-                spawn_local(Box::pin(async move {
-                    handler.listen_once().await;
-                }));
-            };
-            poll!(func, 10);
-        }
+        Ok(events)
     }
 }
 
@@ -323,7 +220,6 @@ pub mod tests {
     use crate::message::MessageHandler;
     use crate::tests::default::prepare_node;
     use crate::tests::manually_establish_connection;
-    use crate::types::message::MessageListener;
 
     #[derive(Clone)]
     struct MessageCallbackInstance {

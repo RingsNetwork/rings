@@ -1,19 +1,14 @@
 use async_trait::async_trait;
 
 use crate::dht::Chord;
-use crate::dht::ChordStorageSync;
-use crate::dht::PeerRingAction;
-use crate::dht::PeerRingRemoteAction;
 use crate::err::Result;
 use crate::message::types::Message;
 use crate::message::types::NotifyPredecessorReport;
 use crate::message::types::NotifyPredecessorSend;
-use crate::message::types::SyncVNodeWithSuccessor;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
+use crate::message::MessageHandlerEvent;
 use crate::message::MessagePayload;
-use crate::message::PayloadSender;
-use crate::transports::manager::TransportManager;
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
@@ -22,21 +17,19 @@ impl HandleMsg<NotifyPredecessorSend> for MessageHandler {
         &self,
         ctx: &MessagePayload<Message>,
         msg: &NotifyPredecessorSend,
-    ) -> Result<()> {
+    ) -> Result<Vec<MessageHandlerEvent>> {
         let predecessor = { *self.dht.lock_predecessor()? };
         self.dht.notify(msg.did)?;
 
         if let Some(did) = predecessor {
             if did != ctx.relay.sender() {
-                return self
-                    .send_report_message(
-                        ctx,
-                        Message::NotifyPredecessorReport(NotifyPredecessorReport { did }),
-                    )
-                    .await;
+                return Ok(vec![MessageHandlerEvent::SendReportMessage(
+                    Message::NotifyPredecessorReport(NotifyPredecessorReport { did }),
+                )]);
             }
         }
-        Ok(())
+
+        Ok(vec![])
     }
 }
 
@@ -47,30 +40,11 @@ impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
         &self,
         _ctx: &MessagePayload<Message>,
         msg: &NotifyPredecessorReport,
-    ) -> Result<()> {
-        // if successor: predecessor is between (id, successor]
-        // then update local successor
-        if self.swarm.get_and_check_transport(msg.did).await.is_none()
-            && msg.did != self.swarm.did()
-        {
-            self.swarm.connect(msg.did).await?;
-        } else {
-            {
-                self.dht.lock_successor()?.update(msg.did)
-            }
-            if let Ok(PeerRingAction::RemoteAction(
-                next,
-                PeerRingRemoteAction::SyncVNodeWithSuccessor(data),
-            )) = self.dht.sync_vnode_with_successor(msg.did).await
-            {
-                self.send_message(
-                    Message::SyncVNodeWithSuccessor(SyncVNodeWithSuccessor { data }),
-                    next,
-                )
-                .await?;
-            }
-        }
-        Ok(())
+    ) -> Result<Vec<MessageHandlerEvent>> {
+        Ok(vec![
+            MessageHandlerEvent::Connect(msg.did),
+            MessageHandlerEvent::SyncVNodeWithSuccessor(msg.did),
+        ])
     }
 }
 

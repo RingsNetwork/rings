@@ -6,9 +6,8 @@ use crate::message::types::MaybeEncrypted;
 use crate::message::types::Message;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
+use crate::message::MessageHandlerEvent;
 use crate::message::MessagePayload;
-use crate::message::PayloadSender;
-use crate::transports::manager::TransportManager;
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
@@ -17,20 +16,11 @@ impl HandleMsg<MaybeEncrypted<CustomMessage>> for MessageHandler {
         &self,
         ctx: &MessagePayload<Message>,
         _: &MaybeEncrypted<CustomMessage>,
-    ) -> Result<()> {
+    ) -> Result<Vec<MessageHandlerEvent>> {
         if self.dht.did != ctx.relay.destination {
-            if self
-                .swarm
-                .get_and_check_transport(ctx.relay.destination)
-                .await
-                .is_some()
-            {
-                return self.forward_payload(ctx, Some(ctx.relay.destination)).await;
-            } else {
-                return self.forward_payload(ctx, None).await;
-            }
+            Ok(vec![MessageHandlerEvent::ForwardPayload].into())
+        } else {
+            Ok(vec![])
         }
-
-        Ok(())
     }
 }
