@@ -222,7 +222,7 @@ impl HandleMsg<SyncVNodeWithSuccessor> for MessageHandler {
         _ctx: &MessagePayload<Message>,
         msg: &SyncVNodeWithSuccessor,
     ) -> Result<Vec<MessageHandlerEvent>> {
-        let events = vec![];
+        let mut events = vec![];
         for data in msg.data.iter().cloned() {
             // only simply store here
             // For relay message, set redundant to 1

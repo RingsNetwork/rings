@@ -54,6 +54,8 @@ pub struct SwarmBuilder {
     session_manager: Option<SessionManager>,
     session_ttl: Option<Ttl>,
     measure: Option<MeasureImpl>,
+    message_callback: Option<CallbackFn>,
+    message_validator: Option<ValidatorFn>,
 }
 
 impl SwarmBuilder {
@@ -74,6 +76,8 @@ impl SwarmBuilder {
             session_manager: None,
             session_ttl: None,
             measure: None,
+            message_callback: None,
+            message_validator: None,
         }
     }
 
@@ -109,6 +113,16 @@ impl SwarmBuilder {
         self
     }
 
+    pub fn message_callback(mut self, callback: CallbackFn) -> Self {
+        self.message_callback = Some(callback);
+        self
+    }
+
+    pub fn message_validator(mut self, validator: ValidatorFn) -> Self {
+        self.message_validator = Some(validator);
+        self
+    }
+
     pub fn build(self) -> Result<Swarm> {
         let session_manager = {
             if self.session_manager.is_some() {
@@ -126,7 +140,14 @@ impl SwarmBuilder {
             .dht_did
             .ok_or_else(|| Error::SwarmBuildFailed("Should set session_manager or key".into()))?;
 
-        let dht = PeerRing::new_with_storage(dht_did, self.dht_succ_max, self.dht_storage);
+        let dht = Arc::new(PeerRing::new_with_storage(
+            dht_did,
+            self.dht_succ_max,
+            self.dht_storage,
+        ));
+
+        let message_handler =
+            MessageHandler::new(dht.clone(), self.message_callback, self.message_validator);
 
         Ok(Swarm {
             pending_transports: Mutex::new(vec![]),
@@ -134,9 +155,10 @@ impl SwarmBuilder {
             transport_event_channel: Channel::new(),
             ice_servers: self.ice_servers,
             external_address: self.external_address,
-            dht: Arc::new(dht),
+            dht: dht.clone(),
             measure: self.measure,
             session_manager,
+            message_handler,
         })
     }
 }
@@ -151,6 +173,7 @@ pub struct Swarm {
     pub(crate) dht: Arc<PeerRing>,
     pub(crate) measure: Option<MeasureImpl>,
     session_manager: SessionManager,
+    message_handler: MessageHandler,
 }
 
 impl Swarm {
@@ -237,31 +260,30 @@ impl Swarm {
         }
     }
 
-    pub async fn loop_forever(
-        &self,
-        callback: Option<CallbackFn>,
-        validator: Option<ValidatorFn>,
-    ) -> MessageHandler {
-        let receiver = &self.transport_event_channel.receiver();
-        let mh = MessageHandler::new(self.dht(), callback, validator);
-        loop {
-            let t_ev = Channel::recv(receiver).await;
+    /// This method is required because web-sys components is not `Send`
+    /// which means a listening loop cannot running concurrency.
+    pub async fn listen_once(&self) -> Option<(MessagePayload<Message>, Vec<MessageHandlerEvent>)> {
+        let payload = self.poll_message().await?;
 
-            let Ok(Some(msg)) = self.load_message(t_ev).await else {
-                continue;
-            };
-
-            let Ok(mh_evs) = mh.handle_message(&msg).await else {
-                continue;
-            };
-
-            for ev in mh_evs {
-                self.handle_message_handler_event(&ev).await;
-            }
+        if !payload.verify() {
+            tracing::error!("Cannot verify msg or it's expired: {:?}", payload);
+            return None;
         }
+
+        let events = self.message_handler.handle_message(&payload).await.ok()?;
+        for ev in &events {
+            self.handle_message_handler_event(&payload, ev).await;
+        }
+
+        Some((payload, events))
     }
 
-    pub async fn handle_message_handler_event(&self, event: &MessageHandlerEvent) {}
+    pub async fn handle_message_handler_event(
+        &self,
+        payload: &MessagePayload<Message>,
+        event: &MessageHandlerEvent,
+    ) {
+    }
 
     pub fn push_pending_transport(&self, transport: &Arc<Transport>) -> Result<()> {
         let mut pending = self
@@ -384,6 +406,27 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Deb
         }
 
         result
+    }
+}
+
+#[cfg(not(feature = "wasm"))]
+impl Swarm {
+    pub async fn listen(&self) {
+        loop {
+            self.listen_once().await;
+        }
+    }
+}
+
+#[cfg(feature = "wasm")]
+impl Swarm {
+    pub async fn listen(&self) {
+        let func = move || {
+            wasm_bindgen_futures::spawn_local(Box::pin(async move {
+                message_handler.listen_once().await;
+            }));
+        };
+        crate::poll!(func, 10);
     }
 }
 

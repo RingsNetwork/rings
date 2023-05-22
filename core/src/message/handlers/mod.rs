@@ -168,11 +168,6 @@ impl MessageHandler {
         &self,
         payload: &MessagePayload<Message>,
     ) -> Result<Vec<MessageHandlerEvent>> {
-        if !payload.verify() {
-            tracing::error!("Cannot verify msg or it's expired: {:?}", payload);
-            return Err(Error::VerifySignatureFailed);
-        }
-
         #[cfg(test)]
         {
             println!("{} got msg {}", self.dht.did, &payload.data);
@@ -181,7 +176,7 @@ impl MessageHandler {
 
         self.validate(payload).await?;
 
-        let mut events = match &payload.data {
+        let events = match &payload.data {
             Message::JoinDHT(ref msg) => self.handle(payload, msg).await,
             Message::LeaveDHT(ref msg) => self.handle(payload, msg).await,
             Message::ConnectNodeSend(ref msg) => self.handle(payload, msg).await,
