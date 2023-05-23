@@ -181,7 +181,6 @@ impl ClientArgs {
             endpoint_url.as_str(),
             Processor::generate_signature(&ecdsa_key).as_str(),
         )
-        .await
     }
 }
 

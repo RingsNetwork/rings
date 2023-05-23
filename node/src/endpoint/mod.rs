@@ -25,7 +25,7 @@ use crate::prelude::http::HeaderMap;
 use crate::prelude::http::HeaderValue;
 use crate::prelude::jsonrpc_core::MetaIoHandler;
 use crate::prelude::rings_core::ecc::PublicKey;
-use crate::processor::NodeInfo;
+use crate::prelude::rings_rpc::response::NodeInfo;
 use crate::processor::Processor;
 
 /// Jsonrpc state

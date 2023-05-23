@@ -10,7 +10,6 @@ use tokio::sync::broadcast::Receiver;
 use tokio::sync::Mutex;
 
 use crate::backend::types::BackendMessage;
-use crate::backend::types::HttpRequest;
 use crate::backend::MessageType;
 use crate::error::Error as ServerError;
 use crate::prelude::jsonrpc_core::Error;
@@ -27,10 +26,12 @@ use crate::prelude::rings_core::transports::manager::TransportHandshake;
 use crate::prelude::rings_core::transports::manager::TransportManager;
 use crate::prelude::rings_core::types::ice_transport::IceTransportInterface;
 use crate::prelude::rings_core::utils::from_rtc_ice_connection_state;
+use crate::prelude::rings_rpc;
 use crate::prelude::rings_rpc::method::Method;
 use crate::prelude::rings_rpc::response;
 use crate::prelude::rings_rpc::response::CustomBackendMessage;
 use crate::prelude::rings_rpc::response::Peer;
+use crate::prelude::rings_rpc::types::HttpRequest;
 use crate::processor;
 use crate::processor::Processor;
 use crate::seed::Seed;
@@ -320,7 +321,12 @@ async fn send_raw_message(params: Params, meta: RpcMeta) -> Result<Value> {
         .processor
         .send_message(destination, text.as_bytes())
         .await?;
-    Ok(serde_json::json!({"tx_id": tx_id.to_string()}))
+    Ok(
+        serde_json::to_value(rings_rpc::response::SendMessageResponse::from(
+            tx_id.to_string(),
+        ))
+        .unwrap(),
+    )
 }
 
 /// send custom message to specifice destination
@@ -356,7 +362,13 @@ async fn send_custom_message(params: Params, meta: RpcMeta) -> Result<Value> {
     let msg: BackendMessage = BackendMessage::from((message_type, data.as_ref()));
     let msg: Vec<u8> = msg.into();
     let tx_id = meta.processor.send_message(destination, &msg).await?;
-    Ok(serde_json::json!({"tx_id": tx_id.to_string()}))
+
+    Ok(
+        serde_json::to_value(rings_rpc::response::SendMessageResponse::from(
+            tx_id.to_string(),
+        ))
+        .unwrap(),
+    )
 }
 
 async fn send_simple_text_message(params: Params, meta: RpcMeta) -> Result<Value> {
@@ -378,7 +390,13 @@ async fn send_simple_text_message(params: Params, meta: RpcMeta) -> Result<Value
     let msg: Vec<u8> = msg.into();
     // TODO chunk message flag
     let tx_id = meta.processor.send_message(destination, &msg).await?;
-    Ok(serde_json::json!({"tx_id": tx_id.to_string()}))
+
+    Ok(
+        serde_json::to_value(rings_rpc::response::SendMessageResponse::from(
+            tx_id.to_string(),
+        ))
+        .unwrap(),
+    )
 }
 
 /// handle send http request message
@@ -402,9 +420,12 @@ async fn send_http_request_message(params: Params, meta: RpcMeta) -> Result<Valu
     // TODO chunk message flag
     let tx_id = meta.processor.send_message(destination, &msg).await?;
 
-    Ok(serde_json::json!({
-      "tx_id": tx_id.to_string(),
-    }))
+    Ok(
+        serde_json::to_value(rings_rpc::response::SendMessageResponse::from(
+            tx_id.to_string(),
+        ))
+        .unwrap(),
+    )
 }
 
 async fn publish_message_to_topic(params: Params, meta: RpcMeta) -> Result<Value> {

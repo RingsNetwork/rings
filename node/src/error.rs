@@ -136,6 +136,9 @@ impl From<crate::prelude::rings_rpc::error::Error> for Error {
             rings_rpc::error::Error::DecodeError => Error::DecodeError,
             rings_rpc::error::Error::EncodeError => Error::EncodeError,
             rings_rpc::error::Error::InvalidMethod => Error::InvalidMethod,
+            rings_rpc::error::Error::RpcError(v) => Error::RemoteRpcError(v.to_string()),
+            rings_rpc::error::Error::InvalidSignature => Error::InvalidData,
+            rings_rpc::error::Error::InvalidHeaders => Error::InvalidHeaders,
         }
     }
 }

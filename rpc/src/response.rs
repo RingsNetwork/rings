@@ -9,6 +9,7 @@ use serde_json::Value as JsonValue;
 use crate::error::Error;
 use crate::error::Result;
 use crate::prelude::rings_core::dht::Did;
+use crate::prelude::rings_core::inspect::SwarmInspect;
 use crate::prelude::rings_core::transports::Transport;
 
 /// Peer contains transport address and state information.
@@ -88,4 +89,24 @@ impl From<(u16, String)> for CustomBackendMessage {
     fn from((message_type, data): (u16, String)) -> Self {
         Self { message_type, data }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SendMessageResponse {
+    pub tx_id: String,
+}
+
+impl From<String> for SendMessageResponse {
+    fn from(v: String) -> Self {
+        Self { tx_id: v }
+    }
+}
+
+/// NodeInfo struct
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NodeInfo {
+    /// node version
+    pub version: String,
+    /// swarm inspect info
+    pub swarm: SwarmInspect,
 }

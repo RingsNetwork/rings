@@ -10,4 +10,10 @@ pub enum Error {
     EncodeError,
     #[error("Invalid method.")]
     InvalidMethod,
+    #[error("Rpc error: {0}")]
+    RpcError(crate::jsonrpc_client::client::RpcError),
+    #[error("Invalid signature.")]
+    InvalidSignature,
+    #[error("Invalid headers.")]
+    InvalidHeaders,
 }

@@ -9,13 +9,13 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use super::backend::types::BackendMessage;
-use super::backend::types::HttpRequest;
 use super::backend::types::HttpResponse;
 use super::backend::MessageEndpoint;
 use super::backend::MessageType;
 use crate::consts::BACKEND_MTU;
 use crate::error::Error;
 use crate::error::Result;
+use crate::prelude::rings_rpc::types::HttpRequest;
 use crate::prelude::*;
 
 /// HTTP Server Config, specific determine port.

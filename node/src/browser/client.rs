@@ -622,7 +622,7 @@ impl Client {
                 Vec::new()
             };
 
-            let b = body.map(|item| Bytes::from(item.to_vec()));
+            let b = body.map(|item| item.to_vec());
 
             let tx_id = p
                 .send_http_request_message(
