@@ -13,10 +13,6 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::routing::post;
 use axum::Router;
-use http::header;
-use http::HeaderMap;
-use http::HeaderValue;
-use jsonrpc_core::MetaIoHandler;
 use tokio::sync::broadcast::Receiver;
 use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
@@ -24,8 +20,12 @@ use tower_http::cors::CorsLayer;
 use self::http_error::HttpError;
 use crate::backend::types::BackendMessage;
 use crate::jsonrpc::RpcMeta;
+use crate::prelude::http::header;
+use crate::prelude::http::HeaderMap;
+use crate::prelude::http::HeaderValue;
+use crate::prelude::jsonrpc_core::MetaIoHandler;
 use crate::prelude::rings_core::ecc::PublicKey;
-use crate::processor::NodeInfo;
+use crate::prelude::rings_rpc::response::NodeInfo;
 use crate::processor::Processor;
 
 /// Jsonrpc state

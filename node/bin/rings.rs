@@ -19,6 +19,7 @@ use rings_node::endpoint::run_http_api;
 use rings_node::logging::node::init_logging;
 use rings_node::logging::node::LogLevel;
 use rings_node::measure::PeriodicMeasure;
+use rings_node::prelude::http;
 use rings_node::prelude::rings_core::dht::Did;
 use rings_node::prelude::rings_core::dht::Stabilization;
 use rings_node::prelude::rings_core::ecc::SecretKey;
@@ -180,7 +181,6 @@ impl ClientArgs {
             endpoint_url.as_str(),
             Processor::generate_signature(&ecdsa_key).as_str(),
         )
-        .await
     }
 }
 

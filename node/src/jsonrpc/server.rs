@@ -6,24 +6,19 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use futures::future::join_all;
-use jsonrpc_core::Error;
-use jsonrpc_core::ErrorCode;
-use jsonrpc_core::MetaIoHandler;
-use jsonrpc_core::Metadata;
-use jsonrpc_core::Params;
-use jsonrpc_core::Result;
-use jsonrpc_core::Value;
 use tokio::sync::broadcast::Receiver;
 use tokio::sync::Mutex;
 
-use super::method::Method;
-use super::response;
-use super::response::CustomBackendMessage;
-use super::response::Peer;
 use crate::backend::types::BackendMessage;
-use crate::backend::types::HttpRequest;
 use crate::backend::MessageType;
 use crate::error::Error as ServerError;
+use crate::prelude::jsonrpc_core::Error;
+use crate::prelude::jsonrpc_core::ErrorCode;
+use crate::prelude::jsonrpc_core::MetaIoHandler;
+use crate::prelude::jsonrpc_core::Metadata;
+use crate::prelude::jsonrpc_core::Params;
+use crate::prelude::jsonrpc_core::Result;
+use crate::prelude::jsonrpc_core::Value;
 use crate::prelude::rings_core::dht::Did;
 use crate::prelude::rings_core::message::Encoder;
 use crate::prelude::rings_core::prelude::vnode::VirtualNode;
@@ -31,6 +26,12 @@ use crate::prelude::rings_core::transports::manager::TransportHandshake;
 use crate::prelude::rings_core::transports::manager::TransportManager;
 use crate::prelude::rings_core::types::ice_transport::IceTransportInterface;
 use crate::prelude::rings_core::utils::from_rtc_ice_connection_state;
+use crate::prelude::rings_rpc;
+use crate::prelude::rings_rpc::method::Method;
+use crate::prelude::rings_rpc::response;
+use crate::prelude::rings_rpc::response::CustomBackendMessage;
+use crate::prelude::rings_rpc::response::Peer;
+use crate::prelude::rings_rpc::types::HttpRequest;
 use crate::processor;
 use crate::processor::Processor;
 use crate::seed::Seed;
@@ -237,8 +238,10 @@ async fn accept_answer(params: Params, meta: RpcMeta) -> Result<Value> {
         .into();
 
     let state = p.transport.ice_connection_state().await;
-    let r: Peer = (&p, state.map(from_rtc_ice_connection_state)).into();
-    r.to_json_obj().map_err(Error::from)
+    let r: Peer = p.into_response_peer(state.map(from_rtc_ice_connection_state));
+    r.to_json_obj()
+        .map_err(|_| ServerError::EncodeError)
+        .map_err(Error::from)
 }
 
 /// Handle list peers
@@ -253,7 +256,7 @@ async fn list_peers(_params: Params, meta: RpcMeta) -> Result<Value> {
     let r: Vec<Peer> = peers
         .iter()
         .zip(states.iter())
-        .map(|(x, y)| Peer::from((x, y.map(from_rtc_ice_connection_state))))
+        .map(|(x, y)| x.into_response_peer(y.map(from_rtc_ice_connection_state)))
         .collect::<Vec<_>>();
     serde_json::to_value(&r).map_err(|_| Error::from(ServerError::EncodeError))
 }
@@ -318,7 +321,12 @@ async fn send_raw_message(params: Params, meta: RpcMeta) -> Result<Value> {
         .processor
         .send_message(destination, text.as_bytes())
         .await?;
-    Ok(serde_json::json!({"tx_id": tx_id.to_string()}))
+    Ok(
+        serde_json::to_value(rings_rpc::response::SendMessageResponse::from(
+            tx_id.to_string(),
+        ))
+        .unwrap(),
+    )
 }
 
 /// send custom message to specifice destination
@@ -354,7 +362,13 @@ async fn send_custom_message(params: Params, meta: RpcMeta) -> Result<Value> {
     let msg: BackendMessage = BackendMessage::from((message_type, data.as_ref()));
     let msg: Vec<u8> = msg.into();
     let tx_id = meta.processor.send_message(destination, &msg).await?;
-    Ok(serde_json::json!({"tx_id": tx_id.to_string()}))
+
+    Ok(
+        serde_json::to_value(rings_rpc::response::SendMessageResponse::from(
+            tx_id.to_string(),
+        ))
+        .unwrap(),
+    )
 }
 
 async fn send_simple_text_message(params: Params, meta: RpcMeta) -> Result<Value> {
@@ -376,7 +390,13 @@ async fn send_simple_text_message(params: Params, meta: RpcMeta) -> Result<Value
     let msg: Vec<u8> = msg.into();
     // TODO chunk message flag
     let tx_id = meta.processor.send_message(destination, &msg).await?;
-    Ok(serde_json::json!({"tx_id": tx_id.to_string()}))
+
+    Ok(
+        serde_json::to_value(rings_rpc::response::SendMessageResponse::from(
+            tx_id.to_string(),
+        ))
+        .unwrap(),
+    )
 }
 
 /// handle send http request message
@@ -400,9 +420,12 @@ async fn send_http_request_message(params: Params, meta: RpcMeta) -> Result<Valu
     // TODO chunk message flag
     let tx_id = meta.processor.send_message(destination, &msg).await?;
 
-    Ok(serde_json::json!({
-      "tx_id": tx_id.to_string(),
-    }))
+    Ok(
+        serde_json::to_value(rings_rpc::response::SendMessageResponse::from(
+            tx_id.to_string(),
+        ))
+        .unwrap(),
+    )
 }
 
 async fn publish_message_to_topic(params: Params, meta: RpcMeta) -> Result<Value> {

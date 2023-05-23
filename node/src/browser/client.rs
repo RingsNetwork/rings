@@ -17,6 +17,7 @@ use crate::consts::BACKEND_MTU;
 use crate::prelude::chunk::Chunk;
 use crate::prelude::chunk::ChunkList;
 use crate::prelude::chunk::ChunkManager;
+use crate::prelude::http;
 use crate::prelude::js_sys;
 use crate::prelude::message;
 use crate::prelude::rings_core::async_trait;
@@ -621,7 +622,7 @@ impl Client {
                 Vec::new()
             };
 
-            let b = body.map(|item| Bytes::from(item.to_vec()));
+            let b = body.map(|item| item.to_vec());
 
             let tx_id = p
                 .send_http_request_message(

@@ -27,6 +27,7 @@
 /// ```
 use crate::error::Error;
 use crate::prelude::js_sys;
+use crate::prelude::jsonrpc_core;
 use crate::prelude::rings_core::utils::js_value;
 use crate::prelude::wasm_bindgen::prelude::*;
 

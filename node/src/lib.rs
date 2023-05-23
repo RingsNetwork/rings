@@ -146,7 +146,7 @@ pub mod consts;
 pub mod endpoint;
 pub mod error;
 pub mod jsonrpc;
-pub mod jsonrpc_client;
+// pub mod jsonrpc_client;
 pub mod logging;
 pub mod measure;
 pub mod prelude;

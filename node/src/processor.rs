@@ -3,31 +3,28 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
-use bytes::Bytes;
 use futures::future::Join;
 use futures::Future;
 #[cfg(feature = "node")]
 use jsonrpc_core::Metadata;
 use rings_core::message::MessagePayload;
-use serde::Deserialize;
-use serde::Serialize;
 
 use crate::backend::types::BackendMessage;
-use crate::backend::types::HttpRequest;
 use crate::backend::types::MessageType;
-use crate::backend::types::Timeout;
 use crate::consts::DATA_REDUNDANT;
 use crate::error::Error;
 use crate::error::Result;
-use crate::jsonrpc::method;
-use crate::jsonrpc_client::SimpleClient;
 use crate::measure::PeriodicMeasure;
+use crate::prelude::http;
+use crate::prelude::jsonrpc_client::SimpleClient;
+use crate::prelude::jsonrpc_core;
+// #[cfg(feature = "node")]
+// use crate::prelude::jsonrpc_core::Metadata;
 use crate::prelude::rings_core::dht::Did;
 use crate::prelude::rings_core::dht::Stabilization;
 use crate::prelude::rings_core::dht::TStabilize;
 use crate::prelude::rings_core::ecc::PublicKey;
 use crate::prelude::rings_core::ecc::SecretKey;
-use crate::prelude::rings_core::inspect::SwarmInspect;
 use crate::prelude::rings_core::message::Encoded;
 use crate::prelude::rings_core::message::Encoder;
 use crate::prelude::rings_core::message::Message;
@@ -46,6 +43,10 @@ use crate::prelude::rings_core::transports::manager::TransportManager;
 use crate::prelude::rings_core::transports::Transport;
 use crate::prelude::rings_core::types::ice_transport::IceTransportInterface;
 use crate::prelude::rings_core::types::message::MessageListener;
+use crate::prelude::rings_rpc::method;
+use crate::prelude::rings_rpc::response;
+use crate::prelude::rings_rpc::types::HttpRequest;
+use crate::prelude::rings_rpc::types::Timeout;
 use crate::prelude::vnode;
 use crate::prelude::web3::signing::keccak256;
 use crate::prelude::CallbackFn;
@@ -53,15 +54,6 @@ use crate::prelude::ChordStorageInterface;
 use crate::prelude::ChordStorageInterfaceCacheChecker;
 use crate::prelude::CustomMessage;
 use crate::prelude::Signer;
-
-/// NodeInfo struct
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct NodeInfo {
-    /// node version
-    pub version: String,
-    /// swarm inspect info
-    pub swarm: SwarmInspect,
-}
 
 /// AddressType enum contains `DEFAULT` and `ED25519`.
 pub enum AddressType {
@@ -430,7 +422,7 @@ impl Processor {
         url: U,
         timeout: T,
         headers: &[(U, U)],
-        body: Option<Bytes>,
+        body: Option<Vec<u8>>,
     ) -> Result<uuid::Uuid>
     where
         U: ToString,
@@ -542,8 +534,8 @@ impl Processor {
     }
 
     /// get node info
-    pub async fn get_node_info(&self) -> Result<NodeInfo> {
-        Ok(NodeInfo {
+    pub async fn get_node_info(&self) -> Result<response::NodeInfo> {
+        Ok(response::NodeInfo {
             version: crate::util::build_version(),
             swarm: self.swarm.inspect().await,
         })
@@ -573,6 +565,17 @@ impl From<&(Did, Arc<Transport>)> for Peer {
         Self {
             did: did.into_token(),
             transport: transport.clone(),
+        }
+    }
+}
+
+impl Peer {
+    /// convert peer to response peer
+    pub fn into_response_peer(&self, state: Option<String>) -> rings_rpc::response::Peer {
+        rings_rpc::response::Peer {
+            did: self.did.clone().into_token().to_string(),
+            transport_id: self.transport.id.to_string(),
+            state: state.unwrap_or_else(|| "Unknown".to_owned()),
         }
     }
 }

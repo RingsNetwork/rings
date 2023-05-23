@@ -1,0 +1,38 @@
+[package]
+name = "rings-rpc"
+version = "0.2.5"
+edition = "2021"
+authors = ["RND <dev@ringsnetwork.io>"]
+description = """
+Rings is a structured peer-to-peer network implementation using WebRTC, Chord algorithm, and full WebAssembly (WASM) support.
+"""
+repository = "https://github.com/RingsNetwork/rings-node"
+license = "GPL-3.0"
+readme = "README.md"
+keywords = ["Chord", "DHT", "Web3", "P2P", "WASM"]
+categories = ["network-programming", "cryptography", "wasm"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["std"]
+std = [
+    "rings-core/default",
+    "reqwest",
+]
+wasm = [
+    "rings-core/wasm",
+    "reqwest-wasm",
+]
+
+[dependencies]
+http = { version = "0.2.6" }
+jsonrpc-core = { version = "18.0.0" }
+jsonrpc-pubsub = { version = "18.0.0" }
+reqwest = { version = "0.11", features = ["json", "rustls-tls"], optional = true, default-features = false }
+reqwest-wasm = { version = "0.11", features = ["json", "rustls-tls"], optional = true, default-features = false }
+rings-core = { package = "rings-core", path = "../core", optional = true, default-features = false, version = "0.2.5" }
+serde = { version = "1.0.136", features = ["derive"] }
+serde_json = "1.0.70"
+thiserror = "1"

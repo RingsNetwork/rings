@@ -1,11 +1,14 @@
 //! A prelude is provided which imports all the important data types and traits of ring-network.
 /// Use this when you want to quickly bootstrap a new project.
-pub use jsonrpc_core;
 #[cfg(feature = "node")]
 pub use reqwest;
 #[cfg(feature = "browser")]
 pub use reqwest_wasm as reqwest;
 pub use rings_core;
+pub use rings_rpc;
+pub use rings_rpc::jsonrpc_client;
+pub use rings_rpc::prelude::http;
+pub use rings_rpc::prelude::jsonrpc_core;
 
 pub use self::rings_core::chunk;
 pub use self::rings_core::dht::PeerRing;
@@ -49,4 +52,3 @@ pub use self::rings_core::types::ice_transport::IceTransportInterface;
 pub use self::rings_core::types::message::MessageListener;
 #[cfg(feature = "browser")]
 pub use self::wasm_bindgen_futures::future_to_promise;
-pub use crate::jsonrpc_client;
