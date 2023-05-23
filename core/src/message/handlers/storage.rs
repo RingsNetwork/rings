@@ -153,7 +153,7 @@ impl HandleMsg<SearchVNode> for MessageHandler {
     /// If a VNode is storead local, it will response immediately.(See Chordstorageinterface::storage_fetch)
     async fn handle(
         &self,
-        ctx: &MessagePayload<Message>,
+        _ctx: &MessagePayload<Message>,
         msg: &SearchVNode,
     ) -> Result<Vec<MessageHandlerEvent>> {
         // For relay message, set redundant to 1
@@ -196,7 +196,7 @@ impl HandleMsg<FoundVNode> for MessageHandler {
 impl HandleMsg<VNodeOperation> for MessageHandler {
     async fn handle(
         &self,
-        ctx: &MessagePayload<Message>,
+        _ctx: &MessagePayload<Message>,
         msg: &VNodeOperation,
     ) -> Result<Vec<MessageHandlerEvent>> {
         // For relay message, set redundant to 1
@@ -247,8 +247,8 @@ mod test {
     async fn test_store_vnode() -> Result<()> {
         let keys = gen_ordered_keys(2);
         let (key1, key2) = (keys[0], keys[1]);
-        let (did1, dht1, swarm1, node1, _path1) = prepare_node(key1).await;
-        let (did2, dht2, swarm2, node2, _path2) = prepare_node(key2).await;
+        let (node1, _path1) = prepare_node(key1).await;
+        let (node2, _path2) = prepare_node(key2).await;
         test_only_two_nodes_establish_connection(&node1, &node2).await?;
 
         // Now, node1 is the successor of node2, and node2 is the successor of node1.
@@ -258,54 +258,53 @@ mod test {
         let vid = vnode.did;
 
         // Make sure the data is stored on node2.
-        let ((_did1, dht1, swarm1, node1), (did2, dht2, swarm2, node2)) =
-            if vid.in_range(did2, did2, did1) {
-                ((did1, dht1, swarm1, node1), (did2, dht2, swarm2, node2))
-            } else {
-                ((did2, dht2, swarm2, node2), (did1, dht1, swarm1, node1))
-            };
+        let (node1, node2) = if vid.in_range(node2.did(), node2.did(), node1.did()) {
+            (node1, node2)
+        } else {
+            (node2, node1)
+        };
 
-        assert!(dht1.cache.is_empty());
-        assert!(dht2.cache.is_empty());
-        assert!(swarm1.storage_check_cache(vid).await.is_none());
-        assert!(swarm2.storage_check_cache(vid).await.is_none());
+        assert!(node1.dht().cache.is_empty());
+        assert!(node2.dht().cache.is_empty());
+        assert!(node1.storage_check_cache(vid).await.is_none());
+        assert!(node2.storage_check_cache(vid).await.is_none());
 
-        <Swarm as ChordStorageInterface<1>>::storage_store(&swarm1, vnode.clone())
+        <Swarm as ChordStorageInterface<1>>::storage_store(&node1, vnode.clone())
             .await
             .unwrap();
-        let ev = node2.listen_once().await.unwrap();
+        let ev = node2.listen_once().await.unwrap().0;
         assert!(matches!(
             ev.data,
             Message::OperateVNode(VNodeOperation::Overwrite(x)) if x.did == vid
         ));
 
-        assert!(swarm1.storage_check_cache(vid).await.is_none());
-        assert!(swarm2.storage_check_cache(vid).await.is_none());
-        assert!(dht1.storage.count().await.unwrap() == 0);
-        assert!(dht2.storage.count().await.unwrap() != 0);
+        assert!(node1.storage_check_cache(vid).await.is_none());
+        assert!(node2.storage_check_cache(vid).await.is_none());
+        assert!(node1.dht().storage.count().await.unwrap() == 0);
+        assert!(node2.dht().storage.count().await.unwrap() != 0);
 
         // test remote query
-        println!("vid is on node2 {:?}", &did2);
-        <Swarm as ChordStorageInterface<1>>::storage_fetch(&swarm1, vid)
+        println!("vid is on node2 {:?}", node2.did());
+        <Swarm as ChordStorageInterface<1>>::storage_fetch(&node1, vid)
             .await
             .unwrap();
 
         // it will send request to node2
-        let ev = node2.listen_once().await.unwrap();
+        let ev = node2.listen_once().await.unwrap().0;
         // node2 received search vnode request
         assert!(matches!(
             ev.data,
             Message::SearchVNode(x) if x.vid == vid
         ));
 
-        let ev = node1.listen_once().await.unwrap();
+        let ev = node1.listen_once().await.unwrap().0;
         assert!(matches!(
             ev.data,
             Message::FoundVNode(x) if x.data[0].did == vid
         ));
 
         assert_eq!(
-            swarm1.storage_check_cache(vid).await,
+            node1.storage_check_cache(vid).await,
             Some(VirtualNode {
                 did: vid,
                 data: vec![data.encode()?],
@@ -322,8 +321,8 @@ mod test {
     async fn test_extend_data() -> Result<()> {
         let keys = gen_ordered_keys(2);
         let (key1, key2) = (keys[0], keys[1]);
-        let (did1, dht1, swarm1, node1, _path1) = prepare_node(key1).await;
-        let (did2, dht2, swarm2, node2, _path2) = prepare_node(key2).await;
+        let (node1, _path1) = prepare_node(key1).await;
+        let (node2, _path2) = prepare_node(key2).await;
         test_only_two_nodes_establish_connection(&node1, &node2).await?;
 
         // Now, node1 is the successor of node2, and node2 is the successor of node1.
@@ -333,64 +332,63 @@ mod test {
         let vid = vnode.did;
 
         // Make sure the data is stored on node2.
-        let ((_did1, dht1, swarm1, node1), (did2, dht2, swarm2, node2)) =
-            if vid.in_range(did2, did2, did1) {
-                ((did1, dht1, swarm1, node1), (did2, dht2, swarm2, node2))
-            } else {
-                ((did2, dht2, swarm2, node2), (did1, dht1, swarm1, node1))
-            };
+        let (node1, node2) = if vid.in_range(node2.did(), node2.did(), node1.did()) {
+            (node1, node2)
+        } else {
+            (node2, node1)
+        };
 
-        assert!(dht1.cache.is_empty());
-        assert!(dht2.cache.is_empty());
-        assert!(swarm1.storage_check_cache(vid).await.is_none());
-        assert!(swarm2.storage_check_cache(vid).await.is_none());
+        assert!(node1.dht().cache.is_empty());
+        assert!(node2.dht().cache.is_empty());
+        assert!(node1.storage_check_cache(vid).await.is_none());
+        assert!(node2.storage_check_cache(vid).await.is_none());
 
         <Swarm as ChordStorageInterface<1>>::storage_append_data(
-            &swarm1,
+            &node1,
             &topic,
             "111".to_string().encode()?,
         )
         .await
         .unwrap();
 
-        let ev = node2.listen_once().await.unwrap();
+        let ev = node2.listen_once().await.unwrap().0;
         assert!(matches!(
             ev.data,
             Message::OperateVNode(VNodeOperation::Extend(VirtualNode { did, data, kind: VNodeType::Data }))
                 if did == vid && data == vec!["111".to_string().encode()?]
         ));
         <Swarm as ChordStorageInterface<1>>::storage_append_data(
-            &swarm1,
+            &node1,
             &topic,
             "222".to_string().encode()?,
         )
         .await
         .unwrap();
-        let ev = node2.listen_once().await.unwrap();
+        let ev = node2.listen_once().await.unwrap().0;
         assert!(matches!(
             ev.data,
             Message::OperateVNode(VNodeOperation::Extend(VirtualNode { did, data, kind: VNodeType::Data }))
                 if did == vid && data == vec!["222".to_string().encode()?]
         ));
-        assert!(swarm1.storage_check_cache(vid).await.is_none());
-        assert!(swarm2.storage_check_cache(vid).await.is_none());
-        assert!(dht1.storage.count().await.unwrap() == 0);
-        assert!(dht2.storage.count().await.unwrap() != 0);
+        assert!(node1.storage_check_cache(vid).await.is_none());
+        assert!(node2.storage_check_cache(vid).await.is_none());
+        assert!(node1.dht().storage.count().await.unwrap() == 0);
+        assert!(node2.dht().storage.count().await.unwrap() != 0);
         // test remote query
-        println!("vid is on node2 {:?}", &did2);
-        <Swarm as ChordStorageInterface<1>>::storage_fetch(&swarm1, vid)
+        println!("vid is on node2 {:?}", node2.did());
+        <Swarm as ChordStorageInterface<1>>::storage_fetch(&node1, vid)
             .await
             .unwrap();
 
         // it will send request to node2
-        let ev = node2.listen_once().await.unwrap();
+        let ev = node2.listen_once().await.unwrap().0;
 
         // node2 received search vnode request
         assert!(matches!(
             ev.data,
             Message::SearchVNode(x) if x.vid == vid
         ));
-        let ev = node1.listen_once().await.unwrap();
+        let ev = node1.listen_once().await.unwrap().0;
 
         assert!(matches!(
             ev.data,
@@ -398,7 +396,7 @@ mod test {
         ));
 
         assert_eq!(
-            swarm1.storage_check_cache(vid).await,
+            node1.storage_check_cache(vid).await,
             Some(VirtualNode {
                 did: vid,
                 data: vec!["111".to_string().encode()?, "222".to_string().encode()?],
@@ -408,14 +406,14 @@ mod test {
 
         // Append more data
         <Swarm as ChordStorageInterface<1>>::storage_append_data(
-            &swarm1,
+            &node1,
             &topic,
             "333".to_string().encode()?,
         )
         .await
         .unwrap();
 
-        let ev = node2.listen_once().await.unwrap();
+        let ev = node2.listen_once().await.unwrap().0;
         assert!(matches!(
             ev.data,
             Message::OperateVNode(VNodeOperation::Extend(VirtualNode { did, data, kind: VNodeType::Data }))
@@ -423,27 +421,27 @@ mod test {
         ));
 
         // test remote query agagin
-        println!("vid is on node2 {:?}", &did2);
-        <Swarm as ChordStorageInterface<1>>::storage_fetch(&swarm1, vid)
+        println!("vid is on node2 {:?}", node2.did());
+        <Swarm as ChordStorageInterface<1>>::storage_fetch(&node1, vid)
             .await
             .unwrap();
 
         // it will send request to node2
-        let ev = node2.listen_once().await.unwrap();
+        let ev = node2.listen_once().await.unwrap().0;
         // node2 received search vnode request
         assert!(matches!(
             ev.data,
             Message::SearchVNode(x) if x.vid == vid
         ));
 
-        let ev = node1.listen_once().await.unwrap();
+        let ev = node1.listen_once().await.unwrap().0;
         assert!(matches!(
             ev.data,
             Message::FoundVNode(x) if x.data[0].did == vid
         ));
 
         assert_eq!(
-            swarm1.storage_check_cache(vid).await,
+            node1.storage_check_cache(vid).await,
             Some(VirtualNode {
                 did: vid,
                 data: vec![

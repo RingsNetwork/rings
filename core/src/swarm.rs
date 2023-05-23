@@ -113,8 +113,8 @@ impl SwarmBuilder {
         self
     }
 
-    pub fn message_callback(mut self, callback: CallbackFn) -> Self {
-        self.message_callback = Some(callback);
+    pub fn message_callback(mut self, callback: Option<CallbackFn>) -> Self {
+        self.message_callback = callback;
         self
     }
 
@@ -155,7 +155,7 @@ impl SwarmBuilder {
             transport_event_channel: Channel::new(),
             ice_servers: self.ice_servers,
             external_address: self.external_address,
-            dht: dht.clone(),
+            dht,
             measure: self.measure,
             session_manager,
             message_handler,
@@ -280,8 +280,8 @@ impl Swarm {
 
     pub async fn handle_message_handler_event(
         &self,
-        payload: &MessagePayload<Message>,
-        event: &MessageHandlerEvent,
+        _payload: &MessagePayload<Message>,
+        _event: &MessageHandlerEvent,
     ) {
     }
 
@@ -411,7 +411,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Deb
 
 #[cfg(not(feature = "wasm"))]
 impl Swarm {
-    pub async fn listen(&self) {
+    pub async fn listen(self: Arc<Self>) {
         loop {
             self.listen_once().await;
         }
@@ -420,10 +420,11 @@ impl Swarm {
 
 #[cfg(feature = "wasm")]
 impl Swarm {
-    pub async fn listen(&self) {
+    pub async fn listen(self: Arc<Self>) {
         let func = move || {
+            let this = self.clone();
             wasm_bindgen_futures::spawn_local(Box::pin(async move {
-                message_handler.listen_once().await;
+                this.listen_once().await;
             }));
         };
         crate::poll!(func, 10);

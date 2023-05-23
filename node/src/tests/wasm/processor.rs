@@ -20,7 +20,7 @@ use crate::prelude::*;
 use crate::processor;
 use crate::processor::*;
 
-async fn new_processor() -> Processor {
+async fn new_processor(cb: Option<CallbackFn>) -> Processor {
     let key = SecretKey::random();
 
     let path = uuid::Uuid::new_v4().to_simple().to_string();
@@ -32,6 +32,7 @@ async fn new_processor() -> Processor {
     let swarm = Arc::new(
         SwarmBuilder::new("stun://stun.l.google.com:19302", storage)
             .key(key)
+            .message_callback(cb)
             .build()
             .unwrap(),
     );
@@ -41,8 +42,8 @@ async fn new_processor() -> Processor {
     (swarm, stab).into()
 }
 
-async fn listen(p: &Processor, cb: Option<CallbackFn>) {
-    let h = Arc::new(p.swarm.create_message_handler(cb, None));
+async fn listen(p: &Processor) {
+    let h = p.swarm.clone();
     let s = Arc::clone(&p.stabilization);
 
     futures::join!(
@@ -67,18 +68,19 @@ struct MsgCallbackStruct {
 impl MessageCallback for MsgCallbackStruct {
     async fn custom_message(
         &self,
-        handler: &MessageHandler,
         _ctx: &MessagePayload<Message>,
-        msg: &MaybeEncrypted<CustomMessage>,
-    ) {
-        let msg = handler.decrypt_msg(msg).unwrap();
-        let text = processor::unpack_text_message(&msg).unwrap();
+        msg: &CustomMessage,
+    ) -> Vec<MessageHandlerEvent> {
+        let text = processor::unpack_text_message(msg).unwrap();
         console_log!("msg received: {}", text);
         let mut msgs = self.msgs.try_lock().unwrap();
         msgs.push(text);
+        vec![]
     }
 
-    async fn builtin_message(&self, _handler: &MessageHandler, _ctx: &MessagePayload<Message>) {}
+    async fn builtin_message(&self, _ctx: &MessagePayload<Message>) -> Vec<MessageHandlerEvent> {
+        vec![]
+    }
 }
 
 async fn create_connection(p1: &Processor, p2: &Processor) {
@@ -116,9 +118,6 @@ async fn create_connection(p1: &Processor, p2: &Processor) {
 
 #[wasm_bindgen_test]
 async fn test_processor_handshake_and_msg() {
-    let p1 = new_processor().await;
-    let p2 = new_processor().await;
-
     let msgs1: Arc<Mutex<Vec<String>>> = Default::default();
     let msgs2: Arc<Mutex<Vec<String>>> = Default::default();
     let callback1 = Box::new(MsgCallbackStruct {
@@ -127,6 +126,9 @@ async fn test_processor_handshake_and_msg() {
     let callback2 = Box::new(MsgCallbackStruct {
         msgs: msgs2.clone(),
     });
+
+    let p1 = new_processor(Some(callback1)).await;
+    let p2 = new_processor(Some(callback2)).await;
 
     let test_text1 = "test1";
     let test_text2 = "test2";
@@ -140,8 +142,8 @@ async fn test_processor_handshake_and_msg() {
     console_log!("p2_addr: {}", p2_addr);
 
     console_log!("listen");
-    listen(&p1, Some(callback1)).await;
-    listen(&p2, Some(callback2)).await;
+    listen(&p1).await;
+    listen(&p2).await;
 
     console_log!("processor_hs_connect_1_2");
     create_connection(&p1, &p2).await;
@@ -206,16 +208,16 @@ async fn test_processor_handshake_and_msg() {
 #[wasm_bindgen_test]
 async fn test_processor_connect_with_did() {
     super::setup_log();
-    let p1 = new_processor().await;
+    let p1 = new_processor(None).await;
     console_log!("p1 address: {}", p1.did());
-    let p2 = new_processor().await;
+    let p2 = new_processor(None).await;
     console_log!("p2 address: {}", p2.did());
-    let p3 = new_processor().await;
+    let p3 = new_processor(None).await;
     console_log!("p3 address: {}", p3.did());
 
-    listen(&p1, None).await;
-    listen(&p2, None).await;
-    listen(&p3, None).await;
+    listen(&p1).await;
+    listen(&p2).await;
+    listen(&p3).await;
 
     console_log!("processor_connect_p1_and_p2");
     create_connection(&p1, &p2).await;

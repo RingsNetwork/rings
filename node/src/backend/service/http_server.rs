@@ -127,10 +127,9 @@ impl HttpServer {
 impl MessageEndpoint for HttpServer {
     async fn handle_message(
         &self,
-        handler: &MessageHandler,
-        ctx: &MessagePayload<Message>,
+        _ctx: &MessagePayload<Message>,
         msg: &BackendMessage,
-    ) -> Result<()> {
+    ) -> Result<Vec<MessageHandlerEvent>> {
         let req: HttpRequest =
             bincode::deserialize(msg.data.as_slice()).map_err(|_| Error::DecodeError)?;
 
@@ -151,13 +150,16 @@ impl MessageEndpoint for HttpServer {
         tracing::debug!("resp_bytes gzip_data len: {}", resp_bytes.len());
 
         let chunks = ChunkList::<BACKEND_MTU>::from(&resp_bytes);
+        let mut events = vec![];
+
         for c in chunks {
             tracing::debug!("Chunk data len: {}", c.data.len());
             let bytes = c.to_bincode().map_err(|_| Error::EncodeError)?;
             tracing::debug!("Chunk len: {}", bytes.len());
-            super::utils::send_chunk_report_message(handler, ctx, bytes.to_vec().as_slice())
-                .await?;
+            let ev = super::utils::send_chunk_report_message(bytes.to_vec().as_slice()).await?;
+            events.push(ev);
         }
-        Ok(())
+
+        Ok(events)
     }
 }

@@ -18,12 +18,11 @@ pub struct TextEndpoint;
 impl MessageEndpoint for TextEndpoint {
     async fn handle_message(
         &self,
-        _handler: &MessageHandler,
         ctx: &MessagePayload<Message>,
         data: &BackendMessage,
-    ) -> Result<()> {
+    ) -> Result<Vec<MessageHandlerEvent>> {
         let text = str::from_utf8(data.data.as_slice()).map_err(|_| Error::InvalidMessage)?;
         tracing::info!("SimpleText, From: {}, Text: {}", ctx.relay.sender(), text);
-        Ok(())
+        Ok(vec![])
     }
 }

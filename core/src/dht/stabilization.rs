@@ -219,25 +219,21 @@ pub mod tests {
         let key1 = SecretKey::random();
         let key2 = SecretKey::random();
         let key3 = SecretKey::random();
-        let (did1, _, swarm1, _, _) = prepare_node(key1).await;
-        let (did2, _, swarm2, _, _) = prepare_node(key2).await;
-        let (did3, _, swarm3, _, _) = prepare_node(key3).await;
+        let (node1, _) = prepare_node(key1).await;
+        let (node2, _) = prepare_node(key2).await;
+        let (node3, _) = prepare_node(key3).await;
 
         // Shouldn't listen to message handler here,
         // otherwise it will automatically remove disconnected transport.
 
-        manually_establish_connection(&swarm1, &swarm2)
-            .await
-            .unwrap();
-        manually_establish_connection(&swarm1, &swarm3)
-            .await
-            .unwrap();
+        manually_establish_connection(&node1, &node2).await.unwrap();
+        manually_establish_connection(&node1, &node3).await.unwrap();
 
         tokio::time::sleep(Duration::from_secs(5)).await;
 
         assert_eq!(
-            swarm1
-                .get_transport(did2)
+            node1
+                .get_transport(node2.did())
                 .unwrap()
                 .ice_connection_state()
                 .await
@@ -245,8 +241,8 @@ pub mod tests {
             RTCIceConnectionState::Connected
         );
         assert_eq!(
-            swarm1
-                .get_transport(did3)
+            node1
+                .get_transport(node3.did())
                 .unwrap()
                 .ice_connection_state()
                 .await
@@ -254,13 +250,13 @@ pub mod tests {
             RTCIceConnectionState::Connected
         );
 
-        swarm2.disconnect(did1).await.unwrap();
-        swarm3.disconnect(did1).await.unwrap();
+        node2.disconnect(node1.did()).await.unwrap();
+        node3.disconnect(node1.did()).await.unwrap();
 
         tokio::time::sleep(Duration::from_secs(10)).await;
         assert_eq!(
-            swarm1
-                .get_transport(did2)
+            node1
+                .get_transport(node2.did())
                 .unwrap()
                 .ice_connection_state()
                 .await
@@ -268,8 +264,8 @@ pub mod tests {
             RTCIceConnectionState::Disconnected
         );
         assert_eq!(
-            swarm1
-                .get_transport(did3)
+            node1
+                .get_transport(node3.did())
                 .unwrap()
                 .ice_connection_state()
                 .await
@@ -277,10 +273,10 @@ pub mod tests {
             RTCIceConnectionState::Disconnected
         );
 
-        let stb = Stabilization::new(swarm1.clone(), 3);
+        let stb = Stabilization::new(node1.clone(), 3);
         stb.clean_unavailable_transports().await.unwrap();
 
-        assert!(swarm1.get_transport(did2).is_none());
-        assert!(swarm1.get_transport(did3).is_none());
+        assert!(node1.get_transport(node2.did()).is_none());
+        assert!(node1.get_transport(node3.did()).is_none());
     }
 }

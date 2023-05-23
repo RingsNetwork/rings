@@ -91,16 +91,10 @@ impl MessageCallback for Backend {
     /// And send http request to localhost through Backend http_request handler.
     async fn custom_message(
         &self,
-        handler: &MessageHandler,
         ctx: &MessagePayload<Message>,
-        msg: &MaybeEncrypted<CustomMessage>,
-    ) {
-        let msg = handler.decrypt_msg(msg);
-        if let Err(e) = msg {
-            tracing::error!("decrypt custom_message failed: {}", e);
-            return;
-        }
-        let msg = msg.unwrap().0;
+        msg: &CustomMessage,
+    ) -> Vec<MessageHandlerEvent> {
+        let msg = msg.0.clone();
 
         let (left, msg) = array_refs![&msg, 4; ..;];
         let (&[flag], _) = array_refs![left, 1, 3];
@@ -109,46 +103,53 @@ impl MessageCallback for Backend {
             let data = self.handle_chunk_data(msg).await;
             if let Err(e) = data {
                 tracing::error!("handle_chunk_data failed: {}", e);
-                return;
+                return vec![];
             }
             let data = data.unwrap();
             if let Some(data) = data {
                 BackendMessage::try_from(data.to_vec().as_ref())
             } else {
-                return;
+                return vec![];
             }
         } else if flag == 0 {
             BackendMessage::try_from(msg)
         } else {
             tracing::warn!("invalid custom_message flag: {}", flag);
-            return;
+            return vec![];
         };
 
         if let Err(e) = msg {
             tracing::error!("decode custom_message failed: {}", e);
-            return;
+            return vec![];
         }
         let msg = msg.unwrap();
         tracing::debug!("receive custom_message: {:?}", msg);
 
         let result = match msg.message_type.into() {
-            MessageType::SimpleText => self.text_endpoint.handle_message(handler, ctx, &msg).await,
-            MessageType::HttpRequest => self.http_server.handle_message(handler, ctx, &msg).await,
+            MessageType::SimpleText => self.text_endpoint.handle_message(ctx, &msg).await,
+            MessageType::HttpRequest => self.http_server.handle_message(ctx, &msg).await,
             _ => {
                 tracing::debug!(
                     "custom_message handle unsupported, tag: {:?}",
                     msg.message_type
                 );
-                Ok(())
+                Ok(vec![])
             }
         };
         if let Err(e) = self.sender.send(msg) {
             tracing::error!("broadcast backend_message failed, {}", e);
         }
-        if let Err(e) = result {
-            tracing::error!("handle custom_message failed: {}", e);
+
+        match result {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!("handle custom_message failed: {}", e);
+                vec![]
+            }
         }
     }
 
-    async fn builtin_message(&self, _handler: &MessageHandler, _ctx: &MessagePayload<Message>) {}
+    async fn builtin_message(&self, _ctx: &MessagePayload<Message>) -> Vec<MessageHandlerEvent> {
+        vec![]
+    }
 }

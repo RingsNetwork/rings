@@ -110,10 +110,8 @@ async fn test_message_handler() {
     let key1 = SecretKey::random();
     let key2 = SecretKey::random();
 
-    let (_did1, _dht1, swarm1, _handler1) = prepare_node(key1).await;
-    let (_did2, _dht2, swarm2, _handler2) = prepare_node(key2).await;
+    let node1 = prepare_node(key1).await;
+    let node2 = prepare_node(key2).await;
 
-    manually_establish_connection(&swarm1, &swarm2)
-        .await
-        .unwrap();
+    manually_establish_connection(&node1, &node2).await.unwrap();
 }

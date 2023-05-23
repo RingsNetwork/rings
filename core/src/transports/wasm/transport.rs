@@ -415,9 +415,11 @@ impl IceTransportCallback for WasmTransport {
                         }
                         let data = data.unwrap();
 
-                        if let Err(e) =
-                            CbChannel::send(&event_sender, TransportEvent::DataChannelMessage(data.into()))
-                                .await
+                        if let Err(e) = CbChannel::send(
+                            &event_sender,
+                            TransportEvent::DataChannelMessage(data.into()),
+                        )
+                        .await
                         {
                             tracing::error!("Failed on handle msg, {:?}", e);
                         }

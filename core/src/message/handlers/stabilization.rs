@@ -113,9 +113,9 @@ mod test {
         key2: SecretKey,
         key3: SecretKey,
     ) -> Result<()> {
-        let (did1, dht1, swarm1, node1, _path1) = prepare_node(key1).await;
-        let (did2, dht2, swarm2, node2, _path2) = prepare_node(key2).await;
-        let (did3, dht3, swarm3, node3, _path3) = prepare_node(key3).await;
+        let (node1, _path1) = prepare_node(key1).await;
+        let (node2, _path2) = prepare_node(key2).await;
+        let (node3, _path3) = prepare_node(key3).await;
 
         println!("========================================");
         println!("||  now we connect node1 and node2    ||");
@@ -127,71 +127,74 @@ mod test {
         println!("||  now we start join node3 to node2  ||");
         println!("========================================");
 
-        manually_establish_connection(&swarm3, &swarm2).await?;
+        manually_establish_connection(&node3, &node2).await?;
         test_listen_join_and_init_find_succeesor(&node3, &node2).await?;
         node3.listen_once().await.unwrap();
         node2.listen_once().await.unwrap();
         assert_no_more_msg(&node1, &node2, &node3).await;
 
         println!("=== Check state before stabilization ===");
-        assert_eq!(dht1.lock_successor()?.list(), vec![did2]);
-        assert_eq!(dht2.lock_successor()?.list(), vec![did3, did1]);
-        assert_eq!(dht3.lock_successor()?.list(), vec![did2]);
-        assert!(dht1.lock_predecessor()?.is_none());
-        assert!(dht2.lock_predecessor()?.is_none());
-        assert!(dht3.lock_predecessor()?.is_none());
+        assert_eq!(node1.dht().lock_successor()?.list(), vec![node2.did()]);
+        assert_eq!(node2.dht().lock_successor()?.list(), vec![
+            node3.did(),
+            node1.did()
+        ]);
+        assert_eq!(node3.dht().lock_successor()?.list(), vec![node2.did()]);
+        assert!(node1.dht().lock_predecessor()?.is_none());
+        assert!(node2.dht().lock_predecessor()?.is_none());
+        assert!(node3.dht().lock_predecessor()?.is_none());
 
         println!("========================================");
         println!("||  now we start first stabilization  ||");
         println!("========================================");
 
-        run_stabilize_once(swarm1.clone()).await?;
-        run_stabilize_once(swarm2.clone()).await?;
-        run_stabilize_once(swarm3.clone()).await?;
+        run_stabilize_once(node1.clone()).await?;
+        run_stabilize_once(node2.clone()).await?;
+        run_stabilize_once(node3.clone()).await?;
 
         // node2 notify node1
-        let ev1 = node1.listen_once().await.unwrap();
-        assert_eq!(ev1.addr, did2);
-        assert_eq!(ev1.relay.path, vec![did2]);
+        let ev1 = node1.listen_once().await.unwrap().0;
+        assert_eq!(ev1.addr, node2.did());
+        assert_eq!(ev1.relay.path, vec![node2.did()]);
         assert!(matches!(
             ev1.data,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did2
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == node2.did()
         ));
 
         // node1 notify node2
-        let ev2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev2.addr, did1);
-        assert_eq!(ev2.relay.path, vec![did1]);
+        let ev2 = node2.listen_once().await.unwrap().0;
+        assert_eq!(ev2.addr, node1.did());
+        assert_eq!(ev2.relay.path, vec![node1.did()]);
         assert!(matches!(
             ev2.data,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did1
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == node1.did()
         ));
 
         // node2 notify node3
-        let ev3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev3.addr, did2);
-        assert_eq!(ev3.relay.path, vec![did2]);
+        let ev3 = node3.listen_once().await.unwrap().0;
+        assert_eq!(ev3.addr, node2.did());
+        assert_eq!(ev3.relay.path, vec![node2.did()]);
         assert!(matches!(
             ev3.data,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did2
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == node2.did()
         ));
 
         // node3 notify node2
-        let ev2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev2.addr, did3);
-        assert_eq!(ev2.relay.path, vec![did3]);
+        let ev2 = node2.listen_once().await.unwrap().0;
+        assert_eq!(ev2.addr, node3.did());
+        assert_eq!(ev2.relay.path, vec![node3.did()]);
         assert!(matches!(
             ev2.data,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did3
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == node3.did()
         ));
 
         // node2 report node3
-        let ev3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev3.addr, did2);
-        assert_eq!(ev3.relay.path, vec![did2]);
+        let ev3 = node3.listen_once().await.unwrap().0;
+        assert_eq!(ev3.addr, node2.did());
+        assert_eq!(ev3.relay.path, vec![node2.did()]);
         assert!(matches!(
             ev3.data,
-            Message::NotifyPredecessorReport(NotifyPredecessorReport{did}) if did == did1
+            Message::NotifyPredecessorReport(NotifyPredecessorReport{did}) if did == node1.did()
         ));
 
         // handle messages of connection after stabilization
@@ -217,100 +220,109 @@ mod test {
         // node1's pre is node2, node1's successor is node2
         // node2's pre is node1, node2's successor is node3
         // node3's pre is node2, node3's successor is node1
-        assert_eq!(dht1.lock_successor()?.list(), vec![did2, did3]);
-        assert_eq!(dht2.lock_successor()?.list(), vec![did3, did1]);
-        assert_eq!(dht3.lock_successor()?.list(), vec![did1, did2]);
-        assert_eq!(*dht1.lock_predecessor()?, Some(did2));
-        assert_eq!(*dht2.lock_predecessor()?, Some(did1));
-        assert_eq!(*dht3.lock_predecessor()?, Some(did2));
+        assert_eq!(node1.dht().lock_successor()?.list(), vec![
+            node2.did(),
+            node3.did()
+        ]);
+        assert_eq!(node2.dht().lock_successor()?.list(), vec![
+            node3.did(),
+            node1.did()
+        ]);
+        assert_eq!(node3.dht().lock_successor()?.list(), vec![
+            node1.did(),
+            node2.did()
+        ]);
+        assert_eq!(*node1.dht().lock_predecessor()?, Some(node2.did()));
+        assert_eq!(*node2.dht().lock_predecessor()?, Some(node1.did()));
+        assert_eq!(*node3.dht().lock_predecessor()?, Some(node2.did()));
 
         println!("=========================================");
         println!("||  now we start second stabilization  ||");
         println!("=========================================");
 
-        run_stabilize_once(swarm1.clone()).await?;
-        run_stabilize_once(swarm2.clone()).await?;
-        run_stabilize_once(swarm3.clone()).await?;
+        run_stabilize_once(node1.clone()).await?;
+        run_stabilize_once(node2.clone()).await?;
+        run_stabilize_once(node3.clone()).await?;
 
         // node1 notify node3
-        let ev3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev3.addr, did1);
-        assert_eq!(ev3.relay.path, vec![did1]);
+        let ev3 = node3.listen_once().await.unwrap().0;
+        assert_eq!(ev3.addr, node1.did());
+        assert_eq!(ev3.relay.path, vec![node1.did()]);
         assert!(matches!(
             ev3.data,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did1
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == node1.did()
         ));
 
         // node2 notify node1
-        let ev1 = node1.listen_once().await.unwrap();
-        assert_eq!(ev1.addr, did2);
-        assert_eq!(ev1.relay.path, vec![did2]);
+        let ev1 = node1.listen_once().await.unwrap().0;
+        assert_eq!(ev1.addr, node2.did());
+        assert_eq!(ev1.relay.path, vec![node2.did()]);
         assert!(matches!(
             ev1.data,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did2
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == node2.did()
         ));
 
         // node3 notify node1
-        let ev1 = node1.listen_once().await.unwrap();
-        assert_eq!(ev1.addr, did3);
-        assert_eq!(ev1.relay.path, vec![did3]);
+        let ev1 = node1.listen_once().await.unwrap().0;
+        assert_eq!(ev1.addr, node3.did());
+        assert_eq!(ev1.relay.path, vec![node3.did()]);
         assert!(matches!(
             ev1.data,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did3
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == node3.did()
         ));
 
         // node1 notify node2
-        let ev2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev2.addr, did1);
-        assert_eq!(ev2.relay.path, vec![did1]);
+        let ev2 = node2.listen_once().await.unwrap().0;
+        assert_eq!(ev2.addr, node1.did());
+        assert_eq!(ev2.relay.path, vec![node1.did()]);
         assert!(matches!(
             ev2.data,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did1
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == node1.did()
         ));
 
         // node3 notify node2
-        let ev2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev2.addr, did3);
-        assert_eq!(ev2.relay.path, vec![did3]);
+        let ev2 = node2.listen_once().await.unwrap().0;
+        assert_eq!(ev2.addr, node3.did());
+        assert_eq!(ev2.relay.path, vec![node3.did()]);
         assert!(matches!(
             ev2.data,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did3
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == node3.did()
         ));
 
         // node2 notify node3
-        let ev3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev3.addr, did2);
-        assert_eq!(ev3.relay.path, vec![did2]);
+        let ev3 = node3.listen_once().await.unwrap().0;
+        assert_eq!(ev3.addr, node2.did());
+        assert_eq!(ev3.relay.path, vec![node2.did()]);
         assert!(matches!(
             ev2.data,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did3
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == node3.did()
         ));
 
         // node1 report node3
-        let ev3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev3.addr, did1);
-        assert_eq!(ev3.relay.path, vec![did1]);
+        let ev3 = node3.listen_once().await.unwrap().0;
+        assert_eq!(ev3.addr, node1.did());
+        assert_eq!(ev3.relay.path, vec![node1.did()]);
         assert!(matches!(
             ev3.data,
-            Message::NotifyPredecessorReport(NotifyPredecessorReport{did}) if did == did2
+            Message::NotifyPredecessorReport(NotifyPredecessorReport{did}) if did == node2.did()
         ));
 
         // node2 report node3
-        let ev3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev3.addr, did2);
-        assert_eq!(ev3.relay.path, vec![did2]);
+        let ev3 = node3.listen_once().await.unwrap().0;
+        assert_eq!(ev3.addr, node2.did());
+        assert_eq!(ev3.relay.path, vec![node2.did()]);
         assert!(matches!(
             ev3.data,
-            Message::NotifyPredecessorReport(NotifyPredecessorReport{did}) if did == did1
+            Message::NotifyPredecessorReport(NotifyPredecessorReport{did}) if did == node1.did()
         ));
 
         // node3 report node1
-        let ev1 = node1.listen_once().await.unwrap();
-        assert_eq!(ev1.addr, did3);
-        assert_eq!(ev1.relay.path, vec![did3]);
+        let ev1 = node1.listen_once().await.unwrap().0;
+        assert_eq!(ev1.addr, node3.did());
+        assert_eq!(ev1.relay.path, vec![node3.did()]);
         assert!(matches!(
             ev1.data,
-            Message::NotifyPredecessorReport(NotifyPredecessorReport{did}) if did == did2
+            Message::NotifyPredecessorReport(NotifyPredecessorReport{did}) if did == node2.did()
         ));
 
         assert_no_more_msg(&node1, &node2, &node3).await;
@@ -322,12 +334,21 @@ mod test {
         // node1's pre is node3, node1's successor is node2
         // node2's pre is node1, node2's successor is node3
         // node3's pre is node2, node3's successor is node1
-        assert_eq!(dht1.lock_successor()?.list(), vec![did2, did3]);
-        assert_eq!(dht2.lock_successor()?.list(), vec![did3, did1]);
-        assert_eq!(dht3.lock_successor()?.list(), vec![did1, did2]);
-        assert_eq!(*dht1.lock_predecessor()?, Some(did3));
-        assert_eq!(*dht2.lock_predecessor()?, Some(did1));
-        assert_eq!(*dht3.lock_predecessor()?, Some(did2));
+        assert_eq!(node1.dht().lock_successor()?.list(), vec![
+            node2.did(),
+            node3.did()
+        ]);
+        assert_eq!(node2.dht().lock_successor()?.list(), vec![
+            node3.did(),
+            node1.did()
+        ]);
+        assert_eq!(node3.dht().lock_successor()?.list(), vec![
+            node1.did(),
+            node2.did()
+        ]);
+        assert_eq!(*node1.dht().lock_predecessor()?, Some(node3.did()));
+        assert_eq!(*node2.dht().lock_predecessor()?, Some(node1.did()));
+        assert_eq!(*node3.dht().lock_predecessor()?, Some(node2.did()));
         tokio::fs::remove_dir_all("./tmp").await.ok();
         Ok(())
     }
@@ -337,9 +358,9 @@ mod test {
         key2: SecretKey,
         key3: SecretKey,
     ) -> Result<()> {
-        let (did1, dht1, swarm1, node1, _path1) = prepare_node(key1).await;
-        let (did2, dht2, swarm2, node2, _path2) = prepare_node(key2).await;
-        let (did3, dht3, swarm3, node3, _path3) = prepare_node(key3).await;
+        let (node1, _path1) = prepare_node(key1).await;
+        let (node2, _path2) = prepare_node(key2).await;
+        let (node3, _path3) = prepare_node(key3).await;
 
         println!("========================================");
         println!("||  now we connect node1 and node2    ||");
@@ -351,7 +372,7 @@ mod test {
         println!("||  now we start join node3 to node2  ||");
         println!("========================================");
 
-        manually_establish_connection(&swarm3, &swarm2).await?;
+        manually_establish_connection(&node3, &node2).await?;
         test_listen_join_and_init_find_succeesor(&node3, &node2).await?;
         node1.listen_once().await.unwrap();
         node2.listen_once().await.unwrap();
@@ -360,64 +381,67 @@ mod test {
         assert_no_more_msg(&node1, &node2, &node3).await;
 
         println!("=== Check state before stabilization ===");
-        assert_eq!(dht1.lock_successor()?.list(), vec![did2]);
-        assert_eq!(dht2.lock_successor()?.list(), vec![did1, did3]);
-        assert_eq!(dht3.lock_successor()?.list(), vec![did2]);
-        assert!(dht1.lock_predecessor()?.is_none());
-        assert!(dht2.lock_predecessor()?.is_none());
-        assert!(dht3.lock_predecessor()?.is_none());
+        assert_eq!(node1.dht().lock_successor()?.list(), vec![node2.did()]);
+        assert_eq!(node2.dht().lock_successor()?.list(), vec![
+            node1.did(),
+            node3.did()
+        ]);
+        assert_eq!(node3.dht().lock_successor()?.list(), vec![node2.did()]);
+        assert!(node1.dht().lock_predecessor()?.is_none());
+        assert!(node2.dht().lock_predecessor()?.is_none());
+        assert!(node3.dht().lock_predecessor()?.is_none());
 
         println!("========================================");
         println!("||  now we start first stabilization  ||");
         println!("========================================");
 
-        run_stabilize_once(swarm1.clone()).await?;
-        run_stabilize_once(swarm2.clone()).await?;
-        run_stabilize_once(swarm3.clone()).await?;
+        run_stabilize_once(node1.clone()).await?;
+        run_stabilize_once(node2.clone()).await?;
+        run_stabilize_once(node3.clone()).await?;
 
         // node2 notify node1
-        let ev1 = node1.listen_once().await.unwrap();
-        assert_eq!(ev1.addr, did2);
-        assert_eq!(ev1.relay.path, vec![did2]);
+        let ev1 = node1.listen_once().await.unwrap().0;
+        assert_eq!(ev1.addr, node2.did());
+        assert_eq!(ev1.relay.path, vec![node2.did()]);
         assert!(matches!(
             ev1.data,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did2
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == node2.did()
         ));
 
         // node1 notify node2
-        let ev2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev2.addr, did1);
-        assert_eq!(ev2.relay.path, vec![did1]);
+        let ev2 = node2.listen_once().await.unwrap().0;
+        assert_eq!(ev2.addr, node1.did());
+        assert_eq!(ev2.relay.path, vec![node1.did()]);
         assert!(matches!(
             ev2.data,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did1
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == node1.did()
         ));
 
         // node3 notify node2
-        let ev2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev2.addr, did3);
-        assert_eq!(ev2.relay.path, vec![did3]);
+        let ev2 = node2.listen_once().await.unwrap().0;
+        assert_eq!(ev2.addr, node3.did());
+        assert_eq!(ev2.relay.path, vec![node3.did()]);
         assert!(matches!(
             ev2.data,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did3
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == node3.did()
         ));
 
         // node2 notify node3
-        let ev3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev3.addr, did2);
-        assert_eq!(ev3.relay.path, vec![did2]);
+        let ev3 = node3.listen_once().await.unwrap().0;
+        assert_eq!(ev3.addr, node2.did());
+        assert_eq!(ev3.relay.path, vec![node2.did()]);
         assert!(matches!(
             ev3.data,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == did2
+            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == node2.did()
         ));
 
         // node2 report node3
-        let ev3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev3.addr, did2);
-        assert_eq!(ev3.relay.path, vec![did2]);
+        let ev3 = node3.listen_once().await.unwrap().0;
+        assert_eq!(ev3.addr, node2.did());
+        assert_eq!(ev3.relay.path, vec![node2.did()]);
         assert!(matches!(
             ev3.data,
-            Message::NotifyPredecessorReport(NotifyPredecessorReport{did}) if did == did1
+            Message::NotifyPredecessorReport(NotifyPredecessorReport{did}) if did == node1.did()
         ));
 
         // handle messages of connection after stabilization
@@ -442,20 +466,29 @@ mod test {
         //   |-----------------|
         // node1's pre is node2, node1's successor is node2
         // node2's pre is node3, node2's successor is node1
-        assert_eq!(dht1.lock_successor()?.list(), vec![did3, did2]);
-        assert_eq!(dht2.lock_successor()?.list(), vec![did1, did3]);
-        assert_eq!(dht3.lock_successor()?.list(), vec![did2, did1]);
-        assert_eq!(*dht1.lock_predecessor()?, Some(did2));
-        assert_eq!(*dht2.lock_predecessor()?, Some(did3));
-        assert_eq!(*dht3.lock_predecessor()?, Some(did2));
+        assert_eq!(node1.dht().lock_successor()?.list(), vec![
+            node3.did(),
+            node2.did()
+        ]);
+        assert_eq!(node2.dht().lock_successor()?.list(), vec![
+            node1.did(),
+            node3.did()
+        ]);
+        assert_eq!(node3.dht().lock_successor()?.list(), vec![
+            node2.did(),
+            node1.did()
+        ]);
+        assert_eq!(*node1.dht().lock_predecessor()?, Some(node2.did()));
+        assert_eq!(*node2.dht().lock_predecessor()?, Some(node3.did()));
+        assert_eq!(*node3.dht().lock_predecessor()?, Some(node2.did()));
 
         println!("=========================================");
         println!("||  now we start second stabilization  ||");
         println!("=========================================");
 
-        run_stabilize_once(swarm1.clone()).await?;
-        run_stabilize_once(swarm2.clone()).await?;
-        run_stabilize_once(swarm3.clone()).await?;
+        run_stabilize_once(node1.clone()).await?;
+        run_stabilize_once(node2.clone()).await?;
+        run_stabilize_once(node3.clone()).await?;
 
         // TODO: should impl assert_receive by callback like elixir here
 
@@ -469,12 +502,21 @@ mod test {
         // node1's pre is node2, node1's successor is node3
         // node2's pre is node3, node2's successor is node1
         // node3's pre is none1, node3's successor is node2
-        assert_eq!(dht1.lock_successor()?.list(), vec![did3, did2]);
-        assert_eq!(dht2.lock_successor()?.list(), vec![did1, did3]);
-        assert_eq!(dht3.lock_successor()?.list(), vec![did2, did1]);
-        assert_eq!(*dht1.lock_predecessor()?, Some(did2));
-        assert_eq!(*dht2.lock_predecessor()?, Some(did3));
-        assert_eq!(*dht3.lock_predecessor()?, Some(did1));
+        assert_eq!(node1.dht().lock_successor()?.list(), vec![
+            node3.did(),
+            node2.did()
+        ]);
+        assert_eq!(node2.dht().lock_successor()?.list(), vec![
+            node1.did(),
+            node3.did()
+        ]);
+        assert_eq!(node3.dht().lock_successor()?.list(), vec![
+            node2.did(),
+            node1.did()
+        ]);
+        assert_eq!(*node1.dht().lock_predecessor()?, Some(node2.did()));
+        assert_eq!(*node2.dht().lock_predecessor()?, Some(node3.did()));
+        assert_eq!(*node3.dht().lock_predecessor()?, Some(node1.did()));
         tokio::fs::remove_dir_all("./tmp").await.ok();
 
         Ok(())

@@ -92,7 +92,10 @@ impl IceTransportInterface<TransportEvent, AcChannel<TransportEvent>> for DummyT
         }
 
         self.event_sender
-            .send(TransportEvent::ConnectClosed((self.remote_did().await, self.id)))
+            .send(TransportEvent::ConnectClosed((
+                self.remote_did().await,
+                self.id,
+            )))
             .await
             .unwrap();
 

@@ -11,13 +11,11 @@ use crate::ecc::SecretKey;
 use crate::err::Error;
 use crate::err::Result;
 use crate::inspect::DHTInspect;
-use crate::message::MessageHandler;
 use crate::swarm::tests::new_swarm;
 use crate::swarm::Swarm;
 use crate::tests::default::gen_pure_dht;
 use crate::tests::manually_establish_connection;
 use crate::transports::manager::TransportManager;
-use crate::types::message::MessageListener;
 
 async fn run_stabilize(swarm: Arc<Swarm>) {
     let mut result = Result::<()>::Ok(());
@@ -37,10 +35,10 @@ async fn run_stabilize(swarm: Arc<Swarm>) {
     }
 }
 
-async fn run_node(swarm: Arc<Swarm>, handler: MessageHandler) {
-    let message_handler = async { Arc::new(handler).listen().await };
+async fn run_node(swarm: Arc<Swarm>) {
+    let message_handler = async { swarm.clone().listen().await };
 
-    let stb = Stabilization::new(swarm, 3);
+    let stb = Stabilization::new(swarm.clone(), 3);
     let stabilization = async { Arc::new(stb).wait().await };
 
     futures::future::join(message_handler, stabilization).await;
@@ -57,8 +55,6 @@ async fn test_stabilization_once() -> Result<()> {
     let swarm1 = Arc::new(new_swarm(key1).await?);
     let swarm2 = Arc::new(new_swarm(key2).await?);
     manually_establish_connection(&swarm1, &swarm2).await?;
-    let handler1 = swarm1.create_message_handler(None, None);
-    let handler2 = swarm2.create_message_handler(None, None);
     println!("swarm1: {:?}, swarm2: {:?}", swarm1.did(), swarm2.did());
 
     tokio::select! {
@@ -66,12 +62,12 @@ async fn test_stabilization_once() -> Result<()> {
             futures::join!(
                 async {
                     loop {
-                        Arc::new(handler1.clone()).listen().await;
+                        swarm1.clone().listen().await;
                     }
                 },
                 async {
                     loop {
-                        Arc::new(handler2.clone()).listen().await;
+                        swarm2.clone().listen().await;
                     }
                 },
             );
@@ -106,20 +102,18 @@ async fn test_stabilization() -> Result<()> {
     let swarm1 = Arc::new(new_swarm(key1).await?);
     let swarm2 = Arc::new(new_swarm(key2).await?);
     manually_establish_connection(&swarm1, &swarm2).await?;
-    let handler1 = swarm1.create_message_handler(None, None);
-    let handler2 = swarm2.create_message_handler(None, None);
 
     tokio::select! {
         _ = async {
             tokio::join!(
                 async {
                     loop {
-                        Arc::new(handler1.clone()).listen().await;
+                        swarm1.clone().listen().await;
                     }
                 },
                 async {
                     loop {
-                        Arc::new(handler2.clone()).listen().await;
+                        swarm2.clone().listen().await;
                     }
                 },
                 async {
@@ -153,9 +147,9 @@ async fn test_online_stabilization() -> Result<()> {
 
     for _ in 0..6 {
         let key = SecretKey::random();
-        let (_, _, swarm, handler, _) = prepare_node(key).await;
+        let (swarm, _) = prepare_node(key).await;
         nodes.push(swarm.clone());
-        tokio::spawn(async { run_node(swarm, handler).await });
+        tokio::spawn(async { run_node(swarm).await });
     }
 
     let swarm1 = Arc::clone(&nodes[0]);

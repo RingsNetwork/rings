@@ -24,25 +24,16 @@ use crate::swarm::tests::new_swarm;
 use crate::tests::manually_establish_connection;
 use crate::transports::manager::TransportManager;
 use crate::types::ice_transport::IceTransportInterface;
-use crate::types::message::MessageListener;
 
 #[tokio::test]
 async fn test_handle_join() -> Result<()> {
     let key1 = SecretKey::random();
     let key2 = SecretKey::random();
-    let swarm1 = Arc::new(new_swarm(key1).await?);
-    let swarm2 = Arc::new(new_swarm(key2).await?);
-    manually_establish_connection(&swarm1, &swarm2).await?;
-    let handle1 = swarm1.create_message_handler(None, None);
-    let payload = swarm1.poll_message().await.unwrap();
-    match handle1.handle_message(&payload).await {
-        Ok(_) => assert_eq!(true, true),
-        Err(e) => {
-            println!("{:?}", e);
-            assert_eq!(true, false);
-        }
-    };
-    assert!(swarm1
+    let node1 = Arc::new(new_swarm(key1).await?);
+    let node2 = Arc::new(new_swarm(key2).await?);
+    manually_establish_connection(&node1, &node2).await?;
+    assert!(node1.listen_once().await.is_some());
+    assert!(node1
         .dht()
         .lock_successor()?
         .list()
@@ -56,54 +47,57 @@ async fn test_handle_connect_node() -> Result<()> {
     let keys = gen_ordered_keys(3);
     let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
 
-    let (_did1, dht1, swarm1, handler1, _path1) = prepare_node(key1).await;
-    let (_did2, dht2, swarm2, handler2, _path2) = prepare_node(key2).await;
-    let (_did3, dht3, swarm3, handler3, _path3) = prepare_node(key3).await;
+    let (node1, _path1) = prepare_node(key1).await;
+    let (node2, _path2) = prepare_node(key2).await;
+    let (node3, _path3) = prepare_node(key3).await;
 
     // 2 to 3
-    manually_establish_connection(&swarm3, &swarm2).await?;
+    manually_establish_connection(&node3, &node2).await?;
 
     // 1 to 2
-    manually_establish_connection(&swarm1, &swarm2).await?;
+    manually_establish_connection(&node1, &node2).await?;
 
     sleep(Duration::from_secs(3)).await;
 
     tokio::select! {
         _ = async {
             futures::join!(
-                async { Arc::new(handler1.clone()).listen().await },
-                async { Arc::new(handler2.clone()).listen().await },
-                async { Arc::new(handler3.clone()).listen().await },
+                async { node1.clone().listen().await },
+                async { node2.clone().listen().await },
+                async { node3.clone().listen().await },
             )
         } => {unreachable!();}
         _ = async {
             // handle join dht situation
             println!("wait tranposrt 1 to 2 and transport 2 to 3 connected");
             sleep(Duration::from_millis(1)).await;
-            let transport_1_to_2 = swarm1.get_transport(swarm2.did()).unwrap();
+            let transport_1_to_2 = node1.get_transport(node2.did()).unwrap();
             transport_1_to_2.wait_for_data_channel_open().await.unwrap();
-            let transport_2_to_3 = swarm2.get_transport(swarm3.did()).unwrap();
+            let transport_2_to_3 = node2.get_transport(node3.did()).unwrap();
             transport_2_to_3.wait_for_data_channel_open().await.unwrap();
 
             println!("wait events trigger");
             sleep(Duration::from_millis(1)).await;
 
-            println!("swarm1 key address: {:?}", swarm1.did());
-            println!("swarm2 key address: {:?}", swarm2.did());
-            println!("swarm3 key address: {:?}", swarm3.did());
+            println!("node1 key address: {:?}", node1.did());
+            println!("node2 key address: {:?}", node2.did());
+            println!("node3 key address: {:?}", node3.did());
+            let dht1 = node1.dht();
+            let dht2 = node2.dht();
+            let dht3 = node3.dht();
             {
                 let dht1_successor = dht1.lock_successor()?;
                 let dht2_successor = dht2.lock_successor()?;
                 let dht3_successor = dht3.lock_successor()?;
-                println!("dht1 successor: {:?}", dht1_successor);
-                println!("dht2 successor: {:?}", dht2_successor);
-                println!("dht3 successor: {:?}", dht3_successor);
+                println!("node1.dht() successor: {:?}", dht1_successor);
+                println!("node2.dht() successor: {:?}", dht2_successor);
+                println!("node3.dht() successor: {:?}", dht3_successor);
 
                 assert!(
                     dht1_successor.list().contains(
                         &key2.address().into()
                     ),
-                    "Expect dht1 successor is key2, Found: {:?}",
+                    "Expect node1.dht() successor is key2, Found: {:?}",
                     dht1_successor.list()
                 );
                 assert!(
@@ -114,7 +108,7 @@ async fn test_handle_connect_node() -> Result<()> {
                     dht3_successor.list().contains(
                         &key2.address().into()
                     ),
-                    "dht3 successor is key2"
+                    "node3.dht() successor is key2"
                 );
             }
 
@@ -127,11 +121,11 @@ async fn test_handle_connect_node() -> Result<()> {
                 Some(RTCIceConnectionState::Connected)
             );
 
-            // dht1 send msg to dht2 ask for connecting dht3
-            swarm1.connect(swarm3.did()).await.unwrap();
+            // node1.dht() send msg to node2.dht() ask for connecting node3.dht()
+            node1.connect(node3.did()).await.unwrap();
             sleep(Duration::from_millis(10000)).await;
 
-            let transport_1_to_3 = swarm1.get_transport(swarm3.did());
+            let transport_1_to_3 = node1.get_transport(node3.did());
             assert!(transport_1_to_3.is_some());
             let transport_1_to_3 = transport_1_to_3.unwrap();
             let both = {
@@ -156,11 +150,9 @@ async fn test_handle_connect_node() -> Result<()> {
 async fn test_handle_notify_predecessor() -> Result<()> {
     let key1 = SecretKey::random();
     let key2 = SecretKey::random();
-    let swarm1 = Arc::new(new_swarm(key1).await?);
-    let swarm2 = Arc::new(new_swarm(key2).await?);
-    manually_establish_connection(&swarm1, &swarm2).await?;
-    let handler1 = swarm1.create_message_handler(None, None);
-    let handler2 = swarm2.create_message_handler(None, None);
+    let node1 = Arc::new(new_swarm(key1).await?);
+    let node2 = Arc::new(new_swarm(key2).await?);
+    manually_establish_connection(&node1, &node2).await?;
 
     // handle join dht situation
     tokio::select! {
@@ -168,38 +160,38 @@ async fn test_handle_notify_predecessor() -> Result<()> {
             futures::join!(
                 async {
                     loop {
-                        Arc::new(handler1.clone()).listen().await;
+                        node1.clone().listen().await;
                     }
                 },
                 async {
                     loop {
-                        Arc::new(handler2.clone()).listen().await;
+                        node2.clone().listen().await;
                     }
                 }
             );
         } => { unreachable!();}
         _ = async {
-            let transport_1_to_2 = swarm1.get_transport(swarm2.did()).unwrap();
+            let transport_1_to_2 = node1.get_transport(node2.did()).unwrap();
             sleep(Duration::from_millis(1000)).await;
             transport_1_to_2.wait_for_data_channel_open().await.unwrap();
-            assert!(swarm1.dht().lock_successor()?.list().contains(&key2.address().into()));
-            assert!(swarm2.dht().lock_successor()?.list().contains(&key1.address().into()));
+            assert!(node1.dht().lock_successor()?.list().contains(&key2.address().into()));
+            assert!(node2.dht().lock_successor()?.list().contains(&key1.address().into()));
             assert_eq!(
                 transport_1_to_2.ice_connection_state().await,
                 Some(RTCIceConnectionState::Connected)
             );
-            handler1
+            node1
                 .send_message(
                     Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
                         did: key1.address().into(),
                     }),
-                    swarm2.did(),
+                    node2.did(),
                 )
                 .await
                 .unwrap();
             sleep(Duration::from_millis(1000)).await;
-            assert_eq!(*swarm2.dht().lock_predecessor()?, Some(key1.address().into()));
-            assert!(swarm1.dht().lock_successor()?.list().contains(&key2.address().into()));
+            assert_eq!(*node2.dht().lock_predecessor()?, Some(key1.address().into()));
+            assert!(node1.dht().lock_successor()?.list().contains(&key2.address().into()));
             Ok::<(), Error>(())
         } => {}
     }
@@ -215,69 +207,67 @@ async fn test_handle_find_successor_increase() -> Result<()> {
     if key1.address() > key2.address() {
         (key1, key2) = (key2, key1)
     }
-    let swarm1 = Arc::new(new_swarm(key1).await?);
-    let swarm2 = Arc::new(new_swarm(key2).await?);
-    manually_establish_connection(&swarm1, &swarm2).await?;
-    let handler1 = swarm1.create_message_handler(None, None);
-    let handler2 = swarm2.create_message_handler(None, None);
+    let node1 = Arc::new(new_swarm(key1).await?);
+    let node2 = Arc::new(new_swarm(key2).await?);
+    manually_establish_connection(&node1, &node2).await?;
 
     tokio::select! {
         _ = async {
             futures::join!(
                 async {
                     loop {
-                        Arc::new(handler1.clone()).listen().await;
+                        node1.clone().listen().await;
                     }
                 },
                 async {
                     loop {
-                        Arc::new(handler2.clone()).listen().await;
+                        node2.clone().listen().await;
                     }
                 }
             );
         } => { unreachable!();}
         _ = async {
-            let transport_1_to_2 = swarm1.get_transport(swarm2.did()).unwrap();
+            let transport_1_to_2 = node1.get_transport(node2.did()).unwrap();
             sleep(Duration::from_millis(1000)).await;
             transport_1_to_2.wait_for_data_channel_open().await.unwrap();
-            assert!(swarm1.dht().lock_successor()?.list().contains(&key2.address().into()), "{:?}", swarm1.dht().lock_successor()?.list());
-            assert!(swarm2.dht().lock_successor()?.list().contains(&key1.address().into()));
+            assert!(node1.dht().lock_successor()?.list().contains(&key2.address().into()), "{:?}", node1.dht().lock_successor()?.list());
+            assert!(node2.dht().lock_successor()?.list().contains(&key1.address().into()));
             assert_eq!(
                 transport_1_to_2.ice_connection_state().await,
                 Some(RTCIceConnectionState::Connected)
             );
-            handler1
+            node1
                 .send_message(
                     Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
-                        did: swarm1.did(),
+                        did: node1.did(),
                     }),
-                    swarm2.did(),
+                    node2.did(),
                 )
                 .await
                 .unwrap();
             sleep(Duration::from_millis(1000)).await;
-            assert_eq!(*swarm2.dht().lock_predecessor()?, Some(key1.address().into()));
-            assert!(swarm1.dht().lock_successor()?.list().contains(&key2.address().into()));
+            assert_eq!(*node2.dht().lock_predecessor()?, Some(key1.address().into()));
+            assert!(node1.dht().lock_successor()?.list().contains(&key2.address().into()));
 
             println!(
-                "swarm1: {:?}, swarm2: {:?}",
-                swarm1.did(),
-                swarm2.did()
+                "node1: {:?}, node2: {:?}",
+                node1.did(),
+                node2.did()
             );
-            handler2
+            node2
                 .send_message(
                     Message::FindSuccessorSend(message::FindSuccessorSend {
-                        did: swarm2.did(),
+                        did: node2.did(),
                         then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect),
                         strict: true
                     }),
-                    swarm1.did(),
+                    node1.did(),
                 )
                 .await
                 .unwrap();
             sleep(Duration::from_millis(1000)).await;
-            assert!(swarm2.dht().lock_successor()?.list().contains(&key1.address().into()));
-            assert!(swarm1.dht().lock_successor()?.list().contains(&key2.address().into()));
+            assert!(node2.dht().lock_successor()?.list().contains(&key1.address().into()));
+            assert!(node1.dht().lock_successor()?.list().contains(&key2.address().into()));
             Ok::<(), Error>(())
         } => {}
     }
@@ -293,11 +283,9 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
     if key1.address() < key2.address() {
         (key1, key2) = (key2, key1)
     }
-    let swarm1 = Arc::new(new_swarm(key1).await?);
-    let swarm2 = Arc::new(new_swarm(key2).await?);
-    manually_establish_connection(&swarm1, &swarm2).await?;
-    let handler1 = swarm1.create_message_handler(None, None);
-    let handler2 = swarm2.create_message_handler(None, None);
+    let node1 = Arc::new(new_swarm(key1).await?);
+    let node2 = Arc::new(new_swarm(key2).await?);
+    manually_establish_connection(&node1, &node2).await?;
 
     // handle join dht situation
     tokio::select! {
@@ -305,63 +293,63 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
             futures::join!(
                 async {
                     loop {
-                        Arc::new(handler1.clone()).listen().await;
+                        node1.clone().listen().await;
                     }
                 },
                 async {
                     loop {
-                        Arc::new(handler2.clone()).listen().await;
+                        node2.clone().listen().await;
                     }
                 }
             );
         } => {unreachable!();}
         _ = async {
-            let transport_1_to_2 = swarm1.get_transport(swarm2.did()).unwrap();
+            let transport_1_to_2 = node1.get_transport(node2.did()).unwrap();
             sleep(Duration::from_millis(1000)).await;
             transport_1_to_2.wait_for_data_channel_open().await.unwrap();
-            assert!(swarm1.dht().lock_successor()?.list().contains(&key2.address().into()));
-            assert!(swarm2.dht().lock_successor()?.list().contains(&key1.address().into()));
-            assert!(swarm1.dht()
+            assert!(node1.dht().lock_successor()?.list().contains(&key2.address().into()));
+            assert!(node2.dht().lock_successor()?.list().contains(&key1.address().into()));
+            assert!(node1.dht()
                 .lock_finger()?
                 .contains(Some(key2.address().into())));
-            assert!(swarm2.dht()
+            assert!(node2.dht()
                 .lock_finger()?
                 .contains(Some(key1.address().into())));
             assert_eq!(
                 transport_1_to_2.ice_connection_state().await,
                 Some(RTCIceConnectionState::Connected)
             );
-            handler1
+            node1
                 .send_message(
                     Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
-                        did: swarm1.did(),
+                        did: node1.did(),
                     }),
-                    swarm2.did(),
+                    node2.did(),
                 )
                 .await
                 .unwrap();
             sleep(Duration::from_millis(1000)).await;
-            assert_eq!(*swarm2.dht().lock_predecessor()?, Some(key1.address().into()));
-            assert!(swarm1.dht().lock_successor()?.list().contains(&key2.address().into()));
+            assert_eq!(*node2.dht().lock_predecessor()?, Some(key1.address().into()));
+            assert!(node1.dht().lock_successor()?.list().contains(&key2.address().into()));
             println!(
-                "swarm1: {:?}, swarm2: {:?}",
-                swarm1.did(),
-                swarm2.did()
+                "node1: {:?}, node2: {:?}",
+                node1.did(),
+                node2.did()
             );
-            handler2
+            node2
                 .send_message(
                     Message::FindSuccessorSend(message::FindSuccessorSend {
-                        did: swarm2.did(),
+                        did: node2.did(),
                         then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect),
                         strict: true
                     }),
-                    swarm1.did(),
+                    node1.did(),
                 )
                 .await
                 .unwrap();
             sleep(Duration::from_millis(1000)).await;
-            let dht1_successor = swarm1.dht().lock_successor()?.clone();
-            let dht2_successor = swarm2.dht().lock_successor()?.clone();
+            let dht1_successor = node1.dht().lock_successor()?.clone();
+            let dht2_successor = node2.dht().lock_successor()?.clone();
             assert!(dht2_successor.list().contains(&key1.address().into()));
             assert!(dht1_successor.list().contains(&key2.address().into()));
             Ok::<(), Error>(())
@@ -386,66 +374,64 @@ async fn test_handle_storage() -> Result<()> {
         key1.address(),
         key2.address()
     );
-    let swarm1 = Arc::new(new_swarm(key1).await?);
-    let swarm2 = Arc::new(new_swarm(key2).await?);
-    manually_establish_connection(&swarm1, &swarm2).await?;
-    let handler1 = swarm1.create_message_handler(None, None);
-    let handler2 = swarm2.create_message_handler(None, None);
+    let node1 = Arc::new(new_swarm(key1).await?);
+    let node2 = Arc::new(new_swarm(key2).await?);
+    manually_establish_connection(&node1, &node2).await?;
     tokio::select! {
          _ = async {
              futures::join!(
                  async {
                      loop {
-                         Arc::new(handler1.clone()).listen().await;
+                         node1.clone().listen().await;
                      }
                  },
                  async {
                      loop {
-                         Arc::new(handler2.clone()).listen().await;
+                         node2.clone().listen().await;
                      }
                  }
              );
          } => { unreachable!();}
          _ = async {
-             let transport_1_to_2 = swarm1.get_transport(swarm2.did()).unwrap();
+             let transport_1_to_2 = node1.get_transport(node2.did()).unwrap();
              sleep(Duration::from_millis(1000)).await;
              transport_1_to_2.wait_for_data_channel_open().await.unwrap();
-             // dht1's successor is dht2
-             // dht2's successor is dht1
-             assert!(swarm1.dht().lock_successor()?.list().contains(&key2.address().into()));
-             assert!(swarm2.dht().lock_successor()?.list().contains(&key1.address().into()));
+             // node1.dht()'s successor is node2.dht()
+             // node2.dht()'s successor is node1.dht()
+             assert!(node1.dht().lock_successor()?.list().contains(&key2.address().into()));
+             assert!(node2.dht().lock_successor()?.list().contains(&key1.address().into()));
              assert_eq!(
                  transport_1_to_2.ice_connection_state().await,
                  Some(RTCIceConnectionState::Connected)
              );
-             handler1
+             node1
                  .send_message(
                      Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
-                         did: swarm1.did()
+                         did: node1.did()
                      }),
-                     swarm2.did(),
+                     node2.did(),
                  )
                  .await
                  .unwrap();
              sleep(Duration::from_millis(1000)).await;
-             assert_eq!(*swarm2.dht().lock_predecessor()?, Some(key1.address().into()));
-             assert!(swarm1.dht().lock_successor()?.list().contains(&key2.address().into()));
+             assert_eq!(*node2.dht().lock_predecessor()?, Some(key1.address().into()));
+             assert!(node1.dht().lock_successor()?.list().contains(&key2.address().into()));
 
-             assert!(swarm2.dht().storage.count().await.unwrap() == 0);
+             assert!(node2.dht().storage.count().await.unwrap() == 0);
              let message = String::from("this is a test string");
              let encoded_message = message.encode().unwrap();
              // the vid is hash of string
              let vnode: VirtualNode = (message.clone(), encoded_message).try_into().unwrap();
-             handler1.send_message(
+             node2.send_message(
                  Message::OperateVNode(VNodeOperation::Overwrite(vnode.clone())),
-                 swarm2.did(),
+                 node2.did(),
              )
              .await
              .unwrap();
              sleep(Duration::from_millis(5000)).await;
-             assert!(swarm1.dht().storage.count().await.unwrap() == 0);
-             assert!(swarm2.dht().storage.count().await.unwrap() > 0);
-             let data: Result<Option<VirtualNode>> = swarm2.dht().storage.get(&(vnode.did)).await;
+             assert!(node1.dht().storage.count().await.unwrap() == 0);
+             assert!(node2.dht().storage.count().await.unwrap() > 0);
+             let data: Result<Option<VirtualNode>> = node2.dht().storage.get(&(vnode.did)).await;
              assert!(data.is_ok(), "vnode: {:?} not in", vnode.did);
              let data = data.unwrap().unwrap();
              assert_eq!(data.data[0].clone().decode::<String>().unwrap(), message);

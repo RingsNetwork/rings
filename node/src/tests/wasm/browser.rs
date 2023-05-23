@@ -46,6 +46,7 @@ async fn new_client() -> (browser::Client, String) {
         &unsigned_info,
         signed_data,
         stuns,
+        None,
         storage_name.clone(),
     ))
     .await
