@@ -9,6 +9,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use crate::channels::Channel;
+use crate::dht::Chord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::ecc::SecretKey;
@@ -19,6 +20,7 @@ use crate::measure::Measure;
 use crate::measure::MeasureCounter;
 use crate::message;
 use crate::message::CallbackFn;
+use crate::message::ChordStorageInterface;
 use crate::message::Message;
 use crate::message::MessageHandler;
 use crate::message::MessageHandlerEvent;
@@ -36,6 +38,7 @@ use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::TransportEvent;
 use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransportInterface;
+use crate::types::ice_transport::IceTrickleScheme;
 
 #[cfg(not(feature = "wasm"))]
 pub type MeasureImpl = Box<dyn Measure + Send + Sync>;
@@ -270,19 +273,93 @@ impl Swarm {
             return None;
         }
 
-        let events = self.message_handler.handle_message(&payload).await.ok()?;
+        let mut events = self.message_handler.handle_message(&payload).await.ok()?;
+        let mut extra_events = vec![];
+
         for ev in &events {
-            self.handle_message_handler_event(&payload, ev).await;
+            let evs = self.handle_message_handler_event(&payload, ev).await.ok()?;
+
+            for sub_ev in &evs {
+                self.handle_message_handler_event(&payload, sub_ev)
+                    .await
+                    .ok()?;
+            }
+
+            extra_events.extend(evs);
         }
 
+        events.extend(extra_events);
         Some((payload, events))
     }
 
     pub async fn handle_message_handler_event(
         &self,
-        _payload: &MessagePayload<Message>,
-        _event: &MessageHandlerEvent,
-    ) {
+        payload: &MessagePayload<Message>,
+        event: &MessageHandlerEvent,
+    ) -> Result<Vec<MessageHandlerEvent>> {
+        tracing::debug!("Handle message handler event: {:?}", event);
+        match event {
+            MessageHandlerEvent::Connect(did) => {
+                self.connect(*did).await?;
+            }
+            MessageHandlerEvent::Disconnect(did) => {
+                self.disconnect(*did).await?;
+            }
+            MessageHandlerEvent::AnswerOffer(msg) => {
+                let (_, answer) = self
+                    .answer_remote_transport(payload.relay.sender(), msg)
+                    .await?;
+
+                return Ok(vec![MessageHandlerEvent::SendReportMessage(
+                    Message::ConnectNodeReport(answer),
+                )]);
+            }
+
+            MessageHandlerEvent::AcceptAnswer(msg) => {
+                let transport = self
+                    .find_pending_transport(
+                        uuid::Uuid::from_str(&msg.transport_uuid)
+                            .map_err(|_| Error::InvalidTransportUuid)?,
+                    )?
+                    .ok_or(Error::MessageHandlerMissTransportConnectedNode)?;
+                transport
+                    .register_remote_info(&msg.answer, payload.relay.sender())
+                    .await?;
+            }
+
+            MessageHandlerEvent::ForwardPayload => {
+                if self
+                    .get_and_check_transport(payload.relay.destination)
+                    .await
+                    .is_some()
+                {
+                    self.forward_payload(payload, Some(payload.relay.destination))
+                        .await?;
+                } else {
+                    self.forward_payload(payload, None).await?;
+                }
+            }
+
+            MessageHandlerEvent::JoinDHT(did) => {
+                self.dht.join(*did)?;
+            }
+            MessageHandlerEvent::SendDirectMessage(msg, did) => {
+                self.send_direct_message(msg.clone(), *did).await?;
+            }
+            MessageHandlerEvent::SendMessage(msg, did) => {
+                self.send_message(msg.clone(), *did).await?;
+            }
+            MessageHandlerEvent::SendReportMessage(msg) => {
+                self.send_report_message(payload, msg.clone()).await?;
+            }
+            MessageHandlerEvent::ResetDestination(did) => {
+                self.reset_destination(payload, *did).await?;
+            }
+            MessageHandlerEvent::StorageStore(vnode) => {
+                <Self as ChordStorageInterface<1>>::storage_store(self, vnode.clone()).await?;
+            }
+        }
+        Ok(vec![])
     }
 
     pub fn push_pending_transport(&self, transport: &Arc<Transport>) -> Result<()> {

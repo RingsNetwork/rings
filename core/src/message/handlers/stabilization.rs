@@ -1,10 +1,14 @@
 use async_trait::async_trait;
 
 use crate::dht::Chord;
+use crate::dht::ChordStorageSync;
+use crate::dht::PeerRingAction;
+use crate::dht::PeerRingRemoteAction;
 use crate::err::Result;
 use crate::message::types::Message;
 use crate::message::types::NotifyPredecessorReport;
 use crate::message::types::NotifyPredecessorSend;
+use crate::message::types::SyncVNodeWithSuccessor;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessageHandlerEvent;
@@ -41,10 +45,24 @@ impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
         _ctx: &MessagePayload<Message>,
         msg: &NotifyPredecessorReport,
     ) -> Result<Vec<MessageHandlerEvent>> {
-        Ok(vec![
-            MessageHandlerEvent::Connect(msg.did),
-            MessageHandlerEvent::SyncVNodeWithSuccessor(msg.did),
-        ])
+        let mut events = vec![MessageHandlerEvent::Connect(msg.did)];
+
+        {
+            self.dht.lock_successor()?.update(msg.did)
+        }
+
+        if let Ok(PeerRingAction::RemoteAction(
+            next,
+            PeerRingRemoteAction::SyncVNodeWithSuccessor(data),
+        )) = self.dht.sync_vnode_with_successor(msg.did).await
+        {
+            events.push(MessageHandlerEvent::SendMessage(
+                Message::SyncVNodeWithSuccessor(SyncVNodeWithSuccessor { data }),
+                next,
+            ))
+        }
+
+        Ok(events)
     }
 }
 

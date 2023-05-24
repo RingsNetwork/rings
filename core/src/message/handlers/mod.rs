@@ -20,6 +20,8 @@ use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::err::Error;
 use crate::err::Result;
+use crate::message::ConnectNodeReport;
+use crate::message::ConnectNodeSend;
 
 /// Operator and Handler for Connection
 pub mod connection;
@@ -80,10 +82,10 @@ pub enum MessageHandlerEvent {
     Disconnect(Did),
 
     /// Instructs the swarm to answer an offer inside payload.
-    AnswerOffer,
+    AnswerOffer(ConnectNodeSend),
 
     /// Instructs the swarm to accept an answer inside payload.
-    AcceptAnswer,
+    AcceptAnswer(ConnectNodeReport),
 
     /// Tell swarm to forward the payload to destination.
     ForwardPayload,
@@ -102,9 +104,6 @@ pub enum MessageHandlerEvent {
 
     /// Instructs the swarm to send a message to a peer via the dht network with a specific next hop.
     ResetDestination(Did),
-
-    /// Instructs the swarm to sync vnode.
-    SyncVNodeWithSuccessor(Did),
 
     /// Instructs the swarm to store vnode.
     StorageStore(VirtualNode),

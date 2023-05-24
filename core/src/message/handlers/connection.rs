@@ -84,12 +84,12 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
     async fn handle(
         &self,
         ctx: &MessagePayload<Message>,
-        _msg: &ConnectNodeSend,
+        msg: &ConnectNodeSend,
     ) -> Result<Vec<MessageHandlerEvent>> {
         if self.dht.did != ctx.relay.destination {
             Ok(vec![MessageHandlerEvent::ForwardPayload])
         } else {
-            Ok(vec![MessageHandlerEvent::AnswerOffer])
+            Ok(vec![MessageHandlerEvent::AnswerOffer(msg.clone())])
         }
     }
 }
@@ -100,12 +100,12 @@ impl HandleMsg<ConnectNodeReport> for MessageHandler {
     async fn handle(
         &self,
         ctx: &MessagePayload<Message>,
-        _msg: &ConnectNodeReport,
+        msg: &ConnectNodeReport,
     ) -> Result<Vec<MessageHandlerEvent>> {
         if self.dht.did != ctx.relay.destination {
             Ok(vec![MessageHandlerEvent::ForwardPayload])
         } else {
-            Ok(vec![MessageHandlerEvent::AcceptAnswer])
+            Ok(vec![MessageHandlerEvent::AcceptAnswer(msg.clone())])
         }
     }
 }
