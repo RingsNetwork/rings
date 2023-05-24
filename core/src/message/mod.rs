@@ -27,4 +27,6 @@ pub use handlers::MessageHandler;
 pub use handlers::ValidatorFn;
 
 mod protocols;
+#[cfg(test)]
+pub use payload::test::new_payload;
 pub use protocols::MessageRelay;

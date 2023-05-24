@@ -3,6 +3,7 @@ use crate::prelude::RTCSdpType;
 use crate::swarm::Swarm;
 use crate::transports::manager::TransportManager;
 use crate::types::ice_transport::IceTrickleScheme;
+pub mod helper;
 
 #[cfg(feature = "wasm")]
 pub mod wasm;
