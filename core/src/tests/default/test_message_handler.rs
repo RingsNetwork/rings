@@ -377,67 +377,68 @@ async fn test_handle_storage() -> Result<()> {
     let node1 = Arc::new(new_swarm(key1).await?);
     let node2 = Arc::new(new_swarm(key2).await?);
     manually_establish_connection(&node1, &node2).await?;
-    tokio::select! {
-         _ = async {
-             futures::join!(
-                 async {
-                     loop {
-                         node1.clone().listen().await;
-                     }
-                 },
-                 async {
-                     loop {
-                         node2.clone().listen().await;
-                     }
-                 }
-             );
-         } => { unreachable!();}
-         _ = async {
-             let transport_1_to_2 = node1.get_transport(node2.did()).unwrap();
-             sleep(Duration::from_millis(1000)).await;
-             transport_1_to_2.wait_for_data_channel_open().await.unwrap();
-             // node1.dht()'s successor is node2.dht()
-             // node2.dht()'s successor is node1.dht()
-             assert!(node1.dht().lock_successor()?.list().contains(&key2.address().into()));
-             assert!(node2.dht().lock_successor()?.list().contains(&key1.address().into()));
-             assert_eq!(
-                 transport_1_to_2.ice_connection_state().await,
-                 Some(RTCIceConnectionState::Connected)
-             );
-             node1
-                 .send_message(
-                     Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
-                         did: node1.did()
-                     }),
-                     node2.did(),
-                 )
-                 .await
-                 .unwrap();
-             sleep(Duration::from_millis(1000)).await;
-             assert_eq!(*node2.dht().lock_predecessor()?, Some(key1.address().into()));
-             assert!(node1.dht().lock_successor()?.list().contains(&key2.address().into()));
 
-             assert!(node2.dht().storage.count().await.unwrap() == 0);
-             let message = String::from("this is a test string");
-             let encoded_message = message.encode().unwrap();
-             // the vid is hash of string
-             let vnode: VirtualNode = (message.clone(), encoded_message).try_into().unwrap();
-             node2.send_message(
-                 Message::OperateVNode(VNodeOperation::Overwrite(vnode.clone())),
-                 node2.did(),
-             )
-             .await
-             .unwrap();
-             sleep(Duration::from_millis(5000)).await;
-             assert!(node1.dht().storage.count().await.unwrap() == 0);
-             assert!(node2.dht().storage.count().await.unwrap() > 0);
-             let data: Result<Option<VirtualNode>> = node2.dht().storage.get(&(vnode.did)).await;
-             assert!(data.is_ok(), "vnode: {:?} not in", vnode.did);
-             let data = data.unwrap().unwrap();
-             assert_eq!(data.data[0].clone().decode::<String>().unwrap(), message);
-             Ok::<(), Error>(())
-         } => {}
-    }
+    let n1 = node1.clone();
+    let n2 = node2.clone();
+    tokio::spawn(async move { n1.listen().await });
+    tokio::spawn(async move { n2.listen().await });
+
+    let transport_1_to_2 = node1.get_transport(node2.did()).unwrap();
+    sleep(Duration::from_millis(1000)).await;
+    transport_1_to_2.wait_for_data_channel_open().await.unwrap();
+    // node1's successor is node2
+    // node2's successor is node1
+    assert!(node1
+        .dht()
+        .lock_successor()?
+        .list()
+        .contains(&key2.address().into()));
+    assert!(node2
+        .dht()
+        .lock_successor()?
+        .list()
+        .contains(&key1.address().into()));
+    assert_eq!(
+        transport_1_to_2.ice_connection_state().await,
+        Some(RTCIceConnectionState::Connected)
+    );
+    node1
+        .send_message(
+            Message::NotifyPredecessorSend(message::NotifyPredecessorSend { did: node1.did() }),
+            node2.did(),
+        )
+        .await
+        .unwrap();
+    sleep(Duration::from_millis(1000)).await;
+    assert_eq!(
+        *node2.dht().lock_predecessor()?,
+        Some(key1.address().into())
+    );
+    assert!(node1
+        .dht()
+        .lock_successor()?
+        .list()
+        .contains(&key2.address().into()));
+
+    assert!(node2.dht().storage.count().await.unwrap() == 0);
+    let message = String::from("this is a test string");
+    let encoded_message = message.encode().unwrap();
+    // the vid is hash of string
+    let vnode: VirtualNode = (message.clone(), encoded_message).try_into().unwrap();
+    node1
+        .send_message(
+            Message::OperateVNode(VNodeOperation::Overwrite(vnode.clone())),
+            node2.did(),
+        )
+        .await
+        .unwrap();
+    sleep(Duration::from_millis(5000)).await;
+    assert!(node1.dht().storage.count().await.unwrap() == 0);
+    assert!(node2.dht().storage.count().await.unwrap() > 0);
+    let data: Result<Option<VirtualNode>> = node2.dht().storage.get(&(vnode.did)).await;
+    assert!(data.is_ok(), "vnode: {:?} not in", vnode.did);
+    let data = data.unwrap().unwrap();
+    assert_eq!(data.data[0].clone().decode::<String>().unwrap(), message);
     tokio::fs::remove_dir_all("./tmp").await.ok();
     Ok(())
 }

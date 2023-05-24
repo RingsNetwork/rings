@@ -182,7 +182,7 @@ impl HandleMsg<FoundVNode> for MessageHandler {
         msg: &FoundVNode,
     ) -> Result<Vec<MessageHandlerEvent>> {
         if self.dht.did != ctx.relay.destination {
-            return Ok(vec![MessageHandlerEvent::ForwardPayload]);
+            return Ok(vec![MessageHandlerEvent::ForwardPayload(None)]);
         }
         for data in msg.data.iter().cloned() {
             self.dht.local_cache_set(data);

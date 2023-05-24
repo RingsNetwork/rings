@@ -47,10 +47,6 @@ impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
     ) -> Result<Vec<MessageHandlerEvent>> {
         let mut events = vec![MessageHandlerEvent::Connect(msg.did)];
 
-        {
-            self.dht.lock_successor()?.update(msg.did)
-        }
-
         if let Ok(PeerRingAction::RemoteAction(
             next,
             PeerRingRemoteAction::SyncVNodeWithSuccessor(data),

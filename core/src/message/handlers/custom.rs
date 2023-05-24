@@ -17,7 +17,7 @@ impl HandleMsg<CustomMessage> for MessageHandler {
         _: &CustomMessage,
     ) -> Result<Vec<MessageHandlerEvent>> {
         if self.dht.did != ctx.relay.destination {
-            Ok(vec![MessageHandlerEvent::ForwardPayload])
+            Ok(vec![MessageHandlerEvent::ForwardPayload(None)])
         } else {
             Ok(vec![])
         }

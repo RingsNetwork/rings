@@ -300,11 +300,16 @@ impl Swarm {
         tracing::debug!("Handle message handler event: {:?}", event);
         match event {
             MessageHandlerEvent::Connect(did) => {
-                self.connect(*did).await?;
+                let did = *did;
+                if self.get_and_check_transport(did).await.is_none() && did != self.did() {
+                    self.connect(did).await?;
+                }
             }
+
             MessageHandlerEvent::Disconnect(did) => {
                 self.disconnect(*did).await?;
             }
+
             MessageHandlerEvent::AnswerOffer(msg) => {
                 let (_, answer) = self
                     .answer_remote_transport(payload.relay.sender(), msg)
@@ -327,7 +332,7 @@ impl Swarm {
                     .await?;
             }
 
-            MessageHandlerEvent::ForwardPayload => {
+            MessageHandlerEvent::ForwardPayload(next_hop) => {
                 if self
                     .get_and_check_transport(payload.relay.destination)
                     .await
@@ -336,25 +341,30 @@ impl Swarm {
                     self.forward_payload(payload, Some(payload.relay.destination))
                         .await?;
                 } else {
-                    self.forward_payload(payload, None).await?;
+                    self.forward_payload(payload, *next_hop).await?;
                 }
             }
 
             MessageHandlerEvent::JoinDHT(did) => {
                 self.dht.join(*did)?;
             }
-            MessageHandlerEvent::SendDirectMessage(msg, did) => {
-                self.send_direct_message(msg.clone(), *did).await?;
+
+            MessageHandlerEvent::SendDirectMessage(msg, dest) => {
+                self.send_direct_message(msg.clone(), *dest).await?;
             }
-            MessageHandlerEvent::SendMessage(msg, did) => {
-                self.send_message(msg.clone(), *did).await?;
+
+            MessageHandlerEvent::SendMessage(msg, dest) => {
+                self.send_message(msg.clone(), *dest).await?;
             }
+
             MessageHandlerEvent::SendReportMessage(msg) => {
                 self.send_report_message(payload, msg.clone()).await?;
             }
-            MessageHandlerEvent::ResetDestination(did) => {
-                self.reset_destination(payload, *did).await?;
+
+            MessageHandlerEvent::ResetDestination(next_hop) => {
+                self.reset_destination(payload, *next_hop).await?;
             }
+
             MessageHandlerEvent::StorageStore(vnode) => {
                 <Self as ChordStorageInterface<1>>::storage_store(self, vnode.clone()).await?;
             }

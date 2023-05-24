@@ -87,7 +87,7 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
         msg: &ConnectNodeSend,
     ) -> Result<Vec<MessageHandlerEvent>> {
         if self.dht.did != ctx.relay.destination {
-            Ok(vec![MessageHandlerEvent::ForwardPayload])
+            Ok(vec![MessageHandlerEvent::ForwardPayload(None)])
         } else {
             Ok(vec![MessageHandlerEvent::AnswerOffer(msg.clone())])
         }
@@ -103,7 +103,7 @@ impl HandleMsg<ConnectNodeReport> for MessageHandler {
         msg: &ConnectNodeReport,
     ) -> Result<Vec<MessageHandlerEvent>> {
         if self.dht.did != ctx.relay.destination {
-            Ok(vec![MessageHandlerEvent::ForwardPayload])
+            Ok(vec![MessageHandlerEvent::ForwardPayload(None)])
         } else {
             Ok(vec![MessageHandlerEvent::AcceptAnswer(msg.clone())])
         }
@@ -132,7 +132,7 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
                         }
                     }
                 } else {
-                    Ok(vec![MessageHandlerEvent::ForwardPayload])
+                    Ok(vec![MessageHandlerEvent::ForwardPayload(Some(did))])
                 }
             }
             PeerRingAction::RemoteAction(next, _) => {
@@ -152,14 +152,13 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
         msg: &FindSuccessorReport,
     ) -> Result<Vec<MessageHandlerEvent>> {
         if self.dht.did != ctx.relay.destination {
-            return Ok(vec![MessageHandlerEvent::ForwardPayload]);
+            return Ok(vec![MessageHandlerEvent::ForwardPayload(None)]);
         }
 
         match &msg.handler {
-            FindSuccessorReportHandler::FixFingerTable => Ok(vec![
-                MessageHandlerEvent::Connect(msg.did),
-                MessageHandlerEvent::JoinDHT(msg.did),
-            ]),
+            FindSuccessorReportHandler::FixFingerTable => {
+                Ok(vec![MessageHandlerEvent::JoinDHT(msg.did)])
+            }
             FindSuccessorReportHandler::Connect => Ok(vec![MessageHandlerEvent::Connect(msg.did)]),
             FindSuccessorReportHandler::SyncStorage => {
                 self.dht.lock_successor()?.update(msg.did);

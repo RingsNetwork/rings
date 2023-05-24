@@ -88,7 +88,7 @@ pub enum MessageHandlerEvent {
     AcceptAnswer(ConnectNodeReport),
 
     /// Tell swarm to forward the payload to destination.
-    ForwardPayload,
+    ForwardPayload(Option<Did>),
 
     /// Instructs the swarm to notify the dht about new peer.
     JoinDHT(Did),
