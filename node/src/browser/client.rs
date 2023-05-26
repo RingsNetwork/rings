@@ -174,8 +174,6 @@ impl UnsignedInfo {
 /// const sig = new Uint8Array(web3.utils.hexToBytes(signed));
 /// const client: Client = await Client.new_client(unsignedInfo, sig, stunOrTurnUrl);
 /// ```
-/// TODO: cannot replace wasm_bidgen to rings_derive::wasm_export
-/// TODO: and dont know why
 #[derive(Clone)]
 #[allow(dead_code)]
 #[wasm_bindgen]
