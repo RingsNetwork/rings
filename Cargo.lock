@@ -2943,6 +2943,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rings-derive"
+version = "0.1.0"
+dependencies = [
+ "rings-core",
+]
+
+[[package]]
 name = "rings-node"
 version = "0.2.5"
 dependencies = [
@@ -2972,6 +2979,7 @@ dependencies = [
  "reqwest",
  "reqwest-wasm",
  "rings-core",
+ "rings-derive",
  "rings-rpc",
  "serde",
  "serde-wasm-bindgen 0.5.0",

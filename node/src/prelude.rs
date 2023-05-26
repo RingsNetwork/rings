@@ -5,6 +5,7 @@ pub use reqwest;
 #[cfg(feature = "browser")]
 pub use reqwest_wasm as reqwest;
 pub use rings_core;
+pub use rings_derive::wasm_export;
 pub use rings_rpc;
 pub use rings_rpc::jsonrpc_client;
 pub use rings_rpc::prelude::http;

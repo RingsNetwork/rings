@@ -1,0 +1,16 @@
+[package]
+name = "rings-derive"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+proc-macro = true
+
+[features]
+default = []
+wasm = [
+    "rings-core/wasm",
+]
+
+[dependencies]
+rings-core = { package = "rings-core", path = "../core", optional = true, default-features = false, version = "0.2.5" }
