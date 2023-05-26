@@ -51,6 +51,7 @@ use crate::prelude::Signer;
 use crate::processor;
 use crate::processor::Processor;
 
+
 /// SignerMode enum contains `DEFAULT` and `EIP191`
 #[wasm_export]
 pub enum SignerMode {
@@ -116,7 +117,7 @@ impl From<processor::UnsignedInfo> for UnsignedInfo {
 #[wasm_export]
 impl UnsignedInfo {
     /// Create a new `UnsignedInfo` instance with SignerMode::EIP191
-    #[wasm_bindgen(constructor)]
+    #[wasm_export(constructor)]
     pub fn new(key_addr: String) -> Result<UnsignedInfo, wasm_bindgen::JsError> {
         Ok(processor::UnsignedInfo::new(key_addr)
             .map_err(JsError::from)?
@@ -1001,7 +1002,7 @@ pub fn get_address_from_hex_pubkey(pubkey: String) -> Result<String, JsError> {
 /// Get address from other address
 ///   * address: source address
 ///   * addr_type: source address type
-#[wasm_bindgen]
+#[wasm_export]
 pub fn get_address(address: &str, addr_type: AddressType) -> Result<String, JsError> {
     Ok(get_did(address, addr_type)?.into_token().to_string())
 }
