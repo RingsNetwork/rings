@@ -37,7 +37,7 @@ use crate::err::Error;
 use crate::err::Result;
 use crate::transports::helper::Promise;
 use crate::types::channel::Channel;
-use crate::types::channel::Event;
+use crate::types::channel::TransportEvent;
 use crate::types::ice_transport::HandshakeInfo;
 use crate::types::ice_transport::IceCandidate;
 use crate::types::ice_transport::IceCandidateGathering;
@@ -48,7 +48,7 @@ use crate::types::ice_transport::IceTransportInterface;
 use crate::types::ice_transport::IceTrickleScheme;
 use crate::utils::js_value;
 
-type EventSender = <CbChannel<Event> as Channel<Event>>::Sender;
+type EventSender = <CbChannel<TransportEvent> as Channel<TransportEvent>>::Sender;
 
 /// WasmTransport use for browser.
 #[derive(Clone)]
@@ -146,7 +146,7 @@ impl IceTransport for WasmTransport {
 }
 
 #[async_trait(?Send)]
-impl IceTransportInterface<Event, CbChannel<Event>> for WasmTransport {
+impl IceTransportInterface<TransportEvent, CbChannel<TransportEvent>> for WasmTransport {
     type IceConnectionState = RtcIceConnectionState;
 
     fn new(event_sender: EventSender) -> Self {
@@ -312,7 +312,7 @@ impl IceTransportCallback for WasmTransport {
                             let remote_did = remote_did.read().unwrap().unwrap();
                             if CbChannel::send(
                                 &event_sender,
-                                Event::RegisterTransport((remote_did, id)),
+                                TransportEvent::RegisterTransport((remote_did, id)),
                             )
                             .await
                             .is_err()
@@ -326,7 +326,7 @@ impl IceTransportCallback for WasmTransport {
                             let remote_did = remote_did.read().unwrap().unwrap();
                             if CbChannel::send(
                                 &event_sender,
-                                Event::ConnectClosed((remote_did, id)),
+                                TransportEvent::ConnectClosed((remote_did, id)),
                             )
                             .await
                             .is_err()
@@ -415,9 +415,11 @@ impl IceTransportCallback for WasmTransport {
                         }
                         let data = data.unwrap();
 
-                        if let Err(e) =
-                            CbChannel::send(&event_sender, Event::DataChannelMessage(data.into()))
-                                .await
+                        if let Err(e) = CbChannel::send(
+                            &event_sender,
+                            TransportEvent::DataChannelMessage(data.into()),
+                        )
+                        .await
                         {
                             tracing::error!("Failed on handle msg, {:?}", e);
                         }

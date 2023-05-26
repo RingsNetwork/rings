@@ -14,7 +14,7 @@ use crate::prelude::RTCSdpType;
 use crate::tests::manually_establish_connection;
 use crate::transports::Transport;
 use crate::types::channel::Channel;
-use crate::types::channel::Event;
+use crate::types::channel::TransportEvent;
 use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransportInterface;
 use crate::types::ice_transport::IceTrickleScheme;
@@ -33,10 +33,10 @@ async fn get_fake_permission() {
     JsFuture::from(promise).await.unwrap();
 }
 
-async fn prepare_transport(channel: Option<Arc<CbChannel<Event>>>) -> Result<Transport> {
+async fn prepare_transport(channel: Option<Arc<CbChannel<TransportEvent>>>) -> Result<Transport> {
     let ch = match channel {
         Some(c) => Arc::clone(&c),
-        None => Arc::new(<CbChannel<Event> as Channel<Event>>::new()),
+        None => Arc::new(<CbChannel<TransportEvent> as Channel<TransportEvent>>::new()),
     };
     let mut trans = Transport::new(ch.sender());
     let stun = IceServer::from_str("stun://stun.l.google.com:19302").unwrap();
@@ -110,10 +110,8 @@ async fn test_message_handler() {
     let key1 = SecretKey::random();
     let key2 = SecretKey::random();
 
-    let (_did1, _dht1, swarm1, _handler1) = prepare_node(key1).await;
-    let (_did2, _dht2, swarm2, _handler2) = prepare_node(key2).await;
+    let node1 = prepare_node(key1).await;
+    let node2 = prepare_node(key2).await;
 
-    manually_establish_connection(&swarm1, &swarm2)
-        .await
-        .unwrap();
+    manually_establish_connection(&node1, &node2).await.unwrap();
 }

@@ -24,6 +24,7 @@ pub use handlers::CallbackFn;
 pub use handlers::HandleMsg;
 pub use handlers::MessageCallback;
 pub use handlers::MessageHandler;
+pub use handlers::MessageHandlerEvent;
 pub use handlers::ValidatorFn;
 
 mod protocols;

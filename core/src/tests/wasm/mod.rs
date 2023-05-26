@@ -2,10 +2,7 @@ use std::sync::Arc;
 
 use wasm_bindgen_test::wasm_bindgen_test_configure;
 
-use crate::dht::Did;
-use crate::dht::PeerRing;
 use crate::ecc::SecretKey;
-use crate::message::MessageHandler;
 use crate::storage::PersistenceStorage;
 use crate::swarm::Swarm;
 use crate::swarm::SwarmBuilder;
@@ -23,20 +20,17 @@ pub fn setup_log() {
     tracing::debug!("test")
 }
 
-pub async fn prepare_node(key: SecretKey) -> (Did, Arc<PeerRing>, Arc<Swarm>, MessageHandler) {
+pub async fn prepare_node(key: SecretKey) -> Arc<Swarm> {
     let stun = "stun://stun.l.google.com:19302";
-    let did = key.address().into();
     let storage =
         PersistenceStorage::new_with_cap_and_name(1000, uuid::Uuid::new_v4().to_string().as_str())
             .await
             .unwrap();
 
     let swarm = Arc::new(SwarmBuilder::new(stun, storage).key(key).build().unwrap());
-    let dht = swarm.dht();
-    let node = swarm.create_message_handler(None, None);
 
     println!("key: {:?}", key.to_string());
-    println!("did: {:?}", did);
+    println!("did: {:?}", swarm.did());
 
-    (did, dht, swarm, node)
+    swarm
 }

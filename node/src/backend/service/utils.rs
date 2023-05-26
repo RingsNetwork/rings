@@ -8,22 +8,13 @@ use crate::prelude::*;
 /// - `handler`
 /// - `ctx`
 /// - `data`
-pub async fn send_chunk_report_message(
-    handler: &MessageHandler,
-    ctx: &MessagePayload<Message>,
-    data: &[u8],
-) -> Result<()> {
+pub async fn send_chunk_report_message(data: &[u8]) -> Result<MessageHandlerEvent> {
     let mut new_bytes: Vec<u8> = Vec::with_capacity(data.len() + 1);
     new_bytes.push(1);
     new_bytes.extend_from_slice(&[0u8; 3]);
     new_bytes.extend_from_slice(data);
 
-    handler
-        .send_report_message(
-            ctx,
-            Message::custom(&new_bytes, None).map_err(|_| Error::InvalidMessage)?,
-        )
-        .await
-        .map_err(Error::SendMessage)?;
-    Ok(())
+    Ok(MessageHandlerEvent::SendReportMessage(
+        Message::custom(&new_bytes).map_err(|_| Error::InvalidMessage)?,
+    ))
 }

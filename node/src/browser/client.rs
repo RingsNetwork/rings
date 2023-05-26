@@ -24,10 +24,9 @@ use crate::prelude::rings_core::async_trait;
 use crate::prelude::rings_core::dht::Did;
 use crate::prelude::rings_core::ecc::PublicKey;
 use crate::prelude::rings_core::message::CustomMessage;
-use crate::prelude::rings_core::message::MaybeEncrypted;
 use crate::prelude::rings_core::message::Message;
 use crate::prelude::rings_core::message::MessageCallback;
-use crate::prelude::rings_core::message::MessageHandler;
+use crate::prelude::rings_core::message::MessageHandlerEvent;
 use crate::prelude::rings_core::message::MessagePayload;
 use crate::prelude::rings_core::prelude::uuid::Uuid;
 use crate::prelude::rings_core::prelude::vnode;
@@ -46,6 +45,7 @@ use crate::prelude::wasm_bindgen_futures;
 use crate::prelude::wasm_bindgen_futures::future_to_promise;
 use crate::prelude::web3::contract::tokens::Tokenizable;
 use crate::prelude::web_sys::RtcIceConnectionState;
+use crate::prelude::CallbackFn;
 use crate::prelude::Signer;
 use crate::processor;
 use crate::processor::Processor;
@@ -190,9 +190,16 @@ impl Client {
         unsigned_info: &UnsignedInfo,
         signed_data: js_sys::Uint8Array,
         stuns: String,
+        callback: Option<MessageCallbackInstance>,
     ) -> js_sys::Promise {
         let unsigned_info = unsigned_info.clone();
-        Self::new_client_with_storage(&unsigned_info, signed_data, stuns, "rings-node".to_owned())
+        Self::new_client_with_storage(
+            &unsigned_info,
+            signed_data,
+            stuns,
+            callback,
+            "rings-node".to_owned(),
+        )
     }
 
     /// get self web3 address
@@ -201,36 +208,6 @@ impl Client {
         Ok(self.processor.did().into_token().to_string())
     }
 
-    pub fn new_client_with_storage(
-        unsigned_info: &UnsignedInfo,
-        signed_data: js_sys::Uint8Array,
-        stuns: String,
-        storage_name: String,
-    ) -> js_sys::Promise {
-        let unsigned_info = unsigned_info.inner.clone();
-        let signed_data = signed_data.to_vec();
-        future_to_promise(async move {
-            let proc =
-                Processor::new_with_storage(&unsigned_info, &signed_data[..], stuns, storage_name)
-                    .await
-                    .map_err(JsError::from)?;
-            Ok(JsValue::from(Client {
-                processor: Arc::new(proc),
-            }))
-        })
-    }
-
-    /// start background listener without custom callback
-    pub fn start(&self) -> js_sys::Promise {
-        let p = self.processor.clone();
-
-        future_to_promise(async move {
-            p.listen(None).await;
-            Ok(JsValue::null())
-        })
-    }
-
-    /// listen message callback.
     /// ```typescript
     /// const intervalHandle = await client.listen(new MessageCallbackInstance(
     ///      async (relay: any, msg: any) => {
@@ -247,12 +224,53 @@ impl Client {
     ///      },
     /// ))
     /// ```
-    pub fn listen(&mut self, callback: MessageCallbackInstance) -> js_sys::Promise {
+    pub fn new_client_with_storage(
+        unsigned_info: &UnsignedInfo,
+        signed_data: js_sys::Uint8Array,
+        stuns: String,
+        callback: Option<MessageCallbackInstance>,
+        storage_name: String,
+    ) -> js_sys::Promise {
+        let unsigned_info = unsigned_info.inner.clone();
+        let signed_data = signed_data.to_vec();
+        future_to_promise(async move {
+            let cb: Option<CallbackFn> = match callback {
+                Some(cb) => Some(Box::new(cb)),
+                None => None,
+            };
+
+            let proc = Processor::new_with_storage(
+                &unsigned_info,
+                &signed_data[..],
+                stuns,
+                cb,
+                storage_name,
+            )
+            .await
+            .map_err(JsError::from)?;
+
+            Ok(JsValue::from(Client {
+                processor: Arc::new(proc),
+            }))
+        })
+    }
+
+    /// start background listener without custom callback
+    pub fn start(&self) -> js_sys::Promise {
         let p = self.processor.clone();
-        let cb = Box::new(callback);
 
         future_to_promise(async move {
-            p.listen(Some(cb)).await;
+            p.listen().await;
+            Ok(JsValue::null())
+        })
+    }
+
+    /// listen message callback.
+    pub fn listen(&mut self) -> js_sys::Promise {
+        let p = self.processor.clone();
+
+        future_to_promise(async move {
+            p.listen().await;
             Ok(JsValue::null())
         })
     }
@@ -847,19 +865,11 @@ impl MessageCallbackInstance {
 impl MessageCallback for MessageCallbackInstance {
     async fn custom_message(
         &self,
-        handler: &MessageHandler,
         relay: &MessagePayload<Message>,
-        msg: &MaybeEncrypted<CustomMessage>,
-    ) {
-        let r = handler.decrypt_msg(msg);
-        let msg = if let Err(e) = r {
-            log::error!("custom_message decrypt failed: {:?}", e);
-            return;
-        } else {
-            r.unwrap()
-        };
+        msg: &CustomMessage,
+    ) -> Vec<MessageHandlerEvent> {
         if msg.0.len() < 2 {
-            return;
+            return vec![];
         }
 
         let (left, right) = array_refs![&msg.0, 4; ..;];
@@ -869,7 +879,7 @@ impl MessageCallback for MessageCallbackInstance {
             let data = self.handle_chunk_data(right);
             if let Err(e) = data {
                 log::error!("handle chunk data failed: {}", e);
-                return;
+                return vec![];
             }
             let data = data.unwrap();
             log::debug!("chunk message of {:?} received", relay.tx_id);
@@ -877,20 +887,21 @@ impl MessageCallback for MessageCallbackInstance {
                 data
             } else {
                 log::info!("chunk message of {:?} not complete", relay.tx_id);
-                return;
+                return vec![];
             }
         } else if tag == 0 {
             Bytes::from(right.to_vec())
         } else {
             log::error!("invalid message tag: {}", tag);
-            return;
+            return vec![];
         };
         if let Err(e) = self.handle_message_data(relay, &data).await {
             log::error!("handle http_server_msg failed, {}", e);
         }
+        vec![]
     }
 
-    async fn builtin_message(&self, _handler: &MessageHandler, relay: &MessagePayload<Message>) {
+    async fn builtin_message(&self, relay: &MessagePayload<Message>) -> Vec<MessageHandlerEvent> {
         let this = JsValue::null();
         // log::debug!("builtin_message received: {:?}", relay);
         if let Ok(r) = self
@@ -903,6 +914,7 @@ impl MessageCallback for MessageCallbackInstance {
                 }
             }
         }
+        vec![]
     }
 }
 

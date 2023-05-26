@@ -42,7 +42,6 @@ use crate::prelude::rings_core::transports::manager::TransportHandshake;
 use crate::prelude::rings_core::transports::manager::TransportManager;
 use crate::prelude::rings_core::transports::Transport;
 use crate::prelude::rings_core::types::ice_transport::IceTransportInterface;
-use crate::prelude::rings_core::types::message::MessageListener;
 use crate::prelude::rings_rpc::method;
 use crate::prelude::rings_rpc::response;
 use crate::prelude::rings_rpc::types::HttpRequest;
@@ -168,8 +167,16 @@ impl Processor {
         unsigned_info: &UnsignedInfo,
         signed_data: &[u8],
         stuns: String,
+        callback: Option<CallbackFn>,
     ) -> Result<Self> {
-        Self::new_with_storage(unsigned_info, signed_data, stuns, "rings-node".to_owned()).await
+        Self::new_with_storage(
+            unsigned_info,
+            signed_data,
+            stuns,
+            callback,
+            "rings-node".to_owned(),
+        )
+        .await
     }
 
     /// Create a new Processor
@@ -177,6 +184,7 @@ impl Processor {
         unsigned_info: &UnsignedInfo,
         signed_data: &[u8],
         stuns: String,
+        callback: Option<CallbackFn>,
         storage_name: String,
     ) -> Result<Self> {
         let verified = SessionManager::verify(&unsigned_info.auth, signed_data)
@@ -208,6 +216,7 @@ impl Processor {
             SwarmBuilder::new(&stuns, storage)
                 .session_manager(unsigned_info.key_addr, session_manager)
                 .measure(Box::new(measure))
+                .message_callback(callback)
                 .build()
                 .map_err(Error::Swarm)?,
         );
@@ -217,14 +226,14 @@ impl Processor {
     }
 
     /// Listen processor message
-    pub fn listen(&self, callback: Option<CallbackFn>) -> Join<impl Future, impl Future> {
-        let hdl = Arc::new(self.swarm.create_message_handler(callback, None));
-        let message_handler = async { hdl.listen().await };
+    pub fn listen(&self) -> Join<impl Future, impl Future> {
+        let swarm = self.swarm.clone();
+        let message_listener = async { swarm.listen().await };
 
         let stb = self.stabilization.clone();
         let stabilization = async { stb.wait().await };
 
-        futures::future::join(message_handler, stabilization)
+        futures::future::join(message_listener, stabilization)
     }
 }
 
@@ -399,7 +408,7 @@ impl Processor {
         new_msg.extend_from_slice(&[0u8; 3]);
         new_msg.extend_from_slice(msg);
 
-        let msg = Message::custom(&new_msg, None).map_err(Error::SendMessage)?;
+        let msg = Message::custom(&new_msg).map_err(Error::SendMessage)?;
 
         let uuid = self
             .swarm
@@ -597,7 +606,6 @@ mod test {
 
     use super::*;
     use crate::prelude::rings_core::ecc::SecretKey;
-    use crate::prelude::rings_core::message::MessageHandler;
     use crate::prelude::rings_core::storage::PersistenceStorage;
     use crate::prelude::rings_core::swarm::SwarmBuilder;
     use crate::prelude::*;
@@ -612,6 +620,26 @@ mod test {
             .unwrap();
 
         let swarm = Arc::new(SwarmBuilder::new(stun, storage).key(key).build().unwrap());
+        let stabilization = Arc::new(Stabilization::new(swarm.clone(), 200));
+        ((swarm, stabilization).into(), path)
+    }
+
+    async fn new_processor_with_callback(callback: CallbackFn) -> (Processor, String) {
+        let key = SecretKey::random();
+
+        let stun = "stun://stun.l.google.com:19302";
+        let path = PersistenceStorage::random_path("./tmp");
+        let storage = PersistenceStorage::new_with_path(path.as_str())
+            .await
+            .unwrap();
+
+        let swarm = Arc::new(
+            SwarmBuilder::new(stun, storage)
+                .key(key)
+                .message_callback(Some(callback))
+                .build()
+                .unwrap(),
+        );
         let stabilization = Arc::new(Stabilization::new(swarm.clone(), 200));
         ((swarm, stabilization).into(), path)
     }
@@ -722,30 +750,25 @@ mod test {
     impl MessageCallback for MsgCallbackStruct {
         async fn custom_message(
             &self,
-            handler: &MessageHandler,
             _ctx: &MessagePayload<Message>,
-            msg: &MaybeEncrypted<CustomMessage>,
-        ) {
-            let msg = handler.decrypt_msg(msg).unwrap();
-            let text = unpack_text_message(&msg).unwrap();
+            msg: &CustomMessage,
+        ) -> Vec<MessageHandlerEvent> {
+            let text = unpack_text_message(msg).unwrap();
             let mut msgs = self.msgs.try_lock().unwrap();
             msgs.push(text);
+            vec![]
         }
 
-        async fn builtin_message(&self, _handler: &MessageHandler, _ctx: &MessagePayload<Message>) {
+        async fn builtin_message(
+            &self,
+            _ctx: &MessagePayload<Message>,
+        ) -> Vec<MessageHandlerEvent> {
+            vec![]
         }
     }
 
     #[tokio::test]
     async fn test_processor_handshake_msg() {
-        let (p1, path1) = new_processor().await;
-        let (p2, path2) = new_processor().await;
-        let did1 = p1.did().to_string();
-        let did2 = p2.did().to_string();
-
-        println!("p1_did: {}", did1);
-        println!("p2_did: {}", did2);
-
         let msgs1: Arc<Mutex<Vec<String>>> = Default::default();
         let msgs2: Arc<Mutex<Vec<String>>> = Default::default();
         let callback1 = Box::new(MsgCallbackStruct {
@@ -755,10 +778,18 @@ mod test {
             msgs: msgs2.clone(),
         });
 
-        let msg_handler_1 = Arc::new(p1.swarm.create_message_handler(Some(callback1), None));
-        let msg_handler_2 = Arc::new(p2.swarm.create_message_handler(Some(callback2), None));
-        tokio::spawn(async { msg_handler_1.listen().await });
-        tokio::spawn(async { msg_handler_2.listen().await });
+        let (p1, path1) = new_processor_with_callback(callback1).await;
+        let (p2, path2) = new_processor_with_callback(callback2).await;
+        let did1 = p1.did().to_string();
+        let did2 = p2.did().to_string();
+
+        println!("p1_did: {}", did1);
+        println!("p2_did: {}", did2);
+
+        let swarm1 = p1.swarm.clone();
+        let swarm2 = p2.swarm.clone();
+        tokio::spawn(async { swarm1.listen().await });
+        tokio::spawn(async { swarm2.listen().await });
 
         let (transport_1, offer) = p1.swarm.create_offer().await.unwrap();
 

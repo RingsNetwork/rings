@@ -405,18 +405,19 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
 
     let external_ip = args.external_ip.map(Some).unwrap_or(c.external_ip);
 
+    let (sender, receiver) = tokio::sync::broadcast::channel(1024);
+    let backend_config = c.backend.into();
+    let backend = Backend::new(backend_config, sender);
+    let backend_service_names = backend.service_names();
+
     let swarm = Arc::new(
         SwarmBuilder::new(stuns.as_str(), per_data_storage)
             .key(key)
             .external_address(external_ip)
             .measure(Box::new(measure))
+            .message_callback(Some(Box::new(backend)))
             .build()?,
     );
-
-    let (sender, receiver) = tokio::sync::broadcast::channel(1024);
-    let backend_config = c.backend.into();
-    let backend = Backend::new(backend_config, sender);
-    let backend_service_names = backend.service_names();
 
     let stabilize_timeout = get_value(args.stabilize_timeout, c.stabilize_timeout);
     let stabilize = Arc::new(Stabilization::new(swarm.clone(), stabilize_timeout));
@@ -430,7 +431,7 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     let bind_addr = get_value(args.http_addr, c.http_addr);
 
     let _ = futures::join!(
-        processor.listen(Some(Box::new(backend))),
+        processor.listen(),
         service_loop_register(&processor, backend_service_names),
         run_http_api(bind_addr, processor_clone, pubkey, receiver,),
     );

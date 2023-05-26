@@ -17,13 +17,13 @@ use crate::err::Result;
 use crate::transports::helper::Promise;
 use crate::transports::helper::State;
 use crate::types::channel::Channel;
-use crate::types::channel::Event;
+use crate::types::channel::TransportEvent;
 use crate::types::ice_transport::HandshakeInfo;
 use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransportInterface;
 use crate::types::ice_transport::IceTrickleScheme;
 
-type EventSender = <AcChannel<Event> as Channel<Event>>::Sender;
+type EventSender = <AcChannel<TransportEvent> as Channel<TransportEvent>>::Sender;
 
 /// Dummy transport use for test only.
 #[derive(Default)]
@@ -57,7 +57,7 @@ impl DummyTransport {
 }
 
 #[async_trait]
-impl IceTransportInterface<Event, AcChannel<Event>> for DummyTransport {
+impl IceTransportInterface<TransportEvent, AcChannel<TransportEvent>> for DummyTransport {
     type IceConnectionState = RTCIceConnectionState;
 
     fn new(event_sender: EventSender) -> Self {
@@ -92,7 +92,10 @@ impl IceTransportInterface<Event, AcChannel<Event>> for DummyTransport {
         }
 
         self.event_sender
-            .send(Event::ConnectClosed((self.remote_did().await, self.id)))
+            .send(TransportEvent::ConnectClosed((
+                self.remote_did().await,
+                self.id,
+            )))
             .await
             .unwrap();
 
@@ -124,7 +127,7 @@ impl IceTransportInterface<Event, AcChannel<Event>> for DummyTransport {
             super::random_delay().await;
         }
         self.remote_sender()
-            .send(Event::DataChannelMessage(msg.to_vec()))
+            .send(TransportEvent::DataChannelMessage(msg.to_vec()))
             .await
             .unwrap();
         Ok(())
@@ -166,7 +169,7 @@ impl IceTrickleScheme for DummyTransport {
 
         let remote_did = self.remote_did().await;
         self.event_sender
-            .send(Event::RegisterTransport((remote_did, self.id)))
+            .send(TransportEvent::RegisterTransport((remote_did, self.id)))
             .await
             .unwrap_or_else(|e| tracing::warn!("failed to send register event: {:?}", e));
 
