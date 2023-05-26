@@ -51,7 +51,6 @@ use crate::prelude::Signer;
 use crate::processor;
 use crate::processor::Processor;
 
-
 /// SignerMode enum contains `DEFAULT` and `EIP191`
 #[wasm_export]
 pub enum SignerMode {
@@ -175,9 +174,11 @@ impl UnsignedInfo {
 /// const sig = new Uint8Array(web3.utils.hexToBytes(signed));
 /// const client: Client = await Client.new_client(unsignedInfo, sig, stunOrTurnUrl);
 /// ```
-#[wasm_export]
+/// TODO: cannot replace wasm_bidgen to rings_derive::wasm_export
+/// TODO: and dont know why
 #[derive(Clone)]
 #[allow(dead_code)]
+#[wasm_bindgen]
 pub struct Client {
     processor: Arc<Processor>,
     // signed_data: Vec<u8>,
