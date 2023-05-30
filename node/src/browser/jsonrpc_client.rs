@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use super::utils;
 use crate::prelude::rings_core::utils::js_value;
+use crate::prelude::wasm_bindgen;
 use crate::prelude::wasm_bindgen::prelude::*;
 use crate::prelude::*;
-use crate::prelude::wasm_bindgen;
 
 #[wasm_bindgen]
 pub struct JsonRpcClient {

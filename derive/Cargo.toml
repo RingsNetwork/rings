@@ -12,10 +12,10 @@ proc-macro = true
 [features]
 default = []
 wasm = [
-     "wasm-bindgen-macro-support",
-     "quote"
+    "wasm-bindgen-macro-support",
+    "quote",
 ]
 
 [dependencies]
-wasm-bindgen-macro-support = {version="0.2.83", optional=true}
-quote = {version="1.0.28", optional=true}
+quote = { version = "1.0.28", optional = true }
+wasm-bindgen-macro-support = { version = "0.2.83", optional = true }
