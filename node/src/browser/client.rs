@@ -43,7 +43,6 @@ use crate::prelude::wasm_bindgen;
 use crate::prelude::wasm_bindgen::prelude::*;
 use crate::prelude::wasm_bindgen_futures;
 use crate::prelude::wasm_bindgen_futures::future_to_promise;
-use crate::prelude::wasm_export;
 use crate::prelude::web3::contract::tokens::Tokenizable;
 use crate::prelude::web_sys::RtcIceConnectionState;
 use crate::prelude::CallbackFn;
@@ -52,7 +51,7 @@ use crate::processor;
 use crate::processor::Processor;
 
 /// SignerMode enum contains `DEFAULT` and `EIP191`
-#[wasm_export]
+#[wasm_bindgen]
 pub enum SignerMode {
     /// ecdsa
     DEFAULT,
@@ -76,7 +75,7 @@ impl From<SignerMode> for Signer {
 }
 
 /// AddressType enum contains `DEFAULT` and `ED25519`.
-#[wasm_export]
+#[wasm_bindgen]
 pub enum AddressType {
     DEFAULT,
     ED25519,
@@ -101,7 +100,7 @@ impl ToString for AddressType {
 }
 
 /// A UnsignedInfo use for wasm.
-#[wasm_export]
+#[wasm_bindgen]
 #[derive(Clone)]
 pub struct UnsignedInfo {
     inner: processor::UnsignedInfo,
@@ -113,10 +112,10 @@ impl From<processor::UnsignedInfo> for UnsignedInfo {
     }
 }
 
-#[wasm_export]
+#[wasm_bindgen]
 impl UnsignedInfo {
     /// Create a new `UnsignedInfo` instance with SignerMode::EIP191
-    #[wasm_export(constructor)]
+    #[wasm_bindgen(constructor)]
     pub fn new(key_addr: String) -> Result<UnsignedInfo, wasm_bindgen::JsError> {
         Ok(processor::UnsignedInfo::new(key_addr)
             .map_err(JsError::from)?
@@ -159,7 +158,7 @@ impl UnsignedInfo {
         )
     }
 
-    #[wasm_export(getter)]
+    #[wasm_bindgen(getter)]
     pub fn auth(&self) -> Result<String, JsError> {
         let s = self.inner.auth().map_err(JsError::from)?;
         Ok(s)
@@ -176,7 +175,7 @@ impl UnsignedInfo {
 /// ```
 #[derive(Clone)]
 #[allow(dead_code)]
-#[wasm_export]
+#[wasm_bindgen]
 pub struct Client {
     processor: Arc<Processor>,
     // signed_data: Vec<u8>,
@@ -184,7 +183,7 @@ pub struct Client {
     // rpc_meta: RpcMeta,
 }
 
-#[wasm_export]
+#[wasm_bindgen]
 impl Client {
     /// Creat a new client instance.
     pub fn new_client(
@@ -204,7 +203,7 @@ impl Client {
     }
 
     /// get self web3 address
-    #[wasm_export(getter)]
+    #[wasm_bindgen(getter)]
     pub fn address(&self) -> Result<String, JsError> {
         Ok(self.processor.did().into_token().to_string())
     }
@@ -728,7 +727,7 @@ impl Client {
     }
 }
 
-#[wasm_export]
+#[wasm_bindgen]
 pub struct MessageCallbackInstance {
     custom_message: Arc<js_sys::Function>,
     http_response_message: Arc<js_sys::Function>,
@@ -736,9 +735,9 @@ pub struct MessageCallbackInstance {
     chunk_list: Arc<Mutex<ChunkList<BACKEND_MTU>>>,
 }
 
-#[wasm_export]
+#[wasm_bindgen]
 impl MessageCallbackInstance {
-    #[wasm_export(constructor)]
+    #[wasm_bindgen(constructor)]
     pub fn new(
         custom_message: &js_sys::Function,
         http_response_message: &js_sys::Function,
@@ -944,7 +943,7 @@ impl TryFrom<&Peer> for JsValue {
     }
 }
 
-#[wasm_export]
+#[wasm_bindgen]
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Internal Info struct
@@ -952,7 +951,7 @@ pub struct InternalInfo {
     build_version: String,
 }
 
-#[wasm_export]
+#[wasm_bindgen]
 impl InternalInfo {
     /// Get InternalInfo
     fn build() -> Self {
@@ -962,14 +961,14 @@ impl InternalInfo {
     }
 
     /// build_version getter
-    #[wasm_export(getter)]
+    #[wasm_bindgen(getter)]
     pub fn build_version(&self) -> String {
         self.build_version.clone()
     }
 }
 
 /// Build InternalInfo
-#[wasm_export]
+#[wasm_bindgen]
 pub fn internal_info() -> InternalInfo {
     InternalInfo::build()
 }
@@ -989,7 +988,7 @@ pub fn get_did(address: &str, addr_type: AddressType) -> Result<Did, JsError> {
 
 /// Get address from hex pubkey
 ///  * pubkey: hex pubkey
-#[wasm_export]
+#[wasm_bindgen]
 pub fn get_address_from_hex_pubkey(pubkey: String) -> Result<String, JsError> {
     Ok(PublicKey::from_hex_string(pubkey.as_str())
         .map_err(JsError::from)?
@@ -1001,7 +1000,7 @@ pub fn get_address_from_hex_pubkey(pubkey: String) -> Result<String, JsError> {
 /// Get address from other address
 ///   * address: source address
 ///   * addr_type: source address type
-#[wasm_export]
+#[wasm_bindgen]
 pub fn get_address(address: &str, addr_type: AddressType) -> Result<String, JsError> {
     Ok(get_did(address, addr_type)?.into_token().to_string())
 }

@@ -3,20 +3,19 @@ use std::sync::Arc;
 
 use super::utils;
 use crate::prelude::rings_core::utils::js_value;
-use crate::prelude::wasm_bindgen;
 use crate::prelude::wasm_bindgen::prelude::*;
 use crate::prelude::*;
-use crate::prelude::wasm_export;
+use crate::prelude::wasm_bindgen;
 
-#[wasm_export]
+#[wasm_bindgen]
 pub struct JsonRpcClient {
     client: Arc<jsonrpc_client::SimpleClient>,
 }
 
-#[wasm_export]
+#[wasm_bindgen]
 impl JsonRpcClient {
     /// Create a new `JsonRpcClient`
-    #[wasm_export(constructor)]
+    #[wasm_bindgen(constructor)]
     pub fn new(node: String) -> JsonRpcClient {
         let client = Arc::new(jsonrpc_client::SimpleClient::new_with_url(node.as_str()));
         JsonRpcClient { client }
