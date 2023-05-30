@@ -176,7 +176,7 @@ impl UnsignedInfo {
 /// ```
 #[derive(Clone)]
 #[allow(dead_code)]
-#[wasm_bindgen]
+#[wasm_export]
 pub struct Client {
     processor: Arc<Processor>,
     // signed_data: Vec<u8>,

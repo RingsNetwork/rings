@@ -12,11 +12,12 @@ use crate::logging::browser::init_logging;
 use crate::logging::browser::set_panic_hook;
 use crate::prelude::wasm_bindgen;
 use crate::prelude::wasm_bindgen::prelude::*;
+use crate::prelude::wasm_export;
 
 /// set debug for wasm.
 /// if `true` will print `Debug` message in console,
 /// otherwise only print `error` message
-#[wasm_bindgen]
+#[wasm_export]
 pub fn debug(value: bool) {
     set_panic_hook();
     if value {
@@ -27,7 +28,7 @@ pub fn debug(value: bool) {
 }
 
 /// set log_level
-#[wasm_bindgen]
+#[wasm_export]
 pub fn log_level(level: &str) {
     init_logging(tracing::Level::from_str(level).unwrap());
 }
