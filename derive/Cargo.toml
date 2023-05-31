@@ -1,0 +1,21 @@
+[package]
+name = "rings-derive"
+version = "0.1.0"
+edition = "2021"
+authors = ["RND <dev@ringsnetwork.io>"]
+repository = "https://github.com/RingsNetwork/rings-node"
+license = "GPL-3.0"
+
+[lib]
+proc-macro = true
+
+[features]
+default = []
+wasm = [
+    "wasm-bindgen-macro-support",
+    "quote",
+]
+
+[dependencies]
+quote = { version = "1.0.28", optional = true }
+wasm-bindgen-macro-support = { workspace = true, optional = true }

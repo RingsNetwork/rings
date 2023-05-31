@@ -1,4 +1,8 @@
 [workspace]
-members = ["core", "node", "rpc"]
+members = ["core", "node", "rpc", "derive"]
 
 resolver = "2"
+
+[workspace.dependencies]
+wasm-bindgen = { version = "=0.2.84" }
+wasm-bindgen-macro-support = { version = "=0.2.84" }

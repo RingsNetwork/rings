@@ -43,6 +43,7 @@ use crate::prelude::wasm_bindgen;
 use crate::prelude::wasm_bindgen::prelude::*;
 use crate::prelude::wasm_bindgen_futures;
 use crate::prelude::wasm_bindgen_futures::future_to_promise;
+use crate::prelude::wasm_export;
 use crate::prelude::web3::contract::tokens::Tokenizable;
 use crate::prelude::web_sys::RtcIceConnectionState;
 use crate::prelude::CallbackFn;
@@ -51,7 +52,7 @@ use crate::processor;
 use crate::processor::Processor;
 
 /// SignerMode enum contains `DEFAULT` and `EIP191`
-#[wasm_bindgen]
+#[wasm_export]
 pub enum SignerMode {
     /// ecdsa
     DEFAULT,
@@ -75,7 +76,7 @@ impl From<SignerMode> for Signer {
 }
 
 /// AddressType enum contains `DEFAULT` and `ED25519`.
-#[wasm_bindgen]
+#[wasm_export]
 pub enum AddressType {
     DEFAULT,
     ED25519,
@@ -100,7 +101,7 @@ impl ToString for AddressType {
 }
 
 /// A UnsignedInfo use for wasm.
-#[wasm_bindgen]
+#[wasm_export]
 #[derive(Clone)]
 pub struct UnsignedInfo {
     inner: processor::UnsignedInfo,
@@ -112,7 +113,7 @@ impl From<processor::UnsignedInfo> for UnsignedInfo {
     }
 }
 
-#[wasm_bindgen]
+#[wasm_export]
 impl UnsignedInfo {
     /// Create a new `UnsignedInfo` instance with SignerMode::EIP191
     #[wasm_bindgen(constructor)]
@@ -173,9 +174,9 @@ impl UnsignedInfo {
 /// const sig = new Uint8Array(web3.utils.hexToBytes(signed));
 /// const client: Client = await Client.new_client(unsignedInfo, sig, stunOrTurnUrl);
 /// ```
-#[wasm_bindgen]
 #[derive(Clone)]
 #[allow(dead_code)]
+#[wasm_export]
 pub struct Client {
     processor: Arc<Processor>,
     // signed_data: Vec<u8>,
@@ -183,7 +184,7 @@ pub struct Client {
     // rpc_meta: RpcMeta,
 }
 
-#[wasm_bindgen]
+#[wasm_export]
 impl Client {
     /// Creat a new client instance.
     pub fn new_client(
@@ -727,7 +728,7 @@ impl Client {
     }
 }
 
-#[wasm_bindgen]
+#[wasm_export]
 pub struct MessageCallbackInstance {
     custom_message: Arc<js_sys::Function>,
     http_response_message: Arc<js_sys::Function>,
@@ -735,7 +736,7 @@ pub struct MessageCallbackInstance {
     chunk_list: Arc<Mutex<ChunkList<BACKEND_MTU>>>,
 }
 
-#[wasm_bindgen]
+#[wasm_export]
 impl MessageCallbackInstance {
     #[wasm_bindgen(constructor)]
     pub fn new(
@@ -943,7 +944,7 @@ impl TryFrom<&Peer> for JsValue {
     }
 }
 
-#[wasm_bindgen]
+#[wasm_export]
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Internal Info struct
@@ -951,7 +952,7 @@ pub struct InternalInfo {
     build_version: String,
 }
 
-#[wasm_bindgen]
+#[wasm_export]
 impl InternalInfo {
     /// Get InternalInfo
     fn build() -> Self {
@@ -968,7 +969,7 @@ impl InternalInfo {
 }
 
 /// Build InternalInfo
-#[wasm_bindgen]
+#[wasm_export]
 pub fn internal_info() -> InternalInfo {
     InternalInfo::build()
 }
@@ -988,7 +989,7 @@ pub fn get_did(address: &str, addr_type: AddressType) -> Result<Did, JsError> {
 
 /// Get address from hex pubkey
 ///  * pubkey: hex pubkey
-#[wasm_bindgen]
+#[wasm_export]
 pub fn get_address_from_hex_pubkey(pubkey: String) -> Result<String, JsError> {
     Ok(PublicKey::from_hex_string(pubkey.as_str())
         .map_err(JsError::from)?
@@ -1000,7 +1001,7 @@ pub fn get_address_from_hex_pubkey(pubkey: String) -> Result<String, JsError> {
 /// Get address from other address
 ///   * address: source address
 ///   * addr_type: source address type
-#[wasm_bindgen]
+#[wasm_export]
 pub fn get_address(address: &str, addr_type: AddressType) -> Result<String, JsError> {
     Ok(get_did(address, addr_type)?.into_token().to_string())
 }
