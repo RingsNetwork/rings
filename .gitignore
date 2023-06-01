@@ -24,3 +24,9 @@ tmp/
 data/
 nohup.out
 config.yaml
+
+# wasm-pack related
+package-lock.json
+*.d.ts
+*.js
+*.wasm
