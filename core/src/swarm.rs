@@ -69,7 +69,7 @@ impl SwarmBuilder {
             .into_iter()
             .map(|s| {
                 IceServer::from_str(s)
-                    .expect(format!("Failed on parse ice server {:?}", s).as_str())
+                    .unwrap_or_else(|_| panic!("Failed on parse ice server {:?}", s))
             })
             .collect::<Vec<IceServer>>();
         SwarmBuilder {
