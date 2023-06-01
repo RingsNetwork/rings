@@ -14,7 +14,9 @@
     "prepare": "make build-browser-pack"
   },
   "files": [
-    "pkg/*"
+    "rings_node_bg.wasm",
+    "rings_node.js",
+    "rings_node.d.ts"
   ],
   "module": "rings_node.js",
   "types": "rings_node.d.ts",
