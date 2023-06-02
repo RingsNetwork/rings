@@ -258,7 +258,7 @@ async fn list_peers(_params: Params, meta: RpcMeta) -> Result<Value> {
         .zip(states.iter())
         .map(|(x, y)| x.into_response_peer(y.map(from_rtc_ice_connection_state)))
         .collect::<Vec<_>>();
-    serde_json::to_value(&r).map_err(|_| Error::from(ServerError::EncodeError))
+    serde_json::to_value(r).map_err(|_| Error::from(ServerError::EncodeError))
 }
 
 /// Handle close connection
@@ -287,7 +287,7 @@ async fn list_pendings(_params: Params, meta: RpcMeta) -> Result<Value> {
         .zip(states.iter())
         .map(|(x, y)| response::TransportInfo::from((x, y.map(from_rtc_ice_connection_state))))
         .collect::<Vec<_>>();
-    serde_json::to_value(&r).map_err(|_| Error::from(ServerError::EncodeError))
+    serde_json::to_value(r).map_err(|_| Error::from(ServerError::EncodeError))
 }
 
 /// Handle close pending transport
@@ -537,7 +537,7 @@ async fn poll_message(params: Params, meta: RpcMeta) -> Result<Value> {
     };
 
     let message = if let Some(msg) = message {
-        serde_json::to_value(&CustomBackendMessage::from(msg))
+        serde_json::to_value(CustomBackendMessage::from(msg))
             .map_err(|_| Error::from(ServerError::EncodeError))?
     } else {
         serde_json::Value::Null

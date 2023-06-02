@@ -67,7 +67,10 @@ impl SwarmBuilder {
             .split(';')
             .collect::<Vec<&str>>()
             .into_iter()
-            .map(|s| IceServer::from_str(s).unwrap())
+            .map(|s| {
+                IceServer::from_str(s)
+                    .unwrap_or_else(|_| panic!("Failed on parse ice server {:?}", s))
+            })
             .collect::<Vec<IceServer>>();
         SwarmBuilder {
             key: None,
