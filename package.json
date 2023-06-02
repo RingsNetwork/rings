@@ -20,6 +20,8 @@
   ],
   "module": "rings_node.js",
   "types": "rings_node.d.ts",
+  "type": "module",
+  "main": "rings_node.js",
   "sideEffects": false,
   "keywords": [
     "Chord",
