@@ -1,4 +1,5 @@
-//! Successor for PeerRing
+#![warn(missing_docs)]
+//! Successor Sequance for PeerRing
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::RwLockReadGuard;
@@ -13,35 +14,52 @@ use crate::err::Result;
 /// It's necessary to have multiple successors to prevent a single point of failure.
 /// Note the successors are in order of a clockwise distance from the node.
 /// See also [super::did::BiasId].
+/// Structure representing the sequence of successors in a Distributed Hash Table (DHT).
+/// This helps to prevent a single point of failure.
 #[derive(Debug, Clone)]
 pub struct SuccessorSeq {
-    /// Node did
+    /// The identifier of a node
     did: Did,
-    /// Max successor num
+    /// The maximum number of successors
     max: u8,
-    /// Successors
+    /// The list of successor nodes
     successors: Arc<RwLock<Vec<Did>>>,
 }
 
+/// Interface for reading from a `SuccessorSeq`
 pub trait SuccessorReader {
+    // Check if the sequence is empty
     fn is_empty(&self) -> Result<bool>;
+    // Check if the sequence is full
     fn is_full(&self) -> Result<bool>;
+    // Retrieve an element at a given index
     fn get(&self, index: usize) -> Result<Did>;
+    // Get the length of the sequence
     fn len(&self) -> Result<usize>;
+    // Get the element with the minimum value
     fn min(&self) -> Result<Did>;
+    // Get the element with the maximum value
     fn max(&self) -> Result<Did>;
+    // Get the list of successors
     fn list(&self) -> Result<Vec<Did>>;
+    // Check if a given identifier exists in the list
     fn contains(&self, did: &Did) -> Result<bool>;
+    // Perform a dry run update
     fn update_dry(&self, did: &[Did]) -> Result<Vec<Did>>;
 }
 
+/// Interface for writing to a `SuccessorSeq`
 pub trait SuccessorWriter {
+    // Update a successor in the sequence
     fn update(&self, successor: Did) -> Result<Option<Did>>;
+    // Extend the sequence with a list of successors
     fn extend(&self, succ_list: &[Did]) -> Result<Vec<Did>>;
+    // Remove a successor from the sequence
     fn remove(&self, did: Did) -> Result<()>;
 }
 
 impl SuccessorSeq {
+    /// Constructor for `SuccessorSeq`
     pub fn new(did: Did, max: u8) -> Self {
         Self {
             did,
@@ -50,18 +68,19 @@ impl SuccessorSeq {
         }
     }
 
+    // Returns the list of successors in a read lock.
     pub fn successors(&self) -> Result<RwLockReadGuard<Vec<Did>>> {
         self.successors
             .read()
             .map_err(|_| Error::FailedToReadSuccessors)
     }
 
-    /// Calculate bias of the Did on the ring.
+    // Calculate bias of a node on the ring.
     pub fn bias(&self, did: Did) -> BiasId {
         BiasId::new(self.did, did)
     }
 
-    /// Verify a given Did is fit successors protocol.
+    // Check if a node should be inserted into the sequence.
     pub fn should_insert(&self, did: Did) -> Result<bool> {
         if (self.contains(&did)?) || (did == self.did) {
             return Ok(false);
@@ -74,6 +93,7 @@ impl SuccessorSeq {
     }
 }
 
+// Implementation of `SuccessorReader` for `SuccessorSeq`
 impl SuccessorReader for SuccessorSeq {
     fn contains(&self, did: &Did) -> Result<bool> {
         let succs = self.successors()?;
@@ -132,6 +152,7 @@ impl SuccessorReader for SuccessorSeq {
     }
 }
 
+// Implementation of `SuccessorWriter` for `SuccessorSeq`
 impl SuccessorWriter for SuccessorSeq {
     fn update(&self, successor: Did) -> Result<Option<Did>> {
         if !(self.should_insert(successor)?) {
