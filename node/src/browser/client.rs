@@ -14,6 +14,7 @@ use crate::backend::types::BackendMessage;
 use crate::backend::types::HttpResponse;
 use crate::backend::types::MessageType;
 use crate::consts::BACKEND_MTU;
+use crate::error;
 use crate::prelude::chunk::Chunk;
 use crate::prelude::chunk::ChunkList;
 use crate::prelude::chunk::ChunkManager;
@@ -232,27 +233,41 @@ impl Client {
         callback: Option<MessageCallbackInstance>,
         storage_name: String,
     ) -> js_sys::Promise {
-        let unsigned_info = unsigned_info.inner.clone();
+        let unsigned_info = unsigned_info.clone();
         let signed_data = signed_data.to_vec();
         future_to_promise(async move {
-            let cb: Option<CallbackFn> = match callback {
-                Some(cb) => Some(Box::new(cb)),
-                None => None,
-            };
-
-            let proc = Processor::new_with_storage(
+            let client = Self::new_client_with_storage_internal(
                 &unsigned_info,
                 &signed_data[..],
                 stuns,
-                cb,
+                callback,
                 storage_name,
             )
             .await
             .map_err(JsError::from)?;
+            Ok(JsValue::from(client))
+        })
+    }
 
-            Ok(JsValue::from(Client {
-                processor: Arc::new(proc),
-            }))
+    pub(crate) async fn new_client_with_storage_internal(
+        unsigned_info: &UnsignedInfo,
+        signed_data: &[u8],
+        stuns: String,
+        callback: Option<MessageCallbackInstance>,
+        storage_name: String,
+    ) -> Result<Client, error::Error> {
+        let unsigned_info = unsigned_info.inner.clone();
+        let cb: Option<CallbackFn> = match callback {
+            Some(cb) => Some(Box::new(cb)),
+            None => None,
+        };
+
+        let proc =
+            Processor::new_with_storage(&unsigned_info, signed_data, stuns, cb, storage_name)
+                .await?;
+
+        Ok(Client {
+            processor: Arc::new(proc),
         })
     }
 

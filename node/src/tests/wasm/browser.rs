@@ -1,34 +1,14 @@
-use js_sys::Uint8Array;
 use wasm_bindgen_test::*;
 
 use crate::browser;
 use crate::browser::Peer;
 use crate::prelude::rings_core::utils;
 use crate::prelude::rings_core::utils::js_value;
-use crate::prelude::wasm_bindgen::convert::FromWasmAbi;
 use crate::prelude::wasm_bindgen::JsValue;
 use crate::prelude::wasm_bindgen_futures::JsFuture;
 use crate::prelude::web3::contract::tokens::Tokenizable;
 use crate::prelude::*;
 wasm_bindgen_test_configure!(run_in_browser);
-
-pub fn generic_of_jsval<T: FromWasmAbi<Abi = u32>>(
-    js: JsValue,
-    classname: &str,
-) -> Result<T, JsValue> {
-    use js_sys::Object;
-    use js_sys::Reflect;
-    let ctor_name = Object::get_prototype_of(&js).constructor().name();
-    if ctor_name == classname {
-        #[allow(unused_unsafe)]
-        let ptr = unsafe { Reflect::get(&js, &JsValue::from_str("ptr"))? };
-        let ptr_u32: u32 = ptr.as_f64().ok_or(JsValue::NULL)? as u32;
-        let ge = unsafe { T::from_abi(ptr_u32) };
-        Ok(ge)
-    } else {
-        Err(JsValue::NULL)
-    }
-}
 
 async fn new_client() -> (browser::Client, String) {
     let key = SecretKey::random();
@@ -39,20 +19,18 @@ async fn new_client() -> (browser::Client, String) {
     .ok()
     .unwrap();
     let auth = unsigned_info.auth().ok().unwrap();
-    let signed_data = Uint8Array::from(key.sign(&auth).to_vec().as_slice());
+    let signed_data = key.sign(&auth).to_vec();
     let stuns = "stun://stun.l.google.com:19302".to_owned();
     let storage_name = uuid::Uuid::new_v4().to_string();
-    let c = JsFuture::from(browser::Client::new_client_with_storage(
+    let client: browser::Client = browser::Client::new_client_with_storage_internal(
         &unsigned_info,
-        signed_data,
+        &signed_data[..],
         stuns,
         None,
         storage_name.clone(),
-    ))
+    )
     .await
-    .ok()
     .unwrap();
-    let client: browser::Client = generic_of_jsval(c, "Client").unwrap();
     (client, storage_name)
 }
 
