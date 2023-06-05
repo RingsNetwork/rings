@@ -93,33 +93,39 @@ impl SuccessorSeq {
     }
 }
 
-// Implementation of `SuccessorReader` for `SuccessorSeq`
+// Implementation of the SuccessorReader trait for SuccessorSeq
 impl SuccessorReader for SuccessorSeq {
+    // Check if the specified Distributed Identifier (DID) exists in the successors list
     fn contains(&self, did: &Did) -> Result<bool> {
         let succs = self.successors()?;
         Ok(succs.contains(did))
     }
 
+    // Check if the successors list is empty
     fn is_empty(&self) -> Result<bool> {
         let succs = self.successors()?;
         Ok(succs.is_empty())
     }
 
+    // Check if the successors list has reached its maximum capacity
     fn is_full(&self) -> Result<bool> {
         let succs = self.successors()?;
         Ok(succs.len() as u8 >= self.max)
     }
 
+    // Retrieve a successor from the list by index
     fn get(&self, index: usize) -> Result<Did> {
         let succs = self.successors()?;
         Ok(succs[index])
     }
 
+    // Return the length of the successors list
     fn len(&self) -> Result<usize> {
         let succs = self.successors()?;
         Ok(succs.len())
     }
 
+    // Retrieve the first successor in the list if not empty, otherwise return the node's DID
     fn min(&self) -> Result<Did> {
         if self.is_empty()? {
             Ok(self.did)
@@ -128,6 +134,7 @@ impl SuccessorReader for SuccessorSeq {
         }
     }
 
+    // Retrieve the last successor in the list if not empty, otherwise return the node's DID
     fn max(&self) -> Result<Did> {
         if self.is_empty()? {
             Ok(self.did)
@@ -136,11 +143,13 @@ impl SuccessorReader for SuccessorSeq {
         }
     }
 
+    // Return a copy of the entire successors list
     fn list(&self) -> Result<Vec<Did>> {
         let succs = self.successors()?;
         Ok(succs.clone())
     }
 
+    // Simulate an update to the list and return the new DIDs that would be added
     fn update_dry(&self, dids: &[Did]) -> Result<Vec<Did>> {
         let mut ret = vec![];
         for did in dids {
@@ -154,6 +163,7 @@ impl SuccessorReader for SuccessorSeq {
 
 // Implementation of `SuccessorWriter` for `SuccessorSeq`
 impl SuccessorWriter for SuccessorSeq {
+    // Update the successors list by adding a new successor, sorting the list, and truncating if necessary
     fn update(&self, successor: Did) -> Result<Option<Did>> {
         if !(self.should_insert(successor)?) {
             return Ok(None);
@@ -173,6 +183,7 @@ impl SuccessorWriter for SuccessorSeq {
         }
     }
 
+    // Extend the successors list with a list of new successors
     fn extend(&self, succ_list: &[Did]) -> Result<Vec<Did>> {
         let mut ret = vec![];
         for s in succ_list {
@@ -183,6 +194,7 @@ impl SuccessorWriter for SuccessorSeq {
         Ok(ret)
     }
 
+    // Remove a successor from the successors list
     fn remove(&self, did: Did) -> Result<()> {
         let mut succs = self
             .successors
