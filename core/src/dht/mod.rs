@@ -8,6 +8,8 @@ mod chord;
 /// Finger table for Rings
 pub mod finger;
 pub mod successor;
+pub use successor::SuccessorReader;
+pub use successor::SuccessorWriter;
 mod types;
 pub use chord::PeerRing;
 pub use chord::PeerRingAction;
@@ -17,6 +19,7 @@ pub use types::Chord;
 pub use types::ChordStorage;
 pub use types::ChordStorageCache;
 pub use types::ChordStorageSync;
+pub use types::LiveDid;
 mod stabilization;
 pub use stabilization::Stabilization;
 pub use stabilization::TStabilize;

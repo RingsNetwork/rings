@@ -4,6 +4,7 @@ use serde::Serialize;
 use crate::dht::vnode::VirtualNode;
 use crate::dht::Did;
 use crate::dht::PeerRing;
+use crate::dht::SuccessorReader;
 use crate::storage::MemStorage;
 use crate::storage::PersistenceStorage;
 use crate::storage::PersistenceStorageReadAndWrite;
@@ -77,8 +78,8 @@ impl DHTInspect {
     pub fn inspect(dht: &PeerRing) -> Self {
         let did = dht.did.to_string();
         let successors = {
-            dht.lock_successor()
-                .map(|ss| ss.list())
+            dht.successors()
+                .list()
                 .unwrap_or_default()
                 .into_iter()
                 .map(|s| s.to_string())

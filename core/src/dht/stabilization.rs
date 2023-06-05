@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::dht::successor::SuccessorReader;
 use crate::dht::Chord;
 use crate::dht::PeerRing;
 use crate::dht::PeerRingAction;
@@ -64,8 +65,8 @@ impl Stabilization {
 
     pub async fn notify_predecessor(&self) -> Result<()> {
         let (successor_min, successor_list) = {
-            let successor = self.chord.lock_successor()?;
-            (successor.min(), successor.list())
+            let successor = self.chord.successors();
+            (successor.min()?, successor.list()?)
         };
 
         let msg = Message::NotifyPredecessorSend(NotifyPredecessorSend {

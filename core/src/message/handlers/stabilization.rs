@@ -68,6 +68,7 @@ mod test {
     use std::sync::Arc;
 
     use super::*;
+    use crate::dht::successor::SuccessorReader;
     use crate::dht::Stabilization;
     use crate::ecc::tests::gen_ordered_keys;
     use crate::ecc::SecretKey;
@@ -148,12 +149,12 @@ mod test {
         assert_no_more_msg(&node1, &node2, &node3).await;
 
         println!("=== Check state before stabilization ===");
-        assert_eq!(node1.dht().lock_successor()?.list(), vec![node2.did()]);
-        assert_eq!(node2.dht().lock_successor()?.list(), vec![
+        assert_eq!(node1.dht().successors().list()?, vec![node2.did()]);
+        assert_eq!(node2.dht().successors().list()?, vec![
             node3.did(),
             node1.did()
         ]);
-        assert_eq!(node3.dht().lock_successor()?.list(), vec![node2.did()]);
+        assert_eq!(node3.dht().successors().list()?, vec![node2.did()]);
         assert!(node1.dht().lock_predecessor()?.is_none());
         assert!(node2.dht().lock_predecessor()?.is_none());
         assert!(node3.dht().lock_predecessor()?.is_none());
@@ -234,15 +235,15 @@ mod test {
         // node1's pre is node2, node1's successor is node2
         // node2's pre is node1, node2's successor is node3
         // node3's pre is node2, node3's successor is node1
-        assert_eq!(node1.dht().lock_successor()?.list(), vec![
+        assert_eq!(node1.dht().successors().list()?, vec![
             node2.did(),
             node3.did()
         ]);
-        assert_eq!(node2.dht().lock_successor()?.list(), vec![
+        assert_eq!(node2.dht().successors().list()?, vec![
             node3.did(),
             node1.did()
         ]);
-        assert_eq!(node3.dht().lock_successor()?.list(), vec![
+        assert_eq!(node3.dht().successors().list()?, vec![
             node1.did(),
             node2.did()
         ]);
@@ -348,15 +349,15 @@ mod test {
         // node1's pre is node3, node1's successor is node2
         // node2's pre is node1, node2's successor is node3
         // node3's pre is node2, node3's successor is node1
-        assert_eq!(node1.dht().lock_successor()?.list(), vec![
+        assert_eq!(node1.dht().successors().list()?, vec![
             node2.did(),
             node3.did()
         ]);
-        assert_eq!(node2.dht().lock_successor()?.list(), vec![
+        assert_eq!(node2.dht().successors().list()?, vec![
             node3.did(),
             node1.did()
         ]);
-        assert_eq!(node3.dht().lock_successor()?.list(), vec![
+        assert_eq!(node3.dht().successors().list()?, vec![
             node1.did(),
             node2.did()
         ]);
@@ -395,12 +396,12 @@ mod test {
         assert_no_more_msg(&node1, &node2, &node3).await;
 
         println!("=== Check state before stabilization ===");
-        assert_eq!(node1.dht().lock_successor()?.list(), vec![node2.did()]);
-        assert_eq!(node2.dht().lock_successor()?.list(), vec![
+        assert_eq!(node1.dht().successors().list()?, vec![node2.did()]);
+        assert_eq!(node2.dht().successors().list()?, vec![
             node1.did(),
             node3.did()
         ]);
-        assert_eq!(node3.dht().lock_successor()?.list(), vec![node2.did()]);
+        assert_eq!(node3.dht().successors().list()?, vec![node2.did()]);
         assert!(node1.dht().lock_predecessor()?.is_none());
         assert!(node2.dht().lock_predecessor()?.is_none());
         assert!(node3.dht().lock_predecessor()?.is_none());
@@ -480,15 +481,15 @@ mod test {
         //   |-----------------|
         // node1's pre is node2, node1's successor is node2
         // node2's pre is node3, node2's successor is node1
-        assert_eq!(node1.dht().lock_successor()?.list(), vec![
+        assert_eq!(node1.dht().successors().list()?, vec![
             node3.did(),
             node2.did()
         ]);
-        assert_eq!(node2.dht().lock_successor()?.list(), vec![
+        assert_eq!(node2.dht().successors().list()?, vec![
             node1.did(),
             node3.did()
         ]);
-        assert_eq!(node3.dht().lock_successor()?.list(), vec![
+        assert_eq!(node3.dht().successors().list()?, vec![
             node2.did(),
             node1.did()
         ]);
@@ -516,15 +517,15 @@ mod test {
         // node1's pre is node2, node1's successor is node3
         // node2's pre is node3, node2's successor is node1
         // node3's pre is none1, node3's successor is node2
-        assert_eq!(node1.dht().lock_successor()?.list(), vec![
+        assert_eq!(node1.dht().successors().list()?, vec![
             node3.did(),
             node2.did()
         ]);
-        assert_eq!(node2.dht().lock_successor()?.list(), vec![
+        assert_eq!(node2.dht().successors().list()?, vec![
             node1.did(),
             node3.did()
         ]);
-        assert_eq!(node3.dht().lock_successor()?.list(), vec![
+        assert_eq!(node3.dht().successors().list()?, vec![
             node2.did(),
             node1.did()
         ]);

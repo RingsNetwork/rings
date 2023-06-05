@@ -133,6 +133,12 @@ pub enum Error {
     #[error("Invalid PeerRingAction")]
     PeerRingInvalidAction,
 
+    #[error("Failed on read successors")]
+    FailedToReadSuccessors,
+
+    #[error("Failed on write successors")]
+    FailedToWriteSuccessors,
+
     #[error("Failed on TryInto VNode")]
     PeerRingInvalidVNode,
 

@@ -6,6 +6,8 @@ use std::sync::MutexGuard;
 
 use async_trait::async_trait;
 use num_bigint::BigUint;
+use serde::Deserialize;
+use serde::Serialize;
 
 use super::did::BiasId;
 use super::successor::SuccessorSeq;
@@ -18,6 +20,9 @@ use super::vnode::VNodeOperation;
 use super::vnode::VirtualNode;
 use super::FingerTable;
 use crate::dht::Did;
+use crate::dht::LiveDid;
+use crate::dht::SuccessorReader;
+use crate::dht::SuccessorWriter;
 use crate::err::Error;
 use crate::err::Result;
 use crate::storage::MemStorage;
@@ -39,7 +44,7 @@ pub struct PeerRing {
     /// The next node on the ring.
     /// The [SuccessorSeq] may contain multiple node dids for fault tolerance.
     /// The min did should be same as the first element in finger table.
-    pub successor_seq: Arc<Mutex<SuccessorSeq>>,
+    pub successor_seq: SuccessorSeq,
     /// The did of previous node on the ring.
     pub predecessor: Arc<Mutex<Option<Did>>>,
     /// Local storage for [ChordStorage].
@@ -97,19 +102,23 @@ pub enum RemoteAction {
     QueryForSuccessorList,
     /// Fetch successor_list and pred from successor
     QueryForSuccessorListAndPred,
+    /// Try connect to a Node
+    TryConnect,
 }
 
 /// Information about successor and predecessor
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
 pub struct TopoInfo {
-    successors: Vec<Did>,
-    predecessor: Option<Did>,
+    /// Successor list
+    pub successors: Vec<Did>,
+    /// Predecessor
+    pub predecessor: Option<Did>,
 }
 
 impl TryFrom<&PeerRing> for TopoInfo {
     type Error = Error;
     fn try_from(dht: &PeerRing) -> Result<TopoInfo> {
-        let successors = dht.lock_successor()?.list();
+        let successors = dht.successors().list()?;
         let predecessor = *dht.lock_predecessor()?;
         Ok(TopoInfo {
             successors,
@@ -174,7 +183,7 @@ impl PeerRing {
     /// Same as new with config, but with a given storage.
     pub fn new_with_storage(did: Did, succ_max: u8, storage: PersistenceStorage) -> Self {
         Self {
-            successor_seq: Arc::new(Mutex::new(SuccessorSeq::new(did, succ_max))),
+            successor_seq: SuccessorSeq::new(did, succ_max),
             predecessor: Arc::new(Mutex::new(None)),
             // for Eth address, it's 160
             finger: Arc::new(Mutex::new(FingerTable::new(did, 160))),
@@ -184,11 +193,15 @@ impl PeerRing {
         }
     }
 
-    /// Lock and return MutexGuard of successor sequence.
-    pub fn lock_successor(&self) -> Result<MutexGuard<SuccessorSeq>> {
-        self.successor_seq
-            .lock()
-            .map_err(|_| Error::DHTSyncLockError)
+    /// Return successor sequence. This function is deprecated, please use [chord.successors] instead.
+    #[deprecated]
+    pub fn lock_successor(&self) -> Result<SuccessorSeq> {
+        Ok(self.successor_seq.clone())
+    }
+
+    /// Return successor sequence
+    pub fn successors(&self) -> SuccessorSeq {
+        self.successor_seq.clone()
     }
 
     /// Lock and return MutexGuard of finger table.
@@ -206,7 +219,7 @@ impl PeerRing {
     /// If successor_seq become empty, try setting the closest node to it.
     pub fn remove(&self, did: Did) -> Result<()> {
         let mut finger = self.lock_finger()?;
-        let mut successor = self.lock_successor()?;
+        let successor = self.successors();
         let mut predecessor = self.lock_predecessor()?;
         if let Some(pid) = *predecessor {
             if pid == did {
@@ -214,10 +227,10 @@ impl PeerRing {
             }
         }
         finger.remove(did);
-        successor.remove(did);
-        if successor.is_empty() {
+        successor.remove(did)?;
+        if successor.is_empty()? {
             if let Some(x) = finger.first() {
-                successor.update(x);
+                successor.update(x)?;
             }
         }
         Ok(())
@@ -243,17 +256,10 @@ impl Chord<PeerRingAction> for PeerRing {
         }
 
         let mut finger = self.lock_finger()?;
-        let mut successor = self.lock_successor()?;
 
         finger.join(did);
-
-        if self.bias(did) < self.bias(successor.max()) || !successor.is_full() {
-            // 1) id should follows self.id
-            // 2) #fff should follow #001 because id space is a Finate Ring
-            // 3) #001 - #fff = #001 + -(#fff) = #001
-            successor.update(did);
-        }
-
+        // Always try update
+        self.successors().update(did)?;
         Ok(PeerRingAction::RemoteAction(
             did,
             RemoteAction::FindSuccessorForConnect(self.did),
@@ -263,14 +269,14 @@ impl Chord<PeerRingAction> for PeerRing {
     /// Find the successor of a Did.
     /// May return a remote action for the successor is recorded in another node.
     fn find_successor(&self, did: Did) -> Result<PeerRingAction> {
-        let successor = self.lock_successor()?;
+        let successor = self.successors();
         let finger = self.lock_finger()?;
 
         let succ = {
-            if successor.is_empty() || self.bias(did) <= self.bias(successor.min()) {
+            if successor.is_empty()? || self.bias(did) <= self.bias(successor.min()?) {
                 // If the did is closer to self than successor, return successor as the
                 // successor of that did.
-                Ok(PeerRingAction::Some(successor.min()))
+                Ok(PeerRingAction::Some(successor.min()?))
             } else {
                 // Otherwise, find the closest preceding node and ask it to find the successor.
                 let closest_predecessor = finger.closest_predecessor(did);
@@ -501,15 +507,53 @@ impl ChordStorageCache<PeerRingAction> for PeerRing {
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl CorrectChord<PeerRingAction> for PeerRing {
+    /// When Chord have a new successor, ask the new successor for successor list
+    async fn update_successor(&self, did: impl LiveDid) -> Result<PeerRingAction> {
+        let is_live = did.live().await;
+        if !is_live {
+            return Ok(PeerRingAction::RemoteAction(
+                did.into(),
+                RemoteAction::TryConnect,
+            ));
+        }
+        if let Some(new_succ) = self.successors().update(did.into())? {
+            Ok(PeerRingAction::RemoteAction(
+                new_succ,
+                RemoteAction::QueryForSuccessorList,
+            ))
+        } else {
+            Ok(PeerRingAction::None)
+        }
+    }
+
+    async fn extend_successor(&self, dids: &[impl LiveDid]) -> Result<PeerRingAction> {
+        let mut ret: Vec<PeerRingAction> = vec![];
+        for did in dids {
+            if let PeerRingAction::RemoteAction(r, act) = self.update_successor(did.clone()).await?
+            {
+                ret.push(PeerRingAction::RemoteAction(r, act))
+            }
+        }
+        Ok(PeerRingAction::MultiActions(ret))
+    }
+
     /// Join Operation in the paper.
     /// Zave's work differs from the original Chord paper in that it requires
     /// a newly joined node to synchronize its successors from remote nodes.
-    fn join_then_sync(&self, did: Did) -> Result<PeerRingAction> {
-        let act = self.join(did)?;
-        Ok(PeerRingAction::MultiActions(vec![
-            act,
-            PeerRingAction::RemoteAction(did, RemoteAction::QueryForSuccessorList),
-        ]))
+    async fn join_then_sync(&self, did: impl LiveDid) -> Result<PeerRingAction> {
+        let is_live = did.live().await;
+        if !is_live {
+            return Ok(PeerRingAction::None);
+        }
+        let mut ret: Vec<PeerRingAction> = vec![];
+        let succ_act = self.update_successor(did.clone()).await?;
+        if succ_act.is_remote() {
+            ret.push(succ_act)
+        }
+        let join_act = self.join(did.into())?;
+        ret.push(join_act);
+
+        Ok(PeerRingAction::MultiActions(ret))
     }
 
     /// TODO: Please check this function and make sure it is correct.
@@ -524,11 +568,11 @@ impl CorrectChord<PeerRingAction> for PeerRing {
     /// Before stabilizing, the node should query its first successor for TopoInfo.
     /// If there are no successors, return PeerRingAction::None.
     fn pre_stabilize(&self) -> Result<PeerRingAction> {
-        let successor = self.lock_successor()?;
-        if successor.is_empty() {
+        let successor = self.successors();
+        if successor.is_empty()? {
             return Ok(PeerRingAction::None);
         }
-        let head = successor.min();
+        let head = successor.min()?;
         Ok(PeerRingAction::RemoteAction(
             head,
             RemoteAction::QueryForSuccessorListAndPred,
@@ -539,16 +583,16 @@ impl CorrectChord<PeerRingAction> for PeerRing {
     /// Perform stabilization for the successor list.
     fn stabilize(&self, info: TopoInfo) -> Result<PeerRingAction> {
         let mut ret = vec![];
-        let mut successors = self.lock_successor()?;
+        let successors = self.successors();
         let succ_len = info.successors.len();
         let but_last = &info.successors[..succ_len - 1].to_vec();
         if let Some(new_succ) = info.predecessor {
-            successors.update(new_succ);
+            successors.update(new_succ)?;
         }
-        successors.extend(but_last);
+        successors.extend(but_last)?;
         // Check if the new successor is between  new_succ and head(successors).
         if let Some(new_succ) = info.predecessor {
-            if self.bias(new_succ) < self.bias(successors.min()) {
+            if self.bias(new_succ) < self.bias(successors.min()?) {
                 // If new_succ is between self.did and the head of the successor list,
                 // query newSucc for its successor list.
                 ret.push(PeerRingAction::RemoteAction(
@@ -558,7 +602,7 @@ impl CorrectChord<PeerRingAction> for PeerRing {
             }
             // Notify the node's minimum successor of its existence.
             ret.push(PeerRingAction::RemoteAction(
-                successors.min(),
+                successors.min()?,
                 RemoteAction::Notify(self.did),
             ));
         }
@@ -619,12 +663,12 @@ mod tests {
 
         // Setup node_a and ensure its successor sequence and finger table is empty.
         let node_a = PeerRing::new_with_storage(a, 3, db_1);
-        assert!(node_a.lock_successor()?.is_empty());
+        assert!(node_a.successors().is_empty()?);
         assert!(node_a.lock_finger()?.is_empty());
 
         // Test a node won't set itself to successor sequence and finger table.
         assert_eq!(node_a.join(a)?, PeerRingAction::None);
-        assert!(node_a.lock_successor()?.is_empty());
+        assert!(node_a.successors().is_empty()?);
         assert!(node_a.lock_finger()?.is_empty());
 
         // Test join ring with node_b.
@@ -650,15 +694,15 @@ mod tests {
         assert_eq!(node_a.lock_finger()?.list(), &expected_finger_list);
 
         // After join, the successor sequence of node_a should be [b].
-        assert_eq!(node_a.lock_successor()?.list(), vec![b]);
+        assert_eq!(node_a.successors().list()?, vec![b]);
 
         // Test repeated join.
         node_a.join(b)?;
         assert_eq!(node_a.lock_finger()?.list(), &expected_finger_list);
-        assert_eq!(node_a.lock_successor()?.list(), vec![b]);
+        assert_eq!(node_a.successors().list()?, vec![b]);
         node_a.join(b)?;
         assert_eq!(node_a.lock_finger()?.list(), &expected_finger_list);
-        assert_eq!(node_a.lock_successor()?.list(), vec![b]);
+        assert_eq!(node_a.successors().list()?, vec![b]);
 
         // Test join ring with node_c.
         // We don't need to setup node_c here, we just use its did.
@@ -684,7 +728,7 @@ mod tests {
 
         // After join, the successor sequence of node_a should be [b, c].
         // Because although node_b is closer to node_a, the sequence is not full.
-        assert_eq!(node_a.lock_successor()?.list(), vec![b, c]);
+        assert_eq!(node_a.successors().list()?, vec![b, c]);
 
         // When try to find_successor of node_d, node_a will send query to node_c.
         assert_eq!(
@@ -707,7 +751,7 @@ mod tests {
         );
         let expected_finger_list = repeat(Some(c)).take(160).collect::<Vec<_>>();
         assert_eq!(node_a.lock_finger()?.list(), &expected_finger_list);
-        assert_eq!(node_a.lock_successor()?.list(), vec![c]);
+        assert_eq!(node_a.successors().list()?, vec![c]);
 
         // Test join ring with node_b.
         assert_eq!(
@@ -717,7 +761,7 @@ mod tests {
         let mut expected_finger_list = repeat(Some(b)).take(157).collect::<Vec<_>>();
         expected_finger_list.extend(repeat(Some(c)).take(3));
         assert_eq!(node_a.lock_finger()?.list(), &expected_finger_list);
-        assert_eq!(node_a.lock_successor()?.list(), vec![b, c]);
+        assert_eq!(node_a.successors().list()?, vec![b, c]);
 
         // Test join over half ring.
         let node_d = PeerRing::new_with_storage(d, 1, db_3);
@@ -738,7 +782,7 @@ mod tests {
         assert_eq!(node_d.lock_finger()?.list(), &expected_finger_list);
 
         // After join, the successor sequence of node_a should be [a].
-        assert_eq!(node_d.lock_successor()?.list(), vec![a]);
+        assert_eq!(node_d.successors().list()?, vec![a]);
 
         // Test join ring with node_b.
         assert_eq!(
@@ -761,7 +805,7 @@ mod tests {
         // Note the max successor sequence size of node_d is set to 1 when created.
         // After join, the successor sequence of node_a should still be [a].
         // Because node_a is closer to node_d, and the sequence is full.
-        assert_eq!(node_d.lock_successor()?.list(), vec![a]);
+        assert_eq!(node_d.successors().list()?, vec![a]);
 
         tokio::fs::remove_dir_all("./tmp").await.ok();
         Ok(())
@@ -789,8 +833,8 @@ mod tests {
 
         node1.join(did2)?;
         node2.join(did1)?;
-        assert!(node1.lock_successor()?.list().contains(&did2));
-        assert!(node2.lock_successor()?.list().contains(&did1));
+        assert!(node1.successors().list()?.contains(&did2));
+        assert!(node2.successors().list()?.contains(&did1));
 
         assert!(
             node1.lock_finger()?.contains(Some(did2)),
@@ -829,8 +873,8 @@ mod tests {
 
         node1.join(did2)?;
         node2.join(did1)?;
-        assert!(node1.lock_successor()?.list().contains(&did2));
-        assert!(node2.lock_successor()?.list().contains(&did1));
+        assert!(node1.successors().list()?.contains(&did2));
+        assert!(node2.successors().list()?.contains(&did1));
         let pos_159 = did2 + Did::from(BigUint::from(2u16).pow(159));
         assert!(pos_159 > did2);
         assert!(pos_159 < max, "{:?};{:?}", pos_159, max);
@@ -859,22 +903,22 @@ mod tests {
     #[tokio::test]
     async fn test_correct_chord_impl() -> Result<()> {
         fn assert_successor(dht: &PeerRing, did: &Did) -> bool {
-            let succ_list = dht.lock_successor().unwrap();
-            succ_list.list().contains(did)
+            let succ_list = dht.successors();
+            succ_list.list().unwrap().contains(did)
         }
 
         /// check that two dht is mutual successors
         fn check_is_mutual_successors(dht1: &PeerRing, dht2: &PeerRing) {
-            let succ_list_1 = dht1.lock_successor().unwrap();
-            let succ_list_2 = dht2.lock_successor().unwrap();
-            assert_eq!(succ_list_1.min(), dht2.did);
-            assert_eq!(succ_list_2.min(), dht1.did);
+            let succ_list_1 = dht1.successors();
+            let succ_list_2 = dht2.successors();
+            assert_eq!(succ_list_1.min().unwrap(), dht2.did);
+            assert_eq!(succ_list_2.min().unwrap(), dht1.did);
         }
 
         fn check_succ_is_including(dht: &PeerRing, dids: Vec<Did>) {
-            let succ_list = dht.lock_successor().unwrap();
+            let succ_list = dht.successors();
             for did in dids {
-                assert!(succ_list.list().contains(&did));
+                assert!(succ_list.list().unwrap().contains(&did));
             }
         }
 
@@ -904,7 +948,16 @@ mod tests {
         n1.join(n5.did).unwrap();
         // n5 is not in n1's successor list
         assert!(!assert_successor(&n1, &n5.did));
-        if let PeerRingAction::MultiActions(rets) = n5.join_then_sync(n1.did).unwrap() {
+
+        #[cfg_attr(feature = "wasm", async_trait(?Send))]
+        #[cfg_attr(not(feature = "wasm"), async_trait)]
+        impl LiveDid for Did {
+            async fn live(&self) -> bool {
+                true
+            }
+        }
+
+        if let PeerRingAction::MultiActions(rets) = n5.join_then_sync(n1.did).await.unwrap() {
             for r in rets {
                 if let PeerRingAction::RemoteAction(t, _) = r {
                     assert_eq!(t, n1.did.clone())
