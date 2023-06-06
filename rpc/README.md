@@ -519,7 +519,7 @@ curl -X POST \
   - `path` - resource path
   - `timeout` - timeout of remote request, optional
   - `headers` - remote request with headers, optional
-  - `body` - reuqest body what you want to send to remote service, optional
+  - `body` - request body what you want to send to remote service, optional
 
 #### RESPONSE
 
