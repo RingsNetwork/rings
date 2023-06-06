@@ -20,7 +20,6 @@ use crate::prelude::jsonrpc_core::Params;
 use crate::prelude::jsonrpc_core::Result;
 use crate::prelude::jsonrpc_core::Value;
 use crate::prelude::rings_core::dht::Did;
-
 use crate::prelude::rings_core::message::Decoder;
 use crate::prelude::rings_core::message::Encoded;
 use crate::prelude::rings_core::message::Encoder;
