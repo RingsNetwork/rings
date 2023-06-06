@@ -20,7 +20,12 @@ use crate::prelude::jsonrpc_core::Params;
 use crate::prelude::jsonrpc_core::Result;
 use crate::prelude::jsonrpc_core::Value;
 use crate::prelude::rings_core::dht::Did;
+
+use crate::prelude::rings_core::message::Decoder;
+use crate::prelude::rings_core::message::Encoded;
 use crate::prelude::rings_core::message::Encoder;
+use crate::prelude::rings_core::message::Message;
+use crate::prelude::rings_core::message::MessagePayload;
 use crate::prelude::rings_core::prelude::vnode::VirtualNode;
 use crate::prelude::rings_core::transports::manager::TransportHandshake;
 use crate::prelude::rings_core::transports::manager::TransportManager;
@@ -187,7 +192,10 @@ async fn create_offer(_params: Params, meta: RpcMeta) -> Result<Value> {
         .map_err(ServerError::CreateOffer)
         .map_err(Error::from)?;
 
-    serde_json::to_value(offer_payload)
+    let encoded = offer_payload
+        .encode()
+        .map_err(|_| ServerError::EncodeError)?;
+    serde_json::to_value(encoded)
         .map_err(ServerError::SerdeJsonError)
         .map_err(Error::from)
 }
@@ -198,9 +206,9 @@ async fn answer_offer(params: Params, meta: RpcMeta) -> Result<Value> {
     let offer_payload_str = p
         .first()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
-
-    let offer_payload = serde_json::from_str(offer_payload_str)
-        .map_err(|_| Error::new(ErrorCode::InvalidParams))?;
+    let encoded: Encoded = <Encoded as From<&str>>::from(offer_payload_str);
+    let offer_payload =
+        MessagePayload::<Message>::from_encoded(&encoded).map_err(|_| ServerError::DecodeError)?;
 
     let (_, answer_payload) = meta
         .processor
@@ -211,7 +219,10 @@ async fn answer_offer(params: Params, meta: RpcMeta) -> Result<Value> {
         .map_err(Error::from)?;
 
     tracing::debug!("connect_peer_via_ice response: {:?}", answer_payload);
-    serde_json::to_value(answer_payload)
+    let encoded = answer_payload
+        .encode()
+        .map_err(|_| ServerError::EncodeError)?;
+    serde_json::to_value(encoded)
         .map_err(ServerError::SerdeJsonError)
         .map_err(Error::from)
 }
@@ -224,10 +235,9 @@ async fn accept_answer(params: Params, meta: RpcMeta) -> Result<Value> {
     let answer_payload_str = p
         .first()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
-
-    let answer_payload = serde_json::from_str(answer_payload_str)
-        .map_err(|_| Error::new(ErrorCode::InvalidParams))?;
-
+    let encoded: Encoded = <Encoded as From<&str>>::from(answer_payload_str);
+    let answer_payload =
+        MessagePayload::<Message>::from_encoded(&encoded).map_err(|_| ServerError::DecodeError)?;
     let p: processor::Peer = meta
         .processor
         .swarm
