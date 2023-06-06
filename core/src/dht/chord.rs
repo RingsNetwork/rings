@@ -144,7 +144,7 @@ impl PeerRingAction {
         false
     }
 
-    /// Returns `true` if the action is a [PeerRingAction::SomeVnode] value.
+    /// Returns `true` if the action is a [PeerRingAction::SomeVNode] value.
     pub fn is_some_vnode(&self) -> bool {
         if let Self::SomeVNode(_) = self {
             return true;
