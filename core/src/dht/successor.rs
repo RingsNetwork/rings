@@ -14,8 +14,6 @@ use crate::err::Result;
 /// It's necessary to have multiple successors to prevent a single point of failure.
 /// Note the successors are in order of a clockwise distance from the node.
 /// See also [super::did::BiasId].
-/// Structure representing the sequence of successors in a Distributed Hash Table (DHT).
-/// This helps to prevent a single point of failure.
 #[derive(Debug, Clone)]
 pub struct SuccessorSeq {
     /// The identifier of a node
