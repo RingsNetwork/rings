@@ -255,11 +255,13 @@ If you have a bug report or feature request, please open an issue on GitHub.
 
 If you'd like to contribute code, please follow these steps:
 
+```text
     Fork the repository on GitHub.
     Create a new branch for your changes.
     Make your changes and commit them with descriptive commit messages.
     Push your changes to your fork.
     Create a pull request from your branch to the main repository.
+```
 
 We'll review your pull request as soon as we can, and we appreciate your contributions!
 
