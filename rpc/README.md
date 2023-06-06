@@ -7,6 +7,9 @@
 Rings RPC
 ===============
 
+[![rings-node](https://github.com/RingsNetwork/rings-node/actions/workflows/rings-node.yml/badge.svg)](https://github.com/RingsNetwork/rings-node/actions/workflows/rings-node.yml)
+
+
 # JSON-RPC API endpoints
 
 ### Make requests
