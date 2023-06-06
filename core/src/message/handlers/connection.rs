@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 
+use crate::dht::successor::SuccessorWriter;
 use crate::dht::Chord;
 use crate::dht::ChordStorageSync;
 use crate::dht::PeerRingAction;
@@ -161,7 +162,7 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
             }
             FindSuccessorReportHandler::Connect => Ok(vec![MessageHandlerEvent::Connect(msg.did)]),
             FindSuccessorReportHandler::SyncStorage => {
-                self.dht.lock_successor()?.update(msg.did);
+                self.dht.successors().update(msg.did)?;
                 if let Ok(PeerRingAction::RemoteAction(
                     next,
                     PeerRingRemoteAction::SyncVNodeWithSuccessor(data),
@@ -190,6 +191,7 @@ pub mod tests {
     use tokio::time::Duration;
 
     use super::*;
+    use crate::dht::successor::SuccessorReader;
     use crate::dht::Did;
     use crate::ecc::tests::gen_ordered_keys;
     use crate::ecc::SecretKey;
@@ -327,9 +329,9 @@ pub mod tests {
 
         test_only_two_nodes_establish_connection(&node1, &node2).await?;
 
-        assert_eq!(node1.dht().lock_successor()?.list(), vec![node2.did()]);
-        assert_eq!(node2.dht().lock_successor()?.list(), vec![node1.did()]);
-        assert_eq!(node3.dht().lock_successor()?.list(), vec![]);
+        assert_eq!(node1.dht().successors().list()?, vec![node2.did()]);
+        assert_eq!(node2.dht().successors().list()?, vec![node1.did()]);
+        assert_eq!(node3.dht().successors().list()?, vec![]);
 
         println!("========================================");
         println!("||  now we start join node3 to node2  ||");
@@ -338,12 +340,12 @@ pub mod tests {
         manually_establish_connection(&node3, &node2).await?;
         test_listen_join_and_init_find_succeesor(&node3, &node2).await?;
 
-        assert_eq!(node1.dht().lock_successor()?.list(), vec![node2.did()]);
-        assert_eq!(node2.dht().lock_successor()?.list(), vec![
+        assert_eq!(node1.dht().successors().list()?, vec![node2.did()]);
+        assert_eq!(node2.dht().successors().list()?, vec![
             node3.did(),
             node1.did()
         ]);
-        assert_eq!(node3.dht().lock_successor()?.list(), vec![node2.did()]);
+        assert_eq!(node3.dht().successors().list()?, vec![node2.did()]);
 
         // 2->3 FindSuccessorReport
         // node2 report node3 as node3's successor to node3
@@ -366,7 +368,7 @@ pub mod tests {
             Message::FindSuccessorReport(FindSuccessorReport{did, handler: FindSuccessorReportHandler::Connect}) if did == node3.did()
         ));
         // dht3 won't set did3 as successor
-        assert!(!node3.dht().lock_successor()?.list().contains(&node3.did()));
+        assert!(!node3.dht().successors().list()?.contains(&node3.did()));
 
         // 3->2 FindSuccessorReport
         // node3 report node2 as node2's successor to node2
@@ -379,18 +381,18 @@ pub mod tests {
             Message::FindSuccessorReport(FindSuccessorReport{did, handler: FindSuccessorReportHandler::Connect}) if did == node2.did()
         ));
         // dht2 won't set did2 as successor
-        assert!(!node2.dht().lock_successor()?.list().contains(&node2.did()));
+        assert!(!node2.dht().successors().list()?.contains(&node2.did()));
 
         println!("=== Check state before connect via DHT ===");
         assert_transports(node1.clone(), vec![node2.did()]);
         assert_transports(node2.clone(), vec![node1.did(), node3.did()]);
         assert_transports(node3.clone(), vec![node2.did()]);
-        assert_eq!(node1.dht().lock_successor()?.list(), vec![node2.did()]);
-        assert_eq!(node2.dht().lock_successor()?.list(), vec![
+        assert_eq!(node1.dht().successors().list()?, vec![node2.did()]);
+        assert_eq!(node2.dht().successors().list()?, vec![
             node3.did(),
             node1.did()
         ]);
-        assert_eq!(node3.dht().lock_successor()?.list(), vec![node2.did()]);
+        assert_eq!(node3.dht().successors().list()?, vec![node2.did()]);
 
         println!("=============================================");
         println!("||  now we connect node1 to node3 via DHT  ||");
@@ -419,7 +421,7 @@ pub mod tests {
             Message::FindSuccessorReport(FindSuccessorReport{did, handler: FindSuccessorReportHandler::Connect}) if did == node1.did()
         ));
         // dht1 won't set did1 as successor
-        assert!(!node1.dht().lock_successor()?.list().contains(&node1.did()));
+        assert!(!node1.dht().successors().list()?.contains(&node1.did()));
 
         // 2->1 FindSuccessorReport
         let ev_1 = node1.listen_once().await.unwrap().0;
@@ -435,7 +437,7 @@ pub mod tests {
             Message::FindSuccessorReport(FindSuccessorReport{did, handler: FindSuccessorReportHandler::Connect}) if did == node3.did()
         ));
         // dht3 won't set did3 as successor
-        assert!(!node3.dht().lock_successor()?.list().contains(&node3.did()));
+        assert!(!node3.dht().successors().list()?.contains(&node3.did()));
 
         assert_no_more_msg(&node1, &node2, &node3).await;
 
@@ -443,15 +445,15 @@ pub mod tests {
         assert_transports(node1.clone(), vec![node2.did(), node3.did()]);
         assert_transports(node2.clone(), vec![node1.did(), node3.did()]);
         assert_transports(node3.clone(), vec![node1.did(), node2.did()]);
-        assert_eq!(node1.dht().lock_successor()?.list(), vec![
+        assert_eq!(node1.dht().successors().list()?, vec![
             node2.did(),
             node3.did()
         ]);
-        assert_eq!(node2.dht().lock_successor()?.list(), vec![
+        assert_eq!(node2.dht().successors().list()?, vec![
             node3.did(),
             node1.did()
         ]);
-        assert_eq!(node3.dht().lock_successor()?.list(), vec![
+        assert_eq!(node3.dht().successors().list()?, vec![
             node1.did(),
             node2.did()
         ]);
@@ -474,9 +476,9 @@ pub mod tests {
 
         test_only_two_nodes_establish_connection(&node1, &node2).await?;
 
-        assert_eq!(node1.dht().lock_successor()?.list(), vec![node2.did()]);
-        assert_eq!(node2.dht().lock_successor()?.list(), vec![node1.did()]);
-        assert_eq!(node3.dht().lock_successor()?.list(), vec![]);
+        assert_eq!(node1.dht().successors().list()?, vec![node2.did()]);
+        assert_eq!(node2.dht().successors().list()?, vec![node1.did()]);
+        assert_eq!(node3.dht().successors().list()?, vec![]);
 
         println!("========================================");
         println!("||  now we start join node3 to node2  ||");
@@ -485,12 +487,12 @@ pub mod tests {
         manually_establish_connection(&node3, &node2).await?;
         test_listen_join_and_init_find_succeesor(&node3, &node2).await?;
 
-        assert_eq!(node1.dht().lock_successor()?.list(), vec![node2.did()]);
-        assert_eq!(node2.dht().lock_successor()?.list(), vec![
+        assert_eq!(node1.dht().successors().list()?, vec![node2.did()]);
+        assert_eq!(node2.dht().successors().list()?, vec![
             node1.did(),
             node3.did()
         ]);
-        assert_eq!(node3.dht().lock_successor()?.list(), vec![node2.did()]);
+        assert_eq!(node3.dht().successors().list()?, vec![node2.did()]);
 
         // 3->2->1 FindSuccessorSend
         // node2 think node1 is closer than itself to node3, so it relay msg to node1
@@ -523,7 +525,7 @@ pub mod tests {
             Message::FindSuccessorReport(FindSuccessorReport{did, handler: FindSuccessorReportHandler::Connect}) if did == node2.did()
         ));
         // dht2 won't set did2 as successor
-        assert!(!node2.dht().lock_successor()?.list().contains(&node2.did()));
+        assert!(!node2.dht().successors().list()?.contains(&node2.did()));
 
         // 1->2 FindSuccessorReport
         // node1 report node2 as node3's successor to node2
@@ -550,12 +552,12 @@ pub mod tests {
         assert_transports(node1.clone(), vec![node2.did()]);
         assert_transports(node2.clone(), vec![node1.did(), node3.did()]);
         assert_transports(node3.clone(), vec![node2.did()]);
-        assert_eq!(node1.dht().lock_successor()?.list(), vec![node2.did()]);
-        assert_eq!(node2.dht().lock_successor()?.list(), vec![
+        assert_eq!(node1.dht().successors().list()?, vec![node2.did()]);
+        assert_eq!(node2.dht().successors().list()?, vec![
             node1.did(),
             node3.did()
         ]);
-        assert_eq!(node3.dht().lock_successor()?.list(), vec![node2.did()]);
+        assert_eq!(node3.dht().successors().list()?, vec![node2.did()]);
 
         println!("=============================================");
         println!("||  now we connect node1 to node3 via DHT  ||");
@@ -584,7 +586,7 @@ pub mod tests {
             Message::FindSuccessorReport(FindSuccessorReport{did, handler: FindSuccessorReportHandler::Connect}) if did == node3.did()
         ));
         // dht3 won't set did3 as successor
-        assert!(!node3.dht.lock_successor()?.list().contains(&node3.did()));
+        assert!(!node3.dht.successors().list()?.contains(&node3.did()));
 
         // 2->3 FindSuccessorReport
         let ev_3 = node3.listen_once().await.unwrap().0;
@@ -600,7 +602,7 @@ pub mod tests {
             Message::FindSuccessorReport(FindSuccessorReport{did, handler: FindSuccessorReportHandler::Connect}) if did == node1.did()
         ));
         // dht1 won't set did1 as successor
-        assert!(!node1.dht.lock_successor()?.list().contains(&node1.did()));
+        assert!(!node1.dht.successors().list()?.contains(&node1.did()));
 
         assert_no_more_msg(&node1, &node2, &node3).await;
 
@@ -608,15 +610,15 @@ pub mod tests {
         assert_transports(node1.clone(), vec![node2.did(), node3.did()]);
         assert_transports(node2.clone(), vec![node1.did(), node3.did()]);
         assert_transports(node3.clone(), vec![node1.did(), node2.did()]);
-        assert_eq!(node1.dht().lock_successor()?.list(), vec![
+        assert_eq!(node1.dht().successors().list()?, vec![
             node3.did(),
             node2.did()
         ]);
-        assert_eq!(node2.dht().lock_successor()?.list(), vec![
+        assert_eq!(node2.dht().successors().list()?, vec![
             node1.did(),
             node3.did()
         ]);
-        assert_eq!(node3.dht().lock_successor()?.list(), vec![
+        assert_eq!(node3.dht().successors().list()?, vec![
             node2.did(),
             node1.did()
         ]);
@@ -680,7 +682,7 @@ pub mod tests {
             Message::FindSuccessorReport(FindSuccessorReport{did, handler: FindSuccessorReportHandler::Connect}) if did == node1.did()
         ));
         // dht1 won't set dhd1 as successor
-        assert!(!node1.dht().lock_successor()?.list().contains(&node1.did()));
+        assert!(!node1.dht().successors().list()?.contains(&node1.did()));
 
         // 1->2 FindSuccessorReport
         // node1 report node2 as node2's successor to node2
@@ -693,7 +695,7 @@ pub mod tests {
             Message::FindSuccessorReport(FindSuccessorReport{did, handler: FindSuccessorReportHandler::Connect}) if did == node2.did()
         ));
         // dht2 won't set did2 as successor
-        assert!(!node2.dht().lock_successor()?.list().contains(&node2.did()));
+        assert!(!node2.dht().successors().list()?.contains(&node2.did()));
 
         Ok(())
     }
@@ -707,7 +709,7 @@ pub mod tests {
         assert!(node1.get_transport(node3.did()).is_none());
 
         // node1's successor should be node2 now
-        assert_eq!(node1.dht.lock_successor()?.max(), node2.did());
+        assert_eq!(node1.dht.successors().max()?, node2.did());
 
         node1.connect(node3.did()).await.unwrap();
 

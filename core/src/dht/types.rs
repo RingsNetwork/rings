@@ -92,30 +92,97 @@ pub trait ChordStorageCache<Action>: Chord<Action> {
 }
 
 /// Chord online correction that inspired by Pamela Zave's work.
+/// Ref: [How to Make Chord Correct](https://arxiv.org/pdf/1502.06461.pdf)
 ///
-/// TODO: Comment out why do we need those operations. What problems do they solve? And how?
+/// Correct Chord reveals two facts:
 ///
-/// This trait defines three operations which are referred in the paper:
+/// 1. Chord must be initialized with a ring containing a minimum of r + 1 nodes,
+///    where r is the length of each node's list of successors. To be proven correct,
+///    a Chord network must maintain a "stable base" of r + 1 nodes that remain members
+///    of the network throughout its lifetime.
+///
+/// 2. The Chord paper defined the maintenance and use of finger tables, which improve
+///    lookup speed by providing pointers that cross the ring like chords of a circle.
+///    Because finger tables are an optimization and they are built from successors and
+///    predecessors, correctness does not depend on them.
+///
+/// Based on the above facts, trait CorrectChord only focuses on handling join and stabilization
+/// operations of Chord.
+///
+/// This trait defines three operations referred to in the paper:
+///
 /// - Join Operation
 /// - Rectify Operation
 /// - Stabilize Operation
 ///
 /// This trait also defines two more methods:
-/// - The `pre_stabilize` is the precondition of Stabilize Operation.
-/// - And `topo_info` is a help function to get the topological info of the chord.
 ///
-/// Some methods return an `Action`. And the reason is same as [Chord].
+/// - The `pre_stabilize` is the precondition of Stabilize Operation.
+/// - `topo_info` is a helper function to get the topological info of the chord.
+///
+/// Some methods return an `Action`. The reason is the same as [Chord].
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait CorrectChord<Action>: Chord<Action> {
     /// Join Operation in the paper.
-    /// Zave's work differs from the original Chord paper in that it requires
-    /// a newly joined node to synchronize its successors from remote nodes.
-    fn join_then_sync(&self, did: Did) -> Result<Action>;
+    ///
+    /// First, the node asks the known node to look up the node's did and get its proper
+    /// successor, storing the value as new successor. The node then queries new successor
+    /// for its successor list (same as the original Chord). Finally, the node constructs
+    /// its own successor list by concatenating new successor and new successor's successor
+    /// list, with the last element of the list trimmed off to produce a result of fixed length.
+    async fn join_then_sync(&self, did: impl LiveDid) -> Result<Action>;
+
     /// Rectify Operation in the paper.
+    ///
+    /// A node rectifies when it is notified.
     fn rectify(&self, pred: Did) -> Result<()>;
+
     /// Steps before Stabilize Operation.
+    ///
+    /// When a node fails or leaves, it ceases to stabilize, notify, or respond to queries
+    /// from other nodes. When a node rejoins, it re-initializes its Chord variables. The node
+    /// (self) queries its successor for its successor's predecessor and successor list.
     fn pre_stabilize(&self) -> Result<Action>;
+
     /// Stabilize operation in the paper.
+    ///
+    /// The node first updates its successor list with its successor's list. It then checks
+    /// to see if the new pointer it has learned, its successor's predecessor, is an improved
+    /// successor. If so, and if new successor is live, it adopts newSucc as its new successor.
+    /// Thus the stabilize operation requires one or two queries for each traversal of the
+    /// outer loop. Whether or not there is a live improved successor, the node notifies its
+    /// successor of its own identity.
     fn stabilize(&self, succ: TopoInfo) -> Result<Action>;
-    /// A help function to get the topological info about the chord.
+
+    /// A helper function to get the topological
+    /// info about the chord.
     fn topo_info(&self) -> Result<TopoInfo>;
+
+    /// Hook of updating successor
+    async fn update_successor(&self, did: impl LiveDid) -> Result<Action>;
+    /// Hook of updating successor
+    async fn extend_successor(&self, did: &[impl LiveDid]) -> Result<Action>;
+}
+
+/// Trait `LiveDid` defines a wrapper for `Did` that can check whether the `Did` is live or not.
+///
+/// Implementors of this trait must also be convertible into a `Did` type using the `Into` trait, and
+/// must satisfy some additional constraints (see below).
+#[cfg(feature = "wasm")]
+#[async_trait(?Send)]
+pub trait LiveDid: Into<Did> + Clone {
+    /// Necessary method, should return true if a wrapped did is live.
+    async fn live(&self) -> bool;
+}
+
+/// Trait `LiveDid` defines a wrapper for `Did` that can check whether the `Did` is live or not.
+///
+/// Implementors of this trait must also be convertible into a `Did` type using the `Into` trait, and
+/// must satisfy some additional constraints (see below).
+#[cfg(not(feature = "wasm"))]
+#[async_trait]
+pub trait LiveDid: Into<Did> + Clone + Send + Sync {
+    /// Necessary method, should return true if a wrapped did is live.
+    async fn live(&self) -> bool;
 }
