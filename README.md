@@ -46,7 +46,7 @@ cargo install --path .
 
 To build Rings Network for WebAssembly, run the following commands:
 
-```
+```sh
 cargo build --release --target wasm32-unknown-unknown --no-default-features --features browser
 wasm-bindgen --out-dir pkg --target web ./target/wasm32-unknown-unknown/release/rings_node.wasm
 ```
@@ -66,7 +66,7 @@ npm i @ringsnetwork/rings-node
 
 ## Usage
 
-```
+```sh
 rings <command> [options]
 ```
 
@@ -88,7 +88,7 @@ rings <command> [options]
 
 The Rings Network architecture is streamlined into five distinct layers.
 
-```
+```text
 +-----------------------------------------------------------------------------------------+
 |                                         RINGS                                           |
 +-----------------------------------------------------------------------------------------+
@@ -176,7 +176,7 @@ The nucleus of Rings Network is similar to the Actor Model, and it requires that
 - The agent uses STUN or TURN to obtain additional candidates. These come in two flavors: translated addresses on the public side of a NAT (SERVER REFLEXIVE CANDIDATES) and addresses on TURN servers (RELAYED CANDIDATES).
 
 
-```
+```text
                  To Internet
 
                      |
@@ -213,7 +213,7 @@ The nucleus of Rings Network is similar to the Actor Model, and it requires that
 
 In the WebRTC framework, communication between the parties consists of media (for example, audio and video) and non-media data.
 
-Non-media data is handled by using the Stream Control Transmission Protocol (SCTP) [RFC4960] encapsulated in DTLS.
+Non-media data is handled by using the Stream Control Transmission Protocol (SCTP) (RFC4960) encapsulated in DTLS.
 
 ```
                                +----------+
@@ -226,7 +226,7 @@ Non-media data is handled by using the Stream Control Transmission Protocol (SCT
 
 ```
 
-The encapsulation of SCTP over DTLS (see [RFC8261]) over ICE/UDP (see [RFC8445]) provides a NAT traversal solution together with confidentiality, source authentication, and integrity-protected transfers.
+The encapsulation of SCTP over DTLS (see RFC8261) over ICE/UDP (see RFC8445) provides a NAT traversal solution together with confidentiality, source authentication, and integrity-protected transfers.
 
 
  The layering of protocols for WebRTC is shown as:
@@ -266,10 +266,10 @@ We'll review your pull request as soon as we can, and we appreciate your contrib
 
 ## Ref:
 
-1. https://datatracker.ietf.org/doc/html/rfc5245
+1. <https://datatracker.ietf.org/doc/html/rfc5245>
 
-2. https://datatracker.ietf.org/doc/html/draft-ietf-rtcweb-ip-handling-01
+2. <https://datatracker.ietf.org/doc/html/draft-ietf-rtcweb-ip-handling-01>
 
-3. https://datatracker.ietf.org/doc/html/rfc8831
+3. <https://datatracker.ietf.org/doc/html/rfc8831>
 
-4. https://datatracker.ietf.org/doc/html/rfc8832
+4. <https://datatracker.ietf.org/doc/html/rfc8832>
