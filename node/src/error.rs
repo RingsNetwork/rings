@@ -124,7 +124,7 @@ impl Error {
             Error::WasmExportError => 27,
             Error::WasmRuntimeError => 28,
             Error::WasmGlobalMemoryMutexError => 29,
-	    Error::WasmFailedToLoadFile => 30,
+            Error::WasmFailedToLoadFile => 30,
             Error::InternalError => 0,
             Error::CreateFileError(_) => 0,
             Error::OpenFileError(_) => 0,

@@ -1,17 +1,10 @@
-use crate::prelude::wasm_export;
-use crate::backend::types::BackendMessage;
-#[cfg(feature = "browser")]
-use crate::prelude::wasm_bindgen;
-#[cfg(feature = "browser")]
-use crate::prelude::wasm_bindgen::prelude::*;
-
 #[cfg(feature = "browser")]
 pub use browser_loader as loader;
 #[cfg(not(feature = "browser"))]
 pub use default_loader as loader;
 
-/// Ref of a &'a BackendMessage
-#[wasm_export]
+use crate::backend::types::BackendMessage;
+
 #[derive(Debug, Clone)]
 pub struct BackendMessageRef {
     /// Message_type
@@ -24,19 +17,23 @@ pub struct BackendMessageRef {
 
 impl From<BackendMessage> for BackendMessageRef {
     fn from(msg: BackendMessage) -> Self {
-	Self {
-	    message_type: msg.message_type,
-	    extra: msg.extra.into(),
-	    data: msg.data.into()
-	}
+        Self {
+            message_type: msg.message_type,
+            extra: msg.extra.into(),
+            data: msg.data.into(),
+        }
     }
 }
 
-#[wasm_export]
-#[derive(Debug, Clone)]
+#[repr(transparent)]
+#[derive(Clone)]
 pub struct MaybeBackendMessage(Option<Box<BackendMessage>>);
 
-
+impl From<BackendMessage> for MaybeBackendMessage {
+    fn from(msg: BackendMessage) -> Self {
+        Self(Some(Box::new(msg.clone())))
+    }
+}
 
 #[cfg(feature = "browser")]
 pub mod browser_loader {
@@ -45,6 +42,7 @@ pub mod browser_loader {
 
 #[cfg(not(feature = "browser"))]
 pub mod default_loader {
+    use std::fs;
     use std::sync::Arc;
     use std::sync::Mutex;
 
@@ -53,16 +51,16 @@ pub mod default_loader {
     use wasmer::ExternRef;
     use wasmer::FromToNativeWasmType;
     use wasmer::TypedFunction;
+
     use super::MaybeBackendMessage;
+    use crate::backend::types::BackendMessage;
     use crate::error::Error;
     use crate::error::Result;
-    use std::fs;
 
     lazy_static! {
         static ref WASM_MEM: Arc<Mutex<wasmer::Store>> =
             Arc::new(Mutex::new(wasmer::Store::default()));
     }
-
 
     unsafe impl FromToNativeWasmType for MaybeBackendMessage {
         type Native = Option<ExternRef>;
@@ -106,15 +104,32 @@ pub mod default_loader {
         pub func: TypedFunction<MaybeBackendMessage, MaybeBackendMessage>,
     }
 
+    impl Handler {
+        pub fn call(&self, msg: BackendMessage) -> Result<BackendMessage> {
+            let msg: MaybeBackendMessage = msg.into();
+            let mut mem = WASM_MEM
+                .lock()
+                .map_err(|_| Error::WasmGlobalMemoryMutexError)?;
+            let ret = self
+                .func
+                .call(&mut mem, msg)
+                .map_err(|_| Error::WasmRuntimeError)?;
+            if ret.0.is_none() {
+                Err(Error::WasmRuntimeError)
+            } else {
+                Ok(*ret.0.unwrap())
+            }
+        }
+    }
+
     pub fn load(wat: String) -> Result<Handler> {
         let mut store = WASM_MEM
             .lock()
             .map_err(|_| Error::WasmGlobalMemoryMutexError)?;
-        let module = wasmer::Module::new(&store, &wat).map_err(|_| Error::WasmCompileError)?;
+        let module = wasmer::Module::new(&store, &wat).unwrap();
         // The module doesn't import anything, so we create an empty import object.
         let import_object = imports! {};
-        let ins = wasmer::Instance::new(&mut store, &module, &import_object)
-            .map_err(|_| Error::WasmInstantiationError)?;
+        let ins = wasmer::Instance::new(&mut store, &module, &import_object).unwrap();
         let handler: TypedFunction<MaybeBackendMessage, MaybeBackendMessage> = ins
             .exports
             .get_function("handler")
@@ -126,22 +141,29 @@ pub mod default_loader {
     }
 
     pub fn load_from_fs(path: String) -> Result<Handler> {
-	if let Ok(wat) = fs::read_to_string(path) {
-	    load(wat)
-	} else {
-	    Err(Error::WasmFailedToLoadFile)
-	}
+        if let Ok(wat) = fs::read_to_string(path) {
+            load(wat)
+        } else {
+            Err(Error::WasmFailedToLoadFile)
+        }
     }
 }
 
 #[cfg(test)]
-#[cfg(feature = "node")]
 mod test {
-    use super::*;
+    use crate::backend::extension::loader::load_from_fs;
+    use crate::backend::types::BackendMessage;
+    use crate::backend::types::MessageType;
 
-    fn test_load() {
-	let handler = load_from_fs("../examples/hello_extension/pkg/hello_extension.wat").unwrap();
-
+    #[test]
+    fn test_load_wasm() {
+	let path = "../target/wasm32-unknown-unknown/release/hello_extension.wat".to_string();
+        let handler =
+            load_from_fs(path)
+                .unwrap();
+        let data = "hello extension";
+        let msg = BackendMessage::from((2u16, data.as_bytes()));
+        let ret = handler.call(msg.clone()).unwrap();
+        assert_eq!(ret, msg);
     }
-
 }

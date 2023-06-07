@@ -1804,7 +1804,6 @@ name = "hello_extension"
 version = "0.1.0"
 dependencies = [
  "rings-node",
- "wasm-bindgen",
 ]
 
 [[package]]
