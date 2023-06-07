@@ -42,15 +42,14 @@ jobs:
       - name: Run clippy for node browser
         run: cargo clippy -p rings-node --features browser --no-deps --no-default-features --target=wasm32-unknown-unknown --tests -- -D warnings
 
-      - name: Run core wasm tests
-        uses: GabrielBB/xvfb-action@v1
-        with:
-          run: cargo test -p rings-core --target=wasm32-unknown-unknown --features wasm --no-default-features
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Run core browser tests
+        run: cd core; wasm-pack test --headless --chrome --features browser_chrome_test --no-default-features
 
       - name: Run node browser tests
-        uses: GabrielBB/xvfb-action@v1
-        with:
-          run: cargo test -p rings-node --target=wasm32-unknown-unknown --features browser --no-default-features
+        run: cd node; wasm-pack test --headless --chrome --features browser_chrome_test --no-default-features
 
   build:
     name: Build and test
