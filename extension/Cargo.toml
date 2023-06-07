@@ -12,8 +12,7 @@ crate-type = ["cdylib"]
 [features]
 wasm = ["wasm-bindgen"]
 
-
 [dependencies]
 quote = { version = "1.0.28", optional = true }
-wasm-bindgen = { workspace = true, optional = true }
 rings-derive = { package = "rings-derive", path = "../derive", default-features = false, version = "0.1.0" }
+wasm-bindgen = { workspace = true, optional = true }

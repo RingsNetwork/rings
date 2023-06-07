@@ -5,12 +5,12 @@ use std::collections::HashMap;
 use bytes::Bytes;
 use serde::Deserialize;
 use serde::Serialize;
+use wasmer::ValueType;
 
 use crate::error::Error;
 use crate::error::Result;
-use crate::prelude::*;
 use crate::prelude::wasm_export;
-use wasmer::ValueType;
+use crate::prelude::*;
 
 /// Enum MessageType of BackendMessage.
 #[wasm_export]
@@ -27,7 +27,7 @@ pub enum MessageType {
     /// http response
     HttpResponse,
     /// extension
-    Extension
+    Extension,
 }
 
 impl From<&[u8; 2]> for MessageType {
@@ -57,7 +57,7 @@ impl From<MessageType> for u16 {
             MessageType::SimpleText => 2,
             MessageType::HttpRequest => 3,
             MessageType::HttpResponse => 4,
-	    MessageType::Extension => 5
+            MessageType::Extension => 5,
         }
     }
 }

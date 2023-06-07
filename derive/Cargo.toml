@@ -11,7 +11,7 @@ proc-macro = true
 
 [features]
 default = [
-	"wasmer"
+    "wasmer",
 ]
 wasm = [
     "wasm-bindgen-macro-support",
