@@ -1,5 +1,5 @@
 [package]
-name = "rings-derive"
+name = "rings-extension"
 version = "0.1.0"
 edition = "2021"
 authors = ["RND <dev@ringsnetwork.io>"]
@@ -7,18 +7,13 @@ repository = "https://github.com/RingsNetwork/rings-node"
 license = "GPL-3.0"
 
 [lib]
-proc-macro = true
+crate-type = ["cdylib"]
 
 [features]
-default = [
-	"wasmer"
-]
-wasm = [
-    "wasm-bindgen-macro-support",
-    "quote",
-]
+wasm = ["wasm-bindgen"]
+
 
 [dependencies]
 quote = { version = "1.0.28", optional = true }
-wasm-bindgen-macro-support = { workspace = true, optional = true }
-wasmer = { version = "3.3.0", optional = true }
+wasm-bindgen = { workspace = true, optional = true }
+rings-derive = { package = "rings-derive", path = "../derive", default-features = false, version = "0.1.0" }

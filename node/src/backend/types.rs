@@ -9,8 +9,11 @@ use serde::Serialize;
 use crate::error::Error;
 use crate::error::Result;
 use crate::prelude::*;
+use crate::prelude::wasm_export;
+use wasmer::ValueType;
 
 /// Enum MessageType of BackendMessage.
+#[wasm_export]
 #[derive(Debug, Clone)]
 pub enum MessageType {
     /// unknown
@@ -23,6 +26,8 @@ pub enum MessageType {
     HttpRequest,
     /// http response
     HttpResponse,
+    /// extension
+    Extension
 }
 
 impl From<&[u8; 2]> for MessageType {
@@ -38,6 +43,7 @@ impl From<u16> for MessageType {
             2 => MessageType::SimpleText,
             3 => MessageType::HttpRequest,
             4 => MessageType::HttpResponse,
+            5 => MessageType::Extension,
             _ => MessageType::Unknown,
         }
     }
@@ -51,6 +57,7 @@ impl From<MessageType> for u16 {
             MessageType::SimpleText => 2,
             MessageType::HttpRequest => 3,
             MessageType::HttpResponse => 4,
+	    MessageType::Extension => 5
         }
     }
 }
@@ -60,6 +67,7 @@ impl From<MessageType> for u16 {
 /// - `message_type`: `[u8;2]`
 /// - `extra data`: `[u8;30]`
 /// - `message data`: `[u8]`
+#[wasm_export]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackendMessage {
     /// message_type
@@ -67,7 +75,7 @@ pub struct BackendMessage {
     /// extra bytes
     pub extra: [u8; 30],
     /// data body
-    pub data: Vec<u8>,
+    pub data: Box<Vec<u8>>,
 }
 
 impl BackendMessage {
@@ -79,7 +87,7 @@ impl BackendMessage {
         Self {
             message_type,
             extra,
-            data: data.to_vec(),
+            data: Box::new(data.to_vec()),
         }
     }
 }

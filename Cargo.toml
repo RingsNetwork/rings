@@ -1,5 +1,5 @@
 [workspace]
-members = ["core", "node", "rpc", "derive"]
+members = ["core", "node", "rpc", "derive", "extension"]
 
 resolver = "2"
 

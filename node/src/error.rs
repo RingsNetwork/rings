@@ -22,6 +22,17 @@ pub enum Error {
     DecodeError,
     #[error("Encode error.")]
     EncodeError,
+    #[error("WASM compile error.")]
+    WasmCompileError,
+    #[error("WASM instantiation error.")]
+    WasmInstantiationError,
+    #[error("WASM export error.")]
+    WasmExportError,
+    #[error("WASM runtime error.")]
+    WasmRuntimeError,
+    #[error("WASM global memory mutex error.")]
+    WasmGlobalMemoryMutexError,
+
     #[error("Create offer info failed: {0}.")]
     CreateOffer(rings_core::err::Error),
     #[error("Answer offer info failed: {0}.")]
