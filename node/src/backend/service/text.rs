@@ -21,7 +21,7 @@ impl MessageEndpoint for TextEndpoint {
         ctx: &MessagePayload<Message>,
         data: &BackendMessage,
     ) -> Result<Vec<MessageHandlerEvent>> {
-        let text = str::from_utf8(data.data.as_slice()).map_err(|_| Error::InvalidMessage)?;
+        let text = str::from_utf8(&*data.data).map_err(|_| Error::InvalidMessage)?;
         tracing::info!("SimpleText, From: {}, Text: {}", ctx.relay.sender(), text);
         Ok(vec![])
     }

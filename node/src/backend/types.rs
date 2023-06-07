@@ -5,15 +5,12 @@ use std::collections::HashMap;
 use bytes::Bytes;
 use serde::Deserialize;
 use serde::Serialize;
-use wasmer::ValueType;
 
 use crate::error::Error;
 use crate::error::Result;
-use crate::prelude::wasm_export;
 use crate::prelude::*;
 
 /// Enum MessageType of BackendMessage.
-#[wasm_export]
 #[derive(Debug, Clone)]
 pub enum MessageType {
     /// unknown
@@ -67,7 +64,6 @@ impl From<MessageType> for u16 {
 /// - `message_type`: `[u8;2]`
 /// - `extra data`: `[u8;30]`
 /// - `message data`: `[u8]`
-#[wasm_export]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackendMessage {
     /// message_type
@@ -75,7 +71,7 @@ pub struct BackendMessage {
     /// extra bytes
     pub extra: [u8; 30],
     /// data body
-    pub data: Box<Vec<u8>>,
+    pub data: Vec<u8>,
 }
 
 impl BackendMessage {
@@ -87,7 +83,7 @@ impl BackendMessage {
         Self {
             message_type,
             extra,
-            data: Box::new(data.to_vec()),
+            data: data.to_vec(),
         }
     }
 }

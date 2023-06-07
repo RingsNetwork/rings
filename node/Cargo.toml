@@ -37,7 +37,7 @@ node = [
     "axum/headers",
     "rings-rpc/std",
     "rings-derive/default",
-    "wasmer/sys",
+    "wasmer/default",
     "wasmer-types",
 ]
 browser = [
@@ -48,8 +48,6 @@ browser = [
     "rings-rpc/wasm",
     "rings-derive/wasm",
     "serde-wasm-bindgen",
-    "wasmer/js",
-    "wasmer-types",
 ]
 browser_chrome_test = ["browser"]
 
@@ -64,7 +62,7 @@ chrono = "0.4.23"
 dotenv = "0.15.0"
 futures = { version = "0.3.21", features = ["alloc"] }
 futures-timer = "3.0.2"
-wasmer = { version = "3.3.0", optional = true }
+wasmer = { version = "3.3.0", optional = true, default-features = false }
 wasmer-types = { version = "3.3.0", optional = true }
 # http = { version = "0.2.6" }
 log = { version = "0.4", features = ["std"] }
