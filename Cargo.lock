@@ -1800,13 +1800,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "95505c38b4572b2d910cecb0281560f54b440a19336cbbcb27bf6ce6adc6f5a8"
 
 [[package]]
-name = "hello_extension"
-version = "0.1.0"
-dependencies = [
- "rings-node",
-]
-
-[[package]]
 name = "hermit-abi"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3269,15 +3262,6 @@ dependencies = [
  "quote",
  "wasm-bindgen-macro-support",
  "wasmer",
-]
-
-[[package]]
-name = "rings-extension"
-version = "0.1.0"
-dependencies = [
- "quote",
- "rings-derive",
- "wasm-bindgen",
 ]
 
 [[package]]

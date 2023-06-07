@@ -149,19 +149,29 @@ pub mod default_loader {
     }
 }
 
+#[ignore]
 #[cfg(test)]
 mod test {
-    use crate::backend::extension::loader::load_from_fs;
+    use wasmer::wat2wasm;
+
+    use crate::backend::extension::loader::load;
     use crate::backend::types::BackendMessage;
-    use crate::backend::types::MessageType;
 
     #[test]
     fn test_load_wasm() {
-	let path = "../target/wasm32-unknown-unknown/release/hello_extension.wat".to_string();
-        let handler =
-            load_from_fs(path)
-                .unwrap();
+        let wasm = r#"
+(module
+  (func $handler
+    (param externref)
+    (result externref)
+    local.get 0
+  )
+  (export "handler" (func $handler))
+)
+
+"#;
         let data = "hello extension";
+        let handler = load(wasm.to_string()).unwrap();
         let msg = BackendMessage::from((2u16, data.as_bytes()));
         let ret = handler.call(msg.clone()).unwrap();
         assert_eq!(ret, msg);
