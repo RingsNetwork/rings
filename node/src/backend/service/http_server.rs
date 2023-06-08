@@ -130,7 +130,7 @@ impl MessageEndpoint for HttpServer {
         _ctx: &MessagePayload<Message>,
         msg: &BackendMessage,
     ) -> Result<Vec<MessageHandlerEvent>> {
-        let req: HttpRequest = bincode::deserialize(&*msg.data).map_err(|_| Error::DecodeError)?;
+        let req: HttpRequest = bincode::deserialize(&msg.data).map_err(|_| Error::DecodeError)?;
 
         let resp = self.execute(&req).await?;
         tracing::debug!("Sending HTTP response: {:?}", resp);

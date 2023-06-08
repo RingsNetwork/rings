@@ -21,7 +21,7 @@ pub struct MaybeBackendMessage(Option<Box<BackendMessage>>);
 
 impl From<BackendMessage> for MaybeBackendMessage {
     fn from(msg: BackendMessage) -> Self {
-        Self(Some(Box::new(msg.clone())))
+        Self(Some(Box::new(msg)))
     }
 }
 
@@ -86,7 +86,7 @@ pub mod browser_loader {
         let exports = ins.exports();
         let func_value = Reflect::get(&exports, &JsValue::from("handler"))
             .map_err(|_| Error::WasmExportError)?;
-        let func: &Function = func_value.dyn_ref::<Function>().unwrap();
+        let func: &Function = func_value.dyn_ref::<Function>().map_err(|_| Error::WasmRuntimeError);
         Ok(Handler { func: func.clone() })
     }
 }
@@ -137,9 +137,7 @@ pub mod default_loader {
 
         fn to_native(self) -> Self::Native {
             // Convert BackendMessage to the native representation
-            if self.0.is_none() {
-                return None;
-            }
+            self.0.as_ref()?;
 
             match WASM_MEM
                 .try_lock()
@@ -171,7 +169,7 @@ pub mod default_loader {
                 .map_err(|_| Error::WasmGlobalMemoryMutexError)?;
             let ret = self
                 .func
-                .call(&mut mem, msg.clone())
+                .call(&mut mem, msg)
                 .map_err(|_| Error::WasmRuntimeError)?;
             if ret.0.is_none() {
                 Err(Error::WasmRuntimeError)
@@ -186,16 +184,16 @@ pub mod default_loader {
         let mut store = WASM_MEM
             .try_lock()
             .map_err(|_| Error::WasmGlobalMemoryMutexError)?;
-        let module = wasmer::Module::new(&store, &bytes).unwrap();
+        let module = wasmer::Module::new(&store, &bytes).map_err(|_| Error::WasmCompileError)?;
         // The module doesn't import anything, so we create an empty import object.
         let import_object = imports! {};
-        let ins = wasmer::Instance::new(&mut store, &module, &import_object).unwrap();
+        let ins = wasmer::Instance::new(&mut store, &module, &import_object).map_err(|_| Error::WasmInstantiationError)?;
         let handler: TypedFunction<MaybeBackendMessage, MaybeBackendMessage> = ins
             .exports
             .get_function("handler")
             .map_err(|_| Error::WasmExportError)?
             .typed(&mut store)
-            .unwrap();
+            .map_err(|_| Error::WasmExportError)?;
 
         Ok(Handler { func: handler })
     }
