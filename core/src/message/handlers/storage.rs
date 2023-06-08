@@ -252,7 +252,7 @@ mod test {
         test_only_two_nodes_establish_connection(&node1, &node2).await?;
 
         // Now, node1 is the successor of node2, and node2 is the successor of node1.
-        // Following tests storing data on ndoe2 and query it from node1.
+        // Following tests storing data on node2 and query it from node1.
         let data = "Across the Great Wall we can reach every corner in the world.".to_string();
         let vnode: VirtualNode = data.clone().try_into().unwrap();
         let vid = vnode.did;
@@ -326,7 +326,7 @@ mod test {
         test_only_two_nodes_establish_connection(&node1, &node2).await?;
 
         // Now, node1 is the successor of node2, and node2 is the successor of node1.
-        // Following tests storing data on ndoe2 and query it from node1.
+        // Following tests storing data on node2 and query it from node1.
         let topic = "Across the Great Wall we can reach every corner in the world.".to_string();
         let vnode: VirtualNode = topic.clone().try_into().unwrap();
         let vid = vnode.did;

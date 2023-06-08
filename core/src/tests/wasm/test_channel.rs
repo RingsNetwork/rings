@@ -33,7 +33,7 @@ async fn test_async_channel_via_future_to_promise() {
 
 // ref https://rustwasm.github.io/wasm-bindgen/api/src/wasm_bindgen_futures/lib.rs.html#77-82
 #[wasm_bindgen_test]
-fn test_async_channel_in_spwan_local() {
+fn test_async_channel_in_spawn_local() {
     let (sender, mut receiver) = futures::channel::mpsc::channel(1);
     spawn_local(async move {
         let mut sender = sender.clone();

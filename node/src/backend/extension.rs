@@ -23,7 +23,7 @@ use crate::prelude::*;
 pub enum Path {
     /// Local filesystem path
     Local(String),
-    /// A remote resource nees to fetch
+    /// A remote resource needs to fetch
     Remote(String),
 }
 
