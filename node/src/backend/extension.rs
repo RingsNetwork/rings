@@ -302,6 +302,7 @@ pub mod default_loader {
     }
 }
 
+#[cfg(not(feature = "browser"))]
 #[cfg(test)]
 mod test {
     use crate::backend::extension::loader::load;
