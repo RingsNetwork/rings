@@ -11,7 +11,7 @@ use crate::error::Result;
 use crate::prelude::*;
 
 /// Enum MessageType of BackendMessage.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum MessageType {
     /// unknown
     Unknown = 0,
@@ -64,7 +64,7 @@ impl From<MessageType> for u16 {
 /// - `message_type`: `[u8;2]`
 /// - `extra data`: `[u8;30]`
 /// - `message data`: `[u8]`
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackendMessage {
     /// message_type
     pub message_type: u16,
