@@ -5,26 +5,6 @@ pub use default_loader as loader;
 
 use crate::backend::types::BackendMessage;
 
-#[derive(Debug, Clone)]
-pub struct BackendMessageRef {
-    /// Message_type
-    pub message_type: u16,
-    /// extra bytes
-    extra: Box<[u8]>,
-    /// data body
-    data: Box<[u8]>,
-}
-
-impl From<BackendMessage> for BackendMessageRef {
-    fn from(msg: BackendMessage) -> Self {
-        Self {
-            message_type: msg.message_type,
-            extra: msg.extra.into(),
-            data: msg.data.into(),
-        }
-    }
-}
-
 #[repr(transparent)]
 #[derive(Clone)]
 pub struct MaybeBackendMessage(Option<Box<BackendMessage>>);
@@ -37,7 +17,7 @@ impl From<BackendMessage> for MaybeBackendMessage {
 
 #[cfg(feature = "browser")]
 pub mod browser_loader {
-    // use js_sys::WebAssembly::instantiate_buffer;
+    use crate::prelude::js_sys::WebAssembly::instantiate_buffer;
 }
 
 #[cfg(not(feature = "browser"))]
@@ -70,7 +50,7 @@ pub mod default_loader {
                 return Self(None);
             }
             match WASM_MEM
-                .lock()
+                .try_lock()
                 .map_err(|_| Error::WasmGlobalMemoryMutexError)
             {
                 Ok(mem) => {
@@ -91,10 +71,18 @@ pub mod default_loader {
             }
 
             match WASM_MEM
-                .lock()
+                .try_lock()
                 .map_err(|_| Error::WasmGlobalMemoryMutexError)
             {
-                Ok(mut mem) => Some(ExternRef::new::<Self>(&mut mem, self)),
+                Ok(mut mem) => {
+                    let ext_ref = ExternRef::new::<Self>(&mut mem, self);
+                    // Checks whether this ExternRef can be used with the given context.
+                    if ext_ref.is_from_store(&mem) {
+                        Some(ext_ref)
+                    } else {
+                        None
+                    }
+                }
                 _ => None,
             }
         }
@@ -108,11 +96,11 @@ pub mod default_loader {
         pub fn call(&self, msg: BackendMessage) -> Result<BackendMessage> {
             let msg: MaybeBackendMessage = msg.into();
             let mut mem = WASM_MEM
-                .lock()
+                .try_lock()
                 .map_err(|_| Error::WasmGlobalMemoryMutexError)?;
             let ret = self
                 .func
-                .call(&mut mem, msg)
+                .call(&mut mem, msg.clone())
                 .map_err(|_| Error::WasmRuntimeError)?;
             if ret.0.is_none() {
                 Err(Error::WasmRuntimeError)
@@ -124,7 +112,7 @@ pub mod default_loader {
 
     pub fn load(wat: String) -> Result<Handler> {
         let mut store = WASM_MEM
-            .lock()
+            .try_lock()
             .map_err(|_| Error::WasmGlobalMemoryMutexError)?;
         let module = wasmer::Module::new(&store, &wat).unwrap();
         // The module doesn't import anything, so we create an empty import object.
@@ -135,7 +123,7 @@ pub mod default_loader {
             .get_function("handler")
             .map_err(|_| Error::WasmExportError)?
             .typed(&mut store)
-            .map_err(|_| Error::WasmRuntimeError)?;
+            .unwrap();
 
         Ok(Handler { func: handler })
     }
@@ -152,23 +140,25 @@ pub mod default_loader {
 #[ignore]
 #[cfg(test)]
 mod test {
-    use wasmer::wat2wasm;
-
     use crate::backend::extension::loader::load;
     use crate::backend::types::BackendMessage;
 
     #[test]
     fn test_load_wasm() {
+        // about wat: https://developer.mozilla.org/en-US/docs/WebAssembly/Understanding_the_text_format
         let wasm = r#"
 (module
-  (func $handler
-    (param externref)
-    (result externref)
-    local.get 0
+  ;; Define a memory that is one page size (64kb)
+  (memory (export "memory") 1)
+
+  ;; fn handler(param: ExternRef) -> ExternRef
+  (func $handler  (param externref) (result externref)
+      (local.get 0)
+      return
   )
+
   (export "handler" (func $handler))
 )
-
 "#;
         let data = "hello extension";
         let handler = load(wasm.to_string()).unwrap();
