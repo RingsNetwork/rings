@@ -2,19 +2,49 @@
 pub use browser_loader as loader;
 #[cfg(not(feature = "browser"))]
 pub use default_loader as loader;
+use loader::Handler;
+use serde::Deserialize;
+use serde::Serialize;
 
+use super::MessageEndpoint;
 use crate::backend::types::BackendMessage;
+use crate::error::Error;
 use crate::error::Result;
+use crate::prelude::reqwest;
 #[cfg(feature = "browser")]
 use crate::prelude::wasm_bindgen;
 #[cfg(feature = "browser")]
 use crate::prelude::wasm_bindgen::prelude::*;
 use crate::prelude::wasm_export;
+use crate::prelude::*;
 
+/// Path of a wasm extension
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub enum Path {
+    /// Local filesystem path
+    Local(String),
+    /// A remote resource nees to fetch
+    Remote(String),
+}
+
+/// Configure for Extension
+#[derive(Deserialize, Serialize, Debug, Clone, Default)]
+pub struct ExtensionConfig {
+    pub paths: Vec<Path>,
+}
+
+/// Manager of Extension
+pub struct Extension {
+    /// Extension list
+    handlers: Vec<Handler>,
+}
+
+/// Calls the extension handler with the given message and returns the response.
 pub trait ExtensionHandlerCaller {
     fn call(&self, msg: BackendMessage) -> Result<BackendMessage>;
 }
 
+/// Wrapper for BackendMessage that can be converted from and to the native WebAssembly type.
 #[derive(Clone)]
 #[wasm_export]
 pub struct MaybeBackendMessage(Option<Box<BackendMessage>>);
@@ -22,6 +52,62 @@ pub struct MaybeBackendMessage(Option<Box<BackendMessage>>);
 impl From<BackendMessage> for MaybeBackendMessage {
     fn from(msg: BackendMessage) -> Self {
         Self(Some(Box::new(msg)))
+    }
+}
+
+impl Extension {
+    /// Loads a wasm module from the specified path.
+    async fn load(path: &Path) -> Result<Handler> {
+        match path {
+            Path::Local(path) => loader::load_from_fs(path.to_string()).await,
+            Path::Remote(path) => {
+                let data: String = reqwest::get(path)
+                    .await
+                    .map_err(|e| Error::HttpRequestError(e.to_string()))?
+                    .text()
+                    .await
+                    .map_err(|e| Error::HttpRequestError(e.to_string()))?;
+                loader::load(data).await
+            }
+        }
+    }
+
+    /// Creates a new Extension instance with the specified configuration.
+    pub async fn new(config: &ExtensionConfig) -> Result<Self> {
+        let mut handlers = vec![];
+        for p in &config.paths {
+            if let Ok(h) = Self::load(&p).await {
+                handlers.push(h)
+            } else {
+                log::error!("Failed on loading extension {:?}", p)
+            }
+        }
+        Ok(Self { handlers })
+    }
+}
+
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl MessageEndpoint for Extension {
+    /// Handles the incoming message by passing it to the extension handlers and returning the resulting events.
+    async fn handle_message(
+        &self,
+        _ctx: &MessagePayload<Message>,
+        data: &BackendMessage,
+    ) -> Result<Vec<MessageHandlerEvent>> {
+        let mut ret = vec![];
+
+        for h in &self.handlers {
+            let resp = h.call(data.clone())?;
+            if resp != data.clone() {
+                let resp_bytes: bytes::Bytes = resp.into();
+                let ev = MessageHandlerEvent::SendReportMessage(
+                    Message::custom(&resp_bytes).map_err(|_| Error::InvalidMessage)?,
+                );
+                ret.push(ev)
+            }
+        }
+        Ok(ret)
     }
 }
 
@@ -86,8 +172,14 @@ pub mod browser_loader {
         let exports = ins.exports();
         let func_value = Reflect::get(&exports, &JsValue::from("handler"))
             .map_err(|_| Error::WasmExportError)?;
-        let func: &Function = func_value.dyn_ref::<Function>().map_err(|_| Error::WasmRuntimeError);
+        let func: &Function = func_value
+            .dyn_ref::<Function>()
+            .map_err(|_| Error::WasmRuntimeError);
         Ok(Handler { func: func.clone() })
+    }
+
+    pub async fn load_from_fs(path: String) -> Result<Handler> {
+        unimplemented!()
     }
 }
 
@@ -157,6 +249,7 @@ pub mod default_loader {
         }
     }
 
+    /// Externref type handler
     pub struct Handler {
         pub func: TypedFunction<MaybeBackendMessage, MaybeBackendMessage>,
     }
@@ -179,7 +272,7 @@ pub mod default_loader {
         }
     }
 
-    /// bytes can be WAT of *.wasm binary
+    /// wasm loarder, bytes can be WAT of *.wasm binary
     pub async fn load(bytes: impl AsRef<[u8]>) -> Result<Handler> {
         let mut store = WASM_MEM
             .try_lock()
@@ -187,7 +280,8 @@ pub mod default_loader {
         let module = wasmer::Module::new(&store, &bytes).map_err(|_| Error::WasmCompileError)?;
         // The module doesn't import anything, so we create an empty import object.
         let import_object = imports! {};
-        let ins = wasmer::Instance::new(&mut store, &module, &import_object).map_err(|_| Error::WasmInstantiationError)?;
+        let ins = wasmer::Instance::new(&mut store, &module, &import_object)
+            .map_err(|_| Error::WasmInstantiationError)?;
         let handler: TypedFunction<MaybeBackendMessage, MaybeBackendMessage> = ins
             .exports
             .get_function("handler")
@@ -198,6 +292,7 @@ pub mod default_loader {
         Ok(Handler { func: handler })
     }
 
+    /// Load wasm from filesystem
     pub async fn load_from_fs(path: String) -> Result<Handler> {
         if let Ok(wat) = fs::read_to_string(path) {
             load(wat).await

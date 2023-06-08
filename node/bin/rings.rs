@@ -406,8 +406,8 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     let external_ip = args.external_ip.map(Some).unwrap_or(c.external_ip);
 
     let (sender, receiver) = tokio::sync::broadcast::channel(1024);
-    let backend_config = c.backend.into();
-    let backend = Backend::new(backend_config, sender);
+    let backend_config = (c.backend, c.extension).into();
+    let backend = Backend::new(backend_config, sender).await?;
     let backend_service_names = backend.service_names();
 
     let swarm = Arc::new(
@@ -426,7 +426,7 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     let processor_clone = processor.clone();
 
     let pubkey = Arc::new(key.pubkey());
-    println!("Signature: {}", Processor::generate_signature(&key));
+    println!("Signautre: {}", Processor::generate_signature(&key));
 
     let bind_addr = get_value(args.http_addr, c.http_addr);
 

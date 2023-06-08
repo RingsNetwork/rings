@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::backend::extension::ExtensionConfig;
 use crate::backend::service::http_server::HiddenServerConfig;
 use crate::error::Error;
 use crate::error::Result;
@@ -50,6 +51,7 @@ pub struct Config {
     pub backend: Vec<HiddenServerConfig>,
     pub data_storage: StorageConfig,
     pub measure_storage: StorageConfig,
+    pub extension: ExtensionConfig,
 }
 
 impl Config {
@@ -64,6 +66,7 @@ impl Config {
             backend: vec![],
             data_storage: DEFAULT_DATA_STORAGE_CONFIG.clone(),
             measure_storage: DEFAULT_MEASURE_STORAGE_CONFIG.clone(),
+            extension: ExtensionConfig::default(),
         }
     }
 
