@@ -76,7 +76,7 @@ impl Extension {
     pub async fn new(config: &ExtensionConfig) -> Result<Self> {
         let mut handlers = vec![];
         for p in &config.paths {
-            if let Ok(h) = Self::load(&p).await {
+            if let Ok(h) = Self::load(p).await {
                 handlers.push(h)
             } else {
                 log::error!("Failed on loading extension {:?}", p)
@@ -286,7 +286,7 @@ pub mod default_loader {
             .exports
             .get_function("handler")
             .map_err(|_| Error::WasmExportError)?
-            .typed(&mut store)
+            .typed(&store)
             .map_err(|_| Error::WasmExportError)?;
 
         Ok(Handler { func: handler })
