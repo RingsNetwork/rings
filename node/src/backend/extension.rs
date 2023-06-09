@@ -43,8 +43,8 @@ pub trait ExtensionHandlerCaller {
 }
 
 /// Wrapper for BackendMessage that can be converted from and to the native WebAssembly type.
-#[derive(Clone)]
 #[wasm_export]
+#[derive(Clone, Debug)]
 pub struct MaybeBackendMessage(Option<Box<BackendMessage>>);
 
 impl From<BackendMessage> for MaybeBackendMessage {
@@ -225,8 +225,6 @@ pub mod default_loader {
 
         fn to_native(self) -> Self::Native {
             // Convert BackendMessage to the native representation
-            self.0.as_ref()?;
-
             match WASM_MEM
                 .try_lock()
                 .map_err(|_| Error::WasmGlobalMemoryMutexError)
@@ -245,21 +243,27 @@ pub mod default_loader {
         }
     }
 
+    type TyHandler = TypedFunction<Option<ExternRef>, Option<ExternRef>>;
+
     /// Externref type handler
     pub struct Handler {
-        pub func: TypedFunction<MaybeBackendMessage, MaybeBackendMessage>,
+        pub func: TyHandler,
+        pub exports: wasmer::Exports,
     }
 
     impl super::ExtensionHandlerCaller for Handler {
         fn call(&self, msg: BackendMessage) -> Result<BackendMessage> {
             let msg: MaybeBackendMessage = msg.into();
-            let mut mem = WASM_MEM
-                .try_lock()
-                .map_err(|_| Error::WasmGlobalMemoryMutexError)?;
-            let ret = self
-                .func
-                .call(&mut mem, msg)
-                .map_err(|_| Error::WasmRuntimeError)?;
+            let native_msg = msg.to_native();
+            let r = {
+                let mut mem = WASM_MEM
+                    .try_lock()
+                    .map_err(|_| Error::WasmGlobalMemoryMutexError)?;
+                self.func
+                    .call(&mut mem, native_msg)
+                    .map_err(|_| Error::WasmRuntimeError)?
+            };
+            let ret = MaybeBackendMessage::from_native(r);
             if ret.0.is_none() {
                 Err(Error::WasmRuntimeError)
             } else {
@@ -278,14 +282,17 @@ pub mod default_loader {
         let import_object = imports! {};
         let ins = wasmer::Instance::new(&mut store, &module, &import_object)
             .map_err(|_| Error::WasmInstantiationError)?;
-        let handler: TypedFunction<MaybeBackendMessage, MaybeBackendMessage> = ins
-            .exports
+        let exports: wasmer::Exports = ins.exports;
+        let handler: TyHandler = exports
             .get_function("handler")
             .map_err(|_| Error::WasmExportError)?
             .typed(&store)
             .map_err(|_| Error::WasmExportError)?;
 
-        Ok(Handler { func: handler })
+        Ok(Handler {
+            func: handler,
+            exports,
+        })
     }
 
     /// Load wasm from filesystem
@@ -310,13 +317,9 @@ mod test {
         // about wat: https://developer.mozilla.org/en-US/docs/WebAssembly/Understanding_the_text_format
         let wasm = r#"
 (module
-  ;; Define a memory that is one page size (64kb)
-  (memory (export "memory") 1)
-
   ;; fn handler(param: ExternRef) -> ExternRef
   (func $handler  (param externref) (result externref)
-      (local.get 0)
-      return
+      (return (local.get 0))
   )
 
   (export "handler" (func $handler))
