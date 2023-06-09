@@ -4,7 +4,7 @@ fmt:
 	taplo format
 
 clippy-fix:
-	cargo clippy --fix --allow-dirty
+	cargo clippy --fix --allow-dirty --no-deps
 
 build-browser-pack:
 	wasm-pack build node --scope ringsnetwork -t web --no-default-features --features browser --features console_error_panic_hook

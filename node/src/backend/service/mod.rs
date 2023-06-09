@@ -67,7 +67,7 @@ impl Backend {
     pub async fn new(config: BackendConfig, sender: Sender<BackendMessage>) -> Result<Self> {
         Ok(Self {
             http_server: Arc::new(HttpServer::from(config.hidden_servers)),
-            text_endpoint: TextEndpoint::default(),
+            text_endpoint: TextEndpoint,
             sender,
             extension_endpoint: Extension::new(&config.extensions).await?,
             chunk_list: Default::default(),
