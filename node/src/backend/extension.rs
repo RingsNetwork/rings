@@ -13,8 +13,7 @@ use crate::error::Result;
 use crate::prelude::reqwest;
 #[cfg(feature = "browser")]
 use crate::prelude::wasm_bindgen;
-#[cfg(feature = "browser")]
-use crate::prelude::wasm_bindgen::prelude::*;
+
 use crate::prelude::wasm_export;
 use crate::prelude::*;
 
@@ -86,8 +85,8 @@ impl Extension {
     }
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl MessageEndpoint for Extension {
     /// Handles the incoming message by passing it to the extension handlers and returning the resulting events.
     async fn handle_message(
@@ -125,10 +124,10 @@ pub mod browser_loader {
     use crate::prelude::wasm_bindgen::convert::FromWasmAbi;
     use crate::prelude::wasm_bindgen::convert::IntoWasmAbi;
     use crate::prelude::wasm_bindgen::convert::ReturnWasmAbi;
-    use crate::prelude::wasm_bindgen::convert::WasmSlice;
+    
     use crate::prelude::wasm_bindgen::JsCast;
     use crate::prelude::wasm_bindgen::JsValue;
-    use crate::prelude::wasm_bindgen_futures::spawn_local;
+    
     use crate::prelude::wasm_bindgen_futures::JsFuture;
 
     pub struct Handler {
@@ -147,9 +146,9 @@ pub mod browser_loader {
             unsafe {
                 let ret = MaybeBackendMessage::from_abi(call_res.into_abi());
                 if let Some(r) = ret.0 {
-                    return Ok(*r);
+                    Ok(*r)
                 } else {
-                    return Err(Error::WasmRuntimeError);
+                    Err(Error::WasmRuntimeError)
                 }
             }
         }
@@ -174,11 +173,11 @@ pub mod browser_loader {
             .map_err(|_| Error::WasmExportError)?;
         let func: &Function = func_value
             .dyn_ref::<Function>()
-            .map_err(|_| Error::WasmRuntimeError);
+            .ok_or(Error::WasmRuntimeError)?;
         Ok(Handler { func: func.clone() })
     }
 
-    pub async fn load_from_fs(path: String) -> Result<Handler> {
+    pub async fn load_from_fs(_path: String) -> Result<Handler> {
         unimplemented!()
     }
 }
