@@ -64,7 +64,7 @@ impl From<MessageType> for u16 {
 /// - `message_type`: `[u8;2]`
 /// - `extra data`: `[u8;30]`
 /// - `message data`: `[u8]`
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BackendMessage {
     /// message_type
     pub message_type: u16,
