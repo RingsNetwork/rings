@@ -13,7 +13,6 @@ use crate::error::Result;
 use crate::prelude::reqwest;
 #[cfg(feature = "browser")]
 use crate::prelude::wasm_bindgen;
-
 use crate::prelude::wasm_export;
 use crate::prelude::*;
 
@@ -124,10 +123,8 @@ pub mod browser_loader {
     use crate::prelude::wasm_bindgen::convert::FromWasmAbi;
     use crate::prelude::wasm_bindgen::convert::IntoWasmAbi;
     use crate::prelude::wasm_bindgen::convert::ReturnWasmAbi;
-    
     use crate::prelude::wasm_bindgen::JsCast;
     use crate::prelude::wasm_bindgen::JsValue;
-    
     use crate::prelude::wasm_bindgen_futures::JsFuture;
 
     pub struct Handler {
