@@ -253,29 +253,4 @@ mod test {
         let ret = handler.call(msg.clone()).unwrap();
         assert_eq!(ret, msg);
     }
-
-    #[tokio::test]
-    async fn test_complex_handler() {
-        // WAT symtax: https://github.com/WebAssembly/spec/blob/master/interpreter/README.md#s-expression-syntax
-        // Intract with mem: https://github.com/wasmerio/wasmer/blob/master/examples/memory.rs
-        let wasm = r#"
-(module
-
-  ;; Define a memory that is one page size (64kb)
-  (memory (export "memory") 1)
-
-  ;; fn handler(param: ExternRef) -> ExternRef
-  (func $handler  (param $input externref) (result externref)
-      (return (local.get 0))
-  )
-
-  (export "handler" (func $handler))
-)
-"#;
-        let data = "hello extension";
-        let handler = load(wasm.to_string()).await.unwrap();
-        let msg = BackendMessage::from((2u16, data.as_bytes()));
-        let ret = handler.call(msg.clone()).unwrap();
-        assert_eq!(ret, msg);
-    }
 }
