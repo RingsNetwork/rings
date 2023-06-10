@@ -190,12 +190,12 @@ pub mod loader {
             );
 
             imports! {
-		"message_abi" => {
-                    "message_type"  => msg_type,
-                    "extra" => extra,
-                    "data" => data
-		}
+            "message_abi" => {
+                        "message_type"  => msg_type,
+                        "extra" => extra,
+                        "data" => data
             }
+                }
         }
     }
 
@@ -312,7 +312,7 @@ pub mod loader {
 
     /// Externref type handler, this is a wrapper of handler function
     pub struct Handler {
-	/// wrapped function
+        /// wrapped function
         pub func: TyHandler,
     }
 
