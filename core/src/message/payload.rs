@@ -110,7 +110,7 @@ where T: Serialize + DeserializeOwned
         let tx_id = uuid::Uuid::new_v4();
         let addr = session_manager.authorizer()?;
         let verification = MessageVerification {
-            session: session_manager.session()?,
+            session: session_manager.session(),
             sig: session_manager.sign(msg)?,
             ttl_ms,
             ts_ms,

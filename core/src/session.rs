@@ -9,9 +9,6 @@
 //! - Then we can sign the auth message via some web3 provider like metamask or just with raw private key, and create the SessionManger with
 //! - SessionManager::new(sig, auth_info, temp_key)
 
-use std::sync::Arc;
-use std::sync::RwLock;
-
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -23,6 +20,24 @@ use crate::ecc::SecretKey;
 use crate::err::Error;
 use crate::err::Result;
 use crate::utils;
+
+/// Session contain signature which sign with `Signer`, so need AuthorizedInfo as well.
+#[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
+pub struct Session {
+    /// Signature
+    pub sig: Vec<u8>,
+    /// Information for verify Session signature
+    pub auth: AuthorizedInfo,
+}
+
+/// Manager about Session.
+#[derive(Debug)]
+pub struct SessionManager {
+    /// Session
+    pub session: Session,
+    /// The private key for session.
+    pub session_key: SecretKey,
+}
 
 /// we support both EIP191 and raw ECDSA singing format.
 #[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
@@ -72,38 +87,6 @@ pub struct AuthorizedInfo {
     ts_ms: u128,
     /// Did of session.
     session_id: Did,
-}
-
-/// Session contain signature which sign with `Signer`, so need AuthorizedInfo as well.
-#[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
-pub struct Session {
-    /// Signature
-    pub sig: Vec<u8>,
-    /// Information for verify Session signature
-    pub auth: AuthorizedInfo,
-}
-
-/// Session with temp secretKey.
-#[derive(Debug, Clone)]
-struct SessionWithKey {
-    /// Session
-    session: Session,
-    /// The private key for session.
-    session_key: SecretKey,
-}
-
-/// Manager about Session.
-#[derive(Debug)]
-pub struct SessionManager {
-    inner: Arc<RwLock<SessionWithKey>>,
-}
-
-impl Clone for SessionManager {
-    fn clone(&self) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
-        }
-    }
 }
 
 impl AuthorizedInfo {
@@ -240,13 +223,9 @@ impl SessionManager {
     /// auth_info: generated from `gen_unsign_info`.
     /// session_key: temp key from gen_unsign_info.
     pub fn new(sig: &[u8], auth_info: &AuthorizedInfo, session_key: &SecretKey) -> Self {
-        let inner = SessionWithKey {
+        Self {
             session: Session::new(sig, auth_info),
             session_key: *session_key,
-        };
-
-        Self {
-            inner: Arc::new(RwLock::new(inner)),
         }
     }
 
@@ -258,47 +237,20 @@ impl SessionManager {
         Ok(Self::new(&sig, &auth, &s_key))
     }
 
-    /// Renew session with new sig.
-    pub fn renew(&self, sig: &[u8], auth_info: &AuthorizedInfo, key: &SecretKey) -> Result<&Self> {
-        let new_inner = SessionWithKey {
-            session: Session::new(sig, auth_info),
-            session_key: *key,
-        };
-        let mut inner = self
-            .inner
-            .try_write()
-            .map_err(|_| Error::SessionTryLockFailed)?;
-        *inner = new_inner;
-        Ok(self)
-    }
-
-    /// Get secret key from SessionManager.
-    pub fn session_key(&self) -> Result<SecretKey> {
-        let inner = self
-            .inner
-            .try_read()
-            .map_err(|_| Error::SessionTryLockFailed)?;
-        Ok(inner.session_key)
-    }
-
     /// Get session from SessionManager.
-    pub fn session(&self) -> Result<Session> {
-        let inner = self
-            .inner
-            .try_read()
-            .map_err(|_| Error::SessionTryLockFailed)?;
-        Ok(inner.session.clone())
+    pub fn session(&self) -> Session {
+        self.session.clone()
     }
 
     /// Sign message with session.
     pub fn sign(&self, msg: &str) -> Result<Vec<u8>> {
-        let key = self.session_key()?;
+        let key = self.session_key;
         Ok(signers::default::sign_raw(key, msg).to_vec())
     }
 
     /// Get authorizer from session.
     pub fn authorizer(&self) -> Result<Did> {
-        Ok(self.session()?.auth.authorizer.did)
+        Ok(self.session().auth.authorizer.did)
     }
 }
 
@@ -310,7 +262,7 @@ mod test {
     pub fn test_session_verify() {
         let key = SecretKey::random();
         let sm = SessionManager::new_with_seckey(&key, None).unwrap();
-        let session = sm.session().unwrap();
+        let session = sm.session();
         assert!(session.verify());
     }
 
@@ -318,7 +270,7 @@ mod test {
     pub fn test_authorizer_pubkey() {
         let key = SecretKey::random();
         let sm = SessionManager::new_with_seckey(&key, None).unwrap();
-        let session = sm.session().unwrap();
+        let session = sm.session();
         let pubkey = session.authorizer_pubkey().unwrap();
         assert_eq!(key.pubkey(), pubkey);
     }
