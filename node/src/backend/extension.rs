@@ -1,7 +1,3 @@
-#[cfg(feature = "browser")]
-pub use browser_loader as loader;
-#[cfg(not(feature = "browser"))]
-pub use default_loader as loader;
 use loader::Handler;
 use serde::Deserialize;
 use serde::Serialize;
@@ -11,9 +7,6 @@ use crate::backend::types::BackendMessage;
 use crate::error::Error;
 use crate::error::Result;
 use crate::prelude::reqwest;
-#[cfg(feature = "browser")]
-use crate::prelude::wasm_bindgen;
-use crate::prelude::wasm_export;
 use crate::prelude::*;
 
 /// Path of a wasm extension
@@ -43,7 +36,6 @@ pub trait ExtensionHandlerCaller {
 }
 
 /// Wrapper for BackendMessage that can be converted from and to the native WebAssembly type.
-#[wasm_export]
 #[derive(Clone, Debug)]
 pub struct MaybeBackendMessage(Option<Box<BackendMessage>>);
 
@@ -109,78 +101,7 @@ impl MessageEndpoint for Extension {
     }
 }
 
-#[cfg(feature = "browser")]
-pub mod browser_loader {
-    use super::MaybeBackendMessage;
-    use crate::backend::types::BackendMessage;
-    use crate::error::Error;
-    use crate::error::Result;
-    use crate::prelude::js_sys::Function;
-    use crate::prelude::js_sys::Object;
-    use crate::prelude::js_sys::Reflect;
-    use crate::prelude::js_sys::Uint8Array;
-    use crate::prelude::js_sys::WebAssembly;
-    use crate::prelude::wasm_bindgen::convert::FromWasmAbi;
-    use crate::prelude::wasm_bindgen::convert::IntoWasmAbi;
-    use crate::prelude::wasm_bindgen::convert::ReturnWasmAbi;
-    use crate::prelude::wasm_bindgen::JsCast;
-    use crate::prelude::wasm_bindgen::JsValue;
-    use crate::prelude::wasm_bindgen_futures::JsFuture;
-
-    pub struct Handler {
-        pub func: Function,
-    }
-
-    impl super::ExtensionHandlerCaller for Handler {
-        fn call(&self, msg: BackendMessage) -> Result<BackendMessage> {
-            let maybe_msg: MaybeBackendMessage = msg.into();
-            let ctx = JsValue::NULL;
-            let msg_abi = maybe_msg.return_abi();
-            let call_res = self
-                .func
-                .call1(&ctx, &msg_abi.into())
-                .map_err(|_| Error::WasmRuntimeError)?;
-            unsafe {
-                let ret = MaybeBackendMessage::from_abi(call_res.into_abi());
-                if let Some(r) = ret.0 {
-                    Ok(*r)
-                } else {
-                    Err(Error::WasmRuntimeError)
-                }
-            }
-        }
-    }
-
-    pub async fn load(wat: impl AsRef<[u8]>) -> Result<Handler> {
-        let data_ref: &[u8] = wat.as_ref();
-        let buff = Uint8Array::from(data_ref);
-        let compile_promise = WebAssembly::compile(buff.as_ref());
-        let module_value = JsFuture::from(compile_promise)
-            .await
-            .map_err(|_| Error::WasmCompileError)?;
-        let module = WebAssembly::Module::from(module_value.to_owned());
-        let imports_obj = Object::new();
-        let ins_promise = WebAssembly::instantiate_module(&module, &imports_obj);
-        let ins_value = JsFuture::from(ins_promise)
-            .await
-            .map_err(|_| Error::WasmInstantiationError)?;
-        let ins = WebAssembly::Instance::from(ins_value);
-        let exports = ins.exports();
-        let func_value = Reflect::get(&exports, &JsValue::from("handler"))
-            .map_err(|_| Error::WasmExportError)?;
-        let func: &Function = func_value
-            .dyn_ref::<Function>()
-            .ok_or(Error::WasmRuntimeError)?;
-        Ok(Handler { func: func.clone() })
-    }
-
-    pub async fn load_from_fs(_path: String) -> Result<Handler> {
-        unimplemented!()
-    }
-}
-
-#[cfg(not(feature = "browser"))]
-pub mod default_loader {
+pub mod loader {
     use std::fs;
     use std::sync::Arc;
     use std::sync::Mutex;
@@ -277,7 +198,8 @@ pub mod default_loader {
         let mut store = WASM_MEM
             .try_lock()
             .map_err(|_| Error::WasmGlobalMemoryMutexError)?;
-        let module = wasmer::Module::new(&store, &bytes).map_err(|_| Error::WasmCompileError)?;
+        let module = wasmer::Module::new(&store, &bytes)
+            .map_err(|e| Error::WasmCompileError(e.to_string()))?;
         // The module doesn't import anything, so we create an empty import object.
         let import_object = imports! {};
         let ins = wasmer::Instance::new(&mut store, &module, &import_object)
@@ -319,6 +241,31 @@ mod test {
 (module
   ;; fn handler(param: ExternRef) -> ExternRef
   (func $handler  (param externref) (result externref)
+      (return (local.get 0))
+  )
+
+  (export "handler" (func $handler))
+)
+"#;
+        let data = "hello extension";
+        let handler = load(wasm.to_string()).await.unwrap();
+        let msg = BackendMessage::from((2u16, data.as_bytes()));
+        let ret = handler.call(msg.clone()).unwrap();
+        assert_eq!(ret, msg);
+    }
+
+    #[tokio::test]
+    async fn test_complex_handler() {
+        // WAT symtax: https://github.com/WebAssembly/spec/blob/master/interpreter/README.md#s-expression-syntax
+        // Intract with mem: https://github.com/wasmerio/wasmer/blob/master/examples/memory.rs
+        let wasm = r#"
+(module
+
+  ;; Define a memory that is one page size (64kb)
+  (memory (export "memory") 1)
+
+  ;; fn handler(param: ExternRef) -> ExternRef
+  (func $handler  (param $input externref) (result externref)
       (return (local.get 0))
   )
 

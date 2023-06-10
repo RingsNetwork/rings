@@ -22,8 +22,8 @@ pub enum Error {
     DecodeError,
     #[error("Encode error.")]
     EncodeError,
-    #[error("WASM compile error.")]
-    WasmCompileError,
+    #[error("WASM compile error: {0}")]
+    WasmCompileError(String),
     #[error("WASM instantiation error.")]
     WasmInstantiationError,
     #[error("WASM export error.")]
@@ -119,7 +119,7 @@ impl Error {
             Error::InvalidAuthData => 22,
             Error::InvalidHeaders => 23,
             Error::SerdeJsonError(_) => 24,
-            Error::WasmCompileError => 25,
+            Error::WasmCompileError(_) => 25,
             Error::WasmInstantiationError => 26,
             Error::WasmExportError => 27,
             Error::WasmRuntimeError => 28,

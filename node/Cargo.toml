@@ -48,6 +48,8 @@ browser = [
     "rings-rpc/wasm",
     "rings-derive/wasm",
     "serde-wasm-bindgen",
+    "wasmer/js-default",
+    "lazy_static",
 ]
 browser_chrome_test = ["browser"]
 
