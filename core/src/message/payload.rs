@@ -70,24 +70,26 @@ pub enum OriginVerificationGen {
     Stick(MessageVerification),
 }
 
+/// All messages transmitted in RingsNetwork should be wrapped by MessagePayload.
+/// It additionally offer transaction ID, origin did, relay, previous hop verification,
+/// and origin verification.
 #[derive(Derivative, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[derivative(Debug)]
-/// MessagePayload with sequence and verification, contain MessageRelay.
 pub struct MessagePayload<T> {
     /// Payload data
     pub data: T,
-    /// The transaction ID of payload
+    /// The transaction ID of payload.
+    /// Remote peer should use same tx_id when response.
     pub tx_id: uuid::Uuid,
-    /// Address from payload authorizer
+    /// The did of original sender.
     pub addr: Did,
-    /// Relay messages
+    /// Guide message passing on rings network.
     pub relay: MessageRelay,
-    /// Signature and other messages for verification
+    /// This field hold a signature from a node,
+    /// which is used to prove that the message was sent from that node.
     #[derivative(Debug = "ignore")]
     pub verification: MessageVerification,
-    /// Signature and other messages for verification,
-    /// if the payload is not stick node, `origin_verificationgen` ashould equal to
-    /// `verification`
+    /// Same as verification, but the signature was from the original sender.
     #[derivative(Debug = "ignore")]
     pub origin_verification: MessageVerification,
 }
