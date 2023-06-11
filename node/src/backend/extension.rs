@@ -267,7 +267,7 @@ pub mod loader {
                 return Self(None);
             }
             match WASM_MEM
-                .try_lock()
+                .lock()
                 .map_err(|_| Error::WasmGlobalMemoryMutexError)
             {
                 Ok(mem) => {
@@ -287,7 +287,7 @@ pub mod loader {
         fn to_native(self) -> Self::Native {
             // Convert BackendMessage to the native representation
             match WASM_MEM
-                .try_lock()
+                .lock()
                 .map_err(|_| Error::WasmGlobalMemoryMutexError)
             {
                 Ok(mut mem) => {
@@ -322,7 +322,7 @@ pub mod loader {
             let native_msg = msg.to_native();
             let r = {
                 let mut mem = WASM_MEM
-                    .try_lock()
+                    .lock()
                     .map_err(|_| Error::WasmGlobalMemoryMutexError)?;
                 self.func
                     .call(&mut mem, native_msg)
@@ -340,7 +340,7 @@ pub mod loader {
     /// wasm loarder, bytes can be WAT of *.wasm binary
     pub async fn load(bytes: impl AsRef<[u8]>) -> Result<Handler> {
         let mut store = WASM_MEM
-            .try_lock()
+            .lock()
             .map_err(|_| Error::WasmGlobalMemoryMutexError)?;
         let module = wasmer::Module::new(&store, &bytes)
             .map_err(|e| Error::WasmCompileError(e.to_string()))?;
