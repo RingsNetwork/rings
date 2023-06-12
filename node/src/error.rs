@@ -24,12 +24,14 @@ pub enum Error {
     EncodeError,
     #[error("WASM compile error: {0}")]
     WasmCompileError(String),
+    #[error("BackendMessage RwLock Error")]
+    WasmBackendMessageRwLockError,
     #[error("WASM instantiation error.")]
     WasmInstantiationError,
     #[error("WASM export error.")]
     WasmExportError,
-    #[error("WASM runtime error.")]
-    WasmRuntimeError,
+    #[error("WASM runtime error: {0}")]
+    WasmRuntimeError(String),
     #[error("WASM global memory mutex error.")]
     WasmGlobalMemoryLockError,
     #[error("WASM failed to load file.")]
@@ -122,9 +124,10 @@ impl Error {
             Error::WasmCompileError(_) => 25,
             Error::WasmInstantiationError => 26,
             Error::WasmExportError => 27,
-            Error::WasmRuntimeError => 28,
+            Error::WasmRuntimeError(_) => 28,
             Error::WasmGlobalMemoryLockError => 29,
             Error::WasmFailedToLoadFile => 30,
+	    Error::WasmBackendMessageRwLockError => 31,
             Error::InternalError => 0,
             Error::CreateFileError(_) => 0,
             Error::OpenFileError(_) => 0,
