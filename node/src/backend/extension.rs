@@ -468,12 +468,10 @@ pub mod loader {
             let ret = MaybeBackendMessage::from_native(r);
             if ret.0.is_none() {
                 Err(Error::WasmRuntimeError)
+            } else if let Ok(r) = ret.0.unwrap().read() {
+                Ok(*r.clone())
             } else {
-                if let Ok(r) = ret.0.unwrap().read() {
-                    Ok(*r.clone())
-                } else {
-                    Err(Error::WasmGlobalMemoryLockError)
-                }
+                Err(Error::WasmGlobalMemoryLockError)
             }
         }
     }
