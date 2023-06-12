@@ -31,7 +31,10 @@
 //! )
 //!
 //! You can see that this wat/wasm extension defines a handler function and
-//! imported the message_type ABI.
+//! imports the message_type ABI.
+
+use std::sync::Arc;
+use std::sync::RwLock;
 
 use loader::Handler;
 use serde::Deserialize;
@@ -74,11 +77,11 @@ pub trait ExtensionHandlerCaller {
 
 /// Wrapper for BackendMessage that can be converted from and to the native WebAssembly type.
 #[derive(Clone, Debug)]
-pub struct MaybeBackendMessage(Option<Box<BackendMessage>>);
+pub struct MaybeBackendMessage(Option<Arc<RwLock<Box<BackendMessage>>>>);
 
 impl From<BackendMessage> for MaybeBackendMessage {
     fn from(msg: BackendMessage) -> Self {
-        Self(Some(Box::new(msg)))
+        Self(Some(Arc::new(RwLock::new(Box::new(msg)))))
     }
 }
 
@@ -142,7 +145,7 @@ impl MessageEndpoint for Extension {
 pub mod loader {
     use std::fs;
     use std::sync::Arc;
-    use std::sync::Mutex;
+    use std::sync::RwLock;
 
     use lazy_static::lazy_static;
     use wasmer::imports;
@@ -160,8 +163,8 @@ pub mod loader {
     use crate::error::Result;
 
     lazy_static! {
-        static ref WASM_MEM: Arc<Mutex<wasmer::Store>> =
-            Arc::new(Mutex::new(wasmer::Store::default()));
+        static ref WASM_MEM: Arc<RwLock<wasmer::Store>> =
+            Arc::new(RwLock::new(wasmer::Store::default()));
     }
 
     /// The "WasmABILander" defines how a Rust native struct generates the corresponding Wasm ABI for its getter functions.
@@ -189,11 +192,25 @@ pub mod loader {
                 MaybeBackendMessage::extra,
             );
 
+            let read_at = wasmer::Function::new(
+                store,
+                FunctionType::new(vec![Type::ExternRef, Type::I32], vec![Type::I32]),
+                MaybeBackendMessage::read_at,
+            );
+
+            let write_at = wasmer::Function::new(
+                store,
+                FunctionType::new(vec![Type::ExternRef, Type::I32, Type::I32], vec![Type::I32]),
+                MaybeBackendMessage::write_at,
+            );
+
             imports! {
             "message_abi" => {
                         "message_type"  => msg_type,
                         "extra" => extra,
-                        "data" => data
+                        "data" => data,
+                "read_at" => read_at,
+                "write_at" => write_at
             }
                 }
         }
@@ -207,8 +224,14 @@ pub mod loader {
                     let maybe_msg: MaybeBackendMessage =
                         MaybeBackendMessage::from_native(e.clone());
                     if let Some(msg) = maybe_msg.0 {
-                        let ty: i32 = msg.message_type.into();
-                        Ok(vec![Value::I32(ty)])
+                        if let Ok(m) = msg.read() {
+                            let ty: i32 = m.message_type.into();
+                            Ok(vec![Value::I32(ty)])
+                        } else {
+                            Err(wasmer::RuntimeError::new(
+                                "Failed on lock memory of external ref",
+                            ))
+                        }
                     } else {
                         Err(wasmer::RuntimeError::new("ExternalRef is NULL"))
                     }
@@ -226,8 +249,14 @@ pub mod loader {
                     let maybe_msg: MaybeBackendMessage =
                         MaybeBackendMessage::from_native(e.clone());
                     if let Some(msg) = maybe_msg.0 {
-                        let extra = msg.extra.map(|e| Value::I32(e as i32)).to_vec();
-                        Ok(extra)
+                        if let Ok(m) = msg.read() {
+                            let extra = m.extra.map(|e| Value::I32(e as i32)).to_vec();
+                            Ok(extra)
+                        } else {
+                            Err(wasmer::RuntimeError::new(
+                                "Failed on lock memory of external ref",
+                            ))
+                        }
                     } else {
                         Err(wasmer::RuntimeError::new("ExternalRef is NULL"))
                     }
@@ -245,14 +274,110 @@ pub mod loader {
                     let maybe_msg: MaybeBackendMessage =
                         MaybeBackendMessage::from_native(e.clone());
                     if let Some(msg) = maybe_msg.0 {
-                        let data = msg.data.into_iter().map(|e| Value::I32(e as i32)).collect();
-                        Ok(data)
+                        if let Ok(m) = msg.read() {
+                            let data = m
+                                .data
+                                .clone()
+                                .into_iter()
+                                .map(|e| Value::I32(e as i32))
+                                .collect();
+                            Ok(data)
+                        } else {
+                            Err(wasmer::RuntimeError::new(
+                                "Failed on lock memory of external ref",
+                            ))
+                        }
                     } else {
                         Err(wasmer::RuntimeError::new("ExternalRef is NULL"))
                     }
                 }
                 x => Err(wasmer::RuntimeError::new(format!(
                     "Expect Externef, got {:?}",
+                    x
+                ))),
+            }
+        }
+
+        /// wasm function type `Fn (Option<ExternalRef>, i32) -> \[i32\]`
+        pub fn read_at(params: &[Value]) -> core::result::Result<Vec<Value>, wasmer::RuntimeError> {
+            match params {
+                [Value::ExternRef(e), Value::I32(idx)] => {
+                    let maybe_msg: MaybeBackendMessage =
+                        MaybeBackendMessage::from_native(e.clone());
+                    if let Some(msg) = maybe_msg.0 {
+                        if let Ok(m) = msg.read() {
+                            let data_len = m.data.len() + 31;
+                            match idx {
+                                ..=-1 => Err(wasmer::RuntimeError::new("Index overflow")),
+                                0 => Ok(vec![Value::I32(m.message_type as i32)]),
+                                1..=31 => Ok(vec![Value::I32(m.extra[*idx as usize] as i32)]),
+                                32.. => {
+                                    if *idx > (1 + data_len as i32) {
+                                        Err(wasmer::RuntimeError::new("Index overflow"))
+                                    } else {
+                                        Ok(vec![Value::I32(m.data[*idx as usize] as i32)])
+                                    }
+                                }
+                            }
+                        } else {
+                            Err(wasmer::RuntimeError::new(
+                                "Failed on lock memory of external ref",
+                            ))
+                        }
+                    } else {
+                        Err(wasmer::RuntimeError::new("ExternalRef is NULL"))
+                    }
+                }
+                x => Err(wasmer::RuntimeError::new(format!(
+                    "Expect [Externef, i32], got {:?}",
+                    x
+                ))),
+            }
+        }
+
+        /// wasm function type `Fn (Option<ExternalRef>, i32) -> \[i32\]`
+        pub fn write_at(
+            params: &[Value],
+        ) -> core::result::Result<Vec<Value>, wasmer::RuntimeError> {
+            match params {
+                [Value::ExternRef(e), Value::I32(idx), Value::I32(value)] => {
+                    let maybe_msg: MaybeBackendMessage =
+                        MaybeBackendMessage::from_native(e.clone());
+                    if let Some(msg) = maybe_msg.0 {
+                        if let Ok(mut m) = msg.write() {
+                            let data_len = m.data.len() + 31;
+                            match idx {
+                                ..=-1 => Err(wasmer::RuntimeError::new("Index overflow")),
+                                0 => {
+                                    m.message_type = *value as u16;
+                                    Ok(vec![Value::I32(1i32)])
+                                }
+                                1..=31 => {
+                                    let i = *idx as usize - 1;
+                                    m.extra[i] = *value as u8;
+                                    Ok(vec![Value::I32(1i32)])
+                                }
+                                32.. => {
+                                    if *idx > (1 + data_len as i32) {
+                                        Err(wasmer::RuntimeError::new("Index overflow"))
+                                    } else {
+                                        let i = *idx as usize - 31;
+                                        m.data[i] = *value as u8;
+                                        Ok(vec![Value::I32(1i32)])
+                                    }
+                                }
+                            }
+                        } else {
+                            Err(wasmer::RuntimeError::new(
+                                "Failed on lock memory of external ref",
+                            ))
+                        }
+                    } else {
+                        Err(wasmer::RuntimeError::new("ExternalRef is NULL"))
+                    }
+                }
+                x => Err(wasmer::RuntimeError::new(format!(
+                    "Expect [Externef, i32], got {:?}",
                     x
                 ))),
             }
@@ -267,8 +392,8 @@ pub mod loader {
                 return Self(None);
             }
             match WASM_MEM
-                .lock()
-                .map_err(|_| Error::WasmGlobalMemoryMutexError)
+                .read()
+                .map_err(|_| Error::WasmGlobalMemoryLockError)
             {
                 Ok(mem) => {
                     if let Some(m) = native.unwrap().downcast::<Self>(&mem) {
@@ -287,8 +412,8 @@ pub mod loader {
         fn to_native(self) -> Self::Native {
             // Convert BackendMessage to the native representation
             match WASM_MEM
-                .lock()
-                .map_err(|_| Error::WasmGlobalMemoryMutexError)
+                .write()
+                .map_err(|_| Error::WasmGlobalMemoryLockError)
             {
                 Ok(mut mem) => {
                     let ext_ref = ExternRef::new::<Self>(&mut mem, self);
@@ -322,8 +447,8 @@ pub mod loader {
             let native_msg = msg.to_native();
             let r = {
                 let mut mem = WASM_MEM
-                    .lock()
-                    .map_err(|_| Error::WasmGlobalMemoryMutexError)?;
+                    .write()
+                    .map_err(|_| Error::WasmGlobalMemoryLockError)?;
                 self.func
                     .call(&mut mem, native_msg)
                     .map_err(|_| Error::WasmRuntimeError)?
@@ -332,7 +457,11 @@ pub mod loader {
             if ret.0.is_none() {
                 Err(Error::WasmRuntimeError)
             } else {
-                Ok(*ret.0.unwrap())
+                if let Ok(r) = ret.0.unwrap().read() {
+                    Ok(*r.clone())
+                } else {
+                    Err(Error::WasmGlobalMemoryLockError)
+                }
             }
         }
     }
@@ -340,8 +469,8 @@ pub mod loader {
     /// wasm loarder, bytes can be WAT of *.wasm binary
     pub async fn load(bytes: impl AsRef<[u8]>) -> Result<Handler> {
         let mut store = WASM_MEM
-            .lock()
-            .map_err(|_| Error::WasmGlobalMemoryMutexError)?;
+            .write()
+            .map_err(|_| Error::WasmGlobalMemoryLockError)?;
         let module = wasmer::Module::new(&store, &bytes)
             .map_err(|e| Error::WasmCompileError(e.to_string()))?;
         // The module doesn't import anything, so we create an empty import object.
@@ -418,5 +547,33 @@ mod test {
         let msg = BackendMessage::from((2u16, data.as_bytes()));
         let ret = handler.call(msg.clone()).unwrap();
         assert_eq!(ret, msg);
+    }
+
+    #[tokio::test]
+    async fn test_handle_write() {
+        // WAT symtax: https://github.com/WebAssembly/spec/blob/master/interpreter/README.md#s-expression-syntax
+        // Intract with mem: https://github.com/wasmerio/wasmer/blob/master/examples/memory.rs
+        let wasm = r#"
+(module
+  ;; Let's import write_at from message_abi
+  (type $ty_write_at (func (param externref i32 i32) (result i32)))
+  (import "message_abi" "write_at" (func $write_at (type $ty_write_at)))
+
+
+  ;; fn handler(param: ExternRef) -> ExternRef
+  (func $handler  (param $input externref) (result externref)
+      (call $write_at (local.get 0) (i32.const 0) (i32.const 42))
+      (return (local.get 0))
+  )
+
+  (export "handler" (func $handler))
+)
+"#;
+        let data = "hello extension";
+        let handler = load(wasm.to_string()).await.unwrap();
+        let msg = BackendMessage::from((2u16, data.as_bytes()));
+        assert_eq!(msg.message_type, 2u16, "{:?}", msg);
+        let ret = handler.call(msg.clone()).unwrap();
+        assert_eq!(ret.message_type, 42u16, "{:?}", ret);
     }
 }

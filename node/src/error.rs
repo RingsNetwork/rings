@@ -31,7 +31,7 @@ pub enum Error {
     #[error("WASM runtime error.")]
     WasmRuntimeError,
     #[error("WASM global memory mutex error.")]
-    WasmGlobalMemoryMutexError,
+    WasmGlobalMemoryLockError,
     #[error("WASM failed to load file.")]
     WasmFailedToLoadFile,
     #[error("Create offer info failed: {0}.")]
@@ -123,7 +123,7 @@ impl Error {
             Error::WasmInstantiationError => 26,
             Error::WasmExportError => 27,
             Error::WasmRuntimeError => 28,
-            Error::WasmGlobalMemoryMutexError => 29,
+            Error::WasmGlobalMemoryLockError => 29,
             Error::WasmFailedToLoadFile => 30,
             Error::InternalError => 0,
             Error::CreateFileError(_) => 0,
