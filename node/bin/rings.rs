@@ -426,7 +426,7 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     let processor_clone = processor.clone();
 
     let pubkey = Arc::new(key.pubkey());
-    println!("Sigature: {}", Processor::generate_signature(&key));
+    println!("Signature: {}", Processor::generate_signature(&key));
 
     let bind_addr = get_value(args.http_addr, c.http_addr);
 
