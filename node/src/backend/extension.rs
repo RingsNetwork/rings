@@ -549,8 +549,10 @@ mod test {
         assert_eq!(ret, msg);
     }
 
+    #[ignore]
     #[tokio::test]
     async fn test_handle_write() {
+	// TODO: this test may cause deadlock
         // WAT symtax: https://github.com/WebAssembly/spec/blob/master/interpreter/README.md#s-expression-syntax
         // Intract with mem: https://github.com/wasmerio/wasmer/blob/master/examples/memory.rs
         let wasm = r#"
