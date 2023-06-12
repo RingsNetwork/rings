@@ -1,5 +1,5 @@
 #![warn(missing_docs)]
-//! The "External" module supports a user-defined message handler based on WebAssembly (Wasm).
+//! This module supports a user-defined message handler based on WebAssembly (Wasm).
 //! The Rings network allows loading a Wasm or Wat file from a remote or local file and transforming it into a message handler.
 //! The Wasm module should satisfy the following requirements:
 //!
@@ -13,8 +13,10 @@
 //!     "message_abi" => {
 //!         "message_type"  => msg_type,
 //!         "extra" => extra,
-//!          "data" => data
-//!    }
+//!         "data" => data,
+//!         "read_at" => read_at,
+//!         "write_at" => write_at
+//!     }
 //! ```
 //! A basic wasm extension may looks like:
 //!
@@ -32,6 +34,16 @@
 //!
 //! You can see that this wat/wasm extension defines a handler function and
 //! imports the message_type ABI.
+//!
+//! ## Global memory management
+//!
+//! We use RwLock<Store> to manage the I/O of the wasm environment.
+//! It's important to note that although this module provides ABIs like write_at,
+//! it can potentially lead to deadlocks in practical usage.
+//! This is because the type conversion of ExternalRef relies on &mut Store,
+//! which can result in nested locks during function calls. One possible solution is to first copy the data of externref to memory,
+//! global, or table within the wasm module.
+//! This will facilitate better data handling in wat/wasm scenarios.
 
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -549,10 +561,9 @@ mod test {
         assert_eq!(ret, msg);
     }
 
-    #[ignore]
     #[tokio::test]
-    async fn test_handle_write() {
-	// TODO: this test may cause deadlock
+    async fn test_import_writer() {
+        // TODO: this test may cause deadlock, only test import and compile function here
         // WAT symtax: https://github.com/WebAssembly/spec/blob/master/interpreter/README.md#s-expression-syntax
         // Intract with mem: https://github.com/wasmerio/wasmer/blob/master/examples/memory.rs
         let wasm = r#"
@@ -571,11 +582,6 @@ mod test {
   (export "handler" (func $handler))
 )
 "#;
-        let data = "hello extension";
-        let handler = load(wasm.to_string()).await.unwrap();
-        let msg = BackendMessage::from((2u16, data.as_bytes()));
-        assert_eq!(msg.message_type, 2u16, "{:?}", msg);
-        let ret = handler.call(msg.clone()).unwrap();
-        assert_eq!(ret.message_type, 42u16, "{:?}", ret);
+        load(wasm.to_string()).await.unwrap();
     }
 }
