@@ -34,7 +34,6 @@
 //!
 //! You can see that this wat/wasm extension defines a handler function and
 //! imports the message_type ABI.
-//!
 use std::sync::Arc;
 use std::sync::RwLock;
 
@@ -480,9 +479,9 @@ pub mod loader {
 
     /// Externref type handler, this is a wrapper of handler function
     pub struct Handler {
-	/// The native function get from wasm.
+        /// The native function get from wasm.
         pub func: TyHandler,
-	/// By default, when resolving an ExternRef, it points to the function environment.
+        /// By default, when resolving an ExternRef, it points to the function environment.
         pub msg_ref: MaybeBackendMessage,
     }
 
