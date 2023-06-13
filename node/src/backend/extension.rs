@@ -246,15 +246,16 @@ pub mod loader {
                 MaybeBackendMessage::write_at,
             );
 
+            #[rustfmt::skip]
             imports! {
-            "message_abi" => {
-                        "message_type"  => msg_type,
-                        "extra" => extra,
-                        "data" => data,
-                "read_at" => read_at,
-                "write_at" => write_at
-            }
+		"message_abi" => {
+                    "message_type"  => msg_type,
+                    "extra" => extra,
+                    "data" => data,
+                    "read_at" => read_at,
+                    "write_at" => write_at
                 }
+            }
         }
     }
 
