@@ -127,7 +127,7 @@ impl Error {
             Error::WasmRuntimeError(_) => 28,
             Error::WasmGlobalMemoryLockError => 29,
             Error::WasmFailedToLoadFile => 30,
-	    Error::WasmBackendMessageRwLockError => 31,
+            Error::WasmBackendMessageRwLockError => 31,
             Error::InternalError => 0,
             Error::CreateFileError(_) => 0,
             Error::OpenFileError(_) => 0,
