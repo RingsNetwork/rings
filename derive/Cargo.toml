@@ -10,9 +10,7 @@ license = "GPL-3.0"
 proc-macro = true
 
 [features]
-default = [
-    "wasmer",
-]
+default = []
 wasm = [
     "wasm-bindgen-macro-support",
     "quote",
