@@ -242,7 +242,7 @@ pub mod loader {
     }
 
     impl MaybeBackendMessage {
-        /// wasm function type `Fn (Option<ExternalRef>) -> I32`
+        /// wasm function type `Fn (Option<ExternalRef>) -> I32`, external ref is always pointed to Env
         pub fn msg_type(env: FunctionEnvMut<MaybeBackendMessage>, v: &[Value]) -> core::result::Result<Vec<Value>, wasmer::RuntimeError> {
             match v {
                 [Value::ExternRef(_)] => {
@@ -266,7 +266,7 @@ pub mod loader {
                 ))),
             }
         }
-        /// wasm function type `Fn (Option<ExternalRef>) -> [I32; 30]`
+        /// wasm function type `Fn (Option<ExternalRef>) -> [I32; 30]`, external ref is always pointed to Env
         pub fn extra(env: FunctionEnvMut<MaybeBackendMessage>, v: &[Value]) -> core::result::Result<Vec<Value>, wasmer::RuntimeError> {
             match v {
                 [Value::ExternRef(_)] => {
@@ -290,7 +290,7 @@ pub mod loader {
                 ))),
             }
         }
-        /// wasm function type `Fn (Option<ExternalRef>) -> \[I32\]`
+        /// wasm function type `Fn (Option<ExternalRef>) -> \[I32\]`, external ref is always pointed to Env
         pub fn data(env: FunctionEnvMut<MaybeBackendMessage>, v: &[Value]) -> core::result::Result<Vec<Value>, wasmer::RuntimeError> {
             match v {
                 [Value::ExternRef(_)] => {
@@ -320,7 +320,7 @@ pub mod loader {
             }
         }
 
-        /// wasm function type `Fn (Option<ExternalRef>, i32) -> \[i32\]`
+        /// wasm function type `Fn (Option<ExternalRef>, i32) -> \[i32\]`, external ref is always pointed to Env
         pub fn read_at(env: FunctionEnvMut<MaybeBackendMessage>, params: &[Value]) -> core::result::Result<Vec<Value>, wasmer::RuntimeError> {
             match params {
                 [Value::ExternRef(_), Value::I32(idx)] => {
@@ -356,7 +356,7 @@ pub mod loader {
             }
         }
 
-        /// wasm function type `Fn (Option<ExternalRef>, i32) -> \[i32\]`
+        /// wasm function type `Fn (Option<ExternalRef>, i32) -> \[i32\]`, external ref is always pointed to Env
         pub fn write_at(
 	    env: FunctionEnvMut<MaybeBackendMessage>,
             params: &[Value],
@@ -389,7 +389,7 @@ pub mod loader {
                                 }
                             }
                         } else {
-			    Err(wasmer::RuntimeError::new("ExternalRef is NULL"))
+			    Err(wasmer::RuntimeError::new("Failed on call func `write_at`:: ExternalRef is NULL"))
                         }
                     } else {
                         Err(wasmer::RuntimeError::new(
@@ -466,8 +466,8 @@ pub mod loader {
 
     impl super::ExtensionHandlerCaller for Handler {
         fn call(&self, msg: BackendMessage) -> Result<BackendMessage> {
-            let msg: MaybeBackendMessage = msg.into();
-            let native_msg = msg.to_native();
+	    self.msg.wrap(msg.clone())?;
+            let native_msg = self.msg.clone().to_native();
             let r = {
                 let mut mem = WASM_MEM
                     .write()
@@ -596,6 +596,6 @@ mod test {
         let msg = BackendMessage::from((2u16, data.as_bytes()));
         assert_eq!(msg.message_type, 2u16, "{:?}", msg);
         let ret = handler.call(msg.clone()).unwrap();
-        assert_eq!(ret.message_type, 42u16, "{:?}", ret);
+        assert_eq!(ret.message_type, 42u16, "{:?}{:?}", msg, ret);
     }
 }
