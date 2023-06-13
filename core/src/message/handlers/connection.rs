@@ -202,7 +202,7 @@ pub mod tests {
     use crate::transports::manager::TransportManager;
     use crate::types::ice_transport::IceTransportInterface;
 
-    // ndoe1.key < node2.key < node3.key
+    // node1.key < node2.key < node3.key
     //
     // Firstly, we connect node1 to node2, node2 to node3.
     // Then, we connect node1 to node3 via DHT.

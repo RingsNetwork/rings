@@ -23,6 +23,8 @@ pub enum MessageType {
     HttpRequest,
     /// http response
     HttpResponse,
+    /// extension
+    Extension,
 }
 
 impl From<&[u8; 2]> for MessageType {
@@ -38,6 +40,7 @@ impl From<u16> for MessageType {
             2 => MessageType::SimpleText,
             3 => MessageType::HttpRequest,
             4 => MessageType::HttpResponse,
+            5 => MessageType::Extension,
             _ => MessageType::Unknown,
         }
     }
@@ -51,6 +54,7 @@ impl From<MessageType> for u16 {
             MessageType::SimpleText => 2,
             MessageType::HttpRequest => 3,
             MessageType::HttpResponse => 4,
+            MessageType::Extension => 5,
         }
     }
 }
@@ -60,7 +64,7 @@ impl From<MessageType> for u16 {
 /// - `message_type`: `[u8;2]`
 /// - `extra data`: `[u8;30]`
 /// - `message data`: `[u8]`
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BackendMessage {
     /// message_type
     pub message_type: u16,
@@ -147,7 +151,8 @@ impl From<BackendMessage> for Vec<u8> {
 }
 
 /// Message Endpoint trait
-#[async_trait::async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 pub trait MessageEndpoint {
     /// handle_message
     async fn handle_message(

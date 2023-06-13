@@ -19,3 +19,4 @@ wasm = [
 [dependencies]
 quote = { version = "1.0.28", optional = true }
 wasm-bindgen-macro-support = { workspace = true, optional = true }
+wasmer = { version = "3.3.0", optional = true }

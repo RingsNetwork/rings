@@ -19,6 +19,8 @@ use self::http_server::HiddenServerConfig;
 use self::http_server::HttpServer;
 use self::text::TextEndpoint;
 use crate::backend;
+use crate::backend::extension::Extension;
+use crate::backend::extension::ExtensionConfig;
 use crate::backend::types::BackendMessage;
 use crate::backend::types::MessageEndpoint;
 use crate::backend::types::MessageType;
@@ -35,6 +37,7 @@ use crate::prelude::*;
 pub struct Backend {
     http_server: Arc<HttpServer>,
     text_endpoint: TextEndpoint,
+    extension_endpoint: Extension,
     sender: Sender<BackendMessage>,
     chunk_list: Arc<Mutex<ChunkList<BACKEND_MTU>>>,
 }
@@ -44,11 +47,16 @@ pub struct Backend {
 pub struct BackendConfig {
     /// http_server
     pub hidden_servers: Vec<HiddenServerConfig>,
+    /// extension
+    pub extensions: ExtensionConfig,
 }
 
-impl From<Vec<HiddenServerConfig>> for BackendConfig {
-    fn from(v: Vec<HiddenServerConfig>) -> Self {
-        Self { hidden_servers: v }
+impl From<(Vec<HiddenServerConfig>, ExtensionConfig)> for BackendConfig {
+    fn from((s, e): (Vec<HiddenServerConfig>, ExtensionConfig)) -> Self {
+        Self {
+            hidden_servers: s,
+            extensions: e,
+        }
     }
 }
 
@@ -56,13 +64,14 @@ impl From<Vec<HiddenServerConfig>> for BackendConfig {
 impl Backend {
     /// new backend
     /// - `ipfs_gateway`
-    pub fn new(config: BackendConfig, sender: Sender<BackendMessage>) -> Self {
-        Self {
+    pub async fn new(config: BackendConfig, sender: Sender<BackendMessage>) -> Result<Self> {
+        Ok(Self {
             http_server: Arc::new(HttpServer::from(config.hidden_servers)),
-            text_endpoint: TextEndpoint::default(),
+            text_endpoint: TextEndpoint,
             sender,
+            extension_endpoint: Extension::new(&config.extensions).await?,
             chunk_list: Default::default(),
-        }
+        })
     }
 
     async fn handle_chunk_data(&self, data: &[u8]) -> Result<Option<Bytes>> {
@@ -128,6 +137,7 @@ impl MessageCallback for Backend {
         let result = match msg.message_type.into() {
             MessageType::SimpleText => self.text_endpoint.handle_message(ctx, &msg).await,
             MessageType::HttpRequest => self.http_server.handle_message(ctx, &msg).await,
+            MessageType::Extension => self.extension_endpoint.handle_message(ctx, &msg).await,
             _ => {
                 tracing::debug!(
                     "custom_message handle unsupported, tag: {:?}",

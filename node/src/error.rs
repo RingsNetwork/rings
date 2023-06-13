@@ -22,6 +22,20 @@ pub enum Error {
     DecodeError,
     #[error("Encode error.")]
     EncodeError,
+    #[error("WASM compile error: {0}")]
+    WasmCompileError(String),
+    #[error("BackendMessage RwLock Error")]
+    WasmBackendMessageRwLockError,
+    #[error("WASM instantiation error.")]
+    WasmInstantiationError,
+    #[error("WASM export error.")]
+    WasmExportError,
+    #[error("WASM runtime error: {0}")]
+    WasmRuntimeError(String),
+    #[error("WASM global memory mutex error.")]
+    WasmGlobalMemoryLockError,
+    #[error("WASM failed to load file.")]
+    WasmFailedToLoadFile,
     #[error("Create offer info failed: {0}.")]
     CreateOffer(rings_core::err::Error),
     #[error("Answer offer info failed: {0}.")]
@@ -107,6 +121,13 @@ impl Error {
             Error::InvalidAuthData => 22,
             Error::InvalidHeaders => 23,
             Error::SerdeJsonError(_) => 24,
+            Error::WasmCompileError(_) => 25,
+            Error::WasmInstantiationError => 26,
+            Error::WasmExportError => 27,
+            Error::WasmRuntimeError(_) => 28,
+            Error::WasmGlobalMemoryLockError => 29,
+            Error::WasmFailedToLoadFile => 30,
+            Error::WasmBackendMessageRwLockError => 31,
             Error::InternalError => 0,
             Error::CreateFileError(_) => 0,
             Error::OpenFileError(_) => 0,

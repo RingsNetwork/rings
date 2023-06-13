@@ -1,4 +1,4 @@
-//! Tranposrt managerment
+//! Tranposrt management
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;

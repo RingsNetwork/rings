@@ -406,8 +406,8 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     let external_ip = args.external_ip.map(Some).unwrap_or(c.external_ip);
 
     let (sender, receiver) = tokio::sync::broadcast::channel(1024);
-    let backend_config = c.backend.into();
-    let backend = Backend::new(backend_config, sender);
+    let backend_config = (c.backend, c.extension).into();
+    let backend = Backend::new(backend_config, sender).await?;
     let backend_service_names = backend.service_names();
 
     let swarm = Arc::new(
