@@ -88,12 +88,21 @@ pub trait ExtensionHandlerCaller {
 }
 
 /// Wrapper for BackendMessage that can be converted from and to the native WebAssembly type.
-#[derive(Clone, Debug)]
-pub struct MaybeBackendMessage(Option<Arc<RwLock<Box<BackendMessage>>>>);
+#[derive(Clone, Debug, Default)]
+pub struct MaybeBackendMessage(Arc<RwLock<Option<Box<BackendMessage>>>>);
+
+impl MaybeBackendMessage {
+    /// Ask the instance to wrap a new backend message;
+    pub fn wrap(&self, msg: BackendMessage) -> Result<()> {
+	let mut guard = self.0.write().map_err(|_| Error::WasmBackendMessageRwLockError)?;
+	*guard = Some(Box::new(msg));
+	Ok(())
+    }
+}
 
 impl From<BackendMessage> for MaybeBackendMessage {
     fn from(msg: BackendMessage) -> Self {
-        Self(Some(Arc::new(RwLock::new(Box::new(msg)))))
+        Self(Arc::new(RwLock::new(Some(Box::new(msg)))))
     }
 }
 
@@ -165,53 +174,69 @@ pub mod loader {
     use wasmer::ExternRef;
     use wasmer::FromToNativeWasmType;
     use wasmer::FunctionType;
+    use wasmer::FunctionEnv;
     use wasmer::Type;
     use wasmer::TypedFunction;
+    use wasmer::FunctionEnvMut;
     use wasmer::Value;
 
     use super::MaybeBackendMessage;
     use crate::backend::types::BackendMessage;
     use crate::error::Error;
     use crate::error::Result;
+    use core::any::Any;
 
     lazy_static! {
         static ref WASM_MEM: Arc<RwLock<wasmer::Store>> =
             Arc::new(RwLock::new(wasmer::Store::default()));
     }
 
+    impl TryFrom<MaybeBackendMessage> for FunctionEnv<MaybeBackendMessage> {
+	type Error = Error;
+	fn try_from(data: MaybeBackendMessage) -> Result<Self> {
+	    let mut mem = WASM_MEM.write().map_err(|_| Error::WasmGlobalMemoryLockError)?;
+	    Ok(FunctionEnv::new(&mut mem, data))
+	}
+    }
+
     /// The "WasmABILander" defines how a Rust native struct generates the corresponding Wasm ABI for its getter functions.
-    pub trait WasmABILander {
+    pub trait WasmABILander: Sized + Any + Send + 'static {
         /// The land_abi function needs to return an ImportObject.
         /// read more: <https://developer.mozilla.org/en-US/docs/WebAssembly/JavaScript_interface/instantiate>
-        fn land_abi(store: &mut impl AsStoreMut) -> wasmer::Imports;
+        fn land_abi(env: &FunctionEnv<Self>, store: &mut impl AsStoreMut) -> wasmer::Imports;
     }
 
     impl WasmABILander for MaybeBackendMessage {
-        fn land_abi(store: &mut impl AsStoreMut) -> wasmer::Imports {
-            let msg_type = wasmer::Function::new(
+        fn land_abi(env: &FunctionEnv<Self>, store: &mut impl AsStoreMut) -> wasmer::Imports {
+            let msg_type = wasmer::Function::new_with_env(
                 store,
+		env,
                 FunctionType::new(vec![Type::ExternRef], vec![Type::I32]),
                 MaybeBackendMessage::msg_type,
             );
-            let extra = wasmer::Function::new(
+            let extra = wasmer::Function::new_with_env(
                 store,
+		env,
                 FunctionType::new(vec![Type::ExternRef], vec![Type::I32]),
                 MaybeBackendMessage::extra,
             );
-            let data = wasmer::Function::new(
+            let data = wasmer::Function::new_with_env(
                 store,
+		env,
                 FunctionType::new(vec![Type::ExternRef], vec![Type::I32]),
                 MaybeBackendMessage::extra,
             );
 
-            let read_at = wasmer::Function::new(
+            let read_at = wasmer::Function::new_with_env(
                 store,
+		env,
                 FunctionType::new(vec![Type::ExternRef, Type::I32], vec![Type::I32]),
                 MaybeBackendMessage::read_at,
             );
 
-            let write_at = wasmer::Function::new(
+            let write_at = wasmer::Function::new_with_env(
                 store,
+		env,
                 FunctionType::new(vec![Type::ExternRef, Type::I32, Type::I32], vec![Type::I32]),
                 MaybeBackendMessage::write_at,
             );
@@ -229,23 +254,22 @@ pub mod loader {
     }
 
     impl MaybeBackendMessage {
-        /// wasm function type `Fn (Option<ExternalRef>) -> I32`
-        pub fn msg_type(v: &[Value]) -> core::result::Result<Vec<Value>, wasmer::RuntimeError> {
+        /// wasm function type `Fn (Option<ExternalRef>) -> I32`, external ref is always pointed to Env
+        pub fn msg_type(env: FunctionEnvMut<MaybeBackendMessage>, v: &[Value]) -> core::result::Result<Vec<Value>, wasmer::RuntimeError> {
             match v {
-                [Value::ExternRef(e)] => {
-                    let maybe_msg: MaybeBackendMessage =
-                        MaybeBackendMessage::from_native(e.clone());
-                    if let Some(msg) = maybe_msg.0 {
-                        if let Ok(m) = msg.read() {
-                            let ty: i32 = m.message_type.into();
+                [Value::ExternRef(_)] => {
+                    let msg = env.data();
+                    if let Ok(m_guard) = msg.0.read() {
+			if let Some(m) = &*m_guard {
+	                    let ty: i32 = m.message_type.into();
                             Ok(vec![Value::I32(ty)])
-                        } else {
-                            Err(wasmer::RuntimeError::new(
-                                "Failed on lock memory of external ref",
-                            ))
-                        }
+			} else {
+			    return Err(wasmer::RuntimeError::new("ExternalRef is NULL"))
+			}
                     } else {
-                        Err(wasmer::RuntimeError::new("ExternalRef is NULL"))
+                        Err(wasmer::RuntimeError::new(
+                            "Failed on lock memory of external ref",
+                        ))
                     }
                 }
                 x => Err(wasmer::RuntimeError::new(format!(
@@ -254,23 +278,22 @@ pub mod loader {
                 ))),
             }
         }
-        /// wasm function type `Fn (Option<ExternalRef>) -> [I32; 30]`
-        pub fn extra(v: &[Value]) -> core::result::Result<Vec<Value>, wasmer::RuntimeError> {
+        /// wasm function type `Fn (Option<ExternalRef>) -> [I32; 30]`, external ref is always pointed to Env
+        pub fn extra(env: FunctionEnvMut<MaybeBackendMessage>, v: &[Value]) -> core::result::Result<Vec<Value>, wasmer::RuntimeError> {
             match v {
-                [Value::ExternRef(e)] => {
-                    let maybe_msg: MaybeBackendMessage =
-                        MaybeBackendMessage::from_native(e.clone());
-                    if let Some(msg) = maybe_msg.0 {
-                        if let Ok(m) = msg.read() {
+                [Value::ExternRef(_)] => {
+                    let msg = env.data();
+                    if let Ok(m_guard) = msg.0.read() {
+			if let Some(m) = &*m_guard {
                             let extra = m.extra.map(|e| Value::I32(e as i32)).to_vec();
                             Ok(extra)
-                        } else {
-                            Err(wasmer::RuntimeError::new(
-                                "Failed on lock memory of external ref",
-                            ))
-                        }
+			} else {
+			    Err(wasmer::RuntimeError::new("ExternalRef is NULL"))
+			}
                     } else {
-                        Err(wasmer::RuntimeError::new("ExternalRef is NULL"))
+                        Err(wasmer::RuntimeError::new(
+                            "Failed on lock memory of external ref",
+                        ))
                     }
                 }
                 x => Err(wasmer::RuntimeError::new(format!(
@@ -279,28 +302,27 @@ pub mod loader {
                 ))),
             }
         }
-        /// wasm function type `Fn (Option<ExternalRef>) -> \[I32\]`
-        pub fn data(v: &[Value]) -> core::result::Result<Vec<Value>, wasmer::RuntimeError> {
+        /// wasm function type `Fn (Option<ExternalRef>) -> \[I32\]`, external ref is always pointed to Env
+        pub fn data(env: FunctionEnvMut<MaybeBackendMessage>, v: &[Value]) -> core::result::Result<Vec<Value>, wasmer::RuntimeError> {
             match v {
-                [Value::ExternRef(e)] => {
-                    let maybe_msg: MaybeBackendMessage =
-                        MaybeBackendMessage::from_native(e.clone());
-                    if let Some(msg) = maybe_msg.0 {
-                        if let Ok(m) = msg.read() {
+                [Value::ExternRef(_)] => {
+                    let msg = env.data();
+                    if let Ok(m_guard) = msg.0.read() {
+			if let Some(m) = &*m_guard {
                             let data = m
-                                .data
-                                .clone()
-                                .into_iter()
-                                .map(|e| Value::I32(e as i32))
-                                .collect();
+				.data
+				.clone()
+				.into_iter()
+				.map(|e| Value::I32(e as i32))
+				.collect();
                             Ok(data)
-                        } else {
-                            Err(wasmer::RuntimeError::new(
-                                "Failed on lock memory of external ref",
-                            ))
-                        }
+			} else {
+			    Err(wasmer::RuntimeError::new("ExternalRef is NULL"))
+			}
                     } else {
-                        Err(wasmer::RuntimeError::new("ExternalRef is NULL"))
+                        Err(wasmer::RuntimeError::new(
+                            "Failed on lock memory of external ref",
+                        ))
                     }
                 }
                 x => Err(wasmer::RuntimeError::new(format!(
@@ -310,14 +332,13 @@ pub mod loader {
             }
         }
 
-        /// wasm function type `Fn (Option<ExternalRef>, i32) -> \[i32\]`
-        pub fn read_at(params: &[Value]) -> core::result::Result<Vec<Value>, wasmer::RuntimeError> {
+        /// wasm function type `Fn (Option<ExternalRef>, i32) -> \[i32\]`, external ref is always pointed to Env
+        pub fn read_at(env: FunctionEnvMut<MaybeBackendMessage>, params: &[Value]) -> core::result::Result<Vec<Value>, wasmer::RuntimeError> {
             match params {
-                [Value::ExternRef(e), Value::I32(idx)] => {
-                    let maybe_msg: MaybeBackendMessage =
-                        MaybeBackendMessage::from_native(e.clone());
-                    if let Some(msg) = maybe_msg.0 {
-                        if let Ok(m) = msg.read() {
+                [Value::ExternRef(_), Value::I32(idx)] => {
+                    let msg = env.data();
+                    if let Ok(m_guard) = msg.0.read() {
+			if let Some(m) = &*m_guard {
                             let data_len = m.data.len() + 31;
                             match idx {
                                 ..=-1 => Err(wasmer::RuntimeError::new("Index overflow")),
@@ -332,12 +353,12 @@ pub mod loader {
                                 }
                             }
                         } else {
-                            Err(wasmer::RuntimeError::new(
-                                "Failed on lock memory of external ref",
-                            ))
-                        }
-                    } else {
-                        Err(wasmer::RuntimeError::new("ExternalRef is NULL"))
+			    Err(wasmer::RuntimeError::new("ExternalRef is NULL"))
+			}
+		    } else {
+                        Err(wasmer::RuntimeError::new(
+                            "Failed on lock memory of external ref",
+                        ))
                     }
                 }
                 x => Err(wasmer::RuntimeError::new(format!(
@@ -347,16 +368,16 @@ pub mod loader {
             }
         }
 
-        /// wasm function type `Fn (Option<ExternalRef>, i32) -> \[i32\]`
+        /// wasm function type `Fn (Option<ExternalRef>, i32) -> \[i32\]`, external ref is always pointed to Env
         pub fn write_at(
+	    env: FunctionEnvMut<MaybeBackendMessage>,
             params: &[Value],
         ) -> core::result::Result<Vec<Value>, wasmer::RuntimeError> {
             match params {
-                [Value::ExternRef(e), Value::I32(idx), Value::I32(value)] => {
-                    let maybe_msg: MaybeBackendMessage =
-                        MaybeBackendMessage::from_native(e.clone());
-                    if let Some(msg) = maybe_msg.0 {
-                        if let Ok(mut m) = msg.write() {
+                [Value::ExternRef(_), Value::I32(idx), Value::I32(value)] => {
+                    let msg = env.data();
+                    if let Ok(mut m_guard) = msg.0.write() {
+			if let Some(ref mut m) = *m_guard {
                             let data_len = m.data.len() + 31;
                             match idx {
                                 ..=-1 => Err(wasmer::RuntimeError::new("Index overflow")),
@@ -380,12 +401,12 @@ pub mod loader {
                                 }
                             }
                         } else {
-                            Err(wasmer::RuntimeError::new(
-                                "Failed on lock memory of external ref",
-                            ))
+			    Err(wasmer::RuntimeError::new("Failed on call func `write_at`:: ExternalRef is NULL"))
                         }
                     } else {
-                        Err(wasmer::RuntimeError::new("ExternalRef is NULL"))
+                        Err(wasmer::RuntimeError::new(
+                            "Failed on lock memory of external ref",
+                        ))
                     }
                 }
                 x => Err(wasmer::RuntimeError::new(format!(
@@ -401,7 +422,7 @@ pub mod loader {
 
         fn from_native(native: Self::Native) -> Self {
             if native.is_none() {
-                return Self(None);
+                return Self::default();
             }
             match WASM_MEM
                 .read()
@@ -411,12 +432,12 @@ pub mod loader {
                     if let Some(m) = native.unwrap().downcast::<Self>(&mem) {
                         m.clone()
                     } else {
-                        Self(None)
+                        Self::default()
                     }
                 }
                 Err(e) => {
                     log::error!("{:?}", e);
-                    Self(None)
+                    Self::default()
                 }
             }
         }
@@ -451,40 +472,43 @@ pub mod loader {
     pub struct Handler {
         /// wrapped function
         pub func: TyHandler,
+	/// Env for wasm function calling
+	pub msg: MaybeBackendMessage
     }
 
     impl super::ExtensionHandlerCaller for Handler {
         fn call(&self, msg: BackendMessage) -> Result<BackendMessage> {
-            let msg: MaybeBackendMessage = msg.into();
-            let native_msg = msg.to_native();
+	    self.msg.wrap(msg.clone())?;
+            let native_msg = self.msg.clone().to_native();
             let r = {
                 let mut mem = WASM_MEM
                     .write()
                     .map_err(|_| Error::WasmGlobalMemoryLockError)?;
                 self.func
                     .call(&mut mem, native_msg)
-                    .map_err(|_| Error::WasmRuntimeError)?
+                    .map_err(|e| Error::WasmRuntimeError(e.to_string()))?
             };
             let ret = MaybeBackendMessage::from_native(r);
-            if ret.0.is_none() {
-                Err(Error::WasmRuntimeError)
-            } else if let Ok(r) = ret.0.unwrap().read() {
-                Ok(*r.clone())
-            } else {
-                Err(Error::WasmGlobalMemoryLockError)
-            }
+	    let data = ret.0.read().map_err(|_| Error::WasmGlobalMemoryLockError)?;
+	    if let Some(m) = &*data {
+		Ok(*m.clone())
+	    } else {
+		Err(Error::WasmRuntimeError("Result data is NULL".to_string()))
+	    }
         }
     }
 
     /// wasm loarder, bytes can be WAT of *.wasm binary
     pub async fn load(bytes: impl AsRef<[u8]>) -> Result<Handler> {
+	let message = MaybeBackendMessage::default();
+	let env: FunctionEnv<MaybeBackendMessage> = message.clone().try_into()?;
         let mut store = WASM_MEM
             .write()
             .map_err(|_| Error::WasmGlobalMemoryLockError)?;
         let module = wasmer::Module::new(&store, &bytes)
             .map_err(|e| Error::WasmCompileError(e.to_string()))?;
         // The module doesn't import anything, so we create an empty import object.
-        let import_object = MaybeBackendMessage::land_abi(&mut store);
+        let import_object = MaybeBackendMessage::land_abi(&env, &mut store);
         let ins = wasmer::Instance::new(&mut store, &module, &import_object)
             .map_err(|_| Error::WasmInstantiationError)?;
         let exports: wasmer::Exports = ins.exports;
@@ -494,7 +518,7 @@ pub mod loader {
             .typed(&store)
             .map_err(|_| Error::WasmExportError)?;
 
-        Ok(Handler { func: handler })
+        Ok(Handler { func: handler, msg: message })
     }
 
     /// Load wasm from filesystem
@@ -580,6 +604,11 @@ mod test {
   (export "handler" (func $handler))
 )
 "#;
-        load(wasm.to_string()).await.unwrap();
+        let data = "hello extension";
+        let handler = load(wasm.to_string()).await.unwrap();
+        let msg = BackendMessage::from((2u16, data.as_bytes()));
+        assert_eq!(msg.message_type, 2u16, "{:?}", msg);
+        let ret = handler.call(msg.clone()).unwrap();
+        assert_eq!(ret.message_type, 42u16, "{:?}{:?}", msg, ret);
     }
 }
