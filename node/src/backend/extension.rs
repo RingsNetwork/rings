@@ -35,16 +35,6 @@
 //! You can see that this wat/wasm extension defines a handler function and
 //! imports the message_type ABI.
 //!
-//! ## Global memory management
-//!
-//! We use RwLock<Store> to manage the I/O of the wasm environment.
-//! It's important to note that although this module provides ABIs like write_at,
-//! it can potentially lead to deadlocks in practical usage.
-//! This is because the type conversion of ExternalRef relies on &mut Store,
-//! which can result in nested locks during function calls. One possible solution is to first copy the data of externref to memory,
-//! global, or table within the wasm module.
-//! This will facilitate better data handling in wat/wasm scenarios.
-
 use std::sync::Arc;
 use std::sync::RwLock;
 
@@ -273,7 +263,7 @@ pub mod loader {
                             let ty: i32 = m.message_type.into();
                             Ok(vec![Value::I32(ty)])
                         } else {
-                            return Err(wasmer::RuntimeError::new("ExternalRef is NULL"));
+                            Err(wasmer::RuntimeError::new("ExternalRef is NULL"))
                         }
                     } else {
                         Err(wasmer::RuntimeError::new(
@@ -490,16 +480,16 @@ pub mod loader {
 
     /// Externref type handler, this is a wrapper of handler function
     pub struct Handler {
-        /// wrapped function
+	/// The native function get from wasm.
         pub func: TyHandler,
-        /// Env for wasm function calling
-        pub msg: MaybeBackendMessage,
+	/// By default, when resolving an ExternRef, it points to the function environment.
+        pub msg_ref: MaybeBackendMessage,
     }
 
     impl super::ExtensionHandlerCaller for Handler {
         fn call(&self, msg: BackendMessage) -> Result<BackendMessage> {
-            self.msg.wrap(msg.clone())?;
-            let native_msg = self.msg.clone().to_native();
+            self.msg_ref.wrap(msg)?;
+            let native_msg = self.msg_ref.clone().to_native();
             let r = {
                 let mut mem = WASM_MEM
                     .write()
@@ -540,7 +530,7 @@ pub mod loader {
 
         Ok(Handler {
             func: handler,
-            msg: message,
+            msg_ref: message,
         })
     }
 
