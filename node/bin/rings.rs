@@ -24,6 +24,7 @@ use rings_node::prelude::rings_core::dht::Did;
 use rings_node::prelude::rings_core::dht::Stabilization;
 use rings_node::prelude::rings_core::ecc::SecretKey;
 use rings_node::prelude::PersistenceStorage;
+use rings_node::prelude::SessionManager;
 use rings_node::prelude::SwarmBuilder;
 use rings_node::processor::Processor;
 use tokio::io;
@@ -378,6 +379,8 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     let did: Did = key.address().into();
     println!("Did: {}", did);
 
+    let session_manager = SessionManager::new_with_seckey(&key)?;
+
     let (data_storage, measure_storage) = if let Some(storage_path) = args.storage_path {
         let storage_path = Path::new(&storage_path);
         let data_path = storage_path.join("data");
@@ -411,12 +414,11 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     let backend_service_names = backend.service_names();
 
     let swarm = Arc::new(
-        SwarmBuilder::new(stuns.as_str(), per_data_storage)
-            .key(key)
+        SwarmBuilder::new(stuns.as_str(), per_data_storage, session_manager)
             .external_address(external_ip)
             .measure(Box::new(measure))
             .message_callback(Some(Box::new(backend)))
-            .build()?,
+            .build(),
     );
 
     let stabilize_timeout = get_value(args.stabilize_timeout, c.stabilize_timeout);

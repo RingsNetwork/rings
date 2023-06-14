@@ -26,24 +26,21 @@ impl MessageVerification {
     /// Verify a MessageVerification
     pub fn verify<T>(&self, data: &T) -> bool
     where T: Serialize {
-        if !self.session.verify() {
-            tracing::warn!("session is expired");
-            return false;
-        }
+        let Ok(msg) = self.msg(data) else {tracing::warn!("MessageVerification pack_msg failed"); return false};
 
-        if let (Ok(did), Ok(msg)) = (self.session.did(), self.msg(data)) {
-            signers::default::verify(&msg, &did, &self.sig)
-        } else {
-            tracing::warn!("failed to verify message");
-            false
-        }
+        self.session
+            .verify(&msg, &self.sig)
+            .map_err(|e| {
+                tracing::warn!("MessageVerification verify failed: {:?}", e);
+            })
+            .is_ok()
     }
 
     /// Recover publickey from packed message.
     pub fn session_pubkey<T>(&self, data: &T) -> Result<PublicKey>
     where T: Serialize {
         let msg = self.msg(data)?;
-        signers::default::recover(&msg, &self.sig)
+        signers::secp256k1::recover(&msg, &self.sig)
     }
 
     /// Pack Message to string, and attach ts and ttl on it.

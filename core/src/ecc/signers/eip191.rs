@@ -20,7 +20,7 @@ pub fn sign(sec: SecretKey, hash: &[u8; 32]) -> [u8; 65] {
     sig
 }
 
-/// \x19Ethereum Signed Message\n use for PersionSign, which can encode by send `personalSign` rpc call.
+/// \x19Ethereum Signed Message\n is used for PersonalSign, which can encode by send `personalSign` rpc call.
 pub fn hash(msg: &str) -> [u8; 32] {
     let mut prefix_msg = format!("\x19Ethereum Signed Message:\n{}", msg.len()).into_bytes();
     prefix_msg.extend_from_slice(msg.as_bytes());

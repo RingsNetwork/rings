@@ -531,16 +531,15 @@ mod tests {
 
     async fn new_rnd_meta() -> RpcMeta {
         let key = SecretKey::random();
+        let session_manager = SessionManager::new_with_seckey(&key).unwrap();
         let path = uuid::Uuid::new_v4().to_simple().to_string();
         let storage = PersistenceStorage::new_with_cap_and_path(1000, path.as_str())
             .await
             .unwrap();
         let swarm = Arc::new(
-            SwarmBuilder::new("stun://stun.l.google.com:19302", storage)
-                .key(key)
+            SwarmBuilder::new("stun://stun.l.google.com:19302", storage, session_manager)
                 .message_callback(None)
-                .build()
-                .unwrap(),
+                .build(),
         );
         let stab = Arc::new(Stabilization::new(swarm.clone(), 20));
         let processor: Processor = (swarm, stab).into();

@@ -34,8 +34,6 @@ use crate::prelude::rings_core::prelude::libsecp256k1;
 use crate::prelude::rings_core::prelude::uuid;
 use crate::prelude::rings_core::prelude::web3::contract::tokens::Tokenizable;
 use crate::prelude::rings_core::prelude::web3::ethabi::Token;
-use crate::prelude::rings_core::session::AuthorizedInfo;
-use crate::prelude::rings_core::session::SessionManager;
 use crate::prelude::rings_core::storage::PersistenceStorage;
 use crate::prelude::rings_core::swarm::Swarm;
 use crate::prelude::rings_core::swarm::SwarmBuilder;
@@ -53,93 +51,7 @@ use crate::prelude::CallbackFn;
 use crate::prelude::ChordStorageInterface;
 use crate::prelude::ChordStorageInterfaceCacheChecker;
 use crate::prelude::CustomMessage;
-use crate::prelude::Signer;
-
-/// AddressType enum contains `DEFAULT` and `ED25519`.
-pub enum AddressType {
-    /// default address type
-    DEFAULT,
-    /// ED25519 address type
-    ED25519,
-}
-
-/// A UnsignedInfo use for wasm.
-#[derive(Clone)]
-pub struct UnsignedInfo {
-    /// Did identify
-    key_addr: Did,
-    /// auth information
-    auth: AuthorizedInfo,
-    /// random secrekey generate by service
-    random_key: SecretKey,
-}
-
-impl UnsignedInfo {
-    /// Create a new `UnsignedInfo` instance with SignerMode::EIP191
-    pub fn new(key_addr: String) -> Result<Self> {
-        Self::new_with_signer(key_addr, Signer::EIP191)
-    }
-
-    /// Create a new `UnsignedInfo` instance
-    ///   * key_addr: wallet address
-    ///   * signer: `SignerMode`
-    pub fn new_with_signer(key_addr: String, signer: Signer) -> Result<Self> {
-        let key_addr = Did::from_str(key_addr.as_str()).map_err(|_| Error::InvalidDid)?;
-        let (auth, random_key) = SessionManager::gen_unsign_info(key_addr, None, Some(signer));
-
-        Ok(UnsignedInfo {
-            auth,
-            random_key,
-            key_addr,
-        })
-    }
-
-    /// Create a new `UnsignedInfo` instance
-    ///   * pubkey: public key
-    ///   * signer: `SignerMode`
-    pub fn new_with_pubkey(pubkey: PublicKey, signer: Signer) -> Result<Self> {
-        let key_addr = pubkey.address().into();
-        let (auth, random_key) = SessionManager::gen_unsign_info(key_addr, None, Some(signer));
-
-        Ok(UnsignedInfo {
-            auth,
-            random_key,
-            key_addr,
-        })
-    }
-
-    /// Create a new `UnsignedInfo` instance
-    ///   * pubkey: solana wallet pubkey
-    pub fn new_with_address(address: String, addr_type: AddressType) -> Result<Self> {
-        let (key_addr, auth, random_key) = match addr_type {
-            AddressType::DEFAULT => {
-                let key_addr = Did::from_str(address.as_str()).map_err(|_| Error::InvalidDid)?;
-                let (auth, random_key) =
-                    SessionManager::gen_unsign_info(key_addr, None, Some(Signer::EIP191));
-                (key_addr, auth, random_key)
-            }
-            AddressType::ED25519 => {
-                let pubkey =
-                    PublicKey::try_from_b58t(&address).map_err(|_| Error::InvalidAddress)?;
-                let (auth, random_key) =
-                    SessionManager::gen_unsign_info_with_ed25519_pubkey(None, pubkey)
-                        .map_err(|_| Error::InvalidAddress)?;
-                (pubkey.address().into(), auth, random_key)
-            }
-        };
-        Ok(UnsignedInfo {
-            auth,
-            random_key,
-            key_addr,
-        })
-    }
-
-    /// Get auth string
-    pub fn auth(&self) -> Result<String> {
-        let s = self.auth.to_string().map_err(|_| Error::InvalidAuthData)?;
-        Ok(s)
-    }
-}
+use crate::prelude::SessionManager;
 
 /// Processor for rings-node jsonrpc server
 #[derive(Clone)]
@@ -165,38 +77,24 @@ impl From<(Arc<Swarm>, Arc<Stabilization>)> for Processor {
 impl Processor {
     /// Create a new Processor instance.
     pub async fn new(
-        unsigned_info: &UnsignedInfo,
-        signed_data: &[u8],
+        session_manager: SessionManager,
         stuns: String,
         callback: Option<CallbackFn>,
     ) -> Result<Self> {
-        Self::new_with_storage(
-            unsigned_info,
-            signed_data,
-            stuns,
-            callback,
-            "rings-node".to_owned(),
-        )
-        .await
+        Self::new_with_storage(session_manager, stuns, callback, "rings-node".to_owned()).await
     }
 
     /// Create a new Processor
     pub async fn new_with_storage(
-        unsigned_info: &UnsignedInfo,
-        signed_data: &[u8],
+        session_manager: SessionManager,
         stuns: String,
         callback: Option<CallbackFn>,
         storage_name: String,
     ) -> Result<Self> {
-        let verified = SessionManager::verify(&unsigned_info.auth, signed_data)
+        session_manager
+            .session
+            .verify_self()
             .map_err(|e| Error::VerifyError(e.to_string()))?;
-
-        if !verified {
-            return Err(Error::VerifyError("not verified".to_string()));
-        }
-
-        let unsigned_info = unsigned_info.clone();
-        let signed_data = signed_data.to_vec();
 
         let storage_path = storage_name.as_str();
         let measure_path = [storage_path, "measure"].join("/");
@@ -210,16 +108,11 @@ impl Processor {
             .map_err(Error::Storage)?;
         let measure = PeriodicMeasure::new(ms);
 
-        let random_key = unsigned_info.random_key;
-        let session_manager = SessionManager::new(&signed_data, &unsigned_info.auth, &random_key);
-
         let swarm = Arc::new(
-            SwarmBuilder::new(&stuns, storage)
-                .session_manager(unsigned_info.key_addr, session_manager)
+            SwarmBuilder::new(&stuns, storage, session_manager)
                 .measure(Box::new(measure))
                 .message_callback(callback)
-                .build()
-                .map_err(Error::Swarm)?,
+                .build(),
         );
 
         let stabilization = Arc::new(Stabilization::new(swarm.clone(), 20));
@@ -619,6 +512,7 @@ mod test {
 
     async fn new_processor() -> (Processor, String) {
         let key = SecretKey::random();
+        let session_manager = SessionManager::new_with_seckey(&key).unwrap();
 
         let stun = "stun://stun.l.google.com:19302";
         let path = PersistenceStorage::random_path("./tmp");
@@ -626,13 +520,14 @@ mod test {
             .await
             .unwrap();
 
-        let swarm = Arc::new(SwarmBuilder::new(stun, storage).key(key).build().unwrap());
+        let swarm = Arc::new(SwarmBuilder::new(stun, storage, session_manager).build());
         let stabilization = Arc::new(Stabilization::new(swarm.clone(), 200));
         ((swarm, stabilization).into(), path)
     }
 
     async fn new_processor_with_callback(callback: CallbackFn) -> (Processor, String) {
         let key = SecretKey::random();
+        let session_manager = SessionManager::new_with_seckey(&key).unwrap();
 
         let stun = "stun://stun.l.google.com:19302";
         let path = PersistenceStorage::random_path("./tmp");
@@ -641,11 +536,9 @@ mod test {
             .unwrap();
 
         let swarm = Arc::new(
-            SwarmBuilder::new(stun, storage)
-                .key(key)
+            SwarmBuilder::new(stun, storage, session_manager)
                 .message_callback(Some(callback))
-                .build()
-                .unwrap(),
+                .build(),
         );
         let stabilization = Arc::new(Stabilization::new(swarm.clone(), 200));
         ((swarm, stabilization).into(), path)

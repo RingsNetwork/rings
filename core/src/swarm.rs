@@ -12,7 +12,6 @@ use crate::channels::Channel;
 use crate::dht::Chord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
-use crate::ecc::SecretKey;
 use crate::err::Error;
 use crate::err::Result;
 use crate::inspect::SwarmInspect;
@@ -28,7 +27,6 @@ use crate::message::MessagePayload;
 use crate::message::PayloadSender;
 use crate::message::ValidatorFn;
 use crate::session::SessionManager;
-use crate::session::Ttl;
 use crate::storage::MemStorage;
 use crate::storage::PersistenceStorage;
 use crate::transports::manager::TransportHandshake;
@@ -48,21 +46,23 @@ pub type MeasureImpl = Box<dyn Measure>;
 
 /// Creates a SwarmBuilder to configure a Swarm.
 pub struct SwarmBuilder {
-    key: Option<SecretKey>,
     ice_servers: Vec<IceServer>,
     external_address: Option<String>,
-    dht_did: Option<Did>,
     dht_succ_max: u8,
     dht_storage: PersistenceStorage,
-    session_manager: Option<SessionManager>,
-    session_ttl: Option<Ttl>,
+    session_manager: SessionManager,
+    session_ttl: Option<usize>,
     measure: Option<MeasureImpl>,
     message_callback: Option<CallbackFn>,
     message_validator: Option<ValidatorFn>,
 }
 
 impl SwarmBuilder {
-    pub fn new(ice_servers: &str, dht_storage: PersistenceStorage) -> Self {
+    pub fn new(
+        ice_servers: &str,
+        dht_storage: PersistenceStorage,
+        session_manager: SessionManager,
+    ) -> Self {
         let ice_servers = ice_servers
             .split(';')
             .collect::<Vec<&str>>()
@@ -73,13 +73,11 @@ impl SwarmBuilder {
             })
             .collect::<Vec<IceServer>>();
         SwarmBuilder {
-            key: None,
             ice_servers,
             external_address: None,
-            dht_did: None,
             dht_succ_max: 3,
             dht_storage,
-            session_manager: None,
+            session_manager,
             session_ttl: None,
             measure: None,
             message_callback: None,
@@ -97,19 +95,7 @@ impl SwarmBuilder {
         self
     }
 
-    pub fn key(mut self, key: SecretKey) -> Self {
-        self.key = Some(key);
-        self.dht_did = Some(key.address().into());
-        self
-    }
-
-    pub fn session_manager(mut self, did: Did, session_manager: SessionManager) -> Self {
-        self.session_manager = Some(session_manager);
-        self.dht_did = Some(did);
-        self
-    }
-
-    pub fn session_ttl(mut self, ttl: Ttl) -> Self {
+    pub fn session_ttl(mut self, ttl: usize) -> Self {
         self.session_ttl = Some(ttl);
         self
     }
@@ -129,22 +115,8 @@ impl SwarmBuilder {
         self
     }
 
-    pub fn build(self) -> Result<Swarm> {
-        let session_manager = {
-            if self.session_manager.is_some() {
-                Ok(self.session_manager.unwrap())
-            } else if self.key.is_some() {
-                SessionManager::new_with_seckey(&self.key.unwrap(), self.session_ttl)
-            } else {
-                Err(Error::SwarmBuildFailed(
-                    "Should set session_manager or key".into(),
-                ))
-            }
-        }?;
-
-        let dht_did = self
-            .dht_did
-            .ok_or_else(|| Error::SwarmBuildFailed("Should set session_manager or key".into()))?;
+    pub fn build(self) -> Swarm {
+        let dht_did = self.session_manager.authorizer();
 
         let dht = Arc::new(PeerRing::new_with_storage(
             dht_did,
@@ -155,7 +127,7 @@ impl SwarmBuilder {
         let message_handler =
             MessageHandler::new(dht.clone(), self.message_callback, self.message_validator);
 
-        Ok(Swarm {
+        Swarm {
             pending_transports: Mutex::new(vec![]),
             transports: MemStorage::new(),
             transport_event_channel: Channel::new(),
@@ -163,9 +135,9 @@ impl SwarmBuilder {
             external_address: self.external_address,
             dht,
             measure: self.measure,
-            session_manager,
+            session_manager: self.session_manager,
             message_handler,
-        })
+        }
     }
 }
 
@@ -538,7 +510,8 @@ pub mod tests {
         let stun = "stun://stun.l.google.com:19302";
         let storage =
             PersistenceStorage::new_with_path(PersistenceStorage::random_path("./tmp")).await?;
-        SwarmBuilder::new(stun, storage).key(key).build()
+        let session_manager = SessionManager::new_with_seckey(&key)?;
+        Ok(SwarmBuilder::new(stun, storage, session_manager).build())
     }
 
     #[tokio::test]

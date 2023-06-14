@@ -4,29 +4,33 @@ use crate::browser;
 use crate::browser::Peer;
 use crate::prelude::jsonrpc_core::types::response::Output;
 use crate::prelude::jsonrpc_core::types::Value;
+use crate::prelude::rings_core::dht::Did;
 use crate::prelude::rings_core::utils;
 use crate::prelude::rings_core::utils::js_value;
 use crate::prelude::wasm_bindgen::JsValue;
 use crate::prelude::wasm_bindgen_futures::JsFuture;
-use crate::prelude::web3::contract::tokens::Tokenizable;
 use crate::prelude::*;
 wasm_bindgen_test_configure!(run_in_browser);
 
-async fn new_client() -> (browser::Client, String) {
+fn new_session_manager_builder() -> SessionManagerBuilder {
     let key = SecretKey::random();
-    let unsigned_info = browser::UnsignedInfo::new_with_signer(
-        key.address().into_token().to_string(),
-        browser::SignerMode::DEFAULT,
-    )
-    .ok()
-    .unwrap();
-    let auth = unsigned_info.auth().ok().unwrap();
-    let signed_data = key.sign(&auth).to_vec();
+    let authorizer_entity = Did::from(key.address()).to_string();
+    let authorizer_type = "secp256k1".to_string();
+
+    let mut builder = SessionManagerBuilder::new(authorizer_entity, authorizer_type);
+
+    let sig = key.sign(&builder.pack_session());
+    builder = builder.sig(sig.to_vec());
+
+    builder
+}
+
+async fn new_client() -> (browser::Client, String) {
+    let session_manager_builder = new_session_manager_builder();
     let stuns = "stun://stun.l.google.com:19302".to_owned();
     let storage_name = uuid::Uuid::new_v4().to_string();
     let client: browser::Client = browser::Client::new_client_with_storage_internal(
-        &unsigned_info,
-        &signed_data[..],
+        session_manager_builder,
         stuns,
         None,
         storage_name.clone(),
@@ -152,7 +156,7 @@ async fn test_get_address() {
     let expect_address = "8b98cf912975b4b6b67ce94882fc25c210a60a60";
     let got_address = browser::get_address(
         "9z1ZTaGocNSAu3DSqGKR6Dqt214X4dXucVd6C53EgqBK",
-        browser::AddressType::ED25519,
+        browser::AddressType::Ed25519,
     )
     .ok()
     .unwrap();

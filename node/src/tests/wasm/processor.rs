@@ -22,6 +22,7 @@ use crate::processor::*;
 
 async fn new_processor(cb: Option<CallbackFn>) -> Processor {
     let key = SecretKey::random();
+    let session_manager = SessionManager::new_with_seckey(&key).unwrap();
 
     let path = uuid::Uuid::new_v4().to_simple().to_string();
     console_log!("uuid: {}", path);
@@ -30,11 +31,9 @@ async fn new_processor(cb: Option<CallbackFn>) -> Processor {
         .unwrap();
 
     let swarm = Arc::new(
-        SwarmBuilder::new("stun://stun.l.google.com:19302", storage)
-            .key(key)
+        SwarmBuilder::new("stun://stun.l.google.com:19302", storage, session_manager)
             .message_callback(cb)
-            .build()
-            .unwrap(),
+            .build(),
     );
 
     let stab = Arc::new(Stabilization::new(swarm.clone(), 20));

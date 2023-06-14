@@ -3234,6 +3234,7 @@ dependencies = [
  "rand_core 0.6.4",
  "rand_hc 0.3.2",
  "rexie",
+ "rings-derive",
  "serde",
  "serde-wasm-bindgen 0.4.5",
  "serde_json",

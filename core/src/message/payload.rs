@@ -81,7 +81,7 @@ pub struct MessagePayload<T> {
     /// The transaction ID of payload.
     /// Remote peer should use same tx_id when response.
     pub tx_id: uuid::Uuid,
-    /// The did of original sender.
+    /// The did of last sender.
     pub addr: Did,
     /// Guide message passing on rings network.
     pub relay: MessageRelay,
@@ -108,7 +108,7 @@ where T: Serialize + DeserializeOwned
         let ttl_ms = DEFAULT_TTL_MS;
         let msg = &MessageVerification::pack_msg(&data, ts_ms, ttl_ms)?;
         let tx_id = uuid::Uuid::new_v4();
-        let addr = session_manager.authorizer()?;
+        let addr = session_manager.authorizer();
         let verification = MessageVerification {
             session: session_manager.session(),
             sig: session_manager.sign(msg)?,
@@ -138,7 +138,7 @@ where T: Serialize + DeserializeOwned
         next_hop: Did,
         destination: Did,
     ) -> Result<Self> {
-        let relay = MessageRelay::new(vec![session_manager.authorizer()?], next_hop, destination);
+        let relay = MessageRelay::new(vec![session_manager.authorizer()], next_hop, destination);
         Self::new(data, session_manager, OriginVerificationGen::Origin, relay)
     }
 
@@ -351,7 +351,7 @@ pub mod test {
     where T: Serialize + DeserializeOwned {
         let key = SecretKey::random();
         let destination = SecretKey::random().address().into();
-        let session = SessionManager::new_with_seckey(&key, None).unwrap();
+        let session = SessionManager::new_with_seckey(&key).unwrap();
         MessagePayload::new_send(data, &session, next_hop, destination).unwrap()
     }
 
