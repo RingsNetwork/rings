@@ -275,20 +275,24 @@ impl Processor {
         tracing::debug!("connect_peer_via_http: {}", peer_url);
 
         let client = SimpleClient::new_with_url(peer_url);
-
         let (_, offer) = self
             .swarm
             .create_offer()
             .await
             .map_err(Error::CreateOffer)?;
         tracing::debug!("sending offer {:?} to {}", offer, peer_url);
+	let encoded = offer
+            .encode()
+            .map_err(|_| Error::EncodeError)?;
+
+	let req = serde_json::to_value(encoded)
+            .map_err(Error::SerdeJsonError)
+            .map_err(Error::from)?;
 
         let resp = client
             .call_method(
                 method::Method::AnswerOffer.as_str(),
-                jsonrpc_core::Params::Array(vec![serde_json::json!(serde_json::to_string(
-                    &offer
-                )?)]),
+                jsonrpc_core::Params::Array(vec![req])
             )
             .await
             .map_err(|e| Error::RemoteRpcError(e.to_string()))?;
