@@ -25,6 +25,7 @@ use crate::prelude::rings_core::dht::Stabilization;
 use crate::prelude::rings_core::dht::TStabilize;
 use crate::prelude::rings_core::ecc::PublicKey;
 use crate::prelude::rings_core::ecc::SecretKey;
+use crate::prelude::rings_core::message::Decoder;
 use crate::prelude::rings_core::message::Encoded;
 use crate::prelude::rings_core::message::Encoder;
 use crate::prelude::rings_core::message::Message;
@@ -281,24 +282,27 @@ impl Processor {
             .await
             .map_err(Error::CreateOffer)?;
         tracing::debug!("sending offer {:?} to {}", offer, peer_url);
-	let encoded = offer
-            .encode()
-            .map_err(|_| Error::EncodeError)?;
+        let encoded_offer = offer.encode().map_err(|_| Error::EncodeError)?;
 
-	let req = serde_json::to_value(encoded)
+        let req = serde_json::to_value(encoded_offer)
             .map_err(Error::SerdeJsonError)
             .map_err(Error::from)?;
 
         let resp = client
             .call_method(
                 method::Method::AnswerOffer.as_str(),
-                jsonrpc_core::Params::Array(vec![req])
+                jsonrpc_core::Params::Array(vec![req]),
             )
             .await
             .map_err(|e| Error::RemoteRpcError(e.to_string()))?;
 
-        let answer_payload: MessagePayload<Message> =
+        let answer_payload_str: String =
             serde_json::from_value(resp).map_err(|_| Error::EncodeError)?;
+
+        let encoded_answer: Encoded = <Encoded as From<&str>>::from(&answer_payload_str);
+
+        let answer_payload = MessagePayload::<Message>::from_encoded(&encoded_answer)
+            .map_err(|_| Error::DecodeError)?;
 
         let (did, transport) = self
             .swarm
