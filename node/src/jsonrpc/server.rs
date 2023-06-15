@@ -46,7 +46,7 @@ use crate::seed::Seed;
 #[derive(Clone)]
 pub struct RpcMeta {
     processor: Arc<Processor>,
-    receiver: Arc<Mutex<Receiver<BackendMessage>>>,
+    receiver: Option<Arc<Mutex<Receiver<BackendMessage>>>>,
     is_auth: bool,
 }
 
@@ -72,8 +72,28 @@ impl From<(Arc<Processor>, Arc<Mutex<Receiver<BackendMessage>>>, bool)> for RpcM
     ) -> Self {
         Self {
             processor,
-            receiver,
+            receiver: Some(receiver),
             is_auth,
+        }
+    }
+}
+
+impl From<(Arc<Processor>, bool)> for RpcMeta {
+    fn from((processor, is_auth): (Arc<Processor>, bool)) -> Self {
+        Self {
+            processor,
+            receiver: None,
+            is_auth,
+        }
+    }
+}
+
+impl From<Arc<Processor>> for RpcMeta {
+    fn from(processor: Arc<Processor>) -> Self {
+        Self {
+            processor,
+            receiver: None,
+            is_auth: true,
         }
     }
 }
@@ -532,16 +552,21 @@ async fn lookup_service(params: Params, meta: RpcMeta) -> Result<Value> {
 }
 
 async fn poll_message(params: Params, meta: RpcMeta) -> Result<Value> {
+    if meta.receiver.is_none() {
+        return Ok(serde_json::Value::Null);
+    }
+    let receiver = meta.receiver.unwrap();
+
     let params: Vec<serde_json::Value> = params.parse()?;
     let wait_recv = params
         .get(0)
         .map(|v| v.as_bool().unwrap_or(false))
         .unwrap_or(false);
     let message = if wait_recv {
-        let mut recv = meta.receiver.lock().await;
+        let mut recv = receiver.lock().await;
         recv.recv().await.ok()
     } else {
-        let mut recv = meta.receiver.lock().await;
+        let mut recv = receiver.lock().await;
         recv.try_recv().ok()
     };
 
@@ -554,4 +579,47 @@ async fn poll_message(params: Params, meta: RpcMeta) -> Result<Value> {
     Ok(serde_json::json!({
       "message": message,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use jsonrpc_core::types::params::Params;
+
+    use super::*;
+    use crate::prelude::rings_core::dht::Stabilization;
+    use crate::prelude::*;
+    use crate::processor::*;
+
+    async fn new_rnd_meta() -> RpcMeta {
+        let key = SecretKey::random();
+        let path = uuid::Uuid::new_v4().to_simple().to_string();
+        let storage = PersistenceStorage::new_with_cap_and_path(1000, path.as_str())
+            .await
+            .unwrap();
+        let swarm = Arc::new(
+            SwarmBuilder::new("stun://stun.l.google.com:19302", storage)
+                .key(key)
+                .message_callback(None)
+                .build()
+                .unwrap(),
+        );
+        let stab = Arc::new(Stabilization::new(swarm.clone(), 20));
+        let processor: Processor = (swarm, stab).into();
+        Arc::new(processor).into()
+    }
+
+    #[tokio::test]
+    async fn test_maually_handshake() {
+        let meta1 = new_rnd_meta().await;
+        let meta2 = new_rnd_meta().await;
+        let offer = create_offer(Params::None, meta1.clone()).await.unwrap();
+        let answer = answer_offer(Params::Array(vec![offer]), meta2)
+            .await
+            .unwrap();
+        accept_answer(Params::Array(vec![answer]), meta1)
+            .await
+            .unwrap();
+    }
 }
