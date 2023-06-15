@@ -22,6 +22,8 @@ pub enum Error {
     DecodeError,
     #[error("Encode error.")]
     EncodeError,
+    #[error("Decode error, {0}.")]
+    DecodeErrorWithReason(String),
     #[error("WASM compile error: {0}")]
     WasmCompileError(String),
     #[error("BackendMessage RwLock Error")]
@@ -104,6 +106,7 @@ impl Error {
             Error::CloseTransportError(_) => 5,
             Error::EncodeError => 6,
             Error::DecodeError => 7,
+            Error::DecodeErrorWithReason(_) => 7,
             Error::CreateOffer(_) => 8,
             Error::AnswerOffer(_) => 9,
             Error::AcceptAnswer(_) => 10,

@@ -281,10 +281,9 @@ impl Processor {
             .create_offer()
             .await
             .map_err(Error::CreateOffer)?;
-        tracing::debug!("sending offer {:?} to {}", offer, peer_url);
         let encoded_offer = offer.encode().map_err(|_| Error::EncodeError)?;
-
-        let req = serde_json::to_value(encoded_offer)
+        tracing::debug!("sending encoded offer {:?} to {}", encoded_offer, peer_url);
+        let req: serde_json::Value = serde_json::to_value(encoded_offer)
             .map_err(Error::SerdeJsonError)
             .map_err(Error::from)?;
 

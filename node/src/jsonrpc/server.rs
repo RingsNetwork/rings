@@ -226,8 +226,8 @@ async fn answer_offer(params: Params, meta: RpcMeta) -> Result<Value> {
         .first()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
     let encoded: Encoded = <Encoded as From<&str>>::from(offer_payload_str);
-    let offer_payload =
-        MessagePayload::<Message>::from_encoded(&encoded).map_err(|_| ServerError::DecodeError)?;
+    let offer_payload = MessagePayload::<Message>::from_encoded(&encoded)
+        .map_err(|_| ServerError::DecodeErrorWithReason(offer_payload_str.to_string()))?;
 
     let (_, answer_payload) = meta
         .processor
