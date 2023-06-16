@@ -19,7 +19,7 @@ use crate::prelude::rings_rpc::types::HttpRequest;
 use crate::prelude::*;
 
 /// HTTP Server Config, specific determine port.
-#[derive(Deserialize, Clone, Serialize, Debug)]
+#[derive(Deserialize, Clone, Serialize, Debug, PartialEq, Eq)]
 pub struct HiddenServerConfig {
     /// name of hidden service
     pub name: String,

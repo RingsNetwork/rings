@@ -48,9 +48,15 @@ pub struct Config {
     pub ice_servers: String,
     pub stabilize_timeout: usize,
     pub external_ip: Option<String>,
+    /// When there is no configuration in the YAML file,
+    /// its deserialization is equivalent to `vec![]` in Rust.
+    #[serde(default)]
     pub backend: Vec<HiddenServerConfig>,
     pub data_storage: StorageConfig,
     pub measure_storage: StorageConfig,
+    /// When there is no configuration in the YAML file,
+    /// its deserialization is equivalent to `ExtensionConfig(vec![])` in Rust.
+    #[serde(default)]
     pub extension: ExtensionConfig,
 }
 
@@ -133,5 +139,31 @@ impl StorageConfig {
             path: path.to_string(),
             capacity,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_deserialization_with_missed_field() {
+        let yaml = r#"
+bind: 127.0.0.1:50000
+endpoint_url: http://127.0.0.1:50000
+ecdsa_key: 65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0
+ice_servers: stun://stun.l.google.com:19302
+stabilize_timeout: 3
+external_ip: null
+data_storage:
+  path: /Users/foo/.rings/data
+  capacity: 200000000
+measure_storage:
+  path: /Users/foo/.rings/measure
+  capacity: 200000000
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.extension, ExtensionConfig::default());
+        assert_eq!(cfg.backend, vec![]);
     }
 }

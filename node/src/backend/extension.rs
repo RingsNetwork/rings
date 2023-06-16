@@ -49,7 +49,7 @@ use crate::prelude::reqwest;
 use crate::prelude::*;
 
 /// Path of a wasm extension
-#[derive(Deserialize, Serialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub enum Path {
     /// Local filesystem path
     Local(String),
@@ -58,7 +58,7 @@ pub enum Path {
 }
 
 /// Configure for Extension
-#[derive(Deserialize, Serialize, Debug, Clone, Default)]
+#[derive(Deserialize, Serialize, Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExtensionConfig {
     /// Path of extension, can be remote or local
     pub paths: Vec<Path>,
