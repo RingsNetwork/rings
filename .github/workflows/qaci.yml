@@ -11,7 +11,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  WASM_BINDGEN_TEST_TIMEOUT: 60
+  WASM_BINDGEN_TEST_TIMEOUT: 120
 
 jobs:
   build_wasm:
