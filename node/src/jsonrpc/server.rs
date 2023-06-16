@@ -552,10 +552,11 @@ async fn lookup_service(params: Params, meta: RpcMeta) -> Result<Value> {
 }
 
 async fn poll_message(params: Params, meta: RpcMeta) -> Result<Value> {
-    if meta.receiver.is_none() {
+    let receiver = if let Some(value) = meta.receiver {
+        value
+    } else {
         return Ok(serde_json::Value::Null);
-    }
-    let receiver = meta.receiver.unwrap();
+    };
 
     let params: Vec<serde_json::Value> = params.parse()?;
     let wait_recv = params
