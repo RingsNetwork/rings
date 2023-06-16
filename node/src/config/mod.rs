@@ -48,9 +48,15 @@ pub struct Config {
     pub ice_servers: String,
     pub stabilize_timeout: usize,
     pub external_ip: Option<String>,
+    /// When there is no configuration in the YAML file,
+    /// its deserialization is equivalent to `vec![]` in Rust.
+    #[serde(default)]
     pub backend: Vec<HiddenServerConfig>,
     pub data_storage: StorageConfig,
     pub measure_storage: StorageConfig,
+    /// When there is no configuration in the YAML file,
+    /// its deserialization is equivalent to `ExtensionConfig(vec![])` in Rust.
+    #[serde(default)]
     pub extension: ExtensionConfig,
 }
 
