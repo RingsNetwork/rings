@@ -141,3 +141,29 @@ impl StorageConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_deserialization_with_missed_field() {
+        let yaml = r#"
+bind: 127.0.0.1:50000
+endpoint_url: http://127.0.0.1:50000
+ecdsa_key: 65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0
+ice_servers: stun://stun.l.google.com:19302
+stabilize_timeout: 3
+external_ip: null
+data_storage:
+  path: /Users/foo/.rings/data
+  capacity: 200000000
+measure_storage:
+  path: /Users/foo/.rings/measure
+  capacity: 200000000
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.extension, ExtensionConfig::default());
+        assert_eq!(cfg.backend, vec![]);
+    }
+}
