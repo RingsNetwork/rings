@@ -46,10 +46,16 @@ jobs:
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
       - name: Run core browser tests
-        run: cd core; wasm-pack test --headless --chrome --features browser_chrome_test --no-default-features
+        uses: coactions/setup-xvfb@v1
+        with:
+          run: cargo test -p rings-core --target=wasm32-unknown-unknown --features wasm --no-default-features
+          working-directory: ./
 
       - name: Run node browser tests
-        run: cd node; wasm-pack test --headless --chrome --features browser_chrome_test --no-default-features
+        uses: coactions/setup-xvfb@v1
+        with:
+          run: cargo test -p rings-node --target=wasm32-unknown-unknown --features browser --no-default-features
+          working-directory: ./
 
   build:
     name: Build and test
