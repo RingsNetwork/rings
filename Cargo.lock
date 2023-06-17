@@ -3280,6 +3280,7 @@ dependencies = [
  "chrono",
  "clap",
  "console_error_panic_hook",
+ "dashmap",
  "dotenv",
  "fluvio-wasm-timer",
  "form_urlencoded",

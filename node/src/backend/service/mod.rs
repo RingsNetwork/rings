@@ -2,6 +2,7 @@
 #![warn(missing_docs)]
 //! An Backend HTTP service handle custom message from `MessageHandler` as CallbackFn.
 pub mod http_server;
+pub mod tcp_services;
 pub mod text;
 pub mod utils;
 
