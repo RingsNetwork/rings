@@ -126,10 +126,10 @@ pub mod browser {
     }
 
     /// Map from Arc<Processor> to MessageHandler<server::RpcMeta>
-    /// The value of is_auth of RpcmMet is set to false
+    /// The value of is_auth of RpcmMet is set to true
     impl From<Arc<Processor>> for MessageHandler<server::RpcMeta> {
         fn from(p: Arc<Processor>) -> Self {
-            let meta: server::RpcMeta = (p, false).into();
+            let meta: server::RpcMeta = p.into();
             Self::new(meta)
         }
     }

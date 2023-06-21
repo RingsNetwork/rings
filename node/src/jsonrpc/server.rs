@@ -517,6 +517,7 @@ pub(crate) async fn lookup_service(params: Params, meta: RpcMeta) -> Result<Valu
     }
 }
 
+#[cfg(feature = "node")]
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
