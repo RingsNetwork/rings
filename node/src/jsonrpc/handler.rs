@@ -9,10 +9,10 @@ use std::pin::Pin;
 
 #[cfg(feature = "browser")]
 pub use self::browser::build_handler;
-#[cfg(feature = "node")]
-pub use self::default::build_handler;
 #[cfg(feature = "browser")]
 pub use self::browser::HandlerType;
+#[cfg(feature = "node")]
+pub use self::default::build_handler;
 #[cfg(feature = "node")]
 pub use self::default::HandlerType;
 use super::server;
@@ -124,7 +124,6 @@ pub mod browser {
         /// Registered Methods
         methods: HashMap<String, Arc<MethodFnBox>>,
     }
-
 
     /// Map from Arc<Processor> to MessageHandler<server::RpcMeta>
     /// The value of is_auth of RpcmMet is set to false

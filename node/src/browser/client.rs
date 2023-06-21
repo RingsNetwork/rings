@@ -15,11 +15,16 @@ use crate::backend::types::HttpResponse;
 use crate::backend::types::MessageType;
 use crate::consts::BACKEND_MTU;
 use crate::error;
+use crate::jsonrpc::build_handler;
+use crate::jsonrpc::handler::browser::MethodHandler;
+use crate::jsonrpc::HandlerType;
 use crate::prelude::chunk::Chunk;
 use crate::prelude::chunk::ChunkList;
 use crate::prelude::chunk::ChunkManager;
 use crate::prelude::http;
 use crate::prelude::js_sys;
+use crate::prelude::jsonrpc_core::types::id::Id;
+use crate::prelude::jsonrpc_core::MethodCall;
 use crate::prelude::message;
 use crate::prelude::rings_core::async_trait;
 use crate::prelude::rings_core::dht::Did;
@@ -51,8 +56,6 @@ use crate::prelude::CallbackFn;
 use crate::prelude::Signer;
 use crate::processor;
 use crate::processor::Processor;
-use crate::jsonrpc::HandlerType;
-use crate::jsonrpc::build_handler;
 
 /// SignerMode enum contains `DEFAULT` and `EIP191`
 #[wasm_export]
@@ -182,7 +185,7 @@ impl UnsignedInfo {
 #[wasm_export]
 pub struct Client {
     processor: Arc<Processor>,
-    handler: HandlerType
+    handler: Arc<HandlerType>,
 }
 
 #[wasm_export]
@@ -265,12 +268,38 @@ impl Client {
         let proc =
             Processor::new_with_storage(&unsigned_info, signed_data, stuns, cb, storage_name)
                 .await?;
-	let processor = Arc::new(proc);
-	let mut handler: HandlerType = processor.clone().into();
-	build_handler(&mut handler).await;
+        let processor = Arc::new(proc);
+        let mut handler: HandlerType = processor.clone().into();
+        build_handler(&mut handler).await;
         Ok(Client {
             processor,
-	    handler
+            handler: handler.into(),
+        })
+    }
+
+    pub fn request(
+        &self,
+        method: String,
+        params: JsValue,
+        opt_id: Option<String>,
+    ) -> js_sys::Promise {
+        let handler = self.handler.clone();
+        future_to_promise(async move {
+            let params = super::utils::parse_params(params)
+                .map_err(|e| JsError::new(e.to_string().as_str()))?;
+            let id = if let Some(id) = opt_id {
+                Id::Str(id)
+            } else {
+                Id::Null
+            };
+            let req: MethodCall = MethodCall {
+                jsonrpc: None,
+                method: method,
+                params: params,
+                id: id,
+            };
+            let ret = handler.handle_request(req).await.map_err(JsError::from)?;
+            Ok(js_value::serialize(&ret).map_err(JsError::from)?)
         })
     }
 
