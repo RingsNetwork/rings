@@ -180,9 +180,6 @@ impl UnsignedInfo {
 #[wasm_export]
 pub struct Client {
     processor: Arc<Processor>,
-    // signed_data: Vec<u8>,
-    // stuns: String,
-    // rpc_meta: RpcMeta,
 }
 
 #[wasm_export]
