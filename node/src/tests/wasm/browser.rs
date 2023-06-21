@@ -211,16 +211,16 @@ async fn test_create_connection_via_local_rpc() {
         .unwrap();
 
     let answer: String = match js_value::deserialize::<Output>(&answer_fut).unwrap() {
-	Output::Success(ret) => {
-	    if let Value::String(o) = ret.result {
+        Output::Success(ret) => {
+            if let Value::String(o) = ret.result {
                 o
             } else {
                 panic!("failed to get answer from output result {:?}", ret);
             }
-	},
-	Output::Failure(e) => {
+        }
+        Output::Failure(e) => {
             panic!("request failed at accept offer, {:?}", e);
-	}
+        }
     };
 
     let js_answer = JsValue::from_str(&answer);
