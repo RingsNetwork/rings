@@ -206,7 +206,7 @@ async fn test_create_connection_via_local_rpc() {
 
     let js_offer = JsValue::from_str(&offer);
     let req1 = js_sys::Array::of1(&js_offer);
-    let answer_fut = JsFuture::from(client2.request("AnswerOffer".to_string(), req1.into(), None))
+    let answer_fut = JsFuture::from(client2.request("answerOffer".to_string(), req1.into(), None))
         .await
         .unwrap();
 
@@ -226,7 +226,7 @@ async fn test_create_connection_via_local_rpc() {
     let js_answer = JsValue::from_str(&answer);
     let req2 = js_sys::Array::of1(&js_answer);
 
-    let _ret = JsFuture::from(client1.request("AcceptAnswer".to_string(), req2.into(), None))
+    let _ret = JsFuture::from(client1.request("acceptAnswer".to_string(), req2.into(), None))
         .await
         .unwrap();
 }
