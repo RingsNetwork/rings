@@ -2,7 +2,7 @@
 //! JSON-RPC handler for both feature=browser and feature=node.
 //! We support running the JSON-RPC server in either native or browser environment.
 //! For the native environment, we use jsonrpc_core to handle requests.
-//! For the browser environment, we utilize a [MessageHandler] to process the requests.
+//! For the browser environment, we utilize a Simple MessageHandler to process the requests.
 
 use core::future::Future;
 use std::pin::Pin;

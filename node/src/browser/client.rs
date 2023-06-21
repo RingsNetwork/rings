@@ -277,6 +277,7 @@ impl Client {
         })
     }
 
+    /// Request local rpc interface
     pub fn request(
         &self,
         method: String,
