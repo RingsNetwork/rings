@@ -81,6 +81,7 @@ pub mod browser {
     use crate::prelude::jsonrpc_core::types::error::Error;
     use crate::prelude::jsonrpc_core::types::error::ErrorCode;
     use crate::prelude::jsonrpc_core::types::response::Output;
+    use crate::processor::Processor;
 
     /// The signature type of MessageHandler is
     /// consistent with the signature type MetaIoHandler in jsonrpc_core,
@@ -92,6 +93,13 @@ pub mod browser {
 	meta: T,
 	/// Registered Methods
 	methods: HashMap<String, Arc<MethodFnBox>>,
+    }
+
+    impl From<Arc<Processor>> for MessageHandler<server::RpcMeta> {
+	fn from(p: Arc<Processor>) -> Self {
+	    let meta: server::RpcMeta = (p, false).into();
+	    Self::new(meta)
+	}
     }
 
     /// This trait defines the register function for method registration.
