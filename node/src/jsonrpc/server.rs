@@ -50,7 +50,7 @@ pub struct RpcMeta {
     processor: Arc<Processor>,
     #[allow(dead_code)]
     pub(crate) receiver: Option<Arc<Mutex<Receiver<BackendMessage>>>>,
-    /// if is_auth set to true, rpc server of *native node* will check sigatures from ,
+    /// if is_auth set to true, rpc server of *native node* will check signature from
     /// HEAD['X-SIGNATURE']
     is_auth: bool,
 }
