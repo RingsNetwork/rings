@@ -210,16 +210,19 @@ async fn test_create_connection_via_local_rpc() {
         .await
         .unwrap();
 
-    let answer: String =
-        if let Output::Success(ret) = js_value::deserialize::<Output>(&answer_fut).unwrap() {
-            if let Value::String(o) = ret.result {
+    let answer: String = match js_value::deserialize::<Output>(&answer_fut).unwrap() {
+	Output::Success(ret) => {
+	    if let Value::String(o) = ret.result {
                 o
             } else {
                 panic!("failed to get answer from output result {:?}", ret);
             }
-        } else {
-            panic!("request failed at accept offer");
-        };
+	},
+	Output::Failure(e) => {
+            panic!("request failed at accept offer, {:?}", e);
+	}
+    };
+
     let js_answer = JsValue::from_str(&answer);
     let req2 = js_sys::Array::of1(&js_answer);
 

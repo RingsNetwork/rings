@@ -294,9 +294,9 @@ impl Client {
             };
             let req: MethodCall = MethodCall {
                 jsonrpc: None,
-                method: method,
-                params: params,
-                id: id,
+                method,
+                params,
+                id,
             };
             let ret = handler.handle_request(req).await.map_err(JsError::from)?;
             Ok(js_value::serialize(&ret).map_err(JsError::from)?)

@@ -153,7 +153,7 @@ pub mod browser {
         /// Create a new instance of message handler
         pub fn new(meta: server::RpcMeta) -> Self {
             Self {
-                meta: meta,
+                meta,
                 methods: HashMap::new(),
             }
         }
