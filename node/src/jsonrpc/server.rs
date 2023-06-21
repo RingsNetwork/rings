@@ -8,16 +8,13 @@ use std::sync::Arc;
 #[cfg(feature = "browser")]
 use futures::channel::mpsc::Receiver;
 use futures::future::join_all;
+#[cfg(feature = "browser")]
+use futures::lock::Mutex;
 use serde_json::Value;
 #[cfg(feature = "node")]
 use tokio::sync::broadcast::Receiver;
-
 #[cfg(feature = "node")]
 use tokio::sync::Mutex;
-
-#[cfg(feature = "browser")]
-use futures::lock::Mutex;
-
 
 use crate::backend::types::BackendMessage;
 use crate::backend::MessageType;
@@ -51,6 +48,7 @@ use crate::seed::Seed;
 #[derive(Clone)]
 pub struct RpcMeta {
     processor: Arc<Processor>,
+    #[allow(dead_code)]
     pub(crate) receiver: Option<Arc<Mutex<Receiver<BackendMessage>>>>,
     /// if is_auth set to true, rpc server of *native node* will check sigatures from ,
     /// HEAD['X-SIGNATURE']
@@ -101,7 +99,6 @@ impl From<Arc<Processor>> for RpcMeta {
         }
     }
 }
-
 
 pub(crate) async fn node_info(_: Params, meta: RpcMeta) -> Result<Value> {
     let node_info = meta

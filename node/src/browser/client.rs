@@ -51,6 +51,8 @@ use crate::prelude::CallbackFn;
 use crate::prelude::Signer;
 use crate::processor;
 use crate::processor::Processor;
+use crate::jsonrpc::HandlerType;
+use crate::jsonrpc::build_handler;
 
 /// SignerMode enum contains `DEFAULT` and `EIP191`
 #[wasm_export]
@@ -180,6 +182,7 @@ impl UnsignedInfo {
 #[wasm_export]
 pub struct Client {
     processor: Arc<Processor>,
+    handler: HandlerType
 }
 
 #[wasm_export]
@@ -262,9 +265,12 @@ impl Client {
         let proc =
             Processor::new_with_storage(&unsigned_info, signed_data, stuns, cb, storage_name)
                 .await?;
-
+	let processor = Arc::new(proc);
+	let mut handler: HandlerType = processor.clone().into();
+	build_handler(&mut handler).await;
         Ok(Client {
-            processor: Arc::new(proc),
+            processor,
+	    handler
         })
     }
 
