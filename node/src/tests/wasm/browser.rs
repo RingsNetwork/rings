@@ -201,7 +201,7 @@ async fn test_create_connection_via_local_rpc() {
                 panic!("failed to get offer from output result {:?}", ret);
             }
         } else {
-            panic!("request failed at acceptAnswer");
+            panic!("request failed at create offer");
         };
 
     let js_offer = JsValue::from_str(&offer);
@@ -218,7 +218,7 @@ async fn test_create_connection_via_local_rpc() {
                 panic!("failed to get answer from output result {:?}", ret);
             }
         } else {
-            panic!("request failed at createOffer");
+            panic!("request failed at accept offer");
         };
     let js_answer = JsValue::from_str(&answer);
     let req2 = js_sys::Array::of1(&js_answer);
