@@ -92,7 +92,7 @@ impl Processor {
         storage_name: String,
     ) -> Result<Self> {
         session_manager
-            .session
+            .session()
             .verify_self()
             .map_err(|e| Error::VerifyError(e.to_string()))?;
 

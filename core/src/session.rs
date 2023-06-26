@@ -7,14 +7,9 @@
 //!
 //! If we have the private key of node B, we can easily implement it. Just regular actions about cryptograph.
 //! But, considering security factors, asking user to provide private key is not practical.
-//! On the contrary, we generate a temporary private key and let user sign it. See [SessionManager] for details.
+//! On the contrary, we generate a temporary private key and let user sign it.
 //!
-//! To avoid frequent signing, and keep the private key safe
-//! - ECDSA Session is based on secp256k1, which create a temporate secret key with one time signing auth
-//! - To create a ECDSA Session, we should generate the unsign_info with our pubkey (Address)
-//! - `SessionManager::gen_unsign_info(addr, ..)`, it will returns the msg needs for sign, and a temporate private key
-//! - Then we can sign the auth message via some web3 provider like metamask or just with raw private key, and create the SessionManger with
-//! - SessionManager::new(sig, auth_info, temp_key)
+//! See [SessionManager] and [SessionManagerBuilder] for details.
 
 use std::str::FromStr;
 
@@ -35,6 +30,12 @@ fn pack_session(session_id: Did, ts_ms: u128, ttl_ms: usize) -> String {
     format!("{}\n{}\n{}", session_id, ts_ms, ttl_ms)
 }
 
+/// SessionManagerBuilder is used to build a [SessionManager].
+///
+/// Firstly, you need to provide the authorizer's entity and type to `new` method.
+/// Then you can call `pack_session` to get the session dump for signing.
+/// After signing, you can call `sig` to set the signature back to builder.
+/// Finally, you can call `build` to get the [SessionManager].
 #[wasm_export]
 pub struct SessionManagerBuilder {
     session_key: SecretKey,
@@ -51,26 +52,38 @@ pub struct SessionManagerBuilder {
 }
 
 /// SessionManager holds the [Session] and its temporary private key.
+/// To prove that the message was sent by the [Authorizer] of [Session],
+/// we need to attach session and the signature signed by session_key to the payload.
+///
+/// SessionManager provide a `session` method to clone the session.
+/// SessionManager also provide `sign` method to sign a message.
+///
+/// To verify the session, use session.verify_self().
+/// To verify a message, use session.verify(msg, sig).
 #[derive(Debug)]
 pub struct SessionManager {
     /// Session
-    pub session: Session,
+    session: Session,
     /// The private key of session. Used for signing and decrypting.
-    pub session_key: SecretKey,
+    session_key: SecretKey,
 }
 
-/// Session contains an AuthorizedInfo and its signature.
+/// Session is used to verify the message.
+/// It's serializable and can be attached to the message payload.
+///
+/// To verify the session is provided by the authorizer, use session.verify_self().
+/// To verify the message, use session.verify(msg, sig).
 #[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
 pub struct Session {
-    /// Did of session.
+    /// Did of session
     session_id: Did,
-    /// Authorizer of session.
+    /// Authorizer of session
     authorizer: Authorizer,
     /// Session's lifetime
     ttl_ms: usize,
     /// Timestamp when session created
     ts_ms: u128,
-    /// Signature
+    /// Signature to verify that the session was signed by the authorizer.
     sig: Vec<u8>,
 }
 
@@ -105,6 +118,9 @@ impl TryFrom<(String, String)> for Authorizer {
 
 #[wasm_export]
 impl SessionManagerBuilder {
+    /// Create a new SessionManagerBuilder.
+    /// The "authorizer_type" is lower case of [Authorizer] variant.
+    /// The "authorizer_entity" refers to the entity that is encapsulated by the [Authorizer] variant, in string format.
     pub fn new(authorizer_entity: String, authorizer_type: String) -> SessionManagerBuilder {
         let session_key = SecretKey::random();
         Self {
@@ -117,6 +133,7 @@ impl SessionManagerBuilder {
         }
     }
 
+    /// This is a helper method to let user know if the authorizer params is valid.
     pub fn validate_authorizer(&self) -> bool {
         Authorizer::try_from((self.authorizer_entity.clone(), self.authorizer_type.clone()))
             .map_err(|e| {
@@ -126,15 +143,18 @@ impl SessionManagerBuilder {
             .is_ok()
     }
 
+    /// Packs the session into a string for signing.
     pub fn pack_session(&self) -> String {
         pack_session(self.session_key.address().into(), self.ts_ms, self.ttl_ms)
     }
 
+    /// Set the signature of session that signed by authorizer.
     pub fn sig(mut self, sig: Vec<u8>) -> Self {
         self.sig = sig;
         self
     }
 
+    /// Set the lifetime of session.
     pub fn ttl(mut self, ttl_ms: Option<usize>) -> Self {
         self.ttl_ms = ttl_ms.unwrap_or(DEFAULT_SESSION_TTL_MS);
         self
@@ -142,6 +162,7 @@ impl SessionManagerBuilder {
 }
 
 impl SessionManagerBuilder {
+    /// Build the [SessionManager].
     pub fn build(self) -> Result<SessionManager> {
         let authorizer = Authorizer::try_from((self.authorizer_entity, self.authorizer_type))?;
         let session = Session {
@@ -162,6 +183,7 @@ impl SessionManagerBuilder {
 }
 
 impl Session {
+    /// Pack the session into a string for verification or public key recovery.
     pub fn pack(&self) -> String {
         pack_session(self.session_id, self.ts_ms, self.ttl_ms)
     }
@@ -196,6 +218,7 @@ impl Session {
         Ok(())
     }
 
+    /// Verify message.
     pub fn verify(&self, msg: &str, sig: impl AsRef<[u8]>) -> Result<()> {
         self.verify_self()?;
         if !signers::secp256k1::verify(msg, &self.session_id, sig) {
@@ -204,7 +227,7 @@ impl Session {
         Ok(())
     }
 
-    /// Get public key from session.
+    /// Get public key from session for encryption.
     pub fn authorizer_pubkey(&self) -> Result<PublicKey> {
         let auth_str = self.pack();
         match self.authorizer {
@@ -212,6 +235,16 @@ impl Session {
             Authorizer::BIP137(_) => signers::bip137::recover(&auth_str, &self.sig),
             Authorizer::EIP191(_) => signers::eip191::recover(&auth_str, &self.sig),
             Authorizer::Ed25519(pk) => Ok(pk),
+        }
+    }
+
+    /// Get authorizer did.
+    pub fn authorizer_did(&self) -> Did {
+        match self.authorizer {
+            Authorizer::Secp256k1(did) => did,
+            Authorizer::BIP137(did) => did,
+            Authorizer::EIP191(did) => did,
+            Authorizer::Ed25519(pk) => pk.address().into(),
         }
     }
 }
@@ -242,14 +275,9 @@ impl SessionManager {
         Ok(signers::secp256k1::sign_raw(key, msg).to_vec())
     }
 
-    /// Get authorizer from session.
-    pub fn authorizer(&self) -> Did {
-        match self.session.authorizer {
-            Authorizer::Secp256k1(did) => did,
-            Authorizer::BIP137(did) => did,
-            Authorizer::EIP191(did) => did,
-            Authorizer::Ed25519(pk) => pk.address().into(),
-        }
+    /// Get authorizer did from session.
+    pub fn authorizer_did(&self) -> Did {
+        self.session.authorizer_did()
     }
 }
 

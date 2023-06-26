@@ -116,7 +116,7 @@ impl SwarmBuilder {
     }
 
     pub fn build(self) -> Swarm {
-        let dht_did = self.session_manager.authorizer();
+        let dht_did = self.session_manager.authorizer_did();
 
         let dht = Arc::new(PeerRing::new_with_storage(
             dht_did,

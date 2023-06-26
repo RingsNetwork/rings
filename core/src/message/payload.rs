@@ -108,7 +108,7 @@ where T: Serialize + DeserializeOwned
         let ttl_ms = DEFAULT_TTL_MS;
         let msg = &MessageVerification::pack_msg(&data, ts_ms, ttl_ms)?;
         let tx_id = uuid::Uuid::new_v4();
-        let addr = session_manager.authorizer();
+        let addr = session_manager.authorizer_did();
         let verification = MessageVerification {
             session: session_manager.session(),
             sig: session_manager.sign(msg)?,
@@ -138,7 +138,11 @@ where T: Serialize + DeserializeOwned
         next_hop: Did,
         destination: Did,
     ) -> Result<Self> {
-        let relay = MessageRelay::new(vec![session_manager.authorizer()], next_hop, destination);
+        let relay = MessageRelay::new(
+            vec![session_manager.authorizer_did()],
+            next_hop,
+            destination,
+        );
         Self::new(data, session_manager, OriginVerificationGen::Origin, relay)
     }
 
