@@ -5,8 +5,15 @@ use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 
+#[cfg(feature = "browser")]
+use futures::channel::mpsc::Receiver;
 use futures::future::join_all;
+#[cfg(feature = "browser")]
+use futures::lock::Mutex;
+use serde_json::Value;
+#[cfg(feature = "node")]
 use tokio::sync::broadcast::Receiver;
+#[cfg(feature = "node")]
 use tokio::sync::Mutex;
 
 use crate::backend::types::BackendMessage;
@@ -14,11 +21,8 @@ use crate::backend::MessageType;
 use crate::error::Error as ServerError;
 use crate::prelude::jsonrpc_core::Error;
 use crate::prelude::jsonrpc_core::ErrorCode;
-use crate::prelude::jsonrpc_core::MetaIoHandler;
-use crate::prelude::jsonrpc_core::Metadata;
 use crate::prelude::jsonrpc_core::Params;
 use crate::prelude::jsonrpc_core::Result;
-use crate::prelude::jsonrpc_core::Value;
 use crate::prelude::rings_core::dht::Did;
 use crate::prelude::rings_core::message::Decoder;
 use crate::prelude::rings_core::message::Encoded;
@@ -31,9 +35,7 @@ use crate::prelude::rings_core::transports::manager::TransportManager;
 use crate::prelude::rings_core::types::ice_transport::IceTransportInterface;
 use crate::prelude::rings_core::utils::from_rtc_ice_connection_state;
 use crate::prelude::rings_rpc;
-use crate::prelude::rings_rpc::method::Method;
 use crate::prelude::rings_rpc::response;
-use crate::prelude::rings_rpc::response::CustomBackendMessage;
 use crate::prelude::rings_rpc::response::Peer;
 use crate::prelude::rings_rpc::types::HttpRequest;
 use crate::processor;
@@ -46,7 +48,10 @@ use crate::seed::Seed;
 #[derive(Clone)]
 pub struct RpcMeta {
     processor: Arc<Processor>,
-    receiver: Option<Arc<Mutex<Receiver<BackendMessage>>>>,
+    #[allow(dead_code)]
+    pub(crate) receiver: Option<Arc<Mutex<Receiver<BackendMessage>>>>,
+    /// if is_auth set to true, rpc server of *native node* will check signature from
+    /// HEAD['X-SIGNATURE']
     is_auth: bool,
 }
 
@@ -58,9 +63,6 @@ impl RpcMeta {
         Ok(())
     }
 }
-
-/// `MetaIoHandler<T>, T: Metadata`
-impl Metadata for RpcMeta {}
 
 impl From<(Arc<Processor>, Arc<Mutex<Receiver<BackendMessage>>>, bool)> for RpcMeta {
     fn from(
@@ -98,43 +100,7 @@ impl From<Arc<Processor>> for RpcMeta {
     }
 }
 
-/// Build handler add method with metadata.
-pub(crate) async fn build_handler(handler: &mut MetaIoHandler<RpcMeta>) {
-    handler.add_method_with_meta(Method::ConnectPeerViaHttp.as_str(), connect_peer_via_http);
-    handler.add_method_with_meta(Method::ConnectWithSeed.as_str(), connect_with_seed);
-    handler.add_method_with_meta(Method::AnswerOffer.as_str(), answer_offer);
-    handler.add_method_with_meta(Method::ConnectWithDid.as_str(), connect_with_did);
-    handler.add_method_with_meta(Method::CreateOffer.as_str(), create_offer);
-    handler.add_method_with_meta(Method::AcceptAnswer.as_str(), accept_answer);
-    handler.add_method_with_meta(Method::ListPeers.as_str(), list_peers);
-    handler.add_method_with_meta(Method::Disconnect.as_str(), close_connection);
-    handler.add_method_with_meta(Method::ListPendings.as_str(), list_pendings);
-    handler.add_method_with_meta(
-        Method::ClosePendingTransport.as_str(),
-        close_pending_transport,
-    );
-    handler.add_method_with_meta(Method::SendTo.as_str(), send_raw_message);
-    handler.add_method_with_meta(
-        Method::SendHttpRequestMessage.as_str(),
-        send_http_request_message,
-    );
-    handler.add_method_with_meta(Method::SendSimpleText.as_str(), send_simple_text_message);
-    handler.add_method_with_meta(Method::SendCustomMessage.as_str(), send_custom_message);
-    handler.add_method_with_meta(
-        Method::PublishMessageToTopic.as_str(),
-        publish_message_to_topic,
-    );
-    handler.add_method_with_meta(
-        Method::FetchMessagesOfTopic.as_str(),
-        fetch_messages_of_topic,
-    );
-    handler.add_method_with_meta(Method::RegisterService.as_str(), register_service);
-    handler.add_method_with_meta(Method::LookupService.as_str(), lookup_service);
-    handler.add_method_with_meta(Method::PollMessage.as_str(), poll_message);
-    handler.add_method_with_meta(Method::NodeInfo.as_str(), node_info);
-}
-
-async fn node_info(_: Params, meta: RpcMeta) -> Result<Value> {
+pub(crate) async fn node_info(_: Params, meta: RpcMeta) -> Result<Value> {
     let node_info = meta
         .processor
         .get_node_info()
@@ -144,7 +110,7 @@ async fn node_info(_: Params, meta: RpcMeta) -> Result<Value> {
 }
 
 /// Connect Peer VIA http
-async fn connect_peer_via_http(params: Params, meta: RpcMeta) -> Result<Value> {
+pub(crate) async fn connect_peer_via_http(params: Params, meta: RpcMeta) -> Result<Value> {
     let p: Vec<String> = params.parse()?;
     let peer_url = p
         .first()
@@ -158,7 +124,7 @@ async fn connect_peer_via_http(params: Params, meta: RpcMeta) -> Result<Value> {
 }
 
 /// Connect Peer with seed
-async fn connect_with_seed(params: Params, meta: RpcMeta) -> Result<Value> {
+pub(crate) async fn connect_with_seed(params: Params, meta: RpcMeta) -> Result<Value> {
     let p: Vec<Seed> = params.parse()?;
     let seed = p
         .first()
@@ -184,7 +150,7 @@ async fn connect_with_seed(params: Params, meta: RpcMeta) -> Result<Value> {
 }
 
 /// Handle Connect with DID
-async fn connect_with_did(params: Params, meta: RpcMeta) -> Result<Value> {
+pub(crate) async fn connect_with_did(params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
     let p: Vec<String> = params.parse()?;
     let address_str = p
@@ -201,7 +167,7 @@ async fn connect_with_did(params: Params, meta: RpcMeta) -> Result<Value> {
 }
 
 /// Handle create offer
-async fn create_offer(_params: Params, meta: RpcMeta) -> Result<Value> {
+pub(crate) async fn create_offer(_params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
     let (_, offer_payload) = meta
         .processor
@@ -220,7 +186,7 @@ async fn create_offer(_params: Params, meta: RpcMeta) -> Result<Value> {
 }
 
 /// Handle Answer Offer
-async fn answer_offer(params: Params, meta: RpcMeta) -> Result<Value> {
+pub(crate) async fn answer_offer(params: Params, meta: RpcMeta) -> Result<Value> {
     let p: Vec<String> = params.parse()?;
     let offer_payload_str = p
         .first()
@@ -247,7 +213,7 @@ async fn answer_offer(params: Params, meta: RpcMeta) -> Result<Value> {
 }
 
 /// Handle accept answer
-async fn accept_answer(params: Params, meta: RpcMeta) -> Result<Value> {
+pub(crate) async fn accept_answer(params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
 
     let p: Vec<String> = params.parse()?;
@@ -274,7 +240,7 @@ async fn accept_answer(params: Params, meta: RpcMeta) -> Result<Value> {
 }
 
 /// Handle list peers
-async fn list_peers(_params: Params, meta: RpcMeta) -> Result<Value> {
+pub(crate) async fn list_peers(_params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
     let peers = meta.processor.list_peers().await?;
     let states_async = peers
@@ -291,7 +257,7 @@ async fn list_peers(_params: Params, meta: RpcMeta) -> Result<Value> {
 }
 
 /// Handle close connection
-async fn close_connection(params: Params, meta: RpcMeta) -> Result<Value> {
+pub(crate) async fn close_connection(params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
     let params: Vec<String> = params.parse()?;
     let did = params
@@ -303,7 +269,7 @@ async fn close_connection(params: Params, meta: RpcMeta) -> Result<Value> {
 }
 
 /// Handle list pendings
-async fn list_pendings(_params: Params, meta: RpcMeta) -> Result<Value> {
+pub(crate) async fn list_pendings(_params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
     let transports = meta.processor.list_pendings().await?;
     let states_async = transports
@@ -320,7 +286,7 @@ async fn list_pendings(_params: Params, meta: RpcMeta) -> Result<Value> {
 }
 
 /// Handle close pending transport
-async fn close_pending_transport(params: Params, meta: RpcMeta) -> Result<Value> {
+pub(crate) async fn close_pending_transport(params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
     let params: Vec<String> = params.parse()?;
     let transport_id = params
@@ -333,7 +299,7 @@ async fn close_pending_transport(params: Params, meta: RpcMeta) -> Result<Value>
 }
 
 /// Handle send message
-async fn send_raw_message(params: Params, meta: RpcMeta) -> Result<Value> {
+pub(crate) async fn send_raw_message(params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
     let params: serde_json::Map<String, Value> = params.parse()?;
     let destination = params
@@ -363,7 +329,7 @@ async fn send_raw_message(params: Params, meta: RpcMeta) -> Result<Value> {
 ///   - destination:  destination did
 ///   - message_type: u16
 ///   - data: base64 of [u8]
-async fn send_custom_message(params: Params, meta: RpcMeta) -> Result<Value> {
+pub(crate) async fn send_custom_message(params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
     let params: Vec<serde_json::Value> = params.parse()?;
     let destination = params
@@ -400,7 +366,7 @@ async fn send_custom_message(params: Params, meta: RpcMeta) -> Result<Value> {
     )
 }
 
-async fn send_simple_text_message(params: Params, meta: RpcMeta) -> Result<Value> {
+pub(crate) async fn send_simple_text_message(params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
     let params: Vec<serde_json::Value> = params.parse()?;
     let destination = params
@@ -429,7 +395,7 @@ async fn send_simple_text_message(params: Params, meta: RpcMeta) -> Result<Value
 }
 
 /// handle send http request message
-async fn send_http_request_message(params: Params, meta: RpcMeta) -> Result<Value> {
+pub(crate) async fn send_http_request_message(params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
     let params: Vec<serde_json::Value> = params.parse()?;
     let destination = params
@@ -457,7 +423,7 @@ async fn send_http_request_message(params: Params, meta: RpcMeta) -> Result<Valu
     )
 }
 
-async fn publish_message_to_topic(params: Params, meta: RpcMeta) -> Result<Value> {
+pub(crate) async fn publish_message_to_topic(params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
     let params: Vec<serde_json::Value> = params.parse()?;
     let topic = params
@@ -479,7 +445,7 @@ async fn publish_message_to_topic(params: Params, meta: RpcMeta) -> Result<Value
     Ok(serde_json::json!({}))
 }
 
-async fn fetch_messages_of_topic(params: Params, meta: RpcMeta) -> Result<Value> {
+pub(crate) async fn fetch_messages_of_topic(params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
     let params: Vec<serde_json::Value> = params.parse()?;
     let topic = params
@@ -512,7 +478,7 @@ async fn fetch_messages_of_topic(params: Params, meta: RpcMeta) -> Result<Value>
     }
 }
 
-async fn register_service(params: Params, meta: RpcMeta) -> Result<Value> {
+pub(crate) async fn register_service(params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
     let params: Vec<serde_json::Value> = params.parse()?;
     let name = params
@@ -524,7 +490,7 @@ async fn register_service(params: Params, meta: RpcMeta) -> Result<Value> {
     Ok(serde_json::json!({}))
 }
 
-async fn lookup_service(params: Params, meta: RpcMeta) -> Result<Value> {
+pub(crate) async fn lookup_service(params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
     let params: Vec<serde_json::Value> = params.parse()?;
     let name = params
@@ -551,37 +517,7 @@ async fn lookup_service(params: Params, meta: RpcMeta) -> Result<Value> {
     }
 }
 
-async fn poll_message(params: Params, meta: RpcMeta) -> Result<Value> {
-    let receiver = if let Some(value) = meta.receiver {
-        value
-    } else {
-        return Ok(serde_json::Value::Null);
-    };
-
-    let params: Vec<serde_json::Value> = params.parse()?;
-    let wait_recv = params
-        .get(0)
-        .map(|v| v.as_bool().unwrap_or(false))
-        .unwrap_or(false);
-    let message = if wait_recv {
-        let mut recv = receiver.lock().await;
-        recv.recv().await.ok()
-    } else {
-        let mut recv = receiver.lock().await;
-        recv.try_recv().ok()
-    };
-
-    let message = if let Some(msg) = message {
-        serde_json::to_value(CustomBackendMessage::from(msg))
-            .map_err(|_| Error::from(ServerError::EncodeError))?
-    } else {
-        serde_json::Value::Null
-    };
-    Ok(serde_json::json!({
-      "message": message,
-    }))
-}
-
+#[cfg(feature = "node")]
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

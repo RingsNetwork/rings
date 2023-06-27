@@ -2,6 +2,8 @@ use wasm_bindgen_test::*;
 
 use crate::browser;
 use crate::browser::Peer;
+use crate::prelude::jsonrpc_core::types::response::Output;
+use crate::prelude::jsonrpc_core::types::Value;
 use crate::prelude::rings_core::utils;
 use crate::prelude::rings_core::utils::js_value;
 use crate::prelude::wasm_bindgen::JsValue;
@@ -173,4 +175,58 @@ async fn test_get_address() {
         got_address,
         expect_address
     )
+}
+
+#[wasm_bindgen_test]
+async fn test_create_connection_via_local_rpc() {
+    // super::setup_log();
+    let (client1, _storage1) = new_client().await;
+    let (client2, _storage2) = new_client().await;
+
+    futures::try_join!(
+        JsFuture::from(client1.start()),
+        JsFuture::from(client2.start()),
+    )
+    .unwrap();
+
+    let offer_fut = JsFuture::from(client1.request("createOffer".to_string(), JsValue::NULL, None))
+        .await
+        .unwrap();
+
+    let offer: String =
+        if let Output::Success(ret) = js_value::deserialize::<Output>(&offer_fut).unwrap() {
+            if let Value::String(o) = ret.result {
+                o
+            } else {
+                panic!("failed to get offer from output result {:?}", ret);
+            }
+        } else {
+            panic!("request failed at create offer");
+        };
+
+    let js_offer = JsValue::from_str(&offer);
+    let req1 = js_sys::Array::of1(&js_offer);
+    let answer_fut = JsFuture::from(client2.request("answerOffer".to_string(), req1.into(), None))
+        .await
+        .unwrap();
+
+    let answer: String = match js_value::deserialize::<Output>(&answer_fut).unwrap() {
+        Output::Success(ret) => {
+            if let Value::String(o) = ret.result {
+                o
+            } else {
+                panic!("failed to get answer from output result {:?}", ret);
+            }
+        }
+        Output::Failure(e) => {
+            panic!("request failed at accept offer, {:?}", e);
+        }
+    };
+
+    let js_answer = JsValue::from_str(&answer);
+    let req2 = js_sys::Array::of1(&js_answer);
+
+    let _ret = JsFuture::from(client1.request("acceptAnswer".to_string(), req2.into(), None))
+        .await
+        .unwrap();
 }

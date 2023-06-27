@@ -28,6 +28,8 @@ use crate::prelude::rings_core::ecc::PublicKey;
 use crate::prelude::rings_rpc::response::NodeInfo;
 use crate::processor::Processor;
 
+impl crate::prelude::jsonrpc_core::Metadata for RpcMeta {}
+
 /// Jsonrpc state
 #[derive(Clone)]
 pub struct JsonrpcState {
