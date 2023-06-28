@@ -18,17 +18,14 @@ use crate::inspect::SwarmInspect;
 use crate::measure::Measure;
 use crate::measure::MeasureCounter;
 use crate::message;
-use crate::message::CallbackFn;
 use crate::message::ChordStorageInterface;
 use crate::message::Message;
 use crate::message::MessageHandler;
 use crate::message::MessageHandlerEvent;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
-use crate::message::ValidatorFn;
 use crate::session::SessionManager;
 use crate::storage::MemStorage;
-use crate::storage::PersistenceStorage;
 use crate::transports::manager::TransportHandshake;
 use crate::transports::manager::TransportManager;
 use crate::transports::Transport;
@@ -37,6 +34,8 @@ use crate::types::channel::TransportEvent;
 use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransportInterface;
 use crate::types::ice_transport::IceTrickleScheme;
+mod builder;
+pub use builder::SwarmBuilder;
 
 #[cfg(not(feature = "wasm"))]
 pub type MeasureImpl = Box<dyn Measure + Send + Sync>;
@@ -44,142 +43,53 @@ pub type MeasureImpl = Box<dyn Measure + Send + Sync>;
 #[cfg(feature = "wasm")]
 pub type MeasureImpl = Box<dyn Measure>;
 
-/// Creates a SwarmBuilder to configure a Swarm.
-pub struct SwarmBuilder {
-    ice_servers: Vec<IceServer>,
-    external_address: Option<String>,
-    dht_succ_max: u8,
-    dht_storage: PersistenceStorage,
-    session_manager: SessionManager,
-    session_ttl: Option<usize>,
-    measure: Option<MeasureImpl>,
-    message_callback: Option<CallbackFn>,
-    message_validator: Option<ValidatorFn>,
-}
-
-impl SwarmBuilder {
-    pub fn new(
-        ice_servers: &str,
-        dht_storage: PersistenceStorage,
-        session_manager: SessionManager,
-    ) -> Self {
-        let ice_servers = ice_servers
-            .split(';')
-            .collect::<Vec<&str>>()
-            .into_iter()
-            .map(|s| {
-                IceServer::from_str(s)
-                    .unwrap_or_else(|_| panic!("Failed on parse ice server {:?}", s))
-            })
-            .collect::<Vec<IceServer>>();
-        SwarmBuilder {
-            ice_servers,
-            external_address: None,
-            dht_succ_max: 3,
-            dht_storage,
-            session_manager,
-            session_ttl: None,
-            measure: None,
-            message_callback: None,
-            message_validator: None,
-        }
-    }
-
-    pub fn dht_succ_max(mut self, succ_max: u8) -> Self {
-        self.dht_succ_max = succ_max;
-        self
-    }
-
-    pub fn external_address(mut self, external_address: Option<String>) -> Self {
-        self.external_address = external_address;
-        self
-    }
-
-    pub fn session_ttl(mut self, ttl: usize) -> Self {
-        self.session_ttl = Some(ttl);
-        self
-    }
-
-    pub fn measure(mut self, implement: MeasureImpl) -> Self {
-        self.measure = Some(implement);
-        self
-    }
-
-    pub fn message_callback(mut self, callback: Option<CallbackFn>) -> Self {
-        self.message_callback = callback;
-        self
-    }
-
-    pub fn message_validator(mut self, validator: ValidatorFn) -> Self {
-        self.message_validator = Some(validator);
-        self
-    }
-
-    pub fn build(self) -> Swarm {
-        let dht_did = self.session_manager.authorizer_did();
-
-        let dht = Arc::new(PeerRing::new_with_storage(
-            dht_did,
-            self.dht_succ_max,
-            self.dht_storage,
-        ));
-
-        let message_handler =
-            MessageHandler::new(dht.clone(), self.message_callback, self.message_validator);
-
-        Swarm {
-            pending_transports: Mutex::new(vec![]),
-            transports: MemStorage::new(),
-            transport_event_channel: Channel::new(),
-            ice_servers: self.ice_servers,
-            external_address: self.external_address,
-            dht,
-            measure: self.measure,
-            session_manager: self.session_manager,
-            message_handler,
-        }
-    }
-}
-
 /// The transports and dht management.
 pub struct Swarm {
+    /// A Vec to for storing pending_transport.
     pub(crate) pending_transports: Mutex<Vec<Arc<Transport>>>,
+    /// Connected Transports.
     pub(crate) transports: MemStorage<Did, Arc<Transport>>,
+    /// Configuration of ice_servers, including `TURN` and `STUN` server.
     pub(crate) ice_servers: Vec<IceServer>,
+    /// Event channel for receive events from transport.
     pub(crate) transport_event_channel: Channel<TransportEvent>,
+    /// Allow setup external address for webrtc transport.
     pub(crate) external_address: Option<String>,
+    /// Reference of DHT.
     pub(crate) dht: Arc<PeerRing>,
+    /// Implementationof measurement.
     pub(crate) measure: Option<MeasureImpl>,
     session_manager: SessionManager,
     message_handler: MessageHandler,
 }
 
 impl Swarm {
+    /// Get did of self.
     pub fn did(&self) -> Did {
         self.dht.did
     }
 
+    /// Get DHT(Distributed Hash Table) of self.
     pub fn dht(&self) -> Arc<PeerRing> {
         self.dht.clone()
     }
 
+    /// Retrieves the session manager associated with the current instance.
+    /// The session manager provides a segregated approach to manage private keys.
+    /// It generates delegated secret keys for the bound entries of PKIs (Public Key Infrastructure).
     pub fn session_manager(&self) -> &SessionManager {
         &self.session_manager
     }
 
-    async fn load_message(
-        &self,
-        ev: Result<Option<TransportEvent>>,
-    ) -> Result<Option<MessagePayload<Message>>> {
-        let ev = ev?;
-
+    /// Load message from a TransportEvent.
+    async fn load_message(&self, ev: TransportEvent) -> Result<Option<MessagePayload<Message>>> {
         match ev {
-            Some(TransportEvent::DataChannelMessage(msg)) => {
+            TransportEvent::DataChannelMessage(msg) => {
                 let payload = MessagePayload::from_bincode(&msg)?;
                 tracing::debug!("load message from channel: {:?}", payload);
                 Ok(Some(payload))
             }
-            Some(TransportEvent::RegisterTransport((did, id))) => {
+            TransportEvent::RegisterTransport((did, id)) => {
                 // if transport is still pending
                 if let Ok(Some(t)) = self.find_pending_transport(id) {
                     tracing::debug!("transport is inside pending list, mov to swarm transports");
@@ -200,7 +110,7 @@ impl Swarm {
                     None => Err(Error::SwarmMissTransport(did)),
                 }
             }
-            Some(TransportEvent::ConnectClosed((did, uuid))) => {
+            TransportEvent::ConnectClosed((did, uuid)) => {
                 if self.pop_pending_transport(uuid).is_ok() {
                     tracing::info!(
                         "[Swarm::ConnectClosed] Pending transport {:?} dropped",
@@ -222,7 +132,6 @@ impl Swarm {
                 }
                 Ok(None)
             }
-            None => Ok(None),
         }
     }
 
@@ -230,11 +139,17 @@ impl Swarm {
     /// which means an async loop cannot running concurrency.
     pub async fn poll_message(&self) -> Option<MessagePayload<Message>> {
         let receiver = &self.transport_event_channel.receiver();
-        let ev = Channel::recv(receiver).await;
-        match self.load_message(ev).await {
-            Ok(Some(msg)) => Some(msg),
+        match Channel::recv(receiver).await {
+            Ok(Some(ev)) => match self.load_message(ev).await {
+                Ok(Some(msg)) => Some(msg),
+                Ok(None) => None,
+                Err(_) => None,
+            },
             Ok(None) => None,
-            Err(_) => None,
+            Err(e) => {
+                tracing::error!("Failed on polling message, Error {:#?}", e);
+                None
+            }
         }
     }
 
@@ -267,6 +182,10 @@ impl Swarm {
         Some((payload, events))
     }
 
+    /// Event handler of Swarm.
+    /// This function should be a pure function (no side effects) or in the so-called sans IO style.
+    /// This function is an abstract transformer that transforms
+    /// a [MessageHandlerEvent] to another [MessageHandlerEvent] based on the received Message.
     pub async fn handle_message_handler_event(
         &self,
         payload: &MessagePayload<Message>,
@@ -501,6 +420,7 @@ pub mod tests {
 
     use super::*;
     use crate::ecc::SecretKey;
+    use crate::storage::PersistenceStorage;
     #[cfg(not(feature = "dummy"))]
     use crate::transports::default::transport::tests::establish_connection;
     #[cfg(feature = "dummy")]
