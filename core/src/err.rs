@@ -4,9 +4,6 @@
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Ed25519/EdDSA pubkey not found")]
-    EdDSAPublicKeyNotFound,
-
     #[error("Ed25519/EdDSA pubkey bad format")]
     EdDSAPublicKeyBadFormat,
 
@@ -78,6 +75,9 @@ pub enum Error {
 
     #[error("Bincode deserialization error")]
     BincodeDeserialize(#[source] bincode::Error),
+
+    #[error("Unknown authorizer")]
+    UnknownAuthorizer,
 
     #[error("Failed on verify message signature")]
     VerifySignatureFailed,
@@ -344,6 +344,9 @@ pub enum Error {
     #[cfg(feature = "wasm")]
     #[error("Error create RTC connection: {0}")]
     CreateConnectionError(String),
+
+    #[error("Session is expired")]
+    SessionExpired,
 }
 
 /// A Result wrapper contain custom Errors.

@@ -70,24 +70,27 @@ pub enum OriginVerificationGen {
     Stick(MessageVerification),
 }
 
+/// All messages transmitted in RingsNetwork should be wrapped by MessagePayload.
+/// It additionally offer transaction ID, origin did, relay, previous hop verification,
+/// and origin verification.
 #[derive(Derivative, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[derivative(Debug)]
-/// MessagePayload with sequence and verification, contain MessageRelay.
 pub struct MessagePayload<T> {
     /// Payload data
     pub data: T,
-    /// The transaction ID of payload
+    /// The transaction ID of payload.
+    /// Remote peer should use same tx_id when response.
     pub tx_id: uuid::Uuid,
-    /// Address from payload authorizer
+    /// The did of last sender.
     pub addr: Did,
-    /// Relay messages
+    /// Relay records the transport path of message.
+    /// And can also help message sender to find the next hop.
     pub relay: MessageRelay,
-    /// Signature and other messages for verification
+    /// This field hold a signature from a node,
+    /// which is used to prove that the message was sent from that node.
     #[derivative(Debug = "ignore")]
     pub verification: MessageVerification,
-    /// Signature and other messages for verification,
-    /// if the payload is not stick node, `origin_verificationgen` ashould equal to
-    /// `verification`
+    /// Same as verification, but the signature was from the original sender.
     #[derivative(Debug = "ignore")]
     pub origin_verification: MessageVerification,
 }
@@ -106,9 +109,9 @@ where T: Serialize + DeserializeOwned
         let ttl_ms = DEFAULT_TTL_MS;
         let msg = &MessageVerification::pack_msg(&data, ts_ms, ttl_ms)?;
         let tx_id = uuid::Uuid::new_v4();
-        let addr = session_manager.authorizer()?;
+        let addr = session_manager.authorizer_did();
         let verification = MessageVerification {
-            session: session_manager.session()?,
+            session: session_manager.session(),
             sig: session_manager.sign(msg)?,
             ttl_ms,
             ts_ms,
@@ -136,7 +139,11 @@ where T: Serialize + DeserializeOwned
         next_hop: Did,
         destination: Did,
     ) -> Result<Self> {
-        let relay = MessageRelay::new(vec![session_manager.authorizer()?], next_hop, destination);
+        let relay = MessageRelay::new(
+            vec![session_manager.authorizer_did()],
+            next_hop,
+            destination,
+        );
         Self::new(data, session_manager, OriginVerificationGen::Origin, relay)
     }
 
@@ -349,7 +356,7 @@ pub mod test {
     where T: Serialize + DeserializeOwned {
         let key = SecretKey::random();
         let destination = SecretKey::random().address().into();
-        let session = SessionManager::new_with_seckey(&key, None).unwrap();
+        let session = SessionManager::new_with_seckey(&key).unwrap();
         MessagePayload::new_send(data, &session, next_hop, destination).unwrap()
     }
 

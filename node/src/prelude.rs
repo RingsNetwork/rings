@@ -45,7 +45,7 @@ pub use self::rings_core::prelude::RTCIceConnectionState;
 pub use self::rings_core::prelude::SubringInterface;
 pub use self::rings_core::session::Session;
 pub use self::rings_core::session::SessionManager;
-pub use self::rings_core::session::Signer;
+pub use self::rings_core::session::SessionManagerBuilder;
 pub use self::rings_core::swarm::Swarm;
 pub use self::rings_core::swarm::SwarmBuilder;
 pub use self::rings_core::transports::Transport;

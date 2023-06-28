@@ -53,123 +53,14 @@ use crate::prelude::wasm_export;
 use crate::prelude::web3::contract::tokens::Tokenizable;
 use crate::prelude::web_sys::RtcIceConnectionState;
 use crate::prelude::CallbackFn;
-use crate::prelude::Signer;
-use crate::processor;
+use crate::prelude::SessionManagerBuilder;
 use crate::processor::Processor;
-
-/// SignerMode enum contains `DEFAULT` and `EIP191`
-#[wasm_export]
-pub enum SignerMode {
-    /// ecdsa
-    DEFAULT,
-    /// ref: https://eips.ethereum.org/EIPS/eip-191
-    EIP191,
-    /// ed25519
-    EdDSA,
-    /// bitcoin bip137 ref: <https://github.com/bitcoin/bips/blob/master/bip-0137.mediawiki>
-    BIP137,
-}
-
-impl From<SignerMode> for Signer {
-    fn from(v: SignerMode) -> Self {
-        match v {
-            SignerMode::DEFAULT => Self::DEFAULT,
-            SignerMode::EIP191 => Self::EIP191,
-            SignerMode::EdDSA => Self::EdDSA,
-            SignerMode::BIP137 => Self::BIP137,
-        }
-    }
-}
 
 /// AddressType enum contains `DEFAULT` and `ED25519`.
 #[wasm_export]
 pub enum AddressType {
     DEFAULT,
-    ED25519,
-}
-
-impl From<AddressType> for processor::AddressType {
-    fn from(v: AddressType) -> Self {
-        match v {
-            AddressType::DEFAULT => Self::DEFAULT,
-            AddressType::ED25519 => Self::ED25519,
-        }
-    }
-}
-
-impl ToString for AddressType {
-    fn to_string(&self) -> String {
-        match self {
-            Self::DEFAULT => "default".to_owned(),
-            Self::ED25519 => "ED25519".to_owned(),
-        }
-    }
-}
-
-/// A UnsignedInfo use for wasm.
-#[wasm_export]
-#[derive(Clone)]
-pub struct UnsignedInfo {
-    inner: processor::UnsignedInfo,
-}
-
-impl From<processor::UnsignedInfo> for UnsignedInfo {
-    fn from(v: processor::UnsignedInfo) -> Self {
-        Self { inner: v }
-    }
-}
-
-#[wasm_export]
-impl UnsignedInfo {
-    /// Create a new `UnsignedInfo` instance with SignerMode::EIP191
-    #[wasm_bindgen(constructor)]
-    pub fn new(key_addr: String) -> Result<UnsignedInfo, wasm_bindgen::JsError> {
-        Ok(processor::UnsignedInfo::new(key_addr)
-            .map_err(JsError::from)?
-            .into())
-    }
-
-    /// Create a new `UnsignedInfo` instance
-    ///   * key_addr: wallet address
-    ///   * signer: `SignerMode`
-    pub fn new_with_signer(key_addr: String, signer: SignerMode) -> Result<UnsignedInfo, JsError> {
-        Ok(
-            processor::UnsignedInfo::new_with_signer(key_addr, signer.into())
-                .map_err(JsError::from)?
-                .into(),
-        )
-    }
-
-    /// Create a new `UnsignedInfo` instance
-    ///   * pubkey: wallet pubkey hex string
-    ///   * signer: `SignerMode`
-    pub fn new_with_pubkey(pubkey: String, signer: SignerMode) -> Result<UnsignedInfo, JsError> {
-        let pubkey = PublicKey::from_hex_string(pubkey.as_str()).map_err(JsError::from)?;
-        Ok(
-            processor::UnsignedInfo::new_with_pubkey(pubkey, signer.into())
-                .map_err(JsError::from)?
-                .into(),
-        )
-    }
-
-    /// Create a new `UnsignedInfo` instance
-    ///   * pubkey: solana wallet pubkey
-    pub fn new_with_address(
-        address: String,
-        addr_type: AddressType,
-    ) -> Result<UnsignedInfo, JsError> {
-        Ok(
-            processor::UnsignedInfo::new_with_address(address, addr_type.into())
-                .map_err(JsError::from)?
-                .into(),
-        )
-    }
-
-    #[wasm_bindgen(getter)]
-    pub fn auth(&self) -> Result<String, JsError> {
-        let s = self.inner.auth().map_err(JsError::from)?;
-        Ok(s)
-    }
+    Ed25519,
 }
 
 /// rings-node browser client
@@ -192,18 +83,15 @@ pub struct Client {
 impl Client {
     /// Creat a new client instance.
     pub fn new_client(
-        unsigned_info: &UnsignedInfo,
-        signed_data: js_sys::Uint8Array,
+        session_manager_builder: SessionManagerBuilder,
         stuns: String,
         callback: Option<MessageCallbackInstance>,
     ) -> js_sys::Promise {
-        let unsigned_info = unsigned_info.clone();
         Self::new_client_with_storage(
-            &unsigned_info,
-            signed_data,
+            session_manager_builder,
             stuns,
             callback,
-            "rings-node".to_owned(),
+            "rings-node".to_string(),
         )
     }
 
@@ -230,18 +118,14 @@ impl Client {
     /// ))
     /// ```
     pub fn new_client_with_storage(
-        unsigned_info: &UnsignedInfo,
-        signed_data: js_sys::Uint8Array,
+        session_manager_builder: SessionManagerBuilder,
         stuns: String,
         callback: Option<MessageCallbackInstance>,
         storage_name: String,
     ) -> js_sys::Promise {
-        let unsigned_info = unsigned_info.clone();
-        let signed_data = signed_data.to_vec();
         future_to_promise(async move {
             let client = Self::new_client_with_storage_internal(
-                &unsigned_info,
-                &signed_data[..],
+                session_manager_builder,
                 stuns,
                 callback,
                 storage_name,
@@ -253,24 +137,26 @@ impl Client {
     }
 
     pub(crate) async fn new_client_with_storage_internal(
-        unsigned_info: &UnsignedInfo,
-        signed_data: &[u8],
+        session_manager_builder: SessionManagerBuilder,
         stuns: String,
         callback: Option<MessageCallbackInstance>,
         storage_name: String,
     ) -> Result<Client, error::Error> {
-        let unsigned_info = unsigned_info.inner.clone();
         let cb: Option<CallbackFn> = match callback {
             Some(cb) => Some(Box::new(cb)),
             None => None,
         };
 
-        let proc =
-            Processor::new_with_storage(&unsigned_info, signed_data, stuns, cb, storage_name)
-                .await?;
+        let sm = session_manager_builder
+            .build()
+            .map_err(error::Error::Swarm)?;
+
+        let proc = Processor::new_with_storage(sm, stuns, cb, storage_name).await?;
         let processor = Arc::new(proc);
+
         let mut handler: HandlerType = processor.clone().into();
         build_handler(&mut handler).await;
+
         Ok(Client {
             processor,
             handler: handler.into(),
@@ -1027,7 +913,7 @@ pub fn get_did(address: &str, addr_type: AddressType) -> Result<Did, JsError> {
         AddressType::DEFAULT => {
             Did::from_str(address).map_err(|_| JsError::new("invalid address"))?
         }
-        AddressType::ED25519 => PublicKey::try_from_b58t(address)
+        AddressType::Ed25519 => PublicKey::try_from_b58t(address)
             .map_err(|_| JsError::new("invalid address"))?
             .address()
             .into(),

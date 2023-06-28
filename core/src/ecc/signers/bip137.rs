@@ -83,32 +83,24 @@ pub fn magic_hash(msg: &str) -> [u8; 32] {
 mod test {
 
     use super::*;
-    use crate::session::AuthorizedInfo;
 
     #[test]
     fn test_verify() {
-        // The sig is created by unisat.
-        // public_key = "02c0eeef8d136b10b862a0ac979eac2ad036f9902d87963ddf0fa108f1e275b9c7"
-        // msg = r#"{"authorizer":{"did":"0xfada88633e01d2f6704a7f2a6ebc57263aca6978","pubkey":null},"signer":"BIP137","ttl_ms":{"Some":2592000000},"ts_ms":1683616225109,"session_id":"0xc5a72f5031c99d6553a6cc0e4c1219b8cbfdc127"}"#
-        // sig = "G96t3+4oboSvj8DQFAGllxKUGcutek25uhLe9xXJY8BSVlGlPAaBEYWGh+/nU7bCVO5Bxtzy1A9gUhRpwYr50SE=";
-        // let sig = await window.unisat.signMessage(msg);
-
         let pubkey = PublicKey::from_hex_string(
-            "02c0eeef8d136b10b862a0ac979eac2ad036f9902d87963ddf0fa108f1e275b9c7",
+            "026a626503429a973dc4fcde64fa7932158a20c69b79c9eab1245577dd43674dc5",
         )
         .unwrap();
 
-        let msg = r#"{"authorizer":{"did":"0xfada88633e01d2f6704a7f2a6ebc57263aca6978","pubkey":null},"signer":"BIP137","ttl_ms":{"Some":2592000000},"ts_ms":1683616225109,"session_id":"0xc5a72f5031c99d6553a6cc0e4c1219b8cbfdc127"}"#;
-        let auth: AuthorizedInfo = serde_json::from_str(msg).unwrap();
+        let msg = "Hello World 42";
         let sig = vec![
-            27, 222, 173, 223, 238, 40, 110, 132, 175, 143, 192, 208, 20, 1, 165, 151, 18, 148, 25,
-            203, 173, 122, 77, 185, 186, 18, 222, 247, 21, 201, 99, 192, 82, 86, 81, 165, 60, 6,
-            129, 17, 133, 134, 135, 239, 231, 83, 182, 194, 84, 238, 65, 198, 220, 242, 212, 15,
-            96, 82, 20, 105, 193, 138, 249, 209, 33,
+            27, 204, 122, 109, 87, 84, 60, 195, 135, 84, 231, 22, 77, 88, 215, 161, 77, 74, 181,
+            192, 19, 219, 188, 251, 142, 104, 2, 233, 132, 82, 171, 102, 125, 114, 45, 23, 202, 59,
+            86, 236, 76, 169, 164, 164, 179, 221, 206, 54, 32, 106, 81, 115, 217, 42, 93, 114, 131,
+            115, 128, 227, 45, 231, 30, 111, 34,
         ];
         assert_eq!(sig.len(), 65);
-        // assert_eq!(sig[64], 28);
-        let pk = self::recover(auth.to_string().unwrap().as_str(), sig).unwrap();
+
+        let pk = self::recover(msg, sig).unwrap();
         assert_eq!(pk, pubkey);
         assert_eq!(pk.address(), pubkey.address());
     }

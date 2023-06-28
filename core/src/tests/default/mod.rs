@@ -5,6 +5,7 @@ use crate::dht::PeerRing;
 use crate::ecc::SecretKey;
 use crate::err::Result;
 use crate::message::CallbackFn;
+use crate::session::SessionManager;
 use crate::storage::PersistenceStorage;
 use crate::swarm::Swarm;
 use crate::swarm::SwarmBuilder;
@@ -22,12 +23,11 @@ pub async fn prepare_node_with_callback(
         .await
         .unwrap();
 
+    let session_manager = SessionManager::new_with_seckey(&key).unwrap();
     let swarm = Arc::new(
-        SwarmBuilder::new(stun, storage)
-            .key(key)
+        SwarmBuilder::new(stun, storage, session_manager)
             .message_callback(message_callback)
-            .build()
-            .unwrap(),
+            .build(),
     );
 
     println!("key: {:?}", key.to_string());
