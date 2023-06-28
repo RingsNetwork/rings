@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 //! Tranposrt management
 use std::fmt;
 use std::str::FromStr;
@@ -15,7 +16,6 @@ use crate::dht::PeerRing;
 use crate::error::Error;
 use crate::error::Result;
 use crate::inspect::SwarmInspect;
-use crate::measure::Measure;
 use crate::measure::MeasureCounter;
 use crate::message;
 use crate::message::ChordStorageInterface;
@@ -35,17 +35,13 @@ use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransportInterface;
 use crate::types::ice_transport::IceTrickleScheme;
 mod builder;
+mod types;
 pub use builder::SwarmBuilder;
-
-#[cfg(not(feature = "wasm"))]
-pub type MeasureImpl = Box<dyn Measure + Send + Sync>;
-
-#[cfg(feature = "wasm")]
-pub type MeasureImpl = Box<dyn Measure>;
+pub use types::MeasureImpl;
 
 /// The transports and dht management.
 pub struct Swarm {
-    /// A Vec to for storing pending_transport.
+    /// A list to for store and manage pending_transport.
     pub(crate) pending_transports: Mutex<Vec<Arc<Transport>>>,
     /// Connected Transports.
     pub(crate) transports: MemStorage<Did, Arc<Transport>>,
@@ -154,6 +150,7 @@ impl Swarm {
     }
 
     /// This method is required because web-sys components is not `Send`
+    /// This method will return events already consumed (landed), which is ok to be ignore.
     /// which means a listening loop cannot running concurrency.
     pub async fn listen_once(&self) -> Option<(MessagePayload<Message>, Vec<MessageHandlerEvent>)> {
         let payload = self.poll_message().await?;
@@ -162,7 +159,6 @@ impl Swarm {
             tracing::error!("Cannot verify msg or it's expired: {:?}", payload);
             return None;
         }
-
         let mut events = self.message_handler.handle_message(&payload).await.ok()?;
         let mut extra_events = vec![];
 
@@ -183,7 +179,7 @@ impl Swarm {
     }
 
     /// Event handler of Swarm.
-    /// This function should be a pure function (no side effects) or in the so-called sans IO style.
+    /// This function should be a pure function (no side effects).
     /// This function is an abstract transformer that transforms
     /// a [MessageHandlerEvent] to another [MessageHandlerEvent] based on the received Message.
     pub async fn handle_message_handler_event(
@@ -266,6 +262,7 @@ impl Swarm {
         Ok(vec![])
     }
 
+    /// Push a pending transport to pending list.
     pub fn push_pending_transport(&self, transport: &Arc<Transport>) -> Result<()> {
         let mut pending = self
             .pending_transports
@@ -275,6 +272,7 @@ impl Swarm {
         Ok(())
     }
 
+    /// Pop a pending trainsport from pending list.
     pub fn pop_pending_transport(&self, transport_id: uuid::Uuid) -> Result<()> {
         let mut pending = self
             .pending_transports
@@ -288,6 +286,7 @@ impl Swarm {
         Ok(())
     }
 
+    /// List all the pending transports.
     pub async fn pending_transports(&self) -> Result<Vec<Arc<Transport>>> {
         let pending = self
             .pending_transports
@@ -296,6 +295,7 @@ impl Swarm {
         Ok(pending.iter().cloned().collect::<Vec<_>>())
     }
 
+    /// Find a pending transport from pending list.
     pub fn find_pending_transport(&self, id: uuid::Uuid) -> Result<Option<Arc<Transport>>> {
         let pending = self
             .pending_transports
@@ -304,6 +304,10 @@ impl Swarm {
         Ok(pending.iter().find(|x| x.id.eq(&id)).cloned())
     }
 
+    /// Disconnect a transport. There are three steps:
+    /// 1) remove from DHT;
+    /// 2) remove from trasnport pool;
+    /// 3) close the transport connection;
     pub async fn disconnect(&self, did: Did) -> Result<()> {
         tracing::info!("disconnect {:?}", did);
         self.dht.remove(did)?;
@@ -313,6 +317,9 @@ impl Swarm {
         Ok(())
     }
 
+    /// Connect a given Did. It the did is managed by swarm transport pool, return directly,
+    /// else try prepare offer and establish connection by dht.
+    /// This function may returns a pending transport or connected transport.
     pub async fn connect(&self, did: Did) -> Result<Arc<Transport>> {
         if let Some(t) = self.get_and_check_transport(did).await {
             return Ok(t);
@@ -326,6 +333,7 @@ impl Swarm {
         Ok(transport)
     }
 
+    /// Check the status of swarm
     pub async fn inspect(&self) -> SwarmInspect {
         SwarmInspect::inspect(self).await
     }

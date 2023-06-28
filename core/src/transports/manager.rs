@@ -1,5 +1,5 @@
 #![warn(missing_docs)]
-
+//! This module defined TransportManager trait
 use std::str::FromStr;
 use std::sync::Arc;
 
