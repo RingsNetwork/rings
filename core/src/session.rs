@@ -5,9 +5,8 @@
 //! This module provides a mechanism for node A to verify that the message received was sent by node B.
 //! It also allows node A to obtain the public key for sending encrypted messages to node B.
 //!
-//! If we have the private key of node B, we can easily implement it. Just regular actions about cryptograph.
-//! But, considering security factors, asking user to provide private key is not practical.
-//! On the contrary, we generate a temporary private key and let user sign it.
+//! Considering security factors, asking user to provide private key is not practical.
+//! On the contrary, we generate a delegated private key and let user sign it.
 //!
 //! See [SessionManager] and [SessionManagerBuilder] for details.
 
@@ -51,15 +50,15 @@ pub struct SessionManagerBuilder {
     sig: Vec<u8>,
 }
 
-/// SessionManager holds the [Session] and its temporary private key.
+/// SessionManager holds the [Session] and its delegated private key.
 /// To prove that the message was sent by the [Authorizer] of [Session],
 /// we need to attach session and the signature signed by session_key to the payload.
 ///
 /// SessionManager provide a `session` method to clone the session.
 /// SessionManager also provide `sign` method to sign a message.
 ///
-/// To verify the session, use session.verify_self().
-/// To verify a message, use session.verify(msg, sig).
+/// To verify the session, use `verify_self()` method of [Session].
+/// To verify a message, use `verify(msg, sig)` method of [Session].
 #[derive(Debug)]
 pub struct SessionManager {
     /// Session
@@ -87,7 +86,9 @@ pub struct Session {
     sig: Vec<u8>,
 }
 
-/// we support both EIP191 and raw ECDSA singing format.
+/// We will support as many protocols/algorithms as possible.
+/// Currently, it comprises Secp256k1, EIP191, BIP137, and Ed25519.
+/// We welcome any issues and PRs for additional implementations.
 #[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
 pub enum Authorizer {
     /// ecdsa

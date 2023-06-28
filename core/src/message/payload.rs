@@ -83,7 +83,8 @@ pub struct MessagePayload<T> {
     pub tx_id: uuid::Uuid,
     /// The did of last sender.
     pub addr: Did,
-    /// Guide message passing on rings network.
+    /// Relay records the transport path of message.
+    /// And can also help message sender to find the next hop.
     pub relay: MessageRelay,
     /// This field hold a signature from a node,
     /// which is used to prove that the message was sent from that node.
