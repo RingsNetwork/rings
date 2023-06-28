@@ -127,7 +127,7 @@ impl HttpServer {
 impl MessageEndpoint for HttpServer {
     async fn handle_message(
         &self,
-        _ctx: &MessagePayload<Message>,
+        ctx: &MessagePayload<Message>,
         msg: &BackendMessage,
     ) -> Result<Vec<MessageHandlerEvent>> {
         let req: HttpRequest = bincode::deserialize(&msg.data).map_err(|_| Error::DecodeError)?;
@@ -155,7 +155,7 @@ impl MessageEndpoint for HttpServer {
             tracing::debug!("Chunk data len: {}", c.data.len());
             let bytes = c.to_bincode().map_err(|_| Error::EncodeError)?;
             tracing::debug!("Chunk len: {}", bytes.len());
-            let ev = super::utils::send_chunk_report_message(bytes.to_vec().as_slice()).await?;
+            let ev = super::utils::send_chunk_report_message(&ctx, bytes.to_vec().as_slice()).await?;
             events.push(ev);
         }
 

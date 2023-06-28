@@ -34,6 +34,9 @@ pub mod storage;
 /// Operator and Handler for Subring
 pub mod subring;
 
+/// Type alias for message payload.
+pub type Payload = MessagePayload<Message>;
+
 /// Trait of message callback.
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
@@ -81,14 +84,17 @@ pub enum MessageHandlerEvent {
     /// Instructs the swarm to disconnect from a peer.
     Disconnect(Did),
 
-    /// Instructs the swarm to answer an offer inside payload.
-    AnswerOffer(ConnectNodeSend),
+    /// Instructs the swarm to answer an offer inside payload by given
+    /// sender's Did and Message.
+    AnswerOffer(Payload, ConnectNodeSend),
 
-    /// Instructs the swarm to accept an answer inside payload.
-    AcceptAnswer(ConnectNodeReport),
+    /// Instructs the swarm to accept an answer inside payload by given
+    /// sender's Did and Message.
+    AcceptAnswer(Did, ConnectNodeReport),
 
-    /// Tell swarm to forward the payload to destination.
-    ForwardPayload(Option<Did>),
+    /// Tell swarm to forward the payload to destination by given
+    /// Payload and optional next hop.
+    ForwardPayload(Payload, Option<Did>),
 
     /// Instructs the swarm to notify the dht about new peer.
     JoinDHT(Did),
@@ -100,10 +106,10 @@ pub enum MessageHandlerEvent {
     SendMessage(Message, Did),
 
     /// Instructs the swarm to send a message as a response to the received message.
-    SendReportMessage(Message),
+    SendReportMessage(Payload, Message),
 
     /// Instructs the swarm to send a message to a peer via the dht network with a specific next hop.
-    ResetDestination(Did),
+    ResetDestination(Payload, Did),
 
     /// Instructs the swarm to store vnode.
     StorageStore(VirtualNode),

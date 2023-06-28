@@ -28,6 +28,7 @@ impl HandleMsg<NotifyPredecessorSend> for MessageHandler {
         if let Some(did) = predecessor {
             if did != ctx.relay.sender() {
                 return Ok(vec![MessageHandlerEvent::SendReportMessage(
+		    ctx.clone(),
                     Message::NotifyPredecessorReport(NotifyPredecessorReport { did }),
                 )]);
             }

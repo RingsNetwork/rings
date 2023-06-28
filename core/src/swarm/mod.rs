@@ -163,10 +163,10 @@ impl Swarm {
         let mut extra_events = vec![];
 
         for ev in &events {
-            let evs = self.handle_message_handler_event(&payload, ev).await.ok()?;
+            let evs = self.handle_message_handler_event(ev).await.ok()?;
 
             for sub_ev in &evs {
-                self.handle_message_handler_event(&payload, sub_ev)
+                self.handle_message_handler_event(sub_ev)
                     .await
                     .ok()?;
             }
@@ -184,7 +184,6 @@ impl Swarm {
     /// a [MessageHandlerEvent] to another [MessageHandlerEvent] based on the received Message.
     pub async fn handle_message_handler_event(
         &self,
-        payload: &MessagePayload<Message>,
         event: &MessageHandlerEvent,
     ) -> Result<Vec<MessageHandlerEvent>> {
         tracing::debug!("Handle message handler event: {:?}", event);
@@ -200,17 +199,18 @@ impl Swarm {
                 self.disconnect(*did).await?;
             }
 
-            MessageHandlerEvent::AnswerOffer(msg) => {
+            MessageHandlerEvent::AnswerOffer(relay, msg) => {
                 let (_, answer) = self
-                    .answer_remote_transport(payload.relay.sender(), msg)
+                    .answer_remote_transport(relay.relay.sender().to_owned(), msg)
                     .await?;
 
                 return Ok(vec![MessageHandlerEvent::SendReportMessage(
+		    relay.clone(),
                     Message::ConnectNodeReport(answer),
                 )]);
             }
 
-            MessageHandlerEvent::AcceptAnswer(msg) => {
+            MessageHandlerEvent::AcceptAnswer(sender, msg) => {
                 let transport = self
                     .find_pending_transport(
                         uuid::Uuid::from_str(&msg.transport_uuid)
@@ -218,11 +218,11 @@ impl Swarm {
                     )?
                     .ok_or(Error::MessageHandlerMissTransportConnectedNode)?;
                 transport
-                    .register_remote_info(&msg.answer, payload.relay.sender())
+                    .register_remote_info(&msg.answer, sender.to_owned())
                     .await?;
             }
 
-            MessageHandlerEvent::ForwardPayload(next_hop) => {
+            MessageHandlerEvent::ForwardPayload(payload, next_hop) => {
                 if self
                     .get_and_check_transport(payload.relay.destination)
                     .await
@@ -247,11 +247,11 @@ impl Swarm {
                 self.send_message(msg.clone(), *dest).await?;
             }
 
-            MessageHandlerEvent::SendReportMessage(msg) => {
+            MessageHandlerEvent::SendReportMessage(payload, msg) => {
                 self.send_report_message(payload, msg.clone()).await?;
             }
 
-            MessageHandlerEvent::ResetDestination(next_hop) => {
+            MessageHandlerEvent::ResetDestination(payload, next_hop) => {
                 self.reset_destination(payload, *next_hop).await?;
             }
 
@@ -400,6 +400,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Deb
 
 #[cfg(not(feature = "wasm"))]
 impl Swarm {
+    /// Listener for native envirement, It will just launch a loop.
     pub async fn listen(self: Arc<Self>) {
         loop {
             self.listen_once().await;
@@ -409,6 +410,7 @@ impl Swarm {
 
 #[cfg(feature = "wasm")]
 impl Swarm {
+    /// Listener for browser envirement, the implementation is based on  js_sys::window.set_timeout.
     pub async fn listen(self: Arc<Self>) {
         let func = move || {
             let this = self.clone();

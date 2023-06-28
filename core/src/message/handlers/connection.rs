@@ -88,9 +88,9 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
         msg: &ConnectNodeSend,
     ) -> Result<Vec<MessageHandlerEvent>> {
         if self.dht.did != ctx.relay.destination {
-            Ok(vec![MessageHandlerEvent::ForwardPayload(None)])
+            Ok(vec![MessageHandlerEvent::ForwardPayload(ctx.clone(), None)])
         } else {
-            Ok(vec![MessageHandlerEvent::AnswerOffer(msg.clone())])
+            Ok(vec![MessageHandlerEvent::AnswerOffer(ctx.clone(), msg.clone())])
         }
     }
 }
@@ -104,9 +104,9 @@ impl HandleMsg<ConnectNodeReport> for MessageHandler {
         msg: &ConnectNodeReport,
     ) -> Result<Vec<MessageHandlerEvent>> {
         if self.dht.did != ctx.relay.destination {
-            Ok(vec![MessageHandlerEvent::ForwardPayload(None)])
+            Ok(vec![MessageHandlerEvent::ForwardPayload(ctx.clone(), None)])
         } else {
-            Ok(vec![MessageHandlerEvent::AcceptAnswer(msg.clone())])
+            Ok(vec![MessageHandlerEvent::AcceptAnswer(ctx.relay.sender(), msg.clone())])
         }
     }
 }
@@ -116,7 +116,7 @@ impl HandleMsg<ConnectNodeReport> for MessageHandler {
 impl HandleMsg<FindSuccessorSend> for MessageHandler {
     async fn handle(
         &self,
-        _ctx: &MessagePayload<Message>,
+        ctx: &MessagePayload<Message>,
         msg: &FindSuccessorSend,
     ) -> Result<Vec<MessageHandlerEvent>> {
         match self.dht.find_successor(msg.did)? {
@@ -125,6 +125,7 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
                     match &msg.then {
                         FindSuccessorThen::Report(handler) => {
                             Ok(vec![MessageHandlerEvent::SendReportMessage(
+				ctx.clone(),
                                 Message::FindSuccessorReport(FindSuccessorReport {
                                     did,
                                     handler: handler.clone(),
@@ -133,11 +134,11 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
                         }
                     }
                 } else {
-                    Ok(vec![MessageHandlerEvent::ForwardPayload(Some(did))])
+                    Ok(vec![MessageHandlerEvent::ForwardPayload(ctx.clone(), Some(did))])
                 }
             }
             PeerRingAction::RemoteAction(next, _) => {
-                Ok(vec![MessageHandlerEvent::ResetDestination(next)])
+                Ok(vec![MessageHandlerEvent::ResetDestination(ctx.clone(), next)])
             }
             act => Err(Error::PeerRingUnexpectedAction(act)),
         }
@@ -153,7 +154,7 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
         msg: &FindSuccessorReport,
     ) -> Result<Vec<MessageHandlerEvent>> {
         if self.dht.did != ctx.relay.destination {
-            return Ok(vec![MessageHandlerEvent::ForwardPayload(None)]);
+            return Ok(vec![MessageHandlerEvent::ForwardPayload(ctx.clone(), None)]);
         }
 
         match &msg.handler {
