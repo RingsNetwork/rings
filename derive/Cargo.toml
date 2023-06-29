@@ -7,7 +7,6 @@ repository = "https://github.com/RingsNetwork/rings-node"
 license = "GPL-3.0"
 description = "Helper macros for rings node implementation."
 
-
 [lib]
 proc-macro = true
 
