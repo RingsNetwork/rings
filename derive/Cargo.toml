@@ -1,10 +1,11 @@
 [package]
 name = "rings-derive"
-version = "0.1.0"
+version = "0.2.6"
 edition = "2021"
 authors = ["RND <dev@ringsnetwork.io>"]
 repository = "https://github.com/RingsNetwork/rings-node"
 license = "GPL-3.0"
+description = "Helper macros for rings node implementation."
 
 [lib]
 proc-macro = true
