@@ -14,8 +14,8 @@ use sha1::Sha1;
 use web3::signing::keccak256;
 use web3::types::Address;
 
-use crate::err::Error;
-use crate::err::Result;
+use crate::error::Error;
+use crate::error::Result;
 pub mod elgamal;
 pub mod signers;
 mod types;

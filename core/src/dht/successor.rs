@@ -7,8 +7,8 @@ use std::sync::RwLockReadGuard;
 use crate::dht::did::BiasId;
 use crate::dht::did::SortRing;
 use crate::dht::Did;
-use crate::err::Error;
-use crate::err::Result;
+use crate::error::Error;
+use crate::error::Result;
 
 /// A sequence of successors for a node on the ring.
 /// It's necessary to have multiple successors to prevent a single point of failure.

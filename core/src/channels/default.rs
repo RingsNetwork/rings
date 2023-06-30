@@ -4,8 +4,8 @@ use async_channel::Receiver;
 use async_channel::Sender;
 use async_trait::async_trait;
 
-use crate::err::Error;
-use crate::err::Result;
+use crate::error::Error;
+use crate::error::Result;
 use crate::types::channel::Channel;
 
 /// Channel combine with async_channel::Sender and async_channel::Receiver.

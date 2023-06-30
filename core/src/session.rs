@@ -21,8 +21,8 @@ use crate::dht::Did;
 use crate::ecc::signers;
 use crate::ecc::PublicKey;
 use crate::ecc::SecretKey;
-use crate::err::Error;
-use crate::err::Result;
+use crate::error::Error;
+use crate::error::Result;
 use crate::utils;
 
 fn pack_session(session_id: Did, ts_ms: u128, ttl_ms: usize) -> String {

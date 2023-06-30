@@ -4,7 +4,7 @@ use crate::dht::Chord;
 use crate::dht::ChordStorageSync;
 use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
-use crate::err::Result;
+use crate::error::Result;
 use crate::message::types::Message;
 use crate::message::types::NotifyPredecessorReport;
 use crate::message::types::NotifyPredecessorSend;

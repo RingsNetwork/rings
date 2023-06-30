@@ -18,8 +18,8 @@ use super::MessagePayload;
 use crate::dht::vnode::VirtualNode;
 use crate::dht::Did;
 use crate::dht::PeerRing;
-use crate::err::Error;
-use crate::err::Result;
+use crate::error::Error;
+use crate::error::Result;
 use crate::message::ConnectNodeReport;
 use crate::message::ConnectNodeSend;
 

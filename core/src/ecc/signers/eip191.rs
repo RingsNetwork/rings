@@ -6,7 +6,7 @@ use web3::signing::keccak256;
 use crate::ecc::Address;
 use crate::ecc::PublicKey;
 use crate::ecc::SecretKey;
-use crate::err::Result;
+use crate::error::Result;
 
 /// sign function passing raw message parameter.
 pub fn sign_raw(sec: SecretKey, msg: &str) -> [u8; 65] {

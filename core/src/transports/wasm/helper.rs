@@ -5,8 +5,8 @@ use wasm_bindgen::JsValue;
 use web_sys::RtcSdpType;
 use web_sys::RtcSessionDescription;
 
-use crate::err::Error;
-use crate::err::Result;
+use crate::error::Error;
+use crate::error::Result;
 
 /// Wasm sdp types.
 #[derive(Clone, Deserialize, Serialize, Debug)]

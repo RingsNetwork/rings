@@ -7,8 +7,8 @@ use std::sync::Mutex;
 use std::task::Context;
 use std::task::Poll;
 
-use crate::err::Error;
-use crate::err::Result;
+use crate::error::Error;
+use crate::error::Result;
 
 /// Custom futures state.
 pub struct State {

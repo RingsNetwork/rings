@@ -5,8 +5,8 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::dht::Did;
-use crate::err::Error;
-use crate::err::Result;
+use crate::error::Error;
+use crate::error::Result;
 
 /// MessageRelay guide message passing on rings network by relay.
 ///

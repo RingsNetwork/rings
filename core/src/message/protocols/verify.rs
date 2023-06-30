@@ -8,8 +8,8 @@ use serde::Serialize;
 
 use crate::ecc::signers;
 use crate::ecc::PublicKey;
-use crate::err::Error;
-use crate::err::Result;
+use crate::error::Error;
+use crate::error::Result;
 use crate::session::Session;
 
 /// Message Verification is based on session, and sig.

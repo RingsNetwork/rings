@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde::Serialize;
 
 use crate::dht::Did;
-use crate::err::Result;
+use crate::error::Result;
 
 /// TransportEvent send and recv through Channel.
 #[derive(Debug, PartialEq, Eq, Serialize, Clone)]

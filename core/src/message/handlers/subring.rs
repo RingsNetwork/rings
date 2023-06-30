@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use super::storage::handle_storage_store_act;
 use crate::dht::ChordStorage;
 use crate::dht::PeerRing;
-use crate::err::Result;
+use crate::error::Result;
 use crate::prelude::vnode::VNodeOperation;
 use crate::swarm::Swarm;
 

@@ -5,8 +5,8 @@ use bytes::Bytes;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::err::Error;
-use crate::err::Result;
+use crate::error::Error;
+use crate::error::Result;
 
 pub trait Encoder {
     fn encode(&self) -> Result<Encoded>;
