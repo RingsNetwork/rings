@@ -53,7 +53,7 @@ use crate::prelude::wasm_export;
 use crate::prelude::web3::contract::tokens::Tokenizable;
 use crate::prelude::web_sys::RtcIceConnectionState;
 use crate::prelude::CallbackFn;
-use crate::prelude::SessionManagerBuilder;
+use crate::prelude::SessionManager;
 use crate::processor::Processor;
 
 /// AddressType enum contains `DEFAULT` and `ED25519`.
@@ -83,16 +83,11 @@ pub struct Client {
 impl Client {
     /// Creat a new client instance.
     pub fn new_client(
-        session_manager_builder: SessionManagerBuilder,
+        session_manager: SessionManager,
         stuns: String,
         callback: Option<MessageCallbackInstance>,
     ) -> js_sys::Promise {
-        Self::new_client_with_storage(
-            session_manager_builder,
-            stuns,
-            callback,
-            "rings-node".to_string(),
-        )
+        Self::new_client_with_storage(session_manager, stuns, callback, "rings-node".to_string())
     }
 
     /// get self web3 address
@@ -118,14 +113,14 @@ impl Client {
     /// ))
     /// ```
     pub fn new_client_with_storage(
-        session_manager_builder: SessionManagerBuilder,
+        session_manager: SessionManager,
         stuns: String,
         callback: Option<MessageCallbackInstance>,
         storage_name: String,
     ) -> js_sys::Promise {
         future_to_promise(async move {
             let client = Self::new_client_with_storage_internal(
-                session_manager_builder,
+                session_manager,
                 stuns,
                 callback,
                 storage_name,
@@ -137,7 +132,7 @@ impl Client {
     }
 
     pub(crate) async fn new_client_with_storage_internal(
-        session_manager_builder: SessionManagerBuilder,
+        session_manager: SessionManager,
         stuns: String,
         callback: Option<MessageCallbackInstance>,
         storage_name: String,
@@ -147,11 +142,7 @@ impl Client {
             None => None,
         };
 
-        let sm = session_manager_builder
-            .build()
-            .map_err(error::Error::Swarm)?;
-
-        let proc = Processor::new_with_storage(sm, stuns, cb, storage_name).await?;
+        let proc = Processor::new_with_storage(session_manager, stuns, cb, storage_name).await?;
         let processor = Arc::new(proc);
 
         let mut handler: HandlerType = processor.clone().into();
