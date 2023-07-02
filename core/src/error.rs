@@ -304,7 +304,7 @@ pub enum Error {
     #[error("Invalid capacity value")]
     InvalidCapacity,
 
-    #[cfg(feature = "default")]
+    #[cfg(not(feature = "wasm"))]
     #[error("Sled error, {0}")]
     SledError(sled::Error),
 
@@ -350,4 +350,11 @@ pub enum Error {
 
     #[error("Session is expired")]
     SessionExpired,
+}
+
+#[cfg(feature = "wasm")]
+impl From<Error> for wasm_bindgen::JsValue {
+    fn from(err: Error) -> Self {
+        wasm_bindgen::JsValue::from_str(&err.to_string())
+    }
 }
