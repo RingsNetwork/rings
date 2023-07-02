@@ -26,7 +26,10 @@ impl MessageVerification {
     /// Verify a MessageVerification
     pub fn verify<T>(&self, data: &T) -> bool
     where T: Serialize {
-        let Ok(msg) = self.msg(data) else {tracing::warn!("MessageVerification pack_msg failed"); return false};
+        let Ok(msg) = self.msg(data) else {
+            tracing::warn!("MessageVerification pack_msg failed");
+            return false;
+        };
 
         self.session
             .verify(&msg, &self.sig)
