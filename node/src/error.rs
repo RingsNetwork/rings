@@ -5,11 +5,14 @@ use crate::prelude::rings_core;
 /// A wrap `Result` contains custom errors.
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Debug, thiserror::Error)]
 /// Errors enum mapping global custom errors.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     #[error("Connect remote rpc server failed: {0}.")]
     RemoteRpcError(String),
+    #[error("Unkown rpc error.")]
+    UnkownRpcError,
     #[error("Pending Transport error: {0}.")]
     PendingTransport(rings_core::error::Error),
     #[error("Transport not found.")]
@@ -96,6 +99,7 @@ impl Error {
     pub fn code(&self) -> i64 {
         let code = match self {
             Error::RemoteRpcError(_) => 1,
+            Error::UnkownRpcError => 1,
             Error::ConnectError(_) => 1,
             Error::HttpRequestError(_) => 1,
             Error::PendingTransport(_) => 2,
@@ -160,6 +164,7 @@ impl From<crate::prelude::rings_rpc::error::Error> for Error {
             rings_rpc::error::Error::RpcError(v) => Error::RemoteRpcError(v.to_string()),
             rings_rpc::error::Error::InvalidSignature => Error::InvalidData,
             rings_rpc::error::Error::InvalidHeaders => Error::InvalidHeaders,
+            _ => Error::UnkownRpcError,
         }
     }
 }

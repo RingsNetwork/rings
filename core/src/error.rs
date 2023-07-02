@@ -1,5 +1,8 @@
 //! Error of rings_core
 
+/// A wrap `Result` contains custom errors.
+pub type Result<T> = std::result::Result<T, Error>;
+
 /// Errors collections in ring-core.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
@@ -348,6 +351,3 @@ pub enum Error {
     #[error("Session is expired")]
     SessionExpired,
 }
-
-/// A Result wrapper contain custom Errors.
-pub type Result<T> = std::result::Result<T, Error>;
