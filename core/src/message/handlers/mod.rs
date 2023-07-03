@@ -75,12 +75,15 @@ pub type ValidatorFn = Box<dyn MessageValidator + Send + Sync>;
 #[cfg(feature = "wasm")]
 pub type ValidatorFn = Box<dyn MessageValidator>;
 
+type NextHop = Did;
+
 /// MessageHandlerEvent that will be handled by Swarm.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum MessageHandlerEvent {
     /// Instructs the swarm to connect to a peer.
     Connect(Did),
-
+    /// Instructs the swarm to connect to a peer via given next hop.
+    ConnectVia(Did, NextHop),
     /// Instructs the swarm to disconnect from a peer.
     Disconnect(Did),
 
@@ -90,7 +93,7 @@ pub enum MessageHandlerEvent {
 
     /// Instructs the swarm to accept an answer inside payload by given
     /// sender's Did and Message.
-    AcceptAnswer(Did, ConnectNodeReport),
+    AcceptAnswer(NextHop, ConnectNodeReport),
 
     /// Tell swarm to forward the payload to destination by given
     /// Payload and optional next hop.
@@ -212,6 +215,8 @@ impl MessageHandler {
             Message::SyncVNodeWithSuccessor(ref msg) => self.handle(payload, msg).await,
             Message::OperateVNode(ref msg) => self.handle(payload, msg).await,
             Message::CustomMessage(ref msg) => self.handle(payload, msg).await,
+            Message::QueryForTopoInfoSend(ref msg) => self.handle(payload, msg).await,
+            Message::QueryForTopoInfoReport(ref msg) => self.handle(payload, msg).await,
         }?;
 
         tracing::debug!("INVOKE CALLBACK {}", &payload.tx_id);

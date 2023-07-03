@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 
+use async_recursion::async_recursion;
 use crate::dht::successor::SuccessorWriter;
 use crate::dht::Chord;
 use crate::dht::ChordStorageSync;
@@ -21,6 +22,10 @@ use crate::message::LeaveDHT;
 use crate::message::MessageHandler;
 use crate::message::MessageHandlerEvent;
 use crate::message::MessagePayload;
+use crate::message::types::QueryForTopoInfoReport;
+use crate::message::types::QueryForTopoInfoSend;
+use crate::dht::TopoInfo;
+use std::ops::Deref;
 
 async fn handle_join_dht(
     act: PeerRingAction,
@@ -50,6 +55,82 @@ async fn handle_join_dht(
 
     Ok(events)
 }
+
+#[cfg_attr(feature = "wasm", async_recursion(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_recursion)]
+pub async fn handle_update_successor(
+    handler: &MessageHandler,
+    act: &PeerRingAction,
+    ctx: &MessagePayload<Message>,
+) -> Result<Vec<MessageHandlerEvent>>  {
+    match act {
+        PeerRingAction::None => Ok(vec![]),
+        PeerRingAction::RemoteAction(next, PeerRingRemoteAction::QueryForSuccessorList) => {
+	    Ok(vec![
+		MessageHandlerEvent::SendDirectMessage(
+                    Message::QueryForTopoInfoSend(QueryForTopoInfoSend { did: next.clone() }),
+		    next.clone()
+		)
+	    ])
+        }
+        PeerRingAction::MultiActions(acts) => {
+	    let ret: Vec<MessageHandlerEvent> = futures::future::join_all(
+		acts.iter()
+		    .map(|act| async { handle_update_successor(handler, act, ctx).await })
+	    ).await.iter().filter(|x| x.is_ok())
+		.map(|x| x.as_ref().unwrap())
+		.flat_map(|xs| xs.iter())
+		.cloned()
+		.collect();
+            Ok(ret)
+        }
+        PeerRingAction::RemoteAction(did, PeerRingRemoteAction::TryConnect) => {
+            Ok(vec![MessageHandlerEvent::ConnectVia(did.clone(), ctx.relay.sender())])
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// QueryForTopoInfoSend is direct message
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl HandleMsg<QueryForTopoInfoSend> for MessageHandler {
+    async fn handle(
+        &self,
+        ctx: &MessagePayload<Message>,
+        msg: &QueryForTopoInfoSend,
+    ) -> Result<Vec<MessageHandlerEvent>>  {
+        let info: TopoInfo = TopoInfo::try_from(self.dht.deref())?;
+        if msg.did == self.dht.did {
+	    Ok(vec![MessageHandlerEvent::SendReportMessage(
+		ctx.clone(),
+		Message::QueryForTopoInfoReport(QueryForTopoInfoReport { info }),
+	    )])
+	} else {
+            Ok(vec![])
+	}
+    }
+}
+
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl HandleMsg<QueryForTopoInfoReport> for MessageHandler {
+    async fn handle(
+        &self,
+        _ctx: &MessagePayload<Message>,
+        msg: &QueryForTopoInfoReport,
+    ) -> Result<Vec<MessageHandlerEvent>>  {
+        let evs: Vec<MessageHandlerEvent> = msg
+            .info
+            .successors
+            .iter()
+            .map(|did| MessageHandlerEvent::JoinDHT(did.clone()))
+            .collect();
+	Ok(evs)
+    }
+}
+
+
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]

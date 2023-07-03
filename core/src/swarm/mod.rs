@@ -38,6 +38,7 @@ mod builder;
 mod types;
 pub use builder::SwarmBuilder;
 pub use types::MeasureImpl;
+pub use types::WrappedDid;
 
 /// The transports and dht management.
 pub struct Swarm {
@@ -195,6 +196,13 @@ impl Swarm {
                 }
             }
 
+            MessageHandlerEvent::ConnectVia(did, next) => {
+                let did = *did;
+                if self.get_and_check_transport(did).await.is_none() && did != self.did() {
+                    self.connect_via(did, *next).await?;
+                }
+            }
+
             MessageHandlerEvent::Disconnect(did) => {
                 self.disconnect(*did).await?;
             }
@@ -332,6 +340,22 @@ impl Swarm {
 
         Ok(transport)
     }
+
+
+    /// Similar to connect, but this function will try connect a Did by given hop.
+    pub async fn connect_via(&self, did: Did, next_hop: Did) -> Result<Arc<Transport>> {
+        if let Some(t) = self.get_and_check_transport(did).await {
+            return Ok(t);
+        }
+
+        let (transport, offer_msg) = self.prepare_transport_offer().await?;
+
+        self.send_message_by_hop(Message::ConnectNodeSend(offer_msg), did, next_hop)
+            .await?;
+
+	Ok(transport)
+    }
+
 
     /// Check the status of swarm
     pub async fn inspect(&self) -> SwarmInspect {

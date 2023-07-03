@@ -265,6 +265,18 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
         Ok(payload.tx_id)
     }
 
+    /// Send a message to a specified destination by specified next hop.
+    async fn send_message_by_hop(
+        &self,
+        msg: T,
+        destination: Did,
+        next_hop: Did,
+    ) -> Result<uuid::Uuid> {
+        let payload = MessagePayload::new_send(msg, self.session_manager(), next_hop, destination)?;
+        self.send_payload(payload.clone()).await?;
+        Ok(payload.tx_id)
+    }
+
     /// Send a direct message to a specified destination.
     async fn send_direct_message(&self, msg: T, destination: Did) -> Result<uuid::Uuid> {
         let payload =

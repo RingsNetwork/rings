@@ -53,6 +53,9 @@ pub struct PeerRing {
     pub cache: Arc<MemStorage<Did, VirtualNode>>,
 }
 
+/// Type alias is just for making the code easy to read.
+type Target = Did;
+
 /// `PeerRing` use this to describe the result of [Chord] algorithm. Sometimes it's a
 /// direct result, sometimes it's an action that is continued externally.
 #[derive(Clone, Debug, PartialEq)]
@@ -64,7 +67,7 @@ pub enum PeerRingAction {
     /// Found some node.
     Some(Did),
     /// Trigger a remote action.
-    RemoteAction(Did, RemoteAction),
+    RemoteAction(Target, RemoteAction),
     /// Trigger multiple remote actions.
     MultiActions(Vec<PeerRingAction>),
 }

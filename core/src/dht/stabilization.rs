@@ -34,10 +34,12 @@ pub struct Stabilization {
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait TStabilize {
+    /// Wait and poll
     async fn wait(self: Arc<Self>);
 }
 
 impl Stabilization {
+    /// Create a new instance of Stabilization
     pub fn new(swarm: Arc<Swarm>, timeout: usize) -> Self {
         Self {
             chord: swarm.dht(),
@@ -46,10 +48,12 @@ impl Stabilization {
         }
     }
 
+    /// Get timeout of waitting delays.
     pub fn get_timeout(&self) -> usize {
         self.timeout
     }
 
+    /// Clean unavailable transports from swarm.
     pub async fn clean_unavailable_transports(&self) -> Result<()> {
         let transports = self.swarm.get_transports();
 
@@ -63,6 +67,7 @@ impl Stabilization {
         Ok(())
     }
 
+    /// Notify predecessor, this is a DHT operation.
     pub async fn notify_predecessor(&self) -> Result<()> {
         let (successor_min, successor_list) = {
             let successor = self.chord.successors();
@@ -89,6 +94,7 @@ impl Stabilization {
         }
     }
 
+    /// Fix fingers from finger table, this is a DHT operation.
     async fn fix_fingers(&self) -> Result<()> {
         match self.chord.fix_fingers() {
             Ok(action) => match action {
@@ -124,6 +130,7 @@ impl Stabilization {
         }
     }
 
+    /// Call stabilize periodly.
     pub async fn stabilize(&self) -> Result<()> {
         tracing::debug!("STABILIZATION notify_predecessor start");
         if let Err(e) = self.notify_predecessor().await {
