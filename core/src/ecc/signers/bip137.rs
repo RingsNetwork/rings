@@ -6,7 +6,7 @@ use sha2::Sha256;
 
 use crate::ecc::Address;
 use crate::ecc::PublicKey;
-use crate::err::Result;
+use crate::error::Result;
 
 /// recover pubkey according to signature.
 pub fn recover(msg: &str, sig: impl AsRef<[u8]>) -> Result<PublicKey> {

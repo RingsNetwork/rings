@@ -9,7 +9,7 @@ use web_sys::RtcIceConnectionState;
 use super::prepare_node;
 use crate::channels::Channel as CbChannel;
 use crate::ecc::SecretKey;
-use crate::err::Result;
+use crate::error::Result;
 use crate::prelude::RTCSdpType;
 use crate::tests::manually_establish_connection;
 use crate::transports::Transport;

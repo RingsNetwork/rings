@@ -21,8 +21,8 @@ use crate::dht::Did;
 use crate::ecc::signers;
 use crate::ecc::PublicKey;
 use crate::ecc::SecretKey;
-use crate::err::Error;
-use crate::err::Result;
+use crate::error::Error;
+use crate::error::Result;
 use crate::utils;
 
 fn pack_session(session_id: Did, ts_ms: u128, ttl_ms: usize) -> String {
@@ -59,6 +59,7 @@ pub struct SessionManagerBuilder {
 ///
 /// To verify the session, use `verify_self()` method of [Session].
 /// To verify a message, use `verify(msg, sig)` method of [Session].
+#[wasm_export]
 #[derive(Debug)]
 pub struct SessionManager {
     /// Session
@@ -160,9 +161,7 @@ impl SessionManagerBuilder {
         self.ttl_ms = ttl_ms.unwrap_or(DEFAULT_SESSION_TTL_MS);
         self
     }
-}
 
-impl SessionManagerBuilder {
     /// Build the [SessionManager].
     pub fn build(self) -> Result<SessionManager> {
         let authorizer = Authorizer::try_from((self.authorizer_entity, self.authorizer_type))?;

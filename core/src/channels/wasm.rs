@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use futures::channel::mpsc;
 use futures::lock::Mutex;
 
-use crate::err::Error;
-use crate::err::Result;
+use crate::error::Error;
+use crate::error::Result;
 use crate::types::channel::Channel;
 
 type Sender<T> = Arc<mpsc::UnboundedSender<T>>;

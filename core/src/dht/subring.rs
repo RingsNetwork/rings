@@ -7,8 +7,8 @@ use super::vnode::VNodeType;
 use super::vnode::VirtualNode;
 use super::FingerTable;
 use crate::dht::Did;
-use crate::err::Error;
-use crate::err::Result;
+use crate::error::Error;
+use crate::error::Result;
 
 /// A Subring is like a [super::PeerRing] without storage functional.
 /// Subring also have two extra fields: `name` and `creator`.

@@ -19,8 +19,8 @@ use wasm_bindgen::JsValue;
 use super::PersistenceStorageOperation;
 use super::PersistenceStorageReadAndWrite;
 use super::PersistenceStorageRemove;
-use crate::err::Error;
-use crate::err::Result;
+use crate::error::Error;
+use crate::error::Result;
 use crate::utils::js_value;
 
 /// Default IndexedDB database and storage name

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::err::Result;
+use crate::error::Result;
 use crate::message::types::CustomMessage;
 use crate::message::types::Message;
 use crate::message::HandleMsg;

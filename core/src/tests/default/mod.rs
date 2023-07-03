@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::ecc::SecretKey;
-use crate::err::Result;
+use crate::error::Result;
 use crate::message::CallbackFn;
 use crate::session::SessionManager;
 use crate::storage::PersistenceStorage;

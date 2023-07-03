@@ -6,8 +6,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::dht::Did;
-use crate::err::Error;
-use crate::err::Result;
+use crate::error::Error;
+use crate::error::Result;
 use crate::message::ConnectNodeReport;
 use crate::message::ConnectNodeSend;
 use crate::message::Message;

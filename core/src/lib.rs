@@ -62,7 +62,7 @@
 pub mod channels;
 pub mod dht;
 pub mod ecc;
-pub mod err;
+pub mod error;
 pub mod macros;
 pub mod message;
 pub mod prelude;

@@ -16,8 +16,8 @@ use uuid::Uuid;
 use crate::consts::DEFAULT_TTL_MS;
 use crate::consts::MAX_TTL_MS;
 use crate::consts::TS_OFFSET_TOLERANCE_MS;
-use crate::err::Error;
-use crate::err::Result;
+use crate::error::Error;
+use crate::error::Result;
 use crate::utils::get_epoch_ms;
 
 /// A data structure to presenting Chunks

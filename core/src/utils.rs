@@ -46,8 +46,8 @@ pub mod js_value {
     use serde::Serialize;
     use wasm_bindgen::JsValue;
 
-    use crate::err::Error;
-    use crate::err::Result;
+    use crate::error::Error;
+    use crate::error::Result;
 
     /// Get property from a JsValue.
     pub fn get<T: DeserializeOwned>(obj: &JsValue, key: impl Into<String>) -> Result<T> {

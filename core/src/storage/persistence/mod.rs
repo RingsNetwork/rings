@@ -8,7 +8,7 @@ use async_trait::async_trait;
 pub use self::idb::IDBStorage;
 #[cfg(not(feature = "wasm"))]
 pub use self::kv::KvStorage;
-use crate::err::Result;
+use crate::error::Result;
 
 /// Persistence Storage read and write functions
 #[cfg_attr(feature = "wasm", async_trait(?Send))]

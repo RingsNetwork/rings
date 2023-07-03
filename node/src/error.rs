@@ -5,19 +5,22 @@ use crate::prelude::rings_core;
 /// A wrap `Result` contains custom errors.
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Debug, thiserror::Error)]
 /// Errors enum mapping global custom errors.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     #[error("Connect remote rpc server failed: {0}.")]
     RemoteRpcError(String),
+    #[error("Unknown rpc error.")]
+    UnknownRpcError,
     #[error("Pending Transport error: {0}.")]
-    PendingTransport(rings_core::err::Error),
+    PendingTransport(rings_core::error::Error),
     #[error("Transport not found.")]
     TransportNotFound,
     #[error("Create Transport error: {0}.")]
-    NewTransportError(rings_core::err::Error),
+    NewTransportError(rings_core::error::Error),
     #[error("Close Transport error: {0}.")]
-    CloseTransportError(rings_core::err::Error),
+    CloseTransportError(rings_core::error::Error),
     #[error("Decode error.")]
     DecodeError,
     #[error("Encode error.")]
@@ -37,11 +40,11 @@ pub enum Error {
     #[error("WASM failed to load file.")]
     WasmFailedToLoadFile,
     #[error("Create offer info failed: {0}.")]
-    CreateOffer(rings_core::err::Error),
+    CreateOffer(rings_core::error::Error),
     #[error("Answer offer info failed: {0}.")]
-    AnswerOffer(rings_core::err::Error),
+    AnswerOffer(rings_core::error::Error),
     #[error("Accept answer info failed: {0}.")]
-    AcceptAnswer(rings_core::err::Error),
+    AcceptAnswer(rings_core::error::Error),
     #[error("Invalid transport id.")]
     InvalidTransportId,
     #[error("Invalid did.")]
@@ -51,15 +54,15 @@ pub enum Error {
     #[error("Internal error.")]
     InternalError,
     #[error("Connect error, {0}")]
-    ConnectError(rings_core::err::Error),
+    ConnectError(rings_core::error::Error),
     #[error("Send message error: {0}")]
-    SendMessage(rings_core::err::Error),
+    SendMessage(rings_core::error::Error),
     #[error("No Permission")]
     NoPermission,
     #[error("vnode action error: {0}")]
-    VNodeError(rings_core::err::Error),
+    VNodeError(rings_core::error::Error),
     #[error("service register action error: {0}")]
-    ServiceRegisterError(rings_core::err::Error),
+    ServiceRegisterError(rings_core::error::Error),
     #[error("JsError: {0}")]
     JsError(String),
     #[error("Invalid http request: {0}")]
@@ -75,9 +78,9 @@ pub enum Error {
     #[error("Invalid auth data")]
     InvalidAuthData,
     #[error("Storage Error: {0}")]
-    Storage(rings_core::err::Error),
+    Storage(rings_core::error::Error),
     #[error("Swarm Error: {0}")]
-    Swarm(rings_core::err::Error),
+    Swarm(rings_core::error::Error),
     #[error("Create File Error: {0}")]
     CreateFileError(String),
     #[error("Open File Error: {0}")]
@@ -96,6 +99,7 @@ impl Error {
     pub fn code(&self) -> i64 {
         let code = match self {
             Error::RemoteRpcError(_) => 1,
+            Error::UnknownRpcError => 1,
             Error::ConnectError(_) => 1,
             Error::HttpRequestError(_) => 1,
             Error::PendingTransport(_) => 2,
@@ -160,6 +164,7 @@ impl From<crate::prelude::rings_rpc::error::Error> for Error {
             rings_rpc::error::Error::RpcError(v) => Error::RemoteRpcError(v.to_string()),
             rings_rpc::error::Error::InvalidSignature => Error::InvalidData,
             rings_rpc::error::Error::InvalidHeaders => Error::InvalidHeaders,
+            _ => Error::UnknownRpcError,
         }
     }
 }

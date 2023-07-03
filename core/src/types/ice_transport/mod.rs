@@ -9,7 +9,7 @@ use serde::Serialize;
 
 pub use self::ice_server::IceServer;
 use crate::dht::Did;
-use crate::err::Result;
+use crate::error::Result;
 use crate::types::channel::Channel;
 
 /// Struct From [webrtc-rs](https://docs.rs/webrtc/latest/webrtc/ice_transport/ice_candidate/struct.RTCIceCandidateInit.html)

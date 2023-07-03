@@ -6,7 +6,7 @@ use super::chord::TopoInfo;
 use super::did::Did;
 use super::vnode::VNodeOperation;
 use super::vnode::VirtualNode;
-use crate::err::Result;
+use crate::error::Result;
 
 /// Chord is a distributed hash table (DHT) algorithm that is designed to efficiently
 /// distribute data across peer-to-peer network nodes. You may want to browse its

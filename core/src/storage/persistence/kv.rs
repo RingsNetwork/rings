@@ -11,8 +11,8 @@ use sled;
 use super::PersistenceStorageOperation;
 use super::PersistenceStorageReadAndWrite;
 use super::PersistenceStorageRemove;
-use crate::err::Error;
-use crate::err::Result;
+use crate::error::Error;
+use crate::error::Result;
 
 trait KvStorageBasic {
     fn get_db(&self) -> &sled::Db;

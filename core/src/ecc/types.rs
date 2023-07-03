@@ -3,8 +3,8 @@
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::err::Error;
-use crate::err::Result;
+use crate::error::Error;
+use crate::error::Result;
 
 /// PublicKey for ECDSA and EdDSA.
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]

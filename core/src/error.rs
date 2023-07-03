@@ -1,5 +1,8 @@
 //! Error of rings_core
 
+/// A wrap `Result` contains custom errors.
+pub type Result<T> = std::result::Result<T, Error>;
+
 /// Errors collections in ring-core.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
@@ -301,7 +304,7 @@ pub enum Error {
     #[error("Invalid capacity value")]
     InvalidCapacity,
 
-    #[cfg(feature = "default")]
+    #[cfg(not(feature = "wasm"))]
     #[error("Sled error, {0}")]
     SledError(sled::Error),
 
@@ -349,5 +352,9 @@ pub enum Error {
     SessionExpired,
 }
 
-/// A Result wrapper contain custom Errors.
-pub type Result<T> = std::result::Result<T, Error>;
+#[cfg(feature = "wasm")]
+impl From<Error> for wasm_bindgen::JsValue {
+    fn from(err: Error) -> Self {
+        wasm_bindgen::JsValue::from_str(&err.to_string())
+    }
+}

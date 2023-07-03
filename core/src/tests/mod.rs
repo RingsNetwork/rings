@@ -1,4 +1,4 @@
-use crate::err::Result;
+use crate::error::Result;
 use crate::prelude::RTCSdpType;
 use crate::swarm::Swarm;
 use crate::transports::manager::TransportManager;

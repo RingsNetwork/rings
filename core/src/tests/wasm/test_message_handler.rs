@@ -5,7 +5,7 @@ use crate::channels::Channel as CbChannel;
 use crate::dht::Chord;
 use crate::dht::Did;
 use crate::ecc::SecretKey;
-use crate::err::Result;
+use crate::error::Result;
 use crate::session::SessionManager;
 use crate::swarm::Swarm;
 use crate::transports::manager::TransportManager;

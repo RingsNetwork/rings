@@ -33,8 +33,8 @@ use libsecp256k1::curve::Scalar;
 use crate::ecc::CurveEle;
 use crate::ecc::PublicKey;
 use crate::ecc::SecretKey;
-use crate::err::Error;
-use crate::err::Result;
+use crate::error::Error;
+use crate::error::Result;
 
 pub fn str_to_field(s: &str) -> Vec<Field> {
     s.as_bytes()
