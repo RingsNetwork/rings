@@ -121,7 +121,6 @@ pub enum MessageHandlerEvent {
 /// MessageHandler will manage resources.
 #[derive(Clone)]
 pub struct MessageHandler {
-    /// DHT implement chord algorithm.
     dht: Arc<PeerRing>,
     /// CallbackFn implement `customMessage` and `builtin_message`.
     callback: Arc<Option<CallbackFn>>,

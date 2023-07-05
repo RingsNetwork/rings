@@ -26,36 +26,65 @@ use crate::message::types::QueryForTopoInfoReport;
 use crate::message::types::QueryForTopoInfoSend;
 use crate::dht::TopoInfo;
 use std::ops::Deref;
+use futures::future::join_all;
 
+
+#[cfg_attr(feature = "wasm", async_recursion(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_recursion)]
 async fn handle_join_dht(
+    handler: &MessageHandler,
     act: PeerRingAction,
     ctx: &MessagePayload<Message>,
 ) -> Result<Vec<MessageHandlerEvent>> {
-    let mut events = vec![];
     match act {
-        PeerRingAction::None => {}
+        PeerRingAction::None => Ok(vec![]),
         PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessorForConnect(did)) => {
             // if there is only two nodes A, B, it may cause recursion
             // A.successor == B
             // B.successor == A
             // A.find_successor(B)
             if next != ctx.addr {
-                events.push(MessageHandlerEvent::SendDirectMessage(
-                    Message::FindSuccessorSend(FindSuccessorSend {
-                        did,
-                        strict: false,
-                        then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect),
-                    }),
-                    next,
-                ));
-            }
+                Ok(vec![
+		    MessageHandlerEvent::SendDirectMessage(
+			Message::FindSuccessorSend(FindSuccessorSend {
+                            did,
+                            strict: false,
+                            then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect),
+			}),
+			next,
+                    )
+		])
+	    } else {
+		Ok(vec![])
+	    }
+        },
+        PeerRingAction::RemoteAction(next, PeerRingRemoteAction::QueryForSuccessorList) => {
+	    Ok(vec![
+		MessageHandlerEvent::SendDirectMessage(
+                    Message::QueryForTopoInfoSend(QueryForTopoInfoSend { did: next.clone() }),
+		    next.clone()
+		)
+	    ])
+        }
+        PeerRingAction::MultiActions(acts) => {
+	    let ret: Vec<MessageHandlerEvent> = join_all(acts.iter().map(|act| async {
+		handle_join_dht(handler, act.clone(), ctx).await
+	    })).await.iter().filter(|x| x.is_ok())
+		.map(|x| x.as_ref().unwrap())
+		.flat_map(|xs| xs.iter())
+		.cloned()
+		.collect();
+	    Ok(ret)
         }
         _ => unreachable!(),
     }
 
-    Ok(events)
 }
 
+
+/// When handling update successor, it may cause two situtation, and it may cause multiple situtation.
+/// 1. DHT put a connected successor into successor list, and ask successor_list of it.
+/// 2. DHT wana set a new successor into successor list, but it's not connected, thus it request to connect first.
 #[cfg_attr(feature = "wasm", async_recursion(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_recursion)]
 pub async fn handle_update_successor(
@@ -74,7 +103,7 @@ pub async fn handle_update_successor(
 	    ])
         }
         PeerRingAction::MultiActions(acts) => {
-	    let ret: Vec<MessageHandlerEvent> = futures::future::join_all(
+	    let ret: Vec<MessageHandlerEvent> = join_all(
 		acts.iter()
 		    .map(|act| async { handle_update_successor(handler, act, ctx).await })
 	    ).await.iter().filter(|x| x.is_ok())
@@ -112,6 +141,7 @@ impl HandleMsg<QueryForTopoInfoSend> for MessageHandler {
     }
 }
 
+/// Try join received node into DHT after received from TopoInfo.
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<QueryForTopoInfoReport> for MessageHandler {
@@ -156,7 +186,7 @@ impl HandleMsg<JoinDHT> for MessageHandler {
         // finger table just have no other node(beside next), it will be a `create` op
         // otherwise, it will be a `send` op
         let act = self.dht.join(msg.did)?;
-        handle_join_dht(act, ctx).await
+        handle_join_dht(&self, act, ctx).await
     }
 }
 
