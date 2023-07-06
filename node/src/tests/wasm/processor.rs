@@ -94,10 +94,36 @@ async fn create_connection(p1: &Processor, p2: &Processor) {
 
     console_log!("answer_offer");
     let (transport_2, answer) = p2.swarm.answer_offer(offer).await.unwrap();
+
     console_log!("accept_answer");
     let peer = p1.swarm.accept_answer(answer).await.unwrap();
-    utils::js_utils::window_sleep(1000).await.unwrap();
+
+    loop {
+        console_log!("waiting for connection");
+        utils::js_utils::window_sleep(1000).await.unwrap();
+
+        console_log!(
+            "transport_1 state: {:?}",
+            transport_1.ice_connection_state().await.unwrap()
+        );
+        console_log!(
+            "transport_2 state: {:?}",
+            transport_2.ice_connection_state().await.unwrap()
+        );
+
+        let s1 = transport_1.get_stats().await.unwrap();
+        let s2 = transport_2.get_stats().await.unwrap();
+
+        console_log!("transport_1 stats: {:?}", s1);
+        console_log!("transport_2 stats: {:?}", s2);
+
+        if transport_1.is_connected().await && transport_2.is_connected().await {
+            break;
+        }
+    }
+
     assert!(peer.1.id.eq(&transport_1.id), "transport not same");
+
     futures::try_join!(
         async {
             if transport_1.is_connected().await {
@@ -214,13 +240,14 @@ async fn test_processor_connect_with_did() {
     let p3 = new_processor(None).await;
     console_log!("p3 address: {}", p3.did());
 
-    listen(&p1).await;
-    listen(&p2).await;
-    listen(&p3).await;
+    p1.swarm.clone().listen().await;
+    p2.swarm.clone().listen().await;
+    p3.swarm.clone().listen().await;
 
     console_log!("processor_connect_p1_and_p2");
     create_connection(&p1, &p2).await;
     console_log!("processor_connect_p1_and_p2, done");
+
     console_log!("processor_connect_p2_and_p3");
     create_connection(&p2, &p3).await;
     console_log!("processor_connect_p2_and_p3, done");

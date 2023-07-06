@@ -118,6 +118,7 @@ web-sys = { version = "0.3.56", optional = true, features = [
     "RtcIceGatheringState",
     "RtcIceCredentialType",
     "RtcLifecycleEvent",
+    "RtcStatsReport",
     "console",
     "Blob",
 ] }

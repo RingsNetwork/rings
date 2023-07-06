@@ -106,6 +106,10 @@ impl IceTransportInterface<TransportEvent, AcChannel<TransportEvent>> for DummyT
         *self.ice_connection_state.lock().unwrap()
     }
 
+    async fn get_stats(&self) -> Option<Vec<String>> {
+        None
+    }
+
     async fn is_disconnected(&self) -> bool {
         matches!(
             self.ice_connection_state().await,
