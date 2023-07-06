@@ -48,7 +48,7 @@ impl Stabilization {
         }
     }
 
-    /// Get timeout of waitting delays.
+    /// Get timeout of waiting delays.
     pub fn get_timeout(&self) -> usize {
         self.timeout
     }

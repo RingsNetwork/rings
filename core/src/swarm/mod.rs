@@ -346,7 +346,7 @@ impl Swarm {
 
     /// Disconnect a transport. There are three steps:
     /// 1) remove from DHT;
-    /// 2) remove from trasnport pool;
+    /// 2) remove from transport pool;
     /// 3) close the transport connection;
     pub async fn disconnect(&self, did: Did) -> Result<()> {
         tracing::info!("disconnect {:?}", did);

@@ -76,7 +76,7 @@ pub struct BiasId {
 /// in a finite ring. It defines a method `rotate` which allows applying
 /// the transformation to the implementing type.
 pub trait Rotate<Rhs = u16> {
-    /// output type of rotate opeation
+    /// output type of rotate operation
     type Output;
     /// rotate a Did with given angle
     fn rotate(&self, angle: Rhs) -> Self::Output;

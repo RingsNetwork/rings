@@ -76,7 +76,7 @@ pub async fn handle_join_dht(act: PeerRingAction) -> Result<Vec<MessageHandlerEv
     }
 }
 
-/// When handling update successor, it may cause two situtation, and it may cause multiple situation.
+/// When handling update successor, it may cause two situation, and it may cause multiple situation.
 /// 1. DHT put a connected successor into successor list, and ask successor_list of it.
 /// 2. DHT wana set a new successor into successor list, but it's not connected, thus it request to connect first.
 #[cfg_attr(feature = "wasm", async_recursion(?Send))]
