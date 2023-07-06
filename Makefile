@@ -1,7 +1,11 @@
 fmt:
 	cargo +nightly fmt -p rings-core
 	cargo +nightly fmt -p rings-node
+# require taplo_cli, which can be install with
+# cargo install taplo-cli
 	taplo format
+# require typos_cli, which can be install with
+# cargo install typos-cli
 	typos --write-changes
 
 clippy-fix:

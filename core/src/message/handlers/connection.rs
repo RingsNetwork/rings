@@ -756,13 +756,11 @@ pub mod tests {
         assert_eq!(ev_1.addr, node1.did());
         assert_eq!(ev_1.relay.path, vec![node1.did()]);
         assert!(matches!(ev_1.data, Message::JoinDHT(JoinDHT{did, ..}) if did == node2.did()));
-
         // 2 JoinDHT
         let ev_2 = node2.listen_once().await.unwrap().0;
         assert_eq!(ev_2.addr, node2.did());
         assert_eq!(ev_2.relay.path, vec![node2.did()]);
         assert!(matches!(ev_2.data, Message::JoinDHT(JoinDHT{did, ..}) if did == node1.did()));
-
         // 1->2 FindSuccessorSend
         let ev_1 = node1.listen_once().await.unwrap().0;
         assert_eq!(ev_1.addr, node2.did());
@@ -771,7 +769,6 @@ pub mod tests {
             ev_1.data,
             Message::FindSuccessorSend(FindSuccessorSend{did, then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect), strict: false}) if did == node2.did()
         ));
-
         // 2->1 FindSuccessorSend
         let ev_2 = node2.listen_once().await.unwrap().0;
         assert_eq!(ev_2.addr, node1.did());

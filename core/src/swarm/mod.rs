@@ -18,6 +18,7 @@ pub use types::MeasureImpl;
 pub use types::WrappedDid;
 
 use crate::channels::Channel;
+use crate::dht::types::Chord;
 use crate::dht::CorrectChord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
@@ -164,6 +165,7 @@ impl Swarm {
             return None;
         }
         let events = self.message_handler.handle_message(&payload).await;
+
         match events {
             Ok(evs) => {
                 self.handle_message_handler_events(&evs)
@@ -250,9 +252,14 @@ impl Swarm {
             }
 
             MessageHandlerEvent::JoinDHT(did) => {
-                let wdid: WrappedDid = WrappedDid::new(self, *did);
-                let dht_ev = self.dht.join_then_sync(wdid).await?;
-                crate::message::handlers::connection::handle_join_dht(dht_ev).await
+                if cfg!(feature = "experimental") {
+                    let wdid: WrappedDid = WrappedDid::new(self, *did);
+                    let dht_ev = self.dht.join_then_sync(wdid).await?;
+                    crate::message::handlers::connection::handle_join_dht(dht_ev).await
+                } else {
+                    let dht_ev = self.dht.join(*did)?;
+                    crate::message::handlers::connection::handle_join_dht(dht_ev).await
+                }
             }
 
             MessageHandlerEvent::SendDirectMessage(msg, dest) => {
