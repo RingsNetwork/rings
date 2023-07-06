@@ -2,6 +2,7 @@ fmt:
 	cargo +nightly fmt -p rings-core
 	cargo +nightly fmt -p rings-node
 	taplo format
+	typos --write-changes
 
 clippy-fix:
 	cargo clippy --fix --allow-dirty --no-deps
