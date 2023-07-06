@@ -161,11 +161,14 @@ impl HandleMsg<SearchVNode> for MessageHandler {
             Ok(action) => match action {
                 PeerRingAction::None => Ok(vec![]),
                 PeerRingAction::SomeVNode(v) => Ok(vec![MessageHandlerEvent::SendReportMessage(
-		    ctx.clone(),
+                    ctx.clone(),
                     Message::FoundVNode(FoundVNode { data: vec![v] }),
                 )]),
                 PeerRingAction::RemoteAction(next, _) => {
-                    Ok(vec![MessageHandlerEvent::ResetDestination(ctx.clone(), next)])
+                    Ok(vec![MessageHandlerEvent::ResetDestination(
+                        ctx.clone(),
+                        next,
+                    )])
                 }
                 act => Err(Error::PeerRingUnexpectedAction(act)),
             },
@@ -205,7 +208,10 @@ impl HandleMsg<VNodeOperation> for MessageHandler {
             Ok(action) => match action {
                 PeerRingAction::None => Ok(vec![]),
                 PeerRingAction::RemoteAction(next, _) => {
-                    Ok(vec![MessageHandlerEvent::ResetDestination(ctx.clone(), next)])
+                    Ok(vec![MessageHandlerEvent::ResetDestination(
+                        ctx.clone(),
+                        next,
+                    )])
                 }
                 act => Err(Error::PeerRingUnexpectedAction(act)),
             },

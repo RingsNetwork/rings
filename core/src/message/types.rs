@@ -9,8 +9,8 @@ use serde::Serialize;
 use crate::dht::vnode::VNodeOperation;
 use crate::dht::vnode::VirtualNode;
 use crate::dht::Did;
-use crate::error::Result;
 use crate::dht::TopoInfo;
+use crate::error::Result;
 use crate::types::ice_transport::HandshakeInfo;
 
 /// MessageType use to ask for connection, send to remote with transport_uuid and handshake_info.
@@ -67,7 +67,6 @@ pub struct NotifyPredecessorReport {
     /// The did for notify target
     pub did: Did,
 }
-
 
 /// MessageType for handle [RemoteAction::Queryforsuccessorlist]
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

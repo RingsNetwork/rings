@@ -26,9 +26,9 @@ impl HandleMsg<NotifyPredecessorSend> for MessageHandler {
         self.dht.notify(msg.did)?;
 
         if let Some(did) = predecessor {
-            if did != ctx.relay.sender() {
+            if did != ctx.relay.origin_sender() {
                 return Ok(vec![MessageHandlerEvent::SendReportMessage(
-		    ctx.clone(),
+                    ctx.clone(),
                     Message::NotifyPredecessorReport(NotifyPredecessorReport { did }),
                 )]);
             }

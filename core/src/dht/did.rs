@@ -32,7 +32,6 @@
 //! This is because what we actually require is the scalar multiplication of affine multiaction.
 //! Did is represented as a wrapper of H160 (\[u8; 20\]). Since there is no `Eq` trait available for algebraic Rings, we have introduced the [BiasId]
 //! struct to implement [Eq] and [PartialEq].
-//!
 
 use std::cmp::PartialEq;
 use std::ops::Add;

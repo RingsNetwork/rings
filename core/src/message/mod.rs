@@ -16,7 +16,7 @@ pub use payload::PayloadSender;
 mod types;
 pub use types::*;
 
-mod handlers;
+pub mod handlers;
 pub use handlers::storage::ChordStorageInterface;
 pub use handlers::storage::ChordStorageInterfaceCacheChecker;
 pub use handlers::subring::SubringInterface;

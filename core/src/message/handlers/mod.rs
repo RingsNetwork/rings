@@ -1,4 +1,5 @@
 #![warn(missing_docs)]
+//! This module implemented message handler of rings network.
 /// Message Flow:
 /// +---------+    +--------------------------------+
 /// | Message | -> | MessageHandler.handler_payload |

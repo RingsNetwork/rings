@@ -70,7 +70,7 @@ impl MessageRelay {
         Ok(Self {
             path: vec![current],
             next_hop: self.path[self.path.len() - 1],
-            destination: self.sender(),
+            destination: self.origin_sender(),
         })
     }
 
@@ -101,9 +101,16 @@ impl MessageRelay {
         Ok(())
     }
 
-    /// Get the sender of current message.
+    /// Get the origin sender of current message.
     /// Should be the first element of path.
+    #[deprecated(note = "please use `origin_sender` instead")]
     pub fn sender(&self) -> Did {
+        *self.path.first().unwrap()
+    }
+
+    /// Get the origin sender of current message.
+    /// Should be the first element of path.
+    pub fn origin_sender(&self) -> Did {
         *self.path.first().unwrap()
     }
 }

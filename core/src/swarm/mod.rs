@@ -1,16 +1,24 @@
 #![warn(missing_docs)]
 //! Tranposrt management
+mod builder;
+mod impls;
+mod types;
+
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use async_recursion::async_recursion;
 use async_trait::async_trait;
+pub use builder::SwarmBuilder;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+pub use types::MeasureImpl;
+pub use types::WrappedDid;
 
 use crate::channels::Channel;
-use crate::dht::Chord;
+use crate::dht::CorrectChord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::error::Error;
@@ -34,11 +42,6 @@ use crate::types::channel::TransportEvent;
 use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransportInterface;
 use crate::types::ice_transport::IceTrickleScheme;
-mod builder;
-mod types;
-pub use builder::SwarmBuilder;
-pub use types::MeasureImpl;
-pub use types::WrappedDid;
 
 /// The transports and dht management.
 pub struct Swarm {
@@ -160,29 +163,29 @@ impl Swarm {
             tracing::error!("Cannot verify msg or it's expired: {:?}", payload);
             return None;
         }
-        let mut events = self.message_handler.handle_message(&payload).await.ok()?;
-        let mut extra_events = vec![];
-
-        for ev in &events {
-            let evs = self.handle_message_handler_event(ev).await.ok()?;
-
-            for sub_ev in &evs {
-                self.handle_message_handler_event(sub_ev)
+        let events = self.message_handler.handle_message(&payload).await;
+        match events {
+            Ok(evs) => {
+                self.handle_message_handler_events(&evs)
                     .await
-                    .ok()?;
+                    .unwrap_or_else(|e| {
+                        tracing::error!(
+                            "Swarm failed on handling event from message handler: {:#?}",
+                            e
+                        );
+                    });
+                Some((payload, evs))
             }
-
-            extra_events.extend(evs);
+            Err(e) => {
+                tracing::error!("Message handler failed on handling event: {:#?}", e);
+                None
+            }
         }
-
-        events.extend(extra_events);
-        Some((payload, events))
     }
 
     /// Event handler of Swarm.
-    /// This function should be a pure function (no side effects).
-    /// This function is an abstract transformer that transforms
-    /// a [MessageHandlerEvent] to another [MessageHandlerEvent] based on the received Message.
+    #[cfg_attr(feature = "wasm", async_recursion(?Send))]
+    #[cfg_attr(not(feature = "wasm"), async_recursion)]
     pub async fn handle_message_handler_event(
         &self,
         event: &MessageHandlerEvent,
@@ -194,6 +197,7 @@ impl Swarm {
                 if self.get_and_check_transport(did).await.is_none() && did != self.did() {
                     self.connect(did).await?;
                 }
+                Ok(vec![])
             }
 
             MessageHandlerEvent::ConnectVia(did, next) => {
@@ -201,21 +205,23 @@ impl Swarm {
                 if self.get_and_check_transport(did).await.is_none() && did != self.did() {
                     self.connect_via(did, *next).await?;
                 }
+                Ok(vec![])
             }
 
             MessageHandlerEvent::Disconnect(did) => {
                 self.disconnect(*did).await?;
+                Ok(vec![])
             }
 
             MessageHandlerEvent::AnswerOffer(relay, msg) => {
                 let (_, answer) = self
-                    .answer_remote_transport(relay.relay.sender().to_owned(), msg)
+                    .answer_remote_transport(relay.relay.origin_sender().to_owned(), msg)
                     .await?;
 
-                return Ok(vec![MessageHandlerEvent::SendReportMessage(
-		    relay.clone(),
+                Ok(vec![MessageHandlerEvent::SendReportMessage(
+                    relay.clone(),
                     Message::ConnectNodeReport(answer),
-                )]);
+                )])
             }
 
             MessageHandlerEvent::AcceptAnswer(sender, msg) => {
@@ -228,6 +234,7 @@ impl Swarm {
                 transport
                     .register_remote_info(&msg.answer, sender.to_owned())
                     .await?;
+                Ok(vec![])
             }
 
             MessageHandlerEvent::ForwardPayload(payload, next_hop) => {
@@ -241,33 +248,60 @@ impl Swarm {
                 } else {
                     self.forward_payload(payload, *next_hop).await?;
                 }
+                Ok(vec![])
             }
 
             MessageHandlerEvent::JoinDHT(did) => {
-                self.dht.join(*did)?;
+                let wdid: WrappedDid = WrappedDid::new(self, *did);
+                let dht_ev = self.dht.join_then_sync(wdid).await?;
+                crate::message::handlers::connection::handle_join_dht(dht_ev).await
             }
 
             MessageHandlerEvent::SendDirectMessage(msg, dest) => {
                 self.send_direct_message(msg.clone(), *dest).await?;
+                Ok(vec![])
             }
 
             MessageHandlerEvent::SendMessage(msg, dest) => {
                 self.send_message(msg.clone(), *dest).await?;
+                Ok(vec![])
             }
 
             MessageHandlerEvent::SendReportMessage(payload, msg) => {
                 self.send_report_message(payload, msg.clone()).await?;
+                Ok(vec![])
             }
 
             MessageHandlerEvent::ResetDestination(payload, next_hop) => {
                 self.reset_destination(payload, *next_hop).await?;
+                Ok(vec![])
             }
 
             MessageHandlerEvent::StorageStore(vnode) => {
                 <Self as ChordStorageInterface<1>>::storage_store(self, vnode.clone()).await?;
+                Ok(vec![])
             }
         }
-        Ok(vec![])
+    }
+
+    /// Batch handle events
+    #[cfg_attr(feature = "wasm", async_recursion(?Send))]
+    #[cfg_attr(not(feature = "wasm"), async_recursion)]
+    pub async fn handle_message_handler_events(
+        &self,
+        events: &Vec<MessageHandlerEvent>,
+    ) -> Result<()> {
+        match events.as_slice() {
+            [] => Ok(()),
+            [x] => {
+                let evs = self.handle_message_handler_event(x).await?;
+                self.handle_message_handler_events(&evs).await
+            }
+            [x, xs @ ..] => {
+                self.handle_message_handler_events(&vec![x.clone()]).await?;
+                self.handle_message_handler_events(&xs.to_vec()).await
+            }
+        }
     }
 
     /// Push a pending transport to pending list.
@@ -341,7 +375,6 @@ impl Swarm {
         Ok(transport)
     }
 
-
     /// Similar to connect, but this function will try connect a Did by given hop.
     pub async fn connect_via(&self, did: Did, next_hop: Did) -> Result<Arc<Transport>> {
         if let Some(t) = self.get_and_check_transport(did).await {
@@ -353,9 +386,8 @@ impl Swarm {
         self.send_message_by_hop(Message::ConnectNodeSend(offer_msg), did, next_hop)
             .await?;
 
-	Ok(transport)
+        Ok(transport)
     }
-
 
     /// Check the status of swarm
     pub async fn inspect(&self) -> SwarmInspect {
