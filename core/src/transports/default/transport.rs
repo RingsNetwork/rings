@@ -223,6 +223,20 @@ impl IceTransportInterface<TransportEvent, AcChannel<TransportEvent>> for Defaul
             .map(|pc| pc.ice_connection_state())
     }
 
+    async fn get_stats(&self) -> Option<Vec<String>> {
+        let pc = self.get_peer_connection().await?;
+        let reports = pc.get_stats().await.reports;
+
+        Some(
+            reports
+                .into_iter()
+                .map(|x| {
+                    serde_json::to_string(&x).unwrap_or("failed to dump stats entry".to_string())
+                })
+                .collect(),
+        )
+    }
+
     async fn is_disconnected(&self) -> bool {
         matches!(
             self.ice_connection_state().await,

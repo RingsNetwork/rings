@@ -24,6 +24,7 @@ use web_sys::RtcPeerConnectionIceEvent;
 use web_sys::RtcSdpType;
 use web_sys::RtcSessionDescription;
 use web_sys::RtcSessionDescriptionInit;
+use web_sys::RtcStatsReport;
 
 use super::helper::RtcSessionDescriptionWrapper;
 use crate::channels::Channel as CbChannel;
@@ -85,7 +86,7 @@ impl IceTransport for WasmTransport {
     type DataChannel = RtcDataChannel;
 
     async fn get_peer_connection(&self) -> Option<Arc<RtcPeerConnection>> {
-        self.connection.as_ref().map(Arc::clone)
+        self.connection.clone()
     }
 
     async fn get_pending_candidates(&self) -> Vec<RtcIceCandidate> {
@@ -230,6 +231,25 @@ impl IceTransportInterface<TransportEvent, CbChannel<TransportEvent>> for WasmTr
         self.get_peer_connection()
             .await
             .map(|pc| pc.ice_connection_state())
+    }
+
+    async fn get_stats(&self) -> Option<Vec<String>> {
+        let pc = self.get_peer_connection().await?;
+
+        let stats: RtcStatsReport = wasm_bindgen_futures::JsFuture::from(pc.get_stats())
+            .await
+            .ok()?
+            .into();
+
+        Some(
+            stats
+                .entries()
+                .into_iter()
+                .map(|x| {
+                    dump_stats_entry(&x.ok()).unwrap_or("failed to dump stats entry".to_string())
+                })
+                .collect::<Vec<_>>(),
+        )
     }
 
     async fn is_connected(&self) -> bool {
@@ -678,4 +698,10 @@ impl WasmTransport {
             None => Err(Error::RTCPeerConnectionNotEstablish),
         }
     }
+}
+
+fn dump_stats_entry(entry: &Option<JsValue>) -> Option<String> {
+    js_sys::JSON::stringify(entry.as_ref()?)
+        .ok()
+        .and_then(|x| x.as_string())
 }

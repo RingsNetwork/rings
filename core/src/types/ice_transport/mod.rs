@@ -63,6 +63,7 @@ pub trait IceTransportInterface<E: Send, Ch: Channel<E>> {
     async fn apply_callback(&self) -> Result<&Self>;
     async fn close(&self) -> Result<()>;
     async fn ice_connection_state(&self) -> Option<Self::IceConnectionState>;
+    async fn get_stats(&self) -> Option<Vec<String>>;
     async fn is_connected(&self) -> bool;
     async fn is_disconnected(&self) -> bool;
     async fn send_message(&self, msg: &Bytes) -> Result<()>;
