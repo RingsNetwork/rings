@@ -37,9 +37,9 @@ pub struct FindSuccessorSend {
     /// did of target
     pub did: Did,
     /// if strict is true, it will try to find the exactly did,
-    /// eles it will try to find the closest did.
+    /// else it will try to find the closest did.
     pub strict: bool,
-    /// events should be triggerd after found successor
+    /// events should be triggered after found successor
     pub then: FindSuccessorThen,
 }
 
@@ -50,7 +50,7 @@ pub struct FindSuccessorReport {
     pub did: Did,
     /// handler event after processed `then` of FindSuccessorSend.
     /// Usually it will contains `then` from FindSuccessorSend,
-    /// And when sender recieved report, it should call related handler for the event
+    /// And when sender received report, it should call related handler for the event
     pub handler: FindSuccessorReportHandler,
 }
 
@@ -99,14 +99,14 @@ pub struct LeaveDHT {
 /// MessageType use to search virtual node.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SearchVNode {
-    /// The virtual id of seraching target
+    /// The virtual id of searching target
     pub vid: Did,
 }
 
 /// MessageType report to origin found virtual node.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct FoundVNode {
-    /// Resposne of [SearchVNode], containing response data
+    /// Response of [SearchVNode], containing response data
     pub data: Vec<VirtualNode>,
 }
 
@@ -161,7 +161,7 @@ pub enum Message {
     FindSuccessorSend(FindSuccessorSend),
     /// Response of FindSuccessorSend
     FindSuccessorReport(FindSuccessorReport),
-    /// Remote message of notify a precessor
+    /// Remote message of notify a predecessor
     NotifyPredecessorSend(NotifyPredecessorSend),
     /// Response of NotifyPredecessorSend
     NotifyPredecessorReport(NotifyPredecessorReport),

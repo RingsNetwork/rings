@@ -35,7 +35,7 @@ use crate::message::MessagePayload;
 pub async fn handle_join_dht(act: PeerRingAction) -> Result<Vec<MessageHandlerEvent>> {
     match act {
         PeerRingAction::None => Ok(vec![]),
-        // Ask next fo find successor for did,
+        // Ask next hop to find successor for did,
         // if there is only two nodes A, B, it may cause loop, for example
         // A's successor is B, B ask A to find successor for B
         // A may send message to it's successor, which is B
@@ -76,7 +76,7 @@ pub async fn handle_join_dht(act: PeerRingAction) -> Result<Vec<MessageHandlerEv
     }
 }
 
-/// When handling update successor, it may cause two situtation, and it may cause multiple situtation.
+/// When handling update successor, it may cause two situtation, and it may cause multiple situation.
 /// 1. DHT put a connected successor into successor list, and ask successor_list of it.
 /// 2. DHT wana set a new successor into successor list, but it's not connected, thus it request to connect first.
 #[cfg_attr(feature = "wasm", async_recursion(?Send))]

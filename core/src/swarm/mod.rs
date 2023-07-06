@@ -184,8 +184,6 @@ impl Swarm {
     }
 
     /// Event handler of Swarm.
-    #[cfg_attr(feature = "wasm", async_recursion(?Send))]
-    #[cfg_attr(not(feature = "wasm"), async_recursion)]
     pub async fn handle_message_handler_event(
         &self,
         event: &MessageHandlerEvent,
