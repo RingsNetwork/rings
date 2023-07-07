@@ -9,7 +9,7 @@ use std::str::FromStr;
 pub use self::client::*;
 pub use self::jsonrpc_client::JsonRpcClient;
 use crate::logging::browser::init_logging;
-use crate::logging::browser::set_panic_hook;
+use crate::logging::set_panic_hook;
 use crate::prelude::wasm_bindgen;
 use crate::prelude::wasm_export;
 

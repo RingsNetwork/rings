@@ -41,7 +41,8 @@ node = [
     "wasmer-types",
 ]
 browser = [
-    "console_error_panic_hook",
+    "backtrace",
+    "clap",
     "tracing-wasm",
     "reqwest-wasm",
     "rings-core/wasm",
