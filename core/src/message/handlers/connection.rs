@@ -4,9 +4,7 @@ use async_recursion::async_recursion;
 use async_trait::async_trait;
 use futures::future::join_all;
 
-
 use crate::dht::Chord;
-
 use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
 use crate::dht::TopoInfo;
@@ -20,7 +18,6 @@ use crate::message::types::JoinDHT;
 use crate::message::types::Message;
 use crate::message::types::QueryForTopoInfoReport;
 use crate::message::types::QueryForTopoInfoSend;
-
 use crate::message::FindSuccessorReportHandler;
 use crate::message::FindSuccessorThen;
 use crate::message::HandleMsg;
