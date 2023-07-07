@@ -93,6 +93,7 @@ pub async fn handle_join_dht(act: PeerRingAction) -> Result<Vec<MessageHandlerEv
                 Ok(vec![])
             }
         }
+        /// A new successor is set, request the new successor for it's successor list
         PeerRingAction::RemoteAction(next, PeerRingRemoteAction::QueryForSuccessorList) => {
             Ok(vec![MessageHandlerEvent::SendDirectMessage(
                 Message::QueryForTopoInfoSend(QueryForTopoInfoSend { did: next }),
@@ -308,21 +309,6 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
                 Ok(vec![MessageHandlerEvent::JoinDHT(msg.did)])
             }
             FindSuccessorReportHandler::Connect => Ok(vec![MessageHandlerEvent::Connect(msg.did)]),
-            FindSuccessorReportHandler::SyncStorage => {
-                self.dht.successors().update(msg.did)?;
-                if let Ok(PeerRingAction::RemoteAction(
-                    next,
-                    PeerRingRemoteAction::SyncVNodeWithSuccessor(data),
-                )) = self.dht.sync_vnode_with_successor(msg.did).await
-                {
-                    Ok(vec![MessageHandlerEvent::SendMessage(
-                        Message::SyncVNodeWithSuccessor(SyncVNodeWithSuccessor { data }),
-                        next,
-                    )])
-                } else {
-                    Ok(vec![])
-                }
-            }
             _ => Ok(vec![]),
         }
     }

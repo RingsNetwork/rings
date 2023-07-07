@@ -139,8 +139,6 @@ pub enum FindSuccessorReportHandler {
     Connect,
     /// - FixFingerTable: update fingers table.
     FixFingerTable,
-    /// - SyncStorage: syncing data in virtual node.
-    SyncStorage,
     /// - CustomCallback: custom callback handle by `custom_message` method.
     CustomCallback(u8),
 }
