@@ -75,7 +75,7 @@ where T: Into<&'a PanicInfo<'a>>
         let location: Option<PanicLocation> = panic.location().map(|l| PanicLocation::from(*l));
         PanicData {
             message: panic,
-            backtrace: backtrace,
+            backtrace,
             location,
         }
     }
