@@ -29,6 +29,46 @@ use crate::message::MessageHandler;
 use crate::message::MessageHandlerEvent;
 use crate::message::MessagePayload;
 
+/// This accept a action instance, handler_func and error_msg string as parameter.
+/// This macro is used for handling `PeerRingAction::MultiActions`.
+///
+/// It accepts three parameters:
+/// * `$actions`: This parameter represents the actions that will be processed.
+/// * `$handler_func`: This is the handler function that will be used to process each action. It is expected to be
+///                    an expression that evaluates to a closure. The closure should be an asynchronous function
+///                    which accepts a single action and returns a `Result<MessageHandlerEvent>`.
+///                    The function will be called for each action in `$actions`, and should handle the action appropriately.
+///
+/// * `$error_msg`: This is a string that will be used as the error message if the handler function returns an error.
+///                 The string should include one set of braces `{}` that will be filled with the `Debug` representation
+///                 of the error returned from the handler function.
+///
+/// The macro returns a `Result<Vec<MessageHandlerEvent>>`. If all actions are processed successfully, it returns
+/// `Ok(Vec<MessageHandlerEvent>)`, where the vector includes all the successful results from the handler function.
+/// If any action fails, an error message will be logged, but the error will not be returned from the macro; instead,
+/// it will continue with the next action.
+///
+/// The macro is asynchronous, so it should be used within an `async` context.
+#[macro_export]
+macro_rules! handle_multi_actions {
+    ($actions:expr, $handler_func:expr, $error_msg:expr) => {{
+        let ret: Vec<MessageHandlerEvent> = join_all($actions.iter().map($handler_func))
+            .await
+            .iter()
+            .map(|x| {
+                if x.is_err() {
+                    tracing::error!($error_msg, x)
+                };
+                x
+            })
+            .filter_map(|x| x.as_ref().ok())
+            .flat_map(|xs| xs.iter())
+            .cloned()
+            .collect();
+        Ok(ret)
+    }};
+}
+
 /// Handler of join dht event from DHT.
 #[cfg_attr(feature = "wasm", async_recursion(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_recursion)]
@@ -60,17 +100,11 @@ pub async fn handle_join_dht(act: PeerRingAction) -> Result<Vec<MessageHandlerEv
             )])
         }
         PeerRingAction::MultiActions(acts) => {
-            let ret: Vec<MessageHandlerEvent> = join_all(
-                acts.iter()
-                    .map(|act| async { handle_join_dht(act.clone()).await }),
+            handle_multi_actions!(
+                acts,
+                |act| async { handle_join_dht(act.clone()).await },
+                "Failed on handle multi actions: {:#?}"
             )
-            .await
-            .iter()
-            .filter_map(|x| x.as_ref().ok())
-            .flat_map(|xs| xs.iter())
-            .cloned()
-            .collect();
-            Ok(ret)
         }
         _ => unreachable!(),
     }
@@ -82,7 +116,6 @@ pub async fn handle_join_dht(act: PeerRingAction) -> Result<Vec<MessageHandlerEv
 #[cfg_attr(feature = "wasm", async_recursion(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_recursion)]
 pub async fn handle_update_successor(
-    handler: &MessageHandler,
     act: &PeerRingAction,
     ctx: &MessagePayload<Message>,
 ) -> Result<Vec<MessageHandlerEvent>> {
@@ -95,17 +128,11 @@ pub async fn handle_update_successor(
             )])
         }
         PeerRingAction::MultiActions(acts) => {
-            let ret: Vec<MessageHandlerEvent> = join_all(
-                acts.iter()
-                    .map(|act| async { handle_update_successor(handler, act, ctx).await }),
+            handle_multi_actions!(
+                acts,
+                |act| async { handle_update_successor(act, ctx).await },
+                "Failed on handle multi actions: {:#?}"
             )
-            .await
-            .iter()
-            .filter_map(|x| x.as_ref().ok())
-            .flat_map(|xs| xs.iter())
-            .cloned()
-            .collect();
-            Ok(ret)
         }
         PeerRingAction::RemoteAction(did, PeerRingRemoteAction::TryConnect) => {
             Ok(vec![MessageHandlerEvent::ConnectVia(
