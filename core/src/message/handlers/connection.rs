@@ -4,9 +4,9 @@ use async_recursion::async_recursion;
 use async_trait::async_trait;
 use futures::future::join_all;
 
-use crate::dht::successor::SuccessorWriter;
+
 use crate::dht::Chord;
-use crate::dht::ChordStorageSync;
+
 use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
 use crate::dht::TopoInfo;
@@ -20,7 +20,7 @@ use crate::message::types::JoinDHT;
 use crate::message::types::Message;
 use crate::message::types::QueryForTopoInfoReport;
 use crate::message::types::QueryForTopoInfoSend;
-use crate::message::types::SyncVNodeWithSuccessor;
+
 use crate::message::FindSuccessorReportHandler;
 use crate::message::FindSuccessorThen;
 use crate::message::HandleMsg;
@@ -93,7 +93,7 @@ pub async fn handle_join_dht(act: PeerRingAction) -> Result<Vec<MessageHandlerEv
                 Ok(vec![])
             }
         }
-        /// A new successor is set, request the new successor for it's successor list
+        // A new successor is set, request the new successor for it's successor list
         PeerRingAction::RemoteAction(next, PeerRingRemoteAction::QueryForSuccessorList) => {
             Ok(vec![MessageHandlerEvent::SendDirectMessage(
                 Message::QueryForTopoInfoSend(QueryForTopoInfoSend { did: next }),
