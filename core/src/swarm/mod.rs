@@ -148,7 +148,7 @@ impl Swarm {
             },
             Ok(None) => None,
             Err(e) => {
-                tracing::error!("Failed on polling message, Error {:#?}", e);
+                tracing::error!("Failed on polling message, Error {}", e);
                 None
             }
         }

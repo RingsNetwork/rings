@@ -57,7 +57,7 @@ where T: std::fmt::Debug
                 tracing::debug!("channel received message: {:?}", v);
                 Ok(Some(v))
             }
-            Err(_) => Err(Error::ChannelRecvMessageFailed),
+            Err(e) => Err(Error::ChannelRecvMessageFailed(e.to_string())),
         }
     }
 }

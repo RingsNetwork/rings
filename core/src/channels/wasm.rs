@@ -56,7 +56,9 @@ impl<T: Send> Channel<T> for CbChannel<T> {
     async fn recv(receiver: &Self::Receiver) -> Result<Option<T>> {
         let mut receiver = receiver.lock().await;
         match receiver.try_next() {
-            Err(_) => Err(Error::ChannelRecvMessageFailed),
+	    // when there are no messages available, but channel is not yet closed
+            Err(_) => Ok(None),
+	    // when message is fetched
             Ok(Some(x)) => Ok(Some(x)),
             // when channel is closed and no messages left in the queue
             Ok(None) => Ok(None),

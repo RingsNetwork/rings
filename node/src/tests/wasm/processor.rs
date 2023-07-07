@@ -86,7 +86,9 @@ async fn create_connection(p1: &Processor, p2: &Processor) {
     console_log!("create_offer");
     let (transport_1, offer) = p1.swarm.create_offer().await.unwrap();
     let pendings_1 = p1.swarm.pending_transports().await.unwrap();
+    // deal if transport is pending
     assert_eq!(pendings_1.len(), 1);
+
     assert_eq!(
         pendings_1.get(0).unwrap().id.to_string(),
         transport_1.id.to_string()

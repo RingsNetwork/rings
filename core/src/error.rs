@@ -130,8 +130,8 @@ pub enum Error {
     #[error("Send message through channel failed")]
     ChannelSendMessageFailed,
 
-    #[error("Recv message through channel failed")]
-    ChannelRecvMessageFailed,
+    #[error("Recv message through channel failed {0}")]
+    ChannelRecvMessageFailed(String),
 
     #[error("Invalid PeerRingAction")]
     PeerRingInvalidAction,
