@@ -13,6 +13,12 @@ use crate::dht::TopoInfo;
 use crate::error::Result;
 use crate::types::ice_transport::HandshakeInfo;
 
+/// The `Then` trait is used to associate a type with a "then" scenario.
+pub trait Then {
+    /// associated type
+    type Then;
+}
+
 /// MessageType use to ask for connection, send to remote with transport_uuid and handshake_info.
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
 pub struct ConnectNodeSend {
@@ -68,11 +74,22 @@ pub struct NotifyPredecessorReport {
     pub did: Did,
 }
 
+/// The reason of query successor's TopoInfo
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+pub enum QueryFor {
+    /// For sync successor list from successor
+    SyncSuccessor,
+    /// For stabilization
+    Stabilization,
+}
+
 /// MessageType for handle [RemoteAction::Queryforsuccessorlist]
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct QueryForTopoInfoSend {
     /// The did for query target
     pub did: Did,
+    /// The reason of query successor's TopoInfo
+    pub then: QueryFor,
 }
 
 /// MessageType for handle [RemoteAction::Queryforsuccessorlist]
@@ -80,6 +97,42 @@ pub struct QueryForTopoInfoSend {
 pub struct QueryForTopoInfoReport {
     /// The did for query target
     pub info: TopoInfo,
+    /// The reason of query successor's TopoInfo
+    pub then: QueryFor,
+}
+
+impl QueryForTopoInfoSend {
+    /// Create new instance with QueryFor::SyncSuccessor
+    pub fn new_for_sync(did: Did) -> Self {
+        Self {
+            did,
+            then: QueryFor::SyncSuccessor,
+        }
+    }
+
+    /// Create new instance with QueryFor::Stabilization
+    pub fn new_for_stab(did: Did) -> Self {
+        Self {
+            did,
+            then: QueryFor::Stabilization,
+        }
+    }
+
+    /// response a send with QueryForTopoInfoSend
+    pub fn resp(&self, info: TopoInfo) -> QueryForTopoInfoReport {
+        QueryForTopoInfoReport {
+            info,
+            then: self.then,
+        }
+    }
+}
+
+impl Then for QueryForTopoInfoReport {
+    type Then = QueryFor;
+}
+
+impl Then for QueryForTopoInfoSend {
+    type Then = QueryFor;
 }
 
 /// MessageType use to join chord ring, add did into fingers table.

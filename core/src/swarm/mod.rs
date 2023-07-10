@@ -27,6 +27,7 @@ use crate::error::Result;
 use crate::inspect::SwarmInspect;
 use crate::measure::MeasureCounter;
 use crate::message;
+use crate::message::types::NotifyPredecessorSend;
 use crate::message::ChordStorageInterface;
 use crate::message::Message;
 use crate::message::MessageHandler;
@@ -200,6 +201,13 @@ impl Swarm {
                 Ok(vec![])
             }
 
+            // Notify did with self.id
+            MessageHandlerEvent::Notify(did) => {
+                let msg =
+                    Message::NotifyPredecessorSend(NotifyPredecessorSend { did: self.dht.did });
+                Ok(vec![MessageHandlerEvent::SendMessage(msg, *did)])
+            }
+
             MessageHandlerEvent::ConnectVia(did, next) => {
                 let did = *did;
                 if self.get_and_check_transport(did).await.is_none() && did != self.did() {
@@ -251,14 +259,14 @@ impl Swarm {
                 Ok(vec![])
             }
 
-            MessageHandlerEvent::JoinDHT(did) => {
+            MessageHandlerEvent::JoinDHT(ctx, did) => {
                 if cfg!(feature = "experimental") {
                     let wdid: WrappedDid = WrappedDid::new(self, *did);
                     let dht_ev = self.dht.join_then_sync(wdid).await?;
-                    crate::message::handlers::connection::handle_join_dht(dht_ev).await
+                    crate::message::handlers::dht::handle_dht_events(&dht_ev, ctx).await
                 } else {
                     let dht_ev = self.dht.join(*did)?;
-                    crate::message::handlers::connection::handle_join_dht(dht_ev).await
+                    crate::message::handlers::dht::handle_dht_events(&dht_ev, ctx).await
                 }
             }
 

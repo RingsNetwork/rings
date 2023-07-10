@@ -28,6 +28,8 @@ use crate::message::ConnectNodeSend;
 pub mod connection;
 /// Operator and Handler for CustomMessage
 pub mod custom;
+/// For handle dht related actions
+pub mod dht;
 /// Operator and handler for DHT stablization
 pub mod stabilization;
 /// Operator and Handler for Storage
@@ -101,7 +103,7 @@ pub enum MessageHandlerEvent {
     ForwardPayload(Payload, Option<Did>),
 
     /// Instructs the swarm to notify the dht about new peer.
-    JoinDHT(Did),
+    JoinDHT(Payload, Did),
 
     /// Instructs the swarm to send a direct message to a peer.
     SendDirectMessage(Message, Did),
@@ -117,6 +119,8 @@ pub enum MessageHandlerEvent {
 
     /// Instructs the swarm to store vnode.
     StorageStore(VirtualNode),
+    /// Notify a node
+    Notify(Did),
 }
 
 /// MessageHandler will manage resources.

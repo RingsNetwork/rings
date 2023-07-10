@@ -1,12 +1,11 @@
 use std::ops::Deref;
 
-use async_recursion::async_recursion;
 use async_trait::async_trait;
-use futures::future::join_all;
 
+use super::dht;
+use crate::dht::types::CorrectChord;
 use crate::dht::Chord;
 use crate::dht::PeerRingAction;
-use crate::dht::PeerRingRemoteAction;
 use crate::dht::TopoInfo;
 use crate::error::Error;
 use crate::error::Result;
@@ -18,6 +17,7 @@ use crate::message::types::JoinDHT;
 use crate::message::types::Message;
 use crate::message::types::QueryForTopoInfoReport;
 use crate::message::types::QueryForTopoInfoSend;
+use crate::message::types::Then;
 use crate::message::FindSuccessorReportHandler;
 use crate::message::FindSuccessorThen;
 use crate::message::HandleMsg;
@@ -25,122 +25,6 @@ use crate::message::LeaveDHT;
 use crate::message::MessageHandler;
 use crate::message::MessageHandlerEvent;
 use crate::message::MessagePayload;
-
-/// This accept a action instance, handler_func and error_msg string as parameter.
-/// This macro is used for handling `PeerRingAction::MultiActions`.
-///
-/// It accepts three parameters:
-/// * `$actions`: This parameter represents the actions that will be processed.
-/// * `$handler_func`: This is the handler function that will be used to process each action. It is expected to be
-///                    an expression that evaluates to a closure. The closure should be an asynchronous function
-///                    which accepts a single action and returns a `Result<MessageHandlerEvent>`.
-///                    The function will be called for each action in `$actions`, and should handle the action appropriately.
-///
-/// * `$error_msg`: This is a string that will be used as the error message if the handler function returns an error.
-///                 The string should include one set of braces `{}` that will be filled with the `Debug` representation
-///                 of the error returned from the handler function.
-///
-/// The macro returns a `Result<Vec<MessageHandlerEvent>>`. If all actions are processed successfully, it returns
-/// `Ok(Vec<MessageHandlerEvent>)`, where the vector includes all the successful results from the handler function.
-/// If any action fails, an error message will be logged, but the error will not be returned from the macro; instead,
-/// it will continue with the next action.
-///
-/// The macro is asynchronous, so it should be used within an `async` context.
-#[macro_export]
-macro_rules! handle_multi_actions {
-    ($actions:expr, $handler_func:expr, $error_msg:expr) => {{
-        let ret: Vec<MessageHandlerEvent> = join_all($actions.iter().map($handler_func))
-            .await
-            .iter()
-            .map(|x| {
-                if x.is_err() {
-                    tracing::error!($error_msg, x)
-                };
-                x
-            })
-            .filter_map(|x| x.as_ref().ok())
-            .flat_map(|xs| xs.iter())
-            .cloned()
-            .collect();
-        Ok(ret)
-    }};
-}
-
-/// Handler of join dht event from DHT.
-#[cfg_attr(feature = "wasm", async_recursion(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_recursion)]
-pub async fn handle_join_dht(act: PeerRingAction) -> Result<Vec<MessageHandlerEvent>> {
-    match act {
-        PeerRingAction::None => Ok(vec![]),
-        // Ask next hop to find successor for did,
-        // if there is only two nodes A, B, it may cause loop, for example
-        // A's successor is B, B ask A to find successor for B
-        // A may send message to it's successor, which is B
-        PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessorForConnect(did)) => {
-            if next != did {
-                Ok(vec![MessageHandlerEvent::SendDirectMessage(
-                    Message::FindSuccessorSend(FindSuccessorSend {
-                        did,
-                        strict: false,
-                        then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect),
-                    }),
-                    next,
-                )])
-            } else {
-                Ok(vec![])
-            }
-        }
-        // A new successor is set, request the new successor for it's successor list
-        PeerRingAction::RemoteAction(next, PeerRingRemoteAction::QueryForSuccessorList) => {
-            Ok(vec![MessageHandlerEvent::SendDirectMessage(
-                Message::QueryForTopoInfoSend(QueryForTopoInfoSend { did: next }),
-                next,
-            )])
-        }
-        PeerRingAction::MultiActions(acts) => {
-            handle_multi_actions!(
-                acts,
-                |act| async { handle_join_dht(act.clone()).await },
-                "Failed on handle multi actions: {:#?}"
-            )
-        }
-        _ => unreachable!(),
-    }
-}
-
-/// When handling update successor, it may cause two situation, and it may cause multiple situation.
-/// 1. DHT put a connected successor into successor list, and ask successor_list of it.
-/// 2. DHT wana set a new successor into successor list, but it's not connected, thus it request to connect first.
-#[cfg_attr(feature = "wasm", async_recursion(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_recursion)]
-pub async fn handle_update_successor(
-    act: &PeerRingAction,
-    ctx: &MessagePayload<Message>,
-) -> Result<Vec<MessageHandlerEvent>> {
-    match act {
-        PeerRingAction::None => Ok(vec![]),
-        PeerRingAction::RemoteAction(next, PeerRingRemoteAction::QueryForSuccessorList) => {
-            Ok(vec![MessageHandlerEvent::SendDirectMessage(
-                Message::QueryForTopoInfoSend(QueryForTopoInfoSend { did: *next }),
-                *next,
-            )])
-        }
-        PeerRingAction::MultiActions(acts) => {
-            handle_multi_actions!(
-                acts,
-                |act| async { handle_update_successor(act, ctx).await },
-                "Failed on handle multi actions: {:#?}"
-            )
-        }
-        PeerRingAction::RemoteAction(did, PeerRingRemoteAction::TryConnect) => {
-            Ok(vec![MessageHandlerEvent::ConnectVia(
-                *did,
-                ctx.relay.origin_sender(),
-            )])
-        }
-        _ => unreachable!(),
-    }
-}
 
 /// QueryForTopoInfoSend is direct message
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
@@ -155,7 +39,7 @@ impl HandleMsg<QueryForTopoInfoSend> for MessageHandler {
         if msg.did == self.dht.did {
             Ok(vec![MessageHandlerEvent::SendReportMessage(
                 ctx.clone(),
-                Message::QueryForTopoInfoReport(QueryForTopoInfoReport { info }),
+                Message::QueryForTopoInfoReport(msg.resp(info)),
             )])
         } else {
             Ok(vec![])
@@ -169,16 +53,21 @@ impl HandleMsg<QueryForTopoInfoSend> for MessageHandler {
 impl HandleMsg<QueryForTopoInfoReport> for MessageHandler {
     async fn handle(
         &self,
-        _ctx: &MessagePayload<Message>,
+        ctx: &MessagePayload<Message>,
         msg: &QueryForTopoInfoReport,
     ) -> Result<Vec<MessageHandlerEvent>> {
-        let evs: Vec<MessageHandlerEvent> = msg
-            .info
-            .successors
-            .iter()
-            .map(|did| MessageHandlerEvent::JoinDHT(*did))
-            .collect();
-        Ok(evs)
+        match msg.then {
+            <QueryForTopoInfoReport as Then>::Then::SyncSuccessor => Ok(msg
+                .info
+                .successors
+                .iter()
+                .map(|did| MessageHandlerEvent::JoinDHT(ctx.clone(), *did))
+                .collect()),
+            <QueryForTopoInfoReport as Then>::Then::Stabilization => {
+                let ev = self.dht.stabilize(msg.info.clone())?;
+                dht::handle_dht_events(&ev, ctx).await
+            }
+        }
     }
 }
 
@@ -199,15 +88,15 @@ impl HandleMsg<LeaveDHT> for MessageHandler {
 impl HandleMsg<JoinDHT> for MessageHandler {
     async fn handle(
         &self,
-        _ctx: &MessagePayload<Message>,
+        ctx: &MessagePayload<Message>,
         msg: &JoinDHT,
     ) -> Result<Vec<MessageHandlerEvent>> {
         // here is two situation.
         // finger table just have no other node(beside next), it will be a `create` op
         // otherwise, it will be a `send` op
-        Ok(vec![MessageHandlerEvent::JoinDHT(msg.did)])
         // let act = self.dht.join(msg.did)?;
         // handle_join_dht(&self, act, ctx).await
+        Ok(vec![MessageHandlerEvent::JoinDHT(ctx.clone(), msg.did)])
     }
 }
 
@@ -303,7 +192,7 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
 
         match &msg.handler {
             FindSuccessorReportHandler::FixFingerTable => {
-                Ok(vec![MessageHandlerEvent::JoinDHT(msg.did)])
+                Ok(vec![MessageHandlerEvent::JoinDHT(ctx.clone(), msg.did)])
             }
             FindSuccessorReportHandler::Connect => Ok(vec![MessageHandlerEvent::Connect(msg.did)]),
             _ => Ok(vec![]),

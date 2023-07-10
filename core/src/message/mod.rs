@@ -13,7 +13,7 @@ pub use payload::MessagePayload;
 pub use payload::OriginVerificationGen;
 pub use payload::PayloadSender;
 
-mod types;
+pub mod types;
 pub use types::*;
 
 pub mod handlers;
