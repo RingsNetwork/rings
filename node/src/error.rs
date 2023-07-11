@@ -8,9 +8,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Errors enum mapping global custom errors.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
+#[repr(u16)]
 pub enum Error {
     #[error("Connect remote rpc server failed: {0}.")]
-    RemoteRpcError(String),
+    RemoteRpcError(String) = 0,
     #[error("Unknown rpc error.")]
     UnknownRpcError,
     #[error("Pending Transport error: {0}.")]
@@ -96,59 +97,28 @@ pub enum Error {
 }
 
 impl Error {
-    pub fn code(&self) -> i64 {
-        let code = match self {
-            Error::RemoteRpcError(_) => 1,
-            Error::UnknownRpcError => 1,
-            Error::ConnectError(_) => 1,
-            Error::HttpRequestError(_) => 1,
-            Error::PendingTransport(_) => 2,
-            Error::TransportNotFound => 3,
-            Error::NewTransportError(_) => 4,
-            Error::CloseTransportError(_) => 5,
-            Error::EncodeError => 6,
-            Error::DecodeError => 7,
-            Error::CreateOffer(_) => 8,
-            Error::AnswerOffer(_) => 9,
-            Error::AcceptAnswer(_) => 10,
-            Error::InvalidTransportId => 11,
-            Error::InvalidDid => 12,
-            Error::InvalidMethod => 13,
-            Error::SendMessage(_) => 14,
-            Error::NoPermission => 15,
-            Error::VNodeError(_) => 16,
-            Error::ServiceRegisterError(_) => 17,
-            Error::InvalidData => 18,
-            Error::InvalidMessage => 19,
-            Error::InvalidService => 20,
-            Error::InvalidAddress => 21,
-            Error::InvalidAuthData => 22,
-            Error::InvalidHeaders => 23,
-            Error::SerdeJsonError(_) => 24,
-            Error::WasmCompileError(_) => 25,
-            Error::WasmInstantiationError => 26,
-            Error::WasmExportError => 27,
-            Error::WasmRuntimeError(_) => 28,
-            Error::WasmGlobalMemoryLockError => 29,
-            Error::WasmFailedToLoadFile => 30,
-            Error::WasmBackendMessageRwLockError => 31,
-            Error::InternalError => 0,
-            Error::CreateFileError(_) => 0,
-            Error::OpenFileError(_) => 0,
-            Error::JsError(_) => 0,
-            Error::Swarm(_) => 0,
-            Error::Storage(_) => 0,
-            Error::VerifyError(_) => 0,
-            Error::Lock => 0,
-        };
-        -32000 - code
+    fn discriminant(&self) -> u16 {
+        // SAFETY: Because `Self` is marked `repr(u16)`, its layout is a `repr(C)` `union`
+        // between `repr(C)` structs, each of which has the `u16` discriminant as its first
+        // field, so we can read the discriminant without offsetting the pointer.
+        // This code is copy from
+        // ref: https://doc.rust-lang.org/std/mem/fn.discriminant.html
+        // And we modify it from [u8] to [u16], this is work because
+        // repr(C) is equivalent to one of repr(u*) (see the next section) for
+        // fieldless enums.
+        // ref: https://doc.rust-lang.org/nomicon/other-reprs.html
+        unsafe { *<*const _>::from(self).cast::<u16>() }
+    }
+
+    pub fn code(&self) -> u16 {
+        self.discriminant()
     }
 }
 
 impl From<Error> for jsonrpc_core::Error {
     fn from(e: Error) -> Self {
         Self {
-            code: jsonrpc_core::ErrorCode::ServerError(e.code()),
+            code: jsonrpc_core::ErrorCode::ServerError(e.code().into()),
             message: e.to_string(),
             data: None,
         }
@@ -166,5 +136,15 @@ impl From<crate::prelude::rings_rpc::error::Error> for Error {
             rings_rpc::error::Error::InvalidHeaders => Error::InvalidHeaders,
             _ => Error::UnknownRpcError,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_error_code() {
+        let err = Error::RemoteRpcError("Test".to_string());
+        assert_eq!(err.code(), 0);
     }
 }
