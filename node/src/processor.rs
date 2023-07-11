@@ -18,8 +18,6 @@ use crate::measure::PeriodicMeasure;
 use crate::prelude::http;
 use crate::prelude::jsonrpc_client::SimpleClient;
 use crate::prelude::jsonrpc_core;
-// #[cfg(feature = "node")]
-// use crate::prelude::jsonrpc_core::Metadata;
 use crate::prelude::rings_core::dht::Did;
 use crate::prelude::rings_core::dht::Stabilization;
 use crate::prelude::rings_core::dht::TStabilize;
