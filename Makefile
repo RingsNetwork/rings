@@ -1,6 +1,5 @@
 fmt:
-	cargo +nightly fmt -p rings-core
-	cargo +nightly fmt -p rings-node
+	cargo +nightly fmt --all
 # require taplo_cli, which can be install with
 # cargo install taplo-cli
 	taplo format
