@@ -11,6 +11,8 @@ use crate::backend::service::http_server::HiddenServerConfig;
 use crate::error::Error;
 use crate::error::Result;
 use crate::prelude::rings_core::ecc::SecretKey;
+use crate::prelude::SessionManager;
+use crate::processor::ProcessorConfig;
 
 lazy_static::lazy_static! {
   static ref DEFAULT_DATA_STORAGE_CONFIG: StorageConfig = StorageConfig {
@@ -41,10 +43,10 @@ where P: AsRef<std::path::Path> {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
+    pub session_manager: String,
     #[serde(rename = "bind")]
     pub http_addr: String,
     pub endpoint_url: String,
-    pub ecdsa_key: SecretKey,
     pub ice_servers: String,
     pub stabilize_timeout: usize,
     pub external_ip: Option<String>,
@@ -60,12 +62,28 @@ pub struct Config {
     pub extension: ExtensionConfig,
 }
 
+impl From<&Config> for ProcessorConfig {
+    fn from(config: &Config) -> Self {
+        Self {
+            ice_servers: config.ice_servers.clone(),
+            external_address: config.external_ip.clone(),
+            session_manager: config.session_manager.clone(),
+            stabilize_timeout: config.stabilize_timeout,
+        }
+    }
+}
+
 impl Config {
     pub fn new_with_key(key: SecretKey) -> Self {
+        let session_manager = SessionManager::new_with_seckey(&key)
+            .expect("create session manager failed")
+            .dump()
+            .expect("dump session manager failed");
+
         Self {
+            session_manager,
             http_addr: DEFAULT_BIND_ADDRESS.to_string(),
             endpoint_url: DEFAULT_ENDPOINT_URL.to_string(),
-            ecdsa_key: key,
             ice_servers: DEFAULT_ICE_SERVERS.to_string(),
             stabilize_timeout: DEFAULT_STABILIZE_TIMEOUT,
             external_ip: None,

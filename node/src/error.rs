@@ -94,8 +94,10 @@ pub enum Error {
     Lock = 902,
     #[error("serde json error: {0}")]
     SerdeJsonError(#[from] serde_json::Error) = 1000,
+    #[error("serde yaml error: {0}")]
+    SerdeYamlError(#[from] serde_yaml::Error) = 1001,
     #[error("verify error: {0}")]
-    VerifyError(String) = 1001,
+    VerifyError(String) = 1002,
 }
 
 impl Error {
@@ -148,5 +150,12 @@ mod tests {
     fn test_error_code() {
         let err = Error::RemoteRpcError("Test".to_string());
         assert_eq!(err.code(), 100);
+    }
+}
+
+#[cfg(feature = "browser")]
+impl From<Error> for wasm_bindgen::JsValue {
+    fn from(err: Error) -> Self {
+        wasm_bindgen::JsValue::from_str(&err.to_string())
     }
 }

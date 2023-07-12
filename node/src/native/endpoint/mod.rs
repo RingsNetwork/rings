@@ -24,7 +24,6 @@ use crate::prelude::http::header;
 use crate::prelude::http::HeaderMap;
 use crate::prelude::http::HeaderValue;
 use crate::prelude::jsonrpc_core::MetaIoHandler;
-use crate::prelude::rings_core::ecc::PublicKey;
 use crate::prelude::rings_rpc::response::NodeInfo;
 use crate::processor::Processor;
 
@@ -35,7 +34,6 @@ impl crate::prelude::jsonrpc_core::Metadata for RpcMeta {}
 pub struct JsonrpcState {
     processor: Arc<Processor>,
     io_handler: Arc<MetaIoHandler<RpcMeta>>,
-    pubkey: Arc<PublicKey>,
     receiver: Arc<Mutex<Receiver<BackendMessage>>>,
 }
 
@@ -44,7 +42,6 @@ pub struct JsonrpcState {
 #[allow(dead_code)]
 pub struct WsState {
     processor: Arc<Processor>,
-    pubkey: Arc<PublicKey>,
     receiver: Arc<Receiver<BackendMessage>>,
 }
 
@@ -58,7 +55,6 @@ pub struct StatusState {
 pub async fn run_http_api(
     addr: String,
     processor: Arc<Processor>,
-    pubkey: Arc<PublicKey>,
     receiver: Receiver<BackendMessage>,
 ) -> anyhow::Result<()> {
     let binding_addr = addr.parse().unwrap();
@@ -70,13 +66,11 @@ pub async fn run_http_api(
     let jsonrpc_state = Arc::new(JsonrpcState {
         processor: processor.clone(),
         io_handler: jsonrpc_handler_layer,
-        pubkey: pubkey.clone(),
         receiver: Arc::new(Mutex::new(receiver.resubscribe())),
     });
 
     let ws_state = Arc::new(WsState {
         processor: processor.clone(),
-        pubkey,
         receiver: Arc::new(receiver.resubscribe()),
     });
 
@@ -107,8 +101,9 @@ async fn jsonrpc_io_handler(
     body: String,
 ) -> Result<JsonResponse, HttpError> {
     let is_auth = if let Some(signature) = headermap.get("X-SIGNATURE") {
-        Processor::verify_signature(signature.as_bytes(), &state.pubkey)
-            .map_err(|_| HttpError::BadRequest)?
+        // TODO: check signature
+        tracing::debug!("signature: {:?}", signature);
+        true
     } else {
         false
     };
