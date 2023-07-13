@@ -3309,6 +3309,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "tracing-wasm",
+ "wasm-bindgen",
  "wasm-bindgen-test",
  "wasmer",
  "wasmer-types",

@@ -296,7 +296,7 @@ impl SessionManager {
     /// Dump session_manager to string, allowing user to save it in a config file.
     /// It can be restored using `SessionManager::from_str`.
     pub fn dump(&self) -> Result<String> {
-        let s = serde_json::to_string(&self.session).map_err(|_| Error::SerializeError)?;
+        let s = serde_json::to_string(&self).map_err(|_| Error::SerializeError)?;
         base58_monero::encode_check(s.as_bytes()).map_err(|_| Error::Encode)
     }
 }

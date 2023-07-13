@@ -167,9 +167,9 @@ mod tests {
     #[test]
     fn test_deserialization_with_missed_field() {
         let yaml = r#"
+session_manager: session_manager
 bind: 127.0.0.1:50000
 endpoint_url: http://127.0.0.1:50000
-ecdsa_key: 65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0
 ice_servers: stun://stun.l.google.com:19302
 stabilize_timeout: 3
 external_ip: null

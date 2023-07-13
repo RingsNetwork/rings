@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use futures::future::Join;
 use futures::Future;
+#[cfg(feature = "node")]
 use jsonrpc_core::Metadata;
 use rings_core::message::MessagePayload;
 use serde::Deserialize;
@@ -151,6 +152,7 @@ impl ProcessorBuilder {
     }
 }
 
+#[cfg(feature = "node")]
 impl Metadata for Processor {}
 
 impl Processor {
@@ -515,48 +517,12 @@ mod test {
     use futures::lock::Mutex;
 
     use super::*;
-    use crate::prelude::rings_core::ecc::SecretKey;
-    use crate::prelude::rings_core::storage::PersistenceStorage;
-    use crate::prelude::rings_core::swarm::SwarmBuilder;
     use crate::prelude::*;
-
-    async fn new_processor() -> (Processor, String) {
-        let key = SecretKey::random();
-        let session_manager = SessionManager::new_with_seckey(&key).unwrap();
-
-        let stun = "stun://stun.l.google.com:19302";
-        let path = PersistenceStorage::random_path("./tmp");
-        let storage = PersistenceStorage::new_with_path(path.as_str())
-            .await
-            .unwrap();
-
-        let swarm = Arc::new(SwarmBuilder::new(stun, storage, session_manager).build());
-        let stabilization = Arc::new(Stabilization::new(swarm.clone(), 200));
-        ((swarm, stabilization).into(), path)
-    }
-
-    async fn new_processor_with_callback(callback: CallbackFn) -> (Processor, String) {
-        let key = SecretKey::random();
-        let session_manager = SessionManager::new_with_seckey(&key).unwrap();
-
-        let stun = "stun://stun.l.google.com:19302";
-        let path = PersistenceStorage::random_path("./tmp");
-        let storage = PersistenceStorage::new_with_path(path.as_str())
-            .await
-            .unwrap();
-
-        let swarm = Arc::new(
-            SwarmBuilder::new(stun, storage, session_manager)
-                .message_callback(Some(callback))
-                .build(),
-        );
-        let stabilization = Arc::new(Stabilization::new(swarm.clone(), 200));
-        ((swarm, stabilization).into(), path)
-    }
+    use crate::tests::native::prepare_processor;
 
     #[tokio::test]
     async fn test_processor_create_offer() {
-        let (processor, path) = new_processor().await;
+        let (processor, path) = prepare_processor(None).await;
         let ti = processor.swarm.create_offer().await.unwrap();
         let pendings = processor.swarm.pending_transports().await.unwrap();
         assert_eq!(pendings.len(), 1);
@@ -566,7 +532,7 @@ mod test {
 
     #[tokio::test]
     async fn test_processor_list_pendings() {
-        let (processor, path) = new_processor().await;
+        let (processor, path) = prepare_processor(None).await;
         let ti0 = processor.swarm.create_offer().await.unwrap();
         let ti1 = processor.swarm.create_offer().await.unwrap();
         let pendings = processor.swarm.pending_transports().await.unwrap();
@@ -586,7 +552,7 @@ mod test {
 
     #[tokio::test]
     async fn test_processor_close_pending_transport() {
-        let (processor, path) = new_processor().await;
+        let (processor, path) = prepare_processor(None).await;
         let ti0 = processor.swarm.create_offer().await.unwrap();
         let _ti1 = processor.swarm.create_offer().await.unwrap();
         let ti2 = processor.swarm.create_offer().await.unwrap();
@@ -688,8 +654,8 @@ mod test {
             msgs: msgs2.clone(),
         });
 
-        let (p1, path1) = new_processor_with_callback(callback1).await;
-        let (p2, path2) = new_processor_with_callback(callback2).await;
+        let (p1, path1) = prepare_processor(Some(callback1)).await;
+        let (p2, path2) = prepare_processor(Some(callback2)).await;
         let did1 = p1.did().to_string();
         let did2 = p2.did().to_string();
 
