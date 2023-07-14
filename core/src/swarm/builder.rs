@@ -81,8 +81,8 @@ impl SwarmBuilder {
     }
 
     /// Bind measurement function for Swarm.
-    pub fn measure(mut self, implement: MeasureImpl) -> Self {
-        self.measure = Some(implement);
+    pub fn measure(mut self, implement: Option<MeasureImpl>) -> Self {
+        self.measure = implement;
         self
     }
 
