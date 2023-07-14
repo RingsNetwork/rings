@@ -22,7 +22,11 @@ impl MessageEndpoint for TextEndpoint {
         data: &BackendMessage,
     ) -> Result<Vec<MessageHandlerEvent>> {
         let text = str::from_utf8(&data.data).map_err(|_| Error::InvalidMessage)?;
-        tracing::info!("SimpleText, From: {}, Text: {}", ctx.relay.sender(), text);
+        tracing::info!(
+            "SimpleText, From: {}, Text: {}",
+            ctx.relay.origin_sender(),
+            text
+        );
         Ok(vec![])
     }
 }

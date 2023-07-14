@@ -11,6 +11,10 @@ keywords = ["Chord", "DHT", "Web3", "P2P", "WASM"]
 categories = ["network-programming", "cryptography", "wasm"]
 
 [features]
+# Feature "experimental" is used to mark an implementation as experimental, which means that:
+# It may not have been thoroughly tested.
+# The corresponding API may be deprecated or adjusted in the future.
+experimental = []
 default = ["std"]
 std = [
     "webrtc",

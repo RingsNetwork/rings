@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 //! Implementation of Ring's DHT
 //!
 //! which is based on CHORD, ref: <https://pdos.csail.mit.edu/papers/ton:chord/paper-ton.pdf>
@@ -5,12 +6,13 @@
 pub mod did;
 pub use did::Did;
 mod chord;
+pub use chord::TopoInfo;
 /// Finger table for Rings
 pub mod finger;
 pub mod successor;
 pub use successor::SuccessorReader;
 pub use successor::SuccessorWriter;
-mod types;
+pub mod types;
 pub use chord::PeerRing;
 pub use chord::PeerRingAction;
 pub use chord::RemoteAction as PeerRingRemoteAction;
@@ -19,6 +21,7 @@ pub use types::Chord;
 pub use types::ChordStorage;
 pub use types::ChordStorageCache;
 pub use types::ChordStorageSync;
+pub use types::CorrectChord;
 pub use types::LiveDid;
 mod stabilization;
 pub use stabilization::Stabilization;

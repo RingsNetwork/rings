@@ -1,4 +1,38 @@
-use std::cmp::Eq;
+#![warn(missing_docs)]
+
+//! This module defines distributed idendity for rings network.
+//! The Did of rings network is also a abstract Ring structure of abstract algebra.
+//! The Did is implemented with H160, which is a 160 bits, which can present as:
+//!
+//! ## Algebraic Did
+//! In abstract algebra, a "ring" is an algebraic structure consisting of a non-empty set
+//! and two binary operations (commonly referred to as addition and multiplication).
+//! The definition of a ring can be stated as follows:
+//!
+//! * Addition is closed: For any two elements a and b in R, their sum a + b belongs to R.
+//!
+//! * Addition is commutative: For any two elements a and b in R, a + b = b + a.
+//!
+//! * Addition is associative: For any three elements a, b, and c in R, (a + b) + c = a + (b + c).
+//!
+//! * Existence of an additive identity: There exists an element 0 in R such that for any element a in R, a + 0 = 0 + a = a.
+//!
+//! * Existence of additive inverses: For every element a in R, there exists an element -a such that a + (-a) = (-a) + a = 0.
+//!
+//! * Multiplication is closed: For any two elements a and b in R, their product a · b belongs to R.
+//!
+//! * Multiplication satisfies the distributive law:
+//! For any three elements a, b, and c in R, a · (b + c) = a · b + a · c and (a + b) · c = a · c + b · c.
+//!
+//! ## Concrete Did
+//!
+//! In our implementation, we have essentially implemented a cyclic Ring structure.
+//! As a result, we can utilize rotation operations as a substitute for multiplication.
+//! Within this module, we have implemented the additive operation for Did, as well as the rotate operation in place of multiaction.
+//! This is because what we actually require is the scalar multiplication of affine multiaction.
+//! Did is represented as a wrapper of H160 (\[u8; 20\]). Since there is no `Eq` trait available for algebraic Rings, we have introduced the [BiasId]
+//! struct to implement [Eq] and [PartialEq].
+
 use std::cmp::PartialEq;
 use std::ops::Add;
 use std::ops::Deref;
@@ -26,10 +60,15 @@ impl std::fmt::Display for Did {
     }
 }
 
-// Bias Did is a special Did which set origin Did's idendity to bias
+/// Bias Did is a special Did which set origin Did's idendity to bias
+/// The underlying concept of BiasId is that while we cannot determine the order between two Dids, such as `did_a` and `did_b`,
+/// we can establish a reference Did, referred to as `did_x`, and compare which one is closer to it. Hence, we introduced BiasId,
+/// where a bias value is applied. Essentially, it considers the midpoint `x` as the zero point within the Ring algebraic structure for observation.
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Serialize, Deserialize, Hash)]
 pub struct BiasId {
+    /// the zero point for determine order of Did.
     bias: Did,
+    /// did data without bias.
     did: Did,
 }
 
@@ -37,7 +76,9 @@ pub struct BiasId {
 /// in a finite ring. It defines a method `rotate` which allows applying
 /// the transformation to the implementing type.
 pub trait Rotate<Rhs = u16> {
+    /// output type of rotate operation
     type Output;
+    /// rotate a Did with given angle
     fn rotate(&self, angle: Rhs) -> Self::Output;
 }
 
@@ -50,6 +91,7 @@ impl Rotate<u16> for Did {
 }
 
 impl BiasId {
+    /// Wrap a Did into BiasDid with given bias.
     pub fn new(bias: Did, did: Did) -> BiasId {
         BiasId {
             bias,
@@ -57,10 +99,12 @@ impl BiasId {
         }
     }
 
+    /// Get wrapped biased value from did
     pub fn to_did(self) -> Did {
         self.did + self.bias
     }
 
+    /// Get unwrap value from a BiasDid
     pub fn pos(&self) -> Did {
         self.did
     }
@@ -123,26 +167,29 @@ impl TryFrom<HashStr> for Did {
 }
 
 impl Did {
-    // Test x <- (a, b)
+    /// Test x <- (a, b)
     pub fn in_range(&self, base_id: Self, a: Self, b: Self) -> bool {
         // Test x > a && b > x
         *self - base_id > a - base_id && b - base_id > *self - base_id
     }
 
-    // Transform Did to BiasDid
+    /// Transform Did to BiasDid
     pub fn bias(&self, did: Self) -> BiasId {
         BiasId::new(did, *self)
     }
 
-    // Rotate Transport did to a list of affined did
-    // affine x, n = [x + rotate(360/n)]
+    /// Rotate Transport did to a list of affined did
+    /// affine x, n = [x + rotate(360/n)]
     pub fn rotate_affine(&self, scalar: u16) -> Vec<Did> {
         let angle = 360 / scalar;
         (0..scalar).map(|i| (*self).rotate(i * angle)).collect()
     }
 }
 
+/// Ordering with a did reference
+/// This trait defines necessary method for sorting based on did.
 pub trait SortRing {
+    /// Sort a impl SortRing with given did
     fn sort(&mut self, did: Did);
 }
 

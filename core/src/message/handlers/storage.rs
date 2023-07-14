@@ -153,7 +153,7 @@ impl HandleMsg<SearchVNode> for MessageHandler {
     /// If a VNode is storead local, it will response immediately.(See Chordstorageinterface::storage_fetch)
     async fn handle(
         &self,
-        _ctx: &MessagePayload<Message>,
+        ctx: &MessagePayload<Message>,
         msg: &SearchVNode,
     ) -> Result<Vec<MessageHandlerEvent>> {
         // For relay message, set redundant to 1
@@ -161,10 +161,14 @@ impl HandleMsg<SearchVNode> for MessageHandler {
             Ok(action) => match action {
                 PeerRingAction::None => Ok(vec![]),
                 PeerRingAction::SomeVNode(v) => Ok(vec![MessageHandlerEvent::SendReportMessage(
+                    ctx.clone(),
                     Message::FoundVNode(FoundVNode { data: vec![v] }),
                 )]),
                 PeerRingAction::RemoteAction(next, _) => {
-                    Ok(vec![MessageHandlerEvent::ResetDestination(next)])
+                    Ok(vec![MessageHandlerEvent::ResetDestination(
+                        ctx.clone(),
+                        next,
+                    )])
                 }
                 act => Err(Error::PeerRingUnexpectedAction(act)),
             },
@@ -182,7 +186,7 @@ impl HandleMsg<FoundVNode> for MessageHandler {
         msg: &FoundVNode,
     ) -> Result<Vec<MessageHandlerEvent>> {
         if self.dht.did != ctx.relay.destination {
-            return Ok(vec![MessageHandlerEvent::ForwardPayload(None)]);
+            return Ok(vec![MessageHandlerEvent::ForwardPayload(ctx.clone(), None)]);
         }
         for data in msg.data.iter().cloned() {
             self.dht.local_cache_set(data);
@@ -196,7 +200,7 @@ impl HandleMsg<FoundVNode> for MessageHandler {
 impl HandleMsg<VNodeOperation> for MessageHandler {
     async fn handle(
         &self,
-        _ctx: &MessagePayload<Message>,
+        ctx: &MessagePayload<Message>,
         msg: &VNodeOperation,
     ) -> Result<Vec<MessageHandlerEvent>> {
         // For relay message, set redundant to 1
@@ -204,7 +208,10 @@ impl HandleMsg<VNodeOperation> for MessageHandler {
             Ok(action) => match action {
                 PeerRingAction::None => Ok(vec![]),
                 PeerRingAction::RemoteAction(next, _) => {
-                    Ok(vec![MessageHandlerEvent::ResetDestination(next)])
+                    Ok(vec![MessageHandlerEvent::ResetDestination(
+                        ctx.clone(),
+                        next,
+                    )])
                 }
                 act => Err(Error::PeerRingUnexpectedAction(act)),
             },

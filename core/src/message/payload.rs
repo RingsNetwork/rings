@@ -81,7 +81,7 @@ pub struct MessagePayload<T> {
     /// The transaction ID of payload.
     /// Remote peer should use same tx_id when response.
     pub tx_id: uuid::Uuid,
-    /// The did of last sender.
+    /// The did of payload authorizer, usually it's last sender.
     pub addr: Did,
     /// Relay records the transport path of message.
     /// And can also help message sender to find the next hop.
@@ -180,7 +180,7 @@ where T: Serialize + DeserializeOwned
             return false;
         }
 
-        if Some(self.relay.sender()) != self.origin_authorizer_did().ok() {
+        if Some(self.relay.origin_sender()) != self.origin_authorizer_did().ok() {
             tracing::warn!("sender is not origin_verification generator");
             return false;
         }
@@ -188,10 +188,20 @@ where T: Serialize + DeserializeOwned
         self.verification.verify(&self.data) && self.origin_verification.verify(&self.data)
     }
 
-    /// Recovers the public key from the origin verification.
+    /// Get Did from the origin verification.
     pub fn origin_authorizer_did(&self) -> Result<Did> {
         Ok(self
             .origin_verification
+            .session
+            .authorizer_pubkey()?
+            .address()
+            .into())
+    }
+
+    /// Get did from sender verification.
+    pub fn authorizer_did(&self) -> Result<Did> {
+        Ok(self
+            .verification
             .session
             .authorizer_pubkey()?
             .address()
@@ -208,6 +218,16 @@ where T: Serialize + DeserializeOwned
         bincode::serialize(self)
             .map(Bytes::from)
             .map_err(Error::BincodeSerialize)
+    }
+
+    /// Did of Sender
+    pub fn sender(&self) -> Result<Did> {
+        self.authorizer_did()
+    }
+
+    /// Did of Origin
+    pub fn origin(&self) -> Result<Did> {
+        self.origin_authorizer_did()
     }
 }
 
@@ -260,6 +280,18 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
     /// Send a message to a specified destination.
     async fn send_message(&self, msg: T, destination: Did) -> Result<uuid::Uuid> {
         let next_hop = self.infer_next_hop(None, destination)?;
+        let payload = MessagePayload::new_send(msg, self.session_manager(), next_hop, destination)?;
+        self.send_payload(payload.clone()).await?;
+        Ok(payload.tx_id)
+    }
+
+    /// Send a message to a specified destination by specified next hop.
+    async fn send_message_by_hop(
+        &self,
+        msg: T,
+        destination: Did,
+        next_hop: Did,
+    ) -> Result<uuid::Uuid> {
         let payload = MessagePayload::new_send(msg, self.session_manager(), next_hop, destination)?;
         self.send_payload(payload.clone()).await?;
         Ok(payload.tx_id)

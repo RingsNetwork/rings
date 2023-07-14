@@ -135,7 +135,7 @@ impl MessageEndpoint for Extension {
     /// Handles the incoming message by passing it to the extension handlers and returning the resulting events.
     async fn handle_message(
         &self,
-        _ctx: &MessagePayload<Message>,
+        ctx: &MessagePayload<Message>,
         data: &BackendMessage,
     ) -> Result<Vec<MessageHandlerEvent>> {
         let mut ret = vec![];
@@ -145,6 +145,7 @@ impl MessageEndpoint for Extension {
             if resp != data.clone() {
                 let resp_bytes: bytes::Bytes = resp.into();
                 let ev = MessageHandlerEvent::SendReportMessage(
+                    ctx.clone(),
                     Message::custom(&resp_bytes).map_err(|_| Error::InvalidMessage)?,
                 );
                 ret.push(ev)

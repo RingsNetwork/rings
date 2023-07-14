@@ -1,34 +1,41 @@
+#![warn(missing_docs)]
 //! Tranposrt management
+mod builder;
+mod impls;
+mod types;
+
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use async_recursion::async_recursion;
 use async_trait::async_trait;
+pub use builder::SwarmBuilder;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+pub use types::MeasureImpl;
+pub use types::WrappedDid;
 
 use crate::channels::Channel;
-use crate::dht::Chord;
+use crate::dht::types::Chord;
+use crate::dht::CorrectChord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::error::Error;
 use crate::error::Result;
 use crate::inspect::SwarmInspect;
-use crate::measure::Measure;
 use crate::measure::MeasureCounter;
 use crate::message;
-use crate::message::CallbackFn;
+use crate::message::types::NotifyPredecessorSend;
 use crate::message::ChordStorageInterface;
 use crate::message::Message;
 use crate::message::MessageHandler;
 use crate::message::MessageHandlerEvent;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
-use crate::message::ValidatorFn;
 use crate::session::SessionManager;
 use crate::storage::MemStorage;
-use crate::storage::PersistenceStorage;
 use crate::transports::manager::TransportHandshake;
 use crate::transports::manager::TransportManager;
 use crate::transports::Transport;
@@ -38,148 +45,53 @@ use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransportInterface;
 use crate::types::ice_transport::IceTrickleScheme;
 
-#[cfg(not(feature = "wasm"))]
-pub type MeasureImpl = Box<dyn Measure + Send + Sync>;
-
-#[cfg(feature = "wasm")]
-pub type MeasureImpl = Box<dyn Measure>;
-
-/// Creates a SwarmBuilder to configure a Swarm.
-pub struct SwarmBuilder {
-    ice_servers: Vec<IceServer>,
-    external_address: Option<String>,
-    dht_succ_max: u8,
-    dht_storage: PersistenceStorage,
-    session_manager: SessionManager,
-    session_ttl: Option<usize>,
-    measure: Option<MeasureImpl>,
-    message_callback: Option<CallbackFn>,
-    message_validator: Option<ValidatorFn>,
-}
-
-impl SwarmBuilder {
-    pub fn new(
-        ice_servers: &str,
-        dht_storage: PersistenceStorage,
-        session_manager: SessionManager,
-    ) -> Self {
-        let ice_servers = ice_servers
-            .split(';')
-            .collect::<Vec<&str>>()
-            .into_iter()
-            .map(|s| {
-                IceServer::from_str(s)
-                    .unwrap_or_else(|_| panic!("Failed on parse ice server {:?}", s))
-            })
-            .collect::<Vec<IceServer>>();
-        SwarmBuilder {
-            ice_servers,
-            external_address: None,
-            dht_succ_max: 3,
-            dht_storage,
-            session_manager,
-            session_ttl: None,
-            measure: None,
-            message_callback: None,
-            message_validator: None,
-        }
-    }
-
-    pub fn dht_succ_max(mut self, succ_max: u8) -> Self {
-        self.dht_succ_max = succ_max;
-        self
-    }
-
-    pub fn external_address(mut self, external_address: Option<String>) -> Self {
-        self.external_address = external_address;
-        self
-    }
-
-    pub fn session_ttl(mut self, ttl: usize) -> Self {
-        self.session_ttl = Some(ttl);
-        self
-    }
-
-    pub fn measure(mut self, implement: MeasureImpl) -> Self {
-        self.measure = Some(implement);
-        self
-    }
-
-    pub fn message_callback(mut self, callback: Option<CallbackFn>) -> Self {
-        self.message_callback = callback;
-        self
-    }
-
-    pub fn message_validator(mut self, validator: ValidatorFn) -> Self {
-        self.message_validator = Some(validator);
-        self
-    }
-
-    pub fn build(self) -> Swarm {
-        let dht_did = self.session_manager.authorizer_did();
-
-        let dht = Arc::new(PeerRing::new_with_storage(
-            dht_did,
-            self.dht_succ_max,
-            self.dht_storage,
-        ));
-
-        let message_handler =
-            MessageHandler::new(dht.clone(), self.message_callback, self.message_validator);
-
-        Swarm {
-            pending_transports: Mutex::new(vec![]),
-            transports: MemStorage::new(),
-            transport_event_channel: Channel::new(),
-            ice_servers: self.ice_servers,
-            external_address: self.external_address,
-            dht,
-            measure: self.measure,
-            session_manager: self.session_manager,
-            message_handler,
-        }
-    }
-}
-
 /// The transports and dht management.
 pub struct Swarm {
+    /// A list to for store and manage pending_transport.
     pub(crate) pending_transports: Mutex<Vec<Arc<Transport>>>,
+    /// Connected Transports.
     pub(crate) transports: MemStorage<Did, Arc<Transport>>,
+    /// Configuration of ice_servers, including `TURN` and `STUN` server.
     pub(crate) ice_servers: Vec<IceServer>,
+    /// Event channel for receive events from transport.
     pub(crate) transport_event_channel: Channel<TransportEvent>,
+    /// Allow setup external address for webrtc transport.
     pub(crate) external_address: Option<String>,
+    /// Reference of DHT.
     pub(crate) dht: Arc<PeerRing>,
+    /// Implementationof measurement.
     pub(crate) measure: Option<MeasureImpl>,
     session_manager: SessionManager,
     message_handler: MessageHandler,
 }
 
 impl Swarm {
+    /// Get did of self.
     pub fn did(&self) -> Did {
         self.dht.did
     }
 
+    /// Get DHT(Distributed Hash Table) of self.
     pub fn dht(&self) -> Arc<PeerRing> {
         self.dht.clone()
     }
 
+    /// Retrieves the session manager associated with the current instance.
+    /// The session manager provides a segregated approach to manage private keys.
+    /// It generates delegated secret keys for the bound entries of PKIs (Public Key Infrastructure).
     pub fn session_manager(&self) -> &SessionManager {
         &self.session_manager
     }
 
-    async fn load_message(
-        &self,
-        ev: Result<Option<TransportEvent>>,
-    ) -> Result<Option<MessagePayload<Message>>> {
-        let ev = ev?;
-
+    /// Load message from a TransportEvent.
+    async fn load_message(&self, ev: TransportEvent) -> Result<Option<MessagePayload<Message>>> {
         match ev {
-            Some(TransportEvent::DataChannelMessage(msg)) => {
+            TransportEvent::DataChannelMessage(msg) => {
                 let payload = MessagePayload::from_bincode(&msg)?;
                 tracing::debug!("load message from channel: {:?}", payload);
                 Ok(Some(payload))
             }
-            Some(TransportEvent::RegisterTransport((did, id))) => {
+            TransportEvent::RegisterTransport((did, id)) => {
                 // if transport is still pending
                 if let Ok(Some(t)) = self.find_pending_transport(id) {
                     tracing::debug!("transport is inside pending list, mov to swarm transports");
@@ -200,7 +112,7 @@ impl Swarm {
                     None => Err(Error::SwarmMissTransport(did)),
                 }
             }
-            Some(TransportEvent::ConnectClosed((did, uuid))) => {
+            TransportEvent::ConnectClosed((did, uuid)) => {
                 if self.pop_pending_transport(uuid).is_ok() {
                     tracing::info!(
                         "[Swarm::ConnectClosed] Pending transport {:?} dropped",
@@ -222,7 +134,6 @@ impl Swarm {
                 }
                 Ok(None)
             }
-            None => Ok(None),
         }
     }
 
@@ -230,15 +141,22 @@ impl Swarm {
     /// which means an async loop cannot running concurrency.
     pub async fn poll_message(&self) -> Option<MessagePayload<Message>> {
         let receiver = &self.transport_event_channel.receiver();
-        let ev = Channel::recv(receiver).await;
-        match self.load_message(ev).await {
-            Ok(Some(msg)) => Some(msg),
+        match Channel::recv(receiver).await {
+            Ok(Some(ev)) => match self.load_message(ev).await {
+                Ok(Some(msg)) => Some(msg),
+                Ok(None) => None,
+                Err(_) => None,
+            },
             Ok(None) => None,
-            Err(_) => None,
+            Err(e) => {
+                tracing::error!("Failed on polling message, Error {}", e);
+                None
+            }
         }
     }
 
     /// This method is required because web-sys components is not `Send`
+    /// This method will return events already consumed (landed), which is ok to be ignore.
     /// which means a listening loop cannot running concurrency.
     pub async fn listen_once(&self) -> Option<(MessagePayload<Message>, Vec<MessageHandlerEvent>)> {
         let payload = self.poll_message().await?;
@@ -247,29 +165,30 @@ impl Swarm {
             tracing::error!("Cannot verify msg or it's expired: {:?}", payload);
             return None;
         }
+        let events = self.message_handler.handle_message(&payload).await;
 
-        let mut events = self.message_handler.handle_message(&payload).await.ok()?;
-        let mut extra_events = vec![];
-
-        for ev in &events {
-            let evs = self.handle_message_handler_event(&payload, ev).await.ok()?;
-
-            for sub_ev in &evs {
-                self.handle_message_handler_event(&payload, sub_ev)
+        match events {
+            Ok(evs) => {
+                self.handle_message_handler_events(&evs)
                     .await
-                    .ok()?;
+                    .unwrap_or_else(|e| {
+                        tracing::error!(
+                            "Swarm failed on handling event from message handler: {:#?}",
+                            e
+                        );
+                    });
+                Some((payload, evs))
             }
-
-            extra_events.extend(evs);
+            Err(e) => {
+                tracing::error!("Message handler failed on handling event: {:#?}", e);
+                None
+            }
         }
-
-        events.extend(extra_events);
-        Some((payload, events))
     }
 
+    /// Event handler of Swarm.
     pub async fn handle_message_handler_event(
         &self,
-        payload: &MessagePayload<Message>,
         event: &MessageHandlerEvent,
     ) -> Result<Vec<MessageHandlerEvent>> {
         tracing::debug!("Handle message handler event: {:?}", event);
@@ -279,23 +198,41 @@ impl Swarm {
                 if self.get_and_check_transport(did).await.is_none() && did != self.did() {
                     self.connect(did).await?;
                 }
+                Ok(vec![])
+            }
+
+            // Notify did with self.id
+            MessageHandlerEvent::Notify(did) => {
+                let msg =
+                    Message::NotifyPredecessorSend(NotifyPredecessorSend { did: self.dht.did });
+                Ok(vec![MessageHandlerEvent::SendMessage(msg, *did)])
+            }
+
+            MessageHandlerEvent::ConnectVia(did, next) => {
+                let did = *did;
+                if self.get_and_check_transport(did).await.is_none() && did != self.did() {
+                    self.connect_via(did, *next).await?;
+                }
+                Ok(vec![])
             }
 
             MessageHandlerEvent::Disconnect(did) => {
                 self.disconnect(*did).await?;
+                Ok(vec![])
             }
 
-            MessageHandlerEvent::AnswerOffer(msg) => {
+            MessageHandlerEvent::AnswerOffer(relay, msg) => {
                 let (_, answer) = self
-                    .answer_remote_transport(payload.relay.sender(), msg)
+                    .answer_remote_transport(relay.relay.origin_sender().to_owned(), msg)
                     .await?;
 
-                return Ok(vec![MessageHandlerEvent::SendReportMessage(
+                Ok(vec![MessageHandlerEvent::SendReportMessage(
+                    relay.clone(),
                     Message::ConnectNodeReport(answer),
-                )]);
+                )])
             }
 
-            MessageHandlerEvent::AcceptAnswer(msg) => {
+            MessageHandlerEvent::AcceptAnswer(sender, msg) => {
                 let transport = self
                     .find_pending_transport(
                         uuid::Uuid::from_str(&msg.transport_uuid)
@@ -303,11 +240,12 @@ impl Swarm {
                     )?
                     .ok_or(Error::MessageHandlerMissTransportConnectedNode)?;
                 transport
-                    .register_remote_info(&msg.answer, payload.relay.sender())
+                    .register_remote_info(&msg.answer, sender.to_owned())
                     .await?;
+                Ok(vec![])
             }
 
-            MessageHandlerEvent::ForwardPayload(next_hop) => {
+            MessageHandlerEvent::ForwardPayload(payload, next_hop) => {
                 if self
                     .get_and_check_transport(payload.relay.destination)
                     .await
@@ -318,35 +256,68 @@ impl Swarm {
                 } else {
                     self.forward_payload(payload, *next_hop).await?;
                 }
+                Ok(vec![])
             }
 
-            MessageHandlerEvent::JoinDHT(did) => {
-                self.dht.join(*did)?;
+            MessageHandlerEvent::JoinDHT(ctx, did) => {
+                if cfg!(feature = "experimental") {
+                    let wdid: WrappedDid = WrappedDid::new(self, *did);
+                    let dht_ev = self.dht.join_then_sync(wdid).await?;
+                    crate::message::handlers::dht::handle_dht_events(&dht_ev, ctx).await
+                } else {
+                    let dht_ev = self.dht.join(*did)?;
+                    crate::message::handlers::dht::handle_dht_events(&dht_ev, ctx).await
+                }
             }
 
             MessageHandlerEvent::SendDirectMessage(msg, dest) => {
                 self.send_direct_message(msg.clone(), *dest).await?;
+                Ok(vec![])
             }
 
             MessageHandlerEvent::SendMessage(msg, dest) => {
                 self.send_message(msg.clone(), *dest).await?;
+                Ok(vec![])
             }
 
-            MessageHandlerEvent::SendReportMessage(msg) => {
+            MessageHandlerEvent::SendReportMessage(payload, msg) => {
                 self.send_report_message(payload, msg.clone()).await?;
+                Ok(vec![])
             }
 
-            MessageHandlerEvent::ResetDestination(next_hop) => {
+            MessageHandlerEvent::ResetDestination(payload, next_hop) => {
                 self.reset_destination(payload, *next_hop).await?;
+                Ok(vec![])
             }
 
             MessageHandlerEvent::StorageStore(vnode) => {
                 <Self as ChordStorageInterface<1>>::storage_store(self, vnode.clone()).await?;
+                Ok(vec![])
             }
         }
-        Ok(vec![])
     }
 
+    /// Batch handle events
+    #[cfg_attr(feature = "wasm", async_recursion(?Send))]
+    #[cfg_attr(not(feature = "wasm"), async_recursion)]
+    pub async fn handle_message_handler_events(
+        &self,
+        events: &Vec<MessageHandlerEvent>,
+    ) -> Result<()> {
+        match events.as_slice() {
+            [] => Ok(()),
+            [x] => {
+                let evs = self.handle_message_handler_event(x).await?;
+                self.handle_message_handler_events(&evs).await
+            }
+            [x, xs @ ..] => {
+                self.handle_message_handler_events(&vec![x.clone()]).await?;
+                self.handle_message_handler_events(&xs.to_vec()).await
+            }
+        }
+    }
+
+    /// Push a pending transport to pending list.
     pub fn push_pending_transport(&self, transport: &Arc<Transport>) -> Result<()> {
         let mut pending = self
             .pending_transports
@@ -356,6 +327,7 @@ impl Swarm {
         Ok(())
     }
 
+    /// Pop a pending trainsport from pending list.
     pub fn pop_pending_transport(&self, transport_id: uuid::Uuid) -> Result<()> {
         let mut pending = self
             .pending_transports
@@ -369,6 +341,7 @@ impl Swarm {
         Ok(())
     }
 
+    /// List all the pending transports.
     pub async fn pending_transports(&self) -> Result<Vec<Arc<Transport>>> {
         let pending = self
             .pending_transports
@@ -377,6 +350,7 @@ impl Swarm {
         Ok(pending.iter().cloned().collect::<Vec<_>>())
     }
 
+    /// Find a pending transport from pending list.
     pub fn find_pending_transport(&self, id: uuid::Uuid) -> Result<Option<Arc<Transport>>> {
         let pending = self
             .pending_transports
@@ -385,6 +359,10 @@ impl Swarm {
         Ok(pending.iter().find(|x| x.id.eq(&id)).cloned())
     }
 
+    /// Disconnect a transport. There are three steps:
+    /// 1) remove from DHT;
+    /// 2) remove from transport pool;
+    /// 3) close the transport connection;
     pub async fn disconnect(&self, did: Did) -> Result<()> {
         tracing::info!("disconnect {:?}", did);
         self.dht.remove(did)?;
@@ -394,6 +372,9 @@ impl Swarm {
         Ok(())
     }
 
+    /// Connect a given Did. It the did is managed by swarm transport pool, return directly,
+    /// else try prepare offer and establish connection by dht.
+    /// This function may returns a pending transport or connected transport.
     pub async fn connect(&self, did: Did) -> Result<Arc<Transport>> {
         if let Some(t) = self.get_and_check_transport(did).await {
             return Ok(t);
@@ -407,6 +388,21 @@ impl Swarm {
         Ok(transport)
     }
 
+    /// Similar to connect, but this function will try connect a Did by given hop.
+    pub async fn connect_via(&self, did: Did, next_hop: Did) -> Result<Arc<Transport>> {
+        if let Some(t) = self.get_and_check_transport(did).await {
+            return Ok(t);
+        }
+
+        let (transport, offer_msg) = self.prepare_transport_offer().await?;
+
+        self.send_message_by_hop(Message::ConnectNodeSend(offer_msg), did, next_hop)
+            .await?;
+
+        Ok(transport)
+    }
+
+    /// Check the status of swarm
     pub async fn inspect(&self) -> SwarmInspect {
         SwarmInspect::inspect(self).await
     }
@@ -473,6 +469,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Deb
 
 #[cfg(not(feature = "wasm"))]
 impl Swarm {
+    /// Listener for native envirement, It will just launch a loop.
     pub async fn listen(self: Arc<Self>) {
         loop {
             self.listen_once().await;
@@ -482,6 +479,7 @@ impl Swarm {
 
 #[cfg(feature = "wasm")]
 impl Swarm {
+    /// Listener for browser envirement, the implementation is based on  js_sys::window.set_timeout.
     pub async fn listen(self: Arc<Self>) {
         let func = move || {
             let this = self.clone();
@@ -501,6 +499,7 @@ pub mod tests {
 
     use super::*;
     use crate::ecc::SecretKey;
+    use crate::storage::PersistenceStorage;
     #[cfg(not(feature = "dummy"))]
     use crate::transports::default::transport::tests::establish_connection;
     #[cfg(feature = "dummy")]

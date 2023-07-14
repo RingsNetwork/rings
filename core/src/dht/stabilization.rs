@@ -4,11 +4,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::dht::successor::SuccessorReader;
+use crate::dht::types::CorrectChord;
 use crate::dht::Chord;
 use crate::dht::PeerRing;
 use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
 use crate::error::Result;
+use crate::message::handlers::MessageHandlerEvent;
 use crate::message::FindSuccessorReportHandler;
 use crate::message::FindSuccessorSend;
 use crate::message::FindSuccessorThen;
@@ -16,6 +18,7 @@ use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::NotifyPredecessorSend;
 use crate::message::PayloadSender;
+use crate::message::QueryForTopoInfoSend;
 use crate::swarm::Swarm;
 use crate::transports::manager::TransportManager;
 use crate::types::ice_transport::IceTransportInterface;
@@ -34,22 +37,12 @@ pub struct Stabilization {
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait TStabilize {
+    /// Wait and poll
     async fn wait(self: Arc<Self>);
 }
 
 impl Stabilization {
-    pub fn new(swarm: Arc<Swarm>, timeout: usize) -> Self {
-        Self {
-            chord: swarm.dht(),
-            swarm,
-            timeout,
-        }
-    }
-
-    pub fn get_timeout(&self) -> usize {
-        self.timeout
-    }
-
+    /// Clean unavailable transports from swarm.
     pub async fn clean_unavailable_transports(&self) -> Result<()> {
         let transports = self.swarm.get_transports();
 
@@ -62,7 +55,26 @@ impl Stabilization {
 
         Ok(())
     }
+}
 
+impl Stabilization {
+    /// Create a new instance of Stabilization
+    pub fn new(swarm: Arc<Swarm>, timeout: usize) -> Self {
+        Self {
+            chord: swarm.dht(),
+            swarm,
+            timeout,
+        }
+    }
+
+    /// Get timeout of waiting delays.
+    pub fn get_timeout(&self) -> usize {
+        self.timeout
+    }
+}
+
+impl Stabilization {
+    /// Notify predecessor, this is a DHT operation.
     pub async fn notify_predecessor(&self) -> Result<()> {
         let (successor_min, successor_list) = {
             let successor = self.chord.successors();
@@ -89,6 +101,7 @@ impl Stabilization {
         }
     }
 
+    /// Fix fingers from finger table, this is a DHT operation.
     async fn fix_fingers(&self) -> Result<()> {
         match self.chord.fix_fingers() {
             Ok(action) => match action {
@@ -123,7 +136,28 @@ impl Stabilization {
             }
         }
     }
+}
 
+impl Stabilization {
+    /// Call stabilization from correct chord implementation
+    pub async fn correct_stabilize(&self) -> Result<()> {
+        if let PeerRingAction::RemoteAction(
+            next,
+            PeerRingRemoteAction::QueryForSuccessorListAndPred,
+        ) = self.chord.pre_stabilize()?
+        {
+            let evs = vec![MessageHandlerEvent::SendDirectMessage(
+                Message::QueryForTopoInfoSend(QueryForTopoInfoSend::new_for_stab(next)),
+                next,
+            )];
+            return self.swarm.handle_message_handler_events(&evs).await;
+        }
+        Ok(())
+    }
+}
+
+impl Stabilization {
+    /// Call stabilize periodly.
     pub async fn stabilize(&self) -> Result<()> {
         tracing::debug!("STABILIZATION notify_predecessor start");
         if let Err(e) = self.notify_predecessor().await {
@@ -140,6 +174,14 @@ impl Stabilization {
             tracing::error!("[stabilize] Failed on clean unavailable transports {:?}", e);
         }
         tracing::debug!("STABILIZATION clean_unavailable_transports end");
+        #[cfg(feature = "experimental")]
+        {
+            tracing::debug!("STABILIZATION correct_stabilize start");
+            if let Err(e) = self.correct_stabilize() {
+                tracing::error!("[stabilize] Failed on call correct stabilize {:?}", e);
+            }
+            tracing::debug!("STABILIZATION correct_stabilize end");
+        }
         Ok(())
     }
 }
