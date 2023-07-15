@@ -3309,6 +3309,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "tracing-wasm",
+ "wasm-bindgen",
  "wasm-bindgen-test",
  "wasmer",
  "wasmer-types",
@@ -3318,6 +3319,7 @@ dependencies = [
 name = "rings-rpc"
 version = "0.2.6"
 dependencies = [
+ "base64 0.13.1",
  "http",
  "jsonrpc-core",
  "jsonrpc-pubsub",

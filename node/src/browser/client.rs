@@ -18,6 +18,7 @@ use crate::error;
 use crate::jsonrpc::build_handler;
 use crate::jsonrpc::handler::browser::MethodHandler;
 use crate::jsonrpc::HandlerType;
+use crate::measure::PeriodicMeasure;
 use crate::prelude::chunk::Chunk;
 use crate::prelude::chunk::ChunkList;
 use crate::prelude::chunk::ChunkManager;
@@ -38,6 +39,7 @@ use crate::prelude::rings_core::prelude::uuid::Uuid;
 use crate::prelude::rings_core::prelude::vnode;
 use crate::prelude::rings_core::prelude::vnode::VirtualNode;
 use crate::prelude::rings_core::prelude::web3::ethabi::Token;
+use crate::prelude::rings_core::storage::PersistenceStorage;
 use crate::prelude::rings_core::transports::manager::TransportHandshake;
 use crate::prelude::rings_core::transports::manager::TransportManager;
 use crate::prelude::rings_core::types::ice_transport::IceTransportInterface;
@@ -53,8 +55,8 @@ use crate::prelude::wasm_export;
 use crate::prelude::web3::contract::tokens::Tokenizable;
 use crate::prelude::web_sys::RtcIceConnectionState;
 use crate::prelude::CallbackFn;
-use crate::prelude::SessionManager;
 use crate::processor::Processor;
+use crate::processor::ProcessorBuilder;
 
 /// AddressType enum contains `DEFAULT` and `ED25519`.
 #[wasm_export]
@@ -83,11 +85,10 @@ pub struct Client {
 impl Client {
     /// Creat a new client instance.
     pub fn new_client(
-        session_manager: SessionManager,
-        stuns: String,
+        config: String,
         callback: Option<MessageCallbackInstance>,
     ) -> js_sys::Promise {
-        Self::new_client_with_storage(session_manager, stuns, callback, "rings-node".to_string())
+        Self::new_client_with_storage(config, callback, "rings-node".to_string())
     }
 
     /// get self web3 address
@@ -96,44 +97,21 @@ impl Client {
         Ok(self.processor.did().into_token().to_string())
     }
 
-    /// ```typescript
-    /// const intervalHandle = await client.listen(new MessageCallbackInstance(
-    ///      async (relay: any, msg: any) => {
-    ///        console.group('on custom message')
-    ///        console.log(relay)
-    ///        console.log(msg)
-    ///        console.groupEnd()
-    ///      }, async (
-    ///        relay: any,
-    ///      ) => {
-    ///        console.group('on builtin message')
-    ///        console.log(relay)
-    ///        console.groupEnd()
-    ///      },
-    /// ))
-    /// ```
     pub fn new_client_with_storage(
-        session_manager: SessionManager,
-        stuns: String,
+        config: String,
         callback: Option<MessageCallbackInstance>,
         storage_name: String,
     ) -> js_sys::Promise {
         future_to_promise(async move {
-            let client = Self::new_client_with_storage_internal(
-                session_manager,
-                stuns,
-                callback,
-                storage_name,
-            )
-            .await
-            .map_err(JsError::from)?;
+            let client = Self::new_client_with_storage_internal(config, callback, storage_name)
+                .await
+                .map_err(JsError::from)?;
             Ok(JsValue::from(client))
         })
     }
 
     pub(crate) async fn new_client_with_storage_internal(
-        session_manager: SessionManager,
-        stuns: String,
+        config: String,
         callback: Option<MessageCallbackInstance>,
         storage_name: String,
     ) -> Result<Client, error::Error> {
@@ -142,8 +120,27 @@ impl Client {
             None => None,
         };
 
-        let proc = Processor::new_with_storage(session_manager, stuns, cb, storage_name).await?;
-        let processor = Arc::new(proc);
+        let storage_path = storage_name.as_str();
+        let measure_path = [storage_path, "measure"].join("/");
+
+        let storage = PersistenceStorage::new_with_cap_and_name(50000, storage_path)
+            .await
+            .map_err(error::Error::Storage)?;
+
+        let ms = PersistenceStorage::new_with_cap_and_path(50000, measure_path)
+            .await
+            .map_err(error::Error::Storage)?;
+        let measure = PeriodicMeasure::new(ms);
+
+        let mut processor_builder = ProcessorBuilder::from_config(config)?
+            .storage(storage)
+            .measure(measure);
+
+        if let Some(cb) = cb {
+            processor_builder = processor_builder.message_callback(cb);
+        }
+
+        let processor = Arc::new(processor_builder.build()?);
 
         let mut handler: HandlerType = processor.clone().into();
         build_handler(&mut handler).await;

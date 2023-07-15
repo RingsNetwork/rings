@@ -5,11 +5,8 @@ use futures::lock::Mutex;
 use wasm_bindgen_test::*;
 
 use crate::prelude::rings_core::async_trait;
-use crate::prelude::rings_core::dht::Stabilization;
 use crate::prelude::rings_core::dht::TStabilize;
-use crate::prelude::rings_core::message::CallbackFn;
 use crate::prelude::rings_core::message::MessageCallback;
-use crate::prelude::rings_core::storage::PersistenceStorage;
 use crate::prelude::rings_core::transports::manager::TransportHandshake;
 use crate::prelude::rings_core::transports::manager::TransportManager;
 use crate::prelude::rings_core::types::ice_transport::IceTrickleScheme;
@@ -19,27 +16,7 @@ use crate::prelude::web_sys::RtcIceConnectionState;
 use crate::prelude::*;
 use crate::processor;
 use crate::processor::*;
-
-async fn new_processor(cb: Option<CallbackFn>) -> Processor {
-    let key = SecretKey::random();
-    let session_manager = SessionManager::new_with_seckey(&key).unwrap();
-
-    let path = uuid::Uuid::new_v4().to_simple().to_string();
-    console_log!("uuid: {}", path);
-    let storage = PersistenceStorage::new_with_cap_and_name(1000, path.as_str())
-        .await
-        .unwrap();
-
-    let swarm = Arc::new(
-        SwarmBuilder::new("stun://stun.l.google.com:19302", storage, session_manager)
-            .message_callback(cb)
-            .build(),
-    );
-
-    let stab = Arc::new(Stabilization::new(swarm.clone(), 20));
-
-    (swarm, stab).into()
-}
+use crate::tests::wasm::prepare_processor;
 
 async fn listen(p: &Processor) {
     let h = p.swarm.clone();
@@ -154,8 +131,8 @@ async fn test_processor_handshake_and_msg() {
         msgs: msgs2.clone(),
     });
 
-    let p1 = new_processor(Some(callback1)).await;
-    let p2 = new_processor(Some(callback2)).await;
+    let p1 = prepare_processor(Some(callback1)).await;
+    let p2 = prepare_processor(Some(callback2)).await;
 
     let test_text1 = "test1";
     let test_text2 = "test2";
@@ -235,11 +212,11 @@ async fn test_processor_handshake_and_msg() {
 #[wasm_bindgen_test]
 async fn test_processor_connect_with_did() {
     super::setup_log();
-    let p1 = new_processor(None).await;
+    let p1 = prepare_processor(None).await;
     console_log!("p1 address: {}", p1.did());
-    let p2 = new_processor(None).await;
+    let p2 = prepare_processor(None).await;
     console_log!("p2 address: {}", p2.did());
-    let p3 = new_processor(None).await;
+    let p3 = prepare_processor(None).await;
     console_log!("p3 address: {}", p3.did());
 
     p1.swarm.clone().listen().await;

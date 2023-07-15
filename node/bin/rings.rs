@@ -13,20 +13,19 @@ use futures::select;
 use futures::StreamExt;
 use futures_timer::Delay;
 use rings_node::backend::service::Backend;
-use rings_node::cli::Client;
-use rings_node::config;
-use rings_node::endpoint::run_http_api;
 use rings_node::logging::init_logging;
 use rings_node::logging::LogLevel;
 use rings_node::measure::PeriodicMeasure;
+use rings_node::native::cli::Client;
+use rings_node::native::config;
+use rings_node::native::endpoint::run_http_api;
 use rings_node::prelude::http;
-use rings_node::prelude::rings_core::dht::Did;
-use rings_node::prelude::rings_core::dht::Stabilization;
 use rings_node::prelude::rings_core::ecc::SecretKey;
 use rings_node::prelude::PersistenceStorage;
 use rings_node::prelude::SessionManager;
-use rings_node::prelude::SwarmBuilder;
 use rings_node::processor::Processor;
+use rings_node::processor::ProcessorBuilder;
+use rings_node::processor::ProcessorConfig;
 use tokio::io;
 use tokio::io::AsyncBufReadExt;
 
@@ -176,12 +175,8 @@ impl ClientArgs {
         let c = config::Config::read_fs(self.config_args.config.as_str())?;
 
         let endpoint_url = self.endpoint_url.as_ref().unwrap_or(&c.endpoint_url);
-        let ecdsa_key = self.ecdsa_key.unwrap_or(c.ecdsa_key);
-
-        Client::new(
-            endpoint_url.as_str(),
-            Processor::generate_signature(&ecdsa_key).as_str(),
-        )
+        let session_manager = SessionManager::from_str(&c.session_manager)?;
+        Client::new(endpoint_url.as_str(), session_manager)
     }
 }
 
@@ -367,19 +362,24 @@ struct InspectCommand {
     client_args: ClientArgs,
 }
 
-fn get_value<V>(value: Option<V>, default_value: V) -> V {
-    value.unwrap_or(default_value)
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
-    let c = config::Config::read_fs(args.config_args.config)?;
+    let mut c = config::Config::read_fs(args.config_args.config)?;
 
-    let key = get_value(args.ecdsa_key, c.ecdsa_key);
-    let did: Did = key.address().into();
-    println!("Did: {}", did);
+    if let Some(ice_servers) = args.ice_servers {
+        c.ice_servers = ice_servers;
+    }
+    if let Some(external_ip) = args.external_ip {
+        c.external_ip = Some(external_ip);
+    }
+    if let Some(stabilize_timeout) = args.stabilize_timeout {
+        c.stabilize_timeout = stabilize_timeout;
+    }
+    if let Some(http_addr) = args.http_addr {
+        c.http_addr = http_addr;
+    }
 
-    let session_manager = SessionManager::new_with_seckey(&key)?;
+    let pc = ProcessorConfig::from(&c);
 
     let (data_storage, measure_storage) = if let Some(storage_path) = args.storage_path {
         let storage_path = Path::new(&storage_path);
@@ -404,38 +404,25 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
 
     let measure = PeriodicMeasure::new(per_measure_storage);
 
-    let stuns = get_value(args.ice_servers, c.ice_servers);
-
-    let external_ip = args.external_ip.map(Some).unwrap_or(c.external_ip);
-
     let (sender, receiver) = tokio::sync::broadcast::channel(1024);
     let backend_config = (c.backend, c.extension).into();
     let backend = Backend::new(backend_config, sender).await?;
     let backend_service_names = backend.service_names();
 
-    let swarm = Arc::new(
-        SwarmBuilder::new(stuns.as_str(), per_data_storage, session_manager)
-            .external_address(external_ip)
-            .measure(Box::new(measure))
-            .message_callback(Some(Box::new(backend)))
-            .build(),
+    let processor = Arc::new(
+        ProcessorBuilder::from_config(serde_yaml::to_string(&pc)?)?
+            .storage(per_data_storage)
+            .measure(measure)
+            .message_callback(Box::new(backend))
+            .build()?,
     );
+    println!("Did: {}", processor.swarm.did());
 
-    let stabilize_timeout = get_value(args.stabilize_timeout, c.stabilize_timeout);
-    let stabilize = Arc::new(Stabilization::new(swarm.clone(), stabilize_timeout));
-
-    let processor = Arc::new(Processor::from((swarm, stabilize)));
     let processor_clone = processor.clone();
-
-    let pubkey = Arc::new(key.pubkey());
-    println!("Signature: {}", Processor::generate_signature(&key));
-
-    let bind_addr = get_value(args.http_addr, c.http_addr);
-
     let _ = futures::join!(
         processor.listen(),
         service_loop_register(&processor, backend_service_names),
-        run_http_api(bind_addr, processor_clone, pubkey, receiver,),
+        run_http_api(c.http_addr, processor_clone, receiver),
     );
 
     Ok(())

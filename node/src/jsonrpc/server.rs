@@ -111,6 +111,7 @@ pub(crate) async fn node_info(_: Params, meta: RpcMeta) -> Result<Value> {
 
 /// Connect Peer VIA http
 pub(crate) async fn connect_peer_via_http(params: Params, meta: RpcMeta) -> Result<Value> {
+    meta.require_authed()?;
     let p: Vec<String> = params.parse()?;
     let peer_url = p
         .first()
@@ -125,6 +126,7 @@ pub(crate) async fn connect_peer_via_http(params: Params, meta: RpcMeta) -> Resu
 
 /// Connect Peer with seed
 pub(crate) async fn connect_with_seed(params: Params, meta: RpcMeta) -> Result<Value> {
+    meta.require_authed()?;
     let p: Vec<Seed> = params.parse()?;
     let seed = p
         .first()
@@ -525,24 +527,11 @@ mod tests {
     use jsonrpc_core::types::params::Params;
 
     use super::*;
-    use crate::prelude::rings_core::dht::Stabilization;
     use crate::prelude::*;
-    use crate::processor::*;
+    use crate::tests::native::prepare_processor;
 
     async fn new_rnd_meta() -> RpcMeta {
-        let key = SecretKey::random();
-        let session_manager = SessionManager::new_with_seckey(&key).unwrap();
-        let path = uuid::Uuid::new_v4().to_simple().to_string();
-        let storage = PersistenceStorage::new_with_cap_and_path(1000, path.as_str())
-            .await
-            .unwrap();
-        let swarm = Arc::new(
-            SwarmBuilder::new("stun://stun.l.google.com:19302", storage, session_manager)
-                .message_callback(None)
-                .build(),
-        );
-        let stab = Arc::new(Stabilization::new(swarm.clone(), 20));
-        let processor: Processor = (swarm, stab).into();
+        let (processor, _) = prepare_processor(None).await;
         Arc::new(processor).into()
     }
 

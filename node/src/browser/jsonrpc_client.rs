@@ -17,7 +17,7 @@ impl JsonRpcClient {
     /// Create a new `JsonRpcClient`
     #[wasm_bindgen(constructor)]
     pub fn new(node: String) -> JsonRpcClient {
-        let client = Arc::new(jsonrpc_client::SimpleClient::new_with_url(node.as_str()));
+        let client = Arc::new(jsonrpc_client::SimpleClient::new(node.as_str(), None));
         JsonRpcClient { client }
     }
 

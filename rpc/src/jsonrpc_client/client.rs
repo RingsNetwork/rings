@@ -2,13 +2,12 @@
 //! SimpleClient for jsonrpc request use reqwest::Client.
 ///
 /// Sample:
-/// let client = Simpleclient::new(reqwest::Client::default(), "http://localhost:5000");
+/// let client = Simpleclient::new("http://localhost:5000", session_manager);
 /// client.call_method("test", params);
-use std::sync::Arc;
-
 use jsonrpc_core::Error;
 use jsonrpc_core::Params;
 use jsonrpc_core::Value;
+use rings_core::session::SessionManager;
 
 use super::request::parse_response;
 use super::request::RequestBuilder;
@@ -17,28 +16,21 @@ use crate::prelude::reqwest::Client as HttpClient;
 /// Create a new SimpleClient
 /// * client: a instance of reqwest::Client
 /// * url: remote jsonrpc_server url
-#[derive(Clone)]
 pub struct SimpleClient {
-    client: Arc<HttpClient>,
+    client: HttpClient,
     url: String,
+    session_manager: Option<SessionManager>,
 }
 
 impl SimpleClient {
     /// * client: reqwest::Client handle http request.
     /// * url: remote json_server url.
-    pub fn new(client: Arc<HttpClient>, url: &str) -> Self {
+    /// * session_key: session_key for sign request.
+    pub fn new(url: &str, session_manager: Option<SessionManager>) -> Self {
         Self {
-            client,
-            url: url.to_owned(),
-        }
-    }
-
-    /// Create a new SimpleClient,
-    /// * url: remote jsonrpc_server url
-    pub fn new_with_url(url: &str) -> Self {
-        Self {
-            client: Arc::new(HttpClient::default()),
+            client: HttpClient::default(),
             url: url.to_string(),
+            session_manager,
         }
     }
 
@@ -73,7 +65,7 @@ impl SimpleClient {
             }
         };
 
-        let resp = self
+        let mut req = self
             .client
             .post(self.url.as_str())
             .header(
@@ -84,7 +76,17 @@ impl SimpleClient {
                 http::header::ACCEPT,
                 http::header::HeaderValue::from_static("application/json"),
             )
-            .body(request)
+            .body(request.clone());
+
+        if let Some(session_manager) = &self.session_manager {
+            let sig = session_manager
+                .sign(&request.clone())
+                .map_err(|e| RpcError::Client(format!("Failed to sign request: {}", e)))?;
+            let encoded_sig = base64::encode(sig);
+            req = req.header("X-SIGNATURE", encoded_sig);
+        }
+
+        let resp = req
             .send()
             .await
             .map_err(|e| RpcError::Client(e.to_string()))?;

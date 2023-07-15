@@ -60,7 +60,7 @@ pub struct SessionManagerBuilder {
 /// To verify the session, use `verify_self()` method of [Session].
 /// To verify a message, use `verify(msg, sig)` method of [Session].
 #[wasm_export]
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionManager {
     /// Session
     session: Session,
@@ -118,6 +118,19 @@ impl TryFrom<(String, String)> for Authorizer {
     }
 }
 
+// A SessionManager can be converted to a string using JSON and then encoded with base58.
+// To load the SessionManager from a string, use `SessionManager::from_str`.
+impl FromStr for SessionManager {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        let s = base58_monero::decode_check(s).map_err(|_| Error::Decode)?;
+        let session_manager: SessionManager =
+            serde_json::from_slice(&s).map_err(Error::Deserialize)?;
+        Ok(session_manager)
+    }
+}
+
 #[wasm_export]
 impl SessionManagerBuilder {
     /// Create a new SessionManagerBuilder.
@@ -157,8 +170,8 @@ impl SessionManagerBuilder {
     }
 
     /// Set the lifetime of session.
-    pub fn ttl(mut self, ttl_ms: Option<usize>) -> Self {
-        self.ttl_ms = ttl_ms.unwrap_or(DEFAULT_SESSION_TTL_MS);
+    pub fn ttl(mut self, ttl_ms: usize) -> Self {
+        self.ttl_ms = ttl_ms;
         self
     }
 
@@ -279,6 +292,13 @@ impl SessionManager {
     pub fn authorizer_did(&self) -> Did {
         self.session.authorizer_did()
     }
+
+    /// Dump session_manager to string, allowing user to save it in a config file.
+    /// It can be restored using `SessionManager::from_str`.
+    pub fn dump(&self) -> Result<String> {
+        let s = serde_json::to_string(&self).map_err(|_| Error::SerializeError)?;
+        base58_monero::encode_check(s.as_bytes()).map_err(|_| Error::Encode)
+    }
 }
 
 #[cfg(test)]
@@ -300,5 +320,14 @@ mod test {
         let session = sm.session();
         let pubkey = session.authorizer_pubkey().unwrap();
         assert_eq!(key.pubkey(), pubkey);
+    }
+
+    #[test]
+    pub fn test_dump_restore() {
+        let key = SecretKey::random();
+        let sm = SessionManager::new_with_seckey(&key).unwrap();
+        let dump = sm.dump().unwrap();
+        let sm2 = SessionManager::from_str(&dump).unwrap();
+        assert_eq!(sm, sm2);
     }
 }

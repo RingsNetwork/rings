@@ -4,27 +4,33 @@ use crate::browser;
 use crate::browser::Peer;
 use crate::prelude::jsonrpc_core::types::response::Output;
 use crate::prelude::jsonrpc_core::types::Value;
+use crate::prelude::rings_core::prelude::uuid;
 use crate::prelude::rings_core::utils;
 use crate::prelude::rings_core::utils::js_value;
 use crate::prelude::wasm_bindgen::JsValue;
 use crate::prelude::wasm_bindgen_futures::JsFuture;
 use crate::prelude::*;
+use crate::processor::ProcessorConfig;
+
 wasm_bindgen_test_configure!(run_in_browser);
 
 async fn new_client() -> (browser::Client, String) {
     let key = SecretKey::random();
-    let session_manager = SessionManager::new_with_seckey(&key).unwrap();
+    let sm = SessionManager::new_with_seckey(&key).unwrap();
 
-    let stuns = "stun://stun.l.google.com:19302".to_owned();
-    let storage_name = uuid::Uuid::new_v4().to_string();
-    let client: browser::Client = browser::Client::new_client_with_storage_internal(
-        session_manager,
-        stuns,
-        None,
-        storage_name.clone(),
-    )
-    .await
+    let config = serde_yaml::to_string(&ProcessorConfig {
+        ice_servers: "stun://stun.l.google.com:19302".to_string(),
+        external_address: None,
+        session_manager: sm.dump().unwrap(),
+        stabilize_timeout: 200,
+    })
     .unwrap();
+
+    let storage_name = uuid::Uuid::new_v4().to_string();
+    let client: browser::Client =
+        browser::Client::new_client_with_storage_internal(config, None, storage_name.clone())
+            .await
+            .unwrap();
     (client, storage_name)
 }
 
