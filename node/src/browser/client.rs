@@ -132,13 +132,15 @@ impl Client {
             .map_err(error::Error::Storage)?;
         let measure = PeriodicMeasure::new(ms);
 
-        let processor = Arc::new(
-            ProcessorBuilder::from_config(config)?
-                .storage(storage)
-                .measure(measure)
-                .message_callback(cb)
-                .build()?,
-        );
+        let mut processor_builder = ProcessorBuilder::from_config(config)?
+            .storage(storage)
+            .measure(measure);
+
+        if let Some(cb) = cb {
+            processor_builder = processor_builder.message_callback(cb);
+        }
+
+        let processor = Arc::new(processor_builder.build()?);
 
         let mut handler: HandlerType = processor.clone().into();
         build_handler(&mut handler).await;

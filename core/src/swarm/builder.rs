@@ -69,8 +69,8 @@ impl SwarmBuilder {
 
     /// Sets up the external address for swarm transport.
     /// This will be used to configure the transport to listen for WebRTC connections in "HOST" mode.
-    pub fn external_address(mut self, external_address: Option<String>) -> Self {
-        self.external_address = external_address;
+    pub fn external_address(mut self, external_address: String) -> Self {
+        self.external_address = Some(external_address);
         self
     }
 
@@ -81,14 +81,14 @@ impl SwarmBuilder {
     }
 
     /// Bind measurement function for Swarm.
-    pub fn measure(mut self, implement: Option<MeasureImpl>) -> Self {
-        self.measure = implement;
+    pub fn measure(mut self, implement: MeasureImpl) -> Self {
+        self.measure = Some(implement);
         self
     }
 
     /// Bind message callback function for Swarm.
-    pub fn message_callback(mut self, callback: Option<CallbackFn>) -> Self {
-        self.message_callback = callback;
+    pub fn message_callback(mut self, callback: CallbackFn) -> Self {
+        self.message_callback = Some(callback);
         self
     }
 

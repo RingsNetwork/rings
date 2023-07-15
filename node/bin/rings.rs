@@ -408,16 +408,11 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     let backend = Backend::new(backend_config, sender).await?;
     let backend_service_names = backend.service_names();
 
-    /*
-    let key = get_value(args.ecdsa_key, c.ecdsa_key);
-    let did: Did = key.address().into();
-    println!("Did: {}", did);
-    */
     let processor = Arc::new(
         ProcessorBuilder::from_config(serde_yaml::to_string(&pc)?)?
             .storage(per_data_storage)
             .measure(measure)
-            .message_callback(Some(Box::new(backend)))
+            .message_callback(Box::new(backend))
             .build()?,
     );
     println!("Did: {}", processor.swarm.did());

@@ -170,8 +170,8 @@ impl SessionManagerBuilder {
     }
 
     /// Set the lifetime of session.
-    pub fn ttl(mut self, ttl_ms: Option<usize>) -> Self {
-        self.ttl_ms = ttl_ms.unwrap_or(DEFAULT_SESSION_TTL_MS);
+    pub fn ttl(mut self, ttl_ms: usize) -> Self {
+        self.ttl_ms = ttl_ms;
         self
     }
 

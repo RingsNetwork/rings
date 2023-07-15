@@ -23,12 +23,13 @@ pub async fn prepare_processor(message_callback: Option<CallbackFn>) -> (Process
         .await
         .unwrap();
 
-    let procssor = ProcessorBuilder::from_config(config)
+    let mut procssor_builder = ProcessorBuilder::from_config(config)
         .unwrap()
-        .storage(storage)
-        .message_callback(message_callback)
-        .build()
-        .unwrap();
+        .storage(storage);
 
-    (procssor, storage_path)
+    if let Some(callback) = message_callback {
+        procssor_builder = procssor_builder.message_callback(callback);
+    }
+
+    (procssor_builder.build().unwrap(), storage_path)
 }

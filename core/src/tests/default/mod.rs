@@ -24,11 +24,14 @@ pub async fn prepare_node_with_callback(
         .unwrap();
 
     let session_manager = SessionManager::new_with_seckey(&key).unwrap();
-    let swarm = Arc::new(
-        SwarmBuilder::new(stun, storage, session_manager)
-            .message_callback(message_callback)
-            .build(),
-    );
+
+    let mut swarm_builder = SwarmBuilder::new(stun, storage, session_manager);
+
+    if let Some(callback) = message_callback {
+        swarm_builder = swarm_builder.message_callback(callback);
+    }
+
+    let swarm = Arc::new(swarm_builder.build());
 
     println!("key: {:?}", key.to_string());
     println!("did: {:?}", swarm.did());

@@ -119,8 +119,8 @@ impl ProcessorBuilder {
     }
 
     /// Set the message callback for the processor.
-    pub fn message_callback(mut self, callback: Option<CallbackFn>) -> Self {
-        self.message_callback = callback;
+    pub fn message_callback(mut self, callback: CallbackFn) -> Self {
+        self.message_callback = Some(callback);
         self
     }
 
@@ -135,14 +135,21 @@ impl ProcessorBuilder {
             .storage
             .expect("Please set storage by `storage()` method");
 
-        let swarm = Arc::new(
-            SwarmBuilder::new(&self.ice_servers, storage, self.session_manager)
-                .external_address(self.external_address)
-                .measure(self.measure)
-                .message_callback(self.message_callback)
-                .build(),
-        );
+        let mut swarm_builder = SwarmBuilder::new(&self.ice_servers, storage, self.session_manager);
 
+        if let Some(external_address) = self.external_address {
+            swarm_builder = swarm_builder.external_address(external_address);
+        }
+
+        if let Some(measure) = self.measure {
+            swarm_builder = swarm_builder.measure(measure);
+        }
+
+        if let Some(callback) = self.message_callback {
+            swarm_builder = swarm_builder.message_callback(callback);
+        }
+
+        let swarm = Arc::new(swarm_builder.build());
         let stabilization = Arc::new(Stabilization::new(swarm.clone(), self.stabilize_timeout));
 
         Ok(Processor {

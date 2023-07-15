@@ -37,10 +37,13 @@ pub async fn prepare_processor(message_callback: Option<CallbackFn>) -> Processo
         .await
         .unwrap();
 
-    ProcessorBuilder::from_config(config)
+    let mut processor_builder = ProcessorBuilder::from_config(config)
         .unwrap()
-        .storage(storage)
-        .message_callback(message_callback)
-        .build()
-        .unwrap()
+        .storage(storage);
+
+    if let Some(callback) = message_callback {
+        processor_builder = processor_builder.message_callback(callback);
+    }
+
+    processor_builder.build().unwrap()
 }
