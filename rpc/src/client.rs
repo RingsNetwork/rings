@@ -1,7 +1,6 @@
 //! rings-rpc client
 
-use std::sync::Arc;
-
+use rings_core::session::SessionManager;
 use serde_json::json;
 use serde_json::Value;
 
@@ -17,29 +16,16 @@ use crate::types;
 use crate::types::Timeout;
 
 /// Wrap json_client send request between nodes or browsers.
-#[derive(Clone)]
 pub struct Client {
     client: SimpleClient,
 }
 
 impl Client {
-    /// Creates a new Client instance with the specified endpoint URL and signature.
-    pub fn new(endpoint_url: &str, signature: &str) -> Result<Self> {
-        let mut default_headers = reqwest::header::HeaderMap::default();
-        default_headers.insert(
-            "X-SIGNATURE",
-            http::header::HeaderValue::from_str(signature).map_err(|_| Error::InvalidSignature)?,
-        );
-        let client = SimpleClient::new(
-            Arc::new(
-                reqwest::Client::builder()
-                    .default_headers(default_headers)
-                    .build()
-                    .map_err(|_| Error::InvalidHeaders)?,
-            ),
-            endpoint_url,
-        );
-        Ok(Self { client })
+    /// Creates a new Client instance with the specified endpoint URL
+    pub fn new(endpoint_url: &str, session_manager: Option<SessionManager>) -> Self {
+        Self {
+            client: SimpleClient::new(endpoint_url, session_manager),
+        }
     }
 
     /// Establishes a WebRTC connection with a remote peer using HTTP as the signaling channel.

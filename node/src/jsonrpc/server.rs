@@ -111,6 +111,7 @@ pub(crate) async fn node_info(_: Params, meta: RpcMeta) -> Result<Value> {
 
 /// Connect Peer VIA http
 pub(crate) async fn connect_peer_via_http(params: Params, meta: RpcMeta) -> Result<Value> {
+    meta.require_authed()?;
     let p: Vec<String> = params.parse()?;
     let peer_url = p
         .first()
@@ -125,6 +126,7 @@ pub(crate) async fn connect_peer_via_http(params: Params, meta: RpcMeta) -> Resu
 
 /// Connect Peer with seed
 pub(crate) async fn connect_with_seed(params: Params, meta: RpcMeta) -> Result<Value> {
+    meta.require_authed()?;
     let p: Vec<Seed> = params.parse()?;
     let seed = p
         .first()

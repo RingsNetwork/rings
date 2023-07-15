@@ -101,9 +101,24 @@ async fn jsonrpc_io_handler(
     body: String,
 ) -> Result<JsonResponse, HttpError> {
     let is_auth = if let Some(signature) = headermap.get("X-SIGNATURE") {
-        // TODO: check signature
-        tracing::debug!("signature: {:?}", signature);
-        true
+        let sig = base64::decode(signature).map_err(|e| {
+            tracing::debug!("signature: {:?}", signature);
+            tracing::error!("signature decode failed: {:?}", e);
+            HttpError::BadRequest
+        })?;
+        state
+            .processor
+            .swarm
+            .session_manager()
+            .session()
+            .verify(&body, sig)
+            .map_err(|e| {
+                tracing::debug!("body: {:?}", body);
+                tracing::debug!("signature: {:?}", signature);
+                tracing::error!("signature verify failed: {:?}", e);
+                e
+            })
+            .is_ok()
     } else {
         false
     };

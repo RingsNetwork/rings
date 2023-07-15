@@ -187,7 +187,7 @@ impl Processor {
         // request remote offer and sand answer to remote
         tracing::debug!("connect_peer_via_http: {}", peer_url);
 
-        let client = SimpleClient::new_with_url(peer_url);
+        let client = SimpleClient::new(peer_url, None);
         let (_, offer) = self
             .swarm
             .create_offer()

@@ -3319,6 +3319,7 @@ dependencies = [
 name = "rings-rpc"
 version = "0.2.6"
 dependencies = [
+ "base64 0.13.1",
  "http",
  "jsonrpc-core",
  "jsonrpc-pubsub",

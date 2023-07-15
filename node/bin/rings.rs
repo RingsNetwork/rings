@@ -22,6 +22,7 @@ use rings_node::native::endpoint::run_http_api;
 use rings_node::prelude::http;
 use rings_node::prelude::rings_core::ecc::SecretKey;
 use rings_node::prelude::PersistenceStorage;
+use rings_node::prelude::SessionManager;
 use rings_node::processor::Processor;
 use rings_node::processor::ProcessorBuilder;
 use rings_node::processor::ProcessorConfig;
@@ -174,8 +175,8 @@ impl ClientArgs {
         let c = config::Config::read_fs(self.config_args.config.as_str())?;
 
         let endpoint_url = self.endpoint_url.as_ref().unwrap_or(&c.endpoint_url);
-
-        Client::new(endpoint_url.as_str(), "")
+        let session_manager = SessionManager::from_str(&c.session_manager)?;
+        Client::new(endpoint_url.as_str(), session_manager)
     }
 }
 

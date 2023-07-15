@@ -28,6 +28,7 @@ use serde_json::json;
 
 use crate::prelude::http;
 use crate::prelude::rings_core::inspect::SwarmInspect;
+use crate::prelude::rings_core::session::SessionManager;
 use crate::prelude::rings_rpc::client::Client as RpcClient;
 use crate::prelude::rings_rpc::types::Timeout;
 use crate::seed::Seed;
@@ -37,7 +38,6 @@ use crate::util::loader::ResourceLoader;
 type Output<T> = anyhow::Result<ClientOutput<T>>;
 
 /// Wrap json_client send request between nodes or browsers.
-#[derive(Clone)]
 pub struct Client {
     client: RpcClient,
 }
@@ -51,9 +51,8 @@ pub struct ClientOutput<T> {
 
 impl Client {
     /// Creates a new Client instance with the specified endpoint URL and signature.
-    pub fn new(endpoint_url: &str, signature: &str) -> anyhow::Result<Self> {
-        let rpc_client =
-            RpcClient::new(endpoint_url, signature).map_err(|e| anyhow::anyhow!("{}", e))?;
+    pub fn new(endpoint_url: &str, session_manager: SessionManager) -> anyhow::Result<Self> {
+        let rpc_client = RpcClient::new(endpoint_url, Some(session_manager));
         Ok(Self { client: rpc_client })
     }
 
