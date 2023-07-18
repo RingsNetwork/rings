@@ -207,7 +207,7 @@ jobs:
 
 
   release:
-    needs: [gen_version, build_macos, build_linux]
+    needs: [gen_version, build_macos, build_linux, build_browser]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
