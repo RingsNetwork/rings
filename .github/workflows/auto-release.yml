@@ -200,7 +200,7 @@ jobs:
       - uses: actions/upload-artifact@v3
         name: Upload artifacts
         with:
-          name: rings-${{ needs.gen_version.outputs.version }}-${{ steps.target.outputs.target }}
+          path: rings-${{ needs.gen_version.outputs.version }}-${{ steps.target.outputs.target }}
           name: rings-${{ needs.gen_version.outputs.version }}-${{ steps.target.outputs.target }}.tgz
           retention-days: 1
 
