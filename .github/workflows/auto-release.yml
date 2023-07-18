@@ -148,8 +148,68 @@ jobs:
           path: rings-${{ needs.gen_version.outputs.version }}-${{ steps.target.outputs.target }}.zip
           retention-days: 1
 
+
+
+  build_browser:
+    needs: gen_version
+    name: build browser version binary
+    timeout-minutes: 25
+    runs-on: "ubuntu-latest"
+    strategy:
+      matrix:
+        arch:
+          - wasm32
+        platform:
+          - unknown
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Get target
+        id: target
+        run: echo 'target=${{ matrix.arch }}-unknown-${{ matrix.platform }}' >> $GITHUB_OUTPUT
+
+      - name: Add target
+        run: |
+          rustup target add ${{ steps.target.outputs.target }}
+
+      - uses: jetli/wasm-bindgen-action@v0.2.0
+        with:
+          version: "0.2.84"
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Setup rust toolchain
+        run: |
+          rustup show
+
+      # If you need to reset the cache version, increment the number after `v`
+      - uses: Swatinem/rust-cache@v1
+        with:
+          sharedKey: auto-release-${{ steps.target.outputs.target }}-v1
+
+      - uses: actions/setup-node@v3
+        with:
+          node-version: 20
+
+      - name: Build
+        run: |
+          npm run prepare
+          npm pack
+          mv ringsnetwork-rings-node-*.tgz rings-${{ needs.gen_version.outputs.version }}-${{ steps.target.outputs.target }}.tgz
+
+      - uses: actions/upload-artifact@v3
+        name: Upload artifacts
+        with:
+          path: rings-${{ needs.gen_version.outputs.version }}-${{ steps.target.outputs.target }}
+          name: rings-${{ needs.gen_version.outputs.version }}-${{ steps.target.outputs.target }}.tgz
+          retention-days: 1
+
+
   release:
-    needs: [gen_version, build_macos, build_linux]
+    needs: [gen_version, build_macos, build_linux, build_browser]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
@@ -173,3 +233,4 @@ jobs:
             rings-${{ needs.gen_version.outputs.version }}-x86_64-unknown-linux-musl/*.zip
             rings-${{ needs.gen_version.outputs.version }}-x86_64-apple-darwin/*.zip
             rings-${{ needs.gen_version.outputs.version }}-aarch64-apple-darwin/*.zip
+            rings-${{ needs.gen_version.outputs.version }}-wasm32-unknown-unknown/*.tgz
