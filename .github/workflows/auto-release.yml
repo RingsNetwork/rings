@@ -178,6 +178,9 @@ jobs:
         with:
           version: "0.2.84"
 
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
       - name: Setup rust toolchain
         run: |
           rustup show
