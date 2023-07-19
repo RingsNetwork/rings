@@ -11,7 +11,8 @@
     "url": "https://github.com/RingsNetwork/rings-node"
   },
   "scripts": {
-    "prepare": "make build-browser-pack && cp node/pkg/rings_node* ./"
+    "wasm_pack": "wasm-pack build node --scope ringsnetwork -t web --no-default-features --features browser --features console_error_panic_hook",
+    "prepare": "npm run wasm_pack && cp node/pkg/rings_node* ./"
   },
   "files": [
     "rings_node_bg.wasm",

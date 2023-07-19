@@ -32,9 +32,9 @@ jobs:
           version: "0.2.84"
 
       # If you need to reset the cache version, increment the number after `v`
-      - uses: Swatinem/rust-cache@v1
+      - uses: Swatinem/rust-cache@v2
         with:
-          sharedKey: wasm-v1
+          shared-key: wasm-v1
 
       - name: Run clippy for core wasm
         run: cargo clippy -p rings-core --features wasm --no-deps --no-default-features --target=wasm32-unknown-unknown --tests -- -D warnings
@@ -71,9 +71,9 @@ jobs:
         run: rustup show
 
       # If you need to reset the cache version, increment the number after `v`
-      - uses: Swatinem/rust-cache@v1
+      - uses: Swatinem/rust-cache@v2
         with:
-          sharedKey: default-v1
+          shared-key: default-v1
 
       - name: Build
         run: cargo build --all --verbose
@@ -101,9 +101,9 @@ jobs:
           rustup show
 
       # If you need to reset the cache version, increment the number after `v`
-      - uses: Swatinem/rust-cache@v1
+      - uses: Swatinem/rust-cache@v2
         with:
-          sharedKey: static-v1
+          shared-key: static-v1
 
       - name: Run clippy
         run: cargo clippy --all --tests -- -D warnings
