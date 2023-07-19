@@ -148,8 +148,6 @@ jobs:
           path: rings-${{ needs.gen_version.outputs.version }}-${{ steps.target.outputs.target }}.zip
           retention-days: 1
 
-
-
   build_browser:
     needs: gen_version
     name: build browser version binary
@@ -196,17 +194,15 @@ jobs:
 
       - name: Build
         run: |
-          npm run prepare
           npm pack
           mv ringsnetwork-rings-node-*.tgz rings-${{ needs.gen_version.outputs.version }}-${{ steps.target.outputs.target }}.tgz
 
       - uses: actions/upload-artifact@v3
         name: Upload artifacts
         with:
-          path: rings-${{ needs.gen_version.outputs.version }}-${{ steps.target.outputs.target }}
-          name: rings-${{ needs.gen_version.outputs.version }}-${{ steps.target.outputs.target }}.tgz
+          name: rings-${{ needs.gen_version.outputs.version }}-${{ steps.target.outputs.target }}
+          path: rings-${{ needs.gen_version.outputs.version }}-${{ steps.target.outputs.target }}.tgz
           retention-days: 1
-
 
   release:
     needs: [gen_version, build_macos, build_linux, build_browser]
