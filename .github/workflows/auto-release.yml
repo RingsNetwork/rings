@@ -80,9 +80,9 @@ jobs:
           rustup show
 
       # If you need to reset the cache version, increment the number after `v`
-      - uses: Swatinem/rust-cache@v1
+      - uses: Swatinem/rust-cache@v2
         with:
-          sharedKey: auto-release-${{ steps.target.outputs.target }}-v1
+          shared-key: auto-release-${{ steps.target.outputs.target }}-v1
 
       - name: Build
         run: |
@@ -132,9 +132,9 @@ jobs:
           sudo apt-get install -y musl-tools
 
       # If you need to reset the cache version, increment the number after `v`
-      - uses: Swatinem/rust-cache@v1
+      - uses: Swatinem/rust-cache@v2
         with:
-          sharedKey: auto-release-${{ steps.target.outputs.target }}-v1
+          shared-key: auto-release-${{ steps.target.outputs.target }}-v1
 
       - name: Build
         run: |
@@ -186,9 +186,9 @@ jobs:
           rustup show
 
       # If you need to reset the cache version, increment the number after `v`
-      - uses: Swatinem/rust-cache@v1
+      - uses: Swatinem/rust-cache@v2
         with:
-          sharedKey: auto-release-${{ steps.target.outputs.target }}-v1
+          shared-key: auto-release-${{ steps.target.outputs.target }}-v1
 
       - uses: actions/setup-node@v3
         with:
