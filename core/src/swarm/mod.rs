@@ -121,6 +121,7 @@ impl Swarm {
                 };
 
                 if let Some(t) = self.get_transport(did) {
+                    tracing::info!("[Swarm::ConnectClosed] removing transport {:?}", uuid);
                     if t.id == uuid && self.remove_transport(did).is_some() {
                         tracing::info!("[Swarm::ConnectClosed] transport {:?} closed", uuid);
                         let payload = MessagePayload::new_send(
@@ -364,7 +365,7 @@ impl Swarm {
     /// 2) remove from transport pool;
     /// 3) close the transport connection;
     pub async fn disconnect(&self, did: Did) -> Result<()> {
-        tracing::info!("disconnect {:?}", did);
+        tracing::info!("[disconnect] removing from DHT {:?}", did);
         self.dht.remove(did)?;
         if let Some((_address, trans)) = self.remove_transport(did) {
             trans.close().await?

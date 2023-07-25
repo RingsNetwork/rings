@@ -311,6 +311,7 @@ impl IceTransportCallback for DefaultTransport {
             Box::pin(async move {
                 match cs {
                     RTCIceConnectionState::Connected => {
+                        tracing::info!("Trans Joined!!!!");
                         let remote_did = remote_did.read().await.unwrap();
                         if AcChannel::send(
                             &event_sender,
