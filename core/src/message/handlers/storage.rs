@@ -117,7 +117,7 @@ pub(super) async fn handle_storage_operate_act(
         PeerRingAction::MultiActions(acts) => {
             handle_multi_actions!(
                 acts,
-                |act| async move { handle_storage_operate_act(&ctx, &act).await },
+                |act| async move { handle_storage_operate_act(ctx, act).await },
                 "Failed on handle multi actions: {:#?}"
             )
         }
@@ -231,7 +231,7 @@ impl HandleMsg<VNodeOperation> for MessageHandler {
         // For relay message, set redundant to 1
         let action =
             <PeerRing as ChordStorage<_, 1>>::vnode_operate(&self.dht, msg.clone()).await?;
-        handle_storage_operate_act(&ctx, &action).await
+        handle_storage_operate_act(ctx, &action).await
     }
 }
 
