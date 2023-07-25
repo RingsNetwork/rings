@@ -8,7 +8,7 @@
 //! Considering security factors, asking user to provide private key is not practical.
 //! On the contrary, we generate a delegated private key and let user sign it.
 //!
-//! See [SessionManager] and [SessionManagerBuilder] for details.
+//! See [DelegatedSk] and [DelegatedSkBuilder] for details.
 
 use std::str::FromStr;
 
@@ -29,14 +29,14 @@ fn pack_session(session_id: Did, ts_ms: u128, ttl_ms: usize) -> String {
     format!("{}\n{}\n{}", session_id, ts_ms, ttl_ms)
 }
 
-/// SessionManagerBuilder is used to build a [SessionManager].
+/// DelegatedSkBuilder is used to build a [DelegatedSk].
 ///
 /// Firstly, you need to provide the authorizer's entity and type to `new` method.
 /// Then you can call `pack_session` to get the session dump for signing.
 /// After signing, you can call `sig` to set the signature back to builder.
-/// Finally, you can call `build` to get the [SessionManager].
+/// Finally, you can call `build` to get the [DelegatedSk].
 #[wasm_export]
-pub struct SessionManagerBuilder {
+pub struct DelegatedSkBuilder {
     session_key: SecretKey,
     /// Authorizer of session.
     authorizer_entity: String,
@@ -50,18 +50,18 @@ pub struct SessionManagerBuilder {
     sig: Vec<u8>,
 }
 
-/// SessionManager holds the [Session] and its delegated private key.
+/// DelegatedSk holds the [Session] and its delegated private key.
 /// To prove that the message was sent by the [Authorizer] of [Session],
 /// we need to attach session and the signature signed by session_key to the payload.
 ///
-/// SessionManager provide a `session` method to clone the session.
-/// SessionManager also provide `sign` method to sign a message.
+/// DelegatedSk provide a `session` method to clone the session.
+/// DelegatedSk also provide `sign` method to sign a message.
 ///
 /// To verify the session, use `verify_self()` method of [Session].
 /// To verify a message, use `verify(msg, sig)` method of [Session].
 #[wasm_export]
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SessionManager {
+pub struct DelegatedSk {
     /// Session
     session: Session,
     /// The private key of session. Used for signing and decrypting.
@@ -118,25 +118,25 @@ impl TryFrom<(String, String)> for Authorizer {
     }
 }
 
-// A SessionManager can be converted to a string using JSON and then encoded with base58.
-// To load the SessionManager from a string, use `SessionManager::from_str`.
-impl FromStr for SessionManager {
+// A DelegatedSk can be converted to a string using JSON and then encoded with base58.
+// To load the DelegatedSk from a string, use `DelegatedSk::from_str`.
+impl FromStr for DelegatedSk {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
         let s = base58_monero::decode_check(s).map_err(|_| Error::Decode)?;
-        let session_manager: SessionManager =
+        let delegated_sk: DelegatedSk =
             serde_json::from_slice(&s).map_err(Error::Deserialize)?;
-        Ok(session_manager)
+        Ok(delegated_sk)
     }
 }
 
 #[wasm_export]
-impl SessionManagerBuilder {
-    /// Create a new SessionManagerBuilder.
+impl DelegatedSkBuilder {
+    /// Create a new DelegatedSkBuilder.
     /// The "authorizer_type" is lower case of [Authorizer] variant.
     /// The "authorizer_entity" refers to the entity that is encapsulated by the [Authorizer] variant, in string format.
-    pub fn new(authorizer_entity: String, authorizer_type: String) -> SessionManagerBuilder {
+    pub fn new(authorizer_entity: String, authorizer_type: String) -> DelegatedSkBuilder {
         let session_key = SecretKey::random();
         Self {
             session_key,
@@ -175,8 +175,8 @@ impl SessionManagerBuilder {
         self
     }
 
-    /// Build the [SessionManager].
-    pub fn build(self) -> Result<SessionManager> {
+    /// Build the [DelegatedSk].
+    pub fn build(self) -> Result<DelegatedSk> {
         let authorizer = Authorizer::try_from((self.authorizer_entity, self.authorizer_type))?;
         let session = Session {
             session_id: self.session_key.address().into(),
@@ -188,7 +188,7 @@ impl SessionManagerBuilder {
 
         session.verify_self()?;
 
-        Ok(SessionManager {
+        Ok(DelegatedSk {
             session,
             session_key: self.session_key,
         })
@@ -262,14 +262,14 @@ impl Session {
     }
 }
 
-impl SessionManager {
+impl DelegatedSk {
     /// Generate Session with private key.
     /// Only use it for unittest.
     pub fn new_with_seckey(key: &SecretKey) -> Result<Self> {
         let authorizer_entity = Did::from(key.address()).to_string();
         let authorizer_type = "secp256k1".to_string();
 
-        let mut builder = SessionManagerBuilder::new(authorizer_entity, authorizer_type);
+        let mut builder = DelegatedSkBuilder::new(authorizer_entity, authorizer_type);
 
         let sig = key.sign(&builder.pack_session());
         builder = builder.sig(sig.to_vec());
@@ -277,7 +277,7 @@ impl SessionManager {
         builder.build()
     }
 
-    /// Get session from SessionManager.
+    /// Get session from DelegatedSk.
     pub fn session(&self) -> Session {
         self.session.clone()
     }
@@ -293,8 +293,8 @@ impl SessionManager {
         self.session.authorizer_did()
     }
 
-    /// Dump session_manager to string, allowing user to save it in a config file.
-    /// It can be restored using `SessionManager::from_str`.
+    /// Dump delegated_sk to string, allowing user to save it in a config file.
+    /// It can be restored using `DelegatedSk::from_str`.
     pub fn dump(&self) -> Result<String> {
         let s = serde_json::to_string(&self).map_err(|_| Error::SerializeError)?;
         base58_monero::encode_check(s.as_bytes()).map_err(|_| Error::Encode)
@@ -308,7 +308,7 @@ mod test {
     #[test]
     pub fn test_session_verify() {
         let key = SecretKey::random();
-        let sm = SessionManager::new_with_seckey(&key).unwrap();
+        let sm = DelegatedSk::new_with_seckey(&key).unwrap();
         let session = sm.session();
         assert!(session.verify_self().is_ok());
     }
@@ -316,7 +316,7 @@ mod test {
     #[test]
     pub fn test_authorizer_pubkey() {
         let key = SecretKey::random();
-        let sm = SessionManager::new_with_seckey(&key).unwrap();
+        let sm = DelegatedSk::new_with_seckey(&key).unwrap();
         let session = sm.session();
         let pubkey = session.authorizer_pubkey().unwrap();
         assert_eq!(key.pubkey(), pubkey);
@@ -325,9 +325,9 @@ mod test {
     #[test]
     pub fn test_dump_restore() {
         let key = SecretKey::random();
-        let sm = SessionManager::new_with_seckey(&key).unwrap();
+        let sm = DelegatedSk::new_with_seckey(&key).unwrap();
         let dump = sm.dump().unwrap();
-        let sm2 = SessionManager::from_str(&dump).unwrap();
+        let sm2 = DelegatedSk::from_str(&dump).unwrap();
         assert_eq!(sm, sm2);
     }
 }

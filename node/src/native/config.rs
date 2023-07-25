@@ -11,7 +11,7 @@ use crate::backend::service::http_server::HiddenServerConfig;
 use crate::error::Error;
 use crate::error::Result;
 use crate::prelude::rings_core::ecc::SecretKey;
-use crate::prelude::SessionManager;
+use crate::prelude::DelegatedSk;
 use crate::processor::ProcessorConfig;
 
 lazy_static::lazy_static! {
@@ -43,7 +43,7 @@ where P: AsRef<std::path::Path> {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
-    pub session_manager: String,
+    pub delegated_sk: String,
     #[serde(rename = "bind")]
     pub http_addr: String,
     pub endpoint_url: String,
@@ -67,7 +67,7 @@ impl From<&Config> for ProcessorConfig {
         Self {
             ice_servers: config.ice_servers.clone(),
             external_address: config.external_ip.clone(),
-            session_manager: config.session_manager.clone(),
+            delegated_sk: config.delegated_sk.clone(),
             stabilize_timeout: config.stabilize_timeout,
         }
     }
@@ -75,13 +75,13 @@ impl From<&Config> for ProcessorConfig {
 
 impl Config {
     pub fn new_with_key(key: SecretKey) -> Self {
-        let session_manager = SessionManager::new_with_seckey(&key)
-            .expect("create session manager failed")
+        let delegated_sk = DelegatedSk::new_with_seckey(&key)
+            .expect("create delegated sk failed")
             .dump()
-            .expect("dump session manager failed");
+            .expect("dump delegated sk failed");
 
         Self {
-            session_manager,
+            delegated_sk,
             http_addr: DEFAULT_BIND_ADDRESS.to_string(),
             endpoint_url: DEFAULT_ENDPOINT_URL.to_string(),
             ice_servers: DEFAULT_ICE_SERVERS.to_string(),
@@ -167,7 +167,7 @@ mod tests {
     #[test]
     fn test_deserialization_with_missed_field() {
         let yaml = r#"
-session_manager: session_manager
+delegated_sk: delegated_sk
 bind: 127.0.0.1:50000
 endpoint_url: http://127.0.0.1:50000
 ice_servers: stun://stun.l.google.com:19302

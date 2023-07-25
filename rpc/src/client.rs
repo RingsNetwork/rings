@@ -1,6 +1,6 @@
 //! rings-rpc client
 
-use rings_core::session::SessionManager;
+use rings_core::session::DelegatedSk;
 use serde_json::json;
 use serde_json::Value;
 
@@ -22,9 +22,9 @@ pub struct Client {
 
 impl Client {
     /// Creates a new Client instance with the specified endpoint URL
-    pub fn new(endpoint_url: &str, session_manager: Option<SessionManager>) -> Self {
+    pub fn new(endpoint_url: &str, delegated_sk: Option<DelegatedSk>) -> Self {
         Self {
-            client: SimpleClient::new(endpoint_url, session_manager),
+            client: SimpleClient::new(endpoint_url, delegated_sk),
         }
     }
 

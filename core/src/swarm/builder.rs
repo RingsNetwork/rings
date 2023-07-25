@@ -11,7 +11,7 @@ use crate::dht::PeerRing;
 use crate::message::CallbackFn;
 use crate::message::MessageHandler;
 use crate::message::ValidatorFn;
-use crate::session::SessionManager;
+use crate::session::DelegatedSk;
 use crate::storage::MemStorage;
 use crate::storage::PersistenceStorage;
 use crate::swarm::MeasureImpl;
@@ -25,7 +25,7 @@ pub struct SwarmBuilder {
     external_address: Option<String>,
     dht_succ_max: u8,
     dht_storage: PersistenceStorage,
-    session_manager: SessionManager,
+    delegated_sk: DelegatedSk,
     session_ttl: Option<usize>,
     measure: Option<MeasureImpl>,
     message_callback: Option<CallbackFn>,
@@ -37,7 +37,7 @@ impl SwarmBuilder {
     pub fn new(
         ice_servers: &str,
         dht_storage: PersistenceStorage,
-        session_manager: SessionManager,
+        delegated_sk: DelegatedSk,
     ) -> Self {
         let ice_servers = ice_servers
             .split(';')
@@ -53,7 +53,7 @@ impl SwarmBuilder {
             external_address: None,
             dht_succ_max: 3,
             dht_storage,
-            session_manager,
+            delegated_sk,
             session_ttl: None,
             measure: None,
             message_callback: None,
@@ -100,7 +100,7 @@ impl SwarmBuilder {
 
     /// Try build for `Swarm`.
     pub fn build(self) -> Swarm {
-        let dht_did = self.session_manager.authorizer_did();
+        let dht_did = self.delegated_sk.authorizer_did();
 
         let dht = Arc::new(PeerRing::new_with_storage(
             dht_did,
@@ -119,7 +119,7 @@ impl SwarmBuilder {
             external_address: self.external_address,
             dht,
             measure: self.measure,
-            session_manager: self.session_manager,
+            delegated_sk: self.delegated_sk,
             message_handler,
         }
     }
