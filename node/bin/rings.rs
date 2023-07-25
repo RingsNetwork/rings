@@ -293,7 +293,7 @@ struct SendHttpCommand {
 
     name: String,
 
-    #[arg(default_value = "get", long, short = 'X', help = "request method")]
+    #[arg(default_value = "GET", long, short = 'X', help = "request method")]
     method: String,
 
     #[arg(default_value = "/")]
@@ -538,7 +538,7 @@ async fn main() -> anyhow::Result<()> {
                 .send_http_request_message(
                     args.to_did.as_str(),
                     args.name.as_str(),
-                    http::Method::from_str(args.method.as_str())?,
+                    http::Method::from_str(args.method.to_uppercase().as_str())?,
                     args.path.as_str(),
                     args.timeout.into(),
                     &args
