@@ -49,6 +49,7 @@ impl PeriodicCounter {
         }
     }
 
+    // Reset periodic count on next period
     fn refresh(&mut self) -> bool {
         let now = Utc::now();
 
@@ -62,6 +63,7 @@ impl PeriodicCounter {
         true
     }
 
+    // If there is no recourd in current period, get pervious_count instead
     fn barely_get(&self) -> u64 {
         if self.previous_count == 0 {
             self.count
@@ -70,12 +72,14 @@ impl PeriodicCounter {
         }
     }
 
+    // Check period, then increase
     fn incr(&mut self) -> (u64, bool) {
         let is_refreshed = self.refresh();
         self.count += 1;
         (self.barely_get(), is_refreshed)
     }
 
+    // Check period, return count or pervious count
     fn get(&mut self) -> (u64, bool) {
         let is_refreshed = self.refresh();
         (self.barely_get(), is_refreshed)
@@ -95,6 +99,7 @@ impl PeriodicMeasure {
         format!("PeriodicMeasure/counters/{}/{:?}", did, counter)
     }
 
+    // Get count from storage, or create a new count instance.
     async fn ensure_counter(
         &self,
         did: Did,
@@ -142,7 +147,7 @@ impl Measure for PeriodicMeasure {
         }
     }
 
-    /// `get_count` returns the counter of a peer in the previous period.
+    /// `get_count` returns the counter of a peer in the current or previous period.
     async fn get_count(&self, did: Did, counter: MeasureCounter) -> u64 {
         let (count, is_refreshed) = {
             let c = self.ensure_counter(did, counter).await;
