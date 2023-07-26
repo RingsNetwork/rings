@@ -384,7 +384,7 @@ impl Swarm {
             return Err(Error::NodeBehaviourBad(did));
         }
         tracing::info!("Try connect Did {:?}", &did);
-	self.record_connect(did).await;
+        self.record_connect(did).await;
         let (transport, offer_msg) = self.prepare_transport_offer().await?;
 
         self.send_message(Message::ConnectNodeSend(offer_msg), did)
@@ -402,7 +402,7 @@ impl Swarm {
             return Err(Error::NodeBehaviourBad(did));
         }
         tracing::info!("Try connect Did {:?} via {:?}", &did, &next_hop);
-	self.record_connect(did).await;
+        self.record_connect(did).await;
         let (transport, offer_msg) = self.prepare_transport_offer().await?;
 
         self.send_message_by_hop(Message::ConnectNodeSend(offer_msg), did, next_hop)
