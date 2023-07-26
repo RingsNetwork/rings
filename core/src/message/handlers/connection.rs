@@ -192,7 +192,7 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
 
         match &msg.handler {
             FindSuccessorReportHandler::FixFingerTable => {
-                Ok(vec![MessageHandlerEvent::JoinDHT(ctx.clone(), msg.did)])
+                Ok(vec![MessageHandlerEvent::Connect(msg.did)])
             }
             FindSuccessorReportHandler::Connect => Ok(vec![MessageHandlerEvent::Connect(msg.did)]),
             _ => Ok(vec![]),

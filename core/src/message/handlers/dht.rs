@@ -2,7 +2,6 @@
 //! This module provides helper function for handle DHT related Actions
 
 use async_recursion::async_recursion;
-use futures::future::join_all;
 
 use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
@@ -38,19 +37,20 @@ use crate::message::MessagePayload;
 #[macro_export]
 macro_rules! handle_multi_actions {
     ($actions:expr, $handler_func:expr, $error_msg:expr) => {{
-        let ret: Vec<MessageHandlerEvent> = join_all($actions.iter().map($handler_func))
-            .await
-            .iter()
-            .map(|x| {
-                if x.is_err() {
-                    tracing::error!($error_msg, x)
-                };
-                x
-            })
-            .filter_map(|x| x.as_ref().ok())
-            .flat_map(|xs| xs.iter())
-            .cloned()
-            .collect();
+        let ret: Vec<MessageHandlerEvent> =
+            futures::future::join_all($actions.iter().map($handler_func))
+                .await
+                .iter()
+                .map(|x| {
+                    if x.is_err() {
+                        tracing::error!($error_msg, x)
+                    };
+                    x
+                })
+                .filter_map(|x| x.as_ref().ok())
+                .flat_map(|xs| xs.iter())
+                .cloned()
+                .collect();
         Ok(ret)
     }};
 }

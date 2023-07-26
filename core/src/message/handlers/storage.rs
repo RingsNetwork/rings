@@ -11,6 +11,7 @@ use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
 use crate::error::Error;
 use crate::error::Result;
+use crate::handle_multi_actions;
 use crate::message::types::FoundVNode;
 use crate::message::types::Message;
 use crate::message::types::SearchVNode;
@@ -98,6 +99,30 @@ pub(super) async fn handle_storage_store_act(swarm: &Swarm, act: PeerRingAction)
         act => return Err(Error::PeerRingUnexpectedAction(act)),
     }
     Ok(())
+}
+
+/// Handle the storage store operations of the peer ring.
+#[cfg_attr(feature = "wasm", async_recursion(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_recursion)]
+pub(super) async fn handle_storage_operate_act(
+    ctx: &MessagePayload<Message>,
+    act: &PeerRingAction,
+) -> Result<Vec<MessageHandlerEvent>> {
+    match act {
+        PeerRingAction::None => Ok(vec![]),
+        PeerRingAction::RemoteAction(next, _) => Ok(vec![MessageHandlerEvent::ResetDestination(
+            ctx.clone(),
+            *next,
+        )]),
+        PeerRingAction::MultiActions(acts) => {
+            handle_multi_actions!(
+                acts,
+                |act| async move { handle_storage_operate_act(ctx, act).await },
+                "Failed on handle multi actions: {:#?}"
+            )
+        }
+        act => Err(Error::PeerRingUnexpectedAction(act.clone())),
+    }
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
@@ -204,19 +229,9 @@ impl HandleMsg<VNodeOperation> for MessageHandler {
         msg: &VNodeOperation,
     ) -> Result<Vec<MessageHandlerEvent>> {
         // For relay message, set redundant to 1
-        match <PeerRing as ChordStorage<_, 1>>::vnode_operate(&self.dht, msg.clone()).await {
-            Ok(action) => match action {
-                PeerRingAction::None => Ok(vec![]),
-                PeerRingAction::RemoteAction(next, _) => {
-                    Ok(vec![MessageHandlerEvent::ResetDestination(
-                        ctx.clone(),
-                        next,
-                    )])
-                }
-                act => Err(Error::PeerRingUnexpectedAction(act)),
-            },
-            Err(e) => Err(e),
-        }
+        let action =
+            <PeerRing as ChordStorage<_, 1>>::vnode_operate(&self.dht, msg.clone()).await?;
+        handle_storage_operate_act(ctx, &action).await
     }
 }
 
