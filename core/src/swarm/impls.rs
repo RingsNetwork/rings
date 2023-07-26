@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
+use crate::measure::MeasureCounter;
 use crate::message::ConnectNodeReport;
 use crate::message::ConnectNodeSend;
 use crate::message::Message;
@@ -19,6 +20,45 @@ use crate::transports::Transport;
 use crate::types::channel::Channel as ChannelTrait;
 use crate::types::ice_transport::IceTransportInterface;
 use crate::types::ice_transport::IceTrickleScheme;
+
+impl Swarm {
+    /// Record a succeeded connected
+    pub async fn record_connect(&self, did: Did) {
+        if let Some(measure) = &self.measure {
+            measure.incr(did, MeasureCounter::Connect).await;
+        }
+    }
+
+    /// Record a disconnected
+    pub async fn record_disconnected(&self, did: Did) {
+        if let Some(measure) = &self.measure {
+            measure.incr(did, MeasureCounter::Disconnected).await;
+        }
+    }
+
+    /// Record a succeeded message sent
+    pub async fn record_sent(&self, did: Did) {
+        if let Some(measure) = &self.measure {
+            measure.incr(did, MeasureCounter::Sent).await;
+        }
+    }
+
+    /// Record a failed message sent
+    pub async fn record_sent_failed(&self, did: Did) {
+        if let Some(measure) = &self.measure {
+            measure.incr(did, MeasureCounter::FailedToSend).await;
+        }
+    }
+
+    /// Check that a Did is behaviour good
+    pub async fn behaviour_good(&self, did: Did) -> bool {
+        if let Some(measure) = &self.measure {
+            measure.good(did).await
+        } else {
+            true
+        }
+    }
+}
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
@@ -33,7 +73,7 @@ impl TransportManager for Swarm {
             .await?
             .apply_callback()
             .await?;
-
+        tracing::info!("New transport created");
         Ok(Arc::new(ice_transport))
     }
 
@@ -44,7 +84,6 @@ impl TransportManager for Swarm {
         if trans.is_disconnected().await {
             return Err(Error::InvalidTransport);
         }
-
         tracing::info!("register transport {:?}", trans.id.clone());
         #[cfg(test)]
         {

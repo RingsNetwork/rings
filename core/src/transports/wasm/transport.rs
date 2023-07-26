@@ -549,7 +549,7 @@ impl IceTrickleScheme for WasmTransport {
             .collect();
 
         if local_candidates_json.is_empty() {
-            return Err(Error::FailedOnGatherLocalCandidate);
+            return Err(Error::FailedOnGatherLocalCandidate(kind.to_string()));
         }
 
         let data = HandshakeInfo {

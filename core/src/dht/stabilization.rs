@@ -86,7 +86,7 @@ impl Stabilization {
         });
         if self.chord.did != successor_min {
             for s in successor_list {
-                tracing::info!("STABILIZATION notify_predecessor: {:?}", s);
+                tracing::debug!("STABILIZATION notify_predecessor: {:?}", s);
                 let payload = MessagePayload::new_send(
                     msg.clone(),
                     self.swarm.session_manager(),
@@ -110,7 +110,7 @@ impl Stabilization {
                     closest_predecessor,
                     PeerRingRemoteAction::FindSuccessorForFix(finger_did),
                 ) => {
-                    tracing::info!("STABILIZATION fix_fingers: {:?}", finger_did);
+                    tracing::debug!("STABILIZATION fix_fingers: {:?}", finger_did);
                     let msg = Message::FindSuccessorSend(FindSuccessorSend {
                         did: finger_did,
                         then: FindSuccessorThen::Report(FindSuccessorReportHandler::FixFingerTable),

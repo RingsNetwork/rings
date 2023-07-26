@@ -9,6 +9,7 @@ use chrono::Duration;
 use chrono::Utc;
 
 use crate::prelude::rings_core::dht::Did;
+use crate::prelude::rings_core::measure;
 use crate::prelude::rings_core::measure::Measure;
 use crate::prelude::rings_core::measure::MeasureCounter;
 use crate::prelude::rings_core::prelude::dashmap::mapref::one::RefMut;
@@ -156,6 +157,28 @@ impl Measure for PeriodicMeasure {
             self.save_counter(did, counter, count).await;
         }
         count
+    }
+}
+
+#[cfg_attr(feature = "node", async_trait)]
+#[cfg_attr(feature = "browser", async_trait(?Send))]
+impl<const T: i16> measure::ConnectBehaviour<T> for PeriodicMeasure {}
+
+#[cfg_attr(feature = "node", async_trait)]
+#[cfg_attr(feature = "browser", async_trait(?Send))]
+impl<const T: i16> measure::MessageSendBehaviour<T> for PeriodicMeasure {}
+
+#[cfg_attr(feature = "node", async_trait)]
+#[cfg_attr(feature = "browser", async_trait(?Send))]
+impl<const T: i16> measure::MessageRecvBehaviour<T> for PeriodicMeasure {}
+
+#[cfg_attr(feature = "node", async_trait)]
+#[cfg_attr(feature = "browser", async_trait(?Send))]
+impl measure::BehaviourJudgement for PeriodicMeasure {
+    async fn good(&self, did: Did) -> bool {
+        <Self as measure::ConnectBehaviour<{crate::consts::CONNECT_FAILED_LIMIT}>>::good(self, did).await &&
+	    <Self as measure::MessageSendBehaviour<{crate::consts::MSG_SEND_FAILED_LIMIT}>>::good(self, did).await &&
+            <Self as measure::MessageRecvBehaviour<{crate::consts::MSG_RECV_FAILED_LIMIT}>>::good(self, did).await
     }
 }
 
