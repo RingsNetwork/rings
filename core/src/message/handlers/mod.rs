@@ -85,8 +85,10 @@ type NextHop = Did;
 pub enum MessageHandlerEvent {
     /// Instructs the swarm to connect to a peer.
     Connect(Did),
+
     /// Instructs the swarm to connect to a peer via given next hop.
     ConnectVia(Did, NextHop),
+
     /// Instructs the swarm to disconnect from a peer.
     Disconnect(Did),
 
@@ -119,6 +121,7 @@ pub enum MessageHandlerEvent {
 
     /// Instructs the swarm to store vnode.
     StorageStore(VirtualNode),
+
     /// Notify a node
     Notify(Did),
 }

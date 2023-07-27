@@ -25,6 +25,10 @@ pub enum MessageType {
     HttpResponse,
     /// extension
     Extension,
+    /// tcp inbound
+    TcpInbound,
+    /// tcp outbound
+    TcpOutbound,
 }
 
 impl From<&[u8; 2]> for MessageType {
@@ -41,6 +45,8 @@ impl From<u16> for MessageType {
             3 => MessageType::HttpRequest,
             4 => MessageType::HttpResponse,
             5 => MessageType::Extension,
+            6 => MessageType::TcpInbound,
+            7 => MessageType::TcpOutbound,
             _ => MessageType::Unknown,
         }
     }
@@ -55,6 +61,8 @@ impl From<MessageType> for u16 {
             MessageType::HttpRequest => 3,
             MessageType::HttpResponse => 4,
             MessageType::Extension => 5,
+            MessageType::TcpInbound => 6,
+            MessageType::TcpOutbound => 7,
         }
     }
 }

@@ -13,6 +13,7 @@ use futures::select;
 use futures::StreamExt;
 use futures_timer::Delay;
 use rings_node::backend::service::Backend;
+use rings_node::backend::service::BackendConfig;
 use rings_node::logging::init_logging;
 use rings_node::logging::LogLevel;
 use rings_node::measure::PeriodicMeasure;
@@ -379,7 +380,8 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
         c.http_addr = http_addr;
     }
 
-    let pc = ProcessorConfig::from(c.clone());
+    let processor_config = ProcessorConfig::from(&c);
+    let backend_config = BackendConfig::from(&c);
 
     let (data_storage, measure_storage) = if let Some(storage_path) = args.storage_path {
         let storage_path = Path::new(&storage_path);
@@ -405,12 +407,11 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     let measure = PeriodicMeasure::new(per_measure_storage);
 
     let (sender, receiver) = tokio::sync::broadcast::channel(1024);
-    let backend_config = (c.backend, c.extension).into();
     let backend = Backend::new(backend_config, sender).await?;
     let backend_service_names = backend.service_names();
 
     let processor = Arc::new(
-        ProcessorBuilder::from_config(serde_yaml::to_string(&pc)?)?
+        ProcessorBuilder::from_config(serde_yaml::to_string(&processor_config)?)?
             .storage(per_data_storage)
             .measure(measure)
             .message_callback(Box::new(backend))
@@ -421,6 +422,7 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     let processor_clone = processor.clone();
     let _ = futures::join!(
         processor.listen(),
+        backend.listen(),
         service_loop_register(&processor, backend_service_names),
         run_http_api(c.http_addr, processor_clone, receiver),
     );

@@ -1,34 +1,45 @@
 #![warn(missing_docs)]
+
 //! http server handler
+
 use std::str::FromStr;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use rings_core::chunk::ChunkList;
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::backend::types::BackendMessage;
-use super::backend::types::HttpResponse;
-use super::backend::MessageEndpoint;
-use super::backend::MessageType;
+use crate::backend::types::BackendMessage;
+use crate::backend::types::HttpResponse;
+use crate::backend::MessageEndpoint;
+use crate::backend::MessageType;
 use crate::consts::BACKEND_MTU;
 use crate::error::Error;
 use crate::error::Result;
+use crate::prelude::rings_core::chunk::ChunkList;
 use crate::prelude::rings_rpc::types::HttpRequest;
 use crate::prelude::*;
 
 /// HTTP Server Config, specific determine port.
-#[derive(Deserialize, Clone, Serialize, Debug, PartialEq, Eq)]
-pub struct HiddenServerConfig {
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub struct HttpServiceConfig {
     /// name of hidden service
     pub name: String,
 
-    /// will register to storage if provided
+    /// will register to dht storage if provided
     pub register_service: Option<String>,
 
-    /// prefix of hidden service
+    /// mode of hidden service
     pub prefix: String,
+}
+
+impl From<Vec<HttpServiceConfig>> for HttpServer {
+    fn from(configs: Vec<HttpServiceConfig>) -> Self {
+        Self {
+            client: Arc::new(reqwest::Client::new()),
+            services: configs,
+        }
+    }
 }
 
 /// HttpServer struct
@@ -38,25 +49,7 @@ pub struct HttpServer {
     pub client: Arc<reqwest::Client>,
 
     /// hidden services
-    pub services: Vec<HiddenServerConfig>,
-}
-
-impl Default for HttpServer {
-    fn default() -> Self {
-        Self {
-            client: Arc::new(reqwest::Client::new()),
-            services: Default::default(),
-        }
-    }
-}
-
-impl From<Vec<HiddenServerConfig>> for HttpServer {
-    fn from(configs: Vec<HiddenServerConfig>) -> Self {
-        Self {
-            client: Arc::new(reqwest::Client::new()),
-            services: configs,
-        }
-    }
+    pub services: Vec<HttpServiceConfig>,
 }
 
 impl HttpServer {

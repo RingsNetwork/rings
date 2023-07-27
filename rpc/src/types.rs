@@ -60,31 +60,6 @@ pub struct HttpRequest {
     pub body: Option<Vec<u8>>,
 }
 
-impl From<(String, http::Method, String, Timeout)> for HttpRequest {
-    fn from((name, method, path, timeout): (String, http::Method, String, Timeout)) -> Self {
-        Self {
-            name,
-            method: method.to_string(),
-            path,
-            timeout,
-            headers: HashMap::new(),
-            body: None,
-        }
-    }
-}
-
-impl From<(&str, http::Method, &str, u64)> for HttpRequest {
-    fn from((name, method, url, timeout): (&str, http::Method, &str, u64)) -> Self {
-        (
-            name.to_owned(),
-            method,
-            url.to_owned(),
-            Timeout::from(timeout),
-        )
-            .into()
-    }
-}
-
 impl HttpRequest {
     /// new HttpRequest
     /// - `name`

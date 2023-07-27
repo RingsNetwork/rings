@@ -98,6 +98,10 @@ pub enum Error {
     SerdeYamlError(#[from] serde_yaml::Error) = 1001,
     #[error("verify error: {0}")]
     VerifyError(String) = 1002,
+    #[error("failed to connect tcp")]
+    TcpConnectError(#[from] std::io::Error) = 1003,
+    #[error("tcp connect timeout")]
+    TcpConnectTimeout = 1004,
 }
 
 impl Error {

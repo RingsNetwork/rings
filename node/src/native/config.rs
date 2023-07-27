@@ -7,7 +7,9 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::backend::extension::ExtensionConfig;
-use crate::backend::service::http_server::HiddenServerConfig;
+use crate::backend::service::http_server::HttpServiceConfig;
+use crate::backend::service::tcp_server::TcpServiceConfig;
+use crate::backend::service::BackendConfig;
 use crate::error::Error;
 use crate::error::Result;
 use crate::prelude::rings_core::ecc::SecretKey;
@@ -55,7 +57,9 @@ pub struct Config {
     /// When there is no configuration in the YAML file,
     /// its deserialization is equivalent to `vec![]` in Rust.
     #[serde(default)]
-    pub backend: Vec<HiddenServerConfig>,
+    pub http_services: Vec<HttpServiceConfig>,
+    #[serde(default)]
+    pub tcp_services: Vec<TcpServiceConfig>,
     pub data_storage: StorageConfig,
     pub measure_storage: StorageConfig,
     /// When there is no configuration in the YAML file,
@@ -89,6 +93,16 @@ impl<T: Into<Config>> From<T> for ProcessorConfig {
     }
 }
 
+impl From<&Config> for BackendConfig {
+    fn from(config: &Config) -> Self {
+        Self {
+            http_services: config.http_services.clone(),
+            tcp_services: config.tcp_services.clone(),
+            extensions: config.extension.clone(),
+        }
+    }
+}
+
 impl Config {
     pub fn new_with_key(key: SecretKey) -> Self {
         let delegated_sk = DelegatedSk::new_with_seckey(&key)
@@ -105,7 +119,8 @@ impl Config {
             ice_servers: DEFAULT_ICE_SERVERS.to_string(),
             stabilize_timeout: DEFAULT_STABILIZE_TIMEOUT,
             external_ip: None,
-            backend: vec![],
+            http_services: vec![],
+            tcp_services: vec![],
             data_storage: DEFAULT_DATA_STORAGE_CONFIG.clone(),
             measure_storage: DEFAULT_MEASURE_STORAGE_CONFIG.clone(),
             extension: ExtensionConfig::default(),
@@ -200,6 +215,7 @@ measure_storage:
 "#;
         let cfg: Config = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(cfg.extension, ExtensionConfig::default());
-        assert_eq!(cfg.backend, vec![]);
+        assert_eq!(cfg.http_services, vec![]);
+        assert_eq!(cfg.tcp_services, vec![]);
     }
 }
