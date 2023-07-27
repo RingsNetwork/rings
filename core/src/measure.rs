@@ -53,6 +53,10 @@ pub trait ConnectBehaviour<const THRESHOLD: i16>: Measure {
     async fn good(&self, did: Did) -> bool {
         let conn = self.get_count(did, MeasureCounter::Connect).await;
         let disconn = self.get_count(did, MeasureCounter::Disconnected).await;
+	tracing::debug!(
+	    "[ConnectBehaviour] in Threadhold: {:}, connect: {:}, disconn: {:}, delta: {:}",
+	    THRESHOLD,
+	    conn, disconn, conn - disconn);
         ((conn - disconn) as i16) < THRESHOLD
     }
 }

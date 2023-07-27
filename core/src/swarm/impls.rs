@@ -12,8 +12,10 @@ use crate::message::ConnectNodeReport;
 use crate::message::ConnectNodeSend;
 use crate::message::Message;
 use crate::message::MessagePayload;
+use crate::message::PayloadSender;
 use crate::prelude::RTCSdpType;
 use crate::swarm::Swarm;
+use crate::transports::manager;
 use crate::transports::manager::TransportHandshake;
 use crate::transports::manager::TransportManager;
 use crate::transports::Transport;
@@ -22,20 +24,6 @@ use crate::types::ice_transport::IceTransportInterface;
 use crate::types::ice_transport::IceTrickleScheme;
 
 impl Swarm {
-    /// Record a succeeded connected
-    pub async fn record_connect(&self, did: Did) {
-        if let Some(measure) = &self.measure {
-            measure.incr(did, MeasureCounter::Connect).await;
-        }
-    }
-
-    /// Record a disconnected
-    pub async fn record_disconnected(&self, did: Did) {
-        if let Some(measure) = &self.measure {
-            measure.incr(did, MeasureCounter::Disconnected).await;
-        }
-    }
-
     /// Record a succeeded message sent
     pub async fn record_sent(&self, did: Did) {
         if let Some(measure) = &self.measure {
@@ -264,5 +252,77 @@ impl TransportHandshake for Swarm {
                 "Should be ConnectNodeReport".to_string(),
             )),
         }
+    }
+}
+
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl manager::ConnectionManager for Swarm {
+    /// Disconnect a transport. There are three steps:
+    /// 1) remove from DHT;
+    /// 2) remove from transport pool;
+    /// 3) close the transport connection;
+    async fn disconnect(&self, did: Did) -> Result<()> {
+        tracing::info!("[disconnect] removing from DHT {:?}", did);
+        self.dht.remove(did)?;
+        if let Some((_address, trans)) = self.remove_transport(did) {
+            trans.close().await?
+        }
+        Ok(())
+    }
+
+    /// Connect a given Did. It the did is managed by swarm transport pool, return directly,
+    /// else try prepare offer and establish connection by dht.
+    /// This function may returns a pending transport or connected transport.
+    async fn connect(&self, did: Did) -> Result<Arc<Transport>> {
+        if let Some(t) = self.get_and_check_transport(did).await {
+            return Ok(t);
+        }
+        tracing::info!("Try connect Did {:?}", &did);
+        let (transport, offer_msg) = self.prepare_transport_offer().await?;
+
+        self.send_message(Message::ConnectNodeSend(offer_msg), did)
+            .await?;
+
+        Ok(transport)
+    }
+
+    /// Similar to connect, but this function will try connect a Did by given hop.
+    async fn connect_via(&self, did: Did, next_hop: Did) -> Result<Arc<Transport>> {
+        if let Some(t) = self.get_and_check_transport(did).await {
+            return Ok(t);
+        }
+        tracing::info!("Try connect Did {:?} via {:?}", &did, &next_hop);
+        let (transport, offer_msg) = self.prepare_transport_offer().await?;
+
+        self.send_message_by_hop(Message::ConnectNodeSend(offer_msg), did, next_hop)
+            .await?;
+
+        Ok(transport)
+    }
+}
+
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl manager::Judegement for Swarm {
+    /// Record a succeeded connected
+    async fn record_connect(&self, did: Did) {
+        if let Some(measure) = &self.measure {
+	    tracing::info!("[Judgement] Record connect");
+            measure.incr(did, MeasureCounter::Connect).await;
+        }
+    }
+
+    /// Record a disconnected
+    async fn record_disconnected(&self, did: Did) {
+        if let Some(measure) = &self.measure {
+	    tracing::info!("[Judgement] Record disconnected");
+            measure.incr(did, MeasureCounter::Disconnected).await;
+        }
+    }
+
+    /// Asynchronously checks if a connection should be established with the provided DID.
+    async fn should_connect(&self, did: Did) -> bool {
+        self.behaviour_good(did).await
     }
 }

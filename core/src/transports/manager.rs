@@ -4,6 +4,7 @@
 use async_trait::async_trait;
 
 use crate::dht::Did;
+use crate::error::Error;
 use crate::error::Result;
 use crate::message::ConnectNodeReport;
 use crate::message::ConnectNodeSend;
@@ -60,4 +61,64 @@ pub trait TransportHandshake {
     /// Accept the answer of remote transport. This function will verify the answer payload and
     /// will return its did with the transport.
     async fn accept_answer(&self, answer_payload: Self::Payload) -> Result<(Did, Self::Transport)>;
+}
+
+/// A trait for judging whether a connection should be established with a given DID (Decentralized Identifier).
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+pub trait Judegement {
+    /// Asynchronously checks if a connection should be established with the provided DID.
+    async fn should_connect(&self, did: Did) -> bool;
+
+    /// Asynchronously records that a connection has been established with the provided DID.
+    async fn record_connect(&self, did: Did);
+
+    /// Asynchronously records that a connection has been disconnected with the provided DID.
+    async fn record_disconnected(&self, did: Did);
+}
+
+/// A trait for managing connections and handling transports, extending the `TransportManager` trait.
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+pub trait ConnectionManager: TransportManager {
+    /// Asynchronously disconnects the transport associated with the provided DID.
+    async fn disconnect(&self, did: Did) -> Result<()>;
+
+    /// Asynchronously establishes a new connection and returns the transport associated with the provided DID.
+    async fn connect(&self, did: Did) -> Result<Self::Transport>;
+
+    /// Asynchronously establishes a new connection via a specified next hop DID and returns the transport associated with the provided DID.
+    async fn connect_via(&self, did: Did, next_hop: Did) -> Result<Self::Transport>;
+}
+
+/// A trait that combines the `Judegement` and `ConnectionManager` traits.
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+pub trait JudgeConnection: Judegement + ConnectionManager {
+    /// Asynchronously disconnects the transport associated with the provided DID after recording the disconnection.
+    async fn disconnect(&self, did: Did) -> Result<()> {
+        self.record_disconnected(did).await;
+	tracing::debug!("[JudegeConnection] Disconnected {:?}", &did);
+        ConnectionManager::disconnect(self, did).await
+    }
+
+    /// Asynchronously establishes a new connection and returns the transport associated with the provided DID if `should_connect` returns true; otherwise, returns an error.
+    async fn connect(&self, did: Did) -> Result<Self::Transport> {
+        if !self.should_connect(did).await {
+            return Err(Error::NodeBehaviourBad(did));
+        }
+	tracing::debug!("[JudgeConnection] Try Connect {:?}", &did);
+        self.record_connect(did).await;
+        ConnectionManager::connect(self, did).await
+    }
+
+    /// Asynchronously establishes a new connection via a specified next hop DID and returns the transport associated with the provided DID if `should_connect` returns true; otherwise, returns an error.
+    async fn connect_via(&self, did: Did, next_hop: Did) -> Result<Self::Transport> {
+        if !self.should_connect(did).await {
+            return Err(Error::NodeBehaviourBad(did));
+        }
+	tracing::debug!("[JudgeConnection] Try Connect {:?}", &did);
+        self.record_connect(did).await;
+        ConnectionManager::connect_via(self, did, next_hop).await
+    }
 }

@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use chrono::DateTime;
 use chrono::Duration;
 use chrono::Utc;
+use rings_derive::MeasureBehaviour;
 
 use crate::prelude::rings_core::dht::Did;
 use crate::prelude::rings_core::measure;
@@ -25,7 +26,7 @@ const DURATION: u64 = 60 * 60;
 /// `PeriodicMeasure` is used to assess the reliability of peers by counting their behaviour.
 /// It currently count the number of sent and received messages in a given period (1 hour).
 /// The method [Measure::incr] should be called in the proper places.
-#[derive(Debug)]
+#[derive(Debug, MeasureBehaviour)]
 pub struct PeriodicMeasure {
     storage: Arc<PersistenceStorage>,
     counters: DashMap<(Did, MeasureCounter), Mutex<PeriodicCounter>>,
@@ -164,18 +165,6 @@ impl Measure for PeriodicMeasure {
         count
     }
 }
-
-#[cfg_attr(feature = "node", async_trait)]
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-impl<const T: i16> measure::ConnectBehaviour<T> for PeriodicMeasure {}
-
-#[cfg_attr(feature = "node", async_trait)]
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-impl<const T: i16> measure::MessageSendBehaviour<T> for PeriodicMeasure {}
-
-#[cfg_attr(feature = "node", async_trait)]
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-impl<const T: i16> measure::MessageRecvBehaviour<T> for PeriodicMeasure {}
 
 #[cfg_attr(feature = "node", async_trait)]
 #[cfg_attr(feature = "browser", async_trait(?Send))]
