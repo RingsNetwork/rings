@@ -308,7 +308,7 @@ impl manager::Judegement for Swarm {
     /// Record a succeeded connected
     async fn record_connect(&self, did: Did) {
         if let Some(measure) = &self.measure {
-	    tracing::info!("[Judgement] Record connect");
+            tracing::info!("[Judgement] Record connect");
             measure.incr(did, MeasureCounter::Connect).await;
         }
     }
@@ -316,7 +316,7 @@ impl manager::Judegement for Swarm {
     /// Record a disconnected
     async fn record_disconnected(&self, did: Did) {
         if let Some(measure) = &self.measure {
-	    tracing::info!("[Judgement] Record disconnected");
+            tracing::info!("[Judgement] Record disconnected");
             measure.incr(did, MeasureCounter::Disconnected).await;
         }
     }

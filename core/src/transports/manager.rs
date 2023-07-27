@@ -98,7 +98,7 @@ pub trait JudgeConnection: Judegement + ConnectionManager {
     /// Asynchronously disconnects the transport associated with the provided DID after recording the disconnection.
     async fn disconnect(&self, did: Did) -> Result<()> {
         self.record_disconnected(did).await;
-	tracing::debug!("[JudegeConnection] Disconnected {:?}", &did);
+        tracing::debug!("[JudegeConnection] Disconnected {:?}", &did);
         ConnectionManager::disconnect(self, did).await
     }
 
@@ -107,7 +107,7 @@ pub trait JudgeConnection: Judegement + ConnectionManager {
         if !self.should_connect(did).await {
             return Err(Error::NodeBehaviourBad(did));
         }
-	tracing::debug!("[JudgeConnection] Try Connect {:?}", &did);
+        tracing::debug!("[JudgeConnection] Try Connect {:?}", &did);
         self.record_connect(did).await;
         ConnectionManager::connect(self, did).await
     }
@@ -117,7 +117,7 @@ pub trait JudgeConnection: Judegement + ConnectionManager {
         if !self.should_connect(did).await {
             return Err(Error::NodeBehaviourBad(did));
         }
-	tracing::debug!("[JudgeConnection] Try Connect {:?}", &did);
+        tracing::debug!("[JudgeConnection] Try Connect {:?}", &did);
         self.record_connect(did).await;
         ConnectionManager::connect_via(self, did, next_hop).await
     }

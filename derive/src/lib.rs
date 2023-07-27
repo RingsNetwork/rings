@@ -3,12 +3,8 @@ extern crate proc_macro;
 extern crate quote;
 use syn::parse_macro_input;
 use syn::DeriveInput;
-
 mod derives;
-
 use proc_macro::TokenStream;
-#[cfg(feature = "wasm")]
-use quote::quote;
 
 /// If the feature is not "wasm", the macro does nothing; otherwise, it calls wasm_bindgen.
 /// wasm_export does not work for Js Class. To export a class to js,
