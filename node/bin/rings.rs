@@ -173,9 +173,9 @@ struct ClientArgs {
 impl ClientArgs {
     async fn new_client(&self) -> anyhow::Result<Client> {
         let c = config::Config::read_fs(self.config_args.config.as_str())?;
-
+        let process_config: ProcessorConfig = c.clone().into();
         let endpoint_url = self.endpoint_url.as_ref().unwrap_or(&c.endpoint_url);
-        let delegated_sk = DelegatedSk::from_str(&c.delegated_sk)?;
+        let delegated_sk = DelegatedSk::from_str(&process_config.delegated_sk)?;
         Client::new(endpoint_url.as_str(), delegated_sk)
     }
 }
@@ -379,7 +379,7 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
         c.http_addr = http_addr;
     }
 
-    let pc = ProcessorConfig::from(&c);
+    let pc = ProcessorConfig::from(c.clone());
 
     let (data_storage, measure_storage) = if let Some(storage_path) = args.storage_path {
         let storage_path = Path::new(&storage_path);

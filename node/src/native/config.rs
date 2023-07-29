@@ -64,8 +64,9 @@ pub struct Config {
     pub extension: ExtensionConfig,
 }
 
-impl From<Config> for ProcessorConfig {
-    fn from(config: Config) -> Self {
+impl<T: Into<Config>> From<T> for ProcessorConfig {
+    fn from(cfg: T) -> Self {
+        let config: Config = cfg.into();
         // Support old version
         let delegated_sk = if let Some(sk) = config.ecdsa_key {
             tracing::warn!("Field `ecdsa_key` is deprecated, use `delegated_sk` instead.");
