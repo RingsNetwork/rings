@@ -43,7 +43,9 @@ where P: AsRef<std::path::Path> {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
-    pub delegated_sk: String,
+    pub ecdsa_key: Option<SecretKey>,
+    pub session_manager: Option<String>,
+    pub delegated_sk: Option<String>,
     #[serde(rename = "bind")]
     pub http_addr: String,
     pub endpoint_url: String,
@@ -62,12 +64,25 @@ pub struct Config {
     pub extension: ExtensionConfig,
 }
 
-impl From<&Config> for ProcessorConfig {
-    fn from(config: &Config) -> Self {
+impl From<Config> for ProcessorConfig {
+    fn from(config: Config) -> Self {
+        // Support old version
+        let delegated_sk = if let Some(sk) = config.ecdsa_key {
+            tracing::warn!("Field `ecdsa_key` is deprecated, use `delegated_sk` instead.");
+            DelegatedSk::new_with_seckey(&sk)
+                .expect("create delegated sk failed")
+                .dump()
+                .expect("dump delegated sk failed")
+        } else if let Some(dk) = config.session_manager {
+            tracing::warn!("Field `session_manager` is deprecated, use `delegated_sk` instead.");
+            dk
+        } else {
+            config.delegated_sk.expect("delegated_sk is not set.")
+        };
         Self {
             ice_servers: config.ice_servers.clone(),
             external_address: config.external_ip.clone(),
-            delegated_sk: config.delegated_sk.clone(),
+            delegated_sk,
             stabilize_timeout: config.stabilize_timeout,
         }
     }
@@ -81,7 +96,9 @@ impl Config {
             .expect("dump delegated sk failed");
 
         Self {
-            delegated_sk,
+            ecdsa_key: None,
+            session_manager: None,
+            delegated_sk: Some(delegated_sk),
             http_addr: DEFAULT_BIND_ADDRESS.to_string(),
             endpoint_url: DEFAULT_ENDPOINT_URL.to_string(),
             ice_servers: DEFAULT_ICE_SERVERS.to_string(),

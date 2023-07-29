@@ -139,11 +139,7 @@ where T: Serialize + DeserializeOwned
         next_hop: Did,
         destination: Did,
     ) -> Result<Self> {
-        let relay = MessageRelay::new(
-            vec![delegated_sk.authorizer_did()],
-            next_hop,
-            destination,
-        );
+        let relay = MessageRelay::new(vec![delegated_sk.authorizer_did()], next_hop, destination);
         Self::new(data, delegated_sk, OriginVerificationGen::Origin, relay)
     }
 
@@ -299,8 +295,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
 
     /// Send a direct message to a specified destination.
     async fn send_direct_message(&self, msg: T, destination: Did) -> Result<uuid::Uuid> {
-        let payload =
-            MessagePayload::new_send(msg, self.delegated_sk(), destination, destination)?;
+        let payload = MessagePayload::new_send(msg, self.delegated_sk(), destination, destination)?;
         self.send_payload(payload.clone()).await?;
         Ok(payload.tx_id)
     }

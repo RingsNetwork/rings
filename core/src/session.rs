@@ -125,8 +125,7 @@ impl FromStr for DelegatedSk {
 
     fn from_str(s: &str) -> Result<Self> {
         let s = base58_monero::decode_check(s).map_err(|_| Error::Decode)?;
-        let delegated_sk: DelegatedSk =
-            serde_json::from_slice(&s).map_err(Error::Deserialize)?;
+        let delegated_sk: DelegatedSk = serde_json::from_slice(&s).map_err(Error::Deserialize)?;
         Ok(delegated_sk)
     }
 }
