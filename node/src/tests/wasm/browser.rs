@@ -16,12 +16,12 @@ wasm_bindgen_test_configure!(run_in_browser);
 
 async fn new_client() -> (browser::Client, String) {
     let key = SecretKey::random();
-    let sm = SessionManager::new_with_seckey(&key).unwrap();
+    let sm = DelegatedSk::new_with_seckey(&key).unwrap();
 
     let config = serde_yaml::to_string(&ProcessorConfig {
         ice_servers: "stun://stun.l.google.com:19302".to_string(),
         external_address: None,
-        session_manager: sm.dump().unwrap(),
+        delegated_sk: sm.dump().unwrap(),
         stabilize_timeout: 200,
     })
     .unwrap();

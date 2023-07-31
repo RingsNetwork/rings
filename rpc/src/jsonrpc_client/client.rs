@@ -2,12 +2,12 @@
 //! SimpleClient for jsonrpc request use reqwest::Client.
 ///
 /// Sample:
-/// let client = Simpleclient::new("http://localhost:5000", session_manager);
+/// let client = Simpleclient::new("http://localhost:5000", delegated_sk);
 /// client.call_method("test", params);
 use jsonrpc_core::Error;
 use jsonrpc_core::Params;
 use jsonrpc_core::Value;
-use rings_core::session::SessionManager;
+use rings_core::session::DelegatedSk;
 
 use super::request::parse_response;
 use super::request::RequestBuilder;
@@ -19,18 +19,18 @@ use crate::prelude::reqwest::Client as HttpClient;
 pub struct SimpleClient {
     client: HttpClient,
     url: String,
-    session_manager: Option<SessionManager>,
+    delegated_sk: Option<DelegatedSk>,
 }
 
 impl SimpleClient {
     /// * client: reqwest::Client handle http request.
     /// * url: remote json_server url.
     /// * session_key: session_key for sign request.
-    pub fn new(url: &str, session_manager: Option<SessionManager>) -> Self {
+    pub fn new(url: &str, delegated_sk: Option<DelegatedSk>) -> Self {
         Self {
             client: HttpClient::default(),
             url: url.to_string(),
-            session_manager,
+            delegated_sk,
         }
     }
 
@@ -78,8 +78,8 @@ impl SimpleClient {
             )
             .body(request.clone());
 
-        if let Some(session_manager) = &self.session_manager {
-            let sig = session_manager
+        if let Some(delegated_sk) = &self.delegated_sk {
+            let sig = delegated_sk
                 .sign(&request.clone())
                 .map_err(|e| RpcError::Client(format!("Failed to sign request: {}", e)))?;
             let encoded_sig = base64::encode(sig);

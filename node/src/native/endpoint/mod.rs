@@ -109,7 +109,7 @@ async fn jsonrpc_io_handler(
         state
             .processor
             .swarm
-            .session_manager()
+            .delegated_sk()
             .session()
             .verify(&body, sig)
             .map_err(|e| {
