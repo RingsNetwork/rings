@@ -72,7 +72,7 @@ impl FingerTable {
             return;
         }
         if did == self.did {
-            tracing::info!("set finger table with self did, ignore it");
+            tracing::trace!("set finger table with self did, ignore it");
             return;
         }
         self.finger[index] = Some(did);

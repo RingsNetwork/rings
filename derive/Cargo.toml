@@ -11,13 +11,16 @@ description = "Helper macros for rings node implementation."
 proc-macro = true
 
 [features]
-default = []
+core_crate = []
+default = [
+]
 wasm = [
     "wasm-bindgen-macro-support",
-    "quote",
 ]
 
 [dependencies]
-quote = { version = "1.0.28", optional = true }
+proc-macro2 = "1.0.66"
+quote = "1.0.32"
+syn = "2.0.27"
 wasm-bindgen-macro-support = { workspace = true, optional = true }
 wasmer = { version = "3.3.0", optional = true }

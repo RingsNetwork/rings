@@ -58,7 +58,6 @@
 //! ```shell
 //! cargo build -p rings-core --target=wasm32-unknown-unknown --features wasm --no-default-features
 //! ```
-
 pub mod channels;
 pub mod dht;
 pub mod ecc;

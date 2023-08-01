@@ -160,8 +160,11 @@ pub enum Error {
     #[error("Cannot seek did in swarm table, {0}")]
     SwarmMissDidInTable(crate::dht::Did),
 
-    #[error("Cannot gather local candidate")]
-    FailedOnGatherLocalCandidate,
+    #[error("Cannot gather local candidate, {0}")]
+    FailedOnGatherLocalCandidate(String),
+
+    #[error("Node behaviour bad")]
+    NodeBehaviourBad(crate::dht::Did),
 
     #[error("Cannot get transport from did: {0}")]
     SwarmMissTransport(crate::dht::Did),

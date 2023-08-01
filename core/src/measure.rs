@@ -16,6 +16,10 @@ pub enum MeasureCounter {
     Received,
     /// The number of failed to receive messages.
     FailedToReceive,
+    /// The number of connected.
+    Connect,
+    /// The number of disconnect.
+    Disconnected,
 }
 
 /// `Measure` is used to assess the reliability of peers by counting their behaviour.
@@ -28,4 +32,60 @@ pub trait Measure {
     async fn incr(&self, did: Did, counter: MeasureCounter);
     /// `get_count` returns the counter of the given peer.
     async fn get_count(&self, did: Did, counter: MeasureCounter) -> u64;
+}
+
+/// `BehaviourJudgement` trait defines a method `good` for assessing whether a node behaves well.
+/// Any structure implementing this trait should provide a way to measure the "goodness" of a node.
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+pub trait BehaviourJudgement: Measure {
+    /// This asynchronous method should return a boolean indicating whether the node identified by `did` is behaving well.
+    async fn good(&self, did: Did) -> bool;
+}
+
+/// `ConnectBehaviour` trait offers a default implementation for the `good` method, providing a judgement
+/// based on a node's behavior in establishing connections.
+/// The "goodness" of a node is measured by comparing the connection and disconnection counts against a given threshold.
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+pub trait ConnectBehaviour<const THRESHOLD: i16>: Measure {
+    /// This asynchronous method returns a boolean indicating whether the node identified by `did` has a satisfactory connection behavior.
+    async fn good(&self, did: Did) -> bool {
+        let conn = self.get_count(did, MeasureCounter::Connect).await;
+        let disconn = self.get_count(did, MeasureCounter::Disconnected).await;
+        tracing::debug!(
+            "[ConnectBehaviour] in Threadhold: {:}, connect: {:}, disconn: {:}, delta: {:}",
+            THRESHOLD,
+            conn,
+            disconn,
+            conn - disconn
+        );
+        ((conn - disconn) as i16) < THRESHOLD
+    }
+}
+
+/// `MessageSendBehaviour` trait provides a default implementation for the `good` method, judging a node's
+/// behavior based on its message sending capabilities.
+/// The "goodness" of a node is measured by comparing the sent and failed-to-send counts against a given threshold.
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+pub trait MessageSendBehaviour<const THRESHOLD: i16>: Measure {
+    /// This asynchronous method returns a boolean indicating whether the node identified by `did` has a satisfactory message sending behavior.
+    async fn good(&self, did: Did) -> bool {
+        let failed = self.get_count(did, MeasureCounter::FailedToSend).await;
+        (failed as i16) < THRESHOLD
+    }
+}
+
+/// `MessageRecvBehaviour` trait provides a default implementation for the `good` method, assessing a node's
+/// behavior based on its message receiving capabilities.
+/// The "goodness" of a node is measured by comparing the received and failed-to-receive counts against a given threshold.
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+pub trait MessageRecvBehaviour<const THRESHOLD: i16>: Measure {
+    /// This asynchronous method returns a boolean indicating whether the node identified by `did` has a satisfactory message receiving behavior.
+    async fn good(&self, did: Did) -> bool {
+        let failed = self.get_count(did, MeasureCounter::FailedToReceive).await;
+        (failed as i16) < THRESHOLD
+    }
 }

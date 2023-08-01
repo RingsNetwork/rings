@@ -130,7 +130,7 @@ impl PersistenceStorageOperation for KvStorage {
 #[async_trait]
 impl<K, V, I> PersistenceStorageReadAndWrite<K, V> for I
 where
-    K: ToString + FromStr + std::marker::Sync + Send,
+    K: ToString + FromStr + std::marker::Sync + Send + std::fmt::Debug,
     V: DeserializeOwned + serde::Serialize + std::marker::Sync + Send,
     I: PersistenceStorageOperation + std::marker::Sync + KvStorageBasic,
 {
@@ -152,7 +152,7 @@ where
     async fn put(&self, key: &K, value: &V) -> Result<()> {
         self.prune().await?;
         let data = bincode::serialize(value).map_err(Error::BincodeSerialize)?;
-        println!("insert v: {:?}", data);
+        tracing::debug!("Try inserting key: {:?}", key);
         self.get_db()
             .insert(key.to_string().as_bytes(), data)
             .map_err(Error::SledError)?;

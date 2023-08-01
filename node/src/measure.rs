@@ -7,8 +7,10 @@ use async_trait::async_trait;
 use chrono::DateTime;
 use chrono::Duration;
 use chrono::Utc;
+use rings_derive::MeasureBehaviour;
 
 use crate::prelude::rings_core::dht::Did;
+use crate::prelude::rings_core::measure;
 use crate::prelude::rings_core::measure::Measure;
 use crate::prelude::rings_core::measure::MeasureCounter;
 use crate::prelude::rings_core::prelude::dashmap::mapref::one::RefMut;
@@ -24,7 +26,7 @@ const DURATION: u64 = 60 * 60;
 /// `PeriodicMeasure` is used to assess the reliability of peers by counting their behaviour.
 /// It currently count the number of sent and received messages in a given period (1 hour).
 /// The method [Measure::incr] should be called in the proper places.
-#[derive(Debug)]
+#[derive(Debug, MeasureBehaviour)]
 pub struct PeriodicMeasure {
     storage: Arc<PersistenceStorage>,
     counters: DashMap<(Did, MeasureCounter), Mutex<PeriodicCounter>>,
@@ -48,6 +50,7 @@ impl PeriodicCounter {
         }
     }
 
+    // Reset periodic count on next period
     fn refresh(&mut self) -> bool {
         let now = Utc::now();
 
@@ -61,6 +64,7 @@ impl PeriodicCounter {
         true
     }
 
+    // If there is no recourd in current period, get pervious_count instead
     fn barely_get(&self) -> u64 {
         if self.previous_count == 0 {
             self.count
@@ -69,12 +73,14 @@ impl PeriodicCounter {
         }
     }
 
+    // Check period, then increase
     fn incr(&mut self) -> (u64, bool) {
         let is_refreshed = self.refresh();
         self.count += 1;
         (self.barely_get(), is_refreshed)
     }
 
+    // Check period, return count or pervious count
     fn get(&mut self) -> (u64, bool) {
         let is_refreshed = self.refresh();
         (self.barely_get(), is_refreshed)
@@ -94,6 +100,7 @@ impl PeriodicMeasure {
         format!("PeriodicMeasure/counters/{}/{:?}", did, counter)
     }
 
+    // Get count from storage, or create a new count instance.
     async fn ensure_counter(
         &self,
         did: Did,
@@ -141,7 +148,7 @@ impl Measure for PeriodicMeasure {
         }
     }
 
-    /// `get_count` returns the counter of a peer in the previous period.
+    /// `get_count` returns the counter of a peer in the current or previous period.
     async fn get_count(&self, did: Did, counter: MeasureCounter) -> u64 {
         let (count, is_refreshed) = {
             let c = self.ensure_counter(did, counter).await;
@@ -156,6 +163,16 @@ impl Measure for PeriodicMeasure {
             self.save_counter(did, counter, count).await;
         }
         count
+    }
+}
+
+#[cfg_attr(feature = "node", async_trait)]
+#[cfg_attr(feature = "browser", async_trait(?Send))]
+impl measure::BehaviourJudgement for PeriodicMeasure {
+    async fn good(&self, did: Did) -> bool {
+        <Self as measure::ConnectBehaviour<{crate::consts::CONNECT_FAILED_LIMIT}>>::good(self, did).await &&
+	    <Self as measure::MessageSendBehaviour<{crate::consts::MSG_SEND_FAILED_LIMIT}>>::good(self, did).await &&
+            <Self as measure::MessageRecvBehaviour<{crate::consts::MSG_RECV_FAILED_LIMIT}>>::good(self, did).await
     }
 }
 

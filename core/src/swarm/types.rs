@@ -7,7 +7,7 @@ use async_trait::async_trait;
 
 use crate::dht::Did;
 use crate::dht::LiveDid;
-use crate::measure::Measure;
+use crate::measure::BehaviourJudgement;
 use crate::swarm::Swarm;
 use crate::transports::manager::TransportManager;
 use crate::transports::Transport;
@@ -15,11 +15,11 @@ use crate::types::ice_transport::IceTransportInterface;
 
 /// Type of Measure, see [Measure].
 #[cfg(not(feature = "wasm"))]
-pub type MeasureImpl = Box<dyn Measure + Send + Sync>;
+pub type MeasureImpl = Box<dyn BehaviourJudgement + Send + Sync>;
 
 /// Type of Measure, see [Measure].
 #[cfg(feature = "wasm")]
-pub type MeasureImpl = Box<dyn Measure>;
+pub type MeasureImpl = Box<dyn BehaviourJudgement>;
 
 /// WrappedDid is a DID wrapped by Swarm and bound to a weak reference of a Transport,
 /// which enables checking whether the WrappedDid is live or not.

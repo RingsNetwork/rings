@@ -469,7 +469,7 @@ impl IceTrickleScheme for DefaultTransport {
             .map(|c| c.clone().to_json().unwrap().into())
             .collect::<Vec<_>>();
         if local_candidates_json.is_empty() {
-            return Err(Error::FailedOnGatherLocalCandidate);
+            return Err(Error::FailedOnGatherLocalCandidate(kind.to_string()));
         }
         let data = HandshakeInfo {
             sdp: serde_json::to_string(&sdp).unwrap(),

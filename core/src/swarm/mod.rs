@@ -12,6 +12,7 @@ use std::sync::Mutex;
 use async_recursion::async_recursion;
 use async_trait::async_trait;
 pub use builder::SwarmBuilder;
+use rings_derive::JudgeConnection;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 pub use types::MeasureImpl;
@@ -25,7 +26,6 @@ use crate::dht::PeerRing;
 use crate::error::Error;
 use crate::error::Result;
 use crate::inspect::SwarmInspect;
-use crate::measure::MeasureCounter;
 use crate::message;
 use crate::message::types::NotifyPredecessorSend;
 use crate::message::ChordStorageInterface;
@@ -46,6 +46,7 @@ use crate::types::ice_transport::IceTransportInterface;
 use crate::types::ice_transport::IceTrickleScheme;
 
 /// The transports and dht management.
+#[derive(JudgeConnection)]
 pub struct Swarm {
     /// A list to for store and manage pending_transport.
     pub(crate) pending_transports: Mutex<Vec<Arc<Transport>>>,
@@ -351,7 +352,7 @@ impl Swarm {
         Ok(pending.iter().cloned().collect::<Vec<_>>())
     }
 
-    /// Find a pending transport from pending list.
+    /// Find a pending transport from pending list by uuid.
     pub fn find_pending_transport(&self, id: uuid::Uuid) -> Result<Option<Arc<Transport>>> {
         let pending = self
             .pending_transports
@@ -365,42 +366,19 @@ impl Swarm {
     /// 2) remove from transport pool;
     /// 3) close the transport connection;
     pub async fn disconnect(&self, did: Did) -> Result<()> {
-        tracing::info!("[disconnect] removing from DHT {:?}", did);
-        self.dht.remove(did)?;
-        if let Some((_address, trans)) = self.remove_transport(did) {
-            trans.close().await?
-        }
-        Ok(())
+        JudgeConnection::disconnect(self, did).await
     }
 
     /// Connect a given Did. It the did is managed by swarm transport pool, return directly,
     /// else try prepare offer and establish connection by dht.
     /// This function may returns a pending transport or connected transport.
     pub async fn connect(&self, did: Did) -> Result<Arc<Transport>> {
-        if let Some(t) = self.get_and_check_transport(did).await {
-            return Ok(t);
-        }
-
-        let (transport, offer_msg) = self.prepare_transport_offer().await?;
-
-        self.send_message(Message::ConnectNodeSend(offer_msg), did)
-            .await?;
-
-        Ok(transport)
+        JudgeConnection::connect(self, did).await
     }
 
     /// Similar to connect, but this function will try connect a Did by given hop.
     pub async fn connect_via(&self, did: Did, next_hop: Did) -> Result<Arc<Transport>> {
-        if let Some(t) = self.get_and_check_transport(did).await {
-            return Ok(t);
-        }
-
-        let (transport, offer_msg) = self.prepare_transport_offer().await?;
-
-        self.send_message_by_hop(Message::ConnectNodeSend(offer_msg), did, next_hop)
-            .await?;
-
-        Ok(transport)
+        JudgeConnection::connect_via(self, did, next_hop).await
     }
 
     /// Check the status of swarm
@@ -456,12 +434,10 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Deb
             transport.id
         );
 
-        if let (Some(measure), did) = (&self.measure, payload.relay.next_hop) {
-            if result.is_ok() {
-                measure.incr(did, MeasureCounter::Sent).await
-            } else {
-                measure.incr(did, MeasureCounter::FailedToSend).await
-            }
+        if result.is_ok() {
+            self.record_sent(payload.relay.next_hop).await
+        } else {
+            self.record_sent_failed(payload.relay.next_hop).await
         }
 
         result
