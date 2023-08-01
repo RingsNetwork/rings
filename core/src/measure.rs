@@ -72,9 +72,8 @@ pub trait ConnectBehaviour<const THRESHOLD: i16>: Measure {
 pub trait MessageSendBehaviour<const THRESHOLD: i16>: Measure {
     /// This asynchronous method returns a boolean indicating whether the node identified by `did` has a satisfactory message sending behavior.
     async fn good(&self, did: Did) -> bool {
-        let sent = self.get_count(did, MeasureCounter::Sent).await;
         let failed = self.get_count(did, MeasureCounter::FailedToSend).await;
-        ((failed - sent) as i16) < THRESHOLD
+        (failed as i16) < THRESHOLD
     }
 }
 
@@ -86,8 +85,7 @@ pub trait MessageSendBehaviour<const THRESHOLD: i16>: Measure {
 pub trait MessageRecvBehaviour<const THRESHOLD: i16>: Measure {
     /// This asynchronous method returns a boolean indicating whether the node identified by `did` has a satisfactory message receiving behavior.
     async fn good(&self, did: Did) -> bool {
-        let recv = self.get_count(did, MeasureCounter::Received).await;
         let failed = self.get_count(did, MeasureCounter::FailedToReceive).await;
-        ((failed - recv) as i16) < THRESHOLD
+        (failed as i16) < THRESHOLD
     }
 }

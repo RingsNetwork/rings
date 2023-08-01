@@ -16,7 +16,7 @@ pub fn impl_measure_behaviour_traits(ast: &syn::DeriveInput) -> proc_macro2::Tok
     #[cfg(not(feature = "core_crate"))]
     quote! {
     use rings_core::measure::measure::MessageRecvBehaviour;
-    use rings_core::measure::measure::MessageSendehaviour;
+    use rings_core::measure::measure::MessageSendBehaviour;
     use rings_core::measure::measure::ConnectBehaviour;
 
     #impl_token
