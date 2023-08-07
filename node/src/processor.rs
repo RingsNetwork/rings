@@ -94,9 +94,9 @@ impl ProcessorConfig {
         }
     }
 
-    /// [DelegatedSk].
+    /// Return associated [DelegatedSk].
     pub fn delegated_sk(&self) -> DelegatedSk {
-	self.delegated_sk.clone()
+        self.delegated_sk.clone()
     }
 }
 
