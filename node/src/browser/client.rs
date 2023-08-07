@@ -133,7 +133,7 @@ impl Client {
             .map_err(error::Error::Storage)?;
         let measure = PeriodicMeasure::new(ms);
 
-        let mut processor_builder = ProcessorBuilder::from_config(config)?
+        let mut processor_builder = ProcessorBuilder::from_config(&config)?
             .storage(storage)
             .measure(measure);
 

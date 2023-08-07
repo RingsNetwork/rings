@@ -59,13 +59,45 @@ use crate::prelude::DelegatedSk;
 #[wasm_export]
 pub struct ProcessorConfig {
     /// ICE servers for webrtc transport.
-    pub ice_servers: String,
+    ice_servers: String,
     /// External address for webrtc transport.
-    pub external_address: Option<String>,
+    external_address: Option<String>,
     /// [DelegatedSk].
-    pub delegated_sk: DelegatedSk,
+    delegated_sk: DelegatedSk,
     /// Stabilization timeout.
-    pub stabilize_timeout: usize,
+    stabilize_timeout: usize,
+}
+
+impl ProcessorConfig {
+    /// Creates a new `ProcessorConfig` instance without an external address.
+    pub fn new(ice_servers: String, delegated_sk: DelegatedSk, stabilize_timeout: usize) -> Self {
+        Self {
+            ice_servers,
+            external_address: None,
+            delegated_sk,
+            stabilize_timeout,
+        }
+    }
+
+    /// Creates a new `ProcessorConfig` instance with an external address.
+    pub fn new_with_ext_addr(
+        ice_servers: String,
+        delegated_sk: DelegatedSk,
+        stabilize_timeout: usize,
+        external_address: String,
+    ) -> Self {
+        Self {
+            ice_servers,
+            external_address: Some(external_address),
+            delegated_sk,
+            stabilize_timeout,
+        }
+    }
+
+    /// [DelegatedSk].
+    pub fn delegated_sk(&self) -> DelegatedSk {
+	self.delegated_sk.clone()
+    }
 }
 
 /// `ProcessorConfigSerialized` is a serialized version of `ProcessorConfig`.

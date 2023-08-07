@@ -174,7 +174,7 @@ impl ClientArgs {
         let c = config::Config::read_fs(self.config_args.config.as_str())?;
         let process_config: ProcessorConfig = c.clone().try_into()?;
         let endpoint_url = self.endpoint_url.as_ref().unwrap_or(&c.endpoint_url);
-        let delegated_sk = process_config.delegated_sk;
+        let delegated_sk = process_config.delegated_sk();
         Client::new(endpoint_url.as_str(), delegated_sk)
     }
 }
