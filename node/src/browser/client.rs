@@ -57,6 +57,7 @@ use crate::prelude::web_sys::RtcIceConnectionState;
 use crate::prelude::CallbackFn;
 use crate::processor::Processor;
 use crate::processor::ProcessorBuilder;
+use crate::processor::ProcessorConfig;
 
 /// AddressType enum contains `DEFAULT` and `ED25519`.
 #[wasm_export]
@@ -84,8 +85,8 @@ pub struct Client {
 #[wasm_export]
 impl Client {
     /// Creat a new client instance.
-    pub fn new_client(
-        config: String,
+    pub fn new_client_with_serialized_config(
+        config: ProcessorConfig,
         callback: Option<MessageCallbackInstance>,
     ) -> js_sys::Promise {
         Self::new_client_with_storage(config, callback, "rings-node".to_string())
@@ -98,7 +99,7 @@ impl Client {
     }
 
     pub fn new_client_with_storage(
-        config: String,
+        config: ProcessorConfig,
         callback: Option<MessageCallbackInstance>,
         storage_name: String,
     ) -> js_sys::Promise {
@@ -111,7 +112,7 @@ impl Client {
     }
 
     pub(crate) async fn new_client_with_storage_internal(
-        config: String,
+        config: ProcessorConfig,
         callback: Option<MessageCallbackInstance>,
         storage_name: String,
     ) -> Result<Client, error::Error> {

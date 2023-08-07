@@ -13,6 +13,7 @@ use crate::error::Result;
 use crate::prelude::rings_core::ecc::SecretKey;
 use crate::prelude::DelegatedSk;
 use crate::processor::ProcessorConfig;
+use crate::processor::ProcessorConfigSerialized;
 
 lazy_static::lazy_static! {
   static ref DEFAULT_DATA_STORAGE_CONFIG: StorageConfig = StorageConfig {
@@ -64,11 +65,11 @@ pub struct Config {
     pub extension: ExtensionConfig,
 }
 
-impl<T: Into<Config>> From<T> for ProcessorConfig {
-    fn from(cfg: T) -> Self {
-        let config: Config = cfg.into();
+impl TryFrom<Config> for ProcessorConfigSerialized {
+    type Error = Error;
+    fn try_from(config: Config) -> Result<Self> {
         // Support old version
-        let delegated_sk = if let Some(sk) = config.ecdsa_key {
+        let delegated_sk: String = if let Some(sk) = config.ecdsa_key {
             tracing::warn!("Field `ecdsa_key` is deprecated, use `delegated_sk` instead.");
             DelegatedSk::new_with_seckey(&sk)
                 .expect("create delegated sk failed")
@@ -80,12 +81,27 @@ impl<T: Into<Config>> From<T> for ProcessorConfig {
         } else {
             config.delegated_sk.expect("delegated_sk is not set.")
         };
-        Self {
-            ice_servers: config.ice_servers.clone(),
-            external_address: config.external_ip.clone(),
-            delegated_sk,
-            stabilize_timeout: config.stabilize_timeout,
+        if let Some(ext_ip) = config.external_ip {
+            Ok(Self::new_with_ext_addr(
+                config.ice_servers,
+                delegated_sk,
+                config.stabilize_timeout,
+                ext_ip,
+            ))
+        } else {
+            Ok(Self::new(
+                config.ice_servers,
+                delegated_sk,
+                config.stabilize_timeout,
+            ))
         }
+    }
+}
+
+impl TryFrom<Config> for ProcessorConfig {
+    type Error = Error;
+    fn try_from(config: Config) -> Result<Self> {
+        ProcessorConfigSerialized::try_from(config).and_then(Self::try_from)
     }
 }
 

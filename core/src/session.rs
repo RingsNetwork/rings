@@ -60,7 +60,7 @@ pub struct DelegatedSkBuilder {
 /// To verify the session, use `verify_self()` method of [Session].
 /// To verify a message, use `verify(msg, sig)` method of [Session].
 #[wasm_export]
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct DelegatedSk {
     /// Session
     session: Session,

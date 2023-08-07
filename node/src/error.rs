@@ -98,6 +98,8 @@ pub enum Error {
     SerdeYamlError(#[from] serde_yaml::Error) = 1001,
     #[error("verify error: {0}")]
     VerifyError(String) = 1002,
+    #[error("core error: {0}")]
+    CoreError(String) = 1102,
 }
 
 impl Error {
