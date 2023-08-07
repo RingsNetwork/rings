@@ -1,7 +1,6 @@
 use crate::prelude::rings_core::ecc::SecretKey;
 use crate::prelude::rings_core::storage::PersistenceStorage;
 use crate::prelude::CallbackFn;
-
 use crate::prelude::DelegatedSk;
 use crate::processor::Processor;
 use crate::processor::ProcessorBuilder;
