@@ -82,6 +82,7 @@ pub struct Client {
     handler: Arc<HandlerType>,
 }
 
+#[allow(dead_code)]
 impl Client {
     pub(crate) async fn new_client_with_storage_internal(
         config: ProcessorConfig,
@@ -124,47 +125,13 @@ impl Client {
         })
     }
 
-    pub(crate) async fn new_client_with_storage_internal_and_serialized_config(
+    pub(crate) async fn new_client_with_storage_and_serialized_config_internal(
         config: String,
         callback: Option<MessageCallbackInstance>,
         storage_name: String,
     ) -> Result<Client, error::Error> {
         let config: ProcessorConfig = serde_yaml::from_str(&config)?;
-
-        let cb: Option<CallbackFn> = match callback {
-            Some(cb) => Some(Box::new(cb)),
-            None => None,
-        };
-
-        let storage_path = storage_name.as_str();
-        let measure_path = [storage_path, "measure"].join("/");
-
-        let storage = PersistenceStorage::new_with_cap_and_name(50000, storage_path)
-            .await
-            .map_err(error::Error::Storage)?;
-
-        let ms = PersistenceStorage::new_with_cap_and_path(50000, measure_path)
-            .await
-            .map_err(error::Error::Storage)?;
-        let measure = PeriodicMeasure::new(ms);
-
-        let mut processor_builder = ProcessorBuilder::from_config(&config)?
-            .storage(storage)
-            .measure(measure);
-
-        if let Some(cb) = cb {
-            processor_builder = processor_builder.message_callback(cb);
-        }
-
-        let processor = Arc::new(processor_builder.build()?);
-
-        let mut handler: HandlerType = processor.clone().into();
-        build_handler(&mut handler).await;
-
-        Ok(Client {
-            processor,
-            handler: handler.into(),
-        })
+	Self::new_client_with_storage_internal(config, callback, storage_name).await
     }
 }
 

@@ -27,7 +27,7 @@ async fn new_client() -> (browser::Client, String) {
 
     let storage_name = uuid::Uuid::new_v4().to_string();
     let client: browser::Client =
-        browser::Client::new_client_with_storage_internal_and_serialized_config(
+        browser::Client::new_client_with_storage_and_serialized_config_internal(
             config,
             None,
             storage_name.clone(),
