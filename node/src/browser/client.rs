@@ -131,7 +131,7 @@ impl Client {
         storage_name: String,
     ) -> Result<Client, error::Error> {
         let config: ProcessorConfig = serde_yaml::from_str(&config)?;
-	Self::new_client_with_storage_internal(config, callback, storage_name).await
+        Self::new_client_with_storage_internal(config, callback, storage_name).await
     }
 }
 
