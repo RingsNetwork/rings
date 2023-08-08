@@ -24,12 +24,11 @@ pub async fn prepare_processor(message_callback: Option<CallbackFn>) -> Processo
     let key = SecretKey::random();
     let sm = DelegatedSk::new_with_seckey(&key).unwrap();
 
-    let config = serde_yaml::to_string(&ProcessorConfig {
-        ice_servers: "stun://stun.l.google.com:19302".to_string(),
-        external_address: None,
-        delegated_sk: sm.dump().unwrap(),
-        stabilize_timeout: 200,
-    })
+    let config = serde_yaml::to_string(&ProcessorConfig::new(
+        "stun://stun.l.google.com:19302".to_string(),
+        sm,
+        200,
+    ))
     .unwrap();
 
     let storage_path = uuid::Uuid::new_v4().to_simple().to_string();
@@ -37,7 +36,7 @@ pub async fn prepare_processor(message_callback: Option<CallbackFn>) -> Processo
         .await
         .unwrap();
 
-    let mut processor_builder = ProcessorBuilder::from_config(config)
+    let mut processor_builder = ProcessorBuilder::from_serialized(&config)
         .unwrap()
         .storage(storage);
 
