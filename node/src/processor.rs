@@ -103,7 +103,7 @@ impl ProcessorConfig {
 impl FromStr for ProcessorConfig {
     type Err = Error;
     /// Reveal config from serialized string.
-    pub fn from_str(ser: &str) -> Result<Self> {
+    fn from_str(ser: &str) -> Result<Self> {
         serde_yaml::from_str::<ProcessorConfig>(ser).map_err(Error::SerdeYamlError)
     }
 }
