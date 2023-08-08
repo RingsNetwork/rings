@@ -7,7 +7,7 @@
 use jsonrpc_core::Error;
 use jsonrpc_core::Params;
 use jsonrpc_core::Value;
-use rings_core::session::DelegatedSk;
+use rings_core::session::DelegateeSk;
 
 use super::request::parse_response;
 use super::request::RequestBuilder;
