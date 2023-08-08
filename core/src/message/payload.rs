@@ -25,7 +25,7 @@ use crate::dht::PeerRing;
 use crate::dht::PeerRingAction;
 use crate::error::Error;
 use crate::error::Result;
-use crate::session::DelegatedSk;
+use crate::session::DelegateeSk;
 use crate::utils::get_epoch_ms;
 
 /// Compresses the given data byte slice using the gzip algorithm with the specified compression level.
@@ -101,7 +101,7 @@ where T: Serialize + DeserializeOwned
     /// Create new instance
     pub fn new(
         data: T,
-        delegated_sk: &DelegatedSk,
+        delegatee_sk: &DelegateeSk,
         origin_verification_gen: OriginVerificationGen,
         relay: MessageRelay,
     ) -> Result<Self> {
@@ -109,10 +109,10 @@ where T: Serialize + DeserializeOwned
         let ttl_ms = DEFAULT_TTL_MS;
         let msg = &MessageVerification::pack_msg(&data, ts_ms, ttl_ms)?;
         let tx_id = uuid::Uuid::new_v4();
-        let addr = delegated_sk.authorizer_did();
+        let addr = delegatee_sk.authorizer_did();
         let verification = MessageVerification {
-            session: delegated_sk.session(),
-            sig: delegated_sk.sign(msg)?,
+            session: delegatee_sk.session(),
+            sig: delegatee_sk.sign(msg)?,
             ttl_ms,
             ts_ms,
         };
@@ -135,12 +135,12 @@ where T: Serialize + DeserializeOwned
     /// Create new Payload for send
     pub fn new_send(
         data: T,
-        delegated_sk: &DelegatedSk,
+        delegatee_sk: &DelegateeSk,
         next_hop: Did,
         destination: Did,
     ) -> Result<Self> {
-        let relay = MessageRelay::new(vec![delegated_sk.authorizer_did()], next_hop, destination);
-        Self::new(data, delegated_sk, OriginVerificationGen::Origin, relay)
+        let relay = MessageRelay::new(vec![delegatee_sk.authorizer_did()], next_hop, destination);
+        Self::new(data, delegatee_sk, OriginVerificationGen::Origin, relay)
     }
 
     /// Checks whether the payload is expired.
@@ -250,8 +250,8 @@ where T: Serialize + DeserializeOwned
 pub trait PayloadSender<T>
 where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
 {
-    /// Get the delegated sk
-    fn delegated_sk(&self) -> &DelegatedSk;
+    /// Get the delegatee sk
+    fn delegatee_sk(&self) -> &DelegateeSk;
     /// Get access to DHT.
     fn dht(&self) -> Arc<PeerRing>;
     /// Send a message payload to a specified DID.
@@ -276,7 +276,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
     /// Send a message to a specified destination.
     async fn send_message(&self, msg: T, destination: Did) -> Result<uuid::Uuid> {
         let next_hop = self.infer_next_hop(None, destination)?;
-        let payload = MessagePayload::new_send(msg, self.delegated_sk(), next_hop, destination)?;
+        let payload = MessagePayload::new_send(msg, self.delegatee_sk(), next_hop, destination)?;
         self.send_payload(payload.clone()).await?;
         Ok(payload.tx_id)
     }
@@ -288,14 +288,14 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
         destination: Did,
         next_hop: Did,
     ) -> Result<uuid::Uuid> {
-        let payload = MessagePayload::new_send(msg, self.delegated_sk(), next_hop, destination)?;
+        let payload = MessagePayload::new_send(msg, self.delegatee_sk(), next_hop, destination)?;
         self.send_payload(payload.clone()).await?;
         Ok(payload.tx_id)
     }
 
     /// Send a direct message to a specified destination.
     async fn send_direct_message(&self, msg: T, destination: Did) -> Result<uuid::Uuid> {
-        let payload = MessagePayload::new_send(msg, self.delegated_sk(), destination, destination)?;
+        let payload = MessagePayload::new_send(msg, self.delegatee_sk(), destination, destination)?;
         self.send_payload(payload.clone()).await?;
         Ok(payload.tx_id)
     }
@@ -306,7 +306,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
 
         let mut pl = MessagePayload::new(
             msg,
-            self.delegated_sk(),
+            self.delegatee_sk(),
             OriginVerificationGen::Origin,
             relay,
         )?;
@@ -324,7 +324,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
     ) -> Result<()> {
         let mut new_pl = MessagePayload::new(
             payload.data.clone(),
-            self.delegated_sk(),
+            self.delegatee_sk(),
             OriginVerificationGen::Stick(payload.origin_verification.clone()),
             relay,
         )?;
@@ -383,7 +383,7 @@ pub mod test {
     where T: Serialize + DeserializeOwned {
         let key = SecretKey::random();
         let destination = SecretKey::random().address().into();
-        let session = DelegatedSk::new_with_seckey(&key).unwrap();
+        let session = DelegateeSk::new_with_seckey(&key).unwrap();
         MessagePayload::new_send(data, &session, next_hop, destination).unwrap()
     }
 

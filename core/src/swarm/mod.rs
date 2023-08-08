@@ -34,7 +34,7 @@ use crate::message::MessageHandler;
 use crate::message::MessageHandlerEvent;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
-use crate::session::DelegatedSk;
+use crate::session::DelegateeSk;
 use crate::storage::MemStorage;
 use crate::transports::manager::TransportHandshake;
 use crate::transports::manager::TransportManager;
@@ -62,7 +62,7 @@ pub struct Swarm {
     pub(crate) dht: Arc<PeerRing>,
     /// Implementationof measurement.
     pub(crate) measure: Option<MeasureImpl>,
-    delegated_sk: DelegatedSk,
+    delegatee_sk: DelegateeSk,
     message_handler: MessageHandler,
 }
 
@@ -77,11 +77,11 @@ impl Swarm {
         self.dht.clone()
     }
 
-    /// Retrieves the delegated sk associated with the current instance.
-    /// The delegated sk provides a segregated approach to manage private keys.
-    /// It generates delegated secret keys for the bound entries of PKIs (Public Key Infrastructure).
-    pub fn delegated_sk(&self) -> &DelegatedSk {
-        &self.delegated_sk
+    /// Retrieves the delegatee sk associated with the current instance.
+    /// The delegatee sk provides a segregated approach to manage private keys.
+    /// It generates delegatee secret keys for the bound entries of PKIs (Public Key Infrastructure).
+    pub fn delegatee_sk(&self) -> &DelegateeSk {
+        &self.delegatee_sk
     }
 
     /// Load message from a TransportEvent.
@@ -104,7 +104,7 @@ impl Swarm {
                     Some(_) => {
                         let payload = MessagePayload::new_send(
                             Message::JoinDHT(message::JoinDHT { did }),
-                            &self.delegated_sk,
+                            &self.delegatee_sk,
                             self.dht.did,
                             self.dht.did,
                         )?;
@@ -127,7 +127,7 @@ impl Swarm {
                         tracing::info!("[Swarm::ConnectClosed] transport {:?} closed", uuid);
                         let payload = MessagePayload::new_send(
                             Message::LeaveDHT(message::LeaveDHT { did }),
-                            &self.delegated_sk,
+                            &self.delegatee_sk,
                             self.dht.did,
                             self.dht.did,
                         )?;
@@ -392,8 +392,8 @@ impl Swarm {
 impl<T> PayloadSender<T> for Swarm
 where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Debug
 {
-    fn delegated_sk(&self) -> &DelegatedSk {
-        Swarm::delegated_sk(self)
+    fn delegatee_sk(&self) -> &DelegateeSk {
+        Swarm::delegatee_sk(self)
     }
 
     fn dht(&self) -> Arc<PeerRing> {
@@ -486,8 +486,8 @@ pub mod tests {
         let stun = "stun://stun.l.google.com:19302";
         let storage =
             PersistenceStorage::new_with_path(PersistenceStorage::random_path("./tmp")).await?;
-        let delegated_sk = DelegatedSk::new_with_seckey(&key)?;
-        Ok(SwarmBuilder::new(stun, storage, delegated_sk).build())
+        let delegatee_sk = DelegateeSk::new_with_seckey(&key)?;
+        Ok(SwarmBuilder::new(stun, storage, delegatee_sk).build())
     }
 
     #[tokio::test]

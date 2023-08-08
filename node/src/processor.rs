@@ -51,7 +51,7 @@ use crate::prelude::CallbackFn;
 use crate::prelude::ChordStorageInterface;
 use crate::prelude::ChordStorageInterfaceCacheChecker;
 use crate::prelude::CustomMessage;
-use crate::prelude::DelegatedSk;
+use crate::prelude::DelegateeSk;
 
 /// ProcessorConfig is usually serialized as json or yaml.
 /// There is a `from_config` method in [ProcessorBuilder] used to initialize the Builder with a serialized ProcessorConfig.
@@ -62,19 +62,19 @@ pub struct ProcessorConfig {
     ice_servers: String,
     /// External address for webrtc transport.
     external_address: Option<String>,
-    /// [DelegatedSk].
-    delegated_sk: DelegatedSk,
+    /// [DelegateeSk].
+    delegatee_sk: DelegateeSk,
     /// Stabilization timeout.
     stabilize_timeout: usize,
 }
 
 impl ProcessorConfig {
     /// Creates a new `ProcessorConfig` instance without an external address.
-    pub fn new(ice_servers: String, delegated_sk: DelegatedSk, stabilize_timeout: usize) -> Self {
+    pub fn new(ice_servers: String, delegatee_sk: DelegateeSk, stabilize_timeout: usize) -> Self {
         Self {
             ice_servers,
             external_address: None,
-            delegated_sk,
+            delegatee_sk,
             stabilize_timeout,
         }
     }
@@ -82,14 +82,14 @@ impl ProcessorConfig {
     /// Creates a new `ProcessorConfig` instance with an external address.
     pub fn new_with_ext_addr(
         ice_servers: String,
-        delegated_sk: DelegatedSk,
+        delegatee_sk: DelegateeSk,
         stabilize_timeout: usize,
         external_address: String,
     ) -> Self {
         Self {
             ice_servers,
             external_address: Some(external_address),
-            delegated_sk,
+            delegatee_sk,
             stabilize_timeout,
         }
     }
@@ -99,14 +99,14 @@ impl ProcessorConfig {
         serde_yaml::from_str::<ProcessorConfig>(&ser).map_err(Error::SerdeYamlError)
     }
 
-    /// Return associated [DelegatedSk].
-    pub fn delegated_sk(&self) -> DelegatedSk {
-        self.delegated_sk.clone()
+    /// Return associated [DelegateeSk].
+    pub fn delegatee_sk(&self) -> DelegateeSk {
+        self.delegatee_sk.clone()
     }
 }
 
 /// `ProcessorConfigSerialized` is a serialized version of `ProcessorConfig`.
-/// Instead of storing the `DelegatedSk` instance, it stores the dumped string representation of the delegated secret key.
+/// Instead of storing the `DelegateeSk` instance, it stores the dumped string representation of the delegatee secret key.
 #[derive(Serialize, Deserialize, Clone)]
 #[wasm_export]
 pub struct ProcessorConfigSerialized {
@@ -114,19 +114,19 @@ pub struct ProcessorConfigSerialized {
     ice_servers: String,
     /// An optional string representing the external address for WebRTC transport.
     external_address: Option<String>,
-    /// A string representing the dumped `DelegatedSk`.
-    delegated_sk: String,
+    /// A string representing the dumped `DelegateeSk`.
+    delegatee_sk: String,
     /// An unsigned integer representing the stabilization timeout.
     stabilize_timeout: usize,
 }
 
 impl ProcessorConfigSerialized {
     /// Creates a new `ProcessorConfigSerialized` instance without an external address.
-    pub fn new(ice_servers: String, delegated_sk: String, stabilize_timeout: usize) -> Self {
+    pub fn new(ice_servers: String, delegatee_sk: String, stabilize_timeout: usize) -> Self {
         Self {
             ice_servers,
             external_address: None,
-            delegated_sk,
+            delegatee_sk,
             stabilize_timeout,
         }
     }
@@ -134,14 +134,14 @@ impl ProcessorConfigSerialized {
     /// Creates a new `ProcessorConfigSerialized` instance with an external address.
     pub fn new_with_ext_addr(
         ice_servers: String,
-        delegated_sk: String,
+        delegatee_sk: String,
         stabilize_timeout: usize,
         external_address: String,
     ) -> Self {
         Self {
             ice_servers,
             external_address: Some(external_address),
-            delegated_sk,
+            delegatee_sk,
             stabilize_timeout,
         }
     }
@@ -153,8 +153,8 @@ impl TryFrom<ProcessorConfig> for ProcessorConfigSerialized {
         Ok(Self {
             ice_servers: ins.ice_servers.clone(),
             external_address: ins.external_address.clone(),
-            delegated_sk: ins
-                .delegated_sk
+            delegatee_sk: ins
+                .delegatee_sk
                 .dump()
                 .map_err(|e| Error::CoreError(e.to_string()))?,
             stabilize_timeout: ins.stabilize_timeout,
@@ -168,7 +168,7 @@ impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
         Ok(Self {
             ice_servers: ins.ice_servers.clone(),
             external_address: ins.external_address.clone(),
-            delegated_sk: DelegatedSk::from_str(&ins.delegated_sk)
+            delegatee_sk: DelegateeSk::from_str(&ins.delegatee_sk)
                 .map_err(|e| Error::CoreError(e.to_string()))?,
             stabilize_timeout: ins.stabilize_timeout,
         })
@@ -207,7 +207,7 @@ impl<'de> serde::de::Deserialize<'de> for ProcessorConfig {
 pub struct ProcessorBuilder {
     ice_servers: String,
     external_address: Option<String>,
-    delegated_sk: DelegatedSk,
+    delegatee_sk: DelegateeSk,
     storage: Option<PersistenceStorage>,
     measure: Option<MeasureImpl>,
     message_callback: Option<CallbackFn>,
@@ -236,7 +236,7 @@ impl ProcessorBuilder {
         Ok(Self {
             ice_servers: config.ice_servers.clone(),
             external_address: config.external_address.clone(),
-            delegated_sk: config.delegated_sk.clone(),
+            delegatee_sk: config.delegatee_sk.clone(),
             storage: None,
             measure: None,
             message_callback: None,
@@ -264,7 +264,7 @@ impl ProcessorBuilder {
 
     /// Build the [Processor].
     pub fn build(self) -> Result<Processor> {
-        self.delegated_sk
+        self.delegatee_sk
             .session()
             .verify_self()
             .map_err(|e| Error::VerifyError(e.to_string()))?;
@@ -273,7 +273,7 @@ impl ProcessorBuilder {
             .storage
             .expect("Please set storage by `storage()` method");
 
-        let mut swarm_builder = SwarmBuilder::new(&self.ice_servers, storage, self.delegated_sk);
+        let mut swarm_builder = SwarmBuilder::new(&self.ice_servers, storage, self.delegatee_sk);
 
         if let Some(external_address) = self.external_address {
             swarm_builder = swarm_builder.external_address(external_address);

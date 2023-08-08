@@ -6,7 +6,7 @@ use crate::dht::Chord;
 use crate::dht::Did;
 use crate::ecc::SecretKey;
 use crate::error::Result;
-use crate::session::DelegatedSk;
+use crate::session::DelegateeSk;
 use crate::swarm::Swarm;
 use crate::transports::manager::TransportManager;
 use crate::transports::Transport;
@@ -29,7 +29,7 @@ fn new_chord(did: Did) -> Chord {
 
 fn new_swarm(key: &SecretKey) -> Swarm {
     let stun = "stun://stun.l.google.com:19302";
-    let session = DelegatedSk::new_with_seckey(key).unwrap();
+    let session = DelegateeSk::new_with_seckey(key).unwrap();
     Swarm::new(stun, key.address(), session)
 }
 
@@ -50,8 +50,8 @@ pub async fn establish_connection(transport1: &Transport, transport2: &Transport
     let key1 = SecretKey::random();
     let key2 = SecretKey::random();
 
-    let session1 = DelegatedSk::new_with_seckey(&key1).unwrap();
-    let session2 = DelegatedSk::new_with_seckey(&key2).unwrap();
+    let session1 = DelegateeSk::new_with_seckey(&key1).unwrap();
+    let session2 = DelegateeSk::new_with_seckey(&key2).unwrap();
 
     // Peer 1 try to connect peer 2
     let handshake_info1 = transport1

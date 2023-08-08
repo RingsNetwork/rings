@@ -3,7 +3,7 @@ use std::sync::Arc;
 use wasm_bindgen_test::wasm_bindgen_test_configure;
 
 use crate::ecc::SecretKey;
-use crate::session::DelegatedSk;
+use crate::session::DelegateeSk;
 use crate::storage::PersistenceStorage;
 use crate::swarm::Swarm;
 use crate::swarm::SwarmBuilder;
@@ -23,13 +23,13 @@ pub fn setup_log() {
 
 pub async fn prepare_node(key: SecretKey) -> Arc<Swarm> {
     let stun = "stun://stun.l.google.com:19302";
-    let delegated_sk = DelegatedSk::new_with_seckey(&key).unwrap();
+    let delegatee_sk = DelegateeSk::new_with_seckey(&key).unwrap();
     let storage =
         PersistenceStorage::new_with_cap_and_name(1000, uuid::Uuid::new_v4().to_string().as_str())
             .await
             .unwrap();
 
-    let swarm = Arc::new(SwarmBuilder::new(stun, storage, delegated_sk).build());
+    let swarm = Arc::new(SwarmBuilder::new(stun, storage, delegatee_sk).build());
 
     println!("key: {:?}", key.to_string());
     println!("did: {:?}", swarm.did());

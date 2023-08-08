@@ -16,7 +16,7 @@ wasm_bindgen_test_configure!(run_in_browser);
 
 async fn new_client() -> (browser::Client, String) {
     let key = SecretKey::random();
-    let sm = DelegatedSk::new_with_seckey(&key).unwrap();
+    let sm = DelegateeSk::new_with_seckey(&key).unwrap();
 
     let config = serde_yaml::to_string(&ProcessorConfig::new(
         "stun://stun.l.google.com:19302".to_string(),

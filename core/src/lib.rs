@@ -11,9 +11,9 @@
 //!
 //! 1. Handshake
 //! - Node A create a new transport via `swarm.new_transport()` and generate the handshake SDP
-//!   with `transport.get_handshake_info(delegated_sk, offer)` and send it to node B.
+//!   with `transport.get_handshake_info(delegatee_sk, offer)` and send it to node B.
 //! - Node B accept the offer with `transport.register_remote_info(offer)` and response with Answer via
-//!   `transport.get_handshake_info(delegated_sk, offer)`.
+//!   `transport.get_handshake_info(delegatee_sk, offer)`.
 //! - Node A accept the answer and wait until the connection creation.
 //! 2. Join Ring
 //! - After the connection creation, node A will ask node B for a successor.
@@ -50,9 +50,9 @@
 //! - ECDSA Session is based on secp256k1.
 //!   ECDSA Session creates a temporary secret key with one-time signing auth.
 //! - To create a ECDSA Session, we should generate the unsign_info with our pubkey (Address).
-//!   `DelegatedSk::gen_unsign_info(addr, ..)`, it will return the msg needs for signing, and a temporary private key.
+//!   `DelegateeSk::gen_unsign_info(addr, ..)`, it will return the msg needs for signing, and a temporary private key.
 //! - Then we can sign the auth message via some web3 provider like metamask or just with a raw private key, and create the SessionManger with
-//!   `DelegatedSk::new(sig, auth_info, temp_key)`.
+//!   `DelegateeSk::new(sig, auth_info, temp_key)`.
 
 //! # WASM Supported
 //! ```shell
