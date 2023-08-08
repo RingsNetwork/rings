@@ -81,7 +81,7 @@ pub struct MessagePayload<T> {
     /// The transaction ID of payload.
     /// Remote peer should use same tx_id when response.
     pub tx_id: uuid::Uuid,
-    /// The did of payload authorizer, usually it's last sender.
+    /// The did of payload delegator, usually it's last sender.
     pub addr: Did,
     /// Relay records the transport path of message.
     /// And can also help message sender to find the next hop.
@@ -109,7 +109,7 @@ where T: Serialize + DeserializeOwned
         let ttl_ms = DEFAULT_TTL_MS;
         let msg = &MessageVerification::pack_msg(&data, ts_ms, ttl_ms)?;
         let tx_id = uuid::Uuid::new_v4();
-        let addr = delegatee_sk.authorizer_did();
+        let addr = delegatee_sk.delegator_did();
         let verification = MessageVerification {
             session: delegatee_sk.session(),
             sig: delegatee_sk.sign(msg)?,
@@ -139,7 +139,7 @@ where T: Serialize + DeserializeOwned
         next_hop: Did,
         destination: Did,
     ) -> Result<Self> {
-        let relay = MessageRelay::new(vec![delegatee_sk.authorizer_did()], next_hop, destination);
+        let relay = MessageRelay::new(vec![delegatee_sk.delegator_did()], next_hop, destination);
         Self::new(data, delegatee_sk, OriginVerificationGen::Origin, relay)
     }
 
@@ -176,7 +176,7 @@ where T: Serialize + DeserializeOwned
             return false;
         }
 
-        if Some(self.relay.origin_sender()) != self.origin_authorizer_did().ok() {
+        if Some(self.relay.origin_sender()) != self.origin_delegator_did().ok() {
             tracing::warn!("sender is not origin_verification generator");
             return false;
         }
@@ -185,21 +185,21 @@ where T: Serialize + DeserializeOwned
     }
 
     /// Get Did from the origin verification.
-    pub fn origin_authorizer_did(&self) -> Result<Did> {
+    pub fn origin_delegator_did(&self) -> Result<Did> {
         Ok(self
             .origin_verification
             .session
-            .authorizer_pubkey()?
+            .delegator_pubkey()?
             .address()
             .into())
     }
 
     /// Get did from sender verification.
-    pub fn authorizer_did(&self) -> Result<Did> {
+    pub fn delegator_did(&self) -> Result<Did> {
         Ok(self
             .verification
             .session
-            .authorizer_pubkey()?
+            .delegator_pubkey()?
             .address()
             .into())
     }
@@ -218,12 +218,12 @@ where T: Serialize + DeserializeOwned
 
     /// Did of Sender
     pub fn sender(&self) -> Result<Did> {
-        self.authorizer_did()
+        self.delegator_did()
     }
 
     /// Did of Origin
     pub fn origin(&self) -> Result<Did> {
-        self.origin_authorizer_did()
+        self.origin_delegator_did()
     }
 }
 

@@ -31,17 +31,17 @@ fn pack_session(session_id: Did, ts_ms: u128, ttl_ms: usize) -> String {
 
 /// DelegateeSkBuilder is used to build a [DelegateeSk].
 ///
-/// Firstly, you need to provide the authorizer's entity and type to `new` method.
+/// Firstly, you need to provide the delegator's entity and type to `new` method.
 /// Then you can call `pack_session` to get the session dump for signing.
 /// After signing, you can call `sig` to set the signature back to builder.
 /// Finally, you can call `build` to get the [DelegateeSk].
 #[wasm_export]
 pub struct DelegateeSkBuilder {
     session_key: SecretKey,
-    /// Authorizer of session.
-    authorizer_entity: String,
-    /// Authorizer of session.
-    authorizer_type: String,
+    /// Delegator of session.
+    delegator_entity: String,
+    /// Delegator of session.
+    delegator_type: String,
     /// Session's lifetime
     ttl_ms: usize,
     /// Timestamp when session created
@@ -51,7 +51,7 @@ pub struct DelegateeSkBuilder {
 }
 
 /// DelegateeSk holds the [Session] and its delegatee private key.
-/// To prove that the message was sent by the [Authorizer] of [Session],
+/// To prove that the message was sent by the [Delegator] of [Session],
 /// we need to attach session and the signature signed by session_key to the payload.
 ///
 /// DelegateeSk provide a `session` method to clone the session.
@@ -71,19 +71,19 @@ pub struct DelegateeSk {
 /// Session is used to verify the message.
 /// It's serializable and can be attached to the message payload.
 ///
-/// To verify the session is provided by the authorizer, use session.verify_self().
+/// To verify the session is provided by the delegator, use session.verify_self().
 /// To verify the message, use session.verify(msg, sig).
 #[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
 pub struct Session {
     /// Did of session
     session_id: Did,
-    /// Authorizer of session
-    authorizer: Authorizer,
+    /// Delegator of session
+    delegator: Delegator,
     /// Session's lifetime
     ttl_ms: usize,
     /// Timestamp when session created
     ts_ms: u128,
-    /// Signature to verify that the session was signed by the authorizer.
+    /// Signature to verify that the session was signed by the delegator.
     sig: Vec<u8>,
 }
 
@@ -91,7 +91,7 @@ pub struct Session {
 /// Currently, it comprises Secp256k1, EIP191, BIP137, and Ed25519.
 /// We welcome any issues and PRs for additional implementations.
 #[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
-pub enum Authorizer {
+pub enum Delegator {
     /// ecdsa
     Secp256k1(Did),
     /// ref: <https://eips.ethereum.org/EIPS/eip-191>
@@ -102,18 +102,18 @@ pub enum Authorizer {
     Ed25519(PublicKey),
 }
 
-impl TryFrom<(String, String)> for Authorizer {
+impl TryFrom<(String, String)> for Delegator {
     type Error = Error;
 
-    fn try_from((authorizer_entity, authorizer_type): (String, String)) -> Result<Self> {
-        match authorizer_type.as_str() {
-            "secp256k1" => Ok(Authorizer::Secp256k1(Did::from_str(&authorizer_entity)?)),
-            "eip191" => Ok(Authorizer::EIP191(Did::from_str(&authorizer_entity)?)),
-            "bip137" => Ok(Authorizer::BIP137(Did::from_str(&authorizer_entity)?)),
-            "ed25519" => Ok(Authorizer::Ed25519(PublicKey::try_from_b58t(
-                &authorizer_entity,
+    fn try_from((delegator_entity, delegator_type): (String, String)) -> Result<Self> {
+        match delegator_type.as_str() {
+            "secp256k1" => Ok(Delegator::Secp256k1(Did::from_str(&delegator_entity)?)),
+            "eip191" => Ok(Delegator::EIP191(Did::from_str(&delegator_entity)?)),
+            "bip137" => Ok(Delegator::BIP137(Did::from_str(&delegator_entity)?)),
+            "ed25519" => Ok(Delegator::Ed25519(PublicKey::try_from_b58t(
+                &delegator_entity,
             )?)),
-            _ => Err(Error::UnknownAuthorizer),
+            _ => Err(Error::UnknownDelegator),
         }
     }
 }
@@ -133,25 +133,25 @@ impl FromStr for DelegateeSk {
 #[wasm_export]
 impl DelegateeSkBuilder {
     /// Create a new DelegateeSkBuilder.
-    /// The "authorizer_type" is lower case of [Authorizer] variant.
-    /// The "authorizer_entity" refers to the entity that is encapsulated by the [Authorizer] variant, in string format.
-    pub fn new(authorizer_entity: String, authorizer_type: String) -> DelegateeSkBuilder {
+    /// The "delegator_type" is lower case of [Delegator] variant.
+    /// The "delegator_entity" refers to the entity that is encapsulated by the [Delegator] variant, in string format.
+    pub fn new(delegator_entity: String, delegator_type: String) -> DelegateeSkBuilder {
         let session_key = SecretKey::random();
         Self {
             session_key,
-            authorizer_entity,
-            authorizer_type,
+            delegator_entity,
+            delegator_type,
             ttl_ms: DEFAULT_SESSION_TTL_MS,
             ts_ms: utils::get_epoch_ms(),
             sig: vec![],
         }
     }
 
-    /// This is a helper method to let user know if the authorizer params is valid.
-    pub fn validate_authorizer(&self) -> bool {
-        Authorizer::try_from((self.authorizer_entity.clone(), self.authorizer_type.clone()))
+    /// This is a helper method to let user know if the delegator params is valid.
+    pub fn validate_delegator(&self) -> bool {
+        Delegator::try_from((self.delegator_entity.clone(), self.delegator_type.clone()))
             .map_err(|e| {
-                tracing::warn!("validate_authorizer error: {:?}", e);
+                tracing::warn!("validate_delegator error: {:?}", e);
                 e
             })
             .is_ok()
@@ -162,7 +162,7 @@ impl DelegateeSkBuilder {
         pack_session(self.session_key.address().into(), self.ts_ms, self.ttl_ms)
     }
 
-    /// Set the signature of session that signed by authorizer.
+    /// Set the signature of session that signed by delegator.
     pub fn sig(mut self, sig: Vec<u8>) -> Self {
         self.sig = sig;
         self
@@ -176,10 +176,10 @@ impl DelegateeSkBuilder {
 
     /// Build the [DelegateeSk].
     pub fn build(self) -> Result<DelegateeSk> {
-        let authorizer = Authorizer::try_from((self.authorizer_entity, self.authorizer_type))?;
+        let delegator = Delegator::try_from((self.delegator_entity, self.delegator_type))?;
         let session = Session {
             session_id: self.session_key.address().into(),
-            authorizer,
+            delegator,
             ttl_ms: self.ttl_ms,
             ts_ms: self.ts_ms,
             sig: self.sig,
@@ -214,13 +214,13 @@ impl Session {
 
         let auth_str = self.pack();
 
-        if !(match self.authorizer {
-            Authorizer::Secp256k1(did) => {
+        if !(match self.delegator {
+            Delegator::Secp256k1(did) => {
                 signers::secp256k1::verify(&auth_str, &did.into(), &self.sig)
             }
-            Authorizer::EIP191(did) => signers::eip191::verify(&auth_str, &did.into(), &self.sig),
-            Authorizer::BIP137(did) => signers::bip137::verify(&auth_str, &did.into(), &self.sig),
-            Authorizer::Ed25519(pk) => {
+            Delegator::EIP191(did) => signers::eip191::verify(&auth_str, &did.into(), &self.sig),
+            Delegator::BIP137(did) => signers::bip137::verify(&auth_str, &did.into(), &self.sig),
+            Delegator::Ed25519(pk) => {
                 signers::ed25519::verify(&auth_str, &pk.address(), &self.sig, pk)
             }
         }) {
@@ -240,23 +240,23 @@ impl Session {
     }
 
     /// Get public key from session for encryption.
-    pub fn authorizer_pubkey(&self) -> Result<PublicKey> {
+    pub fn delegator_pubkey(&self) -> Result<PublicKey> {
         let auth_str = self.pack();
-        match self.authorizer {
-            Authorizer::Secp256k1(_) => signers::secp256k1::recover(&auth_str, &self.sig),
-            Authorizer::BIP137(_) => signers::bip137::recover(&auth_str, &self.sig),
-            Authorizer::EIP191(_) => signers::eip191::recover(&auth_str, &self.sig),
-            Authorizer::Ed25519(pk) => Ok(pk),
+        match self.delegator {
+            Delegator::Secp256k1(_) => signers::secp256k1::recover(&auth_str, &self.sig),
+            Delegator::BIP137(_) => signers::bip137::recover(&auth_str, &self.sig),
+            Delegator::EIP191(_) => signers::eip191::recover(&auth_str, &self.sig),
+            Delegator::Ed25519(pk) => Ok(pk),
         }
     }
 
-    /// Get authorizer did.
-    pub fn authorizer_did(&self) -> Did {
-        match self.authorizer {
-            Authorizer::Secp256k1(did) => did,
-            Authorizer::BIP137(did) => did,
-            Authorizer::EIP191(did) => did,
-            Authorizer::Ed25519(pk) => pk.address().into(),
+    /// Get delegator did.
+    pub fn delegator_did(&self) -> Did {
+        match self.delegator {
+            Delegator::Secp256k1(did) => did,
+            Delegator::BIP137(did) => did,
+            Delegator::EIP191(did) => did,
+            Delegator::Ed25519(pk) => pk.address().into(),
         }
     }
 }
@@ -265,10 +265,10 @@ impl DelegateeSk {
     /// Generate Session with private key.
     /// Only use it for unittest.
     pub fn new_with_seckey(key: &SecretKey) -> Result<Self> {
-        let authorizer_entity = Did::from(key.address()).to_string();
-        let authorizer_type = "secp256k1".to_string();
+        let delegator_entity = Did::from(key.address()).to_string();
+        let delegator_type = "secp256k1".to_string();
 
-        let mut builder = DelegateeSkBuilder::new(authorizer_entity, authorizer_type);
+        let mut builder = DelegateeSkBuilder::new(delegator_entity, delegator_type);
 
         let sig = key.sign(&builder.pack_session());
         builder = builder.sig(sig.to_vec());
@@ -287,9 +287,9 @@ impl DelegateeSk {
         Ok(signers::secp256k1::sign_raw(key, msg).to_vec())
     }
 
-    /// Get authorizer did from session.
-    pub fn authorizer_did(&self) -> Did {
-        self.session.authorizer_did()
+    /// Get delegator did from session.
+    pub fn delegator_did(&self) -> Did {
+        self.session.delegator_did()
     }
 
     /// Dump delegatee_sk to string, allowing user to save it in a config file.
@@ -313,11 +313,11 @@ mod test {
     }
 
     #[test]
-    pub fn test_authorizer_pubkey() {
+    pub fn test_delegator_pubkey() {
         let key = SecretKey::random();
         let sm = DelegateeSk::new_with_seckey(&key).unwrap();
         let session = sm.session();
-        let pubkey = session.authorizer_pubkey().unwrap();
+        let pubkey = session.delegator_pubkey().unwrap();
         assert_eq!(key.pubkey(), pubkey);
     }
 

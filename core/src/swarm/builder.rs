@@ -100,7 +100,7 @@ impl SwarmBuilder {
 
     /// Try build for `Swarm`.
     pub fn build(self) -> Swarm {
-        let dht_did = self.delegatee_sk.authorizer_did();
+        let dht_did = self.delegatee_sk.delegator_did();
 
         let dht = Arc::new(PeerRing::new_with_storage(
             dht_did,
