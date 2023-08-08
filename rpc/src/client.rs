@@ -22,7 +22,7 @@ pub struct Client {
 
 impl Client {
     /// Creates a new Client instance with the specified endpoint URL
-    pub fn new(endpoint_url: &str, delegated_sk: Option<DelegatedSk>) -> Self {
+    pub fn new(endpoint_url: &str, delegated_sk: Option<DelegateeSk>) -> Self {
         Self {
             client: SimpleClient::new(endpoint_url, delegated_sk),
         }

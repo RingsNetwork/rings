@@ -19,14 +19,14 @@ use crate::prelude::reqwest::Client as HttpClient;
 pub struct SimpleClient {
     client: HttpClient,
     url: String,
-    delegated_sk: Option<DelegatedSk>,
+    delegated_sk: Option<DelegateeSk>,
 }
 
 impl SimpleClient {
     /// * client: reqwest::Client handle http request.
     /// * url: remote json_server url.
     /// * session_key: session_key for sign request.
-    pub fn new(url: &str, delegated_sk: Option<DelegatedSk>) -> Self {
+    pub fn new(url: &str, delegated_sk: Option<DelegateeSk>) -> Self {
         Self {
             client: HttpClient::default(),
             url: url.to_string(),
