@@ -37,7 +37,7 @@ fn pack_session(session_id: Did, ts_ms: u128, ttl_ms: usize) -> String {
 /// Finally, you can call `build` to get the [DelegateeSk].
 #[wasm_export]
 pub struct DelegateeSkBuilder {
-    session_key: SecretKey,
+    sk: SecretKey,
     /// Delegator of session.
     delegator_entity: String,
     /// Delegator of session.
@@ -46,13 +46,13 @@ pub struct DelegateeSkBuilder {
     ttl_ms: usize,
     /// Timestamp when session created
     ts_ms: u128,
-    /// Signature
+    /// Signature of delegation
     sig: Vec<u8>,
 }
 
 /// DelegateeSk holds the [Session] and its delegatee private key.
 /// To prove that the message was sent by the [Delegator] of [Session],
-/// we need to attach session and the signature signed by session_key to the payload.
+/// we need to attach session and the signature signed by sk to the payload.
 ///
 /// DelegateeSk provide a `session` method to clone the session.
 /// DelegateeSk also provide `sign` method to sign a message.
@@ -65,7 +65,7 @@ pub struct DelegateeSk {
     /// Session
     session: Session,
     /// The private key of session. Used for signing and decrypting.
-    session_key: SecretKey,
+    sk: SecretKey,
 }
 
 /// Session is used to verify the message.
@@ -136,9 +136,9 @@ impl DelegateeSkBuilder {
     /// The "delegator_type" is lower case of [Delegator] variant.
     /// The "delegator_entity" refers to the entity that is encapsulated by the [Delegator] variant, in string format.
     pub fn new(delegator_entity: String, delegator_type: String) -> DelegateeSkBuilder {
-        let session_key = SecretKey::random();
+        let sk = SecretKey::random();
         Self {
-            session_key,
+            sk,
             delegator_entity,
             delegator_type,
             ttl_ms: DEFAULT_SESSION_TTL_MS,
@@ -157,19 +157,26 @@ impl DelegateeSkBuilder {
             .is_ok()
     }
 
-    /// Packs the session into a string for signing.
+    #[deprecated(note="`pack_session` is deprecated, use `unsigned_delegation` instead")]
+    /// Will be remove in next version
     pub fn pack_session(&self) -> String {
-        pack_session(self.session_key.address().into(), self.ts_ms, self.ttl_ms)
+        pack_session(self.sk.address().into(), self.ts_ms, self.ttl_ms)
+    }
+
+
+    /// Constuct unsigned_info string for signing.
+    pub fn unsigned_delegation(&self) -> String {
+        pack_session(self.sk.address().into(), self.ts_ms, self.ttl_ms)
     }
 
     /// Set the signature of session that signed by delegator.
-    pub fn sig(mut self, sig: Vec<u8>) -> Self {
+    pub fn set_delegation_sig(mut self, sig: Vec<u8>) -> Self {
         self.sig = sig;
         self
     }
 
     /// Set the lifetime of session.
-    pub fn ttl(mut self, ttl_ms: usize) -> Self {
+    pub fn set_ttl(mut self, ttl_ms: usize) -> Self {
         self.ttl_ms = ttl_ms;
         self
     }
@@ -178,7 +185,7 @@ impl DelegateeSkBuilder {
     pub fn build(self) -> Result<DelegateeSk> {
         let delegator = Delegator::try_from((self.delegator_entity, self.delegator_type))?;
         let session = Session {
-            session_id: self.session_key.address().into(),
+            session_id: self.sk.address().into(),
             delegator,
             ttl_ms: self.ttl_ms,
             ts_ms: self.ts_ms,
@@ -189,7 +196,7 @@ impl DelegateeSkBuilder {
 
         Ok(DelegateeSk {
             session,
-            session_key: self.session_key,
+            sk: self.sk,
         })
     }
 }
@@ -270,8 +277,8 @@ impl DelegateeSk {
 
         let mut builder = DelegateeSkBuilder::new(delegator_entity, delegator_type);
 
-        let sig = key.sign(&builder.pack_session());
-        builder = builder.sig(sig.to_vec());
+        let sig = key.sign(&builder.unsigned_delegation());
+        builder = builder.set_delegation_sig(sig.to_vec());
 
         builder.build()
     }
@@ -283,7 +290,7 @@ impl DelegateeSk {
 
     /// Sign message with session.
     pub fn sign(&self, msg: &str) -> Result<Vec<u8>> {
-        let key = self.session_key;
+        let key = self.sk;
         Ok(signers::secp256k1::sign_raw(key, msg).to_vec())
     }
 
