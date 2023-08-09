@@ -157,14 +157,13 @@ impl DelegateeSkBuilder {
             .is_ok()
     }
 
-    #[deprecated(note="`pack_session` is deprecated, use `unsigned_delegation` instead")]
+    #[deprecated(note = "`pack_session` is deprecated, use `unsigned_delegation` instead")]
     /// Will be remove in next version
     pub fn pack_session(&self) -> String {
         pack_session(self.sk.address().into(), self.ts_ms, self.ttl_ms)
     }
 
-
-    /// Constuct unsigned_info string for signing.
+    /// Construct unsigned_info string for signing.
     pub fn unsigned_delegation(&self) -> String {
         pack_session(self.sk.address().into(), self.ts_ms, self.ttl_ms)
     }
