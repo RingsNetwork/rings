@@ -68,6 +68,7 @@ pub struct ProcessorConfig {
     stabilize_timeout: usize,
 }
 
+#[wasm_export]
 impl ProcessorConfig {
     /// Creates a new `ProcessorConfig` instance without an external address.
     pub fn new(ice_servers: String, delegatee_sk: DelegateeSk, stabilize_timeout: usize) -> Self {
