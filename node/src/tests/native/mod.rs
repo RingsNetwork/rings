@@ -1,14 +1,14 @@
 use crate::prelude::rings_core::ecc::SecretKey;
 use crate::prelude::rings_core::storage::PersistenceStorage;
 use crate::prelude::CallbackFn;
-use crate::prelude::DelegateeSk;
+use crate::prelude::SessionSk;
 use crate::processor::Processor;
 use crate::processor::ProcessorBuilder;
 use crate::processor::ProcessorConfig;
 
 pub async fn prepare_processor(message_callback: Option<CallbackFn>) -> (Processor, String) {
     let key = SecretKey::random();
-    let sm = DelegateeSk::new_with_seckey(&key).unwrap();
+    let sm = SessionSk::new_with_seckey(&key).unwrap();
 
     let config = serde_yaml::to_string(&ProcessorConfig::new(
         "stun://stun.l.google.com:19302".to_string(),

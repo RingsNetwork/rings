@@ -109,8 +109,8 @@ async fn jsonrpc_io_handler(
         state
             .processor
             .swarm
-            .delegatee_sk()
-            .delegation()
+            .session_sk()
+            .session()
             .verify(&body, sig)
             .map_err(|e| {
                 tracing::debug!("body: {:?}", body);

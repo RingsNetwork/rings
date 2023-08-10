@@ -11,7 +11,7 @@ use crate::backend::service::http_server::HiddenServerConfig;
 use crate::error::Error;
 use crate::error::Result;
 use crate::prelude::rings_core::ecc::SecretKey;
-use crate::prelude::DelegateeSk;
+use crate::prelude::SessionSk;
 use crate::processor::ProcessorConfig;
 use crate::processor::ProcessorConfigSerialized;
 
@@ -45,8 +45,8 @@ where P: AsRef<std::path::Path> {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     pub ecdsa_key: Option<SecretKey>,
-    pub delegation_manager: Option<String>,
-    pub delegatee_sk: Option<String>,
+    pub session_manager: Option<String>,
+    pub session_sk: Option<String>,
     #[serde(rename = "bind")]
     pub http_addr: String,
     pub endpoint_url: String,
@@ -69,29 +69,29 @@ impl TryFrom<Config> for ProcessorConfigSerialized {
     type Error = Error;
     fn try_from(config: Config) -> Result<Self> {
         // Support old version
-        let delegatee_sk: String = if let Some(sk) = config.ecdsa_key {
-            tracing::warn!("Field `ecdsa_key` is deprecated, use `delegatee_sk` instead.");
-            DelegateeSk::new_with_seckey(&sk)
-                .expect("create delegatee sk failed")
+        let session_sk: String = if let Some(sk) = config.ecdsa_key {
+            tracing::warn!("Field `ecdsa_key` is deprecated, use `session_sk` instead.");
+            SessionSk::new_with_seckey(&sk)
+                .expect("create session sk failed")
                 .dump()
-                .expect("dump delegatee sk failed")
-        } else if let Some(dk) = config.delegation_manager {
-            tracing::warn!("Field `delegation_manager` is deprecated, use `delegatee_sk` instead.");
+                .expect("dump session sk failed")
+        } else if let Some(dk) = config.session_manager {
+            tracing::warn!("Field `session_manager` is deprecated, use `session_sk` instead.");
             dk
         } else {
-            config.delegatee_sk.expect("delegatee_sk is not set.")
+            config.session_sk.expect("session_sk is not set.")
         };
         if let Some(ext_ip) = config.external_ip {
             Ok(Self::new_with_ext_addr(
                 config.ice_servers,
-                delegatee_sk,
+                session_sk,
                 config.stabilize_timeout,
                 ext_ip,
             ))
         } else {
             Ok(Self::new(
                 config.ice_servers,
-                delegatee_sk,
+                session_sk,
                 config.stabilize_timeout,
             ))
         }
@@ -107,15 +107,15 @@ impl TryFrom<Config> for ProcessorConfig {
 
 impl Config {
     pub fn new_with_key(key: SecretKey) -> Self {
-        let delegatee_sk = DelegateeSk::new_with_seckey(&key)
-            .expect("create delegatee sk failed")
+        let session_sk = SessionSk::new_with_seckey(&key)
+            .expect("create session sk failed")
             .dump()
-            .expect("dump delegatee sk failed");
+            .expect("dump session sk failed");
 
         Self {
             ecdsa_key: None,
-            delegation_manager: None,
-            delegatee_sk: Some(delegatee_sk),
+            session_manager: None,
+            session_sk: Some(session_sk),
             http_addr: DEFAULT_BIND_ADDRESS.to_string(),
             endpoint_url: DEFAULT_ENDPOINT_URL.to_string(),
             ice_servers: DEFAULT_ICE_SERVERS.to_string(),
@@ -201,7 +201,7 @@ mod tests {
     #[test]
     fn test_deserialization_with_missed_field() {
         let yaml = r#"
-delegatee_sk: delegatee_sk
+session_sk: session_sk
 bind: 127.0.0.1:50000
 endpoint_url: http://127.0.0.1:50000
 ice_servers: stun://stun.l.google.com:19302

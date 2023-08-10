@@ -184,7 +184,7 @@ impl TransportHandshake for Swarm {
         // The invoker should fix it before sending if it is not a direct message.
         let payload = MessagePayload::new_send(
             Message::ConnectNodeSend(offer_msg),
-            self.delegatee_sk(),
+            self.session_sk(),
             self.did(),
             self.did(),
         )?;
@@ -216,7 +216,7 @@ impl TransportHandshake for Swarm {
         // The invoker should fix it before sending if it is not a direct message.
         let answer_payload = MessagePayload::new_send(
             Message::ConnectNodeReport(answer_msg),
-            self.delegatee_sk(),
+            self.session_sk(),
             self.did(),
             self.did(),
         )?;

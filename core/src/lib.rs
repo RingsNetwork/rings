@@ -11,9 +11,9 @@
 //!
 //! 1. Handshake
 //! - Node A create a new transport via `swarm.new_transport()` and generate the handshake SDP
-//!   with `transport.get_handshake_info(delegatee_sk, offer)` and send it to node B.
+//!   with `transport.get_handshake_info(session_sk, offer)` and send it to node B.
 //! - Node B accept the offer with `transport.register_remote_info(offer)` and response with Answer via
-//!   `transport.get_handshake_info(delegatee_sk, offer)`.
+//!   `transport.get_handshake_info(session_sk, offer)`.
 //! - Node A accept the answer and wait until the connection creation.
 //! 2. Join Ring
 //! - After the connection creation, node A will ask node B for a successor.
@@ -24,7 +24,7 @@
 //!
 //! # MessagePayload
 //!
-//! MSRP over WebRTC Data Channel is Published in Jan/2021, which is based on The Message Delegation Relay Protocol and its extension.
+//! MSRP over WebRTC Data Channel is Published in Jan/2021, which is based on The Message Session Relay Protocol and its extension.
 //!
 //! To implement MSRP over WebRTC, it's necessary to handle SCTP transport of peer connection (text data channel based on SCTP).
 //! For webrtc-rs, there is already an implementation. But unfortunately, it is not widely supported in the browser environment.
@@ -42,24 +42,24 @@
 //!
 //! When node Z receives the relay message, node Z can respond without any query on DHT -- Just reverse the path.
 //!
-//! # ECDSA Delegation
+//! # ECDSA Session
 //!
-//! To avoid too frequent signing, and keep the private key safe, we implemented a delegation protocol for signing/encrypting and verifying messages.
+//! To avoid too frequent signing, and keep the private key safe, we implemented a session protocol for signing/encrypting and verifying messages.
 //!
-//! ECDSA Delegation is based on secp256k1.
-//! - ECDSA Delegation is based on secp256k1.
-//!   ECDSA Delegation creates a temporary secret key with one-time signing auth.
-//! - To create a ECDSA Delegation, we should generate the unsign_info with our pubkey (Address).
-//!   `DelegateeSk::gen_unsign_info(addr, ..)`, it will return the msg needs for signing, and a temporary private key.
-//! - Then we can sign the auth message via some web3 provider like metamask or just with a raw private key, and create the DelegationManger with
-//!   `DelegateeSk::new(sig, auth_info, temp_key)`.
+//! ECDSA Session is based on secp256k1.
+//! - ECDSA Session is based on secp256k1.
+//!   ECDSA Session creates a temporary secret key with one-time signing auth.
+//! - To create a ECDSA Session, we should generate the unsign_info with our pubkey (Address).
+//!   `SessionSk::gen_unsign_info(addr, ..)`, it will return the msg needs for signing, and a temporary private key.
+//! - Then we can sign the auth message via some web3 provider like metamask or just with a raw private key, and create the SessionManger with
+//!   `SessionSk::new(sig, auth_info, temp_key)`.
 
 //! # WASM Supported
 //! ```shell
 //! cargo build -p rings-core --target=wasm32-unknown-unknown --features wasm --no-default-features
 //! ```
 pub mod channels;
-pub mod delegation;
+pub mod session;
 pub mod dht;
 pub mod ecc;
 pub mod error;

@@ -89,7 +89,7 @@ impl Stabilization {
                 tracing::debug!("STABILIZATION notify_predecessor: {:?}", s);
                 let payload = MessagePayload::new_send(
                     msg.clone(),
-                    self.swarm.delegatee_sk(),
+                    self.swarm.session_sk(),
                     s,
                     self.swarm.did(),
                 )?;
@@ -118,7 +118,7 @@ impl Stabilization {
                     });
                     let payload = MessagePayload::new_send(
                         msg.clone(),
-                        self.swarm.delegatee_sk(),
+                        self.swarm.session_sk(),
                         closest_predecessor,
                         closest_predecessor,
                     )?;

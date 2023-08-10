@@ -79,8 +79,8 @@ pub enum Error {
     #[error("Bincode deserialization error")]
     BincodeDeserialize(#[source] bincode::Error),
 
-    #[error("Unknown delegator")]
-    UnknownDelegator,
+    #[error("Unknown account")]
+    UnknownAccount,
 
     #[error("Failed on verify message signature")]
     VerifySignatureFailed,
@@ -185,7 +185,7 @@ pub enum Error {
     SwarmToClosePrevTransport(String),
 
     #[error("call lock() failed")]
-    DelegationTryLockFailed,
+    SessionTryLockFailed,
 
     #[error("Invalid peer type")]
     InvalidPeerType,
@@ -351,8 +351,8 @@ pub enum Error {
     #[error("Error create RTC connection: {0}")]
     CreateConnectionError(String),
 
-    #[error("Delegation is expired")]
-    DelegationExpired,
+    #[error("Session is expired")]
+    SessionExpired,
 }
 
 #[cfg(feature = "wasm")]

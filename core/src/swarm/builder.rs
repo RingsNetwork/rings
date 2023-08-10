@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use crate::channels::Channel;
-use crate::delegation::DelegateeSk;
+use crate::session::SessionSk;
 use crate::dht::PeerRing;
 use crate::message::CallbackFn;
 use crate::message::MessageHandler;
@@ -25,8 +25,8 @@ pub struct SwarmBuilder {
     external_address: Option<String>,
     dht_succ_max: u8,
     dht_storage: PersistenceStorage,
-    delegatee_sk: DelegateeSk,
-    delegation_ttl: Option<usize>,
+    session_sk: SessionSk,
+    session_ttl: Option<usize>,
     measure: Option<MeasureImpl>,
     message_callback: Option<CallbackFn>,
     message_validator: Option<ValidatorFn>,
@@ -37,7 +37,7 @@ impl SwarmBuilder {
     pub fn new(
         ice_servers: &str,
         dht_storage: PersistenceStorage,
-        delegatee_sk: DelegateeSk,
+        session_sk: SessionSk,
     ) -> Self {
         let ice_servers = ice_servers
             .split(';')
@@ -53,8 +53,8 @@ impl SwarmBuilder {
             external_address: None,
             dht_succ_max: 3,
             dht_storage,
-            delegatee_sk,
-            delegation_ttl: None,
+            session_sk,
+            session_ttl: None,
             measure: None,
             message_callback: None,
             message_validator: None,
@@ -74,9 +74,9 @@ impl SwarmBuilder {
         self
     }
 
-    /// Setup timeout for delegation.
-    pub fn delegation_ttl(mut self, ttl: usize) -> Self {
-        self.delegation_ttl = Some(ttl);
+    /// Setup timeout for session.
+    pub fn session_ttl(mut self, ttl: usize) -> Self {
+        self.session_ttl = Some(ttl);
         self
     }
 
@@ -100,7 +100,7 @@ impl SwarmBuilder {
 
     /// Try build for `Swarm`.
     pub fn build(self) -> Swarm {
-        let dht_did = self.delegatee_sk.delegator_did();
+        let dht_did = self.session_sk.account_did();
 
         let dht = Arc::new(PeerRing::new_with_storage(
             dht_did,
@@ -119,7 +119,7 @@ impl SwarmBuilder {
             external_address: self.external_address,
             dht,
             measure: self.measure,
-            delegatee_sk: self.delegatee_sk,
+            session_sk: self.session_sk,
             message_handler,
         }
     }

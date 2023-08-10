@@ -12,9 +12,9 @@ pub use rings_rpc::prelude::http;
 pub use rings_rpc::prelude::jsonrpc_core;
 
 pub use self::rings_core::chunk;
-pub use self::rings_core::delegation::DelegateeSk;
-pub use self::rings_core::delegation::DelegateeSkBuilder;
-pub use self::rings_core::delegation::Delegation;
+pub use self::rings_core::session::SessionSk;
+pub use self::rings_core::session::SessionSkBuilder;
+pub use self::rings_core::session::Session;
 pub use self::rings_core::dht::PeerRing;
 pub use self::rings_core::ecc::SecretKey;
 pub use self::rings_core::message::CallbackFn;

@@ -27,7 +27,7 @@ use futures_timer::Delay;
 use serde_json::json;
 
 use crate::prelude::http;
-use crate::prelude::rings_core::delegation::DelegateeSk;
+use crate::prelude::rings_core::session::SessionSk;
 use crate::prelude::rings_core::inspect::SwarmInspect;
 use crate::prelude::rings_rpc::client::Client as RpcClient;
 use crate::prelude::rings_rpc::types::Timeout;
@@ -51,8 +51,8 @@ pub struct ClientOutput<T> {
 
 impl Client {
     /// Creates a new Client instance with the specified endpoint URL and signature.
-    pub fn new(endpoint_url: &str, delegatee_sk: DelegateeSk) -> anyhow::Result<Self> {
-        let rpc_client = RpcClient::new(endpoint_url, Some(delegatee_sk));
+    pub fn new(endpoint_url: &str, session_sk: SessionSk) -> anyhow::Result<Self> {
+        let rpc_client = RpcClient::new(endpoint_url, Some(session_sk));
         Ok(Self { client: rpc_client })
     }
 
@@ -60,7 +60,7 @@ impl Client {
     ///
     /// This function allows two peers to establish a WebRTC connection using HTTP,
     /// which can be useful in scenarios where a direct peer-to-peer connection is not possible due to firewall restrictions or other network issues.
-    /// The function sends ICE candidates and Delegation Description Protocol (SDP) messages over HTTP as a form of signaling to establish the connection.
+    /// The function sends ICE candidates and Session Description Protocol (SDP) messages over HTTP as a form of signaling to establish the connection.
     ///
     /// Takes a URL for an HTTP server that will be used as the signaling channel to exchange ICE candidates and SDP with the remote peer.
     /// Returns a transport ID that can be used to refer to this connection in subsequent WebRTC operations.

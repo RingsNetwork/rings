@@ -19,7 +19,7 @@ use super::protocols::MessageVerification;
 use crate::consts::DEFAULT_TTL_MS;
 use crate::consts::MAX_TTL_MS;
 use crate::consts::TS_OFFSET_TOLERANCE_MS;
-use crate::delegation::DelegateeSk;
+use crate::session::SessionSk;
 use crate::dht::Chord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
@@ -81,7 +81,7 @@ pub struct MessagePayload<T> {
     /// The transaction ID of payload.
     /// Remote peer should use same tx_id when response.
     pub tx_id: uuid::Uuid,
-    /// The did of payload delegator, usually it's last sender.
+    /// The did of payload account, usually it's last sender.
     pub addr: Did,
     /// Relay records the transport path of message.
     /// And can also help message sender to find the next hop.
@@ -101,7 +101,7 @@ where T: Serialize + DeserializeOwned
     /// Create new instance
     pub fn new(
         data: T,
-        delegatee_sk: &DelegateeSk,
+        session_sk: &SessionSk,
         origin_verification_gen: OriginVerificationGen,
         relay: MessageRelay,
     ) -> Result<Self> {
@@ -109,10 +109,10 @@ where T: Serialize + DeserializeOwned
         let ttl_ms = DEFAULT_TTL_MS;
         let msg = &MessageVerification::pack_msg(&data, ts_ms, ttl_ms)?;
         let tx_id = uuid::Uuid::new_v4();
-        let addr = delegatee_sk.delegator_did();
+        let addr = session_sk.account_did();
         let verification = MessageVerification {
-            delegation: delegatee_sk.delegation(),
-            sig: delegatee_sk.sign(msg)?,
+            session: session_sk.session(),
+            sig: session_sk.sign(msg)?,
             ttl_ms,
             ts_ms,
         };
@@ -135,12 +135,12 @@ where T: Serialize + DeserializeOwned
     /// Create new Payload for send
     pub fn new_send(
         data: T,
-        delegatee_sk: &DelegateeSk,
+        session_sk: &SessionSk,
         next_hop: Did,
         destination: Did,
     ) -> Result<Self> {
-        let relay = MessageRelay::new(vec![delegatee_sk.delegator_did()], next_hop, destination);
-        Self::new(data, delegatee_sk, OriginVerificationGen::Origin, relay)
+        let relay = MessageRelay::new(vec![session_sk.account_did()], next_hop, destination);
+        Self::new(data, session_sk, OriginVerificationGen::Origin, relay)
     }
 
     /// Checks whether the payload is expired.
@@ -176,7 +176,7 @@ where T: Serialize + DeserializeOwned
             return false;
         }
 
-        if Some(self.relay.origin_sender()) != self.origin_delegator_did().ok() {
+        if Some(self.relay.origin_sender()) != self.origin_account_did().ok() {
             tracing::warn!("sender is not origin_verification generator");
             return false;
         }
@@ -185,21 +185,21 @@ where T: Serialize + DeserializeOwned
     }
 
     /// Get Did from the origin verification.
-    pub fn origin_delegator_did(&self) -> Result<Did> {
+    pub fn origin_account_did(&self) -> Result<Did> {
         Ok(self
             .origin_verification
-            .delegation
-            .delegator_pubkey()?
+            .session
+            .account_pubkey()?
             .address()
             .into())
     }
 
     /// Get did from sender verification.
-    pub fn delegator_did(&self) -> Result<Did> {
+    pub fn account_did(&self) -> Result<Did> {
         Ok(self
             .verification
-            .delegation
-            .delegator_pubkey()?
+            .session
+            .account_pubkey()?
             .address()
             .into())
     }
@@ -218,12 +218,12 @@ where T: Serialize + DeserializeOwned
 
     /// Did of Sender
     pub fn sender(&self) -> Result<Did> {
-        self.delegator_did()
+        self.account_did()
     }
 
     /// Did of Origin
     pub fn origin(&self) -> Result<Did> {
-        self.origin_delegator_did()
+        self.origin_account_did()
     }
 }
 
@@ -250,8 +250,8 @@ where T: Serialize + DeserializeOwned
 pub trait PayloadSender<T>
 where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
 {
-    /// Get the delegatee sk
-    fn delegatee_sk(&self) -> &DelegateeSk;
+    /// Get the session sk
+    fn session_sk(&self) -> &SessionSk;
     /// Get access to DHT.
     fn dht(&self) -> Arc<PeerRing>;
     /// Send a message payload to a specified DID.
@@ -276,7 +276,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
     /// Send a message to a specified destination.
     async fn send_message(&self, msg: T, destination: Did) -> Result<uuid::Uuid> {
         let next_hop = self.infer_next_hop(None, destination)?;
-        let payload = MessagePayload::new_send(msg, self.delegatee_sk(), next_hop, destination)?;
+        let payload = MessagePayload::new_send(msg, self.session_sk(), next_hop, destination)?;
         self.send_payload(payload.clone()).await?;
         Ok(payload.tx_id)
     }
@@ -288,14 +288,14 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
         destination: Did,
         next_hop: Did,
     ) -> Result<uuid::Uuid> {
-        let payload = MessagePayload::new_send(msg, self.delegatee_sk(), next_hop, destination)?;
+        let payload = MessagePayload::new_send(msg, self.session_sk(), next_hop, destination)?;
         self.send_payload(payload.clone()).await?;
         Ok(payload.tx_id)
     }
 
     /// Send a direct message to a specified destination.
     async fn send_direct_message(&self, msg: T, destination: Did) -> Result<uuid::Uuid> {
-        let payload = MessagePayload::new_send(msg, self.delegatee_sk(), destination, destination)?;
+        let payload = MessagePayload::new_send(msg, self.session_sk(), destination, destination)?;
         self.send_payload(payload.clone()).await?;
         Ok(payload.tx_id)
     }
@@ -306,7 +306,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
 
         let mut pl = MessagePayload::new(
             msg,
-            self.delegatee_sk(),
+            self.session_sk(),
             OriginVerificationGen::Origin,
             relay,
         )?;
@@ -316,7 +316,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
     }
 
     /// Forward a payload message by relay.
-    /// It just create a new payload, cloned data, resigned with delegation and send
+    /// It just create a new payload, cloned data, resigned with session and send
     async fn forward_by_relay(
         &self,
         payload: &MessagePayload<T>,
@@ -324,7 +324,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
     ) -> Result<()> {
         let mut new_pl = MessagePayload::new(
             payload.data.clone(),
-            self.delegatee_sk(),
+            self.session_sk(),
             OriginVerificationGen::Stick(payload.origin_verification.clone()),
             relay,
         )?;
@@ -383,8 +383,8 @@ pub mod test {
     where T: Serialize + DeserializeOwned {
         let key = SecretKey::random();
         let destination = SecretKey::random().address().into();
-        let delegation = DelegateeSk::new_with_seckey(&key).unwrap();
-        MessagePayload::new_send(data, &delegation, next_hop, destination).unwrap()
+        let session = SessionSk::new_with_seckey(&key).unwrap();
+        MessagePayload::new_send(data, &session, next_hop, destination).unwrap()
     }
 
     #[test]

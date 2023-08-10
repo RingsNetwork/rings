@@ -6,7 +6,7 @@ use crate::dht::Chord;
 use crate::dht::Did;
 use crate::ecc::SecretKey;
 use crate::error::Result;
-use crate::delegation::DelegateeSk;
+use crate::session::SessionSk;
 use crate::swarm::Swarm;
 use crate::transports::manager::TransportManager;
 use crate::transports::Transport;
@@ -29,8 +29,8 @@ fn new_chord(did: Did) -> Chord {
 
 fn new_swarm(key: &SecretKey) -> Swarm {
     let stun = "stun://stun.l.google.com:19302";
-    let delegation = DelegateeSk::new_with_seckey(key).unwrap();
-    Swarm::new(stun, key.address(), delegation)
+    let session = SessionSk::new_with_seckey(key).unwrap();
+    Swarm::new(stun, key.address(), session)
 }
 
 async fn prepare_transport(channel: Option<Arc<CbChannel<TransportEvent>>>) -> Result<Transport> {
@@ -50,12 +50,12 @@ pub async fn establish_connection(transport1: &Transport, transport2: &Transport
     let key1 = SecretKey::random();
     let key2 = SecretKey::random();
 
-    let delegation1 = DelegateeSk::new_with_seckey(&key1).unwrap();
-    let delegation2 = DelegateeSk::new_with_seckey(&key2).unwrap();
+    let session1 = SessionSk::new_with_seckey(&key1).unwrap();
+    let session2 = SessionSk::new_with_seckey(&key2).unwrap();
 
     // Peer 1 try to connect peer 2
     let handshake_info1 = transport1
-        .get_handshake_info(delegation1, RtcSdpType::Offer)
+        .get_handshake_info(session1, RtcSdpType::Offer)
         .await
         .unwrap();
 
@@ -84,7 +84,7 @@ pub async fn establish_connection(transport1: &Transport, transport2: &Transport
 
     // Peer 2 create answer
     let handshake_info2 = transport2
-        .get_handshake_info(delegation2, RtcSdpType::Answer)
+        .get_handshake_info(session2, RtcSdpType::Answer)
         .await
         .unwrap();
 

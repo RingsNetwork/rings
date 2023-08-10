@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::delegation::DelegateeSk;
+use crate::session::SessionSk;
 use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::ecc::SecretKey;
@@ -23,9 +23,9 @@ pub async fn prepare_node_with_callback(
         .await
         .unwrap();
 
-    let delegatee_sk = DelegateeSk::new_with_seckey(&key).unwrap();
+    let session_sk = SessionSk::new_with_seckey(&key).unwrap();
 
-    let mut swarm_builder = SwarmBuilder::new(stun, storage, delegatee_sk);
+    let mut swarm_builder = SwarmBuilder::new(stun, storage, session_sk);
 
     if let Some(callback) = message_callback {
         swarm_builder = swarm_builder.message_callback(callback);
