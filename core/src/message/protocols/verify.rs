@@ -6,17 +6,17 @@ use std::fmt::Write;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::delegation::Delegation;
 use crate::ecc::signers;
 use crate::ecc::PublicKey;
 use crate::error::Error;
 use crate::error::Result;
-use crate::session::Session;
 
-/// Message Verification is based on session, and sig.
+/// Message Verification is based on delegation, and sig.
 /// it also included ttl time and created ts.
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct MessageVerification {
-    pub session: Session,
+    pub delegation: Delegation,
     pub ttl_ms: usize,
     pub ts_ms: u128,
     pub sig: Vec<u8>,
@@ -31,7 +31,7 @@ impl MessageVerification {
             return false;
         };
 
-        self.session
+        self.delegation
             .verify(&msg, &self.sig)
             .map_err(|e| {
                 tracing::warn!("MessageVerification verify failed: {:?}", e);
@@ -40,7 +40,7 @@ impl MessageVerification {
     }
 
     /// Recover publickey from packed message.
-    pub fn session_pubkey<T>(&self, data: &T) -> Result<PublicKey>
+    pub fn delegation_pubkey<T>(&self, data: &T) -> Result<PublicKey>
     where T: Serialize {
         let msg = self.msg(data)?;
         signers::secp256k1::recover(&msg, &self.sig)

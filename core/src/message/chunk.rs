@@ -3,9 +3,9 @@
 //! defined in RFC4917(`https://www.rfc-editor.org/rfc/rfc4975#page-9`)
 //! This chunking mechanism allows a sender to interrupt a chunk part of
 //! the way through sending it.  The ability to interrupt messages allows
-//! multiple sessions to share a TCP connection, and for large messages
+//! multiple delegations to share a TCP connection, and for large messages
 //! to be sent efficiently while not blocking other messages that share
-//! the same connection, or even the same MSRP session.
+//! the same connection, or even the same MSRP delegation.
 
 use itertools::Itertools;
 use serde::Deserialize;

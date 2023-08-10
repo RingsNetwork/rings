@@ -7,11 +7,11 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use crate::channels::Channel;
+use crate::delegation::DelegateeSk;
 use crate::dht::PeerRing;
 use crate::message::CallbackFn;
 use crate::message::MessageHandler;
 use crate::message::ValidatorFn;
-use crate::session::DelegateeSk;
 use crate::storage::MemStorage;
 use crate::storage::PersistenceStorage;
 use crate::swarm::MeasureImpl;
@@ -26,7 +26,7 @@ pub struct SwarmBuilder {
     dht_succ_max: u8,
     dht_storage: PersistenceStorage,
     delegatee_sk: DelegateeSk,
-    session_ttl: Option<usize>,
+    delegation_ttl: Option<usize>,
     measure: Option<MeasureImpl>,
     message_callback: Option<CallbackFn>,
     message_validator: Option<ValidatorFn>,
@@ -54,7 +54,7 @@ impl SwarmBuilder {
             dht_succ_max: 3,
             dht_storage,
             delegatee_sk,
-            session_ttl: None,
+            delegation_ttl: None,
             measure: None,
             message_callback: None,
             message_validator: None,
@@ -74,9 +74,9 @@ impl SwarmBuilder {
         self
     }
 
-    /// Setup timeout for session.
-    pub fn session_ttl(mut self, ttl: usize) -> Self {
-        self.session_ttl = Some(ttl);
+    /// Setup timeout for delegation.
+    pub fn delegation_ttl(mut self, ttl: usize) -> Self {
+        self.delegation_ttl = Some(ttl);
         self
     }
 

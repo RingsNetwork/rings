@@ -1,6 +1,6 @@
 //! rings-rpc client
 
-use rings_core::session::DelegateeSk;
+use rings_core::delegation::DelegateeSk;
 use serde_json::json;
 use serde_json::Value;
 

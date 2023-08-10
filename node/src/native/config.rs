@@ -45,7 +45,7 @@ where P: AsRef<std::path::Path> {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     pub ecdsa_key: Option<SecretKey>,
-    pub session_manager: Option<String>,
+    pub delegation_manager: Option<String>,
     pub delegatee_sk: Option<String>,
     #[serde(rename = "bind")]
     pub http_addr: String,
@@ -75,8 +75,8 @@ impl TryFrom<Config> for ProcessorConfigSerialized {
                 .expect("create delegatee sk failed")
                 .dump()
                 .expect("dump delegatee sk failed")
-        } else if let Some(dk) = config.session_manager {
-            tracing::warn!("Field `session_manager` is deprecated, use `delegatee_sk` instead.");
+        } else if let Some(dk) = config.delegation_manager {
+            tracing::warn!("Field `delegation_manager` is deprecated, use `delegatee_sk` instead.");
             dk
         } else {
             config.delegatee_sk.expect("delegatee_sk is not set.")
@@ -114,7 +114,7 @@ impl Config {
 
         Self {
             ecdsa_key: None,
-            session_manager: None,
+            delegation_manager: None,
             delegatee_sk: Some(delegatee_sk),
             http_addr: DEFAULT_BIND_ADDRESS.to_string(),
             endpoint_url: DEFAULT_ENDPOINT_URL.to_string(),

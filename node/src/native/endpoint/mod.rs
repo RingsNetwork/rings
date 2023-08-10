@@ -110,7 +110,7 @@ async fn jsonrpc_io_handler(
             .processor
             .swarm
             .delegatee_sk()
-            .session()
+            .delegation()
             .verify(&body, sig)
             .map_err(|e| {
                 tracing::debug!("body: {:?}", body);

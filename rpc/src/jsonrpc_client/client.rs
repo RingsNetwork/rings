@@ -7,7 +7,7 @@
 use jsonrpc_core::Error;
 use jsonrpc_core::Params;
 use jsonrpc_core::Value;
-use rings_core::session::DelegateeSk;
+use rings_core::delegation::DelegateeSk;
 
 use super::request::parse_response;
 use super::request::RequestBuilder;
@@ -25,7 +25,7 @@ pub struct SimpleClient {
 impl SimpleClient {
     /// * client: reqwest::Client handle http request.
     /// * url: remote json_server url.
-    /// * session_key: session_key for sign request.
+    /// * delegation_key: delegation_key for sign request.
     pub fn new(url: &str, delegated_sk: Option<DelegateeSk>) -> Self {
         Self {
             client: HttpClient::default(),

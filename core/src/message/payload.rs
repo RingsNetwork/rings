@@ -19,13 +19,13 @@ use super::protocols::MessageVerification;
 use crate::consts::DEFAULT_TTL_MS;
 use crate::consts::MAX_TTL_MS;
 use crate::consts::TS_OFFSET_TOLERANCE_MS;
+use crate::delegation::DelegateeSk;
 use crate::dht::Chord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::dht::PeerRingAction;
 use crate::error::Error;
 use crate::error::Result;
-use crate::session::DelegateeSk;
 use crate::utils::get_epoch_ms;
 
 /// Compresses the given data byte slice using the gzip algorithm with the specified compression level.
@@ -111,7 +111,7 @@ where T: Serialize + DeserializeOwned
         let tx_id = uuid::Uuid::new_v4();
         let addr = delegatee_sk.delegator_did();
         let verification = MessageVerification {
-            session: delegatee_sk.session(),
+            delegation: delegatee_sk.delegation(),
             sig: delegatee_sk.sign(msg)?,
             ttl_ms,
             ts_ms,
@@ -188,7 +188,7 @@ where T: Serialize + DeserializeOwned
     pub fn origin_delegator_did(&self) -> Result<Did> {
         Ok(self
             .origin_verification
-            .session
+            .delegation
             .delegator_pubkey()?
             .address()
             .into())
@@ -198,7 +198,7 @@ where T: Serialize + DeserializeOwned
     pub fn delegator_did(&self) -> Result<Did> {
         Ok(self
             .verification
-            .session
+            .delegation
             .delegator_pubkey()?
             .address()
             .into())
@@ -316,7 +316,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
     }
 
     /// Forward a payload message by relay.
-    /// It just create a new payload, cloned data, resigned with session and send
+    /// It just create a new payload, cloned data, resigned with delegation and send
     async fn forward_by_relay(
         &self,
         payload: &MessagePayload<T>,
@@ -383,8 +383,8 @@ pub mod test {
     where T: Serialize + DeserializeOwned {
         let key = SecretKey::random();
         let destination = SecretKey::random().address().into();
-        let session = DelegateeSk::new_with_seckey(&key).unwrap();
-        MessagePayload::new_send(data, &session, next_hop, destination).unwrap()
+        let delegation = DelegateeSk::new_with_seckey(&key).unwrap();
+        MessagePayload::new_send(data, &delegation, next_hop, destination).unwrap()
     }
 
     #[test]

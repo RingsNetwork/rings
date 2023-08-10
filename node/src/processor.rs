@@ -269,7 +269,7 @@ impl ProcessorBuilder {
     /// Build the [Processor].
     pub fn build(self) -> Result<Processor> {
         self.delegatee_sk
-            .session()
+            .delegation()
             .verify_self()
             .map_err(|e| Error::VerifyError(e.to_string()))?;
 

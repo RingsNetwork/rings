@@ -185,7 +185,7 @@ pub enum Error {
     SwarmToClosePrevTransport(String),
 
     #[error("call lock() failed")]
-    SessionTryLockFailed,
+    DelegationTryLockFailed,
 
     #[error("Invalid peer type")]
     InvalidPeerType,
@@ -351,8 +351,8 @@ pub enum Error {
     #[error("Error create RTC connection: {0}")]
     CreateConnectionError(String),
 
-    #[error("Session is expired")]
-    SessionExpired,
+    #[error("Delegation is expired")]
+    DelegationExpired,
 }
 
 #[cfg(feature = "wasm")]
