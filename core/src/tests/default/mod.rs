@@ -5,7 +5,7 @@ use crate::dht::PeerRing;
 use crate::ecc::SecretKey;
 use crate::error::Result;
 use crate::message::CallbackFn;
-use crate::session::DelegatedSk;
+use crate::session::SessionSk;
 use crate::storage::PersistenceStorage;
 use crate::swarm::Swarm;
 use crate::swarm::SwarmBuilder;
@@ -23,9 +23,9 @@ pub async fn prepare_node_with_callback(
         .await
         .unwrap();
 
-    let delegated_sk = DelegatedSk::new_with_seckey(&key).unwrap();
+    let session_sk = SessionSk::new_with_seckey(&key).unwrap();
 
-    let mut swarm_builder = SwarmBuilder::new(stun, storage, delegated_sk);
+    let mut swarm_builder = SwarmBuilder::new(stun, storage, session_sk);
 
     if let Some(callback) = message_callback {
         swarm_builder = swarm_builder.message_callback(callback);

@@ -21,7 +21,6 @@ use rings_node::native::config;
 use rings_node::native::endpoint::run_http_api;
 use rings_node::prelude::http;
 use rings_node::prelude::rings_core::ecc::SecretKey;
-use rings_node::prelude::DelegatedSk;
 use rings_node::prelude::PersistenceStorage;
 use rings_node::processor::Processor;
 use rings_node::processor::ProcessorBuilder;
@@ -173,10 +172,10 @@ struct ClientArgs {
 impl ClientArgs {
     async fn new_client(&self) -> anyhow::Result<Client> {
         let c = config::Config::read_fs(self.config_args.config.as_str())?;
-        let process_config: ProcessorConfig = c.clone().into();
+        let process_config: ProcessorConfig = c.clone().try_into()?;
         let endpoint_url = self.endpoint_url.as_ref().unwrap_or(&c.endpoint_url);
-        let delegated_sk = DelegatedSk::from_str(&process_config.delegated_sk)?;
-        Client::new(endpoint_url.as_str(), delegated_sk)
+        let session_sk = process_config.session_sk();
+        Client::new(endpoint_url.as_str(), session_sk)
     }
 }
 
@@ -379,7 +378,7 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
         c.http_addr = http_addr;
     }
 
-    let pc = ProcessorConfig::from(c.clone());
+    let pc = ProcessorConfig::try_from(c.clone())?;
 
     let (data_storage, measure_storage) = if let Some(storage_path) = args.storage_path {
         let storage_path = Path::new(&storage_path);
@@ -410,7 +409,7 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     let backend_service_names = backend.service_names();
 
     let processor = Arc::new(
-        ProcessorBuilder::from_config(serde_yaml::to_string(&pc)?)?
+        ProcessorBuilder::from_config(&pc)?
             .storage(per_data_storage)
             .measure(measure)
             .message_callback(Box::new(backend))

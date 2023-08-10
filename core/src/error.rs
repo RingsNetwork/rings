@@ -79,8 +79,8 @@ pub enum Error {
     #[error("Bincode deserialization error")]
     BincodeDeserialize(#[source] bincode::Error),
 
-    #[error("Unknown authorizer")]
-    UnknownAuthorizer,
+    #[error("Unknown account")]
+    UnknownAccount,
 
     #[error("Failed on verify message signature")]
     VerifySignatureFailed,

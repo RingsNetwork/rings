@@ -11,8 +11,9 @@ use crate::backend::service::http_server::HiddenServerConfig;
 use crate::error::Error;
 use crate::error::Result;
 use crate::prelude::rings_core::ecc::SecretKey;
-use crate::prelude::DelegatedSk;
+use crate::prelude::SessionSk;
 use crate::processor::ProcessorConfig;
+use crate::processor::ProcessorConfigSerialized;
 
 lazy_static::lazy_static! {
   static ref DEFAULT_DATA_STORAGE_CONFIG: StorageConfig = StorageConfig {
@@ -45,7 +46,7 @@ where P: AsRef<std::path::Path> {
 pub struct Config {
     pub ecdsa_key: Option<SecretKey>,
     pub session_manager: Option<String>,
-    pub delegated_sk: Option<String>,
+    pub session_sk: Option<String>,
     #[serde(rename = "bind")]
     pub http_addr: String,
     pub endpoint_url: String,
@@ -64,42 +65,57 @@ pub struct Config {
     pub extension: ExtensionConfig,
 }
 
-impl<T: Into<Config>> From<T> for ProcessorConfig {
-    fn from(cfg: T) -> Self {
-        let config: Config = cfg.into();
+impl TryFrom<Config> for ProcessorConfigSerialized {
+    type Error = Error;
+    fn try_from(config: Config) -> Result<Self> {
         // Support old version
-        let delegated_sk = if let Some(sk) = config.ecdsa_key {
-            tracing::warn!("Field `ecdsa_key` is deprecated, use `delegated_sk` instead.");
-            DelegatedSk::new_with_seckey(&sk)
-                .expect("create delegated sk failed")
+        let session_sk: String = if let Some(sk) = config.ecdsa_key {
+            tracing::warn!("Field `ecdsa_key` is deprecated, use `session_sk` instead.");
+            SessionSk::new_with_seckey(&sk)
+                .expect("create session sk failed")
                 .dump()
-                .expect("dump delegated sk failed")
+                .expect("dump session sk failed")
         } else if let Some(dk) = config.session_manager {
-            tracing::warn!("Field `session_manager` is deprecated, use `delegated_sk` instead.");
+            tracing::warn!("Field `session_manager` is deprecated, use `session_sk` instead.");
             dk
         } else {
-            config.delegated_sk.expect("delegated_sk is not set.")
+            config.session_sk.expect("session_sk is not set.")
         };
-        Self {
-            ice_servers: config.ice_servers.clone(),
-            external_address: config.external_ip.clone(),
-            delegated_sk,
-            stabilize_timeout: config.stabilize_timeout,
+        if let Some(ext_ip) = config.external_ip {
+            Ok(Self::new_with_ext_addr(
+                config.ice_servers,
+                session_sk,
+                config.stabilize_timeout,
+                ext_ip,
+            ))
+        } else {
+            Ok(Self::new(
+                config.ice_servers,
+                session_sk,
+                config.stabilize_timeout,
+            ))
         }
+    }
+}
+
+impl TryFrom<Config> for ProcessorConfig {
+    type Error = Error;
+    fn try_from(config: Config) -> Result<Self> {
+        ProcessorConfigSerialized::try_from(config).and_then(Self::try_from)
     }
 }
 
 impl Config {
     pub fn new_with_key(key: SecretKey) -> Self {
-        let delegated_sk = DelegatedSk::new_with_seckey(&key)
-            .expect("create delegated sk failed")
+        let session_sk = SessionSk::new_with_seckey(&key)
+            .expect("create session sk failed")
             .dump()
-            .expect("dump delegated sk failed");
+            .expect("dump session sk failed");
 
         Self {
             ecdsa_key: None,
             session_manager: None,
-            delegated_sk: Some(delegated_sk),
+            session_sk: Some(session_sk),
             http_addr: DEFAULT_BIND_ADDRESS.to_string(),
             endpoint_url: DEFAULT_ENDPOINT_URL.to_string(),
             ice_servers: DEFAULT_ICE_SERVERS.to_string(),
@@ -185,7 +201,7 @@ mod tests {
     #[test]
     fn test_deserialization_with_missed_field() {
         let yaml = r#"
-delegated_sk: delegated_sk
+session_sk: session_sk
 bind: 127.0.0.1:50000
 endpoint_url: http://127.0.0.1:50000
 ice_servers: stun://stun.l.google.com:19302

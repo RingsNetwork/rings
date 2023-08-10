@@ -57,6 +57,7 @@ use crate::prelude::web_sys::RtcIceConnectionState;
 use crate::prelude::CallbackFn;
 use crate::processor::Processor;
 use crate::processor::ProcessorBuilder;
+use crate::processor::ProcessorConfig;
 
 /// AddressType enum contains `DEFAULT` and `ED25519`.
 #[wasm_export]
@@ -81,37 +82,10 @@ pub struct Client {
     handler: Arc<HandlerType>,
 }
 
-#[wasm_export]
+#[allow(dead_code)]
 impl Client {
-    /// Creat a new client instance.
-    pub fn new_client(
-        config: String,
-        callback: Option<MessageCallbackInstance>,
-    ) -> js_sys::Promise {
-        Self::new_client_with_storage(config, callback, "rings-node".to_string())
-    }
-
-    /// get self web3 address
-    #[wasm_bindgen(getter)]
-    pub fn address(&self) -> Result<String, JsError> {
-        Ok(self.processor.did().into_token().to_string())
-    }
-
-    pub fn new_client_with_storage(
-        config: String,
-        callback: Option<MessageCallbackInstance>,
-        storage_name: String,
-    ) -> js_sys::Promise {
-        future_to_promise(async move {
-            let client = Self::new_client_with_storage_internal(config, callback, storage_name)
-                .await
-                .map_err(JsError::from)?;
-            Ok(JsValue::from(client))
-        })
-    }
-
     pub(crate) async fn new_client_with_storage_internal(
-        config: String,
+        config: ProcessorConfig,
         callback: Option<MessageCallbackInstance>,
         storage_name: String,
     ) -> Result<Client, error::Error> {
@@ -132,7 +106,7 @@ impl Client {
             .map_err(error::Error::Storage)?;
         let measure = PeriodicMeasure::new(ms);
 
-        let mut processor_builder = ProcessorBuilder::from_config(config)?
+        let mut processor_builder = ProcessorBuilder::from_config(&config)?
             .storage(storage)
             .measure(measure);
 
@@ -148,6 +122,64 @@ impl Client {
         Ok(Client {
             processor,
             handler: handler.into(),
+        })
+    }
+
+    pub(crate) async fn new_client_with_storage_and_serialized_config_internal(
+        config: String,
+        callback: Option<MessageCallbackInstance>,
+        storage_name: String,
+    ) -> Result<Client, error::Error> {
+        let config: ProcessorConfig = serde_yaml::from_str(&config)?;
+        Self::new_client_with_storage_internal(config, callback, storage_name).await
+    }
+}
+
+#[wasm_export]
+impl Client {
+    /// Create new client instance with serialized config (yaml/json)
+    pub fn new_client_with_serialized_config(
+        config: String,
+        callback: Option<MessageCallbackInstance>,
+    ) -> js_sys::Promise {
+        let cfg: ProcessorConfig = serde_yaml::from_str(&config).unwrap();
+        Self::new_client_with_config(cfg, callback)
+    }
+
+    /// Create new client instance with storage name and serialized config (yaml/json)
+    pub fn new_client_with_storage_and_serialized_config(
+        config: String,
+        callback: Option<MessageCallbackInstance>,
+        storage_name: String,
+    ) -> js_sys::Promise {
+        let cfg: ProcessorConfig = serde_yaml::from_str(&config).unwrap();
+        Self::new_client_with_storage(cfg, callback, storage_name)
+    }
+
+    /// Create a new client instance.
+    pub fn new_client_with_config(
+        config: ProcessorConfig,
+        callback: Option<MessageCallbackInstance>,
+    ) -> js_sys::Promise {
+        Self::new_client_with_storage(config, callback, "rings-node".to_string())
+    }
+
+    /// get self web3 address
+    #[wasm_bindgen(getter)]
+    pub fn address(&self) -> Result<String, JsError> {
+        Ok(self.processor.did().into_token().to_string())
+    }
+
+    pub fn new_client_with_storage(
+        config: ProcessorConfig,
+        callback: Option<MessageCallbackInstance>,
+        storage_name: String,
+    ) -> js_sys::Promise {
+        future_to_promise(async move {
+            let client = Self::new_client_with_storage_internal(config, callback, storage_name)
+                .await
+                .map_err(JsError::from)?;
+            Ok(JsValue::from(client))
         })
     }
 

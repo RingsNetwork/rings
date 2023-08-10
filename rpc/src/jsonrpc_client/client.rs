@@ -7,7 +7,7 @@
 use jsonrpc_core::Error;
 use jsonrpc_core::Params;
 use jsonrpc_core::Value;
-use rings_core::session::DelegatedSk;
+use rings_core::session::SessionSk;
 
 use super::request::parse_response;
 use super::request::RequestBuilder;
@@ -19,14 +19,14 @@ use crate::prelude::reqwest::Client as HttpClient;
 pub struct SimpleClient {
     client: HttpClient,
     url: String,
-    delegated_sk: Option<DelegatedSk>,
+    delegated_sk: Option<SessionSk>,
 }
 
 impl SimpleClient {
     /// * client: reqwest::Client handle http request.
     /// * url: remote json_server url.
     /// * session_key: session_key for sign request.
-    pub fn new(url: &str, delegated_sk: Option<DelegatedSk>) -> Self {
+    pub fn new(url: &str, delegated_sk: Option<SessionSk>) -> Self {
         Self {
             client: HttpClient::default(),
             url: url.to_string(),

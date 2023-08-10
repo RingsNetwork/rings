@@ -16,21 +16,24 @@ wasm_bindgen_test_configure!(run_in_browser);
 
 async fn new_client() -> (browser::Client, String) {
     let key = SecretKey::random();
-    let sm = DelegatedSk::new_with_seckey(&key).unwrap();
+    let sm = SessionSk::new_with_seckey(&key).unwrap();
 
-    let config = serde_yaml::to_string(&ProcessorConfig {
-        ice_servers: "stun://stun.l.google.com:19302".to_string(),
-        external_address: None,
-        delegated_sk: sm.dump().unwrap(),
-        stabilize_timeout: 200,
-    })
+    let config = serde_yaml::to_string(&ProcessorConfig::new(
+        "stun://stun.l.google.com:19302".to_string(),
+        sm,
+        200,
+    ))
     .unwrap();
 
     let storage_name = uuid::Uuid::new_v4().to_string();
     let client: browser::Client =
-        browser::Client::new_client_with_storage_internal(config, None, storage_name.clone())
-            .await
-            .unwrap();
+        browser::Client::new_client_with_storage_and_serialized_config_internal(
+            config,
+            None,
+            storage_name.clone(),
+        )
+        .await
+        .unwrap();
     (client, storage_name)
 }
 
