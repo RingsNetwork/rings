@@ -6,11 +6,11 @@ use std::fmt::Write;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::session::Session;
 use crate::ecc::signers;
 use crate::ecc::PublicKey;
 use crate::error::Error;
 use crate::error::Result;
+use crate::session::Session;
 
 /// Message Verification is based on session, and sig.
 /// it also included ttl time and created ts.

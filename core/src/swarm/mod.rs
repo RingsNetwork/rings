@@ -19,7 +19,6 @@ pub use types::MeasureImpl;
 pub use types::WrappedDid;
 
 use crate::channels::Channel;
-use crate::session::SessionSk;
 use crate::dht::types::Chord;
 use crate::dht::CorrectChord;
 use crate::dht::Did;
@@ -35,6 +34,7 @@ use crate::message::MessageHandler;
 use crate::message::MessageHandlerEvent;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
+use crate::session::SessionSk;
 use crate::storage::MemStorage;
 use crate::transports::manager::TransportHandshake;
 use crate::transports::manager::TransportManager;

@@ -19,13 +19,13 @@ use super::protocols::MessageVerification;
 use crate::consts::DEFAULT_TTL_MS;
 use crate::consts::MAX_TTL_MS;
 use crate::consts::TS_OFFSET_TOLERANCE_MS;
-use crate::session::SessionSk;
 use crate::dht::Chord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::dht::PeerRingAction;
 use crate::error::Error;
 use crate::error::Result;
+use crate::session::SessionSk;
 use crate::utils::get_epoch_ms;
 
 /// Compresses the given data byte slice using the gzip algorithm with the specified compression level.
@@ -196,12 +196,7 @@ where T: Serialize + DeserializeOwned
 
     /// Get did from sender verification.
     pub fn account_did(&self) -> Result<Did> {
-        Ok(self
-            .verification
-            .session
-            .account_pubkey()?
-            .address()
-            .into())
+        Ok(self.verification.session.account_pubkey()?.address().into())
     }
 
     /// Deserializes a `MessagePayload` instance from the given binary data.
@@ -304,12 +299,8 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
     async fn send_report_message(&self, payload: &MessagePayload<T>, msg: T) -> Result<()> {
         let relay = payload.relay.report(self.dht().did)?;
 
-        let mut pl = MessagePayload::new(
-            msg,
-            self.session_sk(),
-            OriginVerificationGen::Origin,
-            relay,
-        )?;
+        let mut pl =
+            MessagePayload::new(msg, self.session_sk(), OriginVerificationGen::Origin, relay)?;
         pl.tx_id = payload.tx_id;
 
         self.send_payload(pl).await

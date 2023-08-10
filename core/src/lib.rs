@@ -59,13 +59,13 @@
 //! cargo build -p rings-core --target=wasm32-unknown-unknown --features wasm --no-default-features
 //! ```
 pub mod channels;
-pub mod session;
 pub mod dht;
 pub mod ecc;
 pub mod error;
 pub mod macros;
 pub mod message;
 pub mod prelude;
+pub mod session;
 pub mod storage;
 pub mod swarm;
 #[cfg(test)]

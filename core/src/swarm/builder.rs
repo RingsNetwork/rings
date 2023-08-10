@@ -7,11 +7,11 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use crate::channels::Channel;
-use crate::session::SessionSk;
 use crate::dht::PeerRing;
 use crate::message::CallbackFn;
 use crate::message::MessageHandler;
 use crate::message::ValidatorFn;
+use crate::session::SessionSk;
 use crate::storage::MemStorage;
 use crate::storage::PersistenceStorage;
 use crate::swarm::MeasureImpl;
@@ -34,11 +34,7 @@ pub struct SwarmBuilder {
 
 impl SwarmBuilder {
     /// Creates new instance of [SwarmBuilder]
-    pub fn new(
-        ice_servers: &str,
-        dht_storage: PersistenceStorage,
-        session_sk: SessionSk,
-    ) -> Self {
+    pub fn new(ice_servers: &str, dht_storage: PersistenceStorage, session_sk: SessionSk) -> Self {
         let ice_servers = ice_servers
             .split(';')
             .collect::<Vec<&str>>()

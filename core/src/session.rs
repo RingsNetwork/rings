@@ -45,7 +45,7 @@ use rings_derive::wasm_export;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::consts::DEFAULT_SESSION_TTL_MS;
+use crate::consts::DEFAULT_DELEGATION_TTL_MS;
 use crate::dht::Did;
 use crate::ecc::signers;
 use crate::ecc::PublicKey;
@@ -139,9 +139,7 @@ impl TryFrom<(String, String)> for Account {
             "secp256k1" => Ok(Account::Secp256k1(Did::from_str(&account_entity)?)),
             "eip191" => Ok(Account::EIP191(Did::from_str(&account_entity)?)),
             "bip137" => Ok(Account::BIP137(Did::from_str(&account_entity)?)),
-            "ed25519" => Ok(Account::Ed25519(PublicKey::try_from_b58t(
-                &account_entity,
-            )?)),
+            "ed25519" => Ok(Account::Ed25519(PublicKey::try_from_b58t(&account_entity)?)),
             _ => Err(Error::UnknownAccount),
         }
     }

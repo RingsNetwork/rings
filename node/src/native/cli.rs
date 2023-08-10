@@ -27,8 +27,8 @@ use futures_timer::Delay;
 use serde_json::json;
 
 use crate::prelude::http;
-use crate::prelude::rings_core::session::SessionSk;
 use crate::prelude::rings_core::inspect::SwarmInspect;
+use crate::prelude::rings_core::session::SessionSk;
 use crate::prelude::rings_rpc::client::Client as RpcClient;
 use crate::prelude::rings_rpc::types::Timeout;
 use crate::seed::Seed;

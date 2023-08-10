@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use wasm_bindgen_test::wasm_bindgen_test_configure;
 
-use crate::session::SessionSk;
 use crate::ecc::SecretKey;
+use crate::session::SessionSk;
 use crate::storage::PersistenceStorage;
 use crate::swarm::Swarm;
 use crate::swarm::SwarmBuilder;

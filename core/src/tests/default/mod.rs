@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use crate::session::SessionSk;
 use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::ecc::SecretKey;
 use crate::error::Result;
 use crate::message::CallbackFn;
+use crate::session::SessionSk;
 use crate::storage::PersistenceStorage;
 use crate::swarm::Swarm;
 use crate::swarm::SwarmBuilder;
