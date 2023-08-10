@@ -75,7 +75,7 @@ pub struct DelegateeSk {
 /// To verify the message, use session.verify(msg, sig).
 #[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
 pub struct Session {
-    /// Did of session
+    /// Did of session, this is hash of delegateePk
     session_id: Did,
     /// Delegator of session
     delegator: Delegator,
@@ -166,6 +166,13 @@ impl DelegateeSkBuilder {
     /// Construct unsigned_info string for signing.
     pub fn unsigned_delegation(&self) -> String {
         pack_session(self.sk.address().into(), self.ts_ms, self.ttl_ms)
+    }
+
+    /// Sign delegation with a signer function.
+    pub fn sign(self, signer: Box<dyn Fn(String) -> Vec<u8>>) -> Self {
+	let unsigned_delegation = self.unsigned_delegation();
+	let sig = signer(unsigned_delegation);
+	self.set_delegation_sig(sig)
     }
 
     /// Set the signature of session that signed by delegator.
