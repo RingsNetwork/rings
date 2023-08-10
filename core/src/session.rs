@@ -45,7 +45,7 @@ use rings_derive::wasm_export;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::consts::DEFAULT_DELEGATION_TTL_MS;
+use crate::consts::DEFAULT_SESSION_TTL_MS;
 use crate::dht::Did;
 use crate::ecc::signers;
 use crate::ecc::PublicKey;
@@ -168,7 +168,7 @@ impl SessionSkBuilder {
             sk,
             account_entity,
             account_type,
-            ttl_ms: DEFAULT_DELEGATION_TTL_MS,
+            ttl_ms: DEFAULT_SESSION_TTL_MS,
             ts_ms: utils::get_epoch_ms(),
             sig: vec![],
         }
