@@ -23,7 +23,7 @@
 //! ```js
 //!    // prepare auth & send to metamask for sign
 //!    let sessionBuilder = SessionSkBuilder.new(account, 'eip191')
-//!    let unsignedSession = sessionBuilder.unsigned_session()
+//!    let unsignedSession = sessionBuilder.unsigned_proof()
 //!    const { signed } = await sendMessage(
 //!      'sign-message',
 //!      {
@@ -185,7 +185,7 @@ impl SessionSkBuilder {
     }
 
     /// Construct unsigned_info string for signing.
-    pub fn unsigned_session(&self) -> String {
+    pub fn unsigned_proof(&self) -> String {
         pack_session(self.sk.address().into(), self.ts_ms, self.ttl_ms)
     }
 
@@ -297,7 +297,7 @@ impl SessionSk {
 
         let mut builder = SessionSkBuilder::new(account_entity, account_type);
 
-        let sig = key.sign(&builder.unsigned_session());
+        let sig = key.sign(&builder.unsigned_proof());
         builder = builder.set_session_sig(sig.to_vec());
 
         builder.build()
