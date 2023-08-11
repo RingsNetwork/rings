@@ -7,7 +7,7 @@ use crate::logging::browser::init_logging;
 use crate::prelude::rings_core::ecc::SecretKey;
 use crate::prelude::rings_core::prelude::uuid;
 use crate::prelude::rings_core::storage::PersistenceStorage;
-use crate::prelude::CallbackFn;
+use crate::prelude::BoxedMessageCallback;
 use crate::prelude::DelegatedSk;
 use crate::processor::Processor;
 use crate::processor::ProcessorBuilder;
@@ -20,7 +20,7 @@ pub fn setup_log() {
     tracing::debug!("test")
 }
 
-pub async fn prepare_processor(message_callback: Option<CallbackFn>) -> Processor {
+pub async fn prepare_processor(message_callback: Option<BoxedMessageCallback>) -> Processor {
     let key = SecretKey::random();
     let sm = DelegatedSk::new_with_seckey(&key).unwrap();
 

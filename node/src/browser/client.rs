@@ -54,7 +54,7 @@ use crate::prelude::wasm_bindgen_futures::future_to_promise;
 use crate::prelude::wasm_export;
 use crate::prelude::web3::contract::tokens::Tokenizable;
 use crate::prelude::web_sys::RtcIceConnectionState;
-use crate::prelude::CallbackFn;
+use crate::prelude::BoxedMessageCallback;
 use crate::processor::Processor;
 use crate::processor::ProcessorBuilder;
 
@@ -115,7 +115,7 @@ impl Client {
         callback: Option<MessageCallbackInstance>,
         storage_name: String,
     ) -> Result<Client, error::Error> {
-        let cb: Option<CallbackFn> = match callback {
+        let cb: Option<BoxedMessageCallback> = match callback {
             Some(cb) => Some(Box::new(cb)),
             None => None,
         };

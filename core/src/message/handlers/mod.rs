@@ -13,7 +13,6 @@ use std::sync::Arc;
 use async_recursion::async_recursion;
 use async_trait::async_trait;
 
-use super::CustomMessage;
 use super::Message;
 use super::MessagePayload;
 use crate::dht::vnode::VirtualNode;
@@ -21,6 +20,8 @@ use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::error::Error;
 use crate::error::Result;
+use crate::hooks::BoxedMessageCallback;
+use crate::hooks::BoxedMessageValidator;
 use crate::message::ConnectNodeReport;
 use crate::message::ConnectNodeSend;
 
@@ -39,44 +40,6 @@ pub mod subring;
 
 /// Type alias for message payload.
 pub type Payload = MessagePayload<Message>;
-
-/// Trait of message callback.
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
-pub trait MessageCallback {
-    /// Message handler for custom message
-    async fn custom_message(
-        &self,
-        ctx: &MessagePayload<Message>,
-        msg: &CustomMessage,
-    ) -> Vec<MessageHandlerEvent>;
-    /// Message handler for builtin message
-    async fn builtin_message(&self, ctx: &MessagePayload<Message>) -> Vec<MessageHandlerEvent>;
-}
-
-/// Trait of message validator.
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
-pub trait MessageValidator {
-    /// Externality validator
-    async fn validate(&self, ctx: &MessagePayload<Message>) -> Option<String>;
-}
-
-/// Boxed Callback, for non-wasm, it should be Sized, Send and Sync.
-#[cfg(not(feature = "wasm"))]
-pub type CallbackFn = Box<dyn MessageCallback + Send + Sync>;
-
-/// Boxed Callback
-#[cfg(feature = "wasm")]
-pub type CallbackFn = Box<dyn MessageCallback>;
-
-/// Boxed Validator
-#[cfg(not(feature = "wasm"))]
-pub type ValidatorFn = Box<dyn MessageValidator + Send + Sync>;
-
-/// Boxed Validator, for non-wasm, it should be Sized, Send and Sync.
-#[cfg(feature = "wasm")]
-pub type ValidatorFn = Box<dyn MessageValidator>;
 
 type NextHop = Did;
 
@@ -131,9 +94,9 @@ pub enum MessageHandlerEvent {
 pub struct MessageHandler {
     dht: Arc<PeerRing>,
     /// CallbackFn implement `customMessage` and `builtin_message`.
-    callback: Arc<Option<CallbackFn>>,
+    callback: Arc<Option<BoxedMessageCallback>>,
     /// A specific validator implement ValidatorFn.
-    validator: Arc<Option<ValidatorFn>>,
+    validator: Arc<Option<BoxedMessageValidator>>,
 }
 
 /// Generic trait for handle message ,inspired by Actor-Model.
@@ -152,8 +115,8 @@ impl MessageHandler {
     /// Create a new MessageHandler Instance.
     pub fn new(
         dht: Arc<PeerRing>,
-        callback: Option<CallbackFn>,
-        validator: Option<ValidatorFn>,
+        callback: Option<BoxedMessageCallback>,
+        validator: Option<BoxedMessageValidator>,
     ) -> Self {
         Self {
             dht,
@@ -245,6 +208,8 @@ pub mod tests {
     use super::*;
     use crate::dht::Did;
     use crate::ecc::SecretKey;
+    use crate::hooks::MessageCallback;
+    use crate::message::CustomMessage;
     use crate::message::PayloadSender;
     use crate::swarm::Swarm;
     use crate::tests::default::prepare_node_with_callback;
@@ -291,11 +256,9 @@ pub mod tests {
         let msg_callback2 = MessageCallbackInstance {
             handler_messages: Arc::new(Mutex::new(vec![])),
         };
-        let cb1: CallbackFn = Box::new(msg_callback1.clone());
-        let cb2: CallbackFn = Box::new(msg_callback2.clone());
 
-        let (node1, _path1) = prepare_node_with_callback(key1, Some(cb1)).await;
-        let (node2, _path2) = prepare_node_with_callback(key2, Some(cb2)).await;
+        let (node1, _path1) = prepare_node_with_callback(key1, Some(msg_callback1.boxed())).await;
+        let (node2, _path2) = prepare_node_with_callback(key2, Some(msg_callback2.boxed())).await;
 
         manually_establish_connection(&node1, &node2).await?;
 

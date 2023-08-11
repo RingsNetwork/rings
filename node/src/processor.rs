@@ -46,7 +46,7 @@ use crate::prelude::rings_rpc::response;
 use crate::prelude::rings_rpc::types::HttpRequest;
 use crate::prelude::rings_rpc::types::Timeout;
 use crate::prelude::vnode;
-use crate::prelude::CallbackFn;
+use crate::prelude::BoxedMessageCallback;
 use crate::prelude::ChordStorageInterface;
 use crate::prelude::ChordStorageInterfaceCacheChecker;
 use crate::prelude::CustomMessage;
@@ -73,7 +73,7 @@ pub struct ProcessorBuilder {
     delegated_sk: DelegatedSk,
     storage: Option<PersistenceStorage>,
     measure: Option<MeasureImpl>,
-    message_callback: Option<CallbackFn>,
+    message_callback: Option<BoxedMessageCallback>,
     stabilize_timeout: usize,
 }
 
@@ -119,7 +119,7 @@ impl ProcessorBuilder {
     }
 
     /// Set the message callback for the processor.
-    pub fn message_callback(mut self, callback: CallbackFn) -> Self {
+    pub fn message_callback(mut self, callback: BoxedMessageCallback) -> Self {
         self.message_callback = Some(callback);
         self
     }

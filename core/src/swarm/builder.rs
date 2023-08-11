@@ -8,9 +8,9 @@ use std::sync::Mutex;
 
 use crate::channels::Channel;
 use crate::dht::PeerRing;
-use crate::message::CallbackFn;
+use crate::hooks::BoxedMessageCallback;
+use crate::hooks::BoxedMessageValidator;
 use crate::message::MessageHandler;
-use crate::message::ValidatorFn;
 use crate::session::DelegatedSk;
 use crate::storage::MemStorage;
 use crate::storage::PersistenceStorage;
@@ -28,8 +28,8 @@ pub struct SwarmBuilder {
     delegated_sk: DelegatedSk,
     session_ttl: Option<usize>,
     measure: Option<MeasureImpl>,
-    message_callback: Option<CallbackFn>,
-    message_validator: Option<ValidatorFn>,
+    message_callback: Option<BoxedMessageCallback>,
+    message_validator: Option<BoxedMessageValidator>,
 }
 
 impl SwarmBuilder {
@@ -87,13 +87,13 @@ impl SwarmBuilder {
     }
 
     /// Bind message callback function for Swarm.
-    pub fn message_callback(mut self, callback: CallbackFn) -> Self {
+    pub fn message_callback(mut self, callback: BoxedMessageCallback) -> Self {
         self.message_callback = Some(callback);
         self
     }
 
     /// Bind message vilidator function implementation for Swarm.
-    pub fn message_validator(mut self, validator: ValidatorFn) -> Self {
+    pub fn message_validator(mut self, validator: BoxedMessageValidator) -> Self {
         self.message_validator = Some(validator);
         self
     }

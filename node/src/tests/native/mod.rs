@@ -1,12 +1,12 @@
 use crate::prelude::rings_core::ecc::SecretKey;
 use crate::prelude::rings_core::storage::PersistenceStorage;
-use crate::prelude::CallbackFn;
+use crate::prelude::BoxedMessageCallback;
 use crate::prelude::DelegatedSk;
 use crate::processor::Processor;
 use crate::processor::ProcessorBuilder;
 use crate::processor::ProcessorConfig;
 
-pub async fn prepare_processor(message_callback: Option<CallbackFn>) -> (Processor, String) {
+pub async fn prepare_processor(message_callback: Option<BoxedMessageCallback>) -> (Processor, String) {
     let key = SecretKey::random();
     let sm = DelegatedSk::new_with_seckey(&key).unwrap();
 

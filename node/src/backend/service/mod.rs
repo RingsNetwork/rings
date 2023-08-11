@@ -1,6 +1,6 @@
 #![allow(clippy::ptr_offset_with_cast)]
 #![warn(missing_docs)]
-//! An Backend HTTP service handle custom message from `MessageHandler` as CallbackFn.
+//! An Backend HTTP service handle custom message from `MessageHandler` as BoxedMessageCallback.
 pub mod http_server;
 pub mod tcp_server;
 pub mod text;

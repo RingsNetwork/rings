@@ -4,7 +4,7 @@ use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::ecc::SecretKey;
 use crate::error::Result;
-use crate::message::CallbackFn;
+use crate::hooks::BoxedMessageCallback;
 use crate::session::DelegatedSk;
 use crate::storage::PersistenceStorage;
 use crate::swarm::Swarm;
@@ -15,7 +15,7 @@ mod test_stabilization;
 
 pub async fn prepare_node_with_callback(
     key: SecretKey,
-    message_callback: Option<CallbackFn>,
+    message_callback: Option<BoxedMessageCallback>,
 ) -> (Arc<Swarm>, String) {
     let stun = "stun://stun.l.google.com:19302";
     let path = PersistenceStorage::random_path("./tmp");
