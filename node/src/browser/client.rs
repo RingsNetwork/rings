@@ -140,25 +140,28 @@ impl Client {
 
 #[wasm_export]
 impl Client {
-    pub async fn new(
+    pub fn new(
         ice_servers: String,
         stabilize_timeout: usize,
         account: String,
         account_type: String,
         signer: js_sys::Function,
         callback: Option<MessageCallbackInstance>,
-    ) -> Result<Client, error::Error> {
+    //) -> Result<Client, error::Error> {
+    ) -> js_sys::Promise {
         let mut sk_builder = SessionSkBuilder::new(account, account_type);
         let proof = sk_builder.unsigned_proof();
         let sig: js_sys::Uint8Array = Uint8Array::from(
             signer
                 .call1(&JsValue::NULL, &JsValue::from_str(&proof))
-                .map_err(|e| error::Error::ExternalError(format!("{:?}", e)))?,
+                .map_err(|e| error::Error::ExternalError(format!("{:?}", e))).unwrap(),
         );
         sk_builder = sk_builder.set_session_sig(sig.to_vec());
-        let session_sk = sk_builder.build()?;
+        let session_sk = sk_builder.build().unwrap();
         let config = ProcessorConfig::new(ice_servers, session_sk, stabilize_timeout);
-        Self::new_client_with_storage_internal(config, callback, "rings-node".to_string()).await
+	future_to_promise(async move {
+            Ok(JsValue::from(Self::new_client_with_storage_internal(config, callback, "rings-node".to_string()).await.unwrap()))
+	})
     }
 
     /// Create new client instance with serialized config (yaml/json)
