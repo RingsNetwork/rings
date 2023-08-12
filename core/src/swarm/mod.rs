@@ -25,6 +25,7 @@ use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::error::Error;
 use crate::error::Result;
+use crate::hooks::BoxedTransportCallback;
 use crate::inspect::SwarmInspect;
 use crate::message;
 use crate::message::types::NotifyPredecessorSend;
@@ -63,6 +64,7 @@ pub struct Swarm {
     /// Implementationof measurement.
     pub(crate) measure: Option<MeasureImpl>,
     delegated_sk: DelegatedSk,
+    transport_callback: Option<Arc<BoxedTransportCallback>>,
     message_handler: MessageHandler,
 }
 

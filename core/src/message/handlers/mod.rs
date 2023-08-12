@@ -94,9 +94,9 @@ pub enum MessageHandlerEvent {
 pub struct MessageHandler {
     dht: Arc<PeerRing>,
     /// CallbackFn implement `customMessage` and `builtin_message`.
-    callback: Arc<Option<BoxedMessageCallback>>,
+    callback: Option<Arc<BoxedMessageCallback>>,
     /// A specific validator implement ValidatorFn.
-    validator: Arc<Option<BoxedMessageValidator>>,
+    validator: Option<Arc<BoxedMessageValidator>>,
 }
 
 /// Generic trait for handle message ,inspired by Actor-Model.
@@ -120,14 +120,14 @@ impl MessageHandler {
     ) -> Self {
         Self {
             dht,
-            callback: Arc::new(callback),
-            validator: Arc::new(validator),
+            callback: callback.map(Arc::new),
+            validator: validator.map(Arc::new),
         }
     }
 
     /// Invoke callback, which will be call after builtin handler.
     async fn invoke_callback(&self, payload: &MessagePayload<Message>) -> Vec<MessageHandlerEvent> {
-        if let Some(ref cb) = *self.callback {
+        if let Some(ref cb) = self.callback {
             match payload.data {
                 Message::CustomMessage(ref msg) => {
                     if self.dht.did == payload.relay.destination {
@@ -147,7 +147,7 @@ impl MessageHandler {
 
     /// Validate message.
     async fn validate(&self, payload: &MessagePayload<Message>) -> Result<()> {
-        if let Some(ref v) = *self.validator {
+        if let Some(ref v) = self.validator {
             v.validate(payload)
                 .await
                 .map(|info| Err(Error::InvalidMessage(info)))
@@ -257,8 +257,10 @@ pub mod tests {
             handler_messages: Arc::new(Mutex::new(vec![])),
         };
 
-        let (node1, _path1) = prepare_node_with_callback(key1, Some(msg_callback1.boxed())).await;
-        let (node2, _path2) = prepare_node_with_callback(key2, Some(msg_callback2.boxed())).await;
+        let (node1, _path1) =
+            prepare_node_with_callback(key1, Some(msg_callback1.clone().boxed())).await;
+        let (node2, _path2) =
+            prepare_node_with_callback(key2, Some(msg_callback2.clone().boxed())).await;
 
         manually_establish_connection(&node1, &node2).await?;
 

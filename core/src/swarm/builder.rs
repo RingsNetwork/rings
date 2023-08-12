@@ -10,6 +10,7 @@ use crate::channels::Channel;
 use crate::dht::PeerRing;
 use crate::hooks::BoxedMessageCallback;
 use crate::hooks::BoxedMessageValidator;
+use crate::hooks::BoxedTransportCallback;
 use crate::message::MessageHandler;
 use crate::session::DelegatedSk;
 use crate::storage::MemStorage;
@@ -28,6 +29,7 @@ pub struct SwarmBuilder {
     delegated_sk: DelegatedSk,
     session_ttl: Option<usize>,
     measure: Option<MeasureImpl>,
+    transport_callback: Option<BoxedTransportCallback>,
     message_callback: Option<BoxedMessageCallback>,
     message_validator: Option<BoxedMessageValidator>,
 }
@@ -56,6 +58,7 @@ impl SwarmBuilder {
             delegated_sk,
             session_ttl: None,
             measure: None,
+            transport_callback: None,
             message_callback: None,
             message_validator: None,
         }
@@ -83,6 +86,12 @@ impl SwarmBuilder {
     /// Bind measurement function for Swarm.
     pub fn measure(mut self, implement: MeasureImpl) -> Self {
         self.measure = Some(implement);
+        self
+    }
+
+    /// Bind message callback function for Swarm.
+    pub fn transport_callback(mut self, callback: BoxedTransportCallback) -> Self {
+        self.transport_callback = Some(callback);
         self
     }
 
@@ -120,6 +129,7 @@ impl SwarmBuilder {
             dht,
             measure: self.measure,
             delegated_sk: self.delegated_sk,
+            transport_callback: self.transport_callback.map(Arc::new),
             message_handler,
         }
     }

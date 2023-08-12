@@ -31,6 +31,7 @@ use crate::consts::TRANSPORT_MTU;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
+use crate::hooks::BoxedTransportCallback;
 use crate::transports::helper::Promise;
 use crate::types::channel::Channel;
 use crate::types::channel::TransportEvent;
@@ -60,6 +61,7 @@ pub struct DefaultTransport {
     event_sender: EventSender,
     remote_did: Arc<AsyncRwLock<Option<Did>>>,
     chunk_list: Arc<FuturesMutex<ChunkList<TRANSPORT_MTU>>>,
+    transport_callback: Option<Arc<BoxedTransportCallback>>,
 }
 
 impl PartialEq for DefaultTransport {
@@ -141,7 +143,7 @@ impl IceTransport for DefaultTransport {
 impl IceTransportInterface<TransportEvent, AcChannel<TransportEvent>> for DefaultTransport {
     type IceConnectionState = RTCIceConnectionState;
 
-    fn new(event_sender: EventSender) -> Self {
+    fn new(event_sender: EventSender, callback: Option<Arc<BoxedTransportCallback>>) -> Self {
         Self {
             id: uuid::Uuid::new_v4(),
             connection: Arc::new(FuturesMutex::new(None)),
@@ -150,6 +152,7 @@ impl IceTransportInterface<TransportEvent, AcChannel<TransportEvent>> for Defaul
             event_sender,
             remote_did: Arc::new(AsyncRwLock::new(None)),
             chunk_list: Default::default(),
+            transport_callback: callback,
         }
     }
 
@@ -304,11 +307,16 @@ impl IceTransportCallback for DefaultTransport {
         let event_sender = self.event_sender.clone();
         let id = self.id;
         let remote_did = self.remote_did.clone();
+        let transport_callback = self.transport_callback.clone();
         Box::new(move |cs: RTCIceConnectionState| {
             let event_sender = event_sender.clone();
             let id = id;
             let remote_did = remote_did.clone();
+            let transport_callback = transport_callback.clone();
             Box::pin(async move {
+                if let Some(ref cb) = transport_callback {
+                    cb.on_ice_connection_state_change(cs).await;
+                }
                 match cs {
                     RTCIceConnectionState::Connected => {
                         let remote_did = remote_did.read().await.unwrap();
@@ -626,7 +634,7 @@ pub mod tests {
 
     async fn prepare_transport() -> Result<(Transport, Receiver<TransportEvent>)> {
         let ch = Arc::new(AcChannel::new());
-        let mut trans = Transport::new(ch.sender());
+        let mut trans = Transport::new(ch.sender(), None);
 
         let stun = IceServer::from_str("stun://stun.l.google.com:19302").unwrap();
         trans

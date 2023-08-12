@@ -55,7 +55,7 @@ impl TransportManager for Swarm {
 
     async fn new_transport(&self) -> Result<Self::Transport> {
         let event_sender = self.transport_event_channel.sender();
-        let mut ice_transport = Transport::new(event_sender);
+        let mut ice_transport = Transport::new(event_sender, self.transport_callback.clone());
         ice_transport
             .start(self.ice_servers.clone(), self.external_address.clone())
             .await?

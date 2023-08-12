@@ -10,6 +10,7 @@ use serde::Serialize;
 pub use self::ice_server::IceServer;
 use crate::dht::Did;
 use crate::error::Result;
+use crate::hooks::BoxedTransportCallback;
 use crate::types::channel::Channel;
 
 /// Struct From [webrtc-rs](https://docs.rs/webrtc/latest/webrtc/ice_transport/ice_candidate/struct.RTCIceCandidateInit.html)
@@ -58,7 +59,7 @@ pub trait IceTransport {
 pub trait IceTransportInterface<E: Send, Ch: Channel<E>> {
     type IceConnectionState;
 
-    fn new(event_sender: Ch::Sender) -> Self;
+    fn new(event_sender: Ch::Sender, callback: Option<Arc<BoxedTransportCallback>>) -> Self;
     async fn start(&mut self, addr: Vec<IceServer>, external_id: Option<String>) -> Result<&Self>;
     async fn apply_callback(&self) -> Result<&Self>;
     async fn close(&self) -> Result<()>;
