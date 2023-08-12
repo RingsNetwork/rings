@@ -157,10 +157,7 @@ impl TryFrom<ProcessorConfig> for ProcessorConfigSerialized {
         Ok(Self {
             ice_servers: ins.ice_servers.clone(),
             external_address: ins.external_address.clone(),
-            session_sk: ins
-                .session_sk
-                .dump()
-                .map_err(|e| Error::CoreError(e.to_string()))?,
+            session_sk: ins.session_sk.dump()?,
             stabilize_timeout: ins.stabilize_timeout,
         })
     }
@@ -172,8 +169,7 @@ impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
         Ok(Self {
             ice_servers: ins.ice_servers.clone(),
             external_address: ins.external_address.clone(),
-            session_sk: SessionSk::from_str(&ins.session_sk)
-                .map_err(|e| Error::CoreError(e.to_string()))?,
+            session_sk: SessionSk::from_str(&ins.session_sk)?,
             stabilize_timeout: ins.stabilize_timeout,
         })
     }

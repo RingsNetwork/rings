@@ -99,7 +99,9 @@ pub enum Error {
     #[error("verify error: {0}")]
     VerifyError(String) = 1002,
     #[error("core error: {0}")]
-    CoreError(String) = 1102,
+    CoreError(#[from] rings_core::error::Error) = 1102,
+    #[error("external singer error: {0}")]
+    ExternalError(String) = 1202,
 }
 
 impl Error {
