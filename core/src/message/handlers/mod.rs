@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use async_recursion::async_recursion;
 use async_trait::async_trait;
+use futures::lock::Mutex;
 
 use super::Message;
 use super::MessagePayload;
@@ -94,7 +95,7 @@ pub enum MessageHandlerEvent {
 pub struct MessageHandler {
     dht: Arc<PeerRing>,
     /// CallbackFn implement `customMessage` and `builtin_message`.
-    callback: Option<Arc<BoxedMessageCallback>>,
+    pub(crate) callback: Option<Arc<Mutex<BoxedMessageCallback>>>,
     /// A specific validator implement ValidatorFn.
     validator: Option<Arc<BoxedMessageValidator>>,
 }
@@ -120,7 +121,7 @@ impl MessageHandler {
     ) -> Self {
         Self {
             dht,
-            callback: callback.map(Arc::new),
+            callback: callback.map(Mutex::new).map(Arc::new),
             validator: validator.map(Arc::new),
         }
     }
@@ -128,14 +129,16 @@ impl MessageHandler {
     /// Invoke callback, which will be call after builtin handler.
     async fn invoke_callback(&self, payload: &MessagePayload<Message>) -> Vec<MessageHandlerEvent> {
         if let Some(ref cb) = self.callback {
+            let locked_cb = cb.lock().await;
+
             match payload.data {
                 Message::CustomMessage(ref msg) => {
                     if self.dht.did == payload.relay.destination {
                         tracing::debug!("INVOKE CUSTOM MESSAGE CALLBACK {}", &payload.tx_id);
-                        return cb.custom_message(payload, msg).await;
+                        return locked_cb.custom_message(payload, msg).await;
                     }
                 }
-                _ => return cb.builtin_message(payload).await,
+                _ => return locked_cb.builtin_message(payload).await,
             };
         } else if let Message::CustomMessage(ref msg) = payload.data {
             if self.dht.did == payload.relay.destination {
@@ -275,7 +278,7 @@ pub mod tests {
         println!("sending messages");
         node1
             .send_message(
-                Message::custom("Hello world 1 to 2 - 1".as_bytes())?,
+                Message::custom("Hello world 1 to 2 - 1".as_bytes()),
                 node2.did(),
             )
             .await
@@ -283,28 +286,28 @@ pub mod tests {
 
         node1
             .send_message(
-                Message::custom("Hello world 1 to 2 - 2".as_bytes())?,
+                Message::custom("Hello world 1 to 2 - 2".as_bytes()),
                 node2.did(),
             )
             .await?;
 
         node2
             .send_message(
-                Message::custom("Hello world 2 to 1 - 1".as_bytes())?,
+                Message::custom("Hello world 2 to 1 - 1".as_bytes()),
                 node1.did(),
             )
             .await?;
 
         node1
             .send_message(
-                Message::custom("Hello world 1 to 2 - 3".as_bytes())?,
+                Message::custom("Hello world 1 to 2 - 3".as_bytes()),
                 node2.did(),
             )
             .await?;
 
         node2
             .send_message(
-                Message::custom("Hello world 2 to 1 - 2".as_bytes())?,
+                Message::custom("Hello world 2 to 1 - 2".as_bytes()),
                 node1.did(),
             )
             .await?;

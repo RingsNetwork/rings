@@ -23,7 +23,9 @@ use rings_node::native::endpoint::run_http_api;
 use rings_node::prelude::http;
 use rings_node::prelude::rings_core::ecc::SecretKey;
 use rings_node::prelude::DelegatedSk;
+use rings_node::prelude::MessageCallback;
 use rings_node::prelude::PersistenceStorage;
+use rings_node::prelude::TransportCallback;
 use rings_node::processor::Processor;
 use rings_node::processor::ProcessorBuilder;
 use rings_node::processor::ProcessorConfig;
@@ -414,7 +416,8 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
         ProcessorBuilder::from_config(serde_yaml::to_string(&processor_config)?)?
             .storage(per_data_storage)
             .measure(measure)
-            .message_callback(Box::new(backend))
+            .transport_callback(backend.boxed())
+            .message_callback(backend.boxed())
             .build()?,
     );
     println!("Did: {}", processor.swarm.did());
@@ -422,7 +425,6 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     let processor_clone = processor.clone();
     let _ = futures::join!(
         processor.listen(),
-        backend.listen(),
         service_loop_register(&processor, backend_service_names),
         run_http_api(c.http_addr, processor_clone, receiver),
     );

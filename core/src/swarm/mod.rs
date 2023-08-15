@@ -69,6 +69,16 @@ pub struct Swarm {
 }
 
 impl Swarm {
+    /// Bind swarm to callback so that a callback can send_message by swarm.
+    /// Should be called before listen.
+    // TODO: Fix this hack.
+    pub async fn bind_callback(&self) {
+        if let Some(ref cb) = self.message_handler.callback {
+            let mut locked_cb = cb.lock().await;
+            locked_cb.bind(self);
+        }
+    }
+
     /// Get did of self.
     pub fn did(&self) -> Did {
         self.dht.did
@@ -450,6 +460,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Deb
 impl Swarm {
     /// Listener for native envirement, It will just launch a loop.
     pub async fn listen(self: Arc<Self>) {
+        self.bind_callback().await;
         loop {
             self.listen_once().await;
         }
@@ -460,6 +471,7 @@ impl Swarm {
 impl Swarm {
     /// Listener for browser envirement, the implementation is based on  js_sys::window.set_timeout.
     pub async fn listen(self: Arc<Self>) {
+        self.bind_callback().await;
         let func = move || {
             let this = self.clone();
             wasm_bindgen_futures::spawn_local(Box::pin(async move {

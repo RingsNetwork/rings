@@ -10,7 +10,6 @@ use crate::dht::vnode::VNodeOperation;
 use crate::dht::vnode::VirtualNode;
 use crate::dht::Did;
 use crate::dht::TopoInfo;
-use crate::error::Result;
 use crate::types::ice_transport::HandshakeInfo;
 
 /// The `Then` trait is used to associate a type with a "then" scenario.
@@ -240,7 +239,7 @@ impl std::fmt::Display for Message {
 
 impl Message {
     /// Wrap a data of message into CustomMessage.
-    pub fn custom(msg: &[u8]) -> Result<Message> {
-        Ok(Message::CustomMessage(CustomMessage(msg.to_vec())))
+    pub fn custom(msg: &[u8]) -> Message {
+        Message::CustomMessage(CustomMessage(msg.to_vec()))
     }
 }

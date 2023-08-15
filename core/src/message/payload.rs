@@ -416,14 +416,14 @@ pub mod test {
         let data = rand::thread_rng().gen::<[u8; 32]>();
 
         let data1 = data;
-        let msg1 = Message::custom(&data1).unwrap();
+        let msg1 = Message::custom(&data1);
         let payload1 = new_payload(msg1, next_hop);
         let bytes1 = payload1.to_bincode().unwrap();
         let encoded1 = payload1.encode().unwrap();
         let encoded_bytes1: Vec<u8> = encoded1.into();
 
         let data2 = data.repeat(2);
-        let msg2 = Message::custom(&data2).unwrap();
+        let msg2 = Message::custom(&data2);
         let payload2 = new_payload(msg2, next_hop);
         let bytes2 = payload2.to_bincode().unwrap();
         let encoded2 = payload2.encode().unwrap();

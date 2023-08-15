@@ -47,6 +47,7 @@ use crate::prelude::rings_rpc::types::HttpRequest;
 use crate::prelude::rings_rpc::types::Timeout;
 use crate::prelude::vnode;
 use crate::prelude::BoxedMessageCallback;
+use crate::prelude::BoxedTransportCallback;
 use crate::prelude::ChordStorageInterface;
 use crate::prelude::ChordStorageInterfaceCacheChecker;
 use crate::prelude::CustomMessage;
@@ -74,6 +75,7 @@ pub struct ProcessorBuilder {
     storage: Option<PersistenceStorage>,
     measure: Option<MeasureImpl>,
     message_callback: Option<BoxedMessageCallback>,
+    transport_callback: Option<BoxedTransportCallback>,
     stabilize_timeout: usize,
 }
 
@@ -102,6 +104,7 @@ impl ProcessorBuilder {
             storage: None,
             measure: None,
             message_callback: None,
+            transport_callback: None,
             stabilize_timeout: config.stabilize_timeout,
         })
     }
@@ -115,6 +118,12 @@ impl ProcessorBuilder {
     /// Set the measure for the processor.
     pub fn measure(mut self, implement: PeriodicMeasure) -> Self {
         self.measure = Some(Box::new(implement));
+        self
+    }
+
+    /// Set the transport callback for the processor.
+    pub fn transport_callback(mut self, callback: BoxedTransportCallback) -> Self {
+        self.transport_callback = Some(callback);
         self
     }
 
@@ -143,6 +152,10 @@ impl ProcessorBuilder {
 
         if let Some(measure) = self.measure {
             swarm_builder = swarm_builder.measure(measure);
+        }
+
+        if let Some(callback) = self.transport_callback {
+            swarm_builder = swarm_builder.transport_callback(callback);
         }
 
         if let Some(callback) = self.message_callback {
@@ -327,7 +340,7 @@ impl Processor {
         new_msg.extend_from_slice(&[0u8; 3]);
         new_msg.extend_from_slice(msg);
 
-        let msg = Message::custom(&new_msg).map_err(Error::SendMessage)?;
+        let msg = Message::custom(&new_msg);
 
         let uuid = self
             .swarm

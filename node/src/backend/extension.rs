@@ -146,7 +146,7 @@ impl MessageEndpoint for Extension {
                 let resp_bytes: bytes::Bytes = resp.into();
                 let ev = MessageHandlerEvent::SendReportMessage(
                     ctx.clone(),
-                    Message::custom(&resp_bytes).map_err(|_| Error::InvalidMessage)?,
+                    Message::custom(&resp_bytes),
                 );
                 ret.push(ev)
             }

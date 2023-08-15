@@ -5,6 +5,7 @@ use crate::message::Message;
 use crate::message::MessageHandlerEvent;
 use crate::message::MessagePayload;
 use crate::prelude::RTCIceConnectionState;
+use crate::swarm::Swarm;
 
 #[macro_export]
 macro_rules! boxed_type {
@@ -44,6 +45,8 @@ pub trait TransportCallback {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait MessageCallback {
     boxed_type!(BoxedMessageCallback);
+
+    fn bind(&mut self, _swarm: &Swarm) {}
 
     /// Message handler for custom message
     async fn custom_message(

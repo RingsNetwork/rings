@@ -2,6 +2,7 @@
 #![warn(missing_docs)]
 //! An Backend HTTP service handle custom message from `MessageHandler` as BoxedMessageCallback.
 pub mod http_server;
+pub mod proxy;
 pub mod tcp_server;
 pub mod text;
 pub mod utils;
@@ -37,6 +38,7 @@ use crate::prelude::*;
 
 /// A Backend struct.
 pub struct Backend {
+    swarm: Option<&'static Swarm>,
     http_server: Arc<HttpServer>,
     tcp_server: Arc<TcpServer>,
     text_endpoint: TextEndpoint,
@@ -75,6 +77,7 @@ impl Backend {
     /// - `ipfs_gateway`
     pub async fn new(config: BackendConfig, sender: Sender<BackendMessage>) -> Result<Self> {
         Ok(Self {
+            swarm: None,
             http_server: Arc::new(HttpServer::from(config.http_services)),
             tcp_server: Arc::new(TcpServer::new(config.tcp_services)),
             text_endpoint: TextEndpoint,
@@ -82,10 +85,6 @@ impl Backend {
             extension_endpoint: Extension::new(&config.extensions).await?,
             chunk_list: Default::default(),
         })
-    }
-
-    pub async fn listen(&self) {
-        self.tcp_server.listen().await
     }
 
     async fn handle_chunk_data(&self, data: &[u8]) -> Result<Option<Bytes>> {
@@ -160,7 +159,7 @@ impl MessageCallback for Backend {
         let result = match msg.message_type.into() {
             MessageType::SimpleText => self.text_endpoint.handle_message(ctx, &msg).await,
             MessageType::HttpRequest => self.http_server.handle_message(ctx, &msg).await,
-            MessageType::TcpInbound => self.tcp_server.handle_message(ctx, &msg).await,
+            MessageType::TunnelMessage => self.tcp_server.handle_message(ctx, &msg).await,
             MessageType::Extension => self.extension_endpoint.handle_message(ctx, &msg).await,
             _ => {
                 tracing::debug!(
