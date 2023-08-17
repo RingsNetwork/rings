@@ -163,11 +163,10 @@ impl Client {
             sk_builder = sk_builder.set_session_sig(sig.to_vec());
             let session_sk = sk_builder.build().unwrap();
             let config = ProcessorConfig::new(ice_servers, session_sk, stabilize_timeout);
-            Ok(
-                JsValue::from(
-		    Self::new_client_with_storage_internal(config, callback, "rings-node".to_string())
-			.await?)
-            )
+            Ok(JsValue::from(
+                Self::new_client_with_storage_internal(config, callback, "rings-node".to_string())
+                    .await?,
+            ))
         })
     }
 
