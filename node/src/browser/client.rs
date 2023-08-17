@@ -136,38 +136,12 @@ impl Client {
         let config: ProcessorConfig = serde_yaml::from_str(&config)?;
         Self::new_client_with_storage_internal(config, callback, storage_name).await
     }
-
-    pub async fn new(
-        ice_servers: String,
-        stabilize_timeout: usize,
-        account: String,
-        account_type: String,
-        // Signer should be `async function (proof: string): Promise<Unit8Array>`
-        signer: js_sys::Function,
-        callback: Option<MessageCallbackInstance>,
-    ) -> Result<JsValue, JsValue> {
-        let mut sk_builder = SessionSkBuilder::new(account, account_type);
-        let proof = sk_builder.unsigned_proof();
-        let sig: js_sys::Uint8Array = Uint8Array::from(
-            JsFuture::from(js_sys::Promise::from(
-                signer.call1(&JsValue::NULL, &JsValue::from_str(&proof))?,
-            ))
-            .await?,
-        );
-        sk_builder = sk_builder.set_session_sig(sig.to_vec());
-        let session_sk = sk_builder.build().unwrap();
-        let config = ProcessorConfig::new(ice_servers, session_sk, stabilize_timeout);
-        Ok(JsValue::from(
-            Self::new_client_with_storage_internal(config, callback, "rings-node".to_string())
-                .await?,
-        ))
-    }
 }
 
 #[wasm_export]
 impl Client {
     #[wasm_bindgen(constructor)]
-    pub fn new_instance(
+    pub fn new(
         ice_servers: String,
         stabilize_timeout: usize,
         account: String,
@@ -178,17 +152,25 @@ impl Client {
         //) -> Result<Client, error::Error> {
     ) -> js_sys::Promise {
         future_to_promise(async move {
-            Self::new(
-                ice_servers,
-                stabilize_timeout,
-                account,
-                account_type,
-                signer,
-                callback,
+            let mut sk_builder = SessionSkBuilder::new(account, account_type);
+            let proof = sk_builder.unsigned_proof();
+            let sig: js_sys::Uint8Array = Uint8Array::from(
+                JsFuture::from(js_sys::Promise::from(
+                    signer.call1(&JsValue::NULL, &JsValue::from_str(&proof))?,
+                ))
+                .await?,
+            );
+            sk_builder = sk_builder.set_session_sig(sig.to_vec());
+            let session_sk = sk_builder.build().unwrap();
+            let config = ProcessorConfig::new(ice_servers, session_sk, stabilize_timeout);
+            Ok(
+                JsValue::from(
+		    Self::new_client_with_storage_internal(config, callback, "rings-node".to_string())
+			.await?)
             )
-            .await
         })
     }
+
     /// Create new client instance with serialized config (yaml/json)
     pub fn new_client_with_serialized_config(
         config: String,
