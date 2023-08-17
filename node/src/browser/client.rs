@@ -141,7 +141,7 @@ impl Client {
 #[wasm_export]
 impl Client {
     #[wasm_bindgen(constructor)]
-    pub fn new(
+    pub fn new_instance(
         ice_servers: String,
         stabilize_timeout: usize,
         account: String,
