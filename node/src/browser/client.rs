@@ -7,6 +7,27 @@ use std::sync::Mutex;
 use anyhow::anyhow;
 use arrayref::array_refs;
 use bytes::Bytes;
+use rings_core::async_trait;
+use rings_core::dht::Did;
+use rings_core::ecc::PublicKey;
+use rings_core::message::CustomMessage;
+use rings_core::message::Message;
+use rings_core::message::MessageCallback;
+use rings_core::message::MessageHandlerEvent;
+use rings_core::message::MessagePayload;
+use rings_core::prelude::uuid::Uuid;
+use rings_core::prelude::vnode;
+use rings_core::prelude::vnode::VirtualNode;
+use rings_core::prelude::web3::ethabi::Token;
+use rings_core::session::SessionSkBuilder;
+use rings_core::storage::PersistenceStorage;
+use rings_core::transports::manager::TransportHandshake;
+use rings_core::transports::manager::TransportManager;
+use rings_core::types::ice_transport::IceTransportInterface;
+use rings_core::types::ice_transport::IceTrickleScheme;
+use rings_core::utils::from_rtc_ice_connection_state;
+use rings_core::utils::js_utils;
+use rings_core::utils::js_value;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -24,33 +45,15 @@ use crate::prelude::chunk::ChunkList;
 use crate::prelude::chunk::ChunkManager;
 use crate::prelude::http;
 use crate::prelude::js_sys;
+use crate::prelude::js_sys::Uint8Array;
 use crate::prelude::jsonrpc_core::types::id::Id;
 use crate::prelude::jsonrpc_core::MethodCall;
 use crate::prelude::message;
-use crate::prelude::rings_core::async_trait;
-use crate::prelude::rings_core::dht::Did;
-use crate::prelude::rings_core::ecc::PublicKey;
-use crate::prelude::rings_core::message::CustomMessage;
-use crate::prelude::rings_core::message::Message;
-use crate::prelude::rings_core::message::MessageCallback;
-use crate::prelude::rings_core::message::MessageHandlerEvent;
-use crate::prelude::rings_core::message::MessagePayload;
-use crate::prelude::rings_core::prelude::uuid::Uuid;
-use crate::prelude::rings_core::prelude::vnode;
-use crate::prelude::rings_core::prelude::vnode::VirtualNode;
-use crate::prelude::rings_core::prelude::web3::ethabi::Token;
-use crate::prelude::rings_core::storage::PersistenceStorage;
-use crate::prelude::rings_core::transports::manager::TransportHandshake;
-use crate::prelude::rings_core::transports::manager::TransportManager;
-use crate::prelude::rings_core::types::ice_transport::IceTransportInterface;
-use crate::prelude::rings_core::types::ice_transport::IceTrickleScheme;
-use crate::prelude::rings_core::utils::from_rtc_ice_connection_state;
-use crate::prelude::rings_core::utils::js_utils;
-use crate::prelude::rings_core::utils::js_value;
 use crate::prelude::wasm_bindgen;
 use crate::prelude::wasm_bindgen::prelude::*;
 use crate::prelude::wasm_bindgen_futures;
 use crate::prelude::wasm_bindgen_futures::future_to_promise;
+use crate::prelude::wasm_bindgen_futures::JsFuture;
 use crate::prelude::wasm_export;
 use crate::prelude::web3::contract::tokens::Tokenizable;
 use crate::prelude::web_sys::RtcIceConnectionState;
@@ -137,6 +140,36 @@ impl Client {
 
 #[wasm_export]
 impl Client {
+    #[wasm_bindgen(constructor)]
+    pub fn new_instance(
+        ice_servers: String,
+        stabilize_timeout: usize,
+        account: String,
+        account_type: String,
+        // Signer should be `async function (proof: string): Promise<Unit8Array>`
+        signer: js_sys::Function,
+        callback: Option<MessageCallbackInstance>,
+        //) -> Result<Client, error::Error> {
+    ) -> js_sys::Promise {
+        future_to_promise(async move {
+            let mut sk_builder = SessionSkBuilder::new(account, account_type);
+            let proof = sk_builder.unsigned_proof();
+            let sig: js_sys::Uint8Array = Uint8Array::from(
+                JsFuture::from(js_sys::Promise::from(
+                    signer.call1(&JsValue::NULL, &JsValue::from_str(&proof))?,
+                ))
+                .await?,
+            );
+            sk_builder = sk_builder.set_session_sig(sig.to_vec());
+            let session_sk = sk_builder.build().unwrap();
+            let config = ProcessorConfig::new(ice_servers, session_sk, stabilize_timeout);
+            Ok(JsValue::from(
+                Self::new_client_with_storage_internal(config, callback, "rings-node".to_string())
+                    .await?,
+            ))
+        })
+    }
+
     /// Create new client instance with serialized config (yaml/json)
     pub fn new_client_with_serialized_config(
         config: String,
@@ -144,16 +177,6 @@ impl Client {
     ) -> js_sys::Promise {
         let cfg: ProcessorConfig = serde_yaml::from_str(&config).unwrap();
         Self::new_client_with_config(cfg, callback)
-    }
-
-    /// Create new client instance with storage name and serialized config (yaml/json)
-    pub fn new_client_with_storage_and_serialized_config(
-        config: String,
-        callback: Option<MessageCallbackInstance>,
-        storage_name: String,
-    ) -> js_sys::Promise {
-        let cfg: ProcessorConfig = serde_yaml::from_str(&config).unwrap();
-        Self::new_client_with_storage(cfg, callback, storage_name)
     }
 
     /// Create a new client instance.
