@@ -19,7 +19,6 @@ use rings_core::prelude::uuid::Uuid;
 use rings_core::prelude::vnode;
 use rings_core::prelude::vnode::VirtualNode;
 use rings_core::prelude::web3::ethabi::Token;
-use rings_core::session::SessionSk;
 use rings_core::session::SessionSkBuilder;
 use rings_core::storage::PersistenceStorage;
 use rings_core::transports::manager::TransportHandshake;
@@ -54,6 +53,7 @@ use crate::prelude::wasm_bindgen;
 use crate::prelude::wasm_bindgen::prelude::*;
 use crate::prelude::wasm_bindgen_futures;
 use crate::prelude::wasm_bindgen_futures::future_to_promise;
+use crate::prelude::wasm_bindgen_futures::JsFuture;
 use crate::prelude::wasm_export;
 use crate::prelude::web3::contract::tokens::Tokenizable;
 use crate::prelude::web_sys::RtcIceConnectionState;
@@ -140,27 +140,32 @@ impl Client {
 
 #[wasm_export]
 impl Client {
+    #[wasm_bindgen(constructor)]
     pub fn new(
         ice_servers: String,
         stabilize_timeout: usize,
         account: String,
         account_type: String,
+	// Signer should be `async function (proof: string): Promise<Unit8Array>`
         signer: js_sys::Function,
         callback: Option<MessageCallbackInstance>,
     //) -> Result<Client, error::Error> {
     ) -> js_sys::Promise {
-        let mut sk_builder = SessionSkBuilder::new(account, account_type);
-        let proof = sk_builder.unsigned_proof();
-        let sig: js_sys::Uint8Array = Uint8Array::from(
-            signer
-                .call1(&JsValue::NULL, &JsValue::from_str(&proof))
-                .map_err(|e| error::Error::ExternalError(format!("{:?}", e))).unwrap(),
-        );
-        sk_builder = sk_builder.set_session_sig(sig.to_vec());
-        let session_sk = sk_builder.build().unwrap();
-        let config = ProcessorConfig::new(ice_servers, session_sk, stabilize_timeout);
 	future_to_promise(async move {
-            Ok(JsValue::from(Self::new_client_with_storage_internal(config, callback, "rings-node".to_string()).await.unwrap()))
+            let mut sk_builder = SessionSkBuilder::new(account, account_type);
+            let proof = sk_builder.unsigned_proof();
+            let sig: js_sys::Uint8Array = Uint8Array::from(
+		JsFuture::from(
+		    js_sys::Promise::from(
+			signer
+			    .call1(&JsValue::NULL, &JsValue::from_str(&proof))?
+		    )
+		).await?
+            );
+            sk_builder = sk_builder.set_session_sig(sig.to_vec());
+            let session_sk = sk_builder.build().unwrap();
+            let config = ProcessorConfig::new(ice_servers, session_sk, stabilize_timeout);
+            Ok(JsValue::from(Self::new_client_with_storage_internal(config, callback, "rings-node".to_string()).await?))
 	})
     }
 
