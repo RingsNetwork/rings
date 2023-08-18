@@ -4,8 +4,8 @@ members = ["core", "node", "rpc", "derive"]
 resolver = "2"
 
 [workspace.dependencies]
-rings-core = { version = "0.2.6", path = "core", default-features = false }
-rings-derive = { version = "0.2.6", path = "derive", default-features = false }
-rings-rpc = { version = "0.2.6", path = "rpc", default-features = false }
+rings-core = { version = "0.2.7", path = "core", default-features = false }
+rings-derive = { version = "0.2.7", path = "derive", default-features = false }
+rings-rpc = { version = "0.2.7", path = "rpc", default-features = false }
 wasm-bindgen = { version = "0.2.84" }
 wasm-bindgen-macro-support = { version = "0.2.84" }
