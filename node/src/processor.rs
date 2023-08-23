@@ -381,7 +381,7 @@ impl Processor {
 
     /// List all peers.
     pub async fn list_peers(&self) -> Result<Vec<Peer>> {
-        let transports = self.swarm.get_transports();
+        let transports = self.swarm.get_connections();
         tracing::debug!(
             "addresses: {:?}",
             transports.iter().map(|(a, _b)| a).collect::<Vec<_>>()
@@ -394,7 +394,7 @@ impl Processor {
     pub async fn get_peer(&self, did: Did) -> Result<Peer> {
         let transport = self
             .swarm
-            .get_transport(did)
+            .get_connection(did)
             .ok_or(Error::TransportNotFound)?;
         Ok(Peer::from(&(did, transport)))
     }
@@ -409,7 +409,7 @@ impl Processor {
 
     /// Disconnect all connections.
     pub async fn disconnect_all(&self) {
-        let transports = self.swarm.get_transports();
+        let transports = self.swarm.get_connections();
 
         let close_async = transports
             .iter()
@@ -851,7 +851,7 @@ mod test {
         );
         assert!(
             p1.swarm
-                .get_transport(p2.did())
+                .get_connection(p2.did())
                 .unwrap()
                 .is_connected()
                 .await,
@@ -863,7 +863,7 @@ mod test {
         );
         assert!(
             p2.swarm
-                .get_transport(p1.did())
+                .get_connection(p1.did())
                 .unwrap()
                 .is_connected()
                 .await,

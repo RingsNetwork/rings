@@ -20,7 +20,7 @@ use crate::types::channel::Channel;
 use crate::types::channel::TransportEvent;
 use crate::types::ice_transport::HandshakeInfo;
 use crate::types::ice_transport::IceServer;
-use crate::types::ice_transport::IceTransportInterface;
+use rings_transport::core::transport::SharedConnection;
 use crate::types::ice_transport::IceTrickleScheme;
 
 type EventSender = <AcChannel<TransportEvent> as Channel<TransportEvent>>::Sender;

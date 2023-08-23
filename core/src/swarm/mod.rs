@@ -1,18 +1,23 @@
 #![warn(missing_docs)]
 //! Tranposrt management
 mod builder;
+mod callback;
 mod impls;
 mod types;
 
 use std::fmt;
-use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use async_recursion::async_recursion;
 use async_trait::async_trait;
 pub use builder::SwarmBuilder;
 use rings_derive::JudgeConnection;
+#[cfg(not(feature = "wasm"))]
+use rings_transport::connections::WebrtcConnection as Connection;
+use rings_transport::core::callback::BoxedCallback;
+use rings_transport::core::transport::SharedConnection;
+use rings_transport::core::transport::TransportMessage;
+use rings_transport::Transport;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 pub use types::MeasureImpl;
@@ -35,35 +40,23 @@ use crate::message::MessageHandlerEvent;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
 use crate::session::SessionSk;
-use crate::storage::MemStorage;
-use crate::transports::manager::TransportHandshake;
-use crate::transports::manager::TransportManager;
-use crate::transports::Transport;
+use crate::swarm::impls::ConnectionHandshake;
 use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::TransportEvent;
-use crate::types::ice_transport::IceServer;
-use crate::types::ice_transport::IceTransportInterface;
-use crate::types::ice_transport::IceTrickleScheme;
 
-/// The transports and dht management.
+/// The transport and dht management.
 #[derive(JudgeConnection)]
 pub struct Swarm {
-    /// A list to for store and manage pending_transport.
-    pub(crate) pending_transports: Mutex<Vec<Arc<Transport>>>,
-    /// Connected Transports.
-    pub(crate) transports: MemStorage<Did, Arc<Transport>>,
-    /// Configuration of ice_servers, including `TURN` and `STUN` server.
-    pub(crate) ice_servers: Vec<IceServer>,
     /// Event channel for receive events from transport.
     pub(crate) transport_event_channel: Channel<TransportEvent>,
-    /// Allow setup external address for webrtc transport.
-    pub(crate) external_address: Option<String>,
     /// Reference of DHT.
     pub(crate) dht: Arc<PeerRing>,
     /// Implementationof measurement.
     pub(crate) measure: Option<MeasureImpl>,
     session_sk: SessionSk,
     message_handler: MessageHandler,
+    transport: Transport<Connection>,
+    callback: Arc<BoxedCallback<Error>>,
 }
 
 impl Swarm {
@@ -92,49 +85,26 @@ impl Swarm {
                 tracing::debug!("load message from channel: {:?}", payload);
                 Ok(Some(payload))
             }
-            TransportEvent::RegisterTransport((did, id)) => {
-                // if transport is still pending
-                if let Ok(Some(t)) = self.find_pending_transport(id) {
-                    tracing::debug!("transport is inside pending list, mov to swarm transports");
-
-                    self.register(did, t).await?;
-                    self.pop_pending_transport(id)?;
+            TransportEvent::Connected(did) => match self.get_connection(did) {
+                Some(_) => {
+                    let payload = MessagePayload::new_send(
+                        Message::JoinDHT(message::JoinDHT { did }),
+                        &self.session_sk,
+                        self.dht.did,
+                        self.dht.did,
+                    )?;
+                    Ok(Some(payload))
                 }
-                match self.get_transport(did) {
-                    Some(_) => {
-                        let payload = MessagePayload::new_send(
-                            Message::JoinDHT(message::JoinDHT { did }),
-                            &self.session_sk,
-                            self.dht.did,
-                            self.dht.did,
-                        )?;
-                        Ok(Some(payload))
-                    }
-                    None => Err(Error::SwarmMissTransport(did)),
-                }
-            }
-            TransportEvent::ConnectClosed((did, uuid)) => {
-                if self.pop_pending_transport(uuid).is_ok() {
-                    tracing::info!(
-                        "[Swarm::ConnectClosed] Pending transport {:?} dropped",
-                        uuid
-                    );
-                };
-
-                if let Some(t) = self.get_transport(did) {
-                    tracing::info!("[Swarm::ConnectClosed] removing transport {:?}", uuid);
-                    if t.id == uuid && self.remove_transport(did).is_some() {
-                        tracing::info!("[Swarm::ConnectClosed] transport {:?} closed", uuid);
-                        let payload = MessagePayload::new_send(
-                            Message::LeaveDHT(message::LeaveDHT { did }),
-                            &self.session_sk,
-                            self.dht.did,
-                            self.dht.did,
-                        )?;
-                        return Ok(Some(payload));
-                    }
-                }
-                Ok(None)
+                None => Err(Error::SwarmMissTransport(did)),
+            },
+            TransportEvent::Closed(did) => {
+                let payload = MessagePayload::new_send(
+                    Message::LeaveDHT(message::LeaveDHT { did }),
+                    &self.session_sk,
+                    self.dht.did,
+                    self.dht.did,
+                )?;
+                Ok(Some(payload))
             }
         }
     }
@@ -197,7 +167,7 @@ impl Swarm {
         match event {
             MessageHandlerEvent::Connect(did) => {
                 let did = *did;
-                if self.get_and_check_transport(did).await.is_none() && did != self.did() {
+                if self.get_and_check_connection(did).await.is_none() && did != self.did() {
                     self.connect(did).await?;
                 }
                 Ok(vec![])
@@ -212,7 +182,7 @@ impl Swarm {
 
             MessageHandlerEvent::ConnectVia(did, next) => {
                 let did = *did;
-                if self.get_and_check_transport(did).await.is_none() && did != self.did() {
+                if self.get_and_check_connection(did).await.is_none() && did != self.did() {
                     self.connect_via(did, *next).await?;
                 }
                 Ok(vec![])
@@ -225,7 +195,7 @@ impl Swarm {
 
             MessageHandlerEvent::AnswerOffer(relay, msg) => {
                 let (_, answer) = self
-                    .answer_remote_transport(relay.relay.origin_sender().to_owned(), msg)
+                    .answer_remote_connection(relay.relay.origin_sender(), msg)
                     .await?;
 
                 Ok(vec![MessageHandlerEvent::SendReportMessage(
@@ -234,22 +204,15 @@ impl Swarm {
                 )])
             }
 
-            MessageHandlerEvent::AcceptAnswer(sender, msg) => {
-                let transport = self
-                    .find_pending_transport(
-                        uuid::Uuid::from_str(&msg.transport_uuid)
-                            .map_err(|_| Error::InvalidTransportUuid)?,
-                    )?
-                    .ok_or(Error::MessageHandlerMissTransportConnectedNode)?;
-                transport
-                    .register_remote_info(&msg.answer, sender.to_owned())
+            MessageHandlerEvent::AcceptAnswer(origin_sender, msg) => {
+                self.accept_remote_connection(origin_sender.to_owned(), msg)
                     .await?;
                 Ok(vec![])
             }
 
             MessageHandlerEvent::ForwardPayload(payload, next_hop) => {
                 if self
-                    .get_and_check_transport(payload.relay.destination)
+                    .get_and_check_connection(payload.relay.destination)
                     .await
                     .is_some()
                 {
@@ -319,65 +282,23 @@ impl Swarm {
         }
     }
 
-    /// Push a pending transport to pending list.
-    pub fn push_pending_transport(&self, transport: &Arc<Transport>) -> Result<()> {
-        let mut pending = self
-            .pending_transports
-            .try_lock()
-            .map_err(|_| Error::SwarmPendingTransTryLockFailed)?;
-        pending.push(transport.to_owned());
-        Ok(())
-    }
-
-    /// Pop a pending trainsport from pending list.
-    pub fn pop_pending_transport(&self, transport_id: uuid::Uuid) -> Result<()> {
-        let mut pending = self
-            .pending_transports
-            .try_lock()
-            .map_err(|_| Error::SwarmPendingTransTryLockFailed)?;
-        let index = pending
-            .iter()
-            .position(|x| x.id.eq(&transport_id))
-            .ok_or(Error::SwarmPendingTransNotFound)?;
-        pending.remove(index);
-        Ok(())
-    }
-
-    /// List all the pending transports.
-    pub async fn pending_transports(&self) -> Result<Vec<Arc<Transport>>> {
-        let pending = self
-            .pending_transports
-            .try_lock()
-            .map_err(|_| Error::SwarmPendingTransTryLockFailed)?;
-        Ok(pending.iter().cloned().collect::<Vec<_>>())
-    }
-
-    /// Find a pending transport from pending list by uuid.
-    pub fn find_pending_transport(&self, id: uuid::Uuid) -> Result<Option<Arc<Transport>>> {
-        let pending = self
-            .pending_transports
-            .try_lock()
-            .map_err(|_| Error::SwarmPendingTransTryLockFailed)?;
-        Ok(pending.iter().find(|x| x.id.eq(&id)).cloned())
-    }
-
-    /// Disconnect a transport. There are three steps:
+    /// Disconnect a connection. There are three steps:
     /// 1) remove from DHT;
-    /// 2) remove from transport pool;
-    /// 3) close the transport connection;
+    /// 2) remove from Transport;
+    /// 3) close the connection;
     pub async fn disconnect(&self, did: Did) -> Result<()> {
         JudgeConnection::disconnect(self, did).await
     }
 
-    /// Connect a given Did. It the did is managed by swarm transport pool, return directly,
+    /// Connect a given Did. If the did is already connected, return directly,
     /// else try prepare offer and establish connection by dht.
-    /// This function may returns a pending transport or connected transport.
-    pub async fn connect(&self, did: Did) -> Result<Arc<Transport>> {
+    /// This function may returns a pending connection or connected connection.
+    pub async fn connect(&self, did: Did) -> Result<Connection> {
         JudgeConnection::connect(self, did).await
     }
 
     /// Similar to connect, but this function will try connect a Did by given hop.
-    pub async fn connect_via(&self, did: Did, next_hop: Did) -> Result<Arc<Transport>> {
+    pub async fn connect_via(&self, did: Did, next_hop: Did) -> Result<Connection> {
         JudgeConnection::connect_via(self, did, next_hop).await
     }
 
@@ -410,28 +331,26 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Deb
             println!("+++++++++++++++++++++++++++++++++");
         }
 
-        let transport = self
-            .get_and_check_transport(did)
+        let conn = self
+            .get_and_check_connection(did)
             .await
             .ok_or(Error::SwarmMissDidInTable(did))?;
 
         tracing::debug!(
-            "Try send {:?}, to node {:?} via transport {:?}",
+            "Try send {:?}, to node {:?}",
             payload.clone(),
             payload.relay.next_hop,
-            transport.id
         );
 
         let data = payload.to_bincode()?;
-
-        transport.wait_for_data_channel_open().await?;
-        let result = transport.send_message(&data).await;
+        let result = conn
+            .send_message(TransportMessage::Custom(data.to_vec()))
+            .await;
 
         tracing::debug!(
-            "Sent {:?}, to node {:?} via transport {:?}",
+            "Sent {:?}, to node {:?}",
             payload.clone(),
             payload.relay.next_hop,
-            transport.id
         );
 
         if result.is_ok() {
@@ -440,7 +359,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Deb
             self.record_sent_failed(payload.relay.next_hop).await
         }
 
-        result
+        result.map_err(|e| e.into())
     }
 }
 
@@ -465,110 +384,5 @@ impl Swarm {
             }));
         };
         crate::poll!(func, 10);
-    }
-}
-
-#[cfg(not(feature = "wasm"))]
-#[cfg(test)]
-pub mod tests {
-    use tokio::time;
-    use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
-
-    use super::*;
-    use crate::ecc::SecretKey;
-    use crate::storage::PersistenceStorage;
-    #[cfg(not(feature = "dummy"))]
-    use crate::transports::default::transport::tests::establish_connection;
-    #[cfg(feature = "dummy")]
-    use crate::transports::dummy::transport::tests::establish_connection;
-
-    pub async fn new_swarm(key: SecretKey) -> Result<Swarm> {
-        let stun = "stun://stun.l.google.com:19302";
-        let storage =
-            PersistenceStorage::new_with_path(PersistenceStorage::random_path("./tmp")).await?;
-        let session_sk = SessionSk::new_with_seckey(&key)?;
-        Ok(SwarmBuilder::new(stun, storage, session_sk).build())
-    }
-
-    #[tokio::test]
-    async fn swarm_new_transport() -> Result<()> {
-        let swarm = new_swarm(SecretKey::random()).await?;
-        let transport = swarm.new_transport().await.unwrap();
-        assert_eq!(
-            transport.ice_connection_state().await.unwrap(),
-            RTCIceConnectionState::New
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_swarm_register_and_get() -> Result<()> {
-        let swarm1 = new_swarm(SecretKey::random()).await?;
-        let swarm2 = new_swarm(SecretKey::random()).await?;
-
-        assert!(swarm1.get_transport(swarm2.did()).is_none());
-        assert!(swarm2.get_transport(swarm1.did()).is_none());
-
-        let transport1 = swarm1.new_transport().await.unwrap();
-        let transport2 = swarm2.new_transport().await.unwrap();
-
-        establish_connection(&transport1, &transport2).await?;
-
-        // Can register if connected
-        swarm1.register(swarm2.did(), transport1.clone()).await?;
-        swarm2.register(swarm1.did(), transport2.clone()).await?;
-
-        // Check address transport pairs in transports
-        let transport_1_to_2 = swarm1.get_transport(swarm2.did()).unwrap();
-        let transport_2_to_1 = swarm2.get_transport(swarm1.did()).unwrap();
-
-        assert!(Arc::ptr_eq(&transport_1_to_2, &transport1));
-        assert!(Arc::ptr_eq(&transport_2_to_1, &transport2));
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_swarm_will_close_previous_transport() -> Result<()> {
-        let swarm1 = new_swarm(SecretKey::random()).await?;
-        let swarm2 = new_swarm(SecretKey::random()).await?;
-
-        assert!(swarm1.get_transport(swarm2.did()).is_none());
-
-        let transport0 = swarm1.new_transport().await.unwrap();
-        let transport1 = swarm1.new_transport().await.unwrap();
-
-        let transport_2_to_0 = swarm2.new_transport().await.unwrap();
-        let transport_2_to_1 = swarm2.new_transport().await.unwrap();
-
-        establish_connection(&transport0, &transport_2_to_0).await?;
-        establish_connection(&transport1, &transport_2_to_1).await?;
-
-        swarm1.register(swarm2.did(), transport0.clone()).await?;
-        swarm1.register(swarm2.did(), transport1.clone()).await?;
-
-        time::sleep(time::Duration::from_secs(3)).await;
-
-        assert_eq!(
-            transport0.ice_connection_state().await.unwrap(),
-            RTCIceConnectionState::Closed
-        );
-        assert_eq!(
-            transport_2_to_0.ice_connection_state().await.unwrap(),
-            RTCIceConnectionState::Connected
-        );
-        // TODO: Find a way to maintain transports in another peer.
-
-        assert_eq!(
-            transport1.ice_connection_state().await.unwrap(),
-            RTCIceConnectionState::Connected
-        );
-        assert_eq!(
-            transport_2_to_1.ice_connection_state().await.unwrap(),
-            RTCIceConnectionState::Connected
-        );
-
-        Ok(())
     }
 }

@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use futures::lock::Mutex as FuturesMutex;
+use rings_transport::core::transport::SharedConnection;
 use serde_json;
 use webrtc::api::setting_engine::SettingEngine;
 use webrtc::api::APIBuilder;
@@ -40,7 +41,6 @@ use crate::types::ice_transport::IceCandidateGathering;
 use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
-use crate::types::ice_transport::IceTransportInterface;
 use crate::types::ice_transport::IceTrickleScheme;
 
 type EventSender = <AcChannel<TransportEvent> as Channel<TransportEvent>>::Sender;

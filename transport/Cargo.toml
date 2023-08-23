@@ -1,0 +1,50 @@
+[package]
+name = "rings-transport"
+version = "0.3.0"
+edition = "2021"
+
+[features]
+# Include nothing by default
+default = []
+dummy = []
+native-webrtc = ["webrtc"]
+web-sys-webrtc = ["wasm-bindgen", "js-sys", "web-sys"]
+
+[dependencies]
+# Dependencies for webrtc feature
+webrtc = { version = "0.8.0", optional = true }
+
+# Dependencies for web_sys_webrtc feature
+js-sys = { version = "0.3.64", optional = true }
+wasm-bindgen = { workspace = true, optional = true }
+web-sys = { version = "0.3.64", optional = true, features = [
+    "RtcPeerConnection",
+    "RtcSignalingState",
+    "RtcSdpType",
+    "ServiceWorkerGlobalScope",
+    "RtcIceServer",
+    "RtcSessionDescriptionInit",
+    "RtcSessionDescription",
+    "RtcPeerConnectionIceEvent",
+    "RtcIceCandidate",
+    "RtcIceCandidateInit",
+    "RtcDataChannel",
+    "RtcDataChannelEvent",
+    "RtcDataChannelState",
+    "RtcConfiguration",
+    "RtcIceConnectionState",
+    "RtcIceGatheringState",
+    "RtcIceCredentialType",
+    "RtcLifecycleEvent",
+    "RtcStatsReport",
+] }
+
+# Common dependencies
+async-trait = "0.1.73"
+bincode = "1.3.3"
+bytes = { version = "1.4.0", features = ["serde"] }
+dashmap = "5.5.1"
+serde = "1.0.183"
+thiserror = "1.0.47"
+tracing = "0.1.37"
+url = { version = "2.4.0", features = ["serde"] }

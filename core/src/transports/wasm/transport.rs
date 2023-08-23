@@ -45,7 +45,7 @@ use crate::types::ice_transport::IceCandidateGathering;
 use crate::types::ice_transport::IceServer;
 use crate::types::ice_transport::IceTransport;
 use crate::types::ice_transport::IceTransportCallback;
-use crate::types::ice_transport::IceTransportInterface;
+use rings_transport::core::transport::SharedConnection;
 use crate::types::ice_transport::IceTrickleScheme;
 use crate::utils::js_value;
 

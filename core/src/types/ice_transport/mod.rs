@@ -1,5 +1,4 @@
 /// Custom webrtc IceServer and configuration.
-pub mod ice_server;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -7,7 +6,6 @@ use bytes::Bytes;
 use serde::Deserialize;
 use serde::Serialize;
 
-pub use self::ice_server::IceServer;
 use crate::dht::Did;
 use crate::error::Result;
 use crate::types::channel::Channel;

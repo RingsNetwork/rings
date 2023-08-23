@@ -1,6 +1,7 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
+use rings_transport::core::transport::SharedConnection;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::*;
@@ -16,7 +17,6 @@ use crate::transports::Transport;
 use crate::types::channel::Channel;
 use crate::types::channel::TransportEvent;
 use crate::types::ice_transport::IceServer;
-use crate::types::ice_transport::IceTransportInterface;
 use crate::types::ice_transport::IceTrickleScheme;
 
 // wasm_bindgen_test_configure!(run_in_browser);

@@ -2,9 +2,10 @@
 //! This module provider [SwarmBuilder] and it's interface for
 //! [Swarm]
 
-use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::Mutex;
+
+use rings_transport::core::callback::Callback;
+use rings_transport::Transport;
 
 use crate::channels::Channel;
 use crate::dht::PeerRing;
@@ -12,16 +13,15 @@ use crate::message::CallbackFn;
 use crate::message::MessageHandler;
 use crate::message::ValidatorFn;
 use crate::session::SessionSk;
-use crate::storage::MemStorage;
 use crate::storage::PersistenceStorage;
+use crate::swarm::callback::SwarmCallback;
 use crate::swarm::MeasureImpl;
 use crate::swarm::Swarm;
 use crate::types::channel::Channel as ChannelTrait;
-use crate::types::ice_transport::IceServer;
 
 /// Creates a SwarmBuilder to configure a Swarm.
 pub struct SwarmBuilder {
-    ice_servers: Vec<IceServer>,
+    ice_servers: String,
     external_address: Option<String>,
     dht_succ_max: u8,
     dht_storage: PersistenceStorage,
@@ -35,17 +35,8 @@ pub struct SwarmBuilder {
 impl SwarmBuilder {
     /// Creates new instance of [SwarmBuilder]
     pub fn new(ice_servers: &str, dht_storage: PersistenceStorage, session_sk: SessionSk) -> Self {
-        let ice_servers = ice_servers
-            .split(';')
-            .collect::<Vec<&str>>()
-            .into_iter()
-            .map(|s| {
-                IceServer::from_str(s)
-                    .unwrap_or_else(|_| panic!("Failed on parse ice server {:?}", s))
-            })
-            .collect::<Vec<IceServer>>();
         SwarmBuilder {
-            ice_servers,
+            ice_servers: ice_servers.to_string(),
             external_address: None,
             dht_succ_max: 3,
             dht_storage,
@@ -107,16 +98,19 @@ impl SwarmBuilder {
         let message_handler =
             MessageHandler::new(dht.clone(), self.message_callback, self.message_validator);
 
+        let transport_event_channel = Channel::new();
+
+        let transport = Transport::new(&self.ice_servers, self.external_address);
+        let callback = Arc::new(SwarmCallback::new(transport_event_channel.sender()).boxed());
+
         Swarm {
-            pending_transports: Mutex::new(vec![]),
-            transports: MemStorage::new(),
-            transport_event_channel: Channel::new(),
-            ice_servers: self.ice_servers,
-            external_address: self.external_address,
+            transport_event_channel,
             dht,
             measure: self.measure,
             session_sk: self.session_sk,
             message_handler,
+            transport,
+            callback,
         }
     }
 }

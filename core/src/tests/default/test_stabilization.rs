@@ -3,7 +3,6 @@ use std::time::Duration;
 
 use tokio::time::sleep;
 
-use super::prepare_node;
 use crate::dht::successor::SuccessorReader;
 use crate::dht::Chord;
 use crate::dht::Stabilization;
@@ -12,11 +11,10 @@ use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
 use crate::inspect::DHTInspect;
-use crate::swarm::tests::new_swarm;
 use crate::swarm::Swarm;
 use crate::tests::default::gen_pure_dht;
+use crate::tests::default::prepare_node;
 use crate::tests::manually_establish_connection;
-use crate::transports::manager::TransportManager;
 
 async fn run_stabilize(swarm: Arc<Swarm>) {
     let mut result = Result::<()>::Ok(());
@@ -53,9 +51,9 @@ async fn test_stabilization_once() -> Result<()> {
     if key1.address() < key2.address() {
         (key1, key2) = (key2, key1)
     }
-    let swarm1 = Arc::new(new_swarm(key1).await?);
-    let swarm2 = Arc::new(new_swarm(key2).await?);
-    manually_establish_connection(&swarm1, &swarm2).await?;
+    let swarm1 = prepare_node(key1).await.0;
+    let swarm2 = prepare_node(key2).await.0;
+    manually_establish_connection(&swarm1, &swarm2).await;
     println!("swarm1: {:?}, swarm2: {:?}", swarm1.did(), swarm2.did());
 
     tokio::select! {
@@ -74,9 +72,7 @@ async fn test_stabilization_once() -> Result<()> {
             );
         } => { unreachable!(); }
         _ = async {
-            let transport_1_to_2 = swarm1.get_transport(swarm2.did()).unwrap();
             sleep(Duration::from_millis(1000)).await;
-            transport_1_to_2.wait_for_data_channel_open().await.unwrap();
             assert!(swarm1.dht().successors().list()?.contains(&key2.address().into()));
             assert!(swarm2.dht().successors().list()?.contains(&key1.address().into()));
             let stabilization = Stabilization::new(Arc::clone(&swarm1), 5usize);
@@ -100,9 +96,9 @@ async fn test_stabilization() -> Result<()> {
     if key1.address() < key2.address() {
         (key1, key2) = (key2, key1)
     }
-    let swarm1 = Arc::new(new_swarm(key1).await?);
-    let swarm2 = Arc::new(new_swarm(key2).await?);
-    manually_establish_connection(&swarm1, &swarm2).await?;
+    let swarm1 = prepare_node(key1).await.0;
+    let swarm2 = prepare_node(key2).await.0;
+    manually_establish_connection(&swarm1, &swarm2).await;
 
     tokio::select! {
         _ = async {
@@ -126,9 +122,7 @@ async fn test_stabilization() -> Result<()> {
             );
         } => { unreachable!(); }
         _ = async {
-            let transport_1_to_2 = swarm1.get_transport(swarm2.did()).unwrap();
             sleep(Duration::from_millis(1000)).await;
-            transport_1_to_2.wait_for_data_channel_open().await.unwrap();
             assert!(swarm1.dht().successors().list()?.contains(&key2.address().into()));
             assert!(swarm2.dht().successors().list()?.contains(&key1.address().into()));
             sleep(Duration::from_millis(10000)).await;
@@ -155,7 +149,7 @@ async fn test_online_stabilization() -> Result<()> {
 
     let swarm1 = Arc::clone(&nodes[0]);
     for swarm in nodes.iter().skip(1) {
-        manually_establish_connection(&swarm1, swarm).await.unwrap();
+        manually_establish_connection(&swarm1, swarm).await;
     }
 
     sleep(Duration::from_secs(30)).await;

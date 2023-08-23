@@ -33,7 +33,7 @@ async fn listen(p: &Processor) {
 }
 
 async fn close_all_transport(p: &Processor) {
-    futures::future::join_all(p.swarm.get_transports().iter().map(|(_, t)| t.close())).await;
+    futures::future::join_all(p.swarm.get_connections().iter().map(|(_, t)| t.close())).await;
 }
 
 struct MsgCallbackStruct {

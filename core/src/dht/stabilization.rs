@@ -2,6 +2,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use rings_transport::core::transport::SharedConnection;
 
 use crate::dht::successor::SuccessorReader;
 use crate::dht::types::CorrectChord;
@@ -20,8 +21,6 @@ use crate::message::NotifyPredecessorSend;
 use crate::message::PayloadSender;
 use crate::message::QueryForTopoInfoSend;
 use crate::swarm::Swarm;
-use crate::transports::manager::TransportManager;
-use crate::types::ice_transport::IceTransportInterface;
 
 /// A combination contains chord and swarm, use to run stabilize.
 /// - swarm: transports communicate with each others.
@@ -42,12 +41,12 @@ pub trait TStabilize {
 }
 
 impl Stabilization {
-    /// Clean unavailable transports from swarm.
-    pub async fn clean_unavailable_transports(&self) -> Result<()> {
-        let transports = self.swarm.get_transports();
+    /// Clean unavailable connections in transport.
+    pub async fn clean_unavailable_connections(&self) -> Result<()> {
+        let conns = self.swarm.get_connections();
 
-        for (did, t) in transports.into_iter() {
-            if t.is_disconnected().await {
+        for (did, conn) in conns.into_iter() {
+            if conn.is_disconnected().await {
                 tracing::info!("STABILIZATION clean_unavailable_transports: {:?}", did);
                 self.swarm.disconnect(did).await?;
             }
@@ -169,11 +168,14 @@ impl Stabilization {
             tracing::error!("[stabilize] Failed on fix_finger {:?}", e);
         }
         tracing::debug!("STABILIZATION fix_fingers end");
-        tracing::debug!("STABILIZATION clean_unavailable_transports start");
-        if let Err(e) = self.clean_unavailable_transports().await {
-            tracing::error!("[stabilize] Failed on clean unavailable transports {:?}", e);
+        tracing::debug!("STABILIZATION clean_unavailable_connections start");
+        if let Err(e) = self.clean_unavailable_connections().await {
+            tracing::error!(
+                "[stabilize] Failed on clean unavailable connections {:?}",
+                e
+            );
         }
-        tracing::debug!("STABILIZATION clean_unavailable_transports end");
+        tracing::debug!("STABILIZATION clean_unavailable_connections end");
         #[cfg(feature = "experimental")]
         {
             tracing::debug!("STABILIZATION correct_stabilize start");
@@ -253,7 +255,6 @@ pub mod tests {
 
     use super::*;
     use crate::ecc::SecretKey;
-    use crate::prelude::RTCIceConnectionState;
     use crate::tests::default::prepare_node;
     use crate::tests::manually_establish_connection;
 
@@ -269,28 +270,30 @@ pub mod tests {
         // Shouldn't listen to message handler here,
         // otherwise it will automatically remove disconnected transport.
 
-        manually_establish_connection(&node1, &node2).await.unwrap();
-        manually_establish_connection(&node1, &node3).await.unwrap();
+        manually_establish_connection(&node1, &node2).await;
+        manually_establish_connection(&node1, &node3).await;
 
         tokio::time::sleep(Duration::from_secs(5)).await;
 
         assert_eq!(
-            node1
-                .get_transport(node2.did())
-                .unwrap()
-                .ice_connection_state()
-                .await
-                .unwrap(),
-            RTCIceConnectionState::Connected
+            format!(
+                "{:?}",
+                node1
+                    .get_connection(node2.did())
+                    .unwrap()
+                    .ice_connection_state()
+            ),
+            "connected"
         );
         assert_eq!(
-            node1
-                .get_transport(node3.did())
-                .unwrap()
-                .ice_connection_state()
-                .await
-                .unwrap(),
-            RTCIceConnectionState::Connected
+            format!(
+                "{:?}",
+                node1
+                    .get_connection(node3.did())
+                    .unwrap()
+                    .ice_connection_state()
+            ),
+            "connected"
         );
 
         node2.disconnect(node1.did()).await.unwrap();
@@ -298,28 +301,30 @@ pub mod tests {
 
         tokio::time::sleep(Duration::from_secs(10)).await;
         assert_eq!(
-            node1
-                .get_transport(node2.did())
-                .unwrap()
-                .ice_connection_state()
-                .await
-                .unwrap(),
-            RTCIceConnectionState::Disconnected
+            format!(
+                "{:?}",
+                node1
+                    .get_connection(node2.did())
+                    .unwrap()
+                    .ice_connection_state()
+            ),
+            "disconnected"
         );
         assert_eq!(
-            node1
-                .get_transport(node3.did())
-                .unwrap()
-                .ice_connection_state()
-                .await
-                .unwrap(),
-            RTCIceConnectionState::Disconnected
+            format!(
+                "{:?}",
+                node1
+                    .get_connection(node3.did())
+                    .unwrap()
+                    .ice_connection_state()
+            ),
+            "disconnected"
         );
 
         let stb = Stabilization::new(node1.clone(), 3);
-        stb.clean_unavailable_transports().await.unwrap();
+        stb.clean_unavailable_connections().await.unwrap();
 
-        assert!(node1.get_transport(node2.did()).is_none());
-        assert!(node1.get_transport(node3.did()).is_none());
+        assert!(node1.get_connection(node2.did()).is_none());
+        assert!(node1.get_connection(node3.did()).is_none());
     }
 }

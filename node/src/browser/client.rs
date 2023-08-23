@@ -470,7 +470,7 @@ impl Client {
             let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
             let transport = p
                 .swarm
-                .get_transport(did)
+                .get_connection(did)
                 .ok_or_else(|| JsError::new("transport not found"))?;
             let state = transport
                 .ice_connection_state()
