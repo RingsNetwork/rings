@@ -271,12 +271,9 @@ impl Swarm {
     ) -> Result<()> {
         match events.as_slice() {
             [] => Ok(()),
-            [x] => {
-                let evs = self.handle_message_handler_event(x).await?;
-                self.handle_message_handler_events(&evs).await
-            }
             [x, xs @ ..] => {
-                self.handle_message_handler_events(&vec![x.clone()]).await?;
+                let evs = self.handle_message_handler_event(x).await?;
+                self.handle_message_handler_events(&evs).await?;
                 self.handle_message_handler_events(&xs.to_vec()).await
             }
         }

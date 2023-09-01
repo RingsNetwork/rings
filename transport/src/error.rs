@@ -27,6 +27,9 @@ pub enum Error {
     #[error("IceServer error: {0}")]
     IceServer(#[from] IceServerError),
 
+    #[error("Failed when waiting for data channel open: {0}")]
+    DataChannelOpen(String),
+
     #[error("WebRTC local SDP generation error")]
     WebrtcLocalSdpGenerationError,
 

@@ -1,8 +1,10 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
+use webrtc::data_channel::data_channel_state::RTCDataChannelState;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice::mdns::MulticastDnsMode;
 use webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType;
@@ -32,12 +34,11 @@ pub struct WebrtcConnection {
 }
 
 impl WebrtcConnection {
-    pub async fn new(webrtc_conn: RTCPeerConnection) -> Result<Self> {
-        let webrtc_data_channel = webrtc_conn.create_data_channel("rings", None).await?;
-        Ok(Self {
+    pub fn new(webrtc_conn: RTCPeerConnection, webrtc_data_channel: Arc<RTCDataChannel>) -> Self {
+        Self {
             webrtc_conn: Arc::new(webrtc_conn),
             webrtc_data_channel,
-        })
+        }
     }
 
     async fn webrtc_gather(&self) -> Result<RTCSessionDescription> {
@@ -53,6 +54,25 @@ impl WebrtcConnection {
             .ok_or(Error::WebrtcLocalSdpGenerationError)
     }
 
+    async fn webrtc_wait_for_data_channel_ready(&self) -> Result<()> {
+        loop {
+            if matches!(
+                self.webrtc_connection_state(),
+                WebrtcConnectionState::Failed
+                    | WebrtcConnectionState::Closed
+                    | WebrtcConnectionState::Disconnected
+            ) {
+                return Err(Error::DataChannelOpen("Connection unavailable".to_string()));
+            }
+
+            if self.webrtc_data_channel.ready_state() == RTCDataChannelState::Open {
+                return Ok(());
+            }
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     async fn close(&self) -> Result<()> {
         self.webrtc_conn.close().await.map_err(|e| e.into())
     }
@@ -64,6 +84,7 @@ impl SharedConnection for WebrtcConnection {
     type Error = Error;
 
     async fn send_message(&self, msg: TransportMessage) -> Result<()> {
+        self.webrtc_wait_for_data_channel_ready().await?;
         let data = bincode::serialize(&msg).map(Bytes::from)?;
         self.webrtc_data_channel.send(&data).await?;
         Ok(())
@@ -121,6 +142,9 @@ impl SharedTransport for Transport<WebrtcConnection> {
     where
         CE: std::error::Error + Send + Sync + 'static,
     {
+        //
+        // Setup webrtc connection env
+        //
         let ice_servers = self.ice_servers.iter().cloned().map(|x| x.into()).collect();
 
         let webrtc_config = RTCConfiguration {
@@ -142,8 +166,14 @@ impl SharedTransport for Transport<WebrtcConnection> {
             .with_setting_engine(setting)
             .build();
 
+        //
+        // Create webrtc connection
+        //
         let webrtc_conn = webrtc_api.new_peer_connection(webrtc_config).await?;
 
+        //
+        // Set callbacks
+        //
         let inner_cb = Arc::new(InnerCallback::new(cid, callback));
 
         let data_channel_inner_cb = inner_cb.clone();
@@ -182,7 +212,15 @@ impl SharedTransport for Transport<WebrtcConnection> {
             })
         }));
 
-        let conn = WebrtcConnection::new(webrtc_conn).await?;
+        //
+        // Create data channel
+        //
+        let webrtc_data_channel = webrtc_conn.create_data_channel("rings", None).await?;
+
+        //
+        // Construct the Connection
+        //
+        let conn = WebrtcConnection::new(webrtc_conn, webrtc_data_channel);
         self.connections.insert(cid.to_string(), conn.clone());
 
         Ok(conn)
