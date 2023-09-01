@@ -4,31 +4,46 @@ use bytes::Bytes;
 
 use crate::core::callback::BoxedCallback;
 use crate::core::transport::TransportMessage;
+use crate::core::transport::WebrtcConnectionState;
 
 pub(crate) struct InnerCallback<CE> {
+    pub cid: String,
     callback: Arc<BoxedCallback<CE>>,
 }
 
 impl<CE> InnerCallback<CE>
 where CE: std::error::Error + Send + Sync + 'static
 {
-    pub fn new(callback: Arc<BoxedCallback<CE>>) -> Self {
-        Self { callback }
+    pub fn new(cid: &str, callback: Arc<BoxedCallback<CE>>) -> Self {
+        Self {
+            cid: cid.to_string(),
+            callback,
+        }
     }
 
-    pub async fn on_message(&self, cid: &str, msg: &Bytes) {
+    pub async fn on_message(&self, msg: &Bytes) {
         match bincode::deserialize(msg) {
-            Ok(m) => self.handle_message(cid, &m).await,
+            Ok(m) => self.handle_message(&m).await,
             Err(e) => {
                 tracing::error!("Deserialize DataChannelMessage failed: {e:?}");
             }
         };
     }
 
-    async fn handle_message(&self, cid: &str, msg: &TransportMessage) {
+    pub async fn on_peer_connection_state_change(&self, s: WebrtcConnectionState) {
+        if let Err(e) = self
+            .callback
+            .on_peer_connection_state_change(&self.cid, s)
+            .await
+        {
+            tracing::error!("Callback on_peer_connection_state_change failed: {e:?}");
+        }
+    }
+
+    async fn handle_message(&self, msg: &TransportMessage) {
         match msg {
             TransportMessage::Custom(bytes) => {
-                if let Err(e) = self.callback.on_message(cid, bytes).await {
+                if let Err(e) = self.callback.on_message(&self.cid, bytes).await {
                     tracing::error!("Callback on_message failed: {e:?}")
                 }
             }

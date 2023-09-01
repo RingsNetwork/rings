@@ -6,10 +6,10 @@ use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice::mdns::MulticastDnsMode;
 use webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType;
-use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 use webrtc::ice_transport::ice_credential_type::RTCIceCredentialType;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
+use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 
@@ -18,6 +18,7 @@ use crate::core::callback::BoxedCallback;
 use crate::core::transport::SharedConnection;
 use crate::core::transport::SharedTransport;
 use crate::core::transport::TransportMessage;
+use crate::core::transport::WebrtcConnectionState;
 use crate::error::Error;
 use crate::error::Result;
 use crate::ice_server::IceCredentialType;
@@ -61,30 +62,15 @@ impl WebrtcConnection {
 impl SharedConnection for WebrtcConnection {
     type Sdp = RTCSessionDescription;
     type Error = Error;
-    type IceConnectionState = RTCIceConnectionState;
-
-    async fn is_connected(&self) -> bool {
-        self.webrtc_conn.ice_connection_state() == RTCIceConnectionState::Connected
-    }
-
-    async fn is_disconnected(&self) -> bool {
-        matches!(
-            self.webrtc_conn.ice_connection_state(),
-            RTCIceConnectionState::Completed
-                | RTCIceConnectionState::Disconnected
-                | RTCIceConnectionState::Failed
-                | RTCIceConnectionState::Closed
-        )
-    }
-
-    fn ice_connection_state(&self) -> RTCIceConnectionState {
-        self.webrtc_conn.ice_connection_state()
-    }
 
     async fn send_message(&self, msg: TransportMessage) -> Result<()> {
         let data = bincode::serialize(&msg).map(Bytes::from)?;
         self.webrtc_data_channel.send(&data).await?;
         Ok(())
+    }
+
+    fn webrtc_connection_state(&self) -> WebrtcConnectionState {
+        self.webrtc_conn.connection_state().into()
     }
 
     async fn webrtc_create_offer(&self) -> Result<RTCSessionDescription> {
@@ -158,28 +144,41 @@ impl SharedTransport for Transport<WebrtcConnection> {
 
         let webrtc_conn = webrtc_api.new_peer_connection(webrtc_config).await?;
 
-        let conn_id = cid.to_string();
-        let inner_cb = Arc::new(InnerCallback::new(callback));
+        let inner_cb = Arc::new(InnerCallback::new(cid, callback));
 
+        let data_channel_inner_cb = inner_cb.clone();
         webrtc_conn.on_data_channel(Box::new(move |d: Arc<RTCDataChannel>| {
             let d_label = d.label();
             let d_id = d.id();
             tracing::debug!("New DataChannel {d_label} {d_id}");
 
-            let conn_id = conn_id.clone();
-            let inner_cb = inner_cb.clone();
+            let inner_cb = data_channel_inner_cb.clone();
 
             Box::pin(async move {
                 d.on_message(Box::new(move |msg: DataChannelMessage| {
-                    tracing::debug!("Received DataChannelMessage from {conn_id}: {msg:?}");
+                    tracing::debug!(
+                        "Received DataChannelMessage from {}: {:?}",
+                        inner_cb.cid,
+                        msg
+                    );
 
-                    let conn_id = conn_id.clone();
                     let inner_cb = inner_cb.clone();
 
                     Box::pin(async move {
-                        inner_cb.on_message(&conn_id, &msg.data).await;
+                        inner_cb.on_message(&msg.data).await;
                     })
                 }));
+            })
+        }));
+
+        let peer_connection_state_change_inner_cb = inner_cb.clone();
+        webrtc_conn.on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
+            tracing::debug!("Peer Connection State has changed: {s}");
+
+            let inner_cb = peer_connection_state_change_inner_cb.clone();
+
+            Box::pin(async move {
+                inner_cb.on_peer_connection_state_change(s.into()).await;
             })
         }));
 
@@ -232,6 +231,20 @@ impl From<IceServer> for RTCIceServer {
             username: s.username,
             credential: s.credential,
             credential_type: s.credential_type.into(),
+        }
+    }
+}
+
+impl From<RTCPeerConnectionState> for WebrtcConnectionState {
+    fn from(s: RTCPeerConnectionState) -> Self {
+        match s {
+            RTCPeerConnectionState::Unspecified => Self::Unspecified,
+            RTCPeerConnectionState::New => Self::New,
+            RTCPeerConnectionState::Connecting => Self::Connecting,
+            RTCPeerConnectionState::Connected => Self::Connected,
+            RTCPeerConnectionState::Disconnected => Self::Disconnected,
+            RTCPeerConnectionState::Failed => Self::Failed,
+            RTCPeerConnectionState::Closed => Self::Closed,
         }
     }
 }

@@ -1,7 +1,11 @@
+use std::str::FromStr;
+
 use async_trait::async_trait;
 use rings_transport::core::callback::Callback;
+use rings_transport::core::transport::WebrtcConnectionState;
 
 use crate::channels::Channel;
+use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
 use crate::types::channel::Channel as ChannelTrait;
@@ -31,5 +35,28 @@ impl Callback for SwarmCallback {
             TransportEvent::DataChannelMessage(msg.into()),
         )
         .await
+    }
+
+    async fn on_peer_connection_state_change(
+        &self,
+        cid: &str,
+        s: WebrtcConnectionState,
+    ) -> Result<()> {
+        let Ok(did) = Did::from_str(cid) else {
+            tracing::warn!("on_peer_connection_state_change parse did failed: {}", cid);
+            return Ok(());
+        };
+
+        match s {
+            WebrtcConnectionState::Connected => {
+                Channel::send(&self.transport_event_sender, TransportEvent::Connected(did)).await
+            }
+            WebrtcConnectionState::Failed
+            | WebrtcConnectionState::Disconnected
+            | WebrtcConnectionState::Closed => {
+                Channel::send(&self.transport_event_sender, TransportEvent::Closed(did)).await
+            }
+            _ => Ok(()),
+        }
     }
 }
