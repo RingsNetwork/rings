@@ -253,13 +253,15 @@ mod stabilizer {
 pub mod tests {
     use std::time::Duration;
 
+    use rings_transport::core::transport::WebrtcConnectionState;
+
     use super::*;
     use crate::ecc::SecretKey;
     use crate::tests::default::prepare_node;
     use crate::tests::manually_establish_connection;
 
     #[tokio::test]
-    async fn test_clean_unavailable_transports() {
+    async fn test_clean_unavailable_connections() {
         let key1 = SecretKey::random();
         let key2 = SecretKey::random();
         let key3 = SecretKey::random();
@@ -276,24 +278,18 @@ pub mod tests {
         tokio::time::sleep(Duration::from_secs(5)).await;
 
         assert_eq!(
-            format!(
-                "{:?}",
-                node1
-                    .get_connection(node2.did())
-                    .unwrap()
-                    .ice_connection_state()
-            ),
-            "connected"
+            node1
+                .get_connection(node2.did())
+                .unwrap()
+                .webrtc_connection_state(),
+            WebrtcConnectionState::Connected,
         );
         assert_eq!(
-            format!(
-                "{:?}",
-                node1
-                    .get_connection(node3.did())
-                    .unwrap()
-                    .ice_connection_state()
-            ),
-            "connected"
+            node1
+                .get_connection(node3.did())
+                .unwrap()
+                .webrtc_connection_state(),
+            WebrtcConnectionState::Connected,
         );
 
         node2.disconnect(node1.did()).await.unwrap();
@@ -301,24 +297,18 @@ pub mod tests {
 
         tokio::time::sleep(Duration::from_secs(10)).await;
         assert_eq!(
-            format!(
-                "{:?}",
-                node1
-                    .get_connection(node2.did())
-                    .unwrap()
-                    .ice_connection_state()
-            ),
-            "disconnected"
+            node1
+                .get_connection(node2.did())
+                .unwrap()
+                .webrtc_connection_state(),
+            WebrtcConnectionState::Disconnected,
         );
         assert_eq!(
-            format!(
-                "{:?}",
-                node1
-                    .get_connection(node3.did())
-                    .unwrap()
-                    .ice_connection_state()
-            ),
-            "disconnected"
+            node1
+                .get_connection(node3.did())
+                .unwrap()
+                .webrtc_connection_state(),
+            WebrtcConnectionState::Disconnected,
         );
 
         let stb = Stabilization::new(node1.clone(), 3);
