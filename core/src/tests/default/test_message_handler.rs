@@ -1,6 +1,7 @@
 use std::str::FromStr;
 
 use rings_transport::core::transport::SharedConnection;
+use rings_transport::core::transport::WebrtcConnectionState;
 use tokio::time::sleep;
 use tokio::time::Duration;
 
@@ -108,12 +109,12 @@ async fn test_handle_connect_node() -> Result<()> {
             }
 
             assert_eq!(
-                format!("{:?}", connection_1_to_2.ice_connection_state()),
-                "connected"
+                connection_1_to_2.ice_connection_state(),
+                WebrtcConnectionState::Connected,
             );
             assert_eq!(
-                format!("{:?}", connection_2_to_3.ice_connection_state()),
-                "connected"
+                connection_2_to_3.ice_connection_state(),
+                WebrtcConnectionState::Connected,
             );
 
             // node1.dht() send msg to node2.dht() ask for connecting node3.dht()
@@ -124,14 +125,14 @@ async fn test_handle_connect_node() -> Result<()> {
             assert!(connection_1_to_3.is_some());
             let connection_1_to_3 = connection_1_to_3.unwrap();
             let both = {
-                format!("{:?}", connection_1_to_3.ice_connection_state()) == "new" ||
-                    format!("{:?}",connection_1_to_3.ice_connection_state()) == "checking" ||
-                    format!("{:?}",connection_1_to_3.ice_connection_state()) == "connected"
+                connection_1_to_3.ice_connection_state() == WebrtcConnectionState::New ||
+                    connection_1_to_3.ice_connection_state() == WebrtcConnectionState::Connecting ||
+                    connection_1_to_3.ice_connection_state() == WebrtcConnectionState::Connected
             };
             assert!(both, "{:?}", connection_1_to_3.ice_connection_state());
             assert_eq!(
-                format!("{:?}", connection_1_to_3.ice_connection_state()),
-                "connected"
+                connection_1_to_3.ice_connection_state(),
+                WebrtcConnectionState::Connected
             );
             Ok::<(), Error>(())
         } => {}
@@ -169,7 +170,7 @@ async fn test_handle_notify_predecessor() -> Result<()> {
             sleep(Duration::from_millis(1000)).await;
             assert!(node1.dht().successors().list()?.contains(&key2.address().into()));
             assert!(node2.dht().successors().list()?.contains(&key1.address().into()));
-            assert_eq!(format!("{:?}", connection_1_to_2.ice_connection_state()), "connected");
+            assert_eq!(connection_1_to_2.ice_connection_state(), WebrtcConnectionState::Connected);
             node1
                 .send_message(
                     Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
@@ -221,7 +222,7 @@ async fn test_handle_find_successor_increase() -> Result<()> {
             sleep(Duration::from_millis(1000)).await;
             assert!(node1.dht().successors().list()?.contains(&key2.address().into()), "{:?}", node1.dht().successors().list()?);
             assert!(node2.dht().successors().list()?.contains(&key1.address().into()));
-            assert_eq!(format!("{:?}", connection_1_to_2.ice_connection_state()), "connected");
+            assert_eq!(connection_1_to_2.ice_connection_state(), WebrtcConnectionState::Connected);
             node1
                 .send_message(
                     Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
@@ -300,10 +301,7 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
             assert!(node2.dht()
                 .lock_finger()?
                 .contains(Some(key1.address().into())));
-            assert_eq!(
-                format!("{:?}", connection_1_to_2.ice_connection_state()),
-                "connected"
-            );
+            assert_eq!(connection_1_to_2.ice_connection_state(), WebrtcConnectionState::Connected);
             node1
                 .send_message(
                     Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
@@ -383,8 +381,8 @@ async fn test_handle_storage() -> Result<()> {
         .list()?
         .contains(&key1.address().into()));
     assert_eq!(
-        format!("{:?}", connection_1_to_2.ice_connection_state()),
-        "connected"
+        connection_1_to_2.ice_connection_state(),
+        WebrtcConnectionState::Connected
     );
     node1
         .send_message(
