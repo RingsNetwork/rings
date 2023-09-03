@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use dashmap::mapref::entry::Entry;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::data_channel_state::RTCDataChannelState;
 use webrtc::data_channel::RTCDataChannel;
@@ -142,6 +143,17 @@ impl SharedTransport for Transport<WebrtcConnection> {
     where
         CE: std::error::Error + Send + Sync + 'static,
     {
+        if let Ok(existed_conn) = self.get_connection(cid) {
+            if matches!(
+                existed_conn.webrtc_connection_state(),
+                WebrtcConnectionState::New
+                    | WebrtcConnectionState::Connecting
+                    | WebrtcConnectionState::Connected
+            ) {
+                return Err(Error::ConnectionAlreadyExists(cid.to_string()));
+            }
+        }
+
         //
         // Setup webrtc connection env
         //
@@ -221,7 +233,34 @@ impl SharedTransport for Transport<WebrtcConnection> {
         // Construct the Connection
         //
         let conn = WebrtcConnection::new(webrtc_conn, webrtc_data_channel);
-        self.connections.insert(cid.to_string(), conn.clone());
+
+        //
+        // Safely insert
+        //
+        // The implementation of match statement refers to Entry::insert in dashmap.
+        // An extra check is added to see if the connection is already connected.
+        // See also: https://docs.rs/dashmap/latest/dashmap/mapref/entry/enum.Entry.html#method.insert
+        //
+        let Some(entry) = self.connections.try_entry(cid.to_string()) else {
+            return Err(Error::ConnectionAlreadyExists(cid.to_string()));
+        };
+        match entry {
+            Entry::Occupied(mut entry) => {
+                let existed_conn = entry.get();
+                if matches!(
+                    existed_conn.webrtc_connection_state(),
+                    WebrtcConnectionState::New
+                        | WebrtcConnectionState::Connecting
+                        | WebrtcConnectionState::Connected
+                ) {
+                    return Err(Error::ConnectionAlreadyExists(cid.to_string()));
+                }
+
+                entry.insert(conn.clone());
+                entry.into_ref()
+            }
+            Entry::Vacant(entry) => entry.insert(conn.clone()),
+        };
 
         Ok(conn)
     }

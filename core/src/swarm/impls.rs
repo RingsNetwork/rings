@@ -331,12 +331,7 @@ impl ConnectionManager for Swarm {
     /// else try prepare offer and establish connection by dht.
     /// This function may returns a pending connection or connected connection.
     async fn connect(&self, did: Did) -> Result<Connection> {
-        if let Some(t) = self.get_and_check_connection(did).await {
-            return Ok(t);
-        }
-
         tracing::info!("Try connect Did {:?}", &did);
-
         let conn = self.new_connection(did).await?;
 
         let offer = conn.webrtc_create_offer().await.map_err(Error::Transport)?;

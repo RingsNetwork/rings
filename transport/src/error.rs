@@ -33,6 +33,9 @@ pub enum Error {
     #[error("WebRTC local SDP generation error")]
     WebrtcLocalSdpGenerationError,
 
+    #[error("Connection {0} already exists")]
+    ConnectionAlreadyExists(String),
+
     #[error("Connection {0} not found, should handshake first")]
     ConnectionNotFound(String),
 }
