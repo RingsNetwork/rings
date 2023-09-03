@@ -891,10 +891,8 @@ pub mod tests {
         println!("===================================");
         node1.disconnect(node2.did()).await?;
 
-        // The transport is already dropped by disconnect function.
-        // So that we get no msg from this listening.
-        let ev1 = node1.listen_once().await;
-        assert!(ev1.is_none());
+        let ev1 = node1.listen_once().await.unwrap().0;
+        assert!(matches!(ev1.data, Message::LeaveDHT(LeaveDHT{did}) if did == node2.did()));
 
         #[cfg(not(feature = "wasm"))]
         node2.disconnect(node1.did()).await.unwrap();
