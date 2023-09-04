@@ -60,18 +60,15 @@ async fn test_stabilization_once() -> Result<()> {
         _ = async {
             futures::join!(
                 async {
-                    loop {
-                        swarm1.clone().listen().await;
-                    }
+                    swarm1.clone().listen().await;
                 },
                 async {
-                    loop {
-                        swarm2.clone().listen().await;
-                    }
+                    swarm2.clone().listen().await;
                 },
             );
         } => { unreachable!(); }
         _ = async {
+            sleep(Duration::from_millis(1000)).await;
             assert!(swarm1.dht().successors().list()?.contains(&key2.address().into()));
             assert!(swarm2.dht().successors().list()?.contains(&key1.address().into()));
             let stabilization = Stabilization::new(Arc::clone(&swarm1), 5usize);
@@ -103,14 +100,10 @@ async fn test_stabilization() -> Result<()> {
         _ = async {
             tokio::join!(
                 async {
-                    loop {
-                        swarm1.clone().listen().await;
-                    }
+                    swarm1.clone().listen().await;
                 },
                 async {
-                    loop {
-                        swarm2.clone().listen().await;
-                    }
+                    swarm2.clone().listen().await;
                 },
                 async {
                     run_stabilize(Arc::clone(&swarm1)).await;
@@ -121,6 +114,7 @@ async fn test_stabilization() -> Result<()> {
             );
         } => { unreachable!(); }
         _ = async {
+            sleep(Duration::from_millis(1000)).await;
             assert!(swarm1.dht().successors().list()?.contains(&key2.address().into()));
             assert!(swarm2.dht().successors().list()?.contains(&key1.address().into()));
             sleep(Duration::from_millis(10000)).await;
