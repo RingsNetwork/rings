@@ -72,7 +72,6 @@ async fn test_stabilization_once() -> Result<()> {
             );
         } => { unreachable!(); }
         _ = async {
-            sleep(Duration::from_millis(1000)).await;
             assert!(swarm1.dht().successors().list()?.contains(&key2.address().into()));
             assert!(swarm2.dht().successors().list()?.contains(&key1.address().into()));
             let stabilization = Stabilization::new(Arc::clone(&swarm1), 5usize);
@@ -122,7 +121,6 @@ async fn test_stabilization() -> Result<()> {
             );
         } => { unreachable!(); }
         _ = async {
-            sleep(Duration::from_millis(1000)).await;
             assert!(swarm1.dht().successors().list()?.contains(&key2.address().into()));
             assert!(swarm2.dht().successors().list()?.contains(&key1.address().into()));
             sleep(Duration::from_millis(10000)).await;

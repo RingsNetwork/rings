@@ -55,7 +55,7 @@ impl WebrtcConnection {
             .ok_or(Error::WebrtcLocalSdpGenerationError)
     }
 
-    async fn webrtc_wait_for_data_channel_ready(&self) -> Result<()> {
+    pub async fn webrtc_wait_for_data_channel_ready(&self) -> Result<()> {
         loop {
             if matches!(
                 self.webrtc_connection_state(),
