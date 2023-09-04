@@ -801,58 +801,105 @@ pub mod tests {
     }
 
     #[tokio::test]
-    async fn test_quadra_desc_node_connection() -> Result<()> {
-        // 1. node1 to node2
-        // 2. node 3 to node 2
+    async fn test_fourth_node_connection() -> Result<()> {
         let keys = gen_ordered_keys(4);
         let (key1, key2, key3, key4) = (keys[0], keys[1], keys[2], keys[3]);
         let (node1, node2, node3) = test_triple_ordered_nodes_connection(key1, key2, key3).await?;
-        // we now have triple connected node
+        // we now have three connected nodes
+        // node1 -> node2 -> node3
+        //  |-<-----<---------<--|
 
         let (node4, _path4) = prepare_node(key4).await;
-        // connect node 4 to node2
-        manually_establish_connection(&node4, &node2).await;
-        test_listen_join_and_init_find_succeesor(&node4, &node2).await?;
-        // node 1 -> node 2 -> node 3
-        //  |-<-----<---------<--|
-        let _ = node2.listen_once().await.unwrap();
-        let _ = node3.listen_once().await.unwrap();
-        let _ = node2.listen_once().await.unwrap();
-        let _ = node4.listen_once().await.unwrap();
-        let _ = node2.listen_once().await.unwrap();
-        println!("==================================================");
-        println!("| test connect node 4 from node 1 via node 2     |");
-        println!("==================================================");
-        println!(
-            "node1.did(): {:?}, node2.did(): {:?}, node3.did(): {:?}, node4.did(): {:?}",
-            node1.did(),
-            node2.did(),
-            node3.did(),
-            node4.did(),
-        );
-        println!("==================================================");
-        node4.connect(node1.did()).await?;
-        // node 4 send msg to node2
-        assert!(matches!(
-            node2.listen_once().await.unwrap().0.data,
-            Message::ConnectNodeSend(_)
-        ));
-        // node 2 relay to node 2
-        assert!(matches!(
-            node1.listen_once().await.unwrap().0.data,
-            Message::ConnectNodeSend(_)
-        ));
-        // report to node 2
-        assert!(matches!(
-            node2.listen_once().await.unwrap().0.data,
-            Message::ConnectNodeReport(_)
-        ));
-        // report to node 4
-        assert!(matches!(
-            node4.listen_once().await.unwrap().0.data,
-            Message::ConnectNodeReport(_)
-        ));
-        println!("=================Finish handshake here=================");
+
+        // Unless we use a fixed did value, we cannot fully predict the communication order between node4 and the nodes,
+        // because we do not know the distance between node4 and each node.
+        //
+        // Therefore, here we only guarantee that messages can be processed correctly without checking the specific message order.
+        //
+        // In addition, we check the final state to ensure the entire process meets expectations.
+        tokio::select! {
+            _ = async {
+                futures::join!(
+                    async { node1.clone().listen().await },
+                    async { node2.clone().listen().await },
+                    async { node3.clone().listen().await },
+                    async { node4.clone().listen().await },
+                )
+            } => {unreachable!();}
+            _ = async {
+                // connect node4 to node2
+                manually_establish_connection(&node4, &node2).await;
+                tokio::time::sleep(Duration::from_secs(3)).await;
+
+                println!("=== Check state before connect via DHT ===");
+                assert_transports(node1.clone(), vec![node2.did(), node3.did(), node4.did()]);
+                assert_transports(node2.clone(), vec![node3.did(), node4.did(), node1.did()]);
+                assert_transports(node3.clone(), vec![node1.did(), node2.did()]);
+                // node4 will connect node1 after connecting node2, because node2 notified node4 that node1 is its predecessor.
+                assert_transports(node4.clone(), vec![node1.did(), node2.did()]);
+                assert_eq!(node1.dht().successors().list().unwrap(), vec![
+                    node2.did(),
+                    node3.did(),
+                    node4.did(),
+                ]);
+                assert_eq!(node2.dht().successors().list().unwrap(), vec![
+                    node3.did(),
+                    node4.did(),
+                    node1.did(),
+                ]);
+                assert_eq!(node3.dht().successors().list().unwrap(), vec![
+                    node1.did(),
+                    node2.did(),
+                ]);
+                assert_eq!(node4.dht().successors().list().unwrap(), vec![
+                    node1.did(),
+                    node2.did(),
+                ]);
+
+                println!("========================================");
+                println!("| test node4 connect node3 via dht     |");
+                println!("========================================");
+                println!(
+                    "node1.did(): {:?}, node2.did(): {:?}, node3.did(): {:?}, node4.did(): {:?}",
+                    node1.did(),
+                    node2.did(),
+                    node3.did(),
+                    node4.did(),
+                );
+                println!("==================================================");
+
+                node4.connect(node3.did()).await.unwrap();
+                tokio::time::sleep(Duration::from_secs(3)).await;
+
+                println!("=== Check state after connect via DHT ===");
+                assert_transports(node1.clone(), vec![node2.did(), node3.did(), node4.did()]);
+                assert_transports(node2.clone(), vec![node3.did(), node4.did(), node1.did()]);
+                assert_transports(node3.clone(), vec![node4.did(), node1.did(), node2.did()]);
+                assert_transports(node4.clone(), vec![node1.did(), node2.did(), node3.did()]);
+                assert_eq!(node1.dht().successors().list().unwrap(), vec![
+                    node2.did(),
+                    node3.did(),
+                    node4.did()
+                ]);
+                assert_eq!(node2.dht().successors().list().unwrap(), vec![
+                    node3.did(),
+                    node4.did(),
+                    node1.did(),
+                ]);
+                assert_eq!(node3.dht().successors().list().unwrap(), vec![
+                    node4.did(),
+                    node1.did(),
+                    node2.did(),
+                ]);
+                assert_eq!(node4.dht().successors().list().unwrap(), vec![
+                    node1.did(),
+                    node2.did(),
+                    node3.did(),
+                ]);
+
+            } => {}
+        }
+
         Ok(())
     }
 
