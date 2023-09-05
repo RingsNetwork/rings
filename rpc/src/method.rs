@@ -24,10 +24,6 @@ pub enum Method {
     SendTo,
     /// Disconnect a peer
     Disconnect,
-    /// List all pending connections
-    ListPendings,
-    /// Close pending connect
-    ClosePendingTransport,
     /// Send simple text message
     SendSimpleText,
     /// SendHttpRequestMessage,
@@ -46,6 +42,8 @@ pub enum Method {
     PollMessage,
     /// Retrieve Node info
     NodeInfo,
+    /// Retrieve Node DID
+    NodeDid,
 }
 
 impl Method {
@@ -61,8 +59,6 @@ impl Method {
             Method::SendTo => "sendTo",
             Method::Disconnect => "disconnect",
             Method::AcceptAnswer => "acceptAnswer",
-            Method::ListPendings => "listPendings",
-            Method::ClosePendingTransport => "closePendingTransport",
             Method::SendSimpleText => "sendSimpleText",
             Method::SendHttpRequestMessage => "sendHttpRequestMessage",
             Method::SendCustomMessage => "sendCustomMessage",
@@ -72,6 +68,7 @@ impl Method {
             Method::LookupService => "lookupService",
             Method::PollMessage => "pollMessage",
             Method::NodeInfo => "nodeInfo",
+            Method::NodeDid => "nodeDid",
         }
     }
 }
@@ -96,8 +93,6 @@ impl TryFrom<&str> for Method {
             "sendTo" => Self::SendTo,
             "disconnect" => Self::Disconnect,
             "acceptAnswer" => Self::AcceptAnswer,
-            "listPendings" => Self::ListPendings,
-            "closePendingTransport" => Self::ClosePendingTransport,
             "sendSimpleText" => Self::SendSimpleText,
             "sendHttpRequestMessage" => Self::SendHttpRequestMessage,
             "sendCustomMessage" => Self::SendCustomMessage,
@@ -107,6 +102,7 @@ impl TryFrom<&str> for Method {
             "lookupService" => Method::LookupService,
             "pollMessage" => Method::PollMessage,
             "nodeInfo" => Method::NodeInfo,
+            "nodeDid" => Method::NodeDid,
             _ => return Err(Error::InvalidMethod),
         })
     }

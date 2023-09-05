@@ -35,7 +35,7 @@ pub async fn manually_establish_connection(swarm1: &Swarm, swarm2: &Swarm) {
     swarm1
         .get_connection(swarm2.did())
         .unwrap()
-        .webrtc_wait_for_data_channel_ready()
+        .webrtc_wait_for_data_channel_open()
         .await
         .unwrap();
 }
