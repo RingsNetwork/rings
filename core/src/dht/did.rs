@@ -340,4 +340,49 @@ mod tests {
         assert_eq!(affine_dids[2], did.rotate(180));
         assert_eq!(affine_dids[3], did.rotate(270));
     }
+
+    #[test]
+    fn test_dump_and_load() {
+        // The length must be 40.
+        assert!(Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab").is_err());
+        assert!(Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab00").is_err());
+
+        // Allow omit 0x prefix
+        assert_eq!(
+            Did::from_str("11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap(),
+            Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap(),
+        );
+
+        // from_str then to_string
+        let did = Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
+        // TODO: Should be "0x11e807fcc88dd319270493fb2e822e388fe36ab0"
+        assert_eq!(did.to_string(), "11e807fcc88dd319270493fb2e822e388fe36ab0");
+
+        // Serialize
+        let did = Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
+        assert_eq!(
+            serde_json::to_string(&did).unwrap(),
+            "\"0x11e807fcc88dd319270493fb2e822e388fe36ab0\""
+        );
+
+        // Deserialize
+        let did =
+            serde_json::from_str::<Did>("\"0x11e807fcc88dd319270493fb2e822e388fe36ab0\"").unwrap();
+        assert_eq!(
+            did,
+            Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap()
+        );
+
+        // Debug and Display
+        let did = Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
+        // TODO: Should be "0x11e807fcc88dd319270493fb2e822e388fe36ab0"
+        assert_eq!(
+            format!("{}", did),
+            "11e807fcc88dd319270493fb2e822e388fe36ab0"
+        );
+        assert_eq!(
+            format!("{:?}", did),
+            "Did(0x11e807fcc88dd319270493fb2e822e388fe36ab0)"
+        );
+    }
 }

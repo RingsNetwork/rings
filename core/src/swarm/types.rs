@@ -1,17 +1,15 @@
 #![warn(missing_docs)]
 //! This module defines type and type alias related to Swarm.
-use std::sync::Arc;
-use std::sync::Weak;
-
 use async_trait::async_trait;
+#[cfg(not(feature = "wasm"))]
+use rings_transport::connections::WebrtcConnection as Connection;
+use rings_transport::core::transport::SharedConnection;
+use rings_transport::core::transport::SharedTransport;
 
 use crate::dht::Did;
 use crate::dht::LiveDid;
 use crate::measure::BehaviourJudgement;
 use crate::swarm::Swarm;
-use crate::transports::manager::TransportManager;
-use crate::transports::Transport;
-use crate::types::ice_transport::IceTransportInterface;
 
 /// Type of Measure, see [Measure].
 #[cfg(not(feature = "wasm"))]
@@ -21,27 +19,28 @@ pub type MeasureImpl = Box<dyn BehaviourJudgement + Send + Sync>;
 #[cfg(feature = "wasm")]
 pub type MeasureImpl = Box<dyn BehaviourJudgement>;
 
-/// WrappedDid is a DID wrapped by Swarm and bound to a weak reference of a Transport,
+/// WrappedDid is a DID wrapped by Swarm and bound to a Connection,
 /// which enables checking whether the WrappedDid is live or not.
 #[derive(Clone)]
 pub struct WrappedDid {
     did: Did,
-    transport: Option<Weak<Transport>>,
+    connection: Option<Connection>,
 }
 
 impl WrappedDid {
     /// Creates a new WrappedDid using the provided Swarm instance and DID.
     pub fn new(swarm: &Swarm, did: Did) -> Self {
-        // Try to get the Transport for the provided DID from the Swarm.
-        match swarm.get_transport(did) {
-            Some(t) => Self {
+        // Try to get the Connection for the provided DID from the Swarm.
+        match swarm.transport.get_connection(&did.to_string()) {
+            Ok(c) => Self {
                 did,
-                // If the Transport is found, create a weak reference to it and store it in the WrappedDid.
-                transport: Some(Arc::downgrade(&t)),
+                // If the Transport is found, create a arc reference to it and store it in the WrappedDid.
+                // TODO: Should use weak reference
+                connection: Some(c),
             },
-            None => Self {
+            Err(_) => Self {
                 did,
-                transport: None,
+                connection: None,
             },
         }
     }
@@ -57,21 +56,10 @@ impl From<WrappedDid> for Did {
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl LiveDid for WrappedDid {
-    /// Implements the LiveDid trait for WrappedDid, which checks if the DID is live or not.
-    /// If the Transport is not present, has been dropped, or is not connected, returns false.
     /// If the Transport is present and connected, returns true.
     async fn live(&self) -> bool {
-        match &self.transport {
-            Some(t) => {
-                if let Some(transport) = t.upgrade() {
-                    // If the weak reference can be upgraded to a strong reference, check if it's connected.
-                    transport.is_connected().await
-                } else {
-                    // If the weak reference cannot be upgraded,
-                    // the Transport has been dropped, so return false.
-                    false
-                }
-            }
+        match &self.connection {
+            Some(c) => c.is_connected().await,
             None => false,
         }
     }

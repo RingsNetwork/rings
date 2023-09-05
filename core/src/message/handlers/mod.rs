@@ -96,7 +96,7 @@ pub enum MessageHandlerEvent {
 
     /// Instructs the swarm to accept an answer inside payload by given
     /// sender's Did and Message.
-    AcceptAnswer(NextHop, ConnectNodeReport),
+    AcceptAnswer(Did, ConnectNodeReport),
 
     /// Tell swarm to forward the payload to destination by given
     /// Payload and optional next hop.
@@ -294,7 +294,7 @@ pub mod tests {
         let (node1, _path1) = prepare_node_with_callback(key1, Some(cb1)).await;
         let (node2, _path2) = prepare_node_with_callback(key2, Some(cb2)).await;
 
-        manually_establish_connection(&node1, &node2).await?;
+        manually_establish_connection(&node1, &node2).await;
 
         let node11 = node1.clone();
         let node22 = node2.clone();

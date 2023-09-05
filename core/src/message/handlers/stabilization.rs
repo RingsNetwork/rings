@@ -143,7 +143,7 @@ mod test {
         println!("||  now we start join node3 to node2  ||");
         println!("========================================");
 
-        manually_establish_connection(&node3, &node2).await?;
+        manually_establish_connection(&node3, &node2).await;
         test_listen_join_and_init_find_succeesor(&node3, &node2).await?;
         node3.listen_once().await.unwrap();
         node2.listen_once().await.unwrap();
@@ -388,7 +388,7 @@ mod test {
         println!("||  now we start join node3 to node2  ||");
         println!("========================================");
 
-        manually_establish_connection(&node3, &node2).await?;
+        manually_establish_connection(&node3, &node2).await;
         test_listen_join_and_init_find_succeesor(&node3, &node2).await?;
         node1.listen_once().await.unwrap();
         node2.listen_once().await.unwrap();

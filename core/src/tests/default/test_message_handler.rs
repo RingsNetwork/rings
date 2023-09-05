@@ -1,11 +1,10 @@
 use std::str::FromStr;
-use std::sync::Arc;
 
+use rings_transport::core::transport::SharedConnection;
+use rings_transport::core::transport::WebrtcConnectionState;
 use tokio::time::sleep;
 use tokio::time::Duration;
-use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 
-use super::prepare_node;
 use crate::dht::successor::SuccessorReader;
 use crate::dht::vnode::VirtualNode;
 use crate::ecc::tests::gen_ordered_keys;
@@ -21,18 +20,16 @@ use crate::message::PayloadSender;
 use crate::prelude::vnode::VNodeOperation;
 use crate::storage::PersistenceStorageOperation;
 use crate::storage::PersistenceStorageReadAndWrite;
-use crate::swarm::tests::new_swarm;
+use crate::tests::default::prepare_node;
 use crate::tests::manually_establish_connection;
-use crate::transports::manager::TransportManager;
-use crate::types::ice_transport::IceTransportInterface;
 
 #[tokio::test]
 async fn test_handle_join() -> Result<()> {
     let key1 = SecretKey::random();
     let key2 = SecretKey::random();
-    let node1 = Arc::new(new_swarm(key1).await?);
-    let node2 = Arc::new(new_swarm(key2).await?);
-    manually_establish_connection(&node1, &node2).await?;
+    let node1 = prepare_node(key1).await.0;
+    let node2 = prepare_node(key2).await.0;
+    manually_establish_connection(&node1, &node2).await;
     assert!(node1.listen_once().await.is_some());
     assert!(node1
         .dht()
@@ -53,10 +50,10 @@ async fn test_handle_connect_node() -> Result<()> {
     let (node3, _path3) = prepare_node(key3).await;
 
     // 2 to 3
-    manually_establish_connection(&node3, &node2).await?;
+    manually_establish_connection(&node3, &node2).await;
 
     // 1 to 2
-    manually_establish_connection(&node1, &node2).await?;
+    manually_establish_connection(&node1, &node2).await;
 
     sleep(Duration::from_secs(3)).await;
 
@@ -70,12 +67,10 @@ async fn test_handle_connect_node() -> Result<()> {
         } => {unreachable!();}
         _ = async {
             // handle join dht situation
-            println!("wait tranposrt 1 to 2 and transport 2 to 3 connected");
+            println!("wait connection 1 to 2 and connection 2 to 3 connected");
             sleep(Duration::from_millis(1)).await;
-            let transport_1_to_2 = node1.get_transport(node2.did()).unwrap();
-            transport_1_to_2.wait_for_data_channel_open().await.unwrap();
-            let transport_2_to_3 = node2.get_transport(node3.did()).unwrap();
-            transport_2_to_3.wait_for_data_channel_open().await.unwrap();
+            let connection_1_to_2 = node1.get_connection(node2.did()).unwrap();
+            let connection_2_to_3 = node2.get_connection(node3.did()).unwrap();
 
             println!("wait events trigger");
             sleep(Duration::from_millis(1)).await;
@@ -114,31 +109,30 @@ async fn test_handle_connect_node() -> Result<()> {
             }
 
             assert_eq!(
-                transport_1_to_2.ice_connection_state().await,
-                Some(RTCIceConnectionState::Connected)
+                connection_1_to_2.ice_connection_state(),
+                WebrtcConnectionState::Connected,
             );
             assert_eq!(
-                transport_2_to_3.ice_connection_state().await,
-                Some(RTCIceConnectionState::Connected)
+                connection_2_to_3.ice_connection_state(),
+                WebrtcConnectionState::Connected,
             );
 
             // node1.dht() send msg to node2.dht() ask for connecting node3.dht()
             node1.connect(node3.did()).await.unwrap();
             sleep(Duration::from_millis(10000)).await;
 
-            let transport_1_to_3 = node1.get_transport(node3.did());
-            assert!(transport_1_to_3.is_some());
-            let transport_1_to_3 = transport_1_to_3.unwrap();
+            let connection_1_to_3 = node1.get_connection(node3.did());
+            assert!(connection_1_to_3.is_some());
+            let connection_1_to_3 = connection_1_to_3.unwrap();
             let both = {
-                transport_1_to_3.ice_connection_state().await == Some(RTCIceConnectionState::New) ||
-                    transport_1_to_3.ice_connection_state().await == Some(RTCIceConnectionState::Checking) ||
-                    transport_1_to_3.ice_connection_state().await == Some(RTCIceConnectionState::Connected)
+                connection_1_to_3.ice_connection_state() == WebrtcConnectionState::New ||
+                    connection_1_to_3.ice_connection_state() == WebrtcConnectionState::Connecting ||
+                    connection_1_to_3.ice_connection_state() == WebrtcConnectionState::Connected
             };
-            assert!(both, "{:?}", transport_1_to_3.ice_connection_state().await);
-            transport_1_to_3.wait_for_data_channel_open().await.unwrap();
+            assert!(both, "{:?}", connection_1_to_3.ice_connection_state());
             assert_eq!(
-                transport_1_to_3.ice_connection_state().await,
-                Some(RTCIceConnectionState::Connected)
+                connection_1_to_3.ice_connection_state(),
+                WebrtcConnectionState::Connected
             );
             Ok::<(), Error>(())
         } => {}
@@ -151,9 +145,9 @@ async fn test_handle_connect_node() -> Result<()> {
 async fn test_handle_notify_predecessor() -> Result<()> {
     let key1 = SecretKey::random();
     let key2 = SecretKey::random();
-    let node1 = Arc::new(new_swarm(key1).await?);
-    let node2 = Arc::new(new_swarm(key2).await?);
-    manually_establish_connection(&node1, &node2).await?;
+    let node1 = prepare_node(key1).await.0;
+    let node2 = prepare_node(key2).await.0;
+    manually_establish_connection(&node1, &node2).await;
 
     // handle join dht situation
     tokio::select! {
@@ -172,15 +166,11 @@ async fn test_handle_notify_predecessor() -> Result<()> {
             );
         } => { unreachable!();}
         _ = async {
-            let transport_1_to_2 = node1.get_transport(node2.did()).unwrap();
+            let connection_1_to_2 = node1.get_connection(node2.did()).unwrap();
             sleep(Duration::from_millis(1000)).await;
-            transport_1_to_2.wait_for_data_channel_open().await.unwrap();
             assert!(node1.dht().successors().list()?.contains(&key2.address().into()));
             assert!(node2.dht().successors().list()?.contains(&key1.address().into()));
-            assert_eq!(
-                transport_1_to_2.ice_connection_state().await,
-                Some(RTCIceConnectionState::Connected)
-            );
+            assert_eq!(connection_1_to_2.ice_connection_state(), WebrtcConnectionState::Connected);
             node1
                 .send_message(
                     Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
@@ -208,9 +198,9 @@ async fn test_handle_find_successor_increase() -> Result<()> {
     if key1.address() > key2.address() {
         (key1, key2) = (key2, key1)
     }
-    let node1 = Arc::new(new_swarm(key1).await?);
-    let node2 = Arc::new(new_swarm(key2).await?);
-    manually_establish_connection(&node1, &node2).await?;
+    let node1 = prepare_node(key1).await.0;
+    let node2 = prepare_node(key2).await.0;
+    manually_establish_connection(&node1, &node2).await;
 
     tokio::select! {
         _ = async {
@@ -228,15 +218,11 @@ async fn test_handle_find_successor_increase() -> Result<()> {
             );
         } => { unreachable!();}
         _ = async {
-            let transport_1_to_2 = node1.get_transport(node2.did()).unwrap();
+            let connection_1_to_2 = node1.get_connection(node2.did()).unwrap();
             sleep(Duration::from_millis(1000)).await;
-            transport_1_to_2.wait_for_data_channel_open().await.unwrap();
             assert!(node1.dht().successors().list()?.contains(&key2.address().into()), "{:?}", node1.dht().successors().list()?);
             assert!(node2.dht().successors().list()?.contains(&key1.address().into()));
-            assert_eq!(
-                transport_1_to_2.ice_connection_state().await,
-                Some(RTCIceConnectionState::Connected)
-            );
+            assert_eq!(connection_1_to_2.ice_connection_state(), WebrtcConnectionState::Connected);
             node1
                 .send_message(
                     Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
@@ -284,9 +270,9 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
     if key1.address() < key2.address() {
         (key1, key2) = (key2, key1)
     }
-    let node1 = Arc::new(new_swarm(key1).await?);
-    let node2 = Arc::new(new_swarm(key2).await?);
-    manually_establish_connection(&node1, &node2).await?;
+    let node1 = prepare_node(key1).await.0;
+    let node2 = prepare_node(key2).await.0;
+    manually_establish_connection(&node1, &node2).await;
 
     // handle join dht situation
     tokio::select! {
@@ -305,9 +291,8 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
             );
         } => {unreachable!();}
         _ = async {
-            let transport_1_to_2 = node1.get_transport(node2.did()).unwrap();
+            let connection_1_to_2 = node1.get_connection(node2.did()).unwrap();
             sleep(Duration::from_millis(1000)).await;
-            transport_1_to_2.wait_for_data_channel_open().await.unwrap();
             assert!(node1.dht().successors().list()?.contains(&key2.address().into()));
             assert!(node2.dht().successors().list()?.contains(&key1.address().into()));
             assert!(node1.dht()
@@ -316,10 +301,7 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
             assert!(node2.dht()
                 .lock_finger()?
                 .contains(Some(key1.address().into())));
-            assert_eq!(
-                transport_1_to_2.ice_connection_state().await,
-                Some(RTCIceConnectionState::Connected)
-            );
+            assert_eq!(connection_1_to_2.ice_connection_state(), WebrtcConnectionState::Connected);
             node1
                 .send_message(
                     Message::NotifyPredecessorSend(message::NotifyPredecessorSend {
@@ -375,18 +357,17 @@ async fn test_handle_storage() -> Result<()> {
         key1.address(),
         key2.address()
     );
-    let node1 = Arc::new(new_swarm(key1).await?);
-    let node2 = Arc::new(new_swarm(key2).await?);
-    manually_establish_connection(&node1, &node2).await?;
+    let node1 = prepare_node(key1).await.0;
+    let node2 = prepare_node(key2).await.0;
+    manually_establish_connection(&node1, &node2).await;
 
     let n1 = node1.clone();
     let n2 = node2.clone();
     tokio::spawn(async move { n1.listen().await });
     tokio::spawn(async move { n2.listen().await });
 
-    let transport_1_to_2 = node1.get_transport(node2.did()).unwrap();
+    let connection_1_to_2 = node1.get_connection(node2.did()).unwrap();
     sleep(Duration::from_millis(1000)).await;
-    transport_1_to_2.wait_for_data_channel_open().await.unwrap();
     // node1's successor is node2
     // node2's successor is node1
     assert!(node1
@@ -400,8 +381,8 @@ async fn test_handle_storage() -> Result<()> {
         .list()?
         .contains(&key1.address().into()));
     assert_eq!(
-        transport_1_to_2.ice_connection_state().await,
-        Some(RTCIceConnectionState::Connected)
+        connection_1_to_2.ice_connection_state(),
+        WebrtcConnectionState::Connected
     );
     node1
         .send_message(

@@ -17,11 +17,11 @@ pub trait TransportManager {
     type Transport;
 
     /// Get all transports in swarm.
-    fn get_transports(&self) -> Vec<(Did, Self::Transport)>;
+    fn get_connections(&self) -> Vec<(Did, Self::Transport)>;
     /// Get dids of all transports in swarm.
     fn get_dids(&self) -> Vec<Did>;
     /// Get transport by did.
-    fn get_transport(&self, did: Did) -> Option<Self::Transport>;
+    fn get_connection(&self, did: Did) -> Option<Self::Transport>;
     /// Remove transport by did.
     fn remove_transport(&self, did: Did) -> Option<(Did, Self::Transport)>;
     /// Get transport by did and check if it is connected.

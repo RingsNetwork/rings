@@ -33,7 +33,6 @@ use crate::prelude::rings_core::prelude::vnode::VirtualNode;
 use crate::prelude::rings_core::transports::manager::TransportHandshake;
 use crate::prelude::rings_core::transports::manager::TransportManager;
 use crate::prelude::rings_core::types::ice_transport::IceTransportInterface;
-use crate::prelude::rings_core::utils::from_rtc_ice_connection_state;
 use crate::prelude::rings_rpc;
 use crate::prelude::rings_rpc::response;
 use crate::prelude::rings_rpc::response::Peer;
@@ -235,7 +234,7 @@ pub(crate) async fn accept_answer(params: Params, meta: RpcMeta) -> Result<Value
         .into();
 
     let state = p.transport.ice_connection_state().await;
-    let r: Peer = p.into_response_peer(state.map(from_rtc_ice_connection_state));
+    let r: Peer = p.into_response_peer(state.map(|x| format!("{x:?}")));
     r.to_json_obj()
         .map_err(|_| ServerError::EncodeError)
         .map_err(Error::from)
@@ -253,7 +252,7 @@ pub(crate) async fn list_peers(_params: Params, meta: RpcMeta) -> Result<Value> 
     let r: Vec<Peer> = peers
         .iter()
         .zip(states.iter())
-        .map(|(x, y)| x.into_response_peer(y.map(from_rtc_ice_connection_state)))
+        .map(|(x, y)| x.into_response_peer(y.map(|x| format!("{x:?}"))))
         .collect::<Vec<_>>();
     serde_json::to_value(r).map_err(|_| Error::from(ServerError::EncodeError))
 }
@@ -282,7 +281,7 @@ pub(crate) async fn list_pendings(_params: Params, meta: RpcMeta) -> Result<Valu
     let r: Vec<response::TransportInfo> = transports
         .iter()
         .zip(states.iter())
-        .map(|(x, y)| response::TransportInfo::from((x, y.map(from_rtc_ice_connection_state))))
+        .map(|(x, y)| response::TransportInfo::from((x, y.map(|x| format!("{x:?}")))))
         .collect::<Vec<_>>();
     serde_json::to_value(r).map_err(|_| Error::from(ServerError::EncodeError))
 }
