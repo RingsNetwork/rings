@@ -57,7 +57,7 @@ pub struct Swarm {
     session_sk: SessionSk,
     message_handler: MessageHandler,
     transport: Transport<Connection>,
-    callback: Arc<BoxedCallback<Error>>,
+    callback: Arc<BoxedCallback>,
 }
 
 impl Swarm {
