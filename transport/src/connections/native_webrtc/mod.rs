@@ -55,25 +55,6 @@ impl WebrtcConnection {
             .ok_or(Error::WebrtcLocalSdpGenerationError)
     }
 
-    pub async fn webrtc_wait_for_data_channel_ready(&self) -> Result<()> {
-        loop {
-            if matches!(
-                self.webrtc_connection_state(),
-                WebrtcConnectionState::Failed
-                    | WebrtcConnectionState::Closed
-                    | WebrtcConnectionState::Disconnected
-            ) {
-                return Err(Error::DataChannelOpen("Connection unavailable".to_string()));
-            }
-
-            if self.webrtc_data_channel.ready_state() == RTCDataChannelState::Open {
-                return Ok(());
-            }
-
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    }
-
     async fn close(&self) -> Result<()> {
         self.webrtc_conn.close().await.map_err(|e| e.into())
     }
@@ -85,7 +66,7 @@ impl SharedConnection for WebrtcConnection {
     type Error = Error;
 
     async fn send_message(&self, msg: TransportMessage) -> Result<()> {
-        self.webrtc_wait_for_data_channel_ready().await?;
+        self.webrtc_wait_for_data_channel_open().await?;
         let data = bincode::serialize(&msg).map(Bytes::from)?;
         self.webrtc_data_channel.send(&data).await?;
         Ok(())
@@ -127,6 +108,25 @@ impl SharedConnection for WebrtcConnection {
             .set_remote_description(answer)
             .await
             .map_err(|e| e.into())
+    }
+
+    async fn webrtc_wait_for_data_channel_open(&self) -> Result<()> {
+        loop {
+            if matches!(
+                self.webrtc_connection_state(),
+                WebrtcConnectionState::Failed
+                    | WebrtcConnectionState::Closed
+                    | WebrtcConnectionState::Disconnected
+            ) {
+                return Err(Error::DataChannelOpen("Connection unavailable".to_string()));
+            }
+
+            if self.webrtc_data_channel.ready_state() == RTCDataChannelState::Open {
+                return Ok(());
+            }
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 }
 

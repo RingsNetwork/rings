@@ -51,8 +51,6 @@ enum Command {
     Connect(ConnectCommand),
     #[command(about = "Manages peers on the network.", subcommand)]
     Peer(PeerCommand),
-    #[command(about = "Manages pending peers on the network.", subcommand)]
-    Pending(PendingCommand),
     #[command(about = "Sends a message to another peer.", subcommand)]
     Send(SendCommand),
     #[command(about = "Registers or looks up a service on the network.", subcommand)]
@@ -235,29 +233,6 @@ struct PeerDisconnectCommand {
     client_args: ClientArgs,
 
     address: String,
-}
-
-#[derive(Subcommand, Debug)]
-#[command(rename_all = "kebab-case")]
-enum PendingCommand {
-    #[command(about = "List pending peers")]
-    List(PendingListCommand),
-    #[command(about = "Close pending peer")]
-    Close(PendingCloseTransportCommand),
-}
-
-#[derive(Args, Debug)]
-struct PendingListCommand {
-    #[command(flatten)]
-    client_args: ClientArgs,
-}
-
-#[derive(Args, Debug)]
-struct PendingCloseTransportCommand {
-    #[command(flatten)]
-    client_args: ClientArgs,
-
-    transport_id: String,
 }
 
 #[derive(Subcommand, Debug)]
@@ -499,24 +474,6 @@ async fn main() -> anyhow::Result<()> {
                 .new_client()
                 .await?
                 .disconnect(args.address.as_str())
-                .await?
-                .display();
-            Ok(())
-        }
-        Command::Pending(PendingCommand::List(args)) => {
-            args.client_args
-                .new_client()
-                .await?
-                .list_pendings()
-                .await?
-                .display();
-            Ok(())
-        }
-        Command::Pending(PendingCommand::Close(args)) => {
-            args.client_args
-                .new_client()
-                .await?
-                .close_pending_transport(args.transport_id.as_str())
                 .await?
                 .display();
             Ok(())

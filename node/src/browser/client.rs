@@ -263,7 +263,6 @@ impl Client {
                 .await
                 .map_err(JsError::from)?
                 .transport;
-            log::debug!("connect_peer_via_http transport_id: {:?}", transport.id);
             Ok(JsValue::from_str(transport.id.to_string().as_str()))
         })
     }

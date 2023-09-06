@@ -2,7 +2,8 @@
 //! Tranposrt management
 mod builder;
 mod callback;
-mod impls;
+/// Implementations of connection management traits for swarm
+pub mod impls;
 mod types;
 
 use std::fmt;

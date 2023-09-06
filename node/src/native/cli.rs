@@ -63,15 +63,15 @@ impl Client {
     /// The function sends ICE candidates and Session Description Protocol (SDP) messages over HTTP as a form of signaling to establish the connection.
     ///
     /// Takes a URL for an HTTP server that will be used as the signaling channel to exchange ICE candidates and SDP with the remote peer.
-    /// Returns a transport ID that can be used to refer to this connection in subsequent WebRTC operations.
+    /// Returns a Did that can be used to refer to this connection in subsequent WebRTC operations.
     pub async fn connect_peer_via_http(&mut self, http_url: &str) -> Output<String> {
-        let transport_id = self
+        let peer_did = self
             .client
             .connect_peer_via_http(http_url)
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        ClientOutput::ok(format!("Your transport_id: {}", transport_id), transport_id)
+        ClientOutput::ok(format!("Remote did: {}", peer_did), peer_did)
     }
 
     /// Attempts to connect to a peer using a seed file located at the specified source path.
@@ -111,7 +111,7 @@ impl Client {
         display.push_str(
             peers
                 .iter()
-                .map(|peer| format!("{}, {}, {}", peer.did, peer.transport_id, peer.state))
+                .map(|peer| format!("{}, {}, {}", peer.did, peer.did, peer.state))
                 .collect::<Vec<_>>()
                 .join("\n")
                 .as_str(),
@@ -127,30 +127,6 @@ impl Client {
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        ClientOutput::ok("Done.".into(), ())
-    }
-
-    /// Lists all pending transports and their status.
-    pub async fn list_pendings(&self) -> Output<()> {
-        let resp = self
-            .client
-            .list_pendings()
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let mut display = String::new();
-        display.push_str("TransportId, Status\n");
-        for item in resp.iter() {
-            display.push_str(format!("{}, {}", item.transport_id, item.state).as_str())
-        }
-        ClientOutput::ok(display, ())
-    }
-
-    /// Closes the pending transport with the specified transport ID.
-    pub async fn close_pending_transport(&self, transport_id: &str) -> Output<()> {
-        self.client
-            .close_pending_transport(transport_id)
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
         ClientOutput::ok("Done.".into(), ())
     }
 

@@ -58,6 +58,7 @@ pub trait SharedConnection: Clone + Send + Sync + 'static {
     async fn webrtc_create_offer(&self) -> Result<Self::Sdp, Self::Error>;
     async fn webrtc_answer_offer(&self, offer: Self::Sdp) -> Result<Self::Sdp, Self::Error>;
     async fn webrtc_accept_answer(&self, answer: Self::Sdp) -> Result<(), Self::Error>;
+    async fn webrtc_wait_for_data_channel_open(&self) -> Result<(), Self::Error>;
 
     // TODO: deprecated, should use webrtc_connection_state
     fn ice_connection_state(&self) -> WebrtcConnectionState {

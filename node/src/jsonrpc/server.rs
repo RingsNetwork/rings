@@ -10,6 +10,7 @@ use futures::channel::mpsc::Receiver;
 use futures::future::join_all;
 #[cfg(feature = "browser")]
 use futures::lock::Mutex;
+use rings_core::swarm::impls::ConnectionHandshake;
 use serde_json::Value;
 #[cfg(feature = "node")]
 use tokio::sync::broadcast::Receiver;
@@ -30,11 +31,7 @@ use crate::prelude::rings_core::message::Encoder;
 use crate::prelude::rings_core::message::Message;
 use crate::prelude::rings_core::message::MessagePayload;
 use crate::prelude::rings_core::prelude::vnode::VirtualNode;
-use crate::prelude::rings_core::transports::manager::TransportHandshake;
-use crate::prelude::rings_core::transports::manager::TransportManager;
-use crate::prelude::rings_core::types::ice_transport::IceTransportInterface;
 use crate::prelude::rings_rpc;
-use crate::prelude::rings_rpc::response;
 use crate::prelude::rings_rpc::response::Peer;
 use crate::prelude::rings_rpc::types::HttpRequest;
 use crate::processor;
@@ -108,6 +105,11 @@ pub(crate) async fn node_info(_: Params, meta: RpcMeta) -> Result<Value> {
     serde_json::to_value(node_info).map_err(|_| Error::new(ErrorCode::ParseError))
 }
 
+pub(crate) async fn node_did(_: Params, meta: RpcMeta) -> Result<Value> {
+    let did = meta.processor.did();
+    serde_json::to_value(did).map_err(|_| Error::new(ErrorCode::ParseError))
+}
+
 /// Connect Peer VIA http
 pub(crate) async fn connect_peer_via_http(params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
@@ -120,7 +122,7 @@ pub(crate) async fn connect_peer_via_http(params: Params, meta: RpcMeta) -> Resu
         .connect_peer_via_http(peer_url)
         .await
         .map_err(Error::from)?;
-    Ok(Value::String(peer.transport.id.to_string()))
+    Ok(Value::String(peer.did.to_string()))
 }
 
 /// Connect Peer with seed
@@ -131,7 +133,8 @@ pub(crate) async fn connect_with_seed(params: Params, meta: RpcMeta) -> Result<V
         .first()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
 
-    let mut connected_addresses: HashSet<Did> = HashSet::from_iter(meta.processor.swarm.get_dids());
+    let mut connected_addresses: HashSet<Did> =
+        HashSet::from_iter(meta.processor.swarm.get_connection_ids());
     connected_addresses.insert(meta.processor.swarm.did());
 
     let tasks = seed
@@ -154,26 +157,34 @@ pub(crate) async fn connect_with_seed(params: Params, meta: RpcMeta) -> Result<V
 pub(crate) async fn connect_with_did(params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
     let p: Vec<String> = params.parse()?;
+
     let address_str = p
         .first()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
+    let did = Did::from_str(address_str).map_err(|_| Error::new(ErrorCode::InvalidParams))?;
+
     meta.processor
-        .connect_with_did(
-            Did::from_str(address_str).map_err(|_| Error::new(ErrorCode::InvalidParams))?,
-            true,
-        )
+        .connect_with_did(did, true)
         .await
         .map_err(Error::from)?;
+
     Ok(Value::Null)
 }
 
 /// Handle create offer
-pub(crate) async fn create_offer(_params: Params, meta: RpcMeta) -> Result<Value> {
+pub(crate) async fn create_offer(params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
+    let p: Vec<String> = params.parse()?;
+
+    let address_str = p
+        .first()
+        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
+    let did = Did::from_str(address_str).map_err(|_| Error::new(ErrorCode::InvalidParams))?;
+
     let (_, offer_payload) = meta
         .processor
         .swarm
-        .create_offer()
+        .create_offer(did)
         .await
         .map_err(ServerError::CreateOffer)
         .map_err(Error::from)?;
@@ -233,8 +244,7 @@ pub(crate) async fn accept_answer(params: Params, meta: RpcMeta) -> Result<Value
         .map_err(Error::from)?
         .into();
 
-    let state = p.transport.ice_connection_state().await;
-    let r: Peer = p.into_response_peer(state.map(|x| format!("{x:?}")));
+    let r: Peer = p.into_response_peer();
     r.to_json_obj()
         .map_err(|_| ServerError::EncodeError)
         .map_err(Error::from)
@@ -244,15 +254,9 @@ pub(crate) async fn accept_answer(params: Params, meta: RpcMeta) -> Result<Value
 pub(crate) async fn list_peers(_params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
     let peers = meta.processor.list_peers().await?;
-    let states_async = peers
-        .iter()
-        .map(|x| x.transport.ice_connection_state())
-        .collect::<Vec<_>>();
-    let states = futures::future::join_all(states_async).await;
     let r: Vec<Peer> = peers
         .iter()
-        .zip(states.iter())
-        .map(|(x, y)| x.into_response_peer(y.map(|x| format!("{x:?}"))))
+        .map(|x| x.into_response_peer())
         .collect::<Vec<_>>();
     serde_json::to_value(r).map_err(|_| Error::from(ServerError::EncodeError))
 }
@@ -266,36 +270,6 @@ pub(crate) async fn close_connection(params: Params, meta: RpcMeta) -> Result<Va
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
     let did = Did::from_str(did).map_err(|_| Error::from(ServerError::InvalidDid))?;
     meta.processor.disconnect(did).await?;
-    Ok(serde_json::json!({}))
-}
-
-/// Handle list pendings
-pub(crate) async fn list_pendings(_params: Params, meta: RpcMeta) -> Result<Value> {
-    meta.require_authed()?;
-    let transports = meta.processor.list_pendings().await?;
-    let states_async = transports
-        .iter()
-        .map(|x| x.ice_connection_state())
-        .collect::<Vec<_>>();
-    let states = futures::future::join_all(states_async).await;
-    let r: Vec<response::TransportInfo> = transports
-        .iter()
-        .zip(states.iter())
-        .map(|(x, y)| response::TransportInfo::from((x, y.map(|x| format!("{x:?}")))))
-        .collect::<Vec<_>>();
-    serde_json::to_value(r).map_err(|_| Error::from(ServerError::EncodeError))
-}
-
-/// Handle close pending transport
-pub(crate) async fn close_pending_transport(params: Params, meta: RpcMeta) -> Result<Value> {
-    meta.require_authed()?;
-    let params: Vec<String> = params.parse()?;
-    let transport_id = params
-        .first()
-        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
-    meta.processor
-        .close_pending_transport(transport_id.as_str())
-        .await?;
     Ok(serde_json::json!({}))
 }
 
@@ -538,7 +512,12 @@ mod tests {
     async fn test_maually_handshake() {
         let meta1 = new_rnd_meta().await;
         let meta2 = new_rnd_meta().await;
-        let offer = create_offer(Params::None, meta1.clone()).await.unwrap();
+        let offer = create_offer(
+            Params::Array(vec![meta2.processor.did().to_string().into()]),
+            meta1.clone(),
+        )
+        .await
+        .unwrap();
         let answer = answer_offer(Params::Array(vec![offer]), meta2)
             .await
             .unwrap();

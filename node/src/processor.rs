@@ -10,6 +10,8 @@ use futures::Future;
 #[cfg(feature = "node")]
 use jsonrpc_core::Metadata;
 use rings_core::message::MessagePayload;
+use rings_core::swarm::impls::ConnectionHandshake;
+use rings_transport::core::transport::SharedConnection;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -37,10 +39,6 @@ use crate::prelude::rings_core::storage::PersistenceStorage;
 use crate::prelude::rings_core::swarm::MeasureImpl;
 use crate::prelude::rings_core::swarm::Swarm;
 use crate::prelude::rings_core::swarm::SwarmBuilder;
-use crate::prelude::rings_core::transports::manager::TransportHandshake;
-use crate::prelude::rings_core::transports::manager::TransportManager;
-use crate::prelude::rings_core::transports::Transport;
-use crate::prelude::rings_core::types::ice_transport::IceTransportInterface;
 use crate::prelude::rings_rpc::method;
 use crate::prelude::rings_rpc::response;
 use crate::prelude::rings_rpc::types::HttpRequest;
@@ -50,6 +48,7 @@ use crate::prelude::wasm_export;
 use crate::prelude::CallbackFn;
 use crate::prelude::ChordStorageInterface;
 use crate::prelude::ChordStorageInterfaceCacheChecker;
+use crate::prelude::Connection;
 use crate::prelude::CustomMessage;
 use crate::prelude::SessionSk;
 
@@ -58,9 +57,9 @@ use crate::prelude::SessionSk;
 #[derive(Clone)]
 #[wasm_export]
 pub struct ProcessorConfig {
-    /// ICE servers for webrtc transport.
+    /// ICE servers for webrtc
     ice_servers: String,
-    /// External address for webrtc transport.
+    /// External address for webrtc
     external_address: Option<String>,
     /// [SessionSk].
     session_sk: SessionSk,
@@ -114,9 +113,9 @@ impl FromStr for ProcessorConfig {
 #[derive(Serialize, Deserialize, Clone)]
 #[wasm_export]
 pub struct ProcessorConfigSerialized {
-    /// A string representing ICE servers for WebRTC transport.
+    /// A string representing ICE servers for WebRTC
     ice_servers: String,
-    /// An optional string representing the external address for WebRTC transport.
+    /// An optional string representing the external address for WebRTC
     external_address: Option<String>,
     /// A string representing the dumped `SessionSk`.
     session_sk: String,
@@ -326,9 +325,19 @@ impl Processor {
         tracing::debug!("connect_peer_via_http: {}", peer_url);
 
         let client = SimpleClient::new(peer_url, None);
+
+        let did_resp = client
+            .call_method(method::Method::NodeDid.as_str(), jsonrpc_core::Params::None)
+            .await
+            .map_err(|e| Error::RemoteRpcError(e.to_string()))?;
+        let did = serde_json::from_value::<String>(did_resp)
+            .map_err(|_| Error::InvalidDid)?
+            .parse()
+            .map_err(|_| Error::InvalidDid)?;
+
         let (_, offer) = self
             .swarm
-            .create_offer()
+            .create_offer(did)
             .await
             .map_err(Error::CreateOffer)?;
         let encoded_offer = offer.encode().map_err(|_| Error::EncodeError)?;
@@ -353,13 +362,13 @@ impl Processor {
         let answer_payload = MessagePayload::<Message>::from_encoded(&encoded_answer)
             .map_err(|_| Error::DecodeError)?;
 
-        let (did, transport) = self
+        let (did, conn) = self
             .swarm
             .accept_answer(answer_payload)
             .await
             .map_err(Error::AcceptAnswer)?;
 
-        Ok(Peer::from((did, transport)))
+        Ok(Peer::from((did, conn)))
     }
 
     /// Connect peer with web3 did.
@@ -368,35 +377,34 @@ impl Processor {
     /// 2. PeerC has a connection with PeerB.
     /// 3. PeerC can connect PeerA with PeerA's web3 address.
     pub async fn connect_with_did(&self, did: Did, wait_for_open: bool) -> Result<Peer> {
-        let transport = self.swarm.connect(did).await.map_err(Error::ConnectError)?;
-        tracing::debug!("wait for transport connected");
+        let conn = self.swarm.connect(did).await.map_err(Error::ConnectError)?;
+        tracing::debug!("wait for connection connected");
         if wait_for_open {
-            transport
-                .wait_for_data_channel_open()
+            conn.webrtc_wait_for_data_channel_open()
                 .await
-                .map_err(Error::ConnectError)?;
+                .map_err(|e| Error::ConnectError(rings_core::error::Error::Transport(e)))?;
         }
-        Ok(Peer::from((did, transport)))
+        Ok(Peer::from((did, conn)))
     }
 
     /// List all peers.
     pub async fn list_peers(&self) -> Result<Vec<Peer>> {
-        let transports = self.swarm.get_connections();
+        let conns = self.swarm.get_connections();
         tracing::debug!(
             "addresses: {:?}",
-            transports.iter().map(|(a, _b)| a).collect::<Vec<_>>()
+            conns.iter().map(|(a, _b)| a).collect::<Vec<_>>()
         );
-        let data = transports.iter().map(|x| x.into()).collect::<Vec<Peer>>();
+        let data = conns.iter().map(|x| x.into()).collect::<Vec<Peer>>();
         Ok(data)
     }
 
     /// Get peer by remote did
     pub async fn get_peer(&self, did: Did) -> Result<Peer> {
-        let transport = self
+        let conn = self
             .swarm
             .get_connection(did)
-            .ok_or(Error::TransportNotFound)?;
-        Ok(Peer::from(&(did, transport)))
+            .ok_or(Error::ConnectionNotFound)?;
+        Ok(Peer::from(&(did, conn)))
     }
 
     /// Disconnect a peer with web3 did.
@@ -404,50 +412,19 @@ impl Processor {
         self.swarm
             .disconnect(did)
             .await
-            .map_err(Error::CloseTransportError)
+            .map_err(Error::CloseConnectionError)
     }
 
     /// Disconnect all connections.
     pub async fn disconnect_all(&self) {
-        let transports = self.swarm.get_connections();
+        let dids = self.swarm.get_connection_ids();
 
-        let close_async = transports
-            .iter()
-            .map(|(_, t)| t.close())
+        let close_async = dids
+            .into_iter()
+            .map(|did| self.swarm.disconnect(did))
             .collect::<Vec<_>>();
 
         futures::future::join_all(close_async).await;
-    }
-
-    /// List all pending transport.
-    pub async fn list_pendings(&self) -> Result<Vec<Arc<Transport>>> {
-        let pendings = self
-            .swarm
-            .pending_transports()
-            .await
-            .map_err(|_| Error::InternalError)?;
-        Ok(pendings)
-    }
-
-    /// Close pending transport
-    pub async fn close_pending_transport(&self, transport_id: &str) -> Result<()> {
-        let transport_id =
-            uuid::Uuid::from_str(transport_id).map_err(|_| Error::InvalidTransportId)?;
-        let transport = self
-            .swarm
-            .find_pending_transport(transport_id)
-            .map_err(|_| Error::TransportNotFound)?
-            .ok_or(Error::TransportNotFound)?;
-        if transport.is_connected().await {
-            transport
-                .close()
-                .await
-                .map_err(Error::CloseTransportError)?;
-        }
-        self.swarm
-            .pop_pending_transport(transport_id)
-            .map_err(Error::CloseTransportError)?;
-        Ok(())
     }
 
     /// Send custom message to a did.
@@ -613,35 +590,35 @@ impl Processor {
 pub struct Peer {
     /// web3 did of a peer.
     pub did: Token,
-    /// transport of the connection.
-    pub transport: Arc<Transport>,
+    /// the connection.
+    pub connection: Connection,
 }
 
-impl From<(Did, Arc<Transport>)> for Peer {
-    fn from((did, transport): (Did, Arc<Transport>)) -> Self {
+impl From<(Did, Connection)> for Peer {
+    fn from((did, connection): (Did, Connection)) -> Self {
         Self {
             did: did.into_token(),
-            transport,
+            connection,
         }
     }
 }
 
-impl From<&(Did, Arc<Transport>)> for Peer {
-    fn from((did, transport): &(Did, Arc<Transport>)) -> Self {
+impl From<&(Did, Connection)> for Peer {
+    fn from((did, connection): &(Did, Connection)) -> Self {
         Self {
             did: did.into_token(),
-            transport: transport.clone(),
+            connection: connection.clone(),
         }
     }
 }
 
 impl Peer {
     /// convert peer to response peer
-    pub fn into_response_peer(&self, state: Option<String>) -> rings_rpc::response::Peer {
+    pub fn into_response_peer(&self) -> rings_rpc::response::Peer {
         rings_rpc::response::Peer {
             did: self.did.clone().into_token().to_string(),
-            transport_id: self.transport.id.to_string(),
-            state: state.unwrap_or_else(|| "Unknown".to_owned()),
+            cid: self.did.clone().into_token().to_string(),
+            state: format!("{:?}", self.connection.webrtc_connection_state()),
         }
     }
 }
@@ -660,6 +637,7 @@ pub fn unpack_text_message(msg: &CustomMessage) -> Result<String> {
 #[cfg(feature = "node")]
 mod test {
     use futures::lock::Mutex;
+    use rings_transport::core::transport::WebrtcConnectionState;
 
     use super::*;
     use crate::prelude::*;
@@ -667,99 +645,12 @@ mod test {
 
     #[tokio::test]
     async fn test_processor_create_offer() {
+        let peer_did = SecretKey::random().address().into();
         let (processor, path) = prepare_processor(None).await;
-        let ti = processor.swarm.create_offer().await.unwrap();
-        let pendings = processor.swarm.pending_transports().await.unwrap();
-        assert_eq!(pendings.len(), 1);
-        assert_eq!(pendings.get(0).unwrap().id.to_string(), ti.0.id.to_string());
-        tokio::fs::remove_dir_all(path).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_processor_list_pendings() {
-        let (processor, path) = prepare_processor(None).await;
-        let ti0 = processor.swarm.create_offer().await.unwrap();
-        let ti1 = processor.swarm.create_offer().await.unwrap();
-        let pendings = processor.swarm.pending_transports().await.unwrap();
-        assert_eq!(pendings.len(), 2);
-        let pending_ids = processor.list_pendings().await.unwrap();
-        assert_eq!(pendings.len(), pending_ids.len());
-        let ids = vec![ti0.0.id.to_string(), ti1.0.id.to_string()];
-        for item in pending_ids {
-            assert!(
-                ids.contains(&item.id.to_string()),
-                "id[{}] not in list",
-                item.id
-            );
-        }
-        tokio::fs::remove_dir_all(path).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_processor_close_pending_transport() {
-        let (processor, path) = prepare_processor(None).await;
-        let ti0 = processor.swarm.create_offer().await.unwrap();
-        let _ti1 = processor.swarm.create_offer().await.unwrap();
-        let ti2 = processor.swarm.create_offer().await.unwrap();
-        let pendings = processor.swarm.pending_transports().await.unwrap();
-        assert_eq!(pendings.len(), 3);
-        assert!(
-            processor.close_pending_transport("abc").await.is_err(),
-            "close_pending_transport() should be error"
-        );
-        let transport1 = processor
-            .swarm
-            .find_pending_transport(uuid::Uuid::from_str(ti0.0.id.to_string().as_str()).unwrap())
-            .unwrap();
-        assert!(transport1.is_some(), "transport_1 should be Some()");
-        let transport1 = transport1.unwrap();
-        assert!(
-            processor
-                .close_pending_transport(ti0.0.id.to_string().as_str())
-                .await
-                .is_ok(),
-            "close_pending_transport({}) should be ok",
-            ti0.0.id
-        );
-        assert!(!transport1.is_connected().await, "transport1 should closed");
-
-        let pendings = processor.swarm.pending_transports().await.unwrap();
-        assert_eq!(pendings.len(), 2);
-
-        assert!(
-            !pendings
-                .iter()
-                .any(|x| x.id.to_string() == ti0.0.id.to_string()),
-            "transport[{}] should not in pending_transports",
-            ti0.0.id
-        );
-
-        let transport2 = processor
-            .swarm
-            .find_pending_transport(uuid::Uuid::from_str(ti2.0.id.to_string().as_str()).unwrap())
-            .unwrap();
-        assert!(transport2.is_some(), "transport2 should be Some()");
-        let transport2 = transport2.unwrap();
-        assert!(
-            processor
-                .close_pending_transport(ti2.0.id.to_string().as_str())
-                .await
-                .is_ok(),
-            "close_pending_transport({}) should be ok",
-            ti0.0.id
-        );
-        assert!(!transport2.is_connected().await, "transport2 should closed");
-
-        let pendings = processor.swarm.pending_transports().await.unwrap();
-        assert_eq!(pendings.len(), 1);
-
-        assert!(
-            !pendings
-                .iter()
-                .any(|x| x.id.to_string() == ti2.0.id.to_string()),
-            "transport[{}] should not in pending_transports",
-            ti0.0.id
-        );
+        processor.swarm.create_offer(peer_did).await.unwrap();
+        let conn_dids = processor.swarm.get_connection_ids();
+        assert_eq!(conn_dids.len(), 1);
+        assert_eq!(conn_dids.get(0).unwrap(), &peer_did);
         tokio::fs::remove_dir_all(path).await.unwrap();
     }
 
@@ -812,62 +703,44 @@ mod test {
         tokio::spawn(async { swarm1.listen().await });
         tokio::spawn(async { swarm2.listen().await });
 
-        let (transport_1, offer) = p1.swarm.create_offer().await.unwrap();
-
-        let pendings_1 = p1.swarm.pending_transports().await.unwrap();
-        assert_eq!(pendings_1.len(), 1);
+        let (conn1, offer) = p1.swarm.create_offer(p2.did()).await.unwrap();
         assert_eq!(
-            pendings_1.get(0).unwrap().id.to_string(),
-            transport_1.id.to_string()
+            p1.swarm
+                .get_connection(p2.did())
+                .unwrap()
+                .webrtc_connection_state(),
+            WebrtcConnectionState::New,
         );
 
-        let (transport_2, answer) = p2.swarm.answer_offer(offer).await.unwrap();
-        let (peer_did, peer_transport) = p1.swarm.accept_answer(answer).await.unwrap();
-
-        assert!(peer_transport.id.eq(&transport_1.id), "transport not same");
+        let (conn2, answer) = p2.swarm.answer_offer(offer).await.unwrap();
+        let (peer_did, _) = p1.swarm.accept_answer(answer).await.unwrap();
         assert!(
             peer_did.to_string().eq(&did2),
             "peer.address got {}, expect: {}",
             peer_did,
             did2
         );
-        println!("waiting for connection");
-        transport_1
-            .connect_success_promise()
-            .await
-            .unwrap()
-            .await
-            .unwrap();
-        transport_2
-            .connect_success_promise()
-            .await
-            .unwrap()
-            .await
-            .unwrap();
 
-        assert!(
-            transport_1.is_connected().await,
-            "transport_1 not connected"
-        );
+        println!("waiting for connection");
+        conn1.webrtc_wait_for_data_channel_open().await.unwrap();
+
+        assert!(conn1.is_connected().await, "conn1 not connected");
         assert!(
             p1.swarm
                 .get_connection(p2.did())
                 .unwrap()
                 .is_connected()
                 .await,
-            "p1 transport not connected"
+            "p1 connection not connected"
         );
-        assert!(
-            transport_2.is_connected().await,
-            "transport_2 not connected"
-        );
+        assert!(conn2.is_connected().await, "conn2 not connected");
         assert!(
             p2.swarm
                 .get_connection(p1.did())
                 .unwrap()
                 .is_connected()
                 .await,
-            "p2 transport not connected"
+            "p2 connection not connected"
         );
 
         println!("waiting for data channel ready");

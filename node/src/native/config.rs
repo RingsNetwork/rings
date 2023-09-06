@@ -44,7 +44,9 @@ where P: AsRef<std::path::Path> {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ecdsa_key: Option<SecretKey>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub session_manager: Option<String>,
     pub session_sk: Option<String>,
     #[serde(rename = "bind")]

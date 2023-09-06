@@ -10,6 +10,10 @@ pub use rings_rpc;
 pub use rings_rpc::jsonrpc_client;
 pub use rings_rpc::prelude::http;
 pub use rings_rpc::prelude::jsonrpc_core;
+#[cfg(feature = "browser")]
+pub use rings_transport::connections::WebSysWebrtcConnection as Connection;
+#[cfg(feature = "node")]
+pub use rings_transport::connections::WebrtcConnection as Connection;
 
 pub use self::rings_core::chunk;
 pub use self::rings_core::dht::PeerRing;
@@ -41,14 +45,11 @@ pub use self::rings_core::prelude::ChordStorageInterfaceCacheChecker;
 pub use self::rings_core::prelude::MessageRelay;
 pub use self::rings_core::prelude::PersistenceStorage;
 pub use self::rings_core::prelude::PersistenceStorageReadAndWrite;
-pub use self::rings_core::prelude::RTCIceConnectionState;
 pub use self::rings_core::prelude::SubringInterface;
 pub use self::rings_core::session::Session;
 pub use self::rings_core::session::SessionSk;
 pub use self::rings_core::session::SessionSkBuilder;
 pub use self::rings_core::swarm::Swarm;
 pub use self::rings_core::swarm::SwarmBuilder;
-pub use self::rings_core::transports::Transport;
-pub use self::rings_core::types::ice_transport::IceTransportInterface;
 #[cfg(feature = "browser")]
 pub use self::wasm_bindgen_futures::future_to_promise;

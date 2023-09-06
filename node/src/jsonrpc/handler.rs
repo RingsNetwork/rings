@@ -60,11 +60,6 @@ pub fn methods() -> Vec<(Method, MethodFnBox)> {
         (Method::AcceptAnswer, pin!(server::accept_answer)),
         (Method::ListPeers, pin!(server::list_peers)),
         (Method::Disconnect, pin!(server::close_connection)),
-        (Method::ListPendings, pin!(server::list_pendings)),
-        (
-            Method::ClosePendingTransport,
-            pin!(server::close_pending_transport),
-        ),
         (Method::SendTo, pin!(server::send_raw_message)),
         (
             Method::SendHttpRequestMessage,
@@ -86,6 +81,7 @@ pub fn methods() -> Vec<(Method, MethodFnBox)> {
         (Method::RegisterService, pin!(server::register_service)),
         (Method::LookupService, pin!(server::lookup_service)),
         (Method::NodeInfo, pin!(server::node_info)),
+        (Method::NodeDid, pin!(server::node_did)),
         #[cfg(feature = "node")]
         (Method::PollMessage, pin!(default::poll_backend_message)),
     ]
