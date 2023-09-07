@@ -35,7 +35,7 @@ pub struct WebrtcConnection {
 }
 
 impl WebrtcConnection {
-    pub fn new(webrtc_conn: RTCPeerConnection, webrtc_data_channel: Arc<RTCDataChannel>) -> Self {
+    fn new(webrtc_conn: RTCPeerConnection, webrtc_data_channel: Arc<RTCDataChannel>) -> Self {
         Self {
             webrtc_conn: Arc::new(webrtc_conn),
             webrtc_data_channel,
@@ -63,6 +63,7 @@ impl WebrtcConnection {
 #[async_trait]
 impl SharedConnection for WebrtcConnection {
     type Sdp = RTCSessionDescription;
+
     type Error = Error;
 
     async fn send_message(&self, msg: TransportMessage) -> Result<()> {
@@ -76,7 +77,7 @@ impl SharedConnection for WebrtcConnection {
         self.webrtc_conn.connection_state().into()
     }
 
-    async fn webrtc_create_offer(&self) -> Result<RTCSessionDescription> {
+    async fn webrtc_create_offer(&self) -> Result<Self::Sdp> {
         let setting_offer = self.webrtc_conn.create_offer(None).await?;
         self.webrtc_conn
             .set_local_description(setting_offer.clone())
@@ -85,10 +86,7 @@ impl SharedConnection for WebrtcConnection {
         self.webrtc_gather().await
     }
 
-    async fn webrtc_answer_offer(
-        &self,
-        offer: RTCSessionDescription,
-    ) -> Result<RTCSessionDescription> {
+    async fn webrtc_answer_offer(&self, offer: Self::Sdp) -> Result<Self::Sdp> {
         tracing::debug!("webrtc_answer_offer, offer: {offer:?}");
 
         self.webrtc_conn.set_remote_description(offer).await?;
@@ -101,7 +99,7 @@ impl SharedConnection for WebrtcConnection {
         self.webrtc_gather().await
     }
 
-    async fn webrtc_accept_answer(&self, answer: RTCSessionDescription) -> Result<()> {
+    async fn webrtc_accept_answer(&self, answer: Self::Sdp) -> Result<()> {
         tracing::debug!("webrtc_accept_answer, answer: {answer:?}");
 
         self.webrtc_conn
@@ -135,14 +133,11 @@ impl SharedTransport for Transport<WebrtcConnection> {
     type Connection = WebrtcConnection;
     type Error = Error;
 
-    async fn new_connection<CE>(
+    async fn new_connection(
         &self,
         cid: &str,
-        callback: Arc<BoxedCallback<CE>>,
-    ) -> Result<Self::Connection>
-    where
-        CE: std::error::Error + Send + Sync + 'static,
-    {
+        callback: Arc<BoxedCallback>,
+    ) -> Result<Self::Connection> {
         if let Ok(existed_conn) = self.get_connection(cid) {
             if matches!(
                 existed_conn.webrtc_connection_state(),

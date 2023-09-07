@@ -86,13 +86,11 @@ pub trait SharedTransport: Clone + Send + Sync + 'static {
     type Connection: SharedConnection<Error = Self::Error>;
     type Error: std::error::Error + Send + Sync + 'static;
 
-    async fn new_connection<CE>(
+    async fn new_connection(
         &self,
         cid: &str,
-        callback: Arc<BoxedCallback<CE>>,
-    ) -> Result<Self::Connection, Self::Error>
-    where
-        CE: std::error::Error + Send + Sync + 'static;
+        callback: Arc<BoxedCallback>,
+    ) -> Result<Self::Connection, Self::Error>;
 
     fn get_connection(&self, cid: &str) -> Result<Self::Connection, Self::Error>;
     fn get_connections(&self) -> Vec<(String, Self::Connection)>;

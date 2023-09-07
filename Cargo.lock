@@ -3396,6 +3396,8 @@ dependencies = [
  "bytes",
  "dashmap",
  "js-sys",
+ "lazy_static",
+ "rand 0.8.5",
  "serde",
  "thiserror",
  "tokio",

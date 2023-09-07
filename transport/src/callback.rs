@@ -6,15 +6,13 @@ use crate::core::callback::BoxedCallback;
 use crate::core::transport::TransportMessage;
 use crate::core::transport::WebrtcConnectionState;
 
-pub(crate) struct InnerCallback<CE> {
+pub(crate) struct InnerCallback {
     pub cid: String,
-    callback: Arc<BoxedCallback<CE>>,
+    callback: Arc<BoxedCallback>,
 }
 
-impl<CE> InnerCallback<CE>
-where CE: std::error::Error + Send + Sync + 'static
-{
-    pub fn new(cid: &str, callback: Arc<BoxedCallback<CE>>) -> Self {
+impl InnerCallback {
+    pub fn new(cid: &str, callback: Arc<BoxedCallback>) -> Self {
         Self {
             cid: cid.to_string(),
             callback,

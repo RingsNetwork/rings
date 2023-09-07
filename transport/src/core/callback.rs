@@ -2,21 +2,21 @@ use async_trait::async_trait;
 
 use crate::core::transport::WebrtcConnectionState;
 
+type CallbackError = Box<dyn std::error::Error>;
+
 #[async_trait]
 pub trait Callback {
-    type Error: std::error::Error + Send + Sync + 'static;
-
-    fn boxed(self) -> BoxedCallback<Self::Error>
+    fn boxed(self) -> BoxedCallback
     where Self: Sized + Send + Sync + 'static {
         Box::new(self)
     }
 
-    async fn on_message(&self, cid: &str, msg: &[u8]) -> Result<(), Self::Error>;
+    async fn on_message(&self, cid: &str, msg: &[u8]) -> Result<(), CallbackError>;
     async fn on_peer_connection_state_change(
         &self,
         cid: &str,
         state: WebrtcConnectionState,
-    ) -> Result<(), Self::Error>;
+    ) -> Result<(), CallbackError>;
 }
 
-pub type BoxedCallback<E> = Box<dyn Callback<Error = E> + Send + Sync>;
+pub type BoxedCallback = Box<dyn Callback + Send + Sync>;

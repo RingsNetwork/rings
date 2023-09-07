@@ -6,16 +6,20 @@ edition = "2021"
 [features]
 # Include nothing by default
 default = []
-dummy = []
-native-webrtc = ["webrtc", "tokio"]
+dummy = ["native-webrtc", "rand", "lazy_static"]
+native-webrtc = ["webrtc", "tokio/time"]
 web-sys-webrtc = ["wasm-bindgen", "js-sys", "web-sys"]
 
 [dependencies]
-# Dependencies for webrtc feature
-tokio = { version = "1.32.0", optional = true, features = ["time"] }
+# Dependencies for native-webrtc feature
+tokio = { version = "1.32.0", optional = true }
 webrtc = { version = "0.8.0", optional = true }
 
-# Dependencies for web_sys_webrtc feature
+# Dependencies for dummy feature
+lazy_static = { version = "1.4.0", optional = true }
+rand = { version = "0.8.5", optional = true, features = ["getrandom"] }
+
+# Dependencies for web-sys-webrtc feature
 js-sys = { version = "0.3.64", optional = true }
 wasm-bindgen = { workspace = true, optional = true }
 web-sys = { version = "0.3.64", optional = true, features = [
