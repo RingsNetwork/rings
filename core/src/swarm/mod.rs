@@ -1,7 +1,7 @@
 #![warn(missing_docs)]
 //! Tranposrt management
 mod builder;
-mod callback;
+pub(crate) mod callback;
 /// Implementations of connection management traits for swarm
 pub mod impls;
 mod types;
@@ -13,6 +13,8 @@ use async_recursion::async_recursion;
 use async_trait::async_trait;
 pub use builder::SwarmBuilder;
 use rings_derive::JudgeConnection;
+#[cfg(feature = "wasm")]
+use rings_transport::connections::WebSysWebrtcConnection as Connection;
 #[cfg(not(feature = "wasm"))]
 use rings_transport::connections::WebrtcConnection as Connection;
 use rings_transport::core::callback::BoxedCallback;

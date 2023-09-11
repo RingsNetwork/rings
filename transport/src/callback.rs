@@ -5,18 +5,33 @@ use bytes::Bytes;
 use crate::core::callback::BoxedCallback;
 use crate::core::transport::TransportMessage;
 use crate::core::transport::WebrtcConnectionState;
+use crate::notifier::Notifier;
 
 pub(crate) struct InnerCallback {
     pub cid: String,
     callback: Arc<BoxedCallback>,
+    data_channel_open_notifier: Notifier,
 }
 
 impl InnerCallback {
-    pub fn new(cid: &str, callback: Arc<BoxedCallback>) -> Self {
+    pub fn new(
+        cid: &str,
+        callback: Arc<BoxedCallback>,
+        data_channel_open_notifier: Notifier,
+    ) -> Self {
         Self {
             cid: cid.to_string(),
             callback,
+            data_channel_open_notifier,
         }
+    }
+
+    pub fn on_data_channel_open(&self) {
+        self.data_channel_open_notifier.set_result(true)
+    }
+
+    pub fn on_data_channel_close(&self) {
+        self.data_channel_open_notifier.set_result(false)
     }
 
     pub async fn on_message(&self, msg: &Bytes) {

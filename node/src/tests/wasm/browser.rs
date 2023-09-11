@@ -1,3 +1,5 @@
+use wasm_bindgen::JsValue;
+use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::*;
 
 use crate::browser;
@@ -7,8 +9,6 @@ use crate::prelude::jsonrpc_core::types::Value;
 use crate::prelude::rings_core::prelude::uuid;
 use crate::prelude::rings_core::utils;
 use crate::prelude::rings_core::utils::js_value;
-use crate::prelude::wasm_bindgen::JsValue;
-use crate::prelude::wasm_bindgen_futures::JsFuture;
 use crate::prelude::*;
 use crate::processor::ProcessorConfig;
 
@@ -38,7 +38,7 @@ async fn new_client() -> (browser::Client, String) {
 }
 
 async fn create_connection(client1: &browser::Client, client2: &browser::Client) {
-    let offer = JsFuture::from(client1.create_offer())
+    let offer = JsFuture::from(client1.create_offer(client2.address(), None))
         .await
         .unwrap()
         .as_string()
@@ -94,11 +94,11 @@ async fn test_two_client_connect_and_list() {
             .unwrap(),
     )
     .unwrap();
-    let peer2_state = JsFuture::from(client1.transport_state(peer2.address.clone(), None))
+    let peer2_state = JsFuture::from(client1.connection_state(peer2.address.clone(), None))
         .await
         .unwrap();
     assert!(
-        peer2_state.eq("connected"),
+        peer2_state.eq("Connected"),
         "peer2 state got {:?}",
         peer2_state,
     );
@@ -190,7 +190,9 @@ async fn test_create_connection_via_local_rpc() {
     )
     .unwrap();
 
-    let offer_fut = JsFuture::from(client1.request("createOffer".to_string(), JsValue::NULL, None))
+    let address = JsValue::from_str(&client2.address());
+    let req0 = js_sys::Array::of1(&address);
+    let offer_fut = JsFuture::from(client1.request("createOffer".to_string(), req0.into(), None))
         .await
         .unwrap();
 

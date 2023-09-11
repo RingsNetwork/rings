@@ -4,7 +4,8 @@ use crate::core::transport::WebrtcConnectionState;
 
 type CallbackError = Box<dyn std::error::Error>;
 
-#[async_trait]
+#[cfg_attr(feature = "web-sys-webrtc", async_trait(?Send))]
+#[cfg_attr(not(feature = "web-sys-webrtc"), async_trait)]
 pub trait Callback {
     fn boxed(self) -> BoxedCallback
     where Self: Sized + Send + Sync + 'static {
@@ -19,4 +20,7 @@ pub trait Callback {
     ) -> Result<(), CallbackError>;
 }
 
+#[cfg(feature = "web-sys-webrtc")]
+pub type BoxedCallback = Box<dyn Callback>;
+#[cfg(not(feature = "web-sys-webrtc"))]
 pub type BoxedCallback = Box<dyn Callback + Send + Sync>;

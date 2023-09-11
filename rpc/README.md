@@ -253,7 +253,7 @@ Create an offer for connection
 curl -X POST \
 -H "Content-Type: application/json" \
 -H "X-SIGNATURE: YOUR-SIGNATURE" \
---data '{"jsonrpc": "2.0", "id": 1, "method": "createOffer", "params": []}' \
+--data '{"jsonrpc": "2.0", "id": 1, "method": "createOffer", "params": [REMOTE-PEER-DID]}' \
 "http://127.0.0.1:50000"
 ```
 

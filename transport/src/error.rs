@@ -21,6 +21,10 @@ pub enum Error {
     #[error("WebRTC error: {0}")]
     Webrtc(#[from] webrtc::error::Error),
 
+    #[cfg(feature = "web-sys-webrtc")]
+    #[error("WebSysWebRTC error: {}", dump_js_value(.0))]
+    WebSysWebrtc(wasm_bindgen::JsValue),
+
     #[error("Bincode error: {0}")]
     Bincode(#[from] bincode::Error),
 
@@ -38,4 +42,18 @@ pub enum Error {
 
     #[error("Connection {0} not found, should handshake first")]
     ConnectionNotFound(String),
+
+    #[error("Failed on notifier, state is not succeeded")]
+    NotifierFailed,
+
+    #[error("Notifier timeout, state is not succeeded within {0} ms")]
+    NotifierTimeout(u64),
+}
+
+#[cfg(feature = "web-sys-webrtc")]
+fn dump_js_value(v: &wasm_bindgen::JsValue) -> String {
+    let Ok(s) = js_sys::JSON::stringify(v) else {
+        return "Failed to stringify Error(JsValue)".to_string();
+    };
+    s.into()
 }
