@@ -31,7 +31,7 @@ pub async fn manually_establish_connection(swarm1: &Swarm, swarm2: &Swarm) {
     assert!(swarm1.get_connection(swarm2.did()).is_some());
     assert!(swarm2.get_connection(swarm1.did()).is_some());
 
-    // Wait for connectin established
+    // Wait for connection established
     swarm1
         .get_connection(swarm2.did())
         .unwrap()
