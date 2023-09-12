@@ -98,36 +98,15 @@ tokio = { version = "1.13.0", features = ["full"], optional = true }
 js-sys = { workspace = true, optional = true }
 rexie = { version = "0.4.1", optional = true }
 serde-wasm-bindgen = { workspace = true, optional = true }
-wasm-bindgen = { workspace = true, features = ["serde-serialize"], optional = true }
+wasm-bindgen = { workspace = true, optional = true }
 wasm-bindgen-futures = { workspace = true, optional = true }
 web-sys = { version = "0.3.56", optional = true, features = [
-    "Window",
-    "Navigator",
-    "MessageEvent",
-    "MediaStreamConstraints",
     "MediaDevices",
-    "RtcPeerConnection",
-    "RtcSignalingState",
-    "RtcSdpType",
+    "Navigator",
     "ServiceWorkerGlobalScope",
-    "RtcIceServer",
-    "RtcSessionDescriptionInit",
+    "Window",
+    "MediaStreamConstraints",
     "WorkerGlobalScope",
-    "RtcSessionDescription",
-    "RtcPeerConnectionIceEvent",
-    "RtcIceCandidate",
-    "RtcIceCandidateInit",
-    "RtcDataChannel",
-    "RtcDataChannelEvent",
-    "RtcDataChannelState",
-    "RtcConfiguration",
-    "RtcIceConnectionState",
-    "RtcIceGatheringState",
-    "RtcIceCredentialType",
-    "RtcLifecycleEvent",
-    "RtcStatsReport",
-    "console",
-    "Blob",
 ] }
 
 [dev-dependencies]
