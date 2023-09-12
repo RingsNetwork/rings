@@ -6,11 +6,12 @@ pub mod jsonrpc_client;
 pub mod utils;
 use std::str::FromStr;
 
+use wasm_bindgen;
+
 pub use self::client::*;
 pub use self::jsonrpc_client::JsonRpcClient;
 use crate::logging::browser::init_logging;
 use crate::logging::set_panic_hook;
-use crate::prelude::wasm_bindgen;
 use crate::prelude::wasm_export;
 
 /// set debug for wasm.

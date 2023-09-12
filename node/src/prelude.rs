@@ -28,18 +28,10 @@ pub use self::rings_core::message::MessagePayload;
 pub use self::rings_core::message::PayloadSender;
 pub use self::rings_core::prelude::async_trait::async_trait;
 pub use self::rings_core::prelude::base58;
-#[cfg(feature = "browser")]
-pub use self::rings_core::prelude::js_sys;
 pub use self::rings_core::prelude::message;
 pub use self::rings_core::prelude::uuid;
 pub use self::rings_core::prelude::vnode;
-#[cfg(feature = "browser")]
-pub use self::rings_core::prelude::wasm_bindgen;
-#[cfg(feature = "browser")]
-pub use self::rings_core::prelude::wasm_bindgen_futures;
 pub use self::rings_core::prelude::web3;
-#[cfg(feature = "browser")]
-pub use self::rings_core::prelude::web_sys;
 pub use self::rings_core::prelude::ChordStorageInterface;
 pub use self::rings_core::prelude::ChordStorageInterfaceCacheChecker;
 pub use self::rings_core::prelude::MessageRelay;
@@ -51,5 +43,3 @@ pub use self::rings_core::session::SessionSk;
 pub use self::rings_core::session::SessionSkBuilder;
 pub use self::rings_core::swarm::Swarm;
 pub use self::rings_core::swarm::SwarmBuilder;
-#[cfg(feature = "browser")]
-pub use self::wasm_bindgen_futures::future_to_promise;

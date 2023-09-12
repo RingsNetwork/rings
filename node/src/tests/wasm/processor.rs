@@ -2,17 +2,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::lock::Mutex;
+use rings_core::swarm::impls::ConnectionHandshake;
+use rings_transport::core::transport::SharedConnection;
+use rings_transport::core::transport::WebrtcConnectionState;
 use wasm_bindgen_test::*;
 
 use crate::prelude::rings_core::async_trait;
 use crate::prelude::rings_core::dht::TStabilize;
 use crate::prelude::rings_core::message::MessageCallback;
-use crate::prelude::rings_core::transports::manager::TransportHandshake;
-use crate::prelude::rings_core::transports::manager::TransportManager;
-use crate::prelude::rings_core::types::ice_transport::IceTrickleScheme;
 use crate::prelude::rings_core::utils;
 use crate::prelude::web3::contract::tokens::Tokenizable;
-use crate::prelude::web_sys::RtcIceConnectionState;
 use crate::prelude::*;
 use crate::processor;
 use crate::processor::*;
@@ -32,7 +31,7 @@ async fn listen(p: &Processor) {
     );
 }
 
-async fn close_all_transport(p: &Processor) {
+async fn close_all_connections(p: &Processor) {
     futures::future::join_all(p.swarm.get_connections().iter().map(|(_, t)| t.close())).await;
 }
 
@@ -61,60 +60,44 @@ impl MessageCallback for MsgCallbackStruct {
 
 async fn create_connection(p1: &Processor, p2: &Processor) {
     console_log!("create_offer");
-    let (transport_1, offer) = p1.swarm.create_offer().await.unwrap();
-    let pendings_1 = p1.swarm.pending_transports().await.unwrap();
-    // deal if transport is pending
-    assert_eq!(pendings_1.len(), 1);
-
-    assert_eq!(
-        pendings_1.get(0).unwrap().id.to_string(),
-        transport_1.id.to_string()
-    );
+    let (conn_1, offer) = p1.swarm.create_offer(p2.did()).await.unwrap();
 
     console_log!("answer_offer");
-    let (transport_2, answer) = p2.swarm.answer_offer(offer).await.unwrap();
+    let (conn_2, answer) = p2.swarm.answer_offer(offer).await.unwrap();
 
     console_log!("accept_answer");
-    let peer = p1.swarm.accept_answer(answer).await.unwrap();
+    p1.swarm.accept_answer(answer).await.unwrap();
 
     loop {
         console_log!("waiting for connection");
         utils::js_utils::window_sleep(1000).await.unwrap();
 
-        console_log!(
-            "transport_1 state: {:?}",
-            transport_1.ice_connection_state().await.unwrap()
-        );
-        console_log!(
-            "transport_2 state: {:?}",
-            transport_2.ice_connection_state().await.unwrap()
-        );
+        console_log!("conn_1 state: {:?}", conn_1.webrtc_connection_state());
+        console_log!("conn_2 state: {:?}", conn_2.webrtc_connection_state());
 
-        let s1 = transport_1.get_stats().await.unwrap();
-        let s2 = transport_2.get_stats().await.unwrap();
+        let s1 = conn_1.get_stats().await;
+        let s2 = conn_2.get_stats().await;
 
-        console_log!("transport_1 stats: {:?}", s1);
-        console_log!("transport_2 stats: {:?}", s2);
+        console_log!("conn_1 stats: {:?}", s1);
+        console_log!("conn_2 stats: {:?}", s2);
 
-        if transport_1.is_connected().await && transport_2.is_connected().await {
+        if conn_1.is_connected().await && conn_2.is_connected().await {
             break;
         }
     }
 
-    assert!(peer.1.id.eq(&transport_1.id), "transport not same");
-
     futures::try_join!(
         async {
-            if transport_1.is_connected().await {
+            if conn_1.is_connected().await {
                 return Ok(());
             }
-            transport_1.wait_for_connected().await
+            conn_1.webrtc_wait_for_data_channel_open().await
         },
         async {
-            if transport_2.is_connected().await {
+            if conn_2.is_connected().await {
                 return Ok(());
             }
-            transport_2.wait_for_connected().await
+            conn_2.webrtc_wait_for_data_channel_open().await
         }
     )
     .unwrap();
@@ -205,8 +188,8 @@ async fn test_processor_handshake_and_msg() {
     assert_eq!(msgs1, expect1);
     assert_eq!(msgs2, expect2);
 
-    console_log!("processor_hs_close_all_transport");
-    futures::join!(close_all_transport(&p1), close_all_transport(&p2),);
+    console_log!("processor_hs_close_all_connections");
+    futures::join!(close_all_connections(&p1), close_all_connections(&p2),);
 }
 
 #[wasm_bindgen_test]
@@ -252,8 +235,8 @@ async fn test_processor_connect_with_did() {
         .unwrap();
     console_log!("processor_detect_connection_state");
     assert_eq!(
-        peer3.transport.ice_connection_state().await.unwrap(),
-        RtcIceConnectionState::Connected
+        peer3.connection.webrtc_connection_state(),
+        WebrtcConnectionState::Connected,
     );
 
     console_log!("check peers");
@@ -265,10 +248,10 @@ async fn test_processor_connect_with_did() {
             .eq(p3.did().into_token().to_string().as_str())),
         "peer list dose NOT contains p3 address"
     );
-    console_log!("processor_close_all_transport");
+    console_log!("processor_close_all_connections");
     futures::join!(
-        close_all_transport(&p1),
-        close_all_transport(&p2),
-        close_all_transport(&p3),
+        close_all_connections(&p1),
+        close_all_connections(&p2),
+        close_all_connections(&p3),
     );
 }

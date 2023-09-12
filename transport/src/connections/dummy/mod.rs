@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use lazy_static::lazy_static;
 use rand::distributions::Distribution;
@@ -19,6 +18,7 @@ use crate::core::transport::TransportMessage;
 use crate::core::transport::WebrtcConnectionState;
 use crate::error::Error;
 use crate::error::Result;
+use crate::notifier::Notifier;
 use crate::Transport;
 
 /// Max delay in ms on sending message
@@ -82,14 +82,6 @@ impl DummyConnection {
         }
         self.callback().on_peer_connection_state_change(state).await;
     }
-
-    async fn close(&self) {
-        self.set_webrtc_connection_state(WebrtcConnectionState::Closed)
-            .await;
-        self.remote_conn()
-            .set_webrtc_connection_state(WebrtcConnectionState::Closed)
-            .await;
-    }
 }
 
 #[async_trait]
@@ -144,6 +136,15 @@ impl SharedConnection for DummyConnection {
         }
         Ok(())
     }
+
+    async fn close(&self) -> Result<()> {
+        self.set_webrtc_connection_state(WebrtcConnectionState::Closed)
+            .await;
+        self.remote_conn()
+            .set_webrtc_connection_state(WebrtcConnectionState::Closed)
+            .await;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -172,63 +173,13 @@ impl SharedTransport for Transport<DummyConnection> {
         //
         let conn = DummyConnection::new(cid);
 
-        //
-        // Safely insert
-        //
-        // The implementation of match statement refers to Entry::insert in dashmap.
-        // An extra check is added to see if the connection is already connected.
-        // See also: https://docs.rs/dashmap/latest/dashmap/mapref/entry/enum.Entry.html#method.insert
-        //
-        let Some(entry) = self.connections.try_entry(cid.to_string()) else {
-            return Err(Error::ConnectionAlreadyExists(cid.to_string()));
-        };
-        match entry {
-            Entry::Occupied(mut entry) => {
-                let existed_conn = entry.get();
-                if matches!(
-                    existed_conn.webrtc_connection_state(),
-                    WebrtcConnectionState::New
-                        | WebrtcConnectionState::Connecting
-                        | WebrtcConnectionState::Connected
-                ) {
-                    return Err(Error::ConnectionAlreadyExists(cid.to_string()));
-                }
-
-                entry.insert(conn.clone());
-                entry.into_ref()
-            }
-            Entry::Vacant(entry) => entry.insert(conn.clone()),
-        };
-
+        self.safely_insert(cid, conn.clone())?;
         CONNS.insert(cid.to_string(), conn.clone());
-        CBS.insert(cid.to_string(), Arc::new(InnerCallback::new(cid, callback)));
-
+        CBS.insert(
+            cid.to_string(),
+            Arc::new(InnerCallback::new(cid, callback, Notifier::default())),
+        );
         Ok(conn)
-    }
-
-    fn get_connection(&self, cid: &str) -> Result<Self::Connection> {
-        self.connections
-            .get(cid)
-            .map(|c| c.value().clone())
-            .ok_or(Error::ConnectionNotFound(cid.to_string()))
-    }
-
-    fn get_connections(&self) -> Vec<(String, Self::Connection)> {
-        self.connections
-            .iter()
-            .map(|kv| (kv.key().clone(), kv.value().clone()))
-            .collect()
-    }
-
-    fn get_connection_ids(&self) -> Vec<String> {
-        self.connections.iter().map(|kv| kv.key().clone()).collect()
-    }
-
-    async fn close_connection(&self, cid: &str) -> Result<()> {
-        let conn = self.get_connection(cid)?;
-        conn.close().await;
-        self.connections.remove(cid);
-        Ok(())
     }
 }
 

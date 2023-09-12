@@ -1,9 +1,7 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use dashmap::mapref::entry::Entry;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::data_channel_state::RTCDataChannelState;
 use webrtc::data_channel::RTCDataChannel;
@@ -26,20 +24,37 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::ice_server::IceCredentialType;
 use crate::ice_server::IceServer;
+use crate::notifier::Notifier;
 use crate::Transport;
 
 #[derive(Clone)]
 pub struct WebrtcConnection {
     webrtc_conn: Arc<RTCPeerConnection>,
     webrtc_data_channel: Arc<RTCDataChannel>,
+    webrtc_data_channel_open_notifier: Notifier,
 }
 
 impl WebrtcConnection {
-    fn new(webrtc_conn: RTCPeerConnection, webrtc_data_channel: Arc<RTCDataChannel>) -> Self {
+    fn new(
+        webrtc_conn: RTCPeerConnection,
+        webrtc_data_channel: Arc<RTCDataChannel>,
+        webrtc_data_channel_open_notifier: Notifier,
+    ) -> Self {
         Self {
             webrtc_conn: Arc::new(webrtc_conn),
             webrtc_data_channel,
+            webrtc_data_channel_open_notifier,
         }
+    }
+
+    pub async fn get_stats(&self) -> Vec<String> {
+        self.webrtc_conn
+            .get_stats()
+            .await
+            .reports
+            .into_iter()
+            .map(|x| serde_json::to_string(&x).unwrap_or("failed to dump stats entry".to_string()))
+            .collect()
     }
 
     async fn webrtc_gather(&self) -> Result<RTCSessionDescription> {
@@ -54,16 +69,11 @@ impl WebrtcConnection {
             .await
             .ok_or(Error::WebrtcLocalSdpGenerationError)
     }
-
-    async fn close(&self) -> Result<()> {
-        self.webrtc_conn.close().await.map_err(|e| e.into())
-    }
 }
 
 #[async_trait]
 impl SharedConnection for WebrtcConnection {
     type Sdp = RTCSessionDescription;
-
     type Error = Error;
 
     async fn send_message(&self, msg: TransportMessage) -> Result<()> {
@@ -109,22 +119,24 @@ impl SharedConnection for WebrtcConnection {
     }
 
     async fn webrtc_wait_for_data_channel_open(&self) -> Result<()> {
-        loop {
-            if matches!(
-                self.webrtc_connection_state(),
-                WebrtcConnectionState::Failed
-                    | WebrtcConnectionState::Closed
-                    | WebrtcConnectionState::Disconnected
-            ) {
-                return Err(Error::DataChannelOpen("Connection unavailable".to_string()));
-            }
-
-            if self.webrtc_data_channel.ready_state() == RTCDataChannelState::Open {
-                return Ok(());
-            }
-
-            tokio::time::sleep(Duration::from_millis(100)).await;
+        if matches!(
+            self.webrtc_connection_state(),
+            WebrtcConnectionState::Failed
+                | WebrtcConnectionState::Closed
+                | WebrtcConnectionState::Disconnected
+        ) {
+            return Err(Error::DataChannelOpen("Connection unavailable".to_string()));
         }
+
+        if self.webrtc_data_channel.ready_state() == RTCDataChannelState::Open {
+            return Ok(());
+        }
+
+        self.webrtc_data_channel_open_notifier.clone().await
+    }
+
+    async fn close(&self) -> Result<()> {
+        self.webrtc_conn.close().await.map_err(|e| e.into())
     }
 }
 
@@ -181,7 +193,12 @@ impl SharedTransport for Transport<WebrtcConnection> {
         //
         // Set callbacks
         //
-        let inner_cb = Arc::new(InnerCallback::new(cid, callback));
+        let webrtc_data_channel_open_notifier = Notifier::default();
+        let inner_cb = Arc::new(InnerCallback::new(
+            cid,
+            callback,
+            webrtc_data_channel_open_notifier.clone(),
+        ));
 
         let data_channel_inner_cb = inner_cb.clone();
         webrtc_conn.on_data_channel(Box::new(move |d: Arc<RTCDataChannel>| {
@@ -189,28 +206,39 @@ impl SharedTransport for Transport<WebrtcConnection> {
             let d_id = d.id();
             tracing::debug!("New DataChannel {d_label} {d_id}");
 
-            let inner_cb = data_channel_inner_cb.clone();
+            let on_open_inner_cb = data_channel_inner_cb.clone();
+            d.on_open(Box::new(move || {
+                on_open_inner_cb.on_data_channel_open();
+                Box::pin(async move {})
+            }));
 
-            Box::pin(async move {
-                d.on_message(Box::new(move |msg: DataChannelMessage| {
-                    tracing::debug!(
-                        "Received DataChannelMessage from {}: {:?}",
-                        inner_cb.cid,
-                        msg
-                    );
+            let on_close_inner_cb = data_channel_inner_cb.clone();
+            d.on_close(Box::new(move || {
+                on_close_inner_cb.on_data_channel_close();
+                Box::pin(async move {})
+            }));
 
-                    let inner_cb = inner_cb.clone();
+            let on_message_inner_cb = data_channel_inner_cb.clone();
+            d.on_message(Box::new(move |msg: DataChannelMessage| {
+                tracing::debug!(
+                    "Received DataChannelMessage from {}: {:?}",
+                    on_message_inner_cb.cid,
+                    msg
+                );
 
-                    Box::pin(async move {
-                        inner_cb.on_message(&msg.data).await;
-                    })
-                }));
-            })
+                let inner_cb = on_message_inner_cb.clone();
+
+                Box::pin(async move {
+                    inner_cb.on_message(&msg.data).await;
+                })
+            }));
+
+            Box::pin(async move {})
         }));
 
         let peer_connection_state_change_inner_cb = inner_cb.clone();
         webrtc_conn.on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
-            tracing::debug!("Peer Connection State has changed: {s}");
+            tracing::debug!("Peer Connection State has changed: {s:?}");
 
             let inner_cb = peer_connection_state_change_inner_cb.clone();
 
@@ -227,62 +255,14 @@ impl SharedTransport for Transport<WebrtcConnection> {
         //
         // Construct the Connection
         //
-        let conn = WebrtcConnection::new(webrtc_conn, webrtc_data_channel);
+        let conn = WebrtcConnection::new(
+            webrtc_conn,
+            webrtc_data_channel,
+            webrtc_data_channel_open_notifier,
+        );
 
-        //
-        // Safely insert
-        //
-        // The implementation of match statement refers to Entry::insert in dashmap.
-        // An extra check is added to see if the connection is already connected.
-        // See also: https://docs.rs/dashmap/latest/dashmap/mapref/entry/enum.Entry.html#method.insert
-        //
-        let Some(entry) = self.connections.try_entry(cid.to_string()) else {
-            return Err(Error::ConnectionAlreadyExists(cid.to_string()));
-        };
-        match entry {
-            Entry::Occupied(mut entry) => {
-                let existed_conn = entry.get();
-                if matches!(
-                    existed_conn.webrtc_connection_state(),
-                    WebrtcConnectionState::New
-                        | WebrtcConnectionState::Connecting
-                        | WebrtcConnectionState::Connected
-                ) {
-                    return Err(Error::ConnectionAlreadyExists(cid.to_string()));
-                }
-
-                entry.insert(conn.clone());
-                entry.into_ref()
-            }
-            Entry::Vacant(entry) => entry.insert(conn.clone()),
-        };
-
+        self.safely_insert(cid, conn.clone())?;
         Ok(conn)
-    }
-
-    fn get_connection(&self, cid: &str) -> Result<Self::Connection> {
-        self.connections
-            .get(cid)
-            .map(|c| c.value().clone())
-            .ok_or(Error::ConnectionNotFound(cid.to_string()))
-    }
-
-    fn get_connections(&self) -> Vec<(String, Self::Connection)> {
-        self.connections
-            .iter()
-            .map(|kv| (kv.key().clone(), kv.value().clone()))
-            .collect()
-    }
-
-    fn get_connection_ids(&self) -> Vec<String> {
-        self.connections.iter().map(|kv| kv.key().clone()).collect()
-    }
-
-    async fn close_connection(&self, cid: &str) -> Result<()> {
-        let conn = self.get_connection(cid)?;
-        conn.close().await?;
-        self.connections.remove(cid);
-        Ok(())
     }
 }
 

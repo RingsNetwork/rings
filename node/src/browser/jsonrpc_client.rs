@@ -1,10 +1,12 @@
 /// Simple json rpc client.
 use std::sync::Arc;
 
+use wasm_bindgen;
+use wasm_bindgen::prelude::*;
+use wasm_bindgen_futures::future_to_promise;
+
 use super::utils;
 use crate::prelude::rings_core::utils::js_value;
-use crate::prelude::wasm_bindgen;
-use crate::prelude::wasm_bindgen::prelude::*;
 use crate::prelude::*;
 
 #[wasm_bindgen]

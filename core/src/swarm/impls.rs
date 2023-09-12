@@ -1,6 +1,8 @@
 use std::str::FromStr;
 
 use async_trait::async_trait;
+#[cfg(feature = "wasm")]
+use rings_transport::connections::WebSysWebrtcConnection as Connection;
 #[cfg(not(feature = "wasm"))]
 use rings_transport::connections::WebrtcConnection as Connection;
 use rings_transport::core::transport::SharedConnection;

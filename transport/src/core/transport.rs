@@ -47,9 +47,10 @@ pub enum WebrtcConnectionState {
     Closed,
 }
 
-#[async_trait]
-pub trait SharedConnection: Clone + Send + Sync + 'static {
-    type Sdp: Serialize + DeserializeOwned + Send + Sync;
+#[cfg_attr(feature = "web-sys-webrtc", async_trait(?Send))]
+#[cfg_attr(not(feature = "web-sys-webrtc"), async_trait)]
+pub trait SharedConnection: Clone + 'static {
+    type Sdp: Serialize + DeserializeOwned;
     type Error: std::error::Error;
 
     async fn send_message(&self, msg: TransportMessage) -> Result<(), Self::Error>;
@@ -59,6 +60,7 @@ pub trait SharedConnection: Clone + Send + Sync + 'static {
     async fn webrtc_answer_offer(&self, offer: Self::Sdp) -> Result<Self::Sdp, Self::Error>;
     async fn webrtc_accept_answer(&self, answer: Self::Sdp) -> Result<(), Self::Error>;
     async fn webrtc_wait_for_data_channel_open(&self) -> Result<(), Self::Error>;
+    async fn close(&self) -> Result<(), Self::Error>;
 
     // TODO: deprecated, should use webrtc_connection_state
     fn ice_connection_state(&self) -> WebrtcConnectionState {
@@ -81,24 +83,15 @@ pub trait SharedConnection: Clone + Send + Sync + 'static {
     }
 }
 
-#[async_trait]
-pub trait SharedTransport: Clone + Send + Sync + 'static {
+#[cfg_attr(feature = "web-sys-webrtc", async_trait(?Send))]
+#[cfg_attr(not(feature = "web-sys-webrtc"), async_trait)]
+pub trait SharedTransport: Clone + 'static {
     type Connection: SharedConnection<Error = Self::Error>;
-    type Error: std::error::Error + Send + Sync + 'static;
+    type Error: std::error::Error;
 
     async fn new_connection(
         &self,
         cid: &str,
         callback: Arc<BoxedCallback>,
     ) -> Result<Self::Connection, Self::Error>;
-
-    fn get_connection(&self, cid: &str) -> Result<Self::Connection, Self::Error>;
-    fn get_connections(&self) -> Vec<(String, Self::Connection)>;
-    fn get_connection_ids(&self) -> Vec<String>;
-
-    async fn close_connection(&self, cid: &str) -> Result<(), Self::Error>;
-
-    async fn send_message(&self, cid: &str, msg: TransportMessage) -> Result<(), Self::Error> {
-        self.get_connection(cid)?.send_message(msg).await
-    }
 }

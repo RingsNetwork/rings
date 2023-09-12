@@ -7,6 +7,8 @@ use std::sync::Mutex;
 use anyhow::anyhow;
 use arrayref::array_refs;
 use bytes::Bytes;
+use js_sys;
+use js_sys::Uint8Array;
 use rings_core::async_trait;
 use rings_core::dht::Did;
 use rings_core::ecc::PublicKey;
@@ -15,21 +17,23 @@ use rings_core::message::Message;
 use rings_core::message::MessageCallback;
 use rings_core::message::MessageHandlerEvent;
 use rings_core::message::MessagePayload;
-use rings_core::prelude::uuid::Uuid;
 use rings_core::prelude::vnode;
 use rings_core::prelude::vnode::VirtualNode;
 use rings_core::prelude::web3::ethabi::Token;
 use rings_core::session::SessionSkBuilder;
 use rings_core::storage::PersistenceStorage;
-use rings_core::transports::manager::TransportHandshake;
-use rings_core::transports::manager::TransportManager;
-use rings_core::types::ice_transport::IceTransportInterface;
-use rings_core::types::ice_transport::IceTrickleScheme;
-use rings_core::utils::from_rtc_ice_connection_state;
+use rings_core::swarm::impls::ConnectionHandshake;
 use rings_core::utils::js_utils;
 use rings_core::utils::js_value;
+use rings_transport::core::transport::SharedConnection;
+use rings_transport::core::transport::WebrtcConnectionState;
 use serde::Deserialize;
 use serde::Serialize;
+use wasm_bindgen;
+use wasm_bindgen::prelude::*;
+use wasm_bindgen_futures;
+use wasm_bindgen_futures::future_to_promise;
+use wasm_bindgen_futures::JsFuture;
 
 use crate::backend::types::BackendMessage;
 use crate::backend::types::HttpResponse;
@@ -44,19 +48,11 @@ use crate::prelude::chunk::Chunk;
 use crate::prelude::chunk::ChunkList;
 use crate::prelude::chunk::ChunkManager;
 use crate::prelude::http;
-use crate::prelude::js_sys;
-use crate::prelude::js_sys::Uint8Array;
 use crate::prelude::jsonrpc_core::types::id::Id;
 use crate::prelude::jsonrpc_core::MethodCall;
 use crate::prelude::message;
-use crate::prelude::wasm_bindgen;
-use crate::prelude::wasm_bindgen::prelude::*;
-use crate::prelude::wasm_bindgen_futures;
-use crate::prelude::wasm_bindgen_futures::future_to_promise;
-use crate::prelude::wasm_bindgen_futures::JsFuture;
 use crate::prelude::wasm_export;
 use crate::prelude::web3::contract::tokens::Tokenizable;
-use crate::prelude::web_sys::RtcIceConnectionState;
 use crate::prelude::CallbackFn;
 use crate::processor::Processor;
 use crate::processor::ProcessorBuilder;
@@ -189,8 +185,8 @@ impl Client {
 
     /// get self web3 address
     #[wasm_bindgen(getter)]
-    pub fn address(&self) -> Result<String, JsError> {
-        Ok(self.processor.did().into_token().to_string())
+    pub fn address(&self) -> String {
+        self.processor.did().into_token().to_string()
     }
 
     pub fn new_client_with_storage(
@@ -258,16 +254,15 @@ impl Client {
         log::debug!("remote_url: {}", remote_url);
         let p = self.processor.clone();
         future_to_promise(async move {
-            let transport = p
+            let peer = p
                 .connect_peer_via_http(remote_url.as_str())
                 .await
-                .map_err(JsError::from)?
-                .transport;
-            Ok(JsValue::from_str(transport.id.to_string().as_str()))
+                .map_err(JsError::from)?;
+            Ok(JsValue::from_str(peer.did.to_string().as_str()))
         })
     }
 
-    /// connect peer with web3 address, without waiting for transport channel connected
+    /// connect peer with web3 address, without waiting for connection channel connected
     pub fn connect_with_address_without_wait(
         &self,
         address: String,
@@ -280,17 +275,13 @@ impl Client {
                 .connect_with_did(did, false)
                 .await
                 .map_err(JsError::from)?;
-            let state = peer.transport.ice_connection_state().await;
+            let state = peer.connection.webrtc_connection_state();
 
-            Ok(JsValue::try_from(&Peer::from((
-                state,
-                peer.did,
-                peer.transport.id,
-            )))?)
+            Ok(JsValue::try_from(&Peer::from((state, peer.did)))?)
         })
     }
 
-    /// connect peer with web3 address, and wait for transport channel connected
+    /// connect peer with web3 address, and wait for connection channel connected
     /// example:
     /// ```typescript
     /// const client1 = new Client()
@@ -309,20 +300,17 @@ impl Client {
         future_to_promise(async move {
             let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
             let peer = p.connect_with_did(did, true).await.map_err(JsError::from)?;
-            let state = peer.transport.ice_connection_state().await;
-            Ok(JsValue::try_from(&Peer::from((
-                state,
-                peer.did,
-                peer.transport.id,
-            )))?)
+            let state = peer.connection.webrtc_connection_state();
+            Ok(JsValue::try_from(&Peer::from((state, peer.did)))?)
         })
     }
 
     /// Manually make handshake with remote peer
-    pub fn create_offer(&self) -> js_sys::Promise {
+    pub fn create_offer(&self, address: String, addr_type: Option<AddressType>) -> js_sys::Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
-            let (_, offer_payload) = p.swarm.create_offer().await.map_err(JsError::from)?;
+            let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
+            let (_, offer_payload) = p.swarm.create_offer(did).await.map_err(JsError::from)?;
             let s = serde_json::to_string(&offer_payload).map_err(JsError::from)?;
             Ok(s.into())
         })
@@ -348,17 +336,13 @@ impl Client {
         let p = self.processor.clone();
         future_to_promise(async move {
             let answer_payload = serde_json::from_str(&answer_payload).map_err(JsError::from)?;
-            let (did, transport) = p
+            let (did, conn) = p
                 .swarm
                 .accept_answer(answer_payload)
                 .await
                 .map_err(JsError::from)?;
-            let state = transport.ice_connection_state().await;
-            Ok(JsValue::try_from(&Peer::from((
-                state,
-                did.into_token(),
-                transport.id,
-            )))?)
+            let state = conn.webrtc_connection_state();
+            Ok(JsValue::try_from(&Peer::from((state, did.into_token())))?)
         })
     }
 
@@ -367,14 +351,12 @@ impl Client {
         let p = self.processor.clone();
         future_to_promise(async move {
             let peers = p.list_peers().await.map_err(JsError::from)?;
-            let states_async = peers
-                .iter()
-                .map(|x| async { x.transport.ice_connection_state().await })
-                .collect::<Vec<_>>();
-            let states = futures::future::join_all(states_async).await;
             let mut js_array = js_sys::Array::new();
-            js_array.extend(peers.iter().zip(states.iter()).flat_map(|(x, y)| {
-                JsValue::try_from(&Peer::from((*y, x.did.clone(), x.transport.id)))
+            js_array.extend(peers.iter().flat_map(|x| {
+                JsValue::try_from(&Peer::from((
+                    x.connection.webrtc_connection_state(),
+                    x.did.clone(),
+                )))
             }));
             Ok(js_array.into())
         })
@@ -408,30 +390,6 @@ impl Client {
         })
     }
 
-    pub fn list_pendings(&self) -> js_sys::Promise {
-        let p = self.processor.clone();
-        future_to_promise(async move {
-            let pendings = p.list_pendings().await.map_err(JsError::from)?;
-            let mut js_array = js_sys::Array::new();
-            js_array.extend(
-                pendings
-                    .into_iter()
-                    .map(|x| JsValue::from_str(x.id.to_string().as_str())),
-            );
-            Ok(js_array.into())
-        })
-    }
-
-    pub fn close_pending_transport(&self, transport_id: String) -> js_sys::Promise {
-        let p = self.processor.clone();
-        future_to_promise(async move {
-            p.close_pending_transport(transport_id.as_str())
-                .await
-                .map_err(JsError::from)?;
-            Ok(JsValue::from_str(&transport_id))
-        })
-    }
-
     /// send custom message to peer.
     pub fn send_message(&self, destination: String, msg: js_sys::Uint8Array) -> js_sys::Promise {
         let p = self.processor.clone();
@@ -449,17 +407,13 @@ impl Client {
         future_to_promise(async move {
             let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
             let peer = p.get_peer(did).await.map_err(JsError::from)?;
-            let state = peer.transport.ice_connection_state().await;
-            Ok(JsValue::try_from(&Peer::from((
-                state,
-                peer.did,
-                peer.transport.id,
-            )))?)
+            let state = peer.connection.webrtc_connection_state();
+            Ok(JsValue::try_from(&Peer::from((state, peer.did)))?)
         })
     }
 
-    /// get transport state by address
-    pub fn transport_state(
+    /// get connection state by address
+    pub fn connection_state(
         &self,
         address: String,
         addr_type: Option<AddressType>,
@@ -467,19 +421,16 @@ impl Client {
         let p = self.processor.clone();
         future_to_promise(async move {
             let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
-            let transport = p
+            let conn = p
                 .swarm
                 .get_connection(did)
-                .ok_or_else(|| JsError::new("transport not found"))?;
-            let state = transport
-                .ice_connection_state()
-                .await
-                .map(from_rtc_ice_connection_state);
+                .ok_or_else(|| JsError::new("connection not found"))?;
+            let state = format!("{:?}", conn.webrtc_connection_state());
             Ok(js_value::serialize(&state).map_err(JsError::from)?)
         })
     }
 
-    /// wait for transport connected
+    /// wait for connection connected
     /// * address: peer's address
     pub fn wait_for_connected(
         &self,
@@ -490,15 +441,11 @@ impl Client {
         future_to_promise(async move {
             let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
             let peer = p.get_peer(did).await.map_err(JsError::from)?;
-            log::debug!("wait_for_data_channel_connected start");
-            if peer.transport.is_connected().await {
-                return Ok(JsValue::null());
+            log::debug!("wait_for_data_channel_open start");
+            if let Err(e) = peer.connection.webrtc_wait_for_data_channel_open().await {
+                log::warn!("wait_for_data_channel_open failed: {}", e);
             }
-            if let Err(e) = peer.transport.wait_for_connected().await {
-                log::warn!("wait_for_data_channel_connected failed: {}", e);
-            }
-            //.map_err(JsError::from)?;
-            log::debug!("wait_for_data_channel_connected done");
+            log::debug!("wait_for_data_channel_open done");
             Ok(JsValue::null())
         })
     }
@@ -514,15 +461,11 @@ impl Client {
         future_to_promise(async move {
             let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
             let peer = p.get_peer(did).await.map_err(JsError::from)?;
-            log::debug!("wait for data channel open start");
-            if peer.transport.is_connected().await {
-                return Ok(JsValue::null());
+            log::debug!("wait_for_data_channel_open start");
+            if let Err(e) = peer.connection.webrtc_wait_for_data_channel_open().await {
+                log::warn!("wait_for_data_channel_open failed: {}", e);
             }
-            if let Err(e) = peer.transport.wait_for_data_channel_open().await {
-                log::warn!("wait_for_data_channel failed: {}", e);
-            }
-            //.map_err(JsError::from)?;
-            log::debug!("wait for data channel open done");
+            log::debug!("wait_for_data_channel_open done");
             Ok(JsValue::null())
         })
     }
@@ -898,16 +841,14 @@ impl MessageCallback for MessageCallbackInstance {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Peer {
     pub address: String,
-    pub transport_id: String,
-    pub state: Option<String>,
+    pub state: String,
 }
 
-impl From<(Option<RtcIceConnectionState>, Token, Uuid)> for Peer {
-    fn from((st, address, transport_id): (Option<RtcIceConnectionState>, Token, Uuid)) -> Self {
+impl From<(WebrtcConnectionState, Token)> for Peer {
+    fn from((st, address): (WebrtcConnectionState, Token)) -> Self {
         Self {
             address: address.to_string(),
-            transport_id: transport_id.to_string(),
-            state: st.map(from_rtc_ice_connection_state),
+            state: format!("{:?}", st),
         }
     }
 }

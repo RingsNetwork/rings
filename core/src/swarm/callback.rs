@@ -23,7 +23,8 @@ impl SwarmCallback {
     }
 }
 
-#[async_trait]
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
 impl Callback for SwarmCallback {
     async fn on_message(&self, _cid: &str, msg: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
         Channel::send(
