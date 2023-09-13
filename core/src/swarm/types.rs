@@ -1,16 +1,13 @@
 #![warn(missing_docs)]
 //! This module defines type and type alias related to Swarm.
 use async_trait::async_trait;
-#[cfg(feature = "wasm")]
-use rings_transport::connections::WebSysWebrtcConnection as Connection;
-#[cfg(not(feature = "wasm"))]
-use rings_transport::connections::WebrtcConnection as Connection;
-use rings_transport::core::transport::SharedConnection;
+use rings_transport::core::transport::ConnectionInterface;
 
 use crate::dht::Did;
 use crate::dht::LiveDid;
 use crate::measure::BehaviourJudgement;
 use crate::swarm::Swarm;
+use crate::types::Connection;
 
 /// Type of Measure, see [Measure].
 #[cfg(not(feature = "wasm"))]

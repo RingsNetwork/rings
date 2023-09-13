@@ -25,7 +25,7 @@ use rings_core::storage::PersistenceStorage;
 use rings_core::swarm::impls::ConnectionHandshake;
 use rings_core::utils::js_utils;
 use rings_core::utils::js_value;
-use rings_transport::core::transport::SharedConnection;
+use rings_transport::core::transport::ConnectionInterface;
 use rings_transport::core::transport::WebrtcConnectionState;
 use serde::Deserialize;
 use serde::Serialize;

@@ -206,7 +206,7 @@ pub mod tests {
     use std::matches;
     use std::sync::Arc;
 
-    use rings_transport::core::transport::SharedConnection;
+    use rings_transport::core::transport::ConnectionInterface;
     use tokio::time::sleep;
     use tokio::time::Duration;
 

@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(thiserror::Error, Debug)]
@@ -42,6 +44,9 @@ pub enum Error {
 
     #[error("Connection {0} not found, should handshake first")]
     ConnectionNotFound(String),
+
+    #[error("Connection {0} is released")]
+    ConnectionReleased(String),
 
     #[error("Failed on notifier, state is not succeeded")]
     NotifierFailed,

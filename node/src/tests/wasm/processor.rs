@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use futures::lock::Mutex;
 use rings_core::swarm::impls::ConnectionHandshake;
-use rings_transport::core::transport::SharedConnection;
+use rings_transport::core::transport::ConnectionInterface;
 use rings_transport::core::transport::WebrtcConnectionState;
 use wasm_bindgen_test::*;
 

@@ -14,6 +14,7 @@ pub enum TransportMessage {
 
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
 pub enum WebrtcConnectionState {
+    /// 当未知的状态被用于转换时，会被转为这个值
     #[default]
     Unspecified,
 
@@ -49,7 +50,7 @@ pub enum WebrtcConnectionState {
 
 #[cfg_attr(feature = "web-sys-webrtc", async_trait(?Send))]
 #[cfg_attr(not(feature = "web-sys-webrtc"), async_trait)]
-pub trait SharedConnection: Clone + 'static {
+pub trait ConnectionInterface {
     type Sdp: Serialize + DeserializeOwned;
     type Error: std::error::Error;
 
@@ -85,13 +86,13 @@ pub trait SharedConnection: Clone + 'static {
 
 #[cfg_attr(feature = "web-sys-webrtc", async_trait(?Send))]
 #[cfg_attr(not(feature = "web-sys-webrtc"), async_trait)]
-pub trait SharedTransport: Clone + 'static {
-    type Connection: SharedConnection<Error = Self::Error>;
+pub trait ConnectionCreation {
+    type Connection: ConnectionInterface<Error = Self::Error>;
     type Error: std::error::Error;
 
     async fn new_connection(
         &self,
         cid: &str,
         callback: Arc<BoxedCallback>,
-    ) -> Result<Self::Connection, Self::Error>;
+    ) -> Result<(), Self::Error>;
 }

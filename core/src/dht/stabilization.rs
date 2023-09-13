@@ -2,7 +2,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rings_transport::core::transport::SharedConnection;
+use rings_transport::core::transport::ConnectionInterface;
 
 use crate::dht::successor::SuccessorReader;
 use crate::dht::types::CorrectChord;

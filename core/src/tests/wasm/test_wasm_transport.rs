@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use rings_transport::connections::WebSysWebrtcConnection as Connection;
 use rings_transport::core::callback::Callback;
-use rings_transport::core::transport::SharedConnection;
-use rings_transport::core::transport::SharedTransport;
+use rings_transport::core::transport::ConnectionInterface;
+use rings_transport::core::transport::ConnectionCreation;
 use rings_transport::core::transport::WebrtcConnectionState;
 use rings_transport::Transport;
 use wasm_bindgen::JsValue;

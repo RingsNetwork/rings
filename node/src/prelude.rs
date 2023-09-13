@@ -10,10 +10,6 @@ pub use rings_rpc;
 pub use rings_rpc::jsonrpc_client;
 pub use rings_rpc::prelude::http;
 pub use rings_rpc::prelude::jsonrpc_core;
-#[cfg(feature = "browser")]
-pub use rings_transport::connections::WebSysWebrtcConnection as Connection;
-#[cfg(feature = "node")]
-pub use rings_transport::connections::WebrtcConnection as Connection;
 
 pub use self::rings_core::chunk;
 pub use self::rings_core::dht::PeerRing;
@@ -43,3 +39,4 @@ pub use self::rings_core::session::SessionSk;
 pub use self::rings_core::session::SessionSkBuilder;
 pub use self::rings_core::swarm::Swarm;
 pub use self::rings_core::swarm::SwarmBuilder;
+pub use self::rings_core::types::Connection;
