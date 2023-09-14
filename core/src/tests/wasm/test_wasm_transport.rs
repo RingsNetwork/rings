@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
-use rings_transport::connections::WebSysWebrtcConnection as Connection;
 use rings_transport::core::callback::Callback;
-use rings_transport::core::transport::SharedConnection;
-use rings_transport::core::transport::SharedTransport;
+use rings_transport::core::transport::ConnectionCreation;
+use rings_transport::core::transport::ConnectionInterface;
 use rings_transport::core::transport::WebrtcConnectionState;
 use rings_transport::Transport;
 use wasm_bindgen::JsValue;
@@ -18,6 +17,8 @@ use crate::swarm::callback::SwarmCallback;
 use crate::tests::manually_establish_connection;
 use crate::types::channel::Channel;
 use crate::types::channel::TransportEvent;
+use crate::types::Connection;
+use crate::types::ConnectionOwner;
 
 async fn get_fake_permission() {
     let window = web_sys::window().unwrap();
@@ -31,7 +32,9 @@ async fn get_fake_permission() {
     JsFuture::from(promise).await.unwrap();
 }
 
-async fn prepare_connection(channel: Option<Arc<CbChannel<TransportEvent>>>) -> Connection {
+async fn prepare_transport(
+    channel: Option<Arc<CbChannel<TransportEvent>>>,
+) -> Transport<ConnectionOwner> {
     let ch = match channel {
         Some(c) => Arc::clone(&c),
         None => Arc::new(<CbChannel<TransportEvent> as Channel<TransportEvent>>::new()),
@@ -41,7 +44,8 @@ async fn prepare_connection(channel: Option<Arc<CbChannel<TransportEvent>>>) -> 
     trans
         .new_connection("test", Arc::new(callback))
         .await
-        .unwrap()
+        .unwrap();
+    trans
 }
 
 pub async fn establish_ice_connection(conn1: &Connection, conn2: &Connection) -> Result<()> {
@@ -67,8 +71,10 @@ pub async fn establish_ice_connection(conn1: &Connection, conn2: &Connection) ->
 #[wasm_bindgen_test]
 async fn test_ice_connection_establish() {
     get_fake_permission().await;
-    let conn1 = prepare_connection(None).await;
-    let conn2 = prepare_connection(None).await;
+    let trans1 = prepare_transport(None).await;
+    let conn1 = trans1.get_connection("test").unwrap();
+    let trans2 = prepare_transport(None).await;
+    let conn2 = trans2.get_connection("test").unwrap();
     establish_ice_connection(&conn1, &conn2).await.unwrap();
 }
 

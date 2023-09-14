@@ -1,12 +1,8 @@
 use std::str::FromStr;
 
 use async_trait::async_trait;
-#[cfg(feature = "wasm")]
-use rings_transport::connections::WebSysWebrtcConnection as Connection;
-#[cfg(not(feature = "wasm"))]
-use rings_transport::connections::WebrtcConnection as Connection;
-use rings_transport::core::transport::SharedConnection;
-use rings_transport::core::transport::SharedTransport;
+use rings_transport::core::transport::ConnectionCreation;
+use rings_transport::core::transport::ConnectionInterface;
 
 use crate::dht::Did;
 use crate::error::Error;
@@ -18,6 +14,7 @@ use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
 use crate::swarm::Swarm;
+use crate::types::Connection;
 
 /// ConnectionHandshake defined how to connect two connections between two swarms.
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
@@ -145,10 +142,12 @@ impl Swarm {
 
     /// Create new connection that will be handled by swarm.
     pub async fn new_connection(&self, did: Did) -> Result<Connection> {
+        let cid = did.to_string();
         self.transport
-            .new_connection(&did.to_string(), self.callback.clone())
+            .new_connection(&cid, self.callback.clone())
             .await
-            .map_err(|e| e.into())
+            .map_err(Error::Transport)?;
+        self.transport.get_connection(&cid).map_err(|e| e.into())
     }
 
     /// Get connection by did and check if it is connected.

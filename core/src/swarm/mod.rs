@@ -13,12 +13,8 @@ use async_recursion::async_recursion;
 use async_trait::async_trait;
 pub use builder::SwarmBuilder;
 use rings_derive::JudgeConnection;
-#[cfg(feature = "wasm")]
-use rings_transport::connections::WebSysWebrtcConnection as Connection;
-#[cfg(not(feature = "wasm"))]
-use rings_transport::connections::WebrtcConnection as Connection;
 use rings_transport::core::callback::BoxedCallback;
-use rings_transport::core::transport::SharedConnection;
+use rings_transport::core::transport::ConnectionInterface;
 use rings_transport::core::transport::TransportMessage;
 use rings_transport::Transport;
 use serde::de::DeserializeOwned;
@@ -46,6 +42,8 @@ use crate::session::SessionSk;
 use crate::swarm::impls::ConnectionHandshake;
 use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::TransportEvent;
+use crate::types::Connection;
+use crate::types::ConnectionOwner;
 
 /// The transport and dht management.
 #[derive(JudgeConnection)]
@@ -58,7 +56,7 @@ pub struct Swarm {
     pub(crate) measure: Option<MeasureImpl>,
     session_sk: SessionSk,
     message_handler: MessageHandler,
-    transport: Transport<Connection>,
+    transport: Transport<ConnectionOwner>,
     callback: Arc<BoxedCallback>,
 }
 

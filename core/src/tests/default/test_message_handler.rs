@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use rings_transport::core::transport::SharedConnection;
+use rings_transport::core::transport::ConnectionInterface;
 use rings_transport::core::transport::WebrtcConnectionState;
 use tokio::time::sleep;
 use tokio::time::Duration;

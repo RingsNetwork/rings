@@ -11,7 +11,7 @@ use futures::Future;
 use jsonrpc_core::Metadata;
 use rings_core::message::MessagePayload;
 use rings_core::swarm::impls::ConnectionHandshake;
-use rings_transport::core::transport::SharedConnection;
+use rings_transport::core::transport::ConnectionInterface;
 use serde::Deserialize;
 use serde::Serialize;
 

@@ -16,8 +16,8 @@ use webrtc::peer_connection::RTCPeerConnection;
 
 use crate::callback::InnerCallback;
 use crate::core::callback::BoxedCallback;
-use crate::core::transport::SharedConnection;
-use crate::core::transport::SharedTransport;
+use crate::core::transport::ConnectionCreation;
+use crate::core::transport::ConnectionInterface;
 use crate::core::transport::TransportMessage;
 use crate::core::transport::WebrtcConnectionState;
 use crate::error::Error;
@@ -27,9 +27,10 @@ use crate::ice_server::IceServer;
 use crate::notifier::Notifier;
 use crate::Transport;
 
-#[derive(Clone)]
+/// A connection that implemented by webrtc-rs library.
+/// Used for native environment.
 pub struct WebrtcConnection {
-    webrtc_conn: Arc<RTCPeerConnection>,
+    webrtc_conn: RTCPeerConnection,
     webrtc_data_channel: Arc<RTCDataChannel>,
     webrtc_data_channel_open_notifier: Notifier,
 }
@@ -41,20 +42,10 @@ impl WebrtcConnection {
         webrtc_data_channel_open_notifier: Notifier,
     ) -> Self {
         Self {
-            webrtc_conn: Arc::new(webrtc_conn),
+            webrtc_conn,
             webrtc_data_channel,
             webrtc_data_channel_open_notifier,
         }
-    }
-
-    pub async fn get_stats(&self) -> Vec<String> {
-        self.webrtc_conn
-            .get_stats()
-            .await
-            .reports
-            .into_iter()
-            .map(|x| serde_json::to_string(&x).unwrap_or("failed to dump stats entry".to_string()))
-            .collect()
     }
 
     async fn webrtc_gather(&self) -> Result<RTCSessionDescription> {
@@ -72,7 +63,7 @@ impl WebrtcConnection {
 }
 
 #[async_trait]
-impl SharedConnection for WebrtcConnection {
+impl ConnectionInterface for WebrtcConnection {
     type Sdp = RTCSessionDescription;
     type Error = Error;
 
@@ -81,6 +72,16 @@ impl SharedConnection for WebrtcConnection {
         let data = bincode::serialize(&msg).map(Bytes::from)?;
         self.webrtc_data_channel.send(&data).await?;
         Ok(())
+    }
+
+    async fn get_stats(&self) -> Vec<String> {
+        self.webrtc_conn
+            .get_stats()
+            .await
+            .reports
+            .into_iter()
+            .map(|x| serde_json::to_string(&x).unwrap_or("failed to dump stats entry".to_string()))
+            .collect()
     }
 
     fn webrtc_connection_state(&self) -> WebrtcConnectionState {
@@ -141,15 +142,11 @@ impl SharedConnection for WebrtcConnection {
 }
 
 #[async_trait]
-impl SharedTransport for Transport<WebrtcConnection> {
+impl ConnectionCreation for Transport<WebrtcConnection> {
     type Connection = WebrtcConnection;
     type Error = Error;
 
-    async fn new_connection(
-        &self,
-        cid: &str,
-        callback: Arc<BoxedCallback>,
-    ) -> Result<Self::Connection> {
+    async fn new_connection(&self, cid: &str, callback: Arc<BoxedCallback>) -> Result<()> {
         if let Ok(existed_conn) = self.get_connection(cid) {
             if matches!(
                 existed_conn.webrtc_connection_state(),
@@ -261,15 +258,14 @@ impl SharedTransport for Transport<WebrtcConnection> {
             webrtc_data_channel_open_notifier,
         );
 
-        self.safely_insert(cid, conn.clone())?;
-        Ok(conn)
+        self.safely_insert(cid, conn)?;
+        Ok(())
     }
 }
 
 impl From<IceCredentialType> for RTCIceCredentialType {
     fn from(s: IceCredentialType) -> Self {
         match s {
-            IceCredentialType::Unspecified => Self::Unspecified,
             IceCredentialType::Password => Self::Password,
             IceCredentialType::Oauth => Self::Oauth,
         }

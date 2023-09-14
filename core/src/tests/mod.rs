@@ -1,4 +1,4 @@
-use rings_transport::core::transport::SharedConnection;
+use rings_transport::core::transport::ConnectionInterface;
 
 use crate::swarm::Swarm;
 

@@ -11,9 +11,10 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::callback::InnerCallback;
+use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedCallback;
-use crate::core::transport::SharedConnection;
-use crate::core::transport::SharedTransport;
+use crate::core::transport::ConnectionCreation;
+use crate::core::transport::ConnectionInterface;
 use crate::core::transport::TransportMessage;
 use crate::core::transport::WebrtcConnectionState;
 use crate::error::Error;
@@ -32,7 +33,7 @@ const CHANNEL_OPEN_DELAY: bool = false;
 
 lazy_static! {
     static ref CBS: DashMap<String, Arc<InnerCallback>> = DashMap::new();
-    static ref CONNS: DashMap<String, DummyConnection> = DashMap::new();
+    static ref CONNS: DashMap<String, ConnectionRef<DummyConnection>> = DashMap::new();
 }
 
 #[derive(Serialize, Deserialize)]
@@ -40,7 +41,8 @@ pub struct DummySdp {
     cid: String,
 }
 
-#[derive(Clone)]
+/// A dummy connection for local testing.
+/// Implements the [ConnectionInterface] trait with no real network.
 pub struct DummyConnection {
     cid: String,
     remote_cid: Arc<Mutex<Option<String>>>,
@@ -65,7 +67,7 @@ impl DummyConnection {
         CBS.get(&cid).unwrap().clone()
     }
 
-    fn remote_conn(&self) -> DummyConnection {
+    fn remote_conn(&self) -> ConnectionRef<DummyConnection> {
         let cid = { self.remote_cid.lock().unwrap().clone() }.unwrap();
         CONNS.get(&cid).unwrap().clone()
     }
@@ -85,7 +87,7 @@ impl DummyConnection {
 }
 
 #[async_trait]
-impl SharedConnection for DummyConnection {
+impl ConnectionInterface for DummyConnection {
     type Sdp = DummySdp;
     type Error = Error;
 
@@ -101,6 +103,10 @@ impl SharedConnection for DummyConnection {
 
     fn webrtc_connection_state(&self) -> WebrtcConnectionState {
         *self.webrtc_connection_state.lock().unwrap()
+    }
+
+    async fn get_stats(&self) -> Vec<String> {
+        Vec::new()
     }
 
     async fn webrtc_create_offer(&self) -> Result<Self::Sdp> {
@@ -125,6 +131,8 @@ impl SharedConnection for DummyConnection {
             .await;
         self.set_remote_cid(&answer.cid);
         self.remote_conn()
+            .upgrade()
+            .unwrap()
             .set_webrtc_connection_state(WebrtcConnectionState::Connected)
             .await;
         Ok(())
@@ -141,6 +149,8 @@ impl SharedConnection for DummyConnection {
         self.set_webrtc_connection_state(WebrtcConnectionState::Closed)
             .await;
         self.remote_conn()
+            .upgrade()
+            .unwrap()
             .set_webrtc_connection_state(WebrtcConnectionState::Closed)
             .await;
         Ok(())
@@ -148,15 +158,11 @@ impl SharedConnection for DummyConnection {
 }
 
 #[async_trait]
-impl SharedTransport for Transport<DummyConnection> {
+impl ConnectionCreation for Transport<DummyConnection> {
     type Connection = DummyConnection;
     type Error = Error;
 
-    async fn new_connection(
-        &self,
-        cid: &str,
-        callback: Arc<BoxedCallback>,
-    ) -> Result<Self::Connection> {
+    async fn new_connection(&self, cid: &str, callback: Arc<BoxedCallback>) -> Result<()> {
         if let Ok(existed_conn) = self.get_connection(cid) {
             if matches!(
                 existed_conn.webrtc_connection_state(),
@@ -173,13 +179,13 @@ impl SharedTransport for Transport<DummyConnection> {
         //
         let conn = DummyConnection::new(cid);
 
-        self.safely_insert(cid, conn.clone())?;
-        CONNS.insert(cid.to_string(), conn.clone());
+        self.safely_insert(cid, conn)?;
+        CONNS.insert(cid.to_string(), self.get_connection(cid)?);
         CBS.insert(
             cid.to_string(),
             Arc::new(InnerCallback::new(cid, callback, Notifier::default())),
         );
-        Ok(conn)
+        Ok(())
     }
 }
 
