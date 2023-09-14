@@ -1,5 +1,6 @@
 #![warn(missing_docs)]
-#[doc = include_str!("../README.md")]
+#![doc = include_str!("../README.md")]
+
 mod callback;
 pub mod connection_ref;
 pub mod connections;
@@ -23,7 +24,7 @@ use crate::error::Result;
 use crate::ice_server::IceServer;
 
 /// [Transport] is the main struct of this library.
-/// It holds all the connections.
+/// It manages all the connections and provides methods to create, get and close connections.
 pub struct Transport<C> {
     ice_servers: Vec<IceServer>,
     #[allow(dead_code)]
@@ -46,6 +47,7 @@ impl<C> Transport<C> {
 }
 
 impl<C> Transport<C> {
+    /// Get a reference of the connection by its id.
     pub fn get_connection(&self, cid: &str) -> Result<ConnectionRef<C>> {
         self.connections
             .get(cid)
@@ -53,6 +55,7 @@ impl<C> Transport<C> {
             .ok_or(Error::ConnectionNotFound(cid.to_string()))
     }
 
+    /// Get all the connections in the transport.
     pub fn get_connections(&self) -> Vec<(String, ConnectionRef<C>)> {
         self.connections
             .iter()
@@ -60,6 +63,7 @@ impl<C> Transport<C> {
             .collect()
     }
 
+    /// Get all the connection ids in the transport.
     pub fn get_connection_ids(&self) -> Vec<String> {
         self.connections.iter().map(|kv| kv.key().clone()).collect()
     }
@@ -71,7 +75,8 @@ where
     C: ConnectionInterface<Error = Error, Sdp = S> + Send + Sync,
     S: Serialize + DeserializeOwned + Send + Sync + 'static,
 {
-    /// Safely insert
+    /// The `safely_insert` method is used to insert a connection into the transport.
+    /// It ensures that the connection is not inserted twice in concurrent scenarios.
     ///
     /// The implementation of match statement refers to Entry::insert in dashmap.
     /// An extra check is added to see if the connection is already connected.
@@ -102,6 +107,9 @@ where
         Ok(())
     }
 
+    /// This method closes and releases the connection from transport.
+    /// All references to this cid, created by `get_connection`, will be released.
+    /// The [ConnectionInterface] methods of them will return [Error::ConnectionReleased].
     pub async fn close_connection(&self, cid: &str) -> Result<()> {
         let Some((_, conn)) = self.connections.remove(cid) else {
             return Err(Error::ConnectionNotFound(cid.to_string()));
@@ -116,7 +124,8 @@ where
     C: ConnectionInterface<Error = Error, Sdp = S>,
     S: Serialize + DeserializeOwned + Send + Sync + 'static,
 {
-    /// Safely insert
+    /// The `safely_insert` method is used to insert a connection into the transport.
+    /// It ensures that the connection is not inserted twice in concurrent scenarios.
     ///
     /// The implementation of match statement refers to Entry::insert in dashmap.
     /// An extra check is added to see if the connection is already connected.
@@ -147,6 +156,9 @@ where
         Ok(())
     }
 
+    /// This method closes and releases the connection from transport.
+    /// All references to this cid, created by `get_connection`, will be released.
+    /// The [ConnectionInterface] methods of them will return [Error::ConnectionReleased].
     pub async fn close_connection(&self, cid: &str) -> Result<()> {
         let Some((_, conn)) = self.connections.remove(cid) else {
             return Err(Error::ConnectionNotFound(cid.to_string()));

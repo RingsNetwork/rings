@@ -34,7 +34,8 @@ use crate::ice_server::IceServer;
 use crate::notifier::Notifier;
 use crate::Transport;
 
-#[derive(Clone)]
+/// A connection that implemented by web_sys library.
+/// Used for browser environment.
 pub struct WebSysWebrtcConnection {
     webrtc_conn: RtcPeerConnection,
     webrtc_data_channel: RtcDataChannel,
@@ -54,6 +55,7 @@ impl WebSysWebrtcConnection {
         }
     }
 
+    /// This is a debug method to dump the stats of webrtc connection.
     pub async fn get_stats(&self) -> Vec<String> {
         let promise = self.webrtc_conn.get_stats();
         let Ok(value) = wasm_bindgen_futures::JsFuture::from(promise).await else {
@@ -328,7 +330,7 @@ impl ConnectionCreation for Transport<WebSysWebrtcConnection> {
             webrtc_data_channel_open_notifier,
         );
 
-        self.safely_insert(cid, conn.clone())?;
+        self.safely_insert(cid, conn)?;
         Ok(())
     }
 }
@@ -337,7 +339,6 @@ impl ConnectionCreation for Transport<WebSysWebrtcConnection> {
 impl From<IceCredentialType> for RtcIceCredentialType {
     fn from(s: IceCredentialType) -> Self {
         match s {
-            IceCredentialType::Unspecified => Self::Password,
             IceCredentialType::Password => Self::Password,
             IceCredentialType::Oauth => Self::Token,
         }

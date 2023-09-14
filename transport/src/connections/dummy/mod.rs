@@ -41,7 +41,8 @@ pub struct DummySdp {
     cid: String,
 }
 
-#[derive(Clone)]
+/// A dummy connection for local testing.
+/// Implements the [ConnectionInterface] trait with no real network.
 pub struct DummyConnection {
     cid: String,
     remote_cid: Arc<Mutex<Option<String>>>,

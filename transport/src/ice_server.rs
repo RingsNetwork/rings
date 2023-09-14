@@ -1,3 +1,5 @@
+//! This module contains the IceServer structure.
+
 use std::str::FromStr;
 
 use serde::Deserialize;
@@ -6,25 +8,39 @@ use url::Url;
 
 use crate::error::IceServerError;
 
-/// Webrtc IceCredentialType enums.
+/// WebRTC IceCredentialType enums.
 #[derive(Deserialize, Serialize, Debug, Clone, Default, PartialEq, Eq)]
 pub enum IceCredentialType {
-    Unspecified,
+    /// IceCredentialType::Password describes username and password based
+    /// credentials as described in <https://tools.ietf.org/html/rfc5389>.
     #[default]
     Password,
+
+    /// IceCredentialType::Oauth describes token based credential as described
+    /// in <https://tools.ietf.org/html/rfc7635>.
+    /// Not supported in WebRTC 1.0 spec
     Oauth,
 }
 
-/// Custom webrtc IceServer.
+/// This structure is used to validate whether the parameter in String format is valid
+/// and convert it to the format required by the underlying library.
+///
+/// In order to create Connection correctly, each Connection needs to implement the conversion
+/// from IceServer to its underlying library parameters.
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct IceServer {
+    /// Urls is an array of URIs that can be used as STUN and TURN servers.
     pub urls: Vec<String>,
+    /// The username to use if the server requires authorization.
     pub username: String,
+    /// The secret to use for authentication with the
     pub credential: String,
+    /// CredentialType indicates which type of credential the ICEAgent will use.
     pub credential_type: IceCredentialType,
 }
 
 impl IceServer {
+    /// Convert String to Vec<IceServer>. Will split the string by `;` and parse each part.
     pub fn vec_from_str(s: &str) -> Result<Vec<Self>, IceServerError> {
         s.split(';').map(IceServer::from_str).collect()
     }

@@ -27,6 +27,8 @@ use crate::ice_server::IceServer;
 use crate::notifier::Notifier;
 use crate::Transport;
 
+/// A connection that implemented by webrtc-rs library.
+/// Used for native environment.
 pub struct WebrtcConnection {
     webrtc_conn: RTCPeerConnection,
     webrtc_data_channel: Arc<RTCDataChannel>,
@@ -46,6 +48,7 @@ impl WebrtcConnection {
         }
     }
 
+    /// This is a debug method to dump the stats of webrtc connection.
     pub async fn get_stats(&self) -> Vec<String> {
         self.webrtc_conn
             .get_stats()
@@ -264,7 +267,6 @@ impl ConnectionCreation for Transport<WebrtcConnection> {
 impl From<IceCredentialType> for RTCIceCredentialType {
     fn from(s: IceCredentialType) -> Self {
         match s {
-            IceCredentialType::Unspecified => Self::Unspecified,
             IceCredentialType::Password => Self::Password,
             IceCredentialType::Oauth => Self::Oauth,
         }

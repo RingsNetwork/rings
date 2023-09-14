@@ -1,3 +1,5 @@
+//! This module contains the [ConnectionRef] struct.
+
 use std::sync::Arc;
 use std::sync::Weak;
 
@@ -11,6 +13,9 @@ use crate::core::transport::WebrtcConnectionState;
 use crate::error::Error;
 use crate::error::Result;
 
+/// The[ConnectionRef] is a weak reference to a connection and implements the `ConnectionInterface` trait.
+/// When the connection is dropped, it returns an error called [Error::ConnectionReleased].
+/// It serves as the return value for the `get_connection` method of [Transport](crate::Transport).
 pub struct ConnectionRef<C> {
     cid: String,
     conn: Weak<C>,
@@ -26,6 +31,7 @@ impl<C> Clone for ConnectionRef<C> {
 }
 
 impl<C> ConnectionRef<C> {
+    /// Create a new connection reference.
     pub fn new(cid: &str, conn: &Arc<C>) -> Self {
         Self {
             cid: cid.to_string(),
