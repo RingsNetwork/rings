@@ -55,22 +55,6 @@ impl WebSysWebrtcConnection {
         }
     }
 
-    /// This is a debug method to dump the stats of webrtc connection.
-    pub async fn get_stats(&self) -> Vec<String> {
-        let promise = self.webrtc_conn.get_stats();
-        let Ok(value) = wasm_bindgen_futures::JsFuture::from(promise).await else {
-            return vec![];
-        };
-
-        let stats: RtcStatsReport = value.into();
-
-        stats
-            .entries()
-            .into_iter()
-            .map(|x| dump_stats_entry(&x.ok()).unwrap_or("failed to dump stats entry".to_string()))
-            .collect::<Vec<_>>()
-    }
-
     async fn webrtc_gather(&self) -> Result<String> {
         let notifier = Notifier::default();
 
@@ -112,6 +96,21 @@ impl ConnectionInterface for WebSysWebrtcConnection {
 
     fn webrtc_connection_state(&self) -> WebrtcConnectionState {
         self.webrtc_conn.connection_state().into()
+    }
+
+    async fn get_stats(&self) -> Vec<String> {
+        let promise = self.webrtc_conn.get_stats();
+        let Ok(value) = wasm_bindgen_futures::JsFuture::from(promise).await else {
+            return vec![];
+        };
+
+        let stats: RtcStatsReport = value.into();
+
+        stats
+            .entries()
+            .into_iter()
+            .map(|x| dump_stats_entry(&x.ok()).unwrap_or("failed to dump stats entry".to_string()))
+            .collect::<Vec<_>>()
     }
 
     async fn webrtc_create_offer(&self) -> Result<Self::Sdp> {

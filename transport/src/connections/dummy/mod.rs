@@ -105,6 +105,10 @@ impl ConnectionInterface for DummyConnection {
         *self.webrtc_connection_state.lock().unwrap()
     }
 
+    async fn get_stats(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     async fn webrtc_create_offer(&self) -> Result<Self::Sdp> {
         self.set_webrtc_connection_state(WebrtcConnectionState::Connecting)
             .await;

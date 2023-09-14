@@ -48,17 +48,6 @@ impl WebrtcConnection {
         }
     }
 
-    /// This is a debug method to dump the stats of webrtc connection.
-    pub async fn get_stats(&self) -> Vec<String> {
-        self.webrtc_conn
-            .get_stats()
-            .await
-            .reports
-            .into_iter()
-            .map(|x| serde_json::to_string(&x).unwrap_or("failed to dump stats entry".to_string()))
-            .collect()
-    }
-
     async fn webrtc_gather(&self) -> Result<RTCSessionDescription> {
         self.webrtc_conn
             .gathering_complete_promise()
@@ -83,6 +72,16 @@ impl ConnectionInterface for WebrtcConnection {
         let data = bincode::serialize(&msg).map(Bytes::from)?;
         self.webrtc_data_channel.send(&data).await?;
         Ok(())
+    }
+
+    async fn get_stats(&self) -> Vec<String> {
+        self.webrtc_conn
+            .get_stats()
+            .await
+            .reports
+            .into_iter()
+            .map(|x| serde_json::to_string(&x).unwrap_or("failed to dump stats entry".to_string()))
+            .collect()
     }
 
     fn webrtc_connection_state(&self) -> WebrtcConnectionState {

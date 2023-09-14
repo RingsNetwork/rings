@@ -67,6 +67,13 @@ where
             .unwrap_or(WebrtcConnectionState::Closed)
     }
 
+    async fn get_stats(&self) -> Vec<String> {
+        let Ok(c) = self.upgrade() else {
+            return Vec::new();
+        };
+        c.get_stats().await
+    }
+
     async fn webrtc_create_offer(&self) -> Result<Self::Sdp> {
         self.upgrade()?.webrtc_create_offer().await
     }
@@ -106,6 +113,13 @@ where
         self.upgrade()
             .map(|c| c.webrtc_connection_state())
             .unwrap_or(WebrtcConnectionState::Closed)
+    }
+
+    async fn get_stats(&self) -> Vec<String> {
+        let Ok(c) = self.upgrade() else {
+            return Vec::new();
+        };
+        c.get_stats().await
     }
 
     async fn webrtc_create_offer(&self) -> Result<Self::Sdp> {

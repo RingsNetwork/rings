@@ -75,6 +75,9 @@ pub trait ConnectionInterface {
     /// Get current webrtc connection state.
     fn webrtc_connection_state(&self) -> WebrtcConnectionState;
 
+    /// This is a debug method to dump the stats of webrtc connection.
+    async fn get_stats(&self) -> Vec<String>;
+
     /// Create a webrtc offer to start handshake.
     async fn webrtc_create_offer(&self) -> Result<Self::Sdp, Self::Error>;
 

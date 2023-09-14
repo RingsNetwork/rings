@@ -9,7 +9,7 @@
 //!
 //! The [Callback](callback::Callback) trait is used to let user handle
 //! the events of a connection, including connection state change,
-//! comming data channel message and etc. See the [callback] module.
+//! coming data channel message and etc. See the [callback] module.
 
 pub mod callback;
 pub mod transport;
