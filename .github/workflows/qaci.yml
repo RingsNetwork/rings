@@ -112,7 +112,7 @@ jobs:
         run: cargo +nightly fmt --all -- --check
 
       - name: Install taplo
-        run: cargo install taplo-cli
+        run: cargo install taplo-cli --locked
 
       - name: Check toml file formating by taplo
         run: taplo format --check
