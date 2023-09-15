@@ -199,6 +199,10 @@ impl Swarm {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl ConnectionHandshake for Swarm {
     async fn prepare_connection_offer(&self, peer: Did) -> Result<(Connection, ConnectNodeSend)> {
+        if self.get_and_check_connection(peer).await.is_some() {
+            return Err(Error::AlreadyConnected);
+        };
+
         let conn = self.new_connection(peer).await?;
 
         let offer = conn.webrtc_create_offer().await.map_err(Error::Transport)?;
@@ -333,6 +337,10 @@ impl ConnectionManager for Swarm {
     /// This function may returns a pending connection or connected connection.
     async fn connect(&self, did: Did) -> Result<Connection> {
         tracing::info!("Try connect Did {:?}", &did);
+        if let Some(t) = self.get_and_check_connection(did).await {
+            return Ok(t);
+        }
+
         let conn = self.new_connection(did).await?;
 
         let offer = conn.webrtc_create_offer().await.map_err(Error::Transport)?;
