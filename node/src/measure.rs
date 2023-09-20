@@ -64,7 +64,7 @@ impl PeriodicCounter {
         true
     }
 
-    // If there is no recourd in current period, get pervious_count instead
+    // If there is no recourd in current period, get previous_count instead
     fn barely_get(&self) -> u64 {
         if self.previous_count == 0 {
             self.count
@@ -80,7 +80,7 @@ impl PeriodicCounter {
         (self.barely_get(), is_refreshed)
     }
 
-    // Check period, return count or pervious count
+    // Check period, return count or previous count
     fn get(&mut self) -> (u64, bool) {
         let is_refreshed = self.refresh();
         (self.barely_get(), is_refreshed)

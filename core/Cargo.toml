@@ -1,6 +1,6 @@
 [package]
 name = "rings-core"
-version = "0.2.7"
+version = "0.3.0"
 edition = "2021"
 authors = ["RND <dev@ringsnetwork.io>"]
 description = "Chord DHT implementation with ICE"
@@ -25,8 +25,9 @@ std = [
     "uuid/v4",
     "uuid/serde",
     "rings-derive/default",
+    "rings-transport/native-webrtc",
 ]
-dummy = ["std", "lazy_static", "tokio"]
+dummy = ["std", "lazy_static", "tokio", "rings-transport/dummy"]
 wasm = [
     "web-sys",
     "wasm-bindgen",
@@ -40,6 +41,7 @@ wasm = [
     "uuid/v4",
     "uuid/serde",
     "rings-derive/wasm",
+    "rings-transport/web-sys-webrtc",
 ]
 browser_chrome_test = ["wasm"]
 
@@ -69,6 +71,7 @@ num-bigint = "0.4.3"
 rand = { version = "0.8.5", features = ["getrandom"] }
 rand_core = { version = "0.6.3", features = ["getrandom"] }
 rand_hc = "0.3.1"
+rings-transport = { workspace = true }
 serde = { version = "1.0.130", features = ["derive"] }
 serde_json = { version = "1.0.70" }
 sha1 = "0.10.1"
@@ -92,39 +95,18 @@ lazy_static = { version = "1.4.0", optional = true }
 tokio = { version = "1.13.0", features = ["full"], optional = true }
 
 # wasm
-js-sys = { version = "0.3.56", optional = true }
+js-sys = { workspace = true, optional = true }
 rexie = { version = "0.4.1", optional = true }
-serde-wasm-bindgen = { version = "0.4.5", optional = true }
-wasm-bindgen = { workspace = true, features = ["serde-serialize"], optional = true }
-wasm-bindgen-futures = { version = "0.4.33", optional = true }
+serde-wasm-bindgen = { workspace = true, optional = true }
+wasm-bindgen = { workspace = true, optional = true }
+wasm-bindgen-futures = { workspace = true, optional = true }
 web-sys = { version = "0.3.56", optional = true, features = [
-    "Window",
-    "Navigator",
-    "MessageEvent",
-    "MediaStreamConstraints",
     "MediaDevices",
-    "RtcPeerConnection",
-    "RtcSignalingState",
-    "RtcSdpType",
+    "Navigator",
     "ServiceWorkerGlobalScope",
-    "RtcIceServer",
-    "RtcSessionDescriptionInit",
+    "Window",
+    "MediaStreamConstraints",
     "WorkerGlobalScope",
-    "RtcSessionDescription",
-    "RtcPeerConnectionIceEvent",
-    "RtcIceCandidate",
-    "RtcIceCandidateInit",
-    "RtcDataChannel",
-    "RtcDataChannelEvent",
-    "RtcDataChannelState",
-    "RtcConfiguration",
-    "RtcIceConnectionState",
-    "RtcIceGatheringState",
-    "RtcIceCredentialType",
-    "RtcLifecycleEvent",
-    "RtcStatsReport",
-    "console",
-    "Blob",
 ] }
 
 [dev-dependencies]

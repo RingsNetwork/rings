@@ -29,7 +29,7 @@ jobs:
 
       - uses: jetli/wasm-bindgen-action@v0.2.0
         with:
-          version: "0.2.84"
+          version: "0.2.87"
 
       # If you need to reset the cache version, increment the number after `v`
       - uses: Swatinem/rust-cache@v2
@@ -112,7 +112,7 @@ jobs:
         run: cargo +nightly fmt --all -- --check
 
       - name: Install taplo
-        run: cargo install taplo-cli
+        run: cargo install taplo-cli --locked
 
       - name: Check toml file formating by taplo
         run: taplo format --check

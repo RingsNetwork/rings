@@ -1,3 +1,6 @@
+use js_sys;
+use wasm_bindgen::prelude::*;
+
 /// A parser convert JsValue to jsonrpc_core::Params.
 /// # Examples
 ///
@@ -26,10 +29,8 @@
 /// }
 /// ```
 use crate::error::Error;
-use crate::prelude::js_sys;
 use crate::prelude::jsonrpc_core;
 use crate::prelude::rings_core::utils::js_value;
-use crate::prelude::wasm_bindgen::prelude::*;
 
 pub fn parse_params(params: JsValue) -> Result<jsonrpc_core::Params, Error> {
     let params = if params.is_null() {

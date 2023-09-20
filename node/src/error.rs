@@ -16,16 +16,14 @@ pub enum Error {
     RemoteRpcError(String) = 100,
     #[error("Unknown rpc error.")]
     UnknownRpcError = 101,
-    #[error("Pending Transport error: {0}.")]
-    PendingTransport(rings_core::error::Error) = 202,
-    #[error("Transport not found.")]
-    TransportNotFound = 203,
-    #[error("Create Transport error: {0}.")]
-    NewTransportError(rings_core::error::Error) = 204,
-    #[error("Close Transport error: {0}.")]
-    CloseTransportError(rings_core::error::Error) = 205,
-    #[error("Invalid transport id.")]
-    InvalidTransportId = 206,
+    #[error("Connection not found.")]
+    ConnectionNotFound = 203,
+    #[error("Create connection error: {0}.")]
+    NewConnectionError(rings_core::error::Error) = 204,
+    #[error("Close connection error: {0}.")]
+    CloseConnectionError(rings_core::error::Error) = 205,
+    #[error("Invalid connection id.")]
+    InvalidConnectionId = 206,
     #[error("Create offer info failed: {0}.")]
     CreateOffer(rings_core::error::Error) = 207,
     #[error("Answer offer info failed: {0}.")]

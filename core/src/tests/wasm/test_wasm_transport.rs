@@ -1,25 +1,24 @@
-use std::str::FromStr;
 use std::sync::Arc;
 
+use rings_transport::core::callback::Callback;
+use rings_transport::core::transport::ConnectionCreation;
+use rings_transport::core::transport::ConnectionInterface;
+use rings_transport::core::transport::WebrtcConnectionState;
+use rings_transport::Transport;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::*;
-use web_sys::RtcIceConnectionState;
 
 use super::prepare_node;
 use crate::channels::Channel as CbChannel;
 use crate::ecc::SecretKey;
 use crate::error::Result;
-use crate::prelude::RTCSdpType;
+use crate::swarm::callback::SwarmCallback;
 use crate::tests::manually_establish_connection;
-use crate::transports::Transport;
 use crate::types::channel::Channel;
 use crate::types::channel::TransportEvent;
-use crate::types::ice_transport::IceServer;
-use crate::types::ice_transport::IceTransportInterface;
-use crate::types::ice_transport::IceTrickleScheme;
-
-// wasm_bindgen_test_configure!(run_in_browser);
+use crate::types::Connection;
+use crate::types::ConnectionOwner;
 
 async fn get_fake_permission() {
     let window = web_sys::window().unwrap();
@@ -33,74 +32,50 @@ async fn get_fake_permission() {
     JsFuture::from(promise).await.unwrap();
 }
 
-async fn prepare_transport(channel: Option<Arc<CbChannel<TransportEvent>>>) -> Result<Transport> {
+async fn prepare_transport(
+    channel: Option<Arc<CbChannel<TransportEvent>>>,
+) -> Transport<ConnectionOwner> {
     let ch = match channel {
         Some(c) => Arc::clone(&c),
         None => Arc::new(<CbChannel<TransportEvent> as Channel<TransportEvent>>::new()),
     };
-    let mut trans = Transport::new(ch.sender());
-    let stun = IceServer::from_str("stun://stun.l.google.com:19302").unwrap();
-    trans.start(vec![stun], None).await.unwrap();
-    trans.apply_callback().await.unwrap();
-    Ok(trans)
+    let callback = SwarmCallback::new(ch.sender()).boxed();
+    let trans = Transport::new("stun://stun.l.google.com:19302", None);
+    trans
+        .new_connection("test", Arc::new(callback))
+        .await
+        .unwrap();
+    trans
 }
 
-pub async fn establish_ice_connection(
-    transport1: &Transport,
-    transport2: &Transport,
-) -> Result<()> {
-    assert_eq!(
-        transport1.ice_connection_state().await,
-        Some(RtcIceConnectionState::New)
-    );
-    assert_eq!(
-        transport2.ice_connection_state().await,
-        Some(RtcIceConnectionState::New)
-    );
+pub async fn establish_ice_connection(conn1: &Connection, conn2: &Connection) -> Result<()> {
+    assert_eq!(conn1.webrtc_connection_state(), WebrtcConnectionState::New);
+    assert_eq!(conn2.webrtc_connection_state(), WebrtcConnectionState::New);
 
-    // Generate key pairs for did register
-    let key1 = SecretKey::random();
-    let key2 = SecretKey::random();
-
-    // Peer 1 try to connect peer 2
-    let handshake_info1 = transport1.get_handshake_info(RTCSdpType::Offer).await?;
-
-    // Peer 2 got offer then register
-    transport2
-        .register_remote_info(&handshake_info1, key1.address().into())
-        .await?;
-
-    // Peer 2 create answer
-    let handshake_info2 = transport2
-        .get_handshake_info(RTCSdpType::Answer)
-        .await
-        .unwrap();
-
-    // Peer 1 got answer then register
-    transport1
-        .register_remote_info(&handshake_info2, key2.address().into())
-        .await
-        .unwrap();
+    let offer = conn1.webrtc_create_offer().await.unwrap();
+    let answer = conn2.webrtc_answer_offer(offer).await.unwrap();
+    conn1.webrtc_accept_answer(answer).await.unwrap();
 
     #[cfg(feature = "browser_chrome_test")]
     {
-        transport2.wait_for_data_channel_open().await.unwrap();
+        conn2.webrtc_wait_for_data_channel_open().await.unwrap();
         assert_eq!(
-            transport2.ice_connection_state().await,
-            Some(RtcIceConnectionState::Connected)
+            conn2.webrtc_connection_state(),
+            WebrtcConnectionState::Connected
         );
     }
+
     Ok(())
 }
 
 #[wasm_bindgen_test]
 async fn test_ice_connection_establish() {
     get_fake_permission().await;
-    let transport1 = prepare_transport(None).await.unwrap();
-    let transport2 = prepare_transport(None).await.unwrap();
-    establish_ice_connection(&transport1, &transport2)
-        .await
-        .unwrap();
+    let trans1 = prepare_transport(None).await;
+    let conn1 = trans1.get_connection("test").unwrap();
+    let trans2 = prepare_transport(None).await;
+    let conn2 = trans2.get_connection("test").unwrap();
+    establish_ice_connection(&conn1, &conn2).await.unwrap();
 }
 
 #[wasm_bindgen_test]
@@ -113,5 +88,5 @@ async fn test_message_handler() {
     let node1 = prepare_node(key1).await;
     let node2 = prepare_node(key2).await;
 
-    manually_establish_connection(&node1, &node2).await.unwrap();
+    manually_establish_connection(&node1, &node2).await;
 }

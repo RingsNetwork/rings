@@ -11,7 +11,6 @@ use crate::dht::vnode::VirtualNode;
 use crate::dht::Did;
 use crate::dht::TopoInfo;
 use crate::error::Result;
-use crate::types::ice_transport::HandshakeInfo;
 
 /// The `Then` trait is used to associate a type with a "then" scenario.
 pub trait Then {
@@ -22,19 +21,15 @@ pub trait Then {
 /// MessageType use to ask for connection, send to remote with transport_uuid and handshake_info.
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
 pub struct ConnectNodeSend {
-    /// uuid of transport
-    pub transport_uuid: String,
     /// sdp offer of webrtc
-    pub offer: HandshakeInfo,
+    pub sdp: String,
 }
 
 /// MessageType report to origin with own transport_uuid and handshake_info.
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
 pub struct ConnectNodeReport {
-    /// uuid of transport
-    pub transport_uuid: String,
     /// sdp answer of webrtc
-    pub answer: HandshakeInfo,
+    pub sdp: String,
 }
 
 /// MessageType use to find successor in a chord ring.

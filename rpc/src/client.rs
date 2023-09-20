@@ -35,7 +35,7 @@ impl Client {
     /// The function sends ICE candidates and Session Description Protocol (SDP) messages over HTTP as a form of signaling to establish the connection.
     ///
     /// Takes a URL for an HTTP server that will be used as the signaling channel to exchange ICE candidates and SDP with the remote peer.
-    /// Returns a transport ID that can be used to refer to this connection in subsequent WebRTC operations.
+    /// Returns a Did that can be used to refer to this connection in subsequent WebRTC operations.
     pub async fn connect_peer_via_http(&mut self, http_url: &str) -> Result<String> {
         let resp = self
             .client
@@ -46,8 +46,8 @@ impl Client {
             .await
             .map_err(Error::RpcError)?;
 
-        let transport_id = resp.as_str().ok_or(Error::DecodeError)?;
-        Ok(transport_id.to_string())
+        let did = resp.as_str().ok_or(Error::DecodeError)?;
+        Ok(did.to_string())
     }
 
     /// Attempts to connect to a peer using a seed file located at the specified source path.
@@ -95,30 +95,6 @@ impl Client {
             .await
             .map_err(Error::RpcError)?;
 
-        Ok(())
-    }
-
-    /// Lists all pending transports and their status.
-    pub async fn list_pendings(&self) -> Result<Vec<response::TransportInfo>> {
-        let resp = self
-            .client
-            .call_method(Method::ListPendings.as_str(), Params::Array(vec![]))
-            .await
-            .map_err(Error::RpcError)?;
-        let resp: Vec<response::TransportInfo> =
-            serde_json::from_value(resp).map_err(|_| Error::DecodeError)?;
-        Ok(resp)
-    }
-
-    /// Closes the pending transport with the specified transport ID.
-    pub async fn close_pending_transport(&self, transport_id: &str) -> Result<()> {
-        self.client
-            .call_method(
-                Method::ClosePendingTransport.as_str(),
-                Params::Array(vec![json!(transport_id)]),
-            )
-            .await
-            .map_err(Error::RpcError)?;
         Ok(())
     }
 

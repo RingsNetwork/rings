@@ -1,3 +1,4 @@
+use rings_transport::core::transport::ConnectionInterface;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -9,23 +10,19 @@ use crate::storage::MemStorage;
 use crate::storage::PersistenceStorage;
 use crate::storage::PersistenceStorageReadAndWrite;
 use crate::swarm::Swarm;
-use crate::transports::manager::TransportManager;
-use crate::types::ice_transport::IceTransportInterface;
-use crate::utils::from_rtc_ice_connection_state;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SwarmInspect {
-    pub transports: Vec<TransportInspect>,
+    pub connections: Vec<ConnectionInspect>,
     pub dht: DHTInspect,
     pub persistence_storage: StorageInspect,
     pub cache_storage: StorageInspect,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TransportInspect {
+pub struct ConnectionInspect {
     pub did: String,
-    pub transport_id: String,
-    pub state: Option<String>,
+    pub state: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,19 +42,14 @@ pub struct StorageInspect {
 impl SwarmInspect {
     pub async fn inspect(swarm: &Swarm) -> Self {
         let dht = DHTInspect::inspect(&swarm.dht());
-        let transports = {
-            let transports = swarm.get_transports();
+        let connections = {
+            let connections = swarm.get_connections();
 
-            let states_async = transports.iter().map(|(_, t)| t.ice_connection_state());
-            let states = futures::future::join_all(states_async).await;
-
-            transports
+            connections
                 .iter()
-                .zip(states.iter())
-                .map(|((did, transport), state)| TransportInspect {
+                .map(|(did, c)| ConnectionInspect {
                     did: did.to_string(),
-                    transport_id: transport.id.to_string(),
-                    state: state.map(from_rtc_ice_connection_state),
+                    state: format!("{:?}", c.ice_connection_state()),
                 })
                 .collect()
         };
@@ -66,7 +58,7 @@ impl SwarmInspect {
         let cache_storage = StorageInspect::inspect_mem_storage(&swarm.dht().cache);
 
         Self {
-            transports,
+            connections,
             dht,
             persistence_storage,
             cache_storage,

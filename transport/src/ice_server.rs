@@ -1,28 +1,49 @@
+//! This module contains the IceServer structure.
+
 use std::str::FromStr;
 
 use serde::Deserialize;
 use serde::Serialize;
 use url::Url;
 
-use crate::error::Error;
-use crate::error::Result;
+use crate::error::IceServerError;
 
-/// Webrtc IceCredentialType enums.
+/// WebRTC IceCredentialType enums.
 #[derive(Deserialize, Serialize, Debug, Clone, Default, PartialEq, Eq)]
 pub enum IceCredentialType {
-    Unspecified,
+    /// IceCredentialType::Password describes username and password based
+    /// credentials as described in <https://tools.ietf.org/html/rfc5389>.
     #[default]
     Password,
+
+    /// IceCredentialType::Oauth describes token based credential as described
+    /// in <https://tools.ietf.org/html/rfc7635>.
+    /// Not supported in WebRTC 1.0 spec
     Oauth,
 }
 
-/// Custom webrtc IceServer.
+/// This structure is used to validate whether the parameter in String format is valid
+/// and convert it to the format required by the underlying library.
+///
+/// In order to create Connection correctly, each Connection needs to implement the conversion
+/// from IceServer to its underlying library parameters.
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct IceServer {
+    /// Urls is an array of URIs that can be used as STUN and TURN servers.
     pub urls: Vec<String>,
+    /// The username to use if the server requires authorization.
     pub username: String,
+    /// The secret to use for authentication with the
     pub credential: String,
+    /// CredentialType indicates which type of credential the ICEAgent will use.
     pub credential_type: IceCredentialType,
+}
+
+impl IceServer {
+    /// Convert String to Vec<IceServer>. Will split the string by `;` and parse each part.
+    pub fn vec_from_str(s: &str) -> Result<Vec<Self>, IceServerError> {
+        s.split(';').map(IceServer::from_str).collect()
+    }
 }
 
 impl Default for IceServer {
@@ -42,15 +63,15 @@ impl Default for IceServer {
 ///      turn://ethereum.org:9090
 ///      turn://ryan@ethereum.org:9090/nginx/v2
 impl FromStr for IceServer {
-    type Err = Error;
-    fn from_str(s: &str) -> Result<Self> {
+    type Err = IceServerError;
+    fn from_str(s: &str) -> Result<Self, IceServerError> {
         let parsed = Url::parse(s)?;
         let scheme = parsed.scheme();
         if !(["turn", "stun"].contains(&scheme)) {
-            return Err(Error::IceServerSchemeNotSupport(scheme.into()));
+            return Err(IceServerError::SchemeNotSupported(scheme.into()));
         }
         if !parsed.has_host() {
-            return Err(Error::IceServerURLMissHost);
+            return Err(IceServerError::UrlMissHost);
         }
         let username = parsed.username();
         let password = parsed.password().unwrap_or("");
@@ -69,85 +90,6 @@ impl FromStr for IceServer {
             credential: password.to_string(),
             credential_type: IceCredentialType::default(),
         })
-    }
-}
-
-#[cfg(feature = "wasm")]
-mod wasm {
-    use js_sys::Array;
-    use wasm_bindgen::JsValue;
-    use web_sys::RtcIceCredentialType;
-    use web_sys::RtcIceServer;
-
-    use super::IceCredentialType;
-    use super::IceServer;
-
-    // set default to password
-    impl From<IceCredentialType> for RtcIceCredentialType {
-        fn from(s: IceCredentialType) -> Self {
-            match s {
-                IceCredentialType::Unspecified => Self::Password,
-                IceCredentialType::Password => Self::Password,
-                IceCredentialType::Oauth => Self::Token,
-            }
-        }
-    }
-
-    impl From<IceServer> for RtcIceServer {
-        fn from(s: IceServer) -> Self {
-            let mut ret = RtcIceServer::new();
-            let urls = Array::new();
-            for u in s.urls {
-                let url = JsValue::from_str(&u);
-                urls.push(&url);
-            }
-            if !s.username.is_empty() {
-                ret.username(&s.username);
-            }
-            if !s.credential.is_empty() {
-                ret.credential(&s.credential);
-            }
-            ret.credential_type(s.credential_type.into());
-            ret.urls(&urls);
-            ret
-        }
-    }
-
-    impl From<IceServer> for JsValue {
-        fn from(a: IceServer) -> Self {
-            let ret: RtcIceServer = a.into();
-            ret.into()
-        }
-    }
-}
-
-#[cfg(not(feature = "wasm"))]
-mod default {
-    use webrtc::ice_transport::ice_credential_type::RTCIceCredentialType;
-    use webrtc::ice_transport::ice_server::RTCIceServer;
-
-    use super::IceCredentialType;
-    use super::IceServer;
-
-    impl From<IceCredentialType> for RTCIceCredentialType {
-        fn from(s: IceCredentialType) -> Self {
-            match s {
-                IceCredentialType::Unspecified => Self::Unspecified,
-                IceCredentialType::Password => Self::Password,
-                IceCredentialType::Oauth => Self::Oauth,
-            }
-        }
-    }
-
-    impl From<IceServer> for RTCIceServer {
-        fn from(s: IceServer) -> Self {
-            Self {
-                urls: s.urls,
-                username: s.username,
-                credential: s.credential,
-                credential_type: s.credential_type.into(),
-            }
-        }
     }
 }
 

@@ -1,41 +1,9 @@
 //! Utils for ring-core
 use chrono::Utc;
 
-use crate::prelude::RTCIceConnectionState;
-
 /// Get local utc timestamp (millisecond)
 pub fn get_epoch_ms() -> u128 {
     Utc::now().timestamp_millis() as u128
-}
-
-/// convert RTCIceConnectionState to string
-pub fn from_rtc_ice_connection_state(state: RTCIceConnectionState) -> String {
-    match state {
-        RTCIceConnectionState::New => "new",
-        RTCIceConnectionState::Checking => "checking",
-        RTCIceConnectionState::Connected => "connected",
-        RTCIceConnectionState::Completed => "completed",
-        RTCIceConnectionState::Failed => "failed",
-        RTCIceConnectionState::Disconnected => "disconnected",
-        RTCIceConnectionState::Closed => "closed",
-        _ => "unknown",
-    }
-    .to_owned()
-}
-
-/// convert string to RTCIceConnectionState
-#[allow(dead_code)]
-pub fn into_rtc_ice_connection_state(value: &str) -> Option<RTCIceConnectionState> {
-    Some(match value {
-        "new" => RTCIceConnectionState::New,
-        "checking" => RTCIceConnectionState::Checking,
-        "connected" => RTCIceConnectionState::Connected,
-        "completed" => RTCIceConnectionState::Completed,
-        "failed" => RTCIceConnectionState::Failed,
-        "disconnected" => RTCIceConnectionState::Disconnected,
-        "closed" => RTCIceConnectionState::Closed,
-        _ => return None,
-    })
 }
 
 #[cfg(feature = "wasm")]

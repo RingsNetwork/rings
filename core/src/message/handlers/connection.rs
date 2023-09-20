@@ -206,6 +206,7 @@ pub mod tests {
     use std::matches;
     use std::sync::Arc;
 
+    use rings_transport::core::transport::ConnectionInterface;
     use tokio::time::sleep;
     use tokio::time::Duration;
 
@@ -218,8 +219,6 @@ pub mod tests {
     use crate::swarm::Swarm;
     use crate::tests::default::prepare_node;
     use crate::tests::manually_establish_connection;
-    use crate::transports::manager::TransportManager;
-    use crate::types::ice_transport::IceTransportInterface;
 
     // node1.key < node2.key < node3.key
     //
@@ -356,7 +355,7 @@ pub mod tests {
         println!("||  now we start join node3 to node2  ||");
         println!("========================================");
 
-        manually_establish_connection(&node3, &node2).await?;
+        manually_establish_connection(&node3, &node2).await;
         test_listen_join_and_init_find_succeesor(&node3, &node2).await?;
 
         assert_eq!(node1.dht().successors().list()?, vec![node2.did()]);
@@ -503,7 +502,7 @@ pub mod tests {
         println!("||  now we start join node3 to node2  ||");
         println!("========================================");
 
-        manually_establish_connection(&node3, &node2).await?;
+        manually_establish_connection(&node3, &node2).await;
         test_listen_join_and_init_find_succeesor(&node3, &node2).await?;
 
         assert_eq!(node1.dht().successors().list()?, vec![node2.did()]);
@@ -684,7 +683,7 @@ pub mod tests {
         node1: &Swarm,
         node2: &Swarm,
     ) -> Result<()> {
-        manually_establish_connection(node1, node2).await?;
+        manually_establish_connection(node1, node2).await;
         test_listen_join_and_init_find_succeesor(node1, node2).await?;
 
         // 2->1 FindSuccessorReport
@@ -722,7 +721,7 @@ pub mod tests {
         node3: &Swarm,
     ) -> Result<()> {
         // check node1 and node3 is not connected to each other
-        assert!(node1.get_transport(node3.did()).is_none());
+        assert!(node1.get_connection(node3.did()).is_none());
 
         // node1's successor should be node2 now
         assert_eq!(node1.dht.successors().max()?, node2.did());
@@ -792,68 +791,115 @@ pub mod tests {
         println!(
             "Check transport of {:?}: {:?} for addresses {:?}",
             swarm.did(),
-            swarm.get_dids(),
+            swarm.get_connection_ids(),
             addresses
         );
-        assert_eq!(swarm.get_transports().len(), addresses.len());
+        assert_eq!(swarm.get_connections().len(), addresses.len());
         for addr in addresses {
-            assert!(swarm.get_transport(addr).is_some());
+            assert!(swarm.get_connection(addr).is_some());
         }
     }
 
     #[tokio::test]
-    async fn test_quadra_desc_node_connection() -> Result<()> {
-        // 1. node1 to node2
-        // 2. node 3 to node 2
+    async fn test_fourth_node_connection() -> Result<()> {
         let keys = gen_ordered_keys(4);
         let (key1, key2, key3, key4) = (keys[0], keys[1], keys[2], keys[3]);
         let (node1, node2, node3) = test_triple_ordered_nodes_connection(key1, key2, key3).await?;
-        // we now have triple connected node
+        // we now have three connected nodes
+        // node1 -> node2 -> node3
+        //  |-<-----<---------<--|
 
         let (node4, _path4) = prepare_node(key4).await;
-        // connect node 4 to node2
-        manually_establish_connection(&node4, &node2).await?;
-        test_listen_join_and_init_find_succeesor(&node4, &node2).await?;
-        // node 1 -> node 2 -> node 3
-        //  |-<-----<---------<--|
-        let _ = node2.listen_once().await.unwrap();
-        let _ = node3.listen_once().await.unwrap();
-        let _ = node2.listen_once().await.unwrap();
-        let _ = node4.listen_once().await.unwrap();
-        let _ = node2.listen_once().await.unwrap();
-        println!("==================================================");
-        println!("| test connect node 4 from node 1 via node 2     |");
-        println!("==================================================");
-        println!(
-            "node1.did(): {:?}, node2.did(): {:?}, node3.did(): {:?}, node4.did(): {:?}",
-            node1.did(),
-            node2.did(),
-            node3.did(),
-            node4.did(),
-        );
-        println!("==================================================");
-        node4.connect(node1.did()).await?;
-        // node 4 send msg to node2
-        assert!(matches!(
-            node2.listen_once().await.unwrap().0.data,
-            Message::ConnectNodeSend(_)
-        ));
-        // node 2 relay to node 2
-        assert!(matches!(
-            node1.listen_once().await.unwrap().0.data,
-            Message::ConnectNodeSend(_)
-        ));
-        // report to node 2
-        assert!(matches!(
-            node2.listen_once().await.unwrap().0.data,
-            Message::ConnectNodeReport(_)
-        ));
-        // report to node 4
-        assert!(matches!(
-            node4.listen_once().await.unwrap().0.data,
-            Message::ConnectNodeReport(_)
-        ));
-        println!("=================Finish handshake here=================");
+
+        // Unless we use a fixed did value, we cannot fully predict the communication order between node4 and the nodes,
+        // because we do not know the distance between node4 and each node.
+        //
+        // Therefore, here we only guarantee that messages can be processed correctly without checking the specific message order.
+        //
+        // In addition, we check the final state to ensure the entire process meets expectations.
+        tokio::select! {
+            _ = async {
+                futures::join!(
+                    async { node1.clone().listen().await },
+                    async { node2.clone().listen().await },
+                    async { node3.clone().listen().await },
+                    async { node4.clone().listen().await },
+                )
+            } => {unreachable!();}
+            _ = async {
+                // connect node4 to node2
+                manually_establish_connection(&node4, &node2).await;
+                tokio::time::sleep(Duration::from_secs(3)).await;
+
+                println!("=== Check state before connect via DHT ===");
+                assert_transports(node1.clone(), vec![node2.did(), node3.did(), node4.did()]);
+                assert_transports(node2.clone(), vec![node3.did(), node4.did(), node1.did()]);
+                assert_transports(node3.clone(), vec![node1.did(), node2.did()]);
+                // node4 will connect node1 after connecting node2, because node2 notified node4 that node1 is its predecessor.
+                assert_transports(node4.clone(), vec![node1.did(), node2.did()]);
+                assert_eq!(node1.dht().successors().list().unwrap(), vec![
+                    node2.did(),
+                    node3.did(),
+                    node4.did(),
+                ]);
+                assert_eq!(node2.dht().successors().list().unwrap(), vec![
+                    node3.did(),
+                    node4.did(),
+                    node1.did(),
+                ]);
+                assert_eq!(node3.dht().successors().list().unwrap(), vec![
+                    node1.did(),
+                    node2.did(),
+                ]);
+                assert_eq!(node4.dht().successors().list().unwrap(), vec![
+                    node1.did(),
+                    node2.did(),
+                ]);
+
+                println!("========================================");
+                println!("| test node4 connect node3 via dht     |");
+                println!("========================================");
+                println!(
+                    "node1.did(): {:?}, node2.did(): {:?}, node3.did(): {:?}, node4.did(): {:?}",
+                    node1.did(),
+                    node2.did(),
+                    node3.did(),
+                    node4.did(),
+                );
+                println!("==================================================");
+
+                node4.connect(node3.did()).await.unwrap();
+                tokio::time::sleep(Duration::from_secs(3)).await;
+
+                println!("=== Check state after connect via DHT ===");
+                assert_transports(node1.clone(), vec![node2.did(), node3.did(), node4.did()]);
+                assert_transports(node2.clone(), vec![node3.did(), node4.did(), node1.did()]);
+                assert_transports(node3.clone(), vec![node4.did(), node1.did(), node2.did()]);
+                assert_transports(node4.clone(), vec![node1.did(), node2.did(), node3.did()]);
+                assert_eq!(node1.dht().successors().list().unwrap(), vec![
+                    node2.did(),
+                    node3.did(),
+                    node4.did()
+                ]);
+                assert_eq!(node2.dht().successors().list().unwrap(), vec![
+                    node3.did(),
+                    node4.did(),
+                    node1.did(),
+                ]);
+                assert_eq!(node3.dht().successors().list().unwrap(), vec![
+                    node4.did(),
+                    node1.did(),
+                    node2.did(),
+                ]);
+                assert_eq!(node4.dht().successors().list().unwrap(), vec![
+                    node1.did(),
+                    node2.did(),
+                    node3.did(),
+                ]);
+
+            } => {}
+        }
+
         Ok(())
     }
 
@@ -892,23 +938,16 @@ pub mod tests {
         println!("===================================");
         node1.disconnect(node2.did()).await?;
 
-        // The transport is already dropped by disconnect function.
-        // So that we get no msg from this listening.
-        let ev1 = node1.listen_once().await;
-        assert!(ev1.is_none());
+        let ev1 = node1.listen_once().await.unwrap().0;
+        assert!(matches!(ev1.data, Message::LeaveDHT(LeaveDHT{did}) if did == node2.did()));
 
         #[cfg(not(feature = "wasm"))]
-        node2
-            .get_transport(node1.did())
-            .unwrap()
-            .close()
-            .await
-            .unwrap();
+        node2.disconnect(node1.did()).await.unwrap();
 
         for _ in 1..10 {
             println!("wait 3 seconds for node2's transport 2to1 closing");
             sleep(Duration::from_secs(3)).await;
-            if let Some(t) = node2.get_transport(node1.did()) {
+            if let Some(t) = node2.get_connection(node1.did()) {
                 if t.is_disconnected().await {
                     println!("transport 2to1 is disconnected!!!!");
                     break;
@@ -933,61 +972,6 @@ pub mod tests {
             assert!(finger2.into_iter().all(|x| x.is_none()));
         }
 
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_already_connect_fixture() -> Result<()> {
-        // NodeA-NodeB-NodeC
-        let keys = gen_ordered_keys(3);
-        let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
-        let (node1, _path1) = prepare_node(key1).await;
-        let (node2, _path2) = prepare_node(key2).await;
-        let (node3, _path3) = prepare_node(key3).await;
-        test_only_two_nodes_establish_connection(&node1, &node2).await?;
-        assert_no_more_msg(&node1, &node2, &node3).await;
-
-        test_only_two_nodes_establish_connection(&node3, &node2).await?;
-        assert_no_more_msg(&node1, &node2, &node3).await;
-        // Node 1 -- Node 2 -- Node 3
-        println!("node1 connect node2 twice here");
-        let _ = node1.connect(node3.did()).await.unwrap();
-        let t_1_3_b = node1.connect(node3.did()).await.unwrap();
-        // ConnectNodeSend
-        let _ = node2.listen_once().await.unwrap();
-        let _ = node2.listen_once().await.unwrap();
-        // ConnectNodeSend
-        let _ = node3.listen_once().await.unwrap();
-        let _ = node3.listen_once().await.unwrap();
-        // ConnectNodeReport
-        // `self.push_pending_transport(&trans)?;`
-        let _ = node2.listen_once().await.unwrap();
-        let _ = node2.listen_once().await.unwrap();
-        // ConnectNodeReport
-        // self.register(&relay.sender(), transport).await
-        let _ = node1.listen_once().await.unwrap();
-        let _ = node1.listen_once().await.unwrap();
-        println!("wait for handshake here");
-        sleep(Duration::from_secs(3)).await;
-        // transport got from node1 for node3
-        // transport got from node3 for node
-        // JoinDHT twice here
-        let ev3 = node3.listen_once().await.unwrap().0;
-        assert!(matches!(ev3.data, Message::JoinDHT(_)));
-        let _ = node3.listen_once().await.is_none();
-
-        // JoinDHT twice here
-        let ev1 = node1.listen_once().await.unwrap().0;
-        assert!(matches!(ev1.data, Message::JoinDHT(_)));
-        let _ = node1.listen_once().await.is_none();
-
-        let t1_3 = node1.get_transport(node3.did()).unwrap();
-        println!("transport is replace by second");
-        assert_eq!(t1_3.id, t_1_3_b.id);
-        let t3_1 = node3.get_transport(node1.did()).unwrap();
-
-        assert!(t1_3.is_connected().await);
-        assert!(t3_1.is_connected().await);
         Ok(())
     }
 }

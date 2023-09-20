@@ -264,8 +264,8 @@ pub enum Error {
     #[error("RTC unsupported sdp type")]
     RTCSdpTypeNotMatch,
 
-    #[error("Transport not Found")]
-    TransportNotFound,
+    #[error("Connection not Found")]
+    ConnectionNotFound,
 
     #[error("Invalid Transport Id")]
     InvalidTransportUuid,
@@ -353,6 +353,9 @@ pub enum Error {
 
     #[error("Session is expired")]
     SessionExpired,
+
+    #[error("Transport error: {0}")]
+    Transport(#[from] rings_transport::error::Error),
 }
 
 #[cfg(feature = "wasm")]
