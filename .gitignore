@@ -1,5 +1,7 @@
 # Rust
 target/
+config.yaml
+config*.yaml
 **/*.rs.bk
 **/*.ipynb
 .ipynb_checkpoints

@@ -2,6 +2,12 @@
 name = "rings-transport"
 version = "0.3.0"
 edition = "2021"
+authors = ["RND <dev@ringsnetwork.io>"]
+description = "Transport layer implementation for Rings Core"
+repository = "https://github.com/RingsNetwork/rings-node"
+readme = "README.md"
+license = "GPL-3.0"
+categories = ["network-programming", "cryptography", "wasm", "webrtc"]
 
 [features]
 # Include nothing by default
