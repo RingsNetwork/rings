@@ -16,3 +16,4 @@ pub mod seed;
 #[cfg(test)]
 mod tests;
 pub mod util;
+pub mod client;

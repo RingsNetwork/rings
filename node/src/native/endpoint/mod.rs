@@ -26,7 +26,7 @@ use crate::prelude::http::HeaderValue;
 use crate::prelude::jsonrpc_core::MetaIoHandler;
 use crate::prelude::rings_rpc::response::NodeInfo;
 use crate::processor::Processor;
-
+use crate::jsonrpc::handler::into_message_handler;
 impl crate::prelude::jsonrpc_core::Metadata for RpcMeta {}
 
 /// Jsonrpc state
@@ -58,9 +58,7 @@ pub async fn run_http_api(
     receiver: Receiver<BackendMessage>,
 ) -> anyhow::Result<()> {
     let binding_addr = addr.parse().unwrap();
-
-    let mut jsonrpc_handler: MetaIoHandler<RpcMeta> = MetaIoHandler::default();
-    crate::jsonrpc::build_handler(&mut jsonrpc_handler).await;
+    let jsonrpc_handler: MetaIoHandler<RpcMeta> = into_message_handler(processor.clone()).await;
     let jsonrpc_handler_layer = Arc::new(jsonrpc_handler);
 
     let jsonrpc_state = Arc::new(JsonrpcState {

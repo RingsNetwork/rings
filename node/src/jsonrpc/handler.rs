@@ -13,6 +13,10 @@ pub use self::browser::build_handler;
 pub use self::browser::HandlerType;
 #[cfg(feature = "node")]
 pub use self::default::build_handler;
+#[cfg(feature = "browser")]
+pub use self::browser::into_message_handler;
+#[cfg(feature = "node")]
+pub use self::default::into_message_handler;
 #[cfg(feature = "node")]
 pub use self::default::HandlerType;
 use super::server;
@@ -123,11 +127,9 @@ pub mod browser {
 
     /// Map from Arc<Processor> to MessageHandler<server::RpcMeta>
     /// The value of is_auth of RpcmMet is set to true
-    impl From<Arc<Processor>> for MessageHandler<server::RpcMeta> {
-        fn from(p: Arc<Processor>) -> Self {
-            let meta: server::RpcMeta = p.into();
-            Self::new(meta)
-        }
+    pub async fn into_message_handler(processor: Arc<Processor>) -> HandlerType {
+        let meta: server::RpcMeta = processor.into();
+        HandlerType::new(meta)
     }
 
     /// This trait defines the register function for method registration.
@@ -195,6 +197,8 @@ pub mod default {
     use crate::prelude::jsonrpc_core::Error;
     use crate::prelude::jsonrpc_core::MetaIoHandler as MessageHandler;
     use crate::prelude::rings_rpc::response::CustomBackendMessage;
+    use std::sync::Arc;
+    use crate::processor::Processor;
 
     /// Type of Messagehandler
     pub type HandlerType = MessageHandler<server::RpcMeta>;
@@ -204,6 +208,14 @@ pub mod default {
         for m in methods() {
             handler.add_method_with_meta(m.0.as_str(), m.1);
         }
+    }
+
+    /// Map from Arc<Processor> to MessageHandler<server::RpcMeta>
+    /// The value of is_auth of RpcmMet is set to true
+    pub async fn into_message_handler(_processor: Arc<Processor>) -> HandlerType {
+	let mut jsonrpc_handler: MessageHandler<RpcMeta> = MessageHandler::default();
+	build_handler(&mut jsonrpc_handler).await;
+	jsonrpc_handler
     }
 
     /// This function is used to handle custom messages for the backend.

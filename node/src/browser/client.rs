@@ -54,6 +54,7 @@ use crate::prelude::CallbackFn;
 use crate::processor::Processor;
 use crate::processor::ProcessorBuilder;
 use crate::processor::ProcessorConfig;
+use crate::jsonrpc::handler::into_message_handler;
 
 /// AddressType enum contains `DEFAULT` and `ED25519`.
 #[wasm_export]
@@ -82,13 +83,9 @@ pub struct Client {
 impl Client {
     pub(crate) async fn new_client_with_storage_internal(
         config: ProcessorConfig,
-        callback: Option<MessageCallbackInstance>,
+        cb: Option<Box<impl MessageCallback + 'static>>,
         storage_name: String,
     ) -> Result<Client, error::Error> {
-        let cb: Option<CallbackFn> = match callback {
-            Some(cb) => Some(Box::new(cb)),
-            None => None,
-        };
 
         let storage_path = storage_name.as_str();
         let measure_path = [storage_path, "measure"].join("/");
@@ -112,7 +109,7 @@ impl Client {
 
         let processor = Arc::new(processor_builder.build()?);
 
-        let mut handler: HandlerType = processor.clone().into();
+        let mut handler: HandlerType = into_message_handler(processor.clone()).await;
         build_handler(&mut handler).await;
 
         Ok(Client {
@@ -123,7 +120,7 @@ impl Client {
 
     pub(crate) async fn new_client_with_storage_and_serialized_config_internal(
         config: String,
-        callback: Option<MessageCallbackInstance>,
+        callback: Option<Box<impl MessageCallback + 'static>>,
         storage_name: String,
     ) -> Result<Client, error::Error> {
         let config: ProcessorConfig = serde_yaml::from_str(&config)?;
@@ -157,7 +154,7 @@ impl Client {
             let session_sk = sk_builder.build().unwrap();
             let config = ProcessorConfig::new(ice_servers, session_sk, stabilize_timeout);
             Ok(JsValue::from(
-                Self::new_client_with_storage_internal(config, callback, "rings-node".to_string())
+                Self::new_client_with_storage_internal(config, callback.map(Box::new), "rings-node".to_string())
                     .await?,
             ))
         })
@@ -192,7 +189,7 @@ impl Client {
         storage_name: String,
     ) -> js_sys::Promise {
         future_to_promise(async move {
-            let client = Self::new_client_with_storage_internal(config, callback, storage_name)
+            let client = Self::new_client_with_storage_internal(config, callback.map(Box::new), storage_name)
                 .await
                 .map_err(JsError::from)?;
             Ok(JsValue::from(client))
