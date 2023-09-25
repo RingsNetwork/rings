@@ -22,9 +22,10 @@ use web_sys::RtcSessionDescriptionInit;
 use web_sys::RtcStatsReport;
 
 use crate::callback::InnerCallback;
+use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedCallback;
-use crate::core::transport::ConnectionCreation;
 use crate::core::transport::ConnectionInterface;
+use crate::core::transport::TransportInterface;
 use crate::core::transport::TransportMessage;
 use crate::core::transport::WebrtcConnectionState;
 use crate::error::Error;
@@ -32,7 +33,7 @@ use crate::error::Result;
 use crate::ice_server::IceCredentialType;
 use crate::ice_server::IceServer;
 use crate::notifier::Notifier;
-use crate::Transport;
+use crate::pool::Pool;
 
 /// A connection that implemented by web_sys library.
 /// Used for browser environment.
@@ -40,6 +41,13 @@ pub struct WebSysWebrtcConnection {
     webrtc_conn: RtcPeerConnection,
     webrtc_data_channel: RtcDataChannel,
     webrtc_data_channel_open_notifier: Notifier,
+}
+
+/// [WebSysWebrtcTransport] manages all the [WebSysWebrtcConnection] and
+/// provides methods to create, get and close connections.
+pub struct WebSysWebrtcTransport {
+    ice_servers: Vec<IceServer>,
+    pool: Pool<WebSysWebrtcConnection>,
 }
 
 impl WebSysWebrtcConnection {
@@ -77,6 +85,18 @@ impl WebSysWebrtcConnection {
             .local_description()
             .ok_or(Error::WebrtcLocalSdpGenerationError)
             .map(|x| x.sdp())
+    }
+}
+
+impl WebSysWebrtcTransport {
+    /// Create a new [WebSysWebrtcTransport] instance.
+    pub fn new(ice_servers: &str, _external_address: Option<String>) -> Self {
+        let ice_servers = IceServer::vec_from_str(ice_servers).unwrap();
+
+        Self {
+            ice_servers,
+            pool: Pool::new(),
+        }
     }
 }
 
@@ -187,12 +207,12 @@ impl ConnectionInterface for WebSysWebrtcConnection {
 }
 
 #[async_trait(?Send)]
-impl ConnectionCreation for Transport<WebSysWebrtcConnection> {
+impl TransportInterface for WebSysWebrtcTransport {
     type Connection = WebSysWebrtcConnection;
     type Error = Error;
 
     async fn new_connection(&self, cid: &str, callback: Arc<BoxedCallback>) -> Result<()> {
-        if let Ok(existed_conn) = self.get_connection(cid) {
+        if let Ok(existed_conn) = self.pool.connection(cid) {
             if matches!(
                 existed_conn.webrtc_connection_state(),
                 WebrtcConnectionState::New
@@ -329,8 +349,24 @@ impl ConnectionCreation for Transport<WebSysWebrtcConnection> {
             webrtc_data_channel_open_notifier,
         );
 
-        self.safely_insert(cid, conn)?;
+        self.pool.safely_insert(cid, conn)?;
         Ok(())
+    }
+
+    async fn close_connection(&self, cid: &str) -> Result<()> {
+        self.pool.safely_remove(cid).await
+    }
+
+    fn connection(&self, cid: &str) -> Result<ConnectionRef<Self::Connection>> {
+        self.pool.connection(cid)
+    }
+
+    fn connections(&self) -> Vec<(String, ConnectionRef<Self::Connection>)> {
+        self.pool.connections()
+    }
+
+    fn connection_ids(&self) -> Vec<String> {
+        self.pool.connection_ids()
     }
 }
 

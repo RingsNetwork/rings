@@ -11,6 +11,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedCallback;
 
 /// Wrapper for the data that is sent over the data channel.
@@ -119,9 +120,10 @@ pub trait ConnectionInterface {
 /// See [connections](crate::connections) module for examples.
 #[cfg_attr(feature = "web-sys-webrtc", async_trait(?Send))]
 #[cfg_attr(not(feature = "web-sys-webrtc"), async_trait)]
-pub trait ConnectionCreation {
+pub trait TransportInterface {
     /// The connection type that is created by this trait.
     type Connection: ConnectionInterface<Error = Self::Error>;
+
     /// The error type that is returned by transport.
     type Error: std::error::Error;
 
@@ -137,4 +139,27 @@ pub trait ConnectionCreation {
         cid: &str,
         callback: Arc<BoxedCallback>,
     ) -> Result<(), Self::Error>;
+
+    /// This method closes and releases the connection from transport.
+    /// All references to this cid, created by `get_connection`, will be released.
+    /// The [ConnectionInterface] methods of them will return [Error::ConnectionReleased].
+    async fn close_connection(&self, cid: &str) -> Result<(), Self::Error>;
+
+    /// Get a reference of the connection by its id.
+    fn connection(&self, cid: &str) -> Result<ConnectionRef<Self::Connection>, Self::Error>;
+
+    /// Get all the connections in the transport.
+    fn connections(&self) -> Vec<(String, ConnectionRef<Self::Connection>)>;
+
+    /// Get all the connection ids in the transport.
+    fn connection_ids(&self) -> Vec<String>;
 }
+
+/// Used to store a boxed [TransportInterface] trait object.
+#[cfg(not(feature = "web-sys-webrtc"))]
+pub type BoxedTransport<C, E> =
+    Box<dyn TransportInterface<Connection = C, Error = E> + Send + Sync>;
+
+/// Used to store a boxed [TransportInterface] trait object.
+#[cfg(feature = "web-sys-webrtc")]
+pub type BoxedTransport<C, E> = Box<dyn TransportInterface<Connection = C, Error = E>>;
