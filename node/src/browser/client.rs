@@ -38,8 +38,7 @@ use crate::backend::types::HttpResponse;
 use crate::backend::types::MessageType;
 use crate::consts::BACKEND_MTU;
 use crate::error;
-use crate::jsonrpc::build_handler;
-use crate::jsonrpc::handler::browser::MethodHandler;
+use crate::jsonrpc::handler::MethodHandler;
 use crate::jsonrpc::HandlerType;
 use crate::measure::PeriodicMeasure;
 use crate::prelude::chunk::Chunk;
@@ -54,7 +53,6 @@ use crate::prelude::CallbackFn;
 use crate::processor::Processor;
 use crate::processor::ProcessorBuilder;
 use crate::processor::ProcessorConfig;
-use crate::jsonrpc::handler::into_message_handler;
 
 /// AddressType enum contains `DEFAULT` and `ED25519`.
 #[wasm_export]
@@ -86,7 +84,6 @@ impl Client {
         cb: Option<Box<impl MessageCallback + 'static>>,
         storage_name: String,
     ) -> Result<Client, error::Error> {
-
         let storage_path = storage_name.as_str();
         let measure_path = [storage_path, "measure"].join("/");
 
@@ -109,8 +106,8 @@ impl Client {
 
         let processor = Arc::new(processor_builder.build()?);
 
-        let mut handler: HandlerType = into_message_handler(processor.clone()).await;
-        build_handler(&mut handler).await;
+        let mut handler: HandlerType = processor.clone().into();
+        handler.build();
 
         Ok(Client {
             processor,
@@ -154,8 +151,12 @@ impl Client {
             let session_sk = sk_builder.build().unwrap();
             let config = ProcessorConfig::new(ice_servers, session_sk, stabilize_timeout);
             Ok(JsValue::from(
-                Self::new_client_with_storage_internal(config, callback.map(Box::new), "rings-node".to_string())
-                    .await?,
+                Self::new_client_with_storage_internal(
+                    config,
+                    callback.map(Box::new),
+                    "rings-node".to_string(),
+                )
+                .await?,
             ))
         })
     }
@@ -189,9 +190,13 @@ impl Client {
         storage_name: String,
     ) -> js_sys::Promise {
         future_to_promise(async move {
-            let client = Self::new_client_with_storage_internal(config, callback.map(Box::new), storage_name)
-                .await
-                .map_err(JsError::from)?;
+            let client = Self::new_client_with_storage_internal(
+                config,
+                callback.map(Box::new),
+                storage_name,
+            )
+            .await
+            .map_err(JsError::from)?;
             Ok(JsValue::from(client))
         })
     }

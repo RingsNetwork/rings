@@ -16,6 +16,8 @@ pub enum Error {
     RemoteRpcError(String) = 100,
     #[error("Unknown rpc error.")]
     UnknownRpcError = 101,
+    #[error("Internal rpc services error: {0}.")]
+    InternalRpcError(#[from] jsonrpc_core::Error) = 102,
     #[error("Connection not found.")]
     ConnectionNotFound = 203,
     #[error("Create connection error: {0}.")]
