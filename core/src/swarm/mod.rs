@@ -14,9 +14,10 @@ use async_trait::async_trait;
 pub use builder::SwarmBuilder;
 use rings_derive::JudgeConnection;
 use rings_transport::core::callback::BoxedCallback;
+use rings_transport::core::transport::BoxedTransport;
 use rings_transport::core::transport::ConnectionInterface;
 use rings_transport::core::transport::TransportMessage;
-use rings_transport::Transport;
+use rings_transport::error::Error as TransportError;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 pub use types::MeasureImpl;
@@ -56,7 +57,7 @@ pub struct Swarm {
     pub(crate) measure: Option<MeasureImpl>,
     session_sk: SessionSk,
     message_handler: MessageHandler,
-    transport: Transport<ConnectionOwner>,
+    transport: BoxedTransport<ConnectionOwner, TransportError>,
     callback: Arc<BoxedCallback>,
 }
 

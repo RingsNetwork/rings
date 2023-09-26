@@ -1,7 +1,6 @@
 use std::str::FromStr;
 
 use async_trait::async_trait;
-use rings_transport::core::transport::ConnectionCreation;
 use rings_transport::core::transport::ConnectionInterface;
 
 use crate::dht::Did;
@@ -147,7 +146,7 @@ impl Swarm {
             .new_connection(&cid, self.callback.clone())
             .await
             .map_err(Error::Transport)?;
-        self.transport.get_connection(&cid).map_err(|e| e.into())
+        self.transport.connection(&cid).map_err(|e| e.into())
     }
 
     /// Get connection by did and check if it is connected.
@@ -173,13 +172,13 @@ impl Swarm {
 
     /// Get connection by did.
     pub fn get_connection(&self, did: Did) -> Option<Connection> {
-        self.transport.get_connection(&did.to_string()).ok()
+        self.transport.connection(&did.to_string()).ok()
     }
 
     /// Get all connections in transport.
     pub fn get_connections(&self) -> Vec<(Did, Connection)> {
         self.transport
-            .get_connections()
+            .connections()
             .into_iter()
             .filter_map(|(k, v)| Did::from_str(&k).ok().map(|did| (did, v)))
             .collect()
@@ -188,7 +187,7 @@ impl Swarm {
     /// Get dids of all connections in transport.
     pub fn get_connection_ids(&self) -> Vec<Did> {
         self.transport
-            .get_connection_ids()
+            .connection_ids()
             .into_iter()
             .filter_map(|k| Did::from_str(&k).ok())
             .collect()

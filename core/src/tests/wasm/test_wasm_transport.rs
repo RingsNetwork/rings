@@ -1,10 +1,9 @@
 use std::sync::Arc;
 
 use rings_transport::core::callback::Callback;
-use rings_transport::core::transport::ConnectionCreation;
 use rings_transport::core::transport::ConnectionInterface;
+use rings_transport::core::transport::TransportInterface;
 use rings_transport::core::transport::WebrtcConnectionState;
-use rings_transport::Transport;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::*;
@@ -18,7 +17,7 @@ use crate::tests::manually_establish_connection;
 use crate::types::channel::Channel;
 use crate::types::channel::TransportEvent;
 use crate::types::Connection;
-use crate::types::ConnectionOwner;
+use crate::types::Transport;
 
 async fn get_fake_permission() {
     let window = web_sys::window().unwrap();
@@ -32,9 +31,7 @@ async fn get_fake_permission() {
     JsFuture::from(promise).await.unwrap();
 }
 
-async fn prepare_transport(
-    channel: Option<Arc<CbChannel<TransportEvent>>>,
-) -> Transport<ConnectionOwner> {
+async fn prepare_transport(channel: Option<Arc<CbChannel<TransportEvent>>>) -> Transport {
     let ch = match channel {
         Some(c) => Arc::clone(&c),
         None => Arc::new(<CbChannel<TransportEvent> as Channel<TransportEvent>>::new()),
@@ -72,9 +69,9 @@ pub async fn establish_ice_connection(conn1: &Connection, conn2: &Connection) ->
 async fn test_ice_connection_establish() {
     get_fake_permission().await;
     let trans1 = prepare_transport(None).await;
-    let conn1 = trans1.get_connection("test").unwrap();
+    let conn1 = trans1.connection("test").unwrap();
     let trans2 = prepare_transport(None).await;
-    let conn2 = trans2.get_connection("test").unwrap();
+    let conn2 = trans2.connection("test").unwrap();
     establish_ice_connection(&conn1, &conn2).await.unwrap();
 }
 

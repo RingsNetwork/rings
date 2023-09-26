@@ -13,14 +13,15 @@ use serde::Serialize;
 use crate::callback::InnerCallback;
 use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedCallback;
-use crate::core::transport::ConnectionCreation;
 use crate::core::transport::ConnectionInterface;
+use crate::core::transport::TransportInterface;
 use crate::core::transport::TransportMessage;
 use crate::core::transport::WebrtcConnectionState;
 use crate::error::Error;
 use crate::error::Result;
+use crate::ice_server::IceServer;
 use crate::notifier::Notifier;
-use crate::Transport;
+use crate::pool::Pool;
 
 /// Max delay in ms on sending message
 const DUMMY_DELAY_MAX: u64 = 100;
@@ -47,6 +48,12 @@ pub struct DummyConnection {
     cid: String,
     remote_cid: Arc<Mutex<Option<String>>>,
     webrtc_connection_state: Arc<Mutex<WebrtcConnectionState>>,
+}
+
+/// [DummyTransport] manages all the [DummyConnection] and
+/// provides methods to create, get and close connections.
+pub struct DummyTransport {
+    pool: Pool<DummyConnection>,
 }
 
 impl DummyConnection {
@@ -83,6 +90,15 @@ impl DummyConnection {
             *webrtc_connection_state = state;
         }
         self.callback().on_peer_connection_state_change(state).await;
+    }
+}
+
+impl DummyTransport {
+    /// Create a new [DummyTransport] instance.
+    pub fn new(ice_servers: &str, _external_address: Option<String>) -> Self {
+        let _ice_servers = IceServer::vec_from_str(ice_servers).unwrap();
+
+        Self { pool: Pool::new() }
     }
 }
 
@@ -158,12 +174,12 @@ impl ConnectionInterface for DummyConnection {
 }
 
 #[async_trait]
-impl ConnectionCreation for Transport<DummyConnection> {
+impl TransportInterface for DummyTransport {
     type Connection = DummyConnection;
     type Error = Error;
 
     async fn new_connection(&self, cid: &str, callback: Arc<BoxedCallback>) -> Result<()> {
-        if let Ok(existed_conn) = self.get_connection(cid) {
+        if let Ok(existed_conn) = self.pool.connection(cid) {
             if matches!(
                 existed_conn.webrtc_connection_state(),
                 WebrtcConnectionState::New
@@ -174,18 +190,31 @@ impl ConnectionCreation for Transport<DummyConnection> {
             }
         }
 
-        //
-        // Construct the Connection
-        //
         let conn = DummyConnection::new(cid);
 
-        self.safely_insert(cid, conn)?;
-        CONNS.insert(cid.to_string(), self.get_connection(cid)?);
+        self.pool.safely_insert(cid, conn)?;
+        CONNS.insert(cid.to_string(), self.connection(cid)?);
         CBS.insert(
             cid.to_string(),
             Arc::new(InnerCallback::new(cid, callback, Notifier::default())),
         );
         Ok(())
+    }
+
+    async fn close_connection(&self, cid: &str) -> Result<()> {
+        self.pool.safely_remove(cid).await
+    }
+
+    fn connection(&self, cid: &str) -> Result<ConnectionRef<Self::Connection>> {
+        self.pool.connection(cid)
+    }
+
+    fn connections(&self) -> Vec<(String, ConnectionRef<Self::Connection>)> {
+        self.pool.connections()
+    }
+
+    fn connection_ids(&self) -> Vec<String> {
+        self.pool.connection_ids()
     }
 }
 

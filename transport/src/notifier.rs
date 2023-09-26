@@ -1,3 +1,5 @@
+//! This module contains the [Notifier] struct.
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -25,6 +27,7 @@ struct NotifierState {
 pub struct Notifier(Arc<Mutex<NotifierState>>);
 
 impl Notifier {
+    /// Set the result of the notifier. Will also wake all the wakers.
     pub fn set_result(&self, succeeded: bool) {
         let mut state = self.0.lock().unwrap();
         state.succeeded = Some(succeeded);

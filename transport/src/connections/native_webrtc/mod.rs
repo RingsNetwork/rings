@@ -15,9 +15,10 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 
 use crate::callback::InnerCallback;
+use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedCallback;
-use crate::core::transport::ConnectionCreation;
 use crate::core::transport::ConnectionInterface;
+use crate::core::transport::TransportInterface;
 use crate::core::transport::TransportMessage;
 use crate::core::transport::WebrtcConnectionState;
 use crate::error::Error;
@@ -25,7 +26,7 @@ use crate::error::Result;
 use crate::ice_server::IceCredentialType;
 use crate::ice_server::IceServer;
 use crate::notifier::Notifier;
-use crate::Transport;
+use crate::pool::Pool;
 
 /// A connection that implemented by webrtc-rs library.
 /// Used for native environment.
@@ -33,6 +34,14 @@ pub struct WebrtcConnection {
     webrtc_conn: RTCPeerConnection,
     webrtc_data_channel: Arc<RTCDataChannel>,
     webrtc_data_channel_open_notifier: Notifier,
+}
+
+/// [WebrtcTransport] manages all the [WebrtcConnection] and
+/// provides methods to create, get and close connections.
+pub struct WebrtcTransport {
+    ice_servers: Vec<IceServer>,
+    external_address: Option<String>,
+    pool: Pool<WebrtcConnection>,
 }
 
 impl WebrtcConnection {
@@ -59,6 +68,19 @@ impl WebrtcConnection {
             .local_description()
             .await
             .ok_or(Error::WebrtcLocalSdpGenerationError)
+    }
+}
+
+impl WebrtcTransport {
+    /// Create a new [WebrtcTransport] instance.
+    pub fn new(ice_servers: &str, external_address: Option<String>) -> Self {
+        let ice_servers = IceServer::vec_from_str(ice_servers).unwrap();
+
+        Self {
+            ice_servers,
+            external_address,
+            pool: Pool::new(),
+        }
     }
 }
 
@@ -142,12 +164,12 @@ impl ConnectionInterface for WebrtcConnection {
 }
 
 #[async_trait]
-impl ConnectionCreation for Transport<WebrtcConnection> {
+impl TransportInterface for WebrtcTransport {
     type Connection = WebrtcConnection;
     type Error = Error;
 
     async fn new_connection(&self, cid: &str, callback: Arc<BoxedCallback>) -> Result<()> {
-        if let Ok(existed_conn) = self.get_connection(cid) {
+        if let Ok(existed_conn) = self.pool.connection(cid) {
             if matches!(
                 existed_conn.webrtc_connection_state(),
                 WebrtcConnectionState::New
@@ -258,8 +280,24 @@ impl ConnectionCreation for Transport<WebrtcConnection> {
             webrtc_data_channel_open_notifier,
         );
 
-        self.safely_insert(cid, conn)?;
+        self.pool.safely_insert(cid, conn)?;
         Ok(())
+    }
+
+    async fn close_connection(&self, cid: &str) -> Result<()> {
+        self.pool.safely_remove(cid).await
+    }
+
+    fn connection(&self, cid: &str) -> Result<ConnectionRef<Self::Connection>> {
+        self.pool.connection(cid)
+    }
+
+    fn connections(&self) -> Vec<(String, ConnectionRef<Self::Connection>)> {
+        self.pool.connections()
+    }
+
+    fn connection_ids(&self) -> Vec<String> {
+        self.pool.connection_ids()
     }
 }
 

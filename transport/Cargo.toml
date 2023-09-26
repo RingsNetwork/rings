@@ -12,7 +12,7 @@ categories = ["network-programming", "cryptography", "wasm", "webrtc"]
 [features]
 # Include nothing by default
 default = []
-dummy = ["native-webrtc", "rand", "lazy_static", "tokio/time"]
+dummy = ["webrtc", "rand", "lazy_static", "tokio/time"]
 native-webrtc = ["webrtc"]
 web-sys-webrtc = ["wasm-bindgen", "js-sys", "web-sys", "wasm-bindgen-futures"]
 

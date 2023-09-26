@@ -5,7 +5,6 @@
 use std::sync::Arc;
 
 use rings_transport::core::callback::Callback;
-use rings_transport::Transport;
 
 use crate::channels::Channel;
 use crate::dht::PeerRing;
@@ -18,6 +17,7 @@ use crate::swarm::callback::SwarmCallback;
 use crate::swarm::MeasureImpl;
 use crate::swarm::Swarm;
 use crate::types::channel::Channel as ChannelTrait;
+use crate::types::Transport;
 
 /// Creates a SwarmBuilder to configure a Swarm.
 pub struct SwarmBuilder {
@@ -99,8 +99,7 @@ impl SwarmBuilder {
             MessageHandler::new(dht.clone(), self.message_callback, self.message_validator);
 
         let transport_event_channel = Channel::new();
-
-        let transport = Transport::new(&self.ice_servers, self.external_address);
+        let transport = Box::new(Transport::new(&self.ice_servers, self.external_address));
         let callback = Arc::new(SwarmCallback::new(transport_event_channel.sender()).boxed());
 
         Swarm {
