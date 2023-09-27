@@ -104,14 +104,21 @@ pub unsafe extern "C" fn request(
     method: *const c_char,
     request: *const c_char,
 ) -> *const c_char {
-    let client: ClientFFI = unsafe {ClientFFI::from_ptr(client) };
-    let c_method = unsafe { CStr::from_ptr(method) };
-    let c_request = unsafe { CStr::from_ptr(request) };
-    let method = c_method.to_str().unwrap().to_owned();
-    let request = c_request.to_str().unwrap().to_owned();
-    let ret: String = executor::block_on(client.request_internal(method, request, None)).unwrap();
-    let c_ret = CString::new(ret).unwrap();
-    c_ret.as_ptr()
+    match (|| -> Result<*const c_char> {
+	let client: ClientFFI = unsafe {ClientFFI::from_ptr(client) };
+	let c_method = unsafe { CStr::from_ptr(method) };
+	let c_request = unsafe { CStr::from_ptr(request) };
+	let method = c_method.to_str()?.to_owned();
+	let request = c_request.to_str()?.to_owned();
+	let ret: String = executor::block_on(client.request_internal(method, request, None))?;
+	let c_ret = CString::new(ret)?;
+	Ok(c_ret.as_ptr())
+    })() {
+	Ok(r) => r,
+        Err(e) => {
+            panic!("FFI: Failed on request {:#}", e)
+        }
+    }
 }
 
 #[no_mangle]
