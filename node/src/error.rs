@@ -90,18 +90,22 @@ pub enum Error {
     CreateFileError(String) = 900,
     #[error("Open File Error: {0}")]
     OpenFileError(String) = 901,
-    #[error("acquire lock failed")]
+    #[error("Acquire lock failed")]
     Lock = 902,
-    #[error("serde json error: {0}")]
+    #[error("Serde json error: {0}")]
     SerdeJsonError(#[from] serde_json::Error) = 1000,
-    #[error("serde yaml error: {0}")]
+    #[error("Serde yaml error: {0}")]
     SerdeYamlError(#[from] serde_yaml::Error) = 1001,
     #[error("verify error: {0}")]
     VerifyError(String) = 1002,
-    #[error("core error: {0}")]
+    #[error("Core error: {0}")]
     CoreError(#[from] rings_core::error::Error) = 1102,
-    #[error("external singer error: {0}")]
+    #[error("External singer error: {0}")]
     ExternalError(String) = 1202,
+    #[error("An error indicating that an interior nul byte was found: {0}")]
+    FFINulError(#[from] std::ffi::NulError) = 1203,
+    #[error("Failed on covering CStr to String: {0}")]
+    FFICStrError(#[from] std::str::Utf8Error) = 1204,
 }
 
 impl Error {

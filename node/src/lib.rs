@@ -3,6 +3,7 @@
 pub mod backend;
 #[cfg(feature = "browser")]
 pub mod browser;
+pub mod client;
 pub mod consts;
 pub mod error;
 pub mod jsonrpc;
