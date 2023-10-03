@@ -68,15 +68,15 @@ where
 
 #[cfg(test)]
 mod tests {
-    use web3::types::Address;
 
     use super::*;
+    use crate::dht::Did;
     use crate::ecc::SecretKey;
 
     #[test]
     fn memstorage_basic_interface_should_work() {
-        let store = MemStorage::<Address, String>::new();
-        let addr = SecretKey::random().address();
+        let store = MemStorage::<Did, String>::new();
+        let addr = SecretKey::random().address().into();
 
         assert!(store.get(&addr).is_none());
 

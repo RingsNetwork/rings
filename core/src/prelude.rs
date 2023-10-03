@@ -7,8 +7,6 @@ pub use futures;
 pub use libsecp256k1;
 pub use url;
 pub use uuid;
-pub use web3;
-pub use web3::types::Address;
 
 pub use crate::dht::vnode;
 pub use crate::message;

@@ -40,11 +40,10 @@ use std::ops::Neg;
 use std::ops::Sub;
 use std::str::FromStr;
 
+use ethereum_types::H160;
 use num_bigint::BigUint;
 use serde::Deserialize;
 use serde::Serialize;
-use web3::contract::tokens::Tokenizable;
-use web3::types::H160;
 
 use crate::ecc::HashStr;
 use crate::error::Error;
@@ -56,7 +55,8 @@ pub struct Did(H160);
 
 impl std::fmt::Display for Did {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", self.into_token())
+        let inner = &self.0;
+        write!(f, "{inner:x}")
     }
 }
 

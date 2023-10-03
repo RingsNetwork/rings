@@ -4,8 +4,8 @@ use arrayref::array_mut_ref;
 use sha2::Digest;
 use sha2::Sha256;
 
-use crate::ecc::Address;
 use crate::ecc::PublicKey;
+use crate::ecc::H160;
 use crate::error::Result;
 
 /// recover pubkey according to signature.
@@ -20,7 +20,7 @@ pub fn recover(msg: &str, sig: impl AsRef<[u8]>) -> Result<PublicKey> {
 }
 
 /// verify message signed by Ethereum address.
-pub fn verify(msg: &str, address: &Address, sig: impl AsRef<[u8]>) -> bool {
+pub fn verify(msg: &str, address: &H160, sig: impl AsRef<[u8]>) -> bool {
     match recover(msg, sig.as_ref()) {
         Ok(recover_pk) => {
             if recover_pk.address() == *address {

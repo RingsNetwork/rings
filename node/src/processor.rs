@@ -33,8 +33,6 @@ use crate::prelude::rings_core::message::Encoder;
 use crate::prelude::rings_core::message::Message;
 use crate::prelude::rings_core::message::PayloadSender;
 use crate::prelude::rings_core::prelude::uuid;
-use crate::prelude::rings_core::prelude::web3::contract::tokens::Tokenizable;
-use crate::prelude::rings_core::prelude::web3::ethabi::Token;
 use crate::prelude::rings_core::storage::PersistenceStorage;
 use crate::prelude::rings_core::swarm::MeasureImpl;
 use crate::prelude::rings_core::swarm::Swarm;
@@ -589,7 +587,7 @@ impl Processor {
 #[derive(Clone)]
 pub struct Peer {
     /// web3 did of a peer.
-    pub did: Token,
+    pub did: String,
     /// the connection.
     pub connection: Connection,
 }
@@ -597,7 +595,7 @@ pub struct Peer {
 impl From<(Did, Connection)> for Peer {
     fn from((did, connection): (Did, Connection)) -> Self {
         Self {
-            did: did.into_token(),
+            did: did.to_string(),
             connection,
         }
     }
@@ -606,7 +604,7 @@ impl From<(Did, Connection)> for Peer {
 impl From<&(Did, Connection)> for Peer {
     fn from((did, connection): &(Did, Connection)) -> Self {
         Self {
-            did: did.into_token(),
+            did: did.to_string(),
             connection: connection.clone(),
         }
     }
@@ -616,8 +614,8 @@ impl Peer {
     /// convert peer to response peer
     pub fn into_response_peer(&self) -> rings_rpc::response::Peer {
         rings_rpc::response::Peer {
-            did: self.did.clone().into_token().to_string(),
-            cid: self.did.clone().into_token().to_string(),
+            did: self.did.clone(),
+            cid: self.did.clone(),
             state: format!("{:?}", self.connection.webrtc_connection_state()),
         }
     }

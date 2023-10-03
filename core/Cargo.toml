@@ -20,7 +20,6 @@ std = [
     "webrtc",
     "async-channel",
     "sled",
-    "web3/http-rustls-tls",
     "futures/default",
     "uuid/v4",
     "uuid/serde",
@@ -35,7 +34,6 @@ wasm = [
     "wasm-bindgen-futures",
     "rexie",
     "serde-wasm-bindgen",
-    "web3/wasm",
     "futures",
     "uuid/wasm-bindgen",
     "uuid/v4",
@@ -62,6 +60,7 @@ derivative = "2.2.0"
 ecies = { version = "0.2", default-features = false, features = ["pure"] }
 ed25519 = "1.5.2"
 ed25519-dalek = "1.0.1"
+ethereum-types = { version = "0.14.1" }
 flate2 = { version = "1.0.22" }
 futures-timer = "3.0.2"
 hex = "0.4.3"
@@ -82,8 +81,8 @@ url = { version = "2", features = ["serde"] }
 
 futures = { version = "0.3.21", default-features = false, optional = true }
 rings-derive = { workspace = true, optional = true, features = ["core_crate"] }
+tiny-keccak = { version = "2.0.1", features = ["keccak"] }
 uuid = { version = "0.8.2", optional = true }
-web3 = { version = "0.18.0", default-features = false, optional = true }
 
 # default and dummy
 async-channel = { version = "1.6.1", optional = true }
