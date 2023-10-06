@@ -2,8 +2,8 @@
 
 use crate::ecc::keccak256;
 use crate::ecc::PublicKey;
+use crate::ecc::PublicKeyAddress;
 use crate::ecc::SecretKey;
-use crate::ecc::H160;
 use crate::error::Result;
 
 /// sign function passing raw message parameter.
@@ -28,7 +28,7 @@ pub fn recover(msg: &str, sig: impl AsRef<[u8]>) -> Result<PublicKey> {
 }
 
 /// verify signature with message and address.
-pub fn verify(msg: &str, address: &H160, sig: impl AsRef<[u8]>) -> bool {
+pub fn verify(msg: &str, address: &PublicKeyAddress, sig: impl AsRef<[u8]>) -> bool {
     if let Ok(p) = recover(msg, sig) {
         p.address() == *address
     } else {

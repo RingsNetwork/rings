@@ -26,6 +26,8 @@ pub use types::PublicKey;
 pub type SigBytes = [u8; 65];
 /// Alias PublicKey.
 pub type CurveEle = PublicKey;
+/// PublicKeyAddress is H160.
+pub type PublicKeyAddress = H160;
 
 /// Wrap libsecp256k1::SecretKey.
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
@@ -206,7 +208,7 @@ impl Serialize for SecretKey {
     }
 }
 
-fn public_key_address(pubkey: &PublicKey) -> H160 {
+fn public_key_address(pubkey: &PublicKey) -> PublicKeyAddress {
     let hash = match TryInto::<libsecp256k1::PublicKey>::try_into(*pubkey) {
         // if pubkey is ecdsa key
         Ok(pk) => {
@@ -217,10 +219,10 @@ fn public_key_address(pubkey: &PublicKey) -> H160 {
         // if pubkey is eddsa key
         Err(_) => keccak256(&pubkey.0[1..]),
     };
-    H160::from_slice(&hash[12..])
+    PublicKeyAddress::from_slice(&hash[12..])
 }
 
-fn secret_key_address(secret_key: &SecretKey) -> H160 {
+fn secret_key_address(secret_key: &SecretKey) -> PublicKeyAddress {
     let public_key = libsecp256k1::PublicKey::from_secret_key(secret_key);
     public_key_address(&public_key.into())
 }
@@ -231,7 +233,7 @@ impl SecretKey {
         Self(libsecp256k1::SecretKey::random(&mut rng))
     }
 
-    pub fn address(&self) -> H160 {
+    pub fn address(&self) -> PublicKeyAddress {
         secret_key_address(self)
     }
 
@@ -264,7 +266,7 @@ impl SecretKey {
 }
 
 impl PublicKey {
-    pub fn address(&self) -> H160 {
+    pub fn address(&self) -> PublicKeyAddress {
         public_key_address(self)
     }
 }

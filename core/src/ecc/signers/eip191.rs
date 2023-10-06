@@ -3,8 +3,8 @@
 
 use crate::ecc::keccak256;
 use crate::ecc::PublicKey;
+use crate::ecc::PublicKeyAddress;
 use crate::ecc::SecretKey;
-use crate::ecc::H160;
 use crate::error::Result;
 
 /// sign function passing raw message parameter.
@@ -36,7 +36,7 @@ pub fn recover(msg: &str, sig: impl AsRef<[u8]>) -> Result<PublicKey> {
 }
 
 /// verify message signed by Ethereum address.
-pub fn verify(msg: &str, address: &H160, sig: impl AsRef<[u8]>) -> bool {
+pub fn verify(msg: &str, address: &PublicKeyAddress, sig: impl AsRef<[u8]>) -> bool {
     if let Ok(p) = recover(msg, sig) {
         p.address() == *address
     } else {
@@ -57,7 +57,8 @@ mod test {
         let key =
             SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0")
                 .unwrap();
-        let address = H160::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
+        let address =
+            PublicKeyAddress::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
 
         // window.ethereum.request({method: "personal_sign", params: ["test", "0x11E807fcc88dD319270493fB2e822e388Fe36ab0"]})
         let metamask_sig = Vec::from_hex("724fc31d9272b34d8406e2e3a12a182e72510b008de6cc44684577e31e20d9626fb760d6a0badd79a6cf4cd56b2fc0fbd60c438b809aa7d29bfb598c13e7b50e1b").unwrap();

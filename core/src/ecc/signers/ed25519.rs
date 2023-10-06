@@ -2,10 +2,15 @@
 use ed25519_dalek::Verifier;
 
 use crate::ecc::PublicKey;
-use crate::ecc::H160;
+use crate::ecc::PublicKeyAddress;
 
 /// ref <https://www.rfc-editor.org/rfc/rfc8709>
-pub fn verify(msg: &str, address: &H160, sig: impl AsRef<[u8]>, pubkey: PublicKey) -> bool {
+pub fn verify(
+    msg: &str,
+    address: &PublicKeyAddress,
+    sig: impl AsRef<[u8]>,
+    pubkey: PublicKey,
+) -> bool {
     if pubkey.address() != *address {
         return false;
     }
