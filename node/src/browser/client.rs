@@ -906,10 +906,12 @@ pub fn get_did(address: &str, addr_type: AddressType) -> Result<Did, JsError> {
 ///  * pubkey: hex pubkey
 #[wasm_export]
 pub fn get_address_from_hex_pubkey(pubkey: String) -> Result<String, JsError> {
-    Ok(PublicKey::from_hex_string(pubkey.as_str())
-        .map_err(JsError::from)?
-        .address()
-        .to_string())
+    Ok(Did::from(
+        PublicKey::from_hex_string(pubkey.as_str())
+            .map_err(JsError::from)?
+            .address(),
+    )
+    .to_string())
 }
 
 /// Get address from other address
