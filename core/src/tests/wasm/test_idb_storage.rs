@@ -41,8 +41,7 @@ async fn test_create_put_data() {
     assert!(store.count(None).await.unwrap() == 1, "indexedDB is empty");
 
     let real_value_1 = store.get(&JsValue::from(&key)).await.unwrap();
-    #[allow(deprecated)]
-    let real_value_1: JsonValue = real_value_1.into_serde().unwrap();
+    let real_value_1: JsonValue = serde_wasm_bindgen::from_value(real_value_1).unwrap();
     let last_visit_1 = real_value_1
         .get("last_visit_time")
         .unwrap()
@@ -69,8 +68,7 @@ async fn test_create_put_data() {
     let (_tx, store) = instance.get_tx_store(TransactionMode::ReadOnly).unwrap();
     assert!(store.count(None).await.unwrap() == 1, "indexedDB is empty");
     let real_value_2 = store.get(&JsValue::from(&key)).await.unwrap();
-    #[allow(deprecated)]
-    let real_value_2: JsonValue = real_value_2.into_serde().unwrap();
+    let real_value_2: JsonValue = serde_wasm_bindgen::from_value(real_value_2).unwrap();
     let last_visit_2 = real_value_2
         .get("last_visit_time")
         .unwrap()
@@ -241,8 +239,8 @@ async fn test_idb_total_size() {
     };
     instance.put(&key1, &value1).await.unwrap();
     #[allow(deprecated)]
-    let expect_size =
-        size_of_val(&JsValue::from(key1)) + size_of_val(&JsValue::from_serde(&value1).unwrap());
+    let expect_size = size_of_val(&JsValue::from(key1))
+        + size_of_val(&serde_wasm_bindgen::to_value(&value1).unwrap());
     let total_size = instance.total_size().await.unwrap();
     assert!(total_size > 0, "total_size should > 0");
     assert!(
