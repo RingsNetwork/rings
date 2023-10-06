@@ -19,7 +19,6 @@ use rings_core::message::MessageHandlerEvent;
 use rings_core::message::MessagePayload;
 use rings_core::prelude::vnode;
 use rings_core::prelude::vnode::VirtualNode;
-use rings_core::prelude::web3::ethabi::Token;
 use rings_core::session::SessionSkBuilder;
 use rings_core::storage::PersistenceStorage;
 use rings_core::swarm::impls::ConnectionHandshake;
@@ -52,7 +51,6 @@ use crate::prelude::jsonrpc_core::types::id::Id;
 use crate::prelude::jsonrpc_core::MethodCall;
 use crate::prelude::message;
 use crate::prelude::wasm_export;
-use crate::prelude::web3::contract::tokens::Tokenizable;
 use crate::prelude::CallbackFn;
 use crate::processor::Processor;
 use crate::processor::ProcessorBuilder;
@@ -186,7 +184,7 @@ impl Client {
     /// get self web3 address
     #[wasm_bindgen(getter)]
     pub fn address(&self) -> String {
-        self.processor.did().into_token().to_string()
+        self.processor.did().to_string()
     }
 
     pub fn new_client_with_storage(
@@ -258,7 +256,7 @@ impl Client {
                 .connect_peer_via_http(remote_url.as_str())
                 .await
                 .map_err(JsError::from)?;
-            Ok(JsValue::from_str(peer.did.to_string().as_str()))
+            Ok(JsValue::from_str(peer.did.as_str()))
         })
     }
 
@@ -342,7 +340,7 @@ impl Client {
                 .await
                 .map_err(JsError::from)?;
             let state = conn.webrtc_connection_state();
-            Ok(JsValue::try_from(&Peer::from((state, did.into_token())))?)
+            Ok(JsValue::try_from(&Peer::from((state, did.to_string())))?)
         })
     }
 
@@ -844,10 +842,10 @@ pub struct Peer {
     pub state: String,
 }
 
-impl From<(WebrtcConnectionState, Token)> for Peer {
-    fn from((st, address): (WebrtcConnectionState, Token)) -> Self {
+impl From<(WebrtcConnectionState, String)> for Peer {
+    fn from((st, address): (WebrtcConnectionState, String)) -> Self {
         Self {
-            address: address.to_string(),
+            address,
             state: format!("{:?}", st),
         }
     }
@@ -908,11 +906,12 @@ pub fn get_did(address: &str, addr_type: AddressType) -> Result<Did, JsError> {
 ///  * pubkey: hex pubkey
 #[wasm_export]
 pub fn get_address_from_hex_pubkey(pubkey: String) -> Result<String, JsError> {
-    Ok(PublicKey::from_hex_string(pubkey.as_str())
-        .map_err(JsError::from)?
-        .address()
-        .into_token()
-        .to_string())
+    Ok(Did::from(
+        PublicKey::from_hex_string(pubkey.as_str())
+            .map_err(JsError::from)?
+            .address(),
+    )
+    .to_string())
 }
 
 /// Get address from other address
@@ -920,5 +919,5 @@ pub fn get_address_from_hex_pubkey(pubkey: String) -> Result<String, JsError> {
 ///   * addr_type: source address type
 #[wasm_export]
 pub fn get_address(address: &str, addr_type: AddressType) -> Result<String, JsError> {
-    Ok(get_did(address, addr_type)?.into_token().to_string())
+    Ok(get_did(address, addr_type)?.to_string())
 }

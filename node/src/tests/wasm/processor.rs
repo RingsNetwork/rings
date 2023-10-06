@@ -11,7 +11,6 @@ use crate::prelude::rings_core::async_trait;
 use crate::prelude::rings_core::dht::TStabilize;
 use crate::prelude::rings_core::message::MessageCallback;
 use crate::prelude::rings_core::utils;
-use crate::prelude::web3::contract::tokens::Tokenizable;
 use crate::prelude::*;
 use crate::processor;
 use crate::processor::*;
@@ -123,8 +122,8 @@ async fn test_processor_handshake_and_msg() {
     let test_text4 = "test4";
     let test_text5 = "test5";
 
-    let p1_addr = p1.did().into_token().to_string();
-    let p2_addr = p2.did().into_token().to_string();
+    let p1_addr = p1.did().to_string();
+    let p2_addr = p2.did().to_string();
     console_log!("p1_addr: {}", p1_addr);
     console_log!("p2_addr: {}", p2_addr);
 
@@ -218,7 +217,7 @@ async fn test_processor_connect_with_did() {
     assert!(
         p1_peers
             .iter()
-            .any(|p| p.did.to_string().eq(&p2.did().into_token().to_string())),
+            .any(|p| p.did.to_string().eq(&p2.did().to_string())),
         "p2 not in p1's peer list"
     );
 
@@ -242,10 +241,9 @@ async fn test_processor_connect_with_did() {
     console_log!("check peers");
     let peers = p1.list_peers().await.unwrap();
     assert!(
-        peers.iter().any(|p| p
-            .did
-            .to_string()
-            .eq(p3.did().into_token().to_string().as_str())),
+        peers
+            .iter()
+            .any(|p| p.did.to_string().eq(p3.did().to_string().as_str())),
         "peer list dose NOT contains p3 address"
     );
     console_log!("processor_close_all_connections");

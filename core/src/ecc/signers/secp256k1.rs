@@ -1,8 +1,8 @@
 //! Default method signing using libsecp256k1::SecretKey.
-use web3::signing::keccak256;
 
-use crate::ecc::Address;
+use crate::ecc::keccak256;
 use crate::ecc::PublicKey;
+use crate::ecc::PublicKeyAddress;
 use crate::ecc::SecretKey;
 use crate::error::Result;
 
@@ -28,7 +28,7 @@ pub fn recover(msg: &str, sig: impl AsRef<[u8]>) -> Result<PublicKey> {
 }
 
 /// verify signature with message and address.
-pub fn verify(msg: &str, address: &Address, sig: impl AsRef<[u8]>) -> bool {
+pub fn verify(msg: &str, address: &PublicKeyAddress, sig: impl AsRef<[u8]>) -> bool {
     if let Ok(p) = recover(msg, sig) {
         p.address() == *address
     } else {

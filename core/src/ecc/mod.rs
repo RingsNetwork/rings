@@ -4,6 +4,7 @@ use std::fmt::Write;
 use std::ops::Deref;
 use std::str::FromStr;
 
+use ethereum_types::H160;
 use hex;
 use rand::SeedableRng;
 use rand_hc::Hc128Rng;
@@ -11,8 +12,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use sha1::Digest;
 use sha1::Sha1;
-use web3::signing::keccak256;
-use web3::types::Address;
 
 use crate::error::Error;
 use crate::error::Result;
@@ -27,6 +26,8 @@ pub use types::PublicKey;
 pub type SigBytes = [u8; 65];
 /// Alias PublicKey.
 pub type CurveEle = PublicKey;
+/// PublicKeyAddress is H160.
+pub type PublicKeyAddress = H160;
 
 /// Wrap libsecp256k1::SecretKey.
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
@@ -35,6 +36,17 @@ pub struct SecretKey(libsecp256k1::SecretKey);
 /// Wrap String into HashStr.
 #[derive(Deserialize, Serialize, Debug, Clone, Eq, PartialEq)]
 pub struct HashStr(String);
+
+/// Compute the Keccak-256 hash of input bytes.
+pub fn keccak256(bytes: &[u8]) -> [u8; 32] {
+    use tiny_keccak::Hasher;
+    use tiny_keccak::Keccak;
+    let mut output = [0u8; 32];
+    let mut hasher = Keccak::v256();
+    hasher.update(bytes);
+    hasher.finalize(&mut output);
+    output
+}
 
 impl HashStr {
     pub fn new<T: Into<String>>(s: T) -> Self {
@@ -196,7 +208,7 @@ impl Serialize for SecretKey {
     }
 }
 
-fn public_key_address(pubkey: &PublicKey) -> Address {
+fn public_key_address(pubkey: &PublicKey) -> PublicKeyAddress {
     let hash = match TryInto::<libsecp256k1::PublicKey>::try_into(*pubkey) {
         // if pubkey is ecdsa key
         Ok(pk) => {
@@ -207,10 +219,10 @@ fn public_key_address(pubkey: &PublicKey) -> Address {
         // if pubkey is eddsa key
         Err(_) => keccak256(&pubkey.0[1..]),
     };
-    Address::from_slice(&hash[12..])
+    PublicKeyAddress::from_slice(&hash[12..])
 }
 
-fn secret_key_address(secret_key: &SecretKey) -> Address {
+fn secret_key_address(secret_key: &SecretKey) -> PublicKeyAddress {
     let public_key = libsecp256k1::PublicKey::from_secret_key(secret_key);
     public_key_address(&public_key.into())
 }
@@ -221,7 +233,7 @@ impl SecretKey {
         Self(libsecp256k1::SecretKey::random(&mut rng))
     }
 
-    pub fn address(&self) -> Address {
+    pub fn address(&self) -> PublicKeyAddress {
         secret_key_address(self)
     }
 
@@ -254,7 +266,7 @@ impl SecretKey {
 }
 
 impl PublicKey {
-    pub fn address(&self) -> Address {
+    pub fn address(&self) -> PublicKeyAddress {
         public_key_address(self)
     }
 }

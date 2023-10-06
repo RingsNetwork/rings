@@ -27,7 +27,6 @@ pub use self::rings_core::prelude::base58;
 pub use self::rings_core::prelude::message;
 pub use self::rings_core::prelude::uuid;
 pub use self::rings_core::prelude::vnode;
-pub use self::rings_core::prelude::web3;
 pub use self::rings_core::prelude::ChordStorageInterface;
 pub use self::rings_core::prelude::ChordStorageInterfaceCacheChecker;
 pub use self::rings_core::prelude::MessageRelay;

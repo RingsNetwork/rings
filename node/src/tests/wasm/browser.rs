@@ -142,7 +142,7 @@ async fn test_get_address_from_hex_pubkey() {
     assert!(addr_result.is_ok(), "addr_result is error");
     let addr = addr_result.ok().unwrap();
     assert!(
-        addr.eq_ignore_ascii_case("fada88633e01d2f6704a7f2a6ebc57263aca6978"),
+        addr.eq_ignore_ascii_case("0xfada88633e01d2f6704a7f2a6ebc57263aca6978"),
         "got addr {:?}",
         addr
     );
@@ -150,7 +150,7 @@ async fn test_get_address_from_hex_pubkey() {
 
 #[wasm_bindgen_test]
 async fn test_get_address() {
-    let expect_address = "8b98cf912975b4b6b67ce94882fc25c210a60a60";
+    let expect_address = "0x8b98cf912975b4b6b67ce94882fc25c210a60a60";
     let got_address = browser::get_address(
         "9z1ZTaGocNSAu3DSqGKR6Dqt214X4dXucVd6C53EgqBK",
         browser::AddressType::Ed25519,
@@ -163,12 +163,9 @@ async fn test_get_address() {
         got_address,
         expect_address
     );
-    let got_address = browser::get_address(
-        format!("0x{}", expect_address).as_str(),
-        browser::AddressType::DEFAULT,
-    )
-    .ok()
-    .unwrap();
+    let got_address = browser::get_address(expect_address, browser::AddressType::DEFAULT)
+        .ok()
+        .unwrap();
 
     assert!(
         got_address.eq_ignore_ascii_case(expect_address),

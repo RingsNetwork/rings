@@ -40,11 +40,10 @@ use std::ops::Neg;
 use std::ops::Sub;
 use std::str::FromStr;
 
+use ethereum_types::H160;
 use num_bigint::BigUint;
 use serde::Deserialize;
 use serde::Serialize;
-use web3::contract::tokens::Tokenizable;
-use web3::types::H160;
 
 use crate::ecc::HashStr;
 use crate::error::Error;
@@ -56,7 +55,8 @@ pub struct Did(H160);
 
 impl std::fmt::Display for Did {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", self.into_token())
+        let inner = &self.0;
+        write!(f, "0x{inner:x}")
     }
 }
 
@@ -355,8 +355,10 @@ mod tests {
 
         // from_str then to_string
         let did = Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
-        // TODO: Should be "0x11e807fcc88dd319270493fb2e822e388fe36ab0"
-        assert_eq!(did.to_string(), "11e807fcc88dd319270493fb2e822e388fe36ab0");
+        assert_eq!(
+            did.to_string(),
+            "0x11e807fcc88dd319270493fb2e822e388fe36ab0"
+        );
 
         // Serialize
         let did = Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
@@ -375,10 +377,9 @@ mod tests {
 
         // Debug and Display
         let did = Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
-        // TODO: Should be "0x11e807fcc88dd319270493fb2e822e388fe36ab0"
         assert_eq!(
             format!("{}", did),
-            "11e807fcc88dd319270493fb2e822e388fe36ab0"
+            "0x11e807fcc88dd319270493fb2e822e388fe36ab0"
         );
         assert_eq!(
             format!("{:?}", did),

@@ -20,8 +20,6 @@ std = [
     "webrtc",
     "async-channel",
     "sled",
-    "web3/http-rustls-tls",
-    "futures/default",
     "uuid/v4",
     "uuid/serde",
     "rings-derive/default",
@@ -35,8 +33,6 @@ wasm = [
     "wasm-bindgen-futures",
     "rexie",
     "serde-wasm-bindgen",
-    "web3/wasm",
-    "futures",
     "uuid/wasm-bindgen",
     "uuid/v4",
     "uuid/serde",
@@ -62,7 +58,9 @@ derivative = "2.2.0"
 ecies = { version = "0.2", default-features = false, features = ["pure"] }
 ed25519 = "1.5.2"
 ed25519-dalek = "1.0.1"
-flate2 = { version = "1.0.22" }
+ethereum-types = "0.14.1"
+flate2 = "1.0.22"
+futures = "0.3.21"
 futures-timer = "3.0.2"
 hex = "0.4.3"
 itertools = "0.10.3"
@@ -73,17 +71,16 @@ rand_core = { version = "0.6.3", features = ["getrandom"] }
 rand_hc = "0.3.1"
 rings-transport = { workspace = true }
 serde = { version = "1.0.130", features = ["derive"] }
-serde_json = { version = "1.0.70" }
+serde_json = "1.0.70"
 sha1 = "0.10.1"
 sha2 = "0.10.6"
 thiserror = "1"
 tracing = "0.1.37"
 url = { version = "2", features = ["serde"] }
 
-futures = { version = "0.3.21", default-features = false, optional = true }
 rings-derive = { workspace = true, optional = true, features = ["core_crate"] }
+tiny-keccak = { version = "2.0.1", features = ["keccak"] }
 uuid = { version = "0.8.2", optional = true }
-web3 = { version = "0.18.0", default-features = false, optional = true }
 
 # default and dummy
 async-channel = { version = "1.6.1", optional = true }

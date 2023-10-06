@@ -122,7 +122,7 @@ pub(crate) async fn connect_peer_via_http(params: Params, meta: RpcMeta) -> Resu
         .connect_peer_via_http(peer_url)
         .await
         .map_err(Error::from)?;
-    Ok(Value::String(peer.did.to_string()))
+    Ok(Value::String(peer.did))
 }
 
 /// Connect Peer with seed
