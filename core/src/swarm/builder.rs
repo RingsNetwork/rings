@@ -4,20 +4,23 @@
 
 use std::sync::Arc;
 
-use rings_transport::core::callback::Callback;
+use rings_transport::core::callback::TransportCallback;
 
 use crate::channels::Channel;
 use crate::dht::PeerRing;
-use crate::message::CallbackFn;
 use crate::message::MessageHandler;
-use crate::message::ValidatorFn;
 use crate::session::SessionSk;
 use crate::storage::PersistenceStorage;
+use crate::swarm::callback::BoxedSwarmCallback;
+use crate::swarm::callback::InnerSwarmCallback;
 use crate::swarm::callback::SwarmCallback;
 use crate::swarm::MeasureImpl;
 use crate::swarm::Swarm;
 use crate::types::channel::Channel as ChannelTrait;
 use crate::types::Transport;
+
+struct DefaultCallback;
+impl SwarmCallback for DefaultCallback {}
 
 /// Creates a SwarmBuilder to configure a Swarm.
 pub struct SwarmBuilder {
@@ -28,8 +31,7 @@ pub struct SwarmBuilder {
     session_sk: SessionSk,
     session_ttl: Option<usize>,
     measure: Option<MeasureImpl>,
-    message_callback: Option<CallbackFn>,
-    message_validator: Option<ValidatorFn>,
+    callback: Option<BoxedSwarmCallback>,
 }
 
 impl SwarmBuilder {
@@ -43,8 +45,7 @@ impl SwarmBuilder {
             session_sk,
             session_ttl: None,
             measure: None,
-            message_callback: None,
-            message_validator: None,
+            callback: None,
         }
     }
 
@@ -73,15 +74,9 @@ impl SwarmBuilder {
         self
     }
 
-    /// Bind message callback function for Swarm.
-    pub fn message_callback(mut self, callback: CallbackFn) -> Self {
-        self.message_callback = Some(callback);
-        self
-    }
-
-    /// Bind message vilidator function implementation for Swarm.
-    pub fn message_validator(mut self, validator: ValidatorFn) -> Self {
-        self.message_validator = Some(validator);
+    /// Bind callback for Swarm.
+    pub fn callback(mut self, callback: BoxedSwarmCallback) -> Self {
+        self.callback = Some(callback);
         self
     }
 
@@ -95,12 +90,15 @@ impl SwarmBuilder {
             self.dht_storage,
         ));
 
-        let message_handler =
-            MessageHandler::new(dht.clone(), self.message_callback, self.message_validator);
+        let message_handler = MessageHandler::new(dht.clone());
+        let swarm_callback = self.callback.unwrap_or_else(|| DefaultCallback {}.boxed());
 
         let transport_event_channel = Channel::new();
+
         let transport = Box::new(Transport::new(&self.ice_servers, self.external_address));
-        let callback = Arc::new(SwarmCallback::new(transport_event_channel.sender()).boxed());
+        let transport_callback = Arc::new(
+            InnerSwarmCallback::new(transport_event_channel.sender(), swarm_callback).boxed(),
+        );
 
         Swarm {
             transport_event_channel,
@@ -109,7 +107,7 @@ impl SwarmBuilder {
             session_sk: self.session_sk,
             message_handler,
             transport,
-            callback,
+            transport_callback,
         }
     }
 }

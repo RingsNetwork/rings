@@ -1,27 +1,27 @@
-//! This module contains the [InnerCallback] struct.
+//! This module contains the [InnerTransportCallback] struct.
 
 use std::sync::Arc;
 
 use bytes::Bytes;
 
-use crate::core::callback::BoxedCallback;
+use crate::core::callback::BoxedTransportCallback;
 use crate::core::transport::TransportMessage;
 use crate::core::transport::WebrtcConnectionState;
 use crate::notifier::Notifier;
 
-/// [InnerCallback] wraps the [BoxedCallback] with inner handling for a specific connection.
-pub struct InnerCallback {
+/// [InnerTransportCallback] wraps the [BoxedTransportCallback] with inner handling for a specific connection.
+pub struct InnerTransportCallback {
     /// The id of the connection to which the current callback is assigned.
     pub cid: String,
-    callback: Arc<BoxedCallback>,
+    callback: Arc<BoxedTransportCallback>,
     data_channel_open_notifier: Notifier,
 }
 
-impl InnerCallback {
-    /// Create a new [InnerCallback].
+impl InnerTransportCallback {
+    /// Create a new [InnerTransportCallback].
     pub fn new(
         cid: &str,
-        callback: Arc<BoxedCallback>,
+        callback: Arc<BoxedTransportCallback>,
         data_channel_open_notifier: Notifier,
     ) -> Self {
         Self {

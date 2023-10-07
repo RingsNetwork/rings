@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::connection_ref::ConnectionRef;
-use crate::core::callback::BoxedCallback;
+use crate::core::callback::BoxedTransportCallback;
 
 /// Wrapper for the data that is sent over the data channel.
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -137,7 +137,7 @@ pub trait TransportInterface {
     async fn new_connection(
         &self,
         cid: &str,
-        callback: Arc<BoxedCallback>,
+        callback: Arc<BoxedTransportCallback>,
     ) -> Result<(), Self::Error>;
 
     /// This method closes and releases the connection from transport.

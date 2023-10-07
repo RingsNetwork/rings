@@ -4,9 +4,9 @@ use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::ecc::SecretKey;
 use crate::error::Result;
-use crate::message::CallbackFn;
 use crate::session::SessionSk;
 use crate::storage::PersistenceStorage;
+use crate::swarm::callback::BoxedSwarmCallback;
 use crate::swarm::Swarm;
 use crate::swarm::SwarmBuilder;
 
@@ -15,7 +15,7 @@ mod test_stabilization;
 
 pub async fn prepare_node_with_callback(
     key: SecretKey,
-    message_callback: Option<CallbackFn>,
+    swarm_callback: Option<BoxedSwarmCallback>,
 ) -> (Arc<Swarm>, String) {
     let stun = "stun://stun.l.google.com:19302";
     let path = PersistenceStorage::random_path("./tmp");
@@ -27,8 +27,8 @@ pub async fn prepare_node_with_callback(
 
     let mut swarm_builder = SwarmBuilder::new(stun, storage, session_sk);
 
-    if let Some(callback) = message_callback {
-        swarm_builder = swarm_builder.message_callback(callback);
+    if let Some(callback) = swarm_callback {
+        swarm_builder = swarm_builder.callback(callback);
     }
 
     let swarm = Arc::new(swarm_builder.build());

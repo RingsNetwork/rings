@@ -143,7 +143,7 @@ impl Swarm {
     pub async fn new_connection(&self, did: Did) -> Result<Connection> {
         let cid = did.to_string();
         self.transport
-            .new_connection(&cid, self.callback.clone())
+            .new_connection(&cid, self.transport_callback.clone())
             .await
             .map_err(Error::Transport)?;
         self.transport.connection(&cid).map_err(|e| e.into())

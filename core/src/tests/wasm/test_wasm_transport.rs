@@ -12,7 +12,7 @@ use super::prepare_node;
 use crate::channels::Channel as CbChannel;
 use crate::ecc::SecretKey;
 use crate::error::Result;
-use crate::swarm::callback::SwarmCallback;
+use crate::swarm::callback::InnerSwarmCallback;
 use crate::tests::manually_establish_connection;
 use crate::types::channel::Channel;
 use crate::types::channel::TransportEvent;
@@ -36,7 +36,7 @@ async fn prepare_transport(channel: Option<Arc<CbChannel<TransportEvent>>>) -> T
         Some(c) => Arc::clone(&c),
         None => Arc::new(<CbChannel<TransportEvent> as Channel<TransportEvent>>::new()),
     };
-    let callback = SwarmCallback::new(ch.sender()).boxed();
+    let callback = InnerSwarmCallback::new(ch.sender()).boxed();
     let trans = Transport::new("stun://stun.l.google.com:19302", None);
     trans
         .new_connection("test", Arc::new(callback))

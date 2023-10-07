@@ -1,9 +1,9 @@
-//! The main entity of this module is the [Callback] trait, which defines
+//! The main entity of this module is the [TransportCallback] trait, which defines
 //! a series of methods that receive connection events.
 //!
 //! The `new_connection` method of
 //! [ConnectionCreation](super::transport::ConnectionCreation) trait will
-//! accept boxed [Callback] trait object.
+//! accept boxed [TransportCallback] trait object.
 
 use async_trait::async_trait;
 
@@ -14,10 +14,10 @@ type CallbackError = Box<dyn std::error::Error>;
 /// Any object that implements this trait can be used as a callback for the connection.
 #[cfg_attr(feature = "web-sys-webrtc", async_trait(?Send))]
 #[cfg_attr(not(feature = "web-sys-webrtc"), async_trait)]
-pub trait Callback {
-    /// Used to turn object into [BoxedCallback] to be used
+pub trait TransportCallback {
+    /// Used to turn object into [BoxedTransportCallback] to be used
     /// in [ConnectionCreation](super::transport::ConnectionCreation)
-    fn boxed(self) -> BoxedCallback
+    fn boxed(self) -> BoxedTransportCallback
     where Self: Sized + Send + Sync + 'static {
         Box::new(self)
     }
@@ -39,12 +39,12 @@ pub trait Callback {
 
 /// The `new_connection` method of
 /// [ConnectionCreation](super::transport::ConnectionCreation) trait will
-/// accept boxed [Callback] trait object.
+/// accept boxed [TransportCallback] trait object.
 #[cfg(not(feature = "web-sys-webrtc"))]
-pub type BoxedCallback = Box<dyn Callback + Send + Sync>;
+pub type BoxedTransportCallback = Box<dyn TransportCallback + Send + Sync>;
 
 /// The `new_connection` method of
 /// [ConnectionCreation](super::transport::ConnectionCreation) trait will
-/// accept boxed [Callback] trait object.
+/// accept boxed [TransportCallback] trait object.
 #[cfg(feature = "web-sys-webrtc")]
-pub type BoxedCallback = Box<dyn Callback>;
+pub type BoxedTransportCallback = Box<dyn TransportCallback>;

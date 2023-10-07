@@ -1,18 +1,18 @@
 use std::sync::Arc;
 
 use rings_transport::connection_ref::ConnectionRef;
-use rings_transport::core::callback::BoxedCallback;
+use rings_transport::core::callback::BoxedTransportCallback;
 use rings_transport::core::transport::BoxedTransport;
 use rings_transport::core::transport::ConnectionInterface;
 
 pub struct Swarm<C, B, E> {
     transport: BoxedTransport<C, E>,
     backend: B,
-    callback: Arc<BoxedCallback>,
+    callback: Arc<BoxedTransportCallback>,
 }
 
 pub trait Backend {
-    fn callback(&self) -> BoxedCallback;
+    fn callback(&self) -> BoxedTransportCallback;
 }
 
 impl<C, B, E> Swarm<C, B, E>

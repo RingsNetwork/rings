@@ -13,7 +13,7 @@ use async_recursion::async_recursion;
 use async_trait::async_trait;
 pub use builder::SwarmBuilder;
 use rings_derive::JudgeConnection;
-use rings_transport::core::callback::BoxedCallback;
+use rings_transport::core::callback::BoxedTransportCallback;
 use rings_transport::core::transport::BoxedTransport;
 use rings_transport::core::transport::ConnectionInterface;
 use rings_transport::core::transport::TransportMessage;
@@ -58,7 +58,7 @@ pub struct Swarm {
     session_sk: SessionSk,
     message_handler: MessageHandler,
     transport: BoxedTransport<ConnectionOwner, TransportError>,
-    callback: Arc<BoxedCallback>,
+    transport_callback: Arc<BoxedTransportCallback>,
 }
 
 impl Swarm {
