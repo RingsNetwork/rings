@@ -74,6 +74,7 @@ pub mod types;
 pub mod utils;
 pub use async_trait::async_trait;
 pub use futures;
+pub mod backend;
 pub mod chunk;
 pub mod consts;
 pub mod inspect;

@@ -31,7 +31,7 @@ async fn listen(p: &Processor) {
 }
 
 async fn close_all_connections(p: &Processor) {
-    futures::future::join_all(p.swarm.get_connections().iter().map(|(_, t)| t.close())).await;
+    futures::future::join_all(p.swarm.backend.connections().iter().map(|(_, t)| t.close())).await;
 }
 
 struct MsgCallbackStruct {

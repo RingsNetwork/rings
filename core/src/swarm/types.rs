@@ -29,14 +29,12 @@ impl WrappedDid {
     /// Creates a new WrappedDid using the provided Swarm instance and DID.
     pub fn new(swarm: &Swarm, did: Did) -> Self {
         // Try to get the Connection for the provided DID from the Swarm.
-        match swarm.transport.connection(&did.to_string()) {
-            Ok(c) => Self {
+        match swarm.backend.connection(did) {
+            Some(c) => Self {
                 did,
-                // If the Transport is found, create a arc reference to it and store it in the WrappedDid.
-                // TODO: Should use weak reference
                 connection: Some(c),
             },
-            Err(_) => Self {
+            None => Self {
                 did,
                 connection: None,
             },

@@ -43,7 +43,7 @@ impl SwarmInspect {
     pub async fn inspect(swarm: &Swarm) -> Self {
         let dht = DHTInspect::inspect(&swarm.dht());
         let connections = {
-            let connections = swarm.get_connections();
+            let connections = swarm.backend.connections();
 
             connections
                 .iter()

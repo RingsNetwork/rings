@@ -56,7 +56,7 @@ async fn handle_storage_fetch_act(swarm: &Swarm, act: PeerRingAction) -> Result<
     match act {
         PeerRingAction::None => (),
         PeerRingAction::SomeVNode(v) => {
-            swarm.dht.local_cache_set(v);
+            swarm.backend.dht.local_cache_set(v);
         }
         PeerRingAction::RemoteAction(next, dht_act) => {
             if let PeerRingRemoteAction::FindVNode(vid) = dht_act {
@@ -130,7 +130,7 @@ pub(super) async fn handle_storage_operate_act(
 impl ChordStorageInterfaceCacheChecker for Swarm {
     /// Check local cache
     async fn storage_check_cache(&self, vid: Did) -> Option<VirtualNode> {
-        self.dht.local_cache_get(vid)
+        self.backend.dht.local_cache_get(vid)
     }
 }
 
@@ -141,7 +141,8 @@ impl<const REDUNDANT: u16> ChordStorageInterface<REDUNDANT> for Swarm {
     /// else Query Remote Node
     async fn storage_fetch(&self, vid: Did) -> Result<()> {
         // If peer found that data is on it's localstore, copy it to the cache
-        let act = <PeerRing as ChordStorage<_, REDUNDANT>>::vnode_lookup(&self.dht, vid).await?;
+        let act =
+            <PeerRing as ChordStorage<_, REDUNDANT>>::vnode_lookup(&self.backend.dht, vid).await?;
         handle_storage_fetch_act(self, act).await?;
         Ok(())
     }
@@ -149,7 +150,8 @@ impl<const REDUNDANT: u16> ChordStorageInterface<REDUNDANT> for Swarm {
     /// Store VirtualNode, `TryInto<VirtualNode>` is implemented for alot of types
     async fn storage_store(&self, vnode: VirtualNode) -> Result<()> {
         let op = VNodeOperation::Overwrite(vnode);
-        let act = <PeerRing as ChordStorage<_, REDUNDANT>>::vnode_operate(&self.dht, op).await?;
+        let act =
+            <PeerRing as ChordStorage<_, REDUNDANT>>::vnode_operate(&self.backend.dht, op).await?;
         handle_storage_store_act(self, act).await?;
         Ok(())
     }
@@ -157,7 +159,8 @@ impl<const REDUNDANT: u16> ChordStorageInterface<REDUNDANT> for Swarm {
     async fn storage_append_data(&self, topic: &str, data: Encoded) -> Result<()> {
         let vnode: VirtualNode = (topic.to_string(), data).try_into()?;
         let op = VNodeOperation::Extend(vnode);
-        let act = <PeerRing as ChordStorage<_, REDUNDANT>>::vnode_operate(&self.dht, op).await?;
+        let act =
+            <PeerRing as ChordStorage<_, REDUNDANT>>::vnode_operate(&self.backend.dht, op).await?;
         handle_storage_store_act(self, act).await?;
         Ok(())
     }
@@ -165,7 +168,8 @@ impl<const REDUNDANT: u16> ChordStorageInterface<REDUNDANT> for Swarm {
     async fn storage_touch_data(&self, topic: &str, data: Encoded) -> Result<()> {
         let vnode: VirtualNode = (topic.to_string(), data).try_into()?;
         let op = VNodeOperation::Touch(vnode);
-        let act = <PeerRing as ChordStorage<_, REDUNDANT>>::vnode_operate(&self.dht, op).await?;
+        let act =
+            <PeerRing as ChordStorage<_, REDUNDANT>>::vnode_operate(&self.backend.dht, op).await?;
         handle_storage_store_act(self, act).await?;
         Ok(())
     }

@@ -69,8 +69,8 @@ async fn test_handle_connect_node() -> Result<()> {
             // handle join dht situation
             println!("wait connection 1 to 2 and connection 2 to 3 connected");
             sleep(Duration::from_millis(1)).await;
-            let connection_1_to_2 = node1.get_connection(node2.did()).unwrap();
-            let connection_2_to_3 = node2.get_connection(node3.did()).unwrap();
+            let connection_1_to_2 = node1.backend.connection(node2.did()).unwrap();
+            let connection_2_to_3 = node2.backend.connection(node3.did()).unwrap();
 
             println!("wait events trigger");
             sleep(Duration::from_millis(1)).await;
@@ -121,7 +121,7 @@ async fn test_handle_connect_node() -> Result<()> {
             node1.connect(node3.did()).await.unwrap();
             sleep(Duration::from_millis(10000)).await;
 
-            let connection_1_to_3 = node1.get_connection(node3.did());
+            let connection_1_to_3 = node1.backend.connection(node3.did());
             assert!(connection_1_to_3.is_some());
             let connection_1_to_3 = connection_1_to_3.unwrap();
             let both = {
@@ -166,7 +166,7 @@ async fn test_handle_notify_predecessor() -> Result<()> {
             );
         } => { unreachable!();}
         _ = async {
-            let connection_1_to_2 = node1.get_connection(node2.did()).unwrap();
+            let connection_1_to_2 = node1.backend.connection(node2.did()).unwrap();
             sleep(Duration::from_millis(1000)).await;
             assert!(node1.dht().successors().list()?.contains(&key2.address().into()));
             assert!(node2.dht().successors().list()?.contains(&key1.address().into()));
@@ -218,7 +218,7 @@ async fn test_handle_find_successor_increase() -> Result<()> {
             );
         } => { unreachable!();}
         _ = async {
-            let connection_1_to_2 = node1.get_connection(node2.did()).unwrap();
+            let connection_1_to_2 = node1.backend.connection(node2.did()).unwrap();
             sleep(Duration::from_millis(1000)).await;
             assert!(node1.dht().successors().list()?.contains(&key2.address().into()), "{:?}", node1.dht().successors().list()?);
             assert!(node2.dht().successors().list()?.contains(&key1.address().into()));
@@ -291,7 +291,7 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
             );
         } => {unreachable!();}
         _ = async {
-            let connection_1_to_2 = node1.get_connection(node2.did()).unwrap();
+            let connection_1_to_2 = node1.backend.connection(node2.did()).unwrap();
             sleep(Duration::from_millis(1000)).await;
             assert!(node1.dht().successors().list()?.contains(&key2.address().into()));
             assert!(node2.dht().successors().list()?.contains(&key1.address().into()));
@@ -366,7 +366,7 @@ async fn test_handle_storage() -> Result<()> {
     tokio::spawn(async move { n1.listen().await });
     tokio::spawn(async move { n2.listen().await });
 
-    let connection_1_to_2 = node1.get_connection(node2.did()).unwrap();
+    let connection_1_to_2 = node1.backend.connection(node2.did()).unwrap();
     sleep(Duration::from_millis(1000)).await;
     // node1's successor is node2
     // node2's successor is node1

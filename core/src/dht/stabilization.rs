@@ -7,7 +7,6 @@ use rings_transport::core::transport::ConnectionInterface;
 use crate::dht::successor::SuccessorReader;
 use crate::dht::types::CorrectChord;
 use crate::dht::Chord;
-use crate::dht::PeerRing;
 use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
 use crate::error::Result;
@@ -22,12 +21,9 @@ use crate::message::PayloadSender;
 use crate::message::QueryForTopoInfoSend;
 use crate::swarm::Swarm;
 
-/// A combination contains chord and swarm, use to run stabilize.
-/// - swarm: transports communicate with each others.
-/// - chord: fix local fingers table.
+/// Used to run stabilize.
 #[derive(Clone)]
 pub struct Stabilization {
-    chord: Arc<PeerRing>,
     swarm: Arc<Swarm>,
     timeout: usize,
 }
@@ -43,7 +39,7 @@ pub trait TStabilize {
 impl Stabilization {
     /// Clean unavailable connections in transport.
     pub async fn clean_unavailable_connections(&self) -> Result<()> {
-        let conns = self.swarm.get_connections();
+        let conns = self.swarm.backend.connections();
 
         for (did, conn) in conns.into_iter() {
             if conn.is_disconnected().await {
@@ -59,11 +55,7 @@ impl Stabilization {
 impl Stabilization {
     /// Create a new instance of Stabilization
     pub fn new(swarm: Arc<Swarm>, timeout: usize) -> Self {
-        Self {
-            chord: swarm.dht(),
-            swarm,
-            timeout,
-        }
+        Self { swarm, timeout }
     }
 
     /// Get timeout of waiting delays.
@@ -76,14 +68,14 @@ impl Stabilization {
     /// Notify predecessor, this is a DHT operation.
     pub async fn notify_predecessor(&self) -> Result<()> {
         let (successor_min, successor_list) = {
-            let successor = self.chord.successors();
+            let successor = self.swarm.backend.dht.successors();
             (successor.min()?, successor.list()?)
         };
 
         let msg = Message::NotifyPredecessorSend(NotifyPredecessorSend {
-            did: self.chord.did,
+            did: self.swarm.did(),
         });
-        if self.chord.did != successor_min {
+        if self.swarm.did() != successor_min {
             for s in successor_list {
                 tracing::debug!("STABILIZATION notify_predecessor: {:?}", s);
                 let payload = MessagePayload::new_send(
@@ -102,7 +94,7 @@ impl Stabilization {
 
     /// Fix fingers from finger table, this is a DHT operation.
     async fn fix_fingers(&self) -> Result<()> {
-        match self.chord.fix_fingers() {
+        match self.swarm.backend.dht.fix_fingers() {
             Ok(action) => match action {
                 PeerRingAction::None => Ok(()),
                 PeerRingAction::RemoteAction(
@@ -143,7 +135,7 @@ impl Stabilization {
         if let PeerRingAction::RemoteAction(
             next,
             PeerRingRemoteAction::QueryForSuccessorListAndPred,
-        ) = self.chord.pre_stabilize()?
+        ) = self.swarm.backend.dht.pre_stabilize()?
         {
             let evs = vec![MessageHandlerEvent::SendDirectMessage(
                 Message::QueryForTopoInfoSend(QueryForTopoInfoSend::new_for_stab(next)),
@@ -279,14 +271,14 @@ pub mod tests {
 
         assert_eq!(
             node1
-                .get_connection(node2.did())
+                .backend.connection(node2.did())
                 .unwrap()
                 .webrtc_connection_state(),
             WebrtcConnectionState::Connected,
         );
         assert_eq!(
             node1
-                .get_connection(node3.did())
+                .backend.connection(node3.did())
                 .unwrap()
                 .webrtc_connection_state(),
             WebrtcConnectionState::Connected,
@@ -298,14 +290,14 @@ pub mod tests {
         tokio::time::sleep(Duration::from_secs(10)).await;
         assert_eq!(
             node1
-                .get_connection(node2.did())
+                .backend.connection(node2.did())
                 .unwrap()
                 .webrtc_connection_state(),
             WebrtcConnectionState::Disconnected,
         );
         assert_eq!(
             node1
-                .get_connection(node3.did())
+                .backend.connection(node3.did())
                 .unwrap()
                 .webrtc_connection_state(),
             WebrtcConnectionState::Disconnected,
@@ -314,7 +306,7 @@ pub mod tests {
         let stb = Stabilization::new(node1.clone(), 3);
         stb.clean_unavailable_connections().await.unwrap();
 
-        assert!(node1.get_connection(node2.did()).is_none());
-        assert!(node1.get_connection(node3.did()).is_none());
+        assert!(node1.backend.connection(node2.did()).is_none());
+        assert!(node1.backend.connection(node3.did()).is_none());
     }
 }

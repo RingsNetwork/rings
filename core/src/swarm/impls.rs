@@ -1,5 +1,3 @@
-use std::str::FromStr;
-
 use async_trait::async_trait;
 use rings_transport::core::transport::ConnectionInterface;
 
@@ -141,56 +139,9 @@ impl Swarm {
 
     /// Create new connection that will be handled by swarm.
     pub async fn new_connection(&self, did: Did) -> Result<Connection> {
-        let cid = did.to_string();
-        self.transport
-            .new_connection(&cid, self.transport_callback.clone())
+        self.backend
+            .new_connection(did, self.transport_callback.clone())
             .await
-            .map_err(Error::Transport)?;
-        self.transport.connection(&cid).map_err(|e| e.into())
-    }
-
-    /// Get connection by did and check if it is connected.
-    pub async fn get_and_check_connection(&self, did: Did) -> Option<Connection> {
-        let Some(c) = self.get_connection(did) else {
-            return None;
-        };
-
-        if c.is_connected().await {
-            return Some(c);
-        }
-
-        tracing::debug!(
-            "[get_and_check_connection] connection {did} is not connected, will be dropped"
-        );
-
-        if let Err(e) = self.disconnect(did).await {
-            tracing::error!("Failed on close connection {did}: {e:?}");
-        };
-
-        None
-    }
-
-    /// Get connection by did.
-    pub fn get_connection(&self, did: Did) -> Option<Connection> {
-        self.transport.connection(&did.to_string()).ok()
-    }
-
-    /// Get all connections in transport.
-    pub fn get_connections(&self) -> Vec<(Did, Connection)> {
-        self.transport
-            .connections()
-            .into_iter()
-            .filter_map(|(k, v)| Did::from_str(&k).ok().map(|did| (did, v)))
-            .collect()
-    }
-
-    /// Get dids of all connections in transport.
-    pub fn get_connection_ids(&self) -> Vec<Did> {
-        self.transport
-            .connection_ids()
-            .into_iter()
-            .filter_map(|k| Did::from_str(&k).ok())
-            .collect()
     }
 }
 
@@ -198,7 +149,7 @@ impl Swarm {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl ConnectionHandshake for Swarm {
     async fn prepare_connection_offer(&self, peer: Did) -> Result<(Connection, ConnectNodeSend)> {
-        if self.get_and_check_connection(peer).await.is_some() {
+        if self.backend.get_and_check_connection(peer).await.is_some() {
             return Err(Error::AlreadyConnected);
         };
 
@@ -216,7 +167,7 @@ impl ConnectionHandshake for Swarm {
         peer: Did,
         offer_msg: &ConnectNodeSend,
     ) -> Result<(Connection, ConnectNodeReport)> {
-        if self.get_and_check_connection(peer).await.is_some() {
+        if self.backend.get_and_check_connection(peer).await.is_some() {
             return Err(Error::AlreadyConnected);
         };
 
@@ -240,7 +191,10 @@ impl ConnectionHandshake for Swarm {
     ) -> Result<Connection> {
         let answer = serde_json::from_str(&answer_msg.sdp).map_err(Error::Deserialize)?;
 
-        let conn = self.get_connection(peer).ok_or(Error::ConnectionNotFound)?;
+        let conn = self
+            .backend
+            .connection(peer)
+            .ok_or(Error::ConnectionNotFound)?;
         conn.webrtc_accept_answer(answer)
             .await
             .map_err(Error::Transport)?;
@@ -323,12 +277,7 @@ impl ConnectionManager for Swarm {
     /// 2) remove from Transport;
     /// 3) close the connection;
     async fn disconnect(&self, did: Did) -> Result<()> {
-        tracing::info!("[disconnect] removing from DHT {:?}", did);
-        self.dht.remove(did)?;
-        self.transport
-            .close_connection(&did.to_string())
-            .await
-            .map_err(|e| e.into())
+        self.backend.disconnect(did).await
     }
 
     /// Connect a given Did. If the did is already connected, return directly,
@@ -336,7 +285,7 @@ impl ConnectionManager for Swarm {
     /// This function may returns a pending connection or connected connection.
     async fn connect(&self, did: Did) -> Result<Connection> {
         tracing::info!("Try connect Did {:?}", &did);
-        if let Some(t) = self.get_and_check_connection(did).await {
+        if let Some(t) = self.backend.get_and_check_connection(did).await {
             return Ok(t);
         }
 
@@ -354,7 +303,7 @@ impl ConnectionManager for Swarm {
 
     /// Similar to connect, but this function will try connect a Did by given hop.
     async fn connect_via(&self, did: Did, next_hop: Did) -> Result<Connection> {
-        if let Some(t) = self.get_and_check_connection(did).await {
+        if let Some(t) = self.backend.get_and_check_connection(did).await {
             return Ok(t);
         }
 

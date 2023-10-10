@@ -93,7 +93,7 @@ where
     }
 
     /// This method closes and releases the connection from pool.
-    /// All references to this cid, created by `get_connection`, will be released.
+    /// All references to this cid, created by `backend.connection`, will be released.
     /// The [ConnectionInterface] methods of them will return [Error::ConnectionReleased].
     pub async fn safely_remove(&self, cid: &str) -> Result<()> {
         let Some((_, conn)) = self.connections.remove(cid) else {
@@ -142,7 +142,7 @@ where
     }
 
     /// This method closes and releases the connection from pool.
-    /// All references to this cid, created by `get_connection`, will be released.
+    /// All references to this cid, created by `backend.connection`, will be released.
     /// The [ConnectionInterface] methods of them will return [Error::ConnectionReleased].
     pub async fn safely_remove(&self, cid: &str) -> Result<()> {
         let Some((_, conn)) = self.connections.remove(cid) else {

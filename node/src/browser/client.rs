@@ -421,7 +421,7 @@ impl Client {
             let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
             let conn = p
                 .swarm
-                .get_connection(did)
+                .backend.connection(did)
                 .ok_or_else(|| JsError::new("connection not found"))?;
             let state = format!("{:?}", conn.webrtc_connection_state());
             Ok(js_value::serialize(&state).map_err(JsError::from)?)

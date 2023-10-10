@@ -130,7 +130,7 @@ pub trait TransportInterface {
     /// Used to create a new connection and register it in [Transport](crate::Transport).
     ///
     /// To avoid memory leak, this function will not return a connection object.
-    /// Instead, use should use `get_connection` method of [Transport](crate::Transport)
+    /// Instead, use should use `backend.connection` method of [Transport](crate::Transport)
     /// to get a [ConnectionRef](crate::connection_ref::ConnectionRef) after creation.
     ///
     /// See [connections](crate::connections) module for examples.
@@ -141,7 +141,7 @@ pub trait TransportInterface {
     ) -> Result<(), Self::Error>;
 
     /// This method closes and releases the connection from transport.
-    /// All references to this cid, created by `get_connection`, will be released.
+    /// All references to this cid, created by `backend.connection`, will be released.
     /// The [ConnectionInterface] methods of them will return [Error::ConnectionReleased].
     async fn close_connection(&self, cid: &str) -> Result<(), Self::Error>;
 

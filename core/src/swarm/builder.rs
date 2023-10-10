@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use rings_transport::core::callback::TransportCallback;
 
+use crate::backend::RingsBackend;
 use crate::channels::Channel;
 use crate::dht::PeerRing;
 use crate::message::MessageHandler;
@@ -100,13 +101,13 @@ impl SwarmBuilder {
             InnerSwarmCallback::new(transport_event_channel.sender(), swarm_callback).boxed(),
         );
 
+        let backend = Arc::new(RingsBackend::new(dht, transport));
         Swarm {
             transport_event_channel,
-            dht,
             measure: self.measure,
+            backend,
             session_sk: self.session_sk,
             message_handler,
-            transport,
             transport_callback,
         }
     }

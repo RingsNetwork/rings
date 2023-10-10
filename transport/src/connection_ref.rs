@@ -15,7 +15,7 @@ use crate::error::Result;
 
 /// The[ConnectionRef] is a weak reference to a connection and implements the `ConnectionInterface` trait.
 /// When the connection is dropped, it returns an error called [Error::ConnectionReleased].
-/// It serves as the return value for the `get_connection` method of [Transport](crate::Transport).
+/// It serves as the return value for the `backend.connection` method of [Transport](crate::Transport).
 pub struct ConnectionRef<C> {
     cid: String,
     conn: Weak<C>,

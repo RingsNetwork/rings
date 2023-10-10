@@ -134,7 +134,7 @@ pub(crate) async fn connect_with_seed(params: Params, meta: RpcMeta) -> Result<V
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
 
     let mut connected_addresses: HashSet<Did> =
-        HashSet::from_iter(meta.processor.swarm.get_connection_ids());
+        HashSet::from_iter(meta.processor.swarm.backend.connection_ids());
     connected_addresses.insert(meta.processor.swarm.did());
 
     let tasks = seed

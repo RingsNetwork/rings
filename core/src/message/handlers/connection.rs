@@ -604,7 +604,7 @@ pub mod tests {
             Message::FindSuccessorReport(FindSuccessorReport{did, handler: FindSuccessorReportHandler::Connect}) if did == node3.did()
         ));
         // dht3 won't set did3 as successor
-        assert!(!node3.dht.successors().list()?.contains(&node3.did()));
+        assert!(!node3.dht().successors().list()?.contains(&node3.did()));
 
         // 2->3 FindSuccessorReport
         let ev_3 = node3.listen_once().await.unwrap().0;
@@ -620,7 +620,7 @@ pub mod tests {
             Message::FindSuccessorReport(FindSuccessorReport{did, handler: FindSuccessorReportHandler::Connect}) if did == node1.did()
         ));
         // dht1 won't set did1 as successor
-        assert!(!node1.dht.successors().list()?.contains(&node1.did()));
+        assert!(!node1.dht().successors().list()?.contains(&node1.did()));
 
         assert_no_more_msg(&node1, &node2, &node3).await;
 
@@ -721,10 +721,10 @@ pub mod tests {
         node3: &Swarm,
     ) -> Result<()> {
         // check node1 and node3 is not connected to each other
-        assert!(node1.get_connection(node3.did()).is_none());
+        assert!(node1.backend.connection(node3.did()).is_none());
 
         // node1's successor should be node2 now
-        assert_eq!(node1.dht.successors().max()?, node2.did());
+        assert_eq!(node1.dht().successors().max()?, node2.did());
 
         node1.connect(node3.did()).await.unwrap();
 
@@ -791,12 +791,12 @@ pub mod tests {
         println!(
             "Check transport of {:?}: {:?} for addresses {:?}",
             swarm.did(),
-            swarm.get_connection_ids(),
+            swarm.backend.connection_ids(),
             addresses
         );
-        assert_eq!(swarm.get_connections().len(), addresses.len());
+        assert_eq!(swarm.backend.connections().len(), addresses.len());
         for addr in addresses {
-            assert!(swarm.get_connection(addr).is_some());
+            assert!(swarm.backend.connection(addr).is_some());
         }
     }
 
@@ -947,7 +947,7 @@ pub mod tests {
         for _ in 1..10 {
             println!("wait 3 seconds for node2's transport 2to1 closing");
             sleep(Duration::from_secs(3)).await;
-            if let Some(t) = node2.get_connection(node1.did()) {
+            if let Some(t) = node2.backend.connection(node1.did()) {
                 if t.is_disconnected().await {
                     println!("transport 2to1 is disconnected!!!!");
                     break;

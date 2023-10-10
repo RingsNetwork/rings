@@ -14,17 +14,16 @@ use async_trait::async_trait;
 pub use builder::SwarmBuilder;
 use rings_derive::JudgeConnection;
 use rings_transport::core::callback::BoxedTransportCallback;
-use rings_transport::core::transport::BoxedTransport;
 use rings_transport::core::transport::ConnectionInterface;
 use rings_transport::core::transport::TransportMessage;
-use rings_transport::error::Error as TransportError;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 pub use types::MeasureImpl;
 pub use types::WrappedDid;
 
+use crate::backend::RingsBackend;
 use crate::channels::Channel;
-use crate::dht::types::Chord;
+use crate::dht::Chord;
 use crate::dht::CorrectChord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
@@ -44,32 +43,29 @@ use crate::swarm::impls::ConnectionHandshake;
 use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::TransportEvent;
 use crate::types::Connection;
-use crate::types::ConnectionOwner;
 
 /// The transport and dht management.
 #[derive(JudgeConnection)]
 pub struct Swarm {
     /// Event channel for receive events from transport.
     pub(crate) transport_event_channel: Channel<TransportEvent>,
-    /// Reference of DHT.
-    pub(crate) dht: Arc<PeerRing>,
+    pub backend: Arc<RingsBackend>,
     /// Implementationof measurement.
     pub(crate) measure: Option<MeasureImpl>,
     session_sk: SessionSk,
     message_handler: MessageHandler,
-    transport: BoxedTransport<ConnectionOwner, TransportError>,
     transport_callback: Arc<BoxedTransportCallback>,
 }
 
 impl Swarm {
     /// Get did of self.
     pub fn did(&self) -> Did {
-        self.dht.did
+        self.backend.dht.did
     }
 
     /// Get DHT(Distributed Hash Table) of self.
     pub fn dht(&self) -> Arc<PeerRing> {
-        self.dht.clone()
+        self.backend.dht.clone()
     }
 
     /// Retrieves the session sk associated with the current instance.
@@ -87,13 +83,13 @@ impl Swarm {
                 tracing::debug!("load message from channel: {:?}", payload);
                 Ok(Some(payload))
             }
-            TransportEvent::Connected(did) => match self.get_connection(did) {
+            TransportEvent::Connected(did) => match self.backend.connection(did) {
                 Some(_) => {
                     let payload = MessagePayload::new_send(
                         Message::JoinDHT(message::JoinDHT { did }),
                         &self.session_sk,
-                        self.dht.did,
-                        self.dht.did,
+                        self.did(),
+                        self.did(),
                     )?;
                     Ok(Some(payload))
                 }
@@ -103,8 +99,8 @@ impl Swarm {
                 let payload = MessagePayload::new_send(
                     Message::LeaveDHT(message::LeaveDHT { did }),
                     &self.session_sk,
-                    self.dht.did,
-                    self.dht.did,
+                    self.did(),
+                    self.did(),
                 )?;
                 Ok(Some(payload))
             }
@@ -169,7 +165,7 @@ impl Swarm {
         match event {
             MessageHandlerEvent::Connect(did) => {
                 let did = *did;
-                if self.get_and_check_connection(did).await.is_none() && did != self.did() {
+                if self.backend.get_and_check_connection(did).await.is_none() && did != self.did() {
                     self.connect(did).await?;
                 }
                 Ok(vec![])
@@ -177,14 +173,13 @@ impl Swarm {
 
             // Notify did with self.id
             MessageHandlerEvent::Notify(did) => {
-                let msg =
-                    Message::NotifyPredecessorSend(NotifyPredecessorSend { did: self.dht.did });
+                let msg = Message::NotifyPredecessorSend(NotifyPredecessorSend { did: self.did() });
                 Ok(vec![MessageHandlerEvent::SendMessage(msg, *did)])
             }
 
             MessageHandlerEvent::ConnectVia(did, next) => {
                 let did = *did;
-                if self.get_and_check_connection(did).await.is_none() && did != self.did() {
+                if self.backend.get_and_check_connection(did).await.is_none() && did != self.did() {
                     self.connect_via(did, *next).await?;
                 }
                 Ok(vec![])
@@ -214,6 +209,7 @@ impl Swarm {
 
             MessageHandlerEvent::ForwardPayload(payload, next_hop) => {
                 if self
+                    .backend
                     .get_and_check_connection(payload.relay.destination)
                     .await
                     .is_some()
@@ -229,10 +225,10 @@ impl Swarm {
             MessageHandlerEvent::JoinDHT(ctx, did) => {
                 if cfg!(feature = "experimental") {
                     let wdid: WrappedDid = WrappedDid::new(self, *did);
-                    let dht_ev = self.dht.join_then_sync(wdid).await?;
+                    let dht_ev = self.backend.dht.join_then_sync(wdid).await?;
                     crate::message::handlers::dht::handle_dht_events(&dht_ev, ctx).await
                 } else {
-                    let dht_ev = self.dht.join(*did)?;
+                    let dht_ev = self.backend.dht.join(*did)?;
                     crate::message::handlers::dht::handle_dht_events(&dht_ev, ctx).await
                 }
             }
@@ -324,13 +320,14 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Deb
         #[cfg(test)]
         {
             println!("+++++++++++++++++++++++++++++++++");
-            println!("node {:?}", self.dht.did);
+            println!("node {:?}", self.did());
             println!("Sent {:?}", payload.clone());
             println!("node {:?}", payload.relay.next_hop);
             println!("+++++++++++++++++++++++++++++++++");
         }
 
         let conn = self
+            .backend
             .get_and_check_connection(did)
             .await
             .ok_or(Error::SwarmMissDidInTable(did))?;

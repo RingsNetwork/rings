@@ -387,7 +387,7 @@ impl Processor {
 
     /// List all peers.
     pub async fn list_peers(&self) -> Result<Vec<Peer>> {
-        let conns = self.swarm.get_connections();
+        let conns = self.swarm.backend.connections();
         tracing::debug!(
             "addresses: {:?}",
             conns.iter().map(|(a, _b)| a).collect::<Vec<_>>()
@@ -400,7 +400,7 @@ impl Processor {
     pub async fn get_peer(&self, did: Did) -> Result<Peer> {
         let conn = self
             .swarm
-            .get_connection(did)
+            .backend.connection(did)
             .ok_or(Error::ConnectionNotFound)?;
         Ok(Peer::from(&(did, conn)))
     }
@@ -415,7 +415,7 @@ impl Processor {
 
     /// Disconnect all connections.
     pub async fn disconnect_all(&self) {
-        let dids = self.swarm.get_connection_ids();
+        let dids = self.swarm.backend.connection_ids();
 
         let close_async = dids
             .into_iter()
@@ -646,7 +646,7 @@ mod test {
         let peer_did = SecretKey::random().address().into();
         let (processor, path) = prepare_processor(None).await;
         processor.swarm.create_offer(peer_did).await.unwrap();
-        let conn_dids = processor.swarm.get_connection_ids();
+        let conn_dids = processor.swarm.backend.connection_ids();
         assert_eq!(conn_dids.len(), 1);
         assert_eq!(conn_dids.get(0).unwrap(), &peer_did);
         tokio::fs::remove_dir_all(path).await.unwrap();
@@ -704,7 +704,7 @@ mod test {
         let (conn1, offer) = p1.swarm.create_offer(p2.did()).await.unwrap();
         assert_eq!(
             p1.swarm
-                .get_connection(p2.did())
+                .backend.connection(p2.did())
                 .unwrap()
                 .webrtc_connection_state(),
             WebrtcConnectionState::New,
@@ -725,7 +725,7 @@ mod test {
         assert!(conn1.is_connected().await, "conn1 not connected");
         assert!(
             p1.swarm
-                .get_connection(p2.did())
+                .backend.connection(p2.did())
                 .unwrap()
                 .is_connected()
                 .await,
@@ -734,7 +734,7 @@ mod test {
         assert!(conn2.is_connected().await, "conn2 not connected");
         assert!(
             p2.swarm
-                .get_connection(p1.did())
+                .backend.connection(p1.did())
                 .unwrap()
                 .is_connected()
                 .await,
