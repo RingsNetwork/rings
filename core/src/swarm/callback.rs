@@ -1,9 +1,11 @@
 use std::str::FromStr;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use rings_transport::core::callback::TransportCallback;
 use rings_transport::core::transport::WebrtcConnectionState;
 
+use crate::backend::RingsBackend;
 use crate::channels::Channel;
 use crate::dht::Did;
 use crate::message::Message;
@@ -56,13 +58,19 @@ pub type BoxedSwarmCallback = Box<dyn SwarmCallback>;
 
 pub struct InnerSwarmCallback {
     transport_event_sender: TransportEventSender,
+    backend: Arc<RingsBackend>,
     callback: BoxedSwarmCallback,
 }
 
 impl InnerSwarmCallback {
-    pub fn new(transport_event_sender: TransportEventSender, callback: BoxedSwarmCallback) -> Self {
+    pub fn new(
+        transport_event_sender: TransportEventSender,
+        backend: Arc<RingsBackend>,
+        callback: BoxedSwarmCallback,
+    ) -> Self {
         Self {
             transport_event_sender,
+            backend,
             callback,
         }
     }
@@ -72,12 +80,22 @@ impl InnerSwarmCallback {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl TransportCallback for InnerSwarmCallback {
     async fn on_message(&self, _cid: &str, msg: &[u8]) -> Result<(), CallbackError> {
+        let payload = MessagePayload::from_bincode(msg)?;
+
+        if !payload.verify() {
+            tracing::error!("Cannot verify msg or it's expired: {:?}", payload);
+            return Err("Cannot verify msg or it's expired".into());
+        }
+
+        self.callback.on_validate(&payload).await?;
+
         Channel::send(
             &self.transport_event_sender,
             TransportEvent::DataChannelMessage(msg.into()),
         )
-        .await
-        .map_err(|e| e.into())
+        .await?;
+
+        self.callback.on_payload(&payload).await
     }
 
     async fn on_peer_connection_state_change(

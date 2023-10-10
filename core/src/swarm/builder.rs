@@ -97,11 +97,17 @@ impl SwarmBuilder {
         let transport_event_channel = Channel::new();
 
         let transport = Box::new(Transport::new(&self.ice_servers, self.external_address));
+        let backend = Arc::new(RingsBackend::new(dht, transport));
+
         let transport_callback = Arc::new(
-            InnerSwarmCallback::new(transport_event_channel.sender(), swarm_callback).boxed(),
+            InnerSwarmCallback::new(
+                transport_event_channel.sender(),
+                backend.clone(),
+                swarm_callback,
+            )
+            .boxed(),
         );
 
-        let backend = Arc::new(RingsBackend::new(dht, transport));
         Swarm {
             transport_event_channel,
             measure: self.measure,
