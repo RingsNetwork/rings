@@ -6,7 +6,7 @@ use crate::prelude::*;
 
 /// send chunk report message
 pub async fn send_chunk_report_message(
-    ctx: &MessagePayload<Message>,
+    ctx: &MessagePayload,
     data: &[u8],
 ) -> Result<MessageHandlerEvent> {
     let mut new_bytes: Vec<u8> = Vec::with_capacity(data.len() + 1);

@@ -111,7 +111,7 @@ async fn jsonrpc_io_handler(
             .swarm
             .session_sk()
             .session()
-            .verify(&body, sig)
+            .verify(body.as_bytes(), sig)
             .map_err(|e| {
                 tracing::debug!("body: {:?}", body);
                 tracing::debug!("signature: {:?}", signature);

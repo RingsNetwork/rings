@@ -6,7 +6,6 @@ pub(crate) mod callback;
 pub mod impls;
 mod types;
 
-use std::fmt;
 use std::sync::Arc;
 
 use async_recursion::async_recursion;
@@ -18,8 +17,6 @@ use rings_transport::core::transport::BoxedTransport;
 use rings_transport::core::transport::ConnectionInterface;
 use rings_transport::core::transport::TransportMessage;
 use rings_transport::error::Error as TransportError;
-use serde::de::DeserializeOwned;
-use serde::Serialize;
 pub use types::MeasureImpl;
 pub use types::WrappedDid;
 
@@ -38,6 +35,7 @@ use crate::message::Message;
 use crate::message::MessageHandler;
 use crate::message::MessageHandlerEvent;
 use crate::message::MessagePayload;
+use crate::message::MessageVerificationExt;
 use crate::message::PayloadSender;
 use crate::session::SessionSk;
 use crate::swarm::impls::ConnectionHandshake;
@@ -80,7 +78,7 @@ impl Swarm {
     }
 
     /// Load message from a TransportEvent.
-    async fn load_message(&self, ev: TransportEvent) -> Result<Option<MessagePayload<Message>>> {
+    async fn load_message(&self, ev: TransportEvent) -> Result<Option<MessagePayload>> {
         match ev {
             TransportEvent::DataChannelMessage(msg) => {
                 let payload = MessagePayload::from_bincode(&msg)?;
@@ -113,7 +111,7 @@ impl Swarm {
 
     /// This method is required because web-sys components is not `Send`
     /// which means an async loop cannot running concurrency.
-    pub async fn poll_message(&self) -> Option<MessagePayload<Message>> {
+    pub async fn poll_message(&self) -> Option<MessagePayload> {
         let receiver = &self.transport_event_channel.receiver();
         match Channel::recv(receiver).await {
             Ok(Some(ev)) => match self.load_message(ev).await {
@@ -132,10 +130,10 @@ impl Swarm {
     /// This method is required because web-sys components is not `Send`
     /// This method will return events already consumed (landed), which is ok to be ignore.
     /// which means a listening loop cannot running concurrency.
-    pub async fn listen_once(&self) -> Option<(MessagePayload<Message>, Vec<MessageHandlerEvent>)> {
+    pub async fn listen_once(&self) -> Option<(MessagePayload, Vec<MessageHandlerEvent>)> {
         let payload = self.poll_message().await?;
 
-        if !payload.verify() {
+        if !(payload.verify() && payload.transaction.verify()) {
             tracing::error!("Cannot verify msg or it's expired: {:?}", payload);
             return None;
         }
@@ -309,9 +307,7 @@ impl Swarm {
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-impl<T> PayloadSender<T> for Swarm
-where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Debug
-{
+impl PayloadSender for Swarm {
     fn session_sk(&self) -> &SessionSk {
         Swarm::session_sk(self)
     }
@@ -320,7 +316,7 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Deb
         Swarm::dht(self)
     }
 
-    async fn do_send_payload(&self, did: Did, payload: MessagePayload<T>) -> Result<()> {
+    async fn do_send_payload(&self, did: Did, payload: MessagePayload) -> Result<()> {
         #[cfg(test)]
         {
             println!("+++++++++++++++++++++++++++++++++");

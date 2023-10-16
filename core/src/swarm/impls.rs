@@ -11,6 +11,7 @@ use crate::message::ConnectNodeReport;
 use crate::message::ConnectNodeSend;
 use crate::message::Message;
 use crate::message::MessagePayload;
+use crate::message::MessageVerificationExt;
 use crate::message::PayloadSender;
 use crate::swarm::Swarm;
 use crate::types::Connection;
@@ -38,21 +39,18 @@ pub trait ConnectionHandshake {
 
     /// Creaet new connection and its answer. This function will wrap the offer inside a payload
     /// with verification.
-    async fn create_offer(&self, peer: Did) -> Result<(Connection, MessagePayload<Message>)>;
+    async fn create_offer(&self, peer: Did) -> Result<(Connection, MessagePayload)>;
 
     /// Answer the offer of remote connection. This function will verify the answer payload and
     /// will wrap the answer inside a payload with verification.
     async fn answer_offer(
         &self,
-        offer_payload: MessagePayload<Message>,
-    ) -> Result<(Connection, MessagePayload<Message>)>;
+        offer_payload: MessagePayload,
+    ) -> Result<(Connection, MessagePayload)>;
 
     /// Accept the answer of remote connection. This function will verify the answer payload and
     /// will return its did with the connection.
-    async fn accept_answer(
-        &self,
-        answer_payload: MessagePayload<Message>,
-    ) -> Result<(Did, Connection)>;
+    async fn accept_answer(&self, answer_payload: MessagePayload) -> Result<(Did, Connection)>;
 }
 
 /// A trait for managing connections.
@@ -248,7 +246,7 @@ impl ConnectionHandshake for Swarm {
         Ok(conn)
     }
 
-    async fn create_offer(&self, peer: Did) -> Result<(Connection, MessagePayload<Message>)> {
+    async fn create_offer(&self, peer: Did) -> Result<(Connection, MessagePayload)> {
         let (conn, offer_msg) = self.prepare_connection_offer(peer).await?;
 
         // This payload has fake next_hop.
@@ -265,13 +263,13 @@ impl ConnectionHandshake for Swarm {
 
     async fn answer_offer(
         &self,
-        offer_payload: MessagePayload<Message>,
-    ) -> Result<(Connection, MessagePayload<Message>)> {
+        offer_payload: MessagePayload,
+    ) -> Result<(Connection, MessagePayload)> {
         if !offer_payload.verify() {
             return Err(Error::VerifySignatureFailed);
         }
 
-        let Message::ConnectNodeSend(msg) = offer_payload.data else {
+        let Message::ConnectNodeSend(msg) = offer_payload.transaction.data()? else {
             return Err(Error::InvalidMessage(
                 "Should be ConnectNodeSend".to_string(),
             ));
@@ -292,17 +290,14 @@ impl ConnectionHandshake for Swarm {
         Ok((conn, answer_payload))
     }
 
-    async fn accept_answer(
-        &self,
-        answer_payload: MessagePayload<Message>,
-    ) -> Result<(Did, Connection)> {
+    async fn accept_answer(&self, answer_payload: MessagePayload) -> Result<(Did, Connection)> {
         tracing::debug!("accept_answer: {:?}", answer_payload);
 
         if !answer_payload.verify() {
             return Err(Error::VerifySignatureFailed);
         }
 
-        let Message::ConnectNodeReport(ref msg) = answer_payload.data else {
+        let Message::ConnectNodeReport(ref msg) = answer_payload.transaction.data()? else {
             return Err(Error::InvalidMessage(
                 "Should be ConnectNodeReport".to_string(),
             ));

@@ -28,7 +28,6 @@ use crate::prelude::rings_core::dht::Did;
 use crate::prelude::rings_core::message::Decoder;
 use crate::prelude::rings_core::message::Encoded;
 use crate::prelude::rings_core::message::Encoder;
-use crate::prelude::rings_core::message::Message;
 use crate::prelude::rings_core::message::MessagePayload;
 use crate::prelude::rings_core::prelude::vnode::VirtualNode;
 use crate::prelude::rings_rpc;
@@ -205,7 +204,7 @@ pub(crate) async fn answer_offer(params: Params, meta: RpcMeta) -> Result<Value>
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
     let encoded: Encoded = <Encoded as From<&str>>::from(offer_payload_str);
     let offer_payload =
-        MessagePayload::<Message>::from_encoded(&encoded).map_err(|_| ServerError::DecodeError)?;
+        MessagePayload::from_encoded(&encoded).map_err(|_| ServerError::DecodeError)?;
 
     let (_, answer_payload) = meta
         .processor
@@ -234,7 +233,7 @@ pub(crate) async fn accept_answer(params: Params, meta: RpcMeta) -> Result<Value
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
     let encoded: Encoded = <Encoded as From<&str>>::from(answer_payload_str);
     let answer_payload =
-        MessagePayload::<Message>::from_encoded(&encoded).map_err(|_| ServerError::DecodeError)?;
+        MessagePayload::from_encoded(&encoded).map_err(|_| ServerError::DecodeError)?;
     let p: processor::Peer = meta
         .processor
         .swarm

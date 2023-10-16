@@ -60,7 +60,7 @@ macro_rules! handle_multi_actions {
 #[cfg_attr(not(feature = "wasm"), async_recursion)]
 pub async fn handle_dht_events(
     act: &PeerRingAction,
-    ctx: &MessagePayload<Message>,
+    ctx: &MessagePayload,
 ) -> Result<Vec<MessageHandlerEvent>> {
     match act {
         PeerRingAction::None => Ok(vec![]),

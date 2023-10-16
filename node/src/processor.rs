@@ -357,8 +357,8 @@ impl Processor {
 
         let encoded_answer: Encoded = <Encoded as From<&str>>::from(&answer_payload_str);
 
-        let answer_payload = MessagePayload::<Message>::from_encoded(&encoded_answer)
-            .map_err(|_| Error::DecodeError)?;
+        let answer_payload =
+            MessagePayload::from_encoded(&encoded_answer).map_err(|_| Error::DecodeError)?;
 
         let (did, conn) = self
             .swarm
@@ -660,7 +660,7 @@ mod test {
     impl MessageCallback for MsgCallbackStruct {
         async fn custom_message(
             &self,
-            _ctx: &MessagePayload<Message>,
+            _ctx: &MessagePayload,
             msg: &CustomMessage,
         ) -> Vec<MessageHandlerEvent> {
             let text = unpack_text_message(msg).unwrap();
@@ -669,10 +669,7 @@ mod test {
             vec![]
         }
 
-        async fn builtin_message(
-            &self,
-            _ctx: &MessagePayload<Message>,
-        ) -> Vec<MessageHandlerEvent> {
+        async fn builtin_message(&self, _ctx: &MessagePayload) -> Vec<MessageHandlerEvent> {
             vec![]
         }
     }

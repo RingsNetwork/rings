@@ -9,7 +9,7 @@ use crate::ecc::PublicKeyAddress;
 use crate::error::Result;
 
 /// recover pubkey according to signature.
-pub fn recover(msg: &str, sig: impl AsRef<[u8]>) -> Result<PublicKey> {
+pub fn recover(msg: &[u8], sig: impl AsRef<[u8]>) -> Result<PublicKey> {
     let mut sig = sig.as_ref().to_vec();
     sig.rotate_left(1);
     let sig = sig.as_mut_slice();
@@ -20,7 +20,7 @@ pub fn recover(msg: &str, sig: impl AsRef<[u8]>) -> Result<PublicKey> {
 }
 
 /// verify message signed by Ethereum address.
-pub fn verify(msg: &str, address: &PublicKeyAddress, sig: impl AsRef<[u8]>) -> bool {
+pub fn verify(msg: &[u8], address: &PublicKeyAddress, sig: impl AsRef<[u8]>) -> bool {
     match recover(msg, sig.as_ref()) {
         Ok(recover_pk) => {
             if recover_pk.address() == *address {
@@ -35,7 +35,7 @@ pub fn verify(msg: &str, address: &PublicKeyAddress, sig: impl AsRef<[u8]>) -> b
         }
         Err(e) => {
             tracing::debug!(
-                "failed to recover pubkey: {:?}\nmsg: {}\nsig:{:?}",
+                "failed to recover pubkey: {:?}\nmsg: {:?}\nsig:{:?}",
                 e,
                 msg,
                 sig.as_ref(),
@@ -67,14 +67,13 @@ fn varint_buf_num(n: u64) -> Vec<u8> {
     }
 }
 
-pub fn magic_hash(msg: &str) -> [u8; 32] {
+pub fn magic_hash(msg: &[u8]) -> [u8; 32] {
     let magic_bytes = "Bitcoin Signed Message:\n".as_bytes();
-    let msg_bytes = msg.as_bytes();
     let mut buf = Vec::new();
     buf.extend_from_slice(varint_buf_num(magic_bytes.len() as u64).as_slice());
     buf.extend_from_slice(magic_bytes);
-    buf.extend_from_slice(varint_buf_num(msg_bytes.len() as u64).as_slice());
-    buf.extend_from_slice(msg_bytes);
+    buf.extend_from_slice(varint_buf_num(msg.len() as u64).as_slice());
+    buf.extend_from_slice(msg);
     let hash = Sha256::digest(Sha256::digest(&buf));
     hash.into()
 }
@@ -100,7 +99,7 @@ mod test {
         ];
         assert_eq!(sig.len(), 65);
 
-        let pk = self::recover(msg, sig).unwrap();
+        let pk = self::recover(msg.as_bytes(), sig).unwrap();
         assert_eq!(pk, pubkey);
         assert_eq!(pk.address(), pubkey.address());
     }

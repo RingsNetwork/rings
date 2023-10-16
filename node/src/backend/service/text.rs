@@ -18,7 +18,7 @@ pub struct TextEndpoint;
 impl MessageEndpoint for TextEndpoint {
     async fn handle_message(
         &self,
-        ctx: &MessagePayload<Message>,
+        ctx: &MessagePayload,
         data: &BackendMessage,
     ) -> Result<Vec<MessageHandlerEvent>> {
         let text = str::from_utf8(&data.data).map_err(|_| Error::InvalidMessage)?;

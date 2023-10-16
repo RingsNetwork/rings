@@ -80,7 +80,7 @@ impl SimpleClient {
 
         if let Some(delegated_sk) = &self.delegated_sk {
             let sig = delegated_sk
-                .sign(&request.clone())
+                .sign(request.clone().as_bytes())
                 .map_err(|e| RpcError::Client(format!("Failed to sign request: {}", e)))?;
             let encoded_sig = base64::encode(sig);
             req = req.header("X-SIGNATURE", encoded_sig);
