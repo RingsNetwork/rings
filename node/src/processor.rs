@@ -308,6 +308,18 @@ impl Processor {
 
         futures::future::join(message_listener, stabilization)
     }
+
+    /// Listen processor message once
+    pub async fn listen_once(&self) -> () {
+        let swarm = self.swarm.clone();
+        swarm.listen_once().await;
+    }
+
+    /// Stabilize Chord DHT once
+    pub async fn stable_once(&self) -> () {
+	let stb = self.stabilization.clone();
+	stb.stabilize().await.unwrap_or_else(|e| tracing::error!("failed to stabilize {:?}", e));
+    }
 }
 
 impl Processor {

@@ -1,3 +1,17 @@
+//! rings.h
+//! ```C
+//! typedef void (* custom_message_callback_t)(const char*, const char*);
+//! typedef void (* builtin_message_callback_t)(const char*);
+//! typedef struct {
+//!    custom_message_callback_t custom_message_callback;
+//!    builtin_message_callback_t builtin_message_callback;
+//! } MessageCallbackInstanceFFI;
+//! MessageCallbackInstanceFFI * new_callback(custom_message_callback_t custom_message_cb, builtin_message_callback_t builtin_message_cb);
+//! const char * request(void * client, const char * method, const char * request);
+//! void * new_client_with_callback(const char * ice_server, size_t stabilize_timeout, const char * account,
+//!                                 const char * account_type, const char *(*signer)(const char*), MessageCallbackInstanceFFI callback);
+//! ```
+
 use std::ffi::c_char;
 use std::ffi::CStr;
 use std::ffi::CString;
@@ -61,17 +75,47 @@ pub struct ClientFFIPtr {
     handler: *const HandlerType,
 }
 
+impl ClientFFIPtr {
+    pub unsafe fn increase_strong_count(&self) -> () {
+	Arc::increment_strong_count(&self.processor);
+	Arc::increment_strong_count(&self.handler);
+    }
+
+    pub unsafe fn decrease_strong_count(&self) -> () {
+	Arc::decrement_strong_count(&self.processor);
+	Arc::decrement_strong_count(&self.handler);
+    }
+}
+
 impl ClientFFI {
     pub unsafe fn from_ptr(ptr: &ClientFFIPtr) -> ClientFFI {
+	// We create Arcs from raw pointers but we don't clone these Arcs
+        // since it will create unnecessary increments in the ref count.
         let processor = unsafe { Arc::<Processor>::from_raw(ptr.processor as *const Processor) };
         let handler = unsafe { Arc::<HandlerType>::from_raw(ptr.handler as *const HandlerType) };
-        Self { processor, handler }
+
+        // avoid double release
+        let _ = Arc::into_raw(processor.clone());
+        let _ = Arc::into_raw(handler.clone());
+
+	Self { processor, handler }
     }
 
     pub fn into_ptr(&self) -> ClientFFIPtr {
+	// Clone the Arcs, which increases the ref count,
+        // then turn them into raw pointers. This makes sure the memory
+        // won't be deallocated as long as we properly manage the raw pointers.
+        let processor_ptr = Arc::into_raw(self.processor.clone());
+        let handler_ptr = Arc::into_raw(self.handler.clone());
+
+	unsafe {
+	    Arc::increment_strong_count(&processor_ptr);
+	    Arc::increment_strong_count(&handler_ptr);
+	}
+
         ClientFFIPtr {
-            processor: Arc::as_ptr(&self.processor),
-            handler: Arc::as_ptr(&self.handler),
+            processor: processor_ptr,
+            handler: handler_ptr,
         }
     }
 }
@@ -81,12 +125,27 @@ unsafe impl Send for MessageCallbackInstanceFFI {}
 #[cfg(not(feature = "browser"))]
 unsafe impl Sync for MessageCallbackInstanceFFI {}
 
+/// C defs:
+/// '''
+/// typedef void (*CustomMessageCallback)(const char*, const char*);
+/// typedef void (*BuiltinMessageCallback)(const char*);
+/// typedef struct {
+///     CustomMessageCallback custom_message_callback;
+///     BuiltinMessageCallback builtin_message_callback;
+/// } MessageCallbackInstanceFFI;
+/// '''
 #[repr(C)]
+#[derive(Clone)]
 pub struct MessageCallbackInstanceFFI {
     custom_message_callback: Option<extern "C" fn(*const c_char, *const c_char) -> ()>,
     builtin_message_callback: Option<extern "C" fn(*const c_char) -> ()>,
 }
 
+/// C defs:
+/// '''
+/// extern MessageCallbackInstanceFFI new_callback(CustomMessageCallback custom_message_cb,
+///                                               BuiltinMessageCallback builtin_message_cb);
+/// '''
 #[no_mangle]
 pub extern "C" fn new_callback(
     custom_message_cb: Option<extern "C" fn(*const c_char, *const c_char) -> ()>,
@@ -98,6 +157,27 @@ pub extern "C" fn new_callback(
     }
 }
 
+/// C defs:
+///'''
+/// typedef void ClientFFIPtr;
+/// void* listen(const ClientFFIPtr* client);
+/// ```
+#[no_mangle]
+pub unsafe extern "C" fn listen_once(
+    client_ptr: *const ClientFFIPtr,
+) {
+    let client_ptr: &ClientFFIPtr = unsafe { &*client_ptr };
+    let client: ClientFFI = unsafe {ClientFFI::from_ptr(client_ptr) };
+    let p = client.processor.clone();
+    executor::block_on(p.listen_once());
+}
+
+
+/// C defs:
+///'''
+/// typedef void ClientFFIPtr;
+/// const char* request(const ClientFFIPtr* client, const char* method, const char* request);
+/// ```
 #[no_mangle]
 pub unsafe extern "C" fn request(
     client: &ClientFFIPtr,
@@ -121,14 +201,20 @@ pub unsafe extern "C" fn request(
     }
 }
 
+/// C defs:
+/// '''
+/// void * new_client_with_callback(const char * ice_server, size_t stabilize_timeout, const char * account,
+///                                 const char * account_type, const char *(*signer)(const char*),
+///                                 MessageCallbackInstanceFFI callback);
+/// '''
 #[no_mangle]
 pub unsafe extern "C" fn new_client_with_callback(
     ice_server: *const c_char,
-    stabilize_timeout: usize,
+    stabilize_timeout: u32,
     account: *const c_char,
     account_type: *const c_char,
     signer: extern "C" fn(*const c_char) -> *const c_char,
-    callback: MessageCallbackInstanceFFI,
+    callback_ptr: *const MessageCallbackInstanceFFI,
 ) -> ClientFFIPtr {
     fn wrapped_signer(
         signer: extern "C" fn(*const c_char) -> *const c_char,
@@ -138,12 +224,11 @@ pub unsafe extern "C" fn new_client_with_callback(
             let c_data = CString::new(data).expect("Failed on covering String to CString");
             let sig = signer(c_data.as_ptr());
             let c_ret = unsafe { CStr::from_ptr(sig) };
-            let ret = c_ret.to_str().expect("Failed on covering CStr to Str");
-            ret.into()
+	    c_ret.to_bytes().to_vec()
         }
     }
 
-    let ret = match (|| -> Result<ClientFFI> {
+    let client: ClientFFI = match (|| -> Result<ClientFFI> {
         let c_ice = unsafe { CStr::from_ptr(ice_server) };
         let c_acc = unsafe { CStr::from_ptr(account) };
         let c_acc_ty = unsafe { CStr::from_ptr(account_type) };
@@ -152,13 +237,15 @@ pub unsafe extern "C" fn new_client_with_callback(
         let acc: String = c_acc.to_str()?.to_owned();
         let acc_ty: String = c_acc_ty.to_str()?.to_owned();
 
+	let callback: &MessageCallbackInstanceFFI = unsafe { &*callback_ptr };
+
         executor::block_on(ClientFFI::new_client_internal(
             ice,
-            stabilize_timeout,
+            stabilize_timeout as usize,
             acc,
             acc_ty,
             Box::new(wrapped_signer(signer)),
-            Some(callback),
+            Some(callback.clone()),
         ))
     })() {
         Ok(r) => r,
@@ -166,7 +253,9 @@ pub unsafe extern "C" fn new_client_with_callback(
             panic!("Failed on create new client {:#}", e)
         }
     };
-    ret.into_ptr()
+    let ret = client.into_ptr();
+    unsafe { ret.increase_strong_count(); }
+    ret
 }
 
 #[cfg_attr(feature = "browser", async_trait(?Send))]
@@ -215,7 +304,7 @@ impl MessageCallback for MessageCallbackInstanceFFI {
 
 #[allow(dead_code)]
 impl ClientFFI {
-    pub(crate) fn new_client_with_storage_internal(
+    pub(crate) async fn new_client_with_storage_internal(
         config: ProcessorConfig,
         cb: Option<TyMessageCallback>,
         storage_name: String,
@@ -223,17 +312,15 @@ impl ClientFFI {
         let storage_path = storage_name.as_str();
         let measure_path = [storage_path, "measure"].join("/");
 
-        let storage = executor::block_on(PersistenceStorage::new_with_cap_and_name(
+        let storage = PersistenceStorage::new_with_cap_and_name(
             50000,
             storage_path,
-        ))
-        .map_err(Error::Storage)?;
+        ).await.map_err(Error::Storage)?;
 
-        let ms = executor::block_on(PersistenceStorage::new_with_cap_and_path(
+        let ms = PersistenceStorage::new_with_cap_and_path(
             50000,
             measure_path,
-        ))
-        .map_err(Error::Storage)?;
+        ).await.map_err(Error::Storage)?;
         let measure = PeriodicMeasure::new(ms);
 
         let mut processor_builder = ProcessorBuilder::from_config(&config)?
@@ -255,13 +342,13 @@ impl ClientFFI {
         })
     }
 
-    pub(crate) fn new_client_with_storage_and_serialized_config_internal(
+    pub(crate) async fn new_client_with_storage_and_serialized_config_internal(
         config: String,
         callback: Option<TyMessageCallback>,
         storage_name: String,
     ) -> Result<ClientFFI> {
         let config: ProcessorConfig = serde_yaml::from_str(&config)?;
-        Self::new_client_with_storage_internal(config, callback, storage_name)
+        Self::new_client_with_storage_internal(config, callback, storage_name).await
     }
 
     pub(crate) async fn new_client_internal(
@@ -284,7 +371,7 @@ impl ClientFFI {
         } else {
             None
         };
-        Self::new_client_with_storage_internal(config, cb, "rings-node".to_string())
+        Self::new_client_with_storage_internal(config, cb, "rings-node".to_string()).await
     }
 
     /// Request local rpc interface
