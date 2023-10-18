@@ -36,26 +36,6 @@ async fn new_client() -> (Client, String) {
     (client, storage_name)
 }
 
-async fn create_connection(client1: &Client, client2: &Client) {
-    let offer = JsFuture::from(client1.create_offer(client2.address(), None))
-        .await
-        .unwrap()
-        .as_string()
-        .unwrap();
-    console_log!("offer: {:?}", offer);
-    let answer = JsFuture::from(client2.answer_offer(offer))
-        .await
-        .ok()
-        .unwrap()
-        .as_string()
-        .unwrap();
-    console_log!("answer: {:?}", answer);
-    JsFuture::from(client1.accept_answer(answer))
-        .await
-        .ok()
-        .unwrap();
-}
-
 async fn get_peers(client: &Client) -> Vec<browser::Peer> {
     let peers = JsFuture::from(client.list_peers()).await.ok().unwrap();
     let peers: js_sys::Array = peers.into();
