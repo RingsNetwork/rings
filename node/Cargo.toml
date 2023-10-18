@@ -20,7 +20,7 @@ crate-type = ["cdylib", "rlib"]
 default = ["node"]
 ffi = [
     "node",
-    "cbindgen"
+    "cbindgen",
 ]
 node = [
     "tokio",

@@ -2,8 +2,10 @@
 //! General Client, this module provide Client implementation for FFI and WASM
 
 use std::sync::Arc;
+
 use rings_core::session::SessionSkBuilder;
 use rings_core::storage::PersistenceStorage;
+
 use crate::error::Error;
 use crate::error::Result;
 use crate::jsonrpc::handler::MethodHandler;

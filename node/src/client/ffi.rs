@@ -58,7 +58,7 @@
 //!     rings_node.listen(ffi.addressof(client))
 //!     print(client)
 //! ```
-//!
+//! 
 //! Note: Since the above code is executed in a single-process environment of Python,
 //! the Rings' listen loop will block the process. If you wish to use it in a production environment,
 //! you should implement your own more advanced process or thread management.
