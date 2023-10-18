@@ -54,8 +54,8 @@ pub enum Error {
     InvalidDid = 500,
     #[error("Invalid method.")]
     InvalidMethod = 501,
-    #[error("Internal error.")]
-    InternalError = 502,
+    #[error("Internal error: {0}.")]
+    InternalError(rings_core::error::Error) = 502,
     #[error("No Permission")]
     NoPermission = 504,
     #[error("Connect error, {0}")]

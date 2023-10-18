@@ -107,7 +107,7 @@ impl Client {
         let proof = sk_builder.unsigned_proof();
         let sig = signer(proof);
         sk_builder = sk_builder.set_session_sig(sig.to_vec());
-        let session_sk = sk_builder.build().unwrap();
+        let session_sk = sk_builder.build().map_err(Error::InternalError)?;
         let config = ProcessorConfig::new(ice_servers, session_sk, stabilize_timeout);
         Self::new_client_with_storage_internal(config, callback, "rings-node".to_string()).await
     }
