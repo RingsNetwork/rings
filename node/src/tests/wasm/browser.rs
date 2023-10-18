@@ -2,6 +2,7 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::*;
 
+use crate::client::browser;
 use crate::client::browser::Peer;
 use crate::client::Client;
 use crate::prelude::jsonrpc_core::types::response::Output;
@@ -36,14 +37,65 @@ async fn new_client() -> (Client, String) {
     (client, storage_name)
 }
 
-async fn get_peers(client: &Client) -> Vec<browser::Peer> {
+async fn get_peers(client: &Client) -> Vec<Peer> {
     let peers = JsFuture::from(client.list_peers()).await.ok().unwrap();
     let peers: js_sys::Array = peers.into();
-    let peers: Vec<browser::Peer> = peers
+    let peers: Vec<Peer> = peers
         .iter()
         .flat_map(|x| js_value::deserialize(&x).ok())
         .collect::<Vec<_>>();
     peers
+}
+
+async fn create_connection(client1: &Client, client2: &Client) {
+    futures::try_join!(
+        JsFuture::from(client1.listen()),
+        JsFuture::from(client2.listen()),
+    )
+    .unwrap();
+
+    let address = JsValue::from_str(&client2.address());
+    let req0 = js_sys::Array::of1(&address);
+    let offer_fut = JsFuture::from(client1.request("createOffer".to_string(), req0.into(), None))
+        .await
+        .unwrap();
+
+    let offer: String =
+        if let Output::Success(ret) = js_value::deserialize::<Output>(&offer_fut).unwrap() {
+            if let Value::String(o) = ret.result {
+                o
+            } else {
+                panic!("failed to get offer from output result {:?}", ret);
+            }
+        } else {
+            panic!("request failed at create offer");
+        };
+
+    let js_offer = JsValue::from_str(&offer);
+    let req1 = js_sys::Array::of1(&js_offer);
+    let answer_fut = JsFuture::from(client2.request("answerOffer".to_string(), req1.into(), None))
+        .await
+        .unwrap();
+
+    let answer: String = match js_value::deserialize::<Output>(&answer_fut).unwrap() {
+        Output::Success(ret) => {
+            if let Value::String(o) = ret.result {
+                o
+            } else {
+                panic!("failed to get answer from output result {:?}", ret);
+            }
+        }
+        Output::Failure(e) => {
+            panic!("request failed at accept offer, {:?}", e);
+        }
+    };
+
+    let js_answer = JsValue::from_str(&answer);
+    let req2 = js_sys::Array::of1(&js_answer);
+
+    let _ret = JsFuture::from(client1.request("acceptAnswer".to_string(), req2.into(), None))
+        .await
+        .unwrap();
 }
 
 #[wasm_bindgen_test]
@@ -53,8 +105,8 @@ async fn test_two_client_connect_and_list() {
     let (client2, _storage2) = new_client().await;
 
     futures::try_join!(
-        JsFuture::from(client1.start()),
-        JsFuture::from(client2.start()),
+        JsFuture::from(client1.listen()),
+        JsFuture::from(client2.listen()),
     )
     .unwrap();
 
@@ -161,8 +213,8 @@ async fn test_create_connection_via_local_rpc() {
     let (client2, _storage2) = new_client().await;
 
     futures::try_join!(
-        JsFuture::from(client1.start()),
-        JsFuture::from(client2.start()),
+        JsFuture::from(client1.listen()),
+        JsFuture::from(client2.listen()),
     )
     .unwrap();
 

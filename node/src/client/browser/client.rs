@@ -174,7 +174,7 @@ impl Client {
     }
 
     /// listen message callback.
-    pub fn listen(&mut self) -> js_sys::Promise {
+    pub fn listen(&self) -> js_sys::Promise {
         let p = self.processor.clone();
 
         future_to_promise(async move {
