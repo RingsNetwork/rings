@@ -13,7 +13,6 @@ use rings_core::async_trait;
 use rings_core::dht::Did;
 use rings_core::ecc::PublicKey;
 use rings_core::message::CustomMessage;
-use rings_core::message::Message;
 use rings_core::message::MessageCallback;
 use rings_core::message::MessageHandlerEvent;
 use rings_core::message::MessagePayload;
@@ -673,7 +672,7 @@ impl MessageCallbackInstance {
 impl MessageCallbackInstance {
     pub async fn handle_message_data(
         &self,
-        relay: &MessagePayload<Message>,
+        relay: &MessagePayload,
         data: &Bytes,
     ) -> anyhow::Result<()> {
         let m = BackendMessage::try_from(data.to_vec()).map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -694,7 +693,7 @@ impl MessageCallbackInstance {
 
     pub async fn handle_simple_text_message(
         &self,
-        relay: &MessagePayload<Message>,
+        relay: &MessagePayload,
         data: &[u8],
     ) -> anyhow::Result<()> {
         log::debug!("custom_message received: {:?}", data);
@@ -717,20 +716,20 @@ impl MessageCallbackInstance {
 
     pub async fn handle_http_response(
         &self,
-        relay: &MessagePayload<Message>,
+        relay: &MessagePayload,
         data: &[u8],
     ) -> anyhow::Result<()> {
         let msg_content = data;
         log::info!(
             "message of {:?} received, before gunzip: {:?}",
-            relay.tx_id,
+            relay.transaction.tx_id,
             msg_content.len(),
         );
         let this = JsValue::null();
         let msg_content = message::decode_gzip_data(&Bytes::from(data.to_vec())).unwrap();
         log::info!(
             "message of {:?} received, after gunzip: {:?}",
-            relay.tx_id,
+            relay.transaction.tx_id,
             msg_content.len(),
         );
         let http_response: HttpResponse = bincode::deserialize(&msg_content)?;
@@ -783,7 +782,7 @@ impl MessageCallbackInstance {
 impl MessageCallback for MessageCallbackInstance {
     async fn custom_message(
         &self,
-        relay: &MessagePayload<Message>,
+        relay: &MessagePayload,
         msg: &CustomMessage,
     ) -> Vec<MessageHandlerEvent> {
         if msg.0.len() < 2 {
@@ -800,11 +799,14 @@ impl MessageCallback for MessageCallbackInstance {
                 return vec![];
             }
             let data = data.unwrap();
-            log::debug!("chunk message of {:?} received", relay.tx_id);
+            log::debug!("chunk message of {:?} received", relay.transaction.tx_id);
             if let Some(data) = data {
                 data
             } else {
-                log::info!("chunk message of {:?} not complete", relay.tx_id);
+                log::info!(
+                    "chunk message of {:?} not complete",
+                    relay.transaction.tx_id
+                );
                 return vec![];
             }
         } else if tag == 0 {
@@ -819,7 +821,7 @@ impl MessageCallback for MessageCallbackInstance {
         vec![]
     }
 
-    async fn builtin_message(&self, relay: &MessagePayload<Message>) -> Vec<MessageHandlerEvent> {
+    async fn builtin_message(&self, relay: &MessagePayload) -> Vec<MessageHandlerEvent> {
         let this = JsValue::null();
         // log::debug!("builtin_message received: {:?}", relay);
         if let Ok(r) = self

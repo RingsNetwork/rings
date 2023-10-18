@@ -37,9 +37,6 @@ pub mod storage;
 /// Operator and Handler for Subring
 pub mod subring;
 
-/// Type alias for message payload.
-pub type Payload = MessagePayload<Message>;
-
 /// Trait of message callback.
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
@@ -47,11 +44,11 @@ pub trait MessageCallback {
     /// Message handler for custom message
     async fn custom_message(
         &self,
-        ctx: &MessagePayload<Message>,
+        ctx: &MessagePayload,
         msg: &CustomMessage,
     ) -> Vec<MessageHandlerEvent>;
     /// Message handler for builtin message
-    async fn builtin_message(&self, ctx: &MessagePayload<Message>) -> Vec<MessageHandlerEvent>;
+    async fn builtin_message(&self, ctx: &MessagePayload) -> Vec<MessageHandlerEvent>;
 }
 
 /// Trait of message validator.
@@ -59,7 +56,7 @@ pub trait MessageCallback {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait MessageValidator {
     /// Externality validator
-    async fn validate(&self, ctx: &MessagePayload<Message>) -> Option<String>;
+    async fn validate(&self, ctx: &MessagePayload) -> Option<String>;
 }
 
 /// Boxed Callback, for non-wasm, it should be Sized, Send and Sync.
@@ -92,7 +89,7 @@ pub enum MessageHandlerEvent {
 
     /// Instructs the swarm to answer an offer inside payload by given
     /// sender's Did and Message.
-    AnswerOffer(Payload, ConnectNodeSend),
+    AnswerOffer(MessagePayload, ConnectNodeSend),
 
     /// Instructs the swarm to accept an answer inside payload by given
     /// sender's Did and Message.
@@ -100,10 +97,10 @@ pub enum MessageHandlerEvent {
 
     /// Tell swarm to forward the payload to destination by given
     /// Payload and optional next hop.
-    ForwardPayload(Payload, Option<Did>),
+    ForwardPayload(MessagePayload, Option<Did>),
 
     /// Instructs the swarm to notify the dht about new peer.
-    JoinDHT(Payload, Did),
+    JoinDHT(MessagePayload, Did),
 
     /// Instructs the swarm to send a direct message to a peer.
     SendDirectMessage(Message, Did),
@@ -112,10 +109,10 @@ pub enum MessageHandlerEvent {
     SendMessage(Message, Did),
 
     /// Instructs the swarm to send a message as a response to the received message.
-    SendReportMessage(Payload, Message),
+    SendReportMessage(MessagePayload, Message),
 
     /// Instructs the swarm to send a message to a peer via the dht network with a specific next hop.
-    ResetDestination(Payload, Did),
+    ResetDestination(MessagePayload, Did),
 
     /// Instructs the swarm to store vnode.
     StorageStore(VirtualNode),
@@ -138,11 +135,7 @@ pub struct MessageHandler {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait HandleMsg<T> {
     /// Message handler.
-    async fn handle(
-        &self,
-        ctx: &MessagePayload<Message>,
-        msg: &T,
-    ) -> Result<Vec<MessageHandlerEvent>>;
+    async fn handle(&self, ctx: &MessagePayload, msg: &T) -> Result<Vec<MessageHandlerEvent>>;
 }
 
 impl MessageHandler {
@@ -160,19 +153,26 @@ impl MessageHandler {
     }
 
     /// Invoke callback, which will be call after builtin handler.
-    async fn invoke_callback(&self, payload: &MessagePayload<Message>) -> Vec<MessageHandlerEvent> {
+    async fn invoke_callback(
+        &self,
+        payload: &MessagePayload,
+        message: &Message,
+    ) -> Vec<MessageHandlerEvent> {
         if let Some(ref cb) = *self.callback {
-            match payload.data {
+            match message {
                 Message::CustomMessage(ref msg) => {
-                    if self.dht.did == payload.relay.destination {
-                        tracing::debug!("INVOKE CUSTOM MESSAGE CALLBACK {}", &payload.tx_id);
+                    if self.dht.did == payload.transaction.destination {
+                        tracing::debug!(
+                            "INVOKE CUSTOM MESSAGE CALLBACK {}",
+                            &payload.transaction.tx_id
+                        );
                         return cb.custom_message(payload, msg).await;
                     }
                 }
                 _ => return cb.builtin_message(payload).await,
             };
-        } else if let Message::CustomMessage(ref msg) = payload.data {
-            if self.dht.did == payload.relay.destination {
+        } else if let Message::CustomMessage(ref msg) = message {
+            if self.dht.did == payload.transaction.destination {
                 tracing::warn!("No callback registered, skip invoke_callback of {:?}", msg);
             }
         }
@@ -180,7 +180,7 @@ impl MessageHandler {
     }
 
     /// Validate message.
-    async fn validate(&self, payload: &MessagePayload<Message>) -> Result<()> {
+    async fn validate(&self, payload: &MessagePayload) -> Result<()> {
         if let Some(ref v) = *self.validator {
             v.validate(payload)
                 .await
@@ -195,17 +195,22 @@ impl MessageHandler {
     #[cfg_attr(not(feature = "wasm"), async_recursion)]
     pub async fn handle_message(
         &self,
-        payload: &MessagePayload<Message>,
+        payload: &MessagePayload,
     ) -> Result<Vec<MessageHandlerEvent>> {
+        self.validate(payload).await?;
+        let message: Message = payload.transaction.data()?;
+
         #[cfg(test)]
         {
-            println!("{} got msg {}", self.dht.did, &payload.data);
+            println!("{} got msg {}", self.dht.did, &message);
         }
-        tracing::debug!("START HANDLE MESSAGE: {} {}", &payload.tx_id, &payload.data);
+        tracing::debug!(
+            "START HANDLE MESSAGE: {} {}",
+            &payload.transaction.tx_id,
+            &message
+        );
 
-        self.validate(payload).await?;
-
-        let mut events = match &payload.data {
+        let mut events = match &message {
             Message::JoinDHT(ref msg) => self.handle(payload, msg).await,
             Message::LeaveDHT(ref msg) => self.handle(payload, msg).await,
             Message::ConnectNodeSend(ref msg) => self.handle(payload, msg).await,
@@ -223,11 +228,11 @@ impl MessageHandler {
             Message::QueryForTopoInfoReport(ref msg) => self.handle(payload, msg).await,
         }?;
 
-        tracing::debug!("INVOKE CALLBACK {}", &payload.tx_id);
+        tracing::debug!("INVOKE CALLBACK {}", &payload.transaction.tx_id);
 
-        events.extend(self.invoke_callback(payload).await);
+        events.extend(self.invoke_callback(payload, &message).await);
 
-        tracing::debug!("FINISH HANDLE MESSAGE {}", &payload.tx_id);
+        tracing::debug!("FINISH HANDLE MESSAGE {}", &payload.transaction.tx_id);
         Ok(events)
     }
 }
@@ -242,6 +247,7 @@ pub mod tests {
     use super::*;
     use crate::dht::Did;
     use crate::ecc::SecretKey;
+    use crate::message::MessageVerificationExt;
     use crate::message::PayloadSender;
     use crate::swarm::Swarm;
     use crate::tests::default::prepare_node_with_callback;
@@ -262,22 +268,19 @@ pub mod tests {
         impl MessageCallback for MessageCallbackInstance {
             async fn custom_message(
                 &self,
-                ctx: &MessagePayload<Message>,
+                ctx: &MessagePayload,
                 msg: &CustomMessage,
             ) -> Vec<MessageHandlerEvent> {
                 self.handler_messages
                     .lock()
                     .await
-                    .push((ctx.addr, msg.0.clone()));
-                println!("{:?}, {:?}, {:?}", ctx, ctx.addr, msg);
+                    .push((ctx.signer(), msg.0.clone()));
+                println!("{:?}, {:?}, {:?}", ctx, ctx.signer(), msg);
                 vec![]
             }
 
-            async fn builtin_message(
-                &self,
-                ctx: &MessagePayload<Message>,
-            ) -> Vec<MessageHandlerEvent> {
-                println!("{:?}, {:?}", ctx, ctx.addr);
+            async fn builtin_message(&self, ctx: &MessagePayload) -> Vec<MessageHandlerEvent> {
+                println!("{:?}, {:?}", ctx, ctx.signer());
                 vec![]
             }
         }

@@ -47,6 +47,7 @@ use serde::Serialize;
 
 use crate::consts::DEFAULT_SESSION_TTL_MS;
 use crate::dht::Did;
+use crate::ecc::keccak256;
 use crate::ecc::signers;
 use crate::ecc::PublicKey;
 use crate::ecc::SecretKey;
@@ -54,7 +55,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::utils;
 
-fn pack_session(session_id: Did, ts_ms: u128, ttl_ms: usize) -> String {
+fn pack_session(session_id: Did, ts_ms: u128, ttl_ms: u64) -> String {
     format!("{}\n{}\n{}", session_id, ts_ms, ttl_ms)
 }
 
@@ -72,7 +73,7 @@ pub struct SessionSkBuilder {
     /// Account of session.
     account_type: String,
     /// Session's lifetime
-    ttl_ms: usize,
+    ttl_ms: u64,
     /// Timestamp when session created
     ts_ms: u128,
     /// Signature of session
@@ -109,7 +110,7 @@ pub struct Session {
     /// Account of session
     account: Account,
     /// Session's lifetime
-    ttl_ms: usize,
+    ttl_ms: u64,
     /// Timestamp when session created
     ts_ms: u128,
     /// Signature to verify that the session was signed by the account.
@@ -196,7 +197,7 @@ impl SessionSkBuilder {
     }
 
     /// Set the lifetime of session.
-    pub fn set_ttl(mut self, ttl_ms: usize) -> Self {
+    pub fn set_ttl(mut self, ttl_ms: u64) -> Self {
         self.ttl_ms = ttl_ms;
         self
     }
@@ -223,8 +224,10 @@ impl SessionSkBuilder {
 
 impl Session {
     /// Pack the session into a string for verification or public key recovery.
-    pub fn pack(&self) -> String {
+    pub fn pack(&self) -> Vec<u8> {
         pack_session(self.session_id, self.ts_ms, self.ttl_ms)
+            .as_bytes()
+            .to_vec()
     }
 
     /// Check session is expired or not.
@@ -239,16 +242,16 @@ impl Session {
             return Err(Error::SessionExpired);
         }
 
-        let auth_str = self.pack();
+        let auth_bytes = self.pack();
 
         if !(match self.account {
             Account::Secp256k1(did) => {
-                signers::secp256k1::verify(&auth_str, &did.into(), &self.sig)
+                signers::secp256k1::verify(&auth_bytes, &did.into(), &self.sig)
             }
-            Account::EIP191(did) => signers::eip191::verify(&auth_str, &did.into(), &self.sig),
-            Account::BIP137(did) => signers::bip137::verify(&auth_str, &did.into(), &self.sig),
+            Account::EIP191(did) => signers::eip191::verify(&auth_bytes, &did.into(), &self.sig),
+            Account::BIP137(did) => signers::bip137::verify(&auth_bytes, &did.into(), &self.sig),
             Account::Ed25519(pk) => {
-                signers::ed25519::verify(&auth_str, &pk.address(), &self.sig, pk)
+                signers::ed25519::verify(&auth_bytes, &pk.address(), &self.sig, pk)
             }
         }) {
             return Err(Error::VerifySignatureFailed);
@@ -258,7 +261,7 @@ impl Session {
     }
 
     /// Verify message.
-    pub fn verify(&self, msg: &str, sig: impl AsRef<[u8]>) -> Result<()> {
+    pub fn verify(&self, msg: &[u8], sig: impl AsRef<[u8]>) -> Result<()> {
         self.verify_self()?;
         if !signers::secp256k1::verify(msg, &self.session_id, sig) {
             return Err(Error::VerifySignatureFailed);
@@ -268,11 +271,11 @@ impl Session {
 
     /// Get public key from session for encryption.
     pub fn account_pubkey(&self) -> Result<PublicKey> {
-        let auth_str = self.pack();
+        let auth_bytes = self.pack();
         match self.account {
-            Account::Secp256k1(_) => signers::secp256k1::recover(&auth_str, &self.sig),
-            Account::BIP137(_) => signers::bip137::recover(&auth_str, &self.sig),
-            Account::EIP191(_) => signers::eip191::recover(&auth_str, &self.sig),
+            Account::Secp256k1(_) => signers::secp256k1::recover(&auth_bytes, &self.sig),
+            Account::BIP137(_) => signers::bip137::recover(&auth_bytes, &self.sig),
+            Account::EIP191(_) => signers::eip191::recover(&auth_bytes, &self.sig),
             Account::Ed25519(pk) => Ok(pk),
         }
     }
@@ -309,9 +312,10 @@ impl SessionSk {
     }
 
     /// Sign message with session.
-    pub fn sign(&self, msg: &str) -> Result<Vec<u8>> {
+    pub fn sign(&self, msg: &[u8]) -> Result<Vec<u8>> {
         let key = self.sk;
-        Ok(signers::secp256k1::sign_raw(key, msg).to_vec())
+        let h = keccak256(msg);
+        Ok(signers::secp256k1::sign(key, &h).to_vec())
     }
 
     /// Get account did from session.

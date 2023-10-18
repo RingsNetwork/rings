@@ -157,7 +157,7 @@ pub trait MessageEndpoint {
     /// handle_message
     async fn handle_message(
         &self,
-        ctx: &MessagePayload<Message>,
+        ctx: &MessagePayload,
         data: &BackendMessage,
     ) -> Result<Vec<MessageHandlerEvent>>;
 }

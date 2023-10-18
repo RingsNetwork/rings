@@ -127,7 +127,7 @@ impl HttpServer {
 impl MessageEndpoint for HttpServer {
     async fn handle_message(
         &self,
-        ctx: &MessagePayload<Message>,
+        ctx: &MessagePayload,
         msg: &BackendMessage,
     ) -> Result<Vec<MessageHandlerEvent>> {
         let req: HttpRequest = bincode::deserialize(&msg.data).map_err(|_| Error::DecodeError)?;

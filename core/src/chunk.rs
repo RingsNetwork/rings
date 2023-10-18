@@ -64,7 +64,7 @@ pub struct ChunkMeta {
     /// Created time
     pub ts_ms: u128,
     /// Time to live
-    pub ttl_ms: usize,
+    pub ttl_ms: u64,
 }
 
 impl Default for ChunkMeta {

@@ -272,10 +272,10 @@ impl PublicKey {
 }
 
 /// Recover PublicKey from RawMessage using signature.
-pub fn recover<S>(message: &str, signature: S) -> Result<PublicKey>
+pub fn recover<S>(message: &[u8], signature: S) -> Result<PublicKey>
 where S: AsRef<[u8]> {
     let sig_bytes: SigBytes = signature.as_ref().try_into()?;
-    let message_hash: [u8; 32] = keccak256(message.as_bytes());
+    let message_hash: [u8; 32] = keccak256(message);
     recover_hash(&message_hash, &sig_bytes)
 }
 
@@ -353,7 +353,7 @@ pub mod tests {
     fn test_recover() {
         let key = SecretKey::random();
         let pubkey1 = key.pubkey();
-        let pubkey2 = recover("hello", key.sign("hello")).unwrap();
+        let pubkey2 = recover("hello".as_bytes(), key.sign("hello")).unwrap();
         assert_eq!(pubkey1, pubkey2);
     }
 

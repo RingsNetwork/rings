@@ -42,7 +42,7 @@ struct MsgCallbackStruct {
 impl MessageCallback for MsgCallbackStruct {
     async fn custom_message(
         &self,
-        _ctx: &MessagePayload<Message>,
+        _ctx: &MessagePayload,
         msg: &CustomMessage,
     ) -> Vec<MessageHandlerEvent> {
         let text = processor::unpack_text_message(msg).unwrap();
@@ -52,7 +52,7 @@ impl MessageCallback for MsgCallbackStruct {
         vec![]
     }
 
-    async fn builtin_message(&self, _ctx: &MessagePayload<Message>) -> Vec<MessageHandlerEvent> {
+    async fn builtin_message(&self, _ctx: &MessagePayload) -> Vec<MessageHandlerEvent> {
         vec![]
     }
 }

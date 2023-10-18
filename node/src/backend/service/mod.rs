@@ -30,7 +30,6 @@ use crate::error::Result;
 use crate::prelude::rings_core::chunk::Chunk;
 use crate::prelude::rings_core::chunk::ChunkList;
 use crate::prelude::rings_core::chunk::ChunkManager;
-use crate::prelude::rings_core::message::Message;
 use crate::prelude::*;
 
 /// A Backend struct contains http_server.
@@ -100,7 +99,7 @@ impl MessageCallback for Backend {
     /// And send http request to localhost through Backend http_request handler.
     async fn custom_message(
         &self,
-        ctx: &MessagePayload<Message>,
+        ctx: &MessagePayload,
         msg: &CustomMessage,
     ) -> Vec<MessageHandlerEvent> {
         let msg = msg.0.clone();
@@ -159,7 +158,7 @@ impl MessageCallback for Backend {
         }
     }
 
-    async fn builtin_message(&self, _ctx: &MessagePayload<Message>) -> Vec<MessageHandlerEvent> {
+    async fn builtin_message(&self, _ctx: &MessagePayload) -> Vec<MessageHandlerEvent> {
         vec![]
     }
 }

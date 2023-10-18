@@ -10,8 +10,8 @@ pub use payload::encode_data_gzip;
 pub use payload::from_gzipped_data;
 pub use payload::gzip_data;
 pub use payload::MessagePayload;
-pub use payload::OriginVerificationGen;
 pub use payload::PayloadSender;
+pub use payload::Transaction;
 
 pub mod types;
 pub use types::*;
@@ -29,3 +29,4 @@ pub use handlers::ValidatorFn;
 
 mod protocols;
 pub use protocols::MessageRelay;
+pub use protocols::MessageVerificationExt;

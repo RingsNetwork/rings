@@ -2,7 +2,6 @@ use async_trait::async_trait;
 
 use crate::error::Result;
 use crate::message::types::CustomMessage;
-use crate::message::types::Message;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessageHandlerEvent;
@@ -13,7 +12,7 @@ use crate::message::MessagePayload;
 impl HandleMsg<CustomMessage> for MessageHandler {
     async fn handle(
         &self,
-        ctx: &MessagePayload<Message>,
+        ctx: &MessagePayload,
         _: &CustomMessage,
     ) -> Result<Vec<MessageHandlerEvent>> {
         if self.dht.did != ctx.relay.destination {

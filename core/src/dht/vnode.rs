@@ -3,7 +3,6 @@ use std::cmp::max;
 use std::str::FromStr;
 
 use num_bigint::BigUint;
-use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -16,6 +15,7 @@ use crate::error::Result;
 use crate::message::Encoded;
 use crate::message::Encoder;
 use crate::message::MessagePayload;
+use crate::message::MessageVerificationExt;
 
 /// VNode Types
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,12 +108,10 @@ impl VNodeOperation {
     }
 }
 
-impl<T> TryFrom<MessagePayload<T>> for VirtualNode
-where T: Serialize + DeserializeOwned
-{
+impl TryFrom<MessagePayload> for VirtualNode {
     type Error = Error;
-    fn try_from(msg: MessagePayload<T>) -> Result<Self> {
-        let did = BigUint::from(msg.addr) + BigUint::from(1u16);
+    fn try_from(msg: MessagePayload) -> Result<Self> {
+        let did = BigUint::from(msg.signer()) + BigUint::from(1u16);
         let data = msg.encode()?;
         Ok(Self {
             did: did.into(),

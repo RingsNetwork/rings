@@ -135,7 +135,7 @@ impl MessageEndpoint for Extension {
     /// Handles the incoming message by passing it to the extension handlers and returning the resulting events.
     async fn handle_message(
         &self,
-        ctx: &MessagePayload<Message>,
+        ctx: &MessagePayload,
         data: &BackendMessage,
     ) -> Result<Vec<MessageHandlerEvent>> {
         let mut ret = vec![];

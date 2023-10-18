@@ -105,7 +105,7 @@ pub(super) async fn handle_storage_store_act(swarm: &Swarm, act: PeerRingAction)
 #[cfg_attr(feature = "wasm", async_recursion(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_recursion)]
 pub(super) async fn handle_storage_operate_act(
-    ctx: &MessagePayload<Message>,
+    ctx: &MessagePayload,
     act: &PeerRingAction,
 ) -> Result<Vec<MessageHandlerEvent>> {
     match act {
@@ -178,7 +178,7 @@ impl HandleMsg<SearchVNode> for MessageHandler {
     /// If a VNode is storead local, it will response immediately.(See Chordstorageinterface::storage_fetch)
     async fn handle(
         &self,
-        ctx: &MessagePayload<Message>,
+        ctx: &MessagePayload,
         msg: &SearchVNode,
     ) -> Result<Vec<MessageHandlerEvent>> {
         // For relay message, set redundant to 1
@@ -207,7 +207,7 @@ impl HandleMsg<SearchVNode> for MessageHandler {
 impl HandleMsg<FoundVNode> for MessageHandler {
     async fn handle(
         &self,
-        ctx: &MessagePayload<Message>,
+        ctx: &MessagePayload,
         msg: &FoundVNode,
     ) -> Result<Vec<MessageHandlerEvent>> {
         if self.dht.did != ctx.relay.destination {
@@ -225,7 +225,7 @@ impl HandleMsg<FoundVNode> for MessageHandler {
 impl HandleMsg<VNodeOperation> for MessageHandler {
     async fn handle(
         &self,
-        ctx: &MessagePayload<Message>,
+        ctx: &MessagePayload,
         msg: &VNodeOperation,
     ) -> Result<Vec<MessageHandlerEvent>> {
         // For relay message, set redundant to 1
@@ -241,7 +241,7 @@ impl HandleMsg<SyncVNodeWithSuccessor> for MessageHandler {
     // received remote sync vnode request
     async fn handle(
         &self,
-        _ctx: &MessagePayload<Message>,
+        _ctx: &MessagePayload,
         msg: &SyncVNodeWithSuccessor,
     ) -> Result<Vec<MessageHandlerEvent>> {
         let mut events = vec![];
@@ -296,7 +296,7 @@ mod test {
             .unwrap();
         let ev = node2.listen_once().await.unwrap().0;
         assert!(matches!(
-            ev.data,
+            ev.transaction.data()?,
             Message::OperateVNode(VNodeOperation::Overwrite(x)) if x.did == vid
         ));
 
@@ -315,13 +315,13 @@ mod test {
         let ev = node2.listen_once().await.unwrap().0;
         // node2 received search vnode request
         assert!(matches!(
-            ev.data,
+            ev.transaction.data()?,
             Message::SearchVNode(x) if x.vid == vid
         ));
 
         let ev = node1.listen_once().await.unwrap().0;
         assert!(matches!(
-            ev.data,
+            ev.transaction.data()?,
             Message::FoundVNode(x) if x.data[0].did == vid
         ));
 
@@ -375,7 +375,7 @@ mod test {
 
         let ev = node2.listen_once().await.unwrap().0;
         assert!(matches!(
-            ev.data,
+            ev.transaction.data()?,
             Message::OperateVNode(VNodeOperation::Extend(VirtualNode { did, data, kind: VNodeType::Data }))
                 if did == vid && data == vec!["111".to_string().encode()?]
         ));
@@ -388,7 +388,7 @@ mod test {
         .unwrap();
         let ev = node2.listen_once().await.unwrap().0;
         assert!(matches!(
-            ev.data,
+            ev.transaction.data()?,
             Message::OperateVNode(VNodeOperation::Extend(VirtualNode { did, data, kind: VNodeType::Data }))
                 if did == vid && data == vec!["222".to_string().encode()?]
         ));
@@ -407,13 +407,13 @@ mod test {
 
         // node2 received search vnode request
         assert!(matches!(
-            ev.data,
+            ev.transaction.data()?,
             Message::SearchVNode(x) if x.vid == vid
         ));
         let ev = node1.listen_once().await.unwrap().0;
 
         assert!(matches!(
-            ev.data,
+            ev.transaction.data()?,
             Message::FoundVNode(x) if x.data[0].did == vid
         ));
 
@@ -437,7 +437,7 @@ mod test {
 
         let ev = node2.listen_once().await.unwrap().0;
         assert!(matches!(
-            ev.data,
+            ev.transaction.data()?,
             Message::OperateVNode(VNodeOperation::Extend(VirtualNode { did, data, kind: VNodeType::Data }))
                 if did == vid && data == vec!["333".to_string().encode()?]
         ));
@@ -452,13 +452,13 @@ mod test {
         let ev = node2.listen_once().await.unwrap().0;
         // node2 received search vnode request
         assert!(matches!(
-            ev.data,
+            ev.transaction.data()?,
             Message::SearchVNode(x) if x.vid == vid
         ));
 
         let ev = node1.listen_once().await.unwrap().0;
         assert!(matches!(
-            ev.data,
+            ev.transaction.data()?,
             Message::FoundVNode(x) if x.data[0].did == vid
         ));
 

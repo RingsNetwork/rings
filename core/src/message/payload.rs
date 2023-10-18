@@ -1,3 +1,5 @@
+#![warn(missing_docs)]
+
 use std::io::Write;
 use std::sync::Arc;
 
@@ -16,17 +18,15 @@ use super::encoder::Encoded;
 use super::encoder::Encoder;
 use super::protocols::MessageRelay;
 use super::protocols::MessageVerification;
-use crate::consts::DEFAULT_TTL_MS;
-use crate::consts::MAX_TTL_MS;
-use crate::consts::TS_OFFSET_TOLERANCE_MS;
+use super::protocols::MessageVerificationExt;
 use crate::dht::Chord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::dht::PeerRingAction;
+use crate::ecc::keccak256;
 use crate::error::Error;
 use crate::error::Result;
 use crate::session::SessionSk;
-use crate::utils::get_epoch_ms;
 
 /// Compresses the given data byte slice using the gzip algorithm with the specified compression level.
 pub fn encode_data_gzip(data: &Bytes, level: u8) -> Result<Bytes> {
@@ -61,142 +61,122 @@ where T: DeserializeOwned {
     Ok(m)
 }
 
-/// An enumeration of options for generating origin verification or stick verification.
-/// Verification can be Stick Verification or origin verification.
-/// When MessagePayload created, Origin Verification is always generated.
-/// and if OriginVerificationGen is stick, it can including existing stick ov
-pub enum OriginVerificationGen {
-    Origin,
-    Stick(MessageVerification),
+fn hash_transaction(destination: Did, tx_id: uuid::Uuid, data: &[u8]) -> [u8; 32] {
+    let mut msg = vec![];
+
+    msg.extend_from_slice(destination.as_bytes());
+    msg.extend_from_slice(tx_id.as_bytes());
+    msg.extend_from_slice(data);
+
+    keccak256(&msg)
 }
 
-/// All messages transmitted in RingsNetwork should be wrapped by MessagePayload.
-/// It additionally offer transaction ID, origin did, relay, previous hop verification,
-/// and origin verification.
+/// All messages transmitted in RingsNetwork should be wrapped by `Transaction`.
+/// It additionally offer destination, tx_id and verification.
+///
+/// To transmit `Transaction` in RingsNetwork, user should build
+/// [MessagePayload] and use [PayloadSender] to send.
 #[derive(Derivative, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[derivative(Debug)]
-pub struct MessagePayload<T> {
-    /// Payload data
-    pub data: T,
-    /// The transaction ID of payload.
+pub struct Transaction {
+    /// The destination of this message.
+    pub destination: Did,
+    /// The transaction ID.
     /// Remote peer should use same tx_id when response.
     pub tx_id: uuid::Uuid,
-    /// The did of payload account, usually it's last sender.
-    pub addr: Did,
+    /// data
+    pub data: Vec<u8>,
+    /// This field holds a signature from a node,
+    /// which is used to prove that the transaction was created by that node.
+    #[derivative(Debug = "ignore")]
+    pub verification: MessageVerification,
+}
+
+/// `MessagePayload` is used to transmit data between nodes.
+/// The data should be packed by [Transaction].
+#[derive(Derivative, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[derivative(Debug)]
+pub struct MessagePayload {
+    /// Payload data
+    pub transaction: Transaction,
     /// Relay records the transport path of message.
     /// And can also help message sender to find the next hop.
     pub relay: MessageRelay,
-    /// This field hold a signature from a node,
-    /// which is used to prove that the message was sent from that node.
+    /// This field holds a signature from a node,
+    /// which is used to prove that payload was created by that node.
     #[derivative(Debug = "ignore")]
     pub verification: MessageVerification,
-    /// Same as verification, but the signature was from the original sender.
-    #[derivative(Debug = "ignore")]
-    pub origin_verification: MessageVerification,
 }
 
-impl<T> MessagePayload<T>
-where T: Serialize + DeserializeOwned
-{
-    /// Create new instance
-    pub fn new(
+impl Transaction {
+    /// Wrap data. Will serialize by [bincode::serialize]
+    /// then sign [MessageVerification] by session_sk.
+    pub fn new<T>(
+        destination: Did,
+        tx_id: uuid::Uuid,
         data: T,
         session_sk: &SessionSk,
-        origin_verification_gen: OriginVerificationGen,
-        relay: MessageRelay,
-    ) -> Result<Self> {
-        let ts_ms = get_epoch_ms();
-        let ttl_ms = DEFAULT_TTL_MS;
-        let msg = &MessageVerification::pack_msg(&data, ts_ms, ttl_ms)?;
-        let tx_id = uuid::Uuid::new_v4();
-        let addr = session_sk.account_did();
-        let verification = MessageVerification {
-            session: session_sk.session(),
-            sig: session_sk.sign(msg)?,
-            ttl_ms,
-            ts_ms,
-        };
-        // If origin_verification_gen is set to Origin, simply clone it into.
-        let origin_verification = match origin_verification_gen {
-            OriginVerificationGen::Origin => verification.clone(),
-            OriginVerificationGen::Stick(ov) => ov,
-        };
-
+    ) -> Result<Self>
+    where
+        T: Serialize,
+    {
+        let data = bincode::serialize(&data).map_err(Error::BincodeSerialize)?;
+        let msg_hash = hash_transaction(destination, tx_id, &data);
+        let verification = MessageVerification::new(&msg_hash, session_sk)?;
         Ok(Self {
-            data,
+            destination,
             tx_id,
-            addr,
+            data,
             verification,
-            origin_verification,
-            relay,
         })
     }
 
-    /// Create new Payload for send
-    pub fn new_send(
+    /// Deserializes the data field into a `T` instance.
+    pub fn data<T>(&self) -> Result<T>
+    where T: DeserializeOwned {
+        bincode::deserialize(&self.data).map_err(Error::BincodeDeserialize)
+    }
+}
+
+impl MessagePayload {
+    /// Create new `MessagePayload`.
+    /// Need [Transaction], [SessionSk] and [MessageRelay].
+    pub fn new(
+        transaction: Transaction,
+        session_sk: &SessionSk,
+        relay: MessageRelay,
+    ) -> Result<Self> {
+        let msg_hash = hash_transaction(
+            transaction.destination,
+            transaction.tx_id,
+            &transaction.data,
+        );
+        let verification = MessageVerification::new(&msg_hash, session_sk)?;
+        Ok(Self {
+            transaction,
+            relay,
+            verification,
+        })
+    }
+
+    /// Helps to create sending message from data.
+    pub fn new_send<T>(
         data: T,
         session_sk: &SessionSk,
         next_hop: Did,
         destination: Did,
-    ) -> Result<Self> {
-        let relay = MessageRelay::new(vec![session_sk.account_did()], next_hop, destination);
-        Self::new(data, session_sk, OriginVerificationGen::Origin, relay)
-    }
-
-    /// Checks whether the payload is expired.
-    pub fn is_expired(&self) -> bool {
-        if self.verification.ttl_ms > MAX_TTL_MS {
-            return false;
-        }
-
-        if self.origin_verification.ttl_ms > MAX_TTL_MS {
-            return false;
-        }
-
-        let now = get_epoch_ms();
-
-        if self.verification.ts_ms - TS_OFFSET_TOLERANCE_MS > now {
-            return false;
-        }
-
-        if self.origin_verification.ts_ms - TS_OFFSET_TOLERANCE_MS > now {
-            return false;
-        }
-
-        now > self.verification.ts_ms + self.verification.ttl_ms as u128
-            && now > self.origin_verification.ts_ms + self.origin_verification.ttl_ms as u128
-    }
-
-    /// Verifies that the payload is not expired and that the signature is valid.
-    pub fn verify(&self) -> bool {
-        tracing::debug!("verifying payload: {:?}", self.tx_id);
-
-        if self.is_expired() {
-            tracing::warn!("message expired");
-            return false;
-        }
-
-        if Some(self.relay.origin_sender()) != self.origin_account_did().ok() {
-            tracing::warn!("sender is not origin_verification generator");
-            return false;
-        }
-
-        self.verification.verify(&self.data) && self.origin_verification.verify(&self.data)
-    }
-
-    /// Get Did from the origin verification.
-    pub fn origin_account_did(&self) -> Result<Did> {
-        Ok(self
-            .origin_verification
-            .session
-            .account_pubkey()?
-            .address()
-            .into())
-    }
-
-    /// Get did from sender verification.
-    pub fn account_did(&self) -> Result<Did> {
-        Ok(self.verification.session.account_pubkey()?.address().into())
+    ) -> Result<Self>
+    where
+        T: Serialize,
+    {
+        let tx_id = uuid::Uuid::new_v4();
+        let transaction = Transaction::new(destination, tx_id, data, session_sk)?;
+        let relay = MessageRelay::new(
+            vec![session_sk.account_did()],
+            next_hop,
+            transaction.destination,
+        );
+        Self::new(transaction, session_sk, relay)
     }
 
     /// Deserializes a `MessagePayload` instance from the given binary data.
@@ -210,29 +190,40 @@ where T: Serialize + DeserializeOwned
             .map(Bytes::from)
             .map_err(Error::BincodeSerialize)
     }
+}
 
-    /// Did of Sender
-    pub fn sender(&self) -> Result<Did> {
-        self.account_did()
+impl MessageVerificationExt for Transaction {
+    fn verification_data(&self) -> Result<Vec<u8>> {
+        Ok(hash_transaction(self.destination, self.tx_id, &self.data).to_vec())
     }
 
-    /// Did of Origin
-    pub fn origin(&self) -> Result<Did> {
-        self.origin_account_did()
+    fn verification(&self) -> &MessageVerification {
+        &self.verification
     }
 }
 
-impl<T> Encoder for MessagePayload<T>
-where T: Serialize + DeserializeOwned
-{
+impl MessageVerificationExt for MessagePayload {
+    fn verification_data(&self) -> Result<Vec<u8>> {
+        Ok(hash_transaction(
+            self.transaction.destination,
+            self.transaction.tx_id,
+            &self.transaction.data,
+        )
+        .to_vec())
+    }
+
+    fn verification(&self) -> &MessageVerification {
+        &self.verification
+    }
+}
+
+impl Encoder for MessagePayload {
     fn encode(&self) -> Result<Encoded> {
         self.to_bincode()?.encode()
     }
 }
 
-impl<T> Decoder for MessagePayload<T>
-where T: Serialize + DeserializeOwned
-{
+impl Decoder for MessagePayload {
     fn from_encoded(encoded: &Encoded) -> Result<Self> {
         let v: Bytes = encoded.decode()?;
         Self::from_bincode(&v)
@@ -242,15 +233,13 @@ where T: Serialize + DeserializeOwned
 /// Trait of PayloadSender
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-pub trait PayloadSender<T>
-where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
-{
+pub trait PayloadSender {
     /// Get the session sk
     fn session_sk(&self) -> &SessionSk;
     /// Get access to DHT.
     fn dht(&self) -> Arc<PeerRing>;
     /// Send a message payload to a specified DID.
-    async fn do_send_payload(&self, did: Did, payload: MessagePayload<T>) -> Result<()>;
+    async fn do_send_payload(&self, did: Did, payload: MessagePayload) -> Result<()>;
     /// Infer the next hop for a message by calling `dht.find_successor()`.
     fn infer_next_hop(&self, next_hop: Option<Did>, destination: Did) -> Result<Did> {
         if let Some(next_hop) = next_hop {
@@ -264,78 +253,71 @@ where T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static
         }
     }
     /// Alias for `do_send_payload` that sets the next hop to `payload.relay.next_hop`.
-    async fn send_payload(&self, payload: MessagePayload<T>) -> Result<()> {
+    async fn send_payload(&self, payload: MessagePayload) -> Result<()> {
         self.do_send_payload(payload.relay.next_hop, payload).await
     }
 
-    /// Send a message to a specified destination.
-    async fn send_message(&self, msg: T, destination: Did) -> Result<uuid::Uuid> {
-        let next_hop = self.infer_next_hop(None, destination)?;
-        let payload = MessagePayload::new_send(msg, self.session_sk(), next_hop, destination)?;
-        self.send_payload(payload.clone()).await?;
-        Ok(payload.tx_id)
-    }
-
     /// Send a message to a specified destination by specified next hop.
-    async fn send_message_by_hop(
+    async fn send_message_by_hop<T>(
         &self,
         msg: T,
         destination: Did,
         next_hop: Did,
-    ) -> Result<uuid::Uuid> {
+    ) -> Result<uuid::Uuid>
+    where
+        T: Serialize + Send,
+    {
         let payload = MessagePayload::new_send(msg, self.session_sk(), next_hop, destination)?;
-        self.send_payload(payload.clone()).await?;
-        Ok(payload.tx_id)
+        let tx_id = payload.transaction.tx_id;
+        self.send_payload(payload).await?;
+        Ok(tx_id)
     }
 
+    /// Send a message to a specified destination.
+    async fn send_message<T>(&self, msg: T, destination: Did) -> Result<uuid::Uuid>
+    where T: Serialize + Send {
+        let next_hop = self.infer_next_hop(None, destination)?;
+        self.send_message_by_hop(msg, destination, next_hop).await
+    }
     /// Send a direct message to a specified destination.
-    async fn send_direct_message(&self, msg: T, destination: Did) -> Result<uuid::Uuid> {
-        let payload = MessagePayload::new_send(msg, self.session_sk(), destination, destination)?;
-        self.send_payload(payload.clone()).await?;
-        Ok(payload.tx_id)
+    async fn send_direct_message<T>(&self, msg: T, destination: Did) -> Result<uuid::Uuid>
+    where T: Serialize + Send {
+        self.send_message_by_hop(msg, destination, destination)
+            .await
     }
 
     /// Send a report message to a specified destination.
-    async fn send_report_message(&self, payload: &MessagePayload<T>, msg: T) -> Result<()> {
+    async fn send_report_message<T>(&self, payload: &MessagePayload, msg: T) -> Result<()>
+    where T: Serialize + Send {
         let relay = payload.relay.report(self.dht().did)?;
 
-        let mut pl =
-            MessagePayload::new(msg, self.session_sk(), OriginVerificationGen::Origin, relay)?;
-        pl.tx_id = payload.tx_id;
+        let transaction = Transaction::new(
+            relay.destination,
+            payload.transaction.tx_id,
+            msg,
+            self.session_sk(),
+        )?;
 
+        let pl = MessagePayload::new(transaction, self.session_sk(), relay)?;
         self.send_payload(pl).await
     }
 
     /// Forward a payload message by relay.
     /// It just create a new payload, cloned data, resigned with session and send
-    async fn forward_by_relay(
-        &self,
-        payload: &MessagePayload<T>,
-        relay: MessageRelay,
-    ) -> Result<()> {
-        let mut new_pl = MessagePayload::new(
-            payload.data.clone(),
-            self.session_sk(),
-            OriginVerificationGen::Stick(payload.origin_verification.clone()),
-            relay,
-        )?;
-        new_pl.tx_id = payload.tx_id;
+    async fn forward_by_relay(&self, payload: &MessagePayload, relay: MessageRelay) -> Result<()> {
+        let new_pl = MessagePayload::new(payload.transaction.clone(), self.session_sk(), relay)?;
         self.send_payload(new_pl).await
     }
 
     /// Forward a payload message, with the next hop inferred by the DHT.
-    async fn forward_payload(
-        &self,
-        payload: &MessagePayload<T>,
-        next_hop: Option<Did>,
-    ) -> Result<()> {
+    async fn forward_payload(&self, payload: &MessagePayload, next_hop: Option<Did>) -> Result<()> {
         let next_hop = self.infer_next_hop(next_hop, payload.relay.destination)?;
         let relay = payload.relay.forward(self.dht().did, next_hop)?;
         self.forward_by_relay(payload, relay).await
     }
 
     /// Reset the destination to a secp DID.
-    async fn reset_destination(&self, payload: &MessagePayload<T>, next_hop: Did) -> Result<()> {
+    async fn reset_destination(&self, payload: &MessagePayload, next_hop: Did) -> Result<()> {
         let relay = payload
             .relay
             .reset_destination(next_hop)
@@ -360,7 +342,7 @@ pub mod test {
         d: bool,
     }
 
-    pub fn new_test_payload(next_hop: Did) -> MessagePayload<TestData> {
+    pub fn new_test_payload(next_hop: Did) -> MessagePayload {
         let test_data = TestData {
             a: "hello".to_string(),
             b: 111,
@@ -370,12 +352,12 @@ pub mod test {
         new_payload(test_data, next_hop)
     }
 
-    pub fn new_payload<T>(data: T, next_hop: Did) -> MessagePayload<T>
+    pub fn new_payload<T>(data: T, next_hop: Did) -> MessagePayload
     where T: Serialize + DeserializeOwned {
         let key = SecretKey::random();
         let destination = SecretKey::random().address().into();
-        let session = SessionSk::new_with_seckey(&key).unwrap();
-        MessagePayload::new_send(data, &session, next_hop, destination).unwrap()
+        let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+        MessagePayload::new_send(data, &session_sk, next_hop, destination).unwrap()
     }
 
     #[test]
@@ -393,11 +375,11 @@ pub mod test {
 
         let payload = new_test_payload(next_hop);
         let gzipped_encoded_payload = payload.encode().unwrap();
-        let payload2: MessagePayload<TestData> = gzipped_encoded_payload.decode().unwrap();
+        let payload2: MessagePayload = gzipped_encoded_payload.decode().unwrap();
         assert_eq!(payload, payload2);
 
         let gunzip_encoded_payload = payload.to_bincode().unwrap().encode().unwrap();
-        let payload2: MessagePayload<TestData> = gunzip_encoded_payload.decode().unwrap();
+        let payload2: MessagePayload = gunzip_encoded_payload.decode().unwrap();
         assert_eq!(payload, payload2);
     }
 
