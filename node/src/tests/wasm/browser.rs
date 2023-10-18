@@ -2,7 +2,7 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::*;
 
-use crate::browser;
+use crate::client::browser;
 use crate::client::browser::Peer;
 use crate::prelude::jsonrpc_core::types::response::Output;
 use crate::prelude::jsonrpc_core::types::Value;
