@@ -3,6 +3,7 @@
 //! =======================
 //! This module allows developers to integrate the client with various programming languages,
 //! such as C, C++, Golang, Python, and Node.js.
+//!
 //! Here's an example of how to use the Rings FFI with Python.
 //!
 //! # Example with Python
@@ -28,7 +29,7 @@
 //!    ret = bytes(sig.signature)
 //!    return ffi.new("char[]", ret)
 //!
-//!@ffi.callback("void(*)(char *, char *)")
+//! @ffi.callback("void(*)(char *, char *)")
 //! def custom_msg_callback(msg):
 //!     print(msg)
 //!     return
@@ -61,7 +62,6 @@
 //! Note: Since the above code is executed in a single-process environment of Python,
 //! the Rings' listen loop will block the process. If you wish to use it in a production environment,
 //! you should implement your own more advanced process or thread management.
-//!
 
 #![allow(unused_unsafe)]
 use std::ffi::c_char;
@@ -80,9 +80,8 @@ use rings_core::message::MessagePayload;
 use super::Client;
 use crate::error::Result;
 use crate::jsonrpc::HandlerType;
-use crate::processor::Processor;
 use crate::prelude::CallbackFn;
-
+use crate::processor::Processor;
 
 /// ClientPtr, which is for presenting Client with C format.
 /// We need this because of Arc in FFI is unsafe

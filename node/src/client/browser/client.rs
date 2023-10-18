@@ -55,7 +55,7 @@ use crate::processor::ProcessorConfig;
 pub enum AddressType {
     /// Default address type, hex string of sha1(pubkey)
     DEFAULT,
-    /// Ed25519 style address type, hax string of pubkey
+    /// Ed25519 style address type, hex string of pubkey
     Ed25519,
 }
 
@@ -384,7 +384,7 @@ impl Client {
         })
     }
 
-    /// fetch stroage with given did
+    /// fetch storage with given did
     pub fn storage_fetch(
         &self,
         address: String,

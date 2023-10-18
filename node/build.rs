@@ -1,9 +1,10 @@
+#[cfg(feature = "ffi")]
 extern crate cbindgen;
-use std::env;
 use std::process::Command;
 
+#[cfg(feature = "ffi")]
 fn gen_cbinding() {
-    let crate_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+    let crate_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
 
     cbindgen::Builder::new()
         .with_language(cbindgen::Language::C)
@@ -26,6 +27,7 @@ fn gen_version() {
 }
 
 fn main() {
+    #[cfg(feature = "ffi")]
     gen_cbinding();
     gen_version();
 }

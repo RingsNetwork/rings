@@ -2,11 +2,8 @@
 //! General Client, this module provide Client implementation for FFI and WASM
 
 use std::sync::Arc;
-
-use rings_core::message::MessageCallback;
 use rings_core::session::SessionSkBuilder;
 use rings_core::storage::PersistenceStorage;
-use crate::prelude::CallbackFn;
 use crate::error::Error;
 use crate::error::Result;
 use crate::jsonrpc::handler::MethodHandler;
@@ -15,12 +12,14 @@ use crate::measure::PeriodicMeasure;
 use crate::prelude::jsonrpc_core::types::id::Id;
 use crate::prelude::jsonrpc_core::MethodCall;
 use crate::prelude::wasm_export;
+use crate::prelude::CallbackFn;
 use crate::processor::Processor;
 use crate::processor::ProcessorBuilder;
 use crate::processor::ProcessorConfig;
 
 #[cfg(feature = "browser")]
 pub mod browser;
+#[cfg(feature = "ffi")]
 pub mod ffi;
 
 /// General Client, which holding reference of Processor and MessageCallback Handler

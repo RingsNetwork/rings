@@ -2,10 +2,10 @@
 //! Utils for browser client
 use js_sys;
 use wasm_bindgen::prelude::*;
+
 use crate::error::Error;
 use crate::prelude::jsonrpc_core;
 use crate::prelude::rings_core::utils::js_value;
-
 
 /// A parser convert JsValue to jsonrpc_core::Params.
 /// # Examples
