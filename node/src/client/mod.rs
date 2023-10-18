@@ -76,7 +76,7 @@ impl Client {
     }
 
     /// Create a client instance with storage name and serialized config string
-    /// This function is usefull for creating a client with config file (yaml and json).
+    /// This function is useful for creating a client with config file (yaml and json).
     pub(crate) async fn new_client_with_storage_and_serialized_config_internal(
         config: String,
         callback: Option<CallbackFn>,
