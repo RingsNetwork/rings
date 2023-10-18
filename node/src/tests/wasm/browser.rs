@@ -2,8 +2,8 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::*;
 
-use crate::client::browser;
 use crate::client::browser::Peer;
+use crate::client::Client;
 use crate::prelude::jsonrpc_core::types::response::Output;
 use crate::prelude::jsonrpc_core::types::Value;
 use crate::prelude::rings_core::prelude::uuid;
@@ -14,7 +14,7 @@ use crate::processor::ProcessorConfig;
 
 wasm_bindgen_test_configure!(run_in_browser);
 
-async fn new_client() -> (browser::Client, String) {
+async fn new_client() -> (Client, String) {
     let key = SecretKey::random();
     let sm = SessionSk::new_with_seckey(&key).unwrap();
 
@@ -26,18 +26,17 @@ async fn new_client() -> (browser::Client, String) {
     .unwrap();
 
     let storage_name = uuid::Uuid::new_v4().to_string();
-    let client: browser::Client =
-        browser::Client::new_client_with_storage_and_serialized_config_internal(
-            config,
-            None,
-            storage_name.clone(),
-        )
-        .await
-        .unwrap();
+    let client: Client = Client::new_client_with_storage_and_serialized_config_internal(
+        config,
+        None,
+        storage_name.clone(),
+    )
+    .await
+    .unwrap();
     (client, storage_name)
 }
 
-async fn create_connection(client1: &browser::Client, client2: &browser::Client) {
+async fn create_connection(client1: &Client, client2: &Client) {
     let offer = JsFuture::from(client1.create_offer(client2.address(), None))
         .await
         .unwrap()
@@ -57,7 +56,7 @@ async fn create_connection(client1: &browser::Client, client2: &browser::Client)
         .unwrap();
 }
 
-async fn get_peers(client: &browser::Client) -> Vec<browser::Peer> {
+async fn get_peers(client: &Client) -> Vec<browser::Peer> {
     let peers = JsFuture::from(client.list_peers()).await.ok().unwrap();
     let peers: js_sys::Array = peers.into();
     let peers: Vec<browser::Peer> = peers
