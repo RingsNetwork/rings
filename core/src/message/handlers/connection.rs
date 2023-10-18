@@ -980,8 +980,10 @@ pub mod tests {
 
         // state change to Disconnected
         let ev2 = node2.listen_once().await.unwrap().0;
-        assert_eq!(ev2.addr, node2.did());
-        assert!(matches!(ev2.data, Message::LeaveDHT(LeaveDHT{did}) if did == node1.did()));
+        assert_eq!(ev2.signer(), node2.did());
+        assert!(
+            matches!(ev2.transaction.data()?, Message::LeaveDHT(LeaveDHT{did}) if did == node1.did())
+        );
 
         // state change to Closed
         let ev2 = node2.listen_once().await.unwrap().0;
