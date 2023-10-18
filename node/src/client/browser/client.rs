@@ -21,8 +21,6 @@ use rings_core::message::MessagePayload;
 use rings_core::prelude::vnode;
 use rings_core::prelude::vnode::VirtualNode;
 use rings_core::session::SessionSkBuilder;
-use rings_core::storage::PersistenceStorage;
-use rings_core::swarm::impls::ConnectionHandshake;
 use rings_core::utils::js_utils;
 use rings_core::utils::js_value;
 use rings_transport::core::transport::ConnectionInterface;
@@ -39,12 +37,8 @@ use crate::backend::types::BackendMessage;
 use crate::backend::types::HttpResponse;
 use crate::backend::types::MessageType;
 use crate::client::Client;
-use crate::client::TyMessageCallback;
 use crate::consts::BACKEND_MTU;
-use crate::error;
 use crate::jsonrpc::handler::MethodHandler;
-use crate::jsonrpc::HandlerType;
-use crate::measure::PeriodicMeasure;
 use crate::prelude::chunk::Chunk;
 use crate::prelude::chunk::ChunkList;
 use crate::prelude::chunk::ChunkManager;
@@ -54,25 +48,34 @@ use crate::prelude::jsonrpc_core::MethodCall;
 use crate::prelude::message;
 use crate::prelude::wasm_export;
 use crate::prelude::CallbackFn;
-use crate::processor::Processor;
-use crate::processor::ProcessorBuilder;
 use crate::processor::ProcessorConfig;
+
 /// AddressType enum contains `DEFAULT` and `ED25519`.
 #[wasm_export]
 pub enum AddressType {
+    /// Default address type, hex string of sha1(pubkey)
     DEFAULT,
+    /// Ed25519 style address type, hax string of pubkey
     Ed25519,
 }
 
 #[wasm_export]
 impl Client {
+    /// Create new instance of Client, return Promise
+    /// Ice_servers should obey forrmat: "[turn|strun]://<Address>:<Port>;..."
+    /// Account is hex string
+    /// Account should format as same as account_type declared
+    /// Account_type is lowercase string, possible input are: `eip191`, `ed25519`, `bip137`, for more imformation,
+    /// please check [rings_core::ecc]
+    /// Signer should be `async function (proof: string): Promise<Unit8Array>`
+    /// Signer should function as same as account_type declared, Eg: eip191 or secp256k1 or ed25519.
+    /// callback should be an instance of [CallbackFn]
     #[wasm_bindgen(constructor)]
     pub fn new_instance(
         ice_servers: String,
         stabilize_timeout: usize,
         account: String,
         account_type: String,
-        // Signer should be `async function (proof: string): Promise<Unit8Array>`
         signer: js_sys::Function,
         callback: Option<MessageCallbackInstance>,
         //) -> Result<Client, error::Error> {
@@ -89,7 +92,7 @@ impl Client {
             sk_builder = sk_builder.set_session_sig(sig.to_vec());
             let session_sk = sk_builder.build().unwrap();
             let config = ProcessorConfig::new(ice_servers, session_sk, stabilize_timeout);
-            let cb: Option<TyMessageCallback> = if let Some(cb) = callback {
+            let cb: Option<CallbackFn> = if let Some(cb) = callback {
                 Some(Box::new(cb))
             } else {
                 None
@@ -124,13 +127,14 @@ impl Client {
         self.processor.did().to_string()
     }
 
+    ///  create new unsigned Client
     pub fn new_client_with_storage(
         config: ProcessorConfig,
         callback: Option<MessageCallbackInstance>,
         storage_name: String,
     ) -> js_sys::Promise {
         future_to_promise(async move {
-            let cb: Option<TyMessageCallback> = if let Some(cb) = callback {
+            let cb: Option<CallbackFn> = if let Some(cb) = callback {
                 Some(Box::new(cb))
             } else {
                 None
@@ -166,16 +170,6 @@ impl Client {
             };
             let ret = handler.handle_request(req).await.map_err(JsError::from)?;
             Ok(js_value::serialize(&ret).map_err(JsError::from)?)
-        })
-    }
-
-    /// start background listener without custom callback
-    pub fn start(&self) -> js_sys::Promise {
-        let p = self.processor.clone();
-
-        future_to_promise(async move {
-            p.listen().await;
-            Ok(JsValue::null())
         })
     }
 
@@ -261,6 +255,7 @@ impl Client {
         })
     }
 
+    /// get info for self, will return build version and inspection of swarm
     pub fn get_node_info(&self) -> js_sys::Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
@@ -281,6 +276,7 @@ impl Client {
         })
     }
 
+    /// disconnect all connected nodes
     pub fn disconnect_all(&self) -> js_sys::Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
@@ -369,6 +365,7 @@ impl Client {
         })
     }
 
+    /// Check local cache
     pub fn storage_check_cache(
         &self,
         address: String,
@@ -387,6 +384,7 @@ impl Client {
         })
     }
 
+    /// fetch stroage with given did
     pub fn storage_fetch(
         &self,
         address: String,
@@ -546,6 +544,7 @@ impl Client {
     }
 }
 
+/// MessageCallback instance for Browser
 #[wasm_export]
 pub struct MessageCallbackInstance {
     custom_message: Arc<js_sys::Function>,
@@ -556,6 +555,11 @@ pub struct MessageCallbackInstance {
 
 #[wasm_export]
 impl MessageCallbackInstance {
+    /// Create a new instance of message callback, this function accept three args:
+    ///
+    /// * custom_message: function(from: string, message: string) -> ();
+    /// * http_response_message: function(from: string, message: string) -> ();
+    /// * builtin_message: function(from: string, message: string) -> ();
     #[wasm_bindgen(constructor)]
     pub fn new(
         custom_message: &js_sys::Function,
@@ -572,7 +576,7 @@ impl MessageCallbackInstance {
 }
 
 impl MessageCallbackInstance {
-    pub async fn handle_message_data(
+    pub(crate) async fn handle_message_data(
         &self,
         relay: &MessagePayload,
         data: &Bytes,
@@ -593,7 +597,7 @@ impl MessageCallbackInstance {
         Ok(())
     }
 
-    pub async fn handle_simple_text_message(
+    pub(crate) async fn handle_simple_text_message(
         &self,
         relay: &MessagePayload,
         data: &[u8],
@@ -616,7 +620,7 @@ impl MessageCallbackInstance {
         Ok(())
     }
 
-    pub async fn handle_http_response(
+    pub(crate) async fn handle_http_response(
         &self,
         relay: &MessagePayload,
         data: &[u8],
@@ -741,7 +745,7 @@ impl MessageCallback for MessageCallbackInstance {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct Peer {
+pub(crate) struct Peer {
     pub address: String,
     pub state: String,
 }
@@ -793,7 +797,7 @@ pub fn internal_info() -> InternalInfo {
     InternalInfo::build()
 }
 
-pub fn get_did(address: &str, addr_type: AddressType) -> Result<Did, JsError> {
+fn get_did(address: &str, addr_type: AddressType) -> Result<Did, JsError> {
     let did = match addr_type {
         AddressType::DEFAULT => {
             Did::from_str(address).map_err(|_| JsError::new("invalid address"))?

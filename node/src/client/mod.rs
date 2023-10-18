@@ -6,7 +6,7 @@ use std::sync::Arc;
 use rings_core::message::MessageCallback;
 use rings_core::session::SessionSkBuilder;
 use rings_core::storage::PersistenceStorage;
-
+use crate::prelude::CallbackFn;
 use crate::error::Error;
 use crate::error::Result;
 use crate::jsonrpc::handler::MethodHandler;
@@ -22,14 +22,6 @@ use crate::processor::ProcessorConfig;
 #[cfg(feature = "browser")]
 pub mod browser;
 pub mod ffi;
-
-/// Boxed Callback, for non-wasm, it should be Sized, Send and Sync.
-#[cfg(not(feature = "browser"))]
-pub type TyMessageCallback = Box<dyn MessageCallback + Send + Sync + 'static>;
-
-/// Boxed Callback
-#[cfg(feature = "browser")]
-pub type TyMessageCallback = Box<dyn MessageCallback + 'static>;
 
 /// General Client, which holding reference of Processor and MessageCallback Handler
 /// Client should be obey memory layout of CLang
@@ -48,7 +40,7 @@ impl Client {
     /// Create a client instance with storage name
     pub(crate) async fn new_client_with_storage_internal(
         config: ProcessorConfig,
-        cb: Option<TyMessageCallback>,
+        cb: Option<CallbackFn>,
         storage_name: String,
     ) -> Result<Client> {
         let storage_path = storage_name.as_str();
@@ -86,7 +78,7 @@ impl Client {
     /// This function is usefull for creating a client with config file (yaml and json).
     pub(crate) async fn new_client_with_storage_and_serialized_config_internal(
         config: String,
-        callback: Option<TyMessageCallback>,
+        callback: Option<CallbackFn>,
         storage_name: String,
     ) -> Result<Client> {
         let config: ProcessorConfig = serde_yaml::from_str(&config)?;
@@ -101,14 +93,14 @@ impl Client {
     /// please check [rings_core::ecc]
     /// Signer should accept a String and returns bytes.
     /// Signer should function as same as account_type declared, Eg: eip191 or secp256k1 or ed25519.
-    /// callback should be an instance of [TyMessageCallback]
+    /// callback should be an instance of [CallbackFn]
     pub(crate) async fn new_client_internal(
         ice_servers: String,
         stabilize_timeout: usize,
         account: String,
         account_type: String,
         signer: Box<dyn Fn(String) -> Vec<u8>>,
-        callback: Option<TyMessageCallback>,
+        callback: Option<CallbackFn>,
     ) -> Result<Client> {
         let mut sk_builder = SessionSkBuilder::new(account, account_type);
         let proof = sk_builder.unsigned_proof();

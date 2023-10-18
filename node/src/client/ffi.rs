@@ -18,6 +18,8 @@ use super::Client;
 use crate::error::Result;
 use crate::jsonrpc::HandlerType;
 use crate::processor::Processor;
+use crate::prelude::CallbackFn;
+
 
 /// ClientPtr, which is for presenting Client with C format.
 /// We need this because of Arc in FFI is unsafe
@@ -236,7 +238,7 @@ pub unsafe extern "C" fn new_client_with_callback(
         let acc_ty: String = c_acc_ty.to_str()?.to_owned();
 
         let callback: &MessageCallbackInstanceFFI = unsafe { &*callback_ptr };
-        let cb: super::TyMessageCallback = Box::new(callback.clone());
+        let cb: CallbackFn = Box::new(callback.clone());
 
         executor::block_on(Client::new_client_internal(
             ice,

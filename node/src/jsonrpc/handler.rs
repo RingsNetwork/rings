@@ -168,26 +168,6 @@ pub fn methods() -> Vec<(Method, MethodFnBox)> {
     ]
 }
 
-/// Implementation for browser
-#[cfg(feature = "browser")]
-pub mod browser {
-    //! This module provides two main facilities:
-    //! [MessageHandler]: It is used to serve JSON-RPC in the browser and
-    //! handle incoming request requests from the browser.
-    //! [build_handler]: It will be used to register and initialize interfaces.
-    use std::collections::HashMap;
-    use std::sync::Arc;
-
-    use async_trait::async_trait;
-
-    use super::*;
-    use crate::prelude::jsonrpc_core::types::error::Error;
-    use crate::prelude::jsonrpc_core::types::error::ErrorCode;
-    use crate::prelude::jsonrpc_core::types::request::MethodCall;
-    use crate::prelude::jsonrpc_core::types::response::Output;
-    use crate::processor::Processor;
-}
-
 /// Implementation for native node
 #[cfg(feature = "node")]
 pub mod default {
