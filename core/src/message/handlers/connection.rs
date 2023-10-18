@@ -964,9 +964,6 @@ pub mod tests {
             matches!(ev1.transaction.data()?, Message::LeaveDHT(LeaveDHT{did}) if did == node2.did())
         );
 
-        #[cfg(not(feature = "wasm"))]
-        node2.disconnect(node1.did()).await.unwrap();
-
         for _ in 1..10 {
             println!("wait 3 seconds for node2's transport 2to1 closing");
             sleep(Duration::from_secs(3)).await;
@@ -980,6 +977,13 @@ pub mod tests {
                 break;
             }
         }
+
+        // state change to Disconnected
+        let ev2 = node2.listen_once().await.unwrap().0;
+        assert_eq!(ev2.addr, node2.did());
+        assert!(matches!(ev2.data, Message::LeaveDHT(LeaveDHT{did}) if did == node1.did()));
+
+        // state change to Closed
         let ev2 = node2.listen_once().await.unwrap().0;
         assert_eq!(ev2.signer(), node2.did());
         assert!(

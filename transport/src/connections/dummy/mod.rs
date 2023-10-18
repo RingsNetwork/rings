@@ -33,20 +33,20 @@ const SEND_MESSAGE_DELAY: bool = true;
 const CHANNEL_OPEN_DELAY: bool = false;
 
 lazy_static! {
-    static ref CBS: DashMap<String, Arc<InnerCallback>> = DashMap::new();
-    static ref CONNS: DashMap<String, ConnectionRef<DummyConnection>> = DashMap::new();
+    static ref CBS: DashMap<u64, Arc<InnerCallback>> = DashMap::new();
+    static ref CONNS: DashMap<u64, Arc<DummyConnection>> = DashMap::new();
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct DummySdp {
-    cid: String,
+    rand_id: u64,
 }
 
 /// A dummy connection for local testing.
 /// Implements the [ConnectionInterface] trait with no real network.
 pub struct DummyConnection {
-    cid: String,
-    remote_cid: Arc<Mutex<Option<String>>>,
+    pub(crate) rand_id: u64,
+    remote_rand_id: Arc<Mutex<Option<u64>>>,
     webrtc_connection_state: Arc<Mutex<WebrtcConnectionState>>,
 }
 
@@ -57,38 +57,44 @@ pub struct DummyTransport {
 }
 
 impl DummyConnection {
-    fn new(cid: &str) -> Self {
+    fn new() -> Self {
         Self {
-            cid: cid.to_string(),
-            remote_cid: Arc::new(Mutex::new(None)),
+            rand_id: random(0, 10000000000),
+            remote_rand_id: Arc::new(Mutex::new(None)),
             webrtc_connection_state: Arc::new(Mutex::new(WebrtcConnectionState::New)),
         }
     }
 
     fn callback(&self) -> Arc<InnerCallback> {
-        CBS.get(&self.cid).unwrap().clone()
+        CBS.get(&self.rand_id).unwrap().clone()
     }
 
     fn remote_callback(&self) -> Arc<InnerCallback> {
-        let cid = { self.remote_cid.lock().unwrap().clone() }.unwrap();
+        let cid = { self.remote_rand_id.lock().unwrap() }.unwrap();
         CBS.get(&cid).unwrap().clone()
     }
 
-    fn remote_conn(&self) -> ConnectionRef<DummyConnection> {
-        let cid = { self.remote_cid.lock().unwrap().clone() }.unwrap();
+    fn remote_conn(&self) -> Arc<DummyConnection> {
+        let cid = { self.remote_rand_id.lock().unwrap() }.unwrap();
         CONNS.get(&cid).unwrap().clone()
     }
 
-    fn set_remote_cid(&self, cid: &str) {
-        let mut remote_cid = self.remote_cid.lock().unwrap();
-        *remote_cid = Some(cid.to_string());
+    fn set_remote_rand_id(&self, rand_id: u64) {
+        let mut remote_rand_id = self.remote_rand_id.lock().unwrap();
+        *remote_rand_id = Some(rand_id);
     }
 
     async fn set_webrtc_connection_state(&self, state: WebrtcConnectionState) {
         {
             let mut webrtc_connection_state = self.webrtc_connection_state.lock().unwrap();
+
+            if state == *webrtc_connection_state {
+                return;
+            }
+
             *webrtc_connection_state = state;
         }
+
         self.callback().on_peer_connection_state_change(state).await;
     }
 }
@@ -129,26 +135,24 @@ impl ConnectionInterface for DummyConnection {
         self.set_webrtc_connection_state(WebrtcConnectionState::Connecting)
             .await;
         Ok(DummySdp {
-            cid: self.cid.clone(),
+            rand_id: self.rand_id,
         })
     }
 
     async fn webrtc_answer_offer(&self, offer: Self::Sdp) -> Result<Self::Sdp> {
         self.set_webrtc_connection_state(WebrtcConnectionState::Connecting)
             .await;
-        self.set_remote_cid(&offer.cid);
+        self.set_remote_rand_id(offer.rand_id);
         Ok(DummySdp {
-            cid: self.cid.clone(),
+            rand_id: self.rand_id,
         })
     }
 
     async fn webrtc_accept_answer(&self, answer: Self::Sdp) -> Result<()> {
         self.set_webrtc_connection_state(WebrtcConnectionState::Connected)
             .await;
-        self.set_remote_cid(&answer.cid);
+        self.set_remote_rand_id(answer.rand_id);
         self.remote_conn()
-            .upgrade()
-            .unwrap()
             .set_webrtc_connection_state(WebrtcConnectionState::Connected)
             .await;
         Ok(())
@@ -164,11 +168,17 @@ impl ConnectionInterface for DummyConnection {
     async fn close(&self) -> Result<()> {
         self.set_webrtc_connection_state(WebrtcConnectionState::Closed)
             .await;
-        self.remote_conn()
-            .upgrade()
-            .unwrap()
-            .set_webrtc_connection_state(WebrtcConnectionState::Closed)
-            .await;
+
+        // simulate remote closing if it's not closed
+        if self.remote_conn().webrtc_connection_state() != WebrtcConnectionState::Closed {
+            self.remote_conn()
+                .set_webrtc_connection_state(WebrtcConnectionState::Disconnected)
+                .await;
+            self.remote_conn()
+                .set_webrtc_connection_state(WebrtcConnectionState::Closed)
+                .await;
+        }
+
         Ok(())
     }
 }
@@ -190,12 +200,13 @@ impl TransportInterface for DummyTransport {
             }
         }
 
-        let conn = DummyConnection::new(cid);
+        let conn = DummyConnection::new();
+        let conn_rand_id = conn.rand_id;
 
         self.pool.safely_insert(cid, conn)?;
-        CONNS.insert(cid.to_string(), self.connection(cid)?);
+        CONNS.insert(conn_rand_id, self.connection(cid)?.upgrade()?);
         CBS.insert(
-            cid.to_string(),
+            conn_rand_id,
             Arc::new(InnerCallback::new(cid, callback, Notifier::default())),
         );
         Ok(())
@@ -219,11 +230,15 @@ impl TransportInterface for DummyTransport {
 }
 
 async fn random_delay() {
-    tokio::time::sleep(Duration::from_millis(random())).await;
+    tokio::time::sleep(Duration::from_millis(random(
+        DUMMY_DELAY_MIN,
+        DUMMY_DELAY_MAX,
+    )))
+    .await;
 }
 
-fn random() -> u64 {
-    let range = rand::distributions::Uniform::new(DUMMY_DELAY_MIN, DUMMY_DELAY_MAX);
+fn random(low: u64, high: u64) -> u64 {
+    let range = rand::distributions::Uniform::new(low, high);
     let mut rng = rand::thread_rng();
     range.sample(&mut rng)
 }
