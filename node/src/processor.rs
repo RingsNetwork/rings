@@ -310,13 +310,13 @@ impl Processor {
     }
 
     /// Listen processor message once
-    pub async fn listen_once(&self) -> () {
+    pub async fn listen_once(&self) {
         let swarm = self.swarm.clone();
         swarm.listen_once().await;
     }
 
     /// Stabilize Chord DHT once
-    pub async fn stable_once(&self) -> () {
+    pub async fn stable_once(&self) {
         let stb = self.stabilization.clone();
         stb.stabilize()
             .await

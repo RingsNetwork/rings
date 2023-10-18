@@ -1,3 +1,5 @@
+#![warn(missing_docs)]
+//! Browser Client implementation
 #![allow(non_snake_case, non_upper_case_globals, clippy::ptr_offset_with_cast)]
 use std::convert::TryFrom;
 use std::str::FromStr;

@@ -429,7 +429,7 @@ async fn main() -> anyhow::Result<()> {
     dotenv::dotenv().ok();
 
     let cli = Cli::parse();
-    init_logging(cli.log_level.into());
+    init_logging(cli.log_level);
 
     match cli.command {
         Command::Run(args) => daemon_run(args).await,

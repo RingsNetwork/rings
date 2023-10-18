@@ -1,5 +1,6 @@
-//! ffi
-
+#![warn(missing_docs)]
+//! ffi Client implementation
+#![allow(unused_unsafe)]
 use std::ffi::c_char;
 use std::ffi::CStr;
 use std::ffi::CString;
@@ -18,6 +19,8 @@ use crate::error::Result;
 use crate::jsonrpc::HandlerType;
 use crate::processor::Processor;
 
+/// ClientPtr, which is for presenting Client with C format.
+/// We need this because of Arc in FFI is unsafe
 #[repr(C)]
 pub struct ClientPtr {
     processor: *const Processor,
@@ -25,47 +28,62 @@ pub struct ClientPtr {
 }
 
 impl ClientPtr {
-    pub unsafe fn increase_strong_count(&self) -> () {
+    /// Manually increase strong count of Arc reference
+    /// # Safety
+    /// This function will increase ref count of arc
+    pub unsafe fn increase_strong_count(&self) {
         Arc::increment_strong_count(&self.processor);
         Arc::increment_strong_count(&self.handler);
     }
 
-    pub unsafe fn decrease_strong_count(&self) -> () {
+    /// Manually decrease strong count of Arc reference
+    /// # Safety
+    /// This function will decrease ref count of arc
+    pub unsafe fn decrease_strong_count(&self) {
         Arc::decrement_strong_count(&self.processor);
         Arc::decrement_strong_count(&self.handler);
     }
 }
 
+impl std::ops::Drop for ClientPtr {
+    fn drop(&mut self) {
+        unsafe {
+            self.decrease_strong_count();
+        }
+    }
+}
+
 impl Client {
+    /// Cast a Client into ClientPtr
+    /// Arc::from_raw and Arc::into_raw won't modify the count.
+    /// # Safety
+    /// This function will try cast Arc from raw points
     pub unsafe fn from_ptr(ptr: &ClientPtr) -> Client {
-        // We create Arcs from raw pointers but we don't clone these Arcs
-        // since it will create unnecessary increments in the ref count.
         let processor = unsafe { Arc::<Processor>::from_raw(ptr.processor as *const Processor) };
         let handler = unsafe { Arc::<HandlerType>::from_raw(ptr.handler as *const HandlerType) };
-
-        // avoid double release
-        let _ = Arc::into_raw(processor.clone());
-        let _ = Arc::into_raw(handler.clone());
 
         Self { processor, handler }
     }
 
-    pub fn into_ptr(&self) -> ClientPtr {
+    /// Cast a ClientPtr back to Client
+    /// # Safety
+    /// This function will turn Arc into raw point and increase ref count.
+    pub unsafe fn into_ptr(&self) -> ClientPtr {
         // Clone the Arcs, which increases the ref count,
         // then turn them into raw pointers. This makes sure the memory
-        // won't be deallocated as long as we properly manage the raw pointers.
         let processor_ptr = Arc::into_raw(self.processor.clone());
         let handler_ptr = Arc::into_raw(self.handler.clone());
-
-        unsafe {
-            Arc::increment_strong_count(&processor_ptr);
-            Arc::increment_strong_count(&handler_ptr);
-        }
-
-        ClientPtr {
+        let ret = ClientPtr {
             processor: processor_ptr,
             handler: handler_ptr,
+        };
+
+        // after left the closure, two cloned Arc will be release
+        // so we do increase the count manually
+        unsafe {
+            ret.increase_strong_count();
         }
+        ret
     }
 }
 
@@ -113,6 +131,8 @@ impl MessageCallback for MessageCallbackInstanceFFI {
     }
 }
 
+/// The MessageCallback Instance for FFI,
+/// This struct holding two functions `custom_message_callback` and `builtin_message_callback`
 #[repr(C)]
 #[derive(Clone)]
 pub struct MessageCallbackInstanceFFI {
@@ -120,11 +140,18 @@ pub struct MessageCallbackInstanceFFI {
     builtin_message_callback: Option<extern "C" fn(*const c_char) -> ()>,
 }
 
+/// Declare that MessageCallbackInstanceFFI is Send
+/// # Safety
+/// The callback instance may not workon on cross-thread case
 #[cfg(not(feature = "browser"))]
 unsafe impl Send for MessageCallbackInstanceFFI {}
+/// Declare that MessageCallbackInstanceFFI is Sync
+/// # Safety
+/// The callback instance may not workon on cross-thread case
 #[cfg(not(feature = "browser"))]
 unsafe impl Sync for MessageCallbackInstanceFFI {}
 
+/// Create a neww callback instance
 #[no_mangle]
 pub extern "C" fn new_callback(
     custom_message_cb: Option<extern "C" fn(*const c_char, *const c_char) -> ()>,
@@ -136,14 +163,22 @@ pub extern "C" fn new_callback(
     }
 }
 
+/// Start message listening and stabilization
+/// # Safety
+/// Listen function accept a ClientPtr and will unsafety cast it into Arc based Client
 #[no_mangle]
 pub unsafe extern "C" fn listen(client_ptr: *const ClientPtr) {
     let client_ptr: &ClientPtr = unsafe { &*client_ptr };
     let client: Client = unsafe { Client::from_ptr(client_ptr) };
-    let p = client.processor.clone();
+    let p = client.processor;
     executor::block_on(p.listen());
 }
 
+/// Request internal rpc api
+/// # Safety
+///
+/// * This function accept a ClientPtr and will unsafety cast it into Arc based Client
+/// * This function cast CStr into Str
 #[no_mangle]
 pub unsafe extern "C" fn request(
     client: &ClientPtr,
@@ -167,6 +202,10 @@ pub unsafe extern "C" fn request(
     }
 }
 
+/// Craft a new Client with signer and callback ptr
+/// # Safety
+///
+/// * This function cast CStr into Str
 #[no_mangle]
 pub unsafe extern "C" fn new_client_with_callback(
     ice_server: *const c_char,
@@ -214,6 +253,8 @@ pub unsafe extern "C" fn new_client_with_callback(
         }
     };
     let ret = client.into_ptr();
+    // When leaving the closure, the origin Arc ref will be release,
+    // So we manually increase the count here
     unsafe {
         ret.increase_strong_count();
     }

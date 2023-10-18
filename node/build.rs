@@ -26,6 +26,6 @@ fn gen_version() {
 }
 
 fn main() {
-    //    gen_cbinding();
+    gen_cbinding();
     gen_version();
 }

@@ -1,4 +1,5 @@
-//! Client
+#![warn(missing_docs)]
+//! General Client, this module provide Client implementation for FFI and WASM
 
 use std::sync::Arc;
 
@@ -30,14 +31,9 @@ pub type TyMessageCallback = Box<dyn MessageCallback + Send + Sync + 'static>;
 #[cfg(feature = "browser")]
 pub type TyMessageCallback = Box<dyn MessageCallback + 'static>;
 
-/// AddressType enum contains `DEFAULT` and `ED25519`.
-#[repr(C)]
-#[wasm_export]
-pub enum AddressTypeFFI {
-    DEFAULT,
-    Ed25519,
-}
-
+/// General Client, which holding reference of Processor and MessageCallback Handler
+/// Client should be obey memory layout of CLang
+/// Client should be export for wasm-bindgen
 #[derive(Clone)]
 #[allow(dead_code)]
 #[repr(C)]
@@ -49,6 +45,7 @@ pub struct Client {
 
 #[allow(dead_code)]
 impl Client {
+    /// Create a client instance with storage name
     pub(crate) async fn new_client_with_storage_internal(
         config: ProcessorConfig,
         cb: Option<TyMessageCallback>,
@@ -85,6 +82,8 @@ impl Client {
         })
     }
 
+    /// Create a client instance with storage name and serialized config string
+    /// This function is usefull for creating a client with config file (yaml and json).
     pub(crate) async fn new_client_with_storage_and_serialized_config_internal(
         config: String,
         callback: Option<TyMessageCallback>,
@@ -94,6 +93,15 @@ impl Client {
         Self::new_client_with_storage_internal(config, callback, storage_name).await
     }
 
+    /// Create a new client instanice with everything in detail
+    /// Ice_servers should obey forrmat: "[turn|strun]://<Address>:<Port>;..."
+    /// Account is hex string
+    /// Account should format as same as account_type declared
+    /// Account_type is lowercase string, possible input are: `eip191`, `ed25519`, `bip137`, for more imformation,
+    /// please check [rings_core::ecc]
+    /// Signer should accept a String and returns bytes.
+    /// Signer should function as same as account_type declared, Eg: eip191 or secp256k1 or ed25519.
+    /// callback should be an instance of [TyMessageCallback]
     pub(crate) async fn new_client_internal(
         ice_servers: String,
         stabilize_timeout: usize,
@@ -112,6 +120,7 @@ impl Client {
     }
 
     /// Request local rpc interface
+    /// the internal rpc interface is provide by rings_rpc
     pub(crate) async fn request_internal(
         &self,
         method: String,
