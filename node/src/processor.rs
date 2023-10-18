@@ -317,8 +317,10 @@ impl Processor {
 
     /// Stabilize Chord DHT once
     pub async fn stable_once(&self) -> () {
-	let stb = self.stabilization.clone();
-	stb.stabilize().await.unwrap_or_else(|e| tracing::error!("failed to stabilize {:?}", e));
+        let stb = self.stabilization.clone();
+        stb.stabilize()
+            .await
+            .unwrap_or_else(|e| tracing::error!("failed to stabilize {:?}", e));
     }
 }
 

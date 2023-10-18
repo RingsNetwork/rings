@@ -14,7 +14,10 @@ use tracing_subscriber::Registry;
 pub use self::browser::init_logging;
 #[cfg(feature = "node")]
 pub use self::node::init_logging;
+use crate::prelude::wasm_export;
 
+#[repr(C)]
+#[wasm_export]
 #[derive(ValueEnum, Debug, Clone)]
 pub enum LogLevel {
     Debug,
@@ -32,6 +35,20 @@ impl From<LogLevel> for Level {
             LogLevel::Info => Level::INFO,
             LogLevel::Warn => Level::WARN,
             LogLevel::Error => Level::ERROR,
+        }
+    }
+}
+
+impl std::str::FromStr for LogLevel {
+    type Err = crate::error::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_uppercase().as_str() {
+            "TRACE" => Ok(LogLevel::Trace),
+            "DEBUG" => Ok(LogLevel::Debug),
+            "INFO" => Ok(LogLevel::Info),
+            "WARN" => Ok(LogLevel::Warn),
+            "ERROR" => Ok(LogLevel::Error),
+            x => Err(crate::error::Error::InvalidLoggingLevel(x.to_string())),
         }
     }
 }
@@ -125,11 +142,12 @@ pub mod node {
 
     use super::*;
 
-    pub fn init_logging(level: Level) {
+    #[no_mangle]
+    pub extern "C" fn init_logging(level: LogLevel) {
         set_panic_hook();
 
         let subscriber = Registry::default();
-        let level_filter = filter::LevelFilter::from_level(level);
+        let level_filter = filter::LevelFilter::from_level(level.into());
 
         // Filter floating log of mdns
         let mdns_log_filter = filter::FilterFn::new(|metadata| {
@@ -184,8 +202,8 @@ pub mod browser {
     use tracing_wasm::WASMLayerConfigBuilder;
 
     use super::*;
-
-    pub fn init_logging(level: Level) {
+    #[wasm_export]
+    pub fn init_logging(level: LogLevel) {
         set_panic_hook();
 
         let subscriber = Registry::default();
@@ -193,7 +211,7 @@ pub mod browser {
         // Browser console and profiler
         let subscriber = subscriber.with(WASMLayer::new(
             WASMLayerConfigBuilder::new()
-                .set_max_level(level)
+                .set_max_level(level.into())
                 .set_console_config(ConsoleConfig::ReportWithoutConsoleColor)
                 .build(),
         ));

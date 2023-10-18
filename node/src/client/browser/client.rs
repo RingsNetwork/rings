@@ -36,6 +36,8 @@ use wasm_bindgen_futures::JsFuture;
 use crate::backend::types::BackendMessage;
 use crate::backend::types::HttpResponse;
 use crate::backend::types::MessageType;
+use crate::client::Client;
+use crate::client::TyMessageCallback;
 use crate::consts::BACKEND_MTU;
 use crate::error;
 use crate::jsonrpc::handler::MethodHandler;
@@ -53,76 +55,11 @@ use crate::prelude::CallbackFn;
 use crate::processor::Processor;
 use crate::processor::ProcessorBuilder;
 use crate::processor::ProcessorConfig;
-
 /// AddressType enum contains `DEFAULT` and `ED25519`.
 #[wasm_export]
 pub enum AddressType {
     DEFAULT,
     Ed25519,
-}
-
-/// rings-node browser client
-/// the process of initialize client.
-/// ``` typescript
-/// const unsignedInfo = new UnsignedInfo(account);
-/// const signed = await signer.signMessage(unsignedInfo.auth);
-/// const sig = new Uint8Array(web3.utils.hexToBytes(signed));
-/// const client: Client = await Client.new_client(unsignedInfo, sig, stunOrTurnUrl);
-/// ```
-#[derive(Clone)]
-#[allow(dead_code)]
-#[wasm_export]
-pub struct Client {
-    processor: Arc<Processor>,
-    handler: Arc<HandlerType>,
-}
-
-#[allow(dead_code)]
-impl Client {
-    pub(crate) async fn new_client_with_storage_internal(
-        config: ProcessorConfig,
-        cb: Option<Box<impl MessageCallback + 'static>>,
-        storage_name: String,
-    ) -> Result<Client, error::Error> {
-        let storage_path = storage_name.as_str();
-        let measure_path = [storage_path, "measure"].join("/");
-
-        let storage = PersistenceStorage::new_with_cap_and_name(50000, storage_path)
-            .await
-            .map_err(error::Error::Storage)?;
-
-        let ms = PersistenceStorage::new_with_cap_and_path(50000, measure_path)
-            .await
-            .map_err(error::Error::Storage)?;
-        let measure = PeriodicMeasure::new(ms);
-
-        let mut processor_builder = ProcessorBuilder::from_config(&config)?
-            .storage(storage)
-            .measure(measure);
-
-        if let Some(cb) = cb {
-            processor_builder = processor_builder.message_callback(cb);
-        }
-
-        let processor = Arc::new(processor_builder.build()?);
-
-        let mut handler: HandlerType = processor.clone().into();
-        handler.build();
-
-        Ok(Client {
-            processor,
-            handler: handler.into(),
-        })
-    }
-
-    pub(crate) async fn new_client_with_storage_and_serialized_config_internal(
-        config: String,
-        callback: Option<Box<impl MessageCallback + 'static>>,
-        storage_name: String,
-    ) -> Result<Client, error::Error> {
-        let config: ProcessorConfig = serde_yaml::from_str(&config)?;
-        Self::new_client_with_storage_internal(config, callback, storage_name).await
-    }
 }
 
 #[wasm_export]
@@ -150,13 +87,14 @@ impl Client {
             sk_builder = sk_builder.set_session_sig(sig.to_vec());
             let session_sk = sk_builder.build().unwrap();
             let config = ProcessorConfig::new(ice_servers, session_sk, stabilize_timeout);
+            let cb: Option<TyMessageCallback> = if let Some(cb) = callback {
+                Some(Box::new(cb))
+            } else {
+                None
+            };
             Ok(JsValue::from(
-                Self::new_client_with_storage_internal(
-                    config,
-                    callback.map(Box::new),
-                    "rings-node".to_string(),
-                )
-                .await?,
+                Self::new_client_with_storage_internal(config, cb, "rings-node".to_string())
+                    .await?,
             ))
         })
     }
@@ -190,13 +128,14 @@ impl Client {
         storage_name: String,
     ) -> js_sys::Promise {
         future_to_promise(async move {
-            let client = Self::new_client_with_storage_internal(
-                config,
-                callback.map(Box::new),
-                storage_name,
-            )
-            .await
-            .map_err(JsError::from)?;
+            let cb: Option<TyMessageCallback> = if let Some(cb) = callback {
+                Some(Box::new(cb))
+            } else {
+                None
+            };
+            let client = Self::new_client_with_storage_internal(config, cb, storage_name)
+                .await
+                .map_err(JsError::from)?;
             Ok(JsValue::from(client))
         })
     }
@@ -301,47 +240,6 @@ impl Client {
             let peer = p.connect_with_did(did, true).await.map_err(JsError::from)?;
             let state = peer.connection.webrtc_connection_state();
             Ok(JsValue::try_from(&Peer::from((state, peer.did)))?)
-        })
-    }
-
-    /// Manually make handshake with remote peer
-    pub fn create_offer(&self, address: String, addr_type: Option<AddressType>) -> js_sys::Promise {
-        let p = self.processor.clone();
-        future_to_promise(async move {
-            let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
-            let (_, offer_payload) = p.swarm.create_offer(did).await.map_err(JsError::from)?;
-            let s = serde_json::to_string(&offer_payload).map_err(JsError::from)?;
-            Ok(s.into())
-        })
-    }
-
-    /// Manually make handshake with remote peer
-    pub fn answer_offer(&self, offer_payload: String) -> js_sys::Promise {
-        let p = self.processor.clone();
-        future_to_promise(async move {
-            let offer_payload = serde_json::from_str(&offer_payload).map_err(JsError::from)?;
-            let (_, answer_payload) = p
-                .swarm
-                .answer_offer(offer_payload)
-                .await
-                .map_err(JsError::from)?;
-            let s = serde_json::to_string(&answer_payload).map_err(JsError::from)?;
-            Ok(s.into())
-        })
-    }
-
-    /// Manually make handshake with remote peer
-    pub fn accept_answer(&self, answer_payload: String) -> js_sys::Promise {
-        let p = self.processor.clone();
-        future_to_promise(async move {
-            let answer_payload = serde_json::from_str(&answer_payload).map_err(JsError::from)?;
-            let (did, conn) = p
-                .swarm
-                .accept_answer(answer_payload)
-                .await
-                .map_err(JsError::from)?;
-            let state = conn.webrtc_connection_state();
-            Ok(JsValue::try_from(&Peer::from((state, did.to_string())))?)
         })
     }
 

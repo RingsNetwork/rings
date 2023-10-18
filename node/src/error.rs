@@ -86,6 +86,8 @@ pub enum Error {
     Storage(rings_core::error::Error) = 807,
     #[error("Swarm Error: {0}")]
     Swarm(rings_core::error::Error) = 808,
+    #[error("Invalid logging level: {0}")]
+    InvalidLoggingLevel(String) = 809,
     #[error("Create File Error: {0}")]
     CreateFileError(String) = 900,
     #[error("Open File Error: {0}")]

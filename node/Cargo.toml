@@ -113,6 +113,9 @@ wasm-bindgen-futures = { workspace = true, optional = true }
 fluvio-wasm-timer = "0.2.5"
 wasm-bindgen-test = { version = "0.3.0" }
 
+[build-dependencies]
+cbindgen = "0.24.0"
+
 [[bin]]
 name = "rings"
 path = "bin/rings.rs"
