@@ -1,3 +1,5 @@
+#![warn(missing_docs)]
+
 use std::io::Write;
 use std::sync::Arc;
 
@@ -69,6 +71,11 @@ fn hash_transaction(destination: Did, tx_id: uuid::Uuid, data: &[u8]) -> [u8; 32
     keccak256(&msg)
 }
 
+/// All messages transmitted in RingsNetwork should be wrapped by `Transaction`.
+/// It additionally offer destination, tx_id and verification.
+///
+/// To transmit `Transaction` in RingsNetwork, user should build
+/// [MessagePayload] and use [PayloadSender] to send.
 #[derive(Derivative, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[derivative(Debug)]
 pub struct Transaction {
@@ -79,15 +86,14 @@ pub struct Transaction {
     pub tx_id: uuid::Uuid,
     /// data
     pub data: Vec<u8>,
-    /// This field hold a signature from a node,
+    /// This field holds a signature from a node,
     /// which is used to prove that the transaction was created by that node.
     #[derivative(Debug = "ignore")]
     pub verification: MessageVerification,
 }
 
-/// All messages transmitted in RingsNetwork should be wrapped by MessagePayload.
-/// It additionally offer transaction ID, origin did, relay, previous hop verification,
-/// and origin verification.
+/// `MessagePayload` is used to transmit data between nodes.
+/// The data should be packed by [Transaction].
 #[derive(Derivative, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[derivative(Debug)]
 pub struct MessagePayload {
@@ -96,13 +102,15 @@ pub struct MessagePayload {
     /// Relay records the transport path of message.
     /// And can also help message sender to find the next hop.
     pub relay: MessageRelay,
-    /// This field hold a signature from a node,
-    /// which is used to prove that the transaction was created by that node.
+    /// This field holds a signature from a node,
+    /// which is used to prove that payload was created by that node.
     #[derivative(Debug = "ignore")]
     pub verification: MessageVerification,
 }
 
 impl Transaction {
+    /// Wrap data. Will serialize by [bincode::serialize]
+    /// then sign [MessageVerification] by session_sk.
     pub fn new<T>(
         destination: Did,
         tx_id: uuid::Uuid,
@@ -123,6 +131,7 @@ impl Transaction {
         })
     }
 
+    /// Deserializes the data field into a `T` instance.
     pub fn data<T>(&self) -> Result<T>
     where T: DeserializeOwned {
         bincode::deserialize(&self.data).map_err(Error::BincodeDeserialize)
@@ -130,7 +139,8 @@ impl Transaction {
 }
 
 impl MessagePayload {
-    /// Create new instance
+    /// Create new `MessagePayload`.
+    /// Need [Transaction], [SessionSk] and [MessageRelay].
     pub fn new(
         transaction: Transaction,
         session_sk: &SessionSk,
@@ -149,6 +159,7 @@ impl MessagePayload {
         })
     }
 
+    /// Helps to create sending message from data.
     pub fn new_send<T>(
         data: T,
         session_sk: &SessionSk,
