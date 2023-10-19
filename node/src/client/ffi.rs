@@ -4,6 +4,36 @@
 //! This module allows developers to integrate the client with various programming languages,
 //! such as C, C++, Golang, Python, and Node.js.
 //!
+//! The module provides functionality for integrating Rust-based systems with external
+//! systems through FFI (Foreign Function Interface). This is particularly useful when
+//! other programming languages want to interface with the functionalities provided by
+//! this Rust module.
+//!
+//! Primary Features:
+//! 1. **Client Representation for FFI**: The module defines `ClientPtr`, a struct that
+//!    serves as a C-compatible representation of the `Client` type, allowing for interaction
+//!    with other languages through raw pointers. It abstracts the reference counting of
+//!    internal `Arc` components, ensuring memory safety across the boundary.
+//!
+//! 2. **Message Callback for FFI**: The `MessageCallbackInstanceFFI` struct serves as a bridge
+//!    for message callback functionalities between Rust and other languages. It can hold
+//!    function pointers to C-compatible functions that handle custom and built-in messages.
+//!
+//! 3. **Functions for Client Interaction**: Several extern "C" functions, such as `new_client_with_callback`,
+//!    `listen`, and `async_listen`, facilitate the creation of clients, listening to messages,
+//!    and making internal requests. They make the module's core functionalities accessible from C
+//!    or other languages supporting FFI.
+//!
+//! This FFI integration is essential when this Rust module is part of a larger system, which might be
+//! written in different languages, and needs a standardized way to communicate with or make use of
+//! functionalities offered by Rust.
+//!
+//! Note: As with all FFI interactions, special care must be taken regarding memory safety. Functions
+//! and methods marked with `# Safety` in this module require the caller to ensure specific invariants
+//! for safe operation.
+//!
+//! # Examples
+//!
 //! Here's an example of how to use the Rings FFI with Python.
 //!
 //! # Example with Python
@@ -82,8 +112,8 @@ use crate::jsonrpc::HandlerType;
 use crate::prelude::CallbackFn;
 use crate::processor::Processor;
 
-/// ClientPtr, which is for presenting Client with C format.
-/// We need this because of Arc in FFI is unsafe
+/// A structure to represent the Client in a C-compatible format.
+/// This is necessary as using Arc directly in FFI can be unsafe.
 #[repr(C)]
 pub struct ClientPtr {
     processor: *const Processor,
@@ -91,17 +121,17 @@ pub struct ClientPtr {
 }
 
 impl ClientPtr {
-    /// Manually increase strong count of Arc reference
+    /// Increases the reference count for the associated Arcs.
     /// # Safety
-    /// This function will increase ref count of arc
+    /// This function unsafely increments the reference count of the Arcs.
     pub unsafe fn increase_strong_count(&self) {
         Arc::increment_strong_count(&self.processor);
         Arc::increment_strong_count(&self.handler);
     }
 
-    /// Manually decrease strong count of Arc reference
+    /// Decreases the reference count for the associated Arcs.
     /// # Safety
-    /// This function will decrease ref count of arc
+    /// This function unsafely decrements the reference count of the Arcs.
     pub unsafe fn decrease_strong_count(&self) {
         Arc::decrement_strong_count(&self.processor);
         Arc::decrement_strong_count(&self.handler);
@@ -118,9 +148,9 @@ impl std::ops::Drop for ClientPtr {
 }
 
 impl Client {
-    /// Cast ClientPtr from raw Ptr
+    /// Converts a raw ClientPtr pointer to a Rust Client type.
     /// # Safety
-    /// This function will cast Structure from raw
+    /// Unsafe due to the dereferencing of the raw pointer.
     fn from_raw(ptr: *const ClientPtr) -> Result<Client> {
         // Check point here.
         if ptr.is_null() {
@@ -134,10 +164,10 @@ impl Client {
 }
 
 impl From<&ClientPtr> for Client {
-    /// Cast a Client into ClientPtr
-    /// Arc::from_raw and Arc::into_raw won't modify the count.
+    /// Converts a reference to a ClientPtr to a Client type.
+    /// Note that the conversion from raw pointers to Arcs does not modify the reference count.
     /// # Safety
-    /// This function will try cast Arc from raw points
+    /// Unsafe due to the conversion from raw pointers to Arcs.
     fn from(ptr: &ClientPtr) -> Client {
         tracing::debug!("FFI: Client from Ptr!");
         let processor = unsafe { Arc::<Processor>::from_raw(ptr.processor as *const Processor) };
@@ -148,13 +178,10 @@ impl From<&ClientPtr> for Client {
 
 impl From<&Client> for ClientPtr {
     /// Cast a Client into ClientPtr
-    /// Arc::from_raw and Arc::into_raw won't modify the count.
-    /// # Safety
-    /// This function will try cast Arc from raw points
     fn from(client: &Client) -> ClientPtr {
         tracing::debug!("FFI: Client into Ptr!");
         // Clone the Arcs, which increases the ref count,
-        // then turn them into raw pointers. This makes sure the memory
+        // then turn them into raw pointers.
         let processor_ptr = Arc::into_raw(client.processor.clone());
         let handler_ptr = Arc::into_raw(client.handler.clone());
         let ret = ClientPtr {
