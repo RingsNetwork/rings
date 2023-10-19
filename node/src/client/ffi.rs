@@ -63,7 +63,6 @@
 //! the Rings' listen loop will block the process. If you wish to use it in a production environment,
 //! you should implement your own more advanced process or thread management.
 
-#![allow(unused_unsafe)]
 use std::ffi::c_char;
 use std::ffi::CStr;
 use std::ffi::CString;
@@ -77,6 +76,7 @@ use rings_core::message::MessageHandlerEvent;
 use rings_core::message::MessagePayload;
 
 use super::Client;
+use crate::error::Error;
 use crate::error::Result;
 use crate::jsonrpc::HandlerType;
 use crate::prelude::CallbackFn;
@@ -118,37 +118,49 @@ impl std::ops::Drop for ClientPtr {
 }
 
 impl Client {
+    /// Cast ClientPtr from raw Ptr
+    /// # Safety
+    /// This function will cast Structure from raw
+    fn from_raw(ptr: *const ClientPtr) -> Result<Client> {
+        // Check point here.
+        if ptr.is_null() {
+            return Err(Error::FFINulPtrError);
+        }
+
+        let client_ptr: &ClientPtr = unsafe { &*ptr };
+        let client: Client = client_ptr.into();
+        Ok(client)
+    }
+}
+
+impl From<&ClientPtr> for Client {
     /// Cast a Client into ClientPtr
     /// Arc::from_raw and Arc::into_raw won't modify the count.
     /// # Safety
     /// This function will try cast Arc from raw points
-    pub unsafe fn from_ptr(ptr: &ClientPtr) -> Client {
-        tracing::debug!("Client from Ptr!");
+    fn from(ptr: &ClientPtr) -> Client {
+        tracing::debug!("FFI: Client from Ptr!");
         let processor = unsafe { Arc::<Processor>::from_raw(ptr.processor as *const Processor) };
         let handler = unsafe { Arc::<HandlerType>::from_raw(ptr.handler as *const HandlerType) };
-
         Self { processor, handler }
     }
+}
 
-    /// Cast a ClientPtr back to Client
+impl From<&Client> for ClientPtr {
+    /// Cast a Client into ClientPtr
+    /// Arc::from_raw and Arc::into_raw won't modify the count.
     /// # Safety
-    /// This function will turn Arc into raw point and increase ref count.
-    pub unsafe fn into_ptr(&self) -> ClientPtr {
-        tracing::debug!("Client into Ptr!");
+    /// This function will try cast Arc from raw points
+    fn from(client: &Client) -> ClientPtr {
+        tracing::debug!("FFI: Client into Ptr!");
         // Clone the Arcs, which increases the ref count,
         // then turn them into raw pointers. This makes sure the memory
-        let processor_ptr = Arc::into_raw(self.processor.clone());
-        let handler_ptr = Arc::into_raw(self.handler.clone());
+        let processor_ptr = Arc::into_raw(client.processor.clone());
+        let handler_ptr = Arc::into_raw(client.handler.clone());
         let ret = ClientPtr {
             processor: processor_ptr,
             handler: handler_ptr,
         };
-
-        // after left the closure, two cloned Arc will be release
-        // so we do increase the count manually
-        unsafe {
-            ret.increase_strong_count();
-        }
         ret
     }
 }
@@ -206,17 +218,6 @@ pub struct MessageCallbackInstanceFFI {
     builtin_message_callback: Option<extern "C" fn(*const c_char) -> ()>,
 }
 
-/// Declare that MessageCallbackInstanceFFI is Send
-/// # Safety
-/// The callback instance may not workon on cross-thread case
-#[cfg(not(feature = "browser"))]
-unsafe impl Send for MessageCallbackInstanceFFI {}
-/// Declare that MessageCallbackInstanceFFI is Sync
-/// # Safety
-/// The callback instance may not workon on cross-thread case
-#[cfg(not(feature = "browser"))]
-unsafe impl Sync for MessageCallbackInstanceFFI {}
-
 /// Create a neww callback instance
 #[no_mangle]
 pub extern "C" fn new_callback(
@@ -233,9 +234,8 @@ pub extern "C" fn new_callback(
 /// # Safety
 /// Listen function accept a ClientPtr and will unsafety cast it into Arc based Client
 #[no_mangle]
-pub unsafe extern "C" fn listen(client_ptr: *const ClientPtr) {
-    let client_ptr: &ClientPtr = unsafe { &*client_ptr };
-    let client: Client = unsafe { Client::from_ptr(client_ptr) };
+pub extern "C" fn listen(client_ptr: *const ClientPtr) {
+    let client: Client = Client::from_raw(client_ptr).expect("Client ptr is invalid");
     let processor = client.processor.clone();
     executor::block_on(processor.listen());
 }
@@ -245,9 +245,8 @@ pub unsafe extern "C" fn listen(client_ptr: *const ClientPtr) {
 /// # Safety
 /// Listen function accept a ClientPtr and will unsafety cast it into Arc based Client
 #[no_mangle]
-pub unsafe extern "C" fn async_listen(client_ptr: *const ClientPtr) {
-    let client_ptr: &ClientPtr = unsafe { &*client_ptr };
-    let client: Client = unsafe { Client::from_ptr(client_ptr) };
+pub extern "C" fn async_listen(client_ptr: *const ClientPtr) {
+    let client: Client = Client::from_raw(client_ptr).expect("Client ptr is invalid");
     let processor = client.processor.clone();
     std::thread::spawn(move || {
         executor::block_on(processor.listen());
@@ -260,17 +259,15 @@ pub unsafe extern "C" fn async_listen(client_ptr: *const ClientPtr) {
 /// * This function accept a ClientPtr and will unsafety cast it into Arc based Client
 /// * This function cast CStr into Str
 #[no_mangle]
-pub unsafe extern "C" fn request(
-    client: &ClientPtr,
+pub extern "C" fn request(
+    client_ptr: *const ClientPtr,
     method: *const c_char,
     request: *const c_char,
 ) -> *const c_char {
     match (|| -> Result<*const c_char> {
-        let client: Client = unsafe { Client::from_ptr(client) };
-        let c_method = unsafe { CStr::from_ptr(method) };
-        let c_request = unsafe { CStr::from_ptr(request) };
-        let method = c_method.to_str()?.to_owned();
-        let request = c_request.to_str()?.to_owned();
+        let client: Client = Client::from_raw(client_ptr)?;
+        let method = c_char_to_string(method)?;
+        let request = c_char_to_string(request)?;
         let ret: String = executor::block_on(client.request_internal(method, request, None))?;
         let c_ret = CString::new(ret)?;
         Ok(c_ret.as_ptr())
@@ -287,7 +284,7 @@ pub unsafe extern "C" fn request(
 ///
 /// * This function cast CStr into Str
 #[no_mangle]
-pub unsafe extern "C" fn new_client_with_callback(
+pub extern "C" fn new_client_with_callback(
     ice_server: *const c_char,
     stabilize_timeout: u32,
     account: *const c_char,
@@ -301,19 +298,15 @@ pub unsafe extern "C" fn new_client_with_callback(
         move |data: String| -> Vec<u8> {
             let c_data = CString::new(data).expect("Failed on covering String to CString");
             let sig = signer(c_data.as_ptr());
-            let c_ret = unsafe { CStr::from_ptr(sig) };
-            c_ret.to_bytes().to_vec()
+            let c_ret = c_char_to_bytes(sig).expect("Failed on covering c char to [u8]");
+            c_ret
         }
     }
 
     let client: Client = match (|| -> Result<Client> {
-        let c_ice = unsafe { CStr::from_ptr(ice_server) };
-        let c_acc = unsafe { CStr::from_ptr(account) };
-        let c_acc_ty = unsafe { CStr::from_ptr(account_type) };
-
-        let ice: String = c_ice.to_str()?.to_owned();
-        let acc: String = c_acc.to_str()?.to_owned();
-        let acc_ty: String = c_acc_ty.to_str()?.to_owned();
+        let ice: String = c_char_to_string(ice_server)?;
+        let acc: String = c_char_to_string(account)?;
+        let acc_ty: String = c_char_to_string(account_type)?;
 
         let callback: &MessageCallbackInstanceFFI = unsafe { &*callback_ptr };
         let cb: CallbackFn = Box::new(callback.clone());
@@ -332,11 +325,27 @@ pub unsafe extern "C" fn new_client_with_callback(
             panic!("Failed on create new client {:#}", e)
         }
     };
-    let ret = client.into_ptr();
-    // When leaving the closure, the origin Arc ref will be release,
+    let ret: ClientPtr = (&client).into();
+    // When leaving the closure, the origin Client ref will be release,
     // So we manually increase the count here
     unsafe {
         ret.increase_strong_count();
     }
     ret
+}
+
+fn c_char_to_string(ptr: *const c_char) -> Result<String> {
+    let c_str = c_char_to_bytes(ptr);
+    // Drop none utf8 sym here.
+    Ok(String::from_utf8(c_str?).map_err(Error::FFIFromUtf8Error)?)
+}
+
+fn c_char_to_bytes(ptr: *const c_char) -> Result<Vec<u8>> {
+    // Check point here.
+    if ptr.is_null() {
+        return Err(Error::FFINulPtrError);
+    }
+    // Drop none utf8 sym here.
+    let c_str: &CStr = unsafe { CStr::from_ptr(ptr) };
+    Ok(c_str.to_owned().into())
 }
