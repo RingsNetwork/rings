@@ -6,14 +6,18 @@ use std::process::Command;
 fn gen_cbinding() {
     let crate_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
 
-    cbindgen::Builder::new()
+    match cbindgen::Builder::new()
         .with_language(cbindgen::Language::C)
         .with_no_includes()
         .with_documentation(true)
         .with_crate(crate_dir)
         .generate()
-        .expect("Unable to generate bindings")
-        .write_to_file("bindings.h");
+    {
+        Ok(g) => {
+            g.write_to_file("bindings.h");
+        }
+        Err(e) => println!("Unable to generate bindings, {:?}", e),
+    };
 }
 
 fn gen_version() {

@@ -70,9 +70,9 @@ use std::ffi::CString;
 use std::sync::Arc;
 
 use futures::executor;
+use futures::task::LocalSpawnExt;
 use rings_core::async_trait;
 use rings_core::message::CustomMessage;
-use rings_core::message::Message;
 use rings_core::message::MessageCallback;
 use rings_core::message::MessageHandlerEvent;
 use rings_core::message::MessagePayload;
@@ -111,6 +111,7 @@ impl ClientPtr {
 
 impl std::ops::Drop for ClientPtr {
     fn drop(&mut self) {
+        tracing::debug!("Ptr dropped!");
         unsafe {
             self.decrease_strong_count();
         }
@@ -123,6 +124,7 @@ impl Client {
     /// # Safety
     /// This function will try cast Arc from raw points
     pub unsafe fn from_ptr(ptr: &ClientPtr) -> Client {
+        tracing::debug!("Client from Ptr!");
         let processor = unsafe { Arc::<Processor>::from_raw(ptr.processor as *const Processor) };
         let handler = unsafe { Arc::<HandlerType>::from_raw(ptr.handler as *const HandlerType) };
 
@@ -133,6 +135,7 @@ impl Client {
     /// # Safety
     /// This function will turn Arc into raw point and increase ref count.
     pub unsafe fn into_ptr(&self) -> ClientPtr {
+        tracing::debug!("Client into Ptr!");
         // Clone the Arcs, which increases the ref count,
         // then turn them into raw pointers. This makes sure the memory
         let processor_ptr = Arc::into_raw(self.processor.clone());
@@ -156,7 +159,7 @@ impl Client {
 impl MessageCallback for MessageCallbackInstanceFFI {
     async fn custom_message(
         &self,
-        relay: &MessagePayload<Message>,
+        relay: &MessagePayload,
         msg: &CustomMessage,
     ) -> Vec<MessageHandlerEvent> {
         match (|| -> Result<()> {
@@ -177,7 +180,7 @@ impl MessageCallback for MessageCallbackInstanceFFI {
         vec![]
     }
 
-    async fn builtin_message(&self, relay: &MessagePayload<Message>) -> Vec<MessageHandlerEvent> {
+    async fn builtin_message(&self, relay: &MessagePayload) -> Vec<MessageHandlerEvent> {
         match (|| -> Result<()> {
             let relay = serde_json::to_string(relay)?;
             if let Some(cb) = self.builtin_message_callback {
@@ -234,8 +237,8 @@ pub extern "C" fn new_callback(
 pub unsafe extern "C" fn listen(client_ptr: *const ClientPtr) {
     let client_ptr: &ClientPtr = unsafe { &*client_ptr };
     let client: Client = unsafe { Client::from_ptr(client_ptr) };
-    let p = client.processor;
-    executor::block_on(p.listen());
+    let processor = client.processor.clone();
+    executor::block_on(processor.listen());
 }
 
 /// Request internal rpc api
