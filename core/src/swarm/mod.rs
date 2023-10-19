@@ -1,18 +1,20 @@
 #![warn(missing_docs)]
 //! Tranposrt management
+
 mod builder;
-pub(crate) mod callback;
+/// Callback interface for swarm
+pub mod callback;
 /// Implementations of connection management traits for swarm
 pub mod impls;
 mod types;
 
 use std::sync::Arc;
+use std::sync::RwLock;
 
 use async_recursion::async_recursion;
 use async_trait::async_trait;
 pub use builder::SwarmBuilder;
 use rings_derive::JudgeConnection;
-use rings_transport::core::callback::BoxedCallback;
 use rings_transport::core::transport::BoxedTransport;
 use rings_transport::core::transport::ConnectionInterface;
 use rings_transport::core::transport::TransportMessage;
@@ -38,6 +40,7 @@ use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
 use crate::message::PayloadSender;
 use crate::session::SessionSk;
+use crate::swarm::callback::SharedSwarmCallback;
 use crate::swarm::impls::ConnectionHandshake;
 use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::TransportEvent;
@@ -56,7 +59,7 @@ pub struct Swarm {
     session_sk: SessionSk,
     message_handler: MessageHandler,
     transport: BoxedTransport<ConnectionOwner, TransportError>,
-    callback: Arc<BoxedCallback>,
+    callback: RwLock<SharedSwarmCallback>,
 }
 
 impl Swarm {

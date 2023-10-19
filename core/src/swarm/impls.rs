@@ -3,6 +3,7 @@ use std::str::FromStr;
 use async_trait::async_trait;
 use rings_transport::core::transport::ConnectionInterface;
 
+use super::callback::InnerSwarmCallback;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
@@ -13,7 +14,9 @@ use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
 use crate::message::PayloadSender;
+use crate::swarm::callback::SharedSwarmCallback;
 use crate::swarm::Swarm;
+use crate::types::channel::Channel;
 use crate::types::Connection;
 
 /// ConnectionHandshake defined how to connect two connections between two swarms.
@@ -137,11 +140,35 @@ impl Swarm {
         }
     }
 
+    fn callback(&self) -> Result<SharedSwarmCallback> {
+        let inner = self
+            .callback
+            .read()
+            .map_err(|_| Error::CallbackSyncLockError)?;
+
+        Ok(inner.clone())
+    }
+
+    /// Set callback for swarm.
+    pub fn set_callback(&self, callback: SharedSwarmCallback) -> Result<()> {
+        let mut inner = self
+            .callback
+            .write()
+            .map_err(|_| Error::CallbackSyncLockError)?;
+
+        *inner = callback;
+
+        Ok(())
+    }
+
     /// Create new connection that will be handled by swarm.
     pub async fn new_connection(&self, did: Did) -> Result<Connection> {
+        let inner_callback =
+            InnerSwarmCallback::new(self.transport_event_channel.sender(), self.callback()?);
+
         let cid = did.to_string();
         self.transport
-            .new_connection(&cid, self.callback.clone())
+            .new_connection(&cid, Box::new(inner_callback))
             .await
             .map_err(Error::Transport)?;
         self.transport.connection(&cid).map_err(|e| e.into())

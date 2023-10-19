@@ -320,6 +320,9 @@ pub enum Error {
     #[error("Failed to get dht from a sync lock")]
     DHTSyncLockError,
 
+    #[error("Failed to lock callback of swarm")]
+    CallbackSyncLockError,
+
     #[error("Failed to build swarm: {0}")]
     SwarmBuildFailed(String),
 

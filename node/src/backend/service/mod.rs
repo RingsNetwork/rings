@@ -30,10 +30,12 @@ use crate::error::Result;
 use crate::prelude::rings_core::chunk::Chunk;
 use crate::prelude::rings_core::chunk::ChunkList;
 use crate::prelude::rings_core::chunk::ChunkManager;
+use crate::prelude::rings_core::swarm::callback::SwarmCallback;
 use crate::prelude::*;
 
 /// A Backend struct contains http_server.
 pub struct Backend {
+    swarm: Arc<Swarm>,
     http_server: Arc<HttpServer>,
     text_endpoint: TextEndpoint,
     extension_endpoint: Extension,
@@ -63,8 +65,13 @@ impl From<(Vec<HiddenServerConfig>, ExtensionConfig)> for BackendConfig {
 impl Backend {
     /// new backend
     /// - `ipfs_gateway`
-    pub async fn new(config: BackendConfig, sender: Sender<BackendMessage>) -> Result<Self> {
+    pub async fn new(
+        config: BackendConfig,
+        sender: Sender<BackendMessage>,
+        swarm: Arc<Swarm>,
+    ) -> Result<Self> {
         Ok(Self {
+            swarm,
             http_server: Arc::new(HttpServer::from(config.hidden_servers)),
             text_endpoint: TextEndpoint,
             sender,
@@ -93,50 +100,49 @@ impl Backend {
 
 #[cfg(feature = "node")]
 #[async_trait]
-impl MessageCallback for Backend {
-    /// `custom_message` in Backend for now only handle
-    /// the `Message::CustomMessage` in handler `invoke_callback` function.
-    /// And send http request to localhost through Backend http_request handler.
-    async fn custom_message(
+impl SwarmCallback for Backend {
+    async fn on_payload(
         &self,
-        ctx: &MessagePayload,
-        msg: &CustomMessage,
-    ) -> Vec<MessageHandlerEvent> {
-        let msg = msg.0.clone();
+        payload: &MessagePayload,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        if payload.transaction.destination != self.swarm.did() {
+            return Ok(());
+        }
+
+        let data: Message = payload.transaction.data()?;
+
+        let Message::CustomMessage(CustomMessage(msg)) = data else {
+            return Ok(());
+        };
 
         let (left, msg) = array_refs![&msg, 4; ..;];
         let (&[flag], _) = array_refs![left, 1, 3];
 
         let msg = if flag == 1 {
-            let data = self.handle_chunk_data(msg).await;
-            if let Err(e) = data {
-                tracing::error!("handle_chunk_data failed: {}", e);
-                return vec![];
-            }
-            let data = data.unwrap();
+            let data = self.handle_chunk_data(msg).await?;
             if let Some(data) = data {
                 BackendMessage::try_from(data.to_vec().as_ref())
             } else {
-                return vec![];
+                return Ok(());
             }
         } else if flag == 0 {
             BackendMessage::try_from(msg)
         } else {
             tracing::warn!("invalid custom_message flag: {}", flag);
-            return vec![];
+            return Ok(());
         };
 
         if let Err(e) = msg {
             tracing::error!("decode custom_message failed: {}", e);
-            return vec![];
+            return Ok(());
         }
         let msg = msg.unwrap();
         tracing::debug!("receive custom_message: {:?}", msg);
 
         let result = match msg.message_type.into() {
-            MessageType::SimpleText => self.text_endpoint.handle_message(ctx, &msg).await,
-            MessageType::HttpRequest => self.http_server.handle_message(ctx, &msg).await,
-            MessageType::Extension => self.extension_endpoint.handle_message(ctx, &msg).await,
+            MessageType::SimpleText => self.text_endpoint.handle_message(payload, &msg).await,
+            MessageType::HttpRequest => self.http_server.handle_message(payload, &msg).await,
+            MessageType::Extension => self.extension_endpoint.handle_message(payload, &msg).await,
             _ => {
                 tracing::debug!(
                     "custom_message handle unsupported, tag: {:?}",
@@ -150,15 +156,15 @@ impl MessageCallback for Backend {
         }
 
         match result {
-            Ok(v) => v,
+            Ok(v) => self
+                .swarm
+                .handle_message_handler_events(&v)
+                .await
+                .map_err(|e| e.into()),
             Err(e) => {
                 tracing::error!("handle custom_message failed: {}", e);
-                vec![]
+                Ok(())
             }
         }
-    }
-
-    async fn builtin_message(&self, _ctx: &MessagePayload) -> Vec<MessageHandlerEvent> {
-        vec![]
     }
 }

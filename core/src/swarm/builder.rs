@@ -3,8 +3,7 @@
 //! [Swarm]
 
 use std::sync::Arc;
-
-use rings_transport::core::callback::Callback;
+use std::sync::RwLock;
 
 use crate::channels::Channel;
 use crate::dht::PeerRing;
@@ -13,11 +12,15 @@ use crate::message::MessageHandler;
 use crate::message::ValidatorFn;
 use crate::session::SessionSk;
 use crate::storage::PersistenceStorage;
+use crate::swarm::callback::SharedSwarmCallback;
 use crate::swarm::callback::SwarmCallback;
 use crate::swarm::MeasureImpl;
 use crate::swarm::Swarm;
 use crate::types::channel::Channel as ChannelTrait;
 use crate::types::Transport;
+
+struct DefaultCallback;
+impl SwarmCallback for DefaultCallback {}
 
 /// Creates a SwarmBuilder to configure a Swarm.
 pub struct SwarmBuilder {
@@ -30,6 +33,7 @@ pub struct SwarmBuilder {
     measure: Option<MeasureImpl>,
     message_callback: Option<CallbackFn>,
     message_validator: Option<ValidatorFn>,
+    callback: Option<SharedSwarmCallback>,
 }
 
 impl SwarmBuilder {
@@ -45,6 +49,7 @@ impl SwarmBuilder {
             measure: None,
             message_callback: None,
             message_validator: None,
+            callback: None,
         }
     }
 
@@ -85,6 +90,12 @@ impl SwarmBuilder {
         self
     }
 
+    /// Bind callback for Swarm.
+    pub fn callback(mut self, callback: SharedSwarmCallback) -> Self {
+        self.callback = Some(callback);
+        self
+    }
+
     /// Try build for `Swarm`.
     pub fn build(self) -> Swarm {
         let dht_did = self.session_sk.account_did();
@@ -100,7 +111,11 @@ impl SwarmBuilder {
 
         let transport_event_channel = Channel::new();
         let transport = Box::new(Transport::new(&self.ice_servers, self.external_address));
-        let callback = Arc::new(SwarmCallback::new(transport_event_channel.sender()).boxed());
+
+        let callback = RwLock::new(
+            self.callback
+                .unwrap_or_else(|| Arc::new(DefaultCallback {})),
+        );
 
         Swarm {
             transport_event_channel,
