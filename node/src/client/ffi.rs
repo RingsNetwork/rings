@@ -58,7 +58,7 @@
 //!     rings_node.listen(ffi.addressof(client))
 //!     print(client)
 //! ```
-//!
+//! 
 //! Note: Since the above code is executed in a single-process environment of Python,
 //! the Rings' listen loop will block the process. If you wish to use it in a production environment,
 //! you should implement your own more advanced process or thread management.
@@ -238,6 +238,20 @@ pub unsafe extern "C" fn listen(client_ptr: *const ClientPtr) {
     let client: Client = unsafe { Client::from_ptr(client_ptr) };
     let processor = client.processor.clone();
     executor::block_on(processor.listen());
+}
+
+/// Start message listening and stabilization
+/// This function will launch listener in a new thread
+/// # Safety
+/// Listen function accept a ClientPtr and will unsafety cast it into Arc based Client
+#[no_mangle]
+pub unsafe extern "C" fn async_listen(client_ptr: *const ClientPtr) {
+    let client_ptr: &ClientPtr = unsafe { &*client_ptr };
+    let client: Client = unsafe { Client::from_ptr(client_ptr) };
+    let processor = client.processor.clone();
+    std::thread::spawn(move || {
+        executor::block_on(processor.listen());
+    });
 }
 
 /// Request internal rpc api
