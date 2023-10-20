@@ -134,9 +134,9 @@ impl Client {
             params,
             id,
         };
-        Ok(handler
+        handler
             .handle_request(req)
             .await
-            .map_err(Error::InternalRpcError)?)
+            .map_err(Error::InternalRpcError)
     }
 }
