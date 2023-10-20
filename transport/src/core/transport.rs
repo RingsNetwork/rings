@@ -4,15 +4,13 @@
 //! There is also a [ConnectionCreation] trait, which is used to specifies the creation of a
 //! [ConnectionInterface] object for [Transport](crate::Transport).
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
 
 use crate::connection_ref::ConnectionRef;
-use crate::core::callback::BoxedCallback;
+use crate::core::callback::BoxedTransportCallback;
 
 /// Wrapper for the data that is sent over the data channel.
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -137,7 +135,7 @@ pub trait TransportInterface {
     async fn new_connection(
         &self,
         cid: &str,
-        callback: Arc<BoxedCallback>,
+        callback: BoxedTransportCallback,
     ) -> Result<(), Self::Error>;
 
     /// This method closes and releases the connection from transport.

@@ -3289,13 +3289,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rings-swarm"
-version = "0.3.0"
-dependencies = [
- "rings-transport",
-]
-
-[[package]]
 name = "rings-transport"
 version = "0.3.0"
 dependencies = [

@@ -10,9 +10,9 @@ use rand::distributions::Distribution;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::callback::InnerCallback;
+use crate::callback::InnerTransportCallback;
 use crate::connection_ref::ConnectionRef;
-use crate::core::callback::BoxedCallback;
+use crate::core::callback::BoxedTransportCallback;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::TransportInterface;
 use crate::core::transport::TransportMessage;
@@ -33,7 +33,7 @@ const SEND_MESSAGE_DELAY: bool = true;
 const CHANNEL_OPEN_DELAY: bool = false;
 
 lazy_static! {
-    static ref CBS: DashMap<u64, Arc<InnerCallback>> = DashMap::new();
+    static ref CBS: DashMap<u64, Arc<InnerTransportCallback>> = DashMap::new();
     static ref CONNS: DashMap<u64, Arc<DummyConnection>> = DashMap::new();
 }
 
@@ -65,11 +65,11 @@ impl DummyConnection {
         }
     }
 
-    fn callback(&self) -> Arc<InnerCallback> {
+    fn callback(&self) -> Arc<InnerTransportCallback> {
         CBS.get(&self.rand_id).unwrap().clone()
     }
 
-    fn remote_callback(&self) -> Arc<InnerCallback> {
+    fn remote_callback(&self) -> Arc<InnerTransportCallback> {
         let cid = { self.remote_rand_id.lock().unwrap() }.unwrap();
         CBS.get(&cid).unwrap().clone()
     }
@@ -188,7 +188,7 @@ impl TransportInterface for DummyTransport {
     type Connection = DummyConnection;
     type Error = Error;
 
-    async fn new_connection(&self, cid: &str, callback: Arc<BoxedCallback>) -> Result<()> {
+    async fn new_connection(&self, cid: &str, callback: BoxedTransportCallback) -> Result<()> {
         if let Ok(existed_conn) = self.pool.connection(cid) {
             if matches!(
                 existed_conn.webrtc_connection_state(),
@@ -207,7 +207,11 @@ impl TransportInterface for DummyTransport {
         CONNS.insert(conn_rand_id, self.connection(cid)?.upgrade()?);
         CBS.insert(
             conn_rand_id,
-            Arc::new(InnerCallback::new(cid, callback, Notifier::default())),
+            Arc::new(InnerTransportCallback::new(
+                cid,
+                callback,
+                Notifier::default(),
+            )),
         );
         Ok(())
     }

@@ -14,9 +14,9 @@ use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 
-use crate::callback::InnerCallback;
+use crate::callback::InnerTransportCallback;
 use crate::connection_ref::ConnectionRef;
-use crate::core::callback::BoxedCallback;
+use crate::core::callback::BoxedTransportCallback;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::TransportInterface;
 use crate::core::transport::TransportMessage;
@@ -168,7 +168,7 @@ impl TransportInterface for WebrtcTransport {
     type Connection = WebrtcConnection;
     type Error = Error;
 
-    async fn new_connection(&self, cid: &str, callback: Arc<BoxedCallback>) -> Result<()> {
+    async fn new_connection(&self, cid: &str, callback: BoxedTransportCallback) -> Result<()> {
         if let Ok(existed_conn) = self.pool.connection(cid) {
             if matches!(
                 existed_conn.webrtc_connection_state(),
@@ -213,7 +213,7 @@ impl TransportInterface for WebrtcTransport {
         // Set callbacks
         //
         let webrtc_data_channel_open_notifier = Notifier::default();
-        let inner_cb = Arc::new(InnerCallback::new(
+        let inner_cb = Arc::new(InnerTransportCallback::new(
             cid,
             callback,
             webrtc_data_channel_open_notifier.clone(),

@@ -378,19 +378,20 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
 
     let measure = PeriodicMeasure::new(per_measure_storage);
 
-    let (sender, receiver) = tokio::sync::broadcast::channel(1024);
-    let backend_config = (c.backend, c.extension).into();
-    let backend = Backend::new(backend_config, sender).await?;
-    let backend_service_names = backend.service_names();
-
     let processor = Arc::new(
         ProcessorBuilder::from_config(&pc)?
             .storage(per_data_storage)
             .measure(measure)
-            .message_callback(Box::new(backend))
             .build()?,
     );
     println!("Did: {}", processor.swarm.did());
+
+    let (sender, receiver) = tokio::sync::broadcast::channel(1024);
+    let backend_config = (c.backend, c.extension).into();
+    let backend = Arc::new(Backend::new(backend_config, sender, processor.swarm.clone()).await?);
+    let backend_service_names = backend.service_names();
+
+    processor.swarm.set_callback(backend).unwrap();
 
     let processor_clone = processor.clone();
     let _ = futures::join!(

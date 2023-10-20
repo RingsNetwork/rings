@@ -1,5 +1,5 @@
 [workspace]
-members = ["core", "transport", "swarm", "node", "rpc", "derive"]
+members = ["core", "transport", "node", "rpc", "derive"]
 
 resolver = "2"
 
@@ -8,7 +8,6 @@ js-sys = { version = "0.3.64" }
 rings-core = { version = "0.3.0", path = "core", default-features = false }
 rings-derive = { version = "0.3.0", path = "derive", default-features = false }
 rings-rpc = { version = "0.3.0", path = "rpc", default-features = false }
-rings-swarm = { version = "0.3.0", path = "swarm" }
 rings-transport = { version = "0.3.0", path = "transport" }
 serde-wasm-bindgen = { version = "0.5.0" }
 wasm-bindgen = { version = "0.2.87" }
