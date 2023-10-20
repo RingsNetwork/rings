@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use rings_transport::core::callback::Callback;
 use rings_transport::core::transport::ConnectionInterface;
 use rings_transport::core::transport::TransportInterface;
 use rings_transport::core::transport::WebrtcConnectionState;
@@ -12,12 +11,16 @@ use super::prepare_node;
 use crate::channels::Channel as CbChannel;
 use crate::ecc::SecretKey;
 use crate::error::Result;
+use crate::swarm::callback::InnerSwarmCallback;
 use crate::swarm::callback::SwarmCallback;
 use crate::tests::manually_establish_connection;
 use crate::types::channel::Channel;
 use crate::types::channel::TransportEvent;
 use crate::types::Connection;
 use crate::types::Transport;
+
+struct DefaultCallback;
+impl SwarmCallback for DefaultCallback {}
 
 async fn get_fake_permission() {
     let window = web_sys::window().unwrap();
@@ -36,10 +39,10 @@ async fn prepare_transport(channel: Option<Arc<CbChannel<TransportEvent>>>) -> T
         Some(c) => Arc::clone(&c),
         None => Arc::new(<CbChannel<TransportEvent> as Channel<TransportEvent>>::new()),
     };
-    let callback = SwarmCallback::new(ch.sender()).boxed();
     let trans = Transport::new("stun://stun.l.google.com:19302", None);
+    let callback = InnerSwarmCallback::new(ch.sender(), Arc::new(DefaultCallback {}));
     trans
-        .new_connection("test", Arc::new(callback))
+        .new_connection("test", Box::new(callback))
         .await
         .unwrap();
     trans
