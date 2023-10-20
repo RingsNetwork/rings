@@ -1,6 +1,8 @@
 #![warn(missing_docs)]
 //! General Client, this module provide Client implementation for FFI and WASM
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use rings_core::session::SessionSkBuilder;
@@ -36,6 +38,23 @@ pub mod ffi;
 pub struct Client {
     processor: Arc<Processor>,
     handler: Arc<HandlerType>,
+}
+
+/// Async signer, without Send required
+#[cfg(feature = "browser")]
+pub type AsyncSigner = Box<dyn Fn(String) -> Pin<Box<dyn Future<Output = Vec<u8>>>>>;
+
+/// Async signer, use for non-wasm envirement, Send is necessary
+#[cfg(not(feature = "browser"))]
+pub type AsyncSigner = Box<dyn Fn(String) -> Pin<Box<dyn Future<Output = Vec<u8>> + Send>>>;
+
+/// Signer can be async and sync
+#[allow(clippy::type_complexity)]
+pub enum Signer {
+    /// Sync signer
+    Sync(Box<dyn Fn(String) -> Vec<u8>>),
+    /// Async signer
+    Async(AsyncSigner),
 }
 
 #[allow(dead_code)]
@@ -102,12 +121,15 @@ impl Client {
         stabilize_timeout: usize,
         account: String,
         account_type: String,
-        signer: Box<dyn Fn(String) -> Vec<u8>>,
+        signer: Signer,
         callback: Option<CallbackFn>,
     ) -> Result<Client> {
         let mut sk_builder = SessionSkBuilder::new(account, account_type);
         let proof = sk_builder.unsigned_proof();
-        let sig = signer(proof);
+        let sig = match signer {
+            Signer::Sync(s) => s(proof),
+            Signer::Async(s) => s(proof).await,
+        };
         sk_builder = sk_builder.set_session_sig(sig.to_vec());
         let session_sk = sk_builder.build().map_err(Error::InternalError)?;
         let config = ProcessorConfig::new(ice_servers, session_sk, stabilize_timeout);

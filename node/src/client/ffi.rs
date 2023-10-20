@@ -106,6 +106,7 @@ use rings_core::message::MessageHandlerEvent;
 use rings_core::message::MessagePayload;
 
 use super::Client;
+use super::Signer;
 use crate::error::Error;
 use crate::error::Result;
 use crate::jsonrpc::HandlerType;
@@ -346,7 +347,7 @@ pub extern "C" fn new_client_with_callback(
             stabilize_timeout as usize,
             acc,
             acc_ty,
-            Box::new(wrapped_signer(signer)),
+            Signer::Sync(Box::new(wrapped_signer(signer))),
             Some(cb),
         ))
     })() {

@@ -2,6 +2,8 @@
 //! Browser Client implementation
 #![allow(non_snake_case, non_upper_case_globals, clippy::ptr_offset_with_cast)]
 use std::convert::TryFrom;
+use std::future::Future;
+use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -20,7 +22,6 @@ use rings_core::message::MessageHandlerEvent;
 use rings_core::message::MessagePayload;
 use rings_core::prelude::vnode;
 use rings_core::prelude::vnode::VirtualNode;
-use rings_core::session::SessionSkBuilder;
 use rings_core::utils::js_utils;
 use rings_core::utils::js_value;
 use rings_transport::core::transport::ConnectionInterface;
@@ -37,6 +38,7 @@ use crate::backend::types::BackendMessage;
 use crate::backend::types::HttpResponse;
 use crate::backend::types::MessageType;
 use crate::client::Client;
+use crate::client::Signer;
 use crate::consts::BACKEND_MTU;
 use crate::prelude::chunk::Chunk;
 use crate::prelude::chunk::ChunkList;
@@ -77,27 +79,46 @@ impl Client {
         callback: Option<MessageCallbackInstance>,
         //) -> Result<Client, error::Error> {
     ) -> js_sys::Promise {
+        fn wrapped_signer(
+            signer: js_sys::Function,
+        ) -> Box<dyn Fn(String) -> Pin<Box<dyn Future<Output = Vec<u8>>>>> {
+            Box::new(
+                move |data: String| -> Pin<Box<dyn Future<Output = Vec<u8>>>> {
+                    let signer = signer.clone();
+                    Box::pin(async move {
+                        let signer = signer.clone();
+                        let sig: js_sys::Uint8Array = Uint8Array::from(
+                            JsFuture::from(js_sys::Promise::from(
+                                signer
+                                    .call1(&JsValue::NULL, &JsValue::from_str(&data))
+                                    .expect("Failed on call external Js Function"),
+                            ))
+                            .await
+                            .expect("Failed await call external Js Promise"),
+                        );
+                        sig.to_vec()
+                    })
+                },
+            )
+        }
+
         future_to_promise(async move {
-            let mut sk_builder = SessionSkBuilder::new(account, account_type);
-            let proof = sk_builder.unsigned_proof();
-            let sig: js_sys::Uint8Array = Uint8Array::from(
-                JsFuture::from(js_sys::Promise::from(
-                    signer.call1(&JsValue::NULL, &JsValue::from_str(&proof))?,
-                ))
-                .await?,
-            );
-            sk_builder = sk_builder.set_session_sig(sig.to_vec());
-            let session_sk = sk_builder.build().unwrap();
-            let config = ProcessorConfig::new(ice_servers, session_sk, stabilize_timeout);
+            let signer = wrapped_signer(signer);
             let cb: Option<CallbackFn> = if let Some(cb) = callback {
                 Some(Box::new(cb))
             } else {
                 None
             };
-            Ok(JsValue::from(
-                Self::new_client_with_storage_internal(config, cb, "rings-node".to_string())
-                    .await?,
-            ))
+            let client = Client::new_client_internal(
+                ice_servers,
+                stabilize_timeout,
+                account,
+                account_type,
+                Signer::Async(Box::new(signer)),
+                cb,
+            )
+            .await?;
+            Ok(JsValue::from(client))
         })
     }
 
