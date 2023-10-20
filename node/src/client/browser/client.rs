@@ -37,9 +37,9 @@ use wasm_bindgen_futures::JsFuture;
 use crate::backend::types::BackendMessage;
 use crate::backend::types::HttpResponse;
 use crate::backend::types::MessageType;
+use crate::client::AsyncSigner;
 use crate::client::Client;
 use crate::client::Signer;
-use crate::client::AsyncSigner;
 use crate::consts::BACKEND_MTU;
 use crate::prelude::chunk::Chunk;
 use crate::prelude::chunk::ChunkList;
@@ -80,9 +80,7 @@ impl Client {
         callback: Option<MessageCallbackInstance>,
         //) -> Result<Client, error::Error> {
     ) -> js_sys::Promise {
-        fn wrapped_signer(
-            signer: js_sys::Function,
-        ) -> AsyncSigner {
+        fn wrapped_signer(signer: js_sys::Function) -> AsyncSigner {
             Box::new(
                 move |data: String| -> Pin<Box<dyn Future<Output = Vec<u8>>>> {
                     let signer = signer.clone();
