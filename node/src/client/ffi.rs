@@ -294,9 +294,11 @@ pub extern "C" fn request(
     match (|| -> Result<*const c_char> {
         let client: Client = Client::from_raw(client_ptr)?;
         let method = c_char_to_string(method)?;
-        let params = c_char_to_string(request)?;
+        let params = c_char_to_string(params)?;
         let params = serde_json::from_str(&params)?;
-        let ret: String = executor::block_on(client.request_internal(method, request, None))?;
+        let ret: String = serde_json::to_string(&executor::block_on(
+            client.request_internal(method, params, None),
+        )?)?;
         let c_ret = CString::new(ret)?;
         Ok(c_ret.as_ptr())
     })() {
