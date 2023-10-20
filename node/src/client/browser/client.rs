@@ -39,6 +39,7 @@ use crate::backend::types::HttpResponse;
 use crate::backend::types::MessageType;
 use crate::client::Client;
 use crate::client::Signer;
+use crate::client::AsyncSigner;
 use crate::consts::BACKEND_MTU;
 use crate::prelude::chunk::Chunk;
 use crate::prelude::chunk::ChunkList;
@@ -81,9 +82,9 @@ impl Client {
     ) -> js_sys::Promise {
         fn wrapped_signer(
             signer: js_sys::Function,
-        ) -> Box<dyn Fn(String) -> Pin<Box<dyn Future<Output = Vec<u8>>>>> {
+        ) -> Box<dyn Fn(String) -> AsyncSigner {
             Box::new(
-                move |data: String| -> Pin<Box<dyn Future<Output = Vec<u8>>>> {
+                move |data: String| -> AsyncSigner {
                     let signer = signer.clone();
                     Box::pin(async move {
                         let signer = signer.clone();
