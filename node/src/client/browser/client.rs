@@ -82,9 +82,9 @@ impl Client {
     ) -> js_sys::Promise {
         fn wrapped_signer(
             signer: js_sys::Function,
-        ) -> Box<dyn Fn(String) -> AsyncSigner {
+        ) -> AsyncSigner {
             Box::new(
-                move |data: String| -> AsyncSigner {
+                move |data: String| -> Pin<Box<dyn Future<Output = Vec<u8>>>> {
                     let signer = signer.clone();
                     Box::pin(async move {
                         let signer = signer.clone();
