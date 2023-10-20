@@ -38,13 +38,10 @@ use crate::backend::types::HttpResponse;
 use crate::backend::types::MessageType;
 use crate::client::Client;
 use crate::consts::BACKEND_MTU;
-use crate::jsonrpc::handler::MethodHandler;
 use crate::prelude::chunk::Chunk;
 use crate::prelude::chunk::ChunkList;
 use crate::prelude::chunk::ChunkManager;
 use crate::prelude::http;
-use crate::prelude::jsonrpc_core::types::id::Id;
-use crate::prelude::jsonrpc_core::MethodCall;
 use crate::prelude::message;
 use crate::prelude::wasm_export;
 use crate::prelude::CallbackFn;
@@ -153,22 +150,14 @@ impl Client {
         params: JsValue,
         opt_id: Option<String>,
     ) -> js_sys::Promise {
-        let handler = self.handler.clone();
+        let ins = self.clone();
         future_to_promise(async move {
             let params = super::utils::parse_params(params)
                 .map_err(|e| JsError::new(e.to_string().as_str()))?;
-            let id = if let Some(id) = opt_id {
-                Id::Str(id)
-            } else {
-                Id::Null
-            };
-            let req: MethodCall = MethodCall {
-                jsonrpc: None,
-                method,
-                params,
-                id,
-            };
-            let ret = handler.handle_request(req).await.map_err(JsError::from)?;
+            let ret = ins
+                .request_internal(method, params, opt_id)
+                .await
+                .map_err(JsError::from)?;
             Ok(js_value::serialize(&ret).map_err(JsError::from)?)
         })
     }

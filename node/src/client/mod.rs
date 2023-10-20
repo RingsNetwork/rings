@@ -13,6 +13,8 @@ use crate::jsonrpc::HandlerType;
 use crate::measure::PeriodicMeasure;
 use crate::prelude::jsonrpc_core::types::id::Id;
 use crate::prelude::jsonrpc_core::MethodCall;
+use crate::prelude::jsonrpc_core::Output;
+use crate::prelude::jsonrpc_core::Params;
 use crate::prelude::wasm_export;
 use crate::prelude::CallbackFn;
 use crate::processor::Processor;
@@ -117,11 +119,10 @@ impl Client {
     pub(crate) async fn request_internal(
         &self,
         method: String,
-        params: String,
+        params: Params,
         opt_id: Option<String>,
-    ) -> Result<String> {
+    ) -> Result<Output> {
         let handler = self.handler.clone();
-        let params = serde_json::from_str(&params)?;
         let id = if let Some(id) = opt_id {
             Id::Str(id)
         } else {
@@ -133,12 +134,9 @@ impl Client {
             params,
             id,
         };
-        serde_json::to_string(
-            &handler
-                .handle_request(req)
-                .await
-                .map_err(Error::InternalRpcError)?,
-        )
-        .map_err(Error::SerdeJsonError)
+        Ok(handler
+            .handle_request(req)
+            .await
+            .map_err(Error::InternalRpcError)?)
     }
 }

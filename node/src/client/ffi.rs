@@ -289,12 +289,13 @@ pub extern "C" fn async_listen(client_ptr: *const ClientPtr) {
 pub extern "C" fn request(
     client_ptr: *const ClientPtr,
     method: *const c_char,
-    request: *const c_char,
+    params: *const c_char,
 ) -> *const c_char {
     match (|| -> Result<*const c_char> {
         let client: Client = Client::from_raw(client_ptr)?;
         let method = c_char_to_string(method)?;
-        let request = c_char_to_string(request)?;
+        let params = c_char_to_string(request)?;
+        let params = serde_json::from_str(&params)?;
         let ret: String = executor::block_on(client.request_internal(method, request, None))?;
         let c_ret = CString::new(ret)?;
         Ok(c_ret.as_ptr())
