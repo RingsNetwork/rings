@@ -1,5 +1,11 @@
+#![warn(missing_docs)]
+//! Utils for browser client
 use js_sys;
 use wasm_bindgen::prelude::*;
+
+use crate::error::Error;
+use crate::prelude::jsonrpc_core;
+use crate::prelude::rings_core::utils::js_value;
 
 /// A parser convert JsValue to jsonrpc_core::Params.
 /// # Examples
@@ -28,10 +34,6 @@ use wasm_bindgen::prelude::*;
 ///     panic!("value2 not array");
 /// }
 /// ```
-use crate::error::Error;
-use crate::prelude::jsonrpc_core;
-use crate::prelude::rings_core::utils::js_value;
-
 pub fn parse_params(params: JsValue) -> Result<jsonrpc_core::Params, Error> {
     let params = if params.is_null() {
         jsonrpc_core::Params::None

@@ -16,7 +16,7 @@ use crate::processor::ProcessorConfig;
 wasm_bindgen_test_configure!(run_in_browser);
 
 pub fn setup_log() {
-    init_logging(tracing::Level::INFO);
+    init_logging(crate::logging::LogLevel::Info);
     tracing::debug!("test")
 }
 

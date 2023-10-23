@@ -1,5 +1,9 @@
+#![warn(missing_docs)]
+//! Browser Client implementation
 #![allow(non_snake_case, non_upper_case_globals, clippy::ptr_offset_with_cast)]
 use std::convert::TryFrom;
+use std::future::Future;
+use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -18,9 +22,6 @@ use rings_core::message::MessageHandlerEvent;
 use rings_core::message::MessagePayload;
 use rings_core::prelude::vnode;
 use rings_core::prelude::vnode::VirtualNode;
-use rings_core::session::SessionSkBuilder;
-use rings_core::storage::PersistenceStorage;
-use rings_core::swarm::impls::ConnectionHandshake;
 use rings_core::utils::js_utils;
 use rings_core::utils::js_value;
 use rings_transport::core::transport::ConnectionInterface;
@@ -36,130 +37,87 @@ use wasm_bindgen_futures::JsFuture;
 use crate::backend::types::BackendMessage;
 use crate::backend::types::HttpResponse;
 use crate::backend::types::MessageType;
+use crate::client::AsyncSigner;
+use crate::client::Client;
+use crate::client::Signer;
 use crate::consts::BACKEND_MTU;
-use crate::error;
-use crate::jsonrpc::build_handler;
-use crate::jsonrpc::handler::browser::MethodHandler;
-use crate::jsonrpc::HandlerType;
-use crate::measure::PeriodicMeasure;
 use crate::prelude::chunk::Chunk;
 use crate::prelude::chunk::ChunkList;
 use crate::prelude::chunk::ChunkManager;
 use crate::prelude::http;
-use crate::prelude::jsonrpc_core::types::id::Id;
-use crate::prelude::jsonrpc_core::MethodCall;
 use crate::prelude::message;
 use crate::prelude::wasm_export;
 use crate::prelude::CallbackFn;
-use crate::processor::Processor;
-use crate::processor::ProcessorBuilder;
 use crate::processor::ProcessorConfig;
 
 /// AddressType enum contains `DEFAULT` and `ED25519`.
 #[wasm_export]
 pub enum AddressType {
+    /// Default address type, hex string of sha1(pubkey)
     DEFAULT,
+    /// Ed25519 style address type, hex string of pubkey
     Ed25519,
 }
 
-/// rings-node browser client
-/// the process of initialize client.
-/// ``` typescript
-/// const unsignedInfo = new UnsignedInfo(account);
-/// const signed = await signer.signMessage(unsignedInfo.auth);
-/// const sig = new Uint8Array(web3.utils.hexToBytes(signed));
-/// const client: Client = await Client.new_client(unsignedInfo, sig, stunOrTurnUrl);
-/// ```
-#[derive(Clone)]
-#[allow(dead_code)]
-#[wasm_export]
-pub struct Client {
-    processor: Arc<Processor>,
-    handler: Arc<HandlerType>,
-}
-
-#[allow(dead_code)]
-impl Client {
-    pub(crate) async fn new_client_with_storage_internal(
-        config: ProcessorConfig,
-        callback: Option<MessageCallbackInstance>,
-        storage_name: String,
-    ) -> Result<Client, error::Error> {
-        let cb: Option<CallbackFn> = match callback {
-            Some(cb) => Some(Box::new(cb)),
-            None => None,
-        };
-
-        let storage_path = storage_name.as_str();
-        let measure_path = [storage_path, "measure"].join("/");
-
-        let storage = PersistenceStorage::new_with_cap_and_name(50000, storage_path)
-            .await
-            .map_err(error::Error::Storage)?;
-
-        let ms = PersistenceStorage::new_with_cap_and_path(50000, measure_path)
-            .await
-            .map_err(error::Error::Storage)?;
-        let measure = PeriodicMeasure::new(ms);
-
-        let mut processor_builder = ProcessorBuilder::from_config(&config)?
-            .storage(storage)
-            .measure(measure);
-
-        if let Some(cb) = cb {
-            processor_builder = processor_builder.message_callback(cb);
-        }
-
-        let processor = Arc::new(processor_builder.build()?);
-
-        let mut handler: HandlerType = processor.clone().into();
-        build_handler(&mut handler).await;
-
-        Ok(Client {
-            processor,
-            handler: handler.into(),
-        })
-    }
-
-    pub(crate) async fn new_client_with_storage_and_serialized_config_internal(
-        config: String,
-        callback: Option<MessageCallbackInstance>,
-        storage_name: String,
-    ) -> Result<Client, error::Error> {
-        let config: ProcessorConfig = serde_yaml::from_str(&config)?;
-        Self::new_client_with_storage_internal(config, callback, storage_name).await
-    }
-}
-
 #[wasm_export]
 impl Client {
+    /// Create new instance of Client, return Promise
+    /// Ice_servers should obey forrmat: "[turn|strun]://<Address>:<Port>;..."
+    /// Account is hex string
+    /// Account should format as same as account_type declared
+    /// Account_type is lowercase string, possible input are: `eip191`, `ed25519`, `bip137`, for more imformation,
+    /// please check [rings_core::ecc]
+    /// Signer should be `async function (proof: string): Promise<Unit8Array>`
+    /// Signer should function as same as account_type declared, Eg: eip191 or secp256k1 or ed25519.
+    /// callback should be an instance of [CallbackFn]
     #[wasm_bindgen(constructor)]
     pub fn new_instance(
         ice_servers: String,
         stabilize_timeout: usize,
         account: String,
         account_type: String,
-        // Signer should be `async function (proof: string): Promise<Unit8Array>`
         signer: js_sys::Function,
         callback: Option<MessageCallbackInstance>,
         //) -> Result<Client, error::Error> {
     ) -> js_sys::Promise {
+        fn wrapped_signer(signer: js_sys::Function) -> AsyncSigner {
+            Box::new(
+                move |data: String| -> Pin<Box<dyn Future<Output = Vec<u8>>>> {
+                    let signer = signer.clone();
+                    Box::pin(async move {
+                        let signer = signer.clone();
+                        let sig: js_sys::Uint8Array = Uint8Array::from(
+                            JsFuture::from(js_sys::Promise::from(
+                                signer
+                                    .call1(&JsValue::NULL, &JsValue::from_str(&data))
+                                    .expect("Failed on call external Js Function"),
+                            ))
+                            .await
+                            .expect("Failed await call external Js Promise"),
+                        );
+                        sig.to_vec()
+                    })
+                },
+            )
+        }
+
         future_to_promise(async move {
-            let mut sk_builder = SessionSkBuilder::new(account, account_type);
-            let proof = sk_builder.unsigned_proof();
-            let sig: js_sys::Uint8Array = Uint8Array::from(
-                JsFuture::from(js_sys::Promise::from(
-                    signer.call1(&JsValue::NULL, &JsValue::from_str(&proof))?,
-                ))
-                .await?,
-            );
-            sk_builder = sk_builder.set_session_sig(sig.to_vec());
-            let session_sk = sk_builder.build().unwrap();
-            let config = ProcessorConfig::new(ice_servers, session_sk, stabilize_timeout);
-            Ok(JsValue::from(
-                Self::new_client_with_storage_internal(config, callback, "rings-node".to_string())
-                    .await?,
-            ))
+            let signer = wrapped_signer(signer);
+            let cb: Option<CallbackFn> = if let Some(cb) = callback {
+                Some(Box::new(cb))
+            } else {
+                None
+            };
+            let client = Client::new_client_internal(
+                ice_servers,
+                stabilize_timeout,
+                account,
+                account_type,
+                Signer::Async(Box::new(signer)),
+                cb,
+            )
+            .await?;
+            Ok(JsValue::from(client))
         })
     }
 
@@ -186,13 +144,19 @@ impl Client {
         self.processor.did().to_string()
     }
 
+    ///  create new unsigned Client
     pub fn new_client_with_storage(
         config: ProcessorConfig,
         callback: Option<MessageCallbackInstance>,
         storage_name: String,
     ) -> js_sys::Promise {
         future_to_promise(async move {
-            let client = Self::new_client_with_storage_internal(config, callback, storage_name)
+            let cb: Option<CallbackFn> = if let Some(cb) = callback {
+                Some(Box::new(cb))
+            } else {
+                None
+            };
+            let client = Self::new_client_with_storage_internal(config, cb, storage_name)
                 .await
                 .map_err(JsError::from)?;
             Ok(JsValue::from(client))
@@ -206,38 +170,20 @@ impl Client {
         params: JsValue,
         opt_id: Option<String>,
     ) -> js_sys::Promise {
-        let handler = self.handler.clone();
+        let ins = self.clone();
         future_to_promise(async move {
             let params = super::utils::parse_params(params)
                 .map_err(|e| JsError::new(e.to_string().as_str()))?;
-            let id = if let Some(id) = opt_id {
-                Id::Str(id)
-            } else {
-                Id::Null
-            };
-            let req: MethodCall = MethodCall {
-                jsonrpc: None,
-                method,
-                params,
-                id,
-            };
-            let ret = handler.handle_request(req).await.map_err(JsError::from)?;
+            let ret = ins
+                .request_internal(method, params, opt_id)
+                .await
+                .map_err(JsError::from)?;
             Ok(js_value::serialize(&ret).map_err(JsError::from)?)
         })
     }
 
-    /// start background listener without custom callback
-    pub fn start(&self) -> js_sys::Promise {
-        let p = self.processor.clone();
-
-        future_to_promise(async move {
-            p.listen().await;
-            Ok(JsValue::null())
-        })
-    }
-
     /// listen message callback.
-    pub fn listen(&mut self) -> js_sys::Promise {
+    pub fn listen(&self) -> js_sys::Promise {
         let p = self.processor.clone();
 
         future_to_promise(async move {
@@ -302,47 +248,6 @@ impl Client {
         })
     }
 
-    /// Manually make handshake with remote peer
-    pub fn create_offer(&self, address: String, addr_type: Option<AddressType>) -> js_sys::Promise {
-        let p = self.processor.clone();
-        future_to_promise(async move {
-            let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
-            let (_, offer_payload) = p.swarm.create_offer(did).await.map_err(JsError::from)?;
-            let s = serde_json::to_string(&offer_payload).map_err(JsError::from)?;
-            Ok(s.into())
-        })
-    }
-
-    /// Manually make handshake with remote peer
-    pub fn answer_offer(&self, offer_payload: String) -> js_sys::Promise {
-        let p = self.processor.clone();
-        future_to_promise(async move {
-            let offer_payload = serde_json::from_str(&offer_payload).map_err(JsError::from)?;
-            let (_, answer_payload) = p
-                .swarm
-                .answer_offer(offer_payload)
-                .await
-                .map_err(JsError::from)?;
-            let s = serde_json::to_string(&answer_payload).map_err(JsError::from)?;
-            Ok(s.into())
-        })
-    }
-
-    /// Manually make handshake with remote peer
-    pub fn accept_answer(&self, answer_payload: String) -> js_sys::Promise {
-        let p = self.processor.clone();
-        future_to_promise(async move {
-            let answer_payload = serde_json::from_str(&answer_payload).map_err(JsError::from)?;
-            let (did, conn) = p
-                .swarm
-                .accept_answer(answer_payload)
-                .await
-                .map_err(JsError::from)?;
-            let state = conn.webrtc_connection_state();
-            Ok(JsValue::try_from(&Peer::from((state, did.to_string())))?)
-        })
-    }
-
     /// list all connect peers
     pub fn list_peers(&self) -> js_sys::Promise {
         let p = self.processor.clone();
@@ -359,6 +264,7 @@ impl Client {
         })
     }
 
+    /// get info for self, will return build version and inspection of swarm
     pub fn get_node_info(&self) -> js_sys::Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
@@ -379,6 +285,7 @@ impl Client {
         })
     }
 
+    /// disconnect all connected nodes
     pub fn disconnect_all(&self) -> js_sys::Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
@@ -467,6 +374,7 @@ impl Client {
         })
     }
 
+    /// Check local cache
     pub fn storage_check_cache(
         &self,
         address: String,
@@ -485,6 +393,7 @@ impl Client {
         })
     }
 
+    /// fetch storage with given did
     pub fn storage_fetch(
         &self,
         address: String,
@@ -644,6 +553,7 @@ impl Client {
     }
 }
 
+/// MessageCallback instance for Browser
 #[wasm_export]
 pub struct MessageCallbackInstance {
     custom_message: Arc<js_sys::Function>,
@@ -654,6 +564,11 @@ pub struct MessageCallbackInstance {
 
 #[wasm_export]
 impl MessageCallbackInstance {
+    /// Create a new instance of message callback, this function accept three args:
+    ///
+    /// * custom_message: function(from: string, message: string) -> ();
+    /// * http_response_message: function(from: string, message: string) -> ();
+    /// * builtin_message: function(from: string, message: string) -> ();
     #[wasm_bindgen(constructor)]
     pub fn new(
         custom_message: &js_sys::Function,
@@ -670,7 +585,7 @@ impl MessageCallbackInstance {
 }
 
 impl MessageCallbackInstance {
-    pub async fn handle_message_data(
+    pub(crate) async fn handle_message_data(
         &self,
         relay: &MessagePayload,
         data: &Bytes,
@@ -691,7 +606,7 @@ impl MessageCallbackInstance {
         Ok(())
     }
 
-    pub async fn handle_simple_text_message(
+    pub(crate) async fn handle_simple_text_message(
         &self,
         relay: &MessagePayload,
         data: &[u8],
@@ -714,7 +629,7 @@ impl MessageCallbackInstance {
         Ok(())
     }
 
-    pub async fn handle_http_response(
+    pub(crate) async fn handle_http_response(
         &self,
         relay: &MessagePayload,
         data: &[u8],
@@ -839,7 +754,7 @@ impl MessageCallback for MessageCallbackInstance {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct Peer {
+pub(crate) struct Peer {
     pub address: String,
     pub state: String,
 }
@@ -891,7 +806,7 @@ pub fn internal_info() -> InternalInfo {
     InternalInfo::build()
 }
 
-pub fn get_did(address: &str, addr_type: AddressType) -> Result<Did, JsError> {
+fn get_did(address: &str, addr_type: AddressType) -> Result<Did, JsError> {
     let did = match addr_type {
         AddressType::DEFAULT => {
             Did::from_str(address).map_err(|_| JsError::new("invalid address"))?
