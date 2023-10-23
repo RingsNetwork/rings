@@ -23,6 +23,7 @@ use elliptic_curve::generic_array::typenum::U32;
 use elliptic_curve::generic_array::GenericArray;
 use elliptic_curve::point::AffineCoordinates;
 use elliptic_curve::point::DecompressPoint;
+use elliptic_curve::FieldBytes;
 use p256::NistP256;
 use subtle::Choice;
 pub use types::PublicKey;
@@ -107,19 +108,27 @@ impl AffineCoordinates for PublicKey {
 }
 
 impl PublicKey {
-    /// Map a PublicKey into secp256r1 affine point
-    pub fn into_secp256r1_affine(self) -> CtOption<primeorder::AffinePoint<NistP256>> {
+    /// Map a PublicKey into secp256r1 affine point,
+    /// This function is an constant-time cryptographic implementations
+    pub fn ct_into_secp256r1_affine(self) -> CtOption<primeorder::AffinePoint<NistP256>> {
         primeorder::AffinePoint::<NistP256>::decompress(&self.x(), self.y_is_odd())
     }
 
-    /// Map a PublicKey into secp256r1 public key
-    pub fn try_into_secp256_pubkey(self) -> CtOption<Result<ecdsa::VerifyingKey<NistP256>>> {
-        let opt_affine: CtOption<primeorder::AffinePoint<NistP256>> = self.into_secp256r1_affine();
+    /// Map a PublicKey into secp256r1 public key,
+    /// This function is an constant-time cryptographic implementations
+    pub fn ct_try_into_secp256_pubkey(self) -> CtOption<Result<ecdsa::VerifyingKey<NistP256>>> {
+        let opt_affine: CtOption<primeorder::AffinePoint<NistP256>> = self.ct_into_secp256r1_affine();
         opt_affine.and_then(|affine| {
             let ret = ecdsa::VerifyingKey::<NistP256>::from_affine(affine)
                 .map_err(|e| Error::ECDSASecp256r1PublicKeyBadFormat(e));
             CtOption::new(ret, Choice::from(1))
         })
+    }
+}
+
+impl Into<FieldBytes<NistP256>> for SecretKey {
+    fn into(self) -> FieldBytes<NistP256> {
+	GenericArray::<u8, U32>::from(self.ser())
     }
 }
 
@@ -297,7 +306,7 @@ impl SecretKey {
         libsecp256k1::PublicKey::from_secret_key(&(*self).into()).into()
     }
 
-    pub fn ser(&self) -> [u8; libsecp256k1::util::SECRET_KEY_SIZE] {
+    pub fn ser(&self) -> [u8; 32] {
         self.0.serialize()
     }
 }
