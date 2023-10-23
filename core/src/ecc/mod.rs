@@ -120,19 +120,19 @@ impl PublicKey {
         let opt_affine: CtOption<primeorder::AffinePoint<NistP256>> =
             self.ct_into_secp256r1_affine();
         opt_affine.and_then(|affine| {
-            let ret = ecdsa::VerifyingKey::<NistP256>::from_affine(affine)
-                .map_err(|e| Error::ECDSAError(e));
+            let ret =
+                ecdsa::VerifyingKey::<NistP256>::from_affine(affine).map_err(Error::ECDSAError);
             match ret {
-                Ok(r) => CtOption::new(ret, Choice::from(1)),
+                Ok(_r) => CtOption::new(ret, Choice::from(1)),
                 Err(_) => CtOption::new(ret, Choice::from(1)),
             }
         })
     }
 }
 
-impl Into<FieldBytes<NistP256>> for SecretKey {
-    fn into(self) -> FieldBytes<NistP256> {
-        GenericArray::<u8, U32>::from(self.ser())
+impl From<SecretKey> for FieldBytes<NistP256> {
+    fn from(val: SecretKey) -> Self {
+        GenericArray::<u8, U32>::from(val.ser())
     }
 }
 

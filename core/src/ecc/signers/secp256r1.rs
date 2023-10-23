@@ -1,4 +1,7 @@
 //! Sign and verify message with curve secp256r1 and ECDSA
+//! This module support WebCrypto API
+//! ref: https://developer.mozilla.org/en-US/docs/Web/API/Web_Crypto_API
+//!
 //! ```js
 //! let keyPair = await window.crypto.subtle.generateKey(
 //!   {
@@ -85,11 +88,11 @@ pub fn verify(
             pk.verify_prehash(
                 &msg_hash,
                 &ecdsa::Signature::<p256::NistP256>::from_slice(sig.as_ref())
-                    .map_err(|e| Error::ECDSAError(e))?,
+                    .map_err(Error::ECDSAError)?,
             )
-            .map_err(|e| Error::ECDSAError(e))
+            .map_err(Error::ECDSAError)
         });
-        if !res.is_ok() {
+        if res.is_err() {
             return false;
         }
     }
