@@ -12,12 +12,19 @@ use serde::Deserialize;
 use serde::Serialize;
 use sha1::Digest;
 use sha1::Sha1;
+use subtle::CtOption;
 
 use crate::error::Error;
 use crate::error::Result;
 pub mod elgamal;
 pub mod signers;
 mod types;
+use elliptic_curve::generic_array::typenum::U32;
+use elliptic_curve::generic_array::GenericArray;
+use elliptic_curve::point::AffineCoordinates;
+use elliptic_curve::point::DecompressPoint;
+use p256::NistP256;
+use subtle::Choice;
 pub use types::PublicKey;
 
 /// ref <https://docs.rs/web3/0.18.0/src/web3/signing.rs.html#69>
@@ -83,6 +90,36 @@ impl TryFrom<PublicKey> for ed25519_dalek::PublicKey {
     fn try_from(key: PublicKey) -> Result<Self> {
         // pubkey[0] == 0
         Self::from_bytes(&key.0[1..]).map_err(|_| Error::EdDSAPublicKeyBadFormat)
+    }
+}
+
+impl AffineCoordinates for PublicKey {
+    type FieldRepr = GenericArray<u8, U32>;
+
+    fn x(&self) -> Self::FieldRepr {
+        let x: [u8; 32] = self.0[1..].try_into().expect("Expecting length is 32");
+        GenericArray::<u8, U32>::from(x)
+    }
+
+    fn y_is_odd(&self) -> subtle::Choice {
+        Choice::from(self.0[0])
+    }
+}
+
+impl PublicKey {
+    /// Map a PublicKey into secp256r1 affine point
+    pub fn into_secp256r1_affine(self) -> CtOption<primeorder::AffinePoint<NistP256>> {
+        primeorder::AffinePoint::<NistP256>::decompress(&self.x(), self.y_is_odd())
+    }
+
+    /// Map a PublicKey into secp256r1 public key
+    pub fn try_into_secp256_pubkey(self) -> CtOption<Result<ecdsa::VerifyingKey<NistP256>>> {
+        let opt_affine: CtOption<primeorder::AffinePoint<NistP256>> = self.into_secp256r1_affine();
+        opt_affine.and_then(|affine| {
+            let ret = ecdsa::VerifyingKey::<NistP256>::from_affine(affine)
+                .map_err(|e| Error::ECDSASecp256r1PublicKeyBadFormat(e));
+            CtOption::new(ret, Choice::from(1))
+        })
     }
 }
 
