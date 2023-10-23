@@ -117,18 +117,22 @@ impl PublicKey {
     /// Map a PublicKey into secp256r1 public key,
     /// This function is an constant-time cryptographic implementations
     pub fn ct_try_into_secp256_pubkey(self) -> CtOption<Result<ecdsa::VerifyingKey<NistP256>>> {
-        let opt_affine: CtOption<primeorder::AffinePoint<NistP256>> = self.ct_into_secp256r1_affine();
+        let opt_affine: CtOption<primeorder::AffinePoint<NistP256>> =
+            self.ct_into_secp256r1_affine();
         opt_affine.and_then(|affine| {
             let ret = ecdsa::VerifyingKey::<NistP256>::from_affine(affine)
-                .map_err(|e| Error::ECDSASecp256r1PublicKeyBadFormat(e));
-            CtOption::new(ret, Choice::from(1))
+                .map_err(|e| Error::ECDSAError(e));
+            match ret {
+                Ok(r) => CtOption::new(ret, Choice::from(1)),
+                Err(_) => CtOption::new(ret, Choice::from(1)),
+            }
         })
     }
 }
 
 impl Into<FieldBytes<NistP256>> for SecretKey {
     fn into(self) -> FieldBytes<NistP256> {
-	GenericArray::<u8, U32>::from(self.ser())
+        GenericArray::<u8, U32>::from(self.ser())
     }
 }
 

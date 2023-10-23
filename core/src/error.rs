@@ -13,8 +13,8 @@ pub enum Error {
     #[error("Secp256k1/ECDSA pubkey bad format")]
     ECDSAPublicKeyBadFormat,
 
-    #[error("Secp256k1/ECDSA pubkey bad format: {0}")]
-    ECDSASecp256r1PublicKeyBadFormat(#[from] ecdsa::Error),
+    #[error("Secp256r1/ECDSA Error: {0}")]
+    ECDSAError(#[from] ecdsa::Error),
 
     #[error("ECDSA or EdDSA pubkey bad format")]
     PublicKeyBadFormat,
