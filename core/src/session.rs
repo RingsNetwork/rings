@@ -125,6 +125,8 @@ pub enum Account {
     /// ecdsa
     Secp256k1(Did),
     /// ref: <https://eips.ethereum.org/EIPS/eip-191>
+    Secp256r1(PublicKey),
+    /// ref: ref: https://developer.mozilla.org/en-US/docs/Web/API/Web_Crypto_API
     EIP191(Did),
     /// bitcoin bip137 ref: <https://github.com/bitcoin/bips/blob/master/bip-0137.mediawiki>
     BIP137(Did),
@@ -138,6 +140,9 @@ impl TryFrom<(String, String)> for Account {
     fn try_from((account_entity, account_type): (String, String)) -> Result<Self> {
         match account_type.as_str() {
             "secp256k1" => Ok(Account::Secp256k1(Did::from_str(&account_entity)?)),
+            "secp256r1" => Ok(Account::Secp256r1(PublicKey::from_hex_string(
+                &account_entity,
+            )?)),
             "eip191" => Ok(Account::EIP191(Did::from_str(&account_entity)?)),
             "bip137" => Ok(Account::BIP137(Did::from_str(&account_entity)?)),
             "ed25519" => Ok(Account::Ed25519(PublicKey::try_from_b58t(&account_entity)?)),
@@ -253,6 +258,9 @@ impl Session {
             Account::Ed25519(pk) => {
                 signers::ed25519::verify(&auth_bytes, &pk.address(), &self.sig, pk)
             }
+            Account::Secp256r1(pk) => {
+                signers::secp256r1::verify(&auth_bytes, &pk.address(), &self.sig, pk)
+            }
         }) {
             return Err(Error::VerifySignatureFailed);
         }
@@ -277,6 +285,7 @@ impl Session {
             Account::BIP137(_) => signers::bip137::recover(&auth_bytes, &self.sig),
             Account::EIP191(_) => signers::eip191::recover(&auth_bytes, &self.sig),
             Account::Ed25519(pk) => Ok(pk),
+            Account::Secp256r1(pk) => Ok(pk),
         }
     }
 
@@ -287,6 +296,7 @@ impl Session {
             Account::BIP137(did) => did,
             Account::EIP191(did) => did,
             Account::Ed25519(pk) => pk.address().into(),
+            Account::Secp256r1(pk) => pk.address().into(),
         }
     }
 }

@@ -43,6 +43,10 @@ impl PublicKey {
     }
 
     /// from raw [u8], the length can be 32, or 33
+    /// Odd flag can be "02" (odd), "03" (even) or "00" (unknown)
+    /// The format is <odd_flat (1 bytes), x_cordinate (32 bytes)>
+    /// For 32 bytes case, we mark the odd flas as 00 (unknown)
+    /// For 64 bytes case, we compress the public key into compressed public key
     pub fn from_u8(value: &[u8]) -> Result<PublicKey> {
         let mut s = value.to_vec();
         let data: Vec<u8> = match s.len() {
@@ -53,6 +57,16 @@ impl PublicKey {
                 Ok(s)
             }
             33 => Ok(s),
+            64 => {
+                let pk: [u8; 64] = s.try_into().unwrap();
+                let mut x: Vec<u8> = pk[..32].to_vec();
+                let y: [u8; 32] = pk[32..].try_into().unwrap();
+                let y_odd = if y[31] & 1 == 1 { 2u8 } else { 3u8 };
+                x.reverse();
+                x.push(y_odd);
+                x.reverse();
+                Ok(x)
+            }
             _ => Err(Error::PublicKeyBadFormat),
         }?;
         let pub_data: [u8; 33] = data.as_slice().try_into()?;
