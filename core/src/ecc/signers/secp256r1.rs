@@ -103,7 +103,7 @@ pub fn verify(
         return false;
     }
     let ct_pk: CtOption<Result<ecdsa::VerifyingKey<p256::NistP256>>> =
-        pubkey.ct_try_into_secp256_pubkey();
+        pubkey.ct_try_into_secp256r1_pubkey();
     let msg_hash = hash(msg);
     if ct_pk.is_some().into() {
         let res: Result<()> = ct_pk.unwrap().and_then(|pk| {

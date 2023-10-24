@@ -120,7 +120,7 @@ impl PublicKey {
 
     /// Map a PublicKey into secp256r1 public key,
     /// This function is an constant-time cryptographic implementations
-    pub fn ct_try_into_secp256_pubkey(self) -> CtOption<Result<ecdsa::VerifyingKey<NistP256>>> {
+    pub fn ct_try_into_secp256r1_pubkey(self) -> CtOption<Result<ecdsa::VerifyingKey<NistP256>>> {
         let opt_affine: CtOption<primeorder::AffinePoint<NistP256>> =
             self.ct_into_secp256r1_affine();
         opt_affine.and_then(|affine| {
