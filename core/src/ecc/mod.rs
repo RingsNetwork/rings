@@ -103,7 +103,11 @@ impl AffineCoordinates for PublicKey {
     }
 
     fn y_is_odd(&self) -> subtle::Choice {
-        Choice::from(self.0[0])
+        match self.0[0] {
+            2u8 => Choice::from(1),
+            3u8 => Choice::from(0),
+            _ => Choice::from(0),
+        }
     }
 }
 
