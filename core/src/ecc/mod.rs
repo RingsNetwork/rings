@@ -128,7 +128,7 @@ impl PublicKey {
                 ecdsa::VerifyingKey::<NistP256>::from_affine(affine).map_err(Error::ECDSAError);
             match ret {
                 Ok(_r) => CtOption::new(ret, Choice::from(1)),
-                Err(_) => CtOption::new(ret, Choice::from(1)),
+                Err(_) => CtOption::new(ret, Choice::from(0)),
             }
         })
     }
