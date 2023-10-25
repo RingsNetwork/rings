@@ -55,7 +55,7 @@
 //! def signer(msg):
 //!    c_input = ffi.string(msg)
 //!    decoded = encode_defunct(c_input)
-//!    sig = acc1.sign_message(decoded)
+//!    sig = acc.sign_message(decoded)
 //!    ret = bytes(sig.signature)
 //!    return ffi.new("char[]", ret)
 //!
@@ -84,7 +84,7 @@
 //!     return client
 //!
 //! if __name__ == "__main__":
-//!     client = create_client(signer, acc1)
+//!     client = create_client(signer, acc)
 //!     rings_node.listen(ffi.addressof(client))
 //!     print(client)
 //! ```
@@ -185,11 +185,10 @@ impl From<&Client> for ClientPtr {
         // then turn them into raw pointers.
         let processor_ptr = Arc::into_raw(client.processor.clone());
         let handler_ptr = Arc::into_raw(client.handler.clone());
-        let ret = ClientPtr {
+        ClientPtr {
             processor: processor_ptr,
             handler: handler_ptr,
-        };
-        ret
+        }
     }
 }
 
@@ -264,8 +263,7 @@ pub extern "C" fn new_callback(
 #[no_mangle]
 pub extern "C" fn listen(client_ptr: *const ClientPtr) {
     let client: Client = Client::from_raw(client_ptr).expect("Client ptr is invalid");
-    let processor = client.processor.clone();
-    executor::block_on(processor.listen());
+    executor::block_on(client.processor.listen());
 }
 
 /// Start message listening and stabilization
@@ -275,9 +273,8 @@ pub extern "C" fn listen(client_ptr: *const ClientPtr) {
 #[no_mangle]
 pub extern "C" fn async_listen(client_ptr: *const ClientPtr) {
     let client: Client = Client::from_raw(client_ptr).expect("Client ptr is invalid");
-    let processor = client.processor.clone();
     std::thread::spawn(move || {
-        executor::block_on(processor.listen());
+        executor::block_on(client.processor.listen());
     });
 }
 
@@ -315,7 +312,7 @@ pub extern "C" fn request(
 ///
 /// * This function cast CStr into Str
 #[no_mangle]
-pub extern "C" fn new_client_with_callback(
+pub unsafe extern "C" fn new_client_with_callback(
     ice_server: *const c_char,
     stabilize_timeout: u32,
     account: *const c_char,
@@ -327,10 +324,9 @@ pub extern "C" fn new_client_with_callback(
         signer: extern "C" fn(*const c_char) -> *const c_char,
     ) -> impl Fn(String) -> Vec<u8> {
         move |data: String| -> Vec<u8> {
-            let c_data = CString::new(data).expect("Failed on covering String to CString");
+            let c_data = CString::new(data).expect("Failed to convert String to CString");
             let sig = signer(c_data.as_ptr());
-            let c_ret = c_char_to_bytes(sig).expect("Failed on covering c char to [u8]");
-            c_ret
+            c_char_to_bytes(sig).expect("Failed to convert c char to [u8]")
         }
     }
 
@@ -368,7 +364,7 @@ pub extern "C" fn new_client_with_callback(
 fn c_char_to_string(ptr: *const c_char) -> Result<String> {
     let c_str = c_char_to_bytes(ptr);
     // Drop none utf8 sym here.
-    Ok(String::from_utf8(c_str?).map_err(Error::FFIFromUtf8Error)?)
+    String::from_utf8(c_str?).map_err(Error::FFIFromUtf8Error)
 }
 
 fn c_char_to_bytes(ptr: *const c_char) -> Result<Vec<u8>> {

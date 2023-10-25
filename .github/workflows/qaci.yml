@@ -84,6 +84,33 @@ jobs:
       - name: Run tests
         run: cargo test --all --verbose
 
+  build_ffi:
+    name: Build and test for ffi
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        os: ["ubuntu-latest"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Setup rust toolchain
+        run: rustup show
+
+      # If you need to reset the cache version, increment the number after `v`
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ffi-v1
+
+      - name: Run clippy for node ffi
+        run: cargo clippy -p rings-node --features ffi
+
+      - name: Build
+        run: cargo build -p rings-node --features ffi && ls ffi && ls target/debug
+
+      - name: Smoke test
+        run: pip install web3 cffi && python ffi/rings.py
+
   rustfmt_and_clippy:
     name: Check rustfmt style && run clippy
     timeout-minutes: 10

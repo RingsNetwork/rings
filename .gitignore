@@ -32,3 +32,6 @@ package-lock.json
 *.d.ts
 *.js
 *.wasm
+
+# cffi related
+rings.h

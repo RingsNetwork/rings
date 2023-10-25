@@ -14,7 +14,7 @@ fn gen_cbinding() {
         .generate()
     {
         Ok(g) => {
-            g.write_to_file("bindings.h");
+            g.write_to_file("../ffi/rings.h");
         }
         Err(e) => println!("Unable to generate bindings, {:?}", e),
     };
