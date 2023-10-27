@@ -86,10 +86,10 @@ jobs:
 
   build_ffi:
     name: Build and test for ffi
-    timeout-minutes: 10
+    timeout-minutes: 20
     strategy:
       matrix:
-        os: ["ubuntu-latest"]
+        os: ["ubuntu-latest", "macos-latest"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v3
@@ -100,7 +100,7 @@ jobs:
       # If you need to reset the cache version, increment the number after `v`
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ffi-v1
+          shared-key: ffi-${{ matrix.os }}-v1
 
       - name: Run clippy for node ffi
         run: cargo clippy -p rings-node --features ffi
@@ -108,8 +108,12 @@ jobs:
       - name: Build
         run: cargo build -p rings-node --features ffi && ls ffi && ls target/debug
 
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
       - name: Smoke test
-        run: pip install web3 cffi && python ffi/rings.py
+        run: pip install wheel && pip install web3 cffi && python ffi/rings.py
 
   rustfmt_and_clippy:
     name: Check rustfmt style && run clippy
