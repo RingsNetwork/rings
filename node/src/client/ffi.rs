@@ -326,7 +326,10 @@ pub unsafe extern "C" fn new_client_with_callback(
         move |data: String| -> Vec<u8> {
             let c_data = CString::new(data).expect("Failed to convert String to CString");
             let sig = signer(c_data.as_ptr());
-            c_char_to_bytes(sig).expect("Failed to convert c char to [u8]")
+            let c_ret = c_char_to_bytes(sig).expect("Failed to convert c char to [u8]");
+            let c_ret_len = c_ret.len();
+            assert!(c_ret.len() >= 64, "sig length({c_ret_len} < 64) is invalid");
+            c_ret
         }
     }
 
