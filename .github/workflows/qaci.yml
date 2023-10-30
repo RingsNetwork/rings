@@ -106,14 +106,14 @@ jobs:
         run: cargo clippy -p rings-node --features ffi
 
       - name: Build
-        run: cargo build -p rings-node --features ffi && ls ffi && ls target/debug
+        run: cargo build -p rings-node --features ffi && ls target/include && ls target/debug
 
       - uses: actions/setup-python@v4
         with:
           python-version: "3.11"
 
       - name: Smoke test
-        run: pip install wheel && pip install web3 cffi && python ffi/rings.py
+        run: pip install wheel && pip install web3 cffi && python examples/ffi/rings.py
 
   rustfmt_and_clippy:
     name: Check rustfmt style && run clippy

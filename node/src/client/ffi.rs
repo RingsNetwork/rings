@@ -317,18 +317,25 @@ pub unsafe extern "C" fn new_client_with_callback(
     stabilize_timeout: u32,
     account: *const c_char,
     account_type: *const c_char,
-    signer: extern "C" fn(*const c_char) -> *const c_char,
+    signer: extern "C" fn(*const c_char, *mut c_char) -> (),
     callback_ptr: *const MessageCallbackInstanceFFI,
 ) -> ClientPtr {
     fn wrapped_signer(
-        signer: extern "C" fn(*const c_char) -> *const c_char,
+        signer: extern "C" fn(*const c_char, *mut c_char) -> (),
     ) -> impl Fn(String) -> Vec<u8> {
         move |data: String| -> Vec<u8> {
             let c_data = CString::new(data).expect("Failed to convert String to CString");
-            let sig = signer(c_data.as_ptr());
-            let c_ret = c_char_to_bytes(sig).expect("Failed to convert c char to [u8]");
+
+            let mut sig = Vec::<u8>::with_capacity(65);
+            let sig_ptr = sig.as_mut_ptr() as *mut c_char;
+            signer(c_data.as_ptr(), sig_ptr);
+
+            let c_ret = c_char_to_bytes(sig_ptr).expect("Failed to convert c char to [u8]");
             let c_ret_len = c_ret.len();
-            assert!(c_ret.len() >= 64, "sig length({c_ret_len} < 64) is invalid");
+            assert!(
+                c_ret.len() >= 64,
+                "sig length({c_ret_len} < 64) is invalid: {c_ret:?}"
+            );
             c_ret
         }
     }
