@@ -10,11 +10,11 @@ fn gen_cbinding() {
         .with_language(cbindgen::Language::C)
         .with_no_includes()
         .with_documentation(true)
-        .with_crate(crate_dir)
+        .with_crate(&crate_dir)
         .generate()
     {
         Ok(g) => {
-            g.write_to_file("bindings.h");
+            g.write_to_file(crate_dir + "/../target/include/rings.h");
         }
         Err(e) => println!("Unable to generate bindings, {:?}", e),
     };

@@ -106,11 +106,11 @@ pub enum Error {
     ExternalError(String) = 1202,
     #[error("An error indicating that an interior nul byte was found: {0}")]
     FFINulError(#[from] std::ffi::NulError) = 1203,
-    #[error("Failed on covering CStr to String: {0}")]
+    #[error("Failed to convert CStr to String: {0}")]
     FFICStrError(#[from] std::str::Utf8Error) = 1204,
     #[error("An error indicating that a ptr is null")]
     FFINulPtrError = 1205,
-    #[error("Failed on covering bytes to String: {0}")]
+    #[error("Failed to convert bytes to String: {0}")]
     FFIFromUtf8Error(#[from] std::string::FromUtf8Error) = 1206,
 }
 

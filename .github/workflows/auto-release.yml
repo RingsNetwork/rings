@@ -56,7 +56,7 @@ jobs:
     needs: gen_version
     name: build macos version binary
     timeout-minutes: 25
-    runs-on: macos-11
+    runs-on: macos-latest
     strategy:
       matrix:
         arch:
