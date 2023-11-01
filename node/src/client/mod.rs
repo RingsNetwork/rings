@@ -18,7 +18,6 @@ use crate::prelude::jsonrpc_core::MethodCall;
 use crate::prelude::jsonrpc_core::Output;
 use crate::prelude::jsonrpc_core::Params;
 use crate::prelude::wasm_export;
-use crate::prelude::CallbackFn;
 use crate::processor::Processor;
 use crate::processor::ProcessorBuilder;
 use crate::processor::ProcessorConfig;
@@ -62,7 +61,6 @@ impl Client {
     /// Create a client instance with storage name
     pub(crate) async fn new_client_with_storage_internal(
         config: ProcessorConfig,
-        cb: Option<CallbackFn>,
         storage_name: String,
     ) -> Result<Client> {
         let storage_path = storage_name.as_str();
@@ -77,13 +75,9 @@ impl Client {
             .map_err(Error::Storage)?;
         let measure = PeriodicMeasure::new(ms);
 
-        let mut processor_builder = ProcessorBuilder::from_config(&config)?
+        let processor_builder = ProcessorBuilder::from_config(&config)?
             .storage(storage)
             .measure(measure);
-
-        if let Some(cb) = cb {
-            processor_builder = processor_builder.message_callback(cb);
-        }
 
         let processor = Arc::new(processor_builder.build()?);
 
@@ -100,11 +94,10 @@ impl Client {
     /// This function is useful for creating a client with config file (yaml and json).
     pub(crate) async fn new_client_with_storage_and_serialized_config_internal(
         config: String,
-        callback: Option<CallbackFn>,
         storage_name: String,
     ) -> Result<Client> {
         let config: ProcessorConfig = serde_yaml::from_str(&config)?;
-        Self::new_client_with_storage_internal(config, callback, storage_name).await
+        Self::new_client_with_storage_internal(config, storage_name).await
     }
 
     /// Create a new client instanice with everything in detail
@@ -122,7 +115,6 @@ impl Client {
         account: String,
         account_type: String,
         signer: Signer,
-        callback: Option<CallbackFn>,
     ) -> Result<Client> {
         let mut sk_builder = SessionSkBuilder::new(account, account_type);
         let proof = sk_builder.unsigned_proof();
@@ -133,7 +125,7 @@ impl Client {
         sk_builder = sk_builder.set_session_sig(sig.to_vec());
         let session_sk = sk_builder.build().map_err(Error::InternalError)?;
         let config = ProcessorConfig::new(ice_servers, session_sk, stabilize_timeout);
-        Self::new_client_with_storage_internal(config, callback, "rings-node".to_string()).await
+        Self::new_client_with_storage_internal(config, "rings-node".to_string()).await
     }
 
     /// Request local rpc interface
