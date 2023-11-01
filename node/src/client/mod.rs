@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use rings_core::session::SessionSkBuilder;
 use rings_core::storage::PersistenceStorage;
+use rings_core::swarm::callback::SharedSwarmCallback;
 
 use crate::error::Error;
 use crate::error::Result;
@@ -27,7 +28,7 @@ pub mod browser;
 #[cfg(feature = "ffi")]
 pub mod ffi;
 
-/// General Client, which holding reference of Processor and MessageCallback Handler
+/// General Client, which holding reference of Processor
 /// Client should be obey memory layout of CLang
 /// Client should be export for wasm-bindgen
 #[derive(Clone)]
@@ -126,6 +127,13 @@ impl Client {
         let session_sk = sk_builder.build().map_err(Error::InternalError)?;
         let config = ProcessorConfig::new(ice_servers, session_sk, stabilize_timeout);
         Self::new_client_with_storage_internal(config, "rings-node".to_string()).await
+    }
+
+    pub(crate) fn set_swarm_callback(&self, callback: SharedSwarmCallback) -> Result<()> {
+        self.processor
+            .swarm
+            .set_callback(callback)
+            .map_err(Error::InternalError)
     }
 
     /// Request local rpc interface

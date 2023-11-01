@@ -34,20 +34,14 @@ def signer(msg, output):
     return
 
 
-@ffi.callback("void(*)(const char *, const char *)")
-def custom_msg_callback(msg):
-    print(msg)
-    return
-
-
 @ffi.callback("void(*)(const char *)")
-def builtin_msg_callback(msg):
-    print(msg)
+def on_payload(payload):
+    print(payload)
     return
 
 
 def create_client(rings_node, acc):
-    callback = rings_node.new_callback(custom_msg_callback, builtin_msg_callback)
+    callback = rings_node.new_callback(on_payload)
     client = rings_node.new_client_with_callback(
         "stun://stun.l.google.com".encode(),
         10,
