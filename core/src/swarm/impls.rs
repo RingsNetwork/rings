@@ -163,8 +163,11 @@ impl Swarm {
 
     /// Create new connection that will be handled by swarm.
     pub async fn new_connection(&self, did: Did) -> Result<Connection> {
-        let inner_callback =
-            InnerSwarmCallback::new(self.transport_event_channel.sender(), self.callback()?);
+        let inner_callback = InnerSwarmCallback::new(
+            self.did(),
+            self.transport_event_channel.sender(),
+            self.callback()?,
+        );
 
         let cid = did.to_string();
         self.transport

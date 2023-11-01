@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::lock::Mutex;
+use rings_core::swarm::callback::SwarmCallback;
 use rings_core::swarm::impls::ConnectionHandshake;
 use rings_transport::core::transport::ConnectionInterface;
 use rings_transport::core::transport::WebrtcConnectionState;
@@ -9,7 +10,6 @@ use wasm_bindgen_test::*;
 
 use crate::prelude::rings_core::async_trait;
 use crate::prelude::rings_core::dht::TStabilize;
-use crate::prelude::rings_core::message::MessageCallback;
 use crate::prelude::rings_core::utils;
 use crate::prelude::*;
 use crate::processor;
@@ -34,26 +34,21 @@ async fn close_all_connections(p: &Processor) {
     futures::future::join_all(p.swarm.get_connections().iter().map(|(_, t)| t.close())).await;
 }
 
-struct MsgCallbackStruct {
-    msgs: Arc<Mutex<Vec<String>>>,
+struct SwarmCallbackStruct {
+    pub msgs: Mutex<Vec<String>>,
 }
 
 #[async_trait(?Send)]
-impl MessageCallback for MsgCallbackStruct {
-    async fn custom_message(
-        &self,
-        _ctx: &MessagePayload,
-        msg: &CustomMessage,
-    ) -> Vec<MessageHandlerEvent> {
-        let text = processor::unpack_text_message(msg).unwrap();
-        console_log!("msg received: {}", text);
-        let mut msgs = self.msgs.try_lock().unwrap();
-        msgs.push(text);
-        vec![]
-    }
-
-    async fn builtin_message(&self, _ctx: &MessagePayload) -> Vec<MessageHandlerEvent> {
-        vec![]
+impl SwarmCallback for SwarmCallbackStruct {
+    async fn on_payload(&self, payload: &MessagePayload) -> Result<(), Box<dyn std::error::Error>> {
+        let msg: Message = payload.transaction.data().map_err(Box::new)?;
+        if let Message::CustomMessage(ref msg) = msg {
+            let text = processor::unpack_text_message(msg).unwrap();
+            console_log!("msg received: {}", text);
+            let mut msgs = self.msgs.try_lock().unwrap();
+            msgs.push(text);
+        }
+        Ok(())
     }
 }
 
@@ -104,17 +99,18 @@ async fn create_connection(p1: &Processor, p2: &Processor) {
 
 #[wasm_bindgen_test]
 async fn test_processor_handshake_and_msg() {
-    let msgs1: Arc<Mutex<Vec<String>>> = Default::default();
-    let msgs2: Arc<Mutex<Vec<String>>> = Default::default();
-    let callback1 = Box::new(MsgCallbackStruct {
-        msgs: msgs1.clone(),
+    let callback1 = Arc::new(SwarmCallbackStruct {
+        msgs: Mutex::new(vec![]),
     });
-    let callback2 = Box::new(MsgCallbackStruct {
-        msgs: msgs2.clone(),
+    let callback2 = Arc::new(SwarmCallbackStruct {
+        msgs: Mutex::new(vec![]),
     });
 
-    let p1 = prepare_processor(Some(callback1)).await;
-    let p2 = prepare_processor(Some(callback2)).await;
+    let p1 = prepare_processor().await;
+    let p2 = prepare_processor().await;
+
+    p1.swarm.set_callback(callback1.clone()).unwrap();
+    p2.swarm.set_callback(callback2.clone()).unwrap();
 
     let test_text1 = "test1";
     let test_text2 = "test2";
@@ -170,9 +166,9 @@ async fn test_processor_handshake_and_msg() {
 
     console_log!("check received");
 
-    let mut msgs1 = msgs1.try_lock().unwrap().as_slice().to_vec();
+    let mut msgs1 = callback1.msgs.try_lock().unwrap().as_slice().to_vec();
     msgs1.sort();
-    let mut msgs2 = msgs2.try_lock().unwrap().as_slice().to_vec();
+    let mut msgs2 = callback2.msgs.try_lock().unwrap().as_slice().to_vec();
     msgs2.sort();
 
     let mut expect1 = vec![
@@ -194,11 +190,11 @@ async fn test_processor_handshake_and_msg() {
 #[wasm_bindgen_test]
 async fn test_processor_connect_with_did() {
     super::setup_log();
-    let p1 = prepare_processor(None).await;
+    let p1 = prepare_processor().await;
     console_log!("p1 address: {}", p1.did());
-    let p2 = prepare_processor(None).await;
+    let p2 = prepare_processor().await;
     console_log!("p2 address: {}", p2.did());
-    let p3 = prepare_processor(None).await;
+    let p3 = prepare_processor().await;
     console_log!("p3 address: {}", p3.did());
 
     p1.swarm.clone().listen().await;

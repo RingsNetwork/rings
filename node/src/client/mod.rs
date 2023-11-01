@@ -109,7 +109,6 @@ impl Client {
     /// please check [rings_core::ecc]
     /// Signer should accept a String and returns bytes.
     /// Signer should function as same as account_type declared, Eg: eip191 or secp256k1 or ed25519.
-    /// callback should be an instance of [CallbackFn]
     pub(crate) async fn new_client_internal(
         ice_servers: String,
         stabilize_timeout: usize,

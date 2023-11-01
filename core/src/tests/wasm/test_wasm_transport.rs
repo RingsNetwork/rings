@@ -1,3 +1,4 @@
+use std::str::FromStr;
 use std::sync::Arc;
 
 use rings_transport::core::transport::ConnectionInterface;
@@ -9,6 +10,7 @@ use wasm_bindgen_test::*;
 
 use super::prepare_node;
 use crate::channels::Channel as CbChannel;
+use crate::dht::Did;
 use crate::ecc::SecretKey;
 use crate::error::Result;
 use crate::swarm::callback::InnerSwarmCallback;
@@ -40,7 +42,11 @@ async fn prepare_transport(channel: Option<Arc<CbChannel<TransportEvent>>>) -> T
         None => Arc::new(<CbChannel<TransportEvent> as Channel<TransportEvent>>::new()),
     };
     let trans = Transport::new("stun://stun.l.google.com:19302", None);
-    let callback = InnerSwarmCallback::new(ch.sender(), Arc::new(DefaultCallback {}));
+    let callback = InnerSwarmCallback::new(
+        Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap(),
+        ch.sender(),
+        Arc::new(DefaultCallback {}),
+    );
     trans
         .new_connection("test", Box::new(callback))
         .await
