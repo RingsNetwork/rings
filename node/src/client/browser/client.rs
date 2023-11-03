@@ -740,7 +740,7 @@ impl MessageCallbackInstance {
 
 #[async_trait(?Send)]
 impl SwarmCallback for MessageCallbackInstance {
-    async fn on_payload(&self, payload: &MessagePayload) -> Result<(), Box<dyn std::error::Error>> {
+    async fn on_inbound(&self, payload: &MessagePayload) -> Result<(), Box<dyn std::error::Error>> {
         let msg: message::Message = payload.transaction.data().map_err(Box::new)?;
 
         match msg {

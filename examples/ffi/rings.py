@@ -35,13 +35,13 @@ def signer(msg, output):
 
 
 @ffi.callback("void(*)(const char *)")
-def on_payload(payload):
+def on_inbound(payload):
     print(payload)
     return
 
 
 def create_client(rings_node, acc):
-    callback = rings_node.new_callback(on_payload)
+    callback = rings_node.new_callback(on_inbound)
     client = rings_node.new_client_with_callback(
         "stun://stun.l.google.com".encode(),
         10,

@@ -40,7 +40,7 @@ struct SwarmCallbackStruct {
 
 #[async_trait(?Send)]
 impl SwarmCallback for SwarmCallbackStruct {
-    async fn on_payload(&self, payload: &MessagePayload) -> Result<(), Box<dyn std::error::Error>> {
+    async fn on_inbound(&self, payload: &MessagePayload) -> Result<(), Box<dyn std::error::Error>> {
         let msg: Message = payload.transaction.data().map_err(Box::new)?;
         if let Message::CustomMessage(ref msg) = msg {
             let text = processor::unpack_text_message(msg).unwrap();

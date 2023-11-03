@@ -47,7 +47,7 @@ pub trait SwarmCallback {
 
     /// This method is invoked when a new message is received and after handling.
     /// Will not be invoked if the message is not for this node.
-    async fn on_payload(&self, _payload: &MessagePayload) -> Result<(), CallbackError> {
+    async fn on_inbound(&self, _payload: &MessagePayload) -> Result<(), CallbackError> {
         Ok(())
     }
 
@@ -97,7 +97,7 @@ impl TransportCallback for InnerSwarmCallback {
         .map_err(Box::new)?;
 
         if payload.transaction.destination == self.did {
-            self.callback.on_payload(&payload).await?;
+            self.callback.on_inbound(&payload).await?;
         }
 
         Ok(())

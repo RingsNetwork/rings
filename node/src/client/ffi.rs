@@ -192,12 +192,12 @@ impl From<&Client> for ClientPtr {
 #[cfg_attr(feature = "browser", async_trait(?Send))]
 #[cfg_attr(not(feature = "browser"), async_trait)]
 impl SwarmCallback for SwarmCallbackInstanceFFI {
-    async fn on_payload(
+    async fn on_inbound(
         &self,
         payload: &MessagePayload,
     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let payload = serde_json::to_string(payload)?;
-        if let Some(cb) = self.on_payload {
+        if let Some(cb) = self.on_inbound {
             let payload = CString::new(payload)?;
             cb(payload.as_ptr())
         };
@@ -210,15 +210,15 @@ impl SwarmCallback for SwarmCallbackInstanceFFI {
 #[repr(C)]
 #[derive(Clone)]
 pub struct SwarmCallbackInstanceFFI {
-    on_payload: Option<extern "C" fn(*const c_char) -> ()>,
+    on_inbound: Option<extern "C" fn(*const c_char) -> ()>,
 }
 
 /// Create a neww callback instance
 #[no_mangle]
 pub extern "C" fn new_callback(
-    on_payload: Option<extern "C" fn(*const c_char) -> ()>,
+    on_inbound: Option<extern "C" fn(*const c_char) -> ()>,
 ) -> SwarmCallbackInstanceFFI {
-    SwarmCallbackInstanceFFI { on_payload }
+    SwarmCallbackInstanceFFI { on_inbound }
 }
 
 /// Start message listening and stabilization
