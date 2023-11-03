@@ -15,7 +15,7 @@
 //!    with other languages through raw pointers. It abstracts the reference counting of
 //!    internal `Arc` components, ensuring memory safety across the boundary.
 //!
-//! 2. **Message Callback for FFI**: The `MessageCallbackInstanceFFI` struct serves as a bridge
+//! 2. **Message Callback for FFI**: The `SwarmCallbackInstanceFFI` struct serves as a bridge
 //!    for message callback functionalities between Rust and other languages. It can hold
 //!    function pointers to C-compatible functions that handle custom and built-in messages.
 //!
@@ -100,17 +100,14 @@ use std::sync::Arc;
 
 use futures::executor;
 use rings_core::async_trait;
-use rings_core::message::CustomMessage;
-use rings_core::message::MessageCallback;
-use rings_core::message::MessageHandlerEvent;
 use rings_core::message::MessagePayload;
+use rings_core::swarm::callback::SwarmCallback;
 
 use super::Client;
 use super::Signer;
 use crate::error::Error;
 use crate::error::Result;
 use crate::jsonrpc::HandlerType;
-use crate::prelude::CallbackFn;
 use crate::processor::Processor;
 
 /// A structure to represent the Client in a C-compatible format.
@@ -194,45 +191,17 @@ impl From<&Client> for ClientPtr {
 
 #[cfg_attr(feature = "browser", async_trait(?Send))]
 #[cfg_attr(not(feature = "browser"), async_trait)]
-impl MessageCallback for MessageCallbackInstanceFFI {
-    async fn custom_message(
+impl SwarmCallback for SwarmCallbackInstanceFFI {
+    async fn on_inbound(
         &self,
-        relay: &MessagePayload,
-        msg: &CustomMessage,
-    ) -> Vec<MessageHandlerEvent> {
-        match (|| -> Result<()> {
-            let relay = serde_json::to_string(relay)?;
-            let msg = serde_json::to_string(msg)?;
-            if let Some(cb) = self.custom_message_callback {
-                let _relay = CString::new(relay)?;
-                let _msg = CString::new(msg)?;
-                cb(_relay.as_ptr(), _msg.as_ptr())
-            };
-            Ok(())
-        })() {
-            Ok(()) => (),
-            Err(e) => {
-                log::error!("Failed on handle builtin_message {:#}", e);
-            }
-        }
-        vec![]
-    }
-
-    async fn builtin_message(&self, relay: &MessagePayload) -> Vec<MessageHandlerEvent> {
-        match (|| -> Result<()> {
-            let relay = serde_json::to_string(relay)?;
-            if let Some(cb) = self.builtin_message_callback {
-                let _relay = CString::new(relay)?;
-                cb(_relay.as_ptr())
-            };
-            Ok(())
-        })() {
-            Ok(()) => (),
-            Err(e) => {
-                log::error!("Failed on handle builtin_message {:#}", e);
-            }
+        payload: &MessagePayload,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let payload = serde_json::to_string(payload)?;
+        if let Some(cb) = self.on_inbound {
+            let payload = CString::new(payload)?;
+            cb(payload.as_ptr())
         };
-        vec![]
+        Ok(())
     }
 }
 
@@ -240,21 +209,16 @@ impl MessageCallback for MessageCallbackInstanceFFI {
 /// This struct holding two functions `custom_message_callback` and `builtin_message_callback`
 #[repr(C)]
 #[derive(Clone)]
-pub struct MessageCallbackInstanceFFI {
-    custom_message_callback: Option<extern "C" fn(*const c_char, *const c_char) -> ()>,
-    builtin_message_callback: Option<extern "C" fn(*const c_char) -> ()>,
+pub struct SwarmCallbackInstanceFFI {
+    on_inbound: Option<extern "C" fn(*const c_char) -> ()>,
 }
 
 /// Create a neww callback instance
 #[no_mangle]
 pub extern "C" fn new_callback(
-    custom_message_cb: Option<extern "C" fn(*const c_char, *const c_char) -> ()>,
-    builtin_message_cb: Option<extern "C" fn(*const c_char) -> ()>,
-) -> MessageCallbackInstanceFFI {
-    MessageCallbackInstanceFFI {
-        custom_message_callback: custom_message_cb,
-        builtin_message_callback: builtin_message_cb,
-    }
+    on_inbound: Option<extern "C" fn(*const c_char) -> ()>,
+) -> SwarmCallbackInstanceFFI {
+    SwarmCallbackInstanceFFI { on_inbound }
 }
 
 /// Start message listening and stabilization
@@ -318,7 +282,7 @@ pub unsafe extern "C" fn new_client_with_callback(
     account: *const c_char,
     account_type: *const c_char,
     signer: extern "C" fn(*const c_char, *mut c_char) -> (),
-    callback_ptr: *const MessageCallbackInstanceFFI,
+    callback_ptr: *const SwarmCallbackInstanceFFI,
 ) -> ClientPtr {
     fn wrapped_signer(
         signer: extern "C" fn(*const c_char, *mut c_char) -> (),
@@ -345,16 +309,12 @@ pub unsafe extern "C" fn new_client_with_callback(
         let acc: String = c_char_to_string(account)?;
         let acc_ty: String = c_char_to_string(account_type)?;
 
-        let callback: &MessageCallbackInstanceFFI = unsafe { &*callback_ptr };
-        let cb: CallbackFn = Box::new(callback.clone());
-
         executor::block_on(Client::new_client_internal(
             ice,
             stabilize_timeout as usize,
             acc,
             acc_ty,
             Signer::Sync(Box::new(wrapped_signer(signer))),
-            Some(cb),
         ))
     })() {
         Ok(r) => r,
@@ -362,6 +322,12 @@ pub unsafe extern "C" fn new_client_with_callback(
             panic!("Failed on create new client {:#}", e)
         }
     };
+
+    let callback: &SwarmCallbackInstanceFFI = unsafe { &*callback_ptr };
+    client
+        .set_swarm_callback(Arc::new(callback.clone()))
+        .expect("Failed to set callback");
+
     let ret: ClientPtr = (&client).into();
     // When leaving the closure, the origin Client ref will be release,
     // So we manually increase the count here

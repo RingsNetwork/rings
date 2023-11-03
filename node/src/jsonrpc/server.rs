@@ -503,7 +503,7 @@ mod tests {
     use crate::tests::native::prepare_processor;
 
     async fn new_rnd_meta() -> RpcMeta {
-        let (processor, _) = prepare_processor(None).await;
+        let (processor, _) = prepare_processor().await;
         Arc::new(processor).into()
     }
 

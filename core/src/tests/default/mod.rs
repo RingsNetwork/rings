@@ -4,7 +4,6 @@ use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::ecc::SecretKey;
 use crate::error::Result;
-use crate::message::CallbackFn;
 use crate::session::SessionSk;
 use crate::storage::PersistenceStorage;
 use crate::swarm::Swarm;
@@ -13,10 +12,7 @@ use crate::swarm::SwarmBuilder;
 mod test_message_handler;
 mod test_stabilization;
 
-pub async fn prepare_node_with_callback(
-    key: SecretKey,
-    message_callback: Option<CallbackFn>,
-) -> (Arc<Swarm>, String) {
+pub async fn prepare_node(key: SecretKey) -> (Arc<Swarm>, String) {
     let stun = "stun://stun.l.google.com:19302";
     let path = PersistenceStorage::random_path("./tmp");
     let storage = PersistenceStorage::new_with_path(path.as_str())
@@ -24,23 +20,12 @@ pub async fn prepare_node_with_callback(
         .unwrap();
 
     let session_sk = SessionSk::new_with_seckey(&key).unwrap();
-
-    let mut swarm_builder = SwarmBuilder::new(stun, storage, session_sk);
-
-    if let Some(callback) = message_callback {
-        swarm_builder = swarm_builder.message_callback(callback);
-    }
-
-    let swarm = Arc::new(swarm_builder.build());
+    let swarm = Arc::new(SwarmBuilder::new(stun, storage, session_sk).build());
 
     println!("key: {:?}", key.to_string());
     println!("did: {:?}", swarm.did());
 
     (swarm, path)
-}
-
-pub async fn prepare_node(key: SecretKey) -> (Arc<Swarm>, String) {
-    prepare_node_with_callback(key, None).await
 }
 
 pub async fn gen_pure_dht(did: Did) -> Result<PeerRing> {

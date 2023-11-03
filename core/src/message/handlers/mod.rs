@@ -13,13 +13,11 @@ use std::sync::Arc;
 use async_recursion::async_recursion;
 use async_trait::async_trait;
 
-use super::CustomMessage;
 use super::Message;
 use super::MessagePayload;
 use crate::dht::vnode::VirtualNode;
 use crate::dht::Did;
 use crate::dht::PeerRing;
-use crate::error::Error;
 use crate::error::Result;
 use crate::message::ConnectNodeReport;
 use crate::message::ConnectNodeSend;
@@ -36,44 +34,6 @@ pub mod stabilization;
 pub mod storage;
 /// Operator and Handler for Subring
 pub mod subring;
-
-/// Trait of message callback.
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
-pub trait MessageCallback {
-    /// Message handler for custom message
-    async fn custom_message(
-        &self,
-        ctx: &MessagePayload,
-        msg: &CustomMessage,
-    ) -> Vec<MessageHandlerEvent>;
-    /// Message handler for builtin message
-    async fn builtin_message(&self, ctx: &MessagePayload) -> Vec<MessageHandlerEvent>;
-}
-
-/// Trait of message validator.
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
-pub trait MessageValidator {
-    /// Externality validator
-    async fn validate(&self, ctx: &MessagePayload) -> Option<String>;
-}
-
-/// Boxed Callback, for non-wasm, it should be Sized, Send and Sync.
-#[cfg(not(feature = "wasm"))]
-pub type CallbackFn = Box<dyn MessageCallback + Send + Sync>;
-
-/// Boxed Callback
-#[cfg(feature = "wasm")]
-pub type CallbackFn = Box<dyn MessageCallback>;
-
-/// Boxed Validator
-#[cfg(not(feature = "wasm"))]
-pub type ValidatorFn = Box<dyn MessageValidator + Send + Sync>;
-
-/// Boxed Validator, for non-wasm, it should be Sized, Send and Sync.
-#[cfg(feature = "wasm")]
-pub type ValidatorFn = Box<dyn MessageValidator>;
 
 type NextHop = Did;
 
@@ -124,10 +84,6 @@ pub enum MessageHandlerEvent {
 #[derive(Clone)]
 pub struct MessageHandler {
     dht: Arc<PeerRing>,
-    /// CallbackFn implement `customMessage` and `builtin_message`.
-    callback: Arc<Option<CallbackFn>>,
-    /// A specific validator implement ValidatorFn.
-    validator: Arc<Option<ValidatorFn>>,
 }
 
 /// Generic trait for handle message ,inspired by Actor-Model.
@@ -140,54 +96,8 @@ pub trait HandleMsg<T> {
 
 impl MessageHandler {
     /// Create a new MessageHandler Instance.
-    pub fn new(
-        dht: Arc<PeerRing>,
-        callback: Option<CallbackFn>,
-        validator: Option<ValidatorFn>,
-    ) -> Self {
-        Self {
-            dht,
-            callback: Arc::new(callback),
-            validator: Arc::new(validator),
-        }
-    }
-
-    /// Invoke callback, which will be call after builtin handler.
-    async fn invoke_callback(
-        &self,
-        payload: &MessagePayload,
-        message: &Message,
-    ) -> Vec<MessageHandlerEvent> {
-        if let Some(ref cb) = *self.callback {
-            match message {
-                Message::CustomMessage(ref msg) => {
-                    if self.dht.did == payload.transaction.destination {
-                        tracing::debug!(
-                            "INVOKE CUSTOM MESSAGE CALLBACK {}",
-                            &payload.transaction.tx_id
-                        );
-                        return cb.custom_message(payload, msg).await;
-                    }
-                }
-                _ => return cb.builtin_message(payload).await,
-            };
-        } else if let Message::CustomMessage(ref msg) = message {
-            if self.dht.did == payload.transaction.destination {
-                tracing::warn!("No callback registered, skip invoke_callback of {:?}", msg);
-            }
-        }
-        vec![]
-    }
-
-    /// Validate message.
-    async fn validate(&self, payload: &MessagePayload) -> Result<()> {
-        if let Some(ref v) = *self.validator {
-            v.validate(payload)
-                .await
-                .map(|info| Err(Error::InvalidMessage(info)))
-                .unwrap_or(Ok(()))?;
-        };
-        Ok(())
+    pub fn new(dht: Arc<PeerRing>) -> Self {
+        Self { dht }
     }
 
     /// Handle builtin message.
@@ -197,7 +107,6 @@ impl MessageHandler {
         &self,
         payload: &MessagePayload,
     ) -> Result<Vec<MessageHandlerEvent>> {
-        self.validate(payload).await?;
         let message: Message = payload.transaction.data()?;
 
         #[cfg(test)]
@@ -210,7 +119,7 @@ impl MessageHandler {
             &message
         );
 
-        let mut events = match &message {
+        let events = match &message {
             Message::JoinDHT(ref msg) => self.handle(payload, msg).await,
             Message::LeaveDHT(ref msg) => self.handle(payload, msg).await,
             Message::ConnectNodeSend(ref msg) => self.handle(payload, msg).await,
@@ -227,10 +136,6 @@ impl MessageHandler {
             Message::QueryForTopoInfoSend(ref msg) => self.handle(payload, msg).await,
             Message::QueryForTopoInfoReport(ref msg) => self.handle(payload, msg).await,
         }?;
-
-        tracing::debug!("INVOKE CALLBACK {}", &payload.transaction.tx_id);
-
-        events.extend(self.invoke_callback(payload, &message).await);
 
         tracing::debug!("FINISH HANDLE MESSAGE {}", &payload.transaction.tx_id);
         Ok(events)
@@ -249,14 +154,13 @@ pub mod tests {
     use crate::ecc::SecretKey;
     use crate::message::MessageVerificationExt;
     use crate::message::PayloadSender;
+    use crate::swarm::callback::SwarmCallback;
     use crate::swarm::Swarm;
-    use crate::tests::default::prepare_node_with_callback;
+    use crate::tests::default::prepare_node;
     use crate::tests::manually_establish_connection;
 
-    #[derive(Clone)]
-    struct MessageCallbackInstance {
-        #[allow(clippy::type_complexity)]
-        handler_messages: Arc<Mutex<Vec<(Did, Vec<u8>)>>>,
+    struct SwarmCallbackInstance {
+        handler_messages: Mutex<Vec<(Did, Vec<u8>)>>,
     }
 
     #[tokio::test]
@@ -265,37 +169,42 @@ pub mod tests {
         let key2 = SecretKey::random();
 
         #[async_trait]
-        impl MessageCallback for MessageCallbackInstance {
-            async fn custom_message(
+        impl SwarmCallback for SwarmCallbackInstance {
+            async fn on_inbound(
                 &self,
-                ctx: &MessagePayload,
-                msg: &CustomMessage,
-            ) -> Vec<MessageHandlerEvent> {
-                self.handler_messages
-                    .lock()
-                    .await
-                    .push((ctx.signer(), msg.0.clone()));
-                println!("{:?}, {:?}, {:?}", ctx, ctx.signer(), msg);
-                vec![]
-            }
+                payload: &MessagePayload,
+            ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+                let msg: Message = payload.transaction.data().map_err(Box::new)?;
 
-            async fn builtin_message(&self, ctx: &MessagePayload) -> Vec<MessageHandlerEvent> {
-                println!("{:?}, {:?}", ctx, ctx.signer());
-                vec![]
+                match msg {
+                    Message::CustomMessage(ref msg) => {
+                        self.handler_messages
+                            .lock()
+                            .await
+                            .push((payload.transaction.signer(), msg.0.clone()));
+                        println!("{:?}, {:?}, {:?}", payload, payload.signer(), msg);
+                    }
+                    _ => {
+                        println!("{:?}, {:?}", payload, payload.signer());
+                    }
+                }
+
+                Ok(())
             }
         }
 
-        let msg_callback1 = MessageCallbackInstance {
-            handler_messages: Arc::new(Mutex::new(vec![])),
-        };
-        let msg_callback2 = MessageCallbackInstance {
-            handler_messages: Arc::new(Mutex::new(vec![])),
-        };
-        let cb1: CallbackFn = Box::new(msg_callback1.clone());
-        let cb2: CallbackFn = Box::new(msg_callback2.clone());
+        let cb1 = Arc::new(SwarmCallbackInstance {
+            handler_messages: Mutex::new(vec![]),
+        });
+        let cb2 = Arc::new(SwarmCallbackInstance {
+            handler_messages: Mutex::new(vec![]),
+        });
 
-        let (node1, _path1) = prepare_node_with_callback(key1, Some(cb1)).await;
-        let (node2, _path2) = prepare_node_with_callback(key2, Some(cb2)).await;
+        let (node1, _path1) = prepare_node(key1).await;
+        let (node2, _path2) = prepare_node(key2).await;
+
+        node1.set_callback(cb1.clone()).unwrap();
+        node2.set_callback(cb2.clone()).unwrap();
 
         manually_establish_connection(&node1, &node2).await;
 
@@ -346,12 +255,12 @@ pub mod tests {
 
         sleep(Duration::from_secs(5)).await;
 
-        assert_eq!(msg_callback1.handler_messages.lock().await.as_slice(), &[
+        assert_eq!(cb1.handler_messages.lock().await.as_slice(), &[
             (node2.did(), "Hello world 2 to 1 - 1".as_bytes().to_vec()),
             (node2.did(), "Hello world 2 to 1 - 2".as_bytes().to_vec())
         ]);
 
-        assert_eq!(msg_callback2.handler_messages.lock().await.as_slice(), &[
+        assert_eq!(cb2.handler_messages.lock().await.as_slice(), &[
             (node1.did(), "Hello world 1 to 2 - 1".as_bytes().to_vec()),
             (node1.did(), "Hello world 1 to 2 - 2".as_bytes().to_vec()),
             (node1.did(), "Hello world 1 to 2 - 3".as_bytes().to_vec())

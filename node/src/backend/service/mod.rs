@@ -101,7 +101,7 @@ impl Backend {
 #[cfg(feature = "node")]
 #[async_trait]
 impl SwarmCallback for Backend {
-    async fn on_payload(
+    async fn on_inbound(
         &self,
         payload: &MessagePayload,
     ) -> std::result::Result<(), Box<dyn std::error::Error>> {

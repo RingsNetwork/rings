@@ -16,9 +16,16 @@ type TransportEventSender = <Channel<TransportEvent> as ChannelTrait<TransportEv
 type CallbackError = Box<dyn std::error::Error>;
 
 /// The [InnerSwarmCallback] will accept shared [SwarmCallback] trait object.
+#[cfg(feature = "wasm")]
+pub type SharedSwarmCallback = Arc<dyn SwarmCallback>;
+
+/// The [InnerSwarmCallback] will accept shared [SwarmCallback] trait object.
+#[cfg(not(feature = "wasm"))]
 pub type SharedSwarmCallback = Arc<dyn SwarmCallback + Send + Sync>;
 
 /// Used to notify the application of events that occur in the swarm.
+#[derive(Debug)]
+#[non_exhaustive]
 pub enum SwarmEvent {
     /// Indicates that the connection state of a peer has changed.
     ConnectionStateChange {
@@ -30,8 +37,8 @@ pub enum SwarmEvent {
 }
 
 /// Any object that implements this trait can be used as a callback for the swarm.
-#[cfg_attr(feature = "swarm", async_trait(?Send))]
-#[cfg_attr(not(feature = "swarm"), async_trait)]
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait SwarmCallback {
     /// This method is invoked when a new message is received and before handling.
     async fn on_validate(&self, _payload: &MessagePayload) -> Result<(), CallbackError> {
@@ -39,7 +46,8 @@ pub trait SwarmCallback {
     }
 
     /// This method is invoked when a new message is received and after handling.
-    async fn on_payload(&self, _payload: &MessagePayload) -> Result<(), CallbackError> {
+    /// Will not be invoked if the message is not for this node.
+    async fn on_inbound(&self, _payload: &MessagePayload) -> Result<(), CallbackError> {
         Ok(())
     }
 
@@ -50,16 +58,19 @@ pub trait SwarmCallback {
 }
 
 pub(crate) struct InnerSwarmCallback {
+    did: Did,
     transport_event_sender: TransportEventSender,
     callback: SharedSwarmCallback,
 }
 
 impl InnerSwarmCallback {
     pub fn new(
+        did: Did,
         transport_event_sender: TransportEventSender,
         callback: SharedSwarmCallback,
     ) -> Self {
         Self {
+            did,
             transport_event_sender,
             callback,
         }
@@ -85,7 +96,11 @@ impl TransportCallback for InnerSwarmCallback {
         .await
         .map_err(Box::new)?;
 
-        self.callback.on_payload(&payload).await
+        if payload.transaction.destination == self.did {
+            self.callback.on_inbound(&payload).await?;
+        }
+
+        Ok(())
     }
 
     async fn on_peer_connection_state_change(

@@ -43,7 +43,6 @@ use crate::prelude::rings_rpc::types::HttpRequest;
 use crate::prelude::rings_rpc::types::Timeout;
 use crate::prelude::vnode;
 use crate::prelude::wasm_export;
-use crate::prelude::CallbackFn;
 use crate::prelude::ChordStorageInterface;
 use crate::prelude::ChordStorageInterfaceCacheChecker;
 use crate::prelude::Connection;
@@ -207,7 +206,6 @@ pub struct ProcessorBuilder {
     session_sk: SessionSk,
     storage: Option<PersistenceStorage>,
     measure: Option<MeasureImpl>,
-    message_callback: Option<CallbackFn>,
     stabilize_timeout: usize,
 }
 
@@ -236,7 +234,6 @@ impl ProcessorBuilder {
             session_sk: config.session_sk.clone(),
             storage: None,
             measure: None,
-            message_callback: None,
             stabilize_timeout: config.stabilize_timeout,
         })
     }
@@ -250,12 +247,6 @@ impl ProcessorBuilder {
     /// Set the measure for the processor.
     pub fn measure(mut self, implement: PeriodicMeasure) -> Self {
         self.measure = Some(Box::new(implement));
-        self
-    }
-
-    /// Set the message callback for the processor.
-    pub fn message_callback(mut self, callback: CallbackFn) -> Self {
-        self.message_callback = Some(callback);
         self
     }
 
@@ -278,10 +269,6 @@ impl ProcessorBuilder {
 
         if let Some(measure) = self.measure {
             swarm_builder = swarm_builder.measure(measure);
-        }
-
-        if let Some(callback) = self.message_callback {
-            swarm_builder = swarm_builder.message_callback(callback);
         }
 
         let swarm = Arc::new(swarm_builder.build());
@@ -635,6 +622,7 @@ pub fn unpack_text_message(msg: &CustomMessage) -> Result<String> {
 #[cfg(feature = "node")]
 mod test {
     use futures::lock::Mutex;
+    use rings_core::swarm::callback::SwarmCallback;
     use rings_transport::core::transport::WebrtcConnectionState;
 
     use super::*;
@@ -644,7 +632,7 @@ mod test {
     #[tokio::test]
     async fn test_processor_create_offer() {
         let peer_did = SecretKey::random().address().into();
-        let (processor, path) = prepare_processor(None).await;
+        let (processor, path) = prepare_processor().await;
         processor.swarm.create_offer(peer_did).await.unwrap();
         let conn_dids = processor.swarm.get_connection_ids();
         assert_eq!(conn_dids.len(), 1);
@@ -652,41 +640,43 @@ mod test {
         tokio::fs::remove_dir_all(path).await.unwrap();
     }
 
-    struct MsgCallbackStruct {
-        msgs: Arc<Mutex<Vec<String>>>,
+    struct SwarmCallbackInstance {
+        pub msgs: Mutex<Vec<String>>,
     }
 
     #[async_trait]
-    impl MessageCallback for MsgCallbackStruct {
-        async fn custom_message(
+    impl SwarmCallback for SwarmCallbackInstance {
+        async fn on_inbound(
             &self,
-            _ctx: &MessagePayload,
-            msg: &CustomMessage,
-        ) -> Vec<MessageHandlerEvent> {
-            let text = unpack_text_message(msg).unwrap();
-            let mut msgs = self.msgs.try_lock().unwrap();
-            msgs.push(text);
-            vec![]
-        }
+            payload: &MessagePayload,
+        ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+            let msg: Message = payload.transaction.data().map_err(Box::new)?;
 
-        async fn builtin_message(&self, _ctx: &MessagePayload) -> Vec<MessageHandlerEvent> {
-            vec![]
+            if let Message::CustomMessage(ref msg) = msg {
+                let text = unpack_text_message(msg).unwrap();
+                let mut msgs = self.msgs.try_lock().unwrap();
+                msgs.push(text);
+            }
+
+            Ok(())
         }
     }
 
     #[tokio::test]
     async fn test_processor_handshake_msg() {
-        let msgs1: Arc<Mutex<Vec<String>>> = Default::default();
-        let msgs2: Arc<Mutex<Vec<String>>> = Default::default();
-        let callback1 = Box::new(MsgCallbackStruct {
-            msgs: msgs1.clone(),
+        let callback1 = Arc::new(SwarmCallbackInstance {
+            msgs: Mutex::new(Vec::new()),
         });
-        let callback2 = Box::new(MsgCallbackStruct {
-            msgs: msgs2.clone(),
+        let callback2 = Arc::new(SwarmCallbackInstance {
+            msgs: Mutex::new(Vec::new()),
         });
 
-        let (p1, path1) = prepare_processor(Some(callback1)).await;
-        let (p2, path2) = prepare_processor(Some(callback2)).await;
+        let (p1, path1) = prepare_processor().await;
+        let (p2, path2) = prepare_processor().await;
+
+        p1.swarm.set_callback(callback1.clone()).unwrap();
+        p2.swarm.set_callback(callback2.clone()).unwrap();
+
         let did1 = p1.did().to_string();
         let did2 = p2.did().to_string();
 
@@ -764,7 +754,7 @@ mod test {
 
         println!("check received");
 
-        let mut msgs2 = msgs2.try_lock().unwrap();
+        let mut msgs2 = callback2.msgs.try_lock().unwrap();
         let got_msg2 = msgs2.pop().unwrap();
         assert!(
             got_msg2.eq(test_text1),
@@ -773,7 +763,7 @@ mod test {
             got_msg2
         );
 
-        let mut msgs1 = msgs1.try_lock().unwrap();
+        let mut msgs1 = callback1.msgs.try_lock().unwrap();
         let got_msg1 = msgs1.pop().unwrap();
         assert!(
             got_msg1.eq(test_text2),

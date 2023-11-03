@@ -17,11 +17,10 @@ use rings_core::async_trait;
 use rings_core::dht::Did;
 use rings_core::ecc::PublicKey;
 use rings_core::message::CustomMessage;
-use rings_core::message::MessageCallback;
-use rings_core::message::MessageHandlerEvent;
 use rings_core::message::MessagePayload;
 use rings_core::prelude::vnode;
 use rings_core::prelude::vnode::VirtualNode;
+use rings_core::swarm::callback::SwarmCallback;
 use rings_core::utils::js_utils;
 use rings_core::utils::js_value;
 use rings_transport::core::transport::ConnectionInterface;
@@ -47,7 +46,6 @@ use crate::prelude::chunk::ChunkManager;
 use crate::prelude::http;
 use crate::prelude::message;
 use crate::prelude::wasm_export;
-use crate::prelude::CallbackFn;
 use crate::processor::ProcessorConfig;
 
 /// AddressType enum contains `DEFAULT` and `ED25519`.
@@ -69,7 +67,6 @@ impl Client {
     /// please check [rings_core::ecc]
     /// Signer should be `async function (proof: string): Promise<Unit8Array>`
     /// Signer should function as same as account_type declared, Eg: eip191 or secp256k1 or ed25519.
-    /// callback should be an instance of [CallbackFn]
     #[wasm_bindgen(constructor)]
     pub fn new_instance(
         ice_servers: String,
@@ -78,7 +75,6 @@ impl Client {
         account_type: String,
         signer: js_sys::Function,
         callback: Option<MessageCallbackInstance>,
-        //) -> Result<Client, error::Error> {
     ) -> js_sys::Promise {
         fn wrapped_signer(signer: js_sys::Function) -> AsyncSigner {
             Box::new(
@@ -103,20 +99,19 @@ impl Client {
 
         future_to_promise(async move {
             let signer = wrapped_signer(signer);
-            let cb: Option<CallbackFn> = if let Some(cb) = callback {
-                Some(Box::new(cb))
-            } else {
-                None
-            };
             let client = Client::new_client_internal(
                 ice_servers,
                 stabilize_timeout,
                 account,
                 account_type,
                 Signer::Async(Box::new(signer)),
-                cb,
             )
             .await?;
+            if let Some(cb) = callback {
+                client
+                    .set_swarm_callback(Arc::new(cb))
+                    .expect("Failed on set swarm callback");
+            }
             Ok(JsValue::from(client))
         })
     }
@@ -151,14 +146,14 @@ impl Client {
         storage_name: String,
     ) -> js_sys::Promise {
         future_to_promise(async move {
-            let cb: Option<CallbackFn> = if let Some(cb) = callback {
-                Some(Box::new(cb))
-            } else {
-                None
-            };
-            let client = Self::new_client_with_storage_internal(config, cb, storage_name)
+            let client = Self::new_client_with_storage_internal(config, storage_name)
                 .await
                 .map_err(JsError::from)?;
+            if let Some(cb) = callback {
+                client
+                    .set_swarm_callback(Arc::new(cb))
+                    .expect("Failed on set swarm callback");
+            }
             Ok(JsValue::from(client))
         })
     }
@@ -631,20 +626,20 @@ impl MessageCallbackInstance {
 
     pub(crate) async fn handle_http_response(
         &self,
-        relay: &MessagePayload,
+        payload: &MessagePayload,
         data: &[u8],
     ) -> anyhow::Result<()> {
         let msg_content = data;
         log::info!(
             "message of {:?} received, before gunzip: {:?}",
-            relay.transaction.tx_id,
+            payload.transaction.tx_id,
             msg_content.len(),
         );
         let this = JsValue::null();
         let msg_content = message::decode_gzip_data(&Bytes::from(data.to_vec())).unwrap();
         log::info!(
             "message of {:?} received, after gunzip: {:?}",
-            relay.transaction.tx_id,
+            payload.transaction.tx_id,
             msg_content.len(),
         );
         let http_response: HttpResponse = bincode::deserialize(&msg_content)?;
@@ -652,7 +647,7 @@ impl MessageCallbackInstance {
             .map_err(|_| anyhow!("Failed on serialize message"))?;
         if let Ok(r) = self.http_response_message.call2(
             &this,
-            &js_value::serialize(&relay).map_err(|_| anyhow!("Failed on serialize message"))?,
+            &js_value::serialize(&payload).map_err(|_| anyhow!("Failed on serialize message"))?,
             &msg_content,
         ) {
             if let Ok(p) = js_sys::Promise::try_from(r) {
@@ -691,17 +686,10 @@ impl MessageCallbackInstance {
 
         Ok(data)
     }
-}
 
-#[async_trait(?Send)]
-impl MessageCallback for MessageCallbackInstance {
-    async fn custom_message(
-        &self,
-        relay: &MessagePayload,
-        msg: &CustomMessage,
-    ) -> Vec<MessageHandlerEvent> {
+    async fn handle_custom_message(&self, payload: &MessagePayload, msg: &CustomMessage) {
         if msg.0.len() < 2 {
-            return vec![];
+            return;
         }
 
         let (left, right) = array_refs![&msg.0, 4; ..;];
@@ -711,37 +699,35 @@ impl MessageCallback for MessageCallbackInstance {
             let data = self.handle_chunk_data(right);
             if let Err(e) = data {
                 log::error!("handle chunk data failed: {}", e);
-                return vec![];
+                return;
             }
             let data = data.unwrap();
-            log::debug!("chunk message of {:?} received", relay.transaction.tx_id);
+            log::debug!("chunk message of {:?} received", payload.transaction.tx_id);
             if let Some(data) = data {
                 data
             } else {
                 log::info!(
                     "chunk message of {:?} not complete",
-                    relay.transaction.tx_id
+                    payload.transaction.tx_id
                 );
-                return vec![];
+                return;
             }
         } else if tag == 0 {
             Bytes::from(right.to_vec())
         } else {
             log::error!("invalid message tag: {}", tag);
-            return vec![];
+            return;
         };
-        if let Err(e) = self.handle_message_data(relay, &data).await {
+        if let Err(e) = self.handle_message_data(payload, &data).await {
             log::error!("handle http_server_msg failed, {}", e);
         }
-        vec![]
     }
 
-    async fn builtin_message(&self, relay: &MessagePayload) -> Vec<MessageHandlerEvent> {
+    async fn handle_builtin_message(&self, payload: &MessagePayload) {
         let this = JsValue::null();
-        // log::debug!("builtin_message received: {:?}", relay);
         if let Ok(r) = self
             .builtin_message
-            .call1(&this, &js_value::serialize(&relay).unwrap())
+            .call1(&this, &js_value::serialize(&payload).unwrap())
         {
             if let Ok(p) = js_sys::Promise::try_from(r) {
                 if let Err(e) = wasm_bindgen_futures::JsFuture::from(p).await {
@@ -749,7 +735,22 @@ impl MessageCallback for MessageCallbackInstance {
                 }
             }
         }
-        vec![]
+    }
+}
+
+#[async_trait(?Send)]
+impl SwarmCallback for MessageCallbackInstance {
+    async fn on_inbound(&self, payload: &MessagePayload) -> Result<(), Box<dyn std::error::Error>> {
+        let msg: message::Message = payload.transaction.data().map_err(Box::new)?;
+
+        match msg {
+            message::Message::CustomMessage(ref msg) => {
+                self.handle_custom_message(payload, msg).await
+            }
+            _ => self.handle_builtin_message(payload).await,
+        }
+
+        Ok(())
     }
 }
 

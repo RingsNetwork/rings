@@ -29,7 +29,6 @@ async fn new_client() -> (Client, String) {
     let storage_name = uuid::Uuid::new_v4().to_string();
     let client: Client = Client::new_client_with_storage_and_serialized_config_internal(
         config,
-        None,
         storage_name.clone(),
     )
     .await
