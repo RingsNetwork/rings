@@ -19,7 +19,7 @@ For more details you can check our [Rings Whitepaper](https://raw.githubusercont
 
 You can also visit [Rings Network's homepage](https://ringsnetwork.io) to get more project info.
 
-And you can get more document here: *[Document](https://rings.gitbook.io/)*.
+And you can get more document [here](https://rings.gitbook.io/).
 
 ## Installation
 
