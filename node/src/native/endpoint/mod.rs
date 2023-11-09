@@ -20,9 +20,6 @@ use tower_http::cors::CorsLayer;
 use self::http_error::HttpError;
 use crate::backend::types::BackendMessage;
 use crate::jsonrpc::RpcMeta;
-use crate::prelude::http::header;
-use crate::prelude::http::HeaderMap;
-use crate::prelude::http::HeaderValue;
 use crate::prelude::jsonrpc_core::MetaIoHandler;
 use crate::prelude::rings_rpc::response::NodeInfo;
 use crate::processor::Processor;
@@ -97,7 +94,7 @@ pub async fn run_http_api(
 
 async fn jsonrpc_io_handler(
     State(state): State<Arc<JsonrpcState>>,
-    headermap: HeaderMap,
+    headermap: http::HeaderMap,
     body: String,
 ) -> Result<JsonResponse, HttpError> {
     let is_auth = if let Some(signature) = headermap.get("X-SIGNATURE") {
@@ -134,13 +131,13 @@ async fn jsonrpc_io_handler(
 }
 
 async fn node_info_header<B>(
-    req: axum::http::Request<B>,
+    req: http::Request<B>,
     next: axum::middleware::Next<B>,
 ) -> axum::response::Response {
     let mut res = next.run(req).await;
     let headers = res.headers_mut();
 
-    if let Ok(version) = axum::http::HeaderValue::from_str(crate::util::build_version().as_str()) {
+    if let Ok(version) = http::HeaderValue::from_str(crate::util::build_version().as_str()) {
         headers.insert("X-NODE-VERSION", version);
     }
     res
@@ -163,14 +160,7 @@ pub struct JsonResponse(String);
 
 impl IntoResponse for JsonResponse {
     fn into_response(self) -> axum::response::Response {
-        (
-            [(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("application/json"),
-            )],
-            self.0,
-        )
-            .into_response()
+        ([("content-type", "application/json")], self.0).into_response()
     }
 }
 

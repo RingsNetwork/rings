@@ -12,8 +12,6 @@ use crate::prelude::jsonrpc_core::Params;
 use crate::prelude::*;
 use crate::response;
 use crate::response::Peer;
-use crate::types;
-use crate::types::Timeout;
 
 /// Wrap json_client send request between nodes or browsers.
 pub struct Client {
@@ -119,63 +117,13 @@ impl Client {
     pub async fn send_custom_message(
         &self,
         did: &str,
-        message_type: u16,
-        data: &str,
+        data_b64: &str,
     ) -> Result<response::SendMessageResponse> {
         let result = self
             .client
             .call_method(
                 Method::SendCustomMessage.as_str(),
-                Params::Array(vec![json!(did), json!(message_type), json!(data)]),
-            )
-            .await
-            .map_err(Error::RpcError)?;
-        serde_json::from_value(result).map_err(|_| Error::DecodeError)
-    }
-
-    /// Sends an HTTP request message to the specified peer.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn send_http_request_message(
-        &self,
-        did: &str,
-        name: &str,
-        method: http::Method,
-        url: &str,
-        timeout: Timeout,
-        headers: &[(&str, &str)],
-        body: Option<String>,
-    ) -> Result<response::SendMessageResponse> {
-        let http_request: types::HttpRequest = types::HttpRequest::new(
-            name,
-            method,
-            url,
-            timeout,
-            headers,
-            body.map(|v| v.as_bytes().to_vec()),
-        );
-        let params2 = serde_json::to_value(http_request).map_err(|_| Error::EncodeError)?;
-        let result = self
-            .client
-            .call_method(
-                Method::SendHttpRequestMessage.as_str(),
-                Params::Array(vec![json!(did), params2]),
-            )
-            .await
-            .map_err(Error::RpcError)?;
-        serde_json::from_value(result).map_err(|_| Error::DecodeError)
-    }
-
-    /// Sends a simple text message to the specified peer.
-    pub async fn send_simple_text_message(
-        &self,
-        did: &str,
-        text: &str,
-    ) -> Result<response::SendMessageResponse> {
-        let result = self
-            .client
-            .call_method(
-                Method::SendSimpleText.as_str(),
-                Params::Array(vec![json!(did), json!(text)]),
+                Params::Array(vec![json!(did), json!(data_b64)]),
             )
             .await
             .map_err(Error::RpcError)?;

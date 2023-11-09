@@ -6,8 +6,6 @@ use futures::SinkExt;
 use futures::StreamExt;
 
 use super::WsState;
-use crate::prelude::rings_rpc::response::BaseResponse;
-use crate::prelude::rings_rpc::response::CustomBackendMessage;
 
 /// Actual websocket statemachine (one will be spawned per connection)
 pub async fn handle_socket(ws_state: Arc<WsState>, socket: WebSocket) {
@@ -17,15 +15,6 @@ pub async fn handle_socket(ws_state: Arc<WsState>, socket: WebSocket) {
         loop {
             let mut receiver = ws_state.receiver.resubscribe();
             if let Ok(data) = receiver.recv().await {
-                let data = BaseResponse::new(
-                    "custom_message".to_owned(),
-                    CustomBackendMessage::from(data),
-                );
-                let data = serde_json::to_value(&data);
-                if data.is_err() {
-                    continue;
-                }
-                let data = data.unwrap();
                 if let Ok(data) = serde_json::to_string(&data) {
                     if let Err(e) = sender.send(Message::Text(data)).await {
                         tracing::error!("send_custom_message_to_ws_failed: {}", e);

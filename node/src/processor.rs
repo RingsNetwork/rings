@@ -7,21 +7,16 @@ use std::sync::Arc;
 
 use futures::future::Join;
 use futures::Future;
-#[cfg(feature = "node")]
-use jsonrpc_core::Metadata;
 use rings_core::message::MessagePayload;
 use rings_core::swarm::impls::ConnectionHandshake;
 use rings_transport::core::transport::ConnectionInterface;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::backend::types::BackendMessage;
-use crate::backend::types::MessageType;
 use crate::consts::DATA_REDUNDANT;
 use crate::error::Error;
 use crate::error::Result;
 use crate::measure::PeriodicMeasure;
-use crate::prelude::http;
 use crate::prelude::jsonrpc_client::SimpleClient;
 use crate::prelude::jsonrpc_core;
 use crate::prelude::rings_core::dht::Did;
@@ -39,13 +34,10 @@ use crate::prelude::rings_core::swarm::Swarm;
 use crate::prelude::rings_core::swarm::SwarmBuilder;
 use crate::prelude::rings_rpc::method;
 use crate::prelude::rings_rpc::response;
-use crate::prelude::rings_rpc::types::HttpRequest;
-use crate::prelude::rings_rpc::types::Timeout;
 use crate::prelude::vnode;
 use crate::prelude::wasm_export;
 use crate::prelude::ChordStorageInterface;
 use crate::prelude::ChordStorageInterfaceCacheChecker;
-use crate::prelude::Connection;
 use crate::prelude::CustomMessage;
 use crate::prelude::SessionSk;
 
@@ -281,9 +273,6 @@ impl ProcessorBuilder {
     }
 }
 
-#[cfg(feature = "node")]
-impl Metadata for Processor {}
-
 impl Processor {
     /// Listen processor message
     pub fn listen(&self) -> Join<impl Future, impl Future> {
@@ -305,7 +294,7 @@ impl Processor {
 
     /// Connect peer with remote rings-node jsonrpc server.
     /// * peer_url: the remote rings-node jsonrpc server url.
-    pub async fn connect_peer_via_http(&self, peer_url: &str) -> Result<Peer> {
+    pub async fn connect_peer_via_http(&self, peer_url: &str) -> Result<Did> {
         // request remote offer and sand answer to remote
         tracing::debug!("connect_peer_via_http: {}", peer_url);
 
@@ -347,13 +336,13 @@ impl Processor {
         let answer_payload =
             MessagePayload::from_encoded(&encoded_answer).map_err(|_| Error::DecodeError)?;
 
-        let (did, conn) = self
+        let (did, _) = self
             .swarm
             .accept_answer(answer_payload)
             .await
             .map_err(Error::AcceptAnswer)?;
 
-        Ok(Peer::from((did, conn)))
+        Ok(did)
     }
 
     /// Connect peer with web3 did.
@@ -361,7 +350,7 @@ impl Processor {
     /// 1. PeerA has a connection with PeerB.
     /// 2. PeerC has a connection with PeerB.
     /// 3. PeerC can connect PeerA with PeerA's web3 address.
-    pub async fn connect_with_did(&self, did: Did, wait_for_open: bool) -> Result<Peer> {
+    pub async fn connect_with_did(&self, did: Did, wait_for_open: bool) -> Result<()> {
         let conn = self.swarm.connect(did).await.map_err(Error::ConnectError)?;
         tracing::debug!("wait for connection connected");
         if wait_for_open {
@@ -369,27 +358,7 @@ impl Processor {
                 .await
                 .map_err(|e| Error::ConnectError(rings_core::error::Error::Transport(e)))?;
         }
-        Ok(Peer::from((did, conn)))
-    }
-
-    /// List all peers.
-    pub async fn list_peers(&self) -> Result<Vec<Peer>> {
-        let conns = self.swarm.get_connections();
-        tracing::debug!(
-            "addresses: {:?}",
-            conns.iter().map(|(a, _b)| a).collect::<Vec<_>>()
-        );
-        let data = conns.iter().map(|x| x.into()).collect::<Vec<Peer>>();
-        Ok(data)
-    }
-
-    /// Get peer by remote did
-    pub async fn get_peer(&self, did: Did) -> Result<Peer> {
-        let conn = self
-            .swarm
-            .get_connection(did)
-            .ok_or(Error::ConnectionNotFound)?;
-        Ok(Peer::from(&(did, conn)))
+        Ok(())
     }
 
     /// Disconnect a peer with web3 did.
@@ -421,98 +390,12 @@ impl Processor {
         );
         let destination = Did::from_str(destination).map_err(|_| Error::InvalidDid)?;
 
-        let mut new_msg = Vec::with_capacity(msg.len() + 4);
-        // chunked mark
-        new_msg.push(0);
-        new_msg.extend_from_slice(&[0u8; 3]);
-        new_msg.extend_from_slice(msg);
+        let msg = Message::custom(msg).map_err(Error::SendMessage)?;
 
-        let msg = Message::custom(&new_msg).map_err(Error::SendMessage)?;
-
-        let uuid = self
-            .swarm
+        self.swarm
             .send_message(msg, destination)
             .await
-            .map_err(Error::SendMessage)?;
-        Ok(uuid)
-    }
-
-    /// send http request message to node
-    /// - destination: did of destination
-    /// - url: ipfs url
-    /// - timeout: timeout in millisecond
-    #[allow(clippy::too_many_arguments)]
-    pub async fn send_http_request_message<U, T>(
-        &self,
-        destination: &str,
-        name: U,
-        method: http::Method,
-        url: U,
-        timeout: T,
-        headers: &[(U, U)],
-        body: Option<Vec<u8>>,
-    ) -> Result<uuid::Uuid>
-    where
-        U: ToString,
-        T: Into<Timeout>,
-    {
-        let timeout: Timeout = timeout.into();
-        tracing::info!(
-            "send_http_request_message, destination: {}, url: {:?}, timeout: {:?}",
-            destination,
-            url.to_string(),
-            timeout,
-        );
-        let msg: BackendMessage = BackendMessage::try_from((
-            MessageType::HttpRequest,
-            &HttpRequest::new(name, method, url, timeout, headers, body),
-        ))?;
-        let msg: Vec<u8> = msg.into();
-
-        self.send_message(destination, &msg).await
-    }
-
-    /// send simple text message
-    /// - destination: did of destination
-    /// - text: text message
-    pub async fn send_simple_text_message(
-        &self,
-        destination: &str,
-        text: &str,
-    ) -> Result<uuid::Uuid> {
-        tracing::info!(
-            "send_simple_text_message, destination: {}, text: {:?}",
-            destination,
-            text,
-        );
-
-        let msg: BackendMessage =
-            BackendMessage::from((MessageType::SimpleText.into(), text.as_bytes()));
-        let msg: Vec<u8> = msg.into();
-        self.send_message(destination, &msg).await
-    }
-
-    /// send custom message
-    /// - destination: did of destination
-    /// - message_type: custom message type u16
-    /// - extra: extra data
-    /// - data: payload data
-    pub async fn send_custom_message(
-        &self,
-        destination: &str,
-        message_type: u16,
-        data: Vec<u8>,
-        extra: [u8; 30],
-    ) -> Result<uuid::Uuid> {
-        tracing::info!(
-            "send_custom_message, destination: {}, message_type: {}",
-            destination,
-            message_type,
-        );
-
-        let msg: BackendMessage = BackendMessage::new(message_type, extra, data.as_ref());
-        let msg: Vec<u8> = msg.into();
-        self.send_message(destination, &msg[..]).await
+            .map_err(Error::SendMessage)
     }
 
     /// check local cache of dht
@@ -567,44 +450,6 @@ impl Processor {
             version: crate::util::build_version(),
             swarm: self.swarm.inspect().await,
         })
-    }
-}
-
-/// Peer struct
-#[derive(Clone)]
-pub struct Peer {
-    /// web3 did of a peer.
-    pub did: String,
-    /// the connection.
-    pub connection: Connection,
-}
-
-impl From<(Did, Connection)> for Peer {
-    fn from((did, connection): (Did, Connection)) -> Self {
-        Self {
-            did: did.to_string(),
-            connection,
-        }
-    }
-}
-
-impl From<&(Did, Connection)> for Peer {
-    fn from((did, connection): &(Did, Connection)) -> Self {
-        Self {
-            did: did.to_string(),
-            connection: connection.clone(),
-        }
-    }
-}
-
-impl Peer {
-    /// convert peer to response peer
-    pub fn into_response_peer(&self) -> rings_rpc::response::Peer {
-        rings_rpc::response::Peer {
-            did: self.did.clone(),
-            cid: self.did.clone(),
-            state: format!("{:?}", self.connection.webrtc_connection_state()),
-        }
     }
 }
 

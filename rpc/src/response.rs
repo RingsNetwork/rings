@@ -1,6 +1,5 @@
 //! A JSONRPC response.
 
-use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
@@ -27,32 +26,6 @@ impl Peer {
 
     pub fn to_json_obj(&self) -> Result<JsonValue> {
         serde_json::to_value(self).map_err(|_| Error::EncodeError)
-    }
-}
-
-#[derive(Deserialize, Serialize, Clone)]
-pub struct BaseResponse<T> {
-    method: String,
-    result: T,
-}
-
-impl<T> BaseResponse<T>
-where T: DeserializeOwned + Serialize + Clone
-{
-    pub fn new(method: String, result: T) -> Self {
-        Self { method, result }
-    }
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone)]
-pub struct CustomBackendMessage {
-    message_type: u16,
-    data: String,
-}
-
-impl From<(u16, String)> for CustomBackendMessage {
-    fn from((message_type, data): (u16, String)) -> Self {
-        Self { message_type, data }
     }
 }
 

@@ -12,14 +12,14 @@ use futures::pin_mut;
 use futures::select;
 use futures::StreamExt;
 use futures_timer::Delay;
-use rings_node::backend::service::Backend;
+use rings_node::backend::Backend;
+use rings_node::backend::BackendConfig;
 use rings_node::logging::init_logging;
 use rings_node::logging::LogLevel;
 use rings_node::measure::PeriodicMeasure;
 use rings_node::native::cli::Client;
 use rings_node::native::config;
 use rings_node::native::endpoint::run_http_api;
-use rings_node::prelude::http;
 use rings_node::prelude::rings_core::ecc::SecretKey;
 use rings_node::prelude::PersistenceStorage;
 use rings_node::processor::Processor;
@@ -242,8 +242,6 @@ enum SendCommand {
     Raw(SendRawCommand),
     #[command(about = "Sends an HTTP request message.")]
     Http(SendHttpCommand),
-    #[command(about = "Sends a simple text message.")]
-    SimpleText(SendSimpleTextCommand),
     #[command(about = "Sends a custom message.")]
     Custom(SendCustomMessageCommand),
 }
@@ -265,7 +263,7 @@ struct SendHttpCommand {
 
     to_did: String,
 
-    name: String,
+    service: String,
 
     #[arg(default_value = "GET", long, short = 'X', help = "request method")]
     method: String,
@@ -288,14 +286,6 @@ struct PubsubCommand {
     #[command(flatten)]
     client_args: ClientArgs,
     topic: String,
-}
-
-#[derive(Args, Debug)]
-struct SendSimpleTextCommand {
-    #[command(flatten)]
-    client_args: ClientArgs,
-    to_did: String,
-    text: String,
 }
 
 #[derive(Args, Debug)]
@@ -354,6 +344,7 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     }
 
     let pc = ProcessorConfig::try_from(c.clone())?;
+    let bc = BackendConfig::from(c.clone());
 
     let (data_storage, measure_storage) = if let Some(storage_path) = args.storage_path {
         let storage_path = Path::new(&storage_path);
@@ -386,9 +377,8 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     );
     println!("Did: {}", processor.swarm.did());
 
-    let (sender, receiver) = tokio::sync::broadcast::channel(1024);
-    let backend_config = (c.backend, c.extension).into();
-    let backend = Arc::new(Backend::new(backend_config, sender, processor.swarm.clone()).await?);
+    let (_sender, receiver) = tokio::sync::broadcast::channel(1024);
+    let backend = Arc::new(Backend::new(bc, processor.clone()).await?);
     let backend_service_names = backend.service_names();
 
     processor.swarm.set_callback(backend).unwrap();
@@ -494,32 +484,25 @@ async fn main() -> anyhow::Result<()> {
                 .await?
                 .send_http_request_message(
                     args.to_did.as_str(),
-                    args.name.as_str(),
+                    args.service.as_str(),
                     http::Method::from_str(args.method.to_uppercase().as_str())?,
                     args.path.as_str(),
-                    args.timeout.into(),
-                    &args
-                        .headers
+                    args.headers
                         .iter()
                         .map(|x| x.split(':').collect::<Vec<&str>>())
                         .map(|b| {
                             (
-                                b[0].trim_start_matches(' ').trim_end_matches(' '),
-                                b[1].trim_start_matches(' ').trim_end_matches(' '),
+                                b[0].trim_start_matches(' ')
+                                    .trim_end_matches(' ')
+                                    .to_string(),
+                                b[1].trim_start_matches(' ')
+                                    .trim_end_matches(' ')
+                                    .to_string(),
                             )
                         })
                         .collect::<Vec<(_, _)>>(),
-                    args.body,
+                    args.body.map(|x| x.as_bytes().to_vec()),
                 )
-                .await?
-                .display();
-            Ok(())
-        }
-        Command::Send(SendCommand::SimpleText(args)) => {
-            args.client_args
-                .new_client()
-                .await?
-                .send_simple_text_message(args.to_did.as_str(), args.text.as_str())
                 .await?
                 .display();
             Ok(())
@@ -528,7 +511,7 @@ async fn main() -> anyhow::Result<()> {
             args.client_args
                 .new_client()
                 .await?
-                .send_custom_message(args.to_did.as_str(), args.message_type, args.data.as_str())
+                .send_custom_message(args.to_did.as_str(), args.data.as_str())
                 .await?
                 .display();
             Ok(())

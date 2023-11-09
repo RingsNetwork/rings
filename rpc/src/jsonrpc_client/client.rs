@@ -68,14 +68,8 @@ impl SimpleClient {
         let mut req = self
             .client
             .post(self.url.as_str())
-            .header(
-                http::header::CONTENT_TYPE,
-                http::header::HeaderValue::from_static("application/json"),
-            )
-            .header(
-                http::header::ACCEPT,
-                http::header::HeaderValue::from_static("application/json"),
-            )
+            .header("content-type", "application/json")
+            .header("accept", "application/json")
             .body(request.clone());
 
         if let Some(delegated_sk) = &self.delegated_sk {
