@@ -211,7 +211,7 @@ impl HandleMsg<SearchVNode> for MessageHandler {
     ) -> Result<Vec<MessageHandlerEvent>> {
         // For relay message, set redundant to 1
         match <PeerRing as ChordStorage<_, 1>>::vnode_lookup(&self.dht, msg.vid).await {
-            Ok(action) => handle_storage_search_act(ctx, action),
+            Ok(action) => handle_storage_search_act(ctx, action).await,
             Err(e) => Err(e),
         }
     }
