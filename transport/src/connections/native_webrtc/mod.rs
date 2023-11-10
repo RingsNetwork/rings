@@ -64,11 +64,12 @@ impl WebrtcConnection {
             .recv()
             .await;
 
-        Ok(self.webrtc_conn
+        Ok(self
+            .webrtc_conn
             .local_description()
             .await
             .ok_or(Error::WebrtcLocalSdpGenerationError)?
-	    .sdp)
+            .sdp)
     }
 }
 
@@ -122,7 +123,7 @@ impl ConnectionInterface for WebrtcConnection {
 
     async fn webrtc_answer_offer(&self, offer: Self::Sdp) -> Result<Self::Sdp> {
         tracing::debug!("webrtc_answer_offer, offer: {offer:?}");
-	let offer = RTCSessionDescription::offer(offer)?;
+        let offer = RTCSessionDescription::offer(offer)?;
         self.webrtc_conn.set_remote_description(offer).await?;
 
         let answer = self.webrtc_conn.create_answer(None).await?;
@@ -135,7 +136,7 @@ impl ConnectionInterface for WebrtcConnection {
 
     async fn webrtc_accept_answer(&self, answer: Self::Sdp) -> Result<()> {
         tracing::debug!("webrtc_accept_answer, answer: {answer:?}");
-	let answer = RTCSessionDescription::answer(answer)?;
+        let answer = RTCSessionDescription::answer(answer)?;
         self.webrtc_conn
             .set_remote_description(answer)
             .await
