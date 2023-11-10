@@ -7,8 +7,6 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use lazy_static::lazy_static;
 use rand::distributions::Distribution;
-use serde::Deserialize;
-use serde::Serialize;
 
 use crate::callback::InnerTransportCallback;
 use crate::connection_ref::ConnectionRef;
@@ -33,20 +31,15 @@ const SEND_MESSAGE_DELAY: bool = true;
 const CHANNEL_OPEN_DELAY: bool = false;
 
 lazy_static! {
-    static ref CBS: DashMap<u64, Arc<InnerTransportCallback>> = DashMap::new();
-    static ref CONNS: DashMap<u64, Arc<DummyConnection>> = DashMap::new();
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct DummySdp {
-    rand_id: u64,
+    static ref CBS: DashMap<String, Arc<InnerTransportCallback>> = DashMap::new();
+    static ref CONNS: DashMap<String, Arc<DummyConnection>> = DashMap::new();
 }
 
 /// A dummy connection for local testing.
 /// Implements the [ConnectionInterface] trait with no real network.
 pub struct DummyConnection {
-    pub(crate) rand_id: u64,
-    remote_rand_id: Arc<Mutex<Option<u64>>>,
+    pub(crate) rand_id: String,
+    remote_rand_id: Arc<Mutex<Option<String>>>,
     webrtc_connection_state: Arc<Mutex<WebrtcConnectionState>>,
 }
 
@@ -59,7 +52,7 @@ pub struct DummyTransport {
 impl DummyConnection {
     fn new() -> Self {
         Self {
-            rand_id: random(0, 10000000000),
+            rand_id: random(0, 10000000000).to_string(),
             remote_rand_id: Arc::new(Mutex::new(None)),
             webrtc_connection_state: Arc::new(Mutex::new(WebrtcConnectionState::New)),
         }
@@ -70,16 +63,18 @@ impl DummyConnection {
     }
 
     fn remote_callback(&self) -> Arc<InnerTransportCallback> {
-        let cid = { self.remote_rand_id.lock().unwrap() }.unwrap();
-        CBS.get(&cid).unwrap().clone()
+        let cid: String = { self.remote_rand_id.lock().unwrap() }.clone().unwrap();
+        CBS.get(&cid)
+            .expect(&format!("Failed to get cid {:?}", &cid))
+            .clone()
     }
 
     fn remote_conn(&self) -> Arc<DummyConnection> {
-        let cid = { self.remote_rand_id.lock().unwrap() }.unwrap();
+        let cid = { self.remote_rand_id.lock().unwrap() }.clone().unwrap();
         CONNS.get(&cid).unwrap().clone()
     }
 
-    fn set_remote_rand_id(&self, rand_id: u64) {
+    fn set_remote_rand_id(&self, rand_id: String) {
         let mut remote_rand_id = self.remote_rand_id.lock().unwrap();
         *remote_rand_id = Some(rand_id);
     }
@@ -110,7 +105,7 @@ impl DummyTransport {
 
 #[async_trait]
 impl ConnectionInterface for DummyConnection {
-    type Sdp = DummySdp;
+    type Sdp = String;
     type Error = Error;
 
     async fn send_message(&self, msg: TransportMessage) -> Result<()> {
@@ -134,24 +129,20 @@ impl ConnectionInterface for DummyConnection {
     async fn webrtc_create_offer(&self) -> Result<Self::Sdp> {
         self.set_webrtc_connection_state(WebrtcConnectionState::Connecting)
             .await;
-        Ok(DummySdp {
-            rand_id: self.rand_id,
-        })
+        Ok(self.rand_id.clone())
     }
 
     async fn webrtc_answer_offer(&self, offer: Self::Sdp) -> Result<Self::Sdp> {
         self.set_webrtc_connection_state(WebrtcConnectionState::Connecting)
             .await;
-        self.set_remote_rand_id(offer.rand_id);
-        Ok(DummySdp {
-            rand_id: self.rand_id,
-        })
+        self.set_remote_rand_id(offer);
+        Ok(self.rand_id.clone())
     }
 
     async fn webrtc_accept_answer(&self, answer: Self::Sdp) -> Result<()> {
         self.set_webrtc_connection_state(WebrtcConnectionState::Connected)
             .await;
-        self.set_remote_rand_id(answer.rand_id);
+        self.set_remote_rand_id(answer);
         self.remote_conn()
             .set_webrtc_connection_state(WebrtcConnectionState::Connected)
             .await;
@@ -201,12 +192,12 @@ impl TransportInterface for DummyTransport {
         }
 
         let conn = DummyConnection::new();
-        let conn_rand_id = conn.rand_id;
+        let conn_rand_id = conn.rand_id.clone();
 
         self.pool.safely_insert(cid, conn)?;
-        CONNS.insert(conn_rand_id, self.connection(cid)?.upgrade()?);
+        CONNS.insert(conn_rand_id.clone(), self.connection(cid)?.upgrade()?);
         CBS.insert(
-            conn_rand_id,
+            conn_rand_id.clone(),
             Arc::new(InnerTransportCallback::new(
                 cid,
                 callback,

@@ -247,9 +247,7 @@ impl ConnectionHandshake for Swarm {
         if self.get_and_check_connection(peer).await.is_some() {
             return Err(Error::AlreadyConnected);
         };
-
         let offer = serde_json::from_str(&offer_msg.sdp).map_err(Error::Deserialize)?;
-
         let conn = self.new_connection(peer).await?;
         let answer = conn
             .webrtc_answer_offer(offer)
