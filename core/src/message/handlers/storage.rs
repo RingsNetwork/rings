@@ -104,6 +104,34 @@ pub(super) async fn handle_storage_store_act(swarm: &Swarm, act: PeerRingAction)
 /// Handle the storage store operations of the peer ring.
 #[cfg_attr(feature = "wasm", async_recursion(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_recursion)]
+pub(super) async fn handle_storage_search_act(
+    ctx: &MessagePayload,
+    act: PeerRingAction,
+) -> Result<Vec<MessageHandlerEvent>> {
+    match act {
+        PeerRingAction::None => Ok(vec![]),
+        PeerRingAction::SomeVNode(v) => Ok(vec![MessageHandlerEvent::SendReportMessage(
+            ctx.clone(),
+            Message::FoundVNode(FoundVNode { data: vec![v] }),
+        )]),
+        PeerRingAction::RemoteAction(next, _) => Ok(vec![MessageHandlerEvent::ResetDestination(
+            ctx.clone(),
+            next,
+        )]),
+        PeerRingAction::MultiActions(acts) => {
+            handle_multi_actions!(
+                acts,
+                |act| async move { handle_storage_search_act(ctx, act.clone()).await },
+                "Failed on handle multi actions: {:#?}"
+            )
+        }
+        act => Err(Error::PeerRingUnexpectedAction(act)),
+    }
+}
+
+/// Handle the storage store operations of the peer ring.
+#[cfg_attr(feature = "wasm", async_recursion(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_recursion)]
 pub(super) async fn handle_storage_operate_act(
     ctx: &MessagePayload,
     act: &PeerRingAction,
@@ -183,20 +211,7 @@ impl HandleMsg<SearchVNode> for MessageHandler {
     ) -> Result<Vec<MessageHandlerEvent>> {
         // For relay message, set redundant to 1
         match <PeerRing as ChordStorage<_, 1>>::vnode_lookup(&self.dht, msg.vid).await {
-            Ok(action) => match action {
-                PeerRingAction::None => Ok(vec![]),
-                PeerRingAction::SomeVNode(v) => Ok(vec![MessageHandlerEvent::SendReportMessage(
-                    ctx.clone(),
-                    Message::FoundVNode(FoundVNode { data: vec![v] }),
-                )]),
-                PeerRingAction::RemoteAction(next, _) => {
-                    Ok(vec![MessageHandlerEvent::ResetDestination(
-                        ctx.clone(),
-                        next,
-                    )])
-                }
-                act => Err(Error::PeerRingUnexpectedAction(act)),
-            },
+            Ok(action) => handle_storage_search_act(ctx, action).await,
             Err(e) => Err(e),
         }
     }

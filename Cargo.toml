@@ -5,10 +5,10 @@ resolver = "2"
 
 [workspace.dependencies]
 js-sys = { version = "0.3.64" }
-rings-core = { version = "0.3.2", path = "core", default-features = false }
-rings-derive = { version = "0.3.2", path = "derive", default-features = false }
-rings-rpc = { version = "0.3.2", path = "rpc", default-features = false }
-rings-transport = { version = "0.3.2", path = "transport" }
+rings-core = { version = "0.3.3", path = "core", default-features = false }
+rings-derive = { version = "0.3.3", path = "derive", default-features = false }
+rings-rpc = { version = "0.3.3", path = "rpc", default-features = false }
+rings-transport = { version = "0.3.3", path = "transport" }
 serde-wasm-bindgen = { version = "0.5.0" }
 wasm-bindgen = { version = "0.2.87" }
 wasm-bindgen-futures = { version = "0.4.37" }
