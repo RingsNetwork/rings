@@ -57,17 +57,18 @@ impl WebrtcConnection {
         }
     }
 
-    async fn webrtc_gather(&self) -> Result<RTCSessionDescription> {
+    async fn webrtc_gather(&self) -> Result<String> {
         self.webrtc_conn
             .gathering_complete_promise()
             .await
             .recv()
             .await;
 
-        self.webrtc_conn
+        Ok(self.webrtc_conn
             .local_description()
             .await
-            .ok_or(Error::WebrtcLocalSdpGenerationError)
+            .ok_or(Error::WebrtcLocalSdpGenerationError)?
+	    .sdp)
     }
 }
 
@@ -86,7 +87,7 @@ impl WebrtcTransport {
 
 #[async_trait]
 impl ConnectionInterface for WebrtcConnection {
-    type Sdp = RTCSessionDescription;
+    type Sdp = String;
     type Error = Error;
 
     async fn send_message(&self, msg: TransportMessage) -> Result<()> {
@@ -121,7 +122,7 @@ impl ConnectionInterface for WebrtcConnection {
 
     async fn webrtc_answer_offer(&self, offer: Self::Sdp) -> Result<Self::Sdp> {
         tracing::debug!("webrtc_answer_offer, offer: {offer:?}");
-
+	let offer = RTCSessionDescription::offer(offer)?;
         self.webrtc_conn.set_remote_description(offer).await?;
 
         let answer = self.webrtc_conn.create_answer(None).await?;
@@ -134,7 +135,7 @@ impl ConnectionInterface for WebrtcConnection {
 
     async fn webrtc_accept_answer(&self, answer: Self::Sdp) -> Result<()> {
         tracing::debug!("webrtc_accept_answer, answer: {answer:?}");
-
+	let answer = RTCSessionDescription::answer(answer)?;
         self.webrtc_conn
             .set_remote_description(answer)
             .await
