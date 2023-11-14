@@ -34,8 +34,10 @@ pub mod js_value {
 
     /// From serde to JsValue
     pub fn serialize(obj: &impl Serialize) -> Result<JsValue> {
-	let serializer = serde_wasm_bindgen::Serializer::json_compatible();
-	serializer.serialize_some(&obj).map_err(Error::SerdeWasmBindgenError)
+        let serializer = serde_wasm_bindgen::Serializer::json_compatible();
+        serializer
+            .serialize_some(&obj)
+            .map_err(Error::SerdeWasmBindgenError)
     }
 
     /// From JsValue to serde
