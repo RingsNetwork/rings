@@ -1,6 +1,5 @@
 //! Utils for ring-core
 use chrono::Utc;
-
 /// Get local utc timestamp (millisecond)
 pub fn get_epoch_ms() -> u128 {
     Utc::now().timestamp_millis() as u128
@@ -12,6 +11,7 @@ pub mod js_value {
     use js_sys::Reflect;
     use serde::de::DeserializeOwned;
     use serde::Serialize;
+    use serde::Serializer;
     use wasm_bindgen::JsValue;
 
     use crate::error::Error;
@@ -34,7 +34,10 @@ pub mod js_value {
 
     /// From serde to JsValue
     pub fn serialize(obj: &impl Serialize) -> Result<JsValue> {
-        serde_wasm_bindgen::to_value(&obj).map_err(Error::SerdeWasmBindgenError)
+        let serializer = serde_wasm_bindgen::Serializer::json_compatible();
+        serializer
+            .serialize_some(&obj)
+            .map_err(Error::SerdeWasmBindgenError)
     }
 
     /// From JsValue to serde
