@@ -1,6 +1,6 @@
 [package]
 name = "rings-transport"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2021"
 authors = ["RND <dev@ringsnetwork.io>"]
 description = "Transport layer implementation for Rings Core"
