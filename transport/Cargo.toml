@@ -1,13 +1,13 @@
 [package]
 name = "rings-transport"
-version = "0.3.4"
-edition = "2021"
-authors = ["RND <dev@ringsnetwork.io>"]
 description = "Transport layer implementation for Rings Core"
-repository = "https://github.com/RingsNetwork/rings-node"
 readme = "README.md"
-license = "GPL-3.0"
 categories = ["network-programming", "cryptography", "wasm", "webrtc"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
 
 [features]
 # Include nothing by default
