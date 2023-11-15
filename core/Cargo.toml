@@ -1,14 +1,14 @@
 [package]
 name = "rings-core"
-version = "0.3.4"
-edition = "2021"
-authors = ["RND <dev@ringsnetwork.io>"]
 description = "Chord DHT implementation with ICE"
-repository = "https://github.com/RingsNetwork/rings-node"
-license = "GPL-3.0"
 readme = "README.md"
 keywords = ["Chord", "DHT", "Web3", "P2P", "WASM"]
 categories = ["network-programming", "cryptography", "wasm"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
 
 [features]
 # Feature "experimental" is used to mark an implementation as experimental, which means that:
