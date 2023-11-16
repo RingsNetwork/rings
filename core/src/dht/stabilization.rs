@@ -234,7 +234,7 @@ mod stabilizer {
     impl TStabilize for Stabilization {
         async fn wait(self: Arc<Self>) {
             let caller = Arc::clone(&self);
-	    let timeout = caller.timeout;
+            let timeout = caller.timeout;
             let func = move || {
                 let caller = caller.clone();
                 spawn_local(Box::pin(async move {
