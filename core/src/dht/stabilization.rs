@@ -244,7 +244,7 @@ mod stabilizer {
                         .unwrap_or_else(|e| tracing::error!("failed to stabilize {:?}", e));
                 }))
             };
-            poll!(func, (timeout / 1000).try_into().unwrap());
+            poll!(func, (timeout * 1000).try_into().unwrap());
         }
     }
 }
