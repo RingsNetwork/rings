@@ -179,7 +179,7 @@ impl Stabilization {
         #[cfg(feature = "experimental")]
         {
             tracing::debug!("STABILIZATION correct_stabilize start");
-            if let Err(e) = self.correct_stabilize() {
+            if let Err(e) = self.correct_stabilize().await {
                 tracing::error!("[stabilize] Failed on call correct stabilize {:?}", e);
             }
             tracing::debug!("STABILIZATION correct_stabilize end");

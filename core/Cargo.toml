@@ -14,7 +14,7 @@ repository.workspace = true
 # Feature "experimental" is used to mark an implementation as experimental, which means that:
 # It may not have been thoroughly tested.
 # The corresponding API may be deprecated or adjusted in the future.
-experimental = []
+experimental = ["std"]
 default = ["std"]
 std = [
     "webrtc",
