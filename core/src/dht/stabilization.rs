@@ -234,6 +234,7 @@ mod stabilizer {
     impl TStabilize for Stabilization {
         async fn wait(self: Arc<Self>) {
             let caller = Arc::clone(&self);
+	    let timeout = caller.timeout;
             let func = move || {
                 let caller = caller.clone();
                 spawn_local(Box::pin(async move {
@@ -243,7 +244,7 @@ mod stabilizer {
                         .unwrap_or_else(|e| tracing::error!("failed to stabilize {:?}", e));
                 }))
             };
-            poll!(func, 25000);
+            poll!(func, (timeout / 1000).try_into().unwrap());
         }
     }
 }
