@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 
-pub mod backend;
+#[cfg(feature = "browser")]
+pub mod browser;
 pub mod client;
 pub mod consts;
 pub mod error;
@@ -14,4 +15,5 @@ pub mod processor;
 pub mod seed;
 #[cfg(test)]
 mod tests;
+pub mod types;
 pub mod util;

@@ -5,20 +5,11 @@ use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 
-#[cfg(feature = "browser")]
-use futures::channel::mpsc::Receiver;
 use futures::future::join_all;
-#[cfg(feature = "browser")]
-use futures::lock::Mutex;
 use rings_core::swarm::impls::ConnectionHandshake;
 use rings_transport::core::transport::ConnectionInterface;
 use serde_json::Value;
-#[cfg(feature = "node")]
-use tokio::sync::broadcast::Receiver;
-#[cfg(feature = "node")]
-use tokio::sync::Mutex;
 
-use crate::backend::types::BackendMessage;
 use crate::error::Error as ServerError;
 use crate::prelude::jsonrpc_core::Error;
 use crate::prelude::jsonrpc_core::ErrorCode;
@@ -41,8 +32,6 @@ use crate::seed::Seed;
 #[derive(Clone)]
 pub struct RpcMeta {
     processor: Arc<Processor>,
-    #[allow(dead_code)]
-    pub(crate) receiver: Option<Arc<Mutex<Receiver<BackendMessage>>>>,
     /// if is_auth set to true, rpc server of *native node* will check signature from
     /// HEAD['X-SIGNATURE']
     is_auth: bool,
@@ -57,29 +46,9 @@ impl RpcMeta {
     }
 }
 
-impl From<(Arc<Processor>, Arc<Mutex<Receiver<BackendMessage>>>, bool)> for RpcMeta {
-    fn from(
-        (processor, receiver, is_auth): (
-            Arc<Processor>,
-            Arc<Mutex<Receiver<BackendMessage>>>,
-            bool,
-        ),
-    ) -> Self {
-        Self {
-            processor,
-            receiver: Some(receiver),
-            is_auth,
-        }
-    }
-}
-
 impl From<(Arc<Processor>, bool)> for RpcMeta {
     fn from((processor, is_auth): (Arc<Processor>, bool)) -> Self {
-        Self {
-            processor,
-            receiver: None,
-            is_auth,
-        }
+        Self { processor, is_auth }
     }
 }
 
@@ -87,7 +56,6 @@ impl From<Arc<Processor>> for RpcMeta {
     fn from(processor: Arc<Processor>) -> Self {
         Self {
             processor,
-            receiver: None,
             is_auth: true,
         }
     }

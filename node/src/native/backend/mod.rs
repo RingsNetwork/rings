@@ -1,27 +1,22 @@
 pub mod extension;
-#[cfg(feature = "node")]
 pub mod server;
-pub mod types;
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rings_core::dht::Did;
 use rings_core::message::CustomMessage;
 use rings_core::message::Message;
 use rings_core::message::MessagePayload;
 use rings_core::swarm::callback::SwarmCallback;
 
-use crate::backend::extension::Extension;
-use crate::backend::extension::ExtensionConfig;
-use crate::backend::server::Server;
-use crate::backend::server::ServiceConfig;
-use crate::backend::types::BackendMessage;
-use crate::backend::types::IntoBackendMessage;
-use crate::backend::types::MessageEndpoint;
-use crate::error::Error;
 use crate::error::Result;
+use crate::native::backend::extension::Extension;
+use crate::native::backend::extension::ExtensionConfig;
+use crate::native::backend::server::Server;
+use crate::native::backend::server::ServiceConfig;
 use crate::processor::Processor;
+use crate::types::backend::BackendMessage;
+use crate::types::backend::MessageEndpoint;
 
 pub struct BackendConfig {
     pub services: Vec<ServiceConfig>,
@@ -49,7 +44,11 @@ impl Backend {
             .collect()
     }
 
-    async fn handle_message(&self, payload: &MessagePayload, msg: &BackendMessage) -> Result<()> {
+    async fn handle_backend_message(
+        &self,
+        payload: &MessagePayload,
+        msg: &BackendMessage,
+    ) -> Result<()> {
         match msg {
             BackendMessage::Extension(data) => self.extension.handle_message(payload, data).await,
             BackendMessage::ServerMessage(data) => self.server.handle_message(payload, data).await,
@@ -70,23 +69,10 @@ impl SwarmCallback for Backend {
         };
 
         let backend_msg = bincode::deserialize(&msg)?;
-        tracing::debug!("received custom_message: {:?}", msg);
+        tracing::debug!("backend_message received: {backend_msg:?}");
 
-        self.handle_message(payload, &backend_msg).await?;
+        self.handle_backend_message(payload, &backend_msg).await?;
 
         Ok(())
-    }
-}
-
-impl Processor {
-    async fn send_backend_message(
-        &self,
-        destination: Did,
-        msg: impl IntoBackendMessage,
-    ) -> Result<uuid::Uuid> {
-        let backend_msg = msg.into_backend_message();
-        let msg_bytes = bincode::serialize(&backend_msg).map_err(|_| Error::EncodeError)?;
-        self.send_message(&destination.to_string(), &msg_bytes)
-            .await
     }
 }

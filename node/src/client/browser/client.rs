@@ -6,23 +6,16 @@ use std::future::Future;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::Mutex;
 
-use anyhow::anyhow;
-use arrayref::array_refs;
-use bytes::Bytes;
 use js_sys;
 use js_sys::Uint8Array;
-use rings_core::async_trait;
 use rings_core::dht::Did;
 use rings_core::ecc::PublicKey;
-use rings_core::message::CustomMessage;
-use rings_core::message::MessagePayload;
 use rings_core::prelude::vnode;
 use rings_core::prelude::vnode::VirtualNode;
-use rings_core::swarm::callback::SwarmCallback;
 use rings_core::utils::js_utils;
 use rings_core::utils::js_value;
+use rings_derive::wasm_export;
 use rings_transport::core::transport::ConnectionInterface;
 use rings_transport::core::transport::WebrtcConnectionState;
 use serde::Deserialize;
@@ -33,20 +26,13 @@ use wasm_bindgen_futures;
 use wasm_bindgen_futures::future_to_promise;
 use wasm_bindgen_futures::JsFuture;
 
-use crate::backend::types::BackendMessage;
-use crate::backend::types::HttpResponse;
-use crate::backend::types::MessageType;
+use crate::browser::backend::Backend;
 use crate::client::AsyncSigner;
 use crate::client::Client;
 use crate::client::Signer;
-use crate::consts::BACKEND_MTU;
-use crate::prelude::chunk::Chunk;
-use crate::prelude::chunk::ChunkList;
-use crate::prelude::chunk::ChunkManager;
-use crate::prelude::http;
-use crate::prelude::message;
-use crate::prelude::wasm_export;
 use crate::processor::ProcessorConfig;
+use crate::types::backend::HttpRequest;
+use crate::types::backend::ServerMessage;
 
 /// AddressType enum contains `DEFAULT` and `ED25519`.
 #[wasm_export]
@@ -55,6 +41,29 @@ pub enum AddressType {
     DEFAULT,
     /// Ed25519 style address type, hex string of pubkey
     Ed25519,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Peer {
+    pub did: String,
+    pub state: String,
+}
+
+impl Peer {
+    fn new(did: Did, state: WebrtcConnectionState) -> Self {
+        Self {
+            did: did.to_string(),
+            state: format!("{:?}", state),
+        }
+    }
+}
+
+impl TryFrom<&Peer> for JsValue {
+    type Error = JsError;
+
+    fn try_from(value: &Peer) -> Result<Self, Self::Error> {
+        js_value::serialize(value).map_err(JsError::from)
+    }
 }
 
 #[wasm_export]
@@ -74,7 +83,7 @@ impl Client {
         account: String,
         account_type: String,
         signer: js_sys::Function,
-        callback: Option<MessageCallbackInstance>,
+        backend: Option<Backend>,
     ) -> js_sys::Promise {
         fn wrapped_signer(signer: js_sys::Function) -> AsyncSigner {
             Box::new(
@@ -107,7 +116,7 @@ impl Client {
                 Signer::Async(Box::new(signer)),
             )
             .await?;
-            if let Some(cb) = callback {
+            if let Some(cb) = backend {
                 client
                     .set_swarm_callback(Arc::new(cb))
                     .expect("Failed on set swarm callback");
@@ -119,18 +128,18 @@ impl Client {
     /// Create new client instance with serialized config (yaml/json)
     pub fn new_client_with_serialized_config(
         config: String,
-        callback: Option<MessageCallbackInstance>,
+        backend: Option<Backend>,
     ) -> js_sys::Promise {
         let cfg: ProcessorConfig = serde_yaml::from_str(&config).unwrap();
-        Self::new_client_with_config(cfg, callback)
+        Self::new_client_with_config(cfg, backend)
     }
 
     /// Create a new client instance.
     pub fn new_client_with_config(
         config: ProcessorConfig,
-        callback: Option<MessageCallbackInstance>,
+        backend: Option<Backend>,
     ) -> js_sys::Promise {
-        Self::new_client_with_storage(config, callback, "rings-node".to_string())
+        Self::new_client_with_storage(config, backend, "rings-node".to_string())
     }
 
     /// get self web3 address
@@ -142,14 +151,14 @@ impl Client {
     ///  create new unsigned Client
     pub fn new_client_with_storage(
         config: ProcessorConfig,
-        callback: Option<MessageCallbackInstance>,
+        backend: Option<Backend>,
         storage_name: String,
     ) -> js_sys::Promise {
         future_to_promise(async move {
             let client = Self::new_client_with_storage_internal(config, storage_name)
                 .await
                 .map_err(JsError::from)?;
-            if let Some(cb) = callback {
+            if let Some(cb) = backend {
                 client
                     .set_swarm_callback(Arc::new(cb))
                     .expect("Failed on set swarm callback");
@@ -177,7 +186,7 @@ impl Client {
         })
     }
 
-    /// listen message callback.
+    /// listen message.
     pub fn listen(&self) -> js_sys::Promise {
         let p = self.processor.clone();
 
@@ -192,11 +201,11 @@ impl Client {
         log::debug!("remote_url: {}", remote_url);
         let p = self.processor.clone();
         future_to_promise(async move {
-            let peer = p
+            let did = p
                 .connect_peer_via_http(remote_url.as_str())
                 .await
                 .map_err(JsError::from)?;
-            Ok(JsValue::from_str(peer.did.as_str()))
+            Ok(JsValue::from_str(&did.to_string()))
         })
     }
 
@@ -209,13 +218,10 @@ impl Client {
         let p = self.processor.clone();
         future_to_promise(async move {
             let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
-            let peer = p
-                .connect_with_did(did, false)
+            p.connect_with_did(did, false)
                 .await
                 .map_err(JsError::from)?;
-            let state = peer.connection.webrtc_connection_state();
-
-            Ok(JsValue::try_from(&Peer::from((state, peer.did)))?)
+            Ok(JsValue::null())
         })
     }
 
@@ -237,9 +243,8 @@ impl Client {
         let p = self.processor.clone();
         future_to_promise(async move {
             let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
-            let peer = p.connect_with_did(did, true).await.map_err(JsError::from)?;
-            let state = peer.connection.webrtc_connection_state();
-            Ok(JsValue::try_from(&Peer::from((state, peer.did)))?)
+            p.connect_with_did(did, true).await.map_err(JsError::from)?;
+            Ok(JsValue::null())
         })
     }
 
@@ -247,14 +252,15 @@ impl Client {
     pub fn list_peers(&self) -> js_sys::Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
-            let peers = p.list_peers().await.map_err(JsError::from)?;
-            let mut js_array = js_sys::Array::new();
-            js_array.extend(peers.iter().flat_map(|x| {
-                JsValue::try_from(&Peer::from((
-                    x.connection.webrtc_connection_state(),
-                    x.did.clone(),
-                )))
-            }));
+            let peers = p
+                .swarm
+                .get_connections()
+                .into_iter()
+                .flat_map(|(did, conn)| {
+                    JsValue::try_from(&Peer::new(did, conn.webrtc_connection_state()))
+                });
+
+            let js_array = js_sys::Array::from_iter(peers);
             Ok(js_array.into())
         })
     }
@@ -305,27 +311,13 @@ impl Client {
         let p = self.processor.clone();
         future_to_promise(async move {
             let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
-            let peer = p.get_peer(did).await.map_err(JsError::from)?;
-            let state = peer.connection.webrtc_connection_state();
-            Ok(JsValue::try_from(&Peer::from((state, peer.did)))?)
-        })
-    }
-
-    /// get connection state by address
-    pub fn connection_state(
-        &self,
-        address: String,
-        addr_type: Option<AddressType>,
-    ) -> js_sys::Promise {
-        let p = self.processor.clone();
-        future_to_promise(async move {
-            let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
-            let conn = p
-                .swarm
-                .get_connection(did)
-                .ok_or_else(|| JsError::new("connection not found"))?;
-            let state = format!("{:?}", conn.webrtc_connection_state());
-            Ok(js_value::serialize(&state).map_err(JsError::from)?)
+            match p.swarm.get_connection(did) {
+                None => Ok(JsValue::null()),
+                Some(conn) => {
+                    let peer = Peer::new(did, conn.webrtc_connection_state());
+                    Ok(JsValue::try_from(&peer)?)
+                }
+            }
         })
     }
 
@@ -336,17 +328,7 @@ impl Client {
         address: String,
         addr_type: Option<AddressType>,
     ) -> js_sys::Promise {
-        let p = self.processor.clone();
-        future_to_promise(async move {
-            let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
-            let peer = p.get_peer(did).await.map_err(JsError::from)?;
-            log::debug!("wait_for_data_channel_open start");
-            if let Err(e) = peer.connection.webrtc_wait_for_data_channel_open().await {
-                log::warn!("wait_for_data_channel_open failed: {}", e);
-            }
-            log::debug!("wait_for_data_channel_open done");
-            Ok(JsValue::null())
-        })
+        self.wait_for_data_channel_open(address, addr_type)
     }
 
     /// wait for data channel open
@@ -359,11 +341,16 @@ impl Client {
         let p = self.processor.clone();
         future_to_promise(async move {
             let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
-            let peer = p.get_peer(did).await.map_err(JsError::from)?;
+            let conn = p
+                .swarm
+                .get_connection(did)
+                .ok_or_else(|| JsError::new("peer not found"))?;
+
             log::debug!("wait_for_data_channel_open start");
-            if let Err(e) = peer.connection.webrtc_wait_for_data_channel_open().await {
+            if let Err(e) = conn.webrtc_wait_for_data_channel_open().await {
                 log::warn!("wait_for_data_channel_open failed: {}", e);
             }
+
             log::debug!("wait_for_data_channel_open done");
             Ok(JsValue::null())
         })
@@ -414,27 +401,29 @@ impl Client {
 
     /// send http request message to remote
     /// - destination: did
-    /// - name: service name
+    /// - service: service name
     /// - method: http method
-    /// - url: http url like `/ipfs/abc1234` `/ipns/abc`
-    /// - timeout: timeout in milliseconds
+    /// - path: http path like `/ipfs/abc1234` `/ipns/abc`
     /// - headers: headers of request
     /// - body: body of request
     #[allow(clippy::too_many_arguments)]
     pub fn send_http_request(
         &self,
         destination: String,
-        name: String,
+        service: String,
         method: String,
-        url: String,
-        timeout: u64,
+        path: String,
         headers: JsValue,
         body: Option<js_sys::Uint8Array>,
     ) -> js_sys::Promise {
         let p = self.processor.clone();
 
         future_to_promise(async move {
-            let method = http::Method::from_str(method.as_str()).map_err(JsError::from)?;
+            let destination = get_did(destination.as_str(), AddressType::DEFAULT)?;
+
+            let method = http::Method::from_str(method.as_str())
+                .map_err(JsError::from)?
+                .to_string();
 
             let headers: Vec<(String, String)> = if headers.is_null() {
                 Vec::new()
@@ -461,59 +450,21 @@ impl Client {
                 Vec::new()
             };
 
-            let b = body.map(|item| item.to_vec());
+            let body = body.map(|item| item.to_vec());
+
+            let req = HttpRequest {
+                service,
+                method,
+                path,
+                headers,
+                body,
+            };
 
             let tx_id = p
-                .send_http_request_message(
-                    destination.as_str(),
-                    name.as_str(),
-                    method,
-                    url.as_str(),
-                    timeout,
-                    &headers
-                        .iter()
-                        .map(|(k, v)| (k.as_str(), v.as_str()))
-                        .collect::<Vec<(&str, &str)>>(),
-                    b,
-                )
+                .send_backend_message(destination, ServerMessage::HttpRequest(req))
                 .await
                 .map_err(JsError::from)?;
-            Ok(JsValue::from_str(tx_id.to_string().as_str()))
-        })
-    }
 
-    /// send simple text message to remote
-    /// - destination: A did of destination
-    /// - text: text message
-    pub fn send_simple_text_message(&self, destination: String, text: String) -> js_sys::Promise {
-        let p = self.processor.clone();
-
-        future_to_promise(async move {
-            let tx_id = p
-                .send_simple_text_message(destination.as_str(), text.as_str())
-                .await
-                .map_err(JsError::from)?;
-            Ok(JsValue::from_str(tx_id.to_string().as_str()))
-        })
-    }
-
-    /// send custom message to remote
-    /// - destination: A did of destination
-    /// - message_type: u16
-    /// - data: uint8Array
-    pub fn send_custom_message(
-        &self,
-        destination: String,
-        message_type: u16,
-        data: js_sys::Uint8Array,
-    ) -> js_sys::Promise {
-        let p = self.processor.clone();
-
-        future_to_promise(async move {
-            let tx_id = p
-                .send_custom_message(destination.as_str(), message_type, data.to_vec(), [0u8; 30])
-                .await
-                .map_err(JsError::from)?;
             Ok(JsValue::from_str(tx_id.to_string().as_str()))
         })
     }
@@ -546,265 +497,6 @@ impl Client {
             }
         })
     }
-}
-
-/// MessageCallback instance for Browser
-#[wasm_export]
-pub struct MessageCallbackInstance {
-    custom_message: Arc<js_sys::Function>,
-    http_response_message: Arc<js_sys::Function>,
-    builtin_message: Arc<js_sys::Function>,
-    chunk_list: Arc<Mutex<ChunkList<BACKEND_MTU>>>,
-}
-
-#[wasm_export]
-impl MessageCallbackInstance {
-    /// Create a new instance of message callback, this function accept three args:
-    ///
-    /// * custom_message: function(from: string, message: string) -> ();
-    /// * http_response_message: function(from: string, message: string) -> ();
-    /// * builtin_message: function(from: string, message: string) -> ();
-    #[wasm_bindgen(constructor)]
-    pub fn new(
-        custom_message: &js_sys::Function,
-        http_response_message: &js_sys::Function,
-        builtin_message: &js_sys::Function,
-    ) -> Result<MessageCallbackInstance, JsError> {
-        Ok(MessageCallbackInstance {
-            custom_message: Arc::new(custom_message.clone()),
-            http_response_message: Arc::new(http_response_message.clone()),
-            builtin_message: Arc::new(builtin_message.clone()),
-            chunk_list: Default::default(),
-        })
-    }
-}
-
-impl MessageCallbackInstance {
-    pub(crate) async fn handle_message_data(
-        &self,
-        relay: &MessagePayload,
-        data: &Bytes,
-    ) -> anyhow::Result<()> {
-        let m = BackendMessage::try_from(data.to_vec()).map_err(|e| anyhow::anyhow!("{}", e))?;
-        match m.message_type.into() {
-            MessageType::SimpleText => {
-                self.handle_simple_text_message(relay, m.data.as_slice())
-                    .await?;
-            }
-            MessageType::HttpResponse => {
-                self.handle_http_response(relay, m.data.as_slice()).await?;
-            }
-            _ => {
-                return Ok(());
-            }
-        };
-        Ok(())
-    }
-
-    pub(crate) async fn handle_simple_text_message(
-        &self,
-        relay: &MessagePayload,
-        data: &[u8],
-    ) -> anyhow::Result<()> {
-        log::debug!("custom_message received: {:?}", data);
-        let msg_content = js_sys::Uint8Array::from(data);
-
-        let this = JsValue::null();
-        if let Ok(r) =
-            self.custom_message
-                .call2(&this, &js_value::serialize(&relay).unwrap(), &msg_content)
-        {
-            if let Ok(p) = js_sys::Promise::try_from(r) {
-                if let Err(e) = wasm_bindgen_futures::JsFuture::from(p).await {
-                    log::warn!("invoke on_custom_message error: {:?}", e);
-                    return Err(anyhow::anyhow!("{:?}", e));
-                }
-            }
-        }
-        Ok(())
-    }
-
-    pub(crate) async fn handle_http_response(
-        &self,
-        payload: &MessagePayload,
-        data: &[u8],
-    ) -> anyhow::Result<()> {
-        let msg_content = data;
-        log::info!(
-            "message of {:?} received, before gunzip: {:?}",
-            payload.transaction.tx_id,
-            msg_content.len(),
-        );
-        let this = JsValue::null();
-        let msg_content = message::decode_gzip_data(&Bytes::from(data.to_vec())).unwrap();
-        log::info!(
-            "message of {:?} received, after gunzip: {:?}",
-            payload.transaction.tx_id,
-            msg_content.len(),
-        );
-        let http_response: HttpResponse = bincode::deserialize(&msg_content)?;
-        let msg_content = js_value::serialize(&http_response)
-            .map_err(|_| anyhow!("Failed on serialize message"))?;
-        if let Ok(r) = self.http_response_message.call2(
-            &this,
-            &js_value::serialize(&payload).map_err(|_| anyhow!("Failed on serialize message"))?,
-            &msg_content,
-        ) {
-            if let Ok(p) = js_sys::Promise::try_from(r) {
-                if let Err(e) = wasm_bindgen_futures::JsFuture::from(p).await {
-                    log::warn!("invoke on_custom_message error: {:?}", e);
-                }
-            }
-        };
-        Ok(())
-    }
-
-    fn handle_chunk_data(&self, data: &[u8]) -> anyhow::Result<Option<Bytes>> {
-        let c_lock = self.chunk_list.try_lock();
-        if c_lock.is_err() {
-            return Err(anyhow!("lock chunklist failed"));
-        }
-        let mut chunk_list = c_lock.unwrap();
-
-        let chunk_item =
-            Chunk::from_bincode(data).map_err(|_| anyhow!("BincodeDeserialize failed"))?;
-
-        log::debug!(
-            "before handle chunk, chunk list len: {}",
-            chunk_list.as_vec().len()
-        );
-        log::debug!(
-            "chunk id: {}, total size: {}",
-            chunk_item.meta.id,
-            chunk_item.chunk[1]
-        );
-        let data = chunk_list.handle(chunk_item);
-        log::debug!(
-            "after handle chunk, chunk list len: {}",
-            chunk_list.as_vec().len()
-        );
-
-        Ok(data)
-    }
-
-    async fn handle_custom_message(&self, payload: &MessagePayload, msg: &CustomMessage) {
-        if msg.0.len() < 2 {
-            return;
-        }
-
-        let (left, right) = array_refs![&msg.0, 4; ..;];
-        let (&[tag], _) = array_refs![left, 1, 3];
-
-        let data = if tag == 1 {
-            let data = self.handle_chunk_data(right);
-            if let Err(e) = data {
-                log::error!("handle chunk data failed: {}", e);
-                return;
-            }
-            let data = data.unwrap();
-            log::debug!("chunk message of {:?} received", payload.transaction.tx_id);
-            if let Some(data) = data {
-                data
-            } else {
-                log::info!(
-                    "chunk message of {:?} not complete",
-                    payload.transaction.tx_id
-                );
-                return;
-            }
-        } else if tag == 0 {
-            Bytes::from(right.to_vec())
-        } else {
-            log::error!("invalid message tag: {}", tag);
-            return;
-        };
-        if let Err(e) = self.handle_message_data(payload, &data).await {
-            log::error!("handle http_server_msg failed, {}", e);
-        }
-    }
-
-    async fn handle_builtin_message(&self, payload: &MessagePayload) {
-        let this = JsValue::null();
-        if let Ok(r) = self
-            .builtin_message
-            .call1(&this, &js_value::serialize(&payload).unwrap())
-        {
-            if let Ok(p) = js_sys::Promise::try_from(r) {
-                if let Err(e) = wasm_bindgen_futures::JsFuture::from(p).await {
-                    log::warn!("invoke on_builtin_message error: {:?}", e);
-                }
-            }
-        }
-    }
-}
-
-#[async_trait(?Send)]
-impl SwarmCallback for MessageCallbackInstance {
-    async fn on_inbound(&self, payload: &MessagePayload) -> Result<(), Box<dyn std::error::Error>> {
-        let msg: message::Message = payload.transaction.data().map_err(Box::new)?;
-
-        match msg {
-            message::Message::CustomMessage(ref msg) => {
-                self.handle_custom_message(payload, msg).await
-            }
-            _ => self.handle_builtin_message(payload).await,
-        }
-
-        Ok(())
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub(crate) struct Peer {
-    pub address: String,
-    pub state: String,
-}
-
-impl From<(WebrtcConnectionState, String)> for Peer {
-    fn from((st, address): (WebrtcConnectionState, String)) -> Self {
-        Self {
-            address,
-            state: format!("{:?}", st),
-        }
-    }
-}
-
-impl TryFrom<&Peer> for JsValue {
-    type Error = JsError;
-
-    fn try_from(value: &Peer) -> Result<Self, Self::Error> {
-        js_value::serialize(value).map_err(JsError::from)
-    }
-}
-
-#[wasm_export]
-#[allow(dead_code)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-/// Internal Info struct
-pub struct InternalInfo {
-    build_version: String,
-}
-
-#[wasm_export]
-impl InternalInfo {
-    /// Get InternalInfo
-    fn build() -> Self {
-        Self {
-            build_version: crate::util::build_version(),
-        }
-    }
-
-    /// build_version getter
-    #[wasm_bindgen(getter)]
-    pub fn build_version(&self) -> String {
-        self.build_version.clone()
-    }
-}
-
-/// Build InternalInfo
-#[wasm_export]
-pub fn internal_info() -> InternalInfo {
-    InternalInfo::build()
 }
 
 fn get_did(address: &str, addr_type: AddressType) -> Result<Did, JsError> {

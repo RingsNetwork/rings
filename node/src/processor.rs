@@ -39,6 +39,7 @@ use crate::prelude::wasm_export;
 use crate::prelude::ChordStorageInterface;
 use crate::prelude::ChordStorageInterfaceCacheChecker;
 use crate::prelude::SessionSk;
+use crate::types::backend::IntoBackendMessage;
 
 /// ProcessorConfig is usually serialized as json or yaml.
 /// There is a `from_config` method in [ProcessorBuilder] used to initialize the Builder with a serialized ProcessorConfig.
@@ -395,6 +396,18 @@ impl Processor {
             .send_message(msg, destination)
             .await
             .map_err(Error::SendMessage)
+    }
+
+    /// Send custom message to a did.
+    pub async fn send_backend_message(
+        &self,
+        destination: Did,
+        msg: impl IntoBackendMessage,
+    ) -> Result<uuid::Uuid> {
+        let backend_msg = msg.into_backend_message();
+        let msg_bytes = bincode::serialize(&backend_msg).map_err(|_| Error::EncodeError)?;
+        self.send_message(&destination.to_string(), &msg_bytes)
+            .await
     }
 
     /// check local cache of dht

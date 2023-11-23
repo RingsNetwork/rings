@@ -26,13 +26,13 @@ use futures::Stream;
 use futures_timer::Delay;
 use serde_json::json;
 
-use crate::backend::types::BackendMessage;
-use crate::backend::types::HttpRequest;
-use crate::backend::types::ServerMessage;
 use crate::prelude::rings_core::inspect::SwarmInspect;
 use crate::prelude::rings_core::session::SessionSk;
 use crate::prelude::rings_rpc::client::Client as RpcClient;
 use crate::seed::Seed;
+use crate::types::backend::BackendMessage;
+use crate::types::backend::HttpRequest;
+use crate::types::backend::ServerMessage;
 use crate::util::loader::ResourceLoader;
 
 /// Alias about Result<ClientOutput<T>, E>.

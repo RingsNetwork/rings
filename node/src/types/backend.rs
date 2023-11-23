@@ -2,12 +2,13 @@
 
 //! Backend Message Types.
 
+use std::io::ErrorKind as IOErrorKind;
+
 use bytes::Bytes;
 use rings_core::message::MessagePayload;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::backend::server::error::TunnelDefeat;
 use crate::error::Result;
 
 /// TunnelId type, use uuid.
@@ -51,6 +52,29 @@ pub enum ServerMessage {
     HttpRequest(HttpRequest),
     /// Http Response
     HttpResponse(HttpResponse),
+}
+
+/// A list specifying general categories of Tunnel error like [std::io::ErrorKind].
+#[derive(Deserialize, Serialize, Debug, Clone, Copy)]
+#[repr(u8)]
+#[non_exhaustive]
+pub enum TunnelDefeat {
+    /// Failed to send data to peer by webrtc datachannel.
+    WebrtcDatachannelSendFailed = 1,
+    /// The connection timed out when dialing.
+    ConnectionTimeout = 2,
+    /// Got [std::io::ErrorKind::ConnectionRefused] error from local stream.
+    ConnectionRefused = 3,
+    /// Got [std::io::ErrorKind::ConnectionAborted] error from local stream.
+    ConnectionAborted = 4,
+    /// Got [std::io::ErrorKind::ConnectionReset] error from local stream.
+    ConnectionReset = 5,
+    /// Got [std::io::ErrorKind::NotConnected] error from local stream.
+    NotConnected = 6,
+    /// The connection is closed by peer.
+    ConnectionClosed = 7,
+    /// Unknown [std::io::ErrorKind] error.
+    Unknown = u8::MAX,
 }
 
 /// HttpRequest
@@ -102,5 +126,17 @@ impl IntoBackendMessage for BackendMessage {
 impl IntoBackendMessage for ServerMessage {
     fn into_backend_message(self) -> BackendMessage {
         BackendMessage::ServerMessage(self)
+    }
+}
+
+impl From<IOErrorKind> for TunnelDefeat {
+    fn from(kind: IOErrorKind) -> TunnelDefeat {
+        match kind {
+            IOErrorKind::ConnectionRefused => TunnelDefeat::ConnectionRefused,
+            IOErrorKind::ConnectionAborted => TunnelDefeat::ConnectionAborted,
+            IOErrorKind::ConnectionReset => TunnelDefeat::ConnectionReset,
+            IOErrorKind::NotConnected => TunnelDefeat::NotConnected,
+            _ => TunnelDefeat::Unknown,
+        }
     }
 }

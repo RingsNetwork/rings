@@ -12,11 +12,11 @@ use futures::pin_mut;
 use futures::select;
 use futures::StreamExt;
 use futures_timer::Delay;
-use rings_node::backend::Backend;
-use rings_node::backend::BackendConfig;
 use rings_node::logging::init_logging;
 use rings_node::logging::LogLevel;
 use rings_node::measure::PeriodicMeasure;
+use rings_node::native::backend::Backend;
+use rings_node::native::backend::BackendConfig;
 use rings_node::native::cli::Client;
 use rings_node::native::config;
 use rings_node::native::endpoint::run_http_api;
@@ -377,7 +377,6 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     );
     println!("Did: {}", processor.swarm.did());
 
-    let (_sender, receiver) = tokio::sync::broadcast::channel(1024);
     let backend = Arc::new(Backend::new(bc, processor.clone()).await?);
     let backend_service_names = backend.service_names();
 
@@ -387,7 +386,7 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     let _ = futures::join!(
         processor.listen(),
         service_loop_register(&processor, backend_service_names),
-        run_http_api(c.http_addr, processor_clone, receiver),
+        run_http_api(c.http_addr, processor_clone),
     );
 
     Ok(())

@@ -1,27 +1,17 @@
 use std::sync::Arc;
 
-use axum::extract::ws::Message;
 use axum::extract::ws::WebSocket;
-use futures::SinkExt;
 use futures::StreamExt;
 
 use super::WsState;
 
 /// Actual websocket statemachine (one will be spawned per connection)
-pub async fn handle_socket(ws_state: Arc<WsState>, socket: WebSocket) {
-    let (mut sender, mut receiver) = socket.split();
+pub async fn handle_socket(_ws_state: Arc<WsState>, socket: WebSocket) {
+    let (_, mut receiver) = socket.split();
 
     let mut send_task = tokio::spawn(async move {
         loop {
-            let mut receiver = ws_state.receiver.resubscribe();
-            if let Ok(data) = receiver.recv().await {
-                if let Ok(data) = serde_json::to_string(&data) {
-                    if let Err(e) = sender.send(Message::Text(data)).await {
-                        tracing::error!("send_custom_message_to_ws_failed: {}", e);
-                    }
-                }
-            }
-            drop(receiver);
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         }
     });
     let mut recv_task = tokio::spawn(async move {

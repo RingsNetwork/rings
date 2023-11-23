@@ -6,11 +6,11 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::backend::extension::ExtensionConfig;
-use crate::backend::server::ServiceConfig;
-use crate::backend::BackendConfig;
 use crate::error::Error;
 use crate::error::Result;
+use crate::native::backend::extension::ExtensionConfig;
+use crate::native::backend::server::ServiceConfig;
+use crate::native::backend::BackendConfig;
 use crate::prelude::rings_core::ecc::SecretKey;
 use crate::prelude::SessionSk;
 use crate::processor::ProcessorConfig;

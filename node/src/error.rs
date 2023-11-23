@@ -1,7 +1,7 @@
 //! A bunch of wrap errors.
-use crate::backend::server::error::TunnelDefeat;
 use crate::prelude::jsonrpc_core;
 use crate::prelude::rings_core;
+use crate::types::backend::TunnelDefeat;
 
 /// A wrap `Result` contains custom errors.
 pub type Result<T> = std::result::Result<T, Error>;

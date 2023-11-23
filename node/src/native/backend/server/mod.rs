@@ -1,4 +1,3 @@
-pub mod error;
 mod tcp_proxy;
 
 use std::collections::HashMap;
@@ -13,17 +12,17 @@ use rings_core::message::MessageVerificationExt;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::backend::server::tcp_proxy::tcp_connect_with_timeout;
-use crate::backend::server::tcp_proxy::Tunnel;
-use crate::backend::types::HttpRequest;
-use crate::backend::types::HttpResponse;
-use crate::backend::types::ServerMessage;
-use crate::backend::types::TunnelId;
-use crate::backend::MessageEndpoint;
 use crate::consts::TCP_SERVER_TIMEOUT;
 use crate::error::Error;
 use crate::error::Result;
+use crate::native::backend::server::tcp_proxy::tcp_connect_with_timeout;
+use crate::native::backend::server::tcp_proxy::Tunnel;
+use crate::native::backend::MessageEndpoint;
 use crate::processor::Processor;
+use crate::types::backend::HttpRequest;
+use crate::types::backend::HttpResponse;
+use crate::types::backend::ServerMessage;
+use crate::types::backend::TunnelId;
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct ServiceConfig {
