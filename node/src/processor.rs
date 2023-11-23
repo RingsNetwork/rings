@@ -38,7 +38,6 @@ use crate::prelude::vnode;
 use crate::prelude::wasm_export;
 use crate::prelude::ChordStorageInterface;
 use crate::prelude::ChordStorageInterfaceCacheChecker;
-use crate::prelude::CustomMessage;
 use crate::prelude::SessionSk;
 
 /// ProcessorConfig is usually serialized as json or yaml.
@@ -453,16 +452,6 @@ impl Processor {
     }
 }
 
-/// unpack custom message to text
-pub fn unpack_text_message(msg: &CustomMessage) -> Result<String> {
-    let (left, right) = msg.0.split_at(4);
-    if left[0] != 0 {
-        return Err(Error::InvalidData);
-    }
-    let text = String::from_utf8(right.to_vec()).unwrap();
-    Ok(text)
-}
-
 #[cfg(test)]
 #[cfg(feature = "node")]
 mod test {
@@ -498,7 +487,7 @@ mod test {
             let msg: Message = payload.transaction.data().map_err(Box::new)?;
 
             if let Message::CustomMessage(ref msg) = msg {
-                let text = unpack_text_message(msg).unwrap();
+                let text = String::from_utf8(msg.0.to_vec()).unwrap();
                 let mut msgs = self.msgs.try_lock().unwrap();
                 msgs.push(text);
             }
