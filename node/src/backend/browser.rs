@@ -7,9 +7,9 @@ use rings_core::utils::js_value;
 use rings_derive::wasm_export;
 use wasm_bindgen::JsValue;
 
+use crate::backend::types::BackendMessage;
 use crate::error::Error;
 use crate::error::Result;
-use crate::backend::types::BackendMessage;
 
 /// MessageCallback instance for Browser
 #[wasm_export]

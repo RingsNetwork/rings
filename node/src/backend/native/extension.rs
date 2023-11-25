@@ -44,9 +44,9 @@ use rings_core::message::MessagePayload;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::backend::types::MessageEndpoint;
 use crate::error::Result;
 use crate::processor::Processor;
-use crate::backend::types::MessageEndpoint;
 
 /// Path of a wasm extension
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]

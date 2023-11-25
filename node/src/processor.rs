@@ -13,6 +13,7 @@ use rings_transport::core::transport::ConnectionInterface;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::backend::types::IntoBackendMessage;
 use crate::consts::DATA_REDUNDANT;
 use crate::error::Error;
 use crate::error::Result;
@@ -39,7 +40,6 @@ use crate::prelude::wasm_export;
 use crate::prelude::ChordStorageInterface;
 use crate::prelude::ChordStorageInterfaceCacheChecker;
 use crate::prelude::SessionSk;
-use crate::backend::types::IntoBackendMessage;
 
 /// ProcessorConfig is usually serialized as json or yaml.
 /// There is a `from_config` method in [ProcessorBuilder] used to initialize the Builder with a serialized ProcessorConfig.
