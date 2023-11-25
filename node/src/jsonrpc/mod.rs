@@ -11,4 +11,3 @@ pub mod handler;
 #[cfg(feature = "node")]
 pub use self::handler::build_handler;
 pub use self::handler::HandlerType;
-pub mod types;

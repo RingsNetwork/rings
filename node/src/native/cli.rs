@@ -26,11 +26,12 @@ use futures::Stream;
 use futures_timer::Delay;
 use serde_json::json;
 
-use crate::prelude::http;
+use crate::backend::types::BackendMessage;
+use crate::backend::types::HttpRequest;
+use crate::backend::types::ServerMessage;
 use crate::prelude::rings_core::inspect::SwarmInspect;
 use crate::prelude::rings_core::session::SessionSk;
 use crate::prelude::rings_rpc::client::Client as RpcClient;
-use crate::prelude::rings_rpc::types::Timeout;
 use crate::seed::Seed;
 use crate::util::loader::ResourceLoader;
 
@@ -143,14 +144,9 @@ impl Client {
     }
 
     /// Sends a custom message to the specified peer.
-    pub async fn send_custom_message(
-        &self,
-        did: &str,
-        message_type: u16,
-        data: &str,
-    ) -> Output<()> {
+    pub async fn send_custom_message(&self, did: &str, data: &str) -> Output<()> {
         self.client
-            .send_custom_message(did, message_type, data)
+            .send_custom_message(did, data)
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         ClientOutput::ok("Done.".into(), ())
@@ -161,26 +157,49 @@ impl Client {
     pub async fn send_http_request_message(
         &self,
         did: &str,
-        name: &str,
+        service: &str,
         method: http::Method,
-        url: &str,
-        timeout: Timeout,
-        headers: &[(&str, &str)],
-        body: Option<String>,
+        path: &str,
+        headers: Vec<(String, String)>,
+        body: Option<Vec<u8>>,
     ) -> Output<()> {
+        let req = HttpRequest {
+            service: service.to_string(),
+            method: method.to_string(),
+            path: path.to_string(),
+            headers,
+            body,
+        };
+
+        let msg = BackendMessage::ServerMessage(ServerMessage::HttpRequest(req));
+
+        let data = bincode::serialize(&msg).map_err(|e| {
+            anyhow::anyhow!("Failed to serialize HttpRequest message to binary format: {e}",)
+        })?;
+        let data_b64 = base64::encode(&data);
+
         self.client
-            .send_http_request_message(did, name, method, url, timeout, headers, body)
+            .send_custom_message(did, &data_b64)
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
+
         ClientOutput::ok("Done.".into(), ())
     }
 
-    /// Sends a simple text message to the specified peer.
-    pub async fn send_simple_text_message(&self, did: &str, text: &str) -> Output<()> {
+    /// Sends a plain text message to the specified peer.
+    pub async fn send_plain_text_message(&self, did: &str, text: &str) -> Output<()> {
+        let msg = BackendMessage::PlainText(text.to_string());
+
+        let data = bincode::serialize(&msg).map_err(|e| {
+            anyhow::anyhow!("Failed to serialize PlainText message to binary format: {e}",)
+        })?;
+        let data_b64 = base64::encode(&data);
+
         self.client
-            .send_simple_text_message(did, text)
+            .send_custom_message(did, &data_b64)
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
+
         ClientOutput::ok("Done.".into(), ())
     }
 

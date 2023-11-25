@@ -5,20 +5,11 @@ use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 
-#[cfg(feature = "browser")]
-use futures::channel::mpsc::Receiver;
 use futures::future::join_all;
-#[cfg(feature = "browser")]
-use futures::lock::Mutex;
 use rings_core::swarm::impls::ConnectionHandshake;
+use rings_transport::core::transport::ConnectionInterface;
 use serde_json::Value;
-#[cfg(feature = "node")]
-use tokio::sync::broadcast::Receiver;
-#[cfg(feature = "node")]
-use tokio::sync::Mutex;
 
-use crate::backend::types::BackendMessage;
-use crate::backend::MessageType;
 use crate::error::Error as ServerError;
 use crate::prelude::jsonrpc_core::Error;
 use crate::prelude::jsonrpc_core::ErrorCode;
@@ -32,8 +23,6 @@ use crate::prelude::rings_core::message::MessagePayload;
 use crate::prelude::rings_core::prelude::vnode::VirtualNode;
 use crate::prelude::rings_rpc;
 use crate::prelude::rings_rpc::response::Peer;
-use crate::prelude::rings_rpc::types::HttpRequest;
-use crate::processor;
 use crate::processor::Processor;
 use crate::seed::Seed;
 
@@ -43,8 +32,6 @@ use crate::seed::Seed;
 #[derive(Clone)]
 pub struct RpcMeta {
     processor: Arc<Processor>,
-    #[allow(dead_code)]
-    pub(crate) receiver: Option<Arc<Mutex<Receiver<BackendMessage>>>>,
     /// if is_auth set to true, rpc server of *native node* will check signature from
     /// HEAD['X-SIGNATURE']
     is_auth: bool,
@@ -59,29 +46,9 @@ impl RpcMeta {
     }
 }
 
-impl From<(Arc<Processor>, Arc<Mutex<Receiver<BackendMessage>>>, bool)> for RpcMeta {
-    fn from(
-        (processor, receiver, is_auth): (
-            Arc<Processor>,
-            Arc<Mutex<Receiver<BackendMessage>>>,
-            bool,
-        ),
-    ) -> Self {
-        Self {
-            processor,
-            receiver: Some(receiver),
-            is_auth,
-        }
-    }
-}
-
 impl From<(Arc<Processor>, bool)> for RpcMeta {
     fn from((processor, is_auth): (Arc<Processor>, bool)) -> Self {
-        Self {
-            processor,
-            receiver: None,
-            is_auth,
-        }
+        Self { processor, is_auth }
     }
 }
 
@@ -89,7 +56,6 @@ impl From<Arc<Processor>> for RpcMeta {
     fn from(processor: Arc<Processor>) -> Self {
         Self {
             processor,
-            receiver: None,
             is_auth: true,
         }
     }
@@ -116,12 +82,12 @@ pub(crate) async fn connect_peer_via_http(params: Params, meta: RpcMeta) -> Resu
     let peer_url = p
         .first()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
-    let peer = meta
+    let did = meta
         .processor
         .connect_peer_via_http(peer_url)
         .await
         .map_err(Error::from)?;
-    Ok(Value::String(peer.did))
+    Ok(Value::String(did.to_string()))
 }
 
 /// Connect Peer with seed
@@ -234,17 +200,16 @@ pub(crate) async fn accept_answer(params: Params, meta: RpcMeta) -> Result<Value
     let encoded: Encoded = <Encoded as From<&str>>::from(answer_payload_str);
     let answer_payload =
         MessagePayload::from_encoded(&encoded).map_err(|_| ServerError::DecodeError)?;
-    let p: processor::Peer = meta
+
+    let dc = meta
         .processor
         .swarm
         .accept_answer(answer_payload)
         .await
-        .map_err(ServerError::AcceptAnswer)
-        .map_err(Error::from)?
-        .into();
+        .map_err(ServerError::AcceptAnswer)?;
 
-    let r: Peer = p.into_response_peer();
-    r.to_json_obj()
+    dc2p(dc)
+        .to_json_obj()
         .map_err(|_| ServerError::EncodeError)
         .map_err(Error::from)
 }
@@ -252,11 +217,8 @@ pub(crate) async fn accept_answer(params: Params, meta: RpcMeta) -> Result<Value
 /// Handle list peers
 pub(crate) async fn list_peers(_params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
-    let peers = meta.processor.list_peers().await?;
-    let r: Vec<Peer> = peers
-        .iter()
-        .map(|x| x.into_response_peer())
-        .collect::<Vec<_>>();
+    let peers = meta.processor.swarm.get_connections();
+    let r: Vec<Peer> = peers.into_iter().map(dc2p).collect();
     serde_json::to_value(r).map_err(|_| Error::from(ServerError::EncodeError))
 }
 
@@ -301,7 +263,6 @@ pub(crate) async fn send_raw_message(params: Params, meta: RpcMeta) -> Result<Va
 /// send custom message to specifice destination
 /// * Params
 ///   - destination:  destination did
-///   - message_type: u16
 ///   - data: base64 of [u8]
 pub(crate) async fn send_custom_message(params: Params, meta: RpcMeta) -> Result<Value> {
     meta.require_authed()?;
@@ -312,82 +273,14 @@ pub(crate) async fn send_custom_message(params: Params, meta: RpcMeta) -> Result
         .as_str()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
 
-    let message_type: u16 = params
-        .get(1)
-        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
-        .as_u64()
-        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
-        .try_into()
-        .map_err(|_| Error::new(ErrorCode::InvalidParams))?;
-
     let data = params
-        .get(2)
+        .get(1)
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
         .as_str()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
 
     let data = base64::decode(data).map_err(|_| Error::new(ErrorCode::InvalidParams))?;
-
-    let msg: BackendMessage = BackendMessage::from((message_type, data.as_ref()));
-    let msg: Vec<u8> = msg.into();
-    let tx_id = meta.processor.send_message(destination, &msg).await?;
-
-    Ok(
-        serde_json::to_value(rings_rpc::response::SendMessageResponse::from(
-            tx_id.to_string(),
-        ))
-        .unwrap(),
-    )
-}
-
-pub(crate) async fn send_simple_text_message(params: Params, meta: RpcMeta) -> Result<Value> {
-    meta.require_authed()?;
-    let params: Vec<serde_json::Value> = params.parse()?;
-    let destination = params
-        .get(0)
-        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
-        .as_str()
-        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
-    let text = params
-        .get(1)
-        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
-        .as_str()
-        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
-
-    let msg: BackendMessage =
-        BackendMessage::from((MessageType::SimpleText.into(), text.as_bytes()));
-    let msg: Vec<u8> = msg.into();
-    // TODO chunk message flag
-    let tx_id = meta.processor.send_message(destination, &msg).await?;
-
-    Ok(
-        serde_json::to_value(rings_rpc::response::SendMessageResponse::from(
-            tx_id.to_string(),
-        ))
-        .unwrap(),
-    )
-}
-
-/// handle send http request message
-pub(crate) async fn send_http_request_message(params: Params, meta: RpcMeta) -> Result<Value> {
-    meta.require_authed()?;
-    let params: Vec<serde_json::Value> = params.parse()?;
-    let destination = params
-        .get(0)
-        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
-        .as_str()
-        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
-    let p2 = params
-        .get(1)
-        .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
-        .to_owned();
-    let http_request: HttpRequest =
-        serde_json::from_value(p2).map_err(|_| Error::new(ErrorCode::InvalidParams))?;
-
-    let msg: BackendMessage = (MessageType::HttpRequest, &http_request).try_into()?;
-    let msg: Vec<u8> = msg.into();
-    // TODO chunk message flag
-    let tx_id = meta.processor.send_message(destination, &msg).await?;
+    let tx_id = meta.processor.send_message(destination, &data).await?;
 
     Ok(
         serde_json::to_value(rings_rpc::response::SendMessageResponse::from(
@@ -488,6 +381,14 @@ pub(crate) async fn lookup_service(params: Params, meta: RpcMeta) -> Result<Valu
         Ok(serde_json::json!(dids))
     } else {
         Ok(serde_json::json!(Vec::<String>::new()))
+    }
+}
+
+fn dc2p((did, conn): (Did, impl ConnectionInterface)) -> Peer {
+    Peer {
+        did: did.to_string(),
+        cid: did.to_string(),
+        state: format!("{:?}", conn.webrtc_connection_state()),
     }
 }
 

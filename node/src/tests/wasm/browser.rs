@@ -119,21 +119,18 @@ async fn test_two_client_connect_and_list() {
 
     console_log!("get peer");
     let peer2: Peer = js_value::deserialize(
-        &JsFuture::from(client1.get_peer(peer2.address.clone(), None))
+        &JsFuture::from(client1.get_peer(peer2.did.clone(), None))
             .await
             .unwrap(),
     )
     .unwrap();
-    let peer2_state = JsFuture::from(client1.connection_state(peer2.address.clone(), None))
-        .await
-        .unwrap();
     assert!(
-        peer2_state.eq("Connected"),
+        peer2.state.eq("Connected"),
         "peer2 state got {:?}",
-        peer2_state,
+        peer2.state,
     );
 
-    JsFuture::from(client1.disconnect(peer2.address.clone(), None))
+    JsFuture::from(client1.disconnect(peer2.did.clone(), None))
         .await
         .unwrap();
     let peers = get_peers(&client1).await;

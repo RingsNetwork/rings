@@ -1,7 +1,7 @@
 pub mod types;
 
-pub mod extension;
+#[cfg(feature = "browser")]
+pub mod browser;
+
 #[cfg(feature = "node")]
-pub mod service;
-pub use types::MessageEndpoint;
-pub use types::MessageType;
+pub mod native;

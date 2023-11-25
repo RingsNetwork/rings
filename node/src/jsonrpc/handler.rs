@@ -142,14 +142,6 @@ pub fn methods() -> Vec<(Method, MethodFnBox)> {
         (Method::ListPeers, pin!(server::list_peers)),
         (Method::Disconnect, pin!(server::close_connection)),
         (Method::SendTo, pin!(server::send_raw_message)),
-        (
-            Method::SendHttpRequestMessage,
-            pin!(server::send_http_request_message),
-        ),
-        (
-            Method::SendSimpleText,
-            pin!(server::send_simple_text_message),
-        ),
         (Method::SendCustomMessage, pin!(server::send_custom_message)),
         (
             Method::PublishMessageToTopic,
@@ -163,8 +155,6 @@ pub fn methods() -> Vec<(Method, MethodFnBox)> {
         (Method::LookupService, pin!(server::lookup_service)),
         (Method::NodeInfo, pin!(server::node_info)),
         (Method::NodeDid, pin!(server::node_did)),
-        #[cfg(feature = "node")]
-        (Method::PollMessage, pin!(default::poll_backend_message)),
     ]
 }
 
@@ -172,47 +162,12 @@ pub fn methods() -> Vec<(Method, MethodFnBox)> {
 #[cfg(feature = "node")]
 pub mod default {
     use super::*;
-    use crate::error::Error as ServerError;
-    use crate::prelude::jsonrpc_core::Error;
     use crate::prelude::jsonrpc_core::MetaIoHandler;
-    use crate::prelude::rings_rpc::response::CustomBackendMessage;
 
     /// Build handler add method with metadata.
     pub async fn build_handler(handler: &mut MetaIoHandler<server::RpcMeta>) {
         for m in methods() {
             handler.add_method_with_meta(m.0.as_str(), m.1);
         }
-    }
-
-    /// This function is used to handle custom messages for the backend.
-    pub async fn poll_backend_message(params: Params, meta: server::RpcMeta) -> Result<Value> {
-        let receiver = if let Some(value) = meta.receiver {
-            value
-        } else {
-            return Ok(serde_json::Value::Null);
-        };
-
-        let params: Vec<serde_json::Value> = params.parse()?;
-        let wait_recv = params
-            .get(0)
-            .map(|v| v.as_bool().unwrap_or(false))
-            .unwrap_or(false);
-        let message = if wait_recv {
-            let mut recv = receiver.lock().await;
-            recv.recv().await.ok()
-        } else {
-            let mut recv = receiver.lock().await;
-            recv.try_recv().ok()
-        };
-
-        let message = if let Some(msg) = message {
-            serde_json::to_value(CustomBackendMessage::from(msg))
-                .map_err(|_| Error::from(ServerError::EncodeError))?
-        } else {
-            serde_json::Value::Null
-        };
-        Ok(serde_json::json!({
-            "message": message,
-        }))
     }
 }

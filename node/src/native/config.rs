@@ -6,8 +6,9 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::backend::extension::ExtensionConfig;
-use crate::backend::service::http_server::HiddenServerConfig;
+use crate::backend::native::extension::ExtensionConfig;
+use crate::backend::native::server::ServiceConfig;
+use crate::backend::native::BackendConfig;
 use crate::error::Error;
 use crate::error::Result;
 use crate::prelude::rings_core::ecc::SecretKey;
@@ -58,7 +59,7 @@ pub struct Config {
     /// When there is no configuration in the YAML file,
     /// its deserialization is equivalent to `vec![]` in Rust.
     #[serde(default)]
-    pub backend: Vec<HiddenServerConfig>,
+    pub services: Vec<ServiceConfig>,
     pub data_storage: StorageConfig,
     pub measure_storage: StorageConfig,
     /// When there is no configuration in the YAML file,
@@ -107,6 +108,15 @@ impl TryFrom<Config> for ProcessorConfig {
     }
 }
 
+impl From<Config> for BackendConfig {
+    fn from(config: Config) -> Self {
+        Self {
+            services: config.services,
+            extensions: config.extension,
+        }
+    }
+}
+
 impl Config {
     pub fn new_with_key(key: SecretKey) -> Self {
         let session_sk = SessionSk::new_with_seckey(&key)
@@ -123,7 +133,7 @@ impl Config {
             ice_servers: DEFAULT_ICE_SERVERS.to_string(),
             stabilize_timeout: DEFAULT_STABILIZE_TIMEOUT,
             external_ip: None,
-            backend: vec![],
+            services: vec![],
             data_storage: DEFAULT_DATA_STORAGE_CONFIG.clone(),
             measure_storage: DEFAULT_MEASURE_STORAGE_CONFIG.clone(),
             extension: ExtensionConfig::default(),
@@ -218,6 +228,6 @@ measure_storage:
 "#;
         let cfg: Config = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(cfg.extension, ExtensionConfig::default());
-        assert_eq!(cfg.backend, vec![]);
+        assert_eq!(cfg.services, vec![]);
     }
 }

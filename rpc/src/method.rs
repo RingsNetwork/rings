@@ -24,10 +24,6 @@ pub enum Method {
     SendTo,
     /// Disconnect a peer
     Disconnect,
-    /// Send simple text message
-    SendSimpleText,
-    /// SendHttpRequestMessage,
-    SendHttpRequestMessage,
     /// SendCustomMessage,
     SendCustomMessage,
     /// Append data to topic
@@ -38,8 +34,6 @@ pub enum Method {
     RegisterService,
     /// Lookup service
     LookupService,
-    /// Poll message
-    PollMessage,
     /// Retrieve Node info
     NodeInfo,
     /// Retrieve Node DID
@@ -59,14 +53,11 @@ impl Method {
             Method::SendTo => "sendTo",
             Method::Disconnect => "disconnect",
             Method::AcceptAnswer => "acceptAnswer",
-            Method::SendSimpleText => "sendSimpleText",
-            Method::SendHttpRequestMessage => "sendHttpRequestMessage",
             Method::SendCustomMessage => "sendCustomMessage",
             Method::PublishMessageToTopic => "publishMessageToTopic",
             Method::FetchMessagesOfTopic => "fetchMessagesOfTopic",
             Method::RegisterService => "registerService",
             Method::LookupService => "lookupService",
-            Method::PollMessage => "pollMessage",
             Method::NodeInfo => "nodeInfo",
             Method::NodeDid => "nodeDid",
         }
@@ -93,14 +84,11 @@ impl TryFrom<&str> for Method {
             "sendTo" => Self::SendTo,
             "disconnect" => Self::Disconnect,
             "acceptAnswer" => Self::AcceptAnswer,
-            "sendSimpleText" => Self::SendSimpleText,
-            "sendHttpRequestMessage" => Self::SendHttpRequestMessage,
             "sendCustomMessage" => Self::SendCustomMessage,
             "publishMessageToTopic" => Method::PublishMessageToTopic,
             "fetchMessagesOfTopic" => Method::FetchMessagesOfTopic,
             "registerService" => Method::RegisterService,
             "lookupService" => Method::LookupService,
-            "pollMessage" => Method::PollMessage,
             "nodeInfo" => Method::NodeInfo,
             "nodeDid" => Method::NodeDid,
             _ => return Err(Error::InvalidMethod),

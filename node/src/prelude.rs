@@ -1,14 +1,9 @@
 //! A prelude is provided which imports all the important data types and traits of ring-network.
 /// Use this when you want to quickly bootstrap a new project.
-#[cfg(feature = "node")]
-pub use reqwest;
-#[cfg(feature = "browser")]
-pub use reqwest_wasm as reqwest;
 pub use rings_core;
 pub use rings_derive::wasm_export;
 pub use rings_rpc;
 pub use rings_rpc::jsonrpc_client;
-pub use rings_rpc::prelude::http;
 pub use rings_rpc::prelude::jsonrpc_core;
 
 pub use self::rings_core::chunk;

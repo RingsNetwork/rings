@@ -12,7 +12,6 @@ use crate::prelude::rings_core::async_trait;
 use crate::prelude::rings_core::dht::TStabilize;
 use crate::prelude::rings_core::utils;
 use crate::prelude::*;
-use crate::processor;
 use crate::processor::*;
 use crate::tests::wasm::prepare_processor;
 
@@ -43,7 +42,7 @@ impl SwarmCallback for SwarmCallbackStruct {
     async fn on_inbound(&self, payload: &MessagePayload) -> Result<(), Box<dyn std::error::Error>> {
         let msg: Message = payload.transaction.data().map_err(Box::new)?;
         if let Message::CustomMessage(ref msg) = msg {
-            let text = processor::unpack_text_message(msg).unwrap();
+            let text = String::from_utf8(msg.0.to_vec()).unwrap();
             console_log!("msg received: {}", text);
             let mut msgs = self.msgs.try_lock().unwrap();
             msgs.push(text);
@@ -209,11 +208,11 @@ async fn test_processor_connect_with_did() {
     create_connection(&p2, &p3).await;
     console_log!("processor_connect_p2_and_p3, done");
 
-    let p1_peers = p1.list_peers().await.unwrap();
+    let p1_peer_dids = p1.swarm.get_connection_ids();
     assert!(
-        p1_peers
+        p1_peer_dids
             .iter()
-            .any(|p| p.did.to_string().eq(&p2.did().to_string())),
+            .any(|did| did.to_string().eq(&p2.did().to_string())),
         "p2 not in p1's peer list"
     );
 
@@ -223,23 +222,24 @@ async fn test_processor_connect_with_did() {
 
     console_log!("connect p1 and p3");
     // p1 create connect with p3's address
-    let peer3 = p1.connect_with_did(p3.did(), true).await.unwrap();
+    p1.connect_with_did(p3.did(), true).await.unwrap();
+    let conn3 = p1.swarm.get_connection(p3.did()).unwrap();
     console_log!("processor_p1_p3_conntected");
     fluvio_wasm_timer::Delay::new(Duration::from_millis(1000))
         .await
         .unwrap();
     console_log!("processor_detect_connection_state");
     assert_eq!(
-        peer3.connection.webrtc_connection_state(),
+        conn3.webrtc_connection_state(),
         WebrtcConnectionState::Connected,
     );
 
     console_log!("check peers");
-    let peers = p1.list_peers().await.unwrap();
+    let peer_dids = p1.swarm.get_connection_ids();
     assert!(
-        peers
+        peer_dids
             .iter()
-            .any(|p| p.did.to_string().eq(p3.did().to_string().as_str())),
+            .any(|did| did.to_string().eq(p3.did().to_string().as_str())),
         "peer list dose NOT contains p3 address"
     );
     console_log!("processor_close_all_connections");

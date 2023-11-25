@@ -1,176 +1,144 @@
 #![warn(missing_docs)]
+
 //! Backend Message Types.
-use std::collections::HashMap;
+
+use std::io::ErrorKind as IOErrorKind;
 
 use bytes::Bytes;
+use rings_core::message::MessagePayload;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::error::Error;
 use crate::error::Result;
-use crate::prelude::*;
 
-/// Enum MessageType of BackendMessage.
-#[derive(Debug, Clone)]
-pub enum MessageType {
-    /// unknown
-    Unknown = 0,
-    /// empty
-    Empty,
-    /// simple texte
-    SimpleText,
-    /// http request
-    HttpRequest,
-    /// http response
-    HttpResponse,
-    /// extension
-    Extension,
+/// TunnelId type, use uuid.
+pub type TunnelId = uuid::Uuid;
+
+/// BackendMessage struct for handling CustomMessage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum BackendMessage {
+    /// extension message
+    Extension(Bytes),
+    /// server message
+    ServerMessage(ServerMessage),
+    /// Plain text
+    PlainText(String),
 }
 
-impl From<&[u8; 2]> for MessageType {
-    fn from(v: &[u8; 2]) -> Self {
-        Self::from(u16::from_le_bytes(*v))
-    }
+/// ServerMessage
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum ServerMessage {
+    /// Tunnel Open
+    TcpDial {
+        /// Tunnel Id
+        tid: TunnelId,
+        /// service name
+        service: String,
+    },
+    /// Tunnel Close
+    TcpClose {
+        /// Tunnel Id
+        tid: TunnelId,
+        /// The reason of close
+        reason: TunnelDefeat,
+    },
+    /// Send Tcp Package
+    TcpPackage {
+        /// Tunnel Id
+        tid: TunnelId,
+        /// Tcp Package
+        body: Bytes,
+    },
+    /// Http Request
+    HttpRequest(HttpRequest),
+    /// Http Response
+    HttpResponse(HttpResponse),
 }
 
-impl From<u16> for MessageType {
-    fn from(v: u16) -> Self {
-        match v {
-            1 => MessageType::Empty,
-            2 => MessageType::SimpleText,
-            3 => MessageType::HttpRequest,
-            4 => MessageType::HttpResponse,
-            5 => MessageType::Extension,
-            _ => MessageType::Unknown,
-        }
-    }
+/// A list specifying general categories of Tunnel error like [std::io::ErrorKind].
+#[derive(Deserialize, Serialize, Debug, Clone, Copy)]
+#[repr(u8)]
+#[non_exhaustive]
+pub enum TunnelDefeat {
+    /// Failed to send data to peer by webrtc datachannel.
+    WebrtcDatachannelSendFailed = 1,
+    /// The connection timed out when dialing.
+    ConnectionTimeout = 2,
+    /// Got [std::io::ErrorKind::ConnectionRefused] error from local stream.
+    ConnectionRefused = 3,
+    /// Got [std::io::ErrorKind::ConnectionAborted] error from local stream.
+    ConnectionAborted = 4,
+    /// Got [std::io::ErrorKind::ConnectionReset] error from local stream.
+    ConnectionReset = 5,
+    /// Got [std::io::ErrorKind::NotConnected] error from local stream.
+    NotConnected = 6,
+    /// The connection is closed by peer.
+    ConnectionClosed = 7,
+    /// Unknown [std::io::ErrorKind] error.
+    Unknown = u8::MAX,
 }
 
-impl From<MessageType> for u16 {
-    fn from(v: MessageType) -> Self {
-        match v {
-            MessageType::Unknown => 0,
-            MessageType::Empty => 1,
-            MessageType::SimpleText => 2,
-            MessageType::HttpRequest => 3,
-            MessageType::HttpResponse => 4,
-            MessageType::Extension => 5,
-        }
-    }
-}
-
-/// BackendMessage struct for CustomMessage.
-/// A backend message body's length at least is 32bytes;
-/// - `message_type`: `[u8;2]`
-/// - `extra data`: `[u8;30]`
-/// - `message data`: `[u8]`
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BackendMessage {
-    /// message_type
-    pub message_type: u16,
-    /// extra bytes
-    pub extra: [u8; 30],
-    /// data body
-    pub data: Vec<u8>,
-}
-
-impl BackendMessage {
-    /// generate new BackendMessage with
-    /// - `message_type`
-    /// - `data`
-    /// extra will be `[0u8;30]`
-    pub fn new(message_type: u16, extra: [u8; 30], data: &[u8]) -> Self {
-        Self {
-            message_type,
-            extra,
-            data: data.to_vec(),
-        }
-    }
-}
-
-impl From<(u16, &[u8])> for BackendMessage {
-    fn from((message_type, data): (u16, &[u8])) -> Self {
-        Self::new(message_type, [0u8; 30], data)
-    }
-}
-
-impl<T> TryFrom<(MessageType, &T)> for BackendMessage
-where T: Serialize
-{
-    type Error = Error;
-
-    fn try_from((message_type, data): (MessageType, &T)) -> std::result::Result<Self, Self::Error> {
-        let bytes = bincode::serialize(data).map_err(|_| Error::EncodeError)?;
-        Ok(Self::new(message_type.into(), [0u8; 30], &bytes))
-    }
-}
-
-impl TryFrom<&[u8]> for BackendMessage {
-    type Error = Error;
-
-    #[allow(clippy::ptr_offset_with_cast)]
-    fn try_from(value: &[u8]) -> std::result::Result<Self, Self::Error> {
-        if value.len() < 32 {
-            return Err(Error::InvalidMessage);
-        }
-        let (left, right) = arrayref::array_refs![value, 32; ..;];
-        let (message_type, _) = arrayref::array_refs![left, 2; ..;];
-
-        Ok(Self::new(
-            u16::from_le_bytes(*message_type),
-            [0u8; 30],
-            right,
-        ))
-    }
-}
-
-impl TryFrom<Vec<u8>> for BackendMessage {
-    type Error = Error;
-
-    fn try_from(value: Vec<u8>) -> std::result::Result<Self, Self::Error> {
-        BackendMessage::try_from(value.as_slice())
-    }
-}
-
-impl From<BackendMessage> for Bytes {
-    fn from(v: BackendMessage) -> Self {
-        let d: Vec<u8> = v.into();
-        Self::from(d)
-    }
-}
-
-impl From<BackendMessage> for Vec<u8> {
-    fn from(v: BackendMessage) -> Self {
-        let mut data = Vec::new();
-        let t: u16 = v.message_type;
-        data.extend_from_slice(&t.to_le_bytes());
-        data.extend_from_slice(&v.extra);
-        data.extend_from_slice(&v.data);
-        data
-    }
-}
-
-/// Message Endpoint trait
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-pub trait MessageEndpoint {
-    /// handle_message
-    async fn handle_message(
-        &self,
-        ctx: &MessagePayload,
-        data: &BackendMessage,
-    ) -> Result<Vec<MessageHandlerEvent>>;
+/// HttpRequest
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct HttpRequest {
+    /// Service name
+    pub service: String,
+    /// Method
+    pub method: String,
+    /// Path
+    pub path: String,
+    /// Headers
+    pub headers: Vec<(String, String)>,
+    /// Body
+    pub body: Option<Vec<u8>>,
 }
 
 /// HttpResponse
-/// - `status`: Status machine with numbers, like 200, 300, 400, 500.
-/// - `body`: Message chunk split bytes and send back to remote client.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HttpResponse {
-    /// status
+    /// Status
     pub status: u16,
-    /// headers
-    pub headers: HashMap<String, String>,
-    /// body: optional
+    /// Headers
+    pub headers: Vec<(String, String)>,
+    /// Body
     pub body: Option<Bytes>,
+}
+
+/// IntoBackendMessage trait
+pub trait IntoBackendMessage {
+    /// into_backend_message
+    fn into_backend_message(self) -> BackendMessage;
+}
+
+/// MessageEndpoint trait
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+pub trait MessageEndpoint<T> {
+    /// handle_message
+    async fn handle_message(&self, ctx: &MessagePayload, data: &T) -> Result<()>;
+}
+
+impl IntoBackendMessage for BackendMessage {
+    fn into_backend_message(self) -> BackendMessage {
+        self
+    }
+}
+
+impl IntoBackendMessage for ServerMessage {
+    fn into_backend_message(self) -> BackendMessage {
+        BackendMessage::ServerMessage(self)
+    }
+}
+
+impl From<IOErrorKind> for TunnelDefeat {
+    fn from(kind: IOErrorKind) -> TunnelDefeat {
+        match kind {
+            IOErrorKind::ConnectionRefused => TunnelDefeat::ConnectionRefused,
+            IOErrorKind::ConnectionAborted => TunnelDefeat::ConnectionAborted,
+            IOErrorKind::ConnectionReset => TunnelDefeat::ConnectionReset,
+            IOErrorKind::NotConnected => TunnelDefeat::NotConnected,
+            _ => TunnelDefeat::Unknown,
+        }
+    }
 }
