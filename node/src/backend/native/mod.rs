@@ -7,16 +7,17 @@ use async_trait::async_trait;
 use rings_core::message::CustomMessage;
 use rings_core::message::Message;
 use rings_core::message::MessagePayload;
+use rings_core::message::MessageVerificationExt;
 use rings_core::swarm::callback::SwarmCallback;
 
-use crate::error::Result;
 use crate::backend::native::extension::Extension;
 use crate::backend::native::extension::ExtensionConfig;
 use crate::backend::native::server::Server;
 use crate::backend::native::server::ServiceConfig;
-use crate::processor::Processor;
 use crate::backend::types::BackendMessage;
 use crate::backend::types::MessageEndpoint;
+use crate::error::Result;
+use crate::processor::Processor;
 
 pub struct BackendConfig {
     pub services: Vec<ServiceConfig>,
@@ -52,6 +53,11 @@ impl Backend {
         match msg {
             BackendMessage::Extension(data) => self.extension.handle_message(payload, data).await,
             BackendMessage::ServerMessage(data) => self.server.handle_message(payload, data).await,
+            BackendMessage::PlainText(text) => {
+                let peer_did = payload.transaction.signer();
+                tracing::info!("BackendMessage from {peer_did:?} PlainText: {text:?}");
+                Ok(())
+            }
         }
     }
 }

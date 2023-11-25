@@ -27,6 +27,7 @@ use wasm_bindgen_futures::future_to_promise;
 use wasm_bindgen_futures::JsFuture;
 
 use crate::backend::browser::Backend;
+use crate::backend::types::BackendMessage;
 use crate::backend::types::HttpRequest;
 use crate::backend::types::ServerMessage;
 use crate::client::AsyncSigner;
@@ -44,7 +45,7 @@ pub enum AddressType {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct Peer {
+pub(crate) struct Peer {
     pub did: String,
     pub state: String,
 }
@@ -462,6 +463,23 @@ impl Client {
 
             let tx_id = p
                 .send_backend_message(destination, ServerMessage::HttpRequest(req))
+                .await
+                .map_err(JsError::from)?;
+
+            Ok(JsValue::from_str(tx_id.to_string().as_str()))
+        })
+    }
+
+    /// send simple text message to remote
+    /// - destination: A did of destination
+    /// - text: text message
+    pub fn send_simple_text_message(&self, destination: String, text: String) -> js_sys::Promise {
+        let p = self.processor.clone();
+
+        future_to_promise(async move {
+            let destination = get_did(destination.as_str(), AddressType::DEFAULT)?;
+            let tx_id = p
+                .send_backend_message(destination, BackendMessage::PlainText(text))
                 .await
                 .map_err(JsError::from)?;
 

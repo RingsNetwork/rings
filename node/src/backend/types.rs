@@ -22,6 +22,8 @@ pub enum BackendMessage {
     Extension(Bytes),
     /// server message
     ServerMessage(ServerMessage),
+    /// Plain text
+    PlainText(String),
 }
 
 /// ServerMessage

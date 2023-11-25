@@ -12,17 +12,17 @@ use rings_core::message::MessageVerificationExt;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::consts::TCP_SERVER_TIMEOUT;
-use crate::error::Error;
-use crate::error::Result;
 use crate::backend::native::server::tcp_proxy::tcp_connect_with_timeout;
 use crate::backend::native::server::tcp_proxy::Tunnel;
 use crate::backend::native::MessageEndpoint;
-use crate::processor::Processor;
 use crate::backend::types::HttpRequest;
 use crate::backend::types::HttpResponse;
 use crate::backend::types::ServerMessage;
 use crate::backend::types::TunnelId;
+use crate::consts::TCP_SERVER_TIMEOUT;
+use crate::error::Error;
+use crate::error::Result;
+use crate::processor::Processor;
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct ServiceConfig {
@@ -105,7 +105,10 @@ impl MessageEndpoint<ServerMessage> for Server {
                     .await?;
                 Ok(())
             }
-            _ => Ok(()),
+            ServerMessage::HttpResponse(resp) => {
+                tracing::info!("ServerMessage from {peer_did:?} HttpResponse: {resp:?}");
+                Ok(())
+            }
         }
     }
 }

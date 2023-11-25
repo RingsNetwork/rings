@@ -26,13 +26,13 @@ use futures::Stream;
 use futures_timer::Delay;
 use serde_json::json;
 
+use crate::backend::types::BackendMessage;
+use crate::backend::types::HttpRequest;
+use crate::backend::types::ServerMessage;
 use crate::prelude::rings_core::inspect::SwarmInspect;
 use crate::prelude::rings_core::session::SessionSk;
 use crate::prelude::rings_rpc::client::Client as RpcClient;
 use crate::seed::Seed;
-use crate::backend::types::BackendMessage;
-use crate::backend::types::HttpRequest;
-use crate::backend::types::ServerMessage;
 use crate::util::loader::ResourceLoader;
 
 /// Alias about Result<ClientOutput<T>, E>.
@@ -175,6 +175,23 @@ impl Client {
 
         let data = bincode::serialize(&msg).map_err(|e| {
             anyhow::anyhow!("Failed to serialize HttpRequest message to binary format: {e}",)
+        })?;
+        let data_b64 = base64::encode(&data);
+
+        self.client
+            .send_custom_message(did, &data_b64)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        ClientOutput::ok("Done.".into(), ())
+    }
+
+    /// Sends a plain text message to the specified peer.
+    pub async fn send_plain_text_message(&self, did: &str, text: &str) -> Output<()> {
+        let msg = BackendMessage::PlainText(text.to_string());
+
+        let data = bincode::serialize(&msg).map_err(|e| {
+            anyhow::anyhow!("Failed to serialize PlainText message to binary format: {e}",)
         })?;
         let data_b64 = base64::encode(&data);
 
