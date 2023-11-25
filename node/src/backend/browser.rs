@@ -9,7 +9,7 @@ use wasm_bindgen::JsValue;
 
 use crate::error::Error;
 use crate::error::Result;
-use crate::types::backend::BackendMessage;
+use crate::backend::types::BackendMessage;
 
 /// MessageCallback instance for Browser
 #[wasm_export]

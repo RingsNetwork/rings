@@ -8,9 +8,9 @@ use serde::Serialize;
 
 use crate::error::Error;
 use crate::error::Result;
-use crate::native::backend::extension::ExtensionConfig;
-use crate::native::backend::server::ServiceConfig;
-use crate::native::backend::BackendConfig;
+use crate::backend::native::extension::ExtensionConfig;
+use crate::backend::native::server::ServiceConfig;
+use crate::backend::native::BackendConfig;
 use crate::prelude::rings_core::ecc::SecretKey;
 use crate::prelude::SessionSk;
 use crate::processor::ProcessorConfig;

@@ -10,13 +10,13 @@ use rings_core::message::MessagePayload;
 use rings_core::swarm::callback::SwarmCallback;
 
 use crate::error::Result;
-use crate::native::backend::extension::Extension;
-use crate::native::backend::extension::ExtensionConfig;
-use crate::native::backend::server::Server;
-use crate::native::backend::server::ServiceConfig;
+use crate::backend::native::extension::Extension;
+use crate::backend::native::extension::ExtensionConfig;
+use crate::backend::native::server::Server;
+use crate::backend::native::server::ServiceConfig;
 use crate::processor::Processor;
-use crate::types::backend::BackendMessage;
-use crate::types::backend::MessageEndpoint;
+use crate::backend::types::BackendMessage;
+use crate::backend::types::MessageEndpoint;
 
 pub struct BackendConfig {
     pub services: Vec<ServiceConfig>,

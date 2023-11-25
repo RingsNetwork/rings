@@ -12,9 +12,9 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 use crate::processor::Processor;
-use crate::types::backend::ServerMessage;
-use crate::types::backend::TunnelDefeat;
-use crate::types::backend::TunnelId;
+use crate::backend::types::ServerMessage;
+use crate::backend::types::TunnelDefeat;
+use crate::backend::types::TunnelId;
 
 pub struct Tunnel {
     tid: TunnelId,

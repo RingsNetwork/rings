@@ -15,14 +15,14 @@ use serde::Serialize;
 use crate::consts::TCP_SERVER_TIMEOUT;
 use crate::error::Error;
 use crate::error::Result;
-use crate::native::backend::server::tcp_proxy::tcp_connect_with_timeout;
-use crate::native::backend::server::tcp_proxy::Tunnel;
-use crate::native::backend::MessageEndpoint;
+use crate::backend::native::server::tcp_proxy::tcp_connect_with_timeout;
+use crate::backend::native::server::tcp_proxy::Tunnel;
+use crate::backend::native::MessageEndpoint;
 use crate::processor::Processor;
-use crate::types::backend::HttpRequest;
-use crate::types::backend::HttpResponse;
-use crate::types::backend::ServerMessage;
-use crate::types::backend::TunnelId;
+use crate::backend::types::HttpRequest;
+use crate::backend::types::HttpResponse;
+use crate::backend::types::ServerMessage;
+use crate::backend::types::TunnelId;
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct ServiceConfig {

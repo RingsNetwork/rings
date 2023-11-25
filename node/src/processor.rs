@@ -39,7 +39,7 @@ use crate::prelude::wasm_export;
 use crate::prelude::ChordStorageInterface;
 use crate::prelude::ChordStorageInterfaceCacheChecker;
 use crate::prelude::SessionSk;
-use crate::types::backend::IntoBackendMessage;
+use crate::backend::types::IntoBackendMessage;
 
 /// ProcessorConfig is usually serialized as json or yaml.
 /// There is a `from_config` method in [ProcessorBuilder] used to initialize the Builder with a serialized ProcessorConfig.

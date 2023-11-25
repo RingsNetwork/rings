@@ -26,13 +26,13 @@ use wasm_bindgen_futures;
 use wasm_bindgen_futures::future_to_promise;
 use wasm_bindgen_futures::JsFuture;
 
-use crate::browser::backend::Backend;
+use crate::backend::browser::Backend;
+use crate::backend::types::HttpRequest;
+use crate::backend::types::ServerMessage;
 use crate::client::AsyncSigner;
 use crate::client::Client;
 use crate::client::Signer;
 use crate::processor::ProcessorConfig;
-use crate::types::backend::HttpRequest;
-use crate::types::backend::ServerMessage;
 
 /// AddressType enum contains `DEFAULT` and `ED25519`.
 #[wasm_export]
