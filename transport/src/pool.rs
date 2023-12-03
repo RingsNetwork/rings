@@ -63,9 +63,9 @@ where
     /// The `safely_insert` method is used to insert a connection into the pool.
     /// It ensures that the connection is not inserted twice in concurrent scenarios.
     ///
-    /// The implementation of match statement refers to Entry::insert in dashmap.
+    /// The implementation of match statement refers to `Entry::insert` in dashmap.
     /// An extra check is added to see if the connection is already connected.
-    /// See also: https://docs.rs/dashmap/latest/dashmap/mapref/entry/enum.Entry.html#method.insert
+    /// See also: <https://docs.rs/dashmap/latest/dashmap/mapref/entry/enum.Entry.html#method.insert>
     pub fn safely_insert(&self, cid: &str, conn: C) -> Result<()> {
         let Some(entry) = self.connections.try_entry(cid.to_string()) else {
             return Err(Error::ConnectionAlreadyExists(cid.to_string()));

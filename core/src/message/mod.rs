@@ -26,4 +26,5 @@ pub use handlers::MessageHandlerEvent;
 
 mod protocols;
 pub use protocols::MessageRelay;
+pub use protocols::MessageVerification;
 pub use protocols::MessageVerificationExt;

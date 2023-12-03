@@ -1,9 +1,9 @@
-//! The main entity of this module is the [Callback] trait, which defines
+//! The main entity of this module is the [TransportCallback] trait, which defines
 //! a series of methods that receive connection events.
 //!
 //! The `new_connection` method of
-//! [ConnectionCreation](super::transport::ConnectionCreation) trait will
-//! accept boxed [Callback] trait object.
+//! [TransportInterface](super::transport::TransportInterface) trait will
+//! accept boxed [TransportCallback] trait object.
 
 use async_trait::async_trait;
 
@@ -31,13 +31,13 @@ pub trait TransportCallback {
 }
 
 /// The `new_connection` method of
-/// [ConnectionCreation](super::transport::ConnectionCreation) trait will
-/// accept boxed [Callback] trait object.
+/// [TransportInterface](super::transport::TransportInterface) trait will
+/// accept boxed [TransportCallback] trait object.
 #[cfg(not(feature = "web-sys-webrtc"))]
 pub type BoxedTransportCallback = Box<dyn TransportCallback + Send + Sync>;
 
 /// The `new_connection` method of
-/// [ConnectionCreation](super::transport::ConnectionCreation) trait will
-/// accept boxed [Callback] trait object.
+/// [TransportInterface](super::transport::TransportInterface) trait will
+/// accept boxed [TransportCallback] trait object.
 #[cfg(feature = "web-sys-webrtc")]
 pub type BoxedTransportCallback = Box<dyn TransportCallback>;

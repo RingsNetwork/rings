@@ -1,8 +1,8 @@
 //! The main entity of this module is the [ConnectionInterface] trait, which provides an
 //! interface for establishing connections with other nodes, send data channel message to it.
 //!
-//! There is also a [ConnectionCreation] trait, which is used to specifies the creation of a
-//! [ConnectionInterface] object for [Transport](crate::Transport).
+//! There is also a [TransportInterface] trait, which is used to specify the management of all
+//! [ConnectionInterface] objects.
 
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
@@ -58,7 +58,7 @@ pub enum WebrtcConnectionState {
     Closed,
 }
 
-/// The [ConnectionInterface](transport::ConnectionInterface) trait defines how to
+/// The [ConnectionInterface] trait defines how to
 /// make webrtc ice handshake with a remote peer and then send data channel message to it.
 #[cfg_attr(feature = "web-sys-webrtc", async_trait(?Send))]
 #[cfg_attr(not(feature = "web-sys-webrtc"), async_trait)]
@@ -113,7 +113,7 @@ pub trait ConnectionInterface {
     }
 }
 
-/// This trait specifies the creation of a [ConnectionInterface] object for [Transport](crate::Transport).
+/// This trait specifies how to management [ConnectionInterface] objects.
 /// Each platform must implement this trait for its own connection implementation.
 /// See [connections](crate::connections) module for examples.
 #[cfg_attr(feature = "web-sys-webrtc", async_trait(?Send))]
@@ -125,11 +125,11 @@ pub trait TransportInterface {
     /// The error type that is returned by transport.
     type Error: std::error::Error;
 
-    /// Used to create a new connection and register it in [Transport](crate::Transport).
+    /// Used to create a new connection and register it in the transport.
     ///
     /// To avoid memory leak, this function will not return a connection object.
-    /// Instead, use should use `get_connection` method of [Transport](crate::Transport)
-    /// to get a [ConnectionRef](crate::connection_ref::ConnectionRef) after creation.
+    /// Instead, user should use `connection` method of to get a [ConnectionRef](crate::connection_ref::ConnectionRef)
+    /// after creation.
     ///
     /// See [connections](crate::connections) module for examples.
     async fn new_connection(
@@ -140,7 +140,6 @@ pub trait TransportInterface {
 
     /// This method closes and releases the connection from transport.
     /// All references to this cid, created by `get_connection`, will be released.
-    /// The [ConnectionInterface] methods of them will return [Error::ConnectionReleased].
     async fn close_connection(&self, cid: &str) -> Result<(), Self::Error>;
 
     /// Get a reference of the connection by its id.

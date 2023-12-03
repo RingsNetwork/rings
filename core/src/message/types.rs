@@ -78,7 +78,7 @@ pub enum QueryFor {
     Stabilization,
 }
 
-/// MessageType for handle [RemoteAction::Queryforsuccessorlist]
+/// MessageType for handle [crate::dht::PeerRingRemoteAction::QueryForSuccessorList]
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct QueryForTopoInfoSend {
     /// The did for query target
@@ -87,7 +87,7 @@ pub struct QueryForTopoInfoSend {
     pub then: QueryFor,
 }
 
-/// MessageType for handle [RemoteAction::Queryforsuccessorlist]
+/// MessageType for handle [crate::dht::PeerRingRemoteAction::QueryForSuccessorList]
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct QueryForTopoInfoReport {
     /// The did for query target

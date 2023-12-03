@@ -9,11 +9,11 @@ use crate::measure::BehaviourJudgement;
 use crate::swarm::Swarm;
 use crate::types::Connection;
 
-/// Type of Measure, see [Measure].
+/// Type of Measure, see [crate::measure::Measure].
 #[cfg(not(feature = "wasm"))]
 pub type MeasureImpl = Box<dyn BehaviourJudgement + Send + Sync>;
 
-/// Type of Measure, see [Measure].
+/// Type of Measure, see [crate::measure::Measure].
 #[cfg(feature = "wasm")]
 pub type MeasureImpl = Box<dyn BehaviourJudgement>;
 

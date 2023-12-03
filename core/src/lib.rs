@@ -3,7 +3,7 @@
 //! - [Chord](crate::dht::PeerRing) is a structured p2p network based on Chord protocol and expanded with secp256k1 based Did support.
 //! - [ElGamal](crate::ecc::elgamal) provides End2End encryption based on Chord Did.
 //! - [Swarm](crate::swarm) is a module for managing all transports.
-//! - [Transport](crate::transports::Transport) is used for connection handshaking, which supports all platforms, including browser (wasm) and native runtime.
+//! - [Connection](rings_transport::core::transport::ConnectionInterface) is used for connection handshaking, which supports all platforms, including browser (wasm) and native runtime.
 
 //! # Connection
 //!

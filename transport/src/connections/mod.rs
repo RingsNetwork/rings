@@ -1,6 +1,6 @@
-//! Default using [WebrtcConnection] for native environment.
-//! Plus a [WebSysWebrtcConnection] for wasm environment.
-//! Also provide a [DummyConnection] for testing.
+//! Default using `WebrtcConnection` for native environment.
+//! Plus a `WebSysWebrtcConnection` for wasm environment.
+//! Also provide a `DummyConnection` for testing.
 
 #[cfg(feature = "dummy")]
 mod dummy;

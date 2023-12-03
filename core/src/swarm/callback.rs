@@ -57,13 +57,15 @@ pub trait SwarmCallback {
     }
 }
 
-pub(crate) struct InnerSwarmCallback {
+/// [InnerSwarmCallback] wraps [SharedSwarmCallback] with inner handling for a specific connection.
+pub struct InnerSwarmCallback {
     did: Did,
     transport_event_sender: TransportEventSender,
     callback: SharedSwarmCallback,
 }
 
 impl InnerSwarmCallback {
+    /// Create a new [InnerSwarmCallback] with the provided did, transport_event_sender and callback.
     pub fn new(
         did: Did,
         transport_event_sender: TransportEventSender,

@@ -1,6 +1,6 @@
 //! Sign and verify message with curve secp256r1 and ECDSA
 //! This module support WebCrypto API
-//! ref: https://developer.mozilla.org/en-US/docs/Web/API/Web_Crypto_API
+//! ref: <https://developer.mozilla.org/en-US/docs/Web/API/Web_Crypto_API>
 //! To use this signature, message should be wrapped with prefix
 //!
 //! ```js

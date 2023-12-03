@@ -40,7 +40,7 @@ pub struct IceServer {
 }
 
 impl IceServer {
-    /// Convert String to Vec<IceServer>. Will split the string by `;` and parse each part.
+    /// Convert String to `Vec<IceServer>`. Will split the string by `;` and parse each part.
     pub fn vec_from_str(s: &str) -> Result<Vec<Self>, IceServerError> {
         s.split(';').map(IceServer::from_str).collect()
     }
