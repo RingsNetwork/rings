@@ -1,25 +1,57 @@
 #![warn(missing_docs)]
 //! Understanding Abstract Account and Session keypair in Rings Network
 //!
-//! The Rings network offers a unique mechanism to bolster security and abstract the user's keypair through a feature known as session keypair.
+//! Rings network offers a unique mechanism to bolster security and abstract the user's keypair through a feature known as session keypair.
+//! The fundamental concept behind session keypair is signing a generated keypair with a time period {ts, ttl} by user without access its private key in this program.
+//! This can be conceptualized as a contract stating, "I delegate to a keypair for the time period {ts, ttl}".
 //!
-//! The fundamental concept behind keypair session involves creating an association between a user's keypair and a randomly generated keypair. In our terminology:
+//! In our terminology:
+//! - `I` is [Account].
+//! - `keypair` is [SessionSk].
+//! - The time period {ts, ttl} is in `SessionSk.session` field.
 //!
-//!    The user's original keypair (private key, public key) is referred to as the "account" (sk, pk).
-//!    The randomly generated keypair by the Rings network is known as the "session" (sk, pk).
+//! The following is an example to build a [SessionSk] in Rust and use it to sign a message.
+//! It is not necessary to construct a secret_key in Rust.
+//! User may manually set account_type, account_entity, and session_sig, instead of provide secret key.
+//! ```
+//! use rings_core::dht::Did;
+//! use rings_core::session::SessionSkBuilder;
 //!
-//! * Here's how the process works:
+//! // We are generate an ethereum account for example.
+//! // It's convenient because secp256k1 is also used in session_sk.
+//! let user_secret_key = rings_core::ecc::SecretKey::random();
+//! let user_secret_key_did: Did = user_secret_key.address().into();
 //!
-//! 1. A random delegate private key (sk) is generated, along with its corresponding public key (pk).
+//! // The account type is "secp256k1".
+//! // The account entity is its address, also known as Did in rings network.
+//! let account_type = "secp256k1".to_string();
+//! let account_entity = user_secret_key_did.to_string();
 //!
-//! 2. A session is formed based on the session's public key and the account's public key. This can be conceptualized as a contract stating, "I delegate to {pk} for the time period {ts, ttl}".
+//! let mut builder = SessionSkBuilder::new(account_entity, account_type);
+//! let unsigned_proof = builder.unsigned_proof();
 //!
-//! 3. The account must sign the session, now termed "Session", using its private key.
+//! // Sign the unsigned proof with user's secret key.
+//! let session_sig = user_secret_key.sign(&unsigned_proof).to_vec();
+//! let builder = builder.set_session_sig(session_sig);
 //!
-//! 4. When sending and receiving messages, the Rings network will handle message signing and verification using the session's keypair (sk, pk).
+//! let session_sk = builder.build().unwrap();
 //!
+//! // Check session_sk is valid. (The verify_self is already called in build().)
+//! assert_eq!(session_sk.account_did(), user_secret_key_did);
+//! assert!(session_sk.session().verify_self().is_ok());
 //!
-//! SessionSkBuilder, SessionSk was exported to wasm envirement, so in browser/wasm envirement it can be done with nodejs code:
+//! // Sign a message with session_sk.
+//! let msg = "hello world".as_bytes();
+//! let msg_sig = session_sk.sign(msg).unwrap();
+//! let msg_session = session_sk.session();
+//!
+//! // Verify the message with session.
+//! assert_eq!(msg_session.account_did(), user_secret_key_did);
+//! assert!(msg_session.verify(msg, msg_sig).is_ok());
+//! ```
+//!
+//! [SessionSkBuilder], [SessionSk] is exported to wasm envirement.
+//! To build a [SessionSk] in javascript:
 //! ```js
 //!    // prepare auth & send to metamask for sign
 //!    let sessionBuilder = SessionSkBuilder.new(account, 'eip191')
@@ -61,7 +93,7 @@ fn pack_session(session_id: Did, ts_ms: u128, ttl_ms: u64) -> String {
 
 /// SessionSkBuilder is used to build a [SessionSk].
 ///
-/// Firstly, you need to provide the account's entity and type to `new` method.
+/// Firstly, you need to provide the account's entity and type to [SessionSkBuilder::new] method.
 /// Then you can call `pack_session` to get the session dump for signing.
 /// After signing, you can call `sig` to set the signature back to builder.
 /// Finally, you can call `build` to get the [SessionSk].
@@ -126,7 +158,7 @@ pub enum Account {
     Secp256k1(Did),
     /// ref: <https://eips.ethereum.org/EIPS/eip-191>
     Secp256r1(PublicKey),
-    /// ref: ref: https://developer.mozilla.org/en-US/docs/Web/API/Web_Crypto_API
+    /// ref: <https://developer.mozilla.org/en-US/docs/Web/API/Web_Crypto_API>
     EIP191(Did),
     /// bitcoin bip137 ref: <https://github.com/bitcoin/bips/blob/master/bip-0137.mediawiki>
     BIP137(Did),
@@ -302,8 +334,8 @@ impl Session {
 }
 
 impl SessionSk {
-    /// Generate Session with private key.
-    /// Only use it for unittest.
+    /// Generate Session with private key. Only use it for unittest.
+    /// To protect your private key, please use [SessionSkBuilder] to generate session.
     pub fn new_with_seckey(key: &SecretKey) -> Result<Self> {
         let account_entity = Did::from(key.address()).to_string();
         let account_type = "secp256k1".to_string();

@@ -18,9 +18,13 @@ use crate::utils::get_epoch_ms;
 /// it also included ttl time and created ts.
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct MessageVerification {
+    /// The [Session] of the [SessionSk]. Used to identify a sender and verify the signature.
     pub session: Session,
+    /// The time to live of the message in milliseconds.
     pub ttl_ms: u64,
+    /// The timestamp of the message in milliseconds.
     pub ts_ms: u128,
+    /// The signature of the message. Signed by [SessionSk]. Can be verified by [Session].
     pub sig: Vec<u8>,
 }
 
@@ -35,6 +39,7 @@ fn pack_msg(data: &[u8], ts_ms: u128, ttl_ms: u64) -> Vec<u8> {
 }
 
 impl MessageVerification {
+    /// Create a new MessageVerification. Should provide the data and the [SessionSk].
     pub fn new(data: &[u8], session_sk: &SessionSk) -> Result<Self> {
         let ts_ms = get_epoch_ms();
         let ttl_ms = DEFAULT_TTL_MS;

@@ -78,6 +78,9 @@ jobs:
       - name: Build
         run: cargo build --all --verbose
 
+      - name: Run doc tests
+        run: cargo test --doc
+
       - name: Run dummy tests
         run: cargo test -p rings-core --features dummy --verbose
 
@@ -141,6 +144,11 @@ jobs:
 
       - name: Check formating
         run: cargo +nightly fmt --all -- --check
+
+      - name: Check docs
+        env:
+          RUSTDOCFLAGS: -Dwarnings
+        run: cargo doc --all --no-deps
 
       - name: Install taplo
         run: cargo install taplo-cli --locked

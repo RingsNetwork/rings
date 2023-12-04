@@ -13,9 +13,9 @@ use crate::core::transport::WebrtcConnectionState;
 use crate::error::Error;
 use crate::error::Result;
 
-/// The[ConnectionRef] is a weak reference to a connection and implements the `ConnectionInterface` trait.
+/// [ConnectionRef] is a weak reference to a connection and implements the `ConnectionInterface` trait.
 /// When the connection is dropped, it returns an error called [Error::ConnectionReleased].
-/// It serves as the return value for the `get_connection` method of [Transport](crate::Transport).
+/// It serves as the return value for the `connection` method of [TransportInterface](crate::core::transport::TransportInterface).
 pub struct ConnectionRef<C> {
     cid: String,
     conn: Weak<C>,
