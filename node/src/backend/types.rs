@@ -3,12 +3,14 @@
 //! Backend Message Types.
 
 use std::io::ErrorKind as IOErrorKind;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use rings_core::message::MessagePayload;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::client::Client;
 use crate::error::Result;
 
 /// TunnelId type, use uuid.
@@ -105,28 +107,41 @@ pub struct HttpResponse {
     pub body: Option<Bytes>,
 }
 
-/// IntoBackendMessage trait
-pub trait IntoBackendMessage {
-    /// into_backend_message
-    fn into_backend_message(self) -> BackendMessage;
-}
-
 /// MessageEndpoint trait
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 pub trait MessageEndpoint<T> {
     /// handle_message
-    async fn handle_message(&self, ctx: &MessagePayload, data: &T) -> Result<()>;
+    async fn handle_message(
+        &self,
+        client: Arc<Client>,
+        ctx: &MessagePayload,
+        data: &T,
+    ) -> Result<()>;
 }
 
-impl IntoBackendMessage for BackendMessage {
-    fn into_backend_message(self) -> BackendMessage {
-        self
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl MessageEndpoint<BackendMessage>
+    for Vec<Box<dyn MessageEndpoint<BackendMessage> + Send + Sync>>
+{
+    async fn handle_message(
+        &self,
+        client: Arc<Client>,
+        ctx: &MessagePayload,
+        data: &BackendMessage,
+    ) -> Result<()> {
+        for endpoint in self {
+            if let Err(e) = self.handle_message(client.clone(), ctx, data).await {
+                tracing::error!("Failed to handle message, {:?}", e)
+            }
+        }
+        Ok(())
     }
 }
 
-impl IntoBackendMessage for ServerMessage {
-    fn into_backend_message(self) -> BackendMessage {
+impl Into<BackendMessage> for ServerMessage {
+    fn into(self) -> BackendMessage {
         BackendMessage::ServerMessage(self)
     }
 }

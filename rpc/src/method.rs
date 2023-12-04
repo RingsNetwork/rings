@@ -26,6 +26,8 @@ pub enum Method {
     Disconnect,
     /// SendCustomMessage,
     SendCustomMessage,
+    /// SendBackendMessage
+    SendBackendMessage,
     /// Append data to topic
     PublishMessageToTopic,
     /// Fetch data of topic
@@ -54,6 +56,7 @@ impl Method {
             Method::Disconnect => "disconnect",
             Method::AcceptAnswer => "acceptAnswer",
             Method::SendCustomMessage => "sendCustomMessage",
+            Method::SendBackendMessage => "sendBackendmessage",
             Method::PublishMessageToTopic => "publishMessageToTopic",
             Method::FetchMessagesOfTopic => "fetchMessagesOfTopic",
             Method::RegisterService => "registerService",

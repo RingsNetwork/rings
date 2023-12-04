@@ -11,10 +11,13 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
+use crate::backend::types::BackendMessage;
 use crate::backend::types::ServerMessage;
 use crate::backend::types::TunnelDefeat;
 use crate::backend::types::TunnelId;
-use crate::processor::Processor;
+use crate::client::Client;
+use crate::jsonrpc::server::BackendMessageParams;
+use crate::prelude::jsonrpc_core::Params;
 
 pub struct Tunnel {
     tid: TunnelId,
@@ -28,7 +31,6 @@ pub struct TunnelListener {
     local_stream: TcpStream,
     remote_stream_tx: mpsc::Sender<Bytes>,
     remote_stream_rx: mpsc::Receiver<Bytes>,
-    processor: Arc<Processor>,
     peer_did: Did,
     cancel_token: CancellationToken,
 }
@@ -68,20 +70,15 @@ impl Tunnel {
         }
     }
 
-    pub async fn listen(
-        &mut self,
-        local_stream: TcpStream,
-        processor: Arc<Processor>,
-        peer_did: Did,
-    ) {
+    pub async fn listen(&mut self, client: Arc<Client>, local_stream: TcpStream, peer_did: Did) {
         if self.listener.is_some() {
             return;
         }
-
-        let mut listener = TunnelListener::new(self.tid, local_stream, processor, peer_did).await;
+        let client = client.clone();
+        let mut listener = TunnelListener::new(self.tid, local_stream, peer_did).await;
         let listener_cancel_token = listener.cancel_token();
         let remote_stream_tx = listener.remote_stream_tx.clone();
-        let listener_handler = tokio::spawn(Box::pin(async move { listener.listen().await }));
+        let listener_handler = tokio::spawn(Box::pin(async move { listener.listen(client).await }));
 
         self.remote_stream_tx = Some(remote_stream_tx);
         self.listener = Some(listener_handler);
@@ -90,19 +87,13 @@ impl Tunnel {
 }
 
 impl TunnelListener {
-    async fn new(
-        tid: TunnelId,
-        local_stream: TcpStream,
-        processor: Arc<Processor>,
-        peer_did: Did,
-    ) -> Self {
+    async fn new(tid: TunnelId, local_stream: TcpStream, peer_did: Did) -> Self {
         let (remote_stream_tx, remote_stream_rx) = mpsc::channel(1024);
         Self {
             tid,
             local_stream,
             remote_stream_tx,
             remote_stream_rx,
-            processor,
             peer_did,
             cancel_token: CancellationToken::new(),
         }
@@ -112,7 +103,7 @@ impl TunnelListener {
         self.cancel_token.clone()
     }
 
-    async fn listen(&mut self) {
+    async fn listen(&mut self, client: Arc<Client>) {
         let (mut local_read, mut local_write) = self.local_stream.split();
 
         let listen_local = async {
@@ -135,9 +126,16 @@ impl TunnelListener {
                             tid: self.tid,
                             body,
                         };
-                        if let Err(e) = self
-                            .processor
-                            .send_backend_message(self.peer_did, msg)
+
+                        let backend_message: BackendMessage = msg.into();
+                        let params: Params = BackendMessageParams {
+                            did: self.peer_did,
+                            data: backend_message,
+                        }
+                        .try_into()
+                        .expect("Failed on cover backend message to rpc Params");
+                        if let Err(e) = client
+                            .request("sendBackendMessage".to_string(), params, None)
                             .await
                         {
                             tracing::error!("Send TcpPackage message failed: {e:?}");
@@ -170,7 +168,9 @@ impl TunnelListener {
                     tid: self.tid,
                     reason: defeat,
                 };
-                if let Err(e) =self.processor.send_backend_message(self.peer_did, msg).await {
+        let backend_message: BackendMessage = msg.into();
+        let params: Params = BackendMessageParams{did: self.peer_did, data: backend_message}.try_into().expect("Failed to cover backend message to rpc params");
+        if let Err(e) = client.request("sendBackendMessage".to_string(), params, None).await {
                     tracing::error!("Send TcpClose message failed: {e:?}");
                 }
             },
@@ -180,7 +180,9 @@ impl TunnelListener {
                     tid: self.tid,
                     reason: defeat,
                 };
-                let _ = self.processor.send_backend_message(self.peer_did, msg).await;
+        let backend_message: BackendMessage = msg.into();
+        let params: Params = BackendMessageParams{did: self.peer_did, data: backend_message}.try_into().expect("Failed to cover backend message to rpc params");
+        let _ = client.request("sendBackendMessage".to_string(), params, None).await;
             }
         }
     }

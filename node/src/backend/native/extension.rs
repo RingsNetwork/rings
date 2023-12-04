@@ -45,8 +45,8 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::backend::types::MessageEndpoint;
+use crate::client::Client;
 use crate::error::Result;
-use crate::processor::Processor;
 
 /// Path of a wasm extension
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
@@ -65,10 +65,7 @@ pub struct ExtensionConfig {
 }
 
 /// Manager of Extension
-pub struct Extension {
-    #[allow(dead_code)]
-    processor: Arc<Processor>,
-}
+pub struct Extension {}
 
 /// Calls the extension handler with the given message and returns the response.
 pub trait ExtensionHandlerCaller {
@@ -78,8 +75,8 @@ pub trait ExtensionHandlerCaller {
 
 impl Extension {
     /// Creates a new Extension instance with the specified configuration.
-    pub async fn new(_config: &ExtensionConfig, processor: Arc<Processor>) -> Result<Self> {
-        Ok(Self { processor })
+    pub async fn new(_config: &ExtensionConfig) -> Result<Self> {
+        Ok(Self {})
     }
 }
 
@@ -87,7 +84,12 @@ impl Extension {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl MessageEndpoint<Bytes> for Extension {
     /// Handles the incoming message by passing it to the extension handlers.
-    async fn handle_message(&self, _ctx: &MessagePayload, _data: &Bytes) -> Result<()> {
+    async fn handle_message(
+        &self,
+        _client: Arc<Client>,
+        _ctx: &MessagePayload,
+        _data: &Bytes,
+    ) -> Result<()> {
         Ok(())
     }
 }

@@ -13,7 +13,7 @@ use rings_transport::core::transport::ConnectionInterface;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::backend::types::IntoBackendMessage;
+use crate::backend::types::BackendMessage;
 use crate::consts::DATA_REDUNDANT;
 use crate::error::Error;
 use crate::error::Result;
@@ -402,9 +402,8 @@ impl Processor {
     pub async fn send_backend_message(
         &self,
         destination: Did,
-        msg: impl IntoBackendMessage,
+        backend_msg: BackendMessage,
     ) -> Result<uuid::Uuid> {
-        let backend_msg = msg.into_backend_message();
         let msg_bytes = bincode::serialize(&backend_msg).map_err(|_| Error::EncodeError)?;
         self.send_message(&destination.to_string(), &msg_bytes)
             .await
