@@ -144,6 +144,10 @@ pub fn methods() -> Vec<(Method, MethodFnBox)> {
         (Method::SendTo, pin!(server::send_raw_message)),
         (Method::SendCustomMessage, pin!(server::send_custom_message)),
         (
+            Method::SendBackendMessage,
+            pin!(server::send_backend_message),
+        ),
+        (
             Method::PublishMessageToTopic,
             pin!(server::publish_message_to_topic),
         ),

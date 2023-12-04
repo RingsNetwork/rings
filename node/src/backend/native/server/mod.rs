@@ -1,5 +1,4 @@
 mod tcp_proxy;
-
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -15,14 +14,17 @@ use serde::Serialize;
 use crate::backend::native::server::tcp_proxy::tcp_connect_with_timeout;
 use crate::backend::native::server::tcp_proxy::Tunnel;
 use crate::backend::native::MessageEndpoint;
+use crate::backend::types::BackendMessage;
 use crate::backend::types::HttpRequest;
 use crate::backend::types::HttpResponse;
 use crate::backend::types::ServerMessage;
 use crate::backend::types::TunnelId;
+use crate::client::Client;
 use crate::consts::TCP_SERVER_TIMEOUT;
 use crate::error::Error;
 use crate::error::Result;
-use crate::processor::Processor;
+use crate::jsonrpc::server::BackendMessageParams;
+use crate::prelude::jsonrpc_core::Params;
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct ServiceConfig {
@@ -37,15 +39,13 @@ pub struct ServiceConfig {
 }
 
 pub struct Server {
-    processor: Arc<Processor>,
     pub services: Vec<ServiceConfig>,
     pub tunnels: DashMap<TunnelId, Tunnel>,
 }
 
 impl Server {
-    pub fn new(services: Vec<ServiceConfig>, processor: Arc<Processor>) -> Self {
+    pub fn new(services: Vec<ServiceConfig>) -> Self {
         Self {
-            processor,
             services,
             tunnels: DashMap::new(),
         }
@@ -59,7 +59,12 @@ impl Server {
 
 #[async_trait::async_trait]
 impl MessageEndpoint<ServerMessage> for Server {
-    async fn handle_message(&self, ctx: &MessagePayload, msg: &ServerMessage) -> Result<()> {
+    async fn handle_message(
+        &self,
+        client: Arc<Client>,
+        ctx: &MessagePayload,
+        msg: &ServerMessage,
+    ) -> Result<()> {
         let peer_did = ctx.transaction.signer();
 
         match msg {
@@ -71,15 +76,21 @@ impl MessageEndpoint<ServerMessage> for Server {
                             tid: *tid,
                             reason: e,
                         };
-                        self.processor.send_backend_message(peer_did, msg).await?;
+                        let backend_message: BackendMessage = msg.into();
+                        let params: Params = BackendMessageParams {
+                            did: peer_did,
+                            data: backend_message,
+                        }
+                        .try_into()?;
+                        client
+                            .request("sendBackendMessage".to_string(), params, None)
+                            .await?;
                         Err(Error::TunnelError(e))
                     }
 
                     Ok(local_stream) => {
                         let mut tunnel = Tunnel::new(*tid);
-                        tunnel
-                            .listen(local_stream, self.processor.clone(), peer_did)
-                            .await;
+                        tunnel.listen(client.clone(), local_stream, peer_did).await;
                         self.tunnels.insert(*tid, tunnel);
                         Ok(())
                     }
@@ -100,8 +111,14 @@ impl MessageEndpoint<ServerMessage> for Server {
             ServerMessage::HttpRequest(req) => {
                 let service = self.service(&req.service).ok_or(Error::InvalidService)?;
                 let resp = handle_http_request(service.addr, req).await?;
-                self.processor
-                    .send_backend_message(peer_did, ServerMessage::HttpResponse(resp))
+                let msg: BackendMessage = ServerMessage::HttpResponse(resp).into();
+                let params: Params = BackendMessageParams {
+                    did: peer_did,
+                    data: msg,
+                }
+                .try_into()?;
+                client
+                    .request("sendBackendMessage".to_string(), params, None)
                     .await?;
                 Ok(())
             }

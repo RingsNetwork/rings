@@ -59,6 +59,15 @@ pub enum Signer {
 
 #[allow(dead_code)]
 impl Client {
+    pub fn from_processor(p: Arc<Processor>) -> Self {
+        let processor = p.clone();
+        let mut handler: HandlerType = processor.clone().into();
+        handler.build();
+        Self {
+            processor,
+            handler: handler.into(),
+        }
+    }
     /// Create a client instance with storage name
     pub(crate) async fn new_client_with_storage_internal(
         config: ProcessorConfig,
@@ -137,7 +146,7 @@ impl Client {
 
     /// Request local rpc interface
     /// the internal rpc interface is provide by rings_rpc
-    pub(crate) async fn request_internal(
+    pub async fn request_internal(
         &self,
         method: String,
         params: Params,
@@ -159,5 +168,17 @@ impl Client {
             .handle_request(req)
             .await
             .map_err(Error::InternalRpcError)
+    }
+}
+
+#[cfg(feature = "node")]
+impl Client {
+    pub async fn request(
+        &self,
+        method: String,
+        params: Params,
+        opt_id: Option<String>,
+    ) -> Result<Output> {
+        self.request_internal(method, params, opt_id).await
     }
 }

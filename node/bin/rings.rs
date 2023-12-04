@@ -12,10 +12,10 @@ use futures::pin_mut;
 use futures::select;
 use futures::StreamExt;
 use futures_timer::Delay;
-use rings_core::dht::Did;
-use rings_core::session::SessionSkBuilder;
-use rings_node::backend::native::Backend;
 use rings_node::backend::native::BackendConfig;
+use rings_node::backend::native::BackendContext;
+use rings_node::backend::Backend;
+use rings_node::client::Client as NodeClient;
 use rings_node::logging::init_logging;
 use rings_node::logging::LogLevel;
 use rings_node::measure::PeriodicMeasure;
@@ -446,10 +446,10 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
             .build()?,
     );
     println!("Did: {}", processor.swarm.did());
-
-    let backend = Arc::new(Backend::new(bc, processor.clone()).await?);
-    let backend_service_names = backend.service_names();
-
+    let backend_context = BackendContext::new(bc).await?;
+    let backend_service_names = backend_context.service_names();
+    let client = Arc::new(NodeClient::from_processor(processor.clone()));
+    let backend = Arc::new(Backend::new(client, Box::new(backend_context)));
     processor.swarm.set_callback(backend).unwrap();
 
     let processor_clone = processor.clone();
