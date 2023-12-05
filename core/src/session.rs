@@ -27,7 +27,7 @@
 //! let account_type = "secp256k1".to_string();
 //! let account_entity = user_secret_key_did.to_string();
 //!
-//! let mut builder = SessionSkBuilder::new(account_entity, account_type);
+//! let builder = SessionSkBuilder::new(account_entity, account_type);
 //! let unsigned_proof = builder.unsigned_proof();
 //!
 //! // Sign the unsigned proof with user's secret key.

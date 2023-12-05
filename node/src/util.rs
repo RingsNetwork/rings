@@ -1,6 +1,9 @@
 //! Utilities for configuration and build.
 #![warn(missing_docs)]
 
+use crate::error::Error;
+use crate::error::Result;
+
 /// build_version of program
 pub fn build_version() -> String {
     let mut infos = vec![];
@@ -11,6 +14,35 @@ pub fn build_version() -> String {
         infos.push(git_hash);
     }
     infos.join("-")
+}
+
+/// Expand path with "~" to absolute path.
+#[cfg(feature = "node")]
+pub fn expand_home<P>(path: P) -> Result<std::path::PathBuf>
+where P: AsRef<std::path::Path> {
+    let Ok(stripped) = path.as_ref().strip_prefix("~") else {
+        return Ok(path.as_ref().to_path_buf());
+    };
+
+    let Some(mut p) = home::home_dir() else {
+        return Err(Error::HomeDirError);
+    };
+
+    p.push(stripped);
+
+    Ok(p)
+}
+
+/// Create parent directory of a path if not exists.
+#[cfg(feature = "node")]
+pub fn ensure_parent_dir<P>(path: P) -> Result<()>
+where P: AsRef<std::path::Path> {
+    let path = expand_home(path)?;
+    let parent = path.parent().ok_or(Error::ParentDirError)?;
+    if !parent.is_dir() {
+        std::fs::create_dir_all(parent).map_err(|e| Error::CreateFileError(e.to_string()))?;
+    };
+    Ok(())
 }
 
 #[cfg(feature = "node")]
@@ -49,4 +81,51 @@ pub mod loader {
     }
 
     impl ResourceLoader for Seed {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_expand_home_with_tilde() {
+        let input = "~";
+        let mut expected = std::env::var("HOME").unwrap();
+        expected.push('/');
+        let result = expand_home(input).unwrap();
+        assert_eq!(result.to_str(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn test_expand_home_with_relative_path() {
+        let input = "~/path/to/file.txt";
+        let mut expected = std::env::var("HOME").unwrap();
+        expected.push_str("/path/to/file.txt");
+        let result = expand_home(input).unwrap();
+        assert_eq!(result.to_str(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn test_expand_home_with_absolute_path() {
+        let input = "/absolute/path/to/file.txt";
+        let expected = std::path::PathBuf::from(input);
+        let result = expand_home(input).unwrap();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_expand_home_with_invalid_path() {
+        let input = "path/does/not/exist.txt";
+        let expected = std::path::PathBuf::from(input);
+        let result = expand_home(input).unwrap();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_expand_home_with_empty_path() {
+        let input = "";
+        let expected = std::path::PathBuf::from("");
+        let result = expand_home(input).unwrap();
+        assert_eq!(result, expected);
+    }
 }
