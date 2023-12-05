@@ -1,8 +1,8 @@
 //! Utilities for configuration and build.
 #![warn(missing_docs)]
 
+#[cfg(feature = "node")]
 use crate::error::Error;
-use crate::error::Result;
 
 /// build_version of program
 pub fn build_version() -> String {
@@ -18,7 +18,7 @@ pub fn build_version() -> String {
 
 /// Expand path with "~" to absolute path.
 #[cfg(feature = "node")]
-pub fn expand_home<P>(path: P) -> Result<std::path::PathBuf>
+pub fn expand_home<P>(path: P) -> Result<std::path::PathBuf, Error>
 where P: AsRef<std::path::Path> {
     let Ok(stripped) = path.as_ref().strip_prefix("~") else {
         return Ok(path.as_ref().to_path_buf());
@@ -35,7 +35,7 @@ where P: AsRef<std::path::Path> {
 
 /// Create parent directory of a path if not exists.
 #[cfg(feature = "node")]
-pub fn ensure_parent_dir<P>(path: P) -> Result<()>
+pub fn ensure_parent_dir<P>(path: P) -> Result<(), Error>
 where P: AsRef<std::path::Path> {
     let path = expand_home(path)?;
     let parent = path.parent().ok_or(Error::ParentDirError)?;
@@ -84,6 +84,7 @@ pub mod loader {
 }
 
 #[cfg(test)]
+#[cfg(feature = "node")]
 mod tests {
     use super::*;
 
