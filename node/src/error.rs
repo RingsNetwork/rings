@@ -95,6 +95,10 @@ pub enum Error {
     OpenFileError(String) = 901,
     #[error("Acquire lock failed")]
     Lock = 902,
+    #[error("Cannot find home directory")]
+    HomeDirError = 903,
+    #[error("Cannot find parent directory")]
+    ParentDirError = 904,
     #[error("Serde json error: {0}")]
     SerdeJsonError(#[from] serde_json::Error) = 1000,
     #[error("Serde yaml error: {0}")]

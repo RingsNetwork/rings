@@ -15,6 +15,8 @@ use crate::prelude::rings_core::ecc::SecretKey;
 use crate::prelude::SessionSk;
 use crate::processor::ProcessorConfig;
 use crate::processor::ProcessorConfigSerialized;
+use crate::util::ensure_parent_dir;
+use crate::util::expand_home;
 
 lazy_static::lazy_static! {
   static ref DEFAULT_DATA_STORAGE_CONFIG: StorageConfig = StorageConfig {
@@ -55,6 +57,7 @@ pub struct Config {
     pub endpoint_url: String,
     pub ice_servers: String,
     pub stabilize_timeout: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub external_ip: Option<String>,
     /// When there is no configuration in the YAML file,
     /// its deserialization is equivalent to `vec![]` in Rust.
@@ -78,12 +81,18 @@ impl TryFrom<Config> for ProcessorConfigSerialized {
                 .expect("create session sk failed")
                 .dump()
                 .expect("dump session sk failed")
-        } else if let Some(dk) = config.session_manager {
+        } else if let Some(ssk) = config.session_manager {
             tracing::warn!("Field `session_manager` is deprecated, use `session_sk` instead.");
-            dk
+            ssk
         } else {
-            config.session_sk.expect("session_sk is not set.")
+            let ssk_file = config.session_sk.expect("session_sk is not set.");
+            let ssk_file_expand_home = expand_home(&ssk_file)?;
+            fs::read_to_string(ssk_file_expand_home).unwrap_or_else(|e| {
+                tracing::warn!("Read session_sk file failed: {e:?}. Handling it as raw session_sk string. This mode is deprecated. please use a file path.");
+                ssk_file
+            })
         };
+
         if let Some(ext_ip) = config.external_ip {
             Ok(Self::new_with_ext_addr(
                 config.ice_servers,
@@ -118,12 +127,9 @@ impl From<Config> for BackendConfig {
 }
 
 impl Config {
-    pub fn new_with_key(key: SecretKey) -> Self {
-        let session_sk = SessionSk::new_with_seckey(&key)
-            .expect("create session sk failed")
-            .dump()
-            .expect("dump session sk failed");
-
+    pub fn new<P>(session_sk: P) -> Self
+    where P: AsRef<std::path::Path> {
+        let session_sk = session_sk.as_ref().to_string_lossy().to_string();
         Self {
             ecdsa_key: None,
             session_manager: None,
@@ -142,21 +148,8 @@ impl Config {
 
     pub fn write_fs<P>(&self, path: P) -> Result<String>
     where P: AsRef<std::path::Path> {
-        let path = match path.as_ref().strip_prefix("~") {
-            Ok(stripped) => {
-                let home_dir = env::var_os("HOME").map(PathBuf::from);
-                home_dir.map(|mut p| {
-                    p.push(stripped);
-                    p
-                })
-            }
-            Err(_) => Some(path.as_ref().to_owned()),
-        }
-        .unwrap();
-        let parent = path.parent().expect("no parent directory");
-        if !parent.is_dir() {
-            fs::create_dir_all(parent).map_err(|e| Error::CreateFileError(e.to_string()))?;
-        };
+        let path = expand_home(path)?;
+        ensure_parent_dir(&path)?;
         let f =
             fs::File::create(path.as_path()).map_err(|e| Error::CreateFileError(e.to_string()))?;
         let f_writer = io::BufWriter::new(f);
@@ -166,28 +159,11 @@ impl Config {
 
     pub fn read_fs<P>(path: P) -> Result<Config>
     where P: AsRef<std::path::Path> {
-        let path = match path.as_ref().strip_prefix("~") {
-            Ok(stripped) => {
-                let home_dir = env::var_os("HOME").map(PathBuf::from);
-                home_dir.map(|mut p| {
-                    p.push(stripped);
-                    p
-                })
-            }
-            Err(_) => Some(path.as_ref().to_owned()),
-        }
-        .unwrap();
+        let path = expand_home(path)?;
         tracing::debug!("Read config from: {:?}", path);
         let f = fs::File::open(path).map_err(|e| Error::OpenFileError(e.to_string()))?;
         let f_rdr = io::BufReader::new(f);
         serde_yaml::from_reader(f_rdr).map_err(|_| Error::EncodeError)
-    }
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        let ecdsa_key = SecretKey::random();
-        Self::new_with_key(ecdsa_key)
     }
 }
 

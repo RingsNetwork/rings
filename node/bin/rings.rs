@@ -12,6 +12,8 @@ use futures::pin_mut;
 use futures::select;
 use futures::StreamExt;
 use futures_timer::Delay;
+use rings_core::dht::Did;
+use rings_core::session::SessionSkBuilder;
 use rings_node::backend::native::Backend;
 use rings_node::backend::native::BackendConfig;
 use rings_node::logging::init_logging;
@@ -25,6 +27,8 @@ use rings_node::prelude::PersistenceStorage;
 use rings_node::processor::Processor;
 use rings_node::processor::ProcessorBuilder;
 use rings_node::processor::ProcessorConfig;
+use rings_node::util::ensure_parent_dir;
+use rings_node::util::expand_home;
 use tokio::io;
 use tokio::io::AsyncBufReadExt;
 
@@ -43,6 +47,8 @@ struct Cli {
 enum Command {
     #[command(about = "Initializes a node with the given configuration.")]
     Init(InitCommand),
+    #[command(about = "Creates a new session secret key.")]
+    NewSession(NewSessionCommand),
     #[command(about = "Starts a long-running node daemon.")]
     Run(RunCommand),
     #[command(about = "Provides chat room-like functionality on the Rings Network.")]
@@ -75,19 +81,21 @@ struct ConfigArgs {
 
 #[derive(Args, Debug)]
 struct InitCommand {
+    #[command(flatten)]
+    session_args: SessionArgs,
+
     #[arg(
         long,
         default_value = "~/.rings/config.yaml",
         help = "The location of config file"
     )]
     pub location: String,
+}
 
-    #[arg(
-        long = "key",
-        short = 'k',
-        help = "Your ecdsa_key. If not provided, a new key will be generated"
-    )]
-    pub ecdsa_key: Option<SecretKey>,
+#[derive(Args, Debug)]
+struct NewSessionCommand {
+    #[command(flatten)]
+    session_args: SessionArgs,
 }
 
 #[derive(Args, Debug)]
@@ -102,7 +110,6 @@ struct RunCommand {
 
     #[arg(
         long,
-        short = 's',
         help = "ICE server list. If not provided, use ice_servers in config file or stun://stun.l.google.com:19302",
         env
     )]
@@ -174,6 +181,59 @@ impl ClientArgs {
         let endpoint_url = self.endpoint_url.as_ref().unwrap_or(&c.endpoint_url);
         let session_sk = process_config.session_sk();
         Client::new(endpoint_url.as_str(), session_sk)
+    }
+}
+
+#[derive(Args, Debug)]
+struct SessionArgs {
+    #[arg(
+        long,
+        short = 's',
+        default_value = "~/.rings/session_sk",
+        help = "The location of session_sk file"
+    )]
+    pub session_sk: String,
+
+    #[arg(
+        long,
+        short = 'k',
+        help = "Your ecdsa_key. If not provided, a random key will be used"
+    )]
+    pub ecdsa_key: Option<SecretKey>,
+
+    #[arg(
+        long,
+        default_value = "2592000",
+        help = "The ttl of session file in seconds"
+    )]
+    pub ttl: u64,
+}
+
+impl SessionArgs {
+    fn new_session_then_write_to_fs(&self) -> anyhow::Result<&std::path::Path> {
+        let key = self.ecdsa_key.unwrap_or_else(|| {
+            let rand_key = SecretKey::random();
+            println!("Your random ecdsa key is: {}", rand_key.to_string());
+            rand_key
+        });
+        let key_did: Did = key.address().into();
+
+        let ssk_builder = SessionSkBuilder::new(key_did.to_string(), "secp256k1".to_string())
+            .set_ttl(self.ttl * 1000);
+        let unsigned_proof = ssk_builder.unsigned_proof();
+
+        let sig = key.sign(&unsigned_proof).to_vec();
+        let ssk_builder = ssk_builder.set_session_sig(sig);
+
+        let ssk = ssk_builder.build()?;
+        let ssk_dump = ssk.dump()?;
+
+        let ssk_path = std::path::Path::new(&self.session_sk);
+        ensure_parent_dir(ssk_path)?;
+        std::fs::write(expand_home(ssk_path)?, ssk_dump)?;
+        println!("Your session_sk file has saved to: {}", ssk_path.display());
+
+        Ok(ssk_path)
     }
 }
 
@@ -553,13 +613,14 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Command::Init(args) => {
-            let config = if let Some(key) = args.ecdsa_key {
-                config::Config::new_with_key(key)
-            } else {
-                config::Config::default()
-            };
-            let p = config.write_fs(args.location.as_str())?;
+            let session_sk_path = args.session_args.new_session_then_write_to_fs()?;
+            let config = config::Config::new(session_sk_path);
+            let p = config.write_fs(&args.location)?;
             println!("Your config file has saved to: {}", p);
+            Ok(())
+        }
+        Command::NewSession(args) => {
+            args.session_args.new_session_then_write_to_fs()?;
             Ok(())
         }
         Command::Inspect(args) => {
