@@ -10,6 +10,7 @@ use rings_core::message::CustomMessage;
 use rings_core::message::Message;
 use rings_core::message::MessagePayload;
 use rings_core::swarm::callback::SwarmCallback;
+use rings_core::utils::js_func;
 use rings_core::utils::js_value;
 use rings_derive::wasm_export;
 use wasm_bindgen::JsValue;
@@ -57,47 +58,10 @@ impl MessageEndpoint<BackendMessage> for BackendContext {
         let ctx = js_value::serialize(&payload)?.clone();
         let msg = js_value::serialize(&msg)?.clone();
 
-        let _ = js_func_wrapper_of_4::<BackendContext, Client, JsValue, JsValue>(
+        let _ = js_func::of4::<BackendContext, Client, JsValue, JsValue>(
             &self.backend_message_handler,
         )(&self, &client, &ctx, &msg)
         .await;
         Ok(())
     }
-}
-
-/// A Wrapper for js_sys::Function with type
-pub fn js_func_wrapper_of_4<
-    'a,
-    'b: 'a,
-    T0: Into<JsValue> + Clone,
-    T1: Into<JsValue> + Clone,
-    T2: Into<JsValue> + Clone,
-    T3: Into<JsValue> + Clone,
->(
-    func: &Function,
-) -> Box<dyn Fn(&'b T0, &'b T1, &'b T2, &'b T3) -> Pin<Box<dyn Future<Output = Result<()>> + 'b>>> {
-    let func = func.clone();
-    Box::new(
-        move |a: &T0, b: &T1, c: &T2, d: &T3| -> Pin<Box<dyn Future<Output = Result<()>>>> {
-            let func = func.clone();
-            Box::pin(async move {
-                let func = func.clone();
-                JsFuture::from(js_sys::Promise::from(
-                    func.apply(
-                        &JsValue::NULL,
-                        &Array::of4(
-                            &a.clone().into(),
-                            &b.clone().into(),
-                            &c.clone().into(),
-                            &d.clone().into(),
-                        ),
-                    )
-                    .map_err(|e| Error::JsError(js_sys::Error::from(e).to_string().into()))?,
-                ))
-                .await
-                .map_err(|e| Error::JsError(js_sys::Error::from(e).to_string().into()))?;
-                Ok(())
-            })
-        },
-    )
 }
