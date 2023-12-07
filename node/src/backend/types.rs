@@ -132,7 +132,7 @@ impl MessageEndpoint<BackendMessage>
         data: &BackendMessage,
     ) -> Result<()> {
         for endpoint in self {
-            if let Err(e) = self.handle_message(client.clone(), ctx, data).await {
+            if let Err(e) = endpoint.handle_message(client.clone(), ctx, data).await {
                 tracing::error!("Failed to handle message, {:?}", e)
             }
         }

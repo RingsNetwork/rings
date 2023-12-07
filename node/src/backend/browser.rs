@@ -1,4 +1,11 @@
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+
 use async_trait::async_trait;
+use js_sys::Array;
+use js_sys::Function;
+use js_sys::JsString;
 use rings_core::message::CustomMessage;
 use rings_core::message::Message;
 use rings_core::message::MessagePayload;
@@ -6,79 +13,92 @@ use rings_core::swarm::callback::SwarmCallback;
 use rings_core::utils::js_value;
 use rings_derive::wasm_export;
 use wasm_bindgen::JsValue;
+use wasm_bindgen_futures::JsFuture;
 
 use crate::backend::types::BackendMessage;
+use crate::backend::types::MessageEndpoint;
+use crate::backend::Backend;
+use crate::client::Client;
 use crate::error::Error;
 use crate::error::Result;
 
 /// MessageCallback instance for Browser
 #[wasm_export]
-pub struct Backend {
-    backend_message_handler: js_sys::Function,
+#[derive(Clone)]
+pub struct BackendContext {
+    backend_message_handler: Function,
 }
 
 #[wasm_export]
-impl Backend {
+impl BackendContext {
     /// Create a new instance of message callback, this function accept one argument:
     ///
-    /// * backend_message_handler: function(payload: string, message: string) -> ();
+    /// * backend_message_handler: function(client: Arc<Client>, payload: string, message: string) -> Promise<()>;
     #[wasm_bindgen(constructor)]
-    pub fn new(backend_message_handler: js_sys::Function) -> Backend {
-        Backend {
+    pub fn new(backend_message_handler: js_sys::Function) -> BackendContext {
+        BackendContext {
             backend_message_handler,
         }
     }
 }
 
-#[async_trait(?Send)]
-impl SwarmCallback for Backend {
-    async fn on_inbound(
+#[cfg_attr(feature = "browser", async_trait(?Send))]
+#[cfg_attr(not(feature = "browser"), async_trait)]
+impl MessageEndpoint<BackendMessage> for BackendContext {
+    async fn handle_message(
         &self,
+        client: Arc<Client>,
         payload: &MessagePayload,
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let data: Message = payload.transaction.data()?;
+        msg: &BackendMessage,
+    ) -> Result<()> {
+        // let _ =
+        //     js_handler_wrapper(&self.backend_message_handler)(&self, client, payload, msg).await;
+        let client = client.clone().as_ref().clone();
+        let ctx = js_value::serialize(&payload)?.clone();
+        let msg = js_value::serialize(&msg)?.clone();
 
-        let Message::CustomMessage(CustomMessage(msg)) = data else {
-            return Ok(());
-        };
-
-        let backend_msg = bincode::deserialize(&msg)?;
-        tracing::debug!("backend_message received: {backend_msg:?}");
-
-        self.handle_backend_message(payload, &backend_msg).await?;
-
+        let _ = js_func_wrapper_of_4::<BackendContext, Client, JsValue, JsValue>(
+            &self.backend_message_handler,
+        )(
+            &self,
+	    &client,
+	    &ctx,
+	    &msg
+        )
+        .await;
         Ok(())
     }
 }
 
-impl Backend {
-    async fn handle_backend_message(
-        &self,
-        payload: &MessagePayload,
-        msg: &BackendMessage,
-    ) -> Result<()> {
-        let this = JsValue::null();
-        let r = self
-            .backend_message_handler
-            .call2(
-                &this,
-                &js_value::serialize(&payload)?,
-                &js_value::serialize(&msg)?,
-            )
-            .map_err(|e| Error::JsError(format!("call backend_message_handler failed: {e:?}")))?;
 
-        let p = js_sys::Promise::try_from(r).map_err(|e| {
-            Error::JsError(format!(
-                "convert backend_message_handler promise failed: {e:?}"
-            ))
-        })?;
-
-        wasm_bindgen_futures::JsFuture::from(p).await.map_err(|e| {
-            Error::JsError(format!(
-                "invoke backend_message_handler promise failed: {e:?}"
-            ))
-        })?;
-
-        Ok(())
-    }
+/// A Wrapper for js_sys::Function with type
+pub fn js_func_wrapper_of_4<'a, 'b: 'a, T0: Into<JsValue> + Clone, T1: Into<JsValue> + Clone, T2: Into<JsValue> + Clone, T3: Into<JsValue> + Clone>(
+    func: &Function,
+) -> Box<
+    dyn Fn(&'b T0, &'b T1, &'b T2, &'b T3) -> Pin<Box<dyn Future<Output = Result<()>> + 'b>>,
+> {
+    let func = func.clone();
+    Box::new(
+        move |a: &T0, b: &T1, c: &T2, d: &T3| -> Pin<Box<dyn Future<Output = Result<()>>>> {
+            let func = func.clone();
+            Box::pin(async move {
+                let func = func.clone();
+                JsFuture::from(js_sys::Promise::from(
+                    func.apply(
+                        &JsValue::NULL,
+                        &Array::of4(
+                            &a.clone().into(),
+                            &b.clone().into(),
+                            &c.clone().into(),
+                            &d.clone().into(),
+                        ),
+                    )
+                    .map_err(|e| Error::JsError(js_sys::Error::from(e).to_string().into()))?,
+                ))
+                .await
+                .map_err(|e| Error::JsError(js_sys::Error::from(e).to_string().into()))?;
+                Ok(())
+            })
+        },
+    )
 }
