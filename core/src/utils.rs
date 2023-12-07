@@ -128,10 +128,10 @@ pub mod js_func {
 					].into_iter()
 				    ),
 				)
-				    .map_err(|e| Error::JsError(js_sys::Error::from(e).to_string().into()))?,
+				    .map_err(|e| Error::from(js_sys::Error::from(e)))?,
 			    ))
 				.await
-				.map_err(|e| Error::JsError(js_sys::Error::from(e).to_string().into()))?;
+				.map_err(|e| Error::from(js_sys::Error::from(e)))?;
 			    Ok(())
 			})
 		    },
