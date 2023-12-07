@@ -49,137 +49,101 @@ pub mod js_value {
 
 #[cfg(feature = "wasm")]
 pub mod js_func {
-    use wasm_bindgen::JsValue;
-    use crate::error::Error;
-    use crate::error::Result;
     use std::future::Future;
     use std::pin::Pin;
-    use wasm_bindgen_futures::JsFuture;
+
     use js_sys::Array;
     use js_sys::Function;
+    use wasm_bindgen::JsValue;
+    use wasm_bindgen_futures::JsFuture;
 
+    use crate::error::Error;
+    use crate::error::Result;
 
-    /// Wrap a js_sys::Function with type fn(T, T) -> Promise<()>
+    /// This macro will generate a Wrapper for map a js_sys::Function with type fn(T, T, T, T) -> Promise<()>
     /// to native function
-    /// Todo: reimplement with macro
-    pub fn of2<
-        'a,
-        'b: 'a,
-        T0: Into<JsValue> + Clone,
-        T1: Into<JsValue> + Clone,
-    >(
-        func: &Function,
-    ) -> Box<dyn Fn(&'b T0, &'b T1) -> Pin<Box<dyn Future<Output = Result<()>> + 'b>>>
-    {
-        let func = func.clone();
-        Box::new(
-            move |a: &T0, b: &T1| -> Pin<Box<dyn Future<Output = Result<()>>>> {
-                let func = func.clone();
-                Box::pin(async move {
-                    let func = func.clone();
-                    JsFuture::from(js_sys::Promise::from(
-                        func.apply(
-                            &JsValue::NULL,
-                            &Array::from_iter(
-				vec![
-                                    &a.clone().into(),
-                                    &b.clone().into(),
-				].into_iter()
-                            ),
-                        )
-                        .map_err(|e| Error::JsError(js_sys::Error::from(e).to_string().into()))?,
-                    ))
-                    .await
-                    .map_err(|e| Error::JsError(js_sys::Error::from(e).to_string().into()))?;
-                    Ok(())
-                })
-            },
-        )
+    /// # Example:
+    /// For macro calling: js_func_for_impls!(of4, a: T0, b: T1, c: T2, d: T3);
+    /// Will generate code:
+    /// ```rust
+    /// pub fn of4<
+    ///     'a,
+    ///     'b: 'a,
+    ///     T0: Into<JsValue> + Clone,
+    ///     T1: Into<JsValue> + Clone,
+    ///     T2: Into<JsValue> + Clone,
+    ///     T3: Into<JsValue> + Clone,
+    /// >(
+    ///     func: &Function,
+    /// ) -> Box<dyn Fn(&'b T0, &'b T1, &'b T2, &'b T3) -> Pin<Box<dyn Future<Output = Result<()>> + 'b>>>
+    /// {
+    ///     let func = func.clone();
+    ///     Box::new(
+    ///         move |a: &T0, b: &T1, c: &T2, d: &T3| -> Pin<Box<dyn Future<Output = Result<()>>>> {
+    ///             let func = func.clone();
+    ///             Box::pin(async move {
+    ///                 let func = func.clone();
+    ///                 JsFuture::from(js_sys::Promise::from(
+    ///                     func.apply(
+    ///                         &JsValue::NULL,
+    ///                         &Array::from_iter(
+    ///                             vec![
+    ///                                 &a.clone().into(),
+    ///                                 &b.clone().into(),
+    ///                                 &c.clone().into(),
+    ///                                 &d.clone().into(),
+    ///                             ]
+    ///                             .into_iter(),
+    ///                         ),
+    ///                     )
+    ///                     .map_err(|e| Error::JsError(js_sys::Error::from(e).to_string().into()))?,
+    ///                 ))
+    ///                 .await
+    ///                 .map_err(|e| Error::JsError(js_sys::Error::from(e).to_string().into()))?;
+    ///                 Ok(())
+    ///             })
+    ///         },
+    ///     )
+    /// }
+    /// ```
+    #[macro_export]
+    macro_rules! of {
+	($func: ident, $($name:ident: $type: ident),+$(,)? ) => (
+	    pub fn $func<'a, 'b: 'a, $($type: Into<JsValue> + Clone),+>(
+		func: &Function,
+	    ) -> Box<dyn Fn($(&'b $type),+) -> Pin<Box<dyn Future<Output = Result<()>> + 'b>>>
+	    {
+		let func = func.clone();
+		Box::new(
+		    move |$($name: &$type,)+| -> Pin<Box<dyn Future<Output = Result<()>>>> {
+			let func = func.clone();
+			Box::pin(async move {
+			    let func = func.clone();
+			    JsFuture::from(js_sys::Promise::from(
+				func.apply(
+				    &JsValue::NULL,
+				    &Array::from_iter(
+					vec![
+					    $(&$name.clone().into())+,
+					].into_iter()
+				    ),
+				)
+				    .map_err(|e| Error::JsError(js_sys::Error::from(e).to_string().into()))?,
+			    ))
+				.await
+				.map_err(|e| Error::JsError(js_sys::Error::from(e).to_string().into()))?;
+			    Ok(())
+			})
+		    },
+		)
+	    }
+	)
     }
 
-
-    /// Wrap a js_sys::Function with type fn(T, T, T) -> Promise<()>
-    /// to native function
-    /// Todo: reimplement with macro
-    pub fn of3<
-        'a,
-        'b: 'a,
-        T0: Into<JsValue> + Clone,
-        T1: Into<JsValue> + Clone,
-        T2: Into<JsValue> + Clone,
-    >(
-        func: &Function,
-    ) -> Box<dyn Fn(&'b T0, &'b T1, &'b T2) -> Pin<Box<dyn Future<Output = Result<()>> + 'b>>>
-    {
-        let func = func.clone();
-        Box::new(
-            move |a: &T0, b: &T1, c: &T2| -> Pin<Box<dyn Future<Output = Result<()>>>> {
-                let func = func.clone();
-                Box::pin(async move {
-                    let func = func.clone();
-                    JsFuture::from(js_sys::Promise::from(
-                        func.apply(
-                            &JsValue::NULL,
-                            &Array::from_iter(
-				vec![
-                                    &a.clone().into(),
-                                    &b.clone().into(),
-                                    &c.clone().into(),
-				].into_iter()
-                            ),
-                        )
-                        .map_err(|e| Error::JsError(js_sys::Error::from(e).to_string().into()))?,
-                    ))
-                    .await
-                    .map_err(|e| Error::JsError(js_sys::Error::from(e).to_string().into()))?;
-                    Ok(())
-                })
-            },
-        )
-    }
-
-
-    /// Wrap a js_sys::Function with type fn(T, T, T, T) -> Promise<()>
-    /// to native function
-    /// Todo: reimplement with macro
-    pub fn of4<
-        'a,
-        'b: 'a,
-        T0: Into<JsValue> + Clone,
-        T1: Into<JsValue> + Clone,
-        T2: Into<JsValue> + Clone,
-        T3: Into<JsValue> + Clone,
-    >(
-        func: &Function,
-    ) -> Box<dyn Fn(&'b T0, &'b T1, &'b T2, &'b T3) -> Pin<Box<dyn Future<Output = Result<()>> + 'b>>>
-    {
-        let func = func.clone();
-        Box::new(
-            move |a: &T0, b: &T1, c: &T2, d: &T3| -> Pin<Box<dyn Future<Output = Result<()>>>> {
-                let func = func.clone();
-                Box::pin(async move {
-                    let func = func.clone();
-                    JsFuture::from(js_sys::Promise::from(
-                        func.apply(
-                            &JsValue::NULL,
-                            &Array::from_iter(
-				vec![
-                                    &a.clone().into(),
-                                    &b.clone().into(),
-                                    &c.clone().into(),
-                                    &d.clone().into()
-				].into_iter()
-                            ),
-                        )
-                        .map_err(|e| Error::JsError(js_sys::Error::from(e).to_string().into()))?,
-                    ))
-                    .await
-                    .map_err(|e| Error::JsError(js_sys::Error::from(e).to_string().into()))?;
-                    Ok(())
-                })
-            },
-        )
-    }
+    of!(of1, a: T0);
+    of!(of2, a: T0, b: T1);
+    of!(of3, a: T0, b: T1, c: T2);
+    of!(of4, a: T0, b: T1, c: T2, d: T3);
 }
 
 #[cfg(feature = "wasm")]
