@@ -48,6 +48,7 @@ impl Backend {
 impl SwarmCallback for Backend {
     async fn on_inbound(
         &self,
+
         payload: &MessagePayload,
     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let data: Message = payload.transaction.data()?;

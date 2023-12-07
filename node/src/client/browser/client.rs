@@ -26,10 +26,12 @@ use wasm_bindgen_futures;
 use wasm_bindgen_futures::future_to_promise;
 use wasm_bindgen_futures::JsFuture;
 
-use crate::backend::browser::Backend;
+use crate::backend::browser::BackendContext;
 use crate::backend::types::BackendMessage;
 use crate::backend::types::HttpRequest;
+use crate::backend::types::MessageEndpoint;
 use crate::backend::types::ServerMessage;
+use crate::backend::Backend;
 use crate::client::AsyncSigner;
 use crate::client::Client;
 use crate::client::Signer;
@@ -84,7 +86,7 @@ impl Client {
         account: String,
         account_type: String,
         signer: js_sys::Function,
-        backend: Option<Backend>,
+        backend_context: Option<BackendContext>,
     ) -> js_sys::Promise {
         fn wrapped_signer(signer: js_sys::Function) -> AsyncSigner {
             Box::new(
@@ -117,9 +119,10 @@ impl Client {
                 Signer::Async(Box::new(signer)),
             )
             .await?;
-            if let Some(cb) = backend {
+            if let Some(cb) = backend_context {
+                let backend: Backend = Backend::new(Arc::new(client.clone()), Box::new(cb));
                 client
-                    .set_swarm_callback(Arc::new(cb))
+                    .set_swarm_callback(Arc::new(backend))
                     .expect("Failed on set swarm callback");
             }
             Ok(JsValue::from(client))
@@ -129,7 +132,7 @@ impl Client {
     /// Create new client instance with serialized config (yaml/json)
     pub fn new_client_with_serialized_config(
         config: String,
-        backend: Option<Backend>,
+        backend: Option<BackendContext>,
     ) -> js_sys::Promise {
         let cfg: ProcessorConfig = serde_yaml::from_str(&config).unwrap();
         Self::new_client_with_config(cfg, backend)
@@ -138,7 +141,7 @@ impl Client {
     /// Create a new client instance.
     pub fn new_client_with_config(
         config: ProcessorConfig,
-        backend: Option<Backend>,
+        backend: Option<BackendContext>,
     ) -> js_sys::Promise {
         Self::new_client_with_storage(config, backend, "rings-node".to_string())
     }
@@ -152,16 +155,17 @@ impl Client {
     ///  create new unsigned Client
     pub fn new_client_with_storage(
         config: ProcessorConfig,
-        backend: Option<Backend>,
+        backend_context: Option<BackendContext>,
         storage_name: String,
     ) -> js_sys::Promise {
         future_to_promise(async move {
             let client = Self::new_client_with_storage_internal(config, storage_name)
                 .await
                 .map_err(JsError::from)?;
-            if let Some(cb) = backend {
+            if let Some(cb) = backend_context {
+                let backend: Backend = Backend::new(Arc::new(client.clone()), Box::new(cb));
                 client
-                    .set_swarm_callback(Arc::new(cb))
+                    .set_swarm_callback(Arc::new(backend))
                     .expect("Failed on set swarm callback");
             }
             Ok(JsValue::from(client))
@@ -462,7 +466,7 @@ impl Client {
             };
 
             let tx_id = p
-                .send_backend_message(destination, ServerMessage::HttpRequest(req))
+                .send_backend_message(destination, ServerMessage::HttpRequest(req).into())
                 .await
                 .map_err(JsError::from)?;
 
