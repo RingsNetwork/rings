@@ -364,7 +364,7 @@ pub enum Error {
     Transport(#[from] rings_transport::error::Error),
 
     #[error("External Javascript error: {0}")]
-    JsError(String)
+    JsError(String),
 }
 
 #[cfg(feature = "wasm")]
@@ -377,6 +377,6 @@ impl From<Error> for wasm_bindgen::JsValue {
 #[cfg(feature = "wasm")]
 impl From<js_sys::Error> for Error {
     fn from(err: js_sys::Error) -> Self {
-	Error::JsError(err.to_string().into())
+        Error::JsError(err.to_string().into())
     }
 }
