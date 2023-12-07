@@ -72,14 +72,14 @@ impl MessageEndpoint<BackendMessage> for BackendContext {
 
 
 /// A Wrapper for js_sys::Function with type
-pub fn js_func_wrapper_of_4<'a, 'b: 'a, T0: Into<JsValue> + Clone, T1: Into<JsValue> + Clone, T2: Into<JsValue> + Clone, T3: Into<JsValue> + Clone>(
+pub fn js_func_wrapper_of_4<'a, 'b: 'a, T0: Into<JsValue> + Clone, T1: Into<JsValue> + Clone, T2: Into<JsValue> + Clone, T3: Into<JsValue> + Clone, F: From<JsValue>>(
     func: &Function,
 ) -> Box<
-    dyn Fn(&'b T0, &'b T1, &'b T2, &'b T3) -> Pin<Box<dyn Future<Output = Result<()>> + 'b>>,
+    dyn Fn(&'b T0, &'b T1, &'b T2, &'b T3) -> Pin<Box<dyn Future<Output = F> + 'b>>,
 > {
     let func = func.clone();
     Box::new(
-        move |a: &T0, b: &T1, c: &T2, d: &T3| -> Pin<Box<dyn Future<Output = Result<()>>>> {
+        move |a: &T0, b: &T1, c: &T2, d: &T3| -> Pin<Box<dyn Future<Output = F>>> {
             let func = func.clone();
             Box::pin(async move {
                 let func = func.clone();
