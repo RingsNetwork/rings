@@ -7,11 +7,11 @@ use rings_core::utils::js_func;
 use rings_core::utils::js_value;
 use rings_derive::wasm_export;
 use wasm_bindgen::JsValue;
-use wasm_bindgen_futures::JsFuture;
+
 
 use crate::backend::types::BackendMessage;
 use crate::backend::types::MessageEndpoint;
-use crate::backend::Backend;
+
 use crate::client::Client;
 use crate::error::Result;
 
@@ -52,7 +52,7 @@ impl MessageEndpoint<BackendMessage> for BackendContext {
 
         let _ = js_func::of4::<BackendContext, Client, JsValue, JsValue>(
             &self.backend_message_handler,
-        )(&self, &client, &ctx, &msg)
+        )(self, &client, &ctx, &msg)
         .await;
         Ok(())
     }
