@@ -1,15 +1,7 @@
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
-
 use async_trait::async_trait;
-use js_sys::Array;
 use js_sys::Function;
-use js_sys::JsString;
-use rings_core::message::CustomMessage;
-use rings_core::message::Message;
 use rings_core::message::MessagePayload;
-use rings_core::swarm::callback::SwarmCallback;
 use rings_core::utils::js_func;
 use rings_core::utils::js_value;
 use rings_derive::wasm_export;
@@ -20,7 +12,6 @@ use crate::backend::types::BackendMessage;
 use crate::backend::types::MessageEndpoint;
 use crate::backend::Backend;
 use crate::client::Client;
-use crate::error::Error;
 use crate::error::Result;
 
 /// MessageCallback instance for Browser
