@@ -344,7 +344,7 @@ pub(crate) async fn send_backend_message(params: Params, meta: RpcMeta) -> Resul
         .processor
         .send_backend_message(bm_params.did, bm_params.data)
         .await?;
-
+    tracing::info!("Send Response message");
     Ok(
         serde_json::to_value(rings_rpc::response::SendMessageResponse::from(
             tx_id.to_string(),

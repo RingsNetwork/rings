@@ -140,9 +140,10 @@ impl MessageEndpoint<ServiceMessage> for ServiceProvider {
                     data: msg,
                 }
                 .try_into()?;
-                provider
+                let resp = provider
                     .request("sendBackendMessage".to_string(), params, None)
                     .await?;
+		tracing::info!("done calling provider {:?}", resp);
                 Ok(())
             }
             ServiceMessage::HttpResponse(resp) => {
@@ -154,7 +155,8 @@ impl MessageEndpoint<ServiceMessage> for ServiceProvider {
 }
 
 async fn handle_http_request(addr: SocketAddr, req: &HttpRequest) -> Result<HttpResponse> {
-    let url = format!("{}/{}", addr, req.path.trim_start_matches('/'));
+    let url = format!("http://{}/{}", addr, req.path.trim_start_matches('/'));
+    tracing::info!("Handle http request on url: {:?} start", url);
     let method = http::Method::from_str(req.method.as_str()).map_err(|_| Error::InvalidMethod)?;
 
     let headers_map: HashMap<String, String> = req.headers.iter().cloned().collect();
@@ -192,7 +194,7 @@ async fn handle_http_request(addr: SocketAddr, req: &HttpRequest) -> Result<Http
         .bytes()
         .await
         .map_err(|e| Error::HttpRequestError(e.to_string()))?;
-
+    tracing::info!("Handle http request done, responsing");
     Ok(HttpResponse {
         status,
         headers,
