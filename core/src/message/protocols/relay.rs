@@ -95,6 +95,7 @@ impl MessageRelay {
 
         // Prevent infinite loop
         if has_infinite_loop(&self.path) {
+	    tracing::error!("Infinite path detected {:?}", self.path);
             return Err(Error::InfiniteRelayPath);
         }
 
