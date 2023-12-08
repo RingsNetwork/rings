@@ -9,7 +9,7 @@ use rings_core::swarm::callback::SwarmCallback;
 
 use crate::backend::types::BackendMessage;
 use crate::backend::types::MessageEndpoint;
-use crate::client::Client;
+use crate::provider::Provider;
 use crate::error::Result;
 
 #[cfg(feature = "browser")]
@@ -24,22 +24,22 @@ type HandlerTrait = dyn MessageEndpoint<BackendMessage> + Send + Sync;
 type HandlerTrait = dyn MessageEndpoint<BackendMessage>;
 
 pub struct Backend {
-    client: Arc<Client>,
+    provider: Arc<Provider>,
     handler: Box<HandlerTrait>,
 }
 
 impl Backend {
-    pub fn new(client: Arc<Client>, handler: Box<HandlerTrait>) -> Self {
-        Self { client, handler }
+    pub fn new(provider: Arc<Provider>, handler: Box<HandlerTrait>) -> Self {
+        Self { provider, handler }
     }
 
-    async fn handle_backend_message(
+    async fn on_backend_message(
         &self,
         payload: &MessagePayload,
         msg: &BackendMessage,
     ) -> Result<()> {
-        let client = self.client.clone();
-        self.handler.handle_message(client, payload, msg).await
+        let provider = self.provider.clone();
+        self.handler.on_message(provider, payload, msg).await
     }
 }
 
@@ -60,7 +60,7 @@ impl SwarmCallback for Backend {
         let backend_msg = bincode::deserialize(&msg)?;
         tracing::debug!("backend_message received: {backend_msg:?}");
 
-        self.handle_backend_message(payload, &backend_msg).await?;
+        self.on_backend_message(payload, &backend_msg).await?;
 
         Ok(())
     }

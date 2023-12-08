@@ -1,7 +1,7 @@
 #![doc = include_str!("../README.md")]
 
 pub mod backend;
-pub mod client;
+pub mod provider;
 pub mod consts;
 pub mod error;
 pub mod jsonrpc;

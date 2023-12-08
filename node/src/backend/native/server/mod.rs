@@ -19,7 +19,7 @@ use crate::backend::types::HttpRequest;
 use crate::backend::types::HttpResponse;
 use crate::backend::types::ServerMessage;
 use crate::backend::types::TunnelId;
-use crate::client::Client;
+use crate::provider::Provider;
 use crate::consts::TCP_SERVER_TIMEOUT;
 use crate::error::Error;
 use crate::error::Result;
@@ -59,9 +59,9 @@ impl Server {
 
 #[async_trait::async_trait]
 impl MessageEndpoint<ServerMessage> for Server {
-    async fn handle_message(
+    async fn on_message(
         &self,
-        client: Arc<Client>,
+        provider: Arc<Provider>,
         ctx: &MessagePayload,
         msg: &ServerMessage,
     ) -> Result<()> {
@@ -82,7 +82,7 @@ impl MessageEndpoint<ServerMessage> for Server {
                             data: backend_message,
                         }
                         .try_into()?;
-                        client
+                        provider
                             .request("sendBackendMessage".to_string(), params, None)
                             .await?;
                         Err(Error::TunnelError(e))
@@ -90,7 +90,7 @@ impl MessageEndpoint<ServerMessage> for Server {
 
                     Ok(local_stream) => {
                         let mut tunnel = Tunnel::new(*tid);
-                        tunnel.listen(client.clone(), local_stream, peer_did).await;
+                        tunnel.listen(provider.clone(), local_stream, peer_did).await;
                         self.tunnels.insert(*tid, tunnel);
                         Ok(())
                     }
@@ -117,7 +117,7 @@ impl MessageEndpoint<ServerMessage> for Server {
                     data: msg,
                 }
                 .try_into()?;
-                client
+                provider
                     .request("sendBackendMessage".to_string(), params, None)
                     .await?;
                 Ok(())

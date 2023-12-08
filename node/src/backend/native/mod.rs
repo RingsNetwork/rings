@@ -13,7 +13,7 @@ use crate::backend::native::server::Server;
 use crate::backend::native::server::ServiceConfig;
 use crate::backend::types::BackendMessage;
 use crate::backend::types::MessageEndpoint;
-use crate::client::Client;
+use crate::provider::Provider;
 use crate::error::Result;
 
 pub struct BackendConfig {
@@ -29,13 +29,13 @@ pub struct BackendContext {
 #[cfg_attr(feature = "browser", async_trait(?Send))]
 #[cfg_attr(not(feature = "browser"), async_trait)]
 impl MessageEndpoint<BackendMessage> for BackendContext {
-    async fn handle_message(
+    async fn on_message(
         &self,
-        client: Arc<Client>,
+        provider: Arc<Provider>,
         payload: &MessagePayload,
         msg: &BackendMessage,
     ) -> Result<()> {
-        self.handle_backend_message(client, payload, msg).await
+        self.handle_backend_message(provider, payload, msg).await
     }
 }
 
@@ -57,16 +57,16 @@ impl BackendContext {
 
     async fn handle_backend_message(
         &self,
-        client: Arc<Client>,
+        provider: Arc<Provider>,
         payload: &MessagePayload,
         msg: &BackendMessage,
     ) -> Result<()> {
         match msg {
             BackendMessage::Extension(data) => {
-                self.extension.handle_message(client, payload, data).await
+                self.extension.on_message(provider, payload, data).await
             }
             BackendMessage::ServerMessage(data) => {
-                self.server.handle_message(client, payload, data).await
+                self.server.on_message(provider, payload, data).await
             }
             BackendMessage::PlainText(text) => {
                 let peer_did = payload.transaction.signer();

@@ -1,5 +1,5 @@
 #![warn(missing_docs)]
-//! Browser Client implementation
+//! Browser Provider implementation
 #![allow(non_snake_case, non_upper_case_globals, clippy::ptr_offset_with_cast)]
 use std::convert::TryFrom;
 use std::future::Future;
@@ -32,9 +32,9 @@ use crate::backend::types::HttpRequest;
 
 use crate::backend::types::ServerMessage;
 use crate::backend::Backend;
-use crate::client::AsyncSigner;
-use crate::client::Client;
-use crate::client::Signer;
+use crate::provider::AsyncSigner;
+use crate::provider::Provider;
+use crate::provider::Signer;
 use crate::processor::ProcessorConfig;
 
 /// AddressType enum contains `DEFAULT` and `ED25519`.
@@ -70,8 +70,8 @@ impl TryFrom<&Peer> for JsValue {
 }
 
 #[wasm_export]
-impl Client {
-    /// Create new instance of Client, return Promise
+impl Provider {
+    /// Create new instance of Provider, return Promise
     /// Ice_servers should obey forrmat: "[turn|strun]://<Address>:<Port>;..."
     /// Account is hex string
     /// Account should format as same as account_type declared
@@ -111,7 +111,7 @@ impl Client {
 
         future_to_promise(async move {
             let signer = wrapped_signer(signer);
-            let client = Client::new_client_internal(
+            let provider = Provider::new_provider_internal(
                 ice_servers,
                 stabilize_timeout,
                 account,
@@ -121,31 +121,31 @@ impl Client {
             .await?;
             if let Some(cb) = backend_context {
 		#[allow(clippy::arc_with_non_send_sync)]
-                let backend: Backend = Backend::new(Arc::new(client.clone()), Box::new(cb));
+                let backend: Backend = Backend::new(Arc::new(provider.clone()), Box::new(cb));
 		#[allow(clippy::arc_with_non_send_sync)]
-                client
+                provider
                     .set_swarm_callback(Arc::new(backend))
                     .expect("Failed on set swarm callback");
             }
-            Ok(JsValue::from(client))
+            Ok(JsValue::from(provider))
         })
     }
 
-    /// Create new client instance with serialized config (yaml/json)
-    pub fn new_client_with_serialized_config(
+    /// Create new provider instance with serialized config (yaml/json)
+    pub fn new_provider_with_serialized_config(
         config: String,
         backend: Option<BackendContext>,
     ) -> js_sys::Promise {
         let cfg: ProcessorConfig = serde_yaml::from_str(&config).unwrap();
-        Self::new_client_with_config(cfg, backend)
+        Self::new_provider_with_config(cfg, backend)
     }
 
-    /// Create a new client instance.
-    pub fn new_client_with_config(
+    /// Create a new provider instance.
+    pub fn new_provider_with_config(
         config: ProcessorConfig,
         backend: Option<BackendContext>,
     ) -> js_sys::Promise {
-        Self::new_client_with_storage(config, backend, "rings-node".to_string())
+        Self::new_provider_with_storage(config, backend, "rings-node".to_string())
     }
 
     /// get self web3 address
@@ -154,25 +154,25 @@ impl Client {
         self.processor.did().to_string()
     }
 
-    ///  create new unsigned Client
-    pub fn new_client_with_storage(
+    ///  create new unsigned Provider
+    pub fn new_provider_with_storage(
         config: ProcessorConfig,
         backend_context: Option<BackendContext>,
         storage_name: String,
     ) -> js_sys::Promise {
         future_to_promise(async move {
-            let client = Self::new_client_with_storage_internal(config, storage_name)
+            let provider = Self::new_provider_with_storage_internal(config, storage_name)
                 .await
                 .map_err(JsError::from)?;
             if let Some(cb) = backend_context {
 		#[allow(clippy::arc_with_non_send_sync)]
-                let backend: Backend = Backend::new(Arc::new(client.clone()), Box::new(cb));
+                let backend: Backend = Backend::new(Arc::new(provider.clone()), Box::new(cb));
 		#[allow(clippy::arc_with_non_send_sync)]
-                client
+                provider
                     .set_swarm_callback(Arc::new(backend))
                     .expect("Failed on set swarm callback");
             }
-            Ok(JsValue::from(client))
+            Ok(JsValue::from(provider))
         })
     }
 
@@ -237,12 +237,12 @@ impl Client {
     /// connect peer with web3 address, and wait for connection channel connected
     /// example:
     /// ```typescript
-    /// const client1 = new Client()
-    /// const client2 = new Client()
-    /// const client3 = new Client()
-    /// await create_connection(client1, client2);
-    /// await create_connection(client2, client3);
-    /// await client1.connect_with_did(client3.address())
+    /// const provider1 = new Provider()
+    /// const provider2 = new Provider()
+    /// const provider3 = new Provider()
+    /// await create_connection(provider1, provider2);
+    /// await create_connection(provider2, provider3);
+    /// await provider1.connect_with_did(provider3.address())
     /// ```
     pub fn connect_with_address(
         &self,

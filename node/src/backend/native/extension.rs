@@ -45,7 +45,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::backend::types::MessageEndpoint;
-use crate::client::Client;
+use crate::provider::Provider;
 use crate::error::Result;
 
 /// Path of a wasm extension
@@ -84,9 +84,9 @@ impl Extension {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl MessageEndpoint<Bytes> for Extension {
     /// Handles the incoming message by passing it to the extension handlers.
-    async fn handle_message(
+    async fn on_message(
         &self,
-        _client: Arc<Client>,
+        _provider: Arc<Provider>,
         _ctx: &MessagePayload,
         _data: &Bytes,
     ) -> Result<()> {
