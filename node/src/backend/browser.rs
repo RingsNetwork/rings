@@ -26,7 +26,7 @@ pub struct BackendContext {
 impl BackendContext {
     /// Create a new instance of message callback, this function accept one argument:
     ///
-    /// * backend_message_handler: function(provider: Arc<Provider>, payload: string, message: string) -> Promise<()>;
+    /// * backend_message_handler: `function(provider: Arc<Provider>, payload: string, message: string) -> Promise<()>`;
     #[wasm_bindgen(constructor)]
     pub fn new(backend_message_handler: js_sys::Function) -> BackendContext {
         BackendContext {
