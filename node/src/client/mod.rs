@@ -60,8 +60,7 @@ pub enum Signer {
 #[allow(dead_code)]
 impl Client {
     /// Create client from processor directly
-    pub fn from_processor(p: Arc<Processor>) -> Self {
-        let processor = p.clone();
+    pub fn from_processor(processor: Arc<Processor>) -> Self {
         let mut handler: HandlerType = processor.clone().into();
         handler.build();
         Self {
