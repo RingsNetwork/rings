@@ -1,3 +1,5 @@
+#![warn(missing_docs)]
+//! BackendContext implementation for browser
 use std::sync::Arc;
 
 use async_trait::async_trait;
