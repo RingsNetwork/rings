@@ -29,7 +29,7 @@ use wasm_bindgen_futures::JsFuture;
 use crate::backend::browser::BackendContext;
 use crate::backend::types::BackendMessage;
 use crate::backend::types::HttpRequest;
-use crate::backend::types::MessageEndpoint;
+
 use crate::backend::types::ServerMessage;
 use crate::backend::Backend;
 use crate::client::AsyncSigner;
@@ -120,7 +120,9 @@ impl Client {
             )
             .await?;
             if let Some(cb) = backend_context {
+		#[allow(clippy::arc_with_non_send_sync)]
                 let backend: Backend = Backend::new(Arc::new(client.clone()), Box::new(cb));
+		#[allow(clippy::arc_with_non_send_sync)]
                 client
                     .set_swarm_callback(Arc::new(backend))
                     .expect("Failed on set swarm callback");
@@ -163,7 +165,9 @@ impl Client {
                 .await
                 .map_err(JsError::from)?;
             if let Some(cb) = backend_context {
+		#[allow(clippy::arc_with_non_send_sync)]
                 let backend: Backend = Backend::new(Arc::new(client.clone()), Box::new(cb));
+		#[allow(clippy::arc_with_non_send_sync)]
                 client
                     .set_swarm_callback(Arc::new(backend))
                     .expect("Failed on set swarm callback");
