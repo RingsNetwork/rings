@@ -89,7 +89,6 @@ impl Provider {
             .storage(storage)
             .measure(measure);
 
-        #[allow(clippy::arc_with_non_send_sync)]
         let processor = Arc::new(processor_builder.build()?);
 
         let mut handler: HandlerType = processor.clone().into();

@@ -119,9 +119,7 @@ impl Provider {
             )
             .await?;
             if let Some(cb) = backend_context {
-                #[allow(clippy::arc_with_non_send_sync)]
                 let backend: Backend = Backend::new(Arc::new(provider.clone()), Box::new(cb));
-                #[allow(clippy::arc_with_non_send_sync)]
                 provider
                     .set_swarm_callback(Arc::new(backend))
                     .expect("Failed on set swarm callback");

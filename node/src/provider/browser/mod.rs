@@ -2,7 +2,7 @@
 #![allow(clippy::unused_unit)]
 #![allow(non_snake_case, non_upper_case_globals)]
 //! rings-node browser support.
-pub mod client;
+pub mod provider;
 pub mod utils;
 use std::str::FromStr;
 
