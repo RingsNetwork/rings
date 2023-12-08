@@ -2,9 +2,6 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::*;
 
-use crate::provider::browser;
-use crate::provider::browser::Peer;
-use crate::provider::Provider;
 use crate::prelude::jsonrpc_core::types::response::Output;
 use crate::prelude::jsonrpc_core::types::Value;
 use crate::prelude::rings_core::prelude::uuid;
@@ -12,6 +9,9 @@ use crate::prelude::rings_core::utils;
 use crate::prelude::rings_core::utils::js_value;
 use crate::prelude::*;
 use crate::processor::ProcessorConfig;
+use crate::provider::browser;
+use crate::provider::browser::Peer;
+use crate::provider::Provider;
 
 wasm_bindgen_test_configure!(run_in_browser);
 
@@ -72,9 +72,10 @@ async fn create_connection(provider1: &Provider, provider2: &Provider) {
 
     let js_offer = JsValue::from_str(&offer);
     let req1 = js_sys::Array::of1(&js_offer);
-    let answer_fut = JsFuture::from(provider2.request("answerOffer".to_string(), req1.into(), None))
-        .await
-        .unwrap();
+    let answer_fut =
+        JsFuture::from(provider2.request("answerOffer".to_string(), req1.into(), None))
+            .await
+            .unwrap();
 
     let answer: String = match js_value::deserialize::<Output>(&answer_fut).unwrap() {
         Output::Success(ret) => {
@@ -233,9 +234,10 @@ async fn test_create_connection_via_local_rpc() {
 
     let js_offer = JsValue::from_str(&offer);
     let req1 = js_sys::Array::of1(&js_offer);
-    let answer_fut = JsFuture::from(provider2.request("answerOffer".to_string(), req1.into(), None))
-        .await
-        .unwrap();
+    let answer_fut =
+        JsFuture::from(provider2.request("answerOffer".to_string(), req1.into(), None))
+            .await
+            .unwrap();
 
     let answer: String = match js_value::deserialize::<Output>(&answer_fut).unwrap() {
         Output::Success(ret) => {
