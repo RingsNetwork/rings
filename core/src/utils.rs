@@ -112,14 +112,16 @@ pub mod js_func {
 			let func = func.clone();
 			Box::pin(async move {
 			    let func = func.clone();
-			    let params = vec![
-				$(&$name.clone().try_into().map_err(|e| $crate::error::Error::JsError(format!("{:?}", e)))?)+,
-			    ];
-			    tracing::info!("fucking params! {:?}", params.clone());
+			    let params = js_sys::Array::from_iter(
+				vec![
+				    $(&$name.clone().try_into().map_err(|e| $crate::error::Error::JsError(format!("{:?}", e)))?)+,
+				].into_iter()
+			    );
+			    tracing::info!("fucking params {:?}", params.clone());
 			    wasm_bindgen_futures::JsFuture::from(js_sys::Promise::from(
 				func.apply(
 				    &wasm_bindgen::JsValue::NULL,
-				    &js_sys::Array::from_iter(params.into_iter())
+				    &params
 				)
 				    .map_err(|e| $crate::error::Error::from(js_sys::Error::from(e)))?,
 			    ))
