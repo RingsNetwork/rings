@@ -33,7 +33,6 @@ pub struct Backend {
 }
 
 impl Backend {
-
     /// Create a new backend instance with Provider and Handler functions
     pub fn new(provider: Arc<Provider>, handler: Box<HandlerTrait>) -> Self {
         Self { provider, handler }

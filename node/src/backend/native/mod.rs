@@ -22,15 +22,14 @@ use rings_core::message::MessageVerificationExt;
 
 use crate::backend::native::extension::Extension;
 use crate::backend::native::extension::ExtensionConfig;
-use crate::backend::native::service::ServiceProvider;
 use crate::backend::native::service::ServiceConfig;
+use crate::backend::native::service::ServiceProvider;
 use crate::backend::types::BackendMessage;
 use crate::backend::types::MessageEndpoint;
 use crate::error::Result;
 use crate::provider::Provider;
 
-
-/// BakendConfig including services config and extension config
+/// BackendConfig including services config and extension config
 pub struct BackendConfig {
     /// Config of services
     pub services: Vec<ServiceConfig>,
