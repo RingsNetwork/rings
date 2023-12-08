@@ -99,12 +99,12 @@ pub mod js_func {
 	($func: ident, $($name:ident: $type: ident),+$(,)? ) => (
 	    pub fn $func<'a, 'b: 'a, $($type: TryInto<wasm_bindgen::JsValue> + Clone),+>(
 		func: &js_sys::Function,
-	    ) -> Box<dyn Fn($(&'b $type),+) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::error::Result<()>> + 'b>>>
+	    ) -> Box<dyn Fn($(&'b $type),+) -> std::pin::Pin<Box<dyn std::future::Future<Output = $crate::error::Result<()>> + 'b>>>
 		where  $($type::Error: std::fmt::Debug),+
 	    {
 		let func = func.clone();
 		Box::new(
-		    move |$($name: &$type,)+| -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::error::Result<()>>>> {
+		    move |$($name: &$type,)+| -> std::pin::Pin<Box<dyn std::future::Future<Output = $crate::error::Result<()>>>> {
 			let func = func.clone();
 			Box::pin(async move {
 			    let func = func.clone();
@@ -113,14 +113,14 @@ pub mod js_func {
 				    &wasm_bindgen::JsValue::NULL,
 				    &js_sys::Array::from_iter(
 					vec![
-					    $(&$name.clone().try_into().map_err(|e| crate::error::Error::JsError(format!("{:?}", e)))?)+,
+					    $(&$name.clone().try_into().map_err(|e| $crate::error::Error::JsError(format!("{:?}", e)))?)+,
 					].into_iter()
 				    ),
 				)
-				    .map_err(|e| crate::error::Error::from(js_sys::Error::from(e)))?,
+				    .map_err(|e| $crate::error::Error::from(js_sys::Error::from(e)))?,
 			    ))
 				.await
-				.map_err(|e| crate::error::Error::from(js_sys::Error::from(e)))?;
+				.map_err(|e| $crate::error::Error::from(js_sys::Error::from(e)))?;
 			    Ok(())
 			})
 		    },
