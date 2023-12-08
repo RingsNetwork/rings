@@ -29,7 +29,7 @@
 //! )
 //!
 //! You can see that this wat/wasm extension defines a handler function and
-//! imports the message_type ABI.
+//! imports the request ABI.
 use std::sync::Arc;
 use std::sync::RwLock;
 
