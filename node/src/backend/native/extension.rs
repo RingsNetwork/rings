@@ -104,7 +104,7 @@ impl WasmABIContainer {
     pub fn new(msg: Option<bytes::Bytes>, provider: Arc<Provider>) -> Self {
         Self {
             msg: Arc::new(RwLock::new(msg.map(Box::new))),
-            provider: Arc::new(RwLock::new(Some(provider.clone()))),
+            provider: Arc::new(RwLock::new(Some(provider))),
         }
     }
 }
@@ -328,7 +328,7 @@ pub mod loader {
     impl super::ExtensionHandlerCaller for Handler {
         fn call(&self, msg: bytes::Bytes, provider: Arc<Provider>) -> Result<()> {
             self.container.set_message(msg)?;
-            self.container.set_provider(provider.clone())?;
+            self.container.set_provider(provider)?;
             let native_container = self.container.clone().to_native();
             {
                 let mut mem = WASM_MEM
