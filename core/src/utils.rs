@@ -117,7 +117,7 @@ pub mod js_func {
 				    $(&$name.clone().try_into().map_err(|e| $crate::error::Error::JsError(format!("{:?}", e)))?)+,
 				].into_iter()
 			    );
-			    tracing::info!("fucking params {:?}", params.clone());
+			    tracing::info!("fucking params {:?}", params.clone().to_vec());
 			    wasm_bindgen_futures::JsFuture::from(js_sys::Promise::from(
 				func.apply(
 				    &wasm_bindgen::JsValue::NULL,
