@@ -262,9 +262,7 @@ impl ProcessorBuilder {
         if let Some(measure) = self.measure {
             swarm_builder = swarm_builder.measure(measure);
         }
-        #[allow(clippy::arc_with_non_send_sync)]
         let swarm = Arc::new(swarm_builder.build());
-        #[allow(clippy::arc_with_non_send_sync)]
         let stabilization = Arc::new(Stabilization::new(swarm.clone(), self.stabilize_timeout));
 
         Ok(Processor {
