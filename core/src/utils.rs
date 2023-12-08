@@ -98,51 +98,6 @@ pub mod js_func {
     ///     )
     /// }
     /// ```
-
-    pub fn of4<
-        'a,
-        'b: 'a,
-        T0: TryInto<JsValue> + Clone,
-        T1: TryInto<JsValue> + Clone,
-        T2: TryInto<JsValue> + Clone,
-        T3: TryInto<JsValue> + Clone,
-    >(
-        func: &Function,
-    ) -> Box<dyn Fn(&'b T0, &'b T1, &'b T2, &'b T3) -> Pin<Box<dyn Future<Output = Result<()>> + 'b>>>
-    where T0::Error: Debug,
-          T1::Error: Debug,
-          T2::Error: Debug,
-          T3::Error: Debug
-    {
-        let func = func.clone();
-        Box::new(
-            move |a: &T0, b: &T1, c: &T2, d: &T3| -> Pin<Box<dyn Future<Output = Result<()>>>> {
-                let func = func.clone();
-                Box::pin(async move {
-                    let func = func.clone();
-                    JsFuture::from(js_sys::Promise::from(
-                        func.apply(
-                            &JsValue::NULL,
-                            &Array::from_iter(
-                                vec![
-                                    &a.clone().into(),
-                                    &b.clone().into(),
-                                    &c.clone().into(),
-                                    &d.clone().into(),
-                                ]
-                                .into_iter(),
-                            ),
-                        )
-                        .map_err(|e| Error::JsError(js_sys::Error::from(e).to_string().into()))?,
-                    ))
-                    .await
-                    .map_err(|e| Error::JsError(js_sys::Error::from(e).to_string().into()))?;
-                    Ok(())
-                })
-            },
-        )
-    }
-
     #[macro_export]
     macro_rules! of {
 	($func: ident, $($name:ident: $type: ident),+$(,)? ) => (
@@ -181,7 +136,7 @@ pub mod js_func {
     of!(of1, a: T0);
     of!(of2, a: T0, b: T1);
     of!(of3, a: T0, b: T1, c: T2);
-//    of!(of4, a: T0, b: T1, c: T2, d: T3);
+    of!(of4, a: T0, b: T1, c: T2, d: T3);
 }
 
 #[cfg(feature = "wasm")]
