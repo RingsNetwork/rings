@@ -19,7 +19,9 @@ use crate::provider::Provider;
 #[wasm_export]
 #[derive(Clone)]
 pub struct BackendContext {
-    backend_message_handler: Function,
+    service_message_handler: Option<Function>,
+    plain_text_message_handler: Option<Function>,
+    extension_message_handler: Option<Function>,
 }
 
 #[wasm_export]
@@ -28,9 +30,15 @@ impl BackendContext {
     ///
     /// * backend_message_handler: `function(provider: Arc<Provider>, payload: string, message: string) -> Promise<()>`;
     #[wasm_bindgen(constructor)]
-    pub fn new(backend_message_handler: js_sys::Function) -> BackendContext {
+    pub fn new(
+        service_message_handler: Option<js_sys::Function>,
+        plain_text_message_handler: Option<js_sys::Function>,
+        extension_message_handler: Option<Function>,
+    ) -> BackendContext {
         BackendContext {
-            backend_message_handler,
+            service_message_handler,
+            plain_text_message_handler,
+            extension_message_handler,
         }
     }
 }
@@ -44,16 +52,36 @@ impl MessageEndpoint<BackendMessage> for BackendContext {
         payload: &MessagePayload,
         msg: &BackendMessage,
     ) -> Result<()> {
-        // let _ =
-        //     js_handler_wrapper(&self.backend_message_handler)(&self, provider, payload, msg).await;
         let provider = provider.clone().as_ref().clone();
         let ctx = js_value::serialize(&payload)?.clone();
-        let msg = js_value::serialize(&msg)?.clone();
-
-        let _ = js_func::of4::<BackendContext, Provider, JsValue, JsValue>(
-            &self.backend_message_handler,
-        )(self, &provider, &ctx, &msg)
-        .await;
+        match msg {
+            BackendMessage::ServiceMessage(m) => {
+                if let Some(func) = &self.service_message_handler {
+                    let m = js_value::serialize(m)?;
+                    let _ = js_func::of4::<BackendContext, Provider, JsValue, JsValue>(&func)(
+                        self, &provider, &ctx, &m,
+                    )
+                    .await;
+                }
+            }
+            BackendMessage::Extension(m) => {
+                if let Some(func) = &self.extension_message_handler {
+                    let m = js_value::serialize(m)?;
+                    let _ = js_func::of4::<BackendContext, Provider, JsValue, JsValue>(&func)(
+                        self, &provider, &ctx, &m,
+                    )
+                    .await;
+                }
+            }
+            BackendMessage::PlainText(m) => {
+                if let Some(func) = &self.plain_text_message_handler {
+                    let _ = js_func::of4::<BackendContext, Provider, JsValue, String>(&func)(
+                        self, &provider, &ctx, &m,
+                    )
+                    .await;
+                }
+            }
+        }
         Ok(())
     }
 }

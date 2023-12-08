@@ -84,7 +84,7 @@ impl BackendContext {
             BackendMessage::Extension(data) => {
                 self.extension.on_message(provider, payload, data).await
             }
-            BackendMessage::ServerMessage(data) => {
+            BackendMessage::ServiceMessage(data) => {
                 self.server.on_message(provider, payload, data).await
             }
             BackendMessage::PlainText(text) => {

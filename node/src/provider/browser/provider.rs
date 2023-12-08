@@ -29,7 +29,7 @@ use wasm_bindgen_futures::JsFuture;
 use crate::backend::browser::BackendContext;
 use crate::backend::types::BackendMessage;
 use crate::backend::types::HttpRequest;
-use crate::backend::types::ServerMessage;
+use crate::backend::types::ServiceMessage;
 use crate::backend::Backend;
 use crate::processor::ProcessorConfig;
 use crate::provider::AsyncSigner;
@@ -465,7 +465,7 @@ impl Provider {
             };
 
             let tx_id = p
-                .send_backend_message(destination, ServerMessage::HttpRequest(req).into())
+                .send_backend_message(destination, ServiceMessage::HttpRequest(req).into())
                 .await
                 .map_err(JsError::from)?;
 

@@ -14,7 +14,7 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 use crate::backend::types::BackendMessage;
-use crate::backend::types::ServerMessage;
+use crate::backend::types::ServiceMessage;
 use crate::backend::types::TunnelDefeat;
 use crate::backend::types::TunnelId;
 use crate::jsonrpc::server::BackendMessageParams;
@@ -137,7 +137,7 @@ impl TunnelListener {
                     }
                     Ok(n) => {
                         let body = Bytes::copy_from_slice(&buf[..n]);
-                        let msg = ServerMessage::TcpPackage {
+                        let msg = ServiceMessage::TcpPackage {
                             tid: self.tid,
                             body,
                         };
@@ -179,7 +179,7 @@ impl TunnelListener {
         tokio::select! {
             defeat = listen_local => {
                 tracing::info!("Local stream closed: {defeat:?}");
-                let msg = ServerMessage::TcpClose {
+                let msg = ServiceMessage::TcpClose {
                     tid: self.tid,
                     reason: defeat,
                 };
@@ -191,7 +191,7 @@ impl TunnelListener {
             },
             defeat = listen_remote => {
                 tracing::info!("Remote stream closed: {defeat:?}");
-                let msg = ServerMessage::TcpClose {
+                let msg = ServiceMessage::TcpClose {
                     tid: self.tid,
                     reason: defeat,
                 };

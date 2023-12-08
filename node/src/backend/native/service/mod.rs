@@ -33,7 +33,7 @@ use crate::backend::native::MessageEndpoint;
 use crate::backend::types::BackendMessage;
 use crate::backend::types::HttpRequest;
 use crate::backend::types::HttpResponse;
-use crate::backend::types::ServerMessage;
+use crate::backend::types::ServiceMessage;
 use crate::backend::types::TunnelId;
 use crate::consts::TCP_SERVER_TIMEOUT;
 use crate::error::Error;
@@ -79,21 +79,21 @@ impl ServiceProvider {
 }
 
 #[async_trait::async_trait]
-impl MessageEndpoint<ServerMessage> for ServiceProvider {
+impl MessageEndpoint<ServiceMessage> for ServiceProvider {
     async fn on_message(
         &self,
         provider: Arc<Provider>,
         ctx: &MessagePayload,
-        msg: &ServerMessage,
+        msg: &ServiceMessage,
     ) -> Result<()> {
         let peer_did = ctx.transaction.signer();
 
         match msg {
-            ServerMessage::TcpDial { tid, service } => {
+            ServiceMessage::TcpDial { tid, service } => {
                 let service = self.service(service).ok_or(Error::InvalidService)?;
                 match tcp_connect_with_timeout(service.addr, TCP_SERVER_TIMEOUT).await {
                     Err(e) => {
-                        let msg = ServerMessage::TcpClose {
+                        let msg = ServiceMessage::TcpClose {
                             tid: *tid,
                             reason: e,
                         };
@@ -119,11 +119,11 @@ impl MessageEndpoint<ServerMessage> for ServiceProvider {
                     }
                 }
             }
-            ServerMessage::TcpClose { tid, .. } => {
+            ServiceMessage::TcpClose { tid, .. } => {
                 self.tunnels.remove(tid);
                 Ok(())
             }
-            ServerMessage::TcpPackage { tid, body } => {
+            ServiceMessage::TcpPackage { tid, body } => {
                 self.tunnels
                     .get(tid)
                     .ok_or(Error::TunnelNotFound)?
@@ -131,10 +131,10 @@ impl MessageEndpoint<ServerMessage> for ServiceProvider {
                     .await;
                 Ok(())
             }
-            ServerMessage::HttpRequest(req) => {
+            ServiceMessage::HttpRequest(req) => {
                 let service = self.service(&req.service).ok_or(Error::InvalidService)?;
                 let resp = handle_http_request(service.addr, req).await?;
-                let msg: BackendMessage = ServerMessage::HttpResponse(resp).into();
+                let msg: BackendMessage = ServiceMessage::HttpResponse(resp).into();
                 let params: Params = BackendMessageParams {
                     did: peer_did,
                     data: msg,
@@ -145,8 +145,8 @@ impl MessageEndpoint<ServerMessage> for ServiceProvider {
                     .await?;
                 Ok(())
             }
-            ServerMessage::HttpResponse(resp) => {
-                tracing::info!("ServerMessage from {peer_did:?} HttpResponse: {resp:?}");
+            ServiceMessage::HttpResponse(resp) => {
+                tracing::info!("ServiceMessage from {peer_did:?} HttpResponse: {resp:?}");
                 Ok(())
             }
         }
