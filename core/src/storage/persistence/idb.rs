@@ -169,7 +169,7 @@ where
             .filter_map(|(k, v)| {
                 Some((
                     K::from_str(k.as_string().unwrap().as_str()).ok()?,
-                    js_value::deserialize::<DataStruct<V>>(&v).unwrap().data,
+                    js_value::deserialize::<DataStruct<V>>(v).unwrap().data,
                 ))
             })
             .collect::<Vec<(K, V)>>())
@@ -260,7 +260,7 @@ impl PersistenceStorageOperation for IDBStorage {
         tracing::debug!("entries: {:?}", entries);
 
         if let Some((_k, value)) = entries.first() {
-            let data_entry: DataStruct<serde_json::Value> = js_value::deserialize(&value)?;
+            let data_entry: DataStruct<serde_json::Value> = js_value::deserialize(value)?;
             store
                 .delete(&JsValue::from(&data_entry.key))
                 .await

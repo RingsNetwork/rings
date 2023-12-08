@@ -140,9 +140,9 @@ impl MessageEndpoint<BackendMessage>
     }
 }
 
-impl Into<BackendMessage> for ServerMessage {
-    fn into(self) -> BackendMessage {
-        BackendMessage::ServerMessage(self)
+impl From<ServerMessage> for BackendMessage {
+    fn from(val: ServerMessage) -> Self {
+        BackendMessage::ServerMessage(val)
     }
 }
 

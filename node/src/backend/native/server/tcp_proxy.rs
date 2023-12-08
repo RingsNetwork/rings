@@ -117,7 +117,7 @@ impl TunnelListener {
                     Err(e) => {
                         break e.kind().into();
                     }
-                    Ok(n) if n == 0 => {
+                    Ok(0) => {
                         break TunnelDefeat::ConnectionClosed;
                     }
                     Ok(n) => {
