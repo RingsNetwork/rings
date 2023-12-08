@@ -48,6 +48,7 @@ use serde::Serialize;
 use crate::ecc::HashStr;
 use crate::error::Error;
 use crate::error::Result;
+
 /// Did is a finate Ring R(P) where P = 2^160, wrap H160.
 #[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd, Debug, Serialize, Deserialize, Hash)]
 pub struct Did(H160);

@@ -48,22 +48,26 @@ pub mod js_value {
 
 #[cfg(feature = "wasm")]
 pub mod js_func {
-    /// This macro will generate a Wrapper for map a js_sys::Function with type fn(T, T, T, T) -> Promise<()>
+    /// This macro will generate a wrapper for mapping a js_sys::Function with type fn(T, T, T, T) -> Promise<()>
     /// to native function
     /// # Example:
-    /// For macro calling: js_func_for_impls!(of4, a: T0, b: T1, c: T2, d: T3);
+    /// For macro calling: of!(of4, a: T0, b: T1, c: T2, d: T3);
     /// Will generate code:
     /// ```rust
     /// pub fn of4<
     ///     'a,
     ///     'b: 'a,
-    ///     T0: Into<JsValue> + Clone,
-    ///     T1: Into<JsValue> + Clone,
-    ///     T2: Into<JsValue> + Clone,
-    ///     T3: Into<JsValue> + Clone,
+    ///     T0: TryInto<JsValue> + Clone,
+    ///     T1: TryInto<JsValue> + Clone,
+    ///     T2: TryInto<JsValue> + Clone,
+    ///     T3: TryInto<JsValue> + Clone,
     /// >(
     ///     func: &Function,
     /// ) -> Box<dyn Fn(&'b T0, &'b T1, &'b T2, &'b T3) -> Pin<Box<dyn Future<Output = Result<()>> + 'b>>>
+    /// where T0::Error: Debug,
+    ///       T1::Error: Debug,
+    ///       T2::Error: Debug,
+    ///       T3::Error: Debug
     /// {
     ///     let func = func.clone();
     ///     Box::new(
