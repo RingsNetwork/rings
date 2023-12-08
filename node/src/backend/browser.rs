@@ -12,7 +12,7 @@ use wasm_bindgen::JsValue;
 use crate::backend::types::BackendMessage;
 use crate::backend::types::MessageEndpoint;
 
-use crate::client::Client;
+use crate::provider::Provider;
 use crate::error::Result;
 
 /// MessageCallback instance for Browser
@@ -26,7 +26,7 @@ pub struct BackendContext {
 impl BackendContext {
     /// Create a new instance of message callback, this function accept one argument:
     ///
-    /// * backend_message_handler: function(client: Arc<Client>, payload: string, message: string) -> Promise<()>;
+    /// * backend_message_handler: function(provider: Arc<Provider>, payload: string, message: string) -> Promise<()>;
     #[wasm_bindgen(constructor)]
     pub fn new(backend_message_handler: js_sys::Function) -> BackendContext {
         BackendContext {
@@ -38,21 +38,21 @@ impl BackendContext {
 #[cfg_attr(feature = "browser", async_trait(?Send))]
 #[cfg_attr(not(feature = "browser"), async_trait)]
 impl MessageEndpoint<BackendMessage> for BackendContext {
-    async fn handle_message(
+    async fn on_message(
         &self,
-        client: Arc<Client>,
+        provider: Arc<Provider>,
         payload: &MessagePayload,
         msg: &BackendMessage,
     ) -> Result<()> {
         // let _ =
-        //     js_handler_wrapper(&self.backend_message_handler)(&self, client, payload, msg).await;
-        let client = client.clone().as_ref().clone();
+        //     js_handler_wrapper(&self.backend_message_handler)(&self, provider, payload, msg).await;
+        let provider = provider.clone().as_ref().clone();
         let ctx = js_value::serialize(&payload)?.clone();
         let msg = js_value::serialize(&msg)?.clone();
 
-        let _ = js_func::of4::<BackendContext, Client, JsValue, JsValue>(
+        let _ = js_func::of4::<BackendContext, Provider, JsValue, JsValue>(
             &self.backend_message_handler,
-        )(self, &client, &ctx, &msg)
+        )(self, &provider, &ctx, &msg)
         .await;
         Ok(())
     }

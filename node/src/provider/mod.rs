@@ -1,5 +1,5 @@
 #![warn(missing_docs)]
-//! General Client, this module provide Client implementation for FFI and WASM
+//! General Provider, this module provide Provider implementation for FFI and WASM
 
 use std::future::Future;
 use std::pin::Pin;
@@ -28,14 +28,14 @@ pub mod browser;
 #[cfg(feature = "ffi")]
 pub mod ffi;
 
-/// General Client, which holding reference of Processor
-/// Client should be obey memory layout of CLang
-/// Client should be export for wasm-bindgen
+/// General Provider, which holding reference of Processor
+/// Provider should be obey memory layout of CLang
+/// Provider should be export for wasm-bindgen
 #[derive(Clone)]
 #[allow(dead_code)]
 #[repr(C)]
 #[wasm_export]
-pub struct Client {
+pub struct Provider {
     processor: Arc<Processor>,
     handler: Arc<HandlerType>,
 }
@@ -58,8 +58,8 @@ pub enum Signer {
 }
 
 #[allow(dead_code)]
-impl Client {
-    /// Create client from processor directly
+impl Provider {
+    /// Create provider from processor directly
     pub fn from_processor(processor: Arc<Processor>) -> Self {
         let mut handler: HandlerType = processor.clone().into();
         handler.build();
@@ -68,11 +68,11 @@ impl Client {
             handler: handler.into(),
         }
     }
-    /// Create a client instance with storage name
-    pub(crate) async fn new_client_with_storage_internal(
+    /// Create a provider instance with storage name
+    pub(crate) async fn new_provider_with_storage_internal(
         config: ProcessorConfig,
         storage_name: String,
-    ) -> Result<Client> {
+    ) -> Result<Provider> {
         let storage_path = storage_name.as_str();
         let measure_path = [storage_path, "measure"].join("/");
 
@@ -95,23 +95,23 @@ impl Client {
         let mut handler: HandlerType = processor.clone().into();
         handler.build();
 
-        Ok(Client {
+        Ok(Provider {
             processor,
             handler: handler.into(),
         })
     }
 
-    /// Create a client instance with storage name and serialized config string
-    /// This function is useful for creating a client with config file (yaml and json).
-    pub(crate) async fn new_client_with_storage_and_serialized_config_internal(
+    /// Create a provider instance with storage name and serialized config string
+    /// This function is useful for creating a provider with config file (yaml and json).
+    pub(crate) async fn new_provider_with_storage_and_serialized_config_internal(
         config: String,
         storage_name: String,
-    ) -> Result<Client> {
+    ) -> Result<Provider> {
         let config: ProcessorConfig = serde_yaml::from_str(&config)?;
-        Self::new_client_with_storage_internal(config, storage_name).await
+        Self::new_provider_with_storage_internal(config, storage_name).await
     }
 
-    /// Create a new client instanice with everything in detail
+    /// Create a new provider instanice with everything in detail
     /// Ice_servers should obey forrmat: "[turn|strun]://<Address>:<Port>;..."
     /// Account is hex string
     /// Account should format as same as account_type declared
@@ -119,13 +119,13 @@ impl Client {
     /// please check [rings_core::ecc]
     /// Signer should accept a String and returns bytes.
     /// Signer should function as same as account_type declared, Eg: eip191 or secp256k1 or ed25519.
-    pub(crate) async fn new_client_internal(
+    pub(crate) async fn new_provider_internal(
         ice_servers: String,
         stabilize_timeout: usize,
         account: String,
         account_type: String,
         signer: Signer,
-    ) -> Result<Client> {
+    ) -> Result<Provider> {
         let mut sk_builder = SessionSkBuilder::new(account, account_type);
         let proof = sk_builder.unsigned_proof();
         let sig = match signer {
@@ -135,7 +135,7 @@ impl Client {
         sk_builder = sk_builder.set_session_sig(sig.to_vec());
         let session_sk = sk_builder.build().map_err(Error::InternalError)?;
         let config = ProcessorConfig::new(ice_servers, session_sk, stabilize_timeout);
-        Self::new_client_with_storage_internal(config, "rings-node".to_string()).await
+        Self::new_provider_with_storage_internal(config, "rings-node".to_string()).await
     }
 
     pub(crate) fn set_swarm_callback(&self, callback: SharedSwarmCallback) -> Result<()> {
@@ -173,8 +173,8 @@ impl Client {
 }
 
 #[cfg(feature = "node")]
-impl Client {
-    /// A request function implementation for native client
+impl Provider {
+    /// A request function implementation for native provider
     pub async fn request(
         &self,
         method: String,
