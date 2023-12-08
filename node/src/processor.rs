@@ -43,7 +43,7 @@ use crate::prelude::SessionSk;
 
 /// ProcessorConfig is usually serialized as json or yaml.
 /// There is a `from_config` method in [ProcessorBuilder] used to initialize the Builder with a serialized ProcessorConfig.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 #[wasm_export]
 pub struct ProcessorConfig {
     /// ICE servers for webrtc
