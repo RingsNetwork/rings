@@ -1,7 +1,6 @@
 #![warn(missing_docs)]
 
 //! Backend Message Types.
-
 use std::io::ErrorKind as IOErrorKind;
 use std::sync::Arc;
 
@@ -23,14 +22,14 @@ pub enum BackendMessage {
     /// extension message
     Extension(Bytes),
     /// server message
-    ServerMessage(ServerMessage),
+    ServiceMessage(ServiceMessage),
     /// Plain text
     PlainText(String),
 }
 
-/// ServerMessage
+/// ServiceMessage
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub enum ServerMessage {
+pub enum ServiceMessage {
     /// Tunnel Open
     TcpDial {
         /// Tunnel Id
@@ -140,9 +139,9 @@ impl MessageEndpoint<BackendMessage>
     }
 }
 
-impl From<ServerMessage> for BackendMessage {
-    fn from(val: ServerMessage) -> Self {
-        BackendMessage::ServerMessage(val)
+impl From<ServiceMessage> for BackendMessage {
+    fn from(val: ServiceMessage) -> Self {
+        BackendMessage::ServiceMessage(val)
     }
 }
 
