@@ -159,7 +159,7 @@ impl MessageEndpoint<bytes::Bytes> for Extension {
 
 /// Loader of wasm, including ABI generator
 pub mod loader {
-//! Wasm Loader module
+    //! Wasm Loader module
     use core::any::Any;
     use std::ffi::CStr;
     use std::fs;
@@ -328,7 +328,7 @@ pub mod loader {
     impl super::ExtensionHandlerCaller for Handler {
         fn call(&self, msg: bytes::Bytes, provider: Arc<Provider>) -> Result<()> {
             self.container.set_message(msg)?;
-	    self.container.set_provider(provider.clone())?;
+            self.container.set_provider(provider.clone())?;
             let native_container = self.container.clone().to_native();
             {
                 let mut mem = WASM_MEM
