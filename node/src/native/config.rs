@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::backend::native::extension::ExtensionConfig;
-use crate::backend::native::server::ServiceConfig;
+use crate::backend::native::service::ServiceConfig;
 use crate::backend::native::BackendConfig;
 use crate::error::Error;
 use crate::error::Result;

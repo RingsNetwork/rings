@@ -1,5 +1,18 @@
+#![warn(missing_docs)]
+//! This module provides the implementation of a native Backend,
+//! which includes BackendConfig and BackendContext.
+//!
+//! This module has two submodules: extension and service.
+//!
+//! The submodule [service] aims to provide an implementation of Rings Network based TCP services.
+//! It can forward a TCP request from the Rings Network to a local request.
+//!
+//! The submodule extension aims to provide an implementation of Rings extensions.
+//! These extensions are based on WebAssembly (WASM), allowing downloaded WASM code to be executed
+//! as an external extension of the backend.
+
 pub mod extension;
-pub mod server;
+pub mod service;
 
 use std::sync::Arc;
 
@@ -9,20 +22,25 @@ use rings_core::message::MessageVerificationExt;
 
 use crate::backend::native::extension::Extension;
 use crate::backend::native::extension::ExtensionConfig;
-use crate::backend::native::server::Server;
-use crate::backend::native::server::ServiceConfig;
+use crate::backend::native::service::ServiceProvider;
+use crate::backend::native::service::ServiceConfig;
 use crate::backend::types::BackendMessage;
 use crate::backend::types::MessageEndpoint;
 use crate::error::Result;
 use crate::provider::Provider;
 
+
+/// BakendConfig including services config and extension config
 pub struct BackendConfig {
+    /// Config of services
     pub services: Vec<ServiceConfig>,
+    /// Config of extensions
     pub extensions: ExtensionConfig,
 }
 
+/// BackendContext is a Context holder of backend message handler
 pub struct BackendContext {
-    server: Server,
+    server: ServiceProvider,
     extension: Extension,
 }
 
@@ -40,13 +58,15 @@ impl MessageEndpoint<BackendMessage> for BackendContext {
 }
 
 impl BackendContext {
+    /// Create a new BackendContext instance with config
     pub async fn new(config: BackendConfig) -> Result<Self> {
         Ok(Self {
-            server: Server::new(config.services),
+            server: ServiceProvider::new(config.services),
             extension: Extension::new(&config.extensions).await?,
         })
     }
 
+    /// List service names
     pub fn service_names(&self) -> Vec<String> {
         self.server
             .services

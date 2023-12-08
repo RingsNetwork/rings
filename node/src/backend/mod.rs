@@ -1,3 +1,6 @@
+#![warn(missing_docs)]
+//! This module provide basic mechanism.
+
 pub mod types;
 use std::sync::Arc;
 
@@ -23,12 +26,15 @@ type HandlerTrait = dyn MessageEndpoint<BackendMessage> + Send + Sync;
 #[cfg(feature = "browser")]
 type HandlerTrait = dyn MessageEndpoint<BackendMessage>;
 
+/// Backend handle custom messages from Swarm
 pub struct Backend {
     provider: Arc<Provider>,
     handler: Box<HandlerTrait>,
 }
 
 impl Backend {
+
+    /// Create a new backend instance with Provider and Handler functions
     pub fn new(provider: Arc<Provider>, handler: Box<HandlerTrait>) -> Self {
         Self { provider, handler }
     }
