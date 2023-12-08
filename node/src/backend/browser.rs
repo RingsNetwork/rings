@@ -15,7 +15,7 @@ use crate::backend::types::MessageEndpoint;
 use crate::error::Result;
 use crate::provider::Provider;
 
-/// MessageCallback instance for Browser
+/// BackendContext is a context instance for handling backend message for browser
 #[wasm_export]
 #[derive(Clone)]
 pub struct BackendContext {
