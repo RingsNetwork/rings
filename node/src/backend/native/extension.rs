@@ -45,8 +45,8 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::backend::types::MessageEndpoint;
-use crate::provider::Provider;
 use crate::error::Result;
+use crate::provider::Provider;
 
 /// Path of a wasm extension
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]

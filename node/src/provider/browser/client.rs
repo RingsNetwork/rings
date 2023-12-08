@@ -29,13 +29,12 @@ use wasm_bindgen_futures::JsFuture;
 use crate::backend::browser::BackendContext;
 use crate::backend::types::BackendMessage;
 use crate::backend::types::HttpRequest;
-
 use crate::backend::types::ServerMessage;
 use crate::backend::Backend;
+use crate::processor::ProcessorConfig;
 use crate::provider::AsyncSigner;
 use crate::provider::Provider;
 use crate::provider::Signer;
-use crate::processor::ProcessorConfig;
 
 /// AddressType enum contains `DEFAULT` and `ED25519`.
 #[wasm_export]
@@ -120,9 +119,9 @@ impl Provider {
             )
             .await?;
             if let Some(cb) = backend_context {
-		#[allow(clippy::arc_with_non_send_sync)]
+                #[allow(clippy::arc_with_non_send_sync)]
                 let backend: Backend = Backend::new(Arc::new(provider.clone()), Box::new(cb));
-		#[allow(clippy::arc_with_non_send_sync)]
+                #[allow(clippy::arc_with_non_send_sync)]
                 provider
                     .set_swarm_callback(Arc::new(backend))
                     .expect("Failed on set swarm callback");
@@ -165,9 +164,9 @@ impl Provider {
                 .await
                 .map_err(JsError::from)?;
             if let Some(cb) = backend_context {
-		#[allow(clippy::arc_with_non_send_sync)]
+                #[allow(clippy::arc_with_non_send_sync)]
                 let backend: Backend = Backend::new(Arc::new(provider.clone()), Box::new(cb));
-		#[allow(clippy::arc_with_non_send_sync)]
+                #[allow(clippy::arc_with_non_send_sync)]
                 provider
                     .set_swarm_callback(Arc::new(backend))
                     .expect("Failed on set swarm callback");

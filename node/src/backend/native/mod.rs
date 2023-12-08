@@ -13,8 +13,8 @@ use crate::backend::native::server::Server;
 use crate::backend::native::server::ServiceConfig;
 use crate::backend::types::BackendMessage;
 use crate::backend::types::MessageEndpoint;
-use crate::provider::Provider;
 use crate::error::Result;
+use crate::provider::Provider;
 
 pub struct BackendConfig {
     pub services: Vec<ServiceConfig>,

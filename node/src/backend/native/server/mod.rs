@@ -19,12 +19,12 @@ use crate::backend::types::HttpRequest;
 use crate::backend::types::HttpResponse;
 use crate::backend::types::ServerMessage;
 use crate::backend::types::TunnelId;
-use crate::provider::Provider;
 use crate::consts::TCP_SERVER_TIMEOUT;
 use crate::error::Error;
 use crate::error::Result;
 use crate::jsonrpc::server::BackendMessageParams;
 use crate::prelude::jsonrpc_core::Params;
+use crate::provider::Provider;
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct ServiceConfig {
@@ -90,7 +90,9 @@ impl MessageEndpoint<ServerMessage> for Server {
 
                     Ok(local_stream) => {
                         let mut tunnel = Tunnel::new(*tid);
-                        tunnel.listen(provider.clone(), local_stream, peer_did).await;
+                        tunnel
+                            .listen(provider.clone(), local_stream, peer_did)
+                            .await;
                         self.tunnels.insert(*tid, tunnel);
                         Ok(())
                     }
