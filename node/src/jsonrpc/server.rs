@@ -62,8 +62,11 @@ impl From<Arc<Processor>> for RpcMeta {
     }
 }
 
+/// Params for method `BackendMessage`
 pub struct BackendMessageParams {
+    /// destination did
     pub did: Did,
+    /// data of backend message
     pub data: BackendMessage,
 }
 

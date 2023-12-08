@@ -41,25 +41,13 @@ pub mod js_value {
     }
 
     /// From JsValue to serde
-    pub fn deserialize<T: DeserializeOwned>(obj: &(impl Into<JsValue> + Clone)) -> Result<T> {
-        let value: JsValue = (*obj).clone().into();
-        serde_wasm_bindgen::from_value(value).map_err(Error::SerdeWasmBindgenError)
+    pub fn deserialize<T: DeserializeOwned>(obj: impl Into<JsValue>) -> Result<T> {
+        serde_wasm_bindgen::from_value(obj.into()).map_err(Error::SerdeWasmBindgenError)
     }
 }
 
 #[cfg(feature = "wasm")]
 pub mod js_func {
-    use std::future::Future;
-    use std::pin::Pin;
-
-    use js_sys::Array;
-    use js_sys::Function;
-    use wasm_bindgen::JsValue;
-    use wasm_bindgen_futures::JsFuture;
-
-    use crate::error::Error;
-    use crate::error::Result;
-
     /// This macro will generate a Wrapper for map a js_sys::Function with type fn(T, T, T, T) -> Promise<()>
     /// to native function
     /// # Example:
@@ -109,29 +97,30 @@ pub mod js_func {
     #[macro_export]
     macro_rules! of {
 	($func: ident, $($name:ident: $type: ident),+$(,)? ) => (
-	    pub fn $func<'a, 'b: 'a, $($type: Into<JsValue> + Clone),+>(
-		func: &Function,
-	    ) -> Box<dyn Fn($(&'b $type),+) -> Pin<Box<dyn Future<Output = Result<()>> + 'b>>>
+	    pub fn $func<'a, 'b: 'a, $($type: TryInto<wasm_bindgen::JsValue> + Clone),+>(
+		func: &js_sys::Function,
+	    ) -> Box<dyn Fn($(&'b $type),+) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::error::Result<()>> + 'b>>>
+		where  $($type::Error: std::fmt::Debug),+
 	    {
 		let func = func.clone();
 		Box::new(
-		    move |$($name: &$type,)+| -> Pin<Box<dyn Future<Output = Result<()>>>> {
+		    move |$($name: &$type,)+| -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::error::Result<()>>>> {
 			let func = func.clone();
 			Box::pin(async move {
 			    let func = func.clone();
-			    JsFuture::from(js_sys::Promise::from(
+			    wasm_bindgen_futures::JsFuture::from(js_sys::Promise::from(
 				func.apply(
-				    &JsValue::NULL,
-				    &Array::from_iter(
+				    &wasm_bindgen::JsValue::NULL,
+				    &js_sys::Array::from_iter(
 					vec![
-					    $(&$name.clone().into())+,
+					    $(&$name.clone().try_into().map_err(|e| crate::error::Error::JsError(format!("{:?}", e)))?)+,
 					].into_iter()
 				    ),
 				)
-				    .map_err(|e| Error::from(js_sys::Error::from(e)))?,
+				    .map_err(|e| crate::error::Error::from(js_sys::Error::from(e)))?,
 			    ))
 				.await
-				.map_err(|e| Error::from(js_sys::Error::from(e)))?;
+				.map_err(|e| crate::error::Error::from(js_sys::Error::from(e)))?;
 			    Ok(())
 			})
 		    },

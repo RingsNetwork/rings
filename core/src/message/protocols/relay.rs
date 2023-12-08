@@ -136,7 +136,7 @@ where T: PartialEq + std::fmt::Debug {
             let p2 = path.iter().rev().skip(indexes[1]);
             let p3 = path.iter().rev().skip(indexes[2]);
 
-            let lens = vec![
+            let lens = [
                 indexes[1] - indexes[0],
                 indexes[2] - indexes[1],
                 path.len() - indexes[2],
