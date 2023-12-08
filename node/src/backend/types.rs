@@ -10,8 +10,8 @@ use rings_core::message::MessagePayload;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::provider::Provider;
 use crate::error::Result;
+use crate::provider::Provider;
 
 /// TunnelId type, use uuid.
 pub type TunnelId = uuid::Uuid;

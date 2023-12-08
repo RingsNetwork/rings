@@ -90,7 +90,7 @@ impl MethodHandler<server::RpcMeta> for InternalRPCHandler<server::RpcMeta> {
 
 impl<T: Clone> MethodRegister for InternalRPCHandler<T> {
     fn register(&mut self, name: &str, func: MethodFnBox) {
-	#[allow(clippy::arc_with_non_send_sync)]
+        #[allow(clippy::arc_with_non_send_sync)]
         self.methods.insert(name.to_string(), Arc::new(func));
     }
 }

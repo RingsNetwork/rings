@@ -9,8 +9,8 @@ use rings_core::swarm::callback::SwarmCallback;
 
 use crate::backend::types::BackendMessage;
 use crate::backend::types::MessageEndpoint;
-use crate::provider::Provider;
 use crate::error::Result;
+use crate::provider::Provider;
 
 #[cfg(feature = "browser")]
 pub mod browser;

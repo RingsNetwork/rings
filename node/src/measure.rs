@@ -90,7 +90,7 @@ impl PeriodicCounter {
 impl PeriodicMeasure {
     /// Create a new `PeriodicMeasure` with the given storage.
     pub fn new(storage: PersistenceStorage) -> Self {
-	#[allow(clippy::arc_with_non_send_sync)]
+        #[allow(clippy::arc_with_non_send_sync)]
         Self {
             storage: Arc::new(storage),
             counters: DashMap::new(),

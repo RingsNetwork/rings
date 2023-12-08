@@ -15,9 +15,9 @@ use crate::backend::types::BackendMessage;
 use crate::backend::types::ServerMessage;
 use crate::backend::types::TunnelDefeat;
 use crate::backend::types::TunnelId;
-use crate::provider::Provider;
 use crate::jsonrpc::server::BackendMessageParams;
 use crate::prelude::jsonrpc_core::Params;
+use crate::provider::Provider;
 
 pub struct Tunnel {
     tid: TunnelId,
@@ -70,7 +70,12 @@ impl Tunnel {
         }
     }
 
-    pub async fn listen(&mut self, provider: Arc<Provider>, local_stream: TcpStream, peer_did: Did) {
+    pub async fn listen(
+        &mut self,
+        provider: Arc<Provider>,
+        local_stream: TcpStream,
+        peer_did: Did,
+    ) {
         if self.listener.is_some() {
             return;
         }
@@ -78,7 +83,8 @@ impl Tunnel {
         let mut listener = TunnelListener::new(self.tid, local_stream, peer_did).await;
         let listener_cancel_token = listener.cancel_token();
         let remote_stream_tx = listener.remote_stream_tx.clone();
-        let listener_handler = tokio::spawn(Box::pin(async move { listener.listen(provider).await }));
+        let listener_handler =
+            tokio::spawn(Box::pin(async move { listener.listen(provider).await }));
 
         self.remote_stream_tx = Some(remote_stream_tx);
         self.listener = Some(listener_handler);
