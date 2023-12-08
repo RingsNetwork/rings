@@ -55,7 +55,7 @@ pub struct ServiceConfig {
     pub addr: SocketAddr,
 }
 
-/// ices: Vec<ServiceConfig>,
+/// Service Provider, which hold tunnel and a list of service
 pub struct ServiceProvider {
     /// Service configs
     pub services: Vec<ServiceConfig>,
