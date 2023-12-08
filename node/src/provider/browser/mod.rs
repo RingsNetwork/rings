@@ -8,7 +8,7 @@ use std::str::FromStr;
 
 use wasm_bindgen;
 
-pub use self::client::*;
+pub use self::provider::*;
 use crate::logging::browser::init_logging;
 use crate::logging::set_panic_hook;
 use crate::logging::LogLevel;
