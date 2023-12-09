@@ -53,7 +53,7 @@ impl MessageEndpoint<BackendMessage> for BackendContext {
         msg: &BackendMessage,
     ) -> Result<()> {
         let provider = provider.clone().as_ref().clone();
-        let ctx = js_value::serialize(&payload)?.clone();
+        let ctx = js_value::serialize(&payload)?;
         match msg {
             BackendMessage::ServiceMessage(m) => {
                 if let Some(func) = &self.service_message_handler {
