@@ -22,7 +22,7 @@ try {
     return e
 }
 "#;
-    let func = Function::new_with_args(js_code_args, &js_code_body);
+    let func = Function::new_with_args(js_code_args, js_code_body);
     let native_func = js_func::of4::<String, String, String, String>(&func);
     let a = "hello".to_string();
     let b = " ".to_string();
