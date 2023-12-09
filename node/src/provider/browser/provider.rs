@@ -419,7 +419,7 @@ impl Provider {
         path: String,
         headers: JsValue,
         body: Option<js_sys::Uint8Array>,
-	rid: Option<String>
+        rid: Option<String>,
     ) -> js_sys::Promise {
         let p = self.processor.clone();
 
@@ -463,7 +463,7 @@ impl Provider {
                 path,
                 headers,
                 body,
-		rid
+                rid,
             };
 
             let tx_id = p

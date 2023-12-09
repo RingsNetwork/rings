@@ -162,7 +162,7 @@ impl Client {
         path: &str,
         headers: Vec<(String, String)>,
         body: Option<Vec<u8>>,
-	rid: Option<String>
+        rid: Option<String>,
     ) -> Output<()> {
         let req = HttpRequest {
             service: service.to_string(),
@@ -170,7 +170,7 @@ impl Client {
             path: path.to_string(),
             headers,
             body,
-	    rid
+            rid,
         };
 
         let msg = BackendMessage::ServiceMessage(ServiceMessage::HttpRequest(req));
