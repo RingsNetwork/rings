@@ -51,44 +51,39 @@ pub mod js_func {
     /// This macro will generate a wrapper for mapping a js_sys::Function with type fn(T, T, T, T) -> Promise<()>
     /// to native function
     /// # Example:
-    /// For macro calling: of!(of4, a: T0, b: T1, c: T2, d: T3);
+    /// For macro calling: of!(of2, a: T0, b: T1);
     /// Will generate code:
     /// ```rust
-    /// pub fn of4<
-    ///     'a,
-    ///     'b: 'a,
-    ///     T0: TryInto<JsValue> + Clone,
-    ///     T1: TryInto<JsValue> + Clone,
-    ///     T2: TryInto<JsValue> + Clone,
-    ///     T3: TryInto<JsValue> + Clone,
-    /// >(
+    /// pub fn of2<'a, 'b: 'a, T0: TryInto<JsValue> + Clone, T1: TryInto<JsValue> + Clone>(
     ///     func: &Function,
-    /// ) -> Box<dyn Fn(&'b T0, &'b T1, &'b T2, &'b T3) -> Pin<Box<dyn Future<Output = Result<()>> + 'b>>>
-    /// where T0::Error: Debug,
-    ///       T1::Error: Debug,
-    ///       T2::Error: Debug,
-    ///       T3::Error: Debug
+    /// ) -> Box<dyn Fn(T0, T1) -> Pin<Box<dyn Future<Output = Result<()>> + 'b>>>
+    /// where
+    ///     T0: 'b,
+    ///     T1: 'b,
+    ///     T0::Error: Debug,
+    ///     T1::Error: Debug,
     /// {
     ///     let func = func.clone();
     ///     Box::new(
-    ///         move |a: &T0, b: &T1, c: &T2, d: &T3| -> Pin<Box<dyn Future<Output = Result<()>>>> {
+    ///         move |a: T0, b: T1| -> Pin<Box<dyn Future<Output = Result<()>>>> {
     ///             let func = func.clone();
     ///             Box::pin(async move {
     ///                 let func = func.clone();
+    ///                 let params = js_sys::Array::new();
+    ///                 let a: JsValue = a
+    ///                     .clone()
+    ///                     .try_into()
+    ///                     .map_err(|_| Error::JsError(format!("{:?}", e)));
+    ///                 params.push(&a);
+    ///                 let b: JsValue = b
+    ///                     .clone()
+    ///                     .try_into()
+    ///                     .map_err(|_| Error::JsError(format!("{:?}", e)));
+    ///                 params.push(&b);
     ///                 JsFuture::from(js_sys::Promise::from(
-    ///                     func.apply(
-    ///                         &JsValue::NULL,
-    ///                         &Array::from_iter(
-    ///                             vec![
-    ///                                 &a.clone().into(),
-    ///                                 &b.clone().into(),
-    ///                                 &c.clone().into(),
-    ///                                 &d.clone().into(),
-    ///                             ]
-    ///                             .into_iter(),
-    ///                         ),
-    ///                     )
-    ///                     .map_err(|e| Error::JsError(js_sys::Error::from(e).to_string().into()))?,
+    ///                     func.apply(&JsValue::NULL, &params).map_err(|e| {
+    ///                         Error::JsError(js_sys::Error::from(e).to_string().into())
+    ///                     })?,
     ///                 ))
     ///                 .await
     ///                 .map_err(|e| Error::JsError(js_sys::Error::from(e).to_string().into()))?;
@@ -100,24 +95,24 @@ pub mod js_func {
     /// ```
     #[macro_export]
     macro_rules! of {
-	($func: ident, $($name:ident: $type: ident),+$(,)? ) => (
+	($func: ident, $($name:ident: $type: ident),+$(,)?) => {
 	    pub fn $func<'a, 'b: 'a, $($type: TryInto<wasm_bindgen::JsValue> + Clone),+>(
 		func: &js_sys::Function,
-	    ) -> Box<dyn Fn($(&'b $type),+) -> std::pin::Pin<Box<dyn std::future::Future<Output = $crate::error::Result<()>> + 'b>>>
-		where  $($type::Error: std::fmt::Debug),+
+	    ) -> Box<dyn Fn($($type),+) -> std::pin::Pin<Box<dyn std::future::Future<Output = $crate::error::Result<()>> + 'b>>>
+	    where  $($type::Error: std::fmt::Debug),+,
+		$($type: 'b),+
 	    {
 		let func = func.clone();
 		Box::new(
-		    move |$($name: &$type,)+| -> std::pin::Pin<Box<dyn std::future::Future<Output = $crate::error::Result<()>>>> {
+		    move |$($name: $type,)+| -> std::pin::Pin<Box<dyn std::future::Future<Output = $crate::error::Result<()>>>> {
 			let func = func.clone();
 			Box::pin(async move {
 			    let func = func.clone();
-			    let params = js_sys::Array::from_iter(
-				vec![
-				    $(&$name.clone().try_into().map_err(|e| $crate::error::Error::JsError(format!("{:?}", e)))?)+,
-				].into_iter()
-			    );
-			    tracing::info!("fucking params {:?}", params.clone().to_vec());
+			    let params = js_sys::Array::new();
+			    $(
+				let $name: wasm_bindgen::JsValue = $name.clone().try_into().map_err(|e| $crate::error::Error::JsError(format!("{:?}", e)))?;
+				params.push(&$name);
+			    )+
 			    wasm_bindgen_futures::JsFuture::from(js_sys::Promise::from(
 				func.apply(
 				    &wasm_bindgen::JsValue::NULL,
@@ -132,7 +127,7 @@ pub mod js_func {
 		    },
 		)
 	    }
-	)
+	}
     }
 
     of!(of1, a: T0);

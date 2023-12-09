@@ -58,21 +58,21 @@ impl MessageEndpoint<BackendMessage> for BackendContext {
             BackendMessage::ServiceMessage(m) => {
                 if let Some(func) = &self.service_message_handler {
                     let m = js_value::serialize(m)?;
-		    let cb = js_func::of4::<BackendContext, Provider, JsValue, JsValue>(func);
-		    cb(self, &provider, &ctx, &m).await?;
+                    let cb = js_func::of4::<BackendContext, Provider, JsValue, JsValue>(func);
+                    cb(self.clone(), provider, ctx, m).await?;
                 }
             }
             BackendMessage::Extension(m) => {
                 if let Some(func) = &self.extension_message_handler {
                     let m = js_value::serialize(m)?;
-		    let cb = js_func::of4::<BackendContext, Provider, JsValue, JsValue>(func);
-                    cb(self, &provider, &ctx, &m).await?;
+                    let cb = js_func::of4::<BackendContext, Provider, JsValue, JsValue>(func);
+                    cb(self.clone(), provider, ctx, m).await?;
                 }
             }
             BackendMessage::PlainText(m) => {
                 if let Some(func) = &self.plain_text_message_handler {
-		    let cb = js_func::of4::<BackendContext, Provider, JsValue, String>(func);
-                    cb(self, &provider, &ctx, m).await?;
+                    let cb = js_func::of4::<BackendContext, Provider, JsValue, String>(func);
+                    cb(self.clone(), provider, ctx, m.to_string()).await?;
                 }
             }
         }

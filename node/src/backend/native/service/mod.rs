@@ -143,7 +143,7 @@ impl MessageEndpoint<ServiceMessage> for ServiceProvider {
                 let resp = provider
                     .request("sendBackendMessage".to_string(), params, None)
                     .await?;
-		tracing::info!("done calling provider {:?}", resp);
+                tracing::info!("done calling provider {:?}", resp);
                 Ok(())
             }
             ServiceMessage::HttpResponse(resp) => {
@@ -194,7 +194,7 @@ async fn handle_http_request(addr: SocketAddr, req: &HttpRequest) -> Result<Http
         .bytes()
         .await
         .map_err(|e| Error::HttpRequestError(e.to_string()))?;
-    tracing::info!("Handle http request done, responsing");
+    tracing::info!("Handle http request done, responding");
     Ok(HttpResponse {
         status,
         headers,
