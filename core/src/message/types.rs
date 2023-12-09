@@ -6,6 +6,7 @@
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::chunk::Chunk;
 use crate::dht::vnode::VNodeOperation;
 use crate::dht::vnode::VirtualNode;
 use crate::dht::Did;
@@ -19,21 +20,21 @@ pub trait Then {
 }
 
 /// MessageType use to ask for connection, send to remote with transport_uuid and handshake_info.
-#[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ConnectNodeSend {
     /// sdp offer of webrtc
     pub sdp: String,
 }
 
 /// MessageType report to origin with own transport_uuid and handshake_info.
-#[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ConnectNodeReport {
     /// sdp answer of webrtc
     pub sdp: String,
 }
 
 /// MessageType use to find successor in a chord ring.
-#[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct FindSuccessorSend {
     /// did of target
     pub did: Did,
@@ -45,7 +46,7 @@ pub struct FindSuccessorSend {
 }
 
 /// MessageType use to report origin node with report message.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct FindSuccessorReport {
     /// did of target
     pub did: Did,
@@ -56,21 +57,21 @@ pub struct FindSuccessorReport {
 }
 
 /// MessageType use to notify predecessor, ask for update finger tables.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct NotifyPredecessorSend {
     /// The did for notify target
     pub did: Did,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 /// MessageType report to origin node.
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct NotifyPredecessorReport {
     /// The did for notify target
     pub did: Did,
 }
 
 /// The reason of query successor's TopoInfo
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Copy, Clone)]
 pub enum QueryFor {
     /// For sync successor list from successor
     SyncSuccessor,
@@ -79,7 +80,7 @@ pub enum QueryFor {
 }
 
 /// MessageType for handle [crate::dht::PeerRingRemoteAction::QueryForSuccessorList]
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Copy, Clone)]
 pub struct QueryForTopoInfoSend {
     /// The did for query target
     pub did: Did,
@@ -88,7 +89,7 @@ pub struct QueryForTopoInfoSend {
 }
 
 /// MessageType for handle [crate::dht::PeerRingRemoteAction::QueryForSuccessorList]
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct QueryForTopoInfoReport {
     /// The did for query target
     pub info: TopoInfo,
@@ -131,46 +132,46 @@ impl Then for QueryForTopoInfoSend {
 }
 
 /// MessageType use to join chord ring, add did into fingers table.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct JoinDHT {
     /// The did for joining
     pub did: Did,
 }
 
 /// MessageType use to leave chord ring.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct LeaveDHT {
     /// The did for dropping
     pub did: Did,
 }
 
 /// MessageType use to search virtual node.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SearchVNode {
     /// The virtual id of searching target
     pub vid: Did,
 }
 
 /// MessageType report to origin found virtual node.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct FoundVNode {
     /// Response of [SearchVNode], containing response data
     pub data: Vec<VirtualNode>,
 }
 
 /// MessageType after `FindSuccessorSend` and syncing data.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SyncVNodeWithSuccessor {
     /// Data of virtual nodes for syncing.
     pub data: Vec<VirtualNode>,
 }
 
 /// MessageType use to customize message, will be handle by `custom_message` method.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct CustomMessage(pub Vec<u8>);
 
 /// MessageType enum Report contain FindSuccessorSend.
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[non_exhaustive]
 pub enum FindSuccessorThen {
     /// Just Report
@@ -178,7 +179,7 @@ pub enum FindSuccessorThen {
 }
 
 /// MessageType enum handle when meet the last node.
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[non_exhaustive]
 pub enum FindSuccessorReportHandler {
     /// None: do nothing but return.
@@ -192,7 +193,7 @@ pub enum FindSuccessorReportHandler {
 }
 
 /// A collection MessageType use for unified management.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[non_exhaustive]
 pub enum Message {
     /// Local message of Join a node to DHT
@@ -225,6 +226,8 @@ pub enum Message {
     QueryForTopoInfoSend(QueryForTopoInfoSend),
     /// Response of QueryForTopoInfoSend
     QueryForTopoInfoReport(QueryForTopoInfoReport),
+    /// A chunk that can be deserialized to a payload.
+    Chunk(Chunk),
 }
 
 impl std::fmt::Display for Message {

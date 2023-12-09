@@ -236,10 +236,13 @@ impl Decoder for MessagePayload {
 pub trait PayloadSender {
     /// Get the session sk
     fn session_sk(&self) -> &SessionSk;
+
     /// Get access to DHT.
     fn dht(&self) -> Arc<PeerRing>;
+
     /// Send a message payload to a specified DID.
     async fn do_send_payload(&self, did: Did, payload: MessagePayload) -> Result<()>;
+
     /// Infer the next hop for a message by calling `dht.find_successor()`.
     fn infer_next_hop(&self, next_hop: Option<Did>, destination: Did) -> Result<Did> {
         if let Some(next_hop) = next_hop {
@@ -252,6 +255,7 @@ pub trait PayloadSender {
             _ => Err(Error::NoNextHop),
         }
     }
+
     /// Alias for `do_send_payload` that sets the next hop to `payload.relay.next_hop`.
     async fn send_payload(&self, payload: MessagePayload) -> Result<()> {
         self.do_send_payload(payload.relay.next_hop, payload).await
