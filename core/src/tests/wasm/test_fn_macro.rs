@@ -22,14 +22,13 @@ try {
     return e
 }
 "#;
-    let func = Function::new_with_args(&js_code_args, &js_code_body);
+    let func = Function::new_with_args(js_code_args, &js_code_body);
     let native_func = js_func::of4::<String, String, String, String>(&func);
     let a = "hello".to_string();
     let b = " ".to_string();
     let c = "world".to_string();
     let d = "".to_string();
-    let ret = native_func(a, b, c, d).await.unwrap();
-    assert_eq!(ret, ());
+    native_func(a, b, c, d).await.unwrap();
 }
 
 #[wasm_bindgen_test]
