@@ -338,8 +338,8 @@ pub enum Error {
     #[error("Message decryption failed")]
     MessageDecryptionFailed(ecies::SecpError),
 
-    #[error("message too large, consider use ChunkList")]
-    MessageTooLarge,
+    #[error("Message has {0} bytes which is too large")]
+    MessageTooLarge(usize),
 
     #[cfg(feature = "wasm")]
     #[error("Cannot get property {0} from JsValue")]

@@ -94,7 +94,10 @@ impl ConnectionInterface for WebrtcConnection {
     async fn send_message(&self, msg: TransportMessage) -> Result<()> {
         self.webrtc_wait_for_data_channel_open().await?;
         let data = bincode::serialize(&msg).map(Bytes::from)?;
-        self.webrtc_data_channel.send(&data).await?;
+        if let Err(e) = self.webrtc_data_channel.send(&data).await {
+            tracing::error!("{:?}, Data size: {:?}", e, data.len());
+            return Err(e.into());
+        }
         Ok(())
     }
 
