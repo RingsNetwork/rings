@@ -1,3 +1,5 @@
+#![warn(missing_docs)]
+//! Module tcp_proxy provide implementation of TCP/IP based services
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,11 +13,15 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
-use crate::backend::types::ServerMessage;
+use crate::backend::types::BackendMessage;
+use crate::backend::types::ServiceMessage;
 use crate::backend::types::TunnelDefeat;
 use crate::backend::types::TunnelId;
-use crate::processor::Processor;
+use crate::jsonrpc::server::BackendMessageParams;
+use crate::prelude::jsonrpc_core::Params;
+use crate::provider::Provider;
 
+/// Abstract Tcp Tunnel
 pub struct Tunnel {
     tid: TunnelId,
     remote_stream_tx: Option<mpsc::Sender<Bytes>>,
@@ -23,12 +29,12 @@ pub struct Tunnel {
     listener: Option<tokio::task::JoinHandle<()>>,
 }
 
+/// Listener of Tcp Tunnel, contains a mpsc channel
 pub struct TunnelListener {
     tid: TunnelId,
     local_stream: TcpStream,
     remote_stream_tx: mpsc::Sender<Bytes>,
     remote_stream_rx: mpsc::Receiver<Bytes>,
-    processor: Arc<Processor>,
     peer_did: Did,
     cancel_token: CancellationToken,
 }
@@ -51,6 +57,7 @@ impl Drop for Tunnel {
 }
 
 impl Tunnel {
+    /// Create a new tunnel with a given tunnel Id
     pub fn new(tid: TunnelId) -> Self {
         Self {
             tid,
@@ -60,6 +67,7 @@ impl Tunnel {
         }
     }
 
+    /// Send bytes to tunnel via channel
     pub async fn send(&self, bytes: Bytes) {
         if let Some(ref tx) = self.remote_stream_tx {
             let _ = tx.send(bytes).await;
@@ -68,20 +76,23 @@ impl Tunnel {
         }
     }
 
+    /// Start listen a local stream, this function will spawn a thread which
+    /// listening the inbound messages
     pub async fn listen(
         &mut self,
+        provider: Arc<Provider>,
         local_stream: TcpStream,
-        processor: Arc<Processor>,
         peer_did: Did,
     ) {
         if self.listener.is_some() {
             return;
         }
-
-        let mut listener = TunnelListener::new(self.tid, local_stream, processor, peer_did).await;
+        let provider = provider.clone();
+        let mut listener = TunnelListener::new(self.tid, local_stream, peer_did).await;
         let listener_cancel_token = listener.cancel_token();
         let remote_stream_tx = listener.remote_stream_tx.clone();
-        let listener_handler = tokio::spawn(Box::pin(async move { listener.listen().await }));
+        let listener_handler =
+            tokio::spawn(Box::pin(async move { listener.listen(provider).await }));
 
         self.remote_stream_tx = Some(remote_stream_tx);
         self.listener = Some(listener_handler);
@@ -90,19 +101,14 @@ impl Tunnel {
 }
 
 impl TunnelListener {
-    async fn new(
-        tid: TunnelId,
-        local_stream: TcpStream,
-        processor: Arc<Processor>,
-        peer_did: Did,
-    ) -> Self {
+    /// Create a new listener instance with TcpStream, tunnel id, and did of a target peer
+    async fn new(tid: TunnelId, local_stream: TcpStream, peer_did: Did) -> Self {
         let (remote_stream_tx, remote_stream_rx) = mpsc::channel(1024);
         Self {
             tid,
             local_stream,
             remote_stream_tx,
             remote_stream_rx,
-            processor,
             peer_did,
             cancel_token: CancellationToken::new(),
         }
@@ -112,7 +118,7 @@ impl TunnelListener {
         self.cancel_token.clone()
     }
 
-    async fn listen(&mut self) {
+    async fn listen(&mut self, provider: Arc<Provider>) {
         let (mut local_read, mut local_write) = self.local_stream.split();
 
         let listen_local = async {
@@ -126,18 +132,25 @@ impl TunnelListener {
                     Err(e) => {
                         break e.kind().into();
                     }
-                    Ok(n) if n == 0 => {
+                    Ok(0) => {
                         break TunnelDefeat::ConnectionClosed;
                     }
                     Ok(n) => {
                         let body = Bytes::copy_from_slice(&buf[..n]);
-                        let msg = ServerMessage::TcpPackage {
+                        let msg = ServiceMessage::TcpPackage {
                             tid: self.tid,
                             body,
                         };
-                        if let Err(e) = self
-                            .processor
-                            .send_backend_message(self.peer_did, msg)
+
+                        let backend_message: BackendMessage = msg.into();
+                        let params: Params = BackendMessageParams {
+                            did: self.peer_did,
+                            data: backend_message,
+                        }
+                        .try_into()
+                        .expect("Failed on cover backend message to rpc Params");
+                        if let Err(e) = provider
+                            .request("sendBackendMessage".to_string(), params, None)
                             .await
                         {
                             tracing::error!("Send TcpPackage message failed: {e:?}");
@@ -166,26 +179,31 @@ impl TunnelListener {
         tokio::select! {
             defeat = listen_local => {
                 tracing::info!("Local stream closed: {defeat:?}");
-                let msg = ServerMessage::TcpClose {
+                let msg = ServiceMessage::TcpClose {
                     tid: self.tid,
                     reason: defeat,
                 };
-                if let Err(e) =self.processor.send_backend_message(self.peer_did, msg).await {
+        let backend_message: BackendMessage = msg.into();
+        let params: Params = BackendMessageParams{did: self.peer_did, data: backend_message}.try_into().expect("Failed to cover backend message to rpc params");
+        if let Err(e) = provider.request("sendBackendMessage".to_string(), params, None).await {
                     tracing::error!("Send TcpClose message failed: {e:?}");
                 }
             },
             defeat = listen_remote => {
                 tracing::info!("Remote stream closed: {defeat:?}");
-                let msg = ServerMessage::TcpClose {
+                let msg = ServiceMessage::TcpClose {
                     tid: self.tid,
                     reason: defeat,
                 };
-                let _ = self.processor.send_backend_message(self.peer_did, msg).await;
+        let backend_message: BackendMessage = msg.into();
+        let params: Params = BackendMessageParams{did: self.peer_did, data: backend_message}.try_into().expect("Failed to cover backend message to rpc params");
+        let _ = provider.request("sendBackendMessage".to_string(), params, None).await;
             }
         }
     }
 }
 
+/// This function handle a tcp request with timeout
 pub async fn tcp_connect_with_timeout(
     addr: SocketAddr,
     request_timeout_s: u64,

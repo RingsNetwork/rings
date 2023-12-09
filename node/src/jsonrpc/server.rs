@@ -10,6 +10,7 @@ use rings_core::swarm::impls::ConnectionHandshake;
 use rings_transport::core::transport::ConnectionInterface;
 use serde_json::Value;
 
+use crate::backend::types::BackendMessage;
 use crate::error::Error as ServerError;
 use crate::prelude::jsonrpc_core::Error;
 use crate::prelude::jsonrpc_core::ErrorCode;
@@ -58,6 +59,48 @@ impl From<Arc<Processor>> for RpcMeta {
             processor,
             is_auth: true,
         }
+    }
+}
+
+/// Params for method `BackendMessage`
+pub struct BackendMessageParams {
+    /// destination did
+    pub did: Did,
+    /// data of backend message
+    pub data: BackendMessage,
+}
+
+impl TryFrom<Params> for BackendMessageParams {
+    type Error = Error;
+    fn try_from(params: Params) -> Result<Self> {
+        let params: Vec<serde_json::Value> = params.parse()?;
+        let did = params
+            .get(0)
+            .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
+            .as_str()
+            .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
+        let did = Did::from_str(did).map_err(|_| Error::new(ErrorCode::InvalidParams))?;
+
+        let data = params
+            .get(1)
+            .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
+            .as_str()
+            .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
+        let data: BackendMessage =
+            serde_json::from_str(data).map_err(|_| Error::new(ErrorCode::InvalidParams))?;
+        Ok(Self { did, data })
+    }
+}
+
+impl TryInto<Params> for BackendMessageParams {
+    type Error = Error;
+    fn try_into(self) -> Result<Params> {
+        let data: String =
+            serde_json::to_string(&self.data).map_err(|_| Error::new(ErrorCode::InvalidParams))?;
+        Ok(Params::Array(vec![
+            serde_json::Value::String(self.did.to_string()),
+            serde_json::Value::String(data),
+        ]))
     }
 }
 
@@ -282,6 +325,26 @@ pub(crate) async fn send_custom_message(params: Params, meta: RpcMeta) -> Result
     let data = base64::decode(data).map_err(|_| Error::new(ErrorCode::InvalidParams))?;
     let tx_id = meta.processor.send_message(destination, &data).await?;
 
+    Ok(
+        serde_json::to_value(rings_rpc::response::SendMessageResponse::from(
+            tx_id.to_string(),
+        ))
+        .unwrap(),
+    )
+}
+
+/// send custom message to specifice destination
+/// * Params
+///   - destination:  destination did
+///   - data: base64 of [u8]
+pub(crate) async fn send_backend_message(params: Params, meta: RpcMeta) -> Result<Value> {
+    meta.require_authed()?;
+    let bm_params: BackendMessageParams = params.try_into()?;
+    let tx_id = meta
+        .processor
+        .send_backend_message(bm_params.did, bm_params.data)
+        .await?;
+    tracing::info!("Send Response message");
     Ok(
         serde_json::to_value(rings_rpc::response::SendMessageResponse::from(
             tx_id.to_string(),

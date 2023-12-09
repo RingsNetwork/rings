@@ -1,7 +1,6 @@
 #![doc = include_str!("../README.md")]
 
 pub mod backend;
-pub mod client;
 pub mod consts;
 pub mod error;
 pub mod jsonrpc;
@@ -11,6 +10,7 @@ pub mod measure;
 pub mod native;
 pub mod prelude;
 pub mod processor;
+pub mod provider;
 pub mod seed;
 #[cfg(test)]
 mod tests;

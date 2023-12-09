@@ -1,42 +1,71 @@
+#![warn(missing_docs)]
+//! This module provides the implementation of a native Backend,
+//! which includes BackendConfig and BackendContext.
+//!
+//! This module has two submodules: extension and service.
+//!
+//! The submodule [service] aims to provide an implementation of Rings Network based TCP services.
+//! It can forward a TCP request from the Rings Network to a local request.
+//!
+//! The submodule extension aims to provide an implementation of Rings extensions.
+//! These extensions are based on WebAssembly (WASM), allowing downloaded WASM code to be executed
+//! as an external extension of the backend.
+
 pub mod extension;
-pub mod server;
+pub mod service;
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rings_core::message::CustomMessage;
-use rings_core::message::Message;
 use rings_core::message::MessagePayload;
 use rings_core::message::MessageVerificationExt;
-use rings_core::swarm::callback::SwarmCallback;
 
 use crate::backend::native::extension::Extension;
 use crate::backend::native::extension::ExtensionConfig;
-use crate::backend::native::server::Server;
-use crate::backend::native::server::ServiceConfig;
+use crate::backend::native::service::ServiceConfig;
+use crate::backend::native::service::ServiceProvider;
 use crate::backend::types::BackendMessage;
 use crate::backend::types::MessageEndpoint;
 use crate::error::Result;
-use crate::processor::Processor;
+use crate::provider::Provider;
 
+/// BackendConfig including services config and extension config
 pub struct BackendConfig {
+    /// Config of services
     pub services: Vec<ServiceConfig>,
+    /// Config of extensions
     pub extensions: ExtensionConfig,
 }
 
-pub struct Backend {
-    server: Server,
+/// BackendContext is a Context holder of backend message handler
+pub struct BackendContext {
+    server: ServiceProvider,
     extension: Extension,
 }
 
-impl Backend {
-    pub async fn new(config: BackendConfig, processor: Arc<Processor>) -> Result<Self> {
+#[cfg_attr(feature = "browser", async_trait(?Send))]
+#[cfg_attr(not(feature = "browser"), async_trait)]
+impl MessageEndpoint<BackendMessage> for BackendContext {
+    async fn on_message(
+        &self,
+        provider: Arc<Provider>,
+        payload: &MessagePayload,
+        msg: &BackendMessage,
+    ) -> Result<()> {
+        self.handle_backend_message(provider, payload, msg).await
+    }
+}
+
+impl BackendContext {
+    /// Create a new BackendContext instance with config
+    pub async fn new(config: BackendConfig) -> Result<Self> {
         Ok(Self {
-            server: Server::new(config.services, processor.clone()),
-            extension: Extension::new(&config.extensions, processor.clone()).await?,
+            server: ServiceProvider::new(config.services),
+            extension: Extension::new(&config.extensions).await?,
         })
     }
 
+    /// List service names
     pub fn service_names(&self) -> Vec<String> {
         self.server
             .services
@@ -47,38 +76,22 @@ impl Backend {
 
     async fn handle_backend_message(
         &self,
+        provider: Arc<Provider>,
         payload: &MessagePayload,
         msg: &BackendMessage,
     ) -> Result<()> {
         match msg {
-            BackendMessage::Extension(data) => self.extension.handle_message(payload, data).await,
-            BackendMessage::ServerMessage(data) => self.server.handle_message(payload, data).await,
+            BackendMessage::Extension(data) => {
+                self.extension.on_message(provider, payload, data).await
+            }
+            BackendMessage::ServiceMessage(data) => {
+                self.server.on_message(provider, payload, data).await
+            }
             BackendMessage::PlainText(text) => {
                 let peer_did = payload.transaction.signer();
                 tracing::info!("BackendMessage from {peer_did:?} PlainText: {text:?}");
                 Ok(())
             }
         }
-    }
-}
-
-#[async_trait]
-impl SwarmCallback for Backend {
-    async fn on_inbound(
-        &self,
-        payload: &MessagePayload,
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let data: Message = payload.transaction.data()?;
-
-        let Message::CustomMessage(CustomMessage(msg)) = data else {
-            return Ok(());
-        };
-
-        let backend_msg = bincode::deserialize(&msg)?;
-        tracing::debug!("backend_message received: {backend_msg:?}");
-
-        self.handle_backend_message(payload, &backend_msg).await?;
-
-        Ok(())
     }
 }

@@ -112,13 +112,7 @@ impl BiasId {
 
 impl PartialOrd for BiasId {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        if other.bias != self.bias {
-            let did: Did = other.into();
-            let bid = BiasId::new(self.bias, did);
-            self.did.partial_cmp(&bid.did)
-        } else {
-            self.did.partial_cmp(&other.did)
-        }
+        Some(self.cmp(other))
     }
 }
 

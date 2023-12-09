@@ -338,8 +338,8 @@ pub enum Error {
     #[error("Message decryption failed")]
     MessageDecryptionFailed(ecies::SecpError),
 
-    #[error("message too large, consider use ChunkList")]
-    MessageTooLarge,
+    #[error("Message has {0} bytes which is too large")]
+    MessageTooLarge(usize),
 
     #[cfg(feature = "wasm")]
     #[error("Cannot get property {0} from JsValue")]
@@ -362,11 +362,21 @@ pub enum Error {
 
     #[error("Transport error: {0}")]
     Transport(#[from] rings_transport::error::Error),
+
+    #[error("External Javascript error: {0}")]
+    JsError(String),
 }
 
 #[cfg(feature = "wasm")]
 impl From<Error> for wasm_bindgen::JsValue {
     fn from(err: Error) -> Self {
         wasm_bindgen::JsValue::from_str(&err.to_string())
+    }
+}
+
+#[cfg(feature = "wasm")]
+impl From<js_sys::Error> for Error {
+    fn from(err: js_sys::Error) -> Self {
+        Error::JsError(err.to_string().into())
     }
 }

@@ -2,9 +2,6 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::*;
 
-use crate::client::browser;
-use crate::client::browser::Peer;
-use crate::client::Client;
 use crate::prelude::jsonrpc_core::types::response::Output;
 use crate::prelude::jsonrpc_core::types::Value;
 use crate::prelude::rings_core::prelude::uuid;
@@ -12,10 +9,13 @@ use crate::prelude::rings_core::utils;
 use crate::prelude::rings_core::utils::js_value;
 use crate::prelude::*;
 use crate::processor::ProcessorConfig;
+use crate::provider::browser;
+use crate::provider::browser::Peer;
+use crate::provider::Provider;
 
 wasm_bindgen_test_configure!(run_in_browser);
 
-async fn new_client() -> (Client, String) {
+async fn new_provider() -> (Provider, String) {
     let key = SecretKey::random();
     let sm = SessionSk::new_with_seckey(&key).unwrap();
 
@@ -27,17 +27,17 @@ async fn new_client() -> (Client, String) {
     .unwrap();
 
     let storage_name = uuid::Uuid::new_v4().to_string();
-    let client: Client = Client::new_client_with_storage_and_serialized_config_internal(
+    let provider: Provider = Provider::new_provider_with_storage_and_serialized_config_internal(
         config,
         storage_name.clone(),
     )
     .await
     .unwrap();
-    (client, storage_name)
+    (provider, storage_name)
 }
 
-async fn get_peers(client: &Client) -> Vec<Peer> {
-    let peers = JsFuture::from(client.list_peers()).await.ok().unwrap();
+async fn get_peers(provider: &Provider) -> Vec<Peer> {
+    let peers = JsFuture::from(provider.list_peers()).await.ok().unwrap();
     let peers: js_sys::Array = peers.into();
     let peers: Vec<Peer> = peers
         .iter()
@@ -46,16 +46,16 @@ async fn get_peers(client: &Client) -> Vec<Peer> {
     peers
 }
 
-async fn create_connection(client1: &Client, client2: &Client) {
+async fn create_connection(provider1: &Provider, provider2: &Provider) {
     futures::try_join!(
-        JsFuture::from(client1.listen()),
-        JsFuture::from(client2.listen()),
+        JsFuture::from(provider1.listen()),
+        JsFuture::from(provider2.listen()),
     )
     .unwrap();
 
-    let address = JsValue::from_str(&client2.address());
+    let address = JsValue::from_str(&provider2.address());
     let req0 = js_sys::Array::of1(&address);
-    let offer_fut = JsFuture::from(client1.request("createOffer".to_string(), req0.into(), None))
+    let offer_fut = JsFuture::from(provider1.request("createOffer".to_string(), req0.into(), None))
         .await
         .unwrap();
 
@@ -72,9 +72,10 @@ async fn create_connection(client1: &Client, client2: &Client) {
 
     let js_offer = JsValue::from_str(&offer);
     let req1 = js_sys::Array::of1(&js_offer);
-    let answer_fut = JsFuture::from(client2.request("answerOffer".to_string(), req1.into(), None))
-        .await
-        .unwrap();
+    let answer_fut =
+        JsFuture::from(provider2.request("answerOffer".to_string(), req1.into(), None))
+            .await
+            .unwrap();
 
     let answer: String = match js_value::deserialize::<Output>(&answer_fut).unwrap() {
         Output::Success(ret) => {
@@ -92,34 +93,34 @@ async fn create_connection(client1: &Client, client2: &Client) {
     let js_answer = JsValue::from_str(&answer);
     let req2 = js_sys::Array::of1(&js_answer);
 
-    let _ret = JsFuture::from(client1.request("acceptAnswer".to_string(), req2.into(), None))
+    let _ret = JsFuture::from(provider1.request("acceptAnswer".to_string(), req2.into(), None))
         .await
         .unwrap();
 }
 
 #[wasm_bindgen_test]
-async fn test_two_client_connect_and_list() {
+async fn test_two_provider_connect_and_list() {
     // super::setup_log();
-    let (client1, _storage1) = new_client().await;
-    let (client2, _storage2) = new_client().await;
+    let (provider1, _storage1) = new_provider().await;
+    let (provider2, _storage2) = new_provider().await;
 
     futures::try_join!(
-        JsFuture::from(client1.listen()),
-        JsFuture::from(client2.listen()),
+        JsFuture::from(provider1.listen()),
+        JsFuture::from(provider2.listen()),
     )
     .unwrap();
 
-    create_connection(&client1, &client2).await;
+    create_connection(&provider1, &provider2).await;
     console_log!("wait for register");
     utils::js_utils::window_sleep(1000).await.unwrap();
 
-    let peers = get_peers(&client1).await;
+    let peers = get_peers(&provider1).await;
     assert!(peers.len() == 1, "peers len should be 1");
     let peer2 = peers.get(0).unwrap();
 
     console_log!("get peer");
     let peer2: Peer = js_value::deserialize(
-        &JsFuture::from(client1.get_peer(peer2.did.clone(), None))
+        &JsFuture::from(provider1.get_peer(peer2.did.clone(), None))
             .await
             .unwrap(),
     )
@@ -130,15 +131,15 @@ async fn test_two_client_connect_and_list() {
         peer2.state,
     );
 
-    JsFuture::from(client1.disconnect(peer2.did.clone(), None))
+    JsFuture::from(provider1.disconnect(peer2.did.clone(), None))
         .await
         .unwrap();
-    let peers = get_peers(&client1).await;
+    let peers = get_peers(&provider1).await;
     assert_eq!(peers.len(), 0);
 }
 
 #[wasm_bindgen_test]
-async fn test_client_parse_params() {
+async fn test_provider_parse_params() {
     let null_value = browser::utils::parse_params(JsValue::null());
     assert!(null_value.is_ok(), "null_value is error");
     match null_value {
@@ -205,18 +206,18 @@ async fn test_get_address() {
 #[wasm_bindgen_test]
 async fn test_create_connection_via_local_rpc() {
     // super::setup_log();
-    let (client1, _storage1) = new_client().await;
-    let (client2, _storage2) = new_client().await;
+    let (provider1, _storage1) = new_provider().await;
+    let (provider2, _storage2) = new_provider().await;
 
     futures::try_join!(
-        JsFuture::from(client1.listen()),
-        JsFuture::from(client2.listen()),
+        JsFuture::from(provider1.listen()),
+        JsFuture::from(provider2.listen()),
     )
     .unwrap();
 
-    let address = JsValue::from_str(&client2.address());
+    let address = JsValue::from_str(&provider2.address());
     let req0 = js_sys::Array::of1(&address);
-    let offer_fut = JsFuture::from(client1.request("createOffer".to_string(), req0.into(), None))
+    let offer_fut = JsFuture::from(provider1.request("createOffer".to_string(), req0.into(), None))
         .await
         .unwrap();
 
@@ -233,9 +234,10 @@ async fn test_create_connection_via_local_rpc() {
 
     let js_offer = JsValue::from_str(&offer);
     let req1 = js_sys::Array::of1(&js_offer);
-    let answer_fut = JsFuture::from(client2.request("answerOffer".to_string(), req1.into(), None))
-        .await
-        .unwrap();
+    let answer_fut =
+        JsFuture::from(provider2.request("answerOffer".to_string(), req1.into(), None))
+            .await
+            .unwrap();
 
     let answer: String = match js_value::deserialize::<Output>(&answer_fut).unwrap() {
         Output::Success(ret) => {
@@ -253,7 +255,7 @@ async fn test_create_connection_via_local_rpc() {
     let js_answer = JsValue::from_str(&answer);
     let req2 = js_sys::Array::of1(&js_answer);
 
-    let _ret = JsFuture::from(client1.request("acceptAnswer".to_string(), req2.into(), None))
+    let _ret = JsFuture::from(provider1.request("acceptAnswer".to_string(), req2.into(), None))
         .await
         .unwrap();
 }

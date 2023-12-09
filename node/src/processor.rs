@@ -13,7 +13,7 @@ use rings_transport::core::transport::ConnectionInterface;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::backend::types::IntoBackendMessage;
+use crate::backend::types::BackendMessage;
 use crate::consts::DATA_REDUNDANT;
 use crate::error::Error;
 use crate::error::Result;
@@ -43,7 +43,7 @@ use crate::prelude::SessionSk;
 
 /// ProcessorConfig is usually serialized as json or yaml.
 /// There is a `from_config` method in [ProcessorBuilder] used to initialize the Builder with a serialized ProcessorConfig.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 #[wasm_export]
 pub struct ProcessorConfig {
     /// ICE servers for webrtc
@@ -262,7 +262,6 @@ impl ProcessorBuilder {
         if let Some(measure) = self.measure {
             swarm_builder = swarm_builder.measure(measure);
         }
-
         let swarm = Arc::new(swarm_builder.build());
         let stabilization = Arc::new(Stabilization::new(swarm.clone(), self.stabilize_timeout));
 
@@ -384,9 +383,9 @@ impl Processor {
     /// Send custom message to a did.
     pub async fn send_message(&self, destination: &str, msg: &[u8]) -> Result<uuid::Uuid> {
         tracing::info!(
-            "send_message, destination: {}, text: {:?}",
+            "send_message, destination: {}, message size: {:?}",
             destination,
-            msg,
+            msg.len(),
         );
         let destination = Did::from_str(destination).map_err(|_| Error::InvalidDid)?;
 
@@ -402,9 +401,8 @@ impl Processor {
     pub async fn send_backend_message(
         &self,
         destination: Did,
-        msg: impl IntoBackendMessage,
+        backend_msg: BackendMessage,
     ) -> Result<uuid::Uuid> {
-        let backend_msg = msg.into_backend_message();
         let msg_bytes = bincode::serialize(&backend_msg).map_err(|_| Error::EncodeError)?;
         self.send_message(&destination.to_string(), &msg_bytes)
             .await

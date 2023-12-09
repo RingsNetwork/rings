@@ -5,7 +5,7 @@ use crate::swarm::Swarm;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
-#[cfg(all(not(feature = "wasm")))]
+#[cfg(not(feature = "wasm"))]
 pub mod default;
 
 #[allow(dead_code)]

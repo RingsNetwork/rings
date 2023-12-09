@@ -346,10 +346,10 @@ impl PayloadSender for Swarm {
         let data = payload.to_bincode()?;
         if data.len() > TRANSPORT_MAX_SIZE {
             tracing::error!("Message is too large: {:?}", payload);
-            return Err(Error::MessageTooLarge);
+            return Err(Error::MessageTooLarge(data.len()));
         }
 
-        if data.len() > TRANSPORT_MTU {
+        let result = if data.len() > TRANSPORT_MTU {
             let chunks = ChunkList::<TRANSPORT_MTU>::from(&data);
             for chunk in chunks {
                 let data =
@@ -358,11 +358,11 @@ impl PayloadSender for Swarm {
                 conn.send_message(TransportMessage::Custom(data.to_vec()))
                     .await?;
             }
-        }
-
-        let result = conn
-            .send_message(TransportMessage::Custom(data.to_vec()))
-            .await;
+            Ok(())
+        } else {
+            conn.send_message(TransportMessage::Custom(data.to_vec()))
+                .await
+        };
 
         tracing::debug!(
             "Sent {:?}, to node {:?}",

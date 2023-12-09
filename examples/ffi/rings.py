@@ -40,9 +40,9 @@ def on_inbound(payload):
     return
 
 
-def create_client(rings_node, acc):
+def create_provider(rings_node, acc):
     callback = rings_node.new_callback(on_inbound)
-    client = rings_node.new_client_with_callback(
+    provider = rings_node.new_provider_with_callback(
         "stun://stun.l.google.com".encode(),
         10,
         acc.address.encode(),
@@ -50,12 +50,12 @@ def create_client(rings_node, acc):
         signer,
         ffi.addressof(callback),
     )
-    return client
+    return provider
 
 
 if __name__ == "__main__":
     rings_node = ffi.dlopen(f"./target/debug/librings_node.{extension}")
     rings_node.init_logging(rings_node.Debug)
 
-    client = create_client(rings_node, acc)
-    print(client)
+    provider = create_provider(rings_node, acc)
+    print(provider)

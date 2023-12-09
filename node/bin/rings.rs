@@ -12,21 +12,23 @@ use futures::pin_mut;
 use futures::select;
 use futures::StreamExt;
 use futures_timer::Delay;
-use rings_core::dht::Did;
-use rings_core::session::SessionSkBuilder;
-use rings_node::backend::native::Backend;
 use rings_node::backend::native::BackendConfig;
+use rings_node::backend::native::BackendContext;
+use rings_node::backend::Backend;
 use rings_node::logging::init_logging;
 use rings_node::logging::LogLevel;
 use rings_node::measure::PeriodicMeasure;
 use rings_node::native::cli::Client;
 use rings_node::native::config;
 use rings_node::native::endpoint::run_http_api;
+use rings_node::prelude::rings_core::dht::Did;
 use rings_node::prelude::rings_core::ecc::SecretKey;
 use rings_node::prelude::PersistenceStorage;
+use rings_node::prelude::SessionSkBuilder;
 use rings_node::processor::Processor;
 use rings_node::processor::ProcessorBuilder;
 use rings_node::processor::ProcessorConfig;
+use rings_node::provider::Provider;
 use rings_node::util::ensure_parent_dir;
 use rings_node::util::expand_home;
 use tokio::io;
@@ -341,6 +343,9 @@ struct SendHttpCommand {
 
     #[arg(long, default_value = "30000")]
     timeout: u64,
+
+    #[arg(long = "request_id", short = 'i', help = "set request id")]
+    rid: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -446,10 +451,10 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
             .build()?,
     );
     println!("Did: {}", processor.swarm.did());
-
-    let backend = Arc::new(Backend::new(bc, processor.clone()).await?);
-    let backend_service_names = backend.service_names();
-
+    let backend_context = BackendContext::new(bc).await?;
+    let backend_service_names = backend_context.service_names();
+    let provider = Arc::new(Provider::from_processor(processor.clone()));
+    let backend = Arc::new(Backend::new(provider, Box::new(backend_context)));
     processor.swarm.set_callback(backend).unwrap();
 
     let processor_clone = processor.clone();
@@ -571,6 +576,7 @@ async fn main() -> anyhow::Result<()> {
                         })
                         .collect::<Vec<(_, _)>>(),
                     args.body.map(|x| x.as_bytes().to_vec()),
+                    args.rid,
                 )
                 .await?
                 .display();

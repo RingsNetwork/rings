@@ -167,7 +167,7 @@ pub struct SyncVNodeWithSuccessor {
 }
 
 /// MessageType use to customize message, will be handle by `custom_message` method.
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct CustomMessage(pub Vec<u8>);
 
 /// MessageType enum Report contain FindSuccessorSend.
@@ -240,5 +240,13 @@ impl Message {
     /// Wrap a data of message into CustomMessage.
     pub fn custom(msg: &[u8]) -> Result<Message> {
         Ok(Message::CustomMessage(CustomMessage(msg.to_vec())))
+    }
+}
+
+impl std::fmt::Debug for CustomMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CustomMessage")
+            .field("size", &self.0.len())
+            .finish()
     }
 }

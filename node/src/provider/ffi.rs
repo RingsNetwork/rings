@@ -1,7 +1,7 @@
 #![warn(missing_docs)]
-//! ffi Client implementation
+//! ffi Provider implementation
 //! =======================
-//! This module allows developers to integrate the client with various programming languages,
+//! This module allows developers to integrate the provider with various programming languages,
 //! such as C, C++, Golang, Python, and Node.js.
 //!
 //! The module provides functionality for integrating Rust-based systems with external
@@ -10,8 +10,8 @@
 //! this Rust module.
 //!
 //! Primary Features:
-//! 1. **Client Representation for FFI**: The module defines `ClientPtr`, a struct that
-//!    serves as a C-compatible representation of the `Client` type, allowing for interaction
+//! 1. **Provider Representation for FFI**: The module defines `ProviderPtr`, a struct that
+//!    serves as a C-compatible representation of the `Provider` type, allowing for interaction
 //!    with other languages through raw pointers. It abstracts the reference counting of
 //!    internal `Arc` components, ensuring memory safety across the boundary.
 //!
@@ -19,8 +19,8 @@
 //!    for message callback functionalities between Rust and other languages. It can hold
 //!    function pointers to C-compatible functions that handle custom and built-in messages.
 //!
-//! 3. **Functions for Client Interaction**: Several extern "C" functions, such as `new_client_with_callback`,
-//!    `listen`, and `async_listen`, facilitate the creation of clients, listening to messages,
+//! 3. **Functions for Provider Interaction**: Several extern "C" functions, such as `new_provider_with_callback`,
+//!    `listen`, and `async_listen`, facilitate the creation of providers, listening to messages,
 //!    and making internal requests. They make the module's core functionalities accessible from C
 //!    or other languages supporting FFI.
 //!
@@ -72,8 +72,8 @@
 //! rings_node.init_logging(rings_node.Debug)
 //! callback = rings_node.new_callback(custom_msg_callback, builtin_msg_callback)
 //!
-//! def create_client(signer, acc):
-//!     client = rings_node.new_client_with_callback(
+//! def create_provider(signer, acc):
+//!     provider = rings_node.new_provider_with_callback(
 //!         "stun://stun.l.google.com".encode(),
 //!         10,
 //!         acc.address.encode(),
@@ -81,12 +81,12 @@
 //!         signer,
 //!         ffi.addressof(callback)
 //!     )
-//!     return client
+//!     return provider
 //!
 //! if __name__ == "__main__":
-//!     client = create_client(signer, acc)
-//!     rings_node.listen(ffi.addressof(client))
-//!     print(client)
+//!     provider = create_provider(signer, acc)
+//!     rings_node.listen(ffi.addressof(provider))
+//!     print(provider)
 //! ```
 //! 
 //! Note: Since the above code is executed in a single-process environment of Python,
@@ -103,22 +103,22 @@ use rings_core::async_trait;
 use rings_core::message::MessagePayload;
 use rings_core::swarm::callback::SwarmCallback;
 
-use super::Client;
+use super::Provider;
 use super::Signer;
 use crate::error::Error;
 use crate::error::Result;
 use crate::jsonrpc::HandlerType;
 use crate::processor::Processor;
 
-/// A structure to represent the Client in a C-compatible format.
+/// A structure to represent the Provider in a C-compatible format.
 /// This is necessary as using Arc directly in FFI can be unsafe.
 #[repr(C)]
-pub struct ClientPtr {
+pub struct ProviderPtr {
     processor: *const Processor,
     handler: *const HandlerType,
 }
 
-impl ClientPtr {
+impl ProviderPtr {
     /// Increases the reference count for the associated Arcs.
     /// # Safety
     /// This function unsafely increments the reference count of the Arcs.
@@ -136,7 +136,7 @@ impl ClientPtr {
     }
 }
 
-impl std::ops::Drop for ClientPtr {
+impl std::ops::Drop for ProviderPtr {
     fn drop(&mut self) {
         tracing::debug!("Ptr dropped!");
         unsafe {
@@ -145,44 +145,44 @@ impl std::ops::Drop for ClientPtr {
     }
 }
 
-impl Client {
-    /// Converts a raw ClientPtr pointer to a Rust Client type.
+impl Provider {
+    /// Converts a raw ProviderPtr pointer to a Rust Provider type.
     /// # Safety
     /// Unsafe due to the dereferencing of the raw pointer.
-    fn from_raw(ptr: *const ClientPtr) -> Result<Client> {
+    fn from_raw(ptr: *const ProviderPtr) -> Result<Provider> {
         // Check point here.
         if ptr.is_null() {
             return Err(Error::FFINulPtrError);
         }
 
-        let client_ptr: &ClientPtr = unsafe { &*ptr };
-        let client: Client = client_ptr.into();
-        Ok(client)
+        let provider_ptr: &ProviderPtr = unsafe { &*ptr };
+        let provider: Provider = provider_ptr.into();
+        Ok(provider)
     }
 }
 
-impl From<&ClientPtr> for Client {
-    /// Converts a reference to a ClientPtr to a Client type.
+impl From<&ProviderPtr> for Provider {
+    /// Converts a reference to a ProviderPtr to a Provider type.
     /// Note that the conversion from raw pointers to Arcs does not modify the reference count.
     /// # Safety
     /// Unsafe due to the conversion from raw pointers to Arcs.
-    fn from(ptr: &ClientPtr) -> Client {
-        tracing::debug!("FFI: Client from Ptr!");
+    fn from(ptr: &ProviderPtr) -> Provider {
+        tracing::debug!("FFI: Provider from Ptr!");
         let processor = unsafe { Arc::<Processor>::from_raw(ptr.processor as *const Processor) };
         let handler = unsafe { Arc::<HandlerType>::from_raw(ptr.handler as *const HandlerType) };
         Self { processor, handler }
     }
 }
 
-impl From<&Client> for ClientPtr {
-    /// Cast a Client into ClientPtr
-    fn from(client: &Client) -> ClientPtr {
-        tracing::debug!("FFI: Client into Ptr!");
+impl From<&Provider> for ProviderPtr {
+    /// Cast a Provider into ProviderPtr
+    fn from(provider: &Provider) -> ProviderPtr {
+        tracing::debug!("FFI: Provider into Ptr!");
         // Clone the Arcs, which increases the ref count,
         // then turn them into raw pointers.
-        let processor_ptr = Arc::into_raw(client.processor.clone());
-        let handler_ptr = Arc::into_raw(client.handler.clone());
-        ClientPtr {
+        let processor_ptr = Arc::into_raw(provider.processor.clone());
+        let handler_ptr = Arc::into_raw(provider.handler.clone());
+        ProviderPtr {
             processor: processor_ptr,
             handler: handler_ptr,
         }
@@ -223,43 +223,43 @@ pub extern "C" fn new_callback(
 
 /// Start message listening and stabilization
 /// # Safety
-/// Listen function accept a ClientPtr and will unsafety cast it into Arc based Client
+/// Listen function accept a ProviderPtr and will unsafety cast it into Arc based Provider
 #[no_mangle]
-pub extern "C" fn listen(client_ptr: *const ClientPtr) {
-    let client: Client = Client::from_raw(client_ptr).expect("Client ptr is invalid");
-    executor::block_on(client.processor.listen());
+pub extern "C" fn listen(provider_ptr: *const ProviderPtr) {
+    let provider: Provider = Provider::from_raw(provider_ptr).expect("Provider ptr is invalid");
+    executor::block_on(provider.processor.listen());
 }
 
 /// Start message listening and stabilization
 /// This function will launch listener in a new thread
 /// # Safety
-/// Listen function accept a ClientPtr and will unsafety cast it into Arc based Client
+/// Listen function accept a ProviderPtr and will unsafety cast it into Arc based Provider
 #[no_mangle]
-pub extern "C" fn async_listen(client_ptr: *const ClientPtr) {
-    let client: Client = Client::from_raw(client_ptr).expect("Client ptr is invalid");
+pub extern "C" fn async_listen(provider_ptr: *const ProviderPtr) {
+    let provider: Provider = Provider::from_raw(provider_ptr).expect("Provider ptr is invalid");
     std::thread::spawn(move || {
-        executor::block_on(client.processor.listen());
+        executor::block_on(provider.processor.listen());
     });
 }
 
 /// Request internal rpc api
 /// # Safety
 ///
-/// * This function accept a ClientPtr and will unsafety cast it into Arc based Client
+/// * This function accept a ProviderPtr and will unsafety cast it into Arc based Provider
 /// * This function cast CStr into Str
 #[no_mangle]
 pub extern "C" fn request(
-    client_ptr: *const ClientPtr,
+    provider_ptr: *const ProviderPtr,
     method: *const c_char,
     params: *const c_char,
 ) -> *const c_char {
     match (|| -> Result<*const c_char> {
-        let client: Client = Client::from_raw(client_ptr)?;
+        let provider: Provider = Provider::from_raw(provider_ptr)?;
         let method = c_char_to_string(method)?;
         let params = c_char_to_string(params)?;
         let params = serde_json::from_str(&params)?;
         let ret: String = serde_json::to_string(&executor::block_on(
-            client.request_internal(method, params, None),
+            provider.request_internal(method, params, None),
         )?)?;
         let c_ret = CString::new(ret)?;
         Ok(c_ret.as_ptr())
@@ -271,19 +271,19 @@ pub extern "C" fn request(
     }
 }
 
-/// Craft a new Client with signer and callback ptr
+/// Craft a new Provider with signer and callback ptr
 /// # Safety
 ///
 /// * This function cast CStr into Str
 #[no_mangle]
-pub unsafe extern "C" fn new_client_with_callback(
+pub unsafe extern "C" fn new_provider_with_callback(
     ice_server: *const c_char,
     stabilize_timeout: u32,
     account: *const c_char,
     account_type: *const c_char,
     signer: extern "C" fn(*const c_char, *mut c_char) -> (),
     callback_ptr: *const SwarmCallbackInstanceFFI,
-) -> ClientPtr {
+) -> ProviderPtr {
     fn wrapped_signer(
         signer: extern "C" fn(*const c_char, *mut c_char) -> (),
     ) -> impl Fn(String) -> Vec<u8> {
@@ -304,12 +304,12 @@ pub unsafe extern "C" fn new_client_with_callback(
         }
     }
 
-    let client: Client = match (|| -> Result<Client> {
+    let provider: Provider = match (|| -> Result<Provider> {
         let ice: String = c_char_to_string(ice_server)?;
         let acc: String = c_char_to_string(account)?;
         let acc_ty: String = c_char_to_string(account_type)?;
 
-        executor::block_on(Client::new_client_internal(
+        executor::block_on(Provider::new_provider_internal(
             ice,
             stabilize_timeout as usize,
             acc,
@@ -319,17 +319,17 @@ pub unsafe extern "C" fn new_client_with_callback(
     })() {
         Ok(r) => r,
         Err(e) => {
-            panic!("Failed on create new client {:#}", e)
+            panic!("Failed on create new provider {:#}", e)
         }
     };
 
     let callback: &SwarmCallbackInstanceFFI = unsafe { &*callback_ptr };
-    client
+    provider
         .set_swarm_callback(Arc::new(callback.clone()))
         .expect("Failed to set callback");
 
-    let ret: ClientPtr = (&client).into();
-    // When leaving the closure, the origin Client ref will be release,
+    let ret: ProviderPtr = (&provider).into();
+    // When leaving the closure, the origin Provider ref will be release,
     // So we manually increase the count here
     unsafe {
         ret.increase_strong_count();

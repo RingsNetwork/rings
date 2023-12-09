@@ -28,7 +28,7 @@ use serde_json::json;
 
 use crate::backend::types::BackendMessage;
 use crate::backend::types::HttpRequest;
-use crate::backend::types::ServerMessage;
+use crate::backend::types::ServiceMessage;
 use crate::prelude::rings_core::inspect::SwarmInspect;
 use crate::prelude::rings_core::session::SessionSk;
 use crate::prelude::rings_rpc::client::Client as RpcClient;
@@ -162,6 +162,7 @@ impl Client {
         path: &str,
         headers: Vec<(String, String)>,
         body: Option<Vec<u8>>,
+        rid: Option<String>,
     ) -> Output<()> {
         let req = HttpRequest {
             service: service.to_string(),
@@ -169,9 +170,10 @@ impl Client {
             path: path.to_string(),
             headers,
             body,
+            rid,
         };
 
-        let msg = BackendMessage::ServerMessage(ServerMessage::HttpRequest(req));
+        let msg = BackendMessage::ServiceMessage(ServiceMessage::HttpRequest(req));
 
         let data = bincode::serialize(&msg).map_err(|e| {
             anyhow::anyhow!("Failed to serialize HttpRequest message to binary format: {e}",)
