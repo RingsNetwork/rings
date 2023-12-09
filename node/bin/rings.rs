@@ -343,6 +343,9 @@ struct SendHttpCommand {
 
     #[arg(long, default_value = "30000")]
     timeout: u64,
+
+    #[arg(long = "request_id", short = 'i', help = "set request id")]
+    rid: Option<String>
 }
 
 #[derive(Args, Debug)]
@@ -573,6 +576,7 @@ async fn main() -> anyhow::Result<()> {
                         })
                         .collect::<Vec<(_, _)>>(),
                     args.body.map(|x| x.as_bytes().to_vec()),
+		    args.rid
                 )
                 .await?
                 .display();

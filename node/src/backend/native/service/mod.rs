@@ -199,5 +199,6 @@ async fn handle_http_request(addr: SocketAddr, req: &HttpRequest) -> Result<Http
         status,
         headers,
         body: Some(body),
+	rid: req.rid.clone()
     })
 }

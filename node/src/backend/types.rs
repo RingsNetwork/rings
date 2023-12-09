@@ -83,6 +83,8 @@ pub enum TunnelDefeat {
 /// HttpRequest
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HttpRequest {
+    /// Request Id
+    pub rid: Option<String>,
     /// Service name
     pub service: String,
     /// Method
@@ -98,6 +100,8 @@ pub struct HttpRequest {
 /// HttpResponse
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HttpResponse {
+    /// Request Id
+    pub rid: Option<String>,
     /// Status
     pub status: u16,
     /// Headers
