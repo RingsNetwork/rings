@@ -23,6 +23,9 @@ pub use types::MeasureImpl;
 pub use types::WrappedDid;
 
 use crate::channels::Channel;
+use crate::chunk::ChunkList;
+use crate::consts::TRANSPORT_MAX_SIZE;
+use crate::consts::TRANSPORT_MTU;
 use crate::dht::types::Chord;
 use crate::dht::CorrectChord;
 use crate::dht::Did;
@@ -341,6 +344,22 @@ impl PayloadSender for Swarm {
         );
 
         let data = payload.to_bincode()?;
+        if data.len() > TRANSPORT_MAX_SIZE {
+            tracing::error!("Message is too large: {:?}", payload);
+            return Err(Error::MessageTooLarge);
+        }
+
+        if data.len() > TRANSPORT_MTU {
+            let chunks = ChunkList::<TRANSPORT_MTU>::from(&data);
+            for chunk in chunks {
+                let data =
+                    MessagePayload::new_send(Message::Chunk(chunk), &self.session_sk, did, did)?
+                        .to_bincode()?;
+                conn.send_message(TransportMessage::Custom(data.to_vec()))
+                    .await?;
+            }
+        }
+
         let result = conn
             .send_message(TransportMessage::Custom(data.to_vec()))
             .await;

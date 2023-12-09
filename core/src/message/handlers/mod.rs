@@ -135,6 +135,7 @@ impl MessageHandler {
             Message::CustomMessage(ref msg) => self.handle(payload, msg).await,
             Message::QueryForTopoInfoSend(ref msg) => self.handle(payload, msg).await,
             Message::QueryForTopoInfoReport(ref msg) => self.handle(payload, msg).await,
+            Message::Chunk(_) => Ok(vec![]),
         }?;
 
         tracing::debug!("FINISH HANDLE MESSAGE {}", &payload.transaction.tx_id);

@@ -2,11 +2,16 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures::lock::Mutex as FuturesMutex;
 use rings_transport::core::callback::TransportCallback;
 use rings_transport::core::transport::WebrtcConnectionState;
 
 use crate::channels::Channel;
+use crate::chunk::ChunkList;
+use crate::chunk::ChunkManager;
+use crate::consts::TRANSPORT_MTU;
 use crate::dht::Did;
+use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
 use crate::types::channel::Channel as ChannelTrait;
@@ -62,6 +67,7 @@ pub struct InnerSwarmCallback {
     did: Did,
     transport_event_sender: TransportEventSender,
     callback: SharedSwarmCallback,
+    chunk_list: Arc<FuturesMutex<ChunkList<TRANSPORT_MTU>>>,
 }
 
 impl InnerSwarmCallback {
@@ -75,20 +81,41 @@ impl InnerSwarmCallback {
             did,
             transport_event_sender,
             callback,
+            chunk_list: Default::default(),
         }
+    }
+
+    async fn handle_payload(
+        &self,
+        cid: &str,
+        payload: &MessagePayload,
+    ) -> Result<(), CallbackError> {
+        let message: Message = payload.transaction.data()?;
+
+        if let Message::Chunk(msg) = message {
+            if let Some(data) = self.chunk_list.lock().await.handle(msg.clone()) {
+                return self.on_message(cid, &data).await;
+            }
+            return Ok(());
+        };
+
+        if payload.transaction.destination == self.did {
+            self.callback.on_inbound(payload).await?;
+        }
+
+        Ok(())
     }
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl TransportCallback for InnerSwarmCallback {
-    async fn on_message(&self, _cid: &str, msg: &[u8]) -> Result<(), CallbackError> {
+    async fn on_message(&self, cid: &str, msg: &[u8]) -> Result<(), CallbackError> {
         let payload = MessagePayload::from_bincode(msg)?;
         if !(payload.verify() && payload.transaction.verify()) {
             tracing::error!("Cannot verify msg or it's expired: {:?}", payload);
             return Err("Cannot verify msg or it's expired".into());
         }
-
         self.callback.on_validate(&payload).await?;
 
         Channel::send(
@@ -98,11 +125,7 @@ impl TransportCallback for InnerSwarmCallback {
         .await
         .map_err(Box::new)?;
 
-        if payload.transaction.destination == self.did {
-            self.callback.on_inbound(&payload).await?;
-        }
-
-        Ok(())
+        self.handle_payload(cid, &payload).await
     }
 
     async fn on_peer_connection_state_change(
