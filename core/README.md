@@ -22,13 +22,11 @@ The design goal of Rings Network is to enable nodes to run in any environment, i
 
 #### Transport Layer
 
-The implementation of WebRTC and WebAssembly in Rings Network provides several advantages for users. Firstly, the browser-based approach means that users do not need to install any additional software or plugins to participate in the network. Secondly, the use of WebRTC and WebAssembly enables the network to have a low latency and high throughput, making it suitable for real-time communication and data transfer.
+The transport layer of Rings Network is based on WebRTC protocol, which provides browsers and mobile apps with real-time communication capabilities through simple interface.
 
-WebRTC, or Web Real-Time Communication, provides browsers and mobile apps with real-time communication capabilities through simple APIs. With WebRTC, users can easily send audio, video, and data streams directly between browsers, without the need for any plug-ins or extra software. At the same time, the Rings Network has some special optimizations for the WebRTC handshakes process.
+The WebRTC protocol obtains the optimal connection path between nodes by exchanging SDP (Session Description Protocol), which can be either TCP or UDP. In the Rings Network, we use WebRTC's data channel to implement data communication. For a typical ICE (Interactive Connectivity Establishment) process, it can be described as follows:
 
 Assuming Node A and Node B want to create a WebRTC connection, they would need to exchange a minimum of three messages with each other:
-
-
 
 **ICE Scheme:**
 
@@ -36,15 +34,24 @@ Assuming Node A and Node B want to create a WebRTC connection, they would need t
 2. Peer B: { set receiveed offer as remote description create answer set it as local description Send Answer to Peer A }
 3. Peer A: { Set receiveed answer as remote description }
 
+For native implementation, the transport layer is based on `webrtc.rs`, and for browser case, we implemented based on `web_sys` and `wasm_bindgen`.
+
+To check the implementation of transport layer: https://github.com/RingsNetwork/rings-node/tree/master/transport
+
+
 #### Network Layer
 
-The Rings Network is a structured peer-to-peer network that incorporates a distributed hash table (DHT) to facilitate efficient and scalable lookups. The Chord algorithm is utilized to implement the lookup function within the DHT, thereby enabling effective routing of messages and storage of key-value pairs in a peer-to-peer setting. The use of a DHT, incorporating the Chord algorithm, guarantees high availability in the Rings Network, which is critical for handling the substantial number of nodes and requests typically present in large-scale peer-to-peer networks.
+The network layer is the core component of the Rings Network, responsible for DID (Decentralized Identifier) discovery and services routing within the network. The Rings Network employs the Chord DHT (Distributed Hash Table) algorithm as the implementation for its network layer.
+
+The Chord algorithm is a well-known DHT algorithm characterized by its formation of an abstract circular topology structure among all participating nodes. It has a lookup algorithm complexity of O(log(N)).
 
 #### Protocol Layer
 
-In the protocol layer, the central design concept revolves around the utilization of a Decentralized Identifier (DID), which constitutes a finite ring in abstract algebra. The DID is a
+In the protocol layer, the central design concept revolves around the utilization of a Decentralized Identifier (DID), which constitutes a finite ring in abstract algebra. The DID is a 160-bit identifier that enables the construction of a mathematical structure that encompasses the characteristics of both a group and a field.
 
-\-bit identifier that enables the construction of a mathematical structure that encompasses the characteristics of both a group and a field. It is comprised of a set of elements with two binary operations, addition and multiplication, which satisfy a set of axioms such as associativity, commutativity, and distributivity. The ring is deemed finite due to its having a finite number of elements. Finite rings are widely employed in various domains of mathematics and computer science, including cryptography and coding theory.
+It is comprised of a set of elements with two binary operations, addition and multiplication, which satisfy a set of axioms such as associativity, commutativity, and distributivity. The ring is deemed finite due to its having a finite number of elements. Finite rings are widely employed in various domains of mathematics and computer science, including cryptography and coding theory.
+
+At the protocol layer, we have implemented the concept of a Delegated Session Key, which is used to support various cryptographic verification methods associated with DID (Decentralized Identifier). Currently, the supported signature algorithms include ECDSA-secp256k1, ECDSA-secp256r1, and EdDSA-ed25519.
 
 #### Application Layer
 
