@@ -86,8 +86,7 @@ rings help
 
 | Resource                        | Link                                          | Status  |
 |---------------------------------|-----------------------------------------------|---------|
-| Rings Whitepaper                | [Rings Whitepaper](https://github.com/RingsNetwork/whitepaper) | [![rings-ext-v2](https://github.com/RingsNetwork/rings_ext_v2/actions/workflows/dev.yml/badge.svg)](https://github.com/RingsNetwork/rings_ext_v2/actions/workflows/dev.yml)
- |
+| Rings Whitepaper                | [Rings Whitepaper](https://github.com/RingsNetwork/whitepaper) | [![rings-ext-v2](https://github.com/RingsNetwork/rings_ext_v2/actions/workflows/dev.yml/badge.svg)](https://github.com/RingsNetwork/rings_ext_v2/actions/workflows/dev.yml)|
 | Rings Documentation             | [Rings Docs](https://rings.gitbook.io/)       |  |
 | Rings Browser Handshakes Example| [Rings Browser Handshakes](https://github.com/RingsNetwork/rings-wasm-p2p) | Demo / PoC |
 | Rings Browser Extension         | [Rings Browser Extension](https://github.com/RingsNetwork/rings_ext_v2) | Beta |
