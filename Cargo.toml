@@ -3,7 +3,7 @@ resolver = "2"
 members = ["core", "transport", "node", "rpc", "derive"]
 
 [workspace.package]
-version = "0.4.2"
+version = "0.5.0"
 edition = "2021"
 license = "GPL-3.0"
 authors = ["RND <dev@ringsnetwork.io>"]

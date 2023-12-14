@@ -4,7 +4,7 @@
     "RND <dev@ringsnetwork.io>"
   ],
   "description": "Rings is a structured peer-to-peer network implementation using WebRTC, Chord algorithm, and full WebAssembly (WASM) support.\n",
-  "version": "0.3.4",
+  "version": "0.5.0",
   "license": "GPL-3.0",
   "repository": {
     "type": "git",
@@ -12,15 +12,21 @@
   },
   "scripts": {
     "wasm_pack": "wasm-pack build node --scope ringsnetwork -t web --no-default-features --features browser --features console_error_panic_hook",
-    "prepare": "npm run wasm_pack && cp node/pkg/rings_node* ./"
+    "proto_generate": "pbjs -t static-module -o node/pkg/rings_node_proto.js rpc/src/protos/rings_node.proto && pbts -o node/pkg/rings_node_proto.d.ts node/pkg/rings_node_proto.js",
+    "prepare": "npm run wasm_pack && npm run proto_generate && cp node/pkg/rings_node* ./"
   },
   "files": [
     "rings_node_bg.wasm",
     "rings_node.js",
-    "rings_node.d.ts"
+    "rings_node.d.ts",
+    "rings_node_proto.js",
+    "rings_node_proto.d.ts"
   ],
   "module": "rings_node.js",
-  "types": "rings_node.d.ts",
+  "types": [
+    "rings_node.d.ts",
+    "rings_node_proto.d.ts"
+  ],
   "type": "module",
   "main": "rings_node.js",
   "sideEffects": false,
