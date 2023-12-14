@@ -194,7 +194,7 @@ jobs:
 
       - name: Build
         run: |
-          npm pack
+          npm install && npm pack
           mv ringsnetwork-rings-node-*.tgz rings-${{ needs.gen_version.outputs.version }}-${{ steps.target.outputs.target }}.tgz
 
       - uses: actions/upload-artifact@v3
