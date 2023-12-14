@@ -29,9 +29,8 @@ config.yaml
 
 # wasm-pack related
 package-lock.json
-*.d.ts
-*.js
-*.wasm
+dist/
+node_modules/
 
 # cffi related
 rings.h
