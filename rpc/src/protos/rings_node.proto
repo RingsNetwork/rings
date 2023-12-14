@@ -1,14 +1,101 @@
 syntax = "proto3";
 package rings_node;
 
-message HelloRequest {
-    string name = 1;
+message ConnectPeerViaHttpRequest {
+    string url = 1;
 }
 
-message HelloReply {
-    string message = 1;
+message ConnectPeerViaHttpResponse {
+    string did = 1;
 }
 
+message ConnectWithDidRequest {
+    string did = 1;
+}
+
+message ConnectWithDidResponse {}
+
+message SeedPeer {
+    string did = 1;
+    string url = 2;
+}
+
+message Seed {
+    repeated SeedPeer peers = 1;
+}
+
+message ConnectWithSeedRequest {
+    Seed seed = 1;
+}
+
+message ConnectWithSeedResponse {}
+
+message Peer {
+    string did = 1;
+    string state = 2;
+}
+
+message ListPeersRequest {}
+
+message ListPeersResponse {
+    repeated Peer peers = 1;
+}
+
+message CreateOfferRequest {
+    string did = 1;
+}
+
+message CreateOfferResponse {
+    string offer = 1;
+}
+
+message AnswerOfferRequest {
+    string offer = 1;
+}
+
+message AnswerOfferResponse {
+    string answer = 1;
+}
+
+message AcceptAnswerRequest {
+    string answer = 1;
+}
+
+message AcceptAnswerResponse {
+    Peer peer = 1;
+}
+
+message DisconnectRequest {
+    string did = 1;
+}
+
+message DisconnectResponse {}
+
+message SendMessageRequest {
+    string destination_did = 1;
+    bytes data = 2;
+}
+
+message SendMessageResponse {}
+
+// Rings node service
 service RingsNodeService {
-    rpc SayHello (HelloRequest) returns (HelloReply);
+    // Connect peer via remote peer's http endpoint
+    rpc ConnectPeerViaHttp (ConnectPeerViaHttpRequest) returns (ConnectPeerViaHttpResponse);
+    // Connect peer with remote peer's did
+    rpc ConnectWithDid (ConnectWithDidRequest) returns (ConnectWithDidResponse);
+    // Connect peers from a seed file
+    rpc ConnectWithSeed (ConnectWithSeedRequest) returns (ConnectWithSeedResponse);
+    // List all connected peers
+    rpc ListPeers (ListPeersRequest) returns (ListPeersResponse);
+    // Create offer for manually handshake
+    rpc CreateOffer (CreateOfferRequest) returns (CreateOfferResponse);
+    // Answer offer for manually handshake
+    rpc AnswerOffer (AnswerOfferRequest) returns (AnswerOfferResponse);
+    // Accept Answer for manually handshake
+    rpc AcceptAnswer (AcceptAnswerRequest) returns (AcceptAnswerResponse);
+    // Disconnect a peer
+    rpc Disconnect (DisconnectRequest) returns (DisconnectResponse);
+    // Send message to peer
+    rpc SendMessage (SendMessageRequest) returns (SendMessageResponse);
 }
