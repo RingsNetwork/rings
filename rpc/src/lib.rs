@@ -4,5 +4,6 @@ pub mod error;
 pub mod jsonrpc_client;
 pub mod method;
 pub mod prelude;
+pub mod protos;
 pub mod response;
 pub mod types;

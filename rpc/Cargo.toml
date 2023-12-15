@@ -17,7 +17,7 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["std"]
-std = ["rings-core/default", "reqwest"]
+std = ["rings-core/default", "reqwest", "tonic"]
 wasm = ["rings-core/wasm", "reqwest-wasm"]
 
 [dependencies]
@@ -32,6 +32,8 @@ rings-core = { workspace = true, optional = true }
 serde = { version = "1.0.136", features = ["derive"] }
 serde_json = "1.0.70"
 thiserror = "1"
+tonic = { version = "0.10.2", optional = true }
 
 [build-dependencies]
 prost-build = "0.12.3"
+tonic-build = "0.10.2"
