@@ -1,7 +1,12 @@
 use std::process::Command;
 
+use prost_build_config::BuildConfig;
+use prost_build_config::Builder;
+
 fn main() {
-    prost_serde::build_with_serde(include_str!("src/protos/build_opts.json"));
+    let config_content = include_str!("src/protos/build_config.yaml");
+    let config: BuildConfig = serde_yaml::from_str(config_content).unwrap();
+    Builder::from(config).build_protos();
 
     Command::new("cargo").args(["fmt"]).output().unwrap();
 
