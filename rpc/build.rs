@@ -36,7 +36,10 @@ fn main() {
 
     build_json_codec_service();
 
-    Command::new("cargo").args(["fmt"]).output().unwrap();
+    Command::new("cargo")
+        .args(["+nightly", "fmt"])
+        .output()
+        .unwrap();
 
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src/protos/rings.proto");

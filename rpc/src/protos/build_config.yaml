@@ -4,9 +4,9 @@ includes:
 files:
   - src/protos/rings_node.proto
 output: src/protos
-opts:
-  - scope: type
-    attr: "#[derive(serde::Serialize, serde::Deserialize)]"
+messages:
+  - attrs:
+      - derive(serde::Serialize, serde::Deserialize)
     paths:
       - rings_node.ConnectPeerViaHttpRequest
       - rings_node.ConnectPeerViaHttpResponse

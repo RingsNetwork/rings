@@ -147,9 +147,7 @@ pub mod internal_service_server {
             }
         }
         pub fn with_interceptor<F>(inner: T, interceptor: F) -> InterceptedService<Self, F>
-        where
-            F: tonic::service::Interceptor,
-        {
+        where F: tonic::service::Interceptor {
             InterceptedService::new(Self::new(inner), interceptor)
         }
         /// Enable decompressing requests with the given encoding.
