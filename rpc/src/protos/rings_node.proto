@@ -157,7 +157,7 @@ message NodeDidResponse {
 }
 
 // Rings node internal service
-service RingsNodeInternalService {
+service InternalService {
     // Connect peer via remote peer's http endpoint
     rpc ConnectPeerViaHttp (ConnectPeerViaHttpRequest) returns (ConnectPeerViaHttpResponse);
     // Connect peer with remote peer's did
@@ -192,7 +192,7 @@ service RingsNodeInternalService {
 }
 
 // Rings node external service
-service RingsNodeExternalService {
+service ExternalService {
     // Answer offer for manually handshake
     rpc AnswerOffer (AnswerOfferRequest) returns (AnswerOfferResponse);
     /// Retrieve Node info
