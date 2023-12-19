@@ -11,8 +11,8 @@ use rings_core::swarm::callback::SharedSwarmCallback;
 
 use crate::error::Error;
 use crate::error::Result;
+use crate::jsonrpc::handler::InternalRpcHandler;
 use crate::jsonrpc::handler::MethodHandler;
-use crate::jsonrpc::HandlerType;
 use crate::measure::PeriodicMeasure;
 use crate::prelude::jsonrpc_core::types::id::Id;
 use crate::prelude::jsonrpc_core::MethodCall;
@@ -37,7 +37,7 @@ pub mod ffi;
 #[wasm_export]
 pub struct Provider {
     processor: Arc<Processor>,
-    handler: Arc<HandlerType>,
+    handler: Arc<InternalRpcHandler>,
 }
 
 /// Async signer, without Send required
@@ -61,8 +61,7 @@ pub enum Signer {
 impl Provider {
     /// Create provider from processor directly
     pub fn from_processor(processor: Arc<Processor>) -> Self {
-        let mut handler: HandlerType = processor.clone().into();
-        handler.build();
+        let handler = InternalRpcHandler::new(processor.clone());
         Self {
             processor,
             handler: handler.into(),
@@ -90,9 +89,7 @@ impl Provider {
             .measure(measure);
 
         let processor = Arc::new(processor_builder.build()?);
-
-        let mut handler: HandlerType = processor.clone().into();
-        handler.build();
+        let handler = InternalRpcHandler::new(processor.clone());
 
         Ok(Provider {
             processor,
@@ -152,7 +149,6 @@ impl Provider {
         params: Params,
         opt_id: Option<String>,
     ) -> Result<Output> {
-        let handler = self.handler.clone();
         let id = if let Some(id) = opt_id {
             Id::Str(id)
         } else {
@@ -165,7 +161,7 @@ impl Provider {
             id,
         };
         tracing::debug!("request {:?}", req);
-        handler
+        self.handler
             .handle_request(req)
             .await
             .map_err(Error::InternalRpcError)

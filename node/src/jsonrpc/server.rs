@@ -27,41 +27,6 @@ use crate::prelude::rings_rpc::response::Peer;
 use crate::processor::Processor;
 use crate::seed::Seed;
 
-/// RpcMeta basic info struct
-/// * processor: contain `swarm` instance and `stabilization` instance.
-/// * is_auth: is_auth set true after verify.
-#[derive(Clone)]
-pub struct RpcMeta {
-    processor: Arc<Processor>,
-    /// if is_auth set to true, rpc server of *native node* will check signature from
-    /// HEAD['X-SIGNATURE']
-    is_auth: bool,
-}
-
-impl RpcMeta {
-    fn require_authed(&self) -> Result<()> {
-        if !self.is_auth {
-            return Err(Error::from(ServerError::NoPermission));
-        }
-        Ok(())
-    }
-}
-
-impl From<(Arc<Processor>, bool)> for RpcMeta {
-    fn from((processor, is_auth): (Arc<Processor>, bool)) -> Self {
-        Self { processor, is_auth }
-    }
-}
-
-impl From<Arc<Processor>> for RpcMeta {
-    fn from(processor: Arc<Processor>) -> Self {
-        Self {
-            processor,
-            is_auth: true,
-        }
-    }
-}
-
 /// Params for method `BackendMessage`
 pub struct BackendMessageParams {
     /// destination did
@@ -104,29 +69,29 @@ impl TryInto<Params> for BackendMessageParams {
     }
 }
 
-pub(crate) async fn node_info(_: Params, meta: RpcMeta) -> Result<Value> {
-    let node_info = meta
-        .processor
+pub(crate) async fn node_info(_: Params, processor: Arc<Processor>) -> Result<Value> {
+    let node_info = processor
         .get_node_info()
         .await
         .map_err(|_| Error::new(ErrorCode::InternalError))?;
     serde_json::to_value(node_info).map_err(|_| Error::new(ErrorCode::ParseError))
 }
 
-pub(crate) async fn node_did(_: Params, meta: RpcMeta) -> Result<Value> {
-    let did = meta.processor.did();
+pub(crate) async fn node_did(_: Params, processor: Arc<Processor>) -> Result<Value> {
+    let did = processor.did();
     serde_json::to_value(did).map_err(|_| Error::new(ErrorCode::ParseError))
 }
 
 /// Connect Peer VIA http
-pub(crate) async fn connect_peer_via_http(params: Params, meta: RpcMeta) -> Result<Value> {
-    meta.require_authed()?;
+pub(crate) async fn connect_peer_via_http(
+    params: Params,
+    processor: Arc<Processor>,
+) -> Result<Value> {
     let p: Vec<String> = params.parse()?;
     let peer_url = p
         .first()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
-    let did = meta
-        .processor
+    let did = processor
         .connect_peer_via_http(peer_url)
         .await
         .map_err(Error::from)?;
@@ -134,22 +99,21 @@ pub(crate) async fn connect_peer_via_http(params: Params, meta: RpcMeta) -> Resu
 }
 
 /// Connect Peer with seed
-pub(crate) async fn connect_with_seed(params: Params, meta: RpcMeta) -> Result<Value> {
-    meta.require_authed()?;
+pub(crate) async fn connect_with_seed(params: Params, processor: Arc<Processor>) -> Result<Value> {
     let p: Vec<Seed> = params.parse()?;
     let seed = p
         .first()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
 
     let mut connected_addresses: HashSet<Did> =
-        HashSet::from_iter(meta.processor.swarm.get_connection_ids());
-    connected_addresses.insert(meta.processor.swarm.did());
+        HashSet::from_iter(processor.swarm.get_connection_ids());
+    connected_addresses.insert(processor.swarm.did());
 
     let tasks = seed
         .peers
         .iter()
         .filter(|&x| !connected_addresses.contains(&x.did))
-        .map(|x| meta.processor.connect_peer_via_http(&x.endpoint));
+        .map(|x| processor.connect_peer_via_http(&x.endpoint));
 
     let results = join_all(tasks).await;
 
@@ -162,8 +126,7 @@ pub(crate) async fn connect_with_seed(params: Params, meta: RpcMeta) -> Result<V
 }
 
 /// Handle Connect with DID
-pub(crate) async fn connect_with_did(params: Params, meta: RpcMeta) -> Result<Value> {
-    meta.require_authed()?;
+pub(crate) async fn connect_with_did(params: Params, processor: Arc<Processor>) -> Result<Value> {
     let p: Vec<String> = params.parse()?;
 
     let address_str = p
@@ -171,7 +134,7 @@ pub(crate) async fn connect_with_did(params: Params, meta: RpcMeta) -> Result<Va
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
     let did = Did::from_str(address_str).map_err(|_| Error::new(ErrorCode::InvalidParams))?;
 
-    meta.processor
+    processor
         .connect_with_did(did, true)
         .await
         .map_err(Error::from)?;
@@ -180,8 +143,7 @@ pub(crate) async fn connect_with_did(params: Params, meta: RpcMeta) -> Result<Va
 }
 
 /// Handle create offer
-pub(crate) async fn create_offer(params: Params, meta: RpcMeta) -> Result<Value> {
-    meta.require_authed()?;
+pub(crate) async fn create_offer(params: Params, processor: Arc<Processor>) -> Result<Value> {
     let p: Vec<String> = params.parse()?;
 
     let address_str = p
@@ -189,8 +151,7 @@ pub(crate) async fn create_offer(params: Params, meta: RpcMeta) -> Result<Value>
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
     let did = Did::from_str(address_str).map_err(|_| Error::new(ErrorCode::InvalidParams))?;
 
-    let (_, offer_payload) = meta
-        .processor
+    let (_, offer_payload) = processor
         .swarm
         .create_offer(did)
         .await
@@ -206,7 +167,7 @@ pub(crate) async fn create_offer(params: Params, meta: RpcMeta) -> Result<Value>
 }
 
 /// Handle Answer Offer
-pub(crate) async fn answer_offer(params: Params, meta: RpcMeta) -> Result<Value> {
+pub(crate) async fn answer_offer(params: Params, processor: Arc<Processor>) -> Result<Value> {
     let p: Vec<String> = params.parse()?;
     let offer_payload_str = p
         .first()
@@ -215,8 +176,7 @@ pub(crate) async fn answer_offer(params: Params, meta: RpcMeta) -> Result<Value>
     let offer_payload =
         MessagePayload::from_encoded(&encoded).map_err(|_| ServerError::DecodeError)?;
 
-    let (_, answer_payload) = meta
-        .processor
+    let (_, answer_payload) = processor
         .swarm
         .answer_offer(offer_payload)
         .await
@@ -233,9 +193,7 @@ pub(crate) async fn answer_offer(params: Params, meta: RpcMeta) -> Result<Value>
 }
 
 /// Handle accept answer
-pub(crate) async fn accept_answer(params: Params, meta: RpcMeta) -> Result<Value> {
-    meta.require_authed()?;
-
+pub(crate) async fn accept_answer(params: Params, processor: Arc<Processor>) -> Result<Value> {
     let p: Vec<String> = params.parse()?;
     let answer_payload_str = p
         .first()
@@ -244,8 +202,7 @@ pub(crate) async fn accept_answer(params: Params, meta: RpcMeta) -> Result<Value
     let answer_payload =
         MessagePayload::from_encoded(&encoded).map_err(|_| ServerError::DecodeError)?;
 
-    let dc = meta
-        .processor
+    let dc = processor
         .swarm
         .accept_answer(answer_payload)
         .await
@@ -258,28 +215,25 @@ pub(crate) async fn accept_answer(params: Params, meta: RpcMeta) -> Result<Value
 }
 
 /// Handle list peers
-pub(crate) async fn list_peers(_params: Params, meta: RpcMeta) -> Result<Value> {
-    meta.require_authed()?;
-    let peers = meta.processor.swarm.get_connections();
+pub(crate) async fn list_peers(_params: Params, processor: Arc<Processor>) -> Result<Value> {
+    let peers = processor.swarm.get_connections();
     let r: Vec<Peer> = peers.into_iter().map(dc2p).collect();
     serde_json::to_value(r).map_err(|_| Error::from(ServerError::EncodeError))
 }
 
 /// Handle close connection
-pub(crate) async fn close_connection(params: Params, meta: RpcMeta) -> Result<Value> {
-    meta.require_authed()?;
+pub(crate) async fn close_connection(params: Params, processor: Arc<Processor>) -> Result<Value> {
     let params: Vec<String> = params.parse()?;
     let did = params
         .first()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
     let did = Did::from_str(did).map_err(|_| Error::from(ServerError::InvalidDid))?;
-    meta.processor.disconnect(did).await?;
+    processor.disconnect(did).await?;
     Ok(serde_json::json!({}))
 }
 
 /// Handle send message
-pub(crate) async fn send_raw_message(params: Params, meta: RpcMeta) -> Result<Value> {
-    meta.require_authed()?;
+pub(crate) async fn send_raw_message(params: Params, processor: Arc<Processor>) -> Result<Value> {
     let params: serde_json::Map<String, Value> = params.parse()?;
     let destination = params
         .get("destination")
@@ -291,10 +245,7 @@ pub(crate) async fn send_raw_message(params: Params, meta: RpcMeta) -> Result<Va
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
         .as_str()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
-    let tx_id = meta
-        .processor
-        .send_message(destination, text.as_bytes())
-        .await?;
+    let tx_id = processor.send_message(destination, text.as_bytes()).await?;
     Ok(
         serde_json::to_value(rings_rpc::response::SendMessageResponse::from(
             tx_id.to_string(),
@@ -307,8 +258,10 @@ pub(crate) async fn send_raw_message(params: Params, meta: RpcMeta) -> Result<Va
 /// * Params
 ///   - destination:  destination did
 ///   - data: base64 of [u8]
-pub(crate) async fn send_custom_message(params: Params, meta: RpcMeta) -> Result<Value> {
-    meta.require_authed()?;
+pub(crate) async fn send_custom_message(
+    params: Params,
+    processor: Arc<Processor>,
+) -> Result<Value> {
     let params: Vec<serde_json::Value> = params.parse()?;
     let destination = params
         .get(0)
@@ -323,7 +276,7 @@ pub(crate) async fn send_custom_message(params: Params, meta: RpcMeta) -> Result
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
 
     let data = base64::decode(data).map_err(|_| Error::new(ErrorCode::InvalidParams))?;
-    let tx_id = meta.processor.send_message(destination, &data).await?;
+    let tx_id = processor.send_message(destination, &data).await?;
 
     Ok(
         serde_json::to_value(rings_rpc::response::SendMessageResponse::from(
@@ -337,11 +290,12 @@ pub(crate) async fn send_custom_message(params: Params, meta: RpcMeta) -> Result
 /// * Params
 ///   - destination:  destination did
 ///   - data: base64 of [u8]
-pub(crate) async fn send_backend_message(params: Params, meta: RpcMeta) -> Result<Value> {
-    meta.require_authed()?;
+pub(crate) async fn send_backend_message(
+    params: Params,
+    processor: Arc<Processor>,
+) -> Result<Value> {
     let bm_params: BackendMessageParams = params.try_into()?;
-    let tx_id = meta
-        .processor
+    let tx_id = processor
         .send_backend_message(bm_params.did, bm_params.data)
         .await?;
     tracing::info!("Send Response message");
@@ -353,8 +307,10 @@ pub(crate) async fn send_backend_message(params: Params, meta: RpcMeta) -> Resul
     )
 }
 
-pub(crate) async fn publish_message_to_topic(params: Params, meta: RpcMeta) -> Result<Value> {
-    meta.require_authed()?;
+pub(crate) async fn publish_message_to_topic(
+    params: Params,
+    processor: Arc<Processor>,
+) -> Result<Value> {
     let params: Vec<serde_json::Value> = params.parse()?;
     let topic = params
         .get(0)
@@ -370,13 +326,15 @@ pub(crate) async fn publish_message_to_topic(params: Params, meta: RpcMeta) -> R
         .encode()
         .map_err(|_| Error::new(ErrorCode::InvalidParams))?;
 
-    meta.processor.storage_append_data(topic, data).await?;
+    processor.storage_append_data(topic, data).await?;
 
     Ok(serde_json::json!({}))
 }
 
-pub(crate) async fn fetch_messages_of_topic(params: Params, meta: RpcMeta) -> Result<Value> {
-    meta.require_authed()?;
+pub(crate) async fn fetch_messages_of_topic(
+    params: Params,
+    processor: Arc<Processor>,
+) -> Result<Value> {
     let params: Vec<serde_json::Value> = params.parse()?;
     let topic = params
         .get(0)
@@ -391,8 +349,8 @@ pub(crate) async fn fetch_messages_of_topic(params: Params, meta: RpcMeta) -> Re
 
     let vid = VirtualNode::gen_did(topic).map_err(|_| Error::new(ErrorCode::InvalidParams))?;
 
-    meta.processor.storage_fetch(vid).await?;
-    let result = meta.processor.storage_check_cache(vid).await;
+    processor.storage_fetch(vid).await?;
+    let result = processor.storage_check_cache(vid).await;
 
     if let Some(vnode) = result {
         let messages = vnode
@@ -408,20 +366,18 @@ pub(crate) async fn fetch_messages_of_topic(params: Params, meta: RpcMeta) -> Re
     }
 }
 
-pub(crate) async fn register_service(params: Params, meta: RpcMeta) -> Result<Value> {
-    meta.require_authed()?;
+pub(crate) async fn register_service(params: Params, processor: Arc<Processor>) -> Result<Value> {
     let params: Vec<serde_json::Value> = params.parse()?;
     let name = params
         .get(0)
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?
         .as_str()
         .ok_or_else(|| Error::new(ErrorCode::InvalidParams))?;
-    meta.processor.register_service(name).await?;
+    processor.register_service(name).await?;
     Ok(serde_json::json!({}))
 }
 
-pub(crate) async fn lookup_service(params: Params, meta: RpcMeta) -> Result<Value> {
-    meta.require_authed()?;
+pub(crate) async fn lookup_service(params: Params, processor: Arc<Processor>) -> Result<Value> {
     let params: Vec<serde_json::Value> = params.parse()?;
     let name = params
         .get(0)
@@ -431,8 +387,8 @@ pub(crate) async fn lookup_service(params: Params, meta: RpcMeta) -> Result<Valu
 
     let rid = VirtualNode::gen_did(name).map_err(|_| Error::new(ErrorCode::InvalidParams))?;
 
-    meta.processor.storage_fetch(rid).await?;
-    let result = meta.processor.storage_check_cache(rid).await;
+    processor.storage_fetch(rid).await?;
+    let result = processor.storage_check_cache(rid).await;
 
     if let Some(vnode) = result {
         let dids = vnode

@@ -16,18 +16,15 @@ use axum::Router;
 use tower_http::cors::CorsLayer;
 
 use self::http_error::HttpError;
-use crate::jsonrpc::RpcMeta;
 use crate::prelude::jsonrpc_core::MetaIoHandler;
 use crate::prelude::rings_rpc::response::NodeInfo;
 use crate::processor::Processor;
-
-impl crate::prelude::jsonrpc_core::Metadata for RpcMeta {}
 
 /// Jsonrpc state
 #[derive(Clone)]
 pub struct JsonrpcState {
     processor: Arc<Processor>,
-    io_handler: Arc<MetaIoHandler<RpcMeta>>,
+    io_handler: MetaIoHandler<Arc<Processor>>,
 }
 
 /// websocket state
@@ -47,13 +44,12 @@ pub struct StatusState {
 pub async fn run_http_api(addr: String, processor: Arc<Processor>) -> anyhow::Result<()> {
     let binding_addr = addr.parse().unwrap();
 
-    let mut jsonrpc_handler: MetaIoHandler<RpcMeta> = MetaIoHandler::default();
-    crate::jsonrpc::build_handler(&mut jsonrpc_handler).await;
-    let jsonrpc_handler_layer = Arc::new(jsonrpc_handler);
+    let mut jsonrpc_handler: MetaIoHandler<Arc<Processor>> = MetaIoHandler::default();
+    crate::jsonrpc::handler::default::register_methods(&mut jsonrpc_handler).await;
 
     let jsonrpc_state = Arc::new(JsonrpcState {
         processor: processor.clone(),
-        io_handler: jsonrpc_handler_layer,
+        io_handler: jsonrpc_handler,
     });
 
     let ws_state = Arc::new(WsState {
@@ -83,34 +79,11 @@ pub async fn run_http_api(addr: String, processor: Arc<Processor>) -> anyhow::Re
 
 async fn jsonrpc_io_handler(
     State(state): State<Arc<JsonrpcState>>,
-    headermap: http::HeaderMap,
     body: String,
 ) -> Result<JsonResponse, HttpError> {
-    let is_auth = if let Some(signature) = headermap.get("X-SIGNATURE") {
-        let sig = base64::decode(signature).map_err(|e| {
-            tracing::debug!("signature: {:?}", signature);
-            tracing::error!("signature decode failed: {:?}", e);
-            HttpError::BadRequest
-        })?;
-        state
-            .processor
-            .swarm
-            .session_sk()
-            .session()
-            .verify(body.as_bytes(), sig)
-            .map_err(|e| {
-                tracing::debug!("body: {:?}", body);
-                tracing::debug!("signature: {:?}", signature);
-                tracing::error!("signature verify failed: {:?}", e);
-                e
-            })
-            .is_ok()
-    } else {
-        false
-    };
     let r = state
         .io_handler
-        .handle_request(&body, (state.processor.clone(), is_auth).into())
+        .handle_request(&body, state.processor.clone())
         .await
         .ok_or(HttpError::BadRequest)?;
     Ok(JsonResponse(r))
