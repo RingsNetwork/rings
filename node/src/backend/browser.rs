@@ -1,5 +1,5 @@
 #![warn(missing_docs)]
-//! BackendContext implementation for browser
+//! BackendBehaviour implementation for browser
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -11,21 +11,21 @@ use rings_derive::wasm_export;
 use wasm_bindgen::JsValue;
 
 use crate::backend::types::BackendMessage;
-use crate::backend::types::MessageEndpoint;
+use crate::backend::types::MessageHandler;
 use crate::error::Result;
 use crate::provider::Provider;
 
-/// BackendContext is a context instance for handling backend message for browser
+/// BackendBehaviour is a context instance for handling backend message for browser
 #[wasm_export]
 #[derive(Clone)]
-pub struct BackendContext {
+pub struct BackendBehaviour {
     service_message_handler: Option<Function>,
     plain_text_message_handler: Option<Function>,
     extension_message_handler: Option<Function>,
 }
 
 #[wasm_export]
-impl BackendContext {
+impl BackendBehaviour {
     /// Create a new instance of message callback, this function accept one argument:
     ///
     /// * backend_message_handler: `function(provider: Arc<Provider>, payload: string, message: string) -> Promise<()>`;
@@ -34,8 +34,8 @@ impl BackendContext {
         service_message_handler: Option<js_sys::Function>,
         plain_text_message_handler: Option<js_sys::Function>,
         extension_message_handler: Option<Function>,
-    ) -> BackendContext {
-        BackendContext {
+    ) -> BackendBehaviour {
+        BackendBehaviour {
             service_message_handler,
             plain_text_message_handler,
             extension_message_handler,
@@ -45,8 +45,8 @@ impl BackendContext {
 
 #[cfg_attr(feature = "browser", async_trait(?Send))]
 #[cfg_attr(not(feature = "browser"), async_trait)]
-impl MessageEndpoint<BackendMessage> for BackendContext {
-    async fn on_message(
+impl MessageHandler<BackendMessage> for BackendBehaviour {
+    async fn handle_message(
         &self,
         provider: Arc<Provider>,
         payload: &MessagePayload,
@@ -58,20 +58,20 @@ impl MessageEndpoint<BackendMessage> for BackendContext {
             BackendMessage::ServiceMessage(m) => {
                 if let Some(func) = &self.service_message_handler {
                     let m = js_value::serialize(m)?;
-                    let cb = js_func::of4::<BackendContext, Provider, JsValue, JsValue>(func);
+                    let cb = js_func::of4::<BackendBehaviour, Provider, JsValue, JsValue>(func);
                     cb(self.clone(), provider, ctx, m).await?;
                 }
             }
             BackendMessage::Extension(m) => {
                 if let Some(func) = &self.extension_message_handler {
                     let m = js_value::serialize(m)?;
-                    let cb = js_func::of4::<BackendContext, Provider, JsValue, JsValue>(func);
+                    let cb = js_func::of4::<BackendBehaviour, Provider, JsValue, JsValue>(func);
                     cb(self.clone(), provider, ctx, m).await?;
                 }
             }
             BackendMessage::PlainText(m) => {
                 if let Some(func) = &self.plain_text_message_handler {
-                    let cb = js_func::of4::<BackendContext, Provider, JsValue, String>(func);
+                    let cb = js_func::of4::<BackendBehaviour, Provider, JsValue, String>(func);
                     cb(self.clone(), provider, ctx, m.to_string()).await?;
                 }
             }

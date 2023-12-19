@@ -29,7 +29,7 @@ use serde::Serialize;
 
 use crate::backend::native::service::tcp_proxy::tcp_connect_with_timeout;
 use crate::backend::native::service::tcp_proxy::Tunnel;
-use crate::backend::native::MessageEndpoint;
+use crate::backend::native::MessageHandler;
 use crate::backend::types::BackendMessage;
 use crate::backend::types::HttpRequest;
 use crate::backend::types::HttpResponse;
@@ -79,8 +79,8 @@ impl ServiceProvider {
 }
 
 #[async_trait::async_trait]
-impl MessageEndpoint<ServiceMessage> for ServiceProvider {
-    async fn on_message(
+impl MessageHandler<ServiceMessage> for ServiceProvider {
+    async fn handle_message(
         &self,
         provider: Arc<Provider>,
         ctx: &MessagePayload,

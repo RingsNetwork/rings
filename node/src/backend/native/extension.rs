@@ -38,7 +38,7 @@ use reqwest;
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::MessageEndpoint;
+use super::MessageHandler;
 use crate::error::Error;
 use crate::error::Result;
 use crate::prelude::*;
@@ -142,9 +142,9 @@ impl Extension {
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-impl MessageEndpoint<bytes::Bytes> for Extension {
+impl MessageHandler<bytes::Bytes> for Extension {
     /// Handles the incoming message by passing it to the extension handlers and returning the resulting events.
-    async fn on_message(
+    async fn handle_message(
         &self,
         provider: Arc<Provider>,
         _ctx: &MessagePayload,

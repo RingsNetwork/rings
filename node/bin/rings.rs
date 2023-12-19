@@ -12,8 +12,8 @@ use futures::pin_mut;
 use futures::select;
 use futures::StreamExt;
 use futures_timer::Delay;
+use rings_node::backend::native::BackendBehaviour;
 use rings_node::backend::native::BackendConfig;
-use rings_node::backend::native::BackendContext;
 use rings_node::backend::Backend;
 use rings_node::logging::init_logging;
 use rings_node::logging::LogLevel;
@@ -451,10 +451,10 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
             .build()?,
     );
     println!("Did: {}", processor.swarm.did());
-    let backend_context = BackendContext::new(bc).await?;
-    let backend_service_names = backend_context.service_names();
+    let backend_behaviour = BackendBehaviour::new(bc).await?;
+    let backend_service_names = backend_behaviour.service_names();
     let provider = Arc::new(Provider::from_processor(processor.clone()));
-    let backend = Arc::new(Backend::new(provider, Box::new(backend_context)));
+    let backend = Arc::new(Backend::new(provider, Box::new(backend_behaviour)));
     processor.swarm.set_callback(backend).unwrap();
 
     let processor_clone = processor.clone();

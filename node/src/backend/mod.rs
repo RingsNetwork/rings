@@ -11,7 +11,7 @@ use rings_core::message::MessagePayload;
 use rings_core::swarm::callback::SwarmCallback;
 
 use crate::backend::types::BackendMessage;
-use crate::backend::types::MessageEndpoint;
+use crate::backend::types::MessageHandler;
 use crate::error::Result;
 use crate::provider::Provider;
 
@@ -25,9 +25,9 @@ pub mod native;
 pub mod ffi;
 
 #[cfg(feature = "node")]
-type HandlerTrait = dyn MessageEndpoint<BackendMessage> + Send + Sync;
+type HandlerTrait = dyn MessageHandler<BackendMessage> + Send + Sync;
 #[cfg(feature = "browser")]
-type HandlerTrait = dyn MessageEndpoint<BackendMessage>;
+type HandlerTrait = dyn MessageHandler<BackendMessage>;
 
 /// Backend handle custom messages from Swarm
 pub struct Backend {
@@ -47,7 +47,7 @@ impl Backend {
         msg: &BackendMessage,
     ) -> Result<()> {
         let provider = self.provider.clone();
-        self.handler.on_message(provider, payload, msg).await
+        self.handler.handle_message(provider, payload, msg).await
     }
 }
 
