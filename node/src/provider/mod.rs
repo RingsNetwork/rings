@@ -117,7 +117,7 @@ impl Provider {
     /// Signer should function as same as account_type declared, Eg: eip191 or secp256k1 or ed25519.
     pub(crate) async fn new_provider_internal(
         ice_servers: String,
-        stabilize_timeout: usize,
+        stabilize_timeout: u64,
         account: String,
         account_type: String,
         signer: Signer,

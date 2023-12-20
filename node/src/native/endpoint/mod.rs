@@ -20,9 +20,9 @@ use crate::prelude::jsonrpc_core::MetaIoHandler;
 use crate::prelude::rings_rpc::response::NodeInfo;
 use crate::processor::Processor;
 
-/// Jsonrpc state
+/// JSON-RPC state
 #[derive(Clone)]
-pub struct JsonrpcState {
+pub struct JsonRpcState {
     processor: Arc<Processor>,
     io_handler: MetaIoHandler<Arc<Processor>>,
 }
@@ -40,14 +40,14 @@ pub struct StatusState {
     processor: Arc<Processor>,
 }
 
-/// Run a web server to handle jsonrpc request
-pub async fn run_http_api(addr: String, processor: Arc<Processor>) -> anyhow::Result<()> {
-    let binding_addr = addr.parse().unwrap();
+/// Run a web server to handle jsonrpc request locally
+pub async fn run_internal_api(port: u16, processor: Arc<Processor>) -> anyhow::Result<()> {
+    let binding_addr = SocketAddr::from(([127, 0, 0, 1], port));
 
     let mut jsonrpc_handler: MetaIoHandler<Arc<Processor>> = MetaIoHandler::default();
-    crate::jsonrpc::handler::default::register_methods(&mut jsonrpc_handler).await;
+    crate::jsonrpc::handler::default::register_internal_methods(&mut jsonrpc_handler).await;
 
-    let jsonrpc_state = Arc::new(JsonrpcState {
+    let jsonrpc_state = Arc::new(JsonRpcState {
         processor: processor.clone(),
         io_handler: jsonrpc_handler,
     });
@@ -69,8 +69,39 @@ pub async fn run_http_api(addr: String, processor: Arc<Processor>) -> anyhow::Re
         .layer(axum::middleware::from_fn(node_info_header))
         .into_make_service_with_connect_info::<SocketAddr>();
 
+    println!("JSON-RPC endpoint: http://{}", binding_addr);
+    println!("WebSocket endpoint: http://{}/ws", binding_addr);
+    axum::Server::bind(&binding_addr)
+        .serve(axum_make_service)
+        .await?;
+    Ok(())
+}
+
+/// Run a web server to handle jsonrpc request from external
+pub async fn run_external_api(addr: String, processor: Arc<Processor>) -> anyhow::Result<()> {
+    let binding_addr = addr.parse().unwrap();
+
+    let mut jsonrpc_handler: MetaIoHandler<Arc<Processor>> = MetaIoHandler::default();
+    crate::jsonrpc::handler::default::register_external_methods(&mut jsonrpc_handler).await;
+
+    let jsonrpc_state = Arc::new(JsonRpcState {
+        processor: processor.clone(),
+        io_handler: jsonrpc_handler,
+    });
+
+    let status_state = Arc::new(StatusState { processor });
+
+    let axum_make_service = Router::new()
+        .route(
+            "/",
+            post(jsonrpc_io_handler).with_state(jsonrpc_state.clone()),
+        )
+        .route("/status", get(status_handler).with_state(status_state))
+        .layer(CorsLayer::permissive())
+        .layer(axum::middleware::from_fn(node_info_header))
+        .into_make_service_with_connect_info::<SocketAddr>();
+
     println!("JSON-RPC endpoint: http://{}", addr);
-    println!("WebSocket endpoint: http://{}/ws", addr);
     axum::Server::bind(&binding_addr)
         .serve(axum_make_service)
         .await?;
@@ -78,7 +109,7 @@ pub async fn run_http_api(addr: String, processor: Arc<Processor>) -> anyhow::Re
 }
 
 async fn jsonrpc_io_handler(
-    State(state): State<Arc<JsonrpcState>>,
+    State(state): State<Arc<JsonRpcState>>,
     body: String,
 ) -> Result<JsonResponse, HttpError> {
     let r = state

@@ -43,7 +43,7 @@ pub trait PersistenceStorageOperation {
     async fn count(&self) -> Result<u64>;
 
     /// Get the maximum storage size, if applicable.
-    async fn max_size(&self) -> Result<usize>;
+    async fn max_size(&self) -> Result<u64>;
 
     /// Get the storage size, if applicable.
     async fn total_size(&self) -> Result<usize>;

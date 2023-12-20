@@ -88,7 +88,7 @@ impl InternalRpcHandler {
             methods: DashMap::new(),
         };
 
-        for (m, f) in methods() {
+        for (m, f) in internal_methods() {
             r.methods.insert(m.to_string(), Arc::new(f));
         }
 
@@ -99,7 +99,7 @@ impl InternalRpcHandler {
 /// This function will return a list of public functions for all interfaces.
 /// If you need to define interfaces separately for the browser or native,
 /// you should use cfg to control the conditions.
-pub fn methods() -> Vec<(Method, MethodFnBox)> {
+pub fn internal_methods() -> Vec<(Method, MethodFnBox)> {
     vec![
         (
             Method::ConnectPeerViaHttp,
@@ -133,15 +133,34 @@ pub fn methods() -> Vec<(Method, MethodFnBox)> {
     ]
 }
 
+/// This function will return a list of public functions for interfaces
+/// can be safely exposed to the browser.
+/// If you need to define interfaces separately for the browser or native,
+/// you should use cfg to control the conditions.
+pub fn external_methods() -> Vec<(Method, MethodFnBox)> {
+    vec![
+        (Method::AnswerOffer, pin!(server::answer_offer)),
+        (Method::NodeInfo, pin!(server::node_info)),
+        (Method::NodeDid, pin!(server::node_did)),
+    ]
+}
+
 /// Implementation for native node
 #[cfg(feature = "node")]
 pub mod default {
     use super::*;
     use crate::prelude::jsonrpc_core::MetaIoHandler;
 
-    /// Build handler add method with metadata.
-    pub async fn register_methods(handler: &mut MetaIoHandler<Arc<Processor>>) {
-        for (m, f) in methods() {
+    /// Register all internal methods to the jsonrpc handler
+    pub async fn register_internal_methods(handler: &mut MetaIoHandler<Arc<Processor>>) {
+        for (m, f) in internal_methods() {
+            handler.add_method_with_meta(m.as_str(), f);
+        }
+    }
+
+    /// Register all external methods to the jsonrpc handler
+    pub async fn register_external_methods(handler: &mut MetaIoHandler<Arc<Processor>>) {
+        for (m, f) in external_methods() {
             handler.add_method_with_meta(m.as_str(), f);
         }
     }

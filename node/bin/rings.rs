@@ -20,7 +20,8 @@ use rings_node::logging::LogLevel;
 use rings_node::measure::PeriodicMeasure;
 use rings_node::native::cli::Client;
 use rings_node::native::config;
-use rings_node::native::endpoint::run_http_api;
+use rings_node::native::endpoint::run_external_api;
+use rings_node::native::endpoint::run_internal_api;
 use rings_node::prelude::rings_core::dht::Did;
 use rings_node::prelude::rings_core::ecc::SecretKey;
 use rings_node::prelude::PersistenceStorage;
@@ -104,11 +105,16 @@ struct NewSessionCommand {
 struct RunCommand {
     #[arg(
         long,
-        short = 'b',
-        help = "Rings node listen address. If not provided, use bind_addr in config file or 127.0.0.1:50000",
+        help = "Rings node external api listen address. If not provided, use bind_addr in config file or 127.0.0.1:50001",
         env
     )]
-    pub http_addr: Option<String>,
+    pub external_api_addr: Option<String>,
+
+    #[arg(
+        long,
+        help = "Rings node internal api listen port. If not provided, use internal_api_port in config file or 50000"
+    )]
+    pub internal_api_port: Option<u16>,
 
     #[arg(
         long,
@@ -130,7 +136,7 @@ struct RunCommand {
         help = "Stabilize service timeout. If not provided, use stabilize_timeout in config file or 3",
         env
     )]
-    pub stabilize_timeout: Option<usize>,
+    pub stabilize_timeout: Option<u64>,
 
     #[arg(long, help = "external ip address", env)]
     pub external_ip: Option<String>,
@@ -148,7 +154,7 @@ struct RunCommand {
         help = "Storage capcity. If not provider, use storage.capacity in config file or 200000000",
         env
     )]
-    pub storage_capacity: Option<usize>,
+    pub storage_capacity: Option<u64>,
 
     #[command(flatten)]
     config_args: ConfigArgs,
@@ -414,8 +420,11 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     if let Some(stabilize_timeout) = args.stabilize_timeout {
         c.stabilize_timeout = stabilize_timeout;
     }
-    if let Some(http_addr) = args.http_addr {
-        c.http_addr = http_addr;
+    if let Some(external_api_addr) = args.external_api_addr {
+        c.external_api_addr = external_api_addr;
+    }
+    if let Some(internal_api_port) = args.internal_api_port {
+        c.internal_api_port = internal_api_port;
     }
 
     let pc = ProcessorConfig::try_from(c.clone())?;
@@ -457,11 +466,13 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     let backend = Arc::new(Backend::new(provider, Box::new(backend_behaviour)));
     processor.swarm.set_callback(backend).unwrap();
 
-    let processor_clone = processor.clone();
+    let processor_clone1 = processor.clone();
+    let processor_clone2 = processor.clone();
     let _ = futures::join!(
         processor.listen(),
         service_loop_register(&processor, backend_service_names),
-        run_http_api(c.http_addr, processor_clone),
+        run_internal_api(c.internal_api_port, processor_clone2),
+        run_external_api(c.external_api_addr, processor_clone1),
     );
 
     Ok(())

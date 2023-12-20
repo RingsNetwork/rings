@@ -53,13 +53,13 @@ pub struct ProcessorConfig {
     /// [SessionSk].
     session_sk: SessionSk,
     /// Stabilization timeout.
-    stabilize_timeout: usize,
+    stabilize_timeout: u64,
 }
 
 #[wasm_export]
 impl ProcessorConfig {
     /// Creates a new `ProcessorConfig` instance without an external address.
-    pub fn new(ice_servers: String, session_sk: SessionSk, stabilize_timeout: usize) -> Self {
+    pub fn new(ice_servers: String, session_sk: SessionSk, stabilize_timeout: u64) -> Self {
         Self {
             ice_servers,
             external_address: None,
@@ -72,7 +72,7 @@ impl ProcessorConfig {
     pub fn new_with_ext_addr(
         ice_servers: String,
         session_sk: SessionSk,
-        stabilize_timeout: usize,
+        stabilize_timeout: u64,
         external_address: String,
     ) -> Self {
         Self {
@@ -109,12 +109,12 @@ pub struct ProcessorConfigSerialized {
     /// A string representing the dumped `SessionSk`.
     session_sk: String,
     /// An unsigned integer representing the stabilization timeout.
-    stabilize_timeout: usize,
+    stabilize_timeout: u64,
 }
 
 impl ProcessorConfigSerialized {
     /// Creates a new `ProcessorConfigSerialized` instance without an external address.
-    pub fn new(ice_servers: String, session_sk: String, stabilize_timeout: usize) -> Self {
+    pub fn new(ice_servers: String, session_sk: String, stabilize_timeout: u64) -> Self {
         Self {
             ice_servers,
             external_address: None,
@@ -127,7 +127,7 @@ impl ProcessorConfigSerialized {
     pub fn new_with_ext_addr(
         ice_servers: String,
         session_sk: String,
-        stabilize_timeout: usize,
+        stabilize_timeout: u64,
         external_address: String,
     ) -> Self {
         Self {
@@ -198,7 +198,7 @@ pub struct ProcessorBuilder {
     session_sk: SessionSk,
     storage: Option<PersistenceStorage>,
     measure: Option<MeasureImpl>,
-    stabilize_timeout: usize,
+    stabilize_timeout: u64,
 }
 
 /// Processor for rings-node jsonrpc server
