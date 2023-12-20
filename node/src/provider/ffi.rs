@@ -106,7 +106,7 @@ use crate::backend::ffi::FFIBackendBehaviour;
 use crate::backend::Backend;
 use crate::error::Error;
 use crate::error::Result;
-use crate::jsonrpc::HandlerType;
+use crate::jsonrpc::handler::InternalRpcHandler;
 use crate::processor::Processor;
 
 /// A structure to represent the Provider in a C-compatible format.
@@ -114,7 +114,7 @@ use crate::processor::Processor;
 #[repr(C)]
 pub struct ProviderPtr {
     processor: *const Processor,
-    handler: *const HandlerType,
+    handler: *const InternalRpcHandler,
 }
 
 impl Provider {
@@ -179,7 +179,9 @@ impl From<&ProviderPtr> for Provider {
     fn from(ptr: &ProviderPtr) -> Provider {
         tracing::debug!("FFI: Provider from Ptr!");
         let processor = unsafe { Arc::<Processor>::from_raw(ptr.processor as *const Processor) };
-        let handler = unsafe { Arc::<HandlerType>::from_raw(ptr.handler as *const HandlerType) };
+        let handler = unsafe {
+            Arc::<InternalRpcHandler>::from_raw(ptr.handler as *const InternalRpcHandler)
+        };
         Self { processor, handler }
     }
 }
@@ -268,7 +270,7 @@ pub extern "C" fn request(
 #[no_mangle]
 pub unsafe extern "C" fn new_provider_with_callback(
     ice_server: *const c_char,
-    stabilize_timeout: u32,
+    stabilize_timeout: u64,
     account: *const c_char,
     account_type: *const c_char,
     signer: extern "C" fn(*const c_char, *mut c_char) -> (),
@@ -301,7 +303,7 @@ pub unsafe extern "C" fn new_provider_with_callback(
 
         executor::block_on(Provider::new_provider_internal(
             ice,
-            stabilize_timeout as usize,
+            stabilize_timeout,
             acc,
             acc_ty,
             Signer::Sync(Box::new(wrapped_signer(signer))),

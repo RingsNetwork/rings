@@ -206,7 +206,7 @@ mod stabilizer {
     impl TStabilize for Stabilization {
         async fn wait(self: Arc<Self>) {
             loop {
-                let timeout = Delay::new(Duration::from_secs(self.timeout as u64)).fuse();
+                let timeout = Delay::new(Duration::from_secs(self.timeout)).fuse();
                 pin_mut!(timeout);
                 select! {
                     _ = timeout => self

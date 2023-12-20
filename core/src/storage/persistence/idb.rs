@@ -247,7 +247,6 @@ impl PersistenceStorageOperation for IDBStorage {
             return Ok(());
         }
         let delete_count = count.sub(self.cap).add(1);
-        let delete_count = u32::try_from(delete_count).unwrap_or(0);
         if delete_count == 0 {
             return Ok(());
         }

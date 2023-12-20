@@ -422,9 +422,9 @@ mod tests {
     use crate::prelude::*;
     use crate::tests::native::prepare_processor;
 
-    async fn new_rnd_meta() -> RpcMeta {
+    async fn new_rnd_meta() -> Arc<Processor> {
         let (processor, _) = prepare_processor().await;
-        Arc::new(processor).into()
+        Arc::new(processor)
     }
 
     #[tokio::test]
@@ -432,7 +432,7 @@ mod tests {
         let meta1 = new_rnd_meta().await;
         let meta2 = new_rnd_meta().await;
         let offer = create_offer(
-            Params::Array(vec![meta2.processor.did().to_string().into()]),
+            Params::Array(vec![meta2.did().to_string().into()]),
             meta1.clone(),
         )
         .await

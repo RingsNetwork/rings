@@ -18,11 +18,11 @@ use crate::tests::manually_establish_connection;
 
 async fn run_stabilize(swarm: Arc<Swarm>) {
     let mut result = Result::<()>::Ok(());
-    let stabilization = Stabilization::new(swarm, 5usize);
+    let stabilization = Stabilization::new(swarm, 5);
     let timeout_in_secs = stabilization.get_timeout();
     println!("RUN Stabilization");
     while result.is_ok() {
-        let timeout = sleep(Duration::from_secs(timeout_in_secs as u64));
+        let timeout = sleep(Duration::from_secs(timeout_in_secs));
         tokio::pin!(timeout);
         tokio::select! {
             _ = timeout.as_mut() => {
@@ -71,7 +71,7 @@ async fn test_stabilization_once() -> Result<()> {
             sleep(Duration::from_millis(1000)).await;
             assert!(swarm1.dht().successors().list()?.contains(&key2.address().into()));
             assert!(swarm2.dht().successors().list()?.contains(&key1.address().into()));
-            let stabilization = Stabilization::new(Arc::clone(&swarm1), 5usize);
+            let stabilization = Stabilization::new(Arc::clone(&swarm1), 5);
             let _ = stabilization.stabilize().await;
             sleep(Duration::from_millis(10000)).await;
             assert_eq!(*swarm2.dht().lock_predecessor()?, Some(key1.address().into()));

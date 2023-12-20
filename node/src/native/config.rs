@@ -193,7 +193,7 @@ mod tests {
         let yaml = r#"
 session_sk: session_sk
 internal_api_port: 50000
-external_api_aadr: 127.0.0.1:50001
+external_api_addr: 127.0.0.1:50001
 endpoint_url: http://127.0.0.1:50000
 ice_servers: stun://stun.l.google.com:19302
 stabilize_timeout: 3
