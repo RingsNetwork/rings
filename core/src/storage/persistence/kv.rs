@@ -22,7 +22,7 @@ trait KvStorageBasic {
 #[allow(dead_code)]
 pub struct KvStorage {
     db: sled::Db,
-    cap: u64,
+    cap: u32,
     path: String,
 }
 
@@ -30,12 +30,12 @@ impl KvStorage {
     /// New KvStorage
     /// * cap: max_size in bytes
     /// * path: db file location
-    pub async fn new_with_cap_and_path<P>(cap: u64, path: P) -> Result<Self>
+    pub async fn new_with_cap_and_path<P>(cap: u32, path: P) -> Result<Self>
     where P: AsRef<std::path::Path> {
         let db = sled::Config::new()
             .path(path.as_ref())
             .mode(sled::Mode::HighThroughput)
-            .cache_capacity(cap)
+            .cache_capacity(cap as u64)
             .open()
             .map_err(Error::SledError)?;
         Ok(Self {
@@ -48,13 +48,13 @@ impl KvStorage {
     /// New KvStorage
     /// * cap: max_size in bytes
     /// * name: db file location
-    pub async fn new_with_cap_and_name(cap: u64, name: &str) -> Result<Self> {
+    pub async fn new_with_cap_and_name(cap: u32, name: &str) -> Result<Self> {
         Self::new_with_cap_and_path(cap, name).await
     }
 
     /// New KvStorage with default path
     /// default_path is `./`
-    pub async fn new_with_cap(cap: u64) -> Result<Self> {
+    pub async fn new_with_cap(cap: u32) -> Result<Self> {
         Self::new_with_cap_and_path(cap, "./data").await
     }
 
@@ -104,11 +104,11 @@ impl PersistenceStorageOperation for KvStorage {
         Ok(())
     }
 
-    async fn count(&self) -> Result<u64> {
-        Ok(self.db.len() as u64)
+    async fn count(&self) -> Result<u32> {
+        Ok(self.db.len() as u32)
     }
 
-    async fn max_size(&self) -> Result<u64> {
+    async fn max_size(&self) -> Result<u32> {
         Ok(self.cap)
     }
 

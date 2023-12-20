@@ -34,7 +34,7 @@ pub const DEFAULT_EXTERNAL_API_ADDR: &str = "127.0.0.1:50000";
 pub const DEFAULT_ENDPOINT_URL: &str = "http://127.0.0.1:50000";
 pub const DEFAULT_ICE_SERVERS: &str = "stun://stun.l.google.com:19302";
 pub const DEFAULT_STABILIZE_TIMEOUT: u64 = 3;
-pub const DEFAULT_STORAGE_CAPACITY: u64 = 200000000;
+pub const DEFAULT_STORAGE_CAPACITY: u32 = 200000000;
 
 pub fn get_storage_location<P>(prefix: P, path: P) -> String
 where P: AsRef<std::path::Path> {
@@ -172,11 +172,11 @@ impl Config {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StorageConfig {
     pub path: String,
-    pub capacity: u64,
+    pub capacity: u32,
 }
 
 impl StorageConfig {
-    pub fn new(path: &str, capacity: u64) -> Self {
+    pub fn new(path: &str, capacity: u32) -> Self {
         Self {
             path: path.to_string(),
             capacity,

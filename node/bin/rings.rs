@@ -154,7 +154,7 @@ struct RunCommand {
         help = "Storage capcity. If not provider, use storage.capacity in config file or 200000000",
         env
     )]
-    pub storage_capacity: Option<u64>,
+    pub storage_capacity: Option<u32>,
 
     #[command(flatten)]
     config_args: ConfigArgs,

@@ -81,7 +81,7 @@ impl Provider {
     #[wasm_bindgen(constructor)]
     pub fn new_instance(
         ice_servers: String,
-        stabilize_timeout: usize,
+        stabilize_timeout: u64,
         account: String,
         account_type: String,
         signer: js_sys::Function,
