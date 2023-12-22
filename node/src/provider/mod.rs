@@ -8,16 +8,11 @@ use std::sync::Arc;
 use rings_core::session::SessionSkBuilder;
 use rings_core::storage::PersistenceStorage;
 use rings_core::swarm::callback::SharedSwarmCallback;
+use rings_rpc::protos::rings_node_handler::InternalRpcHandler;
 
 use crate::error::Error;
 use crate::error::Result;
-use crate::jsonrpc::handler::InternalRpcHandler;
-use crate::jsonrpc::handler::MethodHandler;
 use crate::measure::PeriodicMeasure;
-use crate::prelude::jsonrpc_core::types::id::Id;
-use crate::prelude::jsonrpc_core::MethodCall;
-use crate::prelude::jsonrpc_core::Output;
-use crate::prelude::jsonrpc_core::Params;
 use crate::prelude::wasm_export;
 use crate::processor::Processor;
 use crate::processor::ProcessorBuilder;
@@ -37,7 +32,7 @@ pub mod ffi;
 #[wasm_export]
 pub struct Provider {
     processor: Arc<Processor>,
-    handler: Arc<InternalRpcHandler>,
+    handler: InternalRpcHandler,
 }
 
 /// Async signer, without Send required
@@ -61,10 +56,9 @@ pub enum Signer {
 impl Provider {
     /// Create provider from processor directly
     pub fn from_processor(processor: Arc<Processor>) -> Self {
-        let handler = InternalRpcHandler::new(processor.clone());
         Self {
             processor,
-            handler: handler.into(),
+            handler: InternalRpcHandler,
         }
     }
     /// Create a provider instance with storage name
@@ -89,11 +83,10 @@ impl Provider {
             .measure(measure);
 
         let processor = Arc::new(processor_builder.build()?);
-        let handler = InternalRpcHandler::new(processor.clone());
 
         Ok(Provider {
             processor,
-            handler: handler.into(),
+            handler: InternalRpcHandler,
         })
     }
 
@@ -146,23 +139,11 @@ impl Provider {
     pub async fn request_internal(
         &self,
         method: String,
-        params: Params,
-        opt_id: Option<String>,
-    ) -> Result<Output> {
-        let id = if let Some(id) = opt_id {
-            Id::Str(id)
-        } else {
-            Id::Null
-        };
-        let req: MethodCall = MethodCall {
-            jsonrpc: None,
-            method,
-            params,
-            id,
-        };
-        tracing::debug!("request {:?}", req);
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        tracing::debug!("request {} params: {:?}", method, params);
         self.handler
-            .handle_request(req)
+            .handle_request(self.processor.clone(), method, params)
             .await
             .map_err(Error::InternalRpcError)
     }
@@ -171,12 +152,15 @@ impl Provider {
 #[cfg(feature = "node")]
 impl Provider {
     /// A request function implementation for native provider
-    pub async fn request(
+    pub async fn request<T>(
         &self,
-        method: String,
-        params: Params,
-        opt_id: Option<String>,
-    ) -> Result<Output> {
-        self.request_internal(method, params, opt_id).await
+        method: rings_rpc::method::Method,
+        params: T,
+    ) -> Result<serde_json::Value>
+    where
+        T: serde::Serialize,
+    {
+        let params = serde_json::to_value(params)?;
+        self.request_internal(method.to_string(), params).await
     }
 }

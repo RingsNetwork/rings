@@ -17,14 +17,16 @@ use tower_http::cors::CorsLayer;
 
 use self::http_error::HttpError;
 use crate::prelude::jsonrpc_core::MetaIoHandler;
-use crate::prelude::rings_rpc::response::NodeInfo;
+use crate::prelude::rings_rpc::protos::rings_node::NodeInfoResponse;
 use crate::processor::Processor;
 
 /// JSON-RPC state
 #[derive(Clone)]
-pub struct JsonRpcState {
+pub struct JsonRpcState<M>
+where M: crate::prelude::jsonrpc_core::Middleware<Arc<Processor>>
+{
     processor: Arc<Processor>,
-    io_handler: MetaIoHandler<Arc<Processor>>,
+    io_handler: MetaIoHandler<Arc<Processor>, M>,
 }
 
 /// websocket state
@@ -40,13 +42,14 @@ pub struct StatusState {
     processor: Arc<Processor>,
 }
 
+struct ExternalRpcMiddleware;
+struct InternalRpcMiddleware;
+
 /// Run a web server to handle jsonrpc request locally
 pub async fn run_internal_api(port: u16, processor: Arc<Processor>) -> anyhow::Result<()> {
     let binding_addr = SocketAddr::from(([127, 0, 0, 1], port));
 
-    let mut jsonrpc_handler: MetaIoHandler<Arc<Processor>> = MetaIoHandler::default();
-    crate::jsonrpc::handler::default::register_internal_methods(&mut jsonrpc_handler).await;
-
+    let jsonrpc_handler = MetaIoHandler::with_middleware(InternalRpcMiddleware);
     let jsonrpc_state = Arc::new(JsonRpcState {
         processor: processor.clone(),
         io_handler: jsonrpc_handler,
@@ -81,9 +84,7 @@ pub async fn run_internal_api(port: u16, processor: Arc<Processor>) -> anyhow::R
 pub async fn run_external_api(addr: String, processor: Arc<Processor>) -> anyhow::Result<()> {
     let binding_addr = addr.parse().unwrap();
 
-    let mut jsonrpc_handler: MetaIoHandler<Arc<Processor>> = MetaIoHandler::default();
-    crate::jsonrpc::handler::default::register_external_methods(&mut jsonrpc_handler).await;
-
+    let jsonrpc_handler = MetaIoHandler::with_middleware(ExternalRpcMiddleware);
     let jsonrpc_state = Arc::new(JsonRpcState {
         processor: processor.clone(),
         io_handler: jsonrpc_handler,
@@ -108,10 +109,13 @@ pub async fn run_external_api(addr: String, processor: Arc<Processor>) -> anyhow
     Ok(())
 }
 
-async fn jsonrpc_io_handler(
-    State(state): State<Arc<JsonRpcState>>,
+async fn jsonrpc_io_handler<M>(
+    State(state): State<Arc<JsonRpcState<M>>>,
     body: String,
-) -> Result<JsonResponse, HttpError> {
+) -> Result<JsonResponse, HttpError>
+where
+    M: crate::prelude::jsonrpc_core::Middleware<Arc<Processor>>,
+{
     let r = state
         .io_handler
         .handle_request(&body, state.processor.clone())
@@ -135,7 +139,7 @@ async fn node_info_header<B>(
 
 async fn status_handler(
     State(state): State<Arc<StatusState>>,
-) -> Result<axum::Json<NodeInfo>, HttpError> {
+) -> Result<axum::Json<NodeInfoResponse>, HttpError> {
     let info = state
         .processor
         .get_node_info()
@@ -161,4 +165,75 @@ async fn ws_handler(
 ) -> impl IntoResponse {
     tracing::info!("ws connected, remote: {}", addr);
     ws.on_upgrade(move |socket| self::ws::handle_socket(state, socket))
+}
+
+mod jsonrpc_middleware_impl {
+    use std::future::Future;
+
+    use rings_rpc::protos::rings_node_handler::ExternalRpcHandler;
+    use rings_rpc::protos::rings_node_handler::InternalRpcHandler;
+
+    use super::*;
+    use crate::native::endpoint::jsonrpc_middleware_impl::middleware::NoopCallFuture;
+    use crate::native::endpoint::jsonrpc_middleware_impl::middleware::NoopFuture;
+    use crate::prelude::jsonrpc_core::futures_util::future;
+    use crate::prelude::jsonrpc_core::futures_util::future::Either;
+    use crate::prelude::jsonrpc_core::futures_util::FutureExt;
+    use crate::prelude::jsonrpc_core::*;
+
+    impl Middleware<Arc<Processor>> for InternalRpcMiddleware {
+        type Future = NoopFuture;
+        type CallFuture = NoopCallFuture;
+
+        fn on_call<F, X>(
+            &self,
+            call: Call,
+            meta: Arc<Processor>,
+            next: F,
+        ) -> Either<Self::CallFuture, X>
+        where
+            F: Fn(Call, Arc<Processor>) -> X + Send + Sync,
+            X: Future<Output = Option<Output>> + Send + 'static,
+        {
+            match call {
+                Call::MethodCall(req) => {
+                    let fut = InternalRpcHandler
+                        .handle_request(meta, req.method, req.params.into())
+                        .then(move |res| {
+                            future::ready(Some(Output::from(res, req.id, req.jsonrpc)))
+                        });
+                    Either::Left(Box::pin(fut))
+                }
+                _ => Either::Left(Box::pin(next(call, meta))),
+            }
+        }
+    }
+
+    impl Middleware<Arc<Processor>> for ExternalRpcMiddleware {
+        type Future = NoopFuture;
+        type CallFuture = NoopCallFuture;
+
+        fn on_call<F, X>(
+            &self,
+            call: Call,
+            meta: Arc<Processor>,
+            next: F,
+        ) -> Either<Self::CallFuture, X>
+        where
+            F: Fn(Call, Arc<Processor>) -> X + Send + Sync,
+            X: Future<Output = Option<Output>> + Send + 'static,
+        {
+            match call {
+                Call::MethodCall(req) => {
+                    let fut = ExternalRpcHandler
+                        .handle_request(meta, req.method, req.params.into())
+                        .then(move |res| {
+                            future::ready(Some(Output::from(res, req.id, req.jsonrpc)))
+                        });
+                    Either::Left(Box::pin(fut))
+                }
+                _ => Either::Left(Box::pin(next(call, meta))),
+            }
+        }
+    }
 }

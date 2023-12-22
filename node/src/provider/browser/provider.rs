@@ -172,18 +172,13 @@ impl Provider {
     }
 
     /// Request local rpc interface
-    pub fn request(
-        &self,
-        method: String,
-        params: JsValue,
-        opt_id: Option<String>,
-    ) -> js_sys::Promise {
+    pub fn request(&self, method: String, params: JsValue) -> js_sys::Promise {
         let ins = self.clone();
         future_to_promise(async move {
             let params = super::utils::parse_params(params)
                 .map_err(|e| JsError::new(e.to_string().as_str()))?;
             let ret = ins
-                .request_internal(method, params, opt_id)
+                .request_internal(method, params)
                 .await
                 .map_err(JsError::from)?;
             Ok(js_value::serialize(&ret).map_err(JsError::from)?)
@@ -303,7 +298,8 @@ impl Provider {
     pub fn send_message(&self, destination: String, msg: js_sys::Uint8Array) -> js_sys::Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
-            p.send_message(destination.as_str(), &msg.to_vec())
+            let destination_did = get_did(destination.as_str(), AddressType::DEFAULT)?;
+            p.send_message(destination_did, &msg.to_vec())
                 .await
                 .map_err(JsError::from)?;
             Ok(JsValue::from_bool(true))

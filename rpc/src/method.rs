@@ -1,10 +1,12 @@
 //! A JSONRPC `method` enum.
 #![warn(missing_docs)]
+
 use super::error::Error;
 use super::error::Result;
 
 /// supported methods.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum Method {
     /// Connect peer with remote jsonrpc server url
     ConnectPeerViaHttp,
@@ -20,8 +22,6 @@ pub enum Method {
     AnswerOffer,
     /// Accept Answer for manually handshake
     AcceptAnswer,
-    /// Send custom message to peer
-    SendTo,
     /// Disconnect a peer
     Disconnect,
     /// SendCustomMessage,
@@ -52,7 +52,6 @@ impl Method {
             Method::ListPeers => "listPeers",
             Method::CreateOffer => "createOffer",
             Method::AnswerOffer => "answerOffer",
-            Method::SendTo => "sendTo",
             Method::Disconnect => "disconnect",
             Method::AcceptAnswer => "acceptAnswer",
             Method::SendCustomMessage => "sendCustomMessage",
@@ -84,7 +83,6 @@ impl TryFrom<&str> for Method {
             "listPeers" => Self::ListPeers,
             "createOffer" => Self::CreateOffer,
             "answerOffer" => Self::AnswerOffer,
-            "sendTo" => Self::SendTo,
             "disconnect" => Self::Disconnect,
             "acceptAnswer" => Self::AcceptAnswer,
             "sendBackendMessage" => Self::SendBackendMessage,

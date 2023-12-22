@@ -20,17 +20,13 @@ message SeedPeer {
     string url = 2;
 }
 
-message Seed {
-    repeated SeedPeer peers = 1;
-}
-
 message ConnectWithSeedRequest {
-    Seed seed = 1;
+    repeated SeedPeer peers = 1;
 }
 
 message ConnectWithSeedResponse {}
 
-message Peer {
+message PeerInfo {
     string did = 1;
     string state = 2;
 }
@@ -38,7 +34,7 @@ message Peer {
 message ListPeersRequest {}
 
 message ListPeersResponse {
-    repeated Peer peers = 1;
+    repeated PeerInfo peers = 1;
 }
 
 message CreateOfferRequest {
@@ -62,7 +58,7 @@ message AcceptAnswerRequest {
 }
 
 message AcceptAnswerResponse {
-    Peer peer = 1;
+    PeerInfo peer = 1;
 }
 
 message DisconnectRequest {
@@ -71,26 +67,33 @@ message DisconnectRequest {
 
 message DisconnectResponse {}
 
-message SendMessageRequest {
+message SendCustomMessageRequest {
     string destination_did = 1;
     string data = 2;
 }
 
-message SendMessageResponse {}
+message SendCustomMessageResponse {}
 
-message PublishToTopicRequest {
+message SendBackendMessageRequest {
+    string destination_did = 1;
+    string data = 2;
+}
+
+message SendBackendMessageResponse {}
+
+message PublishMessageToTopicRequest {
     string topic = 1;
     string data = 2;
 }
 
-message PublishToTopicResponse {}
+message PublishMessageToTopicResponse {}
 
-message FetchTopicRequest {
+message FetchMessagesOfTopicRequest {
     string topic = 1;
     int64 skip = 2;
 }
 
-message FetchTopicResponse {
+message FetchMessagesOfTopicResponse {
     repeated string data = 1;
 }
 
@@ -112,11 +115,11 @@ message NodeInfoRequest {}
 
 message FingerTableRange {
     optional string did = 1;
-    int64 start = 2;
-    int64 end = 3;
+    uint64 start = 2;
+    uint64 end = 3;
 }
 
-message Dht {
+message DhtInfo {
     string did = 1;
     repeated string successors = 2;
     optional string predecessor = 3;
@@ -134,20 +137,20 @@ message StorageItem {
     StorageValue value = 2;
 }
 
-message Storage {
+message StorageInfo {
     repeated StorageItem items = 1;
 }
 
-message Swarm {
-    repeated Peer peers = 1;
-    Dht dht = 2;
-    Storage persistence_storage = 3;
-    Storage cache_storage =4;
+message SwarmInfo {
+    repeated PeerInfo peers = 1;
+    DhtInfo dht = 2;
+    StorageInfo persistence_storage = 3;
+    StorageInfo cache_storage =4;
 }
 
 message NodeInfoResponse {
     string version = 1;
-    Swarm swarm = 2;
+    SwarmInfo swarm = 2;
 }
 
 message NodeDidRequest {}
@@ -174,21 +177,22 @@ service InternalService {
     rpc AcceptAnswer (AcceptAnswerRequest) returns (AcceptAnswerResponse);
     // Disconnect a peer
     rpc Disconnect (DisconnectRequest) returns (DisconnectResponse);
-    // Send message to peer
-    rpc SendMessage (SendMessageRequest) returns (SendMessageResponse);
-    /// Append data to topic
-    rpc PublishToTopic(PublishToTopicRequest) returns (PublishToTopicResponse);
-    /// Fetch data of topic
-    rpc FetchTopic(FetchTopicRequest) returns (FetchTopicResponse);
-    /// Register service
+    // Send custom message to peer
+    rpc SendCustomMessage (SendCustomMessageRequest) returns (SendCustomMessageResponse);
+    // Send backend message
+    rpc SendBackendMessage (SendBackendMessageRequest) returns (SendBackendMessageResponse);
+    // Append data to topic
+    rpc PublishMessageToTopic(PublishMessageToTopicRequest) returns (PublishMessageToTopicResponse);
+    // Fetch data of topic
+    rpc FetchMessagesOfTopic(FetchMessagesOfTopicRequest) returns (FetchMessagesOfTopicResponse);
+    // Register service
     rpc RegisterService(RegisterServiceRequest) returns (RegisterServiceResponse);
-    /// Lookup service
+    // Lookup service
     rpc LookupService(LookupServiceRequest) returns (LookupServiceResponse);
-    /// Retrieve Node info
+    // Retrieve Node info
     rpc NodeInfo(NodeInfoRequest) returns (NodeInfoResponse);
-    /// Retrieve Node DID
+    // Retrieve Node DID
     rpc NodeDid(NodeDidRequest) returns (NodeDidResponse);
-
 }
 
 // Rings node external service
@@ -199,5 +203,4 @@ service ExternalService {
     rpc NodeInfo(NodeInfoRequest) returns (NodeInfoResponse);
     /// Retrieve Node DID
     rpc NodeDid(NodeDidRequest) returns (NodeDidResponse);
-
 }

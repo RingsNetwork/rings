@@ -243,11 +243,9 @@ pub mod loader {
                     if let Some(provider) = guard.clone() {
                         let params = serde_json::from_str(params)
                             .map_err(|_| wasmer::RuntimeError::new("Failed to serialize params"))?;
-                        futures::executor::block_on(provider.request_internal(
-                            method.to_string(),
-                            params,
-                            None,
-                        ))
+                        futures::executor::block_on(
+                            provider.request_internal(method.to_string(), params),
+                        )
                         .map_err(|_| {
                             wasmer::RuntimeError::new("Failed to call async request function")
                         })?;

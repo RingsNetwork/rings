@@ -306,24 +306,12 @@ struct PeerDisconnectCommand {
 #[derive(Subcommand, Debug)]
 #[command(rename_all = "kebab-case")]
 enum SendCommand {
-    #[command(about = "Sends a raw message.")]
-    Raw(SendRawCommand),
     #[command(about = "Sends an HTTP request message.")]
     Http(SendHttpCommand),
     #[command(about = "Sends a simple text message.")]
     PlainText(SendPlainTextCommand),
     #[command(about = "Sends a custom message.")]
     Custom(SendCustomMessageCommand),
-}
-
-#[derive(Args, Debug)]
-struct SendRawCommand {
-    #[command(flatten)]
-    client_args: ClientArgs,
-
-    to_did: String,
-
-    text: String,
 }
 
 #[derive(Args, Debug)]
@@ -550,15 +538,6 @@ async fn main() -> anyhow::Result<()> {
                 .new_client()
                 .await?
                 .disconnect(args.address.as_str())
-                .await?
-                .display();
-            Ok(())
-        }
-        Command::Send(SendCommand::Raw(args)) => {
-            args.client_args
-                .new_client()
-                .await?
-                .send_message(args.to_did.as_str(), args.text.as_str())
                 .await?
                 .display();
             Ok(())

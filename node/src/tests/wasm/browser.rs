@@ -55,7 +55,7 @@ async fn create_connection(provider1: &Provider, provider2: &Provider) {
 
     let address = JsValue::from_str(&provider2.address());
     let req0 = js_sys::Array::of1(&address);
-    let offer_fut = JsFuture::from(provider1.request("createOffer".to_string(), req0.into(), None))
+    let offer_fut = JsFuture::from(provider1.request("createOffer".to_string(), req0.into()))
         .await
         .unwrap();
 
@@ -72,10 +72,9 @@ async fn create_connection(provider1: &Provider, provider2: &Provider) {
 
     let js_offer = JsValue::from_str(&offer);
     let req1 = js_sys::Array::of1(&js_offer);
-    let answer_fut =
-        JsFuture::from(provider2.request("answerOffer".to_string(), req1.into(), None))
-            .await
-            .unwrap();
+    let answer_fut = JsFuture::from(provider2.request("answerOffer".to_string(), req1.into()))
+        .await
+        .unwrap();
 
     let answer: String = match js_value::deserialize::<Output>(&answer_fut).unwrap() {
         Output::Success(ret) => {
@@ -93,7 +92,7 @@ async fn create_connection(provider1: &Provider, provider2: &Provider) {
     let js_answer = JsValue::from_str(&answer);
     let req2 = js_sys::Array::of1(&js_answer);
 
-    let _ret = JsFuture::from(provider1.request("acceptAnswer".to_string(), req2.into(), None))
+    let _ret = JsFuture::from(provider1.request("acceptAnswer".to_string(), req2.into()))
         .await
         .unwrap();
 }
@@ -143,7 +142,7 @@ async fn test_provider_parse_params() {
     let null_value = browser::utils::parse_params(JsValue::null());
     assert!(null_value.is_ok(), "null_value is error");
     match null_value {
-        Ok(v) => assert!(v == jsonrpc_core::Params::None, "not null"),
+        Ok(v) => assert!(v == serde_json::Value::Null, "not null"),
         Err(_) => panic!("err"),
     }
 
@@ -152,7 +151,7 @@ async fn test_provider_parse_params() {
 
     let jv: &JsValue = arr_v.as_ref();
     let value2 = browser::utils::parse_params(jv.clone()).unwrap();
-    if let jsonrpc_core::Params::Array(v) = value2 {
+    if let serde_json::Value::Array(v) = value2 {
         assert!(v.len() == 1, "value2.len got {}, expect 1", v.len());
         let v0 = v.get(0).unwrap();
         assert!(v0.is_string(), "v0 not string");
@@ -217,7 +216,7 @@ async fn test_create_connection_via_local_rpc() {
 
     let address = JsValue::from_str(&provider2.address());
     let req0 = js_sys::Array::of1(&address);
-    let offer_fut = JsFuture::from(provider1.request("createOffer".to_string(), req0.into(), None))
+    let offer_fut = JsFuture::from(provider1.request("createOffer".to_string(), req0.into()))
         .await
         .unwrap();
 
@@ -234,10 +233,9 @@ async fn test_create_connection_via_local_rpc() {
 
     let js_offer = JsValue::from_str(&offer);
     let req1 = js_sys::Array::of1(&js_offer);
-    let answer_fut =
-        JsFuture::from(provider2.request("answerOffer".to_string(), req1.into(), None))
-            .await
-            .unwrap();
+    let answer_fut = JsFuture::from(provider2.request("answerOffer".to_string(), req1.into()))
+        .await
+        .unwrap();
 
     let answer: String = match js_value::deserialize::<Output>(&answer_fut).unwrap() {
         Output::Success(ret) => {
@@ -255,7 +253,7 @@ async fn test_create_connection_via_local_rpc() {
     let js_answer = JsValue::from_str(&answer);
     let req2 = js_sys::Array::of1(&js_answer);
 
-    let _ret = JsFuture::from(provider1.request("acceptAnswer".to_string(), req2.into(), None))
+    let _ret = JsFuture::from(provider1.request("acceptAnswer".to_string(), req2.into()))
         .await
         .unwrap();
 }
