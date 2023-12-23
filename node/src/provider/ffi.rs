@@ -191,38 +191,6 @@ impl From<&Provider> for ProviderPtr {
     }
 }
 
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait)]
-impl SwarmCallback for SwarmCallbackInstanceFFI {
-    async fn on_inbound(
-        &self,
-        payload: &MessagePayload,
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let payload = serde_json::to_string(payload)?;
-        if let Some(cb) = self.on_inbound {
-            let payload = CString::new(payload)?;
-            cb(payload.as_ptr())
-        };
-        Ok(())
-    }
-}
-
-/// The MessageCallback Instance for FFI,
-/// This struct holding two functions `custom_message_callback` and `builtin_message_callback`
-#[repr(C)]
-#[derive(Clone)]
-pub struct SwarmCallbackInstanceFFI {
-    on_inbound: Option<extern "C" fn(*const c_char) -> ()>,
-}
-
-/// Create a neww callback instance
-#[no_mangle]
-pub extern "C" fn new_callback(
-    on_inbound: Option<extern "C" fn(*const c_char) -> ()>,
-) -> SwarmCallbackInstanceFFI {
-    SwarmCallbackInstanceFFI { on_inbound }
-}
-
 /// Start message listening and stabilization
 /// # Safety
 /// Listen function accept a ProviderPtr and will unsafety cast it into Arc based Provider
