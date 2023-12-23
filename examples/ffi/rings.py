@@ -41,7 +41,7 @@ def on_inbound(payload):
 
 
 def create_provider(rings_node, acc):
-    callback = rings_node.new_callback(on_inbound)
+    callback = rings_node.new_ffi_backend_behaviour(on_inbound, on_inbound, on_inbound)
     provider = rings_node.new_provider_with_callback(
         "stun://stun.l.google.com".encode(),
         10,
