@@ -34,7 +34,7 @@ def signer(msg, output):
     return
 
 
-@ffi.callback("void(*)(const char *)")
+@ffi.callback("void(*)(FFIBackendBehaviour *, ProviderPtr *, char *, char *)")
 def on_inbound(payload):
     print(payload)
     return
