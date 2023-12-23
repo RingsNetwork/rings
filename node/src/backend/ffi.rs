@@ -47,11 +47,11 @@ pub extern "C" fn new_ffi_backend_behaviour(
 }
 
 macro_rules! handle_backend_message {
-    ($self:ident, $provider:ident, $handler:ident, $message:ident) => {
+    ($self:ident, $provider:ident, $handler:ident, $payload: ident, $message:ident) => {
         if let Some(handler) = $self.$handler {
             let provider: &Provider = Arc::as_ref(&$provider);
             let provider_ptr: ProviderPtr = provider.into();
-            let payload = serde_json::to_string(&payload)?;
+            let payload = serde_json::to_string(&$payload)?;
             let message = serde_json::to_string(&$message)?;
             let payload = CString::new(payload)?;
             let message = CString::new(message)?;
@@ -75,13 +75,13 @@ impl MessageEndpoint<BackendMessage> for FFIBackendBehaviour {
     ) -> Result<()> {
         match msg {
             BackendMessage::PlainText(m) => {
-                handle_backend_message!(self, provider, paintext_message_handler, m)
+                handle_backend_message!(self, provider, paintext_message_handler, payload, m)
             }
             BackendMessage::Extension(m) => {
-                handle_backend_message!(self, provider, extension_message_handler, m)
+                handle_backend_message!(self, provider, extension_message_handler, payload, m)
             }
             BackendMessage::ServiceMessage(m) => {
-                handle_backend_message!(self, provider, service_message_handler, m)
+                handle_backend_message!(self, provider, service_message_handler, payload, m)
             }
         }
         Ok(())
