@@ -51,7 +51,7 @@ macro_rules! handle_backend_message {
         if let Some(handler) = $self.$handler {
             let provider: &Provider = Arc::as_ref(&$provider);
             let provider_ptr: ProviderPtr = provider.into();
-            let payload = serde_json::to_string(&$self.payload)?;
+            let payload = serde_json::to_string(&payload)?;
             let message = serde_json::to_string(&$message)?;
             let payload = CString::new(payload)?;
             let message = CString::new(message)?;
