@@ -28,8 +28,8 @@ pub fn verify(msg: &[u8], address: &PublicKeyAddress, sig: impl AsRef<[u8]>) -> 
             }
             tracing::debug!(
                 "failed to recover pubkey address, got: {}, expect: {}",
-                recover_pk.address(),
-                address
+                address,
+                recover_pk.address()
             );
             false
         }

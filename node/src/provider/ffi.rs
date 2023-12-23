@@ -99,12 +99,11 @@ use std::ffi::CString;
 use std::sync::Arc;
 
 use futures::executor;
-use rings_core::async_trait;
-use rings_core::message::MessagePayload;
-use rings_core::swarm::callback::SwarmCallback;
 
 use super::Provider;
 use super::Signer;
+use crate::backend::ffi::FFIBackendBehaviour;
+use crate::backend::Backend;
 use crate::error::Error;
 use crate::error::Result;
 use crate::jsonrpc::HandlerType;
@@ -189,38 +188,6 @@ impl From<&Provider> for ProviderPtr {
     }
 }
 
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait)]
-impl SwarmCallback for SwarmCallbackInstanceFFI {
-    async fn on_inbound(
-        &self,
-        payload: &MessagePayload,
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let payload = serde_json::to_string(payload)?;
-        if let Some(cb) = self.on_inbound {
-            let payload = CString::new(payload)?;
-            cb(payload.as_ptr())
-        };
-        Ok(())
-    }
-}
-
-/// The MessageCallback Instance for FFI,
-/// This struct holding two functions `custom_message_callback` and `builtin_message_callback`
-#[repr(C)]
-#[derive(Clone)]
-pub struct SwarmCallbackInstanceFFI {
-    on_inbound: Option<extern "C" fn(*const c_char) -> ()>,
-}
-
-/// Create a neww callback instance
-#[no_mangle]
-pub extern "C" fn new_callback(
-    on_inbound: Option<extern "C" fn(*const c_char) -> ()>,
-) -> SwarmCallbackInstanceFFI {
-    SwarmCallbackInstanceFFI { on_inbound }
-}
-
 /// Start message listening and stabilization
 /// # Safety
 /// Listen function accept a ProviderPtr and will unsafety cast it into Arc based Provider
@@ -282,7 +249,7 @@ pub unsafe extern "C" fn new_provider_with_callback(
     account: *const c_char,
     account_type: *const c_char,
     signer: extern "C" fn(*const c_char, *mut c_char) -> (),
-    callback_ptr: *const SwarmCallbackInstanceFFI,
+    callback_ptr: *const FFIBackendBehaviour,
 ) -> ProviderPtr {
     fn wrapped_signer(
         signer: extern "C" fn(*const c_char, *mut c_char) -> (),
@@ -322,10 +289,10 @@ pub unsafe extern "C" fn new_provider_with_callback(
             panic!("Failed on create new provider {:#}", e)
         }
     };
-
-    let callback: &SwarmCallbackInstanceFFI = unsafe { &*callback_ptr };
+    let callback: &FFIBackendBehaviour = unsafe { &*callback_ptr };
+    let backend = Backend::new(Arc::new(provider.clone()), Box::new(callback.clone()));
     provider
-        .set_swarm_callback(Arc::new(callback.clone()))
+        .set_swarm_callback(Arc::new(backend))
         .expect("Failed to set callback");
 
     let ret: ProviderPtr = (&provider).into();
