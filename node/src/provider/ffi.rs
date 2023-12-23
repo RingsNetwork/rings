@@ -88,7 +88,7 @@
 //!     rings_node.listen(ffi.addressof(provider))
 //!     print(provider)
 //! ```
-//! 
+//!
 //! Note: Since the above code is executed in a single-process environment of Python,
 //! the Rings' listen loop will block the process. If you wish to use it in a production environment,
 //! you should implement your own more advanced process or thread management.
@@ -256,15 +256,14 @@ pub unsafe extern "C" fn new_provider_with_callback(
     ) -> impl Fn(String) -> Vec<u8> {
         move |data: String| -> Vec<u8> {
             let c_data = CString::new(data).expect("Failed to convert String to CString");
-
             let mut sig = Vec::<u8>::with_capacity(65);
             let sig_ptr = sig.as_mut_ptr() as *mut c_char;
             signer(c_data.as_ptr(), sig_ptr);
 
-            let c_ret = c_char_to_bytes(sig_ptr).expect("Failed to convert c char to [u8]");
+            let c_ret = c_char_to_bytes(sig_ptr, 65).expect("Failed to convert c char to [u8]");
             let c_ret_len = c_ret.len();
             assert!(
-                c_ret.len() >= 64,
+                c_ret.len() == 65,
                 "sig length({c_ret_len} < 64) is invalid: {c_ret:?}"
             );
             c_ret
@@ -305,17 +304,16 @@ pub unsafe extern "C" fn new_provider_with_callback(
 }
 
 fn c_char_to_string(ptr: *const c_char) -> Result<String> {
-    let c_str = c_char_to_bytes(ptr);
+    let c_str: &CStr = unsafe { CStr::from_ptr(ptr) };
     // Drop none utf8 sym here.
-    String::from_utf8(c_str?).map_err(Error::FFIFromUtf8Error)
+    String::from_utf8(c_str.to_owned().into()).map_err(Error::FFIFromUtf8Error)
 }
 
-fn c_char_to_bytes(ptr: *const c_char) -> Result<Vec<u8>> {
+fn c_char_to_bytes(ptr: *const c_char, len: usize) -> Result<Vec<u8>> {
     // Check point here.
     if ptr.is_null() {
         return Err(Error::FFINulPtrError);
     }
-    // Drop none utf8 sym here.
-    let c_str: &CStr = unsafe { CStr::from_ptr(ptr) };
-    Ok(c_str.to_owned().into())
+    let c_bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len) };
+    Ok(c_bytes.to_vec())
 }
