@@ -117,33 +117,6 @@ pub struct ProviderPtr {
     handler: *const HandlerType,
 }
 
-impl ProviderPtr {
-    /// Increases the reference count for the associated Arcs.
-    /// # Safety
-    /// This function unsafely increments the reference count of the Arcs.
-    pub unsafe fn increase_strong_count(&self) {
-        Arc::increment_strong_count(&self.processor);
-        Arc::increment_strong_count(&self.handler);
-    }
-
-    /// Decreases the reference count for the associated Arcs.
-    /// # Safety
-    /// This function unsafely decrements the reference count of the Arcs.
-    pub unsafe fn decrease_strong_count(&self) {
-        Arc::decrement_strong_count(&self.processor);
-        Arc::decrement_strong_count(&self.handler);
-    }
-}
-
-impl std::ops::Drop for ProviderPtr {
-    fn drop(&mut self) {
-        tracing::debug!("Ptr dropped!");
-        unsafe {
-            self.decrease_strong_count();
-        }
-    }
-}
-
 impl Provider {
     /// Converts a raw ProviderPtr pointer to a Rust Provider type.
     /// # Safety
@@ -156,7 +129,45 @@ impl Provider {
 
         let provider_ptr: &ProviderPtr = unsafe { &*ptr };
         let provider: Provider = provider_ptr.into();
+        // Avoid release here
+        provider.check_arc();
         Ok(provider)
+    }
+
+    /// Make sure there 1 at least 5 ref to keep arc onlive
+    fn check_arc(&self) {
+        let threshold = 5;
+
+        let p_count = Arc::strong_count(&self.processor);
+        let h_count = Arc::strong_count(&self.handler);
+        tracing::debug!("processor arc: {:?} handler arc {:?}", p_count, h_count);
+        if h_count < threshold {
+            for _ in 0..threshold - h_count {
+                unsafe { self.increase_handler_count() };
+            }
+            tracing::debug!("Arc<HandlerType> will be released when out of scope, increased")
+        }
+        if p_count < threshold {
+            for _ in 0..threshold - h_count {
+                unsafe { self.increase_processor_count() };
+            }
+            tracing::debug!("Arc<Processor> will be released when out of scope, increased")
+        }
+    }
+
+    unsafe fn increase_processor_count(&self) {
+        tracing::debug!("Increment strong count on processor and handler");
+        let p = Arc::into_raw(self.processor.clone());
+        Arc::increment_strong_count(p);
+    }
+
+    /// Decreases the reference count for the associated Arcs.
+    /// # Safety
+    /// This function unsafely decrements the reference count of the Arcs.
+    unsafe fn increase_handler_count(&self) {
+        tracing::debug!("Decrement strong count on processor and handler");
+        let h = Arc::into_raw(self.handler.clone());
+        Arc::increment_strong_count(h);
     }
 }
 
@@ -181,6 +192,7 @@ impl From<&Provider> for ProviderPtr {
         // then turn them into raw pointers.
         let processor_ptr = Arc::into_raw(provider.processor.clone());
         let handler_ptr = Arc::into_raw(provider.handler.clone());
+        provider.check_arc();
         ProviderPtr {
             processor: processor_ptr,
             handler: handler_ptr,
@@ -222,17 +234,28 @@ pub extern "C" fn request(
 ) -> *const c_char {
     match (|| -> Result<*const c_char> {
         let provider: Provider = Provider::from_raw(provider_ptr)?;
+
         let method = c_char_to_string(method)?;
         let params = c_char_to_string(params)?;
-        let params = serde_json::from_str(&params)?;
-        let ret: String = serde_json::to_string(&executor::block_on(
-            provider.request_internal(method, params, None),
-        )?)?;
-        let c_ret = CString::new(ret)?;
-        Ok(c_ret.as_ptr())
+        let params = serde_json::from_str(&params)
+            .expect(&format!("Failed on covering data {:?} to JSON", params));
+
+        let handle = std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                provider
+                    .request_internal(method, params, None)
+                    .await
+                    .unwrap()
+            })
+        });
+        let ret: String = serde_json::to_string(&handle.join().unwrap())?;
+        let c_ret = CString::new(ret)?.into_raw();
+        Ok(c_ret)
     })() {
         Ok(r) => r,
         Err(e) => {
+            tracing::error!("FFI Request failed, cause by: {:?}", e);
             panic!("FFI: Failed on request {:#}", e)
         }
     }
@@ -256,15 +279,15 @@ pub unsafe extern "C" fn new_provider_with_callback(
     ) -> impl Fn(String) -> Vec<u8> {
         move |data: String| -> Vec<u8> {
             let c_data = CString::new(data).expect("Failed to convert String to CString");
-
+            // 64 bytes sig + \0 here
             let mut sig = Vec::<u8>::with_capacity(65);
             let sig_ptr = sig.as_mut_ptr() as *mut c_char;
             signer(c_data.as_ptr(), sig_ptr);
 
-            let c_ret = c_char_to_bytes(sig_ptr).expect("Failed to convert c char to [u8]");
+            let c_ret = c_char_to_bytes(sig_ptr, 65).expect("Failed to convert c char to [u8]");
             let c_ret_len = c_ret.len();
             assert!(
-                c_ret.len() >= 64,
+                c_ret.len() == 65,
                 "sig length({c_ret_len} < 64) is invalid: {c_ret:?}"
             );
             c_ret
@@ -296,26 +319,20 @@ pub unsafe extern "C" fn new_provider_with_callback(
         .expect("Failed to set callback");
 
     let ret: ProviderPtr = (&provider).into();
-    // When leaving the closure, the origin Provider ref will be release,
-    // So we manually increase the count here
-    unsafe {
-        ret.increase_strong_count();
-    }
     ret
 }
 
 fn c_char_to_string(ptr: *const c_char) -> Result<String> {
-    let c_str = c_char_to_bytes(ptr);
+    let c_str: &CStr = unsafe { CStr::from_ptr(ptr) };
     // Drop none utf8 sym here.
-    String::from_utf8(c_str?).map_err(Error::FFIFromUtf8Error)
+    String::from_utf8(c_str.to_owned().into()).map_err(Error::FFIFromUtf8Error)
 }
 
-fn c_char_to_bytes(ptr: *const c_char) -> Result<Vec<u8>> {
+fn c_char_to_bytes(ptr: *const c_char, len: usize) -> Result<Vec<u8>> {
     // Check point here.
     if ptr.is_null() {
         return Err(Error::FFINulPtrError);
     }
-    // Drop none utf8 sym here.
-    let c_str: &CStr = unsafe { CStr::from_ptr(ptr) };
-    Ok(c_str.to_owned().into())
+    let c_bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len) };
+    Ok(c_bytes.to_vec())
 }

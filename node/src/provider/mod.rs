@@ -164,6 +164,7 @@ impl Provider {
             params,
             id,
         };
+        tracing::debug!("request {:?}", req);
         handler
             .handle_request(req)
             .await
