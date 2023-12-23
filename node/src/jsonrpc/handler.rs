@@ -4,11 +4,11 @@
 //! For the native environment, we use jsonrpc_core to handle requests.
 //! For the browser environment, we utilize a Simple MessageHandler to process the requests.
 use core::future::Future;
-use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use dashmap::DashMap;
 
 #[cfg(feature = "node")]
 pub use self::default::build_handler;
@@ -51,7 +51,7 @@ pub struct InternalRPCHandler<T: Clone> {
     /// MetaData for jsonrpc
     meta: T,
     /// Registered Methods
-    methods: HashMap<String, Arc<MethodFnBox>>,
+    methods: DashMap<String, Arc<MethodFnBox>>,
 }
 
 /// This trait defines the register function for method registration.
@@ -99,7 +99,7 @@ impl InternalRPCHandler<server::RpcMeta> {
     pub fn new(meta: server::RpcMeta) -> Self {
         Self {
             meta,
-            methods: HashMap::new(),
+            methods: DashMap::new(),
         }
     }
 
