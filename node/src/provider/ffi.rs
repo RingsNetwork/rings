@@ -240,16 +240,13 @@ pub extern "C" fn request(
         let params = serde_json::from_str(&params)
             .expect(&format!("Failed on covering data {:?} to JSON", params));
 
-        // let ret: String = serde_json::to_string(&executor::block_on(
-        //     provider.request_internal(method, params, None),
-        // )?)?;
         let handle = std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
                 provider
                     .request_internal(method, params, None)
                     .await
-                    .unwrap();
+                    .unwrap()
             })
         });
         let ret: String = serde_json::to_string(&handle.join().unwrap())?;
