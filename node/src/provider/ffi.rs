@@ -88,7 +88,7 @@
 //!     rings_node.listen(ffi.addressof(provider))
 //!     print(provider)
 //! ```
-//!
+//! 
 //! Note: Since the above code is executed in a single-process environment of Python,
 //! the Rings' listen loop will block the process. If you wish to use it in a production environment,
 //! you should implement your own more advanced process or thread management.
@@ -256,6 +256,7 @@ pub unsafe extern "C" fn new_provider_with_callback(
     ) -> impl Fn(String) -> Vec<u8> {
         move |data: String| -> Vec<u8> {
             let c_data = CString::new(data).expect("Failed to convert String to CString");
+            // 64 bytes sig + \0 here
             let mut sig = Vec::<u8>::with_capacity(65);
             let sig_ptr = sig.as_mut_ptr() as *mut c_char;
             signer(c_data.as_ptr(), sig_ptr);
