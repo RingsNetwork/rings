@@ -15,29 +15,69 @@ use crate::prelude::MessagePayload;
 use crate::provider::ffi::ProviderPtr;
 use crate::provider::Provider;
 
-/// A ffi type alice presenting fn(FFIbackendbehaviour, Provider, MessagePayload, BackendMessage)
-pub type FFIBackendBehaviourHandlerFn = extern "C" fn(
-    *const FFIBackendBehaviour,
-    *const ProviderPtr,
-    *const c_char,
-    *const c_char,
-) -> ();
-
 /// Context for handling backend behaviour
 #[repr(C)]
 #[derive(Clone)]
 pub struct FFIBackendBehaviour {
-    paintext_message_handler: Option<Box<FFIBackendBehaviourHandlerFn>>,
-    service_message_handler: Option<Box<FFIBackendBehaviourHandlerFn>>,
-    extension_message_handler: Option<Box<FFIBackendBehaviourHandlerFn>>,
+    paintext_message_handler: Option<
+        Box<
+            extern "C" fn(
+                *const FFIBackendBehaviour,
+                *const ProviderPtr,
+                *const c_char,
+                *const c_char,
+            ) -> (),
+        >,
+    >,
+    service_message_handler: Option<
+        Box<
+            extern "C" fn(
+                *const FFIBackendBehaviour,
+                *const ProviderPtr,
+                *const c_char,
+                *const c_char,
+            ) -> (),
+        >,
+    >,
+    extension_message_handler: Option<
+        Box<
+            extern "C" fn(
+                *const FFIBackendBehaviour,
+                *const ProviderPtr,
+                *const c_char,
+                *const c_char,
+            ) -> (),
+        >,
+    >,
 }
 
 /// Backend behaviour for FFI
 #[no_mangle]
 pub extern "C" fn new_ffi_backend_behaviour(
-    paintext_message_handler: Option<FFIBackendBehaviourHandlerFn>,
-    service_message_handler: Option<FFIBackendBehaviourHandlerFn>,
-    extension_message_handler: Option<FFIBackendBehaviourHandlerFn>,
+    paintext_message_handler: Option<
+        extern "C" fn(
+            *const FFIBackendBehaviour,
+            *const ProviderPtr,
+            *const c_char,
+            *const c_char,
+        ) -> (),
+    >,
+    service_message_handler: Option<
+        extern "C" fn(
+            *const FFIBackendBehaviour,
+            *const ProviderPtr,
+            *const c_char,
+            *const c_char,
+        ) -> (),
+    >,
+    extension_message_handler: Option<
+        extern "C" fn(
+            *const FFIBackendBehaviour,
+            *const ProviderPtr,
+            *const c_char,
+            *const c_char,
+        ) -> (),
+    >,
 ) -> FFIBackendBehaviour {
     FFIBackendBehaviour {
         paintext_message_handler: paintext_message_handler.map(|c| Box::new(c)),
