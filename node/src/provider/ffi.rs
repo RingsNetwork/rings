@@ -99,9 +99,6 @@ use std::ffi::CString;
 use std::sync::Arc;
 
 use futures::executor;
-use rings_core::async_trait;
-use rings_core::message::MessagePayload;
-use rings_core::swarm::callback::SwarmCallback;
 
 use super::Provider;
 use super::Signer;
