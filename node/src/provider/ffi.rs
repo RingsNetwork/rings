@@ -105,6 +105,8 @@ use rings_core::swarm::callback::SwarmCallback;
 
 use super::Provider;
 use super::Signer;
+use crate::backend::ffi::FFIBackendBehaviour;
+use crate::backend::Backend;
 use crate::error::Error;
 use crate::error::Result;
 use crate::jsonrpc::HandlerType;
@@ -282,7 +284,7 @@ pub unsafe extern "C" fn new_provider_with_callback(
     account: *const c_char,
     account_type: *const c_char,
     signer: extern "C" fn(*const c_char, *mut c_char) -> (),
-    callback_ptr: *const SwarmCallbackInstanceFFI,
+    callback_ptr: *const FFIBackendBehaviour,
 ) -> ProviderPtr {
     fn wrapped_signer(
         signer: extern "C" fn(*const c_char, *mut c_char) -> (),
@@ -322,10 +324,10 @@ pub unsafe extern "C" fn new_provider_with_callback(
             panic!("Failed on create new provider {:#}", e)
         }
     };
-
-    let callback: &SwarmCallbackInstanceFFI = unsafe { &*callback_ptr };
+    let callback: &FFIBackendBehaviour = unsafe { &*callback_ptr };
+    let backend = Backend::new(Arc::new(provider.clone()), Box::new(callback.clone()));
     provider
-        .set_swarm_callback(Arc::new(callback.clone()))
+        .set_swarm_callback(Arc::new(backend))
         .expect("Failed to set callback");
 
     let ret: ProviderPtr = (&provider).into();

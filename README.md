@@ -99,7 +99,7 @@ rings help
 
 * node: The implementation of Rings native, Rings browser, and Rings FFI provider.
 
-* rpc: The defination of Rings RPC protocol is here.
+* rpc: The definition of Rings RPC protocol is here.
 
 * derive: Rings macros, including `wasm_export` macro.
 

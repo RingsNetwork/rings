@@ -21,6 +21,9 @@ pub mod browser;
 #[cfg(feature = "node")]
 pub mod native;
 
+#[cfg(feature = "ffi")]
+pub mod ffi;
+
 #[cfg(feature = "node")]
 type HandlerTrait = dyn MessageEndpoint<BackendMessage> + Send + Sync;
 #[cfg(feature = "browser")]
