@@ -27,9 +27,9 @@ pub type FFIBackendBehaviourHandlerFn = extern "C" fn(
 #[repr(C)]
 #[derive(Clone)]
 pub struct FFIBackendBehaviour {
-    paintext_message_handler: Option<FFIBackendBehaviourHandlerFn>,
-    service_message_handler: Option<FFIBackendBehaviourHandlerFn>,
-    extension_message_handler: Option<FFIBackendBehaviourHandlerFn>,
+    paintext_message_handler: Option<Box<FFIBackendBehaviourHandlerFn>>,
+    service_message_handler: Option<Box<FFIBackendBehaviourHandlerFn>>,
+    extension_message_handler: Option<Box<FFIBackendBehaviourHandlerFn>>,
 }
 
 /// Backend behaviour for FFI
@@ -40,15 +40,15 @@ pub extern "C" fn new_ffi_backend_behaviour(
     extension_message_handler: Option<FFIBackendBehaviourHandlerFn>,
 ) -> FFIBackendBehaviour {
     FFIBackendBehaviour {
-        paintext_message_handler,
-        service_message_handler,
-        extension_message_handler,
+        paintext_message_handler: paintext_message_handler.map(|c| Box::new(c)),
+        service_message_handler: service_message_handler.map(|c| Box::new(c)),
+        extension_message_handler: extension_message_handler.map(|c| Box::new(c)),
     }
 }
 
 macro_rules! handle_backend_message {
     ($self:ident, $provider:ident, $handler:ident, $payload: ident, $message:ident) => {
-        if let Some(handler) = $self.$handler {
+        if let Some(handler) = &$self.$handler {
             let provider: &Provider = Arc::as_ref(&$provider);
             let provider_ptr: ProviderPtr = provider.into();
             let payload = serde_json::to_string(&$payload)?;
