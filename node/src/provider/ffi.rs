@@ -150,7 +150,7 @@ impl ProviderWithRuntime {
     }
 
     /// Make sure there 1 at least 5 ref to keep arc onlive
-    fn check_arc(&self) {
+    pub fn check_arc(&self) {
         let threshold = 5;
 
         let p_count = Arc::strong_count(&self.provider);
@@ -289,7 +289,7 @@ pub unsafe extern "C" fn new_provider_with_callback(
     account: *const c_char,
     account_type: *const c_char,
     signer: extern "C" fn(*const c_char, *mut c_char) -> (),
-    callback_ptr: *mut FFIBackendBehaviour,
+    callback_ptr: *const FFIBackendBehaviour,
 ) -> ProviderPtr {
     fn wrapped_signer(
         signer: extern "C" fn(*const c_char, *mut c_char) -> (),
@@ -331,9 +331,7 @@ pub unsafe extern "C" fn new_provider_with_callback(
     };
     let runtime = Arc::new(Runtime::new().expect("Failed to create runtime"));
     let provider = Arc::new(provider.clone());
-    let mut callback: &mut FFIBackendBehaviour = unsafe { &mut *callback_ptr };
-    callback.with_runtime(runtime.clone());
-
+    let callback: &FFIBackendBehaviour = unsafe { &*callback_ptr };
     let backend = Backend::new(provider.clone(), Box::new(callback.clone()));
 
     provider

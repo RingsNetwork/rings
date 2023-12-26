@@ -51,13 +51,6 @@ pub struct FFIBackendBehaviour {
             ) -> (),
         >,
     >,
-    runtime: Option<Arc<Runtime>>,
-}
-
-impl FFIBackendBehaviour {
-    pub(crate) fn with_runtime(&mut self, rt: Arc<Runtime>) {
-        self.runtime = Some(rt.clone())
-    }
 }
 
 /// Backend behaviour for FFI
@@ -92,17 +85,16 @@ pub extern "C" fn new_ffi_backend_behaviour(
         paintext_message_handler: paintext_message_handler.map(|c| Box::new(c)),
         service_message_handler: service_message_handler.map(|c| Box::new(c)),
         extension_message_handler: extension_message_handler.map(|c| Box::new(c)),
-        runtime: None,
     }
 }
 
 macro_rules! handle_backend_message {
     ($self:ident, $provider:ident, $handler:ident, $payload: ident, $message:ident) => {
         if let Some(handler) = &$self.$handler {
-            let provider_with_runtime = ProviderWithRuntime::new(
-                $provider.clone(),
-                $self.runtime.clone().expect("Runtime is not found").clone(),
-            );
+            let rt = Arc::new(Runtime::new().expect("Failed to create runtime"));
+
+            let provider_with_runtime = ProviderWithRuntime::new($provider.clone(), rt.clone());
+            provider_with_runtime.check_arc();
             let provider_ptr: ProviderPtr = (&provider_with_runtime).into();
             let payload = serde_json::to_string(&$payload)?;
             let message = serde_json::to_string(&$message)?;
