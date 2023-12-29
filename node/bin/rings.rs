@@ -105,7 +105,7 @@ struct NewSessionCommand {
 struct RunCommand {
     #[arg(
         long,
-        help = "Rings node external api listen address. If not provided, use bind_addr in config file or 127.0.0.1:50001",
+        help = "Rings node external api listen address. If not provided, use external_api_addr in config file or 127.0.0.1:50001",
         env
     )]
     pub external_api_addr: Option<String>,
