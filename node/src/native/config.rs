@@ -30,7 +30,7 @@ lazy_static::lazy_static! {
 }
 
 pub const DEFAULT_INTERNAL_API_PORT: u16 = 50000;
-pub const DEFAULT_EXTERNAL_API_ADDR: &str = "127.0.0.1:50000";
+pub const DEFAULT_EXTERNAL_API_ADDR: &str = "127.0.0.1:50001";
 pub const DEFAULT_ENDPOINT_URL: &str = "http://127.0.0.1:50000";
 pub const DEFAULT_ICE_SERVERS: &str = "stun://stun.l.google.com:19302";
 pub const DEFAULT_STABILIZE_TIMEOUT: u64 = 3;
