@@ -175,8 +175,8 @@ impl Provider {
     pub fn request(&self, method: String, params: JsValue) -> js_sys::Promise {
         let ins = self.clone();
         future_to_promise(async move {
-            let params = super::utils::parse_params(params)
-                .map_err(|e| JsError::new(e.to_string().as_str()))?;
+            let params =
+                js_value::json_value(params).map_err(|e| JsError::new(e.to_string().as_str()))?;
             let ret = ins
                 .request_internal(method, params)
                 .await

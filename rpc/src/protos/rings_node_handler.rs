@@ -60,97 +60,97 @@ impl InternalRpcHandler {
             Method::ConnectPeerViaHttp => {
                 let req = serde_json::from_value::<ConnectPeerViaHttpRequest>(params)
                     .map_err(|e| Error::invalid_params(e.to_string()))?;
-                let resp = processor.handle_rpc(req).await;
+                let resp = processor.handle_rpc(req).await?;
                 serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))
             }
             Method::ConnectWithDid => {
                 let req = serde_json::from_value::<ConnectWithDidRequest>(params)
                     .map_err(|e| Error::invalid_params(e.to_string()))?;
-                let resp = processor.handle_rpc(req).await;
+                let resp = processor.handle_rpc(req).await?;
                 serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))
             }
             Method::ConnectWithSeed => {
                 let req = serde_json::from_value::<ConnectWithSeedRequest>(params)
                     .map_err(|e| Error::invalid_params(e.to_string()))?;
-                let resp = processor.handle_rpc(req).await;
+                let resp = processor.handle_rpc(req).await?;
                 serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))
             }
             Method::ListPeers => {
                 let req = serde_json::from_value::<ListPeersRequest>(params)
                     .map_err(|e| Error::invalid_params(e.to_string()))?;
-                let resp = processor.handle_rpc(req).await;
+                let resp = processor.handle_rpc(req).await?;
                 serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))
             }
             Method::CreateOffer => {
                 let req = serde_json::from_value::<CreateOfferRequest>(params)
                     .map_err(|e| Error::invalid_params(e.to_string()))?;
-                let resp = processor.handle_rpc(req).await;
+                let resp = processor.handle_rpc(req).await?;
                 serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))
             }
             Method::AnswerOffer => {
                 let req = serde_json::from_value::<AnswerOfferRequest>(params)
                     .map_err(|e| Error::invalid_params(e.to_string()))?;
-                let resp = processor.handle_rpc(req).await;
+                let resp = processor.handle_rpc(req).await?;
                 serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))
             }
             Method::AcceptAnswer => {
                 let req = serde_json::from_value::<AcceptAnswerRequest>(params)
                     .map_err(|e| Error::invalid_params(e.to_string()))?;
-                let resp = processor.handle_rpc(req).await;
+                let resp = processor.handle_rpc(req).await?;
                 serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))
             }
             Method::Disconnect => {
                 let req = serde_json::from_value::<DisconnectRequest>(params)
                     .map_err(|e| Error::invalid_params(e.to_string()))?;
-                let resp = processor.handle_rpc(req).await;
+                let resp = processor.handle_rpc(req).await?;
                 serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))
             }
             Method::SendCustomMessage => {
                 let req = serde_json::from_value::<SendCustomMessageRequest>(params)
                     .map_err(|e| Error::invalid_params(e.to_string()))?;
-                let resp = processor.handle_rpc(req).await;
+                let resp = processor.handle_rpc(req).await?;
                 serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))
             }
             Method::SendBackendMessage => {
                 let req = serde_json::from_value::<SendBackendMessageRequest>(params)
                     .map_err(|e| Error::invalid_params(e.to_string()))?;
-                let resp = processor.handle_rpc(req).await;
+                let resp = processor.handle_rpc(req).await?;
                 serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))
             }
             Method::PublishMessageToTopic => {
                 let req = serde_json::from_value::<PublishMessageToTopicRequest>(params)
                     .map_err(|e| Error::invalid_params(e.to_string()))?;
-                let resp = processor.handle_rpc(req).await;
+                let resp = processor.handle_rpc(req).await?;
                 serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))
             }
             Method::FetchMessagesOfTopic => {
                 let req = serde_json::from_value::<FetchMessagesOfTopicRequest>(params)
                     .map_err(|e| Error::invalid_params(e.to_string()))?;
-                let resp = processor.handle_rpc(req).await;
+                let resp = processor.handle_rpc(req).await?;
                 serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))
             }
             Method::RegisterService => {
                 let req = serde_json::from_value::<RegisterServiceRequest>(params)
                     .map_err(|e| Error::invalid_params(e.to_string()))?;
-                let resp = processor.handle_rpc(req).await;
+                let resp = processor.handle_rpc(req).await?;
                 serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))
             }
             Method::LookupService => {
                 let req = serde_json::from_value::<LookupServiceRequest>(params)
                     .map_err(|e| Error::invalid_params(e.to_string()))?;
-                let resp = processor.handle_rpc(req).await;
+                let resp = processor.handle_rpc(req).await?;
                 serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))
             }
             Method::NodeInfo => {
                 let req = serde_json::from_value::<NodeInfoRequest>(params)
                     .map_err(|e| Error::invalid_params(e.to_string()))?;
-                let resp = processor.handle_rpc(req).await;
+                let resp = processor.handle_rpc(req).await?;
                 serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))
             }
             Method::NodeDid => {
                 let req = serde_json::from_value::<NodeDidRequest>(params)
                     .map_err(|e| Error::invalid_params(e.to_string()))?;
-                let resp = processor.handle_rpc(req).await;
+                let resp = processor.handle_rpc(req).await?;
                 serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))
             }
         }
@@ -180,19 +180,19 @@ impl ExternalRpcHandler {
             Method::AnswerOffer => {
                 let req = serde_json::from_value::<AnswerOfferRequest>(params)
                     .map_err(|e| Error::invalid_params(e.to_string()))?;
-                let resp = processor.handle_rpc(req).await;
+                let resp = processor.handle_rpc(req).await?;
                 serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))
             }
             Method::NodeInfo => {
                 let req = serde_json::from_value::<NodeInfoRequest>(params)
                     .map_err(|e| Error::invalid_params(e.to_string()))?;
-                let resp = processor.handle_rpc(req).await;
+                let resp = processor.handle_rpc(req).await?;
                 serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))
             }
             Method::NodeDid => {
                 let req = serde_json::from_value::<NodeDidRequest>(params)
                     .map_err(|e| Error::invalid_params(e.to_string()))?;
-                let resp = processor.handle_rpc(req).await;
+                let resp = processor.handle_rpc(req).await?;
                 serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))
             }
             _ => Err(Error {
