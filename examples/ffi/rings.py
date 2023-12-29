@@ -18,7 +18,7 @@ else:
 
 
 ffi = cffi.FFI()
-c_header = open("./target/include/rings.h", "r").read()
+c_header = open("./examples/ffi/rings.h", "r").read()
 c_header = re.sub(r"#define .*", "", c_header)
 ffi.cdef(c_header)
 rings = ffi.dlopen(f"./target/debug/librings_node.{extension}")

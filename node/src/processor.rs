@@ -1,6 +1,6 @@
 #![warn(missing_docs)]
 
-//! Processor of rings-node jsonrpc-server.
+//! Processor of rings-node rpc server.
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -201,7 +201,7 @@ pub struct ProcessorBuilder {
     stabilize_timeout: u64,
 }
 
-/// Processor for rings-node jsonrpc server
+/// Processor for rings-node rpc server
 #[derive(Clone)]
 pub struct Processor {
     /// a swarm instance
