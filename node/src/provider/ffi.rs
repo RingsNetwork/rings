@@ -99,6 +99,7 @@ use std::ffi::CString;
 use std::sync::Arc;
 
 use futures::executor;
+use rings_rpc::protos::rings_node_handler::InternalRpcHandler;
 
 use super::Provider;
 use super::Signer;
@@ -106,7 +107,6 @@ use crate::backend::ffi::FFIBackendBehaviour;
 use crate::backend::Backend;
 use crate::error::Error;
 use crate::error::Result;
-use crate::jsonrpc::handler::InternalRpcHandler;
 use crate::processor::Processor;
 
 /// A structure to represent the Provider in a C-compatible format.
@@ -139,16 +139,9 @@ impl Provider {
         let threshold = 5;
 
         let p_count = Arc::strong_count(&self.processor);
-        let h_count = Arc::strong_count(&self.handler);
-        tracing::debug!("processor arc: {:?} handler arc {:?}", p_count, h_count);
-        if h_count < threshold {
-            for _ in 0..threshold - h_count {
-                unsafe { self.increase_handler_count() };
-            }
-            tracing::debug!("Arc<HandlerType> will be released when out of scope, increased")
-        }
+        tracing::debug!("processor arc: {:?}", p_count);
         if p_count < threshold {
-            for _ in 0..threshold - h_count {
+            for _ in 0..threshold - p_count {
                 unsafe { self.increase_processor_count() };
             }
             tracing::debug!("Arc<Processor> will be released when out of scope, increased")
@@ -156,18 +149,9 @@ impl Provider {
     }
 
     unsafe fn increase_processor_count(&self) {
-        tracing::debug!("Increment strong count on processor and handler");
+        tracing::debug!("Increment strong count on processor");
         let p = Arc::into_raw(self.processor.clone());
         Arc::increment_strong_count(p);
-    }
-
-    /// Decreases the reference count for the associated Arcs.
-    /// # Safety
-    /// This function unsafely decrements the reference count of the Arcs.
-    unsafe fn increase_handler_count(&self) {
-        tracing::debug!("Decrement strong count on processor and handler");
-        let h = Arc::into_raw(self.handler.clone());
-        Arc::increment_strong_count(h);
     }
 }
 
@@ -179,9 +163,7 @@ impl From<&ProviderPtr> for Provider {
     fn from(ptr: &ProviderPtr) -> Provider {
         tracing::debug!("FFI: Provider from Ptr!");
         let processor = unsafe { Arc::<Processor>::from_raw(ptr.processor as *const Processor) };
-        let handler = unsafe {
-            Arc::<InternalRpcHandler>::from_raw(ptr.handler as *const InternalRpcHandler)
-        };
+        let handler = unsafe { *ptr.handler };
         Self { processor, handler }
     }
 }
@@ -193,7 +175,7 @@ impl From<&Provider> for ProviderPtr {
         // Clone the Arcs, which increases the ref count,
         // then turn them into raw pointers.
         let processor_ptr = Arc::into_raw(provider.processor.clone());
-        let handler_ptr = Arc::into_raw(provider.handler.clone());
+        let handler_ptr = &provider.handler as *const InternalRpcHandler;
         provider.check_arc();
         ProviderPtr {
             processor: processor_ptr,
@@ -240,16 +222,11 @@ pub extern "C" fn request(
         let method = c_char_to_string(method)?;
         let params = c_char_to_string(params)?;
         let params = serde_json::from_str(&params)
-            .expect(&format!("Failed on covering data {:?} to JSON", params));
+            .unwrap_or_else(|_| panic!("Failed on covering data {:?} to JSON", params));
 
         let handle = std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async {
-                provider
-                    .request_internal(method, params, None)
-                    .await
-                    .unwrap()
-            })
+            rt.block_on(async { provider.request_internal(method, params).await.unwrap() })
         });
         let ret: String = serde_json::to_string(&handle.join().unwrap())?;
         let c_ret = CString::new(ret)?.into_raw();

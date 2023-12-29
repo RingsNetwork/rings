@@ -17,11 +17,11 @@ pub trait HandleRpc<Req, Resp> {
 }
 
 /// Provide handle_request method for internal rpc api.
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct InternalRpcHandler;
 
 /// Provide handle_request method for external rpc api.
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct ExternalRpcHandler;
 
 impl InternalRpcHandler {

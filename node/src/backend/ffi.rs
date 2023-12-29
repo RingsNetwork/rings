@@ -9,7 +9,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::backend::types::BackendMessage;
-use crate::backend::types::MessageEndpoint;
+use crate::backend::types::MessageHandler;
 use crate::error::Result;
 use crate::prelude::MessagePayload;
 use crate::provider::ffi::ProviderPtr;
@@ -80,9 +80,9 @@ pub extern "C" fn new_ffi_backend_behaviour(
     >,
 ) -> FFIBackendBehaviour {
     FFIBackendBehaviour {
-        paintext_message_handler: paintext_message_handler.map(|c| Box::new(c)),
-        service_message_handler: service_message_handler.map(|c| Box::new(c)),
-        extension_message_handler: extension_message_handler.map(|c| Box::new(c)),
+        paintext_message_handler: paintext_message_handler.map(Box::new),
+        service_message_handler: service_message_handler.map(Box::new),
+        extension_message_handler: extension_message_handler.map(Box::new),
     }
 }
 
@@ -106,8 +106,8 @@ macro_rules! handle_backend_message {
 }
 
 #[async_trait]
-impl MessageEndpoint<BackendMessage> for FFIBackendBehaviour {
-    async fn on_message(
+impl MessageHandler<BackendMessage> for FFIBackendBehaviour {
+    async fn handle_message(
         &self,
         provider: Arc<Provider>,
         payload: &MessagePayload,
