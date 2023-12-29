@@ -14,6 +14,6 @@ fn main() {
         .unwrap();
 
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=src/protos/rings.proto");
+    println!("cargo:rerun-if-changed=src/protos/rings_node.proto");
     println!("cargo:rerun-if-changed=src/protos/build_config.yaml");
 }

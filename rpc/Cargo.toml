@@ -33,7 +33,6 @@ reqwest-wasm = { version = "0.11", features = ["json", "rustls-tls"], optional =
 rings-core = { workspace = true, optional = true }
 serde = { version = "1.0.136", features = ["derive"] }
 serde_json = "1.0.70"
-strum = { version = "0.25.0", features = ["derive"] }
 thiserror = "1"
 
 [build-dependencies]
