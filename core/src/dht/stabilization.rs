@@ -29,7 +29,7 @@ use crate::swarm::Swarm;
 pub struct Stabilization {
     chord: Arc<PeerRing>,
     swarm: Arc<Swarm>,
-    timeout: usize,
+    timeout: u64,
 }
 
 /// A trait with `wait` method.
@@ -58,7 +58,7 @@ impl Stabilization {
 
 impl Stabilization {
     /// Create a new instance of Stabilization
-    pub fn new(swarm: Arc<Swarm>, timeout: usize) -> Self {
+    pub fn new(swarm: Arc<Swarm>, timeout: u64) -> Self {
         Self {
             chord: swarm.dht(),
             swarm,
@@ -67,7 +67,7 @@ impl Stabilization {
     }
 
     /// Get timeout of waiting delays.
-    pub fn get_timeout(&self) -> usize {
+    pub fn get_timeout(&self) -> u64 {
         self.timeout
     }
 }
@@ -206,7 +206,7 @@ mod stabilizer {
     impl TStabilize for Stabilization {
         async fn wait(self: Arc<Self>) {
             loop {
-                let timeout = Delay::new(Duration::from_secs(self.timeout as u64)).fuse();
+                let timeout = Delay::new(Duration::from_secs(self.timeout)).fuse();
                 pin_mut!(timeout);
                 select! {
                     _ = timeout => self

@@ -117,10 +117,10 @@ async fn test_processor_handshake_and_msg() {
     let test_text4 = "test4";
     let test_text5 = "test5";
 
-    let p1_addr = p1.did().to_string();
-    let p2_addr = p2.did().to_string();
-    console_log!("p1_addr: {}", p1_addr);
-    console_log!("p2_addr: {}", p2_addr);
+    let p1_did = p1.did();
+    let p2_did = p2.did();
+    console_log!("p1_did: {}", p1_did);
+    console_log!("p2_did: {}", p2_did);
 
     console_log!("listen");
     listen(&p1).await;
@@ -134,27 +134,27 @@ async fn test_processor_handshake_and_msg() {
         .unwrap();
 
     console_log!("processor_send_test_text_messages");
-    p1.send_message(p2_addr.as_str(), test_text1.as_bytes())
+    p1.send_message(p2_did, test_text1.as_bytes())
         .await
         .unwrap();
     console_log!("send test_text1 done");
 
-    p2.send_message(p1_addr.as_str(), test_text2.as_bytes())
+    p2.send_message(p1_did, test_text2.as_bytes())
         .await
         .unwrap();
     console_log!("send test_text2 done");
 
-    p2.send_message(p1_addr.as_str(), test_text3.as_bytes())
+    p2.send_message(p1_did, test_text3.as_bytes())
         .await
         .unwrap();
     console_log!("send test_text3 done");
 
-    p1.send_message(p2_addr.as_str(), test_text4.as_bytes())
+    p1.send_message(p2_did, test_text4.as_bytes())
         .await
         .unwrap();
     console_log!("send test_text4 done");
 
-    p2.send_message(p1_addr.as_str(), test_text5.as_bytes())
+    p2.send_message(p1_did, test_text5.as_bytes())
         .await
         .unwrap();
     console_log!("send test_text5 done");

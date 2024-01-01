@@ -24,7 +24,6 @@ use futures::select;
 use futures::FutureExt;
 use futures::Stream;
 use futures_timer::Delay;
-use serde_json::json;
 
 use crate::backend::types::BackendMessage;
 use crate::backend::types::HttpRequest;
@@ -128,18 +127,6 @@ impl Client {
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        ClientOutput::ok("Done.".into(), ())
-    }
-
-    /// Sends a message to the specified peer.
-    pub async fn send_message(&self, did: &str, text: &str) -> Output<()> {
-        let mut params = serde_json::Map::new();
-        params.insert("destination".to_owned(), json!(did));
-        params.insert("text".to_owned(), json!(text));
-        self.client
-            .send_message(did, text)
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
         ClientOutput::ok("Done.".into(), ())
     }
 

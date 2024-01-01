@@ -31,7 +31,7 @@ pub const DEFAULT_REXIE_STORE_NAME: &str = "rings-storage";
 struct DataStruct<T> {
     key: String,
     last_visit_time: i64,
-    visit_count: u64,
+    visit_count: u32,
     created_time: i64,
     data: T,
 }
@@ -53,7 +53,7 @@ impl<T> DataStruct<T> {
 /// StorageInstance struct
 pub struct IDBStorage {
     db: Rexie,
-    cap: usize,
+    cap: u32,
     storage_name: String,
 }
 
@@ -66,7 +66,7 @@ pub trait IDBStorageBasic {
 impl IDBStorage {
     /// New IDBStorage
     /// * cap: rows of data limit
-    pub async fn new_with_cap(cap: usize) -> Result<Self> {
+    pub async fn new_with_cap(cap: u32) -> Result<Self> {
         Self::new_with_cap_and_name(cap, DEFAULT_REXIE_STORE_NAME).await
     }
 
@@ -78,13 +78,13 @@ impl IDBStorage {
     /// New IDBStorage
     /// * cap: max_size in bytes
     /// * path: db file location
-    pub async fn new_with_cap_and_path<P>(cap: usize, _path: P) -> Result<Self>
+    pub async fn new_with_cap_and_path<P>(cap: u32, _path: P) -> Result<Self>
     where P: AsRef<std::path::Path> {
         Self::new_with_cap(cap).await
     }
 
     /// New IDBStorage with capacity and name
-    pub async fn new_with_cap_and_name(cap: usize, name: &str) -> Result<Self> {
+    pub async fn new_with_cap_and_name(cap: u32, name: &str) -> Result<Self> {
         if cap == 0 {
             return Err(Error::InvalidCapacity);
         }
@@ -217,13 +217,13 @@ impl PersistenceStorageOperation for IDBStorage {
         Ok(())
     }
 
-    async fn count(&self) -> Result<u64> {
+    async fn count(&self) -> Result<u32> {
         let (_tx, store) = self.get_tx_store(TransactionMode::ReadOnly)?;
         let count = store.count(None).await.map_err(Error::IDBError)?;
-        Ok(count as u64)
+        Ok(count)
     }
 
-    async fn max_size(&self) -> Result<usize> {
+    async fn max_size(&self) -> Result<u32> {
         Ok(self.cap)
     }
 
@@ -242,12 +242,11 @@ impl PersistenceStorageOperation for IDBStorage {
 
     async fn prune(&self) -> Result<()> {
         let (tx, store) = self.get_tx_store(TransactionMode::ReadWrite)?;
-        let count = store.count(None).await.map_err(Error::IDBError)? as usize;
+        let count = store.count(None).await.map_err(Error::IDBError)?;
         if count < self.cap {
             return Ok(());
         }
         let delete_count = count.sub(self.cap).add(1);
-        let delete_count = u32::try_from(delete_count).unwrap_or(0);
         if delete_count == 0 {
             return Ok(());
         }

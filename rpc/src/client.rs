@@ -96,23 +96,6 @@ impl Client {
         Ok(())
     }
 
-    /// Sends a message to the specified peer.
-    pub async fn send_message(
-        &self,
-        did: &str,
-        text: &str,
-    ) -> Result<response::SendMessageResponse> {
-        let mut params = serde_json::Map::new();
-        params.insert("destination".to_owned(), json!(did));
-        params.insert("text".to_owned(), json!(text));
-        let result = self
-            .client
-            .call_method(Method::SendTo.as_str(), Params::Map(params))
-            .await
-            .map_err(Error::RpcError)?;
-        serde_json::from_value(result).map_err(|_| Error::DecodeError)
-    }
-
     /// Sends a custom message to the specified peer.
     pub async fn send_custom_message(
         &self,

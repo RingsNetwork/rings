@@ -26,7 +26,7 @@ use wasm_bindgen_futures;
 use wasm_bindgen_futures::future_to_promise;
 use wasm_bindgen_futures::JsFuture;
 
-use crate::backend::browser::BackendContext;
+use crate::backend::browser::BackendBehaviour;
 use crate::backend::types::BackendMessage;
 use crate::backend::types::HttpRequest;
 use crate::backend::types::ServiceMessage;
@@ -81,11 +81,11 @@ impl Provider {
     #[wasm_bindgen(constructor)]
     pub fn new_instance(
         ice_servers: String,
-        stabilize_timeout: usize,
+        stabilize_timeout: u64,
         account: String,
         account_type: String,
         signer: js_sys::Function,
-        backend_context: Option<BackendContext>,
+        backend_behaviour: Option<BackendBehaviour>,
     ) -> js_sys::Promise {
         fn wrapped_signer(signer: js_sys::Function) -> AsyncSigner {
             Box::new(
@@ -118,7 +118,7 @@ impl Provider {
                 Signer::Async(Box::new(signer)),
             )
             .await?;
-            if let Some(cb) = backend_context {
+            if let Some(cb) = backend_behaviour {
                 let backend: Backend = Backend::new(Arc::new(provider.clone()), Box::new(cb));
                 provider
                     .set_swarm_callback(Arc::new(backend))
@@ -131,7 +131,7 @@ impl Provider {
     /// Create new provider instance with serialized config (yaml/json)
     pub fn new_provider_with_serialized_config(
         config: String,
-        backend: Option<BackendContext>,
+        backend: Option<BackendBehaviour>,
     ) -> js_sys::Promise {
         let cfg: ProcessorConfig = serde_yaml::from_str(&config).unwrap();
         Self::new_provider_with_config(cfg, backend)
@@ -140,7 +140,7 @@ impl Provider {
     /// Create a new provider instance.
     pub fn new_provider_with_config(
         config: ProcessorConfig,
-        backend: Option<BackendContext>,
+        backend: Option<BackendBehaviour>,
     ) -> js_sys::Promise {
         Self::new_provider_with_storage(config, backend, "rings-node".to_string())
     }
@@ -154,14 +154,14 @@ impl Provider {
     ///  create new unsigned Provider
     pub fn new_provider_with_storage(
         config: ProcessorConfig,
-        backend_context: Option<BackendContext>,
+        backend_behaviour: Option<BackendBehaviour>,
         storage_name: String,
     ) -> js_sys::Promise {
         future_to_promise(async move {
             let provider = Self::new_provider_with_storage_internal(config, storage_name)
                 .await
                 .map_err(JsError::from)?;
-            if let Some(cb) = backend_context {
+            if let Some(cb) = backend_behaviour {
                 let backend: Backend = Backend::new(Arc::new(provider.clone()), Box::new(cb));
                 provider
                     .set_swarm_callback(Arc::new(backend))
@@ -172,18 +172,13 @@ impl Provider {
     }
 
     /// Request local rpc interface
-    pub fn request(
-        &self,
-        method: String,
-        params: JsValue,
-        opt_id: Option<String>,
-    ) -> js_sys::Promise {
+    pub fn request(&self, method: String, params: JsValue) -> js_sys::Promise {
         let ins = self.clone();
         future_to_promise(async move {
-            let params = super::utils::parse_params(params)
-                .map_err(|e| JsError::new(e.to_string().as_str()))?;
+            let params =
+                js_value::json_value(params).map_err(|e| JsError::new(e.to_string().as_str()))?;
             let ret = ins
-                .request_internal(method, params, opt_id)
+                .request_internal(method, params)
                 .await
                 .map_err(JsError::from)?;
             Ok(js_value::serialize(&ret).map_err(JsError::from)?)
@@ -303,7 +298,8 @@ impl Provider {
     pub fn send_message(&self, destination: String, msg: js_sys::Uint8Array) -> js_sys::Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
-            p.send_message(destination.as_str(), &msg.to_vec())
+            let destination_did = get_did(destination.as_str(), AddressType::DEFAULT)?;
+            p.send_message(destination_did, &msg.to_vec())
                 .await
                 .map_err(JsError::from)?;
             Ok(JsValue::from_bool(true))

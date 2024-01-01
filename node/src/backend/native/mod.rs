@@ -1,6 +1,6 @@
 #![warn(missing_docs)]
 //! This module provides the implementation of a native Backend,
-//! which includes BackendConfig and BackendContext.
+//! which includes BackendConfig and BackendBehaviour.
 //!
 //! This module has two submodules: extension and service.
 //!
@@ -25,7 +25,7 @@ use crate::backend::native::extension::ExtensionConfig;
 use crate::backend::native::service::ServiceConfig;
 use crate::backend::native::service::ServiceProvider;
 use crate::backend::types::BackendMessage;
-use crate::backend::types::MessageEndpoint;
+use crate::backend::types::MessageHandler;
 use crate::error::Result;
 use crate::provider::Provider;
 
@@ -37,16 +37,16 @@ pub struct BackendConfig {
     pub extensions: ExtensionConfig,
 }
 
-/// BackendContext is a Context holder of backend message handler
-pub struct BackendContext {
+/// BackendBehaviour is a Context holder of backend message handler
+pub struct BackendBehaviour {
     server: ServiceProvider,
     extension: Extension,
 }
 
 #[cfg_attr(feature = "browser", async_trait(?Send))]
 #[cfg_attr(not(feature = "browser"), async_trait)]
-impl MessageEndpoint<BackendMessage> for BackendContext {
-    async fn on_message(
+impl MessageHandler<BackendMessage> for BackendBehaviour {
+    async fn handle_message(
         &self,
         provider: Arc<Provider>,
         payload: &MessagePayload,
@@ -56,8 +56,8 @@ impl MessageEndpoint<BackendMessage> for BackendContext {
     }
 }
 
-impl BackendContext {
-    /// Create a new BackendContext instance with config
+impl BackendBehaviour {
+    /// Create a new BackendBehaviour instance with config
     pub async fn new(config: BackendConfig) -> Result<Self> {
         Ok(Self {
             server: ServiceProvider::new(config.services),
@@ -82,10 +82,10 @@ impl BackendContext {
     ) -> Result<()> {
         match msg {
             BackendMessage::Extension(data) => {
-                self.extension.on_message(provider, payload, data).await
+                self.extension.handle_message(provider, payload, data).await
             }
             BackendMessage::ServiceMessage(data) => {
-                self.server.on_message(provider, payload, data).await
+                self.server.handle_message(provider, payload, data).await
             }
             BackendMessage::PlainText(text) => {
                 let peer_did = payload.transaction.signer();

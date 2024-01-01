@@ -200,13 +200,13 @@ pub extern "C" fn request(
         let method = c_char_to_string(method)?;
         let params = c_char_to_string(params)?;
         let params = serde_json::from_str(&params)
-            .expect(&format!("Failed on covering data {:?} to JSON", params));
+            .unwrap_or_else(|_| panic!("Failed on covering data {:?} to JSON", params));
 
         let handle = std::thread::spawn(move || {
             provider.runtime.block_on(async {
                 provider
                     .provider
-                    .request_internal(method, params, None)
+                    .request_internal(method, params)
                     .await
                     .unwrap()
             })
@@ -230,7 +230,7 @@ pub extern "C" fn request(
 #[no_mangle]
 pub unsafe extern "C" fn new_provider_with_callback(
     ice_server: *const c_char,
-    stabilize_timeout: u32,
+    stabilize_timeout: u64,
     account: *const c_char,
     account_type: *const c_char,
     signer: extern "C" fn(*const c_char, *mut c_char) -> (),
@@ -263,7 +263,7 @@ pub unsafe extern "C" fn new_provider_with_callback(
 
         executor::block_on(Provider::new_provider_internal(
             ice,
-            stabilize_timeout as usize,
+            stabilize_timeout,
             acc,
             acc_ty,
             Signer::Sync(Box::new(wrapped_signer(signer))),
