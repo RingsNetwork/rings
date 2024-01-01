@@ -34,64 +34,7 @@
 //!
 //! # Examples
 //!
-//! Here's an example of how to use the Rings FFI with Python.
-//!
-//! # Example with Python
-//! ```python
-//! import cffi
-//! import ctypes
-//! from web3 import Web3;
-//! from eth_account.messages import encode_defunct
-//! import re
-//! w3 = Web3();
-//! acc = w3.eth.account.create();
-//! ffi = cffi.FFI()
-//! c_header = open("./node/bindings.h", "r").read()
-//! c_header = re.sub(r'#define .*', '', c_header)
-//! ffi.cdef(c_header)
-//! rings_node = ffi.dlopen("./target/debug/librings_node.dylib")
-//!
-//! @ffi.callback("char*(*)(char *)")
-//! def signer(msg):
-//!    c_input = ffi.string(msg)
-//!    decoded = encode_defunct(c_input)
-//!    sig = acc.sign_message(decoded)
-//!    ret = bytes(sig.signature)
-//!    return ffi.new("char[]", ret)
-//!
-//! @ffi.callback("void(*)(char *, char *)")
-//! def custom_msg_callback(msg):
-//!     print(msg)
-//!     return
-//!
-//! @ffi.callback("void(*)(char *)")
-//! def builtin_msg_callback(msg):
-//!    print(msg)
-//!    return
-
-//! rings_node.init_logging(rings_node.Debug)
-//! callback = rings_node.new_callback(custom_msg_callback, builtin_msg_callback)
-//!
-//! def create_provider(signer, acc):
-//!     provider = rings_node.new_provider_with_callback(
-//!         "stun://stun.l.google.com".encode(),
-//!         10,
-//!         acc.address.encode(),
-//!         "eip191".encode(),
-//!         signer,
-//!         ffi.addressof(callback)
-//!     )
-//!     return provider
-//!
-//! if __name__ == "__main__":
-//!     provider = create_provider(signer, acc)
-//!     rings_node.listen(ffi.addressof(provider))
-//!     print(provider)
-//! ```
-//! 
-//! Note: Since the above code is executed in a single-process environment of Python,
-//! the Rings' listen loop will block the process. If you wish to use it in a production environment,
-//! you should implement your own more advanced process or thread management.
+//! Please check python example at examples/ffi/rings.py
 
 use std::ffi::c_char;
 use std::ffi::CStr;
@@ -99,87 +42,120 @@ use std::ffi::CString;
 use std::sync::Arc;
 
 use futures::executor;
-use rings_rpc::protos::rings_node_handler::InternalRpcHandler;
+use tokio::runtime::Runtime;
 
 use super::Provider;
 use super::Signer;
 use crate::backend::ffi::FFIBackendBehaviour;
+use crate::backend::ffi::FFIBackendBehaviourWithRuntime;
 use crate::backend::Backend;
 use crate::error::Error;
 use crate::error::Result;
-use crate::processor::Processor;
 
 /// A structure to represent the Provider in a C-compatible format.
 /// This is necessary as using Arc directly in FFI can be unsafe.
 #[repr(C)]
 pub struct ProviderPtr {
-    processor: *const Processor,
-    handler: *const InternalRpcHandler,
+    provider: *const Provider,
+    runtime: *const Runtime,
 }
 
-impl Provider {
+/// Provider with runtime
+/// cbindgen:field-names=[]
+pub(crate) struct ProviderWithRuntime {
+    provider: Arc<Provider>,
+    runtime: Arc<Runtime>,
+}
+
+impl ProviderWithRuntime {
+    /// Create a new instance of ProviderWithRuntime
+    pub fn new(p: Arc<Provider>, r: Arc<Runtime>) -> Self {
+        Self {
+            provider: p.clone(),
+            runtime: r.clone(),
+        }
+    }
+}
+
+impl ProviderWithRuntime {
     /// Converts a raw ProviderPtr pointer to a Rust Provider type.
     /// # Safety
     /// Unsafe due to the dereferencing of the raw pointer.
-    fn from_raw(ptr: *const ProviderPtr) -> Result<Provider> {
+    fn from_raw(ptr: *const ProviderPtr) -> Result<ProviderWithRuntime> {
         // Check point here.
         if ptr.is_null() {
             return Err(Error::FFINulPtrError);
         }
 
         let provider_ptr: &ProviderPtr = unsafe { &*ptr };
-        let provider: Provider = provider_ptr.into();
+        let provider: ProviderWithRuntime = provider_ptr.into();
         // Avoid release here
         provider.check_arc();
         Ok(provider)
     }
 
     /// Make sure there 1 at least 5 ref to keep arc onlive
-    fn check_arc(&self) {
+    pub fn check_arc(&self) {
         let threshold = 5;
 
-        let p_count = Arc::strong_count(&self.processor);
-        tracing::debug!("processor arc: {:?}", p_count);
+        let p_count = Arc::strong_count(&self.provider);
+        let r_count = Arc::strong_count(&self.runtime);
+
         if p_count < threshold {
             for _ in 0..threshold - p_count {
-                unsafe { self.increase_processor_count() };
+                unsafe { self.increase_provider_count() };
             }
-            tracing::debug!("Arc<Processor> will be released when out of scope, increased")
+            tracing::debug!("Arc<Provider> will be released when out of scope, increased")
+        }
+
+        if r_count < threshold {
+            for _ in 0..threshold - r_count {
+                unsafe { self.increase_runtime_count() };
+            }
+            tracing::debug!("Arc<Runtime> will be released when out of scope, increased")
         }
     }
 
-    unsafe fn increase_processor_count(&self) {
-        tracing::debug!("Increment strong count on processor");
-        let p = Arc::into_raw(self.processor.clone());
+    unsafe fn increase_provider_count(&self) {
+        tracing::debug!("Increment strong count on provider");
+        let p = Arc::into_raw(self.provider.clone());
         Arc::increment_strong_count(p);
+    }
+
+    unsafe fn increase_runtime_count(&self) {
+        tracing::debug!("Decrement strong count on runtime");
+        let h = Arc::into_raw(self.runtime.clone());
+        Arc::increment_strong_count(h);
     }
 }
 
-impl From<&ProviderPtr> for Provider {
+impl From<&ProviderPtr> for ProviderWithRuntime {
     /// Converts a reference to a ProviderPtr to a Provider type.
     /// Note that the conversion from raw pointers to Arcs does not modify the reference count.
     /// # Safety
     /// Unsafe due to the conversion from raw pointers to Arcs.
-    fn from(ptr: &ProviderPtr) -> Provider {
+    fn from(ptr: &ProviderPtr) -> ProviderWithRuntime {
         tracing::debug!("FFI: Provider from Ptr!");
-        let processor = unsafe { Arc::<Processor>::from_raw(ptr.processor as *const Processor) };
-        let handler = unsafe { *ptr.handler };
-        Self { processor, handler }
+        let provider = unsafe { Arc::<Provider>::from_raw(ptr.provider as *const Provider) };
+        let runtime = unsafe { Arc::<Runtime>::from_raw(ptr.runtime as *const Runtime) };
+
+        Self { provider, runtime }
     }
 }
 
-impl From<&Provider> for ProviderPtr {
+impl From<&ProviderWithRuntime> for ProviderPtr {
     /// Cast a Provider into ProviderPtr
-    fn from(provider: &Provider) -> ProviderPtr {
+    fn from(provider: &ProviderWithRuntime) -> ProviderPtr {
         tracing::debug!("FFI: Provider into Ptr!");
         // Clone the Arcs, which increases the ref count,
         // then turn them into raw pointers.
-        let processor_ptr = Arc::into_raw(provider.processor.clone());
-        let handler_ptr = &provider.handler as *const InternalRpcHandler;
+        let provider_ptr = Arc::into_raw(provider.provider.clone());
+        let runtime_ptr = Arc::into_raw(provider.runtime.clone());
+
         provider.check_arc();
         ProviderPtr {
-            processor: processor_ptr,
-            handler: handler_ptr,
+            provider: provider_ptr,
+            runtime: runtime_ptr,
         }
     }
 }
@@ -189,8 +165,9 @@ impl From<&Provider> for ProviderPtr {
 /// Listen function accept a ProviderPtr and will unsafety cast it into Arc based Provider
 #[no_mangle]
 pub extern "C" fn listen(provider_ptr: *const ProviderPtr) {
-    let provider: Provider = Provider::from_raw(provider_ptr).expect("Provider ptr is invalid");
-    executor::block_on(provider.processor.listen());
+    let provider: ProviderWithRuntime =
+        ProviderWithRuntime::from_raw(provider_ptr).expect("Provider ptr is invalid");
+    executor::block_on(provider.provider.processor.listen());
 }
 
 /// Start message listening and stabilization
@@ -199,9 +176,10 @@ pub extern "C" fn listen(provider_ptr: *const ProviderPtr) {
 /// Listen function accept a ProviderPtr and will unsafety cast it into Arc based Provider
 #[no_mangle]
 pub extern "C" fn async_listen(provider_ptr: *const ProviderPtr) {
-    let provider: Provider = Provider::from_raw(provider_ptr).expect("Provider ptr is invalid");
+    let provider: ProviderWithRuntime =
+        ProviderWithRuntime::from_raw(provider_ptr).expect("Provider ptr is invalid");
     std::thread::spawn(move || {
-        executor::block_on(provider.processor.listen());
+        executor::block_on(provider.provider.processor.listen());
     });
 }
 
@@ -217,7 +195,7 @@ pub extern "C" fn request(
     params: *const c_char,
 ) -> *const c_char {
     match (|| -> Result<*const c_char> {
-        let provider: Provider = Provider::from_raw(provider_ptr)?;
+        let provider: ProviderWithRuntime = ProviderWithRuntime::from_raw(provider_ptr)?;
 
         let method = c_char_to_string(method)?;
         let params = c_char_to_string(params)?;
@@ -225,8 +203,13 @@ pub extern "C" fn request(
             .unwrap_or_else(|_| panic!("Failed on covering data {:?} to JSON", params));
 
         let handle = std::thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async { provider.request_internal(method, params).await.unwrap() })
+            provider.runtime.block_on(async {
+                provider
+                    .provider
+                    .request_internal(method, params)
+                    .await
+                    .unwrap()
+            })
         });
         let ret: String = serde_json::to_string(&handle.join().unwrap())?;
         let c_ret = CString::new(ret)?.into_raw();
@@ -291,13 +274,16 @@ pub unsafe extern "C" fn new_provider_with_callback(
             panic!("Failed on create new provider {:#}", e)
         }
     };
+    let runtime = Arc::new(Runtime::new().expect("Failed to create runtime"));
+    let provider = Arc::new(provider.clone());
     let callback: &FFIBackendBehaviour = unsafe { &*callback_ptr };
-    let backend = Backend::new(Arc::new(provider.clone()), Box::new(callback.clone()));
+    let callback_with_rt = FFIBackendBehaviourWithRuntime::new(callback.clone(), runtime.clone());
+    let backend = Backend::new(provider.clone(), Box::new(callback_with_rt.clone()));
+
     provider
         .set_swarm_callback(Arc::new(backend))
         .expect("Failed to set callback");
-
-    let ret: ProviderPtr = (&provider).into();
+    let ret: ProviderPtr = (&ProviderWithRuntime::new(provider.clone(), runtime.clone())).into();
     ret
 }
 

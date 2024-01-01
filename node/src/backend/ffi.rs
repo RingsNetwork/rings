@@ -7,22 +7,25 @@ use std::ffi::CString;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use tokio::runtime::Runtime;
 
 use crate::backend::types::BackendMessage;
 use crate::backend::types::MessageHandler;
 use crate::error::Result;
 use crate::prelude::MessagePayload;
 use crate::provider::ffi::ProviderPtr;
+use crate::provider::ffi::ProviderWithRuntime;
 use crate::provider::Provider;
 
 /// Context for handling backend behaviour
+/// cbindgen:no-export
 #[repr(C)]
 #[derive(Clone)]
 pub struct FFIBackendBehaviour {
     paintext_message_handler: Option<
         Box<
             extern "C" fn(
-                *const FFIBackendBehaviour,
+                *const FFIBackendBehaviourWithRuntime,
                 *const ProviderPtr,
                 *const c_char,
                 *const c_char,
@@ -32,7 +35,7 @@ pub struct FFIBackendBehaviour {
     service_message_handler: Option<
         Box<
             extern "C" fn(
-                *const FFIBackendBehaviour,
+                *const FFIBackendBehaviourWithRuntime,
                 *const ProviderPtr,
                 *const c_char,
                 *const c_char,
@@ -42,7 +45,7 @@ pub struct FFIBackendBehaviour {
     extension_message_handler: Option<
         Box<
             extern "C" fn(
-                *const FFIBackendBehaviour,
+                *const FFIBackendBehaviourWithRuntime,
                 *const ProviderPtr,
                 *const c_char,
                 *const c_char,
@@ -51,12 +54,30 @@ pub struct FFIBackendBehaviour {
     >,
 }
 
+/// A wrapper for FFIbackendbehaviour, we needs runtime to make async request work
+/// cbindgen:field-names=[]
+#[derive(Clone)]
+pub struct FFIBackendBehaviourWithRuntime {
+    behaviour: FFIBackendBehaviour,
+    runtime: Arc<Runtime>,
+}
+
+impl FFIBackendBehaviourWithRuntime {
+    /// Create a new instance
+    pub fn new(behaviour: FFIBackendBehaviour, runtime: Arc<Runtime>) -> Self {
+        Self {
+            behaviour: behaviour.clone(),
+            runtime: runtime.clone(),
+        }
+    }
+}
+
 /// Backend behaviour for FFI
 #[no_mangle]
 pub extern "C" fn new_ffi_backend_behaviour(
     paintext_message_handler: Option<
         extern "C" fn(
-            *const FFIBackendBehaviour,
+            *const FFIBackendBehaviourWithRuntime,
             *const ProviderPtr,
             *const c_char,
             *const c_char,
@@ -64,7 +85,7 @@ pub extern "C" fn new_ffi_backend_behaviour(
     >,
     service_message_handler: Option<
         extern "C" fn(
-            *const FFIBackendBehaviour,
+            *const FFIBackendBehaviourWithRuntime,
             *const ProviderPtr,
             *const c_char,
             *const c_char,
@@ -72,7 +93,7 @@ pub extern "C" fn new_ffi_backend_behaviour(
     >,
     extension_message_handler: Option<
         extern "C" fn(
-            *const FFIBackendBehaviour,
+            *const FFIBackendBehaviourWithRuntime,
             *const ProviderPtr,
             *const c_char,
             *const c_char,
@@ -88,15 +109,18 @@ pub extern "C" fn new_ffi_backend_behaviour(
 
 macro_rules! handle_backend_message {
     ($self:ident, $provider:ident, $handler:ident, $payload: ident, $message:ident) => {
-        if let Some(handler) = &$self.$handler {
-            let provider: &Provider = Arc::as_ref(&$provider);
-            let provider_ptr: ProviderPtr = provider.into();
+        if let Some(handler) = &$self.behaviour.$handler {
+            let rt = $self.runtime.clone();
+
+            let provider_with_runtime = ProviderWithRuntime::new($provider.clone(), rt.clone());
+            provider_with_runtime.check_arc();
+            let provider_ptr: ProviderPtr = (&provider_with_runtime).into();
             let payload = serde_json::to_string(&$payload)?;
             let message = serde_json::to_string(&$message)?;
             let payload = CString::new(payload)?;
             let message = CString::new(message)?;
             handler(
-                $self as *const FFIBackendBehaviour,
+                $self as *const FFIBackendBehaviourWithRuntime,
                 &provider_ptr as *const ProviderPtr,
                 payload.as_ptr(),
                 message.as_ptr(),
@@ -106,7 +130,7 @@ macro_rules! handle_backend_message {
 }
 
 #[async_trait]
-impl MessageHandler<BackendMessage> for FFIBackendBehaviour {
+impl MessageHandler<BackendMessage> for FFIBackendBehaviourWithRuntime {
     async fn handle_message(
         &self,
         provider: Arc<Provider>,

@@ -16,6 +16,14 @@ typedef struct Processor Processor;
  */
 typedef struct InternalRpcHandler InternalRpcHandler;
 
+typedef struct InternalRpcHandler InternalRpcHandler;
+
+/**
+ * A wrapper for FFIbackendbehaviour, we needs runtime to make async request work
+ */
+typedef struct FFIBackendBehaviourWithRuntime FFIBackendBehaviourWithRuntime;
+
+
 /**
  * A structure to represent the Provider in a C-compatible format.
  * This is necessary as using Arc directly in FFI can be unsafe.
@@ -29,15 +37,15 @@ typedef struct ProviderPtr {
  * Context for handling backend behaviour
  */
 typedef struct FFIBackendBehaviour {
-  void (**paintext_message_handler)(const struct FFIBackendBehaviour*,
+  void (**paintext_message_handler)(const struct FFIBackendBehaviourWithRuntime*,
                                     const struct ProviderPtr*,
                                     const char*,
                                     const char*);
-  void (**service_message_handler)(const struct FFIBackendBehaviour*,
+  void (**service_message_handler)(const struct FFIBackendBehaviourWithRuntime*,
                                    const struct ProviderPtr*,
                                    const char*,
                                    const char*);
-  void (**extension_message_handler)(const struct FFIBackendBehaviour*,
+  void (**extension_message_handler)(const struct FFIBackendBehaviourWithRuntime*,
                                      const struct ProviderPtr*,
                                      const char*,
                                      const char*);
@@ -46,15 +54,15 @@ typedef struct FFIBackendBehaviour {
 /**
  * Backend behaviour for FFI
  */
-struct FFIBackendBehaviour new_ffi_backend_behaviour(void (*paintext_message_handler)(const struct FFIBackendBehaviour*,
+struct FFIBackendBehaviour new_ffi_backend_behaviour(void (*paintext_message_handler)(const struct FFIBackendBehaviourWithRuntime*,
                                                                                       const struct ProviderPtr*,
                                                                                       const char*,
                                                                                       const char*),
-                                                     void (*service_message_handler)(const struct FFIBackendBehaviour*,
+                                                     void (*service_message_handler)(const struct FFIBackendBehaviourWithRuntime*,
                                                                                      const struct ProviderPtr*,
                                                                                      const char*,
                                                                                      const char*),
-                                                     void (*extension_message_handler)(const struct FFIBackendBehaviour*,
+                                                     void (*extension_message_handler)(const struct FFIBackendBehaviourWithRuntime*,
                                                                                        const struct ProviderPtr*,
                                                                                        const char*,
                                                                                        const char*));

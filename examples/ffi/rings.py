@@ -33,12 +33,12 @@ def gen_signer(acc):
         return
     return signer
 
-@ffi.callback("void(*)(FFIBackendBehaviour *, ProviderPtr *, char *, char *)")
+@ffi.callback("void(*)(FFIBackendBehaviourWithRuntime *, ProviderPtr *, char *, char *)")
 def default_handler(ins, provider, relay, message):
     return
 
 
-@ffi.callback("void(*)(FFIBackendBehaviour *, ProviderPtr *, char *, char *)")
+@ffi.callback("void(*)(FFIBackendBehaviourWithRuntime *, ProviderPtr *, char *, char *)")
 def on_custom_message(ins, provider, relay, message):
     print(message)
     return
