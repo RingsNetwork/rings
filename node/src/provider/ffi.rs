@@ -34,64 +34,7 @@
 //!
 //! # Examples
 //!
-//! Here's an example of how to use the Rings FFI with Python.
-//!
-//! # Example with Python
-//! ```python
-//! import cffi
-//! import ctypes
-//! from web3 import Web3;
-//! from eth_account.messages import encode_defunct
-//! import re
-//! w3 = Web3();
-//! acc = w3.eth.account.create();
-//! ffi = cffi.FFI()
-//! c_header = open("./node/bindings.h", "r").read()
-//! c_header = re.sub(r'#define .*', '', c_header)
-//! ffi.cdef(c_header)
-//! rings_node = ffi.dlopen("./target/debug/librings_node.dylib")
-//!
-//! @ffi.callback("char*(*)(char *)")
-//! def signer(msg):
-//!    c_input = ffi.string(msg)
-//!    decoded = encode_defunct(c_input)
-//!    sig = acc.sign_message(decoded)
-//!    ret = bytes(sig.signature)
-//!    return ffi.new("char[]", ret)
-//!
-//! @ffi.callback("void(*)(char *, char *)")
-//! def custom_msg_callback(msg):
-//!     print(msg)
-//!     return
-//!
-//! @ffi.callback("void(*)(char *)")
-//! def builtin_msg_callback(msg):
-//!    print(msg)
-//!    return
-
-//! rings_node.init_logging(rings_node.Debug)
-//! callback = rings_node.new_callback(custom_msg_callback, builtin_msg_callback)
-//!
-//! def create_provider(signer, acc):
-//!     provider = rings_node.new_provider_with_callback(
-//!         "stun://stun.l.google.com".encode(),
-//!         10,
-//!         acc.address.encode(),
-//!         "eip191".encode(),
-//!         signer,
-//!         ffi.addressof(callback)
-//!     )
-//!     return provider
-//!
-//! if __name__ == "__main__":
-//!     provider = create_provider(signer, acc)
-//!     rings_node.listen(ffi.addressof(provider))
-//!     print(provider)
-//! ```
-//! 
-//! Note: Since the above code is executed in a single-process environment of Python,
-//! the Rings' listen loop will block the process. If you wish to use it in a production environment,
-//! you should implement your own more advanced process or thread management.
+//! Please check python example at examples/ffi/rings.py
 
 use std::ffi::c_char;
 use std::ffi::CStr;
@@ -104,6 +47,7 @@ use tokio::runtime::Runtime;
 use super::Provider;
 use super::Signer;
 use crate::backend::ffi::FFIBackendBehaviour;
+use crate::backend::ffi::FFIBackendBehaviourWithRuntime;
 use crate::backend::Backend;
 use crate::error::Error;
 use crate::error::Result;
@@ -117,6 +61,7 @@ pub struct ProviderPtr {
 }
 
 /// Provider with runtime
+/// cbindgen:field-names=[]
 pub(crate) struct ProviderWithRuntime {
     provider: Arc<Provider>,
     runtime: Arc<Runtime>,
@@ -332,7 +277,8 @@ pub unsafe extern "C" fn new_provider_with_callback(
     let runtime = Arc::new(Runtime::new().expect("Failed to create runtime"));
     let provider = Arc::new(provider.clone());
     let callback: &FFIBackendBehaviour = unsafe { &*callback_ptr };
-    let backend = Backend::new(provider.clone(), Box::new(callback.clone()));
+    let callback_with_rt = FFIBackendBehaviourWithRuntime::new(callback.clone(), runtime.clone());
+    let backend = Backend::new(provider.clone(), Box::new(callback_with_rt.clone()));
 
     provider
         .set_swarm_callback(Arc::new(backend))

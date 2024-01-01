@@ -11,6 +11,7 @@ fn gen_cbinding() {
         .with_no_includes()
         .with_documentation(true)
         .with_crate(&crate_dir)
+        .with_parse_deps(false)
         .generate()
     {
         Ok(g) => {
