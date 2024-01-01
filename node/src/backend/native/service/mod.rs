@@ -24,12 +24,13 @@ use std::time::Duration;
 use dashmap::DashMap;
 use rings_core::message::MessagePayload;
 use rings_core::message::MessageVerificationExt;
+use rings_rpc::method::Method;
 use serde::Deserialize;
 use serde::Serialize;
 
 use crate::backend::native::service::tcp_proxy::tcp_connect_with_timeout;
 use crate::backend::native::service::tcp_proxy::Tunnel;
-use crate::backend::native::MessageEndpoint;
+use crate::backend::native::MessageHandler;
 use crate::backend::types::BackendMessage;
 use crate::backend::types::HttpRequest;
 use crate::backend::types::HttpResponse;
@@ -38,8 +39,6 @@ use crate::backend::types::TunnelId;
 use crate::consts::TCP_SERVER_TIMEOUT;
 use crate::error::Error;
 use crate::error::Result;
-use crate::jsonrpc::server::BackendMessageParams;
-use crate::prelude::jsonrpc_core::Params;
 use crate::provider::Provider;
 
 /// Service Config for creating a Server instance
@@ -79,8 +78,8 @@ impl ServiceProvider {
 }
 
 #[async_trait::async_trait]
-impl MessageEndpoint<ServiceMessage> for ServiceProvider {
-    async fn on_message(
+impl MessageHandler<ServiceMessage> for ServiceProvider {
+    async fn handle_message(
         &self,
         provider: Arc<Provider>,
         ctx: &MessagePayload,
@@ -98,14 +97,8 @@ impl MessageEndpoint<ServiceMessage> for ServiceProvider {
                             reason: e,
                         };
                         let backend_message: BackendMessage = msg.into();
-                        let params: Params = BackendMessageParams {
-                            did: peer_did,
-                            data: backend_message,
-                        }
-                        .try_into()?;
-                        provider
-                            .request("sendBackendMessage".to_string(), params, None)
-                            .await?;
+                        let params = backend_message.to_request_params(peer_did)?;
+                        provider.request(Method::SendBackendMessage, params).await?;
                         Err(Error::TunnelError(e))
                     }
 
@@ -134,15 +127,9 @@ impl MessageEndpoint<ServiceMessage> for ServiceProvider {
             ServiceMessage::HttpRequest(req) => {
                 let service = self.service(&req.service).ok_or(Error::InvalidService)?;
                 let resp = handle_http_request(service.addr, req).await?;
-                let msg: BackendMessage = ServiceMessage::HttpResponse(resp).into();
-                let params: Params = BackendMessageParams {
-                    did: peer_did,
-                    data: msg,
-                }
-                .try_into()?;
-                let resp = provider
-                    .request("sendBackendMessage".to_string(), params, None)
-                    .await?;
+                let backend_message: BackendMessage = ServiceMessage::HttpResponse(resp).into();
+                let params = backend_message.to_request_params(peer_did)?;
+                let resp = provider.request(Method::SendBackendMessage, params).await?;
                 tracing::info!("done calling provider {:?}", resp);
                 Ok(())
             }

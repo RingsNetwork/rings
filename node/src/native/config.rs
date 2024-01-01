@@ -29,11 +29,12 @@ lazy_static::lazy_static! {
   };
 }
 
-pub const DEFAULT_BIND_ADDRESS: &str = "127.0.0.1:50000";
+pub const DEFAULT_INTERNAL_API_PORT: u16 = 50000;
+pub const DEFAULT_EXTERNAL_API_ADDR: &str = "127.0.0.1:50001";
 pub const DEFAULT_ENDPOINT_URL: &str = "http://127.0.0.1:50000";
 pub const DEFAULT_ICE_SERVERS: &str = "stun://stun.l.google.com:19302";
-pub const DEFAULT_STABILIZE_TIMEOUT: usize = 3;
-pub const DEFAULT_STORAGE_CAPACITY: usize = 200000000;
+pub const DEFAULT_STABILIZE_TIMEOUT: u64 = 3;
+pub const DEFAULT_STORAGE_CAPACITY: u32 = 200000000;
 
 pub fn get_storage_location<P>(prefix: P, path: P) -> String
 where P: AsRef<std::path::Path> {
@@ -52,11 +53,11 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_manager: Option<String>,
     pub session_sk: Option<String>,
-    #[serde(rename = "bind")]
-    pub http_addr: String,
+    pub internal_api_port: u16,
+    pub external_api_addr: String,
     pub endpoint_url: String,
     pub ice_servers: String,
-    pub stabilize_timeout: usize,
+    pub stabilize_timeout: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_ip: Option<String>,
     /// When there is no configuration in the YAML file,
@@ -134,7 +135,8 @@ impl Config {
             ecdsa_key: None,
             session_manager: None,
             session_sk: Some(session_sk),
-            http_addr: DEFAULT_BIND_ADDRESS.to_string(),
+            internal_api_port: DEFAULT_INTERNAL_API_PORT,
+            external_api_addr: DEFAULT_EXTERNAL_API_ADDR.to_string(),
             endpoint_url: DEFAULT_ENDPOINT_URL.to_string(),
             ice_servers: DEFAULT_ICE_SERVERS.to_string(),
             stabilize_timeout: DEFAULT_STABILIZE_TIMEOUT,
@@ -170,11 +172,11 @@ impl Config {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StorageConfig {
     pub path: String,
-    pub capacity: usize,
+    pub capacity: u32,
 }
 
 impl StorageConfig {
-    pub fn new(path: &str, capacity: usize) -> Self {
+    pub fn new(path: &str, capacity: u32) -> Self {
         Self {
             path: path.to_string(),
             capacity,
@@ -190,7 +192,8 @@ mod tests {
     fn test_deserialization_with_missed_field() {
         let yaml = r#"
 session_sk: session_sk
-bind: 127.0.0.1:50000
+internal_api_port: 50000
+external_api_addr: 127.0.0.1:50001
 endpoint_url: http://127.0.0.1:50000
 ice_servers: stun://stun.l.google.com:19302
 stabilize_timeout: 3

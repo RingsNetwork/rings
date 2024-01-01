@@ -75,6 +75,9 @@ jobs:
         run: |
           rustup target add ${{ steps.target.outputs.target }}
 
+      - name: Setup protoc
+        uses: arduino/setup-protoc@v2.1.0
+
       - name: Setup rust toolchain
         run: |
           rustup show
@@ -119,6 +122,9 @@ jobs:
       - name: Add target
         run: |
           rustup target add ${{ steps.target.outputs.target }}
+
+      - name: Setup protoc
+        uses: arduino/setup-protoc@v2.1.0
 
       - name: Setup rust toolchain
         run: |
@@ -179,6 +185,9 @@ jobs:
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
+      - name: Setup protoc
+        uses: arduino/setup-protoc@v2.1.0
+
       - name: Setup rust toolchain
         run: |
           rustup show
@@ -194,7 +203,7 @@ jobs:
 
       - name: Build
         run: |
-          npm pack
+          npm install && npm pack
           mv ringsnetwork-rings-node-*.tgz rings-${{ needs.gen_version.outputs.version }}-${{ steps.target.outputs.target }}.tgz
 
       - uses: actions/upload-artifact@v3

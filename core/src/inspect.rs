@@ -31,7 +31,7 @@ pub struct DHTInspect {
     pub successors: Vec<String>,
     #[serde(default)]
     pub predecessor: Option<String>,
-    pub finger_table: Vec<(Option<String>, usize, usize)>,
+    pub finger_table: Vec<(Option<String>, u64, u64)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,11 +126,11 @@ impl StorageInspect {
     }
 }
 
-pub fn compress_iter<T>(iter: impl Iterator<Item = T>) -> Vec<(T, usize, usize)>
+pub fn compress_iter<T>(iter: impl Iterator<Item = T>) -> Vec<(T, u64, u64)>
 where T: PartialEq {
     let mut result = vec![];
-    let mut start = 0;
-    let mut count = 0;
+    let mut start = 0u64;
+    let mut count = 0u64;
     let mut prev: Option<T> = None;
 
     for (i, x) in iter.enumerate() {
@@ -142,7 +142,7 @@ where T: PartialEq {
                 if let Some(p) = prev {
                     result.push((p, start, start + count - 1));
                 }
-                start = i;
+                start = i as u64;
                 count = 1;
             }
         }

@@ -1,6 +1,6 @@
 #![warn(missing_docs)]
 
-//! Processor of rings-node jsonrpc-server.
+//! Processor of rings-node rpc server.
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -34,7 +34,7 @@ use crate::prelude::rings_core::swarm::MeasureImpl;
 use crate::prelude::rings_core::swarm::Swarm;
 use crate::prelude::rings_core::swarm::SwarmBuilder;
 use crate::prelude::rings_rpc::method;
-use crate::prelude::rings_rpc::response;
+use crate::prelude::rings_rpc::protos::rings_node::NodeInfoResponse;
 use crate::prelude::vnode;
 use crate::prelude::wasm_export;
 use crate::prelude::ChordStorageInterface;
@@ -53,13 +53,13 @@ pub struct ProcessorConfig {
     /// [SessionSk].
     session_sk: SessionSk,
     /// Stabilization timeout.
-    stabilize_timeout: usize,
+    stabilize_timeout: u64,
 }
 
 #[wasm_export]
 impl ProcessorConfig {
     /// Creates a new `ProcessorConfig` instance without an external address.
-    pub fn new(ice_servers: String, session_sk: SessionSk, stabilize_timeout: usize) -> Self {
+    pub fn new(ice_servers: String, session_sk: SessionSk, stabilize_timeout: u64) -> Self {
         Self {
             ice_servers,
             external_address: None,
@@ -72,7 +72,7 @@ impl ProcessorConfig {
     pub fn new_with_ext_addr(
         ice_servers: String,
         session_sk: SessionSk,
-        stabilize_timeout: usize,
+        stabilize_timeout: u64,
         external_address: String,
     ) -> Self {
         Self {
@@ -109,12 +109,12 @@ pub struct ProcessorConfigSerialized {
     /// A string representing the dumped `SessionSk`.
     session_sk: String,
     /// An unsigned integer representing the stabilization timeout.
-    stabilize_timeout: usize,
+    stabilize_timeout: u64,
 }
 
 impl ProcessorConfigSerialized {
     /// Creates a new `ProcessorConfigSerialized` instance without an external address.
-    pub fn new(ice_servers: String, session_sk: String, stabilize_timeout: usize) -> Self {
+    pub fn new(ice_servers: String, session_sk: String, stabilize_timeout: u64) -> Self {
         Self {
             ice_servers,
             external_address: None,
@@ -127,7 +127,7 @@ impl ProcessorConfigSerialized {
     pub fn new_with_ext_addr(
         ice_servers: String,
         session_sk: String,
-        stabilize_timeout: usize,
+        stabilize_timeout: u64,
         external_address: String,
     ) -> Self {
         Self {
@@ -198,10 +198,10 @@ pub struct ProcessorBuilder {
     session_sk: SessionSk,
     storage: Option<PersistenceStorage>,
     measure: Option<MeasureImpl>,
-    stabilize_timeout: usize,
+    stabilize_timeout: u64,
 }
 
-/// Processor for rings-node jsonrpc server
+/// Processor for rings-node rpc server
 #[derive(Clone)]
 pub struct Processor {
     /// a swarm instance
@@ -303,10 +303,10 @@ impl Processor {
             .call_method(method::Method::NodeDid.as_str(), jsonrpc_core::Params::None)
             .await
             .map_err(|e| Error::RemoteRpcError(e.to_string()))?;
-        let did = serde_json::from_value::<String>(did_resp)
-            .map_err(|_| Error::InvalidDid)?
+        let did = serde_json::from_value::<String>(did_resp.clone())
+            .map_err(|_| Error::InvalidDid(did_resp.clone().to_string()))?
             .parse()
-            .map_err(|_| Error::InvalidDid)?;
+            .map_err(|_| Error::InvalidDid(did_resp.clone().to_string()))?;
 
         let (_, offer) = self
             .swarm
@@ -351,8 +351,8 @@ impl Processor {
     /// 3. PeerC can connect PeerA with PeerA's web3 address.
     pub async fn connect_with_did(&self, did: Did, wait_for_open: bool) -> Result<()> {
         let conn = self.swarm.connect(did).await.map_err(Error::ConnectError)?;
-        tracing::debug!("wait for connection connected");
         if wait_for_open {
+            tracing::debug!("wait for connection connected");
             conn.webrtc_wait_for_data_channel_open()
                 .await
                 .map_err(|e| Error::ConnectError(rings_core::error::Error::Transport(e)))?;
@@ -381,13 +381,12 @@ impl Processor {
     }
 
     /// Send custom message to a did.
-    pub async fn send_message(&self, destination: &str, msg: &[u8]) -> Result<uuid::Uuid> {
+    pub async fn send_message(&self, destination: Did, msg: &[u8]) -> Result<uuid::Uuid> {
         tracing::info!(
             "send_message, destination: {}, message size: {:?}",
             destination,
             msg.len(),
         );
-        let destination = Did::from_str(destination).map_err(|_| Error::InvalidDid)?;
 
         let msg = Message::custom(msg).map_err(Error::SendMessage)?;
 
@@ -404,8 +403,7 @@ impl Processor {
         backend_msg: BackendMessage,
     ) -> Result<uuid::Uuid> {
         let msg_bytes = bincode::serialize(&backend_msg).map_err(|_| Error::EncodeError)?;
-        self.send_message(&destination.to_string(), &msg_bytes)
-            .await
+        self.send_message(destination, &msg_bytes).await
     }
 
     /// check local cache of dht
@@ -455,10 +453,10 @@ impl Processor {
     }
 
     /// get node info
-    pub async fn get_node_info(&self) -> Result<response::NodeInfo> {
-        Ok(response::NodeInfo {
+    pub async fn get_node_info(&self) -> Result<NodeInfoResponse> {
+        Ok(NodeInfoResponse {
             version: crate::util::build_version(),
-            swarm: self.swarm.inspect().await,
+            swarm: Some(self.swarm.inspect().await.into()),
         })
     }
 }
@@ -522,8 +520,8 @@ mod test {
         p1.swarm.set_callback(callback1.clone()).unwrap();
         p2.swarm.set_callback(callback2.clone()).unwrap();
 
-        let did1 = p1.did().to_string();
-        let did2 = p2.did().to_string();
+        let did1 = p1.did();
+        let did2 = p2.did();
 
         println!("p1_did: {}", did1);
         println!("p2_did: {}", did2);
@@ -544,11 +542,10 @@ mod test {
 
         let (conn2, answer) = p2.swarm.answer_offer(offer).await.unwrap();
         let (peer_did, _) = p1.swarm.accept_answer(answer).await.unwrap();
-        assert!(
-            peer_did.to_string().eq(&did2),
+        assert_eq!(
+            peer_did, did2,
             "peer.address got {}, expect: {}",
-            peer_did,
-            did2
+            peer_did, did2
         );
 
         println!("waiting for connection");
@@ -580,19 +577,13 @@ mod test {
         let test_text2 = "test2";
 
         println!("send_message 1");
-        let uuid1 = p1
-            .send_message(did2.as_str(), test_text1.as_bytes())
-            .await
-            .unwrap();
+        let uuid1 = p1.send_message(did2, test_text1.as_bytes()).await.unwrap();
         println!("send_message 1 done, msg id: {}", uuid1);
 
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
         println!("send_message 2");
-        let uuid2 = p2
-            .send_message(did1.as_str(), test_text2.as_bytes())
-            .await
-            .unwrap();
+        let uuid2 = p2.send_message(did1, test_text2.as_bytes()).await.unwrap();
         println!("send_message 2 done, msg id: {}", uuid2);
 
         tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;

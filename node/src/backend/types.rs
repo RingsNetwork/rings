@@ -5,7 +5,9 @@ use std::io::ErrorKind as IOErrorKind;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use rings_core::dht::Did;
 use rings_core::message::MessagePayload;
+use rings_rpc::protos::rings_node::SendBackendMessageRequest;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -110,37 +112,17 @@ pub struct HttpResponse {
     pub body: Option<Bytes>,
 }
 
-/// MessageEndpoint trait
+/// MessageHandler trait
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-pub trait MessageEndpoint<T> {
+pub trait MessageHandler<T> {
     /// handle_message
-    async fn on_message(
+    async fn handle_message(
         &self,
         provider: Arc<Provider>,
         ctx: &MessagePayload,
         data: &T,
     ) -> Result<()>;
-}
-
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-impl MessageEndpoint<BackendMessage>
-    for Vec<Box<dyn MessageEndpoint<BackendMessage> + Send + Sync>>
-{
-    async fn on_message(
-        &self,
-        provider: Arc<Provider>,
-        ctx: &MessagePayload,
-        data: &BackendMessage,
-    ) -> Result<()> {
-        for endpoint in self {
-            if let Err(e) = endpoint.on_message(provider.clone(), ctx, data).await {
-                tracing::error!("Failed to handle message, {:?}", e)
-            }
-        }
-        Ok(())
-    }
 }
 
 impl From<ServiceMessage> for BackendMessage {
@@ -158,5 +140,15 @@ impl From<IOErrorKind> for TunnelDefeat {
             IOErrorKind::NotConnected => TunnelDefeat::NotConnected,
             _ => TunnelDefeat::Unknown,
         }
+    }
+}
+
+impl BackendMessage {
+    /// Convert to SendBackendMessageRequest
+    pub fn to_request_params(&self, destination_did: Did) -> Result<SendBackendMessageRequest> {
+        Ok(SendBackendMessageRequest {
+            destination_did: destination_did.to_string(),
+            data: serde_json::to_string(self)?,
+        })
     }
 }

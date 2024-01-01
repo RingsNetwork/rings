@@ -24,6 +24,9 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
+      - name: Setup protoc
+        uses: arduino/setup-protoc@v2.1.0
+
       - name: Setup rust toolchain
         run: rustup show
 
@@ -67,6 +70,9 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
+      - name: Setup protoc
+        uses: arduino/setup-protoc@v2.1.0
+
       - name: Setup rust toolchain
         run: rustup show
 
@@ -96,6 +102,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v3
+
+      - name: Setup protoc
+        uses: arduino/setup-protoc@v2.1.0
 
       - name: Setup rust toolchain
         run: rustup show
@@ -127,6 +136,9 @@ jobs:
 
       - name: Check typos
         uses: crate-ci/typos@master
+
+      - name: Setup protoc
+        uses: arduino/setup-protoc@v2.1.0
 
       - name: Setup rust toolchain
         run: |

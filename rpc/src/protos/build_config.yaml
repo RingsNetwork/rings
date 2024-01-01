@@ -1,0 +1,51 @@
+---
+includes:
+  - src/protos
+files:
+  - src/protos/rings_node.proto
+output: src/protos
+messages:
+  - attrs:
+      - derive(serde::Serialize, serde::Deserialize)
+    paths:
+      - rings_node.ConnectPeerViaHttpRequest
+      - rings_node.ConnectPeerViaHttpResponse
+      - rings_node.ConnectWithDidRequest
+      - rings_node.ConnectWithDidResponse
+      - rings_node.SeedPeer
+      - rings_node.Seed
+      - rings_node.ConnectWithSeedRequest
+      - rings_node.ConnectWithSeedResponse
+      - rings_node.PeerInfo
+      - rings_node.ListPeersRequest
+      - rings_node.ListPeersResponse
+      - rings_node.CreateOfferRequest
+      - rings_node.CreateOfferResponse
+      - rings_node.AnswerOfferRequest
+      - rings_node.AnswerOfferResponse
+      - rings_node.AcceptAnswerRequest
+      - rings_node.AcceptAnswerResponse
+      - rings_node.DisconnectRequest
+      - rings_node.DisconnectResponse
+      - rings_node.SendCustomMessageRequest
+      - rings_node.SendCustomMessageResponse
+      - rings_node.SendBackendMessageRequest
+      - rings_node.SendBackendMessageResponse
+      - rings_node.PublishMessageToTopicRequest
+      - rings_node.PublishMessageToTopicResponse
+      - rings_node.FetchMessagesOfTopicRequest
+      - rings_node.FetchMessagesOfTopicResponse
+      - rings_node.RegisterServiceRequest
+      - rings_node.RegisterServiceResponse
+      - rings_node.LookupServiceRequest
+      - rings_node.LookupServiceResponse
+      - rings_node.NodeInfoRequest
+      - rings_node.FingerTableRange
+      - rings_node.DhtInfo
+      - rings_node.StorageValue
+      - rings_node.StorageItem
+      - rings_node.StorageInfo
+      - rings_node.SwarmInfo
+      - rings_node.NodeInfoResponse
+      - rings_node.NodeDidRequest
+      - rings_node.NodeDidResponse

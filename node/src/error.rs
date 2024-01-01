@@ -51,8 +51,8 @@ pub enum Error {
     WasmGlobalMemoryLockError = 405,
     #[error("WASM failed to load file.")]
     WasmFailedToLoadFile = 406,
-    #[error("Invalid did.")]
-    InvalidDid = 500,
+    #[error("Invalid did: {0}")]
+    InvalidDid(String) = 500,
     #[error("Invalid method.")]
     InvalidMethod = 501,
     #[error("Internal error: {0}.")]
