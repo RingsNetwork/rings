@@ -54,15 +54,15 @@ typedef struct FFIBackendBehaviour {
 /**
  * Backend behaviour for FFI
  */
-struct FFIBackendBehaviour new_ffi_backend_behaviour(void (*paintext_message_handler)(const struct FFIBackendBehaviour*,
+struct FFIBackendBehaviour new_ffi_backend_behaviour(void (*paintext_message_handler)(const struct FFIBackendBehaviourWithRuntime*,
                                                                                       const struct ProviderPtr*,
                                                                                       const char*,
                                                                                       const char*),
-                                                     void (*service_message_handler)(const struct FFIBackendBehaviour*,
+                                                     void (*service_message_handler)(const struct FFIBackendBehaviourWithRuntime*,
                                                                                      const struct ProviderPtr*,
                                                                                      const char*,
                                                                                      const char*),
-                                                     void (*extension_message_handler)(const struct FFIBackendBehaviour*,
+                                                     void (*extension_message_handler)(const struct FFIBackendBehaviourWithRuntime*,
                                                                                        const struct ProviderPtr*,
                                                                                        const char*,
                                                                                        const char*));
