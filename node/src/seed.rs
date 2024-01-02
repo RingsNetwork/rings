@@ -1,12 +1,12 @@
 //! Seed and SeedLoader use for getting peers from endpoint.
 use std::str::FromStr;
 
+use rings_core::dht::Did;
+use rings_rpc::protos::rings_node::ConnectWithSeedRequest;
 use serde::Deserialize;
 use serde::Serialize;
 
 use crate::error::Error;
-use crate::prelude::rings_core::dht::Did;
-use crate::prelude::rings_rpc::protos::rings_node::ConnectWithSeedRequest;
 
 /// A list contains SeedPeer.
 #[derive(Deserialize, Serialize, Debug)]
@@ -35,5 +35,20 @@ impl TryFrom<ConnectWithSeedRequest> for Seed {
         }
 
         Ok(Seed { peers })
+    }
+}
+
+impl Seed {
+    pub fn into_connect_with_seed_request(self) -> ConnectWithSeedRequest {
+        let mut peers = Vec::new();
+
+        for peer in self.peers {
+            peers.push(rings_rpc::protos::rings_node::SeedPeer {
+                did: peer.did.to_string(),
+                url: peer.url,
+            });
+        }
+
+        ConnectWithSeedRequest { peers }
     }
 }

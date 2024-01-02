@@ -11,6 +11,7 @@ repository = "https://github.com/RingsNetwork/rings-node"
 
 [workspace.dependencies]
 js-sys = "0.3.64"
+jsonrpc-core = "18.0.0"
 rings-core = { path = "core", default-features = false }
 rings-derive = { path = "derive", default-features = false }
 rings-rpc = { path = "rpc", default-features = false }

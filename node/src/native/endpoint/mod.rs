@@ -13,17 +13,17 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::routing::post;
 use axum::Router;
+use jsonrpc_core::MetaIoHandler;
+use rings_rpc::protos::rings_node::NodeInfoResponse;
 use tower_http::cors::CorsLayer;
 
 use self::http_error::HttpError;
-use crate::prelude::jsonrpc_core::MetaIoHandler;
-use crate::prelude::rings_rpc::protos::rings_node::NodeInfoResponse;
 use crate::processor::Processor;
 
 /// JSON-RPC state
 #[derive(Clone)]
 pub struct JsonRpcState<M>
-where M: crate::prelude::jsonrpc_core::Middleware<Arc<Processor>>
+where M: jsonrpc_core::Middleware<Arc<Processor>>
 {
     processor: Arc<Processor>,
     io_handler: MetaIoHandler<Arc<Processor>, M>,
@@ -114,7 +114,7 @@ async fn jsonrpc_io_handler<M>(
     body: String,
 ) -> Result<JsonResponse, HttpError>
 where
-    M: crate::prelude::jsonrpc_core::Middleware<Arc<Processor>>,
+    M: jsonrpc_core::Middleware<Arc<Processor>>,
 {
     let r = state
         .io_handler
@@ -170,16 +170,16 @@ async fn ws_handler(
 mod jsonrpc_middleware_impl {
     use std::future::Future;
 
+    use jsonrpc_core::futures_util::future;
+    use jsonrpc_core::futures_util::future::Either;
+    use jsonrpc_core::futures_util::FutureExt;
+    use jsonrpc_core::middleware::NoopCallFuture;
+    use jsonrpc_core::middleware::NoopFuture;
+    use jsonrpc_core::*;
     use rings_rpc::protos::rings_node_handler::ExternalRpcHandler;
     use rings_rpc::protos::rings_node_handler::InternalRpcHandler;
 
     use super::*;
-    use crate::native::endpoint::jsonrpc_middleware_impl::middleware::NoopCallFuture;
-    use crate::native::endpoint::jsonrpc_middleware_impl::middleware::NoopFuture;
-    use crate::prelude::jsonrpc_core::futures_util::future;
-    use crate::prelude::jsonrpc_core::futures_util::future::Either;
-    use crate::prelude::jsonrpc_core::futures_util::FutureExt;
-    use crate::prelude::jsonrpc_core::*;
 
     impl Middleware<Arc<Processor>> for InternalRpcMiddleware {
         type Future = NoopFuture;

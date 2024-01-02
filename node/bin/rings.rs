@@ -184,11 +184,9 @@ struct ClientArgs {
 
 impl ClientArgs {
     async fn new_client(&self) -> anyhow::Result<Client> {
-        let c = config::Config::read_fs(self.config_args.config.as_str())?;
-        let process_config: ProcessorConfig = c.clone().try_into()?;
+        let c = config::Config::read_fs(&self.config_args.config)?;
         let endpoint_url = self.endpoint_url.as_ref().unwrap_or(&c.endpoint_url);
-        let session_sk = process_config.session_sk();
-        Client::new(endpoint_url.as_str(), session_sk)
+        Client::new(endpoint_url)
     }
 }
 

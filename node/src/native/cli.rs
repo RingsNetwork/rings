@@ -24,13 +24,12 @@ use futures::select;
 use futures::FutureExt;
 use futures::Stream;
 use futures_timer::Delay;
+use rings_rpc::jsonrpc::Client as RpcClient;
+use rings_rpc::protos::rings_node::*;
 
 use crate::backend::types::BackendMessage;
 use crate::backend::types::HttpRequest;
 use crate::backend::types::ServiceMessage;
-use crate::prelude::rings_core::inspect::SwarmInspect;
-use crate::prelude::rings_core::session::SessionSk;
-use crate::prelude::rings_rpc::client::Client as RpcClient;
 use crate::seed::Seed;
 use crate::util::loader::ResourceLoader;
 
@@ -51,8 +50,8 @@ pub struct ClientOutput<T> {
 
 impl Client {
     /// Creates a new Client instance with the specified endpoint URL and signature.
-    pub fn new(endpoint_url: &str, session_sk: SessionSk) -> anyhow::Result<Self> {
-        let rpc_client = RpcClient::new(endpoint_url, Some(session_sk));
+    pub fn new(endpoint_url: &str) -> anyhow::Result<Self> {
+        let rpc_client = RpcClient::new(endpoint_url);
         Ok(Self { client: rpc_client })
     }
 
@@ -64,12 +63,17 @@ impl Client {
     ///
     /// Takes a URL for an HTTP server that will be used as the signaling channel to exchange ICE candidates and SDP with the remote peer.
     /// Returns a Did that can be used to refer to this connection in subsequent WebRTC operations.
-    pub async fn connect_peer_via_http(&mut self, http_url: &str) -> Output<String> {
+    pub async fn connect_peer_via_http(&mut self, url: &str) -> Output<String> {
         let peer_did = self
             .client
-            .connect_peer_via_http(http_url)
+            .connect_peer_via_http(&ConnectPeerViaHttpRequest {
+                url: url.to_string(),
+            })
             .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+            .map_err(|e| anyhow::anyhow!("{}", e))?
+            .peer
+            .ok_or_else(|| anyhow::anyhow!("peer did not return"))?
+            .did;
 
         ClientOutput::ok(format!("Remote did: {}", peer_did), peer_did)
     }
@@ -77,10 +81,10 @@ impl Client {
     /// Attempts to connect to a peer using a seed file located at the specified source path.
     pub async fn connect_with_seed(&mut self, source: &str) -> Output<()> {
         let seed = Seed::load(source).await?;
-        let seed_v = serde_json::to_value(seed).map_err(|_| anyhow::anyhow!("serialize failed"))?;
+        let req = seed.into_connect_with_seed_request();
 
         self.client
-            .connect_with_seed(&[seed_v])
+            .connect_with_seed(&req)
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
@@ -90,7 +94,9 @@ impl Client {
     /// Attempts to connect to a peer using a DID stored in a Distributed Hash Table (DHT).
     pub async fn connect_with_did(&mut self, did: &str) -> Output<()> {
         self.client
-            .connect_with_did(did)
+            .connect_with_did(&ConnectWithDidRequest {
+                did: did.to_string(),
+            })
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         ClientOutput::ok("Successful!".to_owned(), ())
@@ -102,9 +108,10 @@ impl Client {
     pub async fn list_peers(&mut self) -> Output<()> {
         let peers = self
             .client
-            .list_peers()
+            .list_peers(&ListPeersRequest {})
             .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+            .map_err(|e| anyhow::anyhow!("{}", e))?
+            .peers;
 
         let mut display = String::new();
         display.push_str("Did, TransportId, Status\n");
@@ -123,7 +130,9 @@ impl Client {
     /// Disconnects from the peer with the specified DID.
     pub async fn disconnect(&mut self, did: &str) -> Output<()> {
         self.client
-            .disconnect(did)
+            .disconnect(&DisconnectRequest {
+                did: did.to_string(),
+            })
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
@@ -133,7 +142,10 @@ impl Client {
     /// Sends a custom message to the specified peer.
     pub async fn send_custom_message(&self, did: &str, data: &str) -> Output<()> {
         self.client
-            .send_custom_message(did, data)
+            .send_custom_message(&SendCustomMessageRequest {
+                destination_did: did.to_string(),
+                data: data.to_string(),
+            })
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         ClientOutput::ok("Done.".into(), ())
@@ -160,15 +172,13 @@ impl Client {
             rid,
         };
 
-        let msg = BackendMessage::ServiceMessage(ServiceMessage::HttpRequest(req));
-
-        let data = bincode::serialize(&msg).map_err(|e| {
-            anyhow::anyhow!("Failed to serialize HttpRequest message to binary format: {e}",)
-        })?;
-        let data_b64 = base64::encode(&data);
+        let backend_msg = BackendMessage::from(ServiceMessage::HttpRequest(req));
+        let rpc_req = backend_msg
+            .into_send_backend_message_request(did)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         self.client
-            .send_custom_message(did, &data_b64)
+            .send_backend_message(&rpc_req)
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
@@ -177,15 +187,13 @@ impl Client {
 
     /// Sends a plain text message to the specified peer.
     pub async fn send_plain_text_message(&self, did: &str, text: &str) -> Output<()> {
-        let msg = BackendMessage::PlainText(text.to_string());
-
-        let data = bincode::serialize(&msg).map_err(|e| {
-            anyhow::anyhow!("Failed to serialize PlainText message to binary format: {e}",)
-        })?;
-        let data_b64 = base64::encode(&data);
+        let backend_msg = BackendMessage::PlainText(text.to_string());
+        let rpc_req = backend_msg
+            .into_send_backend_message_request(did)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         self.client
-            .send_custom_message(did, &data_b64)
+            .send_backend_message(&rpc_req)
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
@@ -195,7 +203,9 @@ impl Client {
     /// Registers a new service with the given name.
     pub async fn register_service(&self, name: &str) -> Output<()> {
         self.client
-            .register_service(name)
+            .register_service(&RegisterServiceRequest {
+                name: name.to_string(),
+            })
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         ClientOutput::ok("Done.".into(), ())
@@ -205,9 +215,12 @@ impl Client {
     pub async fn lookup_service(&self, name: &str) -> Output<()> {
         let dids = self
             .client
-            .lookup_service(name)
+            .lookup_service(&LookupServiceRequest {
+                name: name.to_string(),
+            })
             .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+            .map_err(|e| anyhow::anyhow!("{}", e))?
+            .dids;
 
         ClientOutput::ok(dids.join("\n"), ())
     }
@@ -215,7 +228,10 @@ impl Client {
     /// Publishes a message to the specified topic.
     pub async fn publish_message_to_topic(&self, topic: &str, data: &str) -> Output<()> {
         self.client
-            .publish_message_to_topic(topic, data)
+            .publish_message_to_topic(&PublishMessageToTopicRequest {
+                topic: topic.to_string(),
+                data: data.to_string(),
+            })
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         ClientOutput::ok("Done.".into(), ())
@@ -229,29 +245,32 @@ impl Client {
     where
         'a: 'b,
     {
-        let mut index = 0;
+        let mut skip = 0usize;
 
         stream! {
-        loop {
-            let timeout = Delay::new(Duration::from_secs(5)).fuse();
-            pin_mut!(timeout);
+            loop {
+                let timeout = Delay::new(Duration::from_secs(5)).fuse();
+                pin_mut!(timeout);
 
-            select! {
-                _ = timeout => {
-                    let result = self
-                        .client
-                        .fetch_topic_messages(topic.as_str(), index)
-                        .await;
+                select! {
+                    _ = timeout => {
+                        let result = self
+                            .client
+                            .fetch_topic_messages(&FetchTopicMessagesRequest {
+                                topic: topic.clone(),
+                                skip: skip as i64,
+                            })
+                            .await;
 
-                    if let Err(e) = result {
-                        tracing::error!("Failed to fetch messages of topic: {}, {}", topic, e);
-                        continue;
-                    }
-                    let messages = result.unwrap();
-                    for msg in messages.iter().cloned() {
-                        yield msg
-                    }
-                    index += messages.len();
+                        if let Err(e) = result {
+                            tracing::error!("Failed to fetch messages of topic: {}, {}", topic, e);
+                            continue;
+                        }
+                        let messages = result.unwrap().data;
+                        for msg in messages.iter().cloned() {
+                            yield msg
+                        }
+                        skip += messages.len();
                     }
                 }
             }
@@ -259,17 +278,19 @@ impl Client {
     }
 
     /// Query for swarm inspect info.
-    pub async fn inspect(&self) -> Output<SwarmInspect> {
-        let info = self
+    pub async fn inspect(&self) -> Output<SwarmInfo> {
+        let swarm_info = self
             .client
-            .inspect()
+            .node_info(&NodeInfoRequest {})
             .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+            .map_err(|e| anyhow::anyhow!("{}", e))?
+            .swarm
+            .unwrap();
 
         let display =
-            serde_json::to_string_pretty(&info.swarm).map_err(|e| anyhow::anyhow!("{}", e))?;
+            serde_json::to_string_pretty(&swarm_info).map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        ClientOutput::ok(display, info.swarm)
+        ClientOutput::ok(display, swarm_info)
     }
 }
 

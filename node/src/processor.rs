@@ -7,8 +7,7 @@ use std::sync::Arc;
 
 use futures::future::Join;
 use futures::Future;
-use rings_core::message::MessagePayload;
-use rings_core::swarm::impls::ConnectionHandshake;
+use rings_rpc::protos::rings_node::*;
 use rings_transport::core::transport::ConnectionInterface;
 use serde::Deserialize;
 use serde::Serialize;
@@ -18,12 +17,9 @@ use crate::consts::DATA_REDUNDANT;
 use crate::error::Error;
 use crate::error::Result;
 use crate::measure::PeriodicMeasure;
-use crate::prelude::jsonrpc_client::SimpleClient;
-use crate::prelude::jsonrpc_core;
 use crate::prelude::rings_core::dht::Did;
 use crate::prelude::rings_core::dht::Stabilization;
 use crate::prelude::rings_core::dht::TStabilize;
-use crate::prelude::rings_core::message::Decoder;
 use crate::prelude::rings_core::message::Encoded;
 use crate::prelude::rings_core::message::Encoder;
 use crate::prelude::rings_core::message::Message;
@@ -33,8 +29,6 @@ use crate::prelude::rings_core::storage::PersistenceStorage;
 use crate::prelude::rings_core::swarm::MeasureImpl;
 use crate::prelude::rings_core::swarm::Swarm;
 use crate::prelude::rings_core::swarm::SwarmBuilder;
-use crate::prelude::rings_rpc::method;
-use crate::prelude::rings_rpc::protos::rings_node::NodeInfoResponse;
 use crate::prelude::vnode;
 use crate::prelude::wasm_export;
 use crate::prelude::ChordStorageInterface;
@@ -289,59 +283,6 @@ impl Processor {
     /// Get current did
     pub fn did(&self) -> Did {
         self.swarm.did()
-    }
-
-    /// Connect peer with remote rings-node jsonrpc server.
-    /// * peer_url: the remote rings-node jsonrpc server url.
-    pub async fn connect_peer_via_http(&self, peer_url: &str) -> Result<Did> {
-        // request remote offer and sand answer to remote
-        tracing::debug!("connect_peer_via_http: {}", peer_url);
-
-        let client = SimpleClient::new(peer_url, None);
-
-        let did_resp = client
-            .call_method(method::Method::NodeDid.as_str(), jsonrpc_core::Params::None)
-            .await
-            .map_err(|e| Error::RemoteRpcError(e.to_string()))?;
-        let did = serde_json::from_value::<String>(did_resp.clone())
-            .map_err(|_| Error::InvalidDid(did_resp.clone().to_string()))?
-            .parse()
-            .map_err(|_| Error::InvalidDid(did_resp.clone().to_string()))?;
-
-        let (_, offer) = self
-            .swarm
-            .create_offer(did)
-            .await
-            .map_err(Error::CreateOffer)?;
-        let encoded_offer = offer.encode().map_err(|_| Error::EncodeError)?;
-        tracing::debug!("sending encoded offer {:?} to {}", encoded_offer, peer_url);
-        let req: serde_json::Value = serde_json::to_value(encoded_offer)
-            .map_err(Error::SerdeJsonError)
-            .map_err(Error::from)?;
-
-        let resp = client
-            .call_method(
-                method::Method::AnswerOffer.as_str(),
-                jsonrpc_core::Params::Array(vec![req]),
-            )
-            .await
-            .map_err(|e| Error::RemoteRpcError(e.to_string()))?;
-
-        let answer_payload_str: String =
-            serde_json::from_value(resp).map_err(|_| Error::EncodeError)?;
-
-        let encoded_answer: Encoded = <Encoded as From<&str>>::from(&answer_payload_str);
-
-        let answer_payload =
-            MessagePayload::from_encoded(&encoded_answer).map_err(|_| Error::DecodeError)?;
-
-        let (did, _) = self
-            .swarm
-            .accept_answer(answer_payload)
-            .await
-            .map_err(Error::AcceptAnswer)?;
-
-        Ok(did)
     }
 
     /// Connect peer with web3 did.

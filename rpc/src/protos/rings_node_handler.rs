@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use jsonrpc_core::types::error::Error;
+use jsonrpc_core::types::error::ErrorCode;
+use jsonrpc_core::Result;
 
 use super::rings_node::*;
 use crate::method::Method;
-use crate::prelude::jsonrpc_core::types::error::Error;
-use crate::prelude::jsonrpc_core::types::error::ErrorCode;
-use crate::prelude::jsonrpc_core::Result;
 
 /// Used for processor to match rpc request and response.
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
@@ -44,7 +44,7 @@ impl InternalRpcHandler {
             + HandleRpc<SendCustomMessageRequest, SendCustomMessageResponse>
             + HandleRpc<SendBackendMessageRequest, SendBackendMessageResponse>
             + HandleRpc<PublishMessageToTopicRequest, PublishMessageToTopicResponse>
-            + HandleRpc<FetchMessagesOfTopicRequest, FetchMessagesOfTopicResponse>
+            + HandleRpc<FetchTopicMessagesRequest, FetchTopicMessagesResponse>
             + HandleRpc<RegisterServiceRequest, RegisterServiceResponse>
             + HandleRpc<LookupServiceRequest, LookupServiceResponse>
             + HandleRpc<NodeInfoRequest, NodeInfoResponse>
@@ -123,8 +123,8 @@ impl InternalRpcHandler {
                 let resp = processor.handle_rpc(req).await?;
                 serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))
             }
-            Method::FetchMessagesOfTopic => {
-                let req = serde_json::from_value::<FetchMessagesOfTopicRequest>(params)
+            Method::FetchTopicMessages => {
+                let req = serde_json::from_value::<FetchTopicMessagesRequest>(params)
                     .map_err(|e| Error::invalid_params(e.to_string()))?;
                 let resp = processor.handle_rpc(req).await?;
                 serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))
