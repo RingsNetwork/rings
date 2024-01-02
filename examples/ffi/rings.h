@@ -77,14 +77,6 @@ void init_logging(enum LogLevel level);
 void listen(const struct ProviderPtr *provider_ptr);
 
 /**
- * Start message listening and stabilization
- * This function will launch listener in a new thread
- * # Safety
- * Listen function accept a ProviderPtr and will unsafety cast it into Arc based Provider
- */
-void async_listen(const struct ProviderPtr *provider_ptr);
-
-/**
  * Request internal rpc api
  * # Safety
  *
