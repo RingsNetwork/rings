@@ -161,25 +161,17 @@ impl From<&ProviderWithRuntime> for ProviderPtr {
 }
 
 /// Start message listening and stabilization
+/// This function will launch listener in a new thread
 /// # Safety
 /// Listen function accept a ProviderPtr and will unsafety cast it into Arc based Provider
 #[no_mangle]
 pub extern "C" fn listen(provider_ptr: *const ProviderPtr) {
     let provider: ProviderWithRuntime =
         ProviderWithRuntime::from_raw(provider_ptr).expect("Provider ptr is invalid");
-    executor::block_on(provider.provider.processor.listen());
-}
-
-/// Start message listening and stabilization
-/// This function will launch listener in a new thread
-/// # Safety
-/// Listen function accept a ProviderPtr and will unsafety cast it into Arc based Provider
-#[no_mangle]
-pub extern "C" fn async_listen(provider_ptr: *const ProviderPtr) {
-    let provider: ProviderWithRuntime =
-        ProviderWithRuntime::from_raw(provider_ptr).expect("Provider ptr is invalid");
     std::thread::spawn(move || {
-        executor::block_on(provider.provider.processor.listen());
+        provider.runtime.block_on(async {
+            provider.provider.processor.listen().await;
+        })
     });
 }
 

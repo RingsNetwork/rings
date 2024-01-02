@@ -66,7 +66,7 @@ def create_provider(acc,
         gen_signer(acc),
         ffi.addressof(callback),
     )
-    rings.async_listen(ffi.addressof(provider))
+    rings.listen(ffi.addressof(provider))
     return provider
 
 
