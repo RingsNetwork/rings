@@ -196,7 +196,7 @@ impl Provider {
         })
     }
 
-    /// connect peer with remote jsonrpc-server url
+    /// connect peer with remote jsonrpc server url
     pub fn connect_peer_via_http(&self, remote_url: String) -> js_sys::Promise {
         log::debug!("remote_url: {}", remote_url);
         self.request(
