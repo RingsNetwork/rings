@@ -118,7 +118,7 @@ jobs:
         run: cargo clippy -p rings-node --features ffi
 
       - name: Build
-        run: cargo build -p rings-node --features ffi && ls target/include && ls target/debug
+        run: cargo build -p rings-node --features ffi
 
       - uses: actions/setup-python@v4
         with:
