@@ -42,12 +42,9 @@ impl HandleRpc<ConnectPeerViaHttpRequest, ConnectPeerViaHttpResponse> for Proces
             .did;
 
         let offer = self.handle_rpc(CreateOfferRequest { did }).await?.offer;
-        let encoded_offer = offer.encode().map_err(|_| ServerError::EncodeError)?;
 
         let answer = client
-            .answer_offer(&AnswerOfferRequest {
-                offer: encoded_offer.to_string(),
-            })
+            .answer_offer(&AnswerOfferRequest { offer })
             .await
             .map_err(|e| ServerError::RemoteRpcError(e.to_string()))?
             .answer;
