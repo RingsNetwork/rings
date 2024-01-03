@@ -407,6 +407,7 @@ impl Processor {
 mod test {
     use futures::lock::Mutex;
     use rings_core::swarm::callback::SwarmCallback;
+    use rings_core::swarm::impls::ConnectionHandshake;
     use rings_transport::core::transport::WebrtcConnectionState;
 
     use super::*;
