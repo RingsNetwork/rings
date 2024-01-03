@@ -14,6 +14,7 @@
 pub mod extension;
 pub mod service;
 
+use std::result::Result;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -26,7 +27,7 @@ use crate::backend::native::service::ServiceConfig;
 use crate::backend::native::service::ServiceProvider;
 use crate::backend::types::BackendMessage;
 use crate::backend::types::MessageHandler;
-use crate::error::Result;
+use crate::error::Error;
 use crate::provider::Provider;
 
 /// BackendConfig including services config and extension config
@@ -51,14 +52,14 @@ impl MessageHandler<BackendMessage> for BackendBehaviour {
         provider: Arc<Provider>,
         payload: &MessagePayload,
         msg: &BackendMessage,
-    ) -> Result<()> {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         self.handle_backend_message(provider, payload, msg).await
     }
 }
 
 impl BackendBehaviour {
     /// Create a new BackendBehaviour instance with config
-    pub async fn new(config: BackendConfig) -> Result<Self> {
+    pub async fn new(config: BackendConfig) -> Result<Self, Error> {
         Ok(Self {
             server: ServiceProvider::new(config.services),
             extension: Extension::new(&config.extensions).await?,
@@ -79,7 +80,7 @@ impl BackendBehaviour {
         provider: Arc<Provider>,
         payload: &MessagePayload,
         msg: &BackendMessage,
-    ) -> Result<()> {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         match msg {
             BackendMessage::Extension(data) => {
                 self.extension.handle_message(provider, payload, data).await

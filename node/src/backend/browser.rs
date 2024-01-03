@@ -1,5 +1,6 @@
 #![warn(missing_docs)]
 //! BackendBehaviour implementation for browser
+use std::result::Result;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -12,7 +13,7 @@ use wasm_bindgen::JsValue;
 
 use crate::backend::types::BackendMessage;
 use crate::backend::types::MessageHandler;
-use crate::error::Result;
+use crate::error::Error;
 use crate::provider::Provider;
 
 /// BackendBehaviour is a context instance for handling backend message for browser
@@ -41,17 +42,13 @@ impl BackendBehaviour {
             extension_message_handler,
         }
     }
-}
 
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait)]
-impl MessageHandler<BackendMessage> for BackendBehaviour {
-    async fn handle_message(
+    async fn do_handle_message(
         &self,
         provider: Arc<Provider>,
         payload: &MessagePayload,
         msg: &BackendMessage,
-    ) -> Result<()> {
+    ) -> Result<(), Error> {
         let provider = provider.clone().as_ref().clone();
         let ctx = js_value::serialize(&payload)?;
         match msg {
@@ -77,5 +74,20 @@ impl MessageHandler<BackendMessage> for BackendBehaviour {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg_attr(feature = "browser", async_trait(?Send))]
+#[cfg_attr(not(feature = "browser"), async_trait)]
+impl MessageHandler<BackendMessage> for BackendBehaviour {
+    async fn handle_message(
+        &self,
+        provider: Arc<Provider>,
+        payload: &MessagePayload,
+        msg: &BackendMessage,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.do_handle_message(provider, payload, msg)
+            .await
+            .map_err(|e| e.into())
     }
 }

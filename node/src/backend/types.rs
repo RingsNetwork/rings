@@ -10,7 +10,7 @@ use rings_rpc::protos::rings_node::SendBackendMessageRequest;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::error::Result;
+use crate::error::Error;
 use crate::provider::Provider;
 
 /// TunnelId type, use uuid.
@@ -121,7 +121,7 @@ pub trait MessageHandler<T> {
         provider: Arc<Provider>,
         ctx: &MessagePayload,
         data: &T,
-    ) -> Result<()>;
+    ) -> Result<(), Box<dyn std::error::Error>>;
 }
 
 impl From<ServiceMessage> for BackendMessage {
@@ -147,7 +147,7 @@ impl BackendMessage {
     pub fn into_send_backend_message_request(
         self,
         destination_did: impl ToString,
-    ) -> Result<SendBackendMessageRequest> {
+    ) -> Result<SendBackendMessageRequest, Error> {
         Ok(SendBackendMessageRequest {
             destination_did: destination_did.to_string(),
             data: serde_json::to_string(&self)?,

@@ -2,6 +2,7 @@
 //! This module provide basic mechanism.
 
 pub mod types;
+use std::result::Result;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -12,7 +13,6 @@ use rings_core::swarm::callback::SwarmCallback;
 
 use crate::backend::types::BackendMessage;
 use crate::backend::types::MessageHandler;
-use crate::error::Result;
 use crate::provider::Provider;
 
 #[cfg(feature = "browser")]
@@ -45,7 +45,7 @@ impl Backend {
         &self,
         payload: &MessagePayload,
         msg: &BackendMessage,
-    ) -> Result<()> {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let provider = self.provider.clone();
         self.handler.handle_message(provider, payload, msg).await
     }
@@ -54,11 +54,7 @@ impl Backend {
 #[cfg_attr(feature = "browser", async_trait(?Send))]
 #[cfg_attr(not(feature = "browser"), async_trait)]
 impl SwarmCallback for Backend {
-    async fn on_inbound(
-        &self,
-
-        payload: &MessagePayload,
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    async fn on_inbound(&self, payload: &MessagePayload) -> Result<(), Box<dyn std::error::Error>> {
         let data: Message = payload.transaction.data()?;
 
         let Message::CustomMessage(CustomMessage(msg)) = data else {

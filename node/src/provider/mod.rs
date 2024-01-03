@@ -127,7 +127,8 @@ impl Provider {
         Self::new_provider_with_storage_internal(config, "rings-node".to_string()).await
     }
 
-    pub(crate) fn set_swarm_callback(&self, callback: SharedSwarmCallback) -> Result<()> {
+    /// Set callback for swarm.
+    pub fn set_swarm_callback(&self, callback: SharedSwarmCallback) -> Result<()> {
         self.processor
             .swarm
             .set_callback(callback)
@@ -162,5 +163,10 @@ impl Provider {
     {
         let params = serde_json::to_value(params)?;
         self.request_internal(method.to_string(), params).await
+    }
+
+    /// Listen messages
+    pub async fn listen(&self) {
+        self.processor.listen().await;
     }
 }

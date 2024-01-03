@@ -5,8 +5,6 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
-use futures::future::Join;
-use futures::Future;
 use rings_rpc::protos::rings_node::*;
 use rings_transport::core::transport::ConnectionInterface;
 use serde::Deserialize;
@@ -268,14 +266,14 @@ impl ProcessorBuilder {
 
 impl Processor {
     /// Listen processor message
-    pub fn listen(&self) -> Join<impl Future, impl Future> {
+    pub async fn listen(&self) {
         let swarm = self.swarm.clone();
         let message_listener = async { swarm.listen().await };
 
         let stb = self.stabilization.clone();
         let stabilization = async { stb.wait().await };
 
-        futures::future::join(message_listener, stabilization)
+        futures::future::join(message_listener, stabilization).await;
     }
 }
 
