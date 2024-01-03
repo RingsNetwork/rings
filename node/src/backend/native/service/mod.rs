@@ -70,16 +70,14 @@ impl ServiceProvider {
             tunnels: DashMap::new(),
         }
     }
+
     fn service(&self, name: &str) -> Option<&ServiceConfig> {
         self.services
             .iter()
             .find(|x| x.name.eq_ignore_ascii_case(name))
     }
-}
 
-#[async_trait::async_trait]
-impl MessageHandler<ServiceMessage> for ServiceProvider {
-    async fn handle_message(
+    async fn do_handle_message(
         &self,
         provider: Arc<Provider>,
         ctx: &MessagePayload,
@@ -138,6 +136,20 @@ impl MessageHandler<ServiceMessage> for ServiceProvider {
                 Ok(())
             }
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl MessageHandler<ServiceMessage> for ServiceProvider {
+    async fn handle_message(
+        &self,
+        provider: Arc<Provider>,
+        ctx: &MessagePayload,
+        msg: &ServiceMessage,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        self.do_handle_message(provider, ctx, msg)
+            .await
+            .map_err(|e| e.into())
     }
 }
 

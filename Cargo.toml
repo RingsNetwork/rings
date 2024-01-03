@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "transport", "node", "rpc", "derive"]
+members = ["core", "transport", "node", "rpc", "derive", "examples/native"]
 
 [workspace.package]
 version = "0.5.2"
@@ -10,10 +10,12 @@ authors = ["RND <dev@ringsnetwork.io>"]
 repository = "https://github.com/RingsNetwork/rings-node"
 
 [workspace.dependencies]
+async-trait = "0.1.77"
 js-sys = "0.3.64"
 jsonrpc-core = "18.0.0"
 rings-core = { path = "core", default-features = false }
 rings-derive = { path = "derive", default-features = false }
+rings-node = { path = "node" }
 rings-rpc = { path = "rpc", default-features = false }
 rings-transport = { path = "transport" }
 serde-wasm-bindgen = "0.6.1"

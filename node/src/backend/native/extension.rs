@@ -149,7 +149,7 @@ impl MessageHandler<bytes::Bytes> for Extension {
         provider: Arc<Provider>,
         _ctx: &MessagePayload,
         data: &bytes::Bytes,
-    ) -> Result<()> {
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         for h in &self.handlers {
             h.call(data.clone(), provider.clone())?;
         }
