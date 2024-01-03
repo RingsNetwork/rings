@@ -1693,7 +1693,6 @@ dependencies = [
  "futures-core",
  "futures-task",
  "futures-util",
- "num_cpus",
 ]
 
 [[package]]
@@ -2323,21 +2322,6 @@ dependencies = [
  "serde",
  "serde_derive",
  "serde_json",
-]
-
-[[package]]
-name = "jsonrpc-pubsub"
-version = "18.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "240f87695e6c6f62fb37f05c02c04953cf68d6408b8c1c89de85c7a0125b1011"
-dependencies = [
- "futures",
- "jsonrpc-core",
- "lazy_static",
- "log",
- "parking_lot 0.11.2",
- "rand 0.7.3",
- "serde",
 ]
 
 [[package]]
@@ -3643,6 +3627,7 @@ dependencies = [
  "http",
  "hyper",
  "js-sys",
+ "jsonrpc-core",
  "lazy_static",
  "log",
  "opentelemetry",
@@ -3685,7 +3670,6 @@ dependencies = [
  "bytes",
  "http",
  "jsonrpc-core",
- "jsonrpc-pubsub",
  "prost 0.12.3",
  "prost-build-config",
  "reqwest",

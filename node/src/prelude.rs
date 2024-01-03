@@ -2,9 +2,6 @@
 /// Use this when you want to quickly bootstrap a new project.
 pub use rings_core;
 pub use rings_derive::wasm_export;
-pub use rings_rpc;
-pub use rings_rpc::jsonrpc_client;
-pub use rings_rpc::prelude::jsonrpc_core;
 
 pub use self::rings_core::chunk;
 pub use self::rings_core::dht::PeerRing;

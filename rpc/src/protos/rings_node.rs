@@ -1,6 +1,15 @@
 #[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PeerInfo {
+    #[prost(string, tag = "1")]
+    pub did: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub state: ::prost::alloc::string::String,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ConnectPeerViaHttpRequest {
     #[prost(string, tag = "1")]
     pub url: ::prost::alloc::string::String,
@@ -9,8 +18,8 @@ pub struct ConnectPeerViaHttpRequest {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ConnectPeerViaHttpResponse {
-    #[prost(string, tag = "1")]
-    pub did: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "1")]
+    pub peer: ::core::option::Option<PeerInfo>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -43,15 +52,6 @@ pub struct ConnectWithSeedRequest {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ConnectWithSeedResponse {}
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct PeerInfo {
-    #[prost(string, tag = "1")]
-    pub did: ::prost::alloc::string::String,
-    #[prost(string, tag = "2")]
-    pub state: ::prost::alloc::string::String,
-}
 #[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -158,7 +158,7 @@ pub struct PublishMessageToTopicResponse {}
 #[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct FetchMessagesOfTopicRequest {
+pub struct FetchTopicMessagesRequest {
     #[prost(string, tag = "1")]
     pub topic: ::prost::alloc::string::String,
     #[prost(int64, tag = "2")]
@@ -167,7 +167,7 @@ pub struct FetchMessagesOfTopicRequest {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct FetchMessagesOfTopicResponse {
+pub struct FetchTopicMessagesResponse {
     #[prost(string, repeated, tag = "1")]
     pub data: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }

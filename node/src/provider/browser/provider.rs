@@ -16,6 +16,7 @@ use rings_core::prelude::vnode::VirtualNode;
 use rings_core::utils::js_utils;
 use rings_core::utils::js_value;
 use rings_derive::wasm_export;
+use rings_rpc::protos::rings_node::*;
 use rings_transport::core::transport::ConnectionInterface;
 use rings_transport::core::transport::WebrtcConnectionState;
 use serde::Deserialize;
@@ -195,17 +196,13 @@ impl Provider {
         })
     }
 
-    /// connect peer with remote jsonrpc-server url
+    /// connect peer with remote jsonrpc server url
     pub fn connect_peer_via_http(&self, remote_url: String) -> js_sys::Promise {
         log::debug!("remote_url: {}", remote_url);
-        let p = self.processor.clone();
-        future_to_promise(async move {
-            let did = p
-                .connect_peer_via_http(remote_url.as_str())
-                .await
-                .map_err(JsError::from)?;
-            Ok(JsValue::from_str(&did.to_string()))
-        })
+        self.request(
+            "ConnectPeerViaHttp".to_string(),
+            js_value::serialize(&ConnectPeerViaHttpRequest { url: remote_url }).unwrap(),
+        )
     }
 
     /// connect peer with web3 address, without waiting for connection channel connected

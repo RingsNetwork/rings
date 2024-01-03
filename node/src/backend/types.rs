@@ -5,7 +5,6 @@ use std::io::ErrorKind as IOErrorKind;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use rings_core::dht::Did;
 use rings_core::message::MessagePayload;
 use rings_rpc::protos::rings_node::SendBackendMessageRequest;
 use serde::Deserialize;
@@ -145,10 +144,13 @@ impl From<IOErrorKind> for TunnelDefeat {
 
 impl BackendMessage {
     /// Convert to SendBackendMessageRequest
-    pub fn to_request_params(&self, destination_did: Did) -> Result<SendBackendMessageRequest> {
+    pub fn into_send_backend_message_request(
+        self,
+        destination_did: impl ToString,
+    ) -> Result<SendBackendMessageRequest> {
         Ok(SendBackendMessageRequest {
             destination_did: destination_did.to_string(),
-            data: serde_json::to_string(self)?,
+            data: serde_json::to_string(&self)?,
         })
     }
 }

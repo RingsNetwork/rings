@@ -142,7 +142,9 @@ impl TunnelListener {
                         };
 
                         let backend_message: BackendMessage = msg.into();
-                        let params = backend_message.to_request_params(self.peer_did).unwrap();
+                        let params = backend_message
+                            .into_send_backend_message_request(self.peer_did)
+                            .unwrap();
                         if let Err(e) = provider.request(Method::SendBackendMessage, params).await {
                             tracing::error!("Send TcpPackage message failed: {e:?}");
                             break TunnelDefeat::WebrtcDatachannelSendFailed;
@@ -176,7 +178,7 @@ impl TunnelListener {
                 };
 
                 let backend_message: BackendMessage = msg.into();
-                let params = backend_message.to_request_params(self.peer_did).unwrap();
+                let params = backend_message.into_send_backend_message_request(self.peer_did).unwrap();
                 if let Err(e) = provider.request(Method::SendBackendMessage, params).await {
                     tracing::error!("Send TcpClose message failed: {e:?}");
                 }
@@ -189,7 +191,7 @@ impl TunnelListener {
                 };
 
                 let backend_message: BackendMessage = msg.into();
-                let params = backend_message.to_request_params(self.peer_did).unwrap();
+                let params = backend_message.into_send_backend_message_request(self.peer_did).unwrap();
                 let _ = provider.request(Method::SendBackendMessage, params).await;
             }
         }

@@ -97,7 +97,7 @@ impl MessageHandler<ServiceMessage> for ServiceProvider {
                             reason: e,
                         };
                         let backend_message: BackendMessage = msg.into();
-                        let params = backend_message.to_request_params(peer_did)?;
+                        let params = backend_message.into_send_backend_message_request(peer_did)?;
                         provider.request(Method::SendBackendMessage, params).await?;
                         Err(Error::TunnelError(e))
                     }
@@ -128,7 +128,7 @@ impl MessageHandler<ServiceMessage> for ServiceProvider {
                 let service = self.service(&req.service).ok_or(Error::InvalidService)?;
                 let resp = handle_http_request(service.addr, req).await?;
                 let backend_message: BackendMessage = ServiceMessage::HttpResponse(resp).into();
-                let params = backend_message.to_request_params(peer_did)?;
+                let params = backend_message.into_send_backend_message_request(peer_did)?;
                 let resp = provider.request(Method::SendBackendMessage, params).await?;
                 tracing::info!("done calling provider {:?}", resp);
                 Ok(())

@@ -12,7 +12,7 @@ pub enum Error {
     #[error("Invalid method.")]
     InvalidMethod,
     #[error("Rpc error: {0}")]
-    RpcError(crate::jsonrpc_client::client::RpcError),
+    RpcError(crate::jsonrpc::RpcError),
     #[error("Invalid signature.")]
     InvalidSignature,
     #[error("Invalid headers.")]

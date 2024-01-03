@@ -1,4 +1,4 @@
-//! A JSONRPC `method` enum.
+//! Rpc methods.
 #![warn(missing_docs)]
 
 use super::error::Error;
@@ -31,7 +31,7 @@ pub enum Method {
     /// Append data to topic
     PublishMessageToTopic,
     /// Fetch data of topic
-    FetchMessagesOfTopic,
+    FetchTopicMessages,
     /// Register service
     RegisterService,
     /// Lookup service
@@ -57,7 +57,7 @@ impl Method {
             Method::SendCustomMessage => "sendCustomMessage",
             Method::SendBackendMessage => "sendBackendMessage",
             Method::PublishMessageToTopic => "publishMessageToTopic",
-            Method::FetchMessagesOfTopic => "fetchMessagesOfTopic",
+            Method::FetchTopicMessages => "fetchTopicMessages",
             Method::RegisterService => "registerService",
             Method::LookupService => "lookupService",
             Method::NodeInfo => "nodeInfo",
@@ -88,7 +88,7 @@ impl TryFrom<&str> for Method {
             "sendBackendMessage" => Self::SendBackendMessage,
             "sendCustomMessage" => Self::SendCustomMessage,
             "publishMessageToTopic" => Method::PublishMessageToTopic,
-            "fetchMessagesOfTopic" => Method::FetchMessagesOfTopic,
+            "fetchTopicMessages" => Method::FetchTopicMessages,
             "registerService" => Method::RegisterService,
             "lookupService" => Method::LookupService,
             "nodeInfo" => Method::NodeInfo,

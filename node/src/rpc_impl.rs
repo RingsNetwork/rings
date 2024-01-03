@@ -1,28 +1,30 @@
 #![warn(missing_docs)]
-//! JSON-RPC handler for both feature=browser and feature=node.
-//! We support running the JSON-RPC server in either native or browser environment.
+
+//! RPC handler for both feature=browser and feature=node.
+//! We support handling the RPC request in either native or browser environment by `InternalRpcHandler` and `ExternalRpcHandler` from rings_rpc crate.
 //! For the native environment, we use jsonrpc_core to handle requests.
-//! For the browser environment, we utilize a Simple MessageHandler to process the requests.
+//! For the browser environment, we use `InternalRpcHandler` to process the requests.
+
 use std::collections::HashSet;
 use std::str::FromStr;
 
 use async_trait::async_trait;
 use futures::future::join_all;
+use jsonrpc_core::types::error::Error;
+use jsonrpc_core::types::error::ErrorCode;
+use jsonrpc_core::Result;
+use rings_core::dht::Did;
+use rings_core::message::Decoder;
+use rings_core::message::Encoded;
+use rings_core::message::Encoder;
+use rings_core::message::MessagePayload;
+use rings_core::prelude::vnode::VirtualNode;
 use rings_core::swarm::impls::ConnectionHandshake;
 use rings_rpc::protos::rings_node::*;
 use rings_rpc::protos::rings_node_handler::HandleRpc;
 use rings_transport::core::transport::ConnectionInterface;
 
 use crate::error::Error as ServerError;
-use crate::prelude::jsonrpc_core::types::error::Error;
-use crate::prelude::jsonrpc_core::types::error::ErrorCode;
-use crate::prelude::jsonrpc_core::Result;
-use crate::prelude::rings_core::dht::Did;
-use crate::prelude::rings_core::message::Decoder;
-use crate::prelude::rings_core::message::Encoded;
-use crate::prelude::rings_core::message::Encoder;
-use crate::prelude::rings_core::message::MessagePayload;
-use crate::prelude::rings_core::prelude::vnode::VirtualNode;
 use crate::processor::Processor;
 use crate::seed::Seed;
 
@@ -33,14 +35,25 @@ impl HandleRpc<ConnectPeerViaHttpRequest, ConnectPeerViaHttpResponse> for Proces
         &self,
         req: ConnectPeerViaHttpRequest,
     ) -> Result<ConnectPeerViaHttpResponse> {
-        let did = self
-            .connect_peer_via_http(&req.url)
-            .await
-            .map_err(Error::from)?;
+        let client = rings_rpc::jsonrpc::Client::new(&req.url);
 
-        Ok(ConnectPeerViaHttpResponse {
-            did: did.to_string(),
-        })
+        let did = client
+            .node_did(&NodeDidRequest {})
+            .await
+            .map_err(|e| ServerError::RemoteRpcError(e.to_string()))?
+            .did;
+
+        let offer = self.handle_rpc(CreateOfferRequest { did }).await?.offer;
+
+        let answer = client
+            .answer_offer(&AnswerOfferRequest { offer })
+            .await
+            .map_err(|e| ServerError::RemoteRpcError(e.to_string()))?
+            .answer;
+
+        let peer = self.handle_rpc(AcceptAnswerRequest { answer }).await?.peer;
+
+        Ok(ConnectPeerViaHttpResponse { peer })
     }
 }
 
@@ -70,7 +83,11 @@ impl HandleRpc<ConnectWithSeedRequest, ConnectWithSeedResponse> for Processor {
             .peers
             .iter()
             .filter(|&x| !connected.contains(&x.did))
-            .map(|x| self.connect_peer_via_http(&x.url));
+            .map(|x| {
+                self.handle_rpc(ConnectPeerViaHttpRequest {
+                    url: x.url.to_string(),
+                })
+            });
 
         let results = join_all(tasks).await;
 
@@ -151,7 +168,7 @@ impl HandleRpc<AcceptAnswerRequest, AcceptAnswerResponse> for Processor {
         if req.answer.is_empty() {
             return Err(Error::invalid_params("Answer is empty"));
         }
-        let encoded: Encoded = <Encoded as From<String>>::from(req.answer);
+        let encoded = Encoded::from(req.answer);
 
         let answer_payload =
             MessagePayload::from_encoded(&encoded).map_err(|_| ServerError::DecodeError)?;
@@ -223,11 +240,11 @@ impl HandleRpc<PublishMessageToTopicRequest, PublishMessageToTopicResponse> for 
 
 #[cfg_attr(feature = "browser", async_trait(?Send))]
 #[cfg_attr(not(feature = "browser"), async_trait)]
-impl HandleRpc<FetchMessagesOfTopicRequest, FetchMessagesOfTopicResponse> for Processor {
+impl HandleRpc<FetchTopicMessagesRequest, FetchTopicMessagesResponse> for Processor {
     async fn handle_rpc(
         &self,
-        req: FetchMessagesOfTopicRequest,
-    ) -> Result<FetchMessagesOfTopicResponse> {
+        req: FetchTopicMessagesRequest,
+    ) -> Result<FetchTopicMessagesResponse> {
         let vid = VirtualNode::gen_did(&req.topic)
             .map_err(|_| Error::invalid_params("Failed to get id of topic"))?;
 
@@ -235,7 +252,7 @@ impl HandleRpc<FetchMessagesOfTopicRequest, FetchMessagesOfTopicResponse> for Pr
         let result = self.storage_check_cache(vid).await;
 
         let Some(vnode) = result else {
-            return Ok(FetchMessagesOfTopicResponse { data: vec![] });
+            return Ok(FetchTopicMessagesResponse { data: vec![] });
         };
 
         let data = vnode
@@ -246,7 +263,7 @@ impl HandleRpc<FetchMessagesOfTopicRequest, FetchMessagesOfTopicResponse> for Pr
             .filter_map(|v| v.ok())
             .collect::<Vec<String>>();
 
-        Ok(FetchMessagesOfTopicResponse { data })
+        Ok(FetchTopicMessagesResponse { data })
     }
 }
 

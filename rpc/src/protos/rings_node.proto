@@ -1,12 +1,17 @@
 syntax = "proto3";
 package rings_node;
 
+message PeerInfo {
+    string did = 1;
+    string state = 2;
+}
+
 message ConnectPeerViaHttpRequest {
     string url = 1;
 }
 
 message ConnectPeerViaHttpResponse {
-    string did = 1;
+    PeerInfo peer = 1;
 }
 
 message ConnectWithDidRequest {
@@ -25,11 +30,6 @@ message ConnectWithSeedRequest {
 }
 
 message ConnectWithSeedResponse {}
-
-message PeerInfo {
-    string did = 1;
-    string state = 2;
-}
 
 message ListPeersRequest {}
 
@@ -88,12 +88,12 @@ message PublishMessageToTopicRequest {
 
 message PublishMessageToTopicResponse {}
 
-message FetchMessagesOfTopicRequest {
+message FetchTopicMessagesRequest {
     string topic = 1;
     int64 skip = 2;
 }
 
-message FetchMessagesOfTopicResponse {
+message FetchTopicMessagesResponse {
     repeated string data = 1;
 }
 
@@ -184,7 +184,7 @@ service InternalService {
     // Append data to topic
     rpc PublishMessageToTopic(PublishMessageToTopicRequest) returns (PublishMessageToTopicResponse);
     // Fetch data of topic
-    rpc FetchMessagesOfTopic(FetchMessagesOfTopicRequest) returns (FetchMessagesOfTopicResponse);
+    rpc FetchTopicMessages(FetchTopicMessagesRequest) returns (FetchTopicMessagesResponse);
     // Register service
     rpc RegisterService(RegisterServiceRequest) returns (RegisterServiceResponse);
     // Lookup service
