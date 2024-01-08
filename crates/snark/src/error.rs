@@ -11,5 +11,5 @@ pub enum Error {
     HttpRequestError(#[from] reqwest::Error),
     /// Error on load witness at path
     #[error("Error on load witness calculator at path {0}")]
-    WASMFailedToLoad(String)
+    WASMFailedToLoad(String),
 }

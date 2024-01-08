@@ -1,16 +1,12 @@
 //! Recursive SNARK implementation
-use circom_scotia::r1cs::R1CS;
-use ff::PrimeField;
-use crate::r1cs::TyWitness;
-use nova_snark::traits::Group;
-use nova_snark::PublicParams;
-use nova_snark::provider::{mlkzg::Bn256EngineKZG, GrumpkinEngine};
-use nova_snark::traits::circuit::StepCircuit;
 use bellpepper_core::num::AllocatedNum;
 use bellpepper_core::ConstraintSystem;
-use bellpepper_core::SynthesisError;
 use bellpepper_core::LinearCombination;
-
+use bellpepper_core::SynthesisError;
+use circom_scotia::r1cs::R1CS;
+use ff::PrimeField;
+use nova_snark::traits::circuit::StepCircuit;
+use crate::r1cs::TyWitness;
 
 /// Input of witness
 pub type TyInput<F> = (String, Vec<F>);
@@ -19,18 +15,18 @@ pub type TySanityCheck = bool;
 /// Type of witness calculator
 pub type TyWitnessCalculator<F> = fn(Vec<TyInput<F>>, TySanityCheck) -> TyWitness<F>;
 
-/// Circit
+/// Circuit
 #[derive(Clone, Debug)]
 pub struct Circuit<F: PrimeField> {
     r1cs: R1CS<F>,
-    witness: Option<TyWitness<F>>
+    witness: Option<TyWitness<F>>,
 }
 
 /// Reference work: Nota-Scotia :: CircomCircuit
 /// https://github.com/nalinbhardwaj/Nova-Scotia/blob/main/src/circom/circuit.rs
-impl <F: PrimeField> Circuit<F> {
+/// NOTE: assumes exactly half of the (public inputs + outputs) are outputs
+impl<F: PrimeField> Circuit<F> {
     pub fn get_public_outputs(&self) -> Vec<F> {
-        // NOTE: assumes exactly half of the (public inputs + outputs) are outputs
         let pub_output_count = (self.r1cs.num_inputs - 1) / 2;
         let mut z_out: Vec<F> = vec![];
         for i in 1..self.r1cs.num_inputs {
@@ -47,10 +43,10 @@ impl <F: PrimeField> Circuit<F> {
                 z_out.push(f);
             }
         }
-
         z_out
     }
 
+    /// Simple synthesize
     pub fn vanilla_synthesize<CS: ConstraintSystem<F>>(
         &self,
         cs: &mut CS,
@@ -126,7 +122,7 @@ impl <F: PrimeField> Circuit<F> {
     }
 }
 
-
+/// Implement StepCircuit for our Circuit
 /// Reference work: Nota-Scotia :: CircomCircuit
 /// https://github.com/nalinbhardwaj/Nova-Scotia/blob/main/src/circom/circuit.rs
 impl<F: PrimeField> StepCircuit<F> for Circuit<F> {
