@@ -54,7 +54,6 @@ where
         self.table
             .clone()
             .into_iter()
-            .map(|(k, v)| (k, v))
             .collect()
     }
 

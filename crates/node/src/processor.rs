@@ -419,7 +419,7 @@ mod test {
         processor.swarm.create_offer(peer_did).await.unwrap();
         let conn_dids = processor.swarm.get_connection_ids();
         assert_eq!(conn_dids.len(), 1);
-        assert_eq!(conn_dids.get(0).unwrap(), &peer_did);
+        assert_eq!(conn_dids.first().unwrap(), &peer_did);
         tokio::fs::remove_dir_all(path).await.unwrap();
     }
 
