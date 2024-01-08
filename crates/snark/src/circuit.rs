@@ -1,4 +1,5 @@
-//! Recursive SNARK implementation
+//! Implementation of Circuit
+//! ==========================
 use bellpepper_core::num::AllocatedNum;
 use bellpepper_core::ConstraintSystem;
 use bellpepper_core::LinearCombination;
@@ -21,6 +22,13 @@ pub type TyWitnessCalculator<F> = fn(Vec<TyInput<F>>, TySanityCheck) -> TyWitnes
 pub struct Circuit<F: PrimeField> {
     r1cs: R1CS<F>,
     witness: Option<TyWitness<F>>,
+}
+
+impl<F: PrimeField> Circuit<F> {
+    /// Create a new instance
+    pub fn new(r1cs: R1CS<F>, witness: Option<TyWitness<F>>) -> Self {
+        Self { r1cs, witness }
+    }
 }
 
 /// Implement StepCircuit for our Circuit
