@@ -11,7 +11,7 @@ clippy-fix:
 	cargo clippy --fix --allow-dirty --no-deps
 
 test-core-wasm:
-	cd core; wasm-pack test --chrome --features browser_chrome_test --no-default-features
+	cd crates/core; wasm-pack test --chrome --features browser_chrome_test --no-default-features
 
 test-node-browser:
-	cd node; wasm-pack test --chrome --features browser_chrome_test --no-default-features
+	cd crates/node; wasm-pack test --chrome --features browser_chrome_test --no-default-features
