@@ -25,7 +25,7 @@ pub struct Circuit<F: PrimeField> {
 
 /// Implement StepCircuit for our Circuit
 /// Reference work: Nota-Scotia :: CircomCircuit
-/// https://github.com/nalinbhardwaj/Nova-Scotia/blob/main/src/circom/circuit.rs
+/// `<https://github.com/nalinbhardwaj/Nova-Scotia/blob/main/src/circom/circuit.rs>`
 /// NOTE: assumes exactly half of the (public inputs + outputs) are outputs
 impl<F: PrimeField> StepCircuit<F> for Circuit<F> {
     fn arity(&self) -> usize {
