@@ -1,0 +1,206 @@
+syntax = "proto3";
+package rings_node;
+
+message PeerInfo {
+    string did = 1;
+    string state = 2;
+}
+
+message ConnectPeerViaHttpRequest {
+    string url = 1;
+}
+
+message ConnectPeerViaHttpResponse {
+    PeerInfo peer = 1;
+}
+
+message ConnectWithDidRequest {
+    string did = 1;
+}
+
+message ConnectWithDidResponse {}
+
+message SeedPeer {
+    string did = 1;
+    string url = 2;
+}
+
+message ConnectWithSeedRequest {
+    repeated SeedPeer peers = 1;
+}
+
+message ConnectWithSeedResponse {}
+
+message ListPeersRequest {}
+
+message ListPeersResponse {
+    repeated PeerInfo peers = 1;
+}
+
+message CreateOfferRequest {
+    string did = 1;
+}
+
+message CreateOfferResponse {
+    string offer = 1;
+}
+
+message AnswerOfferRequest {
+    string offer = 1;
+}
+
+message AnswerOfferResponse {
+    string answer = 1;
+}
+
+message AcceptAnswerRequest {
+    string answer = 1;
+}
+
+message AcceptAnswerResponse {
+    PeerInfo peer = 1;
+}
+
+message DisconnectRequest {
+    string did = 1;
+}
+
+message DisconnectResponse {}
+
+message SendCustomMessageRequest {
+    string destination_did = 1;
+    string data = 2;
+}
+
+message SendCustomMessageResponse {}
+
+message SendBackendMessageRequest {
+    string destination_did = 1;
+    string data = 2;
+}
+
+message SendBackendMessageResponse {}
+
+message PublishMessageToTopicRequest {
+    string topic = 1;
+    string data = 2;
+}
+
+message PublishMessageToTopicResponse {}
+
+message FetchTopicMessagesRequest {
+    string topic = 1;
+    int64 skip = 2;
+}
+
+message FetchTopicMessagesResponse {
+    repeated string data = 1;
+}
+
+message RegisterServiceRequest {
+    string name = 1;
+}
+
+message RegisterServiceResponse {}
+
+message LookupServiceRequest {
+    string name = 1;
+}
+
+message LookupServiceResponse {
+    repeated string dids = 1;
+}
+
+message NodeInfoRequest {}
+
+message FingerTableRange {
+    optional string did = 1;
+    uint64 start = 2;
+    uint64 end = 3;
+}
+
+message DhtInfo {
+    string did = 1;
+    repeated string successors = 2;
+    optional string predecessor = 3;
+    repeated FingerTableRange finger_table_ranges = 4;
+}
+
+message StorageValue {
+    string did = 1;
+    string kind = 2;
+    repeated string data = 3;
+}
+
+message StorageItem {
+    string key = 1;
+    StorageValue value = 2;
+}
+
+message StorageInfo {
+    repeated StorageItem items = 1;
+}
+
+message SwarmInfo {
+    repeated PeerInfo peers = 1;
+    DhtInfo dht = 2;
+    StorageInfo persistence_storage = 3;
+    StorageInfo cache_storage =4;
+}
+
+message NodeInfoResponse {
+    string version = 1;
+    SwarmInfo swarm = 2;
+}
+
+message NodeDidRequest {}
+
+message NodeDidResponse {
+    string did = 1;
+}
+
+// Rings node internal service
+service InternalService {
+    // Connect peer via remote peer's http endpoint
+    rpc ConnectPeerViaHttp (ConnectPeerViaHttpRequest) returns (ConnectPeerViaHttpResponse);
+    // Connect peer with remote peer's did
+    rpc ConnectWithDid (ConnectWithDidRequest) returns (ConnectWithDidResponse);
+    // Connect peers from a seed file
+    rpc ConnectWithSeed (ConnectWithSeedRequest) returns (ConnectWithSeedResponse);
+    // List all connected peers
+    rpc ListPeers (ListPeersRequest) returns (ListPeersResponse);
+    // Create offer for manually handshake
+    rpc CreateOffer (CreateOfferRequest) returns (CreateOfferResponse);
+    // Answer offer for manually handshake
+    rpc AnswerOffer (AnswerOfferRequest) returns (AnswerOfferResponse);
+    // Accept Answer for manually handshake
+    rpc AcceptAnswer (AcceptAnswerRequest) returns (AcceptAnswerResponse);
+    // Disconnect a peer
+    rpc Disconnect (DisconnectRequest) returns (DisconnectResponse);
+    // Send custom message to peer
+    rpc SendCustomMessage (SendCustomMessageRequest) returns (SendCustomMessageResponse);
+    // Send backend message
+    rpc SendBackendMessage (SendBackendMessageRequest) returns (SendBackendMessageResponse);
+    // Append data to topic
+    rpc PublishMessageToTopic(PublishMessageToTopicRequest) returns (PublishMessageToTopicResponse);
+    // Fetch data of topic
+    rpc FetchTopicMessages(FetchTopicMessagesRequest) returns (FetchTopicMessagesResponse);
+    // Register service
+    rpc RegisterService(RegisterServiceRequest) returns (RegisterServiceResponse);
+    // Lookup service
+    rpc LookupService(LookupServiceRequest) returns (LookupServiceResponse);
+    // Retrieve Node info
+    rpc NodeInfo(NodeInfoRequest) returns (NodeInfoResponse);
+    // Retrieve Node DID
+    rpc NodeDid(NodeDidRequest) returns (NodeDidResponse);
+}
+
+// Rings node external service
+service ExternalService {
+    // Answer offer for manually handshake
+    rpc AnswerOffer (AnswerOfferRequest) returns (AnswerOfferResponse);
+    /// Retrieve Node info
+    rpc NodeInfo(NodeInfoRequest) returns (NodeInfoResponse);
+    /// Retrieve Node DID
+    rpc NodeDid(NodeDidRequest) returns (NodeDidResponse);
+}
