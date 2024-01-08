@@ -36,11 +36,7 @@ async fn test_try_into() {
     let a = "hello".to_string();
     let b = " ".to_string();
     let c = "world".to_string();
-    let p: Vec<JsValue> = vec![
-        a.into(),
-        b.into(),
-        c.into(),
-    ];
+    let p: Vec<JsValue> = vec![a.into(), b.into(), c.into()];
     let array = Array::from_iter(p.into_iter());
     assert_eq!(array.to_vec().len(), 3, "{:?}", array.to_vec());
 }
