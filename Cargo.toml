@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "transport", "node", "rpc", "derive"]
+members = ["core", "transport", "node", "rpc", "derive", "snark"]
 
 [workspace.package]
 version = "0.5.1"
