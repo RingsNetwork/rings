@@ -51,10 +51,7 @@ where
     }
 
     pub fn items(&self) -> Vec<(K, V)> {
-        self.table
-            .clone()
-            .into_iter()
-            .collect()
+        self.table.clone().into_iter().collect()
     }
 
     pub fn remove(&self, addr: &K) -> Option<(K, V)> {
