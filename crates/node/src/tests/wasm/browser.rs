@@ -98,7 +98,7 @@ async fn test_two_provider_connect_and_list() {
 
     let peers = get_peers(&provider1).await;
     assert!(peers.len() == 1, "peers len should be 1");
-    let peer2 = peers.get(0).unwrap();
+    let peer2 = peers.first().unwrap();
 
     console_log!("get peer");
     let peer2: Peer = js_value::deserialize(
