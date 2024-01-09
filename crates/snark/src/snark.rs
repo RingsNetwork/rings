@@ -46,7 +46,7 @@ where
             &*S1::ck_floor(),
             &*S2::ck_floor(),
         );
-        /// default input for secondary on initialize round is [0]
+        // default input for secondary on initialize round is [0]
         let secondary_inputs = [<<E2 as Engine>::Scalar as Field>::ZERO];
         let snark = RecursiveSNARK::new(
             &pp,
