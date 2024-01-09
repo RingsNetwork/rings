@@ -17,6 +17,7 @@ rings-core = { path = "crates/core", default-features = false }
 rings-derive = { path = "crates/derive", default-features = false }
 rings-node = { path = "crates/node" }
 rings-rpc = { path = "crates/rpc", default-features = false }
+rings-snark = { path = "crates/snark", default-features = false }
 rings-transport = { path = "crates/transport" }
 serde-wasm-bindgen = "0.6.1"
 wasm-bindgen = "0.2.87"

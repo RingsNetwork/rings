@@ -19,4 +19,4 @@ test-node-browser:
 # You may need to install circomlib by `npm install circomlib` first
 build-snark-bitcoin:
 # This will generate bitcoin_cpp, thus you may need [https://github.com/nlohmann/json] as deps lib
-	cargo run -p crates/snark -- ./examples/snark/bitcoin/circom/bitcoin.circom --r1cs --sym --wasm --prime vesta -o ./examples/snark/bitcoin/circom
+	cargo run -p snark -- ./examples/snark/bitcoin/circom/bitcoin.circom --r1cs --sym --wasm --prime vesta -o ./examples/snark/bitcoin/circom
