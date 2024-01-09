@@ -1,6 +1,6 @@
 //! Circom compiler
 //! =============
-//! reimport from https://github.com/iden3/circom/blob/master/circom/src/main.rs
+//! reimport from `<https://github.com/iden3/circom/blob/master/circom/src/main.rs>`
 
 use circom::input_user::Input;
 
