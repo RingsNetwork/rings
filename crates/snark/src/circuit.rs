@@ -57,12 +57,12 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
     {
         let mut ret = vec![];
         let mut calc = self.calculator.borrow_mut();
-        for i in 0..inputs.len() {
+        for input in &inputs {
             let witness: TyWitness<F> =
-                calc.calculate_witness::<F>(inputs[i].clone(), sanity_check)?;
+                calc.calculate_witness::<F>(input.clone(), sanity_check)?;
             let circom = Circuit::<F> {
                 r1cs: self.r1cs.clone(),
-                witness: witness,
+                witness,
             };
             ret.push(circom);
         }
@@ -80,18 +80,18 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
         F: PrimeField,
     {
         fn reshape<F: PrimeField>(
-            input: &Vec<(String, Vec<F>)>,
-            output: &Vec<F>,
+            input: &[(String, Vec<F>)],
+            output: &[F],
         ) -> Vec<(String, Vec<F>)> {
             let mut ret = vec![];
-            let mut iter = output.into_iter();
+            let mut iter = output.iter();
 
             for (val, vec) in input.iter() {
                 let size = vec.len();
                 let mut new_vec: Vec<F> = Vec::with_capacity(size);
                 for _ in 0..size {
                     if let Some(item) = iter.next() {
-                        new_vec.push(item.clone());
+                        new_vec.push(*item);
                     } else {
                         panic!("Failed on reshape output")
                     }
@@ -106,14 +106,14 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
         let mut latest_output: Vec<(String, Vec<F>)> = vec![];
 
         for _ in 0..public_input.len() {
-            let witness: TyWitness<F> = if latest_output.len() == 0 {
+            let witness: TyWitness<F> = if latest_output.is_empty() {
                 calc.calculate_witness::<F>(public_input.clone(), sanity_check)?
             } else {
                 calc.calculate_witness::<F>(latest_output.clone(), sanity_check)?
             };
             let circom = Circuit::<F> {
                 r1cs: self.r1cs.clone(),
-                witness: witness,
+                witness,
             };
             latest_output = reshape(&public_input, &circom.get_public_outputs());
             ret.push(circom);
