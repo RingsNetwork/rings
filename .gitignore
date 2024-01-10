@@ -4,6 +4,7 @@ config.yaml
 config*.yaml
 **/*.rs.bk
 **/*.ipynb
+**/*.js
 .ipynb_checkpoints
 # Local environment configuration
 .envrc

@@ -21,6 +21,7 @@ use crate::prelude::nova::PublicParams;
 use crate::prelude::nova::RecursiveSNARK;
 use crate::prelude::nova::VerifierKey;
 
+/// Snark wrapper of nova's implementation
 #[derive(Serialize, Deserialize)]
 pub struct SNARK<E1, E2>
 where
@@ -118,7 +119,8 @@ where
             RelaxedR1CSSNARK<E1, EE1>,
             RelaxedR1CSSNARK<E2, EE2>,
         >,
-    )> where
+    )>
+    where
         EE1: EvaluationEngineTrait<E1>,
         EE2: EvaluationEngineTrait<E2>,
     {
