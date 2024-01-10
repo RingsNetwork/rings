@@ -1,5 +1,5 @@
 [package]
-name = "snark"
+name = "rings-snark"
 description = "IVC SNARK implementation of Rings Network"
 version.workspace = true
 edition.workspace = true
@@ -40,6 +40,12 @@ wasmer = "4.0.0"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasmer = { version = "4.0.0", features = ["std", "js"], default-features = false }
+
+[package.metadata.docs.rs]
+rustdoc-args = [
+    "--html-in-header",
+    "crates/snark/docs/katex.html",
+]
 
 [[bin]]
 name = "circom"

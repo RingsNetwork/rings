@@ -17,11 +17,12 @@ use crate::error::Result;
 use crate::r1cs::TyWitness;
 
 /// Input of witness
-pub type TyInput<F> = (String, Vec<F>);
-/// type of sanity check
-pub type TySanityCheck = bool;
-/// Type of witness calculator
-pub type TyWitnessCalculator<F> = fn(Vec<TyInput<F>>, TySanityCheck) -> TyWitness<F>;
+pub type TyInput<F> = Vec<(String, Vec<F>)>;
+
+/// Flat a witness input to values
+pub fn flat_input<F: PrimeField>(input: TyInput<F>) -> Vec<F> {
+    input.into_iter().flat_map(|(_, v)| v).collect()
+}
 
 /// Circuit
 #[derive(Clone, Debug)]
@@ -38,9 +39,9 @@ pub struct WasmCircuitGenerator<F: PrimeField> {
 
 impl<F: PrimeField> WasmCircuitGenerator<F> {
     /// Crate new instance
-    pub fn new(r1cs: Arc<R1CS<F>>, calculator: WitnessCalculator) -> Self {
+    pub fn new(r1cs: R1CS<F>, calculator: WitnessCalculator) -> Self {
         Self {
-            r1cs,
+            r1cs: Arc::new(r1cs),
             calculator: Rc::new(RefCell::new(calculator)),
         }
     }
@@ -49,7 +50,7 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
     /// Which iterate inputs and generate circuit
     pub fn gen_iterator_circuit(
         &self,
-        inputs: Vec<Vec<(String, Vec<F>)>>,
+        inputs: Vec<TyInput<F>>,
         sanity_check: bool,
     ) -> Result<Vec<Circuit<F>>>
     where
@@ -72,7 +73,8 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
     /// Which use $output_{i-1}$ as $input_i$
     pub fn gen_recursive_circuit(
         &self,
-        public_input: Vec<(String, Vec<F>)>,
+        public_input: TyInput<F>,
+        times: usize,
         sanity_check: bool,
     ) -> Result<Vec<Circuit<F>>>
     where
@@ -104,7 +106,7 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
         let mut calc = self.calculator.borrow_mut();
         let mut latest_output: Vec<(String, Vec<F>)> = vec![];
 
-        for _ in 0..public_input.len() {
+        for _ in 0..times {
             let witness: TyWitness<F> = if latest_output.is_empty() {
                 calc.calculate_witness::<F>(public_input.clone(), sanity_check)?
             } else {

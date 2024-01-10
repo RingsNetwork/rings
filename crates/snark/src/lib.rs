@@ -6,5 +6,6 @@
 
 pub mod circuit;
 pub mod error;
+pub mod prelude;
 pub mod r1cs;
 pub mod snark;

@@ -4622,6 +4622,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "rings-snark"
+version = "0.5.2"
+dependencies = [
+ "bellpepper-core",
+ "byteorder",
+ "circom",
+ "circom-scotia",
+ "crypto-bigint 0.5.5",
+ "ff 0.13.0",
+ "lalrpop",
+ "log",
+ "nova-snark",
+ "pasta_curves",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "wasmer 4.2.5",
+]
+
+[[package]]
+name = "rings-snark-example"
+version = "0.5.2"
+dependencies = [
+ "rings-snark",
+ "tokio",
+]
+
+[[package]]
 name = "rings-transport"
 version = "0.5.2"
 dependencies = [
@@ -5245,27 +5274,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "74212e6bbe9a4352329b2f68ba3130c15a3f26fe88ff22dbdc6cdd58fa85e99c"
 dependencies = [
  "serde",
-]
-
-[[package]]
-name = "snark"
-version = "0.5.2"
-dependencies = [
- "bellpepper-core",
- "byteorder",
- "circom",
- "circom-scotia",
- "crypto-bigint 0.5.5",
- "ff 0.13.0",
- "lalrpop",
- "log",
- "nova-snark",
- "pasta_curves",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror",
- "wasmer 4.2.5",
 ]
 
 [[package]]
