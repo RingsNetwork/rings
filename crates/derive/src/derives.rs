@@ -4,13 +4,13 @@ pub fn impl_measure_behaviour_traits(ast: &syn::DeriveInput) -> proc_macro2::Tok
     let impl_token = quote! {
     #[cfg_attr(feature = "node", async_trait)]
     #[cfg_attr(feature = "browser", async_trait(?Send))]
-    impl<const T: i16> MessageSendBehaviour<T> for #name {}
+    impl<const T: i64> MessageSendBehaviour<T> for #name {}
     #[cfg_attr(feature = "node", async_trait)]
     #[cfg_attr(feature = "browser", async_trait(?Send))]
-    impl<const T: i16> MessageRecvBehaviour<T> for #name {}
+    impl<const T: i64> MessageRecvBehaviour<T> for #name {}
     #[cfg_attr(feature = "node", async_trait)]
     #[cfg_attr(feature = "browser", async_trait(?Send))]
-    impl<const T: i16> ConnectBehaviour<T> for #name {}
+    impl<const T: i64> ConnectBehaviour<T> for #name {}
     };
 
     #[cfg(not(feature = "core_crate"))]

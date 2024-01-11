@@ -48,11 +48,11 @@ pub trait BehaviourJudgement: Measure {
 /// The "goodness" of a node is measured by comparing the connection and disconnection counts against a given threshold.
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-pub trait ConnectBehaviour<const THRESHOLD: i16>: Measure {
+pub trait ConnectBehaviour<const THRESHOLD: i64>: Measure {
     /// This asynchronous method returns a boolean indicating whether the node identified by `did` has a satisfactory connection behavior.
     async fn good(&self, did: Did) -> bool {
-        let conn = self.get_count(did, MeasureCounter::Connect).await;
-        let disconn = self.get_count(did, MeasureCounter::Disconnected).await;
+        let conn = self.get_count(did, MeasureCounter::Connect).await as i64;
+        let disconn = self.get_count(did, MeasureCounter::Disconnected).await as i64;
         tracing::debug!(
             "[ConnectBehaviour] in Threadhold: {:}, connect: {:}, disconn: {:}, delta: {:}",
             THRESHOLD,
@@ -60,7 +60,7 @@ pub trait ConnectBehaviour<const THRESHOLD: i16>: Measure {
             disconn,
             conn - disconn
         );
-        ((conn - disconn) as i16) < THRESHOLD
+        (conn - disconn) < THRESHOLD
     }
 }
 
@@ -69,11 +69,11 @@ pub trait ConnectBehaviour<const THRESHOLD: i16>: Measure {
 /// The "goodness" of a node is measured by comparing the sent and failed-to-send counts against a given threshold.
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-pub trait MessageSendBehaviour<const THRESHOLD: i16>: Measure {
+pub trait MessageSendBehaviour<const THRESHOLD: i64>: Measure {
     /// This asynchronous method returns a boolean indicating whether the node identified by `did` has a satisfactory message sending behavior.
     async fn good(&self, did: Did) -> bool {
         let failed = self.get_count(did, MeasureCounter::FailedToSend).await;
-        (failed as i16) < THRESHOLD
+        (failed as i64) < THRESHOLD
     }
 }
 
@@ -82,10 +82,10 @@ pub trait MessageSendBehaviour<const THRESHOLD: i16>: Measure {
 /// The "goodness" of a node is measured by comparing the received and failed-to-receive counts against a given threshold.
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-pub trait MessageRecvBehaviour<const THRESHOLD: i16>: Measure {
+pub trait MessageRecvBehaviour<const THRESHOLD: i64>: Measure {
     /// This asynchronous method returns a boolean indicating whether the node identified by `did` has a satisfactory message receiving behavior.
     async fn good(&self, did: Did) -> bool {
         let failed = self.get_count(did, MeasureCounter::FailedToReceive).await;
-        (failed as i16) < THRESHOLD
+        (failed as i64) < THRESHOLD
     }
 }
