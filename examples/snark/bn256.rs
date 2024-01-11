@@ -42,16 +42,19 @@ async fn main() {
     let recursive_circuits = circuit_generator
         .gen_recursive_circuit(input_0.clone(), 5, true)
         .unwrap();
-    assert_eq!(recursive_circuits.len(), 10);
+    assert_eq!(recursive_circuits.len(), 5);
     let pp = snark::SNARK::<E1, E2>::gen_pp::<EE1, EE2, S1, S2>(recursive_circuits[0].clone());
     let pp_ref = Rc::new(pp);
 
-    let rec_snark_iter = snark::SNARK::<E1, E2>::new::<EE1, EE2, S1, S2>(
+    let mut rec_snark_iter = snark::SNARK::<E1, E2>::new::<EE1, EE2, S1, S2>(
         &Rc::new(recursive_circuits[0].clone()),
         input_0.clone(),
         pp_ref.clone(),
     )
     .unwrap();
+    for c in recursive_circuits {
+        rec_snark_iter.foldr(pp_ref.clone(), &c).unwrap();
+    }
     rec_snark_iter
         .verify(
             pp_ref.clone(),
@@ -60,14 +63,15 @@ async fn main() {
             &vec![F2::from(0)],
         )
         .unwrap();
+    println!("success on create recursive snark");
+    let (pk, vk) =
+        snark::SNARK::<E1, E2>::compress_setup::<EE1, EE2, S1, S2>(pp_ref.clone()).unwrap();
+    let pk_ref = Rc::new(pk);
 
-    // iterator based circuit example
-    let inputs: Vec<Vec<(String, Vec<F1>)>> = vec![input_0.clone()];
-    let iterator_circuits = circuit_generator
-        .gen_iterator_circuit(inputs, true)
+    let compress_snark = rec_snark_iter
+        .compress_prove::<EE1, EE2, S1, S2>(pp_ref.clone(), pk_ref)
         .unwrap();
-    assert_eq!(iterator_circuits.len(), 1);
-
     //    let snark_iter = snark::SNARK::<E1, E2>::new::<EE1, EE2, S1, S2>(iterator_circuits, inputs[0].clone());
+
     println!("test")
 }

@@ -11,7 +11,6 @@ use crate::circuit::flat_input;
 use crate::circuit::Circuit;
 use crate::circuit::TyInput;
 use crate::error::Result;
-use crate::prelude::nova::spartan::snark::RelaxedR1CSSNARK;
 use crate::prelude::nova::traits::circuit::TrivialCircuit;
 use crate::prelude::nova::traits::evaluation::EvaluationEngineTrait;
 use crate::prelude::nova::traits::snark::RelaxedR1CSSNARKTrait;
@@ -159,30 +158,76 @@ where
     }
 
     /// Gen compress snark
-    pub fn compress<EE1, EE2>(
-        pp: &PublicParams<E1, E2, Circuit<<E1 as Engine>::Scalar>, TrivialCircuit<E2::Scalar>>,
+    pub fn compress_setup<EE1, EE2, S1, S2>(
+        pp: impl AsRef<
+            PublicParams<E1, E2, Circuit<<E1 as Engine>::Scalar>, TrivialCircuit<E2::Scalar>>,
+        >,
     ) -> Result<(
         ProverKey<
             E1,
             E2,
             Circuit<<E1 as Engine>::Scalar>,
             TrivialCircuit<<E2 as Engine>::Scalar>,
-            RelaxedR1CSSNARK<E1, EE1>,
-            RelaxedR1CSSNARK<E2, EE2>,
+            S1,
+            S2,
         >,
         VerifierKey<
             E1,
             E2,
             Circuit<<E1 as Engine>::Scalar>,
             TrivialCircuit<<E2 as Engine>::Scalar>,
-            RelaxedR1CSSNARK<E1, EE1>,
-            RelaxedR1CSSNARK<E2, EE2>,
+            S1,
+            S2,
         >,
     )>
     where
         EE1: EvaluationEngineTrait<E1>,
         EE2: EvaluationEngineTrait<E2>,
+        S1: RelaxedR1CSSNARKTrait<E1>,
+        S2: RelaxedR1CSSNARKTrait<E2>,
     {
-        Ok(CompressedSNARK::setup(pp)?)
+        Ok(CompressedSNARK::setup(pp.as_ref())?)
+    }
+
+    /// gen compress_proof
+    pub fn compress_prove<EE1, EE2, S1, S2>(
+        &self,
+        pp: impl AsRef<
+            PublicParams<E1, E2, Circuit<<E1 as Engine>::Scalar>, TrivialCircuit<E2::Scalar>>,
+        >,
+        pk: impl AsRef<
+            ProverKey<
+                E1,
+                E2,
+                Circuit<<E1 as Engine>::Scalar>,
+                TrivialCircuit<<E2 as Engine>::Scalar>,
+                S1,
+                S2,
+            >,
+        >,
+    ) -> Result<
+        CompressedSNARK<
+            E1,
+            E2,
+            Circuit<<E1 as Engine>::Scalar>,
+            TrivialCircuit<E2::Scalar>,
+            S1,
+            S2,
+        >,
+    >
+    where
+        EE1: EvaluationEngineTrait<E1>,
+        EE2: EvaluationEngineTrait<E2>,
+        S1: RelaxedR1CSSNARKTrait<E1>,
+        S2: RelaxedR1CSSNARKTrait<E2>,
+    {
+        Ok(CompressedSNARK::<
+            E1,
+            E2,
+            Circuit<<E1 as Engine>::Scalar>,
+            TrivialCircuit<E2::Scalar>,
+            S1,
+            S2,
+        >::prove(pp.as_ref(), pk.as_ref(), self)?)
     }
 }
