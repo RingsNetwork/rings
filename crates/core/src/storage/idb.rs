@@ -16,11 +16,11 @@ use serde::Deserialize;
 use serde::Serialize;
 use wasm_bindgen::JsValue;
 
+use super::KvStorageInterface;
 use super::PersistenceStorageOperation;
-use super::PersistenceStorageReadAndWrite;
-use super::PersistenceStorageRemove;
 use crate::error::Error;
 use crate::error::Result;
+use crate::storage::persistence::PersistenceStorageInterface;
 use crate::utils::js_value;
 
 /// Default IndexedDB database and storage name
@@ -51,31 +51,31 @@ impl<T> DataStruct<T> {
 }
 
 /// StorageInstance struct
-pub struct IDBStorage {
+pub struct IdbStorage {
     db: Rexie,
     cap: u32,
     storage_name: String,
 }
 
-/// IDBStorage basic functions
-pub trait IDBStorageBasic {
+/// IdbStorage basic functions
+pub trait IdbStorageBasic {
     /// Get transaction and store of current `ObjectStore`
     fn get_tx_store(&self, mode: TransactionMode) -> Result<(rexie::Transaction, rexie::Store)>;
 }
 
-impl IDBStorage {
-    /// New IDBStorage
+impl IdbStorage {
+    /// New IdbStorage
     /// * cap: rows of data limit
     pub async fn new_with_cap(cap: u32) -> Result<Self> {
         Self::new_with_cap_and_name(cap, DEFAULT_REXIE_STORE_NAME).await
     }
 
-    /// New IDBStorage with default capacity 50000 rows data limit
+    /// New IdbStorage with default capacity 50000 rows data limit
     pub async fn new() -> Result<Self> {
         Self::new_with_cap(50000).await
     }
 
-    /// New IDBStorage
+    /// New IdbStorage
     /// * cap: max_size in bytes
     /// * path: db file location
     pub async fn new_with_cap_and_path<P>(cap: u32, _path: P) -> Result<Self>
@@ -83,7 +83,7 @@ impl IDBStorage {
         Self::new_with_cap(cap).await
     }
 
-    /// New IDBStorage with capacity and name
+    /// New IdbStorage with capacity and name
     pub async fn new_with_cap_and_name(cap: u32, name: &str) -> Result<Self> {
         if cap == 0 {
             return Err(Error::InvalidCapacity);
@@ -113,9 +113,38 @@ impl IDBStorage {
             .map_err(Error::IDBError)?;
         Ok(())
     }
+
+    pub async fn prune(&self) -> Result<()> {
+        let (tx, store) = self.get_tx_store(TransactionMode::ReadWrite)?;
+        let count = store.count(None).await.map_err(Error::IDBError)?;
+        if count < self.cap {
+            return Ok(());
+        }
+        let delete_count = count.sub(self.cap).add(1);
+        if delete_count == 0 {
+            return Ok(());
+        }
+
+        let item_index = store.index("last_visit_time").map_err(Error::IDBError)?;
+        let entries = item_index
+            .get_all(None, Some(delete_count), None, None)
+            .await
+            .map_err(Error::IDBError)?;
+        tracing::debug!("entries: {:?}", entries);
+
+        if let Some((_k, value)) = entries.first() {
+            let data_entry: DataStruct<serde_json::Value> = js_value::deserialize(value)?;
+            store
+                .delete(&JsValue::from(&data_entry.key))
+                .await
+                .map_err(Error::IDBError)?;
+        }
+        tx.done().await.map_err(Error::IDBError)?;
+        Ok(())
+    }
 }
 
-impl IDBStorageBasic for IDBStorage {
+impl IdbStorageBasic for IdbStorage {
     fn get_tx_store(&self, mode: TransactionMode) -> Result<(rexie::Transaction, rexie::Store)> {
         let transaction = self
             .db
@@ -129,11 +158,11 @@ impl IDBStorageBasic for IDBStorage {
 }
 
 #[async_trait(?Send)]
-impl<K, V, I> PersistenceStorageReadAndWrite<K, V> for I
+impl<K, V, I> KvStorageInterface<K, V> for I
 where
     K: ToString + FromStr,
     V: DeserializeOwned + Serialize + Sized,
-    I: PersistenceStorageOperation + IDBStorageBasic,
+    I: PersistenceStorageOperation + IdbStorageBasic,
 {
     async fn get(&self, key: &K) -> Result<Option<V>> {
         let (tx, store) = self.get_tx_store(TransactionMode::ReadWrite)?;
@@ -192,10 +221,10 @@ where
 }
 
 #[async_trait(?Send)]
-impl<K, I> PersistenceStorageRemove<K> for I
+impl<K, I> KvStorageInterface<K> for I
 where
     K: ToString,
-    I: PersistenceStorageOperation + IDBStorageBasic,
+    I: PersistenceStorageOperation + IdbStorageBasic,
 {
     async fn remove(&self, key: &K) -> Result<()> {
         let (tx, store) = self.get_tx_store(TransactionMode::ReadWrite)?;
@@ -209,7 +238,7 @@ where
 }
 
 #[async_trait(?Send)]
-impl PersistenceStorageOperation for IDBStorage {
+impl PersistenceStorageOperation for IdbStorage {
     async fn clear(&self) -> Result<()> {
         let (tx, store) = self.get_tx_store(TransactionMode::ReadWrite)?;
         store.clear().await.map_err(Error::IDBError)?;
@@ -240,44 +269,15 @@ impl PersistenceStorageOperation for IDBStorage {
         Ok(size)
     }
 
-    async fn prune(&self) -> Result<()> {
-        let (tx, store) = self.get_tx_store(TransactionMode::ReadWrite)?;
-        let count = store.count(None).await.map_err(Error::IDBError)?;
-        if count < self.cap {
-            return Ok(());
-        }
-        let delete_count = count.sub(self.cap).add(1);
-        if delete_count == 0 {
-            return Ok(());
-        }
-
-        let item_index = store.index("last_visit_time").map_err(Error::IDBError)?;
-        let entries = item_index
-            .get_all(None, Some(delete_count), None, None)
-            .await
-            .map_err(Error::IDBError)?;
-        tracing::debug!("entries: {:?}", entries);
-
-        if let Some((_k, value)) = entries.first() {
-            let data_entry: DataStruct<serde_json::Value> = js_value::deserialize(value)?;
-            store
-                .delete(&JsValue::from(&data_entry.key))
-                .await
-                .map_err(Error::IDBError)?;
-        }
-        tx.done().await.map_err(Error::IDBError)?;
-        Ok(())
-    }
-
     async fn close(self) -> Result<()> {
         self.db.close();
         Ok(())
     }
 }
 
-impl std::fmt::Debug for IDBStorage {
+impl std::fmt::Debug for IdbStorage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IDBStorage")
+        f.debug_struct("IdbStorage")
             .field("storage_name", &self.storage_name)
             .field("cap", &self.cap)
             .finish()

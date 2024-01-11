@@ -9,9 +9,8 @@ use wasm_bindgen_test::wasm_bindgen_test;
 
 use crate::storage::persistence::idb::IDBStorageBasic;
 use crate::storage::persistence::IDBStorage;
+use crate::storage::persistence::KvStorageInterface;
 use crate::storage::persistence::PersistenceStorageOperation;
-use crate::storage::persistence::PersistenceStorageReadAndWrite;
-use crate::storage::persistence::PersistenceStorageRemove;
 
 async fn create_db_instance(cap: u32) -> IDBStorage {
     let instance = IDBStorage::new_with_cap(cap).await.unwrap();

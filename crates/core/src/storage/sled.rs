@@ -1,33 +1,26 @@
 #![warn(missing_docs)]
-#![allow(clippy::ptr_offset_with_cast)]
+
 //! Persistence Storage for default, use `sled` as backend db.
-use std::str::FromStr;
 
 use async_trait::async_trait;
 use itertools::Itertools;
 use serde::de::DeserializeOwned;
-use sled;
+use serde::Serialize;
 
-use super::PersistenceStorageOperation;
-use super::PersistenceStorageReadAndWrite;
-use super::PersistenceStorageRemove;
 use crate::error::Error;
 use crate::error::Result;
-
-trait KvStorageBasic {
-    fn get_db(&self) -> &sled::Db;
-}
+use crate::storage::KvStorageInterface;
 
 /// StorageInstance struct
 #[allow(dead_code)]
-pub struct KvStorage {
+pub struct SledStorage {
     db: sled::Db,
     cap: u32,
     path: String,
 }
 
-impl KvStorage {
-    /// New KvStorage
+impl SledStorage {
+    /// New SledStorage
     /// * cap: max_size in bytes
     /// * path: db file location
     pub async fn new_with_cap_and_path<P>(cap: u32, path: P) -> Result<Self>
@@ -45,34 +38,7 @@ impl KvStorage {
         })
     }
 
-    /// New KvStorage
-    /// * cap: max_size in bytes
-    /// * name: db file location
-    pub async fn new_with_cap_and_name(cap: u32, name: &str) -> Result<Self> {
-        Self::new_with_cap_and_path(cap, name).await
-    }
-
-    /// New KvStorage with default path
-    /// default_path is `./`
-    pub async fn new_with_cap(cap: u32) -> Result<Self> {
-        Self::new_with_cap_and_path(cap, "./data").await
-    }
-
-    /// New KvStorage with default capacity and specific path
-    /// * path: db file location
-    pub async fn new_with_path<P>(path: P) -> Result<Self>
-    where P: AsRef<std::path::Path> {
-        Self::new_with_cap_and_path(200000000, path).await
-    }
-
-    /// New KvStorage
-    /// * default capacity 200 megabytes
-    /// * default path `./data`
-    pub async fn new() -> Result<Self> {
-        Self::new_with_cap(200000000).await
-    }
-
-    /// Delete current KvStorage
+    /// Delete current SledStorage
     #[cfg(test)]
     pub async fn delete(self) -> Result<()> {
         let path = self.path.clone();
@@ -82,63 +48,14 @@ impl KvStorage {
             .map_err(Error::IOError)?;
         Ok(())
     }
-
-    /// Generate a random path
-    pub fn random_path(prefix: &str) -> String {
-        let p = std::path::Path::new(prefix).join(uuid::Uuid::new_v4().to_string());
-        p.to_string_lossy().to_string()
-    }
-}
-
-impl KvStorageBasic for KvStorage {
-    fn get_db(&self) -> &sled::Db {
-        &self.db
-    }
 }
 
 #[async_trait]
-impl PersistenceStorageOperation for KvStorage {
-    async fn clear(&self) -> Result<()> {
-        self.db.clear().map_err(Error::SledError)?;
-        // self.db.flush_async().await.map_err(Error::SledError)?;
-        Ok(())
-    }
-
-    async fn count(&self) -> Result<u32> {
-        Ok(self.db.len() as u32)
-    }
-
-    async fn max_size(&self) -> Result<u32> {
-        Ok(self.cap)
-    }
-
-    /// Get the storage size, if applicable.
-    async fn total_size(&self) -> Result<usize> {
-        Ok(self.db.len())
-    }
-
-    /// Prune database storage
-    async fn prune(&self) -> Result<()> {
-        Ok(())
-    }
-
-    async fn close(self) -> Result<()> {
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl<K, V, I> PersistenceStorageReadAndWrite<K, V> for I
-where
-    K: ToString + FromStr + std::marker::Sync + Send + std::fmt::Debug,
-    V: DeserializeOwned + serde::Serialize + std::marker::Sync + Send,
-    I: PersistenceStorageOperation + std::marker::Sync + KvStorageBasic,
+impl<V> KvStorageInterface<V> for SledStorage
+where V: Serialize + DeserializeOwned + Sync
 {
-    /// Get a cache entry by `key`.
-    async fn get(&self, key: &K) -> Result<Option<V>> {
-        let k = key.to_string();
-        let k = k.as_bytes();
-        let v = self.get_db().get(k).map_err(Error::SledError)?;
+    async fn get(&self, key: &str) -> Result<Option<V>> {
+        let v = self.db.get(key).map_err(Error::SledError)?;
         if let Some(v) = v {
             let v = v.as_ref();
             return bincode::deserialize(v)
@@ -148,48 +65,46 @@ where
         Ok(None)
     }
 
-    /// Put `entry` in the cache under `key`.
-    async fn put(&self, key: &K, value: &V) -> Result<()> {
-        self.prune().await?;
-        let data = bincode::serialize(value).map_err(Error::BincodeSerialize)?;
+    async fn put(&self, key: &str, value: &V) -> Result<()> {
+        let data = bincode::serialize(&value).map_err(Error::BincodeSerialize)?;
         tracing::debug!("Try inserting key: {:?}", key);
-        self.get_db()
-            .insert(key.to_string().as_bytes(), data)
-            .map_err(Error::SledError)?;
+        self.db.insert(key, data).map_err(Error::SledError)?;
         Ok(())
     }
 
-    async fn get_all(&self) -> Result<Vec<(K, V)>> {
-        let iter = self.get_db().iter();
+    async fn get_all(&self) -> Result<Vec<(String, V)>> {
+        let iter = self.db.iter();
         Ok(iter
             .flatten()
             .flat_map(|(k, v)| {
                 Some((
-                    K::from_str(std::str::from_utf8(k.as_ref()).ok()?).ok()?,
+                    std::str::from_utf8(k.as_ref()).ok()?.to_string(),
                     bincode::deserialize(v.as_ref()).ok()?,
                 ))
             })
             .collect_vec())
     }
-}
 
-#[async_trait]
-impl<K, I> PersistenceStorageRemove<K> for I
-where
-    K: ToString + std::marker::Sync,
-    I: PersistenceStorageOperation + std::marker::Sync + KvStorageBasic,
-{
-    async fn remove(&self, key: &K) -> Result<()> {
-        self.get_db()
+    async fn remove(&self, key: &str) -> Result<()> {
+        self.db
             .remove(key.to_string().as_bytes())
             .map_err(Error::SledError)?;
         Ok(())
     }
+
+    async fn clear(&self) -> Result<()> {
+        self.db.clear().map_err(Error::SledError)?;
+        Ok(())
+    }
+
+    async fn count(&self) -> Result<u32> {
+        Ok(self.db.len() as u32)
+    }
 }
 
-impl std::fmt::Debug for KvStorage {
+impl std::fmt::Debug for SledStorage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("KvStorage")
+        f.debug_struct("SledStorage")
             .field("cap", &self.cap)
             .field("path", &self.path)
             .finish()
@@ -210,7 +125,7 @@ mod test {
 
     #[tokio::test]
     async fn test_kv_storage_put_delete() {
-        let storage = KvStorage::new_with_cap_and_path(4096, "temp/db")
+        let storage = SledStorage::new_with_cap_and_path(4096, "temp/db")
             .await
             .unwrap();
         let key1 = "test1".to_owned();
@@ -218,7 +133,10 @@ mod test {
             content: "test1".to_string(),
         };
         storage.put(&key1, &data1).await.unwrap();
-        let count1 = storage.count().await.unwrap();
+        let count1 =
+            <SledStorage as KvStorageInterface<TestStorageStruct>>::count::<'_, '_>(&storage)
+                .await
+                .unwrap();
         assert!(count1 == 1, "expect count1.1 is {}, got {}", 1, count1);
         let got_v1: TestStorageStruct = storage.get(&key1).await.unwrap().unwrap();
         assert!(
@@ -235,7 +153,10 @@ mod test {
 
         storage.put(&key2, &data2).await.unwrap();
 
-        let count_got_2 = storage.count().await.unwrap();
+        let count_got_2 =
+            <SledStorage as KvStorageInterface<TestStorageStruct>>::count::<'_, '_>(&storage)
+                .await
+                .unwrap();
         assert!(count_got_2 == 2, "expect count 2, got {}", count_got_2);
 
         let all_entries: Vec<(String, TestStorageStruct)> = storage.get_all().await.unwrap();
@@ -259,10 +180,16 @@ mod test {
         storage.put(&key3, &data3).await.unwrap();
         let got_d3: u64 = storage.get(&key3).await.unwrap().unwrap();
         assert!(data3 == got_d3, "expect {}, got {}", data3, got_d3);
-        storage.clear().await.unwrap();
-        let count1 = storage.count().await.unwrap();
+
+        <SledStorage as KvStorageInterface<TestStorageStruct>>::clear::<'_, '_>(&storage)
+            .await
+            .unwrap();
+        let count1 =
+            <SledStorage as KvStorageInterface<TestStorageStruct>>::count::<'_, '_>(&storage)
+                .await
+                .unwrap();
         assert!(count1 == 0, "expect count1.2 is {}, got {}", 0, count1);
-        storage.get_db().flush_async().await.unwrap();
+        storage.db.flush_async().await.unwrap();
         drop(storage)
     }
 }

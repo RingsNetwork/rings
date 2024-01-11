@@ -266,9 +266,9 @@ pub mod tests {
         let key1 = SecretKey::random();
         let key2 = SecretKey::random();
         let key3 = SecretKey::random();
-        let (node1, _) = prepare_node(key1).await;
-        let (node2, _) = prepare_node(key2).await;
-        let (node3, _) = prepare_node(key3).await;
+        let node1 = prepare_node(key1).await;
+        let node2 = prepare_node(key2).await;
+        let node3 = prepare_node(key3).await;
 
         // Shouldn't listen to message handler here,
         // otherwise it will automatically remove disconnected transport.

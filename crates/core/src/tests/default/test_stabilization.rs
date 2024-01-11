@@ -51,8 +51,8 @@ async fn test_stabilization_once() -> Result<()> {
     if key1.address() < key2.address() {
         (key1, key2) = (key2, key1)
     }
-    let swarm1 = prepare_node(key1).await.0;
-    let swarm2 = prepare_node(key2).await.0;
+    let swarm1 = prepare_node(key1).await;
+    let swarm2 = prepare_node(key2).await;
     manually_establish_connection(&swarm1, &swarm2).await;
     println!("swarm1: {:?}, swarm2: {:?}", swarm1.did(), swarm2.did());
 
@@ -92,8 +92,8 @@ async fn test_stabilization() -> Result<()> {
     if key1.address() < key2.address() {
         (key1, key2) = (key2, key1)
     }
-    let swarm1 = prepare_node(key1).await.0;
-    let swarm2 = prepare_node(key2).await.0;
+    let swarm1 = prepare_node(key1).await;
+    let swarm2 = prepare_node(key2).await;
     manually_establish_connection(&swarm1, &swarm2).await;
 
     tokio::select! {
@@ -134,7 +134,7 @@ async fn test_online_stabilization() -> Result<()> {
 
     for _ in 0..6 {
         let key = SecretKey::random();
-        let (swarm, _) = prepare_node(key).await;
+        let swarm = prepare_node(key).await;
         nodes.push(swarm.clone());
         tokio::spawn(async { run_node(swarm).await });
     }

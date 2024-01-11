@@ -130,9 +130,9 @@ mod test {
         key2: SecretKey,
         key3: SecretKey,
     ) -> Result<()> {
-        let (node1, _path1) = prepare_node(key1).await;
-        let (node2, _path2) = prepare_node(key2).await;
-        let (node3, _path3) = prepare_node(key3).await;
+        let node1 = prepare_node(key1).await;
+        let node2 = prepare_node(key2).await;
+        let node3 = prepare_node(key3).await;
 
         println!("========================================");
         println!("||  now we connect node1 and node2    ||");
@@ -375,9 +375,9 @@ mod test {
         key2: SecretKey,
         key3: SecretKey,
     ) -> Result<()> {
-        let (node1, _path1) = prepare_node(key1).await;
-        let (node2, _path2) = prepare_node(key2).await;
-        let (node3, _path3) = prepare_node(key3).await;
+        let node1 = prepare_node(key1).await;
+        let node2 = prepare_node(key2).await;
+        let node3 = prepare_node(key3).await;
 
         println!("========================================");
         println!("||  now we connect node1 and node2    ||");
