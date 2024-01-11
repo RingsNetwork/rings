@@ -24,6 +24,11 @@ pub fn flat_input<F: PrimeField>(input: TyInput<F>) -> Vec<F> {
     input.into_iter().flat_map(|(_, v)| v).collect()
 }
 
+/// Calculate length of input
+pub fn input_len<F: PrimeField>(input: &TyInput<F>) -> usize {
+    input.into_iter().flat_map(|(_, v)| v).collect::<Vec<&F>>().len()
+}
+
 /// Circuit
 #[derive(Clone, Debug)]
 pub struct Circuit<F: PrimeField> {
@@ -94,7 +99,7 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
                     if let Some(item) = iter.next() {
                         new_vec.push(*item);
                     } else {
-                        panic!("Failed on reshape output")
+                        panic!("Failed on reshape output {:?} as input format {:?}", output, input)
                     }
                 }
                 ret.push((val.clone(), new_vec));
@@ -105,6 +110,7 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
         let mut ret = vec![];
         let mut calc = self.calculator.borrow_mut();
         let mut latest_output: Vec<(String, Vec<F>)> = vec![];
+	let input_len = input_len(&public_input.clone());
 
         for _ in 0..times {
             let witness: TyWitness<F> = if latest_output.is_empty() {
@@ -114,9 +120,10 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
             };
             let circom = Circuit::<F> {
                 r1cs: self.r1cs.clone(),
-                witness,
+                witness: witness.clone(),
             };
-            latest_output = reshape(&public_input, &circom.get_public_outputs());
+	    log::trace!("witness: {:?}, r1cs: {:?}", witness, self.r1cs);
+            latest_output = reshape(&public_input, &circom.get_public_outputs(input_len));
             ret.push(circom);
         }
         Ok(ret)
@@ -130,15 +137,11 @@ impl<F: PrimeField> Circuit<F> {
     }
 
     /// get public outputs from witness
-    pub fn get_public_outputs(&self) -> Vec<F> {
+    pub fn get_public_outputs(&self, input_size: usize) -> Vec<F> {
+	// witness: <1> <Outputs> <Inputs> <Auxs>
         // NOTE: assumes exactly half of the (public inputs + outputs) are outputs
-        let pub_output_count = (self.r1cs.num_inputs - 1) / 2;
-        let mut z_out: Vec<F> = vec![];
-        for i in 1..pub_output_count {
-            // Public inputs do not exist, so we alloc, and later enforce equality from z values
-            z_out.push(self.witness[i]);
-        }
-        z_out
+	let output_count = self.r1cs.num_inputs - input_size - 1;
+	self.witness[1..output_count+1].to_vec()
     }
 }
 

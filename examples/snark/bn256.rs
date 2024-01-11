@@ -3,12 +3,14 @@ use rings_snark::prelude::nova;
 use rings_snark::prelude::nova::traits::Engine;
 use rings_snark::r1cs;
 use rings_snark::snark;
+use rings_snark::prelude::nova::provider::VestaEngine;
+use rings_snark::prelude::nova::provider::PallasEngine;
 
 #[tokio::main]
 async fn main() {
-    type E1 = nova::provider::mlkzg::Bn256EngineKZG;
-    type E2 = nova::provider::GrumpkinEngine;
-    type EE1 = nova::provider::mlkzg::EvaluationEngine<E1>;
+    type E1 = VestaEngine;
+    type E2 = PallasEngine;
+    type EE1 = nova::provider::ipa_pc::EvaluationEngine<E1>;
     type EE2 = nova::provider::ipa_pc::EvaluationEngine<E2>;
     type S1 = nova::spartan::snark::RelaxedR1CSSNARK<E1, EE1>; // non-preprocessing SNARK
     type S2 = nova::spartan::snark::RelaxedR1CSSNARK<E2, EE2>; // non-preprocessing SNARK
@@ -30,8 +32,7 @@ async fn main() {
     let circuit_generator = circuit::WasmCircuitGenerator::<F1>::new(r1cs, witness_calculator);
 
     // recursion based circuit example
-    let input_0: Vec<(String, Vec<F1>)> =
-        vec![("setp_in".to_string(), vec![F1::from(0u64), F1::from(1u64)])];
+    let input_0: Vec<(String, Vec<F1>)> = vec![("step_in".to_string(), vec![F1::from(4u64), F1::from(2u64)])];
 
     let recursive_circuits = circuit_generator
         .gen_recursive_circuit(input_0.clone(), 10, true)

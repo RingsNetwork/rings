@@ -21,7 +21,7 @@ use crate::prelude::nova::PublicParams;
 use crate::prelude::nova::RecursiveSNARK;
 use crate::prelude::nova::VerifierKey;
 
-/// Snark wrapper of nova's implementation
+/// Rings Snark implementation, a wrapper of nova's recursion snark and compressed snark
 #[derive(Serialize, Deserialize)]
 pub struct SNARK<E1, E2>
 where
@@ -99,7 +99,7 @@ where
         Ok(self.snark.verify(pp, num_steps, z0_primary, z0_secondary)?)
     }
 
-    /// Gen compress snark, return (pk, vk)
+    /// Gen compress snark
     pub fn compress<EE1, EE2>(
         pp: &PublicParams<E1, E2, Circuit<<E1 as Engine>::Scalar>, TrivialCircuit<E2::Scalar>>,
     ) -> Result<(

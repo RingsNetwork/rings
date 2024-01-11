@@ -4639,6 +4639,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
  "wasmer 4.2.5",
 ]
 
