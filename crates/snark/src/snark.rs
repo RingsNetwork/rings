@@ -1,5 +1,6 @@
 //! Implementation of Rings Snark
 //! ==============
+#![allow(clippy::type_complexity)]
 use std::ops::Deref;
 use std::ops::DerefMut;
 
@@ -140,6 +141,7 @@ where
     }
 
     /// Verify the correctness of the `RecursiveSNARK`
+    /// Gen compress snark
     pub fn verify(
         &self,
         pp: impl AsRef<
