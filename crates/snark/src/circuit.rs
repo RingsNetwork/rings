@@ -26,11 +26,7 @@ pub fn flat_input<F: PrimeField>(input: TyInput<F>) -> Vec<F> {
 
 /// Calculate length of input
 pub fn input_len<F: PrimeField>(input: &TyInput<F>) -> usize {
-    input
-        .iter()
-        .flat_map(|(_, v)| v)
-        .collect::<Vec<&F>>()
-        .len()
+    input.iter().flat_map(|(_, v)| v).collect::<Vec<&F>>().len()
 }
 
 /// Circuit
@@ -38,6 +34,12 @@ pub fn input_len<F: PrimeField>(input: &TyInput<F>) -> usize {
 pub struct Circuit<F: PrimeField> {
     r1cs: Arc<R1CS<F>>,
     witness: TyWitness<F>,
+}
+
+impl<F: PrimeField> AsRef<Circuit<F>> for &Circuit<F> {
+    fn as_ref(&self) -> &Circuit<F> {
+        self
+    }
 }
 
 /// Wasm based circuit generator

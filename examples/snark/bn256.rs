@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use rings_snark::circuit;
 use rings_snark::prelude::nova;
 use rings_snark::prelude::nova::provider::PallasEngine;
@@ -32,23 +34,31 @@ async fn main() {
     let circuit_generator = circuit::WasmCircuitGenerator::<F1>::new(r1cs, witness_calculator);
 
     // recursion based circuit example
+    //
+    // prepare inputs
     let input_0: Vec<(String, Vec<F1>)> =
         vec![("step_in".to_string(), vec![F1::from(4u64), F1::from(2u64)])];
 
     let recursive_circuits = circuit_generator
-        .gen_recursive_circuit(input_0.clone(), 10, true)
+        .gen_recursive_circuit(input_0.clone(), 5, true)
         .unwrap();
     assert_eq!(recursive_circuits.len(), 10);
+    let pp = snark::SNARK::<E1, E2>::gen_pp::<EE1, EE2, S1, S2>(recursive_circuits[0].clone());
+    let pp_ref = Rc::new(pp);
 
-    let (rec_snark_iter, pp) = snark::SNARK::<E1, E2>::new::<EE1, EE2, S1, S2>(
-        recursive_circuits[0].clone(),
+    let rec_snark_iter = snark::SNARK::<E1, E2>::new::<EE1, EE2, S1, S2>(
+        &Rc::new(recursive_circuits[0].clone()),
         input_0.clone(),
+        pp_ref.clone(),
     )
     .unwrap();
     rec_snark_iter
-        .verify(&pp, 1, &vec![F1::from(0u64), F1::from(1u64)], &vec![
-            F2::from(0),
-        ])
+        .verify(
+            pp_ref.clone(),
+            5,
+            &vec![F1::from(4u64), F1::from(2u64)],
+            &vec![F2::from(0)],
+        )
         .unwrap();
 
     // iterator based circuit example
