@@ -1,10 +1,10 @@
 use rings_snark::circuit;
 use rings_snark::prelude::nova;
+use rings_snark::prelude::nova::provider::PallasEngine;
+use rings_snark::prelude::nova::provider::VestaEngine;
 use rings_snark::prelude::nova::traits::Engine;
 use rings_snark::r1cs;
 use rings_snark::snark;
-use rings_snark::prelude::nova::provider::VestaEngine;
-use rings_snark::prelude::nova::provider::PallasEngine;
 
 #[tokio::main]
 async fn main() {
@@ -32,7 +32,8 @@ async fn main() {
     let circuit_generator = circuit::WasmCircuitGenerator::<F1>::new(r1cs, witness_calculator);
 
     // recursion based circuit example
-    let input_0: Vec<(String, Vec<F1>)> = vec![("step_in".to_string(), vec![F1::from(4u64), F1::from(2u64)])];
+    let input_0: Vec<(String, Vec<F1>)> =
+        vec![("step_in".to_string(), vec![F1::from(4u64), F1::from(2u64)])];
 
     let recursive_circuits = circuit_generator
         .gen_recursive_circuit(input_0.clone(), 10, true)

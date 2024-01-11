@@ -26,7 +26,11 @@ pub fn flat_input<F: PrimeField>(input: TyInput<F>) -> Vec<F> {
 
 /// Calculate length of input
 pub fn input_len<F: PrimeField>(input: &TyInput<F>) -> usize {
-    input.into_iter().flat_map(|(_, v)| v).collect::<Vec<&F>>().len()
+    input
+        .into_iter()
+        .flat_map(|(_, v)| v)
+        .collect::<Vec<&F>>()
+        .len()
 }
 
 /// Circuit
@@ -99,7 +103,10 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
                     if let Some(item) = iter.next() {
                         new_vec.push(*item);
                     } else {
-                        panic!("Failed on reshape output {:?} as input format {:?}", output, input)
+                        panic!(
+                            "Failed on reshape output {:?} as input format {:?}",
+                            output, input
+                        )
                     }
                 }
                 ret.push((val.clone(), new_vec));
@@ -110,7 +117,7 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
         let mut ret = vec![];
         let mut calc = self.calculator.borrow_mut();
         let mut latest_output: Vec<(String, Vec<F>)> = vec![];
-	let input_len = input_len(&public_input.clone());
+        let input_len = input_len(&public_input.clone());
 
         for _ in 0..times {
             let witness: TyWitness<F> = if latest_output.is_empty() {
@@ -122,7 +129,7 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
                 r1cs: self.r1cs.clone(),
                 witness: witness.clone(),
             };
-	    log::trace!("witness: {:?}, r1cs: {:?}", witness, self.r1cs);
+            log::trace!("witness: {:?}, r1cs: {:?}", witness, self.r1cs);
             latest_output = reshape(&public_input, &circom.get_public_outputs(input_len));
             ret.push(circom);
         }
@@ -138,10 +145,10 @@ impl<F: PrimeField> Circuit<F> {
 
     /// get public outputs from witness
     pub fn get_public_outputs(&self, input_size: usize) -> Vec<F> {
-	// witness: <1> <Outputs> <Inputs> <Auxs>
+        // witness: <1> <Outputs> <Inputs> <Auxs>
         // NOTE: assumes exactly half of the (public inputs + outputs) are outputs
-	let output_count = self.r1cs.num_inputs - input_size - 1;
-	self.witness[1..output_count+1].to_vec()
+        let output_count = self.r1cs.num_inputs - input_size - 1;
+        self.witness[1..output_count + 1].to_vec()
     }
 }
 
