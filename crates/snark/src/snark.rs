@@ -124,6 +124,6 @@ where
         EE1: EvaluationEngineTrait<E1>,
         EE2: EvaluationEngineTrait<E2>,
     {
-        Ok(CompressedSNARK::setup(&pp)?)
+        Ok(CompressedSNARK::setup(pp)?)
     }
 }

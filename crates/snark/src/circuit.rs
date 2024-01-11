@@ -27,7 +27,7 @@ pub fn flat_input<F: PrimeField>(input: TyInput<F>) -> Vec<F> {
 /// Calculate length of input
 pub fn input_len<F: PrimeField>(input: &TyInput<F>) -> usize {
     input
-        .into_iter()
+        .iter()
         .flat_map(|(_, v)| v)
         .collect::<Vec<&F>>()
         .len()

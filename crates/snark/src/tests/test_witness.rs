@@ -58,13 +58,13 @@ pub async fn test_calcu_witness_bn256() -> Result<()> {
         witness[3],
         F::from(4u64),
         "input is not included, {:?}",
-        &with
+        &witness
     );
     assert_eq!(
         witness[4],
         F::from(2u64),
         "input is not included, {:?}",
-        &with
+        &witness
     );
     Ok(())
 }
