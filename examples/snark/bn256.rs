@@ -67,11 +67,18 @@ async fn main() {
     let (pk, vk) =
         snark::SNARK::<E1, E2>::compress_setup::<EE1, EE2, S1, S2>(pp_ref.clone()).unwrap();
     let pk_ref = Rc::new(pk);
+    let vk_ref = Rc::new(vk);
 
     let compress_snark = rec_snark_iter
         .compress_prove::<EE1, EE2, S1, S2>(pp_ref.clone(), pk_ref)
         .unwrap();
-    //    let snark_iter = snark::SNARK::<E1, E2>::new::<EE1, EE2, S1, S2>(iterator_circuits, inputs[0].clone());
-
-    println!("test")
+    let compress_snark_ref = Rc::new(compress_snark);
+    let ret = snark::SNARK::<E1, E2>::compress_verify::<EE1, EE2, S1, S2>(
+        compress_snark_ref,
+        vk_ref,
+        5,
+        &vec![F1::from(4u64), F1::from(2u64)],
+    );
+    assert!(ret.is_ok());
+    println!("done!")
 }

@@ -230,4 +230,41 @@ where
             S2,
         >::prove(pp.as_ref(), pk.as_ref(), self)?)
     }
+
+    /// gen compress_proof
+    pub fn compress_verify<EE1, EE2, S1, S2>(
+        proof: impl AsRef<
+            CompressedSNARK<
+                E1,
+                E2,
+                Circuit<<E1 as Engine>::Scalar>,
+                TrivialCircuit<E2::Scalar>,
+                S1,
+                S2,
+            >,
+        >,
+        vk: impl AsRef<
+            VerifierKey<
+                E1,
+                E2,
+                Circuit<<E1 as Engine>::Scalar>,
+                TrivialCircuit<<E2 as Engine>::Scalar>,
+                S1,
+                S2,
+            >,
+        >,
+        num_steps: usize,
+        public_inputs: impl AsRef<[E1::Scalar]>,
+    ) -> Result<(Vec<E1::Scalar>, Vec<E2::Scalar>)>
+    where
+        EE1: EvaluationEngineTrait<E1>,
+        EE2: EvaluationEngineTrait<E2>,
+        S1: RelaxedR1CSSNARKTrait<E1>,
+        S2: RelaxedR1CSSNARKTrait<E2>,
+    {
+        let z1 = vec![E2::Scalar::from(0)];
+        Ok(proof
+            .as_ref()
+            .verify(vk.as_ref(), num_steps, public_inputs.as_ref(), &z1)?)
+    }
 }
