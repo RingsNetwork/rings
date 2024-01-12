@@ -135,8 +135,7 @@ pub async fn test_calcu_bn256_recursive_snark_with_private_input() -> Result<()>
     // init pp with ouptn inputs
     let pp = snark::SNARK::<E1, E2>::gen_pp::<S1, S2>(circuit_0.clone());
     let mut rec_snark_iter =
-        snark::SNARK::<E1, E2>::new(&recursive_circuits[0].clone(), input_0.clone(), &pp)
-            .unwrap();
+        snark::SNARK::<E1, E2>::new(&recursive_circuits[0].clone(), input_0.clone(), &pp).unwrap();
 
     for c in recursive_circuits {
         rec_snark_iter.foldr(&pp, &c).unwrap();

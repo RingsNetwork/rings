@@ -109,7 +109,7 @@ where
     pub fn new(
         circom: impl AsRef<Circuit<E1::Scalar>>,
         public_inputs: impl AsRef<TyInput<E1::Scalar>>,
-        pp: impl AsRef<PublicParams<E1, E2>>
+        pp: impl AsRef<PublicParams<E1, E2>>,
     ) -> Result<Self> {
         // flat public input here
         let public_inputs = flat_input::<E1::Scalar>(public_inputs.as_ref().clone());
