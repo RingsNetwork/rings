@@ -165,6 +165,13 @@ impl From<rings_rpc::error::Error> for Error {
     }
 }
 
+#[cfg(feature = "browser")]
+impl From<Error> for wasm_bindgen::JsValue {
+    fn from(err: Error) -> Self {
+        wasm_bindgen::JsValue::from_str(&err.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,12 +179,5 @@ mod tests {
     fn test_error_code() {
         let err = Error::RemoteRpcError("Test".to_string());
         assert_eq!(err.code(), 100);
-    }
-}
-
-#[cfg(feature = "browser")]
-impl From<Error> for wasm_bindgen::JsValue {
-    fn from(err: Error) -> Self {
-        wasm_bindgen::JsValue::from_str(&err.to_string())
     }
 }
