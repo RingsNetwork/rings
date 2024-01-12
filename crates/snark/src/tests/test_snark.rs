@@ -37,23 +37,25 @@ pub async fn test_calcu_bn256_recursive_snark() -> Result<()> {
 
     let input_0: Vec<(String, Vec<F1>)> =
         vec![("step_in".to_string(), vec![F1::from(4u64), F1::from(2u64)])];
-
     let recursive_circuits = circuit_generator
         .gen_recursive_circuit(input_0.clone(), vec![], 3, true)
         .unwrap();
+
+    let public_circuit = recursive_circuits[0].clone();
     assert_eq!(recursive_circuits.len(), 3);
-    let pp = snark::SNARK::<E1, E2>::gen_pp::<S1, S2>(recursive_circuits[0].clone());
+    let pp = snark::SNARK::<E1, E2>::gen_pp::<S1, S2>(public_circuit.clone());
 
     let mut rec_snark_iter = snark::SNARK::<E1, E2>::new(
         &Rc::new(recursive_circuits[0].clone()),
         input_0.clone(),
         &pp,
+        None,
     )
     .unwrap();
     for c in recursive_circuits {
         rec_snark_iter.foldr(&pp, &c).unwrap();
     }
-    rec_snark_iter
+    let (z0, _) = rec_snark_iter
         .verify(&pp, 3, &vec![F1::from(4u64), F1::from(2u64)], &vec![
             F2::from(0),
         ])
@@ -68,6 +70,23 @@ pub async fn test_calcu_bn256_recursive_snark() -> Result<()> {
         F1::from(2u64),
     ]);
     assert!(ret.is_ok());
+
+    // maybe on other machine
+    let next_start_input = vec![("step_in".to_string(), z0.clone())];
+    let recursive_circuits_2 = circuit_generator
+        .gen_recursive_circuit(next_start_input, vec![], 3, true)
+        .unwrap();
+
+    for c in recursive_circuits_2 {
+        rec_snark_iter.foldr(&pp, &c).unwrap();
+    }
+
+    let (_z0, _) = rec_snark_iter
+        .verify(&pp, 6, &vec![F1::from(4u64), F1::from(2u64)], &vec![
+            F2::from(0),
+        ])
+        .unwrap();
+
     Ok(())
 }
 
@@ -117,7 +136,8 @@ pub async fn test_calcu_bn256_recursive_snark_with_private_input() -> Result<()>
     // init pp with ouptn inputs
     let pp = snark::SNARK::<E1, E2>::gen_pp::<S1, S2>(circuit_0.clone());
     let mut rec_snark_iter =
-        snark::SNARK::<E1, E2>::new(&recursive_circuits[0].clone(), input_0.clone(), &pp).unwrap();
+        snark::SNARK::<E1, E2>::new(&recursive_circuits[0].clone(), input_0.clone(), &pp, None)
+            .unwrap();
 
     for c in recursive_circuits {
         rec_snark_iter.foldr(&pp, &c).unwrap();
