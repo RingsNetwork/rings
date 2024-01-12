@@ -22,8 +22,6 @@ pub async fn test_calcu_witness_sha256() -> Result<()> {
         .calculate_witness::<F>(input, true)
         .unwrap();
     assert_eq![witness[0], F::from(1u64)];
-    // witness: <1> <Outputs> <Inputs> <Auxs>
-    // test input
     assert_eq!(
         witness[2],
         F::from(4u64),
