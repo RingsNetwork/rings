@@ -59,25 +59,21 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
 
     /// Generate iterator circuit list
     /// Which iterate inputs and generate circuit
-    pub fn gen_iterator_circuit(
+    pub fn gen_circuit(
         &self,
-        inputs: Vec<TyInput<F>>,
+        input: TyInput<F>,
         sanity_check: bool,
-    ) -> Result<Vec<Circuit<F>>>
+    ) -> Result<Circuit<F>>
     where
         F: PrimeField,
     {
-        let mut ret = vec![];
         let mut calc = self.calculator.borrow_mut();
-        for input in &inputs {
-            let witness: TyWitness<F> = calc.calculate_witness::<F>(input.clone(), sanity_check)?;
-            let circom = Circuit::<F> {
-                r1cs: self.r1cs.clone(),
-                witness,
-            };
-            ret.push(circom);
-        }
-        Ok(ret)
+        let witness: TyWitness<F> = calc.calculate_witness::<F>(input.clone(), sanity_check)?;
+        let circom = Circuit::<F> {
+            r1cs: self.r1cs.clone(),
+            witness,
+        };
+        Ok(circom)
     }
 
     /// Generate recursive circuit list
@@ -85,6 +81,7 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
     pub fn gen_recursive_circuit(
         &self,
         public_input: TyInput<F>,
+	private_inputs: Vec<TyInput<F>>,
         times: usize,
         sanity_check: bool,
     ) -> Result<Vec<Circuit<F>>>
@@ -119,13 +116,21 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
         let mut ret = vec![];
         let mut calc = self.calculator.borrow_mut();
         let mut latest_output: Vec<(String, Vec<F>)> = vec![];
-        let input_len = input_len(&public_input.clone());
+        let input_len = input_len(&public_input);
 
-        for _ in 0..times {
+        for i in 0..times {
             let witness: TyWitness<F> = if latest_output.is_empty() {
-                calc.calculate_witness::<F>(public_input.clone(), sanity_check)?
+		let mut input = public_input.clone();
+		if let Some(p) = private_inputs.get(i) {
+		    input.extend(p.clone());
+		}
+                calc.calculate_witness::<F>(input, sanity_check)?
             } else {
-                calc.calculate_witness::<F>(latest_output.clone(), sanity_check)?
+		let mut input = latest_output.clone();
+		if let Some(p) = private_inputs.get(i) {
+		    input.extend(p.clone());
+		}
+                calc.calculate_witness::<F>(input, sanity_check)?
             };
             let circom = Circuit::<F> {
                 r1cs: self.r1cs.clone(),

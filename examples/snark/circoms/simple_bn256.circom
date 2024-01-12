@@ -5,7 +5,9 @@ template Example () {
 
     signal output step_out[2];
 
-    step_out[0] <== step_in[0] + 42;
+    signal input adder;
+
+    step_out[0] <== step_in[0] + adder;
     step_out[1] <== step_in[0] + step_in[1];
 }
 
@@ -14,4 +16,5 @@ component main { public [step_in] } = Example();
 /* INPUT = {
     "step_in": [1, 1],
     "step_out": [1, 2],
+    "adder": 0
 } */

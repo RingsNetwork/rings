@@ -53,6 +53,7 @@ where
     S1: RelaxedR1CSSNARKTrait<E1>,
     S2: RelaxedR1CSSNARKTrait<E2>,
 {
+    /// prove key
     pub pk: nova::ProverKey<
         E1,
         E2,
@@ -71,6 +72,7 @@ where
     S1: RelaxedR1CSSNARKTrait<E1>,
     S2: RelaxedR1CSSNARKTrait<E2>,
 {
+    /// verifier key
     pub vk: nova::VerifierKey<
         E1,
         E2,
