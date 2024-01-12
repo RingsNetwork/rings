@@ -1,15 +1,14 @@
+use std::rc::Rc;
+
+use crate::circuit;
 use crate::error::Result;
+use crate::prelude::nova::provider::ipa_pc::EvaluationEngine;
+use crate::prelude::nova::provider::PallasEngine;
 use crate::prelude::nova::provider::VestaEngine;
+use crate::prelude::nova::spartan::snark::RelaxedR1CSSNARK;
 use crate::prelude::nova::traits::Engine;
 use crate::r1cs;
-use std::rc::Rc;
-use crate::circuit;
-use crate::prelude::nova::provider::PallasEngine;
-use crate::prelude::nova::provider::ipa_pc::EvaluationEngine;
-use crate::prelude::nova::spartan::snark::RelaxedR1CSSNARK;
 use crate::snark;
-
-
 
 #[tokio::test]
 pub async fn test_calcu_bn256_recursive_snark() -> Result<()> {
@@ -55,16 +54,12 @@ pub async fn test_calcu_bn256_recursive_snark() -> Result<()> {
         rec_snark_iter.foldr(&pp, &c).unwrap();
     }
     rec_snark_iter
-        .verify(
-            &pp,
-            3,
-            &vec![F1::from(4u64), F1::from(2u64)],
-            &vec![F2::from(0)],
-        )
+        .verify(&pp, 3, &vec![F1::from(4u64), F1::from(2u64)], &vec![
+            F2::from(0),
+        ])
         .unwrap();
     println!("success on create recursive snark");
-    let (pk, vk) =
-        snark::SNARK::<E1, E2>::compress_setup::<S1, S2>(&pp).unwrap();
+    let (pk, vk) = snark::SNARK::<E1, E2>::compress_setup::<S1, S2>(&pp).unwrap();
     let pk_ref = Rc::new(pk);
     let vk_ref = Rc::new(vk);
 
@@ -72,12 +67,11 @@ pub async fn test_calcu_bn256_recursive_snark() -> Result<()> {
         .compress_prove::<S1, S2>(&pp, pk_ref)
         .unwrap();
     let compress_snark_ref = Rc::new(compress_snark);
-    let ret = snark::SNARK::<E1, E2>::compress_verify::<S1, S2>(
-        compress_snark_ref,
-        vk_ref,
-        3,
-        &vec![F1::from(4u64), F1::from(2u64)],
-    );
+    let ret =
+        snark::SNARK::<E1, E2>::compress_verify::<S1, S2>(compress_snark_ref, vk_ref, 3, &vec![
+            F1::from(4u64),
+            F1::from(2u64),
+        ]);
     assert!(ret.is_ok());
     Ok(())
 }

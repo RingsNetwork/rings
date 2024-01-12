@@ -1,6 +1,7 @@
 //! Implementation of Rings Snark
 //! ==============
 #![allow(clippy::type_complexity)]
+mod impls;
 use std::ops::Deref;
 use std::ops::DerefMut;
 
@@ -12,14 +13,12 @@ use crate::circuit::flat_input;
 use crate::circuit::Circuit;
 use crate::circuit::TyInput;
 use crate::error::Result;
+use crate::prelude::nova;
 use crate::prelude::nova::traits::circuit::TrivialCircuit;
 use crate::prelude::nova::traits::snark::RelaxedR1CSSNARKTrait;
 use crate::prelude::nova::traits::Engine;
 use crate::prelude::nova::CompressedSNARK;
-use crate::prelude::nova::ProverKey;
-use crate::prelude::nova;
 use crate::prelude::nova::RecursiveSNARK;
-use crate::prelude::nova::VerifierKey;
 
 /// Rings Snark implementation, a wrapper of nova's recursion snark and compressed snark
 #[derive(Serialize, Deserialize)]
@@ -33,38 +32,6 @@ where
     pub inner: RecursiveSNARK<E1, E2, Circuit<<E1 as Engine>::Scalar>, TrivialCircuit<E2::Scalar>>,
 }
 
-impl <E1, E2> AsRef<SNARK<E1, E2>> for SNARK<E1, E2>
-where
-    E1: Engine<Base = <E2 as Engine>::Scalar>,
-    E2: Engine<Base = <E1 as Engine>::Scalar>,
-{
-    fn as_ref(&self) -> &Self {
-        self
-    }
-}
-
-impl<E1, E2> Deref for SNARK<E1, E2>
-where
-    E1: Engine<Base = <E2 as Engine>::Scalar>,
-    E2: Engine<Base = <E1 as Engine>::Scalar>,
-{
-    type Target =
-        RecursiveSNARK<E1, E2, Circuit<<E1 as Engine>::Scalar>, TrivialCircuit<E2::Scalar>>;
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-impl<E1, E2> DerefMut for SNARK<E1, E2>
-where
-    E1: Engine<Base = <E2 as Engine>::Scalar>,
-    E2: Engine<Base = <E1 as Engine>::Scalar>,
-{
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
-    }
-}
-
 /// Wrap of nova's public params
 #[derive(Serialize, Deserialize)]
 pub struct PublicParams<E1, E2>
@@ -74,50 +41,44 @@ where
 {
     /// public params
     #[serde(flatten)]
-    pub inner: nova::PublicParams<E1, E2, Circuit<<E1 as Engine>::Scalar>, TrivialCircuit<E2::Scalar>>
+    pub inner:
+        nova::PublicParams<E1, E2, Circuit<<E1 as Engine>::Scalar>, TrivialCircuit<E2::Scalar>>,
 }
 
-impl <E1, E2> From<nova::PublicParams<E1, E2, Circuit<<E1 as Engine>::Scalar>, TrivialCircuit<E2::Scalar>>> for PublicParams<E1, E2>
-where
-    E1: Engine<Base = <E2 as Engine>::Scalar>,
-    E2: Engine<Base = <E1 as Engine>::Scalar>
-{
-    fn from(pp: nova::PublicParams<E1, E2, Circuit<<E1 as Engine>::Scalar>, TrivialCircuit<E2::Scalar>>) -> Self {
-	Self { inner: pp }
-    }
-}
-
-impl<E1, E2> Deref for PublicParams<E1, E2>
+/// Wrap of nova's prover key
+pub struct ProverKey<E1, E2, S1, S2>
 where
     E1: Engine<Base = <E2 as Engine>::Scalar>,
     E2: Engine<Base = <E1 as Engine>::Scalar>,
+    S1: RelaxedR1CSSNARKTrait<E1>,
+    S2: RelaxedR1CSSNARKTrait<E2>,
 {
-    type Target =
-	nova::PublicParams<E1, E2, Circuit<<E1 as Engine>::Scalar>, TrivialCircuit<E2::Scalar>>;
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
+    pub pk: nova::ProverKey<
+        E1,
+        E2,
+        Circuit<<E1 as Engine>::Scalar>,
+        TrivialCircuit<<E2 as Engine>::Scalar>,
+        S1,
+        S2,
+    >,
 }
 
-impl<E1, E2> DerefMut for PublicParams<E1, E2>
+/// Wrap of nova's verifier key
+pub struct VerifierKey<E1, E2, S1, S2>
 where
     E1: Engine<Base = <E2 as Engine>::Scalar>,
     E2: Engine<Base = <E1 as Engine>::Scalar>,
+    S1: RelaxedR1CSSNARKTrait<E1>,
+    S2: RelaxedR1CSSNARKTrait<E2>,
 {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
-    }
-}
-
-impl <E1, E2> AsRef<PublicParams<E1, E2>> for PublicParams<E1, E2>
-where
-    E1: Engine<Base = <E2 as Engine>::Scalar>,
-    E2: Engine<Base = <E1 as Engine>::Scalar>,
-
-{
-    fn as_ref(&self) -> &Self {
-        self
-    }
+    pub vk: nova::VerifierKey<
+        E1,
+        E2,
+        Circuit<<E1 as Engine>::Scalar>,
+        TrivialCircuit<<E2 as Engine>::Scalar>,
+        S1,
+        S2,
+    >,
 }
 
 impl<E1, E2> SNARK<E1, E2>
@@ -126,9 +87,7 @@ where
     E2: Engine<Base = <E1 as Engine>::Scalar>,
 {
     /// Create public params
-    pub fn gen_pp<S1, S2>(
-        circom: Circuit<E1::Scalar>,
-    ) -> PublicParams<E1, E2>
+    pub fn gen_pp<S1, S2>(circom: Circuit<E1::Scalar>) -> PublicParams<E1, E2>
     where
         S1: RelaxedR1CSSNARKTrait<E1>,
         S2: RelaxedR1CSSNARKTrait<E2>,
@@ -140,18 +99,16 @@ where
             &circuit_secondary,
             S1::ck_floor().deref(),
             S2::ck_floor().deref(),
-        ).into()
+        )
+        .into()
     }
 
     /// Create public params with circom, and public input
     pub fn new(
         circom: impl AsRef<Circuit<E1::Scalar>>,
         public_inputs: impl AsRef<TyInput<E1::Scalar>>,
-        pp: impl AsRef<
-            PublicParams<E1, E2>,
-        >,
-    ) -> Result<Self>
-    {
+        pp: impl AsRef<PublicParams<E1, E2>>,
+    ) -> Result<Self> {
         // flat public input here
         let public_inputs = flat_input::<E1::Scalar>(public_inputs.as_ref().clone());
         let circuit_secondary = TrivialCircuit::<E2::Scalar>::default();
@@ -170,9 +127,7 @@ where
     /// This folder will create a new snark instance
     pub fn fold_clone(
         &self,
-        pp: impl AsRef<
-            PublicParams<E1, E2>,
-        >,
+        pp: impl AsRef<PublicParams<E1, E2>>,
         circom: impl AsRef<Circuit<E1::Scalar>>,
     ) -> Result<Self> {
         // Create a new instance here
@@ -186,9 +141,7 @@ where
     /// Fold next circuit
     pub fn foldr(
         &mut self,
-        pp: impl AsRef<
-            PublicParams<E1, E2>,
-        >,
+        pp: impl AsRef<PublicParams<E1, E2>>,
         circom: impl AsRef<Circuit<E1::Scalar>>,
     ) -> Result<()> {
         let circuit_secondary = TrivialCircuit::<E2::Scalar>::default();
@@ -201,9 +154,7 @@ where
     /// Gen compress snark
     pub fn verify(
         &self,
-        pp: impl AsRef<
-            PublicParams<E1, E2>,
-        >,
+        pp: impl AsRef<PublicParams<E1, E2>>,
         num_steps: usize,
         z0_primary: impl AsRef<[E1::Scalar]>,
         z0_secondary: impl AsRef<[E2::Scalar]>,
@@ -218,50 +169,21 @@ where
 
     /// Gen compress snark
     pub fn compress_setup<S1, S2>(
-        pp: impl AsRef<
-            PublicParams<E1, E2>,
-        >,
-    ) -> Result<(
-        ProverKey<
-            E1,
-            E2,
-            Circuit<<E1 as Engine>::Scalar>,
-            TrivialCircuit<<E2 as Engine>::Scalar>,
-            S1,
-            S2,
-        >,
-        VerifierKey<
-            E1,
-            E2,
-            Circuit<<E1 as Engine>::Scalar>,
-            TrivialCircuit<<E2 as Engine>::Scalar>,
-            S1,
-            S2,
-        >,
-    )>
+        pp: impl AsRef<PublicParams<E1, E2>>,
+    ) -> Result<(ProverKey<E1, E2, S1, S2>, VerifierKey<E1, E2, S1, S2>)>
     where
         S1: RelaxedR1CSSNARKTrait<E1>,
         S2: RelaxedR1CSSNARKTrait<E2>,
     {
-        Ok(CompressedSNARK::setup(pp.as_ref())?)
+        let (pk, vk) = CompressedSNARK::setup(pp.as_ref())?;
+        Ok((ProverKey { pk }, VerifierKey { vk }))
     }
 
     /// gen compress_proof
     pub fn compress_prove<S1, S2>(
         &self,
-        pp: impl AsRef<
-            PublicParams<E1, E2>,
-        >,
-        pk: impl AsRef<
-            ProverKey<
-                E1,
-                E2,
-                Circuit<<E1 as Engine>::Scalar>,
-                TrivialCircuit<<E2 as Engine>::Scalar>,
-                S1,
-                S2,
-            >,
-        >,
+        pp: impl AsRef<PublicParams<E1, E2>>,
+        pk: impl AsRef<ProverKey<E1, E2, S1, S2>>,
     ) -> Result<
         CompressedSNARK<
             E1,
@@ -298,16 +220,7 @@ where
                 S2,
             >,
         >,
-        vk: impl AsRef<
-            VerifierKey<
-                E1,
-                E2,
-                Circuit<<E1 as Engine>::Scalar>,
-                TrivialCircuit<<E2 as Engine>::Scalar>,
-                S1,
-                S2,
-            >,
-        >,
+        vk: impl AsRef<VerifierKey<E1, E2, S1, S2>>,
         num_steps: usize,
         public_inputs: impl AsRef<[E1::Scalar]>,
     ) -> Result<(Vec<E1::Scalar>, Vec<E2::Scalar>)>

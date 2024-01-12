@@ -1,2 +1,2 @@
-mod test_witness;
 mod test_snark;
+mod test_witness;
