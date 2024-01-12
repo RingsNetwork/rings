@@ -109,24 +109,20 @@ where
     pub fn new(
         circom: impl AsRef<Circuit<E1::Scalar>>,
         public_inputs: impl AsRef<TyInput<E1::Scalar>>,
-        pp: impl AsRef<PublicParams<E1, E2>>,
-        index: Option<usize>,
+        pp: impl AsRef<PublicParams<E1, E2>>
     ) -> Result<Self> {
         // flat public input here
         let public_inputs = flat_input::<E1::Scalar>(public_inputs.as_ref().clone());
         let circuit_secondary = TrivialCircuit::<E2::Scalar>::default();
         // default input for secondary on initialize round is [0]
         let secondary_inputs = [<<E2 as Engine>::Scalar as Field>::ZERO];
-        let mut inner = RecursiveSNARK::new(
+        let inner = RecursiveSNARK::new(
             pp.as_ref(),
             circom.as_ref(),
             &circuit_secondary,
             &public_inputs,
             &secondary_inputs,
         )?;
-        if let Some(i) = index {
-            inner.set_step(i);
-        }
         Ok(Self { inner })
     }
 
