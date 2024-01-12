@@ -61,19 +61,15 @@ pub async fn test_calcu_bn256_recursive_snark() -> Result<()> {
     println!("success on create recursive snark");
     let (pk, vk) = snark::SNARK::<E1, E2>::compress_setup::<S1, S2>(&pp).unwrap();
 
-    let compress_snark = rec_snark_iter
-        .compress_prove::<S1, S2>(&pp, &pk)
-        .unwrap();
+    let compress_snark = rec_snark_iter.compress_prove::<S1, S2>(&pp, &pk).unwrap();
     let compress_snark_ref = Rc::new(compress_snark);
-    let ret =
-        snark::SNARK::<E1, E2>::compress_verify::<S1, S2>(compress_snark_ref, vk, 3, &vec![
-            F1::from(4u64),
-            F1::from(2u64),
-        ]);
+    let ret = snark::SNARK::<E1, E2>::compress_verify::<S1, S2>(compress_snark_ref, vk, 3, &vec![
+        F1::from(4u64),
+        F1::from(2u64),
+    ]);
     assert!(ret.is_ok());
     Ok(())
 }
-
 
 #[tokio::test]
 pub async fn test_calcu_bn256_recursive_snark_with_private_input() -> Result<()> {
@@ -103,13 +99,15 @@ pub async fn test_calcu_bn256_recursive_snark_with_private_input() -> Result<()>
     let input_0: Vec<(String, Vec<F1>)> =
         vec![("step_in".to_string(), vec![F1::from(4u64), F1::from(2u64)])];
     let private_inputs: Vec<Vec<(String, Vec<F1>)>> = vec![
-	vec![("adder".to_string(), vec![F1::from(1u64)])],
-	vec![("adder".to_string(), vec![F1::from(42u64)])],
-	vec![("adder".to_string(), vec![F1::from(33u64)])],
+        vec![("adder".to_string(), vec![F1::from(1u64)])],
+        vec![("adder".to_string(), vec![F1::from(42u64)])],
+        vec![("adder".to_string(), vec![F1::from(33u64)])],
     ];
     assert_eq!(private_inputs.len(), 3);
 
-    let circuit_0 = circuit_generator.gen_circuit(input_0.clone(), true).unwrap();
+    let circuit_0 = circuit_generator
+        .gen_circuit(input_0.clone(), true)
+        .unwrap();
 
     let recursive_circuits = circuit_generator
         .gen_recursive_circuit(input_0.clone(), private_inputs.clone(), 3, true)
@@ -118,12 +116,8 @@ pub async fn test_calcu_bn256_recursive_snark_with_private_input() -> Result<()>
     assert_eq!(recursive_circuits.len(), 3);
     // init pp with ouptn inputs
     let pp = snark::SNARK::<E1, E2>::gen_pp::<S1, S2>(circuit_0.clone());
-    let mut rec_snark_iter = snark::SNARK::<E1, E2>::new(
-        &recursive_circuits[0].clone(),
-        input_0.clone(),
-        &pp,
-    )
-	.unwrap();
+    let mut rec_snark_iter =
+        snark::SNARK::<E1, E2>::new(&recursive_circuits[0].clone(), input_0.clone(), &pp).unwrap();
 
     for c in recursive_circuits {
         rec_snark_iter.foldr(&pp, &c).unwrap();
@@ -136,15 +130,12 @@ pub async fn test_calcu_bn256_recursive_snark_with_private_input() -> Result<()>
     println!("success on create recursive snark");
     let (pk, vk) = snark::SNARK::<E1, E2>::compress_setup::<S1, S2>(&pp).unwrap();
 
-    let compress_snark = rec_snark_iter
-        .compress_prove::<S1, S2>(&pp, &pk)
-        .unwrap();
+    let compress_snark = rec_snark_iter.compress_prove::<S1, S2>(&pp, &pk).unwrap();
     let compress_snark_ref = Rc::new(compress_snark);
-    let ret =
-        snark::SNARK::<E1, E2>::compress_verify::<S1, S2>(compress_snark_ref, &vk, 3, &vec![
-            F1::from(4u64),
-            F1::from(2u64),
-        ]);
+    let ret = snark::SNARK::<E1, E2>::compress_verify::<S1, S2>(compress_snark_ref, &vk, 3, &vec![
+        F1::from(4u64),
+        F1::from(2u64),
+    ]);
     assert!(ret.is_ok());
     Ok(())
 }

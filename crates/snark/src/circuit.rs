@@ -59,14 +59,8 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
 
     /// Generate iterator circuit list
     /// Which iterate inputs and generate circuit
-    pub fn gen_circuit(
-        &self,
-        input: TyInput<F>,
-        sanity_check: bool,
-    ) -> Result<Circuit<F>>
-    where
-        F: PrimeField,
-    {
+    pub fn gen_circuit(&self, input: TyInput<F>, sanity_check: bool) -> Result<Circuit<F>>
+    where F: PrimeField {
         let mut calc = self.calculator.borrow_mut();
         let witness: TyWitness<F> = calc.calculate_witness::<F>(input.clone(), sanity_check)?;
         let circom = Circuit::<F> {
@@ -81,7 +75,7 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
     pub fn gen_recursive_circuit(
         &self,
         public_input: TyInput<F>,
-	private_inputs: Vec<TyInput<F>>,
+        private_inputs: Vec<TyInput<F>>,
         times: usize,
         sanity_check: bool,
     ) -> Result<Vec<Circuit<F>>>
@@ -120,16 +114,16 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
 
         for i in 0..times {
             let witness: TyWitness<F> = if latest_output.is_empty() {
-		let mut input = public_input.clone();
-		if let Some(p) = private_inputs.get(i) {
-		    input.extend(p.clone());
-		}
+                let mut input = public_input.clone();
+                if let Some(p) = private_inputs.get(i) {
+                    input.extend(p.clone());
+                }
                 calc.calculate_witness::<F>(input, sanity_check)?
             } else {
-		let mut input = latest_output.clone();
-		if let Some(p) = private_inputs.get(i) {
-		    input.extend(p.clone());
-		}
+                let mut input = latest_output.clone();
+                if let Some(p) = private_inputs.get(i) {
+                    input.extend(p.clone());
+                }
                 calc.calculate_witness::<F>(input, sanity_check)?
             };
             let circom = Circuit::<F> {

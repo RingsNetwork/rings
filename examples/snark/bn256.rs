@@ -1,9 +1,10 @@
 use std::rc::Rc;
 
 use rings_snark::circuit;
-use rings_snark::prelude::nova;
+use rings_snark::prelude::nova::provider::ipa_pc::EvaluationEngine;
 use rings_snark::prelude::nova::provider::PallasEngine;
 use rings_snark::prelude::nova::provider::VestaEngine;
+use rings_snark::prelude::nova::spartan::snark::RelaxedR1CSSNARK;
 use rings_snark::prelude::nova::traits::Engine;
 use rings_snark::r1cs;
 use rings_snark::snark;
@@ -12,73 +13,66 @@ use rings_snark::snark;
 async fn main() {
     type E1 = VestaEngine;
     type E2 = PallasEngine;
-    type EE1 = nova::provider::ipa_pc::EvaluationEngine<E1>;
-    type EE2 = nova::provider::ipa_pc::EvaluationEngine<E2>;
-    type S1 = nova::spartan::snark::RelaxedR1CSSNARK<E1, EE1>; // non-preprocessing SNARK
-    type S2 = nova::spartan::snark::RelaxedR1CSSNARK<E2, EE2>; // non-preprocessing SNARK
+    type EE1 = EvaluationEngine<E1>;
+    type EE2 = EvaluationEngine<E2>;
+    type S1 = RelaxedR1CSSNARK<E1, EE1>; // non-preprocessing SNARK
+    type S2 = RelaxedR1CSSNARK<E2, EE2>; // non-preprocessing SNARK
     type F1 = <E1 as Engine>::Scalar;
     type F2 = <E2 as Engine>::Scalar;
 
     let r1cs = r1cs::load_r1cs::<F1>(
-        r1cs::Path::Local("examples/snark/circoms/simple_bn256.r1cs".to_string()),
+        r1cs::Path::Local("src/tests/circoms/simple_bn256_priv.r1cs".to_string()),
         r1cs::Format::Bin,
     )
     .await
     .unwrap();
     let witness_calculator = r1cs::load_circom_witness_calculator(r1cs::Path::Local(
-        "examples/snark/circoms/simple_bn256_js/simple_bn256.wasm".to_string(),
+        "src/tests/circoms/simple_bn256_priv.wasm".to_string(),
     ))
     .await
     .unwrap();
 
     let circuit_generator = circuit::WasmCircuitGenerator::<F1>::new(r1cs, witness_calculator);
 
-    // recursion based circuit example
-    //
-    // prepare inputs
     let input_0: Vec<(String, Vec<F1>)> =
         vec![("step_in".to_string(), vec![F1::from(4u64), F1::from(2u64)])];
+    let private_inputs: Vec<Vec<(String, Vec<F1>)>> = vec![
+        vec![("adder".to_string(), vec![F1::from(1u64)])],
+        vec![("adder".to_string(), vec![F1::from(42u64)])],
+        vec![("adder".to_string(), vec![F1::from(33u64)])],
+    ];
+    assert_eq!(private_inputs.len(), 3);
+
+    let circuit_0 = circuit_generator
+        .gen_circuit(input_0.clone(), true)
+        .unwrap();
 
     let recursive_circuits = circuit_generator
-        .gen_recursive_circuit(input_0.clone(), 5, true)
+        .gen_recursive_circuit(input_0.clone(), private_inputs.clone(), 3, true)
         .unwrap();
-    assert_eq!(recursive_circuits.len(), 5);
-    let pp = snark::SNARK::<E1, E2>::gen_pp::<EE1, EE2, S1, S2>(recursive_circuits[0].clone());
-    let pp_ref = Rc::new(pp);
 
-    let mut rec_snark_iter = snark::SNARK::<E1, E2>::new::<EE1, EE2, S1, S2>(
-        &Rc::new(recursive_circuits[0].clone()),
-        input_0.clone(),
-        pp_ref.clone(),
-    )
-    .unwrap();
+    assert_eq!(recursive_circuits.len(), 3);
+    // init pp with ouptn inputs
+    let pp = snark::SNARK::<E1, E2>::gen_pp::<S1, S2>(circuit_0.clone());
+    let mut rec_snark_iter =
+        snark::SNARK::<E1, E2>::new(&recursive_circuits[0].clone(), input_0.clone(), &pp).unwrap();
+
     for c in recursive_circuits {
-        rec_snark_iter.foldr(pp_ref.clone(), &c).unwrap();
+        rec_snark_iter.foldr(&pp, &c).unwrap();
     }
     rec_snark_iter
-        .verify(
-            pp_ref.clone(),
-            5,
-            &vec![F1::from(4u64), F1::from(2u64)],
-            &vec![F2::from(0)],
-        )
+        .verify(&pp, 3, &vec![F1::from(4u64), F1::from(2u64)], &vec![
+            F2::from(0),
+        ])
         .unwrap();
     println!("success on create recursive snark");
-    let (pk, vk) =
-        snark::SNARK::<E1, E2>::compress_setup::<EE1, EE2, S1, S2>(pp_ref.clone()).unwrap();
-    let pk_ref = Rc::new(pk);
-    let vk_ref = Rc::new(vk);
+    let (pk, vk) = snark::SNARK::<E1, E2>::compress_setup::<S1, S2>(&pp).unwrap();
 
-    let compress_snark = rec_snark_iter
-        .compress_prove::<EE1, EE2, S1, S2>(pp_ref.clone(), pk_ref)
-        .unwrap();
+    let compress_snark = rec_snark_iter.compress_prove::<S1, S2>(&pp, &pk).unwrap();
     let compress_snark_ref = Rc::new(compress_snark);
-    let ret = snark::SNARK::<E1, E2>::compress_verify::<EE1, EE2, S1, S2>(
-        compress_snark_ref,
-        vk_ref,
-        5,
-        &vec![F1::from(4u64), F1::from(2u64)],
-    );
+    let ret = snark::SNARK::<E1, E2>::compress_verify::<S1, S2>(compress_snark_ref, &vk, 3, &vec![
+        F1::from(4u64),
+        F1::from(2u64),
+    ]);
     assert!(ret.is_ok());
-    println!("done!")
 }
