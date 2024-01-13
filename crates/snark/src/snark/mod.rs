@@ -5,13 +5,11 @@ mod impls;
 use std::ops::Deref;
 use std::ops::DerefMut;
 
-use ff::Field;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::circuit::flat_input;
 use crate::circuit::Circuit;
-use crate::circuit::TyInput;
+use crate::circuit::Input;
 use crate::error::Result;
 use crate::prelude::nova;
 use crate::prelude::nova::traits::circuit::TrivialCircuit;
@@ -108,20 +106,20 @@ where
     /// Create public params with circom, and public input
     pub fn new(
         circom: impl AsRef<Circuit<E1::Scalar>>,
-        public_inputs: impl AsRef<TyInput<E1::Scalar>>,
         pp: impl AsRef<PublicParams<E1, E2>>,
+        public_inputs: impl AsRef<Input<E1::Scalar>>,
+        secondary_inputs: impl AsRef<[E2::Scalar]>,
     ) -> Result<Self> {
         // flat public input here
-        let public_inputs = flat_input::<E1::Scalar>(public_inputs.as_ref().clone());
+        let public_inputs = public_inputs.as_ref().flat();
         let circuit_secondary = TrivialCircuit::<E2::Scalar>::default();
         // default input for secondary on initialize round is [0]
-        let secondary_inputs = [<<E2 as Engine>::Scalar as Field>::ZERO];
         let inner = RecursiveSNARK::new(
             pp.as_ref(),
             circom.as_ref(),
             &circuit_secondary,
-            &public_inputs,
-            &secondary_inputs,
+            public_inputs.as_ref(),
+            secondary_inputs.as_ref(),
         )?;
         Ok(Self { inner })
     }

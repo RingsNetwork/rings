@@ -1,6 +1,9 @@
 //! Implementation of Circuit
 //! ==========================
 use std::cell::RefCell;
+use std::iter::Iterator;
+use std::ops::Deref;
+use std::ops::DerefMut;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -17,16 +20,73 @@ use crate::error::Result;
 use crate::r1cs::TyWitness;
 
 /// Input of witness
-pub type TyInput<F> = Vec<(String, Vec<F>)>;
-
-/// Flat a witness input to values
-pub fn flat_input<F: PrimeField>(input: TyInput<F>) -> Vec<F> {
-    input.into_iter().flat_map(|(_, v)| v).collect()
+#[derive(Clone)]
+pub struct Input<F: PrimeField> {
+    /// inner input
+    pub input: Vec<(String, Vec<F>)>,
 }
 
-/// Calculate length of input
-pub fn input_len<F: PrimeField>(input: &TyInput<F>) -> usize {
-    input.iter().flat_map(|(_, v)| v).collect::<Vec<&F>>().len()
+impl<F: PrimeField> AsRef<Input<F>> for Input<F> {
+    fn as_ref(&self) -> &Self {
+        self
+    }
+}
+
+impl<F: PrimeField> Deref for Input<F> {
+    type Target = Vec<(String, Vec<F>)>;
+    fn deref(&self) -> &Self::Target {
+        &self.input
+    }
+}
+
+impl<F: PrimeField> DerefMut for Input<F> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.input
+    }
+}
+
+impl<F: PrimeField> Input<F> {
+    /// flat input
+    pub fn flat(&self) -> Vec<F> {
+        self.input
+            .clone()
+            .into_iter()
+            .flat_map(|(_, v)| v)
+            .collect()
+    }
+
+    /// Get flat length of input
+    #[allow(clippy::len_without_is_empty)]
+    pub fn len(&self) -> usize {
+        self.input
+            .iter()
+            .flat_map(|(_, v)| v)
+            .collect::<Vec<&F>>()
+            .len()
+    }
+}
+
+impl<F: PrimeField> IntoIterator for Input<F> {
+    type Item = (String, Vec<F>);
+    type IntoIter = <Vec<Self::Item> as IntoIterator>::IntoIter;
+    fn into_iter(self) -> Self::IntoIter {
+        self.input.into_iter()
+    }
+}
+
+impl<'a, F: PrimeField> IntoIterator for &'a Input<F> {
+    type Item = <&'a Vec<(String, Vec<F>)> as IntoIterator>::Item;
+    type IntoIter = <&'a Vec<(String, Vec<F>)> as IntoIterator>::IntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.input.iter()
+    }
+}
+
+impl<F: PrimeField> From<Vec<(String, Vec<F>)>> for Input<F> {
+    fn from(input: Vec<(String, Vec<F>)>) -> Self {
+        Self { input }
+    }
 }
 
 /// Circuit
@@ -59,10 +119,10 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
 
     /// Generate iterator circuit list
     /// Which iterate inputs and generate circuit
-    pub fn gen_circuit(&self, input: TyInput<F>, sanity_check: bool) -> Result<Circuit<F>>
+    pub fn gen_circuit(&self, input: Input<F>, sanity_check: bool) -> Result<Circuit<F>>
     where F: PrimeField {
         let mut calc = self.calculator.borrow_mut();
-        let witness: TyWitness<F> = calc.calculate_witness::<F>(input.clone(), sanity_check)?;
+        let witness: TyWitness<F> = calc.calculate_witness::<F>(input.to_vec(), sanity_check)?;
         let circom = Circuit::<F> {
             r1cs: self.r1cs.clone(),
             witness,
@@ -74,18 +134,15 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
     /// Which use $output_{i-1}$ as $input_i$
     pub fn gen_recursive_circuit(
         &self,
-        public_input: TyInput<F>,
-        private_inputs: Vec<TyInput<F>>,
+        public_input: Input<F>,
+        private_inputs: Vec<Input<F>>,
         times: usize,
         sanity_check: bool,
     ) -> Result<Vec<Circuit<F>>>
     where
         F: PrimeField,
     {
-        fn reshape<F: PrimeField>(
-            input: &[(String, Vec<F>)],
-            output: &[F],
-        ) -> Vec<(String, Vec<F>)> {
+        fn reshape<F: PrimeField>(input: &[(String, Vec<F>)], output: &[F]) -> Input<F> {
             let mut ret = vec![];
             let mut iter = output.iter();
 
@@ -104,27 +161,27 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
                 }
                 ret.push((val.clone(), new_vec));
             }
-            ret
+            ret.into()
         }
 
         let mut ret = vec![];
         let mut calc = self.calculator.borrow_mut();
-        let mut latest_output: Vec<(String, Vec<F>)> = vec![];
-        let input_len = input_len(&public_input);
+        let mut latest_output: Input<F> = vec![].into();
+        let input_len = public_input.len();
 
         for i in 0..times {
             let witness: TyWitness<F> = if latest_output.is_empty() {
                 let mut input = public_input.clone();
                 if let Some(p) = private_inputs.get(i) {
-                    input.extend(p.clone());
+                    input.input.extend(p.to_owned());
                 }
-                calc.calculate_witness::<F>(input, sanity_check)?
+                calc.calculate_witness::<F>(input.to_vec(), sanity_check)?
             } else {
                 let mut input = latest_output.clone();
                 if let Some(p) = private_inputs.get(i) {
-                    input.extend(p.clone());
+                    input.input.extend(p.to_owned());
                 }
-                calc.calculate_witness::<F>(input, sanity_check)?
+                calc.calculate_witness::<F>(input.to_vec(), sanity_check)?
             };
             let circom = Circuit::<F> {
                 r1cs: self.r1cs.clone(),

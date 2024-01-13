@@ -1,6 +1,7 @@
 use std::rc::Rc;
 
 use crate::circuit;
+use crate::circuit::Input;
 use crate::error::Result;
 use crate::prelude::nova::provider::ipa_pc::EvaluationEngine;
 use crate::prelude::nova::provider::PallasEngine;
@@ -35,8 +36,8 @@ pub async fn test_calcu_bn256_recursive_snark() -> Result<()> {
 
     let circuit_generator = circuit::WasmCircuitGenerator::<F1>::new(r1cs, witness_calculator);
 
-    let input_0: Vec<(String, Vec<F1>)> =
-        vec![("step_in".to_string(), vec![F1::from(4u64), F1::from(2u64)])];
+    let input_0: Input<F1> =
+        vec![("step_in".to_string(), vec![F1::from(4u64), F1::from(2u64)])].into();
     let recursive_circuits = circuit_generator
         .gen_recursive_circuit(input_0.clone(), vec![], 3, true)
         .unwrap();
@@ -45,16 +46,17 @@ pub async fn test_calcu_bn256_recursive_snark() -> Result<()> {
     assert_eq!(recursive_circuits.len(), 3);
     let pp = snark::SNARK::<E1, E2>::gen_pp::<S1, S2>(public_circuit.clone());
 
-    let mut rec_snark_iter = snark::SNARK::<E1, E2>::new(
+    let mut rec_snark = snark::SNARK::<E1, E2>::new(
         &Rc::new(recursive_circuits[0].clone()),
-        input_0.clone(),
         &pp,
+        &input_0,
+        &vec![F2::from(0)],
     )
     .unwrap();
     for c in recursive_circuits {
-        rec_snark_iter.foldr(&pp, &c).unwrap();
+        rec_snark.foldr(&pp, &c).unwrap();
     }
-    let (z0, _) = rec_snark_iter
+    let (z0, _z1) = rec_snark
         .verify(&pp, 3, &vec![F1::from(4u64), F1::from(2u64)], &vec![
             F2::from(0),
         ])
@@ -62,7 +64,7 @@ pub async fn test_calcu_bn256_recursive_snark() -> Result<()> {
     println!("success on create recursive snark");
     let (pk, vk) = snark::SNARK::<E1, E2>::compress_setup::<S1, S2>(&pp).unwrap();
 
-    let compress_snark = rec_snark_iter.compress_prove::<S1, S2>(&pp, &pk).unwrap();
+    let compress_snark = rec_snark.compress_prove::<S1, S2>(&pp, &pk).unwrap();
     let compress_snark_ref = Rc::new(compress_snark);
     let ret = snark::SNARK::<E1, E2>::compress_verify::<S1, S2>(compress_snark_ref, vk, 3, &vec![
         F1::from(4u64),
@@ -71,16 +73,16 @@ pub async fn test_calcu_bn256_recursive_snark() -> Result<()> {
     assert!(ret.is_ok());
 
     // maybe on other machine
-    let next_start_input = vec![("step_in".to_string(), z0.clone())];
+    let next_start_input: Input<F1> = vec![("step_in".to_string(), z0.clone())].into();
     let recursive_circuits_2 = circuit_generator
         .gen_recursive_circuit(next_start_input, vec![], 3, true)
         .unwrap();
 
     for c in recursive_circuits_2 {
-        rec_snark_iter.foldr(&pp, &c).unwrap();
+        rec_snark.foldr(&pp, &c).unwrap();
     }
 
-    let (_z0, _) = rec_snark_iter
+    let (_z0, _) = rec_snark
         .verify(&pp, 6, &vec![F1::from(4u64), F1::from(2u64)], &vec![
             F2::from(0),
         ])
@@ -114,12 +116,12 @@ pub async fn test_calcu_bn256_recursive_snark_with_private_input() -> Result<()>
 
     let circuit_generator = circuit::WasmCircuitGenerator::<F1>::new(r1cs, witness_calculator);
 
-    let input_0: Vec<(String, Vec<F1>)> =
-        vec![("step_in".to_string(), vec![F1::from(4u64), F1::from(2u64)])];
-    let private_inputs: Vec<Vec<(String, Vec<F1>)>> = vec![
-        vec![("adder".to_string(), vec![F1::from(1u64)])],
-        vec![("adder".to_string(), vec![F1::from(42u64)])],
-        vec![("adder".to_string(), vec![F1::from(33u64)])],
+    let input_0: Input<F1> =
+        vec![("step_in".to_string(), vec![F1::from(4u64), F1::from(2u64)])].into();
+    let private_inputs: Vec<Input<F1>> = vec![
+        vec![("adder".to_string(), vec![F1::from(1u64)])].into(),
+        vec![("adder".to_string(), vec![F1::from(42u64)])].into(),
+        vec![("adder".to_string(), vec![F1::from(33u64)])].into(),
     ];
     assert_eq!(private_inputs.len(), 3);
 
@@ -135,7 +137,10 @@ pub async fn test_calcu_bn256_recursive_snark_with_private_input() -> Result<()>
     // init pp with ouptn inputs
     let pp = snark::SNARK::<E1, E2>::gen_pp::<S1, S2>(circuit_0.clone());
     let mut rec_snark_iter =
-        snark::SNARK::<E1, E2>::new(&recursive_circuits[0].clone(), input_0.clone(), &pp).unwrap();
+        snark::SNARK::<E1, E2>::new(&recursive_circuits[0].clone(), &pp, input_0.clone(), vec![
+            F2::from(0),
+        ])
+        .unwrap();
 
     for c in recursive_circuits {
         rec_snark_iter.foldr(&pp, &c).unwrap();
