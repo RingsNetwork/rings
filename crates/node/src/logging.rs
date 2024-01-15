@@ -149,20 +149,11 @@ pub mod node {
         let subscriber = Registry::default();
         let level_filter = filter::LevelFilter::from_level(level.into());
 
-        // Filter floating log of mdns
-        let mdns_log_filter = filter::FilterFn::new(|metadata| {
-            !metadata.target().starts_with("webrtc_mdns::conn")
-                || [276, 322]
-                    .iter()
-                    .all(|&line| !metadata.line().unwrap_or_default() == line)
-        });
-
         // Stderr
         let subscriber = subscriber.with(
             fmt::layer()
                 .with_writer(std::io::stderr)
-                .with_filter(level_filter)
-                .with_filter(mdns_log_filter.clone()),
+                .with_filter(level_filter),
         );
 
         // Jaeger
@@ -178,8 +169,7 @@ pub mod node {
                 subscriber.with(Some(
                     tracing_opentelemetry::layer()
                         .with_tracer(jaeger)
-                        .with_filter(level_filter)
-                        .with_filter(mdns_log_filter),
+                        .with_filter(level_filter),
                 ))
             } else {
                 subscriber.with(None)
