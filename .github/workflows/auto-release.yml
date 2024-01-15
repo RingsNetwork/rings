@@ -77,6 +77,8 @@ jobs:
 
       - name: Setup protoc
         uses: arduino/setup-protoc@v2.1.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup rust toolchain
         run: |
@@ -125,6 +127,8 @@ jobs:
 
       - name: Setup protoc
         uses: arduino/setup-protoc@v2.1.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup rust toolchain
         run: |
@@ -187,6 +191,8 @@ jobs:
 
       - name: Setup protoc
         uses: arduino/setup-protoc@v2.1.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup rust toolchain
         run: |
