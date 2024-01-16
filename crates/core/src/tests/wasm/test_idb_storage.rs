@@ -1,36 +1,36 @@
-use std::mem::size_of_val;
-
 use rexie::TransactionMode;
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_test::wasm_bindgen_test;
 
-use crate::storage::persistence::idb::IDBStorageBasic;
-use crate::storage::persistence::IDBStorage;
-use crate::storage::persistence::PersistenceStorageOperation;
-use crate::storage::persistence::PersistenceStorageReadAndWrite;
-use crate::storage::persistence::PersistenceStorageRemove;
-
-async fn create_db_instance(cap: u32) -> IDBStorage {
-    let instance = IDBStorage::new_with_cap(cap).await.unwrap();
-    let (tx, store) = instance.get_tx_store(TransactionMode::ReadWrite).unwrap();
-    store.clear().await.unwrap();
-    tx.done().await.unwrap();
-    let (_tx, store) = instance.get_tx_store(TransactionMode::ReadOnly).unwrap();
-    assert!(store.count(None).await.unwrap() == 0, "store not empty");
-    instance
-}
+use crate::storage::idb::IdbStorage;
+use crate::storage::KvStorageInterface;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct TestDataStruct {
     content: String,
 }
 
+async fn create_db_instance(cap: u32) -> IdbStorage {
+    let instance = IdbStorage::new_with_cap(cap).await.unwrap();
+    instance.clear().await.unwrap();
+    let count = instance.count().await.unwrap();
+    assert_eq!(count, 0, "store not empty");
+    instance
+}
+
+async fn create_kv_db<V>(cap: u32) -> Box<dyn KvStorageInterface<V>>
+where V: DeserializeOwned + Serialize + Sized {
+    Box::new(create_db_instance(cap).await)
+}
+
 #[wasm_bindgen_test]
 async fn test_create_put_data() {
     let instance = create_db_instance(4).await;
+
     let key = "1".to_string();
     let value = TestDataStruct {
         content: "content1".to_string(),
@@ -103,36 +103,33 @@ async fn test_create_put_data() {
 
 #[wasm_bindgen_test]
 async fn test_indexed_db_count() {
-    let instance = create_db_instance(4).await;
+    let instance = create_kv_db::<JsonValue>(4).await;
     instance
-        .put(&"1".to_string(), &serde_json::json!("test1"))
+        .put("1", &serde_json::json!("test1"))
         .await
         .unwrap();
     instance
-        .put(&"2".to_string(), &serde_json::json!("test2"))
+        .put("2", &serde_json::json!("test2"))
         .await
         .unwrap();
     instance
-        .put(&"3".to_string(), &serde_json::json!("test3"))
+        .put("3", &serde_json::json!("test3"))
         .await
         .unwrap();
     instance
-        .put(&"4".to_string(), &serde_json::json!("test4"))
+        .put("4", &serde_json::json!("test4"))
         .await
         .unwrap();
     let count = instance.count().await.unwrap();
     assert!(count == 4, "count error, got: {:?}, expect: {:?}", count, 4);
     instance.clear().await.unwrap();
-    let (_tx, store) = instance.get_tx_store(TransactionMode::ReadOnly).unwrap();
-    assert!(
-        store.count(None).await.unwrap() == 0,
-        "indexedDB is not empty"
-    );
+    let count = instance.count().await.unwrap();
+    assert_eq!(count, 0, "indexedDB is not empty");
 }
 
 #[wasm_bindgen_test]
 async fn test_indexed_db_remove() {
-    let instance = create_db_instance(4).await;
+    let instance = create_kv_db::<JsonValue>(4).await;
     let key1 = "1".to_string();
     let key2 = "2".to_string();
     let key3 = "3".to_string();
@@ -170,7 +167,7 @@ async fn test_indexed_db_remove() {
 #[wasm_bindgen_test]
 async fn test_idb_prune() {
     super::setup_log();
-    let instance = create_db_instance(4).await;
+    let instance = create_kv_db::<TestDataStruct>(4).await;
     let key1 = "1".to_string();
     let key2 = "2".to_string();
     let key3 = "3".to_string();
@@ -224,35 +221,6 @@ async fn test_idb_prune() {
     );
 
     instance.clear().await.unwrap();
-    assert!(
-        instance.count().await.unwrap() == 0,
-        "indexedDB is not empty"
-    );
-}
-
-#[wasm_bindgen_test]
-async fn test_idb_total_size() {
-    let instance = create_db_instance(4).await;
-    let key1 = "1".to_string();
-    let value1 = TestDataStruct {
-        content: "test1".to_owned(),
-    };
-    instance.put(&key1, &value1).await.unwrap();
-    #[allow(deprecated)]
-    let expect_size = size_of_val(&JsValue::from(key1))
-        + size_of_val(&serde_wasm_bindgen::to_value(&value1).unwrap());
-    let total_size = instance.total_size().await.unwrap();
-    assert!(total_size > 0, "total_size should > 0");
-    assert!(
-        total_size == expect_size,
-        "total_size got: {}, expect: {}",
-        total_size,
-        expect_size
-    );
-
-    instance.clear().await.unwrap();
-    assert!(
-        instance.count().await.unwrap() == 0,
-        "indexedDB is not empty"
-    );
+    let count = instance.count().await.unwrap();
+    assert_eq!(count, 0, "indexedDB is not empty");
 }

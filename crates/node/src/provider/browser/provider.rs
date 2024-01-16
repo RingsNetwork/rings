@@ -13,6 +13,7 @@ use rings_core::dht::Did;
 use rings_core::ecc::PublicKey;
 use rings_core::prelude::vnode;
 use rings_core::prelude::vnode::VirtualNode;
+use rings_core::storage::idb::IdbStorage;
 use rings_core::utils::js_utils;
 use rings_core::utils::js_value;
 use rings_derive::wasm_export;
@@ -111,20 +112,37 @@ impl Provider {
 
         future_to_promise(async move {
             let signer = wrapped_signer(signer);
+
+            let vnode_storage = Box::new(
+                IdbStorage::new_with_cap_and_name(50000, "rings-node")
+                    .await
+                    .expect("Failed on create vnode storage"),
+            );
+
+            let measure_storage = Box::new(
+                IdbStorage::new_with_cap_and_name(50000, "rings-node/measure")
+                    .await
+                    .expect("Failed on create measure storage"),
+            );
+
             let provider = Provider::new_provider_internal(
                 ice_servers,
                 stabilize_timeout,
                 account,
                 account_type,
                 Signer::Async(Box::new(signer)),
+                Some(vnode_storage),
+                Some(measure_storage),
             )
             .await?;
+
             if let Some(cb) = backend_behaviour {
                 let backend: Backend = Backend::new(Arc::new(provider.clone()), Box::new(cb));
                 provider
                     .set_swarm_callback(Arc::new(backend))
                     .expect("Failed on set swarm callback");
             }
+
             Ok(JsValue::from(provider))
         })
     }
@@ -159,9 +177,25 @@ impl Provider {
         storage_name: String,
     ) -> js_sys::Promise {
         future_to_promise(async move {
-            let provider = Self::new_provider_with_storage_internal(config, storage_name)
-                .await
-                .map_err(JsError::from)?;
+            let vnode_storage = Box::new(
+                IdbStorage::new_with_cap_and_name(50000, &storage_name)
+                    .await
+                    .expect("Failed on create vnode storage"),
+            );
+
+            let measure_storage = Box::new(
+                IdbStorage::new_with_cap_and_name(50000, &format!("{}/measure", storage_name))
+                    .await
+                    .expect("Failed on create measure storage"),
+            );
+
+            let provider = Self::new_provider_with_storage_internal(
+                config,
+                Some(vnode_storage),
+                Some(measure_storage),
+            )
+            .await
+            .map_err(JsError::from)?;
             if let Some(cb) = backend_behaviour {
                 let backend: Backend = Backend::new(Arc::new(provider.clone()), Box::new(cb));
                 provider

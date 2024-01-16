@@ -1,37 +1,21 @@
+use std::sync::Arc;
+
 use rings_rpc::protos::rings_node::*;
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::*;
 
-use crate::prelude::rings_core::prelude::uuid;
 use crate::prelude::rings_core::utils;
 use crate::prelude::rings_core::utils::js_value;
-use crate::prelude::*;
-use crate::processor::ProcessorConfig;
 use crate::provider::browser;
 use crate::provider::browser::Peer;
 use crate::provider::Provider;
+use crate::tests::wasm::prepare_processor;
 
 wasm_bindgen_test_configure!(run_in_browser);
 
-async fn new_provider() -> (Provider, String) {
-    let key = SecretKey::random();
-    let sm = SessionSk::new_with_seckey(&key).unwrap();
-
-    let config = serde_yaml::to_string(&ProcessorConfig::new(
-        "stun://stun.l.google.com:19302".to_string(),
-        sm,
-        200,
-    ))
-    .unwrap();
-
-    let storage_name = uuid::Uuid::new_v4().to_string();
-    let provider: Provider = Provider::new_provider_with_storage_and_serialized_config_internal(
-        config,
-        storage_name.clone(),
-    )
-    .await
-    .unwrap();
-    (provider, storage_name)
+async fn new_provider() -> Provider {
+    let processor = prepare_processor().await;
+    Provider::from_processor(Arc::new(processor))
 }
 
 async fn get_peers(provider: &Provider) -> Vec<Peer> {
@@ -83,8 +67,8 @@ async fn create_connection(provider1: &Provider, provider2: &Provider) {
 #[wasm_bindgen_test]
 async fn test_two_provider_connect_and_list() {
     // super::setup_log();
-    let (provider1, _storage1) = new_provider().await;
-    let (provider2, _storage2) = new_provider().await;
+    let provider1 = new_provider().await;
+    let provider2 = new_provider().await;
 
     futures::try_join!(
         JsFuture::from(provider1.listen()),

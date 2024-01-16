@@ -5,7 +5,7 @@ use rings_core::dht::Did;
 use rings_core::ecc::SecretKey;
 use rings_core::message::MessagePayload;
 use rings_core::session::SessionSkBuilder;
-use rings_core::storage::PersistenceStorage;
+use rings_core::storage::MemStorage;
 use rings_node::backend::types::BackendMessage;
 use rings_node::backend::types::MessageHandler;
 use rings_node::backend::Backend;
@@ -45,10 +45,7 @@ async fn main() {
 
     // Build processor
     let config = ProcessorConfig::new("stun://stun.l.google.com:19302".to_string(), sk, 3);
-    let storage_path = PersistenceStorage::random_path("./tmp");
-    let storage = PersistenceStorage::new_with_path(storage_path.as_str())
-        .await
-        .unwrap();
+    let storage = Box::new(MemStorage::new());
     let processor = Arc::new(
         ProcessorBuilder::from_config(&config)
             .unwrap()

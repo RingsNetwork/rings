@@ -259,6 +259,8 @@ pub unsafe extern "C" fn new_provider_with_callback(
             acc,
             acc_ty,
             Signer::Sync(Box::new(wrapped_signer(signer))),
+            None,
+            None,
         ))
     })() {
         Ok(r) => r,

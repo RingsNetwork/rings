@@ -1,11 +1,12 @@
-use crate::prelude::rings_core::ecc::SecretKey;
-use crate::prelude::rings_core::storage::PersistenceStorage;
+use rings_core::ecc::SecretKey;
+use rings_core::storage::MemStorage;
+
 use crate::prelude::SessionSk;
 use crate::processor::Processor;
 use crate::processor::ProcessorBuilder;
 use crate::processor::ProcessorConfig;
 
-pub async fn prepare_processor() -> (Processor, String) {
+pub async fn prepare_processor() -> Processor {
     let key = SecretKey::random();
     let sm = SessionSk::new_with_seckey(&key).unwrap();
 
@@ -16,14 +17,11 @@ pub async fn prepare_processor() -> (Processor, String) {
     ))
     .unwrap();
 
-    let storage_path = PersistenceStorage::random_path("./tmp");
-    let storage = PersistenceStorage::new_with_path(storage_path.as_str())
-        .await
-        .unwrap();
+    let storage = Box::new(MemStorage::new());
 
     let procssor_builder = ProcessorBuilder::from_serialized(&config)
         .unwrap()
         .storage(storage);
 
-    (procssor_builder.build().unwrap(), storage_path)
+    procssor_builder.build().unwrap()
 }

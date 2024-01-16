@@ -5,6 +5,7 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
+use rings_core::storage::MemStorage;
 use rings_rpc::protos::rings_node::*;
 use rings_transport::core::transport::ConnectionInterface;
 use serde::Deserialize;
@@ -18,12 +19,12 @@ use crate::measure::PeriodicMeasure;
 use crate::prelude::rings_core::dht::Did;
 use crate::prelude::rings_core::dht::Stabilization;
 use crate::prelude::rings_core::dht::TStabilize;
+use crate::prelude::rings_core::dht::VNodeStorage;
 use crate::prelude::rings_core::message::Encoded;
 use crate::prelude::rings_core::message::Encoder;
 use crate::prelude::rings_core::message::Message;
 use crate::prelude::rings_core::message::PayloadSender;
 use crate::prelude::rings_core::prelude::uuid;
-use crate::prelude::rings_core::storage::PersistenceStorage;
 use crate::prelude::rings_core::swarm::MeasureImpl;
 use crate::prelude::rings_core::swarm::Swarm;
 use crate::prelude::rings_core::swarm::SwarmBuilder;
@@ -188,7 +189,7 @@ pub struct ProcessorBuilder {
     ice_servers: String,
     external_address: Option<String>,
     session_sk: SessionSk,
-    storage: Option<PersistenceStorage>,
+    storage: Option<VNodeStorage>,
     measure: Option<MeasureImpl>,
     stabilize_timeout: u64,
 }
@@ -223,7 +224,7 @@ impl ProcessorBuilder {
     }
 
     /// Set the storage for the processor.
-    pub fn storage(mut self, storage: PersistenceStorage) -> Self {
+    pub fn storage(mut self, storage: VNodeStorage) -> Self {
         self.storage = Some(storage);
         self
     }
@@ -241,9 +242,7 @@ impl ProcessorBuilder {
             .verify_self()
             .map_err(|e| Error::VerifyError(e.to_string()))?;
 
-        let storage = self
-            .storage
-            .expect("Please set storage by `storage()` method");
+        let storage = self.storage.unwrap_or_else(|| Box::new(MemStorage::new()));
 
         let mut swarm_builder = SwarmBuilder::new(&self.ice_servers, storage, self.session_sk);
 
@@ -415,12 +414,11 @@ mod test {
     #[tokio::test]
     async fn test_processor_create_offer() {
         let peer_did = SecretKey::random().address().into();
-        let (processor, path) = prepare_processor().await;
+        let processor = prepare_processor().await;
         processor.swarm.create_offer(peer_did).await.unwrap();
         let conn_dids = processor.swarm.get_connection_ids();
         assert_eq!(conn_dids.len(), 1);
         assert_eq!(conn_dids.first().unwrap(), &peer_did);
-        tokio::fs::remove_dir_all(path).await.unwrap();
     }
 
     struct SwarmCallbackInstance {
@@ -454,8 +452,8 @@ mod test {
             msgs: Mutex::new(Vec::new()),
         });
 
-        let (p1, path1) = prepare_processor().await;
-        let (p2, path2) = prepare_processor().await;
+        let p1 = prepare_processor().await;
+        let p2 = prepare_processor().await;
 
         p1.swarm.set_callback(callback1.clone()).unwrap();
         p2.swarm.set_callback(callback2.clone()).unwrap();
@@ -547,7 +545,5 @@ mod test {
             test_text2,
             got_msg1
         );
-        tokio::fs::remove_dir_all(path1).await.unwrap();
-        tokio::fs::remove_dir_all(path2).await.unwrap();
     }
 }

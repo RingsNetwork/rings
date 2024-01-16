@@ -24,7 +24,7 @@ use rings_node::native::endpoint::run_external_api;
 use rings_node::native::endpoint::run_internal_api;
 use rings_node::prelude::rings_core::dht::Did;
 use rings_node::prelude::rings_core::ecc::SecretKey;
-use rings_node::prelude::PersistenceStorage;
+use rings_node::prelude::rings_core::storage::sled::SledStorage;
 use rings_node::prelude::SessionSkBuilder;
 use rings_node::processor::Processor;
 use rings_node::processor::ProcessorBuilder;
@@ -431,11 +431,12 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
         (c.data_storage, c.measure_storage)
     };
 
-    let per_data_storage =
-        PersistenceStorage::new_with_cap_and_path(data_storage.capacity, data_storage.path).await?;
-    let per_measure_storage =
-        PersistenceStorage::new_with_cap_and_path(measure_storage.capacity, measure_storage.path)
-            .await?;
+    let per_data_storage = Box::new(
+        SledStorage::new_with_cap_and_path(data_storage.capacity, data_storage.path).await?,
+    );
+    let per_measure_storage = Box::new(
+        SledStorage::new_with_cap_and_path(measure_storage.capacity, measure_storage.path).await?,
+    );
 
     let measure = PeriodicMeasure::new(per_measure_storage);
 

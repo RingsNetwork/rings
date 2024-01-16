@@ -22,7 +22,6 @@ docs
 .DS_Store
 
 pkg/
-temp/
 tmp/
 data/
 nohup.out

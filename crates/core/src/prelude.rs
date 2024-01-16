@@ -14,5 +14,3 @@ pub use crate::message::ChordStorageInterface;
 pub use crate::message::ChordStorageInterfaceCacheChecker;
 pub use crate::message::MessageRelay;
 pub use crate::message::SubringInterface;
-pub use crate::storage::PersistenceStorage;
-pub use crate::storage::PersistenceStorageReadAndWrite;

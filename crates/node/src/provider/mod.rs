@@ -5,13 +5,15 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use rings_core::dht::VNodeStorage;
 use rings_core::session::SessionSkBuilder;
-use rings_core::storage::PersistenceStorage;
+use rings_core::storage::MemStorage;
 use rings_core::swarm::callback::SharedSwarmCallback;
 use rings_rpc::protos::rings_node_handler::InternalRpcHandler;
 
 use crate::error::Error;
 use crate::error::Result;
+use crate::measure::MeasureStorage;
 use crate::measure::PeriodicMeasure;
 use crate::prelude::wasm_export;
 use crate::processor::Processor;
@@ -64,22 +66,16 @@ impl Provider {
     /// Create a provider instance with storage name
     pub(crate) async fn new_provider_with_storage_internal(
         config: ProcessorConfig,
-        storage_name: String,
+        vnode_storage: Option<VNodeStorage>,
+        measure_storage: Option<MeasureStorage>,
     ) -> Result<Provider> {
-        let storage_path = storage_name.as_str();
-        let measure_path = [storage_path, "measure"].join("/");
+        let vnode_storage = vnode_storage.unwrap_or_else(|| Box::new(MemStorage::new()));
+        let measure_storage = measure_storage.unwrap_or_else(|| Box::new(MemStorage::new()));
 
-        let storage = PersistenceStorage::new_with_cap_and_name(50000, storage_path)
-            .await
-            .map_err(Error::Storage)?;
-
-        let ms = PersistenceStorage::new_with_cap_and_path(50000, measure_path)
-            .await
-            .map_err(Error::Storage)?;
-        let measure = PeriodicMeasure::new(ms);
+        let measure = PeriodicMeasure::new(measure_storage);
 
         let processor_builder = ProcessorBuilder::from_config(&config)?
-            .storage(storage)
+            .storage(vnode_storage)
             .measure(measure);
 
         let processor = Arc::new(processor_builder.build()?);
@@ -88,16 +84,6 @@ impl Provider {
             processor,
             handler: InternalRpcHandler,
         })
-    }
-
-    /// Create a provider instance with storage name and serialized config string
-    /// This function is useful for creating a provider with config file (yaml and json).
-    pub(crate) async fn new_provider_with_storage_and_serialized_config_internal(
-        config: String,
-        storage_name: String,
-    ) -> Result<Provider> {
-        let config: ProcessorConfig = serde_yaml::from_str(&config)?;
-        Self::new_provider_with_storage_internal(config, storage_name).await
     }
 
     /// Create a new provider instanice with everything in detail
@@ -114,6 +100,8 @@ impl Provider {
         account: String,
         account_type: String,
         signer: Signer,
+        vnode_storage: Option<VNodeStorage>,
+        measure_storage: Option<MeasureStorage>,
     ) -> Result<Provider> {
         let mut sk_builder = SessionSkBuilder::new(account, account_type);
         let proof = sk_builder.unsigned_proof();
@@ -124,7 +112,7 @@ impl Provider {
         sk_builder = sk_builder.set_session_sig(sig.to_vec());
         let session_sk = sk_builder.build().map_err(Error::InternalError)?;
         let config = ProcessorConfig::new(ice_servers, session_sk, stabilize_timeout);
-        Self::new_provider_with_storage_internal(config, "rings-node".to_string()).await
+        Self::new_provider_with_storage_internal(config, vnode_storage, measure_storage).await
     }
 
     /// Set callback for swarm.

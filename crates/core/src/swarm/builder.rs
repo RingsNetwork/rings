@@ -7,9 +7,9 @@ use std::sync::RwLock;
 
 use crate::channels::Channel;
 use crate::dht::PeerRing;
+use crate::dht::VNodeStorage;
 use crate::message::MessageHandler;
 use crate::session::SessionSk;
-use crate::storage::PersistenceStorage;
 use crate::swarm::callback::SharedSwarmCallback;
 use crate::swarm::callback::SwarmCallback;
 use crate::swarm::MeasureImpl;
@@ -25,7 +25,7 @@ pub struct SwarmBuilder {
     ice_servers: String,
     external_address: Option<String>,
     dht_succ_max: u8,
-    dht_storage: PersistenceStorage,
+    dht_storage: VNodeStorage,
     session_sk: SessionSk,
     session_ttl: Option<usize>,
     measure: Option<MeasureImpl>,
@@ -34,7 +34,7 @@ pub struct SwarmBuilder {
 
 impl SwarmBuilder {
     /// Creates new instance of [SwarmBuilder]
-    pub fn new(ice_servers: &str, dht_storage: PersistenceStorage, session_sk: SessionSk) -> Self {
+    pub fn new(ice_servers: &str, dht_storage: VNodeStorage, session_sk: SessionSk) -> Self {
         SwarmBuilder {
             ice_servers: ice_servers.to_string(),
             external_address: None,

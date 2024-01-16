@@ -18,8 +18,6 @@ use crate::message::FindSuccessorThen;
 use crate::message::Message;
 use crate::message::PayloadSender;
 use crate::prelude::vnode::VNodeOperation;
-use crate::storage::PersistenceStorageOperation;
-use crate::storage::PersistenceStorageReadAndWrite;
 use crate::tests::default::prepare_node;
 use crate::tests::manually_establish_connection;
 
@@ -27,8 +25,8 @@ use crate::tests::manually_establish_connection;
 async fn test_handle_join() -> Result<()> {
     let key1 = SecretKey::random();
     let key2 = SecretKey::random();
-    let node1 = prepare_node(key1).await.0;
-    let node2 = prepare_node(key2).await.0;
+    let node1 = prepare_node(key1).await;
+    let node2 = prepare_node(key2).await;
     manually_establish_connection(&node1, &node2).await;
     assert!(node1.listen_once().await.is_some());
     assert!(node1
@@ -36,7 +34,6 @@ async fn test_handle_join() -> Result<()> {
         .successors()
         .list()?
         .contains(&key2.address().into()));
-    tokio::fs::remove_dir_all("./tmp").await.ok();
     Ok(())
 }
 
@@ -45,9 +42,9 @@ async fn test_handle_connect_node() -> Result<()> {
     let keys = gen_ordered_keys(3);
     let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
 
-    let (node1, _path1) = prepare_node(key1).await;
-    let (node2, _path2) = prepare_node(key2).await;
-    let (node3, _path3) = prepare_node(key3).await;
+    let node1 = prepare_node(key1).await;
+    let node2 = prepare_node(key2).await;
+    let node3 = prepare_node(key3).await;
 
     // 2 to 3
     manually_establish_connection(&node3, &node2).await;
@@ -137,7 +134,6 @@ async fn test_handle_connect_node() -> Result<()> {
             Ok::<(), Error>(())
         } => {}
     }
-    tokio::fs::remove_dir_all("./tmp").await.ok();
     Ok(())
 }
 
@@ -145,8 +141,8 @@ async fn test_handle_connect_node() -> Result<()> {
 async fn test_handle_notify_predecessor() -> Result<()> {
     let key1 = SecretKey::random();
     let key2 = SecretKey::random();
-    let node1 = prepare_node(key1).await.0;
-    let node2 = prepare_node(key2).await.0;
+    let node1 = prepare_node(key1).await;
+    let node2 = prepare_node(key2).await;
     manually_establish_connection(&node1, &node2).await;
 
     // handle join dht situation
@@ -187,7 +183,6 @@ async fn test_handle_notify_predecessor() -> Result<()> {
         } => {}
     }
 
-    tokio::fs::remove_dir_all("./tmp").await.ok();
     Ok(())
 }
 
@@ -198,8 +193,8 @@ async fn test_handle_find_successor_increase() -> Result<()> {
     if key1.address() > key2.address() {
         (key1, key2) = (key2, key1)
     }
-    let node1 = prepare_node(key1).await.0;
-    let node2 = prepare_node(key2).await.0;
+    let node1 = prepare_node(key1).await;
+    let node2 = prepare_node(key2).await;
     manually_establish_connection(&node1, &node2).await;
 
     tokio::select! {
@@ -258,7 +253,6 @@ async fn test_handle_find_successor_increase() -> Result<()> {
             Ok::<(), Error>(())
         } => {}
     }
-    tokio::fs::remove_dir_all("./tmp").await.ok();
     Ok(())
 }
 
@@ -270,8 +264,8 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
     if key1.address() < key2.address() {
         (key1, key2) = (key2, key1)
     }
-    let node1 = prepare_node(key1).await.0;
-    let node2 = prepare_node(key2).await.0;
+    let node1 = prepare_node(key1).await;
+    let node2 = prepare_node(key2).await;
     manually_establish_connection(&node1, &node2).await;
 
     // handle join dht situation
@@ -338,7 +332,6 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
             Ok::<(), Error>(())
         } => {}
     };
-    tokio::fs::remove_dir_all("./tmp").await.ok();
     Ok(())
 }
 
@@ -357,8 +350,8 @@ async fn test_handle_storage() -> Result<()> {
         key1.address(),
         key2.address()
     );
-    let node1 = prepare_node(key1).await.0;
-    let node2 = prepare_node(key2).await.0;
+    let node1 = prepare_node(key1).await;
+    let node2 = prepare_node(key2).await;
     manually_establish_connection(&node1, &node2).await;
 
     let n1 = node1.clone();
@@ -417,10 +410,9 @@ async fn test_handle_storage() -> Result<()> {
     sleep(Duration::from_millis(5000)).await;
     assert!(node1.dht().storage.count().await.unwrap() == 0);
     assert!(node2.dht().storage.count().await.unwrap() > 0);
-    let data: Result<Option<VirtualNode>> = node2.dht().storage.get(&(vnode.did)).await;
+    let data: Result<Option<VirtualNode>> = node2.dht().storage.get(&vnode.did.to_string()).await;
     assert!(data.is_ok(), "vnode: {:?} not in", vnode.did);
     let data = data.unwrap().unwrap();
     assert_eq!(data.data[0].clone().decode::<String>().unwrap(), message);
-    tokio::fs::remove_dir_all("./tmp").await.ok();
     Ok(())
 }
