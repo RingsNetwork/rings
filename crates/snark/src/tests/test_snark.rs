@@ -19,14 +19,13 @@ fn print_mem_status(desc: Option<&str>) {
     if let Some(usage) = memory_stats() {
 	println!("Memory STATUS: <{:?}>", desc);
 	println!("Current physical memory usage: {} Mb", usage.physical_mem / 1000000);
-	println!("Current virtual memory usage: {} Mb", usage.virtual_mem / 1000000);
     } else {
 	println!("Couldn't get the current memory usage :(");
     }
 }
 
 #[tokio::test]
-pub async fn test_calcu_bn256_recursive_snark() -> Result<()> {
+pub async fn test_calcu_sha256_recursive_snark() -> Result<()> {
     type E1 = VestaEngine;
     type E2 = PallasEngine;
     type EE1 = EvaluationEngine<E1>;
@@ -48,8 +47,8 @@ pub async fn test_calcu_bn256_recursive_snark() -> Result<()> {
     .await
 	.unwrap();
 
-    let round = 100;
-    let round2 = 100;
+    let round = 5;
+    let round2 = 5;
 
 
     let circuit_generator = circuit::WasmCircuitGenerator::<F1>::new(r1cs, witness_calculator);
@@ -111,26 +110,27 @@ pub async fn test_calcu_bn256_recursive_snark() -> Result<()> {
     assert!(ret.is_ok());
 
     // maybe on other machine
-    // assert_eq!(z0.clone().len(), 256);
-    // let next_start_input: Input<F1> = vec![("inp".to_string(), z0.clone())].into();
-    // let recursive_circuits_2 = circuit_generator
-    //     .gen_recursive_circuit(next_start_input, vec![], round2, true)
-    //     .unwrap();
-    // print_mem_status(Some("after gen second recursive circuit"));
+    assert_eq!(z0.clone().len(), 256);
+    let next_start_input: Input<F1> = vec![("in".to_string(), z0.clone())].into();
+    let recursive_circuits_2 = circuit_generator
+        .gen_recursive_circuit(next_start_input, vec![], round2, true)
+        .unwrap();
+    print_mem_status(Some("after gen second recursive circuit"));
 
-    // for c in recursive_circuits_2 {
-    //     rec_snark.foldr(&pp, &c).unwrap();
-    // }
-    // print_mem_status(Some("after foldr circuits"));
-    // let (_z0, _) = rec_snark
-    //     .verify(&pp, round + round2, &input_inner.clone(), &vec![
-    //         F2::from(0),
-    //     ])
-    //     .unwrap();
-    // print_mem_status(Some("after verify"));
+    for c in recursive_circuits_2 {
+        rec_snark.foldr(&pp, &c).unwrap();
+    }
+    print_mem_status(Some("after foldr circuits"));
+    let (_z0, _) = rec_snark
+        .verify(&pp, round + round2, &input_inner.clone(), &vec![
+            F2::from(0),
+        ])
+        .unwrap();
+    print_mem_status(Some("after verify"));
     Ok(())
 }
 
+#[tokio::test]
 pub async fn test_calcu_bn256_recursive_snark_with_private_input() -> Result<()> {
     type E1 = VestaEngine;
     type E2 = PallasEngine;

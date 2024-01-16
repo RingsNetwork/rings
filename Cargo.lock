@@ -4128,7 +4128,6 @@ dependencies = [
  "quote",
  "syn 2.0.48",
  "wasm-bindgen-macro-support",
- "wasmer 3.3.0",
 ]
 
 [[package]]
@@ -4181,6 +4180,7 @@ dependencies = [
  "rings-core",
  "rings-derive",
  "rings-rpc",
+ "rings-snark",
  "rings-transport",
  "serde",
  "serde-wasm-bindgen 0.6.3",
@@ -4252,6 +4252,10 @@ dependencies = [
 name = "rings-snark-example"
 version = "0.5.5"
 dependencies = [
+ "async-trait",
+ "rings-core",
+ "rings-node",
+ "rings-rpc",
  "rings-snark",
  "tokio",
 ]

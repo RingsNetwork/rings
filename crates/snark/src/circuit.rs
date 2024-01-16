@@ -6,21 +6,23 @@ use std::ops::Deref;
 use std::ops::DerefMut;
 use std::rc::Rc;
 use std::sync::Arc;
-
+use serde::Deserialize;
+use serde::Serialize;
 use bellpepper_core::num::AllocatedNum;
 use bellpepper_core::ConstraintSystem;
 use bellpepper_core::LinearCombination;
 use bellpepper_core::SynthesisError;
-use circom_scotia::r1cs::R1CS;
+//use circom_scotia::r1cs::R1CS;
 use circom_scotia::witness::WitnessCalculator;
 use ff::PrimeField;
 use nova_snark::traits::circuit::StepCircuit;
 
 use crate::error::Result;
 use crate::r1cs::TyWitness;
+use crate::r1cs::R1CS;
 
 /// Input of witness
-#[derive(Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Input<F: PrimeField> {
     /// inner input
     pub input: Vec<(String, Vec<F>)>,

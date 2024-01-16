@@ -22,13 +22,13 @@ async fn main() {
     type F2 = <E2 as Engine>::Scalar;
 
     let r1cs = r1cs::load_r1cs::<F1>(
-        r1cs::Path::Local("src/tests/circoms/simple_bn256_priv.r1cs".to_string()),
+        r1cs::Path::Local("examples/snark/circoms/simple_bn256.r1cs".to_string()),
         r1cs::Format::Bin,
     )
     .await
     .unwrap();
     let witness_calculator = r1cs::load_circom_witness_calculator(r1cs::Path::Local(
-        "src/tests/circoms/simple_bn256_priv.wasm".to_string(),
+        "examples/snark/circoms/simple_bn256.wasm".to_string(),
     ))
     .await
     .unwrap();

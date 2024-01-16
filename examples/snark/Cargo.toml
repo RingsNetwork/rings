@@ -8,6 +8,10 @@ repository.workspace = true
 
 [dependencies]
 rings-snark = { workspace = true }
+async-trait = { workspace = true }
+rings-core = { workspace = true }
+rings-node = { workspace = true }
+rings-rpc = { workspace = true }
 tokio = { version = "1.13.0", features = ["full"] }
 
 [[example]]

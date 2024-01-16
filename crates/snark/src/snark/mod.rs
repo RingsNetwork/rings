@@ -2,9 +2,9 @@
 //! ==============
 #![allow(clippy::type_complexity)]
 mod impls;
+mod utils;
 use std::ops::Deref;
 use std::ops::DerefMut;
-
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -17,6 +17,7 @@ use crate::prelude::nova::traits::snark::RelaxedR1CSSNARKTrait;
 use crate::prelude::nova::traits::Engine;
 use crate::prelude::nova::CompressedSNARK;
 use crate::prelude::nova::RecursiveSNARK;
+use utils::{serialize_forward, deserialize_forward};
 
 /// Rings Snark implementation, a wrapper of nova's recursion snark and compressed snark
 #[derive(Serialize, Deserialize)]
@@ -44,6 +45,7 @@ where
 }
 
 /// Wrap of nova's prover key
+#[derive(Serialize, Deserialize)]
 pub struct ProverKey<E1, E2, S1, S2>
 where
     E1: Engine<Base = <E2 as Engine>::Scalar>,
@@ -52,6 +54,8 @@ where
     S2: RelaxedR1CSSNARKTrait<E2>,
 {
     /// prove key
+    #[serde(flatten)]
+    #[serde(serialize_with = "serialize_forward", deserialize_with = "deserialize_forward")]
     pub pk: nova::ProverKey<
         E1,
         E2,
@@ -59,10 +63,11 @@ where
         TrivialCircuit<<E2 as Engine>::Scalar>,
         S1,
         S2,
-    >,
+	>,
 }
 
 /// Wrap of nova's verifier key
+#[derive(Serialize, Deserialize)]
 pub struct VerifierKey<E1, E2, S1, S2>
 where
     E1: Engine<Base = <E2 as Engine>::Scalar>,
@@ -71,6 +76,8 @@ where
     S2: RelaxedR1CSSNARKTrait<E2>,
 {
     /// verifier key
+    #[serde(flatten)]
+    #[serde(serialize_with = "serialize_forward", deserialize_with = "deserialize_forward")]
     pub vk: nova::VerifierKey<
         E1,
         E2,
@@ -124,20 +131,6 @@ where
         Ok(Self { inner })
     }
 
-    /// This folder will create a new snark instance
-    pub fn fold_clone(
-        &self,
-        pp: impl AsRef<PublicParams<E1, E2>>,
-        circom: impl AsRef<Circuit<E1::Scalar>>,
-    ) -> Result<Self> {
-        // Create a new instance here
-        let mut snark = Self {
-            inner: self.deref().clone(),
-        };
-        snark.foldr(pp, circom)?;
-        Ok(snark)
-    }
-
     /// Fold next circuit
     pub fn foldr(
         &mut self,
@@ -149,6 +142,19 @@ where
         snark.prove_step(pp.as_ref(), circom.as_ref(), &circuit_secondary)?;
         Ok(())
     }
+
+    /// Fold a set of circuit
+    pub fn fold_all(
+        &mut self,
+        pp: impl AsRef<PublicParams<E1, E2>>,
+        circom: impl AsRef<Vec<Circuit<E1::Scalar>>>
+    ) -> Result<()> {
+	for c in circom.as_ref() {
+	    self.foldr(pp.as_ref(), c)?;
+	}
+	Ok(())
+    }
+
 
     /// Verify the correctness of the `RecursiveSNARK`
     /// Gen compress snark

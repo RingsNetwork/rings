@@ -2,6 +2,7 @@
 //! This module provide basic mechanism.
 
 pub mod types;
+pub mod snark;
 use std::result::Result;
 use std::sync::Arc;
 

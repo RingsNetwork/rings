@@ -1,14 +1,54 @@
 //! Utils for r1cs
 use std::io::Cursor;
 
-use circom_scotia::r1cs::R1CS;
+//use circom_scotia::r1cs::R1CS;
 use circom_scotia::reader;
 use circom_scotia::witness::WitnessCalculator;
 use ff::PrimeField;
 use wasmer::Module;
-
+use serde::Deserialize;
+use serde::Serialize;
 use crate::error::Error;
 use crate::error::Result;
+
+/// type of constraint
+pub(crate) type Constraint<F> = (Vec<(usize, F)>, Vec<(usize, F)>, Vec<(usize, F)>);
+
+/// R1CS
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct R1CS<F: PrimeField> {
+    /// number inputs of r1cs
+    pub num_inputs: usize,
+    /// number aux variable of r1cs
+    pub num_aux: usize,
+    /// number of total variables
+    pub num_variables: usize,
+    /// constraints
+    pub constraints: Vec<Constraint<F>>,
+}
+
+impl <F:PrimeField> Into<circom_scotia::r1cs::R1CS<F>> for R1CS<F> {
+    fn into(self) -> circom_scotia::r1cs::R1CS<F> {
+	circom_scotia::r1cs::R1CS::<F> {
+	    num_inputs: self.num_inputs,
+	    num_aux: self.num_aux,
+	    num_variables: self.num_variables,
+	    constraints: self.constraints
+	}
+    }
+}
+
+impl <F:PrimeField> From<circom_scotia::r1cs::R1CS<F>> for R1CS<F> {
+    fn from(r1cs: circom_scotia::r1cs::R1CS<F>) -> Self {
+	Self {
+	    num_inputs: r1cs.num_inputs,
+	    num_aux: r1cs.num_aux,
+	    num_variables: r1cs.num_variables,
+	    constraints: r1cs.constraints
+	}
+    }
+}
+
 
 /// Path of a r1cs
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,7 +84,7 @@ pub async fn load_r1cs_remote<F: PrimeField>(url: &str, format: Format) -> Resul
         Format::Json => reader::load_r1cs_from_json::<F, Cursor<Vec<u8>>>(data),
         Format::Bin => reader::load_r1cs_from_bin::<F, Cursor<Vec<u8>>>(data),
     };
-    Ok(ret)
+    Ok(ret.into())
 }
 
 /// Load local r1cs
@@ -56,7 +96,7 @@ pub fn load_r1cs_local<F: PrimeField>(
         Format::Json => reader::load_r1cs_from_json_file::<F>(path),
         Format::Bin => reader::load_r1cs_from_bin_file::<F>(path),
     };
-    Ok(ret)
+    Ok(ret.into())
 }
 
 /// Load r1cs, the resource path can be remote local, and both bin and json are supported
@@ -65,7 +105,7 @@ pub async fn load_r1cs<F: PrimeField>(path: Path, format: Format) -> Result<R1CS
         Path::Local(p) => load_r1cs_local::<F>(p, format)?,
         Path::Remote(url) => load_r1cs_remote::<F>(&url, format).await?,
     };
-    Ok(ret)
+    Ok(ret.into())
 }
 
 /// Fetch remote witness
