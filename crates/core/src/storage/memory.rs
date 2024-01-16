@@ -21,7 +21,8 @@ where V: Clone
     }
 }
 
-#[async_trait]
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
 impl<V> KvStorageInterface<V> for MemStorage<V>
 where V: Clone + Send + Sync
 {

@@ -26,8 +26,7 @@ pub trait KvStorageInterface<V> {
     /// Remove an `entry` by `key`.
     async fn remove(&self, key: &str) -> Result<()>;
 
-    /// Clear Storage.
-    /// All `Entry` will be deleted.
+    /// Delete all values.
     async fn clear(&self) -> Result<()>;
 
     /// Get the current storage usage.

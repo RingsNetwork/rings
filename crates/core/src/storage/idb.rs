@@ -1,12 +1,11 @@
 #![warn(missing_docs)]
 
 //! Storage for wasm
-use std::mem::size_of_val;
 use std::ops::Add;
 use std::ops::Sub;
-use std::str::FromStr;
 
 use async_trait::async_trait;
+use itertools::Itertools;
 use rexie::Index;
 use rexie::ObjectStore;
 use rexie::Rexie;
@@ -16,11 +15,9 @@ use serde::Deserialize;
 use serde::Serialize;
 use wasm_bindgen::JsValue;
 
-use super::KvStorageInterface;
-use super::PersistenceStorageOperation;
 use crate::error::Error;
 use crate::error::Result;
-use crate::storage::persistence::PersistenceStorageInterface;
+use crate::storage::KvStorageInterface;
 use crate::utils::js_value;
 
 /// Default IndexedDB database and storage name
@@ -57,30 +54,11 @@ pub struct IdbStorage {
     storage_name: String,
 }
 
-/// IdbStorage basic functions
-pub trait IdbStorageBasic {
-    /// Get transaction and store of current `ObjectStore`
-    fn get_tx_store(&self, mode: TransactionMode) -> Result<(rexie::Transaction, rexie::Store)>;
-}
-
 impl IdbStorage {
     /// New IdbStorage
     /// * cap: rows of data limit
     pub async fn new_with_cap(cap: u32) -> Result<Self> {
         Self::new_with_cap_and_name(cap, DEFAULT_REXIE_STORE_NAME).await
-    }
-
-    /// New IdbStorage with default capacity 50000 rows data limit
-    pub async fn new() -> Result<Self> {
-        Self::new_with_cap(50000).await
-    }
-
-    /// New IdbStorage
-    /// * cap: max_size in bytes
-    /// * path: db file location
-    pub async fn new_with_cap_and_path<P>(cap: u32, _path: P) -> Result<Self>
-    where P: AsRef<std::path::Path> {
-        Self::new_with_cap(cap).await
     }
 
     /// New IdbStorage with capacity and name
@@ -105,16 +83,22 @@ impl IdbStorage {
         })
     }
 
-    /// Delete db
-    pub async fn delete(self) -> Result<()> {
-        self.db.close();
-        Rexie::delete(self.storage_name.as_str())
-            .await
+    /// Get db transaction and store
+    pub fn get_tx_store(
+        &self,
+        mode: TransactionMode,
+    ) -> Result<(rexie::Transaction, rexie::Store)> {
+        let transaction = self
+            .db
+            .transaction(&self.db.store_names(), mode)
             .map_err(Error::IDBError)?;
-        Ok(())
+        let store = transaction
+            .store(self.storage_name.as_str())
+            .map_err(Error::IDBError)?;
+        Ok((transaction, store))
     }
 
-    pub async fn prune(&self) -> Result<()> {
+    async fn prune(&self) -> Result<()> {
         let (tx, store) = self.get_tx_store(TransactionMode::ReadWrite)?;
         let count = store.count(None).await.map_err(Error::IDBError)?;
         if count < self.cap {
@@ -142,31 +126,30 @@ impl IdbStorage {
         tx.done().await.map_err(Error::IDBError)?;
         Ok(())
     }
-}
 
-impl IdbStorageBasic for IdbStorage {
-    fn get_tx_store(&self, mode: TransactionMode) -> Result<(rexie::Transaction, rexie::Store)> {
-        let transaction = self
-            .db
-            .transaction(&self.db.store_names(), mode)
-            .map_err(Error::IDBError)?;
-        let store = transaction
-            .store(self.storage_name.as_str())
-            .map_err(Error::IDBError)?;
-        Ok((transaction, store))
+    /// Delete all values.
+    pub async fn clear(&self) -> Result<()> {
+        let (tx, store) = self.get_tx_store(TransactionMode::ReadWrite)?;
+        store.clear().await.map_err(Error::IDBError)?;
+        tx.done().await.map_err(Error::IDBError)?;
+        Ok(())
+    }
+
+    /// Get the current storage usage.
+    pub async fn count(&self) -> Result<u32> {
+        let (_tx, store) = self.get_tx_store(TransactionMode::ReadOnly)?;
+        let count = store.count(None).await.map_err(Error::IDBError)?;
+        Ok(count)
     }
 }
 
 #[async_trait(?Send)]
-impl<K, V, I> KvStorageInterface<K, V> for I
-where
-    K: ToString + FromStr,
-    V: DeserializeOwned + Serialize + Sized,
-    I: PersistenceStorageOperation + IdbStorageBasic,
+impl<V> KvStorageInterface<V> for IdbStorage
+where V: DeserializeOwned + Serialize + Sized
 {
-    async fn get(&self, key: &K) -> Result<Option<V>> {
+    async fn get(&self, key: &str) -> Result<Option<V>> {
         let (tx, store) = self.get_tx_store(TransactionMode::ReadWrite)?;
-        let k: JsValue = JsValue::from(key.to_string());
+        let k: JsValue = JsValue::from(key);
         let v = store.get(&k).await.map_err(Error::IDBError)?;
         let v: Option<DataStruct<V>> = js_value::deserialize(&v)?;
         if let Some(mut v) = v {
@@ -186,7 +169,18 @@ where
         Ok(None)
     }
 
-    async fn get_all(&self) -> Result<Vec<(K, V)>> {
+    async fn put(&self, key: &str, value: &V) -> Result<()> {
+        self.prune().await?;
+        let (tx, store) = self.get_tx_store(TransactionMode::ReadWrite)?;
+        store
+            .put(&js_value::serialize(&DataStruct::new(key, value))?, None)
+            .await
+            .map_err(Error::IDBError)?;
+        tx.done().await.map_err(Error::IDBError)?;
+        Ok(())
+    }
+
+    async fn get_all(&self) -> Result<Vec<(String, V)>> {
         let (_tx, store) = self.get_tx_store(TransactionMode::ReadOnly)?;
         let entries = store
             .get_all(None, None, None, None)
@@ -195,83 +189,28 @@ where
 
         Ok(entries
             .iter()
-            .filter_map(|(k, v)| {
-                Some((
-                    K::from_str(k.as_string().unwrap().as_str()).ok()?,
+            .map(|(k, v)| {
+                (
+                    k.as_string().unwrap(),
                     js_value::deserialize::<DataStruct<V>>(v).unwrap().data,
-                ))
+                )
             })
-            .collect::<Vec<(K, V)>>())
+            .collect_vec())
     }
 
-    async fn put(&self, key: &K, entry: &V) -> Result<()> {
-        self.prune().await?;
+    async fn remove(&self, key: &str) -> Result<()> {
         let (tx, store) = self.get_tx_store(TransactionMode::ReadWrite)?;
-        store
-            .put(
-                &js_value::serialize(&DataStruct::new(key.to_string().as_str(), entry))?,
-                //Some(&key.into()),
-                None,
-            )
-            .await
-            .map_err(Error::IDBError)?;
+        store.delete(&key.into()).await.map_err(Error::IDBError)?;
         tx.done().await.map_err(Error::IDBError)?;
         Ok(())
     }
-}
 
-#[async_trait(?Send)]
-impl<K, I> KvStorageInterface<K> for I
-where
-    K: ToString,
-    I: PersistenceStorageOperation + IdbStorageBasic,
-{
-    async fn remove(&self, key: &K) -> Result<()> {
-        let (tx, store) = self.get_tx_store(TransactionMode::ReadWrite)?;
-        store
-            .delete(&key.to_string().into())
-            .await
-            .map_err(Error::IDBError)?;
-        tx.done().await.map_err(Error::IDBError)?;
-        Ok(())
-    }
-}
-
-#[async_trait(?Send)]
-impl PersistenceStorageOperation for IdbStorage {
     async fn clear(&self) -> Result<()> {
-        let (tx, store) = self.get_tx_store(TransactionMode::ReadWrite)?;
-        store.clear().await.map_err(Error::IDBError)?;
-        tx.done().await.map_err(Error::IDBError)?;
-        Ok(())
+        IdbStorage::clear(self).await
     }
 
     async fn count(&self) -> Result<u32> {
-        let (_tx, store) = self.get_tx_store(TransactionMode::ReadOnly)?;
-        let count = store.count(None).await.map_err(Error::IDBError)?;
-        Ok(count)
-    }
-
-    async fn max_size(&self) -> Result<u32> {
-        Ok(self.cap)
-    }
-
-    async fn total_size(&self) -> Result<usize> {
-        let (_tx, store) = self.get_tx_store(TransactionMode::ReadOnly)?;
-        let entries = store
-            .get_all(None, None, None, None)
-            .await
-            .map_err(Error::IDBError)?;
-        let size = entries
-            .iter()
-            .map(|(k, v)| size_of_val(k) + size_of_val(v))
-            .sum::<usize>();
-        Ok(size)
-    }
-
-    async fn close(self) -> Result<()> {
-        self.db.close();
-        Ok(())
+        IdbStorage::count(self).await
     }
 }
 
