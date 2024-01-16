@@ -89,6 +89,7 @@ impl<F: PrimeField> From<Vec<(String, Vec<F>)>> for Input<F> {
     }
 }
 
+
 /// Circuit
 #[derive(Clone, Debug)]
 pub struct Circuit<F: PrimeField> {

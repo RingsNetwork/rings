@@ -16,6 +16,7 @@
     "prepare": "npm run wasm_pack && npm run proto_generate && cp crates/node/pkg/rings_node* ./dist && cp index.ts ./dist && tsc ./dist/index.ts"
   },
   "dependencies": {
+    "circomlib": "^2.0.5",
     "protobufjs": "^7.2.5"
   },
   "devDependencies": {

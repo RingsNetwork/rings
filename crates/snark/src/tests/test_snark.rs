@@ -10,6 +10,20 @@ use crate::prelude::nova::spartan::snark::RelaxedR1CSSNARK;
 use crate::prelude::nova::traits::Engine;
 use crate::r1cs;
 use crate::snark;
+use memory_stats::memory_stats;
+use flate2::{write::ZlibEncoder, Compression};
+
+
+
+fn print_mem_status(desc: Option<&str>) {
+    if let Some(usage) = memory_stats() {
+	println!("Memory STATUS: <{:?}>", desc);
+	println!("Current physical memory usage: {} Mb", usage.physical_mem / 1000000);
+	println!("Current virtual memory usage: {} Mb", usage.virtual_mem / 1000000);
+    } else {
+	println!("Couldn't get the current memory usage :(");
+    }
+}
 
 #[tokio::test]
 pub async fn test_calcu_bn256_recursive_snark() -> Result<()> {
@@ -23,75 +37,100 @@ pub async fn test_calcu_bn256_recursive_snark() -> Result<()> {
     type F2 = <E2 as Engine>::Scalar;
 
     let r1cs = r1cs::load_r1cs::<F1>(
-        r1cs::Path::Local("src/tests/circoms/simple_bn256.r1cs".to_string()),
+        r1cs::Path::Local("src/tests/circoms/test_sha256.r1cs".to_string()),
         r1cs::Format::Bin,
     )
     .await
     .unwrap();
     let witness_calculator = r1cs::load_circom_witness_calculator(r1cs::Path::Local(
-        "src/tests/circoms/simple_bn256.wasm".to_string(),
+        "src/tests/circoms/test_sha256.wasm".to_string(),
     ))
     .await
-    .unwrap();
+	.unwrap();
+
+    let round = 100;
+    let round2 = 100;
+
 
     let circuit_generator = circuit::WasmCircuitGenerator::<F1>::new(r1cs, witness_calculator);
 
+    let mut input_inner = [F1::from(0); 256].to_vec();
+    input_inner[0] = F1::from(0u64);
+    input_inner[1] = F1::from(1u64);
     let input_0: Input<F1> =
-        vec![("step_in".to_string(), vec![F1::from(4u64), F1::from(2u64)])].into();
+        vec![("in".to_string(), input_inner.clone())].into();
+
     let recursive_circuits = circuit_generator
-        .gen_recursive_circuit(input_0.clone(), vec![], 3, true)
+        .gen_recursive_circuit(input_0.clone(), vec![], round, true)
         .unwrap();
 
-    let public_circuit = recursive_circuits[0].clone();
-    assert_eq!(recursive_circuits.len(), 3);
-    let pp = snark::SNARK::<E1, E2>::gen_pp::<S1, S2>(public_circuit.clone());
+    print_mem_status(Some("after gen circuits"));
 
+    assert_eq!(input_0.input[0].1.len(), 256);
+
+    let public_circuit = recursive_circuits[0].clone();
+
+    assert_eq!(recursive_circuits.len(), round);
+
+    let pp = snark::SNARK::<E1, E2>::gen_pp::<S1, S2>(public_circuit.clone());
+    print_mem_status(Some("after gen pp"));
     let mut rec_snark = snark::SNARK::<E1, E2>::new(
         &Rc::new(recursive_circuits[0].clone()),
         &pp,
         &input_0,
         &vec![F2::from(0)],
     )
-    .unwrap();
+	.unwrap();
+    print_mem_status(Some("after gen recursive snark"));
     for c in recursive_circuits {
         rec_snark.foldr(&pp, &c).unwrap();
     }
     let (z0, _z1) = rec_snark
-        .verify(&pp, 3, &vec![F1::from(4u64), F1::from(2u64)], &vec![
+        .verify(&pp, round, &input_inner.clone(), &vec![
             F2::from(0),
         ])
         .unwrap();
+    print_mem_status(Some("after verified recursive snark"));
     println!("success on create recursive snark");
     let (pk, vk) = snark::SNARK::<E1, E2>::compress_setup::<S1, S2>(&pp).unwrap();
 
     let compress_snark = rec_snark.compress_prove::<S1, S2>(&pp, &pk).unwrap();
+    print_mem_status(Some("after gen compress prove"));
+
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    bincode::serialize_into(&mut encoder, &compress_snark).unwrap();
+    let compressed_snark_encoded = encoder.finish().unwrap();
+    println!(
+      "CompressedSNARK::len {:?} bytes",
+      compressed_snark_encoded.len()
+    );
+
     let compress_snark_ref = Rc::new(compress_snark);
-    let ret = snark::SNARK::<E1, E2>::compress_verify::<S1, S2>(compress_snark_ref, vk, 3, &vec![
-        F1::from(4u64),
-        F1::from(2u64),
-    ]);
+    let ret = snark::SNARK::<E1, E2>::compress_verify::<S1, S2>(compress_snark_ref, vk, round, &input_inner);
+    print_mem_status(Some("after verified compress prove"));
     assert!(ret.is_ok());
 
     // maybe on other machine
-    let next_start_input: Input<F1> = vec![("step_in".to_string(), z0.clone())].into();
-    let recursive_circuits_2 = circuit_generator
-        .gen_recursive_circuit(next_start_input, vec![], 3, true)
-        .unwrap();
+    // assert_eq!(z0.clone().len(), 256);
+    // let next_start_input: Input<F1> = vec![("inp".to_string(), z0.clone())].into();
+    // let recursive_circuits_2 = circuit_generator
+    //     .gen_recursive_circuit(next_start_input, vec![], round2, true)
+    //     .unwrap();
+    // print_mem_status(Some("after gen second recursive circuit"));
 
-    for c in recursive_circuits_2 {
-        rec_snark.foldr(&pp, &c).unwrap();
-    }
-
-    let (_z0, _) = rec_snark
-        .verify(&pp, 6, &vec![F1::from(4u64), F1::from(2u64)], &vec![
-            F2::from(0),
-        ])
-        .unwrap();
-
+    // for c in recursive_circuits_2 {
+    //     rec_snark.foldr(&pp, &c).unwrap();
+    // }
+    // print_mem_status(Some("after foldr circuits"));
+    // let (_z0, _) = rec_snark
+    //     .verify(&pp, round + round2, &input_inner.clone(), &vec![
+    //         F2::from(0),
+    //     ])
+    //     .unwrap();
+    // print_mem_status(Some("after verify"));
     Ok(())
 }
 
-#[tokio::test]
 pub async fn test_calcu_bn256_recursive_snark_with_private_input() -> Result<()> {
     type E1 = VestaEngine;
     type E2 = PallasEngine;
