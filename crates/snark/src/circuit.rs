@@ -93,7 +93,7 @@ impl<F: PrimeField> From<Vec<(String, Vec<F>)>> for Input<F> {
 
 
 /// Circuit
-#[derive(Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Circuit<F: PrimeField> {
     r1cs: Arc<R1CS<F>>,
     witness: TyWitness<F>,
