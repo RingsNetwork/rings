@@ -476,7 +476,6 @@ pub mod tests {
             node1.did(),
             node2.did()
         ]);
-        tokio::fs::remove_dir_all("./tmp").await.ok();
         Ok((node1.clone(), node2.clone(), node3.clone()))
     }
 
@@ -642,7 +641,6 @@ pub mod tests {
             node1.did()
         ]);
 
-        tokio::fs::remove_dir_all("./tmp").await.ok();
         Ok((node1.clone(), node2.clone(), node3.clone()))
     }
 

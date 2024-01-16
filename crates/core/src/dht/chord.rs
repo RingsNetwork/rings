@@ -806,7 +806,6 @@ mod tests {
         // Because node_a is closer to node_d, and the sequence is full.
         assert_eq!(node_d.successors().list()?, vec![a]);
 
-        tokio::fs::remove_dir_all("./tmp").await.ok();
         Ok(())
     }
 
@@ -839,7 +838,6 @@ mod tests {
             did1,
             did2
         );
-        tokio::fs::remove_dir_all("./tmp").await.ok();
 
         Ok(())
     }
@@ -877,7 +875,6 @@ mod tests {
             did2,
             did1
         );
-        tokio::fs::remove_dir_all("./tmp").await.ok();
 
         Ok(())
     }

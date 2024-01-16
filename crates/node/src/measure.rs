@@ -25,7 +25,7 @@ const DURATION: u64 = 60 * 60;
 /// `MeasureStorage` is the type accepted by `PeriodicMeasure::new`.
 /// It's used to store counts in a storage media provided by user.
 #[cfg(feature = "browser")]
-pub type MeasureStorage = Arc<dyn KvStorageInterface<u64>>;
+pub type MeasureStorage = Box<dyn KvStorageInterface<u64>>;
 
 /// `MeasureStorage` is the type accepted by `PeriodicMeasure::new`.
 /// It's used to store counts in a storage media provided by user.
@@ -190,6 +190,7 @@ impl measure::BehaviourJudgement for PeriodicMeasure {
 mod tests {
     use std::str::FromStr;
 
+    use rings_core::storage::sled::SledStorage;
     use rings_core::storage::MemStorage;
 
     use super::*;
@@ -265,8 +266,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_measure_storage() {
-        let ms = Box::new(MemStorage::new());
+    async fn test_persistent_measure_storage() {
+        let ms: MeasureStorage = Box::new(
+            SledStorage::new_with_cap_and_path(4096, "tmp/measure_test_db")
+                .await
+                .unwrap(),
+        );
+        ms.clear().await.unwrap();
 
         let did = Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
         let measure = PeriodicMeasure::new(ms);
@@ -289,7 +295,11 @@ mod tests {
         drop(measure);
 
         // Create new measure.
-        let ms2 = Box::new(MemStorage::new());
+        let ms2 = Box::new(
+            SledStorage::new_with_cap_and_path(4096, "tmp/measure_test_db")
+                .await
+                .unwrap(),
+        );
         let measure2 = PeriodicMeasure::new(ms2);
 
         // Will take previous count from storage.

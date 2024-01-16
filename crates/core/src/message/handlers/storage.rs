@@ -348,7 +348,6 @@ mod test {
             })
         );
 
-        tokio::fs::remove_dir_all("./tmp").await.ok();
         Ok(())
     }
 
@@ -489,7 +488,6 @@ mod test {
             })
         );
 
-        tokio::fs::remove_dir_all("./tmp").await.ok();
         Ok(())
     }
 }

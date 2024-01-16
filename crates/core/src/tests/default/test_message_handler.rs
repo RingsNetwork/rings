@@ -34,7 +34,6 @@ async fn test_handle_join() -> Result<()> {
         .successors()
         .list()?
         .contains(&key2.address().into()));
-    tokio::fs::remove_dir_all("./tmp").await.ok();
     Ok(())
 }
 
@@ -135,7 +134,6 @@ async fn test_handle_connect_node() -> Result<()> {
             Ok::<(), Error>(())
         } => {}
     }
-    tokio::fs::remove_dir_all("./tmp").await.ok();
     Ok(())
 }
 
@@ -185,7 +183,6 @@ async fn test_handle_notify_predecessor() -> Result<()> {
         } => {}
     }
 
-    tokio::fs::remove_dir_all("./tmp").await.ok();
     Ok(())
 }
 
@@ -256,7 +253,6 @@ async fn test_handle_find_successor_increase() -> Result<()> {
             Ok::<(), Error>(())
         } => {}
     }
-    tokio::fs::remove_dir_all("./tmp").await.ok();
     Ok(())
 }
 
@@ -336,7 +332,6 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
             Ok::<(), Error>(())
         } => {}
     };
-    tokio::fs::remove_dir_all("./tmp").await.ok();
     Ok(())
 }
 
@@ -419,6 +414,5 @@ async fn test_handle_storage() -> Result<()> {
     assert!(data.is_ok(), "vnode: {:?} not in", vnode.did);
     let data = data.unwrap().unwrap();
     assert_eq!(data.data[0].clone().decode::<String>().unwrap(), message);
-    tokio::fs::remove_dir_all("./tmp").await.ok();
     Ok(())
 }

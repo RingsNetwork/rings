@@ -366,7 +366,6 @@ mod test {
         assert_eq!(*node1.dht().lock_predecessor()?, Some(node3.did()));
         assert_eq!(*node2.dht().lock_predecessor()?, Some(node1.did()));
         assert_eq!(*node3.dht().lock_predecessor()?, Some(node2.did()));
-        tokio::fs::remove_dir_all("./tmp").await.ok();
         Ok(())
     }
 
@@ -534,7 +533,6 @@ mod test {
         assert_eq!(*node1.dht().lock_predecessor()?, Some(node2.did()));
         assert_eq!(*node2.dht().lock_predecessor()?, Some(node3.did()));
         assert_eq!(*node3.dht().lock_predecessor()?, Some(node1.did()));
-        tokio::fs::remove_dir_all("./tmp").await.ok();
 
         Ok(())
     }

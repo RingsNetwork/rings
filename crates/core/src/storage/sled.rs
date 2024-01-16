@@ -37,17 +37,6 @@ impl SledStorage {
             path: path.as_ref().to_string_lossy().to_string(),
         })
     }
-
-    /// Delete current SledStorage
-    #[cfg(test)]
-    pub async fn delete(self) -> Result<()> {
-        let path = self.path.clone();
-        drop(self);
-        tokio::fs::remove_dir_all(path.as_str())
-            .await
-            .map_err(Error::IOError)?;
-        Ok(())
-    }
 }
 
 #[async_trait]
@@ -125,7 +114,7 @@ mod test {
 
     #[tokio::test]
     async fn test_kv_storage_put_delete() {
-        let storage = SledStorage::new_with_cap_and_path(4096, "temp/db")
+        let storage = SledStorage::new_with_cap_and_path(4096, "tmp/test_db")
             .await
             .unwrap();
         let key1 = "test1".to_owned();
@@ -181,6 +170,7 @@ mod test {
         let got_d3: u64 = storage.get(&key3).await.unwrap().unwrap();
         assert!(data3 == got_d3, "expect {}, got {}", data3, got_d3);
 
+        // Clear full db and check if it's count is zero now.
         <SledStorage as KvStorageInterface<TestStorageStruct>>::clear::<'_, '_>(&storage)
             .await
             .unwrap();
@@ -188,8 +178,9 @@ mod test {
             <SledStorage as KvStorageInterface<TestStorageStruct>>::count::<'_, '_>(&storage)
                 .await
                 .unwrap();
-        assert!(count1 == 0, "expect count1.2 is {}, got {}", 0, count1);
+        assert!(count1 == 0, "expect count1 is 0, got {count1}");
         storage.db.flush_async().await.unwrap();
+
         drop(storage)
     }
 }

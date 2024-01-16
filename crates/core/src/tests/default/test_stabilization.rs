@@ -80,7 +80,6 @@ async fn test_stabilization_once() -> Result<()> {
             Ok::<(), Error>(())
         } => {}
     }
-    tokio::fs::remove_dir_all("./tmp").await.ok();
     Ok(())
 }
 
@@ -123,7 +122,6 @@ async fn test_stabilization() -> Result<()> {
             Ok::<(), Error>(())
         } => {}
     }
-    tokio::fs::remove_dir_all("./tmp").await.ok();
     Ok(())
 }
 
