@@ -31,3 +31,6 @@ config.yaml
 package-lock.json
 dist/
 node_modules/
+
+# snark
+.!*
