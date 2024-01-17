@@ -131,6 +131,12 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install compiler
+        id: install_cc
+        uses: rlalik/setup-cpp-compiler@master
+        with:
+          compiler: g++-latest
+
       - name: Setup rust toolchain
         run: |
           rustup show
