@@ -130,11 +130,9 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install compiler
-        id: install_cc
-        uses: rlalik/setup-cpp-compiler@master
-        with:
-          compiler: g++-latest
+      - name: alias compiler
+        run: |
+          sudo ln -s /bin/g++ /bin/musl-g++
 
       - name: Setup rust toolchain
         run: |
