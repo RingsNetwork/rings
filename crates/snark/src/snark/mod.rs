@@ -5,8 +5,11 @@ mod impls;
 mod utils;
 use std::ops::Deref;
 use std::ops::DerefMut;
+
 use serde::Deserialize;
 use serde::Serialize;
+use utils::deserialize_forward;
+use utils::serialize_forward;
 
 use crate::circuit::Circuit;
 use crate::circuit::Input;
@@ -17,7 +20,6 @@ use crate::prelude::nova::traits::snark::RelaxedR1CSSNARKTrait;
 use crate::prelude::nova::traits::Engine;
 use crate::prelude::nova::CompressedSNARK;
 use crate::prelude::nova::RecursiveSNARK;
-use utils::{serialize_forward, deserialize_forward};
 
 /// Rings Snark implementation, a wrapper of nova's recursion snark and compressed snark
 #[derive(Serialize, Deserialize)]
@@ -55,7 +57,10 @@ where
 {
     /// prove key
     #[serde(flatten)]
-    #[serde(serialize_with = "serialize_forward", deserialize_with = "deserialize_forward")]
+    #[serde(
+        serialize_with = "serialize_forward",
+        deserialize_with = "deserialize_forward"
+    )]
     pub pk: nova::ProverKey<
         E1,
         E2,
@@ -63,7 +68,7 @@ where
         TrivialCircuit<<E2 as Engine>::Scalar>,
         S1,
         S2,
-	>,
+    >,
 }
 
 /// Wrap of nova's verifier key
@@ -77,7 +82,10 @@ where
 {
     /// verifier key
     #[serde(flatten)]
-    #[serde(serialize_with = "serialize_forward", deserialize_with = "deserialize_forward")]
+    #[serde(
+        serialize_with = "serialize_forward",
+        deserialize_with = "deserialize_forward"
+    )]
     pub vk: nova::VerifierKey<
         E1,
         E2,
@@ -147,14 +155,13 @@ where
     pub fn fold_all(
         &mut self,
         pp: impl AsRef<PublicParams<E1, E2>>,
-        circom: impl AsRef<Vec<Circuit<E1::Scalar>>>
+        circom: impl AsRef<Vec<Circuit<E1::Scalar>>>,
     ) -> Result<()> {
-	for c in circom.as_ref() {
-	    self.foldr(pp.as_ref(), c)?;
-	}
-	Ok(())
+        for c in circom.as_ref() {
+            self.foldr(pp.as_ref(), c)?;
+        }
+        Ok(())
     }
-
 
     /// Verify the correctness of the `RecursiveSNARK`
     /// Gen compress snark

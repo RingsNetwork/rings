@@ -1,5 +1,9 @@
 use std::rc::Rc;
 
+use flate2::write::ZlibEncoder;
+use flate2::Compression;
+use memory_stats::memory_stats;
+
 use crate::circuit;
 use crate::circuit::Input;
 use crate::error::Result;
@@ -10,17 +14,16 @@ use crate::prelude::nova::spartan::snark::RelaxedR1CSSNARK;
 use crate::prelude::nova::traits::Engine;
 use crate::r1cs;
 use crate::snark;
-use memory_stats::memory_stats;
-use flate2::{write::ZlibEncoder, Compression};
-
-
 
 fn print_mem_status(desc: Option<&str>) {
     if let Some(usage) = memory_stats() {
-	println!("Memory STATUS: <{:?}>", desc);
-	println!("Current physical memory usage: {} Mb", usage.physical_mem / 1000000);
+        println!("Memory STATUS: <{:?}>", desc);
+        println!(
+            "Current physical memory usage: {} Mb",
+            usage.physical_mem / 1000000
+        );
     } else {
-	println!("Couldn't get the current memory usage :(");
+        println!("Couldn't get the current memory usage :(");
     }
 }
 
@@ -45,19 +48,17 @@ pub async fn test_calcu_sha256_recursive_snark() -> Result<()> {
         "src/tests/circoms/test_sha256.wasm".to_string(),
     ))
     .await
-	.unwrap();
+    .unwrap();
 
     let round = 5;
     let round2 = 5;
-
 
     let circuit_generator = circuit::WasmCircuitGenerator::<F1>::new(r1cs, witness_calculator);
 
     let mut input_inner = [F1::from(0); 256].to_vec();
     input_inner[0] = F1::from(0u64);
     input_inner[1] = F1::from(1u64);
-    let input_0: Input<F1> =
-        vec![("in".to_string(), input_inner.clone())].into();
+    let input_0: Input<F1> = vec![("in".to_string(), input_inner.clone())].into();
 
     let recursive_circuits = circuit_generator
         .gen_recursive_circuit(input_0.clone(), vec![], round, true)
@@ -79,15 +80,13 @@ pub async fn test_calcu_sha256_recursive_snark() -> Result<()> {
         &input_0,
         &vec![F2::from(0)],
     )
-	.unwrap();
+    .unwrap();
     print_mem_status(Some("after gen recursive snark"));
     for c in recursive_circuits {
         rec_snark.foldr(&pp, &c).unwrap();
     }
     let (z0, _z1) = rec_snark
-        .verify(&pp, round, &input_inner.clone(), &vec![
-            F2::from(0),
-        ])
+        .verify(&pp, round, &input_inner.clone(), &vec![F2::from(0)])
         .unwrap();
     print_mem_status(Some("after verified recursive snark"));
     println!("success on create recursive snark");
@@ -100,12 +99,17 @@ pub async fn test_calcu_sha256_recursive_snark() -> Result<()> {
     bincode::serialize_into(&mut encoder, &compress_snark).unwrap();
     let compressed_snark_encoded = encoder.finish().unwrap();
     println!(
-      "CompressedSNARK::len {:?} bytes",
-      compressed_snark_encoded.len()
+        "CompressedSNARK::len {:?} bytes",
+        compressed_snark_encoded.len()
     );
 
     let compress_snark_ref = Rc::new(compress_snark);
-    let ret = snark::SNARK::<E1, E2>::compress_verify::<S1, S2>(compress_snark_ref, vk, round, &input_inner);
+    let ret = snark::SNARK::<E1, E2>::compress_verify::<S1, S2>(
+        compress_snark_ref,
+        vk,
+        round,
+        &input_inner,
+    );
     print_mem_status(Some("after verified compress prove"));
     assert!(ret.is_ok());
 
@@ -122,9 +126,9 @@ pub async fn test_calcu_sha256_recursive_snark() -> Result<()> {
     }
     print_mem_status(Some("after foldr circuits"));
     let (_z0, _) = rec_snark
-        .verify(&pp, round + round2, &input_inner.clone(), &vec![
-            F2::from(0),
-        ])
+        .verify(&pp, round + round2, &input_inner.clone(), &vec![F2::from(
+            0,
+        )])
         .unwrap();
     print_mem_status(Some("after verify"));
     Ok(())

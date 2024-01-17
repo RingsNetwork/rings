@@ -6,8 +6,7 @@ use std::ops::Deref;
 use std::ops::DerefMut;
 use std::rc::Rc;
 use std::sync::Arc;
-use serde::Deserialize;
-use serde::Serialize;
+
 use bellpepper_core::num::AllocatedNum;
 use bellpepper_core::ConstraintSystem;
 use bellpepper_core::LinearCombination;
@@ -16,7 +15,10 @@ use bellpepper_core::SynthesisError;
 use circom_scotia::witness::WitnessCalculator;
 use ff::PrimeField;
 use nova_snark::traits::circuit::StepCircuit;
+use serde::Deserialize;
+use serde::Serialize;
 
+use crate::error::Error;
 use crate::error::Result;
 use crate::r1cs::TyWitness;
 use crate::r1cs::R1CS;
@@ -91,7 +93,6 @@ impl<F: PrimeField> From<Vec<(String, Vec<F>)>> for Input<F> {
     }
 }
 
-
 /// Circuit
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Circuit<F: PrimeField> {
@@ -125,7 +126,9 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
     pub fn gen_circuit(&self, input: Input<F>, sanity_check: bool) -> Result<Circuit<F>>
     where F: PrimeField {
         let mut calc = self.calculator.borrow_mut();
-        let witness: TyWitness<F> = calc.calculate_witness::<F>(input.to_vec(), sanity_check)?;
+        let witness: TyWitness<F> = calc
+            .calculate_witness::<F>(input.to_vec(), sanity_check)
+            .map_err(|e| Error::CalculateWitness(e))?;
         let circom = Circuit::<F> {
             r1cs: self.r1cs.clone(),
             witness,
@@ -170,8 +173,6 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
         let mut ret = vec![];
         let mut calc = self.calculator.borrow_mut();
         let mut latest_output: Input<F> = vec![].into();
-        let input_len = public_input.len();
-
         for i in 0..times {
             let witness: TyWitness<F> = if latest_output.is_empty() {
                 let mut input = public_input.clone();
@@ -191,7 +192,7 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
                 witness: witness.clone(),
             };
             log::trace!("witness: {:?}, r1cs: {:?}", witness, self.r1cs);
-            latest_output = reshape(&public_input, &circom.get_public_outputs(input_len));
+            latest_output = reshape(&public_input, &circom.get_public_outputs());
             ret.push(circom);
         }
         Ok(ret)
@@ -205,11 +206,19 @@ impl<F: PrimeField> Circuit<F> {
     }
 
     /// get public outputs from witness
-    pub fn get_public_outputs(&self, input_size: usize) -> Vec<F> {
+    pub fn get_public_outputs(&self) -> Vec<F> {
         // witness: <1> <Outputs> <Inputs> <Auxs>
         // NOTE: assumes exactly half of the (public inputs + outputs) are outputs
-        let output_count = self.r1cs.num_inputs - input_size - 1;
+        let output_count = (self.r1cs.num_inputs - 1) / 2;
         self.witness[1..output_count + 1].to_vec()
+    }
+
+    /// get public inputs from witness
+    pub fn get_public_inputs(&self) -> Vec<F> {
+        // witness: <1> <Outputs> <Inputs> <Auxs>
+        // NOTE: assumes exactly half of the (public inputs + outputs) are outputs
+        let output_count = (self.r1cs.num_inputs - 1) / 2;
+        self.witness[1 + output_count + 1..self.r1cs.num_inputs].to_vec()
     }
 }
 

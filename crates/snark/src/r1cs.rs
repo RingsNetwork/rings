@@ -5,9 +5,10 @@ use std::io::Cursor;
 use circom_scotia::reader;
 use circom_scotia::witness::WitnessCalculator;
 use ff::PrimeField;
-use wasmer::Module;
 use serde::Deserialize;
 use serde::Serialize;
+use wasmer::Module;
+
 use crate::error::Error;
 use crate::error::Result;
 
@@ -27,28 +28,27 @@ pub struct R1CS<F: PrimeField> {
     pub constraints: Vec<Constraint<F>>,
 }
 
-impl <F:PrimeField> Into<circom_scotia::r1cs::R1CS<F>> for R1CS<F> {
+impl<F: PrimeField> Into<circom_scotia::r1cs::R1CS<F>> for R1CS<F> {
     fn into(self) -> circom_scotia::r1cs::R1CS<F> {
-	circom_scotia::r1cs::R1CS::<F> {
-	    num_inputs: self.num_inputs,
-	    num_aux: self.num_aux,
-	    num_variables: self.num_variables,
-	    constraints: self.constraints
-	}
+        circom_scotia::r1cs::R1CS::<F> {
+            num_inputs: self.num_inputs,
+            num_aux: self.num_aux,
+            num_variables: self.num_variables,
+            constraints: self.constraints,
+        }
     }
 }
 
-impl <F:PrimeField> From<circom_scotia::r1cs::R1CS<F>> for R1CS<F> {
+impl<F: PrimeField> From<circom_scotia::r1cs::R1CS<F>> for R1CS<F> {
     fn from(r1cs: circom_scotia::r1cs::R1CS<F>) -> Self {
-	Self {
-	    num_inputs: r1cs.num_inputs,
-	    num_aux: r1cs.num_aux,
-	    num_variables: r1cs.num_variables,
-	    constraints: r1cs.constraints
-	}
+        Self {
+            num_inputs: r1cs.num_inputs,
+            num_aux: r1cs.num_aux,
+            num_variables: r1cs.num_variables,
+            constraints: r1cs.constraints,
+        }
     }
 }
-
 
 /// Path of a r1cs
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,7 +112,8 @@ pub async fn load_r1cs<F: PrimeField>(path: Path, format: Format) -> Result<R1CS
 pub async fn load_witness_remote<F: PrimeField>(url: &str, format: Format) -> Result<TyWitness<F>> {
     let data = fetch(url).await?;
     let ret = match format {
-        Format::Json => reader::load_witness_from_bin_reader::<F, Cursor<Vec<u8>>>(data)?,
+        Format::Json => reader::load_witness_from_bin_reader::<F, Cursor<Vec<u8>>>(data)
+            .map_err(|e| Error::WitnessFailedOnLoad(e.to_string()))?,
         Format::Bin => reader::load_witness_from_json::<F, Cursor<Vec<u8>>>(data),
     };
     Ok(ret)
@@ -149,7 +150,8 @@ pub fn load_circom_witness_calculator_local(
 pub async fn load_circom_witness_calculator_remote(path: &str) -> Result<WitnessCalculator> {
     let store = WitnessCalculator::new_store();
     let data = fetch(path).await?;
-    let module = Module::from_binary(&store, data.get_ref().as_slice())?;
+    let module = Module::from_binary(&store, data.get_ref().as_slice())
+        .map_err(|e| Error::WitnessCompileError(e))?;
     Ok(WitnessCalculator::from_module(module, store)?)
 }
 

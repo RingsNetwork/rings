@@ -1,7 +1,7 @@
-use serde::Serializer;
-use serde::Deserializer;
 use serde::Deserialize;
+use serde::Deserializer;
 use serde::Serialize;
+use serde::Serializer;
 
 pub(crate) fn serialize_forward<T, S>(value: &T, serializer: S) -> Result<S::Ok, S::Error>
 where

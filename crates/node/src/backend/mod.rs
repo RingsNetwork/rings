@@ -1,8 +1,8 @@
 #![warn(missing_docs)]
 //! This module provide basic mechanism.
 
-pub mod types;
 pub mod snark;
+pub mod types;
 use std::result::Result;
 use std::sync::Arc;
 

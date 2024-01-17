@@ -4233,6 +4233,7 @@ dependencies = [
  "byteorder",
  "circom-scotia",
  "crypto-bigint 0.5.5",
+ "eyre",
  "ff 0.13.0",
  "flate2",
  "lalrpop",
