@@ -7,6 +7,13 @@ use std::sync::Arc;
 use bytes::Bytes;
 use rings_core::message::MessagePayload;
 use rings_rpc::protos::rings_node::SendBackendMessageRequest;
+use crate::backend::snark::SNARKTask;
+use rings_snark::prelude::nova::provider::PallasEngine;
+use rings_snark::prelude::nova::provider::VestaEngine;
+use rings_snark::prelude::nova::provider::GrumpkinEngine;
+use rings_snark::prelude::nova::provider::mlkzg::Bn256EngineKZG;
+
+
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -26,6 +33,27 @@ pub enum BackendMessage {
     ServiceMessage(ServiceMessage),
     /// Plain text
     PlainText(String),
+    /// SNARK with curve pallas and vesta
+    SNARKTaskMessage(SNARKTaskMessage),
+}
+
+
+/// Message types for snark task, including proof and verify
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum SNARKTaskMessage {
+    SNARKProof(SNARKProof),
+    SNARKVerify
+}
+
+/// Message type of snark proof
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum SNARKProof {
+    /// SNARK with curve pallas and vesta
+    PallasVasta(SNARKTask<PallasEngine, VestaEngine>),
+    /// SNARK with curve vesta and pallas
+    VastaPallas(SNARKTask<VestaEngine, PallasEngine>),
+    /// SNARK witn curve bn256 whth KZG multi linear commitment and grumpkin
+    Bn256KZGGrumpkin(SNARKTask<Bn256EngineKZG, GrumpkinEngine>)
 }
 
 /// ServiceMessage

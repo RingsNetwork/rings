@@ -12,10 +12,22 @@ use rings_snark::snark::VerifierKey;
 use rings_snark::snark::SNARK;
 use serde::Deserialize;
 use serde::Serialize;
-
+use super::types::SNARKProof;
+use rings_snark::prelude::nova::provider;
+use crate::backend::types::MessageHandler;
+use rings_snark::prelude::nova::provider::ipa_pc;
+use rings_snark::prelude::nova::provider::mlkzg;
+use rings_snark::prelude::nova::spartan;
+use std::sync::Arc;
+use crate::provider::Provider;
+use rings_core::message::MessagePayload;
 use crate::error::Result;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SNARKTaskBehaviour {
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SNARKTask<E1, E2>
 where
     E1: Engine<Base = <E2 as Engine>::Scalar>,
@@ -84,4 +96,51 @@ where
             &first_input,
         )?)
     }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl MessageHandler<SNARKProof> for SNARKTaskBehaviour {
+     async fn handle_message(
+        &self,
+        provider: Arc<Provider>,
+        ctx: &MessagePayload,
+        data: &SNARKProof,
+     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+	 match data {
+	     SNARKProof::VastaPallas(s) => {
+		 type E1 = provider::VestaEngine;
+		 type E2 = provider::PallasEngine;
+		 type EE1 = ipa_pc::EvaluationEngine<E1>;
+		 type EE2 = ipa_pc::EvaluationEngine<E2>;
+		 type S1 = spartan::snark::RelaxedR1CSSNARK<E1, EE1>;
+		 type S2 = spartan::snark::RelaxedR1CSSNARK<E2, EE2>;
+		 let (pk, _vk) = s.setup()?;
+		 let proof = s.prove::<S1, S2>(&pk)?;
+		 Ok(())
+	     },
+	     SNARKProof::PallasVasta(s) => {
+		 type E1 = provider::PallasEngine;
+		 type E2 = provider::VestaEngine;
+		 type EE1 = ipa_pc::EvaluationEngine<E1>;
+		 type EE2 = ipa_pc::EvaluationEngine<E2>;
+		 type S1 = spartan::snark::RelaxedR1CSSNARK<E1, EE1>;
+		 type S2 = spartan::snark::RelaxedR1CSSNARK<E2, EE2>;
+		 let (pk, _vk) = s.setup()?;
+		 let proof = s.prove::<S1, S2>(&pk)?;
+		 Ok(())
+	     },
+	     SNARKProof::Bn256KZGGrumpkin(s) => {
+		 type E1 = provider::mlkzg::Bn256EngineKZG;
+		 type E2 = provider::GrumpkinEngine;
+		 type EE1 = mlkzg::EvaluationEngine<E1>;
+		 type EE2 = ipa_pc::EvaluationEngine<E2>;
+		 type S1 = spartan::snark::RelaxedR1CSSNARK<E1, EE1>; // non-preprocessing SNARK
+		 type S2 = spartan::snark::RelaxedR1CSSNARK<E2, EE2>; // non-preprocessing SNARK
+		 let (pk, _vk) = s.setup()?;
+		 let proof = s.prove::<S1, S2>(&pk)?;
+		 Ok(())
+	     }
+	 }
+     }
 }

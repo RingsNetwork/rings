@@ -2935,9 +2935,8 @@ dependencies = [
 
 [[package]]
 name = "nova-snark"
-version = "0.32.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "364946cc19869525612e9cc259fcd9e558228dc073f14d421c6012cd659b84bf"
+version = "0.33.0"
+source = "git+https://github.com/RingsNetwork/nova?rev=ea333243b57f3ae794f1d8f6ff00f89adc94bfac#ea333243b57f3ae794f1d8f6ff00f89adc94bfac"
 dependencies = [
  "bellpepper",
  "bellpepper-core",

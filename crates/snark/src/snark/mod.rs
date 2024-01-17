@@ -22,7 +22,7 @@ use crate::prelude::nova::CompressedSNARK;
 use crate::prelude::nova::RecursiveSNARK;
 
 /// Rings Snark implementation, a wrapper of nova's recursion snark and compressed snark
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SNARK<E1, E2>
 where
     E1: Engine<Base = <E2 as Engine>::Scalar>,
@@ -34,7 +34,7 @@ where
 }
 
 /// Wrap of nova's public params
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct PublicParams<E1, E2>
 where
     E1: Engine<Base = <E2 as Engine>::Scalar>,
@@ -44,6 +44,18 @@ where
     #[serde(flatten)]
     pub inner:
         nova::PublicParams<E1, E2, Circuit<<E1 as Engine>::Scalar>, TrivialCircuit<E2::Scalar>>,
+}
+
+impl <E1, E2> std::fmt::Debug for PublicParams<E1, E2>
+where
+    E1: Engine<Base = <E2 as Engine>::Scalar>,
+    E2: Engine<Base = <E1 as Engine>::Scalar>,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PublicParams")
+         .field("inner", &serde_json::to_string(&self.inner).map_err(|_| std::fmt::Error)?)
+         .finish()
+    }
 }
 
 /// Wrap of nova's prover key
