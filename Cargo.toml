@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*", "examples/native", "examples/snark"]
 
 [workspace.package]
-version = "0.5.2"
+version = "0.5.3"
 edition = "2021"
 license = "GPL-3.0"
 authors = ["RND <dev@ringsnetwork.io>"]
