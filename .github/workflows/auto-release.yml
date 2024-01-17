@@ -112,7 +112,6 @@ jobs:
           - x86_64
         platform:
           - musl
-        compiler: [ gcc-latest, g++-latest ]
     steps:
       - uses: actions/checkout@v3
         with:
