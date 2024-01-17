@@ -112,7 +112,6 @@ jobs:
           - x86_64
         platform:
           - musl
-        compiler: [ gcc-latest, g++-latest ]
     steps:
       - uses: actions/checkout@v3
         with:
@@ -130,6 +129,12 @@ jobs:
         uses: arduino/setup-protoc@v2.1.0
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install compiler
+        id: install_cc
+        uses: rlalik/setup-cpp-compiler@master
+        with:
+          compiler: g++-latest
 
       - name: Setup rust toolchain
         run: |
