@@ -86,9 +86,9 @@ pub trait ChordStorageSync<Action>: Chord<Action> {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait ChordStorageCache<Action>: Chord<Action> {
     /// Cache fetched resource locally.
-    fn local_cache_set(&self, vnode: VirtualNode);
+    async fn local_cache_put(&self, vnode: VirtualNode) -> Result<()>;
     /// Get local cache.
-    fn local_cache_get(&self, vid: Did) -> Option<VirtualNode>;
+    async fn local_cache_get(&self, vid: Did) -> Result<Option<VirtualNode>>;
 }
 
 /// Chord online correction that inspired by Pamela Zave's work.

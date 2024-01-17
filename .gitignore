@@ -22,7 +22,6 @@ docs
 .DS_Store
 
 pkg/
-temp/
 tmp/
 data/
 nohup.out
@@ -32,3 +31,6 @@ config.yaml
 package-lock.json
 dist/
 node_modules/
+
+# snark
+.!*

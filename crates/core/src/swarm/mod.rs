@@ -18,6 +18,7 @@ use rings_derive::JudgeConnection;
 use rings_transport::core::transport::BoxedTransport;
 use rings_transport::core::transport::ConnectionInterface;
 use rings_transport::core::transport::TransportMessage;
+use rings_transport::core::transport::WebrtcConnectionState;
 use rings_transport::error::Error as TransportError;
 pub use types::MeasureImpl;
 pub use types::WrappedDid;
@@ -320,6 +321,13 @@ impl PayloadSender for Swarm {
 
     fn dht(&self) -> Arc<PeerRing> {
         Swarm::dht(self)
+    }
+
+    fn is_connected(&self, did: Did) -> bool {
+        let Some(conn) = self.get_connection(did) else {
+            return false;
+        };
+        conn.webrtc_connection_state() == WebrtcConnectionState::Connected
     }
 
     async fn do_send_payload(&self, did: Did, payload: MessagePayload) -> Result<()> {

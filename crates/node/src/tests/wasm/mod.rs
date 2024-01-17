@@ -1,13 +1,13 @@
 pub mod browser;
 pub mod processor;
 
+use rings_core::ecc::SecretKey;
+use rings_core::prelude::uuid;
+use rings_core::session::SessionSk;
+use rings_core::storage::idb::IdbStorage;
 use wasm_bindgen_test::wasm_bindgen_test_configure;
 
 use crate::logging::browser::init_logging;
-use crate::prelude::rings_core::ecc::SecretKey;
-use crate::prelude::rings_core::prelude::uuid;
-use crate::prelude::rings_core::storage::PersistenceStorage;
-use crate::prelude::SessionSk;
 use crate::processor::Processor;
 use crate::processor::ProcessorBuilder;
 use crate::processor::ProcessorConfig;
@@ -30,10 +30,12 @@ pub async fn prepare_processor() -> Processor {
     ))
     .unwrap();
 
-    let storage_path = uuid::Uuid::new_v4().to_simple().to_string();
-    let storage = PersistenceStorage::new_with_cap_and_path(50000, storage_path.as_str())
-        .await
-        .unwrap();
+    let storage_name = uuid::Uuid::new_v4().to_simple().to_string();
+    let storage = Box::new(
+        IdbStorage::new_with_cap_and_name(50000, &storage_name)
+            .await
+            .unwrap(),
+    );
 
     ProcessorBuilder::from_serialized(&config)
         .unwrap()

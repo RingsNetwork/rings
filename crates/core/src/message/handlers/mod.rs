@@ -201,8 +201,8 @@ pub mod tests {
             handler_messages: Mutex::new(vec![]),
         });
 
-        let (node1, _path1) = prepare_node(key1).await;
-        let (node2, _path2) = prepare_node(key2).await;
+        let node1 = prepare_node(key1).await;
+        let node2 = prepare_node(key2).await;
 
         node1.set_callback(cb1.clone()).unwrap();
         node2.set_callback(cb2.clone()).unwrap();

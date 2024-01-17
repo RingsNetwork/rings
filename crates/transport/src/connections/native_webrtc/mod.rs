@@ -199,10 +199,9 @@ impl TransportInterface for WebrtcTransport {
         if let Some(ref addr) = self.external_address {
             tracing::debug!("setting external ip {:?}", addr);
             setting.set_nat_1to1_ips(vec![addr.to_string()], RTCIceCandidateType::Host);
-            setting.set_ice_multicast_dns_mode(MulticastDnsMode::QueryOnly);
+            setting.set_ice_multicast_dns_mode(MulticastDnsMode::Disabled);
         } else {
-            // mDNS gathering cannot be used with 1:1 NAT IP mapping for host candidate
-            setting.set_ice_multicast_dns_mode(MulticastDnsMode::QueryAndGather);
+            setting.set_ice_multicast_dns_mode(MulticastDnsMode::Disabled);
         }
 
         let webrtc_api = webrtc::api::APIBuilder::new()

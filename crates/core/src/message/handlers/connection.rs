@@ -338,9 +338,9 @@ pub mod tests {
         key2: SecretKey,
         key3: SecretKey,
     ) -> Result<(Arc<Swarm>, Arc<Swarm>, Arc<Swarm>)> {
-        let (node1, _path1) = prepare_node(key1).await;
-        let (node2, _path2) = prepare_node(key2).await;
-        let (node3, _path3) = prepare_node(key3).await;
+        let node1 = prepare_node(key1).await;
+        let node2 = prepare_node(key2).await;
+        let node3 = prepare_node(key3).await;
 
         println!("========================================");
         println!("||  now we connect node1 and node2    ||");
@@ -476,7 +476,6 @@ pub mod tests {
             node1.did(),
             node2.did()
         ]);
-        tokio::fs::remove_dir_all("./tmp").await.ok();
         Ok((node1.clone(), node2.clone(), node3.clone()))
     }
 
@@ -485,9 +484,9 @@ pub mod tests {
         key2: SecretKey,
         key3: SecretKey,
     ) -> Result<(Arc<Swarm>, Arc<Swarm>, Arc<Swarm>)> {
-        let (node1, _path1) = prepare_node(key1).await;
-        let (node2, _path2) = prepare_node(key2).await;
-        let (node3, _path3) = prepare_node(key3).await;
+        let node1 = prepare_node(key1).await;
+        let node2 = prepare_node(key2).await;
+        let node3 = prepare_node(key3).await;
 
         println!("========================================");
         println!("||  now we connect node1 and node2    ||");
@@ -642,7 +641,6 @@ pub mod tests {
             node1.did()
         ]);
 
-        tokio::fs::remove_dir_all("./tmp").await.ok();
         Ok((node1.clone(), node2.clone(), node3.clone()))
     }
 
@@ -830,7 +828,7 @@ pub mod tests {
         // node1 -> node2 -> node3
         //  |-<-----<---------<--|
 
-        let (node4, _path4) = prepare_node(key4).await;
+        let node4 = prepare_node(key4).await;
 
         // Unless we use a fixed did value, we cannot fully predict the communication order between node4 and the nodes,
         // because we do not know the distance between node4 and each node.
@@ -930,11 +928,11 @@ pub mod tests {
         let key2 = SecretKey::random();
         let key3 = SecretKey::random();
 
-        let (node1, _path1) = prepare_node(key1).await;
-        let (node2, _path2) = prepare_node(key2).await;
+        let node1 = prepare_node(key1).await;
+        let node2 = prepare_node(key2).await;
 
         // This is only a dummy node for using assert_no_more_msg function
-        let (node3, _path3) = prepare_node(key3).await;
+        let node3 = prepare_node(key3).await;
 
         {
             assert!(node1.dht().lock_finger()?.is_empty());

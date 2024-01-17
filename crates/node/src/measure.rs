@@ -1,34 +1,43 @@
-//! This module implemented the `Measure` trait for swarm.
 #![warn(missing_docs)]
-use std::sync::Arc;
+
+//! This module implemented the `Measure` trait for swarm.
+
 use std::sync::Mutex;
 
 use async_trait::async_trait;
 use chrono::DateTime;
 use chrono::Duration;
 use chrono::Utc;
+use dashmap::mapref::one::RefMut;
+use dashmap::DashMap;
+use rings_core::dht::Did;
+use rings_core::measure;
+use rings_core::measure::Measure;
+use rings_core::measure::MeasureCounter;
+use rings_core::storage::KvStorageInterface;
 use rings_derive::MeasureBehaviour;
-
-use crate::prelude::rings_core::dht::Did;
-use crate::prelude::rings_core::measure;
-use crate::prelude::rings_core::measure::Measure;
-use crate::prelude::rings_core::measure::MeasureCounter;
-use crate::prelude::rings_core::prelude::dashmap::mapref::one::RefMut;
-use crate::prelude::rings_core::prelude::dashmap::DashMap;
-use crate::prelude::PersistenceStorage;
-use crate::prelude::PersistenceStorageReadAndWrite;
 
 #[cfg(test)]
 const DURATION: u64 = 1;
 #[cfg(not(test))]
 const DURATION: u64 = 60 * 60;
 
+/// `MeasureStorage` is the type accepted by `PeriodicMeasure::new`.
+/// It's used to store counts in a storage media provided by user.
+#[cfg(feature = "browser")]
+pub type MeasureStorage = Box<dyn KvStorageInterface<u64>>;
+
+/// `MeasureStorage` is the type accepted by `PeriodicMeasure::new`.
+/// It's used to store counts in a storage media provided by user.
+#[cfg(not(feature = "browser"))]
+pub type MeasureStorage = Box<dyn KvStorageInterface<u64> + Sync + Send>;
+
 /// `PeriodicMeasure` is used to assess the reliability of peers by counting their behaviour.
 /// It currently count the number of sent and received messages in a given period (1 hour).
 /// The method [Measure::incr] should be called in the proper places.
-#[derive(Debug, MeasureBehaviour)]
+#[derive(MeasureBehaviour)]
 pub struct PeriodicMeasure {
-    storage: Arc<PersistenceStorage>,
+    storage: MeasureStorage,
     counters: DashMap<(Did, MeasureCounter), Mutex<PeriodicCounter>>,
 }
 
@@ -89,9 +98,9 @@ impl PeriodicCounter {
 
 impl PeriodicMeasure {
     /// Create a new `PeriodicMeasure` with the given storage.
-    pub fn new(storage: PersistenceStorage) -> Self {
+    pub fn new(storage: MeasureStorage) -> Self {
         Self {
-            storage: Arc::new(storage),
+            storage,
             counters: DashMap::new(),
         }
     }
@@ -181,14 +190,14 @@ impl measure::BehaviourJudgement for PeriodicMeasure {
 mod tests {
     use std::str::FromStr;
 
+    use rings_core::storage::sled::SledStorage;
+    use rings_core::storage::MemStorage;
+
     use super::*;
 
     #[tokio::test]
     async fn test_measure_counter() {
-        let ms_path = PersistenceStorage::random_path("./tmp");
-        let ms = PersistenceStorage::new_with_path(ms_path.as_str())
-            .await
-            .unwrap();
+        let ms = Box::new(MemStorage::new());
 
         let did1 = Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
         let did2 = Did::from_str("0x999999cf1046e68e36E1aA2E0E07105eDDD1f08E").unwrap();
@@ -216,10 +225,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_measure_period() {
-        let ms_path = PersistenceStorage::random_path("./tmp");
-        let ms = PersistenceStorage::new_with_path(ms_path.as_str())
-            .await
-            .unwrap();
+        let ms = Box::new(MemStorage::new());
 
         let did = Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
 
@@ -260,11 +266,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_measure_storage() {
-        let ms_path = PersistenceStorage::random_path("./tmp");
-        let ms = PersistenceStorage::new_with_path(ms_path.as_str())
-            .await
-            .unwrap();
+    async fn test_persistent_measure_storage() {
+        let ms: MeasureStorage = Box::new(
+            SledStorage::new_with_cap_and_path(4096, "tmp/measure_test_db")
+                .await
+                .unwrap(),
+        );
+        ms.clear().await.unwrap();
 
         let did = Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
         let measure = PeriodicMeasure::new(ms);
@@ -287,13 +295,11 @@ mod tests {
         drop(measure);
 
         // Create new measure.
-        let ms2 = PersistenceStorage::new_with_path(ms_path.as_str())
-            .await
-            .unwrap();
-        // let k = PeriodicMeasure::gen_storage_key(did, MeasureCounter::Sent);
-        // let c2: u64 = ms2.get(&k).await.unwrap().unwrap();
-        // assert!(c2 == 2, "c2 not 2");
-        //.unwrap().unwrap();
+        let ms2 = Box::new(
+            SledStorage::new_with_cap_and_path(4096, "tmp/measure_test_db")
+                .await
+                .unwrap(),
+        );
         let measure2 = PeriodicMeasure::new(ms2);
 
         // Will take previous count from storage.

@@ -1,35 +1,37 @@
 #![warn(missing_docs)]
 //! Implementation of Ring's DHT
-//!
 //! which is based on CHORD, ref: <https://pdos.csail.mit.edu/papers/ton:chord/paper-ton.pdf>
 //! With high probability, the number of nodes that must be contacted to find a successor in an N-node network is O(log N).
-pub mod did;
-pub use did::Did;
+
 mod chord;
-pub use chord::TopoInfo;
+pub mod did;
 /// Finger table for Rings
 pub mod finger;
+mod stabilization;
+/// Implement Subring with VNode
+pub mod subring;
 pub mod successor;
-pub use successor::SuccessorReader;
-pub use successor::SuccessorWriter;
 pub mod types;
+/// VNode is a special node that only has virtual address
+pub mod vnode;
+
 pub use chord::PeerRing;
 pub use chord::PeerRingAction;
 pub use chord::RemoteAction as PeerRingRemoteAction;
+pub use chord::TopoInfo;
+pub use chord::VNodeStorage;
+pub use did::Did;
 pub use finger::FingerTable;
+pub use stabilization::Stabilization;
+pub use stabilization::TStabilize;
+pub use successor::SuccessorReader;
+pub use successor::SuccessorWriter;
 pub use types::Chord;
 pub use types::ChordStorage;
 pub use types::ChordStorageCache;
 pub use types::ChordStorageSync;
 pub use types::CorrectChord;
 pub use types::LiveDid;
-mod stabilization;
-pub use stabilization::Stabilization;
-pub use stabilization::TStabilize;
-/// Implement Subring with VNode
-pub mod subring;
-/// VNode is a special node that only has virtual address
-pub mod vnode;
 
 #[cfg(test)]
 pub mod tests {

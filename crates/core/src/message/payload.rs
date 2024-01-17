@@ -240,6 +240,9 @@ pub trait PayloadSender {
     /// Get access to DHT.
     fn dht(&self) -> Arc<PeerRing>;
 
+    /// Used to check if destination is already connected when `infer_next_hop`
+    fn is_connected(&self, did: Did) -> bool;
+
     /// Send a message payload to a specified DID.
     async fn do_send_payload(&self, did: Did, payload: MessagePayload) -> Result<()>;
 
@@ -247,6 +250,10 @@ pub trait PayloadSender {
     fn infer_next_hop(&self, next_hop: Option<Did>, destination: Did) -> Result<Did> {
         if let Some(next_hop) = next_hop {
             return Ok(next_hop);
+        }
+
+        if self.is_connected(destination) {
+            return Ok(destination);
         }
 
         match self.dht().find_successor(destination)? {

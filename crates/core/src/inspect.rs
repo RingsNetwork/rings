@@ -3,12 +3,9 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::dht::vnode::VirtualNode;
-use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::dht::SuccessorReader;
-use crate::storage::MemStorage;
-use crate::storage::PersistenceStorage;
-use crate::storage::PersistenceStorageReadAndWrite;
+use crate::dht::VNodeStorage;
 use crate::swarm::Swarm;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,9 +50,8 @@ impl SwarmInspect {
                 })
                 .collect()
         };
-        let persistence_storage =
-            StorageInspect::inspect_persistence_storage(&swarm.dht().storage).await;
-        let cache_storage = StorageInspect::inspect_mem_storage(&swarm.dht().cache);
+        let persistence_storage = StorageInspect::inspect_kv_storage(&swarm.dht().storage).await;
+        let cache_storage = StorageInspect::inspect_kv_storage(&swarm.dht().cache).await;
 
         Self {
             connections,
@@ -105,22 +101,13 @@ impl DHTInspect {
 }
 
 impl StorageInspect {
-    pub async fn inspect_persistence_storage(storage: &PersistenceStorage) -> Self {
+    pub async fn inspect_kv_storage(storage: &VNodeStorage) -> Self {
         Self {
             items: storage
                 .get_all()
                 .await
                 .unwrap_or_default()
                 .into_iter()
-                .collect(),
-        }
-    }
-    pub fn inspect_mem_storage(storage: &MemStorage<Did, VirtualNode>) -> Self {
-        Self {
-            items: storage
-                .items()
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), v))
                 .collect(),
         }
     }

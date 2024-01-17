@@ -56,7 +56,7 @@ async fn handle_storage_fetch_act(swarm: &Swarm, act: PeerRingAction) -> Result<
     match act {
         PeerRingAction::None => (),
         PeerRingAction::SomeVNode(v) => {
-            swarm.dht.local_cache_set(v);
+            swarm.dht.local_cache_put(v).await?;
         }
         PeerRingAction::RemoteAction(next, dht_act) => {
             if let PeerRingRemoteAction::FindVNode(vid) = dht_act {
@@ -158,7 +158,7 @@ pub(super) async fn handle_storage_operate_act(
 impl ChordStorageInterfaceCacheChecker for Swarm {
     /// Check local cache
     async fn storage_check_cache(&self, vid: Did) -> Option<VirtualNode> {
-        self.dht.local_cache_get(vid)
+        self.dht.local_cache_get(vid).await.ok().flatten()
     }
 }
 
@@ -229,7 +229,7 @@ impl HandleMsg<FoundVNode> for MessageHandler {
             return Ok(vec![MessageHandlerEvent::ForwardPayload(ctx.clone(), None)]);
         }
         for data in msg.data.iter().cloned() {
-            self.dht.local_cache_set(data);
+            self.dht.local_cache_put(data).await?;
         }
         Ok(vec![])
     }
@@ -277,15 +277,14 @@ mod test {
     use crate::message::handlers::connection::tests::test_only_two_nodes_establish_connection;
     use crate::message::Encoder;
     use crate::prelude::vnode::VNodeType;
-    use crate::storage::PersistenceStorageOperation;
     use crate::tests::default::prepare_node;
 
     #[tokio::test]
     async fn test_store_vnode() -> Result<()> {
         let keys = gen_ordered_keys(2);
         let (key1, key2) = (keys[0], keys[1]);
-        let (node1, _path1) = prepare_node(key1).await;
-        let (node2, _path2) = prepare_node(key2).await;
+        let node1 = prepare_node(key1).await;
+        let node2 = prepare_node(key2).await;
         test_only_two_nodes_establish_connection(&node1, &node2).await?;
 
         // Now, node1 is the successor of node2, and node2 is the successor of node1.
@@ -301,8 +300,8 @@ mod test {
             (node2, node1)
         };
 
-        assert!(node1.dht().cache.is_empty());
-        assert!(node2.dht().cache.is_empty());
+        assert_eq!(node1.dht().cache.count().await.unwrap(), 0);
+        assert_eq!(node2.dht().cache.count().await.unwrap(), 0);
         assert!(node1.storage_check_cache(vid).await.is_none());
         assert!(node2.storage_check_cache(vid).await.is_none());
 
@@ -349,7 +348,6 @@ mod test {
             })
         );
 
-        tokio::fs::remove_dir_all("./tmp").await.ok();
         Ok(())
     }
 
@@ -358,8 +356,8 @@ mod test {
     async fn test_extend_data() -> Result<()> {
         let keys = gen_ordered_keys(2);
         let (key1, key2) = (keys[0], keys[1]);
-        let (node1, _path1) = prepare_node(key1).await;
-        let (node2, _path2) = prepare_node(key2).await;
+        let node1 = prepare_node(key1).await;
+        let node2 = prepare_node(key2).await;
         test_only_two_nodes_establish_connection(&node1, &node2).await?;
 
         // Now, node1 is the successor of node2, and node2 is the successor of node1.
@@ -375,8 +373,8 @@ mod test {
             (node2, node1)
         };
 
-        assert!(node1.dht().cache.is_empty());
-        assert!(node2.dht().cache.is_empty());
+        assert_eq!(node1.dht().cache.count().await.unwrap(), 0);
+        assert_eq!(node2.dht().cache.count().await.unwrap(), 0);
         assert!(node1.storage_check_cache(vid).await.is_none());
         assert!(node2.storage_check_cache(vid).await.is_none());
 
@@ -490,7 +488,6 @@ mod test {
             })
         );
 
-        tokio::fs::remove_dir_all("./tmp").await.ok();
         Ok(())
     }
 }
