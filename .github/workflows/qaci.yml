@@ -133,8 +133,8 @@ jobs:
       - name: Smoke test ffi
         run: pip install wheel && pip install web3 cffi && python examples/ffi/rings.py
 
-      - name: Smoke test native
-        run: cargo run -p rings-native-example
+      # - name: Smoke test native
+      #   run: cargo run -p rings-native-example
 
   rustfmt_and_clippy:
     name: Check rustfmt style && run clippy

@@ -4438,6 +4438,7 @@ dependencies = [
  "rings-core",
  "rings-node",
  "rings-rpc",
+ "serde_json",
  "tokio",
 ]
 

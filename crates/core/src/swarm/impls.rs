@@ -2,6 +2,7 @@ use std::str::FromStr;
 
 use async_trait::async_trait;
 use rings_transport::core::transport::ConnectionInterface;
+use rings_transport::core::transport::WebrtcConnectionState;
 
 use super::callback::InnerSwarmCallback;
 use crate::dht::Did;
@@ -183,7 +184,10 @@ impl Swarm {
             return None;
         };
 
-        if c.is_connected().await {
+        if matches!(
+            c.webrtc_connection_state(),
+            WebrtcConnectionState::Connecting | WebrtcConnectionState::Connected
+        ) {
             return Some(c);
         }
 

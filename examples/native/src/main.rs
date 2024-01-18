@@ -9,6 +9,8 @@ use rings_core::storage::MemStorage;
 use rings_node::backend::types::BackendMessage;
 use rings_node::backend::types::MessageHandler;
 use rings_node::backend::Backend;
+use rings_node::logging::init_logging;
+use rings_node::logging::LogLevel;
 use rings_node::processor::ProcessorBuilder;
 use rings_node::processor::ProcessorConfig;
 use rings_node::provider::Provider;
@@ -32,6 +34,8 @@ impl MessageHandler<BackendMessage> for BackendBehaviour {
 
 #[tokio::main]
 async fn main() {
+    init_logging(LogLevel::Info);
+
     // Generate a random secret key and its did.
     let key = SecretKey::random();
     let did = Did::from(key.address());
@@ -65,20 +69,66 @@ async fn main() {
     let listening_provider = provider.clone();
     tokio::spawn(async move { listening_provider.listen().await });
 
-    // Invoke apis of node.
-    println!("\nrequest NodeInfo api...");
-    let resp = provider
-        .request(Method::NodeInfo, NodeInfoRequest {})
-        .await
-        .unwrap();
-    println!("NodeInfo: {:?}", resp);
+    // Join remote network via url then send message to the did.
+    let mut args: Vec<String> = std::env::args().rev().collect();
+    let _ = args.pop();
+    let url = args.pop().expect("remote address is required");
+    let destination_did = args.pop().expect("did is required");
 
-    println!("\nrequest CreateOffer api...");
+    println!("===> request ConnectPeerViaHttp api...");
+    let resp: ConnectPeerViaHttpResponse = serde_json::from_value(
+        provider
+            .request(Method::ConnectPeerViaHttp, ConnectPeerViaHttpRequest {
+                url,
+            })
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    println!("<=== ConnectPeerViaHttpResponse: {:?}", resp);
+
+    let remote_did = resp.peer.unwrap().did;
+
+    let connected = 'connected: {
+        for _ in 0..10 {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+            println!("===> request ListPeers api...");
+            let resp: ListPeersResponse = serde_json::from_value(
+                provider
+                    .request(Method::ListPeers, ListPeersRequest {})
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            println!("<=== ListPeersResponse: {:?}", resp);
+
+            if resp
+                .peers
+                .iter()
+                .any(|peer| peer.did == remote_did && peer.state == "Connected")
+            {
+                break 'connected true;
+            }
+        }
+        false
+    };
+
+    if !connected {
+        panic!("Failed to connect to remote peer");
+    }
+
+    let msg = BackendMessage::PlainText("Hello from native provider example".to_string());
+    let rpc_req = msg
+        .into_send_backend_message_request(destination_did)
+        .unwrap();
+    println!("===> request SendBackendMessage api...");
     let resp = provider
-        .request(Method::CreateOffer, CreateOfferRequest {
-            did: "0x11E807fcc88dD319270493fB2e822e388Fe36ab0".to_string(),
-        })
+        .request(Method::SendBackendMessage, rpc_req)
         .await
         .unwrap();
-    println!("CreateOffer: {:?}", resp);
+    println!("<=== SendBackendMessage: {:?}", resp);
+
+    // Wait for message sent.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 }
