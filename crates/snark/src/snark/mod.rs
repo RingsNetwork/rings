@@ -18,7 +18,6 @@ use crate::prelude::nova;
 use crate::prelude::nova::traits::circuit::TrivialCircuit;
 use crate::prelude::nova::traits::snark::RelaxedR1CSSNARKTrait;
 use crate::prelude::nova::traits::Engine;
-use crate::prelude::nova::CompressedSNARK;
 use crate::prelude::nova::RecursiveSNARK;
 
 /// Rings Snark implementation, a wrapper of nova's recursion snark and compressed snark
@@ -31,6 +30,30 @@ where
     /// recursive snark
     #[serde(flatten)]
     pub inner: RecursiveSNARK<E1, E2, Circuit<<E1 as Engine>::Scalar>, TrivialCircuit<E2::Scalar>>,
+}
+
+/// Compressed snark
+#[derive(Serialize, Deserialize, Clone)]
+pub struct CompressedSNARK<E1, E2, S1, S2>
+where
+    E1: Engine<Base = <E2 as Engine>::Scalar>,
+    E2: Engine<Base = <E1 as Engine>::Scalar>,
+    S1: RelaxedR1CSSNARKTrait<E1>,
+    S2: RelaxedR1CSSNARKTrait<E2>,
+{
+    #[serde(flatten)]
+    #[serde(
+        serialize_with = "serialize_forward",
+        deserialize_with = "deserialize_forward"
+    )]
+    inner: nova::CompressedSNARK<
+        E1,
+        E2,
+        Circuit<<E1 as Engine>::Scalar>,
+        TrivialCircuit<E2::Scalar>,
+        S1,
+        S2,
+    >,
 }
 
 /// Wrap of nova's public params
@@ -46,15 +69,18 @@ where
         nova::PublicParams<E1, E2, Circuit<<E1 as Engine>::Scalar>, TrivialCircuit<E2::Scalar>>,
 }
 
-impl <E1, E2> std::fmt::Debug for PublicParams<E1, E2>
+impl<E1, E2> std::fmt::Debug for PublicParams<E1, E2>
 where
     E1: Engine<Base = <E2 as Engine>::Scalar>,
     E2: Engine<Base = <E1 as Engine>::Scalar>,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PublicParams")
-         .field("inner", &serde_json::to_string(&self.inner).map_err(|_| std::fmt::Error)?)
-         .finish()
+            .field(
+                "inner",
+                &serde_json::to_string(&self.inner).map_err(|_| std::fmt::Error)?,
+            )
+            .finish()
     }
 }
 
@@ -200,7 +226,7 @@ where
         S1: RelaxedR1CSSNARKTrait<E1>,
         S2: RelaxedR1CSSNARKTrait<E2>,
     {
-        let (pk, vk) = CompressedSNARK::setup(pp.as_ref())?;
+        let (pk, vk) = nova::CompressedSNARK::setup(pp.as_ref())?;
         Ok((ProverKey { pk }, VerifierKey { vk }))
     }
 
@@ -209,42 +235,25 @@ where
         &self,
         pp: impl AsRef<PublicParams<E1, E2>>,
         pk: impl AsRef<ProverKey<E1, E2, S1, S2>>,
-    ) -> Result<
-        CompressedSNARK<
-            E1,
-            E2,
-            Circuit<<E1 as Engine>::Scalar>,
-            TrivialCircuit<E2::Scalar>,
-            S1,
-            S2,
-        >,
-    >
+    ) -> Result<CompressedSNARK<E1, E2, S1, S2>>
     where
         S1: RelaxedR1CSSNARKTrait<E1>,
         S2: RelaxedR1CSSNARKTrait<E2>,
     {
-        Ok(CompressedSNARK::<
+        Ok(nova::CompressedSNARK::<
             E1,
             E2,
             Circuit<<E1 as Engine>::Scalar>,
             TrivialCircuit<E2::Scalar>,
             S1,
             S2,
-        >::prove(pp.as_ref(), pk.as_ref(), self)?)
+        >::prove(pp.as_ref(), pk.as_ref(), self)?
+        .into())
     }
 
     /// gen compress_proof
     pub fn compress_verify<S1, S2>(
-        proof: impl AsRef<
-            CompressedSNARK<
-                E1,
-                E2,
-                Circuit<<E1 as Engine>::Scalar>,
-                TrivialCircuit<E2::Scalar>,
-                S1,
-                S2,
-            >,
-        >,
+        proof: impl AsRef<CompressedSNARK<E1, E2, S1, S2>>,
         vk: impl AsRef<VerifierKey<E1, E2, S1, S2>>,
         num_steps: usize,
         public_inputs: impl AsRef<[E1::Scalar]>,

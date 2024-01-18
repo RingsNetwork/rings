@@ -93,7 +93,7 @@ impl BackendBehaviour {
                 tracing::info!("BackendMessage from {peer_did:?} PlainText: {text:?}");
                 Ok(())
             }
-	    _ => Ok(())
+            _ => Ok(()),
         }
     }
 }

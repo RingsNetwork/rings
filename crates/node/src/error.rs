@@ -122,6 +122,8 @@ pub enum Error {
     TunnelError(TunnelDefeat) = 1304,
     #[error("Snark error: {0}")]
     RingsSNARKError(#[from] rings_snark::error::Error) = 1400,
+    #[error("Snark curve not match")]
+    SNARKCurveNotMatch() = 1401,
 }
 
 impl Error {

@@ -7,16 +7,14 @@ use std::sync::Arc;
 use bytes::Bytes;
 use rings_core::message::MessagePayload;
 use rings_rpc::protos::rings_node::SendBackendMessageRequest;
-use crate::backend::snark::SNARKTask;
+use rings_snark::prelude::nova::provider::mlkzg::Bn256EngineKZG;
+use rings_snark::prelude::nova::provider::GrumpkinEngine;
 use rings_snark::prelude::nova::provider::PallasEngine;
 use rings_snark::prelude::nova::provider::VestaEngine;
-use rings_snark::prelude::nova::provider::GrumpkinEngine;
-use rings_snark::prelude::nova::provider::mlkzg::Bn256EngineKZG;
-
-
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::backend::snark::SNARKGenerator;
 use crate::error::Error;
 use crate::provider::Provider;
 
@@ -37,23 +35,42 @@ pub enum BackendMessage {
     SNARKTaskMessage(SNARKTaskMessage),
 }
 
+/// Message for snark task
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SNARKTaskMessage {
+    /// uuid of task
+    pub task_id: uuid::Uuid,
+    /// task details
+    pub task: SNARKTask,
+}
 
 /// Message types for snark task, including proof and verify
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub enum SNARKTaskMessage {
-    SNARKProof(SNARKProof),
-    SNARKVerify
+pub enum SNARKTask {
+    SNARKProof(SNARKProofTask),
+    SNARKVerify(SNARKVerifyTask),
 }
 
 /// Message type of snark proof
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub enum SNARKProof {
+pub enum SNARKProofTask {
     /// SNARK with curve pallas and vesta
-    PallasVasta(SNARKTask<PallasEngine, VestaEngine>),
+    PallasVasta(SNARKGenerator<PallasEngine, VestaEngine>),
     /// SNARK with curve vesta and pallas
-    VastaPallas(SNARKTask<VestaEngine, PallasEngine>),
-    /// SNARK witn curve bn256 whth KZG multi linear commitment and grumpkin
-    Bn256KZGGrumpkin(SNARKTask<Bn256EngineKZG, GrumpkinEngine>)
+    VastaPallas(SNARKGenerator<VestaEngine, PallasEngine>),
+    /// SNARK with curve bn256 whth KZG multi linear commitment and grumpkin
+    Bn256KZGGrumpkin(SNARKGenerator<Bn256EngineKZG, GrumpkinEngine>),
+}
+
+/// Message type of snark proof
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum SNARKVerifyTask {
+    /// SNARK with curve pallas and vesta
+    PallasVasta(String),
+    /// SNARK with curve vesta and pallas
+    VastaPallas(String),
+    /// SNARK with curve bn256 whth KZG multi linear commitment and grumpkin
+    Bn256KZGGrumpkin(String),
 }
 
 /// ServiceMessage
@@ -155,6 +172,12 @@ pub trait MessageHandler<T> {
 impl From<ServiceMessage> for BackendMessage {
     fn from(val: ServiceMessage) -> Self {
         BackendMessage::ServiceMessage(val)
+    }
+}
+
+impl From<SNARKTaskMessage> for BackendMessage {
+    fn from(val: SNARKTaskMessage) -> Self {
+        BackendMessage::SNARKTaskMessage(val)
     }
 }
 

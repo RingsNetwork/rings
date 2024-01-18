@@ -71,11 +71,8 @@ impl BackendBehaviour {
                     let cb = js_func::of4::<BackendBehaviour, Provider, JsValue, String>(func);
                     cb(self.clone(), provider, ctx, m.to_string()).await?;
                 }
-            },
-	    _ => {
-		Result<()>
-	    }
-
+            }
+            _ => Ok(()),
         }
         Ok(())
     }

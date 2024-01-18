@@ -1,34 +1,69 @@
 //! SNARK Backend
 //! ================
 
+use std::sync::Arc;
+
+use dashmap::DashMap;
+use rings_core::message::MessagePayload;
+use rings_rpc::method::Method;
 use rings_snark::circuit::Circuit;
-use rings_snark::prelude::nova::traits::circuit::TrivialCircuit;
+use rings_snark::prelude::nova::provider;
+use rings_snark::prelude::nova::provider::ipa_pc;
+use rings_snark::prelude::nova::provider::mlkzg;
+use rings_snark::prelude::nova::spartan;
 use rings_snark::prelude::nova::traits::snark::RelaxedR1CSSNARKTrait;
 use rings_snark::prelude::nova::traits::Engine;
-use rings_snark::prelude::nova::CompressedSNARK;
+use rings_snark::snark::CompressedSNARK;
 use rings_snark::snark::ProverKey;
 use rings_snark::snark::PublicParams;
 use rings_snark::snark::VerifierKey;
 use rings_snark::snark::SNARK;
 use serde::Deserialize;
 use serde::Serialize;
-use super::types::SNARKProof;
-use rings_snark::prelude::nova::provider;
-use crate::backend::types::MessageHandler;
-use rings_snark::prelude::nova::provider::ipa_pc;
-use rings_snark::prelude::nova::provider::mlkzg;
-use rings_snark::prelude::nova::spartan;
-use std::sync::Arc;
-use crate::provider::Provider;
-use rings_core::message::MessagePayload;
-use crate::error::Result;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct SNARKTaskBehaviour {
+use super::types::SNARKProofTask;
+use super::types::SNARKTask;
+use super::types::SNARKTaskMessage;
+use super::types::SNARKVerifyTask;
+use crate::backend::types::BackendMessage;
+use crate::backend::types::MessageHandler;
+use crate::error::Error;
+use crate::error::Result;
+use crate::provider::Provider;
+
+type TaskId = uuid::Uuid;
+/// Behaviour of SNARK provier and verifier
+pub struct SNARKBehaviour {
+    /// map of task_id and task
+    pub task: DashMap<TaskId, SNARKProofTask>,
+    /// map of task_id and result
+    pub verified: DashMap<TaskId, bool>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct SNARKProof<E1, E2, S1, S2>
+where
+    S1: RelaxedR1CSSNARKTrait<E1>,
+    S2: RelaxedR1CSSNARKTrait<E2>,
+    E1: Engine<Base = <E2 as Engine>::Scalar>,
+    E2: Engine<Base = <E1 as Engine>::Scalar>,
+{
+    /// verifier key of proof
+    #[serde(
+        serialize_with = "crate::util::serialize_forward",
+        deserialize_with = "crate::util::deserialize_forward"
+    )]
+    pub vk: VerifierKey<E1, E2, S1, S2>,
+    #[serde(
+        serialize_with = "crate::util::serialize_forward",
+        deserialize_with = "crate::util::deserialize_forward"
+    )]
+    /// compressed proof
+    pub proof: CompressedSNARK<E1, E2, S1, S2>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct SNARKTask<E1, E2>
+pub struct SNARKGenerator<E1, E2>
 where
     E1: Engine<Base = <E2 as Engine>::Scalar>,
     E2: Engine<Base = <E1 as Engine>::Scalar>,
@@ -38,7 +73,7 @@ where
     pp: PublicParams<E1, E2>,
 }
 
-impl<E1, E2> SNARKTask<E1, E2>
+impl<E1, E2> SNARKGenerator<E1, E2>
 where
     E1: Engine<Base = <E2 as Engine>::Scalar>,
     E2: Engine<Base = <E1 as Engine>::Scalar>,
@@ -59,32 +94,14 @@ where
     pub fn prove<S1: RelaxedR1CSSNARKTrait<E1>, S2: RelaxedR1CSSNARKTrait<E2>>(
         &self,
         pk: impl AsRef<ProverKey<E1, E2, S1, S2>>,
-    ) -> Result<
-        CompressedSNARK<
-            E1,
-            E2,
-            Circuit<<E1 as Engine>::Scalar>,
-            TrivialCircuit<E2::Scalar>,
-            S1,
-            S2,
-        >,
-    > {
+    ) -> Result<CompressedSNARK<E1, E2, S1, S2>> {
         Ok(self.snark.compress_prove(&self.pp, pk)?)
     }
 
     /// verify a proof
     pub fn verify<S1: RelaxedR1CSSNARKTrait<E1>, S2: RelaxedR1CSSNARKTrait<E2>>(
         &self,
-        proof: impl AsRef<
-            CompressedSNARK<
-                E1,
-                E2,
-                Circuit<<E1 as Engine>::Scalar>,
-                TrivialCircuit<E2::Scalar>,
-                S1,
-                S2,
-            >,
-        >,
+        proof: impl AsRef<CompressedSNARK<E1, E2, S1, S2>>,
         vk: impl AsRef<VerifierKey<E1, E2, S1, S2>>,
     ) -> Result<(Vec<E1::Scalar>, Vec<E2::Scalar>)> {
         let steps = self.circuits.len();
@@ -98,49 +115,139 @@ where
     }
 }
 
+impl SNARKBehaviour {
+    fn handle_snark_proof_task(data: SNARKProofTask) -> Result<SNARKVerifyTask> {
+        match data {
+            SNARKProofTask::VastaPallas(s) => {
+                type E1 = provider::VestaEngine;
+                type E2 = provider::PallasEngine;
+                type EE1 = ipa_pc::EvaluationEngine<E1>;
+                type EE2 = ipa_pc::EvaluationEngine<E2>;
+                type S1 = spartan::snark::RelaxedR1CSSNARK<E1, EE1>;
+                type S2 = spartan::snark::RelaxedR1CSSNARK<E2, EE2>;
+                let (pk, vk) = s.setup()?;
+                let compressed_proof = s.prove::<S1, S2>(&pk)?;
+                let proof = SNARKProof::<E1, E2, S1, S2> {
+                    vk,
+                    proof: compressed_proof,
+                };
+                Ok(SNARKVerifyTask::VastaPallas(serde_json::to_string(&proof)?))
+            }
+            SNARKProofTask::PallasVasta(s) => {
+                type E1 = provider::PallasEngine;
+                type E2 = provider::VestaEngine;
+                type EE1 = ipa_pc::EvaluationEngine<E1>;
+                type EE2 = ipa_pc::EvaluationEngine<E2>;
+                type S1 = spartan::snark::RelaxedR1CSSNARK<E1, EE1>;
+                type S2 = spartan::snark::RelaxedR1CSSNARK<E2, EE2>;
+                let (pk, vk) = s.setup()?;
+                let compressed_proof = s.prove::<S1, S2>(&pk)?;
+                let proof = SNARKProof::<E1, E2, S1, S2> {
+                    vk,
+                    proof: compressed_proof,
+                };
+                Ok(SNARKVerifyTask::PallasVasta(serde_json::to_string(&proof)?))
+            }
+            SNARKProofTask::Bn256KZGGrumpkin(s) => {
+                type E1 = provider::mlkzg::Bn256EngineKZG;
+                type E2 = provider::GrumpkinEngine;
+                type EE1 = mlkzg::EvaluationEngine<E1>;
+                type EE2 = ipa_pc::EvaluationEngine<E2>;
+                type S1 = spartan::snark::RelaxedR1CSSNARK<E1, EE1>; // non-preprocessing SNARK
+                type S2 = spartan::snark::RelaxedR1CSSNARK<E2, EE2>; // non-preprocessing SNARK
+                let (pk, vk) = s.setup()?;
+                let compressed_proof = s.prove::<S1, S2>(&pk)?;
+                let proof = SNARKProof::<E1, E2, S1, S2> {
+                    vk,
+                    proof: compressed_proof,
+                };
+                Ok(SNARKVerifyTask::Bn256KZGGrumpkin(serde_json::to_string(
+                    &proof,
+                )?))
+            }
+        }
+    }
+
+    fn handle_snark_verify_task(data: SNARKVerifyTask, snark: SNARKProofTask) -> Result<bool> {
+        match data {
+            SNARKVerifyTask::PallasVasta(p) => {
+                type E1 = provider::PallasEngine;
+                type E2 = provider::VestaEngine;
+                type EE1 = ipa_pc::EvaluationEngine<E1>;
+                type EE2 = ipa_pc::EvaluationEngine<E2>;
+                type S1 = spartan::snark::RelaxedR1CSSNARK<E1, EE1>;
+                type S2 = spartan::snark::RelaxedR1CSSNARK<E2, EE2>;
+                let proof = serde_json::from_str::<SNARKProof<E1, E2, S1, S2>>(&p)?;
+                if let SNARKProofTask::PallasVasta(t) = snark {
+                    let ret = t.verify::<S1, S2>(proof.proof, proof.vk);
+                    Ok(ret.is_ok())
+                } else {
+                    Err(Error::SNARKCurveNotMatch())
+                }
+            }
+            SNARKVerifyTask::VastaPallas(p) => {
+                type E1 = provider::VestaEngine;
+                type E2 = provider::PallasEngine;
+                type EE1 = ipa_pc::EvaluationEngine<E1>;
+                type EE2 = ipa_pc::EvaluationEngine<E2>;
+                type S1 = spartan::snark::RelaxedR1CSSNARK<E1, EE1>;
+                type S2 = spartan::snark::RelaxedR1CSSNARK<E2, EE2>;
+                let proof = serde_json::from_str::<SNARKProof<E1, E2, S1, S2>>(&p)?;
+                if let SNARKProofTask::VastaPallas(t) = snark {
+                    let ret = t.verify::<S1, S2>(proof.proof, proof.vk);
+                    Ok(ret.is_ok())
+                } else {
+                    Err(Error::SNARKCurveNotMatch())
+                }
+            }
+            SNARKVerifyTask::Bn256KZGGrumpkin(p) => {
+                type E1 = provider::mlkzg::Bn256EngineKZG;
+                type E2 = provider::GrumpkinEngine;
+                type EE1 = mlkzg::EvaluationEngine<E1>;
+                type EE2 = ipa_pc::EvaluationEngine<E2>;
+                type S1 = spartan::snark::RelaxedR1CSSNARK<E1, EE1>; // non-preprocessing SNARK
+                type S2 = spartan::snark::RelaxedR1CSSNARK<E2, EE2>; // non-preprocessing SNARK
+                let proof = serde_json::from_str::<SNARKProof<E1, E2, S1, S2>>(&p)?;
+                if let SNARKProofTask::Bn256KZGGrumpkin(t) = snark {
+                    let ret = t.verify::<S1, S2>(proof.proof, proof.vk);
+                    Ok(ret.is_ok())
+                } else {
+                    Err(Error::SNARKCurveNotMatch())
+                }
+            }
+        }
+    }
+}
+
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-impl MessageHandler<SNARKProof> for SNARKTaskBehaviour {
-     async fn handle_message(
+impl MessageHandler<SNARKTaskMessage> for SNARKBehaviour {
+    async fn handle_message(
         &self,
         provider: Arc<Provider>,
         ctx: &MessagePayload,
-        data: &SNARKProof,
-     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-	 match data {
-	     SNARKProof::VastaPallas(s) => {
-		 type E1 = provider::VestaEngine;
-		 type E2 = provider::PallasEngine;
-		 type EE1 = ipa_pc::EvaluationEngine<E1>;
-		 type EE2 = ipa_pc::EvaluationEngine<E2>;
-		 type S1 = spartan::snark::RelaxedR1CSSNARK<E1, EE1>;
-		 type S2 = spartan::snark::RelaxedR1CSSNARK<E2, EE2>;
-		 let (pk, _vk) = s.setup()?;
-		 let proof = s.prove::<S1, S2>(&pk)?;
-		 Ok(())
-	     },
-	     SNARKProof::PallasVasta(s) => {
-		 type E1 = provider::PallasEngine;
-		 type E2 = provider::VestaEngine;
-		 type EE1 = ipa_pc::EvaluationEngine<E1>;
-		 type EE2 = ipa_pc::EvaluationEngine<E2>;
-		 type S1 = spartan::snark::RelaxedR1CSSNARK<E1, EE1>;
-		 type S2 = spartan::snark::RelaxedR1CSSNARK<E2, EE2>;
-		 let (pk, _vk) = s.setup()?;
-		 let proof = s.prove::<S1, S2>(&pk)?;
-		 Ok(())
-	     },
-	     SNARKProof::Bn256KZGGrumpkin(s) => {
-		 type E1 = provider::mlkzg::Bn256EngineKZG;
-		 type E2 = provider::GrumpkinEngine;
-		 type EE1 = mlkzg::EvaluationEngine<E1>;
-		 type EE2 = ipa_pc::EvaluationEngine<E2>;
-		 type S1 = spartan::snark::RelaxedR1CSSNARK<E1, EE1>; // non-preprocessing SNARK
-		 type S2 = spartan::snark::RelaxedR1CSSNARK<E2, EE2>; // non-preprocessing SNARK
-		 let (pk, _vk) = s.setup()?;
-		 let proof = s.prove::<S1, S2>(&pk)?;
-		 Ok(())
-	     }
-	 }
-     }
+        msg: &SNARKTaskMessage,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let verifier = ctx.relay.origin_sender();
+        match &msg.task {
+            SNARKTask::SNARKProof(t) => {
+                let proof = Self::handle_snark_proof_task(t.clone())?;
+                let resp: BackendMessage = SNARKTaskMessage {
+                    task_id: msg.task_id.clone(),
+                    task: SNARKTask::SNARKVerify(proof),
+                }
+                .into();
+                let params = resp.into_send_backend_message_request(verifier)?;
+                provider.request(Method::SendBackendMessage, params).await?;
+                Ok(())
+            }
+            SNARKTask::SNARKVerify(t) => {
+                if let Some(task) = self.task.get(&msg.task_id) {
+                    let verified = Self::handle_snark_verify_task(t.clone(), task.value().clone())?;
+                    self.verified.insert(msg.task_id.clone(), verified);
+                }
+                Ok(())
+            }
+        }
+    }
 }

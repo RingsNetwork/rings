@@ -1,6 +1,7 @@
 use std::ops::Deref;
 use std::ops::DerefMut;
 
+use super::CompressedSNARK;
 use super::ProverKey;
 use super::PublicParams;
 use super::VerifierKey;
@@ -175,5 +176,111 @@ where
 {
     fn as_ref(&self) -> &Self {
         self
+    }
+}
+
+impl<E1, E2, S1, S2> Deref for CompressedSNARK<E1, E2, S1, S2>
+where
+    E1: Engine<Base = <E2 as Engine>::Scalar>,
+    E2: Engine<Base = <E1 as Engine>::Scalar>,
+    S1: RelaxedR1CSSNARKTrait<E1>,
+    S2: RelaxedR1CSSNARKTrait<E2>,
+{
+    type Target = nova::CompressedSNARK<
+        E1,
+        E2,
+        Circuit<<E1 as Engine>::Scalar>,
+        TrivialCircuit<<E2 as Engine>::Scalar>,
+        S1,
+        S2,
+    >;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<E1, E2, S1, S2> DerefMut for CompressedSNARK<E1, E2, S1, S2>
+where
+    E1: Engine<Base = <E2 as Engine>::Scalar>,
+    E2: Engine<Base = <E1 as Engine>::Scalar>,
+    S1: RelaxedR1CSSNARKTrait<E1>,
+    S2: RelaxedR1CSSNARKTrait<E2>,
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+impl<E1, E2, S1, S2> AsRef<CompressedSNARK<E1, E2, S1, S2>> for CompressedSNARK<E1, E2, S1, S2>
+where
+    E1: Engine<Base = <E2 as Engine>::Scalar>,
+    E2: Engine<Base = <E1 as Engine>::Scalar>,
+    S1: RelaxedR1CSSNARKTrait<E1>,
+    S2: RelaxedR1CSSNARKTrait<E2>,
+{
+    fn as_ref(&self) -> &Self {
+        self
+    }
+}
+
+impl<E1, E2, S1, S2>
+    From<
+        nova::CompressedSNARK<
+            E1,
+            E2,
+            Circuit<<E1 as Engine>::Scalar>,
+            TrivialCircuit<E2::Scalar>,
+            S1,
+            S2,
+        >,
+    > for CompressedSNARK<E1, E2, S1, S2>
+where
+    E1: Engine<Base = <E2 as Engine>::Scalar>,
+    E2: Engine<Base = <E1 as Engine>::Scalar>,
+    S1: RelaxedR1CSSNARKTrait<E1>,
+    S2: RelaxedR1CSSNARKTrait<E2>,
+{
+    fn from(
+        snark: nova::CompressedSNARK<
+            E1,
+            E2,
+            Circuit<<E1 as Engine>::Scalar>,
+            TrivialCircuit<E2::Scalar>,
+            S1,
+            S2,
+        >,
+    ) -> Self {
+        Self { inner: snark }
+    }
+}
+
+impl<E1, E2, S1, S2>
+    Into<
+        nova::CompressedSNARK<
+            E1,
+            E2,
+            Circuit<<E1 as Engine>::Scalar>,
+            TrivialCircuit<E2::Scalar>,
+            S1,
+            S2,
+        >,
+    > for CompressedSNARK<E1, E2, S1, S2>
+where
+    E1: Engine<Base = <E2 as Engine>::Scalar>,
+    E2: Engine<Base = <E1 as Engine>::Scalar>,
+    S1: RelaxedR1CSSNARKTrait<E1>,
+    S2: RelaxedR1CSSNARKTrait<E2>,
+{
+    fn into(
+        self,
+    ) -> nova::CompressedSNARK<
+        E1,
+        E2,
+        Circuit<<E1 as Engine>::Scalar>,
+        TrivialCircuit<E2::Scalar>,
+        S1,
+        S2,
+    > {
+        self.inner
     }
 }
