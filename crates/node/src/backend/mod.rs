@@ -36,6 +36,22 @@ pub struct Backend {
     handler: Box<HandlerTrait>,
 }
 
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl MessageHandler<BackendMessage> for Vec<Box<HandlerTrait>> {
+    async fn handle_message(
+        &self,
+        provider: Arc<Provider>,
+        ctx: &MessagePayload,
+        msg: &BackendMessage,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+	for handler in self.iter() {
+	    let _ = handler.handle_message(provider.clone(), ctx, msg).await?;
+	}
+	Ok(())
+    }
+}
+
 impl Backend {
     /// Create a new backend instance with Provider and Handler functions
     pub fn new(provider: Arc<Provider>, handler: Box<HandlerTrait>) -> Self {

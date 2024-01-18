@@ -128,7 +128,7 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
         let mut calc = self.calculator.borrow_mut();
         let witness: TyWitness<F> = calc
             .calculate_witness::<F>(input.to_vec(), sanity_check)
-            .map_err(|e| Error::CalculateWitness(e))?;
+            .map_err(Error::CalculateWitness)?;
         let circom = Circuit::<F> {
             r1cs: self.r1cs.clone(),
             witness,

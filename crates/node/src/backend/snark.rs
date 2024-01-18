@@ -40,6 +40,7 @@ pub struct SNARKBehaviour {
     pub verified: DashMap<TaskId, bool>,
 }
 
+/// SNARK Proof
 #[derive(Serialize, Deserialize)]
 pub struct SNARKProof<E1, E2, S1, S2>
 where
@@ -62,6 +63,7 @@ where
     pub proof: CompressedSNARK<E1, E2, S1, S2>,
 }
 
+/// SNARK proof generator, including setup, proof and verify
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SNARKGenerator<E1, E2>
 where
@@ -84,6 +86,7 @@ where
     }
 
     /// setup compressed snark, get (pk, vk)
+    #[allow(clippy::type_complexity)]
     pub fn setup<S1: RelaxedR1CSSNARKTrait<E1>, S2: RelaxedR1CSSNARKTrait<E2>>(
         &self,
     ) -> Result<(ProverKey<E1, E2, S1, S2>, VerifierKey<E1, E2, S1, S2>)> {
@@ -99,6 +102,7 @@ where
     }
 
     /// verify a proof
+    #[allow(clippy::type_complexity)]
     pub fn verify<S1: RelaxedR1CSSNARKTrait<E1>, S2: RelaxedR1CSSNARKTrait<E2>>(
         &self,
         proof: impl AsRef<CompressedSNARK<E1, E2, S1, S2>>,
@@ -110,7 +114,7 @@ where
             proof,
             vk,
             steps,
-            &first_input,
+            first_input,
         )?)
     }
 }
@@ -233,7 +237,7 @@ impl MessageHandler<SNARKTaskMessage> for SNARKBehaviour {
             SNARKTask::SNARKProof(t) => {
                 let proof = Self::handle_snark_proof_task(t.clone())?;
                 let resp: BackendMessage = SNARKTaskMessage {
-                    task_id: msg.task_id.clone(),
+                    task_id: msg.task_id,
                     task: SNARKTask::SNARKVerify(proof),
                 }
                 .into();
@@ -244,10 +248,48 @@ impl MessageHandler<SNARKTaskMessage> for SNARKBehaviour {
             SNARKTask::SNARKVerify(t) => {
                 if let Some(task) = self.task.get(&msg.task_id) {
                     let verified = Self::handle_snark_verify_task(t.clone(), task.value().clone())?;
-                    self.verified.insert(msg.task_id.clone(), verified);
+                    self.verified.insert(msg.task_id, verified);
                 }
                 Ok(())
             }
         }
+    }
+}
+
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl MessageHandler<BackendMessage> for SNARKBehaviour {
+    async fn handle_message(
+        &self,
+        provider: Arc<Provider>,
+        ctx: &MessagePayload,
+        msg: &BackendMessage,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+	if let BackendMessage::SNARKTaskMessage(msg) = msg {
+	    let verifier = ctx.relay.origin_sender();
+            match &msg.task {
+		SNARKTask::SNARKProof(t) => {
+                    let proof = Self::handle_snark_proof_task(t.clone())?;
+                    let resp: BackendMessage = SNARKTaskMessage {
+			task_id: msg.task_id,
+			task: SNARKTask::SNARKVerify(proof),
+                    }
+                    .into();
+                    let params = resp.into_send_backend_message_request(verifier)?;
+                    provider.request(Method::SendBackendMessage, params).await?;
+                    Ok(())
+		}
+		SNARKTask::SNARKVerify(t) => {
+                    if let Some(task) = self.task.get(&msg.task_id) {
+			let verified = Self::handle_snark_verify_task(t.clone(), task.value().clone())?;
+			self.verified.insert(msg.task_id, verified);
+                    }
+                    Ok(())
+		}
+            }
+	} else {
+	    Ok(())
+	}
     }
 }

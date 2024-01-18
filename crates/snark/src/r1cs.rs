@@ -28,13 +28,13 @@ pub struct R1CS<F: PrimeField> {
     pub constraints: Vec<Constraint<F>>,
 }
 
-impl<F: PrimeField> Into<circom_scotia::r1cs::R1CS<F>> for R1CS<F> {
-    fn into(self) -> circom_scotia::r1cs::R1CS<F> {
+impl<F: PrimeField> From<R1CS<F>> for circom_scotia::r1cs::R1CS<F> {
+    fn from(val: R1CS<F>) -> Self {
         circom_scotia::r1cs::R1CS::<F> {
-            num_inputs: self.num_inputs,
-            num_aux: self.num_aux,
-            num_variables: self.num_variables,
-            constraints: self.constraints,
+            num_inputs: val.num_inputs,
+            num_aux: val.num_aux,
+            num_variables: val.num_variables,
+            constraints: val.constraints,
         }
     }
 }
@@ -105,7 +105,7 @@ pub async fn load_r1cs<F: PrimeField>(path: Path, format: Format) -> Result<R1CS
         Path::Local(p) => load_r1cs_local::<F>(p, format)?,
         Path::Remote(url) => load_r1cs_remote::<F>(&url, format).await?,
     };
-    Ok(ret.into())
+    Ok(ret)
 }
 
 /// Fetch remote witness
@@ -143,7 +143,7 @@ pub async fn load_witness<F: PrimeField>(path: Path, format: Format) -> Result<T
 pub fn load_circom_witness_calculator_local(
     path: impl AsRef<std::path::Path>,
 ) -> Result<WitnessCalculator> {
-    Ok(WitnessCalculator::from_file(path).map_err(|e| Error::WASMFailedToLoad(e.to_string()))?)
+    WitnessCalculator::from_file(path).map_err(|e| Error::WASMFailedToLoad(e.to_string()))
 }
 
 /// Load witness calculator from remote path
@@ -151,7 +151,7 @@ pub async fn load_circom_witness_calculator_remote(path: &str) -> Result<Witness
     let store = WitnessCalculator::new_store();
     let data = fetch(path).await?;
     let module = Module::from_binary(&store, data.get_ref().as_slice())
-        .map_err(|e| Error::WitnessCompileError(e))?;
+        .map_err(Error::WitnessCompileError)?;
     Ok(WitnessCalculator::from_module(module, store)?)
 }
 
