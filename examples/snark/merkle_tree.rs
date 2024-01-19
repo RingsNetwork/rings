@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use rings_snark::circuit;
 use rings_snark::circuit::Input;
 use rings_snark::prelude::nova::provider::ipa_pc::EvaluationEngine;
@@ -7,8 +9,6 @@ use rings_snark::prelude::nova::spartan::snark::RelaxedR1CSSNARK;
 use rings_snark::prelude::nova::traits::Engine;
 use rings_snark::r1cs;
 use rings_snark::snark;
-use std::time::Instant;
-
 
 pub async fn merkle_tree_path_proof() {
     type E1 = PallasEngine;
@@ -33,17 +33,15 @@ pub async fn merkle_tree_path_proof() {
         "examples/snark/circoms/merkle_tree.wasm".to_string(),
     ))
     .await
-	.unwrap();
+    .unwrap();
 
     println!("load r1cs and wasm, took {:?} ", start.elapsed());
 
-
     let circuit_generator = circuit::WasmCircuitGenerator::<F1>::new(r1cs, witness_calculator);
     let input_value_0 = vec![F1::from(42u64)];
-    let input_0: Input<F1> =
-        vec![("leaf".to_string(), input_value_0.clone())].into();
+    let input_0: Input<F1> = vec![("leaf".to_string(), input_value_0.clone())].into();
     let private_inputs: Vec<Input<F1>> = vec![
-	// element, index
+        // element, index
         vec![("path".to_string(), vec![F1::from(1u64), F1::from(0u64)])].into(),
         vec![("path".to_string(), vec![F1::from(42u64), F1::from(1u64)])].into(),
         vec![("path".to_string(), vec![F1::from(33u64), F1::from(0u64)])].into(),
@@ -114,10 +112,14 @@ pub async fn merkle_tree_path_proof() {
     println!("compressed snark proof, took {:?} ", start.elapsed());
 
     let start = Instant::now();
-    let ret = snark::SNARK::<E1, E2>::compress_verify::<S1, S2>(&compress_snark, &vk, round, &input_value_0);
+    let ret = snark::SNARK::<E1, E2>::compress_verify::<S1, S2>(
+        &compress_snark,
+        &vk,
+        round,
+        &input_value_0,
+    );
     assert!(ret.is_ok());
     println!("compressed snark verify, took {:?} ", start.elapsed());
-
 }
 
 #[tokio::main]

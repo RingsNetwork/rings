@@ -11,6 +11,9 @@ use rings_core::storage::MemStorage;
 use rings_core::swarm::callback::SharedSwarmCallback;
 use rings_rpc::protos::rings_node_handler::InternalRpcHandler;
 
+use crate::backend::types::BackendMessage;
+use crate::backend::types::MessageHandler;
+use crate::backend::Backend;
 use crate::error::Error;
 use crate::error::Result;
 use crate::measure::MeasureStorage;
@@ -115,15 +118,19 @@ impl Provider {
         Self::new_provider_with_storage_internal(config, vnode_storage, measure_storage).await
     }
 
-    // /// Set callback for swarm.
-    // pub fn set_backend(&self, callback: SharedSwarmCallback) -> Result<()> {
-    //     self.processor
-    //         .swarm
-    //         .set_callback(callback)
-    //         .map_err(Error::InternalError)
-    // }
+    /// Set callback for swarm, it can be T, or (T0, T1, T2)
+    /// Where T is MessageHandler<BackendMessage> + Send + Sync + Sized + 'static,
+    pub fn set_backend_callback<T>(&self, callback: T) -> Result<()>
+    where T: MessageHandler<BackendMessage> + Send + Sync + Sized + 'static {
+        let backend = Backend::new(Arc::new(self.clone()), Box::new(callback));
+        self.processor
+            .swarm
+            .set_callback(Arc::new(backend))
+            .map_err(Error::InternalError)
+    }
 
     /// Set callback for swarm.
+    #[deprecated(note = "please use set backend callback instead")]
     pub fn set_swarm_callback(&self, callback: SharedSwarmCallback) -> Result<()> {
         self.processor
             .swarm

@@ -226,22 +226,25 @@ impl SNARKBehaviour {
 
 impl From<SNARKGenerator<provider::PallasEngine, provider::VestaEngine>> for SNARKProofTask {
     fn from(snark: SNARKGenerator<provider::PallasEngine, provider::VestaEngine>) -> Self {
-	Self::PallasVasta(snark)
+        Self::PallasVasta(snark)
     }
 }
 
 impl From<SNARKGenerator<provider::VestaEngine, provider::PallasEngine>> for SNARKProofTask {
     fn from(snark: SNARKGenerator<provider::VestaEngine, provider::PallasEngine>) -> Self {
-	Self::VastaPallas(snark)
+        Self::VastaPallas(snark)
     }
 }
 
-impl From<SNARKGenerator<provider::mlkzg::Bn256EngineKZG, provider::GrumpkinEngine>> for SNARKProofTask {
-    fn from(snark: SNARKGenerator<provider::mlkzg::Bn256EngineKZG, provider::GrumpkinEngine>) -> Self {
-	Self::Bn256KZGGrumpkin(snark)
+impl From<SNARKGenerator<provider::mlkzg::Bn256EngineKZG, provider::GrumpkinEngine>>
+    for SNARKProofTask
+{
+    fn from(
+        snark: SNARKGenerator<provider::mlkzg::Bn256EngineKZG, provider::GrumpkinEngine>,
+    ) -> Self {
+        Self::Bn256KZGGrumpkin(snark)
     }
 }
-
 
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
@@ -262,13 +265,20 @@ impl MessageHandler<SNARKTaskMessage> for SNARKBehaviour {
                 }
                 .into();
                 let params = resp.into_send_backend_message_request(verifier)?;
-		#[cfg(not(target_arch="wasm32"))]
+                #[cfg(not(target_arch = "wasm32"))]
                 provider.request(Method::SendBackendMessage, params).await?;
-		#[cfg(target_arch="wasm32")]
-		{
-                    let promise = provider.request(Method::SendBackendMessage.to_string(), rings_core::utils::js_value::serialize(&params)?);
-		    wasm_bindgen_futures::JsFuture::from(promise).await.map_err(|e| Error::JsError(format!("Failed send backend messate: {:?}", e)))?;
-		}
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let promise = provider.request(
+                        Method::SendBackendMessage.to_string(),
+                        rings_core::utils::js_value::serialize(&params)?,
+                    );
+                    wasm_bindgen_futures::JsFuture::from(promise)
+                        .await
+                        .map_err(|e| {
+                            Error::JsError(format!("Failed send backend messate: {:?}", e))
+                        })?;
+                }
                 Ok(())
             }
             SNARKTask::SNARKVerify(t) => {
@@ -292,7 +302,7 @@ impl MessageHandler<BackendMessage> for SNARKBehaviour {
         msg: &BackendMessage,
     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         if let BackendMessage::SNARKTaskMessage(msg) = msg {
-	    Ok(self.handle_message(provider.clone(), ctx, msg).await?)
+            Ok(self.handle_message(provider.clone(), ctx, msg).await?)
         } else {
             Ok(())
         }
