@@ -4,7 +4,7 @@
     "RND <dev@ringsnetwork.io>"
   ],
   "description": "Rings is a structured peer-to-peer network implementation using WebRTC, Chord algorithm, and full WebAssembly (WASM) support.\n",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "license": "GPL-3.0",
   "repository": {
     "type": "git",
