@@ -9,14 +9,14 @@ use std::task::Poll;
 
 #[derive(Default)]
 struct NotifierState {
-    /// Indicates whether state has waked.
-    pub(crate) waked: bool,
+    /// Indicates whether state has woken.
+    pub(crate) woken: bool,
 
     /// The wakers associated with State.
     pub(crate) wakers: Vec<std::task::Waker>,
 }
 
-/// A notifier that can be waked by calling `wake` or `set_timeout`.
+/// A notifier that can be woken by calling `wake` or `set_timeout`.
 /// Used to notify the data channel state changing in `webrtc_wait_for_data_channel_open` of
 /// [crate::core::transport::ConnectionInterface].
 #[derive(Clone, Default)]
@@ -26,7 +26,7 @@ impl Notifier {
     /// Immediately wake the notifier.
     pub fn wake(&self) {
         let mut state = self.0.lock().unwrap();
-        state.waked = true;
+        state.woken = true;
         for waker in state.wakers.drain(..) {
             waker.wake();
         }
@@ -80,7 +80,7 @@ impl Future for Notifier {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut state = self.0.lock().unwrap();
 
-        if state.waked {
+        if state.woken {
             return Poll::Ready(());
         }
 
