@@ -28,12 +28,14 @@ use crate::ice_server::IceServer;
 use crate::notifier::Notifier;
 use crate::pool::Pool;
 
+const WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT: u8 = 8; // seconds
+
 /// A connection that implemented by webrtc-rs library.
 /// Used for native environment.
 pub struct WebrtcConnection {
     webrtc_conn: RTCPeerConnection,
     webrtc_data_channel: Arc<RTCDataChannel>,
-    webrtc_data_channel_open_notifier: Notifier,
+    webrtc_data_channel_state_notifier: Notifier,
 }
 
 /// [WebrtcTransport] manages all the [WebrtcConnection] and
@@ -48,12 +50,12 @@ impl WebrtcConnection {
     fn new(
         webrtc_conn: RTCPeerConnection,
         webrtc_data_channel: Arc<RTCDataChannel>,
-        webrtc_data_channel_open_notifier: Notifier,
+        webrtc_data_channel_state_notifier: Notifier,
     ) -> Self {
         Self {
             webrtc_conn,
             webrtc_data_channel,
-            webrtc_data_channel_open_notifier,
+            webrtc_data_channel_state_notifier,
         }
     }
 
@@ -68,7 +70,9 @@ impl WebrtcConnection {
             .webrtc_conn
             .local_description()
             .await
-            .ok_or(Error::WebrtcLocalSdpGenerationError)?
+            .ok_or(Error::WebrtcLocalSdpGenerationError(
+                "Failed to get local description".to_string(),
+            ))?
             .sdp)
     }
 }
@@ -160,7 +164,17 @@ impl ConnectionInterface for WebrtcConnection {
             return Ok(());
         }
 
-        self.webrtc_data_channel_open_notifier.clone().await
+        self.webrtc_data_channel_state_notifier
+            .set_timeout(WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT);
+        self.webrtc_data_channel_state_notifier.clone().await;
+
+        if self.webrtc_data_channel.ready_state() == RTCDataChannelState::Open {
+            return Ok(());
+        } else {
+            return Err(Error::DataChannelOpen(format!(
+                "DataChannel not open in {WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT} seconds"
+            )));
+        }
     }
 
     async fn close(&self) -> Result<()> {
@@ -216,11 +230,11 @@ impl TransportInterface for WebrtcTransport {
         //
         // Set callbacks
         //
-        let webrtc_data_channel_open_notifier = Notifier::default();
+        let webrtc_data_channel_state_notifier = Notifier::default();
         let inner_cb = Arc::new(InnerTransportCallback::new(
             cid,
             callback,
-            webrtc_data_channel_open_notifier.clone(),
+            webrtc_data_channel_state_notifier.clone(),
         ));
 
         let data_channel_inner_cb = inner_cb.clone();
@@ -281,7 +295,7 @@ impl TransportInterface for WebrtcTransport {
         let conn = WebrtcConnection::new(
             webrtc_conn,
             webrtc_data_channel,
-            webrtc_data_channel_open_notifier,
+            webrtc_data_channel_state_notifier,
         );
 
         self.pool.safely_insert(cid, conn)?;

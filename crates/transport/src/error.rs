@@ -36,8 +36,8 @@ pub enum Error {
     #[error("Failed when waiting for data channel open: {0}")]
     DataChannelOpen(String),
 
-    #[error("WebRTC local SDP generation error")]
-    WebrtcLocalSdpGenerationError,
+    #[error("WebRTC local SDP generation error: {0}")]
+    WebrtcLocalSdpGenerationError(String),
 
     #[error("Connection {0} already exists")]
     ConnectionAlreadyExists(String),
@@ -47,12 +47,6 @@ pub enum Error {
 
     #[error("Connection {0} is released")]
     ConnectionReleased(String),
-
-    #[error("Failed on notifier, state is not succeeded")]
-    NotifierFailed,
-
-    #[error("Notifier timeout, state is not succeeded within {0} ms")]
-    NotifierTimeout(u64),
 }
 
 #[cfg(feature = "web-sys-webrtc")]
