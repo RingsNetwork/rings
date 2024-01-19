@@ -195,93 +195,84 @@ impl From<IOErrorKind> for TunnelDefeat {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-impl<T1, T2> MessageHandler<BackendMessage> for (T1, T2)
-where
-    T1: MessageHandler<BackendMessage> + Send + Sync + Sized,
-    T2: MessageHandler<BackendMessage> + Send + Sync + Sized,
-{
-    async fn handle_message(
-        &self,
-        provider: Arc<Provider>,
-        ctx: &MessagePayload,
-        msg: &BackendMessage,
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-        self.0.handle_message(provider.clone(), ctx, msg).await?;
-        self.1.handle_message(provider.clone(), ctx, msg).await?;
-        Ok(())
-    }
+/// This macro is aims to generate code like
+/// ```
+/// impl<T1, T2, T3> MessageHandler<BackendMessage> for (T1, T2, T3)
+/// where
+///     T1: MessageHandler<BackendMessage> + Send + Sync + Sized,
+///     T2: MessageHandler<BackendMessage> + Send + Sync + Sized,
+///     T3: MessageHandler<BackendMessage> + Send + Sync + Sized,
+/// {
+///     async fn handle_message(
+///         &self,
+///         provider: Arc<Provider>,
+///         ctx: &MessagePayload,
+///         msg: &BackendMessage,
+///     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+///         self.0.handle_message(provider.clone(), ctx, msg).await?;
+///         self.1.handle_message(provider.clone(), ctx, msg).await?;
+///         self.2.handle_message(provider.clone(), ctx, msg).await?;
+///         Ok(())
+///     }
+/// }
+/// ```
+macro_rules! impl_message_handler_for_tuple {
+    // Case for WebAssembly target (`wasm`)
+    ($($T:ident),+; $($n: tt),+; wasm) => {
+        #[async_trait::async_trait(?Send)]
+        impl<$($T: MessageHandler<BackendMessage>),+> MessageHandler<BackendMessage> for ($($T),+)
+        {
+            async fn handle_message(
+                &self,
+                provider: Arc<Provider>,
+                ctx: &MessagePayload,
+                msg: &BackendMessage,
+            ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+                $(
+                    self.$n.handle_message(provider.clone(), ctx, msg).await?;
+                )+
+                Ok(())
+            }
+        }
+    };
+
+    // Case for non-WebAssembly targets
+    ($($T:ident),+; $($n: tt),+; non_wasm) => {
+        #[async_trait::async_trait]
+        impl<$($T: MessageHandler<BackendMessage> + Send + Sync),+> MessageHandler<BackendMessage> for ($($T),+)
+        {
+            async fn handle_message(
+                &self,
+                provider: Arc<Provider>,
+                ctx: &MessagePayload,
+                msg: &BackendMessage,
+            ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+                $(
+                    self.$n.handle_message(provider.clone(), ctx, msg).await?;
+                )+
+                Ok(())
+            }
+        }
+    };
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-impl<T1, T2, T3> MessageHandler<BackendMessage> for (T1, T2, T3)
-where
-    T1: MessageHandler<BackendMessage> + Send + Sync + Sized,
-    T2: MessageHandler<BackendMessage> + Send + Sync + Sized,
-    T3: MessageHandler<BackendMessage> + Send + Sync + Sized,
-{
-    async fn handle_message(
-        &self,
-        provider: Arc<Provider>,
-        ctx: &MessagePayload,
-        msg: &BackendMessage,
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-        self.0.handle_message(provider.clone(), ctx, msg).await?;
-        self.1.handle_message(provider.clone(), ctx, msg).await?;
-        self.2.handle_message(provider.clone(), ctx, msg).await?;
-        Ok(())
-    }
-}
+#[cfg(not(target_family = "wasm"))]
+impl_message_handler_for_tuple!(T1, T2; 0, 1; non_wasm);
+#[cfg(not(target_family = "wasm"))]
+impl_message_handler_for_tuple!(T1, T2, T3; 0, 1, 2; non_wasm);
+#[cfg(not(target_family = "wasm"))]
+impl_message_handler_for_tuple!(T1, T2, T3, T4; 0, 1, 2, 3; non_wasm);
+#[cfg(not(target_family = "wasm"))]
+impl_message_handler_for_tuple!(T1, T2, T3, T4, T5; 0, 1, 2, 3, 4; non_wasm);
 
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-impl<T1, T2, T3, T4> MessageHandler<BackendMessage> for (T1, T2, T3, T4)
-where
-    T1: MessageHandler<BackendMessage> + Send + Sync + Sized,
-    T2: MessageHandler<BackendMessage> + Send + Sync + Sized,
-    T3: MessageHandler<BackendMessage> + Send + Sync + Sized,
-    T4: MessageHandler<BackendMessage> + Send + Sync + Sized,
-{
-    async fn handle_message(
-        &self,
-        provider: Arc<Provider>,
-        ctx: &MessagePayload,
-        msg: &BackendMessage,
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-        self.0.handle_message(provider.clone(), ctx, msg).await?;
-        self.1.handle_message(provider.clone(), ctx, msg).await?;
-        self.2.handle_message(provider.clone(), ctx, msg).await?;
-        self.3.handle_message(provider.clone(), ctx, msg).await?;
-        Ok(())
-    }
-}
-
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-impl<T1, T2, T3, T4, T5> MessageHandler<BackendMessage> for (T1, T2, T3, T4, T5)
-where
-    T1: MessageHandler<BackendMessage> + Send + Sync + Sized,
-    T2: MessageHandler<BackendMessage> + Send + Sync + Sized,
-    T3: MessageHandler<BackendMessage> + Send + Sync + Sized,
-    T4: MessageHandler<BackendMessage> + Send + Sync + Sized,
-    T5: MessageHandler<BackendMessage> + Send + Sync + Sized,
-{
-    async fn handle_message(
-        &self,
-        provider: Arc<Provider>,
-        ctx: &MessagePayload,
-        msg: &BackendMessage,
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-        self.0.handle_message(provider.clone(), ctx, msg).await?;
-        self.1.handle_message(provider.clone(), ctx, msg).await?;
-        self.2.handle_message(provider.clone(), ctx, msg).await?;
-        self.3.handle_message(provider.clone(), ctx, msg).await?;
-        self.4.handle_message(provider.clone(), ctx, msg).await?;
-        Ok(())
-    }
-}
+#[cfg(target_family = "wasm")]
+impl_message_handler_for_tuple!(T1, T2; 0, 1; wasm);
+#[cfg(target_family = "wasm")]
+impl_message_handler_for_tuple!(T1, T2, T3; 0, 1, 2; wasm);
+#[cfg(target_family = "wasm")]
+impl_message_handler_for_tuple!(T1, T2, T3, T4; 0, 1, 2, 3; wasm);
+#[cfg(target_family = "wasm")]
+impl_message_handler_for_tuple!(T1, T2, T3, T4, T5; 0, 1, 2, 3, 4; wasm);
 
 impl BackendMessage {
     /// Convert to SendBackendMessageRequest

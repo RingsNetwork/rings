@@ -115,6 +115,14 @@ impl Provider {
         Self::new_provider_with_storage_internal(config, vnode_storage, measure_storage).await
     }
 
+    // /// Set callback for swarm.
+    // pub fn set_backend(&self, callback: SharedSwarmCallback) -> Result<()> {
+    //     self.processor
+    //         .swarm
+    //         .set_callback(callback)
+    //         .map_err(Error::InternalError)
+    // }
+
     /// Set callback for swarm.
     pub fn set_swarm_callback(&self, callback: SharedSwarmCallback) -> Result<()> {
         self.processor

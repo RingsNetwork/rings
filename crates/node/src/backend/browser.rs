@@ -72,7 +72,7 @@ impl BackendBehaviour {
                     cb(self.clone(), provider, ctx, m.to_string()).await?;
                 }
             }
-            _ => Ok(()),
+            _ => (),
         }
         Ok(())
     }

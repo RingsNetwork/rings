@@ -27,7 +27,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures;
 use wasm_bindgen_futures::future_to_promise;
 use wasm_bindgen_futures::JsFuture;
-
+use crate::backend::snark::SNARKBehaviour;
 use crate::backend::browser::BackendBehaviour;
 use crate::backend::types::BackendMessage;
 use crate::backend::types::HttpRequest;
@@ -137,7 +137,7 @@ impl Provider {
             .await?;
 
             if let Some(cb) = backend_behaviour {
-                let backend: Backend = Backend::new(Arc::new(provider.clone()), Box::new(cb));
+                let backend: Backend = Backend::new(Arc::new(provider.clone()), Box::new((cb, SNARKBehaviour::default())));
                 provider
                     .set_swarm_callback(Arc::new(backend))
                     .expect("Failed on set swarm callback");

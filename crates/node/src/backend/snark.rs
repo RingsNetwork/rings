@@ -33,6 +33,7 @@ use crate::provider::Provider;
 
 type TaskId = uuid::Uuid;
 /// Behaviour of SNARK provier and verifier
+#[derive(Default)]
 pub struct SNARKBehaviour {
     /// map of task_id and task
     pub task: DashMap<TaskId, SNARKProofTask>,
@@ -261,7 +262,13 @@ impl MessageHandler<SNARKTaskMessage> for SNARKBehaviour {
                 }
                 .into();
                 let params = resp.into_send_backend_message_request(verifier)?;
+		#[cfg(not(target_arch="wasm32"))]
                 provider.request(Method::SendBackendMessage, params).await?;
+		#[cfg(target_arch="wasm32")]
+		{
+                    let promise = provider.request(Method::SendBackendMessage.to_string(), rings_core::utils::js_value::serialize(&params)?);
+		    wasm_bindgen_futures::JsFuture::from(promise).await.map_err(|e| Error::JsError(format!("Failed send backend messate: {:?}", e)))?;
+		}
                 Ok(())
             }
             SNARKTask::SNARKVerify(t) => {
@@ -275,8 +282,8 @@ impl MessageHandler<SNARKTaskMessage> for SNARKBehaviour {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
 impl MessageHandler<BackendMessage> for SNARKBehaviour {
     async fn handle_message(
         &self,
@@ -285,28 +292,7 @@ impl MessageHandler<BackendMessage> for SNARKBehaviour {
         msg: &BackendMessage,
     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         if let BackendMessage::SNARKTaskMessage(msg) = msg {
-            let verifier = ctx.relay.origin_sender();
-            match &msg.task {
-                SNARKTask::SNARKProof(t) => {
-                    let proof = Self::handle_snark_proof_task(t.clone())?;
-                    let resp: BackendMessage = SNARKTaskMessage {
-                        task_id: msg.task_id,
-                        task: SNARKTask::SNARKVerify(proof),
-                    }
-                    .into();
-                    let params = resp.into_send_backend_message_request(verifier)?;
-                    provider.request(Method::SendBackendMessage, params).await?;
-                    Ok(())
-                }
-                SNARKTask::SNARKVerify(t) => {
-                    if let Some(task) = self.task.get(&msg.task_id) {
-                        let verified =
-                            Self::handle_snark_verify_task(t.clone(), task.value().clone())?;
-                        self.verified.insert(msg.task_id, verified);
-                    }
-                    Ok(())
-                }
-            }
+	    Ok(self.handle_message(provider.clone(), ctx, msg).await?)
         } else {
             Ok(())
         }
