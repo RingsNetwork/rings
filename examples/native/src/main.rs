@@ -40,6 +40,10 @@ async fn main() {
     let key = SecretKey::random();
     let did = Did::from(key.address());
 
+    let key_str = serde_json::to_string(&key).unwrap();
+    println!("===> Current key: {key_str}"); // It's useful when you want to reproduce the same did.
+    println!("===> Current did: {did}");
+
     // Build SessionSk of node in a safely way.
     // You can also use `SessionSk::new_with_key(&key)` directly.
     let mut skb = SessionSkBuilder::new(did.to_string(), "secp256k1".to_string());

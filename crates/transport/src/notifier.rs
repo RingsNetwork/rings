@@ -7,57 +7,114 @@ use std::sync::Mutex;
 use std::task::Context;
 use std::task::Poll;
 
-use crate::error::Error;
-use crate::error::Result;
-
 #[derive(Default)]
 struct NotifierState {
-    /// Indicates whether state has succeeded.
-    pub(crate) succeeded: Option<bool>,
+    /// Indicates whether state has woken.
+    pub(crate) woken: bool,
 
     /// The wakers associated with State.
     pub(crate) wakers: Vec<std::task::Waker>,
 }
 
-/// Notifier allow to wait for a result.
-/// It does not provide timeout mechanism for platform compatibility.
-/// It is recommended to use tokio::time::timeout instead in native-webrtc feature.
-/// It is recommended to use set_timeout in web-sys-webrtc feature.
+/// A notifier that can be woken by calling `wake` or `set_timeout`.
+/// Used to notify the data channel state changing in `webrtc_wait_for_data_channel_open` of
+/// [crate::core::transport::ConnectionInterface].
 #[derive(Clone, Default)]
 pub struct Notifier(Arc<Mutex<NotifierState>>);
 
 impl Notifier {
-    /// Set the result of the notifier. Will also wake all the wakers.
-    pub fn set_result(&self, succeeded: bool) {
+    /// Immediately wake the notifier.
+    pub fn wake(&self) {
         let mut state = self.0.lock().unwrap();
-        state.succeeded = Some(succeeded);
+        state.woken = true;
         for waker in state.wakers.drain(..) {
             waker.wake();
         }
     }
+
+    /// Wake the notifier after the specified time.
+    #[cfg(not(feature = "web-sys-webrtc"))]
+    pub fn set_timeout(&self, seconds: u8) {
+        let this = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_secs(seconds.into())).await;
+            this.wake();
+        });
+    }
+
+    /// Wake the notifier after the specified time.
+    #[cfg(feature = "web-sys-webrtc")]
+    pub fn set_timeout(&self, seconds: u8) {
+        use wasm_bindgen::JsCast;
+
+        let millis = seconds as i32 * 1000;
+
+        let this = self.clone();
+        let wake = wasm_bindgen::closure::Closure::once_into_js(move || {
+            this.wake();
+        });
+
+        match js_utils::global().unwrap() {
+            js_utils::Global::Window(window) => window
+                .set_timeout_with_callback_and_timeout_and_arguments_0(
+                    wake.as_ref().unchecked_ref(),
+                    millis,
+                ),
+            js_utils::Global::WorkerGlobal(window) => window
+                .set_timeout_with_callback_and_timeout_and_arguments_0(
+                    wake.as_ref().unchecked_ref(),
+                    millis,
+                ),
+            js_utils::Global::ServiceWorkerGlobal(window) => window
+                .set_timeout_with_callback_and_timeout_and_arguments_0(
+                    wake.as_ref().unchecked_ref(),
+                    millis,
+                ),
+        }
+        .unwrap();
+    }
 }
 
 impl Future for Notifier {
-    type Output = Result<()>;
+    type Output = ();
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut state = self.0.lock().unwrap();
 
-        match *state {
-            NotifierState {
-                succeeded: Some(true),
-                ..
-            } => Poll::Ready(Ok(())),
-
-            NotifierState {
-                succeeded: Some(false),
-                ..
-            } => Poll::Ready(Err(Error::NotifierFailed)),
-
-            _ => {
-                state.wakers.push(cx.waker().clone());
-                Poll::Pending
-            }
+        if state.woken {
+            return Poll::Ready(());
         }
+
+        state.wakers.push(cx.waker().clone());
+        Poll::Pending
+    }
+}
+
+// This is copied from utils module of rings-core crate.
+#[cfg(feature = "web-sys-webrtc")]
+mod js_utils {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::JsValue;
+
+    pub enum Global {
+        Window(web_sys::Window),
+        WorkerGlobal(web_sys::WorkerGlobalScope),
+        ServiceWorkerGlobal(web_sys::ServiceWorkerGlobalScope),
+    }
+
+    pub fn global() -> Option<Global> {
+        let obj = JsValue::from(js_sys::global());
+        if obj.has_type::<web_sys::Window>() {
+            return Some(Global::Window(web_sys::Window::from(obj)));
+        }
+        if obj.has_type::<web_sys::WorkerGlobalScope>() {
+            return Some(Global::WorkerGlobal(web_sys::WorkerGlobalScope::from(obj)));
+        }
+        if obj.has_type::<web_sys::ServiceWorkerGlobalScope>() {
+            return Some(Global::ServiceWorkerGlobal(
+                web_sys::ServiceWorkerGlobalScope::from(obj),
+            ));
+        }
+        None
     }
 }
 
@@ -66,81 +123,30 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_notifier_success() {
+    async fn test_notifier() {
         let notifier = Notifier::default();
-
-        let notifier_clone = notifier.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            notifier_clone.set_result(true);
-        });
+        notifier.set_timeout(1);
 
         let mut jobs = vec![];
 
-        // Await three times to ensure that the notifier will always return result.
+        // Await three times.
         for _ in 0..3 {
             let notifier_clone = notifier.clone();
             jobs.push(tokio::spawn(async move {
-                notifier_clone.await.unwrap();
+                notifier_clone.await;
             }));
         }
 
-        // Await three times after wake to ensure that the notifier will always return result.
+        // Await three times after wake.
         for _ in 0..3 {
             let notifier_clone = notifier.clone();
             jobs.push(tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                notifier_clone.await.unwrap();
+                notifier_clone.await;
             }));
         }
 
         futures::future::join_all(jobs).await;
-    }
-
-    #[tokio::test]
-    #[should_panic(expected = "NotifierFailed")]
-    async fn test_notifier_fail() {
-        let notifier = Notifier::default();
-
-        let notifier_clone = notifier.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            notifier_clone.set_result(false);
-        });
-
-        let mut jobs = vec![];
-
-        // Await three times to ensure that the notifier will always return result.
-        for _ in 0..3 {
-            let notifier_clone = notifier.clone();
-            jobs.push(tokio::spawn(async move {
-                assert!(notifier_clone.await.is_err());
-            }));
-        }
-
-        // Await three times after wake to ensure that the notifier will always return result.
-        for _ in 0..3 {
-            let notifier_clone = notifier.clone();
-            jobs.push(tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                assert!(notifier_clone.await.is_err());
-            }));
-        }
-
-        futures::future::join_all(jobs).await;
-        notifier.await.unwrap();
-    }
-
-    #[tokio::test]
-    #[should_panic(expected = "NotifierTimeout(1000)")]
-    async fn test_notifier_timeout() {
-        let notifier = Notifier::default();
-        let ttl = 1000u64;
-
-        tokio::time::timeout(tokio::time::Duration::from_millis(ttl), notifier)
-            .await
-            .map_err(|_| Error::NotifierTimeout(ttl))
-            .unwrap()
-            .unwrap();
+        notifier.await;
     }
 }

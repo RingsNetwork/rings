@@ -35,12 +35,15 @@ use crate::ice_server::IceServer;
 use crate::notifier::Notifier;
 use crate::pool::Pool;
 
+const WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT: u8 = 8; // seconds
+const WEBRTC_GATHER_TIMEOUT: u8 = 60; // seconds
+
 /// A connection that implemented by web_sys library.
 /// Used for browser environment.
 pub struct WebSysWebrtcConnection {
     webrtc_conn: RtcPeerConnection,
     webrtc_data_channel: RtcDataChannel,
-    webrtc_data_channel_open_notifier: Notifier,
+    webrtc_data_channel_state_notifier: Notifier,
 }
 
 /// [WebSysWebrtcTransport] manages all the [WebSysWebrtcConnection] and
@@ -54,12 +57,12 @@ impl WebSysWebrtcConnection {
     fn new(
         webrtc_conn: RtcPeerConnection,
         webrtc_data_channel: RtcDataChannel,
-        webrtc_data_channel_open_notifier: Notifier,
+        webrtc_data_channel_state_notifier: Notifier,
     ) -> Self {
         Self {
             webrtc_conn,
             webrtc_data_channel,
-            webrtc_data_channel_open_notifier,
+            webrtc_data_channel_state_notifier,
         }
     }
 
@@ -69,7 +72,7 @@ impl WebSysWebrtcConnection {
         let notifier_clone = notifier.clone();
         let conn_clone = self.webrtc_conn.clone();
         let onicegatheringstatechange = Box::new(move || match conn_clone.ice_gathering_state() {
-            RtcIceGatheringState::Complete => notifier_clone.set_result(true),
+            RtcIceGatheringState::Complete => notifier_clone.wake(),
             x => {
                 tracing::trace!("gather status: {:?}", x)
             }
@@ -80,10 +83,19 @@ impl WebSysWebrtcConnection {
             .set_onicegatheringstatechange(Some(c.as_ref().unchecked_ref()));
         c.forget();
 
-        notifier.await?;
+        notifier.set_timeout(WEBRTC_GATHER_TIMEOUT);
+        notifier.await;
+        if self.webrtc_conn.ice_gathering_state() != RtcIceGatheringState::Complete {
+            return Err(Error::WebrtcLocalSdpGenerationError(format!(
+                "Webrtc gathering is not completed in {WEBRTC_GATHER_TIMEOUT} seconds"
+            )));
+        }
+
         self.webrtc_conn
             .local_description()
-            .ok_or(Error::WebrtcLocalSdpGenerationError)
+            .ok_or(Error::WebrtcLocalSdpGenerationError(
+                "local_description is None".to_string(),
+            ))
             .map(|x| x.sdp())
     }
 }
@@ -197,7 +209,17 @@ impl ConnectionInterface for WebSysWebrtcConnection {
             return Ok(());
         }
 
-        self.webrtc_data_channel_open_notifier.clone().await
+        self.webrtc_data_channel_state_notifier
+            .set_timeout(WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT);
+        self.webrtc_data_channel_state_notifier.clone().await;
+
+        if self.webrtc_data_channel.ready_state() == RtcDataChannelState::Open {
+            return Ok(());
+        } else {
+            return Err(Error::DataChannelOpen(format!(
+                "DataChannel not open in {WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT} seconds"
+            )));
+        }
     }
 
     async fn close(&self) -> Result<()> {
@@ -240,11 +262,11 @@ impl TransportInterface for WebSysWebrtcTransport {
         //
         // Set callbacks
         //
-        let webrtc_data_channel_open_notifier = Notifier::default();
+        let webrtc_data_channel_state_notifier = Notifier::default();
         let inner_cb = Arc::new(InnerTransportCallback::new(
             cid,
             callback,
-            webrtc_data_channel_open_notifier.clone(),
+            webrtc_data_channel_state_notifier.clone(),
         ));
 
         let data_channel_inner_cb = inner_cb.clone();
@@ -346,7 +368,7 @@ impl TransportInterface for WebSysWebrtcTransport {
         let conn = WebSysWebrtcConnection::new(
             webrtc_conn,
             webrtc_data_channel,
-            webrtc_data_channel_open_notifier,
+            webrtc_data_channel_state_notifier,
         );
 
         self.pool.safely_insert(cid, conn)?;

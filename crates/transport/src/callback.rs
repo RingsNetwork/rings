@@ -12,7 +12,7 @@ pub struct InnerTransportCallback {
     /// The id of the connection to which the current callback is assigned.
     pub cid: String,
     callback: BoxedTransportCallback,
-    data_channel_open_notifier: Notifier,
+    data_channel_state_notifier: Notifier,
 }
 
 impl InnerTransportCallback {
@@ -20,23 +20,23 @@ impl InnerTransportCallback {
     pub fn new(
         cid: &str,
         callback: BoxedTransportCallback,
-        data_channel_open_notifier: Notifier,
+        data_channel_state_notifier: Notifier,
     ) -> Self {
         Self {
             cid: cid.to_string(),
             callback,
-            data_channel_open_notifier,
+            data_channel_state_notifier,
         }
     }
 
     /// Notify the data channel is open.
     pub fn on_data_channel_open(&self) {
-        self.data_channel_open_notifier.set_result(true)
+        self.data_channel_state_notifier.wake()
     }
 
     /// Notify the data channel is close.
     pub fn on_data_channel_close(&self) {
-        self.data_channel_open_notifier.set_result(false)
+        self.data_channel_state_notifier.wake()
     }
 
     /// This method is invoked on a binary message arrival over the data channel of webrtc.
