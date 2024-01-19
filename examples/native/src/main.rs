@@ -66,8 +66,7 @@ async fn main() {
     let provider = Arc::new(Provider::from_processor(processor));
 
     // Setup your callback handler.
-    let backend = Arc::new(Backend::new(provider.clone(), Box::new(BackendBehaviour)));
-    provider.set_swarm_callback(backend).unwrap();
+    provider.set_backend_callback(BackendBehaviour).unwrap();
 
     // Listen messages from peers.
     let listening_provider = provider.clone();
