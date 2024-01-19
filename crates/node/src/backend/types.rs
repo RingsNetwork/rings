@@ -195,6 +195,94 @@ impl From<IOErrorKind> for TunnelDefeat {
     }
 }
 
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl<T1, T2> MessageHandler<BackendMessage> for (T1, T2)
+where
+    T1: MessageHandler<BackendMessage> + Send + Sync + Sized,
+    T2: MessageHandler<BackendMessage> + Send + Sync + Sized,
+{
+    async fn handle_message(
+        &self,
+        provider: Arc<Provider>,
+        ctx: &MessagePayload,
+        msg: &BackendMessage,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        self.0.handle_message(provider.clone(), ctx, msg).await?;
+        self.1.handle_message(provider.clone(), ctx, msg).await?;
+        Ok(())
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl<T1, T2, T3> MessageHandler<BackendMessage> for (T1, T2, T3)
+where
+    T1: MessageHandler<BackendMessage> + Send + Sync + Sized,
+    T2: MessageHandler<BackendMessage> + Send + Sync + Sized,
+    T3: MessageHandler<BackendMessage> + Send + Sync + Sized,
+{
+    async fn handle_message(
+        &self,
+        provider: Arc<Provider>,
+        ctx: &MessagePayload,
+        msg: &BackendMessage,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        self.0.handle_message(provider.clone(), ctx, msg).await?;
+        self.1.handle_message(provider.clone(), ctx, msg).await?;
+        self.2.handle_message(provider.clone(), ctx, msg).await?;
+        Ok(())
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl<T1, T2, T3, T4> MessageHandler<BackendMessage> for (T1, T2, T3, T4)
+where
+    T1: MessageHandler<BackendMessage> + Send + Sync + Sized,
+    T2: MessageHandler<BackendMessage> + Send + Sync + Sized,
+    T3: MessageHandler<BackendMessage> + Send + Sync + Sized,
+    T4: MessageHandler<BackendMessage> + Send + Sync + Sized,
+{
+    async fn handle_message(
+        &self,
+        provider: Arc<Provider>,
+        ctx: &MessagePayload,
+        msg: &BackendMessage,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        self.0.handle_message(provider.clone(), ctx, msg).await?;
+        self.1.handle_message(provider.clone(), ctx, msg).await?;
+        self.2.handle_message(provider.clone(), ctx, msg).await?;
+        self.3.handle_message(provider.clone(), ctx, msg).await?;
+        Ok(())
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl<T1, T2, T3, T4, T5> MessageHandler<BackendMessage> for (T1, T2, T3, T4, T5)
+where
+    T1: MessageHandler<BackendMessage> + Send + Sync + Sized,
+    T2: MessageHandler<BackendMessage> + Send + Sync + Sized,
+    T3: MessageHandler<BackendMessage> + Send + Sync + Sized,
+    T4: MessageHandler<BackendMessage> + Send + Sync + Sized,
+    T5: MessageHandler<BackendMessage> + Send + Sync + Sized,
+{
+    async fn handle_message(
+        &self,
+        provider: Arc<Provider>,
+        ctx: &MessagePayload,
+        msg: &BackendMessage,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        self.0.handle_message(provider.clone(), ctx, msg).await?;
+        self.1.handle_message(provider.clone(), ctx, msg).await?;
+        self.2.handle_message(provider.clone(), ctx, msg).await?;
+        self.3.handle_message(provider.clone(), ctx, msg).await?;
+        self.4.handle_message(provider.clone(), ctx, msg).await?;
+        Ok(())
+    }
+}
+
 impl BackendMessage {
     /// Convert to SendBackendMessageRequest
     pub fn into_send_backend_message_request(

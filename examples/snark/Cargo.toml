@@ -18,3 +18,8 @@ tokio = { version = "1.13.0", features = ["full"] }
 name = "rings-bn256-example"
 path = "bn256.rs"
 bench = false
+
+[[example]]
+name = "rings-merkle-tree-example"
+path = "merkle_tree.rs"
+bench = false

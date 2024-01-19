@@ -223,6 +223,25 @@ impl SNARKBehaviour {
     }
 }
 
+impl From<SNARKGenerator<provider::PallasEngine, provider::VestaEngine>> for SNARKProofTask {
+    fn from(snark: SNARKGenerator<provider::PallasEngine, provider::VestaEngine>) -> Self {
+	Self::PallasVasta(snark)
+    }
+}
+
+impl From<SNARKGenerator<provider::VestaEngine, provider::PallasEngine>> for SNARKProofTask {
+    fn from(snark: SNARKGenerator<provider::VestaEngine, provider::PallasEngine>) -> Self {
+	Self::VastaPallas(snark)
+    }
+}
+
+impl From<SNARKGenerator<provider::mlkzg::Bn256EngineKZG, provider::GrumpkinEngine>> for SNARKProofTask {
+    fn from(snark: SNARKGenerator<provider::mlkzg::Bn256EngineKZG, provider::GrumpkinEngine>) -> Self {
+	Self::Bn256KZGGrumpkin(snark)
+    }
+}
+
+
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl MessageHandler<SNARKTaskMessage> for SNARKBehaviour {
@@ -256,7 +275,6 @@ impl MessageHandler<SNARKTaskMessage> for SNARKBehaviour {
     }
 }
 
-
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl MessageHandler<BackendMessage> for SNARKBehaviour {
@@ -266,30 +284,31 @@ impl MessageHandler<BackendMessage> for SNARKBehaviour {
         ctx: &MessagePayload,
         msg: &BackendMessage,
     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-	if let BackendMessage::SNARKTaskMessage(msg) = msg {
-	    let verifier = ctx.relay.origin_sender();
+        if let BackendMessage::SNARKTaskMessage(msg) = msg {
+            let verifier = ctx.relay.origin_sender();
             match &msg.task {
-		SNARKTask::SNARKProof(t) => {
+                SNARKTask::SNARKProof(t) => {
                     let proof = Self::handle_snark_proof_task(t.clone())?;
                     let resp: BackendMessage = SNARKTaskMessage {
-			task_id: msg.task_id,
-			task: SNARKTask::SNARKVerify(proof),
+                        task_id: msg.task_id,
+                        task: SNARKTask::SNARKVerify(proof),
                     }
                     .into();
                     let params = resp.into_send_backend_message_request(verifier)?;
                     provider.request(Method::SendBackendMessage, params).await?;
                     Ok(())
-		}
-		SNARKTask::SNARKVerify(t) => {
+                }
+                SNARKTask::SNARKVerify(t) => {
                     if let Some(task) = self.task.get(&msg.task_id) {
-			let verified = Self::handle_snark_verify_task(t.clone(), task.value().clone())?;
-			self.verified.insert(msg.task_id, verified);
+                        let verified =
+                            Self::handle_snark_verify_task(t.clone(), task.value().clone())?;
+                        self.verified.insert(msg.task_id, verified);
                     }
                     Ok(())
-		}
+                }
             }
-	} else {
-	    Ok(())
-	}
+        } else {
+            Ok(())
+        }
     }
 }
