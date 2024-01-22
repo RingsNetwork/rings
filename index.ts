@@ -1,2 +1,2 @@
-export * from "./dist/rings_node";
-export * from "./dist/rings_node_proto";
+export * from "./rings_node";
+export * from "./rings_node_proto";
