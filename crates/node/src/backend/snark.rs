@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
+use rings_core::dht::Did;
 use rings_core::message::MessagePayload;
 use rings_derive::wasm_export;
 use rings_rpc::method::Method;
@@ -32,7 +33,6 @@ use crate::backend::types::MessageHandler;
 use crate::error::Error;
 use crate::error::Result;
 use crate::provider::Provider;
-use rings_core::dht::Did;
 
 type TaskId = uuid::Uuid;
 /// Behaviour of SNARK provier and verifier
@@ -51,15 +51,18 @@ impl SNARKBehaviour {
     pub fn new() -> SNARKBehaviour {
         Self::default()
     }
-
 }
-
 
 impl SNARKBehaviour {
     /// send proof task to did
-    pub async fn send_proof_task(&self, provider: Arc<Provider>, circuits: Vec<Circuit>, did: Did) -> Result<()> {
-	let task = SNARKTaskBuilder::gen_proof_task(circuits)?;
-	let task_id = uuid::Uuid::new_v4();
+    pub async fn send_proof_task(
+        &self,
+        provider: Arc<Provider>,
+        circuits: Vec<Circuit>,
+        did: Did,
+    ) -> Result<()> {
+        let task = SNARKTaskBuilder::gen_proof_task(circuits)?;
+        let task_id = uuid::Uuid::new_v4();
         let msg: BackendMessage = SNARKTaskMessage {
             task_id,
             task: SNARKTask::SNARKProof(task.clone()),
@@ -76,11 +79,9 @@ impl SNARKBehaviour {
             );
             wasm_bindgen_futures::JsFuture::from(promise)
                 .await
-                .map_err(|e| {
-                    Error::JsError(format!("Failed send backend messate: {:?}", e))
-                })?;
+                .map_err(|e| Error::JsError(format!("Failed send backend messate: {:?}", e)))?;
         }
-	self.task.insert(task_id, task);
+        self.task.insert(task_id, task);
         Ok(())
     }
 }
@@ -825,24 +826,33 @@ impl MessageHandler<BackendMessage> for SNARKBehaviour {
 }
 
 /// Special case for browser
-#[cfg(target_family="wasm")]
+#[cfg(target_family = "wasm")]
 pub mod browser {
+    use std::str::FromStr;
+
     use rings_derive::wasm_export;
-    use super::*;
-    use wasm_bindgen_futures::future_to_promise;
     use wasm_bindgen::JsError;
     use wasm_bindgen::JsValue;
-    use std::str::FromStr;
+    use wasm_bindgen_futures::future_to_promise;
+
+    use super::*;
 
     #[wasm_export]
     impl SNARKBehaviour {
-	/// send proof task to did
-	pub fn send_proof_task_to(&self, provider: Provider, circuits: Vec<Circuit>, did: String) -> js_sys::Promise {
-	    let ins = self.clone();
-	    future_to_promise(async move {
-		ins.send_proof_task(provider.clone().into(), circuits, Did::from_str(&did)?).await.map_err(JsError::from)?;
-		Ok(JsValue::NULL)
-	    })
-	}
+        /// send proof task to did
+        pub fn send_proof_task_to(
+            &self,
+            provider: Provider,
+            circuits: Vec<Circuit>,
+            did: String,
+        ) -> js_sys::Promise {
+            let ins = self.clone();
+            future_to_promise(async move {
+                ins.send_proof_task(provider.clone().into(), circuits, Did::from_str(&did)?)
+                    .await
+                    .map_err(JsError::from)?;
+                Ok(JsValue::NULL)
+            })
+        }
     }
 }
