@@ -8,7 +8,6 @@ use rings_core::session::SessionSkBuilder;
 use rings_core::storage::MemStorage;
 use rings_node::backend::types::BackendMessage;
 use rings_node::backend::types::MessageHandler;
-use rings_node::backend::Backend;
 use rings_node::logging::init_logging;
 use rings_node::logging::LogLevel;
 use rings_node::processor::ProcessorBuilder;
