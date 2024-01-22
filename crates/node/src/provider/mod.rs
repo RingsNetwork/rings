@@ -130,7 +130,17 @@ impl Provider {
     }
 
     /// Set callback for swarm.
-    pub(crate) fn set_swarm_callback(&self, callback: SharedSwarmCallback) -> Result<()> {
+    #[deprecated(
+        note = "set_swarm_callback will be removed in next version, plz use set_backend_callback instead"
+    )]
+    pub fn set_swarm_callback(&self, callback: SharedSwarmCallback) -> Result<()> {
+        self.processor
+            .swarm
+            .set_callback(callback)
+            .map_err(Error::InternalError)
+    }
+
+    pub(crate) fn set_swarm_callback_internal(&self, callback: SharedSwarmCallback) -> Result<()> {
         self.processor
             .swarm
             .set_callback(callback)

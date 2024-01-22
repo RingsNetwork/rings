@@ -11,6 +11,7 @@ use rings_core::utils::js_value;
 use rings_derive::wasm_export;
 use wasm_bindgen::JsValue;
 
+use crate::backend::snark::SNARKBehaviour;
 use crate::backend::types::BackendMessage;
 use crate::backend::types::MessageHandler;
 use crate::error::Error;
@@ -23,6 +24,7 @@ pub struct BackendBehaviour {
     service_message_handler: Option<Function>,
     plain_text_message_handler: Option<Function>,
     extension_message_handler: Option<Function>,
+    snark_message_handler: Option<SNARKBehaviour>,
 }
 
 #[wasm_export]
@@ -35,11 +37,13 @@ impl BackendBehaviour {
         service_message_handler: Option<js_sys::Function>,
         plain_text_message_handler: Option<js_sys::Function>,
         extension_message_handler: Option<Function>,
+        snark_message_handler: Option<SNARKBehaviour>,
     ) -> BackendBehaviour {
         BackendBehaviour {
             service_message_handler,
             plain_text_message_handler,
             extension_message_handler,
+            snark_message_handler,
         }
     }
 
@@ -72,7 +76,13 @@ impl BackendBehaviour {
                     cb(self.clone(), provider, ctx, m.to_string()).await?;
                 }
             }
-            _ => (),
+            BackendMessage::SNARKTaskMessage(m) => {
+                if let Some(h) = &self.snark_message_handler {
+                    h.handle_message(provider.into(), payload, m)
+                        .await
+                        .map_err(|e| Error::SNARKHandleMessage(e.to_string()))?;
+                }
+            }
         }
         Ok(())
     }

@@ -124,6 +124,10 @@ pub enum Error {
     RingsSNARKError(#[from] rings_snark::error::Error) = 1400,
     #[error("Snark curve not match")]
     SNARKCurveNotMatch() = 1401,
+    #[error("Snark handle message error: {0}")]
+    SNARKHandleMessage(String) = 1402,
+    #[error("Wrong field, should be {0}")]
+    SNARKWrongField(String) = 1403,
 }
 
 impl Error {

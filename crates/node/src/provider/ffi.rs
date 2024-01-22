@@ -40,7 +40,7 @@ use std::ffi::c_char;
 use std::ffi::CStr;
 use std::ffi::CString;
 use std::sync::Arc;
-use crate::backend::snark::SNARKBehaviour;
+
 use futures::executor;
 use tokio::runtime::Runtime;
 
@@ -48,6 +48,7 @@ use super::Provider;
 use super::Signer;
 use crate::backend::ffi::FFIBackendBehaviour;
 use crate::backend::ffi::FFIBackendBehaviourWithRuntime;
+use crate::backend::snark::SNARKBehaviour;
 use crate::backend::Backend;
 use crate::error::Error;
 use crate::error::Result;
@@ -272,7 +273,10 @@ pub unsafe extern "C" fn new_provider_with_callback(
     let provider = Arc::new(provider.clone());
     let callback: &FFIBackendBehaviour = unsafe { &*callback_ptr };
     let callback_with_rt = FFIBackendBehaviourWithRuntime::new(callback.clone(), runtime.clone());
-    let backend = Backend::new(provider.clone(), Box::new((callback_with_rt.clone(), SNARKBehaviour::default())));
+    let backend = Backend::new(
+        provider.clone(),
+        Box::new((callback_with_rt.clone(), SNARKBehaviour::default())),
+    );
 
     provider
         .set_swarm_callback(Arc::new(backend))

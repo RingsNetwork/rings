@@ -5,14 +5,17 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use rings_core::message::MessagePayload;
+use rings_derive::wasm_export;
 use rings_rpc::method::Method;
-use rings_snark::circuit::Circuit;
 use rings_snark::prelude::nova::provider;
 use rings_snark::prelude::nova::provider::ipa_pc;
 use rings_snark::prelude::nova::provider::mlkzg;
 use rings_snark::prelude::nova::spartan;
+use rings_snark::prelude::ff;
 use rings_snark::prelude::nova::traits::snark::RelaxedR1CSSNARKTrait;
 use rings_snark::prelude::nova::traits::Engine;
+use rings_snark::circuit;
+use rings_snark::r1cs;
 use rings_snark::snark::CompressedSNARK;
 use rings_snark::snark::ProverKey;
 use rings_snark::snark::PublicParams;
@@ -33,13 +36,261 @@ use crate::provider::Provider;
 
 type TaskId = uuid::Uuid;
 /// Behaviour of SNARK provier and verifier
-#[derive(Default)]
+#[wasm_export]
+#[derive(Default, Clone)]
 pub struct SNARKBehaviour {
     /// map of task_id and task
-    pub task: DashMap<TaskId, SNARKProofTask>,
+    task: DashMap<TaskId, SNARKProofTask>,
     /// map of task_id and result
-    pub verified: DashMap<TaskId, bool>,
+    verified: DashMap<TaskId, bool>,
 }
+
+#[wasm_export]
+impl SNARKBehaviour {
+    pub fn new() -> SNARKBehaviour {
+	Self::default()
+    }
+}
+
+/// Types for circuit
+pub enum CircuitGenerator {
+    /// Circuit based on Vesta curve
+    Vesta(circuit::WasmCircuitGenerator<<provider::VestaEngine as Engine>::Base>),
+    /// Circuit based on pallas curve
+    Pallas(circuit::WasmCircuitGenerator<<provider::PallasEngine as Engine>::Base>),
+    /// Circuit based on KZG bn256
+    Bn256KZG(circuit::WasmCircuitGenerator<<provider::mlkzg::Bn256EngineKZG as Engine>::Base>)
+}
+
+/// Supported prime field
+#[wasm_export]
+pub enum SupportedPrimeField {
+    /// field of vesta curve
+    Vesta,
+    /// field of pallas curve
+    Pallas,
+    /// bn256 with kzg
+    Bn256KZG
+}
+
+/// Supported prime field
+pub enum FieldEnum {
+    /// field of vesta curve
+    Vesta(<provider::VestaEngine as Engine>::Base),
+    /// field of pallas curve
+    Pallas(<provider::PallasEngine as Engine>::Base),
+    /// bn256 with kzg
+    Bn256KZG(<provider::mlkzg::Bn256EngineKZG as Engine>::Base)
+}
+
+/// Input type
+pub type Input = Vec<(String, Vec<Field>)>;
+
+/// Field type
+#[wasm_export]
+pub struct Field {
+    value: FieldEnum
+}
+
+/// Types of Circuit
+pub enum CircuitEnum {
+    /// Based on vesta curve
+    Vesta(circuit::Circuit<<provider::VestaEngine as Engine>::Base>),
+    /// Based on pallas curve
+    Pallas(circuit::Circuit<<provider::PallasEngine as Engine>::Base>),
+    /// based on bn256 and KZG
+    Bn256KZG(circuit::Circuit<<provider::mlkzg::Bn256EngineKZG as Engine>::Base>)
+}
+
+/// Circuit, it's a typeless wrapper of rings_snark circuit
+#[wasm_export]
+pub struct Circuit {
+    inner: CircuitEnum
+}
+
+
+#[wasm_export]
+impl Field {
+    /// create field from u64
+    pub fn from_u64(v: u64, ty: SupportedPrimeField) -> Self {
+	match ty {
+	    SupportedPrimeField::Vesta => Self {
+		value:  FieldEnum::Vesta(
+		    <provider::VestaEngine as Engine>::Base::from(v)
+		)
+	    },
+	    SupportedPrimeField::Pallas => Self {
+		value:  FieldEnum::Pallas(
+		    <provider::PallasEngine as Engine>::Base::from(v)
+		)
+	    },
+	    SupportedPrimeField::Bn256KZG => Self {
+		value:  FieldEnum::Bn256KZG(
+		    <provider::mlkzg::Bn256EngineKZG as Engine>::Base::from(v)
+		)
+	    }
+
+	}
+    }
+}
+
+
+pub struct SNARKTaskBuilder {
+    circuit_generator: CircuitGenerator,
+}
+
+impl SNARKTaskBuilder {
+    pub async fn from_local(r1cs_path: String, witness_wasm_path: String, field: SupportedPrimeField) -> Result<Self> {
+	match field {
+	    SupportedPrimeField::Vesta => {
+		type F = <provider::VestaEngine as Engine>::Base;
+		let r1cs = r1cs::load_r1cs::<F>(
+		    r1cs::Path::Local(r1cs_path),
+		    r1cs::Format::Bin
+		).await?;
+		let witness_calculator = r1cs::load_circom_witness_calculator(
+		    r1cs::Path::Local(witness_wasm_path)
+		).await?;
+		let circuit_generator = circuit::WasmCircuitGenerator::<F>::new(r1cs, witness_calculator);
+		Ok(Self {
+		    circuit_generator:  CircuitGenerator::Vesta(circuit_generator)
+		})
+	    },
+	    SupportedPrimeField::Pallas => {
+		type F = <provider::PallasEngine as Engine>::Base;
+		let r1cs = r1cs::load_r1cs::<F>(
+		    r1cs::Path::Local(r1cs_path),
+		    r1cs::Format::Bin
+		).await?;
+		let witness_calculator = r1cs::load_circom_witness_calculator(
+		    r1cs::Path::Local(witness_wasm_path)
+		).await?;
+		let circuit_generator = circuit::WasmCircuitGenerator::<F>::new(r1cs, witness_calculator);
+		Ok(Self {
+		    circuit_generator:  CircuitGenerator::Pallas(circuit_generator)
+		})
+	    }
+	    SupportedPrimeField::Bn256KZG => {
+		type F = <provider::mlkzg::Bn256EngineKZG as Engine>::Base;
+		let r1cs = r1cs::load_r1cs::<F>(
+		    r1cs::Path::Local(r1cs_path),
+		    r1cs::Format::Bin
+		).await?;
+		let witness_calculator = r1cs::load_circom_witness_calculator(
+		    r1cs::Path::Local(witness_wasm_path)
+		).await?;
+		let circuit_generator = circuit::WasmCircuitGenerator::<F>::new(r1cs, witness_calculator);
+		Ok(Self {
+		    circuit_generator:  CircuitGenerator::Bn256KZG(circuit_generator)
+		})
+	    }
+	}
+    }
+
+    /// generate recursive circuits
+    pub async fn gen_circuits(&self, public_input: Input, private_inputs: Vec<Input>, round: usize) -> Result<Vec<Circuit>> {
+	match &self.circuit_generator {
+	    CircuitGenerator::Vesta(g) => {
+		type F = <provider::VestaEngine as Engine>::Base;
+
+		let input: circuit::Input<F> = public_input.into_iter().map(|(s, v)| {
+		    (s, v.into_iter().map(|inp| {
+			if let FieldEnum::Vesta(x) = inp.value {
+			    x
+			} else {
+			    panic!("Wrong curve, expect Vesta")
+			}
+		    }).collect())
+		}).collect::<Vec<(String, Vec<F>)>>().into();
+
+		let private_inputs: Vec<circuit::Input<F>> = private_inputs.into_iter().map(|inp| {
+		    inp.into_iter().map(|(s, v)| {
+			let fields: Vec<F> = v.into_iter().map(|inp| {
+			    if let FieldEnum::Vesta(x) = inp.value {
+				x
+			    } else {
+				panic!("Wrong curve, expect Vesta")
+			    }
+			}).collect();
+			(s, fields)
+		    }).collect::<Vec<(String, Vec<F>)>>().into()
+		}).collect();
+
+
+		let circuits = g.gen_recursive_circuit(
+		    input.into(), private_inputs, round, true
+		)?.iter().map(|c| Circuit {inner: CircuitEnum::Vesta(c.clone())}).collect::<Vec<Circuit>>();
+		Ok(circuits)
+	    }
+	    CircuitGenerator::Pallas(g) => {
+		type F = <provider::PallasEngine as Engine>::Base;
+
+		let input: circuit::Input<F> = public_input.into_iter().map(|(s, v)| {
+		    (s, v.into_iter().map(|inp| {
+			if let FieldEnum::Pallas(x) = inp.value {
+			    x
+			} else {
+			    panic!("Wrong curve, expect pallas")
+			}
+		    }).collect())
+		}).collect::<Vec<(String, Vec<F>)>>().into();
+
+		let private_inputs: Vec<circuit::Input<F>> = private_inputs.into_iter().map(|inp| {
+		    inp.into_iter().map(|(s, v)| {
+			let fields: Vec<F> = v.into_iter().map(|inp| {
+			    if let FieldEnum::Pallas(x) = inp.value {
+				x
+			    } else {
+				panic!("Wrong curve, expect Vesta")
+			    }
+			}).collect();
+			(s, fields)
+		    }).collect::<Vec<(String, Vec<F>)>>().into()
+		}).collect();
+
+		let circuits = g.gen_recursive_circuit(
+		    input.into(), private_inputs, round, true
+		)?.iter().map(|c| Circuit {inner: CircuitEnum::Pallas(c.clone())}).collect::<Vec<Circuit>>();
+		Ok(circuits)
+	    }
+	    CircuitGenerator::Bn256KZG(g) => {
+		type F = <provider::mlkzg::Bn256EngineKZG as Engine>::Base;
+
+		let input: circuit::Input<F> = public_input.into_iter().map(|(s, v)| {
+		    (s, v.into_iter().map(|inp| {
+			if let FieldEnum::Bn256KZG(x) = inp.value {
+			    x
+			} else {
+			    panic!("Wrong curve, expect bn256")
+			}
+		    }).collect())
+		}).collect::<Vec<(String, Vec<F>)>>().into();
+
+		let private_inputs: Vec<circuit::Input<F>> = private_inputs.into_iter().map(|inp| {
+		    inp.into_iter().map(|(s, v)| {
+			let fields: Vec<F> = v.into_iter().map(|inp| {
+			    if let FieldEnum::Bn256KZG(x) = inp.value {
+				x
+			    } else {
+				panic!("Wrong curve, expect bn256")
+			    }
+			}).collect();
+			(s, fields)
+		    }).collect::<Vec<(String, Vec<F>)>>().into()
+		}).collect();
+
+		let circuits = g.gen_recursive_circuit(
+		    input.into(), private_inputs, round, true
+		)?.iter().map(|c| Circuit {inner: CircuitEnum::Bn256KZG(c.clone())}).collect::<Vec<Circuit>>();
+		Ok(circuits)
+	    }
+	}
+    }
+}
+
+
+
+
 
 /// SNARK Proof
 #[derive(Serialize, Deserialize)]
@@ -72,7 +323,7 @@ where
     E2: Engine<Base = <E1 as Engine>::Scalar>,
 {
     snark: SNARK<E1, E2>,
-    circuits: Vec<Circuit<<E1 as Engine>::Scalar>>,
+    circuits: Vec<circuit::Circuit<<E1 as Engine>::Scalar>>,
     pp: PublicParams<E1, E2>,
 }
 

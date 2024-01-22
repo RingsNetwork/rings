@@ -110,7 +110,7 @@ impl FFIBackendBehaviourWithRuntime {
             BackendMessage::ServiceMessage(m) => {
                 handle_backend_message!(self, provider, service_message_handler, payload, m)
             }
-	    _ => ()
+            _ => (),
         }
         Ok(())
     }
