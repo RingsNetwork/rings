@@ -29,7 +29,6 @@ use wasm_bindgen_futures::future_to_promise;
 use wasm_bindgen_futures::JsFuture;
 
 use crate::backend::browser::BackendBehaviour;
-use crate::backend::snark::SNARKBehaviour;
 use crate::backend::types::BackendMessage;
 use crate::backend::types::HttpRequest;
 use crate::backend::types::ServiceMessage;

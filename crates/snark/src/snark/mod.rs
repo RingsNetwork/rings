@@ -12,7 +12,6 @@ use utils::deserialize_forward;
 use utils::serialize_forward;
 
 use crate::circuit::Circuit;
-use crate::circuit::Input;
 use crate::error::Result;
 use crate::prelude::nova;
 use crate::prelude::nova::traits::circuit::TrivialCircuit;
@@ -160,11 +159,10 @@ where
     pub fn new(
         circom: impl AsRef<Circuit<E1::Scalar>>,
         pp: impl AsRef<PublicParams<E1, E2>>,
-        public_inputs: impl AsRef<Input<E1::Scalar>>,
+        public_inputs: impl AsRef<[E1::Scalar]>,
         secondary_inputs: impl AsRef<[E2::Scalar]>,
     ) -> Result<Self> {
         // flat public input here
-        let public_inputs = public_inputs.as_ref().flat();
         let circuit_secondary = TrivialCircuit::<E2::Scalar>::default();
         // default input for secondary on initialize round is [0]
         let inner = RecursiveSNARK::new(

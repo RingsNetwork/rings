@@ -218,7 +218,7 @@ impl<F: PrimeField> Circuit<F> {
         // witness: <1> <Outputs> <Inputs> <Auxs>
         // NOTE: assumes exactly half of the (public inputs + outputs) are outputs
         let output_count = (self.r1cs.num_inputs - 1) / 2;
-        self.witness[1 + output_count + 1..self.r1cs.num_inputs].to_vec()
+        self.witness[1 + output_count..self.r1cs.num_inputs].to_vec()
     }
 }
 

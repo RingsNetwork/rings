@@ -1,7 +1,3 @@
-use std::rc::Rc;
-
-use flate2::write::ZlibEncoder;
-use flate2::Compression;
 use memory_stats::memory_stats;
 
 use crate::circuit;
@@ -63,7 +59,6 @@ pub async fn test_calcu_sha256_recursive_snark() -> Result<()> {
     let recursive_circuits = circuit_generator
         .gen_recursive_circuit(input_0.clone(), vec![], round, true)
         .unwrap();
-
     print_mem_status(Some("after gen circuits"));
 
     assert_eq!(input_0.input[0].1.len(), 256);
@@ -75,9 +70,9 @@ pub async fn test_calcu_sha256_recursive_snark() -> Result<()> {
     let pp = snark::SNARK::<E1, E2>::gen_pp::<S1, S2>(public_circuit.clone());
     print_mem_status(Some("after gen pp"));
     let mut rec_snark = snark::SNARK::<E1, E2>::new(
-        &Rc::new(recursive_circuits[0].clone()),
+        &recursive_circuits[0],
         &pp,
-        &input_0,
+        &recursive_circuits[0].get_public_inputs(),
         &vec![F2::from(0)],
     )
     .unwrap();
@@ -95,21 +90,8 @@ pub async fn test_calcu_sha256_recursive_snark() -> Result<()> {
     let compress_snark = rec_snark.compress_prove::<S1, S2>(&pp, &pk).unwrap();
     print_mem_status(Some("after gen compress prove"));
 
-    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-    bincode::serialize_into(&mut encoder, &compress_snark).unwrap();
-    let compressed_snark_encoded = encoder.finish().unwrap();
-    println!(
-        "CompressedSNARK::len {:?} bytes",
-        compressed_snark_encoded.len()
-    );
-
-    let compress_snark_ref = Rc::new(compress_snark);
-    let ret = snark::SNARK::<E1, E2>::compress_verify::<S1, S2>(
-        compress_snark_ref,
-        vk,
-        round,
-        &input_inner,
-    );
+    let ret =
+        snark::SNARK::<E1, E2>::compress_verify::<S1, S2>(compress_snark, vk, round, &input_inner);
     print_mem_status(Some("after verified compress prove"));
     assert!(ret.is_ok());
 
@@ -179,11 +161,13 @@ pub async fn test_calcu_bn256_recursive_snark_with_private_input() -> Result<()>
     assert_eq!(recursive_circuits.len(), 3);
     // init pp with ouptn inputs
     let pp = snark::SNARK::<E1, E2>::gen_pp::<S1, S2>(circuit_0.clone());
-    let mut rec_snark_iter =
-        snark::SNARK::<E1, E2>::new(&recursive_circuits[0].clone(), &pp, input_0.clone(), vec![
-            F2::from(0),
-        ])
-        .unwrap();
+    let mut rec_snark_iter = snark::SNARK::<E1, E2>::new(
+        &recursive_circuits[0].clone(),
+        &pp,
+        &recursive_circuits[0].get_public_inputs(),
+        vec![F2::from(0)],
+    )
+    .unwrap();
 
     for c in recursive_circuits {
         rec_snark_iter.foldr(&pp, &c).unwrap();
@@ -197,8 +181,7 @@ pub async fn test_calcu_bn256_recursive_snark_with_private_input() -> Result<()>
     let (pk, vk) = snark::SNARK::<E1, E2>::compress_setup::<S1, S2>(&pp).unwrap();
 
     let compress_snark = rec_snark_iter.compress_prove::<S1, S2>(&pp, &pk).unwrap();
-    let compress_snark_ref = Rc::new(compress_snark);
-    let ret = snark::SNARK::<E1, E2>::compress_verify::<S1, S2>(compress_snark_ref, &vk, 3, &vec![
+    let ret = snark::SNARK::<E1, E2>::compress_verify::<S1, S2>(compress_snark, &vk, 3, &vec![
         F1::from(4u64),
         F1::from(2u64),
     ]);
