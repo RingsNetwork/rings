@@ -87,7 +87,7 @@ pub async fn merkle_tree_path_proof() {
 
     let start = Instant::now();
     let mut rec_snark_iter =
-        snark::SNARK::<E1, E2>::new(&recursive_circuits[0].clone(), &pp, input_0.clone(), vec![
+        snark::SNARK::<E1, E2>::new(&recursive_circuits[0].clone(), &pp, &input_value_0, vec![
             F2::from(0),
         ])
         .unwrap();

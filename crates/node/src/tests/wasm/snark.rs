@@ -1,8 +1,9 @@
-use crate::backend::snark::browser::bigint2ff;
 use rings_snark::prelude::nova::provider;
+use rings_snark::prelude::nova::traits::Engine;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_test::wasm_bindgen_test;
-use rings_snark::prelude::nova::traits::Engine;
+
+use crate::backend::snark::browser::bigint2ff;
 
 #[wasm_bindgen_test]
 fn test_bigint2ff() {

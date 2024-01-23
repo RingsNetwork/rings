@@ -100,6 +100,19 @@ pub enum SupportedPrimeField {
     Bn256KZG,
 }
 
+#[wasm_export]
+impl SupportedPrimeField {
+    /// Convert string to [Supportedprimefield]
+    pub fn from_str(s: &str) -> SupportedPrimeField {
+        match s {
+            "Vesta" => SupportedPrimeField::Vesta,
+            "Pallas" => SupportedPrimeField::Pallas,
+            "Bn256kzg" => SupportedPrimeField::Bn256KZG,
+            _ => unimplemented!(),
+        }
+    }
+}
+
 /// Supported prime field
 pub enum FieldEnum {
     /// field of vesta curve
@@ -339,7 +352,7 @@ impl SNARKTaskBuilder {
                     .collect();
 
                 let circuits = g
-                    .gen_recursive_circuit(input.into(), private_inputs, round, true)?
+                    .gen_recursive_circuit(input, private_inputs, round, true)?
                     .iter()
                     .map(|c| Circuit {
                         inner: CircuitEnum::Vesta(c.clone()),
@@ -392,7 +405,7 @@ impl SNARKTaskBuilder {
                     .collect();
 
                 let circuits = g
-                    .gen_recursive_circuit(input.into(), private_inputs, round, true)?
+                    .gen_recursive_circuit(input, private_inputs, round, true)?
                     .iter()
                     .map(|c| Circuit {
                         inner: CircuitEnum::Pallas(c.clone()),
@@ -445,7 +458,7 @@ impl SNARKTaskBuilder {
                     .collect();
 
                 let circuits = g
-                    .gen_recursive_circuit(input.into(), private_inputs, round, true)?
+                    .gen_recursive_circuit(input, private_inputs, round, true)?
                     .iter()
                     .map(|c| Circuit {
                         inner: CircuitEnum::Bn256KZG(c.clone()),
@@ -484,9 +497,9 @@ impl SNARKTaskBuilder {
                     <E2 as Engine>::Scalar::from(0),
                 ])?;
                 SNARKProofTask::VastaPallas(SNARKGenerator {
-                    pp: pp,
-                    snark: snark,
-                    circuits: circuits,
+                    pp,
+                    snark,
+                    circuits,
                 })
             }
             CircuitEnum::Pallas(_) => {
@@ -512,9 +525,9 @@ impl SNARKTaskBuilder {
                     <E2 as Engine>::Scalar::from(0),
                 ])?;
                 SNARKProofTask::PallasVasta(SNARKGenerator {
-                    pp: pp,
-                    snark: snark,
-                    circuits: circuits,
+                    pp,
+                    snark,
+                    circuits,
                 })
             }
             CircuitEnum::Bn256KZG(_) => {
@@ -540,9 +553,9 @@ impl SNARKTaskBuilder {
                     <E2 as Engine>::Scalar::from(0),
                 ])?;
                 SNARKProofTask::Bn256KZGGrumpkin(SNARKGenerator {
-                    pp: pp,
-                    snark: snark,
-                    circuits: circuits,
+                    pp,
+                    snark,
+                    circuits,
                 })
             }
         };
@@ -824,11 +837,11 @@ pub mod browser {
     use std::str::FromStr;
 
     use rings_derive::wasm_export;
+    use rings_snark::prelude::ff;
     use wasm_bindgen::JsError;
     use wasm_bindgen::JsValue;
     use wasm_bindgen_futures::future_to_promise;
     use wasm_bindgen_futures::wasm_bindgen;
-    use rings_snark::prelude::ff;
 
     use super::*;
 
@@ -850,76 +863,96 @@ pub mod browser {
             })
         }
 
-	/// create new instance for browser
-	/// which support syntax `new SNARKBehaviour` in browser env
-	#[wasm_bindgen(constructor)]
-	pub fn new_instance() -> SNARKBehaviour {
-	    SNARKBehaviour::default()
-	}
+        /// create new instance for browser
+        /// which support syntax `new SNARKBehaviour` in browser env
+        #[wasm_bindgen(constructor)]
+        pub fn new_instance() -> SNARKBehaviour {
+            SNARKBehaviour::default()
+        }
     }
 
     #[wasm_export]
     impl SNARKTaskBuilder {
-	/// create new instance for browser
-	/// which support syntax `new SNARKTaskBuilder` in browser env
-	#[wasm_bindgen(constructor)]
-	pub fn new_instance(
+        /// create new instance for browser
+        /// which support syntax `new SNARKTaskBuilder` in browser env
+        #[wasm_bindgen(constructor)]
+        pub fn new_instance(
             r1cs_path: String,
             witness_wasm_path: String,
-            field: SupportedPrimeField
-	) -> js_sys::Promise {
-	    future_to_promise(async move {
-		let ret = SNARKTaskBuilder::from_remote(
-		    r1cs_path,
-		    witness_wasm_path,
-		    field
-		).await.map_err(JsError::from)?;
-		Ok(JsValue::from(ret))
-	    })
-	}
+            field: SupportedPrimeField,
+        ) -> js_sys::Promise {
+            future_to_promise(async move {
+                let ret = SNARKTaskBuilder::from_remote(r1cs_path, witness_wasm_path, field)
+                    .await
+                    .map_err(JsError::from)?;
+                Ok(JsValue::from(ret))
+            })
+        }
     }
-
 
     /// Convert biguint to finatefield
     pub(crate) fn bigint2ff<F: ff::PrimeField>(v: js_sys::BigInt) -> Result<F> {
-
-	let repr = v.to_string(10).map_err(|e| Error::SNARKFFRangeError(format!("{:?}", e)))?.as_string();
-	if let Some(v) = &repr {
-	    Ok(F::from_str_vartime(&v).ok_or(Error::FailedToLoadFF())?)
-	} else {
-	    Err(Error::SNARKBigIntValueEmpty())
-	}
+        let repr = v
+            .to_string(10)
+            .map_err(|e| Error::SNARKFFRangeError(format!("{:?}", e)))?
+            .as_string();
+        if let Some(v) = &repr {
+            Ok(F::from_str_vartime(&v).ok_or(Error::FailedToLoadFF())?)
+        } else {
+            Err(Error::SNARKBigIntValueEmpty())
+        }
     }
 
-    /// Convert bigint from js to [Field]
+    /// Convert BigInt from js to [Field]
     #[wasm_export]
     pub fn bigint_to_field(v: js_sys::BigInt, field: SupportedPrimeField) -> Result<Field> {
-	let ret = match field {
-	    SupportedPrimeField::Vesta => {
-		type F = <provider::VestaEngine as Engine>::Scalar;
-		Field {
-		    value: FieldEnum::Vesta(bigint2ff::<F>(v)?)
-		}
-	    },
-	    SupportedPrimeField::Pallas => {
-		type F = <provider::PallasEngine as Engine>::Scalar;
-		Field {
-		    value: FieldEnum::Pallas(bigint2ff::<F>(v)?)
-		}
-	    },
-	    SupportedPrimeField::Bn256KZG => {
-		type F = <provider::mlkzg::Bn256EngineKZG as Engine>::Scalar;
-		Field {
-		    value: FieldEnum::Bn256KZG(bigint2ff::<F>(v)?)
-		}
-	    }
-	};
-	Ok(ret)
+        let ret = match field {
+            SupportedPrimeField::Vesta => {
+                type F = <provider::VestaEngine as Engine>::Scalar;
+                Field {
+                    value: FieldEnum::Vesta(bigint2ff::<F>(v)?),
+                }
+            }
+            SupportedPrimeField::Pallas => {
+                type F = <provider::PallasEngine as Engine>::Scalar;
+                Field {
+                    value: FieldEnum::Pallas(bigint2ff::<F>(v)?),
+                }
+            }
+            SupportedPrimeField::Bn256KZG => {
+                type F = <provider::mlkzg::Bn256EngineKZG as Engine>::Scalar;
+                Field {
+                    value: FieldEnum::Bn256KZG(bigint2ff::<F>(v)?),
+                }
+            }
+        };
+        Ok(ret)
     }
 
-    /// Convert list of bigint from js to list of [Field]
     #[wasm_export]
-    pub fn bigints_to_fields(vs: Vec<js_sys::BigInt>, field: SupportedPrimeField) -> Result<Vec<Field>> {
-	vs.into_iter().map(|v| bigint_to_field(v, field.clone())).collect()
+    impl Input {
+        /// Convert [["foo", [BigInt(2), BigInt(3)]], ["bar", [BigInt(4), BigInt(5)]]] to Input with given field
+        pub fn from_array(input: js_sys::Array, field: SupportedPrimeField) -> Input {
+            let data: Vec<(String, Vec<Field>)> = input
+                .into_iter()
+                .map(|s| {
+                    let lst = js_sys::Array::from(&s);
+                    let p = lst
+                        .get(0)
+                        .as_string()
+                        .expect("first argument should be string like");
+                    let v: Vec<Field> = lst
+                        .slice(1, lst.length())
+                        .into_iter()
+                        .map(|p| {
+                            bigint_to_field(p.into(), field.clone())
+                                .expect("failed to cover bigint to field")
+                        })
+                        .collect();
+                    (p, v)
+                })
+                .collect();
+            Input(data)
+        }
     }
 }

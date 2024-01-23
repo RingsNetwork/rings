@@ -55,11 +55,13 @@ async fn main() {
     assert_eq!(recursive_circuits.len(), 3);
     // init pp with ouptn inputs
     let pp = snark::SNARK::<E1, E2>::gen_pp::<S1, S2>(circuit_0.clone());
-    let mut rec_snark_iter =
-        snark::SNARK::<E1, E2>::new(&recursive_circuits[0].clone(), &pp, input_0.clone(), vec![
-            F2::from(0),
-        ])
-        .unwrap();
+    let mut rec_snark_iter = snark::SNARK::<E1, E2>::new(
+        &recursive_circuits[0].clone(),
+        &pp,
+        vec![F1::from(4u64), F1::from(2u64)],
+        vec![F2::from(0)],
+    )
+    .unwrap();
 
     for c in recursive_circuits {
         rec_snark_iter.foldr(&pp, &c).unwrap();
