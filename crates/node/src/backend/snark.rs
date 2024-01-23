@@ -100,19 +100,6 @@ pub enum SupportedPrimeField {
     Bn256KZG,
 }
 
-#[wasm_export]
-impl SupportedPrimeField {
-    /// Convert string to [Supportedprimefield]
-    pub fn from_str(s: &str) -> SupportedPrimeField {
-        match s {
-            "Vesta" => SupportedPrimeField::Vesta,
-            "Pallas" => SupportedPrimeField::Pallas,
-            "Bn256kzg" => SupportedPrimeField::Bn256KZG,
-            _ => unimplemented!(),
-        }
-    }
-}
-
 /// Supported prime field
 pub enum FieldEnum {
     /// field of vesta curve
