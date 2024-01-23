@@ -128,6 +128,15 @@ pub enum Error {
     SNARKHandleMessage(String) = 1402,
     #[error("Wrong field, should be {0}")]
     SNARKWrongField(String) = 1403,
+    #[cfg(feature = "browser")]
+    #[error("range error when covering js_sys::BigInt to PrimeField: {0}")]
+    SNARKFFRangeError(String) = 1404,
+    #[cfg(feature = "browser")]
+    #[error("Failed to load bigint to repr string, it's empty")]
+    SNARKBigIntValueEmpty() = 1405,
+    #[error("Failed to load string to PrimeField")]
+    FailedToLoadFF() = 1406,
+
 }
 
 impl Error {

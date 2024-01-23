@@ -1,6 +1,6 @@
 pub mod browser;
 pub mod processor;
-
+pub mod snark;
 use rings_core::ecc::SecretKey;
 use rings_core::prelude::uuid;
 use rings_core::session::SessionSk;

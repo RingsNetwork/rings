@@ -45,14 +45,6 @@ pub struct SNARKBehaviour {
     verified: DashMap<TaskId, bool>,
 }
 
-#[wasm_export]
-impl SNARKBehaviour {
-    /// Create a new instance of snark behaviour management
-    pub fn new() -> SNARKBehaviour {
-        Self::default()
-    }
-}
-
 impl SNARKBehaviour {
     /// send proof task to did
     pub async fn send_proof_task(
@@ -98,6 +90,7 @@ pub enum CircuitGenerator {
 
 /// Supported prime field
 #[wasm_export]
+#[derive(Clone)]
 pub enum SupportedPrimeField {
     /// field of vesta curve
     Vesta,
@@ -834,6 +827,8 @@ pub mod browser {
     use wasm_bindgen::JsError;
     use wasm_bindgen::JsValue;
     use wasm_bindgen_futures::future_to_promise;
+    use wasm_bindgen_futures::wasm_bindgen;
+    use rings_snark::prelude::ff;
 
     use super::*;
 
@@ -854,5 +849,77 @@ pub mod browser {
                 Ok(JsValue::NULL)
             })
         }
+
+	/// create new instance for browser
+	/// which support syntax `new SNARKBehaviour` in browser env
+	#[wasm_bindgen(constructor)]
+	pub fn new_instance() -> SNARKBehaviour {
+	    SNARKBehaviour::default()
+	}
+    }
+
+    #[wasm_export]
+    impl SNARKTaskBuilder {
+	/// create new instance for browser
+	/// which support syntax `new SNARKTaskBuilder` in browser env
+	#[wasm_bindgen(constructor)]
+	pub fn new_instance(
+            r1cs_path: String,
+            witness_wasm_path: String,
+            field: SupportedPrimeField
+	) -> js_sys::Promise {
+	    future_to_promise(async move {
+		let ret = SNARKTaskBuilder::from_remote(
+		    r1cs_path,
+		    witness_wasm_path,
+		    field
+		).await.map_err(JsError::from)?;
+		Ok(JsValue::from(ret))
+	    })
+	}
+    }
+
+
+    /// Convert biguint to finatefield
+    pub(crate) fn bigint2ff<F: ff::PrimeField>(v: js_sys::BigInt) -> Result<F> {
+
+	let repr = v.to_string(10).map_err(|e| Error::SNARKFFRangeError(format!("{:?}", e)))?.as_string();
+	if let Some(v) = &repr {
+	    Ok(F::from_str_vartime(&v).ok_or(Error::FailedToLoadFF())?)
+	} else {
+	    Err(Error::SNARKBigIntValueEmpty())
+	}
+    }
+
+    /// Convert bigint from js to [Field]
+    #[wasm_export]
+    pub fn bigint_to_field(v: js_sys::BigInt, field: SupportedPrimeField) -> Result<Field> {
+	let ret = match field {
+	    SupportedPrimeField::Vesta => {
+		type F = <provider::VestaEngine as Engine>::Scalar;
+		Field {
+		    value: FieldEnum::Vesta(bigint2ff::<F>(v)?)
+		}
+	    },
+	    SupportedPrimeField::Pallas => {
+		type F = <provider::PallasEngine as Engine>::Scalar;
+		Field {
+		    value: FieldEnum::Pallas(bigint2ff::<F>(v)?)
+		}
+	    },
+	    SupportedPrimeField::Bn256KZG => {
+		type F = <provider::mlkzg::Bn256EngineKZG as Engine>::Scalar;
+		Field {
+		    value: FieldEnum::Bn256KZG(bigint2ff::<F>(v)?)
+		}
+	    }
+	};
+	Ok(ret)
+    }
+
+    /// Convert list of bigint from js to list of [Field]
+    #[wasm_export]
+    pub fn bigints_to_fields(vs: Vec<js_sys::BigInt>, field: SupportedPrimeField) -> Result<Vec<Field>> {
+	vs.into_iter().map(|v| bigint_to_field(v, field.clone())).collect()
     }
 }
