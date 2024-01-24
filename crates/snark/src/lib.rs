@@ -11,3 +11,4 @@ pub mod r1cs;
 pub mod snark;
 #[cfg(test)]
 mod tests;
+pub mod witness;

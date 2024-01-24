@@ -11,17 +11,15 @@ use bellpepper_core::num::AllocatedNum;
 use bellpepper_core::ConstraintSystem;
 use bellpepper_core::LinearCombination;
 use bellpepper_core::SynthesisError;
-//use circom_scotia::r1cs::R1CS;
-use circom_scotia::witness::WitnessCalculator;
 use ff::PrimeField;
 use nova_snark::traits::circuit::StepCircuit;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::error::Error;
 use crate::error::Result;
 use crate::r1cs::TyWitness;
 use crate::r1cs::R1CS;
+use crate::witness::calculator::WitnessCalculator;
 
 /// Input of witness
 #[derive(Serialize, Deserialize, Clone)]
@@ -126,9 +124,7 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
     pub fn gen_circuit(&self, input: Input<F>, sanity_check: bool) -> Result<Circuit<F>>
     where F: PrimeField {
         let mut calc = self.calculator.borrow_mut();
-        let witness: TyWitness<F> = calc
-            .calculate_witness::<F>(input.to_vec(), sanity_check)
-            .map_err(Error::CalculateWitness)?;
+        let witness: TyWitness<F> = calc.calculate_witness::<F>(input.to_vec(), sanity_check)?;
         let circom = Circuit::<F> {
             r1cs: self.r1cs.clone(),
             witness,

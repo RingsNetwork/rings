@@ -942,14 +942,15 @@ pub mod browser {
             Input(data)
         }
 
-
-	/// Conver [Array] to Vec<Input>
-	pub fn from_input_array_list(inputs: js_sys::Array, field: SupportedPrimeField) -> Vec<Input> {
-	    inputs.into_iter()
-		.map(|input| Input::from_input_array(input.into(), field.clone()))
-		.collect()
-	}
+        /// Convert [Array] to Vec<Input>
+        pub fn from_input_array_list(
+            inputs: js_sys::Array,
+            field: SupportedPrimeField,
+        ) -> Vec<Input> {
+            inputs
+                .into_iter()
+                .map(|input| Input::from_input_array(input.into(), field.clone()))
+                .collect()
+        }
     }
-
-
 }
