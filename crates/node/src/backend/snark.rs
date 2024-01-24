@@ -822,17 +822,15 @@ impl MessageHandler<BackendMessage> for SNARKBehaviour {
 #[cfg(target_family = "wasm")]
 pub mod browser {
     use std::str::FromStr;
-
-    use rings_derive::wasm_export;
     use rings_snark::prelude::ff;
     use wasm_bindgen::JsError;
     use wasm_bindgen::JsValue;
     use wasm_bindgen_futures::future_to_promise;
-    use wasm_bindgen_futures::wasm_bindgen;
+    use wasm_bindgen::prelude::*;
 
     use super::*;
 
-    #[wasm_export]
+    #[wasm_bindgen]
     impl SNARKBehaviour {
         /// send proof task to did
         pub fn send_proof_task_to(
@@ -858,7 +856,7 @@ pub mod browser {
         }
     }
 
-    #[wasm_export]
+    #[wasm_bindgen]
     impl SNARKTaskBuilder {
         /// create new instance for browser
         /// which support syntax `new SNARKTaskBuilder` in browser env
@@ -891,7 +889,7 @@ pub mod browser {
     }
 
     /// Convert BigInt from js to [Field]
-    #[wasm_export]
+    #[wasm_bindgen]
     pub fn bigint_to_field(v: js_sys::BigInt, field: SupportedPrimeField) -> Result<Field> {
         let ret = match field {
             SupportedPrimeField::Vesta => {
@@ -916,7 +914,7 @@ pub mod browser {
         Ok(ret)
     }
 
-    #[wasm_export]
+    #[wasm_bindgen]
     impl Input {
         /// Convert [["foo", [BigInt(2), BigInt(3)]], ["bar", [BigInt(4), BigInt(5)]]] to Input with given field
         pub fn from_array(input: js_sys::Array, field: SupportedPrimeField) -> Input {
