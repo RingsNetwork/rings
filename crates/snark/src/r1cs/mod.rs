@@ -62,7 +62,7 @@ pub async fn load_r1cs_remote<F: PrimeField>(url: &str, format: Format) -> Resul
         Format::Json => reader::load_r1cs_from_json::<F, Cursor<Vec<u8>>>(data),
         Format::Bin => reader::load_r1cs_from_bin::<F, Cursor<Vec<u8>>>(data),
     };
-    Ok(ret.into())
+    Ok(ret)
 }
 
 /// Load local r1cs
@@ -74,7 +74,7 @@ pub fn load_r1cs_local<F: PrimeField>(
         Format::Json => reader::load_r1cs_from_json_file::<F>(path),
         Format::Bin => reader::load_r1cs_from_bin_file::<F>(path),
     };
-    Ok(ret.into())
+    Ok(ret)
 }
 
 /// Load r1cs, the resource path can be remote local, and both bin and json are supported
@@ -128,9 +128,8 @@ pub fn load_circom_witness_calculator_local(
 pub async fn load_circom_witness_calculator_remote(path: &str) -> Result<WitnessCalculator> {
     let store = WitnessCalculator::new_store();
     let data = fetch(path).await?;
-    let module = Module::from_binary(&store, data.get_ref().as_slice())
-        .map_err(Error::WitnessCompileError)?;
-    Ok(WitnessCalculator::from_module(module, store)?)
+    let module = Module::from_binary(&store, data.get_ref().as_slice())?;
+    WitnessCalculator::from_module(module, store)
 }
 
 /// Load witness calculator from local path or remote url

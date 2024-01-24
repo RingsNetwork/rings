@@ -361,7 +361,7 @@ pub fn load_r1cs_from_bin<Fr: PrimeField, R: Read + Seek>(reader: R) -> R1CS<Fr>
 
 /// load r1cs file by filename with autodetect encoding (bin or json)
 pub fn load_r1cs<Fr: PrimeField>(filename: impl AsRef<Path>) -> R1CS<Fr> {
-    if filename.as_ref().ends_with("json".to_string()) {
+    if filename.as_ref().ends_with("json") {
         load_r1cs_from_json_file(filename)
     } else {
         load_r1cs_from_bin_file(filename)

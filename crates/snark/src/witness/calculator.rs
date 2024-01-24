@@ -1,6 +1,5 @@
 //! A Rust module for calculating witnesses for Circom circuits using WebAssembly (Wasm).
 //! This module adapts the original work from arkworks-rs/circom-compat and refines it for use without specific `arkworks` libraries.
-//! It includes features for both Circom and Circom2 versions, with conditional compilation depending on the enabled feature flags.
 //! The module provides functionality to initialize Wasm instances, manage memory, and compute witnesses for circuit inputs.
 //! ======================
 //!
@@ -34,9 +33,6 @@ use wasmer::Store;
 use wasmer_compiler_llvm::LLVM;
 
 use super::circom::Circom;
-// #[cfg(feature = "circom-2")]
-// use num::ToPrimitive;
-#[cfg(feature = "circom-2")]
 use super::circom::Circom2;
 use super::circom::CircomBase;
 use super::circom::Wasm;
@@ -70,7 +66,7 @@ struct ExitCode(u32);
 
 /// Little endian
 /// Converts a vector of `u32` values to a field element in little endian format.
-//// This function is crucial for translating Wasm memory data into field elements.
+/// This function is crucial for translating Wasm memory data into field elements.
 pub fn from_vec_u32<F: PrimeField>(arr: Vec<u32>) -> F {
     let mut res = F::ZERO;
     let radix = F::from(0x0001_0000_0000_u64);
@@ -84,7 +80,6 @@ pub fn from_vec_u32<F: PrimeField>(arr: Vec<u32>) -> F {
 /// Converts a field element to a vector of `u32` values in little endian format.
 /// Used for converting field elements into a format suitable for Wasm memory.
 /// This function is available only when the `circom-2` feature is enabled.
-#[cfg(feature = "circom-2")]
 pub fn to_vec_u32<F: PrimeField>(f: F) -> Vec<u32> {
     let repr = F::to_repr(&f);
     let repr = repr.as_ref();
@@ -99,7 +94,6 @@ pub fn to_vec_u32<F: PrimeField>(f: F) -> Vec<u32> {
 /// Little endian
 /// Converts a slice of `u32` values to a `U256` number in little endian format.
 /// Primarily used for handling cryptographic operations that require 256-bit integers.
-#[cfg(feature = "circom-2")]
 pub fn u256_from_vec_u32(data: &[u32]) -> U256 {
     let mut limbs = [0u32; 8];
     limbs.copy_from_slice(data);
@@ -136,17 +130,16 @@ impl WitnessCalculator {
     }
 
     /// Creates a new `Store` for Wasm execution.
-    /// Configures the store depending on the compilation features, such as LLVM.
     pub fn new_store() -> Store {
         cfg_if::cfg_if! {
             if #[cfg(feature = "llvm")] {
                 let compiler = LLVM::new();
                 let store = Store::new(compiler);
             } else {
-                let store = Store::default();
+
             }
         }
-        store
+        Store::default()
     }
 
     /// Creates a `WitnessCalculator` from a file path to a Wasm module.
@@ -183,8 +176,6 @@ impl WitnessCalculator {
         let instance = Wasm::new(Instance::new(&mut store, &module, &import_object)?);
         let version = instance.get_version(&mut store).unwrap_or(1);
 
-        // Circom 2 feature flag with version 2
-        #[cfg(feature = "circom-2")]
         fn new_circom2(
             mut store: Store,
             instance: Wasm,
@@ -237,23 +228,10 @@ impl WitnessCalculator {
             })
         }
 
-        // Three possibilities:
-        // a) Circom 2 feature flag enabled, WASM runtime version 2
-        // b) Circom 2 feature flag enabled, WASM runtime version 1
-        // c) Circom 1 default behavior
-        //
-        // Once Circom 2 support is more stable, feature flag can be removed
-
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "circom-2")] {
-                match version {
-                    2 => new_circom2(store, instance, memory, version),
-                    1 => new_circom1(store, instance, memory, version),
-                    _ => panic!("Unknown Circom version")
-                }
-            } else {
-                new_circom1(store, instance, memory, version)
-            }
+        match version {
+            2 => new_circom2(store, instance, memory, version),
+            1 => new_circom1(store, instance, memory, version),
+            _ => panic!("Unknown Circom version")
         }
     }
 
@@ -267,16 +245,10 @@ impl WitnessCalculator {
     ) -> Result<Vec<F>> {
         self.instance.init(&mut self.store, sanity_check)?;
 
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "circom-2")] {
-                match self.circom_version {
-                    2 => self.calculate_witness_circom2(input, sanity_check),
-                    1 => self.calculate_witness_circom1(input, sanity_check),
-                    _ => panic!("Unknown Circom version")
-                }
-            } else {
-                self.calculate_witness_circom1(input, sanity_check)
-            }
+        match self.circom_version {
+            2 => self.calculate_witness_circom2(input, sanity_check),
+            1 => self.calculate_witness_circom1(input, sanity_check),
+            _ => panic!("Unknown Circom version")
         }
     }
 
@@ -323,8 +295,6 @@ impl WitnessCalculator {
         Ok(w)
     }
 
-    // Circom 2 feature flag with version 2
-    #[cfg(feature = "circom-2")]
     fn calculate_witness_circom2<F: PrimeField>(
         &mut self,
         input: Vec<(String, Vec<F>)>,

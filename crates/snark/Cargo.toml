@@ -9,7 +9,7 @@ repository.workspace = true
 
 [features]
 default = []
-
+llvm = []
 [dependencies]
 # https://github.com/microsoft/Nova
 nova-snark = { git = "https://github.com/RingsNetwork/nova", version = "0.33", rev = "ea333243b57f3ae794f1d8f6ff00f89adc94bfac" }
@@ -42,7 +42,7 @@ eyre = "0.6.11"
 wasmer = "4.0.0"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasmer = { version = "4.0.0", features = ["std", "js"], default-features = false }
+wasmer = { version = "4.0.0", features = ["js-default"], default-features = false }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 memory-stats = "1.0.0"

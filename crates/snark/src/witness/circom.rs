@@ -123,7 +123,6 @@ impl Circom for Wasm {
     }
 }
 
-#[cfg(feature = "circom-2")]
 impl Circom2 for Wasm {
     fn get_field_num_len32(&self, store: &mut impl AsStoreMut) -> Result<u32> {
         self.get_u32(store, "getFieldNumLen32")
@@ -233,14 +232,7 @@ impl CircomBase for Wasm {
     // Default to version 1 if it isn't explicitly defined
     fn get_version(&self, store: &mut impl AsStoreMut) -> Result<u32> {
         match self.0.exports.get_function("getVersion") {
-            Ok(func) => {
-                let ret = func.call(store, &[])?;
-                if let Some(r) = ret.first() {
-                    Ok(r.unwrap_i32() as u32)
-                } else {
-                    Ok(1)
-                }
-            }
+            Ok(func) => Ok(func.call(store, &[])?[0].unwrap_i32() as u32), // should be 2
             Err(_) => Ok(1),
         }
     }

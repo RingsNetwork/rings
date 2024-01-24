@@ -5842,6 +5842,8 @@ dependencies = [
  "wasmer-derive 4.2.5",
  "wasmer-types 4.2.5",
  "wasmer-vm 4.2.5",
+ "wasmparser 0.83.0",
+ "wasmparser 0.95.0",
  "wat",
  "winapi",
 ]
