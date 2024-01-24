@@ -947,10 +947,12 @@ pub mod browser {
             inputs: js_sys::Array,
             field: SupportedPrimeField,
         ) -> Vec<Input> {
-            inputs
-                .into_iter()
-                .map(|input| Input::from_input_array(input.into(), field.clone()))
-                .collect()
+	    let mut ret = vec![];
+	    let input_list: Vec<Input> = inputs.into_iter(map(|input| input.into()));
+	    for i in input_list {
+		ret.push(Input::from_input_array);
+	    }
+	    ret
         }
     }
 }
