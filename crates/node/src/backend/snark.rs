@@ -853,7 +853,10 @@ pub mod browser {
         #[wasm_bindgen(constructor)]
         pub fn new_instance() -> js_sys::Promise {
             future_to_promise(async move {
-		let ret = SNARKBehaviour::default();
+		let ret = SNARKBehaviour {
+		    task: DashMap::<TaskId, SNARKProofTask>::new(),
+		    verified: DashMap::<TaskId, bool>::new()
+		};
 		Ok(JsValue::from(ret))
             })
 	}
