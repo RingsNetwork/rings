@@ -950,7 +950,7 @@ pub mod browser {
 	    let mut ret = vec![];
 	    let input_list: Vec<Input> = inputs.into_iter(map(|input| input.into()));
 	    for i in input_list {
-		ret.push(Input::from_input_array);
+		ret.push(Input::from_input_array(input));
 	    }
 	    ret
         }
