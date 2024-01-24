@@ -24,7 +24,7 @@ pub struct BackendBehaviour {
     service_message_handler: Option<Function>,
     plain_text_message_handler: Option<Function>,
     extension_message_handler: Option<Function>,
-    snark_message_handler: Option<SNARKBehaviour>,
+    snark_message_handler: Option<Arc<SNARKBehaviour>>,
 }
 
 #[wasm_export]
@@ -43,7 +43,7 @@ impl BackendBehaviour {
             service_message_handler,
             plain_text_message_handler,
             extension_message_handler,
-            snark_message_handler,
+            snark_message_handler: snark_message_handler.map(|s| Arc::new(s)),
         }
     }
 
