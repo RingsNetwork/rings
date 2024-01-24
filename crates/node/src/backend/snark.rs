@@ -851,7 +851,7 @@ pub mod browser {
         /// create new instance for browser
         /// which support syntax `new SNARKBehaviour` in browser env
         #[wasm_bindgen(constructor)]
-        pub fn new_instance() -> Promise {
+        pub fn new_instance() -> js_sys::Promise {
             future_to_promise(async move {
 		let ret = SNARKBehaviour::default();
 		Ok(JsValue::from(ret))
