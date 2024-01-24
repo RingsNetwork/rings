@@ -948,9 +948,9 @@ pub mod browser {
             field: SupportedPrimeField,
         ) -> Vec<Input> {
 	    let mut ret = vec![];
-	    let input_list: Vec<Input> = inputs.into_iter(map(|input| input.into()));
+	    let input_list: Vec<js_sys::Array> = inputs.into_iter().map(|input| input.into()).collect();
 	    for i in input_list {
-		ret.push(Input::from_input_array(input, field.clone()));
+		ret.push(Input::from_input_array(i, field.clone()));
 	    }
 	    ret
         }
