@@ -919,7 +919,7 @@ pub mod browser {
     #[wasm_export]
     impl Input {
         /// Convert [["foo", [BigInt(2), BigInt(3)]], ["bar", [BigInt(4), BigInt(5)]]] to Input with given field
-        pub fn from_input_array(input: js_sys::Array, field: SupportedPrimeField) -> Input {
+        pub fn from_array(input: js_sys::Array, field: SupportedPrimeField) -> Input {
             let data: Vec<(String, Vec<Field>)> = input
                 .into_iter()
                 .map(|s| {
@@ -928,8 +928,8 @@ pub mod browser {
                         .get(0)
                         .as_string()
                         .expect("first argument should be string like");
-                    let v: Vec<Field> = lst
-                        .slice(1, lst.length())
+                    let ints: Vec<BigInt> = lst
+			.get(1)
                         .into_iter()
                         .map(|p| {
                             bigint_to_field(p.into(), field.clone())
@@ -940,19 +940,6 @@ pub mod browser {
                 })
                 .collect();
             Input(data)
-        }
-
-        /// Convert [Array] to Vec<Input>
-        pub fn from_input_array_list(
-            inputs: js_sys::Array,
-            field: SupportedPrimeField,
-        ) -> Vec<Input> {
-	    let mut ret = vec![];
-	    let input_list: Vec<js_sys::Array> = inputs.into_iter().map(|input| input.into()).collect();
-	    for i in input_list {
-		ret.push(Input::from_input_array(i, field.clone()));
-	    }
-	    ret
         }
     }
 }
