@@ -928,7 +928,7 @@ pub mod browser {
                         .get(0)
                         .as_string()
                         .expect("first argument should be string like");
-                    let v: Vec<BigInt> = js_sys::Array::from(&lst.get(1))
+                    let v: Vec<Field> = js_sys::Array::from(&lst.get(1))
                         .into_iter()
                         .map(|p| {
                             bigint_to_field(p.into(), field.clone())
