@@ -928,7 +928,7 @@ pub mod browser {
                         .get(0)
                         .as_string()
                         .expect("first argument should be string like");
-                    let ints: Vec<BigInt> = lst
+                    let v: Vec<BigInt> = lst
 			.get(1)
                         .into_iter()
                         .map(|p| {
