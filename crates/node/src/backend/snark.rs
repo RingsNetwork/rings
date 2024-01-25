@@ -36,7 +36,6 @@ use crate::provider::Provider;
 
 type TaskId = uuid::Uuid;
 
-
 /// Task Manageer of SNARK provier and verifier
 #[derive(Default, Clone)]
 pub struct SNARKTaskManager {
@@ -50,7 +49,7 @@ pub struct SNARKTaskManager {
 #[wasm_export]
 #[derive(Default, Clone)]
 pub struct SNARKBehaviour {
-    inner: Arc<SNARKTaskManager>
+    inner: Arc<SNARKTaskManager>,
 }
 
 impl std::ops::Deref for SNARKBehaviour {
@@ -80,9 +79,10 @@ impl SNARKBehaviour {
         provider.request(Method::SendBackendMessage, params).await?;
         #[cfg(target_arch = "wasm32")]
         {
+	    let req = serde_json::to_string(&params)?;
             let promise = provider.request(
                 Method::SendBackendMessage.to_string(),
-                rings_core::utils::js_value::serialize(&params)?,
+                wasm_bindgen::JsValue::from(req),
             );
             wasm_bindgen_futures::JsFuture::from(promise)
                 .await
@@ -837,11 +837,12 @@ impl MessageHandler<BackendMessage> for SNARKBehaviour {
 #[cfg(target_family = "wasm")]
 pub mod browser {
     use std::str::FromStr;
+
     use rings_snark::prelude::ff;
+    use wasm_bindgen::prelude::*;
     use wasm_bindgen::JsError;
     use wasm_bindgen::JsValue;
     use wasm_bindgen_futures::future_to_promise;
-    use wasm_bindgen::prelude::*;
 
     use super::*;
 
@@ -867,16 +868,16 @@ pub mod browser {
         /// which support syntax `new SNARKBehaviour` in browser env
         #[wasm_bindgen(constructor)]
         pub fn new_instance() -> SNARKBehaviour {
-	    SNARKBehaviour::default()
-	}
+            SNARKBehaviour::default()
+        }
 
-	/// Clone snarkbehaviour, and hold the arc
-	/// this function is useful on js_sys
-	pub fn clone(&self) -> SNARKBehaviour {
-	    SNARKBehaviour {
-		inner: self.inner.clone()
-	    }
-	}
+        /// Clone snarkbehaviour, and hold the arc
+        /// this function is useful on js_sys
+        pub fn clone(&self) -> SNARKBehaviour {
+            SNARKBehaviour {
+                inner: self.inner.clone(),
+            }
+        }
     }
 
     #[wasm_bindgen]

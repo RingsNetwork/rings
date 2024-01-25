@@ -231,7 +231,7 @@ impl WitnessCalculator {
         match version {
             2 => new_circom2(store, instance, memory, version),
             1 => new_circom1(store, instance, memory, version),
-            _ => panic!("Unknown Circom version")
+            _ => panic!("Unknown Circom version"),
         }
     }
 
@@ -248,7 +248,7 @@ impl WitnessCalculator {
         match self.circom_version {
             2 => self.calculate_witness_circom2(input, sanity_check),
             1 => self.calculate_witness_circom1(input, sanity_check),
-            _ => panic!("Unknown Circom version")
+            _ => panic!("Unknown Circom version"),
         }
     }
 

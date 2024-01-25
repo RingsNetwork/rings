@@ -14,7 +14,6 @@
 //!
 //! - Rings Network Dev Team
 //!   - refine the original work here: <https://github.com/lurk-lab/circom-scotia/tree/main/src/witness>
-//!
 
 use std::ops::Deref;
 

@@ -170,8 +170,6 @@ impl From<Error> for jsonrpc_core::Error {
 impl From<rings_rpc::error::Error> for Error {
     fn from(e: rings_rpc::error::Error) -> Self {
         match e {
-            rings_rpc::error::Error::DecodeError => Error::DecodeError,
-            rings_rpc::error::Error::EncodeError => Error::EncodeError,
             rings_rpc::error::Error::InvalidMethod => Error::InvalidMethod,
             rings_rpc::error::Error::RpcError(v) => Error::RemoteRpcError(v.to_string()),
             rings_rpc::error::Error::InvalidSignature => Error::InvalidData,

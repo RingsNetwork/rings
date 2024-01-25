@@ -41,28 +41,26 @@ pub enum Error {
     NovaError(#[from] nova_snark::errors::NovaError),
 }
 
-
 impl From<wasmer::RuntimeError> for Error {
     fn from(e: wasmer::RuntimeError) -> Self {
-	Self::WitnessWasmRuntimeError(Box::new(e))
+        Self::WitnessWasmRuntimeError(Box::new(e))
     }
 }
 
 impl From<wasmer::InstantiationError> for Error {
     fn from(e: wasmer::InstantiationError) -> Self {
-	Self::WitnessWasmInstanceError(Box::new(e))
+        Self::WitnessWasmInstanceError(Box::new(e))
     }
 }
 
-
 impl From<wasmer::CompileError> for Error {
     fn from(e: wasmer::CompileError) -> Self {
-	Self::WitnessCompileError(Box::new(e))
+        Self::WitnessCompileError(Box::new(e))
     }
 }
 
 impl From<wasmer::IoCompileError> for Error {
     fn from(e: wasmer::IoCompileError) -> Self {
-	Self::WitnessIoCompileError(Box::new(e))
+        Self::WitnessIoCompileError(Box::new(e))
     }
 }

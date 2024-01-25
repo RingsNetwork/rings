@@ -5,10 +5,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-    #[error("Decode error.")]
-    DecodeError,
-    #[error("Encode error.")]
-    EncodeError,
     #[error("Invalid method.")]
     InvalidMethod,
     #[error("Rpc error: {0}")]
