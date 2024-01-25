@@ -89,6 +89,7 @@ impl SNARKBehaviour {
                 .map_err(|e| Error::JsError(format!("Failed to send backend messate: {:?}", e)))?;
         }
         self.task.insert(task_id, task);
+	tracing::info!("sent proof request");
         Ok(())
     }
 }
@@ -793,9 +794,10 @@ impl MessageHandler<SNARKTaskMessage> for SNARKBehaviour {
                 provider.request(Method::SendBackendMessage, params).await?;
                 #[cfg(target_arch = "wasm32")]
                 {
+		    let req = serde_json::to_string(&params)?;
                     let promise = provider.request(
                         Method::SendBackendMessage.to_string(),
-                        rings_core::utils::js_value::serialize(&params)?,
+                        wasm_bindgen::JsValue::from(req),
                     );
                     wasm_bindgen_futures::JsFuture::from(promise)
                         .await
