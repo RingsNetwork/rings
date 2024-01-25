@@ -647,7 +647,8 @@ where
 
 impl SNARKBehaviour {
     fn handle_snark_proof_task(data: SNARKProofTask) -> Result<SNARKVerifyTask> {
-        match data {
+	tracing::debug!("SNARK proof start");
+        let ret = match data {
             SNARKProofTask::VastaPallas(s) => {
                 type E1 = provider::VestaEngine;
                 type E2 = provider::PallasEngine;
@@ -695,11 +696,14 @@ impl SNARKBehaviour {
                     &proof,
                 )?))
             }
-        }
+        };
+	tracing::debug!("SNARK proof success");
+	ret
     }
 
     fn handle_snark_verify_task(data: SNARKVerifyTask, snark: SNARKProofTask) -> Result<bool> {
-        match data {
+	tracing::debug!("SNARK verify start");
+        let ret = match data {
             SNARKVerifyTask::PallasVasta(p) => {
                 type E1 = provider::PallasEngine;
                 type E2 = provider::VestaEngine;
@@ -746,6 +750,8 @@ impl SNARKBehaviour {
                 }
             }
         }
+	tracing::debug!("SNARK verify success");
+	ret
     }
 }
 
