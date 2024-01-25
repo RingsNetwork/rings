@@ -86,7 +86,7 @@ impl SNARKBehaviour {
             );
             wasm_bindgen_futures::JsFuture::from(promise)
                 .await
-                .map_err(|e| Error::JsError(format!("Failed send backend messate: {:?}", e)))?;
+                .map_err(|e| Error::JsError(format!("Failed to send backend messate: {:?}", e)))?;
         }
         self.task.insert(task_id, task);
         Ok(())
