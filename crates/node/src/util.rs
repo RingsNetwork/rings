@@ -5,6 +5,11 @@ use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
 use serde::Serializer;
+use flate2::write::GzEncoder;
+use flate2::read::GzDecoder;
+use flate2::Compression;
+use std::io::Read;
+use serde::de::DeserializeOwned;
 
 #[cfg(feature = "node")]
 use crate::error::Error;
@@ -23,6 +28,29 @@ where
     D: Deserializer<'de>,
 {
     T::deserialize(deserializer)
+}
+
+pub(crate) fn serialize_gzip<T, S>(value: &T, serializer: S) -> Result<S::Ok, S::Error>
+where
+    T: Serialize,
+    S: Serializer,
+{
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    serde_json::to_writer(&mut encoder, value).map_err(serde::ser::Error::custom)?;
+    let compressed_data = encoder.finish().map_err(serde::ser::Error::custom)?;
+    serializer.serialize_bytes(&compressed_data)
+}
+
+pub(crate) fn deserialize_gzip<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    T: DeserializeOwned,
+    D: Deserializer<'de>,
+{
+    let bytes = Vec::<u8>::deserialize(deserializer)?;
+    let mut decoder = GzDecoder::new(&bytes[..]);
+    let mut decompressed_data = Vec::new();
+    decoder.read_to_end(&mut decompressed_data).map_err(serde::de::Error::custom)?;
+    serde_json::from_slice(&decompressed_data).map_err(serde::de::Error::custom)
 }
 
 /// build_version of program
