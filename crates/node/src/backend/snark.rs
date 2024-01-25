@@ -79,10 +79,10 @@ impl SNARKBehaviour {
         provider.request(Method::SendBackendMessage, params).await?;
         #[cfg(target_arch = "wasm32")]
         {
-	    let req = serde_json::to_string(&params)?;
+	    let req = rings_core::utils::js_value::serialize(&params)?;
             let promise = provider.request(
                 Method::SendBackendMessage.to_string(),
-                wasm_bindgen::JsValue::from(req),
+                req,
             );
             wasm_bindgen_futures::JsFuture::from(promise)
                 .await
@@ -129,6 +129,12 @@ pub enum FieldEnum {
 /// Input type
 #[wasm_export]
 pub struct Input(Vec<(String, Vec<Field>)>);
+
+impl From<Vec<(String, Vec<Field>)>> for Input {
+    fn from(data: Vec<(String, Vec<Field>)>) -> Self {
+	Self(data)
+    }
+}
 
 impl std::ops::Deref for Input {
     type Target = Vec<(String, Vec<Field>)>;
@@ -800,10 +806,10 @@ impl MessageHandler<SNARKTaskMessage> for SNARKBehaviour {
                 provider.request(Method::SendBackendMessage, params).await?;
                 #[cfg(target_arch = "wasm32")]
                 {
-		    let req = serde_json::to_string(&params)?;
+		    let req = rings_core::utils::js_value::serialize(&params)?;
                     let promise = provider.request(
                         Method::SendBackendMessage.to_string(),
-                        wasm_bindgen::JsValue::from(req),
+                        req,
                     );
                     wasm_bindgen_futures::JsFuture::from(promise)
                         .await
