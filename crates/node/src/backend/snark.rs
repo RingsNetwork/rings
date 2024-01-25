@@ -749,7 +749,7 @@ impl SNARKBehaviour {
                     Err(Error::SNARKCurveNotMatch())
                 }
             }
-        }
+        };
 	tracing::debug!("SNARK verify success");
 	ret
     }
