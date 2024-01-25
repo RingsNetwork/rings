@@ -4,6 +4,7 @@ use rings_rpc::protos::rings_node::*;
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::*;
 
+use crate::backend::types::BackendMessage;
 use crate::prelude::rings_core::utils;
 use crate::prelude::rings_core::utils::js_value;
 use crate::provider::browser;
@@ -102,6 +103,34 @@ async fn test_two_provider_connect_and_list() {
         .unwrap();
     let peers = get_peers(&provider1).await;
     assert_eq!(peers.len(), 0);
+}
+
+#[wasm_bindgen_test]
+async fn test_send_backend_message() {
+    let provider1 = new_provider().await;
+    let provider2 = new_provider().await;
+
+    futures::try_join!(
+        JsFuture::from(provider1.listen()),
+        JsFuture::from(provider2.listen()),
+    )
+    .unwrap();
+
+    create_connection(&provider1, &provider2).await;
+    console_log!("wait for register");
+    utils::js_utils::window_sleep(1000).await.unwrap();
+
+    let msg = BackendMessage::PlainText("test".to_string());
+    let req = msg
+        .into_send_backend_message_request(provider2.address())
+        .unwrap();
+
+    JsFuture::from(provider1.request(
+        "sendBackendMessage".to_string(),
+        js_value::serialize(&req).unwrap(),
+    ))
+    .await
+    .unwrap();
 }
 
 #[wasm_bindgen_test]
