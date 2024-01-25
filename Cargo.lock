@@ -4106,6 +4106,7 @@ dependencies = [
  "console_error_panic_hook",
  "dashmap",
  "dotenv",
+ "flate2",
  "fluvio-wasm-timer",
  "form_urlencoded",
  "futures",

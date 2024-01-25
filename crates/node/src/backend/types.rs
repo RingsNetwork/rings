@@ -3,7 +3,7 @@
 //! Backend Message Types.
 use std::io::ErrorKind as IOErrorKind;
 use std::sync::Arc;
-
+use std::io::Read;
 use bytes::Bytes;
 use rings_core::message::MessagePayload;
 use rings_rpc::protos::rings_node::SendBackendMessageRequest;
@@ -13,6 +13,9 @@ use rings_snark::prelude::nova::provider::PallasEngine;
 use rings_snark::prelude::nova::provider::VestaEngine;
 use serde::Deserialize;
 use serde::Serialize;
+use flate2::write::GzEncoder;
+use flate2::read::GzDecoder;
+use flate2::Compression;
 
 use crate::backend::snark::SNARKGenerator;
 use crate::error::Error;
@@ -45,7 +48,7 @@ pub struct SNARKTaskMessage {
 }
 
 /// Message types for snark task, including proof and verify
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone)]
 pub enum SNARKTask {
     /// Proof task
     SNARKProof(SNARKProofTask),
@@ -62,6 +65,32 @@ pub enum SNARKProofTask {
     VastaPallas(SNARKGenerator<VestaEngine, PallasEngine>),
     /// SNARK with curve bn256 whth KZG multi linear commitment and grumpkin
     Bn256KZGGrumpkin(SNARKGenerator<Bn256EngineKZG, GrumpkinEngine>),
+}
+
+impl Serialize for SNARKTask {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        serde_json::to_writer(&mut encoder, self).map_err(serde::ser::Error::custom)?;
+        let compressed_data = encoder.finish().map_err(serde::ser::Error::custom)?;
+
+        serializer.serialize_bytes(&compressed_data)
+    }
+}
+
+impl<'de> Deserialize<'de> for SNARKTask {
+    fn deserialize<D>(deserializer: D) -> Result<SNARKTask, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let bytes = Vec::<u8>::deserialize(deserializer)?;
+        let mut decoder = GzDecoder::new(&bytes[..]);
+        let mut decompressed_data = Vec::new();
+        decoder.read_to_end(&mut decompressed_data).map_err(serde::de::Error::custom)?;
+        serde_json::from_slice(&decompressed_data).map_err(serde::de::Error::custom)
+    }
 }
 
 /// Message type of snark proof

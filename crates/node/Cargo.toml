@@ -122,7 +122,7 @@ serde-wasm-bindgen = { workspace = true, optional = true }
 tracing-wasm = { version = "0.2.1", optional = true }
 wasm-bindgen = { workspace = true, features = ["serde-serialize"], optional = true }
 wasm-bindgen-futures = { workspace = true, optional = true }
-
+flate2 = "1.0"
 [dev-dependencies]
 fluvio-wasm-timer = "0.2.5"
 wasm-bindgen-test = { version = "0.3.0" }
