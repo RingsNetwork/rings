@@ -68,6 +68,8 @@ enum Command {
         about = "Show information of swarm. Include transport table, successors, predecessor, and finger table."
     )]
     Inspect(InspectCommand),
+    #[command(about = "Calculate dht for a node")]
+    Dht(DhtCommand),
 }
 
 #[derive(Args, Debug)]
@@ -393,6 +395,14 @@ struct InspectCommand {
     client_args: ClientArgs,
 }
 
+#[derive(Args, Debug)]
+struct DhtCommand {
+    #[arg(help = "Node index in peers list.")]
+    node: usize,
+    #[arg(help = "Peers list. Accept Did or SecretKey.")]
+    peers: String,
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     let mut c = config::Config::read_fs(args.config_args.config)?;
@@ -625,6 +635,35 @@ async fn main() -> anyhow::Result<()> {
                 .inspect()
                 .await?
                 .display();
+            Ok(())
+        }
+        Command::Dht(args) => {
+            use rings_core::dht::Chord;
+            use rings_core::dht::PeerRing;
+            use rings_core::inspect::DHTInspect;
+            use rings_core::storage::MemStorage;
+
+            let get_did = |s: &str| -> Did {
+                if s.len() > 34 {
+                    let no_prefix = s.strip_prefix("0x").unwrap_or(s);
+                    SecretKey::from_str(no_prefix).unwrap().address().into()
+                } else {
+                    Did::from_str(s).unwrap()
+                }
+            };
+
+            let peers = args.peers.split(',').map(get_did).collect::<Vec<_>>();
+            let node = peers[args.node];
+
+            let storage = Box::new(MemStorage::new());
+            let dht = PeerRing::new_with_storage(node, 3, storage);
+
+            for peer in peers {
+                dht.join(peer).unwrap();
+            }
+
+            dbg!(DHTInspect::inspect(&dht));
+
             Ok(())
         }
     }
