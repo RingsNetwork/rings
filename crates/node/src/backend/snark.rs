@@ -35,14 +35,29 @@ use crate::error::Result;
 use crate::provider::Provider;
 
 type TaskId = uuid::Uuid;
-/// Behaviour of SNARK provier and verifier
-#[wasm_export]
+
+
+/// Task Manageer of SNARK provier and verifier
 #[derive(Default, Clone)]
-pub struct SNARKBehaviour {
+pub struct SNARKTaskManager {
     /// map of task_id and task
     task: DashMap<TaskId, SNARKProofTask>,
     /// map of task_id and result
     verified: DashMap<TaskId, bool>,
+}
+
+/// SNARK
+#[wasm_export]
+#[derive(Default, Clone)]
+pub struct SNARKBehaviour {
+    inner: Arc<SNARKTaskManager>
+}
+
+impl std::ops::Deref for SNARKBehaviour {
+    type Target = Arc<SNARKTaskManager>;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
 }
 
 impl SNARKBehaviour {
@@ -851,14 +866,16 @@ pub mod browser {
         /// create new instance for browser
         /// which support syntax `new SNARKBehaviour` in browser env
         #[wasm_bindgen(constructor)]
-        pub fn new_instance() -> js_sys::Promise {
-            future_to_promise(async move {
-		let ret = SNARKBehaviour {
-		    task: DashMap::<TaskId, SNARKProofTask>::new(),
-		    verified: DashMap::<TaskId, bool>::new()
-		};
-		Ok(JsValue::from(ret))
-            })
+        pub fn new_instance() -> SNARKBehaviour {
+	    SNARKBehaviour::default()
+	}
+
+	/// Clone snarkbehaviour, and hold the arc
+	/// this function is useful on js_sys
+	pub fn clone(&self) -> SNARKBehaviour {
+	    SNARKBehaviour {
+		inner: self.inner.clone()
+	    }
 	}
     }
 
