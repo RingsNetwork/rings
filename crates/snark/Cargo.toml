@@ -39,10 +39,10 @@ reqwest = { version = "0.11", features = ["json", "rustls-tls"], default-feature
 eyre = "0.6.11"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-wasmer = "4.0.0"
+wasmer = "4.2.5"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasmer = { version = "4.0.0", features = ["js-default"], default-features = false }
+wasmer = { version = "4.2.5", features = ["js-default"], default-features = false }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 memory-stats = "1.0.0"
