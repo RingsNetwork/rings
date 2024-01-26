@@ -22,5 +22,5 @@ pub async fn test_gen_proof_and_verify() {
     let task = SNARKBehaviour::gen_proof_task(circuits).unwrap();
     let proof = SNARKBehaviour::handle_snark_proof_task(&task).unwrap();
     let ret = SNARKBehaviour::handle_snark_verify_task(&proof, &task).unwrap();
-    assert_eq!(ret, true)
+    assert!(ret)
 }

@@ -18,6 +18,8 @@ pub enum Error {
     UnknownRpcError = 101,
     #[error("Internal rpc services error: {0}.")]
     InternalRpcError(#[from] jsonrpc_core::Error) = 102,
+    #[error("Uuid error: {0}")]
+    UuidError(#[from] uuid::Error) = 103,
     #[error("Connection not found.")]
     ConnectionNotFound = 203,
     #[error("Create connection error: {0}.")]

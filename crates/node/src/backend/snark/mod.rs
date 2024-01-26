@@ -77,7 +77,7 @@ impl AsRef<SNARKVerifyTask> for &SNARKVerifyTask {
 impl SNARKBehaviour {
     /// Generate proof task
     pub fn gen_proof_task(circuits: Vec<Circuit>) -> Result<SNARKProofTask> {
-        Ok(SNARKTaskBuilder::gen_proof_task(circuits)?)
+        SNARKTaskBuilder::gen_proof_task(circuits)
     }
 
     /// send proof task to did
@@ -86,7 +86,7 @@ impl SNARKBehaviour {
         provider: Arc<Provider>,
         circuits: Vec<Circuit>,
         did: Did,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let task = Self::gen_proof_task(circuits)?;
         let task_id = uuid::Uuid::new_v4();
         let msg: BackendMessage = SNARKTaskMessage {
@@ -107,7 +107,20 @@ impl SNARKBehaviour {
         }
         self.task.insert(task_id, task);
         tracing::info!("sent proof request");
-        Ok(())
+        Ok(task_id.to_string())
+    }
+}
+
+#[wasm_export]
+impl SNARKBehaviour {
+    /// Get task result
+    pub fn get_task_result(&self, task_id: String) -> Result<bool> {
+        let task_id = uuid::Uuid::parse_str(&task_id)?;
+        if let Some(v) = self.inner.verified.get(&task_id) {
+            Ok(*v.value())
+        } else {
+            Ok(false)
+        }
     }
 }
 
@@ -633,12 +646,12 @@ where
     /// Setup snark, get pk and vk, if check set to true, it will check the folding is working correct
     pub fn fold(&mut self, check: bool) -> Result<()> {
         self.snark.fold_all(&self.pp, &self.circuits)?;
-	if check {
-	    let steps = self.circuits.len();
+        if check {
+            let steps = self.circuits.len();
             let first_input = self.circuits.first().unwrap().get_public_inputs();
             self.snark
-		.verify(&self.pp, steps, first_input, vec![E2::Scalar::from(0)])?;
-	}
+                .verify(&self.pp, steps, first_input, vec![E2::Scalar::from(0)])?;
+        }
         Ok(())
     }
 
