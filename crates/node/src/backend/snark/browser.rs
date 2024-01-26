@@ -65,6 +65,7 @@ impl From<SNARKVerifyTask> for SNARKVerifyTaskRef {
 impl SNARKVerifyTaskRef {
     /// Clone snark verify ref, and hold the arc
     /// this function is useful on js_sys
+    #[allow(clippy::should_implement_trait)]
     pub fn clone(&self) -> SNARKVerifyTaskRef {
         SNARKVerifyTaskRef {
             inner: self.inner.clone(),
@@ -76,6 +77,7 @@ impl SNARKVerifyTaskRef {
 impl SNARKProofTaskRef {
     /// Clone snark proof ref, and hold the arc
     /// this function is useful on js_sys
+    #[allow(clippy::should_implement_trait)]
     pub fn clone(&self) -> SNARKProofTaskRef {
         SNARKProofTaskRef {
             inner: self.inner.clone(),
@@ -130,6 +132,7 @@ impl SNARKBehaviour {
 
     /// Clone snarkbehaviour, and hold the arc
     /// this function is useful on js_sys
+    #[allow(clippy::should_implement_trait)]
     pub fn clone(&self) -> SNARKBehaviour {
         SNARKBehaviour {
             inner: self.inner.clone(),
@@ -163,7 +166,7 @@ pub(crate) fn bigint2ff<F: ff::PrimeField>(v: js_sys::BigInt) -> Result<F> {
         .map_err(|e| Error::SNARKFFRangeError(format!("{:?}", e)))?
         .as_string();
     if let Some(v) = &repr {
-        Ok(F::from_str_vartime(&v).ok_or(Error::FailedToLoadFF())?)
+        Ok(F::from_str_vartime(v).ok_or(Error::FailedToLoadFF())?)
     } else {
         Err(Error::SNARKBigIntValueEmpty())
     }
