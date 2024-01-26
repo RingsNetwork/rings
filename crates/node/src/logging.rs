@@ -155,27 +155,6 @@ pub mod node {
                 .with_writer(std::io::stderr)
                 .with_filter(level_filter),
         );
-
-        // Jaeger
-        let subscriber = {
-            if let Ok(endpoint) = std::env::var("RINGS_JAEGER_AGENT_ENDPOINT") {
-                global::set_text_map_propagator(TraceContextPropagator::new());
-                let jaeger = opentelemetry_jaeger::new_agent_pipeline()
-                    .with_service_name("rings")
-                    .with_endpoint(endpoint)
-                    .with_auto_split_batch(true)
-                    .install_batch(opentelemetry::runtime::Tokio)
-                    .expect("opentelemetry_jaeger install");
-                subscriber.with(Some(
-                    tracing_opentelemetry::layer()
-                        .with_tracer(jaeger)
-                        .with_filter(level_filter),
-                ))
-            } else {
-                subscriber.with(None)
-            }
-        };
-
         // Enable log compatible layer to convert log record to tracing span.
         // We will ignore any errors that returned by this functions.
         let _ = LogTracer::init();
@@ -205,8 +184,6 @@ pub mod browser {
                 .set_console_config(ConsoleConfig::ReportWithoutConsoleColor)
                 .build(),
         ));
-
-        //TODO: Jaeger in browser. How to setup agent endpoint?
 
         // Enable log compatible layer to convert log record to tracing span.
         // We will ignore any errors that returned by this functions.

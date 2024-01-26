@@ -32,8 +32,6 @@ node = [
     "form_urlencoded",
     "pin-project",
     "async-stream",
-    "opentelemetry",
-    "opentelemetry-jaeger",
     "backtrace",
     "lazy_static",
     "axum/ws",
