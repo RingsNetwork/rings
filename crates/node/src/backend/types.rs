@@ -49,7 +49,7 @@ pub struct SNARKTaskMessage {
 }
 
 /// Message types for snark task, including proof and verify
-#[derive(Debug, Clone, eserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum SNARKTask {
     /// Proof task
     SNARKProof(SNARKProofTask),
