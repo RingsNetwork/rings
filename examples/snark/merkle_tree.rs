@@ -65,7 +65,7 @@ pub async fn merkle_tree_path_proof() {
         vec![("path".to_string(), vec![F1::from(77777u64), F1::from(0u64)])].into(),
     ];
 
-    let round = private_inputs.len() - 1;
+    let round = private_inputs.len();
     println!("total round {:?}", round);
     // Gen recursived circuit
     let start = Instant::now();
@@ -73,6 +73,7 @@ pub async fn merkle_tree_path_proof() {
     let circuit_0 = circuit_generator
         .gen_circuit(input_0.clone(), true)
         .unwrap();
+    let first_input = circuit_0.get_public_inputs();
 
     let recursive_circuits = circuit_generator
         .gen_recursive_circuit(input_0.clone(), private_inputs.clone(), round, true)
@@ -87,7 +88,7 @@ pub async fn merkle_tree_path_proof() {
 
     let start = Instant::now();
     let mut rec_snark_iter =
-        snark::SNARK::<E1, E2>::new(&recursive_circuits[0].clone(), &pp, &input_value_0, vec![
+        snark::SNARK::<E1, E2>::new(&recursive_circuits[0].clone(), &pp, &first_input, vec![
             F2::from(0),
         ])
         .unwrap();
