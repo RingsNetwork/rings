@@ -9,8 +9,7 @@ use crate::backend::types;
 use super::*;
 
 /// We need this ref to pass Task ref to js_sys
-#[wasm_export]
-#[derive(Clone)]
+#[wasm_bindgen]
 pub struct SNARKProofTaskRef {
     inner: Arc<types::SNARKProofTask>,
 }
@@ -35,8 +34,7 @@ impl From<SNARKProofTask> for SNARKProofTaskRef {
 }
 
 /// We need this ref to pass Task ref to js_sys
-#[wasm_export]
-#[derive(Clone)]
+#[wasm_bindgen]
 pub struct SNARKVerifyTaskRef {
     inner: Arc<types::SNARKVerifyTask>,
 }
@@ -51,6 +49,29 @@ impl std::ops::Deref for SNARKVerifyTaskRef {
     type Target = Arc<types::SNARKVerifyTask>;
     fn deref(&self) -> &Self::Target {
         &self.inner
+    }
+}
+
+#[wasm_bindgen]
+impl SNARKVerifyTaskRef {
+    /// Clone snark verify ref, and hold the arc
+    /// this function is useful on js_sys
+    pub fn clone(&self) -> SNARKVerifyTaskRef {
+	SNARKVerifyTaskRef {
+	    inner: self.inner.clone()
+	}
+    }
+}
+
+
+#[wasm_bindgen]
+impl SNARKProofTaskRef {
+    /// Clone snark proof ref, and hold the arc
+    /// this function is useful on js_sys
+    pub fn clone(&self) -> SNARKProofTaskRef {
+	SNARKProofTaskRef {
+	    inner: self.inner.clone()
+	}
     }
 }
 
