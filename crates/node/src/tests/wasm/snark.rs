@@ -1,14 +1,15 @@
 use rings_snark::prelude::nova::provider;
 use rings_snark::prelude::nova::traits::Engine;
 use wasm_bindgen::JsValue;
+use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::wasm_bindgen_test;
-use crate::backend::snark::SupportedPrimeField;
+use wasm_bindgen_test::*;
+
+use super::setup_log;
 use crate::backend::snark::browser::bigint2ff;
 use crate::backend::snark::Input;
-use wasm_bindgen_test::*;
+use crate::backend::snark::SupportedPrimeField;
 use crate::prelude::rings_core::utils::js_utils;
-use wasm_bindgen_futures::JsFuture;
-use super::setup_log;
 wasm_bindgen_test_configure!(run_in_browser);
 
 #[wasm_bindgen_test]
@@ -28,7 +29,6 @@ fn test_map_array_to_input() {
     let _input = Input::from_array(array, SupportedPrimeField::Pallas);
 }
 
-
 #[wasm_bindgen_test]
 async fn test_send_snark_backend_message() {
     setup_log();
@@ -37,14 +37,18 @@ async fn test_send_snark_backend_message() {
 
     let snark_behaviour = crate::backend::snark::SNARKBehaviour::new_instance();
     let snark_task_builder = crate::backend::snark::SNARKTaskBuilder::from_remote(
-	r1cs.to_string(),
-	wasm.to_string(),
-	crate::backend::snark::SupportedPrimeField::Vesta
-    ).await.unwrap();
+        r1cs.to_string(),
+        wasm.to_string(),
+        crate::backend::snark::SupportedPrimeField::Vesta,
+    )
+    .await
+    .unwrap();
     type F = crate::backend::snark::Field;
-    let input: Input = vec![
-	("step_in".to_string(), vec![F::from_u64(4u64, SupportedPrimeField::Vesta), F::from_u64(2u64, SupportedPrimeField::Vesta)])
-    ].into();
+    let input: Input = vec![("step_in".to_string(), vec![
+        F::from_u64(4u64, SupportedPrimeField::Vesta),
+        F::from_u64(2u64, SupportedPrimeField::Vesta),
+    ])]
+    .into();
     console_log!("gen circuit");
     let circuits = snark_task_builder.gen_circuits(input, vec![], 5).unwrap();
 
@@ -55,7 +59,7 @@ async fn test_send_snark_backend_message() {
         JsFuture::from(provider1.listen()),
         JsFuture::from(provider2.listen()),
     )
-	.unwrap();
+    .unwrap();
 
     super::create_connection(&provider1, &provider2).await;
     console_log!("wait for register");

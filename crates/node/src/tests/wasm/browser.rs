@@ -1,15 +1,16 @@
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::*;
+
+use super::create_connection;
+use super::get_peers;
+use super::new_provider;
 use crate::backend::types::BackendMessage;
 use crate::prelude::rings_core::utils;
 use crate::prelude::rings_core::utils::js_value;
 use crate::provider::browser;
 use crate::provider::browser::Peer;
-use super::new_provider;
-use super::get_peers;
-use super::create_connection;
 
-#[cfg(feature="browser_chrome_test")]
+#[cfg(feature = "browser_chrome_test")]
 wasm_bindgen_test_configure!(run_in_browser);
 
 #[wasm_bindgen_test]
@@ -52,7 +53,6 @@ async fn test_two_provider_connect_and_list() {
     assert_eq!(peers.len(), 0);
 }
 
-
 #[wasm_bindgen_test]
 async fn test_send_backend_message() {
     let provider1 = new_provider().await;
@@ -80,7 +80,6 @@ async fn test_send_backend_message() {
     .await
     .unwrap();
 }
-
 
 #[wasm_bindgen_test]
 async fn test_get_address_from_hex_pubkey() {

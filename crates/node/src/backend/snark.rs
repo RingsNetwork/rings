@@ -45,7 +45,7 @@ pub struct SNARKTaskManager {
     verified: DashMap<TaskId, bool>,
 }
 
-/// SNARK
+/// SNARK message handler
 #[wasm_export]
 #[derive(Default, Clone)]
 pub struct SNARKBehaviour {
@@ -56,6 +56,79 @@ impl std::ops::Deref for SNARKBehaviour {
     type Target = Arc<SNARKTaskManager>;
     fn deref(&self) -> &Self::Target {
         &self.inner
+    }
+}
+
+/// We need this ref to pass Task ref to js_sys
+#[wasm_export]
+#[derive(Clone)]
+pub struct SNARKProofTaskRef {
+    inner: Arc<super::types::SNARKProofTask>,
+}
+
+impl AsRef<SNARKProofTask> for &SNARKProofTask {
+    fn as_ref(&self) -> &SNARKProofTask {
+        self
+    }
+}
+
+impl AsRef<SNARKProofTask> for SNARKProofTaskRef {
+    fn as_ref(&self) -> &SNARKProofTask {
+        self.inner.as_ref()
+    }
+}
+
+impl std::ops::Deref for SNARKProofTaskRef {
+    type Target = Arc<super::types::SNARKProofTask>;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl From<SNARKProofTask> for SNARKProofTaskRef {
+    fn from(t: SNARKProofTask) -> SNARKProofTaskRef {
+        SNARKProofTaskRef { inner: Arc::new(t) }
+    }
+}
+
+/// We need this ref to pass Task ref to js_sys
+#[wasm_export]
+#[derive(Clone)]
+pub struct SNARKVerifyTaskRef {
+    inner: Arc<super::types::SNARKVerifyTask>,
+}
+
+impl AsRef<SNARKVerifyTask> for &SNARKVerifyTask {
+    fn as_ref(&self) -> &SNARKVerifyTask {
+        self
+    }
+}
+
+impl AsRef<SNARKVerifyTask> for SNARKVerifyTaskRef {
+    fn as_ref(&self) -> &SNARKVerifyTask {
+        self.inner.as_ref()
+    }
+}
+
+impl std::ops::Deref for SNARKVerifyTaskRef {
+    type Target = Arc<super::types::SNARKVerifyTask>;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl From<SNARKVerifyTask> for SNARKVerifyTaskRef {
+    fn from(t: SNARKVerifyTask) -> SNARKVerifyTaskRef {
+        SNARKVerifyTaskRef { inner: Arc::new(t) }
+    }
+}
+
+#[wasm_export]
+impl SNARKBehaviour {
+    /// gen proof task with circuits, this function is use for solo proof
+    /// you can call [SNARKBehaviour::handle_snark_proof_task_ref] later to finalize the proof
+    pub fn gen_proof_task_ref(circuits: Vec<Circuit>) -> Result<SNARKProofTaskRef> {
+        SNARKTaskBuilder::gen_proof_task(circuits).map(|t| t.into())
     }
 }
 
@@ -79,17 +152,14 @@ impl SNARKBehaviour {
         provider.request(Method::SendBackendMessage, params).await?;
         #[cfg(target_arch = "wasm32")]
         {
-	    let req = rings_core::utils::js_value::serialize(&params)?;
-            let promise = provider.request(
-                Method::SendBackendMessage.to_string(),
-                req,
-            );
+            let req = rings_core::utils::js_value::serialize(&params)?;
+            let promise = provider.request(Method::SendBackendMessage.to_string(), req);
             wasm_bindgen_futures::JsFuture::from(promise)
                 .await
                 .map_err(|e| Error::JsError(format!("Failed to send backend messate: {:?}", e)))?;
         }
         self.task.insert(task_id, task);
-	tracing::info!("sent proof request");
+        tracing::info!("sent proof request");
         Ok(())
     }
 }
@@ -132,7 +202,7 @@ pub struct Input(Vec<(String, Vec<Field>)>);
 
 impl From<Vec<(String, Vec<Field>)>> for Input {
     fn from(data: Vec<(String, Vec<Field>)>) -> Self {
-	Self(data)
+        Self(data)
     }
 }
 
@@ -651,10 +721,26 @@ where
     }
 }
 
+#[wasm_export]
 impl SNARKBehaviour {
-    fn handle_snark_proof_task(data: SNARKProofTask) -> Result<SNARKVerifyTask> {
-	tracing::debug!("SNARK proof start");
-        let ret = match data {
+    /// handle snark proof task ref, this function is helpful for js_sys
+    pub fn handle_snark_proof_task_ref(data: SNARKProofTaskRef) -> Result<SNARKVerifyTaskRef> {
+        Self::handle_snark_proof_task(data).map(|x| x.into())
+    }
+
+    /// handle snark verify task ref, this function is helpful for js_sys
+    pub fn handle_snark_verify_task_ref(
+        data: SNARKVerifyTaskRef,
+        snark: SNARKProofTaskRef,
+    ) -> Result<bool> {
+        Self::handle_snark_verify_task(data, snark)
+    }
+}
+
+impl SNARKBehaviour {
+    fn handle_snark_proof_task<T: AsRef<SNARKProofTask>>(data: T) -> Result<SNARKVerifyTask> {
+        tracing::debug!("SNARK proof start");
+        let ret = match data.as_ref() {
             SNARKProofTask::VastaPallas(s) => {
                 type E1 = provider::VestaEngine;
                 type E2 = provider::PallasEngine;
@@ -703,13 +789,17 @@ impl SNARKBehaviour {
                 )?))
             }
         };
-	tracing::debug!("SNARK proof success");
-	ret
+        tracing::debug!("SNARK proof success");
+        ret
     }
 
-    fn handle_snark_verify_task(data: SNARKVerifyTask, snark: SNARKProofTask) -> Result<bool> {
-	tracing::debug!("SNARK verify start");
-        let ret = match data {
+    fn handle_snark_verify_task<T: AsRef<SNARKVerifyTask>, F: AsRef<SNARKProofTask>>(
+        data: T,
+        snark: F,
+    ) -> Result<bool> {
+        tracing::debug!("SNARK verify start");
+        let snark = snark.as_ref();
+        let ret = match data.as_ref() {
             SNARKVerifyTask::PallasVasta(p) => {
                 type E1 = provider::PallasEngine;
                 type E2 = provider::VestaEngine;
@@ -717,7 +807,7 @@ impl SNARKBehaviour {
                 type EE2 = ipa_pc::EvaluationEngine<E2>;
                 type S1 = spartan::snark::RelaxedR1CSSNARK<E1, EE1>;
                 type S2 = spartan::snark::RelaxedR1CSSNARK<E2, EE2>;
-                let proof = serde_json::from_str::<SNARKProof<E1, E2, S1, S2>>(&p)?;
+                let proof = serde_json::from_str::<SNARKProof<E1, E2, S1, S2>>(p)?;
                 if let SNARKProofTask::PallasVasta(t) = snark {
                     let ret = t.verify::<S1, S2>(proof.proof, proof.vk);
                     Ok(ret.is_ok())
@@ -732,7 +822,7 @@ impl SNARKBehaviour {
                 type EE2 = ipa_pc::EvaluationEngine<E2>;
                 type S1 = spartan::snark::RelaxedR1CSSNARK<E1, EE1>;
                 type S2 = spartan::snark::RelaxedR1CSSNARK<E2, EE2>;
-                let proof = serde_json::from_str::<SNARKProof<E1, E2, S1, S2>>(&p)?;
+                let proof = serde_json::from_str::<SNARKProof<E1, E2, S1, S2>>(p)?;
                 if let SNARKProofTask::VastaPallas(t) = snark {
                     let ret = t.verify::<S1, S2>(proof.proof, proof.vk);
                     Ok(ret.is_ok())
@@ -747,7 +837,7 @@ impl SNARKBehaviour {
                 type EE2 = ipa_pc::EvaluationEngine<E2>;
                 type S1 = spartan::snark::RelaxedR1CSSNARK<E1, EE1>; // non-preprocessing SNARK
                 type S2 = spartan::snark::RelaxedR1CSSNARK<E2, EE2>; // non-preprocessing SNARK
-                let proof = serde_json::from_str::<SNARKProof<E1, E2, S1, S2>>(&p)?;
+                let proof = serde_json::from_str::<SNARKProof<E1, E2, S1, S2>>(p)?;
                 if let SNARKProofTask::Bn256KZGGrumpkin(t) = snark {
                     let ret = t.verify::<S1, S2>(proof.proof, proof.vk);
                     Ok(ret.is_ok())
@@ -756,8 +846,8 @@ impl SNARKBehaviour {
                 }
             }
         };
-	tracing::debug!("SNARK verify success");
-	ret
+        tracing::debug!("SNARK verify success");
+        ret
     }
 }
 
@@ -795,7 +885,7 @@ impl MessageHandler<SNARKTaskMessage> for SNARKBehaviour {
         let verifier = ctx.relay.origin_sender();
         match &msg.task {
             SNARKTask::SNARKProof(t) => {
-                let proof = Self::handle_snark_proof_task(t.clone())?;
+                let proof = Self::handle_snark_proof_task(t)?;
                 let resp: BackendMessage = SNARKTaskMessage {
                     task_id: msg.task_id,
                     task: SNARKTask::SNARKVerify(proof),
@@ -806,11 +896,8 @@ impl MessageHandler<SNARKTaskMessage> for SNARKBehaviour {
                 provider.request(Method::SendBackendMessage, params).await?;
                 #[cfg(target_arch = "wasm32")]
                 {
-		    let req = rings_core::utils::js_value::serialize(&params)?;
-                    let promise = provider.request(
-                        Method::SendBackendMessage.to_string(),
-                        req,
-                    );
+                    let req = rings_core::utils::js_value::serialize(&params)?;
+                    let promise = provider.request(Method::SendBackendMessage.to_string(), req);
                     wasm_bindgen_futures::JsFuture::from(promise)
                         .await
                         .map_err(|e| {
@@ -821,7 +908,7 @@ impl MessageHandler<SNARKTaskMessage> for SNARKBehaviour {
             }
             SNARKTask::SNARKVerify(t) => {
                 if let Some(task) = self.task.get(&msg.task_id) {
-                    let verified = Self::handle_snark_verify_task(t.clone(), task.value().clone())?;
+                    let verified = Self::handle_snark_verify_task(t, task.value())?;
                     self.verified.insert(msg.task_id, verified);
                 }
                 Ok(())

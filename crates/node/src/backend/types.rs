@@ -3,6 +3,7 @@
 //! Backend Message Types.
 use std::io::ErrorKind as IOErrorKind;
 use std::sync::Arc;
+
 use bytes::Bytes;
 use rings_core::message::MessagePayload;
 use rings_rpc::protos::rings_node::SendBackendMessageRequest;
@@ -66,7 +67,6 @@ pub enum SNARKProofTask {
     /// SNARK with curve bn256 whth KZG multi linear commitment and grumpkin
     Bn256KZGGrumpkin(SNARKGenerator<Bn256EngineKZG, GrumpkinEngine>),
 }
-
 
 /// Message type of snark proof
 #[derive(Debug, Clone, Deserialize, Serialize)]

@@ -1,24 +1,26 @@
 pub mod browser;
 pub mod processor;
 pub mod snark;
+use std::sync::Arc;
+
 use rings_core::ecc::SecretKey;
 use rings_core::prelude::uuid;
 use rings_core::session::SessionSk;
 use rings_core::storage::idb::IdbStorage;
-use crate::prelude::rings_core::utils::js_value;
-use crate::provider::Provider;
-use rings_rpc::protos::rings_node::CreateOfferRequest;
-use wasm_bindgen_futures::JsFuture;
+use rings_rpc::protos::rings_node::AcceptAnswerRequest;
 use rings_rpc::protos::rings_node::AnswerOfferRequest;
+use rings_rpc::protos::rings_node::AnswerOfferResponse;
+use rings_rpc::protos::rings_node::CreateOfferRequest;
+use rings_rpc::protos::rings_node::CreateOfferResponse;
+use wasm_bindgen_futures::JsFuture;
+
 use crate::logging::browser::init_logging;
+use crate::prelude::rings_core::utils::js_value;
 use crate::processor::Processor;
 use crate::processor::ProcessorBuilder;
 use crate::processor::ProcessorConfig;
-use rings_rpc::protos::rings_node::CreateOfferResponse;
-use rings_rpc::protos::rings_node::AcceptAnswerRequest;
 use crate::provider::browser::Peer;
-use rings_rpc::protos::rings_node::AnswerOfferResponse;
-use std::sync::Arc;
+use crate::provider::Provider;
 
 pub fn setup_log() {
     init_logging(crate::logging::LogLevel::Info);

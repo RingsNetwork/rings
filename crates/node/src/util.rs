@@ -1,15 +1,16 @@
 //! Utilities for configuration and build.
 #![warn(missing_docs)]
 
+use std::io::Read;
+
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
+use flate2::Compression;
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
 use serde::Serializer;
-use flate2::write::GzEncoder;
-use flate2::read::GzDecoder;
-use flate2::Compression;
-use std::io::Read;
-use serde::de::DeserializeOwned;
 
 #[cfg(feature = "node")]
 use crate::error::Error;
@@ -49,7 +50,9 @@ where
     let bytes = Vec::<u8>::deserialize(deserializer)?;
     let mut decoder = GzDecoder::new(&bytes[..]);
     let mut decompressed_data = Vec::new();
-    decoder.read_to_end(&mut decompressed_data).map_err(serde::de::Error::custom)?;
+    decoder
+        .read_to_end(&mut decompressed_data)
+        .map_err(serde::de::Error::custom)?;
     serde_json::from_slice(&decompressed_data).map_err(serde::de::Error::custom)
 }
 
