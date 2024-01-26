@@ -134,8 +134,6 @@ pub fn set_panic_hook() {
 #[cfg(feature = "node")]
 /// logging configuration about node.
 pub mod node {
-    use opentelemetry::global;
-    use opentelemetry::sdk::propagation::TraceContextPropagator;
     use tracing_subscriber::filter;
     use tracing_subscriber::fmt;
     use tracing_subscriber::Layer;
