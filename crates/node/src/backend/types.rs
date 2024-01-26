@@ -199,9 +199,9 @@ impl From<IOErrorKind> for TunnelDefeat {
     }
 }
 
-/// This macro is aims to generate code impl
-/// ```
-/// like<T1, T2, T3> MessageHandler<BackendMessage> for (T1, T2, T3)
+/// This macro is aims to generate code like
+/// '''
+/// impl <T1, T2, T3> MessageHandler<BackendMessage> for (T1, T2, T3)
 /// where
 ///     T1: MessageHandler<BackendMessage> + Send + Sync + Sized,
 ///     T2: MessageHandler<BackendMessage> + Send + Sync + Sized,
@@ -219,7 +219,7 @@ impl From<IOErrorKind> for TunnelDefeat {
 ///         Ok(())
 ///     }
 /// }
-/// ```ignore
+/// '''ignore
 macro_rules! impl_message_handler_for_tuple {
     // Case for WebAssembly target (`wasm`)
     ($($T:ident),+; $($n: tt),+; wasm) => {
