@@ -7,8 +7,9 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsError;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::future_to_promise;
-use crate::backend::types;
+
 use super::*;
+use crate::backend::types;
 
 /// We need this ref to pass Task ref to js_sys
 #[wasm_bindgen]
@@ -60,28 +61,25 @@ impl From<SNARKVerifyTask> for SNARKVerifyTaskRef {
     }
 }
 
-
-
 #[wasm_bindgen]
 impl SNARKVerifyTaskRef {
     /// Clone snark verify ref, and hold the arc
     /// this function is useful on js_sys
     pub fn clone(&self) -> SNARKVerifyTaskRef {
-	SNARKVerifyTaskRef {
-	    inner: self.inner.clone()
-	}
+        SNARKVerifyTaskRef {
+            inner: self.inner.clone(),
+        }
     }
 }
-
 
 #[wasm_bindgen]
 impl SNARKProofTaskRef {
     /// Clone snark proof ref, and hold the arc
     /// this function is useful on js_sys
     pub fn clone(&self) -> SNARKProofTaskRef {
-	SNARKProofTaskRef {
-	    inner: self.inner.clone()
-	}
+        SNARKProofTaskRef {
+            inner: self.inner.clone(),
+        }
     }
 }
 

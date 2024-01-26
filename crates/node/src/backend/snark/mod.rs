@@ -36,7 +36,7 @@ use crate::provider::Provider;
 
 type TaskId = uuid::Uuid;
 
-#[cfg(feature="browser")]
+#[cfg(feature = "browser")]
 pub mod browser;
 
 /// Task Manageer of SNARK provier and verifier
