@@ -738,7 +738,6 @@ impl SNARKBehaviour {
                     let ret = t.verify::<S1, S2>(proof.proof, proof.vk);
                     Ok(ret.is_ok())
                 } else {
-		    tracing::error!("snark curve not patch");
                     Err(Error::SNARKCurveNotMatch())
                 }
             }
@@ -754,7 +753,6 @@ impl SNARKBehaviour {
                     let ret = t.verify::<S1, S2>(proof.proof, proof.vk);
                     Ok(ret.is_ok())
                 } else {
-		    tracing::error!("snark curve not patch");
                     Err(Error::SNARKCurveNotMatch())
                 }
             }
@@ -770,7 +768,6 @@ impl SNARKBehaviour {
                     let ret = t.verify::<S1, S2>(proof.proof, proof.vk);
                     Ok(ret.is_ok())
                 } else {
-		    tracing::error!("snark curve not patch");
                     Err(Error::SNARKCurveNotMatch())
                 }
             }
