@@ -75,6 +75,11 @@ impl AsRef<SNARKVerifyTask> for &SNARKVerifyTask {
 }
 
 impl SNARKBehaviour {
+    /// Generate proof task
+    pub fn gen_proof_task(circuits: Vec<Circuit>) -> Result<SNARKProofTask> {
+        Ok(SNARKTaskBuilder::gen_proof_task(circuits)?)
+    }
+
     /// send proof task to did
     pub async fn send_proof_task(
         &self,
@@ -82,7 +87,7 @@ impl SNARKBehaviour {
         circuits: Vec<Circuit>,
         did: Did,
     ) -> Result<()> {
-        let task = SNARKTaskBuilder::gen_proof_task(circuits)?;
+        let task = Self::gen_proof_task(circuits)?;
         let task_id = uuid::Uuid::new_v4();
         let msg: BackendMessage = SNARKTaskMessage {
             task_id,
@@ -517,6 +522,7 @@ impl SNARKTaskBuilder {
                 let snark = SNARK::<E1, E2>::new(&circuits[0], &pp, &inputs, &vec![
                     <E2 as Engine>::Scalar::from(0),
                 ])?;
+
                 SNARKProofTask::VastaPallas(SNARKGenerator {
                     pp,
                     snark,
@@ -626,7 +632,12 @@ where
 {
     /// Setup snark, get pk and vk
     pub fn fold(&mut self) -> Result<()> {
-        Ok(self.snark.fold_all(&self.pp, &self.circuits)?)
+        self.snark.fold_all(&self.pp, &self.circuits)?;
+        // let steps = self.circuits.len();
+        // let first_input = self.circuits.first().unwrap().get_public_inputs();
+        // self.snark
+        //     .verify(&self.pp, steps, first_input, vec![E2::Scalar::from(0)])?;
+        Ok(())
     }
 
     /// setup compressed snark, get (pk, vk)
@@ -664,7 +675,8 @@ where
 }
 
 impl SNARKBehaviour {
-    fn handle_snark_proof_task<T: AsRef<SNARKProofTask>>(data: T) -> Result<SNARKVerifyTask> {
+    /// Handle proof task
+    pub fn handle_snark_proof_task<T: AsRef<SNARKProofTask>>(data: T) -> Result<SNARKVerifyTask> {
         tracing::debug!("SNARK proof start");
         let ret = match data.as_ref() {
             SNARKProofTask::VastaPallas(s) => {
@@ -674,8 +686,10 @@ impl SNARKBehaviour {
                 type EE2 = ipa_pc::EvaluationEngine<E2>;
                 type S1 = spartan::snark::RelaxedR1CSSNARK<E1, EE1>;
                 type S2 = spartan::snark::RelaxedR1CSSNARK<E2, EE2>;
-                let (pk, vk) = s.setup()?;
-                let compressed_proof = s.prove::<S1, S2>(&pk)?;
+                let mut snark = s.clone();
+                snark.fold()?;
+                let (pk, vk) = snark.setup()?;
+                let compressed_proof = snark.prove::<S1, S2>(&pk)?;
                 let proof = SNARKProof::<E1, E2, S1, S2> {
                     vk,
                     proof: compressed_proof,
@@ -689,8 +703,10 @@ impl SNARKBehaviour {
                 type EE2 = ipa_pc::EvaluationEngine<E2>;
                 type S1 = spartan::snark::RelaxedR1CSSNARK<E1, EE1>;
                 type S2 = spartan::snark::RelaxedR1CSSNARK<E2, EE2>;
-                let (pk, vk) = s.setup()?;
-                let compressed_proof = s.prove::<S1, S2>(&pk)?;
+                let mut snark = s.clone();
+                snark.fold()?;
+                let (pk, vk) = snark.setup()?;
+                let compressed_proof = snark.prove::<S1, S2>(&pk)?;
                 let proof = SNARKProof::<E1, E2, S1, S2> {
                     vk,
                     proof: compressed_proof,
@@ -704,8 +720,10 @@ impl SNARKBehaviour {
                 type EE2 = ipa_pc::EvaluationEngine<E2>;
                 type S1 = spartan::snark::RelaxedR1CSSNARK<E1, EE1>; // non-preprocessing SNARK
                 type S2 = spartan::snark::RelaxedR1CSSNARK<E2, EE2>; // non-preprocessing SNARK
-                let (pk, vk) = s.setup()?;
-                let compressed_proof = s.prove::<S1, S2>(&pk)?;
+                let mut snark = s.clone();
+                snark.fold()?;
+                let (pk, vk) = snark.setup()?;
+                let compressed_proof = snark.prove::<S1, S2>(&pk)?;
                 let proof = SNARKProof::<E1, E2, S1, S2> {
                     vk,
                     proof: compressed_proof,
@@ -719,7 +737,8 @@ impl SNARKBehaviour {
         ret
     }
 
-    fn handle_snark_verify_task<T: AsRef<SNARKVerifyTask>, F: AsRef<SNARKProofTask>>(
+    /// Handle verify task
+    pub fn handle_snark_verify_task<T: AsRef<SNARKVerifyTask>, F: AsRef<SNARKProofTask>>(
         data: T,
         snark: F,
     ) -> Result<bool> {

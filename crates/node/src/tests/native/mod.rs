@@ -5,6 +5,7 @@ use crate::prelude::SessionSk;
 use crate::processor::Processor;
 use crate::processor::ProcessorBuilder;
 use crate::processor::ProcessorConfig;
+pub mod snark;
 
 pub async fn prepare_processor() -> Processor {
     let key = SecretKey::random();

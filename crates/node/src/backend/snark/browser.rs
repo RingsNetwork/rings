@@ -88,7 +88,7 @@ impl SNARKBehaviour {
     /// gen proof task with circuits, this function is use for solo proof
     /// you can call [SNARKBehaviour::handle_snark_proof_task_ref] later to finalize the proof
     pub fn gen_proof_task_ref(circuits: Vec<Circuit>) -> Result<SNARKProofTaskRef> {
-        SNARKTaskBuilder::gen_proof_task(circuits).map(|t| t.into())
+        SNARKBehaviour::gen_proof_task(circuits).map(|t| t.into())
     }
 
     /// handle snark proof task ref, this function is helpful for js_sys
