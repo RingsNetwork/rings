@@ -119,7 +119,6 @@ impl Provider {
     }
 
     /// Set callback for swarm, it can be T, or (T0, T1, T2)
-    /// Where T is MessageHandler<BackendMessage> + Send + Sync + Sized + 'static,
     pub fn set_backend_callback<T>(&self, callback: T) -> Result<()>
     where T: MessageHandler<BackendMessage> + Send + Sync + Sized + 'static {
         let backend = Backend::new(Arc::new(self.clone()), Box::new(callback));
