@@ -1,3 +1,5 @@
+//! special supported structure and functions for browser and wasm
+//! ===========
 use std::str::FromStr;
 
 use rings_snark::prelude::ff;
@@ -51,6 +53,14 @@ impl std::ops::Deref for SNARKVerifyTaskRef {
         &self.inner
     }
 }
+
+impl From<SNARKVerifyTask> for SNARKVerifyTaskRef {
+    fn from(t: SNARKVerifyTask) -> SNARKVerifyTaskRef {
+        SNARKVerifyTaskRef { inner: Arc::new(t) }
+    }
+}
+
+
 
 #[wasm_bindgen]
 impl SNARKVerifyTaskRef {
