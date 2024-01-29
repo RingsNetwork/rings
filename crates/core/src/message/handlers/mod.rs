@@ -109,10 +109,6 @@ impl MessageHandler {
     ) -> Result<Vec<MessageHandlerEvent>> {
         let message: Message = payload.transaction.data()?;
 
-        #[cfg(test)]
-        {
-            println!("{} got msg {}", self.dht.did, &message);
-        }
         tracing::debug!(
             "START HANDLE MESSAGE: {} {}",
             &payload.transaction.tx_id,

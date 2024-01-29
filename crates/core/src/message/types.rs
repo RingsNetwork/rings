@@ -56,17 +56,17 @@ pub struct FindSuccessorReport {
     pub handler: FindSuccessorReportHandler,
 }
 
-/// MessageType use to notify predecessor, ask for update finger tables.
+/// MessageType use notify the successor about the predecessor inferred by current node.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct NotifyPredecessorSend {
-    /// The did for notify target
+    /// The did of predecessor.
     pub did: Did,
 }
 
-/// MessageType report to origin node.
+/// MessageType use to tell the real predecessor of current node.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct NotifyPredecessorReport {
-    /// The did for notify target
+    /// The real predecessor of current node after compare.
     pub did: Did,
 }
 
