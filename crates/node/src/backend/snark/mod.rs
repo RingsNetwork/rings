@@ -219,7 +219,7 @@ impl Circuit {
         Ok(serde_json::to_string(self)?)
     }
 
-    /// circuit Input from json
+    /// deserialize circuit from json
     pub fn from_json(s: String) -> Result<Circuit> {
         Ok(serde_json::from_str(&s)?)
     }
