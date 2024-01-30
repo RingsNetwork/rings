@@ -13,8 +13,22 @@ use crate::backend::types;
 
 /// We need this ref to pass Task ref to js_sys
 #[wasm_bindgen]
+#[derive(Deserialize, Serialize)]
 pub struct SNARKProofTaskRef {
     inner: Arc<types::SNARKProofTask>,
+}
+
+#[wasm_bindgen]
+impl SNARKProofTaskRef {
+    /// serialize SNARKProofTaskRef to json
+    pub fn to_json(&self) -> Result<String> {
+        Ok(serde_json::to_string(self)?)
+    }
+
+    /// deserialize SNARKProofTaskRef from json
+    pub fn from_json(s: String) -> Result<SNARKProofTaskRef> {
+        Ok(serde_json::from_str(&s)?)
+    }
 }
 
 impl AsRef<SNARKProofTask> for SNARKProofTaskRef {
@@ -38,8 +52,22 @@ impl From<SNARKProofTask> for SNARKProofTaskRef {
 
 /// We need this ref to pass Task ref to js_sys
 #[wasm_bindgen]
+#[derive(Deserialize, Serialize)]
 pub struct SNARKVerifyTaskRef {
     inner: Arc<types::SNARKVerifyTask>,
+}
+
+#[wasm_bindgen]
+impl SNARKVerifyTaskRef {
+    /// serialize SNARKPVerifyRef to json
+    pub fn to_json(&self) -> Result<String> {
+        Ok(serde_json::to_string(self)?)
+    }
+
+    /// de serialize SNARKPVerifyRef from json
+    pub fn from_json(s: String) -> Result<SNARKVerifyTaskRef> {
+        Ok(serde_json::from_str(&s)?)
+    }
 }
 
 impl AsRef<SNARKVerifyTask> for SNARKVerifyTaskRef {
