@@ -146,23 +146,27 @@ pub enum SupportedPrimeField {
     Bn256KZG,
 }
 
-/// Supported prime field
-pub enum FieldEnum {
-    /// field of vesta curve
-    Vesta(<provider::VestaEngine as Engine>::Scalar),
-    /// field of pallas curve
-    Pallas(<provider::PallasEngine as Engine>::Scalar),
-    /// bn256 with kzg
-    Bn256KZG(<provider::mlkzg::Bn256EngineKZG as Engine>::Scalar),
-}
-
 /// Input type
 #[wasm_export]
+#[derive(Deserialize, Serialize)]
 pub struct Input(Vec<(String, Vec<Field>)>);
 
 impl From<Vec<(String, Vec<Field>)>> for Input {
     fn from(data: Vec<(String, Vec<Field>)>) -> Self {
         Self(data)
+    }
+}
+
+#[wasm_export]
+impl Input {
+    /// serialize Input to json
+    pub fn to_json(&self) -> Result<String> {
+        Ok(serde_json::to_string(self)?)
+    }
+
+    /// deserialize Input from json
+    pub fn from_json(s: String) -> Result<Input> {
+        Ok(serde_json::from_str(&s)?)
     }
 }
 
@@ -190,10 +194,10 @@ impl<'a> IntoIterator for &'a Input {
     }
 }
 
-/// Field type
+/// Circuit, it's a typeless wrapper of rings_snark circuit
 #[wasm_export]
-pub struct Field {
-    value: FieldEnum,
+pub struct Circuit {
+    inner: CircuitEnum,
 }
 
 /// Types of Circuit
@@ -206,10 +210,22 @@ pub enum CircuitEnum {
     Bn256KZG(circuit::Circuit<<provider::mlkzg::Bn256EngineKZG as Engine>::Scalar>),
 }
 
-/// Circuit, it's a typeless wrapper of rings_snark circuit
+/// Field type
 #[wasm_export]
-pub struct Circuit {
-    inner: CircuitEnum,
+#[derive(Deserialize, Serialize)]
+pub struct Field {
+    value: FieldEnum,
+}
+
+/// Supported prime field
+#[derive(Deserialize, Serialize)]
+pub enum FieldEnum {
+    /// field of vesta curve
+    Vesta(<provider::VestaEngine as Engine>::Scalar),
+    /// field of pallas curve
+    Pallas(<provider::PallasEngine as Engine>::Scalar),
+    /// bn256 with kzg
+    Bn256KZG(<provider::mlkzg::Bn256EngineKZG as Engine>::Scalar),
 }
 
 #[wasm_export]
