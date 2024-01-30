@@ -892,7 +892,7 @@ impl MessageHandler<SNARKTaskMessage> for SNARKBehaviour {
                     wasm_bindgen_futures::JsFuture::from(promise)
                         .await
                         .map_err(|e| {
-                            Error::JsError(format!("Failed send backend messate: {:?}", e))
+                            Error::JsError(format!("Failed send backend message: {:?}", e))
                         })?;
                 }
                 Ok(())
