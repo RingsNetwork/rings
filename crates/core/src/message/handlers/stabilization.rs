@@ -91,14 +91,14 @@ mod test {
         let keys = gen_ordered_keys(3);
         let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
 
-        test_triple_ordered_nodes_stabilization(key1, key2, key3).await
+        test_triple_ordered_nodes_stabilization(key2, key3, key1).await
     }
 
     #[tokio::test]
     async fn test_triple_nodes_stabilization_3_1_2() -> Result<()> {
         let keys = gen_ordered_keys(3);
         let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
-        test_triple_ordered_nodes_stabilization(key1, key2, key3).await
+        test_triple_ordered_nodes_stabilization(key3, key1, key2).await
     }
 
     #[tokio::test]
@@ -112,14 +112,14 @@ mod test {
     async fn test_triple_nodes_stabilization_2_1_3() -> Result<()> {
         let keys = gen_ordered_keys(3);
         let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
-        test_triple_desc_ordered_nodes_stabilization(key3, key2, key1).await
+        test_triple_desc_ordered_nodes_stabilization(key2, key1, key3).await
     }
 
     #[tokio::test]
     async fn test_triple_nodes_stabilization_1_3_2() -> Result<()> {
         let keys = gen_ordered_keys(3);
         let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
-        test_triple_desc_ordered_nodes_stabilization(key3, key2, key1).await
+        test_triple_desc_ordered_nodes_stabilization(key1, key3, key2).await
     }
 
     async fn test_triple_ordered_nodes_stabilization(
