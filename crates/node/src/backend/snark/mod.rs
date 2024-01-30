@@ -220,7 +220,7 @@ impl Circuit {
     }
 
     /// circuit Input from json
-    pub fn from_json(s: String) -> Result<Input> {
+    pub fn from_json(s: String) -> Result<Circuit> {
         Ok(serde_json::from_str(&s)?)
     }
 }
