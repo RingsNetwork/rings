@@ -35,13 +35,13 @@ pub async fn test_calcu_sha256_recursive_snark() -> Result<()> {
     type F2 = <E2 as Engine>::Scalar;
 
     let r1cs = r1cs::load_r1cs::<F1>(
-        r1cs::Path::Local("src/tests/circoms/test_sha256.r1cs".to_string()),
+        r1cs::Path::Local("src/tests/native/circoms/test_sha256.r1cs".to_string()),
         r1cs::Format::Bin,
     )
     .await
     .unwrap();
     let witness_calculator = r1cs::load_circom_witness_calculator(r1cs::Path::Local(
-        "src/tests/circoms/test_sha256.wasm".to_string(),
+        "src/tests/native/circoms/test_sha256.wasm".to_string(),
     ))
     .await
     .unwrap();
