@@ -128,13 +128,13 @@ pub async fn test_calcu_bn256_recursive_snark_with_private_input() -> Result<()>
     type F2 = <E2 as Engine>::Scalar;
 
     let r1cs = r1cs::load_r1cs::<F1>(
-        r1cs::Path::Local("src/tests/circoms/simple_bn256_priv.r1cs".to_string()),
+        r1cs::Path::Local("src/tests/native/circoms/simple_bn256_priv.r1cs".to_string()),
         r1cs::Format::Bin,
     )
     .await
     .unwrap();
     let witness_calculator = r1cs::load_circom_witness_calculator(r1cs::Path::Local(
-        "src/tests/circoms/simple_bn256_priv.wasm".to_string(),
+        "src/tests/native/circoms/simple_bn256_priv.wasm".to_string(),
     ))
     .await
     .unwrap();
