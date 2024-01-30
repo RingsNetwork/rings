@@ -7,13 +7,13 @@ use crate::r1cs;
 pub async fn test_calcu_witness_sha256() -> Result<()> {
     type F = <VestaEngine as Engine>::Base;
     let r1cs = r1cs::load_r1cs_local::<F>(
-        "src/tests/circoms/sha256/circom_sha256.r1cs",
+        "src/tests/native/circoms/sha256/circom_sha256.r1cs",
         r1cs::Format::Bin,
     )
     .unwrap();
     assert_eq!(r1cs.num_inputs, 4, "wrong inputs {:?}", r1cs.num_inputs);
     let mut witness_calculator = r1cs::load_circom_witness_calculator(r1cs::Path::Local(
-        "src/tests/circoms/sha256/circom_sha256.wasm".to_string(),
+        "src/tests/native/circoms/sha256/circom_sha256.wasm".to_string(),
     ))
     .await
     .unwrap();
