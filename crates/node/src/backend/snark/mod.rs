@@ -196,11 +196,13 @@ impl<'a> IntoIterator for &'a Input {
 
 /// Circuit, it's a typeless wrapper of rings_snark circuit
 #[wasm_export]
+#[derive(Deserialize, Serialize)]
 pub struct Circuit {
     inner: CircuitEnum,
 }
 
 /// Types of Circuit
+#[derive(Deserialize, Serialize)]
 pub enum CircuitEnum {
     /// Based on vesta curve
     Vesta(circuit::Circuit<<provider::VestaEngine as Engine>::Scalar>),
@@ -208,6 +210,19 @@ pub enum CircuitEnum {
     Pallas(circuit::Circuit<<provider::PallasEngine as Engine>::Scalar>),
     /// based on bn256 and KZG
     Bn256KZG(circuit::Circuit<<provider::mlkzg::Bn256EngineKZG as Engine>::Scalar>),
+}
+
+#[wasm_export]
+impl Circuit {
+    /// serialize circuit to json
+    pub fn to_json(&self) -> Result<String> {
+        Ok(serde_json::to_string(self)?)
+    }
+
+    /// circuit Input from json
+    pub fn from_json(s: String) -> Result<Input> {
+        Ok(serde_json::from_str(&s)?)
+    }
 }
 
 /// Field type
