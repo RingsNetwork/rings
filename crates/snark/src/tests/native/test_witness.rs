@@ -41,7 +41,7 @@ pub async fn test_calcu_witness_sha256() -> Result<()> {
 pub async fn test_calcu_witness_bn256() -> Result<()> {
     type F = <VestaEngine as Engine>::Base;
     let mut witness_calculator = r1cs::load_circom_witness_calculator(r1cs::Path::Local(
-        "src/tests/circoms/simple_bn256.wasm".to_string(),
+        "src/tests/native/circoms/simple_bn256.wasm".to_string(),
     ))
     .await
     .unwrap();

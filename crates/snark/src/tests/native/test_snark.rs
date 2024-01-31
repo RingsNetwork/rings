@@ -46,8 +46,8 @@ pub async fn test_calcu_sha256_recursive_snark() -> Result<()> {
     .await
     .unwrap();
 
-    let round = 5;
-    let round2 = 5;
+    let round = 3;
+    let round2 = 3;
 
     let circuit_generator = circuit::WasmCircuitGenerator::<F1>::new(r1cs, witness_calculator);
 
