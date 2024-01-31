@@ -138,13 +138,30 @@ impl SNARKBehaviour {
     pub fn send_proof_task_to(
         &self,
         provider: Provider,
+        task: SNARKProofTaskRef,
+        did: String,
+    ) -> js_sys::Promise {
+        let ins = self.clone();
+        future_to_promise(async move {
+            let ret = ins
+                .send_proof_task(provider.clone().into(), task.as_ref(), Did::from_str(&did)?)
+                .await
+                .map_err(JsError::from)?;
+            Ok(JsValue::from(ret))
+        })
+    }
+
+    /// Generate a proof task and send it to did
+    pub fn gen_and_send_proof_task_to(
+        &self,
+        provider: Provider,
         circuits: Vec<Circuit>,
         did: String,
     ) -> js_sys::Promise {
         let ins = self.clone();
         future_to_promise(async move {
             let ret = ins
-                .send_proof_task(provider.clone().into(), circuits, Did::from_str(&did)?)
+                .gen_and_send_proof_task(provider.clone().into(), circuits, Did::from_str(&did)?)
                 .await
                 .map_err(JsError::from)?;
             Ok(JsValue::from(ret))

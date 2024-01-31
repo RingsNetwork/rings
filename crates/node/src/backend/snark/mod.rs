@@ -80,15 +80,26 @@ impl SNARKBehaviour {
         SNARKTaskBuilder::gen_proof_task(circuits)
     }
 
-    /// send proof task to did
-    pub async fn send_proof_task(
+    /// Generate a proof task and send it to did
+    pub async fn gen_and_send_proof_task(
         &self,
         provider: Arc<Provider>,
         circuits: Vec<Circuit>,
         did: Did,
     ) -> Result<String> {
         let task = Self::gen_proof_task(circuits)?;
+        self.send_proof_task(provider.clone(), &task, did).await
+    }
+
+    /// send proof task to did
+    pub async fn send_proof_task(
+        &self,
+        provider: Arc<Provider>,
+        task_ref: impl AsRef<SNARKProofTask>,
+        did: Did,
+    ) -> Result<String> {
         let task_id = uuid::Uuid::new_v4();
+        let task = task_ref.as_ref().clone();
         let msg: BackendMessage = SNARKTaskMessage {
             task_id,
             task: SNARKTask::SNARKProof(task.clone()),
