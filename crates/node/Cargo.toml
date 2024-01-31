@@ -134,4 +134,4 @@ path = "bin/rings.rs"
 required-features = ["node"]
 
 [package.metadata.wasm-pack.profile.release]
-wasm-opt = ['-O3']
+wasm-opt = ['-O4']
