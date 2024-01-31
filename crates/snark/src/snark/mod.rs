@@ -139,6 +139,7 @@ where
     E2: Engine<Base = <E1 as Engine>::Scalar>,
 {
     /// Create public params
+    #[inline]
     pub fn gen_pp<S1, S2>(circom: Circuit<E1::Scalar>) -> PublicParams<E1, E2>
     where
         S1: RelaxedR1CSSNARKTrait<E1>,
@@ -176,6 +177,7 @@ where
     }
 
     /// Fold next circuit
+    #[inline]
     pub fn foldr(
         &mut self,
         pp: impl AsRef<PublicParams<E1, E2>>,
@@ -201,6 +203,7 @@ where
 
     /// Verify the correctness of the `RecursiveSNARK`
     /// Gen compress snark
+    #[inline]
     pub fn verify(
         &self,
         pp: impl AsRef<PublicParams<E1, E2>>,
@@ -217,6 +220,7 @@ where
     }
 
     /// Gen compress snark
+    #[inline]
     pub fn compress_setup<S1, S2>(
         pp: impl AsRef<PublicParams<E1, E2>>,
     ) -> Result<(ProverKey<E1, E2, S1, S2>, VerifierKey<E1, E2, S1, S2>)>
@@ -229,6 +233,7 @@ where
     }
 
     /// gen compress_proof
+    #[inline]
     pub fn compress_prove<S1, S2>(
         &self,
         pp: impl AsRef<PublicParams<E1, E2>>,
@@ -250,6 +255,7 @@ where
     }
 
     /// gen compress_proof
+    #[inline]
     pub fn compress_verify<S1, S2>(
         proof: impl AsRef<CompressedSNARK<E1, E2, S1, S2>>,
         vk: impl AsRef<VerifierKey<E1, E2, S1, S2>>,
