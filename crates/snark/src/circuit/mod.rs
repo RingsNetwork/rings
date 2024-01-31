@@ -17,9 +17,11 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::error::Result;
-use crate::r1cs::TyWitness;
 use crate::r1cs::R1CS;
 use crate::witness::calculator::WitnessCalculator;
+
+pub mod bellman;
+pub mod bellpepper;
 
 /// Input of witness
 #[derive(Serialize, Deserialize, Clone)]
@@ -95,7 +97,7 @@ impl<F: PrimeField> From<Vec<(String, Vec<F>)>> for Input<F> {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Circuit<F: PrimeField> {
     r1cs: Arc<R1CS<F>>,
-    witness: TyWitness<F>,
+    witness: Vec<F>,
 }
 
 impl<F: PrimeField> AsRef<Circuit<F>> for &Circuit<F> {
@@ -124,7 +126,7 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
     pub fn gen_circuit(&self, input: Input<F>, sanity_check: bool) -> Result<Circuit<F>>
     where F: PrimeField {
         let mut calc = self.calculator.borrow_mut();
-        let witness: TyWitness<F> = calc.calculate_witness::<F>(input.to_vec(), sanity_check)?;
+        let witness: Vec<F> = calc.calculate_witness::<F>(input.to_vec(), sanity_check)?;
         let circom = Circuit::<F> {
             r1cs: self.r1cs.clone(),
             witness,
@@ -170,7 +172,7 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
         let mut calc = self.calculator.borrow_mut();
         let mut latest_output: Input<F> = vec![].into();
         for i in 0..times {
-            let witness: TyWitness<F> = if latest_output.is_empty() {
+            let witness: Vec<F> = if latest_output.is_empty() {
                 let mut input = public_input.clone();
                 if let Some(p) = private_inputs.get(i) {
                     input.input.extend(p.to_owned());
@@ -197,7 +199,7 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
 
 impl<F: PrimeField> Circuit<F> {
     /// Create a new instance
-    pub fn new(r1cs: Arc<R1CS<F>>, witness: TyWitness<F>) -> Self {
+    pub fn new(r1cs: Arc<R1CS<F>>, witness: Vec<F>) -> Self {
         Self { r1cs, witness }
     }
 
