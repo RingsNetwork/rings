@@ -9,7 +9,7 @@ use crate::prelude::bellpepper::SynthesisError;
 use crate::prelude::ff::PrimeField;
 
 impl<F: PrimeField> bellpepper::Circuit<F> for Circuit<F> {
-    /// Reference work is Nota-Scotia: https://github.com/nalinbhardwaj/Nova-Scotia
+    /// Reference work is Nota-Scotia: <https://github.com/nalinbhardwaj/Nova-Scotia>
     fn synthesize<CS: ConstraintSystem<F>>(self, cs: &mut CS) -> Result<(), SynthesisError> {
         let mut vars: Vec<AllocatedNum<F>> = vec![];
 
