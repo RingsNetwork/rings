@@ -310,9 +310,9 @@ impl Chord<PeerRingAction> for PeerRing {
     }
 
     /// Handle notification from a node that thinks a did is the predecessor of current node.
-    /// The `did` in parameters is the Did of that node.
+    /// The `did` in parameters is the Did of that predecessor.
     /// If that node is closer to current node or current node has no predecessor, set it to the did.
-    /// This method will return that did if it is set to the predecessor.
+    /// This method will return current predecessor after setting.
     fn notify(&self, did: Did) -> Result<Did> {
         let mut predecessor = self.lock_predecessor()?;
 
