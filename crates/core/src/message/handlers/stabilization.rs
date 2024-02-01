@@ -124,17 +124,8 @@ mod test {
 
     #[tokio::test]
     async fn test_triple_nodes_stabilization_1_3_2() -> Result<()> {
-        //  let keys = gen_ordered_keys(3);
-        // let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
-        let key1 =
-            SecretKey::try_from("57e3ff36ab767056baba3ea9d09c6a178721bd686b8c5d98f66147865de6a288")
-                .unwrap(); // 0x78b3fdea83a3db371cfc79c45f0527b7f216e6c9
-        let key2 =
-            SecretKey::try_from("d842f7143beac06ab8d81589c3c53cffd7eb8e07dadae8fdcb3ed1e1319ab477")
-                .unwrap(); // 0x8d4300b4df3c85ee107009e354c1b95717ab1c17
-        let key3 =
-            SecretKey::try_from("af3543cde0c40fd217c536a358fb5f3c609eb1135f68daf7e2f2fbd51f164221")
-                .unwrap(); // 0xfe81c75f0ef75d7436b84089c5be31b692518d73
+        let keys = gen_ordered_keys(3);
+        let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
         test_triple_desc_ordered_nodes_stabilization(key1, key3, key2).await
     }
 
@@ -682,7 +673,7 @@ mod test {
         //   |-----------------|
         // node1's pre is node2, node1's successor is node3
         // node2's pre is node3, node2's successor is node1
-        // node3's pre is none1, node3's successor is node2
+        // node3's pre is node2, node3's successor is node2
         assert_eq!(node1.dht().successors().list()?, vec![
             node3.did(),
             node2.did()
