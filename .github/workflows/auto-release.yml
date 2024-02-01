@@ -55,7 +55,7 @@ jobs:
   build_macos:
     needs: gen_version
     name: build macos version binary
-    timeout-minutes: 25
+    timeout-minutes: 30
     runs-on: macos-latest
     strategy:
       matrix:
@@ -104,7 +104,7 @@ jobs:
   build_linux:
     needs: gen_version
     name: build linux version binary
-    timeout-minutes: 25
+    timeout-minutes: 30
     runs-on: "ubuntu-latest"
     strategy:
       matrix:
@@ -165,7 +165,7 @@ jobs:
   build_browser:
     needs: gen_version
     name: build browser version binary
-    timeout-minutes: 25
+    timeout-minutes: 30
     runs-on: "ubuntu-latest"
     strategy:
       matrix:
