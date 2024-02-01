@@ -32,8 +32,8 @@ fn test_map_array_to_input() {
 #[wasm_bindgen_test]
 async fn test_send_snark_backend_message() {
     setup_log();
-    let wasm = "https://raw.githubusercontent.com/RingsNetwork/rings/master/crates/snark/src/tests/circoms/simple_bn256.wasm";
-    let r1cs = "https://raw.githubusercontent.com/RingsNetwork/rings/master/crates/snark/src/tests/circoms/simple_bn256.r1cs";
+    let wasm = "https://raw.githubusercontent.com/RingsNetwork/rings/master/crates/snark/src/tests/native/circoms/simple_bn256.wasm";
+    let r1cs = "https://raw.githubusercontent.com/RingsNetwork/rings/master/crates/snark/src/tests/native/circoms/simple_bn256.r1cs";
 
     let snark_behaviour = crate::backend::snark::SNARKBehaviour::new_instance();
     let snark_task_builder = crate::backend::snark::SNARKTaskBuilder::from_remote(
