@@ -473,7 +473,6 @@ mod test {
         run_stabilize_once(node2.clone()).await?;
         run_stabilize_once(node3.clone()).await?;
 
-        /*
         // node2 notify node3
         let ev3 = node3.listen_once().await.unwrap().0;
         assert_eq!(ev3.signer(), node2.did());
@@ -665,9 +664,7 @@ mod test {
             )
             if did == node1.did()
         ));
-        */
 
-        wait_for_msgs(&node1, &node2, &node3).await;
         assert_no_more_msg(&node1, &node2, &node3).await;
 
         println!("=== Check state after second stabilization ===");
