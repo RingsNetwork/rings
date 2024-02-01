@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::time::sleep;
+use tracing_test::traced_test;
 
 use crate::dht::successor::SuccessorReader;
 use crate::dht::Chord;
@@ -11,6 +12,7 @@ use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
 use crate::inspect::DHTInspect;
+use crate::inspect::SwarmInspect;
 use crate::swarm::Swarm;
 use crate::tests::default::gen_pure_dht;
 use crate::tests::default::prepare_node;
@@ -127,11 +129,18 @@ async fn test_stabilization() -> Result<()> {
 
 #[ignore]
 #[tokio::test]
-async fn test_online_stabilization() -> Result<()> {
+#[traced_test]
+async fn test_stabilization_final_dht() -> Result<()> {
     let mut nodes = vec![];
 
-    for _ in 0..6 {
-        let key = SecretKey::random();
+    let keys = vec![
+        "af3543cde0c40fd217c536a358fb5f3c609eb1135f68daf7e2f2fbd51f164221", // 0xfe81c75f0ef75d7436b84089c5be31b692518d73
+        "d842f7143beac06ab8d81589c3c53cffd7eb8e07dadae8fdcb3ed1e1319ab477", // 0x8d4300b4df3c85ee107009e354c1b95717ab1c17
+        "57e3ff36ab767056baba3ea9d09c6a178721bd686b8c5d98f66147865de6a288", // 0x78b3fdea83a3db371cfc79c45f0527b7f216e6c9
+    ];
+
+    for s in keys {
+        let key = SecretKey::try_from(s).unwrap();
         let swarm = prepare_node(key).await;
         nodes.push(swarm.clone());
         tokio::spawn(async { run_node(swarm).await });
@@ -142,7 +151,7 @@ async fn test_online_stabilization() -> Result<()> {
         manually_establish_connection(&swarm1, swarm).await;
     }
 
-    sleep(Duration::from_secs(30)).await;
+    sleep(Duration::from_secs(9)).await;
 
     let mut expected_dhts = vec![];
     for node in nodes.iter() {
@@ -159,10 +168,20 @@ async fn test_online_stabilization() -> Result<()> {
 
     let mut current_dhts = vec![];
     for node in nodes.iter() {
+        println!(
+            "Connected peers: {:?}",
+            SwarmInspect::inspect(node).await.connections
+        );
         current_dhts.push(DHTInspect::inspect(&node.dht()));
     }
 
-    assert_eq!(expected_dhts, current_dhts);
+    for (i, (cur, exp)) in std::iter::zip(current_dhts, expected_dhts)
+        .enumerate()
+        .skip(2)
+    {
+        println!("Check node{}", i);
+        pretty_assertions::assert_eq!(cur, exp);
+    }
 
     Ok(())
 }

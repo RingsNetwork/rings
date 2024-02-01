@@ -109,10 +109,6 @@ impl MessageHandler {
     ) -> Result<Vec<MessageHandlerEvent>> {
         let message: Message = payload.transaction.data()?;
 
-        #[cfg(test)]
-        {
-            println!("{} got msg {}", self.dht.did, &message);
-        }
         tracing::debug!(
             "START HANDLE MESSAGE: {} {}",
             &payload.transaction.tx_id,
@@ -146,6 +142,7 @@ impl MessageHandler {
 #[cfg(not(feature = "wasm"))]
 #[cfg(test)]
 pub mod tests {
+    use dashmap::DashMap;
     use futures::lock::Mutex;
     use tokio::time::sleep;
     use tokio::time::Duration;
@@ -280,13 +277,56 @@ pub mod tests {
     }
 
     pub async fn wait_for_msgs(node1: &Swarm, node2: &Swarm, node3: &Swarm) {
-        loop {
-            tokio::select! {
-                _ = node1.listen_once() => {}
-                _ = node2.listen_once() => {}
-                _ = node3.listen_once() => {}
-                _ = sleep(Duration::from_secs(3)) => break
+        let did_names: DashMap<Did, &str, _> = DashMap::new();
+        did_names.insert(node1.did(), "node1");
+        did_names.insert(node2.did(), "node2");
+        did_names.insert(node3.did(), "node3");
+
+        let listen1 = async {
+            loop {
+                tokio::select! {
+                    Some((payload, _)) = node1.listen_once() => {
+                        println!(
+                            "Msg {} => node1 : {:?}",
+                            *did_names.get(&payload.signer()).unwrap(),
+                            payload.transaction.data::<Message>().unwrap()
+                        )
+                    }
+                    _ = sleep(Duration::from_secs(3)) => break
+                }
             }
-        }
+        };
+
+        let listen2 = async {
+            loop {
+                tokio::select! {
+                    Some((payload, _)) = node2.listen_once() => {
+                        println!(
+                            "Msg {} => node2 : {:?}",
+                            *did_names.get(&payload.signer()).unwrap(),
+                            payload.transaction.data::<Message>().unwrap()
+                        )
+                    }
+                    _ = sleep(Duration::from_secs(3)) => break
+                }
+            }
+        };
+
+        let listen3 = async {
+            loop {
+                tokio::select! {
+                    Some((payload, _)) = node3.listen_once() => {
+                        println!(
+                            "Msg {} => node3 : {:?}",
+                            *did_names.get(&payload.signer()).unwrap(),
+                            payload.transaction.data::<Message>().unwrap()
+                        )
+                    }
+                    _ = sleep(Duration::from_secs(3)) => break
+                }
+            }
+        };
+
+        futures::join!(listen1, listen2, listen3);
     }
 }
