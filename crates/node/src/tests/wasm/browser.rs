@@ -1,69 +1,17 @@
-use std::sync::Arc;
-
-use rings_rpc::protos::rings_node::*;
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::*;
 
+use super::create_connection;
+use super::get_peers;
+use super::new_provider;
 use crate::backend::types::BackendMessage;
 use crate::prelude::rings_core::utils;
 use crate::prelude::rings_core::utils::js_value;
 use crate::provider::browser;
 use crate::provider::browser::Peer;
-use crate::provider::Provider;
-use crate::tests::wasm::prepare_processor;
 
+#[cfg(feature = "browser_chrome_test")]
 wasm_bindgen_test_configure!(run_in_browser);
-
-async fn new_provider() -> Provider {
-    let processor = prepare_processor().await;
-    Provider::from_processor(Arc::new(processor))
-}
-
-async fn get_peers(provider: &Provider) -> Vec<Peer> {
-    let peers = JsFuture::from(provider.list_peers()).await.ok().unwrap();
-    let peers: js_sys::Array = peers.into();
-    let peers: Vec<Peer> = peers
-        .iter()
-        .flat_map(|x| js_value::deserialize(&x).ok())
-        .collect::<Vec<_>>();
-    peers
-}
-
-async fn create_connection(provider1: &Provider, provider2: &Provider) {
-    let req0 = CreateOfferRequest {
-        did: provider2.address(),
-    };
-    let resp0 = JsFuture::from(provider1.request(
-        "createOffer".to_string(),
-        js_value::serialize(&req0).unwrap(),
-    ))
-    .await
-    .unwrap();
-
-    let offer = js_value::deserialize::<CreateOfferResponse>(resp0)
-        .unwrap()
-        .offer;
-
-    let req1 = AnswerOfferRequest { offer };
-    let resp1 = JsFuture::from(provider2.request(
-        "answerOffer".to_string(),
-        js_value::serialize(&req1).unwrap(),
-    ))
-    .await
-    .unwrap();
-
-    let answer = js_value::deserialize::<AnswerOfferResponse>(resp1)
-        .unwrap()
-        .answer;
-
-    let req2 = AcceptAnswerRequest { answer };
-    let _resp2 = JsFuture::from(provider1.request(
-        "acceptAnswer".to_string(),
-        js_value::serialize(&req2).unwrap(),
-    ))
-    .await
-    .unwrap();
-}
 
 #[wasm_bindgen_test]
 async fn test_two_provider_connect_and_list() {

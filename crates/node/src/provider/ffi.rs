@@ -275,7 +275,7 @@ pub unsafe extern "C" fn new_provider_with_callback(
     let backend = Backend::new(provider.clone(), Box::new(callback_with_rt.clone()));
 
     provider
-        .set_swarm_callback(Arc::new(backend))
+        .set_swarm_callback_internal(Arc::new(backend))
         .expect("Failed to set callback");
     let ret: ProviderPtr = (&ProviderWithRuntime::new(provider.clone(), runtime.clone())).into();
     ret

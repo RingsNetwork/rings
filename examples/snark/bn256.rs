@@ -1,6 +1,7 @@
 use std::rc::Rc;
 
 use rings_snark::circuit;
+use rings_snark::circuit::Input;
 use rings_snark::prelude::nova::provider::ipa_pc::EvaluationEngine;
 use rings_snark::prelude::nova::provider::PallasEngine;
 use rings_snark::prelude::nova::provider::VestaEngine;
@@ -21,25 +22,25 @@ async fn main() {
     type F2 = <E2 as Engine>::Scalar;
 
     let r1cs = r1cs::load_r1cs::<F1>(
-        r1cs::Path::Local("src/tests/circoms/simple_bn256_priv.r1cs".to_string()),
+        r1cs::Path::Local("examples/snark/circoms/simple_bn256.r1cs".to_string()),
         r1cs::Format::Bin,
     )
     .await
     .unwrap();
     let witness_calculator = r1cs::load_circom_witness_calculator(r1cs::Path::Local(
-        "src/tests/circoms/simple_bn256_priv.wasm".to_string(),
+        "examples/snark/circoms/simple_bn256.wasm".to_string(),
     ))
     .await
     .unwrap();
 
     let circuit_generator = circuit::WasmCircuitGenerator::<F1>::new(r1cs, witness_calculator);
 
-    let input_0: Vec<(String, Vec<F1>)> =
-        vec![("step_in".to_string(), vec![F1::from(4u64), F1::from(2u64)])];
-    let private_inputs: Vec<Vec<(String, Vec<F1>)>> = vec![
-        vec![("adder".to_string(), vec![F1::from(1u64)])],
-        vec![("adder".to_string(), vec![F1::from(42u64)])],
-        vec![("adder".to_string(), vec![F1::from(33u64)])],
+    let input_0: Input<F1> =
+        vec![("step_in".to_string(), vec![F1::from(4u64), F1::from(2u64)])].into();
+    let private_inputs: Vec<Input<F1>> = vec![
+        vec![("adder".to_string(), vec![F1::from(1u64)])].into(),
+        vec![("adder".to_string(), vec![F1::from(42u64)])].into(),
+        vec![("adder".to_string(), vec![F1::from(33u64)])].into(),
     ];
     assert_eq!(private_inputs.len(), 3);
 
@@ -54,8 +55,13 @@ async fn main() {
     assert_eq!(recursive_circuits.len(), 3);
     // init pp with ouptn inputs
     let pp = snark::SNARK::<E1, E2>::gen_pp::<S1, S2>(circuit_0.clone());
-    let mut rec_snark_iter =
-        snark::SNARK::<E1, E2>::new(&recursive_circuits[0].clone(), input_0.clone(), &pp).unwrap();
+    let mut rec_snark_iter = snark::SNARK::<E1, E2>::new(
+        &recursive_circuits[0].clone(),
+        &pp,
+        vec![F1::from(4u64), F1::from(2u64)],
+        vec![F2::from(0)],
+    )
+    .unwrap();
 
     for c in recursive_circuits {
         rec_snark_iter.foldr(&pp, &c).unwrap();

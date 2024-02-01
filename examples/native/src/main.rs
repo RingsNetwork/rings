@@ -8,7 +8,6 @@ use rings_core::session::SessionSkBuilder;
 use rings_core::storage::MemStorage;
 use rings_node::backend::types::BackendMessage;
 use rings_node::backend::types::MessageHandler;
-use rings_node::backend::Backend;
 use rings_node::logging::init_logging;
 use rings_node::logging::LogLevel;
 use rings_node::processor::ProcessorBuilder;
@@ -66,8 +65,7 @@ async fn main() {
     let provider = Arc::new(Provider::from_processor(processor));
 
     // Setup your callback handler.
-    let backend = Arc::new(Backend::new(provider.clone(), Box::new(BackendBehaviour)));
-    provider.set_swarm_callback(backend).unwrap();
+    provider.set_backend_callback(BackendBehaviour).unwrap();
 
     // Listen messages from peers.
     let listening_provider = provider.clone();

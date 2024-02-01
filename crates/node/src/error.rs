@@ -18,6 +18,8 @@ pub enum Error {
     UnknownRpcError = 101,
     #[error("Internal rpc services error: {0}.")]
     InternalRpcError(#[from] jsonrpc_core::Error) = 102,
+    #[error("Uuid error: {0}")]
+    UuidError(#[from] uuid::Error) = 103,
     #[error("Connection not found.")]
     ConnectionNotFound = 203,
     #[error("Create connection error: {0}.")]
@@ -120,6 +122,22 @@ pub enum Error {
     TunnelNotFound = 1303,
     #[error("Tunnel error: {0:?}")]
     TunnelError(TunnelDefeat) = 1304,
+    #[error("Snark error: {0}")]
+    RingsSNARKError(#[from] rings_snark::error::Error) = 1400,
+    #[error("Snark curve not match")]
+    SNARKCurveNotMatch() = 1401,
+    #[error("Snark handle message error: {0}")]
+    SNARKHandleMessage(String) = 1402,
+    #[error("Wrong field, should be {0}")]
+    SNARKWrongField(String) = 1403,
+    #[cfg(feature = "browser")]
+    #[error("range error when covering js_sys::BigInt to PrimeField: {0}")]
+    SNARKFFRangeError(String) = 1404,
+    #[cfg(feature = "browser")]
+    #[error("Failed to load bigint to repr string, it's empty")]
+    SNARKBigIntValueEmpty() = 1405,
+    #[error("Failed to load string to PrimeField")]
+    FailedToLoadFF() = 1406,
 }
 
 impl Error {
@@ -154,8 +172,6 @@ impl From<Error> for jsonrpc_core::Error {
 impl From<rings_rpc::error::Error> for Error {
     fn from(e: rings_rpc::error::Error) -> Self {
         match e {
-            rings_rpc::error::Error::DecodeError => Error::DecodeError,
-            rings_rpc::error::Error::EncodeError => Error::EncodeError,
             rings_rpc::error::Error::InvalidMethod => Error::InvalidMethod,
             rings_rpc::error::Error::RpcError(v) => Error::RemoteRpcError(v.to_string()),
             rings_rpc::error::Error::InvalidSignature => Error::InvalidData,

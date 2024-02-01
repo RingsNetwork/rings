@@ -139,7 +139,7 @@ impl Provider {
             if let Some(cb) = backend_behaviour {
                 let backend: Backend = Backend::new(Arc::new(provider.clone()), Box::new(cb));
                 provider
-                    .set_swarm_callback(Arc::new(backend))
+                    .set_swarm_callback_internal(Arc::new(backend))
                     .expect("Failed on set swarm callback");
             }
 
@@ -199,7 +199,7 @@ impl Provider {
             if let Some(cb) = backend_behaviour {
                 let backend: Backend = Backend::new(Arc::new(provider.clone()), Box::new(cb));
                 provider
-                    .set_swarm_callback(Arc::new(backend))
+                    .set_swarm_callback_internal(Arc::new(backend))
                     .expect("Failed on set swarm callback");
             }
             Ok(JsValue::from(provider))

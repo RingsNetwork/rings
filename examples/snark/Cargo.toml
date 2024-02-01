@@ -7,10 +7,19 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+async-trait = { workspace = true }
+rings-core = { workspace = true }
+rings-node = { workspace = true }
+rings-rpc = { workspace = true }
 rings-snark = { workspace = true }
 tokio = { version = "1.13.0", features = ["full"] }
 
 [[example]]
 name = "rings-bn256-example"
 path = "bn256.rs"
+bench = false
+
+[[example]]
+name = "rings-merkle-tree-example"
+path = "merkle_tree.rs"
 bench = false

@@ -9,48 +9,45 @@ repository.workspace = true
 
 [features]
 default = []
-
+llvm = []
 [dependencies]
 # https://github.com/microsoft/Nova
-nova-snark = "0.32"
+nova-snark = { git = "https://github.com/RingsNetwork/nova", version = "0.33", rev = "ea333243b57f3ae794f1d8f6ff00f89adc94bfac" }
 
 ff = { version = "0.13", features = ["derive"] }
 
+# for calculate witness
+fnv = "1.0.7"
+
 # ref: https://electriccoin.co/blog/the-pasta-curves-for-halo-2-and-beyond/
-circom-scotia = { git = "https://github.com/RingsNetwork/circom-scotia", rev = "d453cc8cf55e62712762282b2c531b7a02787190", features = ["circom-2"] }
-pasta_curves = "0.5"
-# We wrapped cicrom as binary
-circom = { git = "https://github.com/RingsNetwork/circom", rev = "ea8c4cd987f035ef4f08e17269d9b68cb5ab9122", version = "2.1.7" }
-# Required for avoiding error from circom/parser
+cfg-if = "1.0.0"
 lalrpop = { version = "0.19.9", features = ["lexer"] }
 log = { version = "0.4", features = ["std"] }
+pasta_curves = "0.5"
 
 # for load r1cs
+bellman_ce = { git = "https://github.com/matter-labs/bellman", version = "0.3.2" }
+bellpepper-core = "0.4.0"
 byteorder = "1.4.3"
 crypto-bigint = { version = "0.5.2", features = ["serde"] }
-serde = { version = "1.0.136", features = ["derive"] }
+itertools = "0.9.0"
+reqwest = { version = "0.11", features = ["json", "rustls-tls"], default-features = false }
+serde = { version = "1.0.136", features = ["derive", "rc"] }
 serde_json = "1.0.70"
 thiserror = "1"
 
-bellpepper-core = "0.4.0"
-reqwest = { version = "0.11", features = ["json", "rustls-tls"], default-features = false }
-
-[dev-dependencies]
-# only for unitest
-tokio = { version = "1.13.0", features = ["full"] }
+eyre = "0.6.11"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-wasmer = "4.0.0"
+wasmer = "4.2.5"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasmer = { version = "4.0.0", features = ["std", "js"], default-features = false }
+wasmer = { version = "4.2.5", features = ["js-default"], default-features = false }
 
-[package.metadata.docs.rs]
-rustdoc-args = [
-    "--html-in-header",
-    "crates/snark/docs/katex.html",
-]
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+memory-stats = "1.0.0"
+tokio = { version = "1.13.0", features = ["full"] }
 
-[[bin]]
-name = "circom"
-path = "bin/circom.rs"
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen = { workspace = true, features = ["serde-serialize"] }
+wasm-bindgen-test = { version = "0.3.0" }

@@ -7,9 +7,14 @@ use std::sync::Arc;
 use bytes::Bytes;
 use rings_core::message::MessagePayload;
 use rings_rpc::protos::rings_node::SendBackendMessageRequest;
+use rings_snark::prelude::nova::provider::mlkzg::Bn256EngineKZG;
+use rings_snark::prelude::nova::provider::GrumpkinEngine;
+use rings_snark::prelude::nova::provider::PallasEngine;
+use rings_snark::prelude::nova::provider::VestaEngine;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::backend::snark::SNARKGenerator;
 use crate::error::Error;
 use crate::provider::Provider;
 
@@ -26,6 +31,52 @@ pub enum BackendMessage {
     ServiceMessage(ServiceMessage),
     /// Plain text
     PlainText(String),
+    /// SNARK with curve pallas and vesta
+    SNARKTaskMessage(SNARKTaskMessage),
+}
+
+/// Message for snark task
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SNARKTaskMessage {
+    /// uuid of task
+    pub task_id: uuid::Uuid,
+    /// task details
+    #[serde(
+        serialize_with = "crate::util::serialize_gzip",
+        deserialize_with = "crate::util::deserialize_gzip"
+    )]
+    pub task: SNARKTask,
+}
+
+/// Message types for snark task, including proof and verify
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum SNARKTask {
+    /// Proof task
+    SNARKProof(SNARKProofTask),
+    /// Verify task
+    SNARKVerify(SNARKVerifyTask),
+}
+
+/// Message type of snark proof
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum SNARKProofTask {
+    /// SNARK with curve pallas and vesta
+    PallasVasta(SNARKGenerator<PallasEngine, VestaEngine>),
+    /// SNARK with curve vesta and pallas
+    VastaPallas(SNARKGenerator<VestaEngine, PallasEngine>),
+    /// SNARK with curve bn256 whth KZG multi linear commitment and grumpkin
+    Bn256KZGGrumpkin(SNARKGenerator<Bn256EngineKZG, GrumpkinEngine>),
+}
+
+/// Message type of snark proof
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum SNARKVerifyTask {
+    /// SNARK with curve pallas and vesta
+    PallasVasta(String),
+    /// SNARK with curve vesta and pallas
+    VastaPallas(String),
+    /// SNARK with curve bn256 whth KZG multi linear commitment and grumpkin
+    Bn256KZGGrumpkin(String),
 }
 
 /// ServiceMessage
@@ -130,6 +181,12 @@ impl From<ServiceMessage> for BackendMessage {
     }
 }
 
+impl From<SNARKTaskMessage> for BackendMessage {
+    fn from(val: SNARKTaskMessage) -> Self {
+        BackendMessage::SNARKTaskMessage(val)
+    }
+}
+
 impl From<IOErrorKind> for TunnelDefeat {
     fn from(kind: IOErrorKind) -> TunnelDefeat {
         match kind {
@@ -141,6 +198,85 @@ impl From<IOErrorKind> for TunnelDefeat {
         }
     }
 }
+
+/// This macro is aims to generate code like
+/// '''
+/// impl <T1, T2, T3> MessageHandler<BackendMessage> for (T1, T2, T3)
+/// where
+///     T1: MessageHandler<BackendMessage> + Send + Sync + Sized,
+///     T2: MessageHandler<BackendMessage> + Send + Sync + Sized,
+///     T3: MessageHandler<BackendMessage> + Send + Sync + Sized,
+/// {
+///     async fn handle_message(
+///         &self,
+///         provider: Arc<Provider>,
+///         ctx: &MessagePayload,
+///         msg: &BackendMessage,
+///     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+///         self.0.handle_message(provider.clone(), ctx, msg).await?;
+///         self.1.handle_message(provider.clone(), ctx, msg).await?;
+///         self.2.handle_message(provider.clone(), ctx, msg).await?;
+///         Ok(())
+///     }
+/// }
+/// '''ignore
+macro_rules! impl_message_handler_for_tuple {
+    // Case for WebAssembly target (`wasm`)
+    ($($T:ident),+; $($n: tt),+; wasm) => {
+        #[async_trait::async_trait(?Send)]
+        impl<$($T: MessageHandler<BackendMessage>),+> MessageHandler<BackendMessage> for ($($T),+)
+        {
+            async fn handle_message(
+                &self,
+                provider: Arc<Provider>,
+                ctx: &MessagePayload,
+                msg: &BackendMessage,
+            ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+                $(
+                    self.$n.handle_message(provider.clone(), ctx, msg).await?;
+                )+
+                Ok(())
+            }
+        }
+    };
+
+    // Case for non-WebAssembly targets
+    ($($T:ident),+; $($n: tt),+; non_wasm) => {
+        #[async_trait::async_trait]
+        impl<$($T: MessageHandler<BackendMessage> + Send + Sync),+> MessageHandler<BackendMessage> for ($($T),+)
+        {
+            async fn handle_message(
+                &self,
+                provider: Arc<Provider>,
+                ctx: &MessagePayload,
+                msg: &BackendMessage,
+            ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+                $(
+                    self.$n.handle_message(provider.clone(), ctx, msg).await?;
+                )+
+                Ok(())
+            }
+        }
+    };
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl_message_handler_for_tuple!(T1, T2; 0, 1; non_wasm);
+#[cfg(not(target_family = "wasm"))]
+impl_message_handler_for_tuple!(T1, T2, T3; 0, 1, 2; non_wasm);
+#[cfg(not(target_family = "wasm"))]
+impl_message_handler_for_tuple!(T1, T2, T3, T4; 0, 1, 2, 3; non_wasm);
+#[cfg(not(target_family = "wasm"))]
+impl_message_handler_for_tuple!(T1, T2, T3, T4, T5; 0, 1, 2, 3, 4; non_wasm);
+
+#[cfg(target_family = "wasm")]
+impl_message_handler_for_tuple!(T1, T2; 0, 1; wasm);
+#[cfg(target_family = "wasm")]
+impl_message_handler_for_tuple!(T1, T2, T3; 0, 1, 2; wasm);
+#[cfg(target_family = "wasm")]
+impl_message_handler_for_tuple!(T1, T2, T3, T4; 0, 1, 2, 3; wasm);
+#[cfg(target_family = "wasm")]
+impl_message_handler_for_tuple!(T1, T2, T3, T4, T5; 0, 1, 2, 3, 4; wasm);
 
 impl BackendMessage {
     /// Convert to SendBackendMessageRequest
