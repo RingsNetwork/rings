@@ -78,7 +78,7 @@ pub async fn test_calcu_witness_bn256() -> Result<()> {
 pub async fn test_load_witness_remote() -> Result<()> {
     type F = <VestaEngine as Engine>::Base;
 
-    let url = "https://github.com/RingsNetwork/rings/raw/master/crates/snark/src/tests/circoms/simple_bn256.wasm";
+    let url = "https://github.com/RingsNetwork/rings/raw/master/crates/snark/src/tests/native/circoms/simple_bn256.wasm";
     let mut witness_calculator =
         r1cs::load_circom_witness_calculator(r1cs::Path::Remote(url.to_string()))
             .await
