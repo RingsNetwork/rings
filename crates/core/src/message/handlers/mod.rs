@@ -282,31 +282,51 @@ pub mod tests {
         did_names.insert(node2.did(), "node2");
         did_names.insert(node3.did(), "node3");
 
-        loop {
-            tokio::select! {
-                Some((payload, _)) = node1.listen_once() => {
-                    println!(
-                        "Msg {} => node1 : {:?}",
-                        *did_names.get(&payload.signer()).unwrap(),
-                        payload.transaction.data::<Message>().unwrap()
-                    )
+        let listen1 = async {
+            loop {
+                tokio::select! {
+                    Some((payload, _)) = node1.listen_once() => {
+                        println!(
+                            "Msg {} => node1 : {:?}",
+                            *did_names.get(&payload.signer()).unwrap(),
+                            payload.transaction.data::<Message>().unwrap()
+                        )
+                    }
+                    _ = sleep(Duration::from_secs(3)) => break
                 }
-                Some((payload, _)) = node2.listen_once() => {
-                    println!(
-                        "Msg {} => node2 : {:?}",
-                        *did_names.get(&payload.signer()).unwrap(),
-                        payload.transaction.data::<Message>().unwrap()
-                    )
-                }
-                Some((payload, _)) = node3.listen_once() => {
-                    println!(
-                        "Msg {} => node3 : {:?}",
-                        *did_names.get(&payload.signer()).unwrap(),
-                        payload.transaction.data::<Message>().unwrap()
-                    )
-                }
-                _ = sleep(Duration::from_secs(3)) => break
             }
-        }
+        };
+
+        let listen2 = async {
+            loop {
+                tokio::select! {
+                    Some((payload, _)) = node2.listen_once() => {
+                        println!(
+                            "Msg {} => node2 : {:?}",
+                            *did_names.get(&payload.signer()).unwrap(),
+                            payload.transaction.data::<Message>().unwrap()
+                        )
+                    }
+                    _ = sleep(Duration::from_secs(3)) => break
+                }
+            }
+        };
+
+        let listen3 = async {
+            loop {
+                tokio::select! {
+                    Some((payload, _)) = node3.listen_once() => {
+                        println!(
+                            "Msg {} => node3 : {:?}",
+                            *did_names.get(&payload.signer()).unwrap(),
+                            payload.transaction.data::<Message>().unwrap()
+                        )
+                    }
+                    _ = sleep(Duration::from_secs(3)) => break
+                }
+            }
+        };
+
+        futures::join!(listen1, listen2, listen3);
     }
 }

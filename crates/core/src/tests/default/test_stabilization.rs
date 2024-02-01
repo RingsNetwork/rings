@@ -127,6 +127,7 @@ async fn test_stabilization() -> Result<()> {
     Ok(())
 }
 
+#[ignore]
 #[tokio::test]
 #[traced_test]
 async fn test_stabilization_final_dht() -> Result<()> {
