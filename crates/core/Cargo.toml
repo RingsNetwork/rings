@@ -112,7 +112,9 @@ web-sys = { version = "0.3.56", optional = true, features = [
 ] }
 
 [dev-dependencies]
+pretty_assertions = "1.4.0"
 tracing-subscriber = { version = "0.3.15", features = ["ansi"] }
+tracing-test = "0.2.4"
 tracing-wasm = "0.2.1"
 wasm-bindgen-test = "0.3.0"
 

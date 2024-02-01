@@ -331,15 +331,6 @@ impl PayloadSender for Swarm {
     }
 
     async fn do_send_payload(&self, did: Did, payload: MessagePayload) -> Result<()> {
-        #[cfg(test)]
-        {
-            println!("+++++++++++++++++++++++++++++++++");
-            println!("node {:?}", self.dht.did);
-            println!("Sent {:?}", payload.clone());
-            println!("node {:?}", payload.relay.next_hop);
-            println!("+++++++++++++++++++++++++++++++++");
-        }
-
         let conn = self
             .get_and_check_connection(did)
             .await
