@@ -1,6 +1,7 @@
 //! implement bellman proof system for circuit, this is useful for plonk and growth16
 
 use super::Circuit;
+use super::TrivialCircuit;
 use crate::prelude::bellman;
 use crate::prelude::bellman::pairing::Engine;
 use crate::prelude::bellman::ConstraintSystem;
@@ -52,5 +53,15 @@ where E::Fr: ff::PrimeField
             }
         }
         Ok(())
+    }
+}
+
+
+impl<E: Engine> bellman::Circuit<E> for TrivialCircuit<E::Fr>
+where E::Fr: ff::PrimeField
+{
+    //noinspection RsBorrowChecker
+    fn synthesize<CS: ConstraintSystem<E>>(self, _cs: &mut CS) -> Result<(), SynthesisError> {
+	Ok(())
     }
 }

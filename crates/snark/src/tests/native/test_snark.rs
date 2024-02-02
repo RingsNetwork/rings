@@ -6,6 +6,7 @@ use crate::error::Result;
 use crate::prelude::nova::provider::ipa_pc::EvaluationEngine;
 use crate::prelude::nova::provider::PallasEngine;
 use crate::prelude::nova::provider::VestaEngine;
+use crate::prelude::nova::provider::Bn256Engine;
 use crate::prelude::nova::spartan::snark::RelaxedR1CSSNARK;
 use crate::prelude::nova::traits::Engine;
 use crate::r1cs;

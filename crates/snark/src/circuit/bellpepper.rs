@@ -1,6 +1,7 @@
 //! implement bellpepper proof system for circuit
 
 use super::Circuit;
+use super::TrivialCircuit;
 use crate::prelude::bellpepper;
 use crate::prelude::bellpepper::num::AllocatedNum;
 use crate::prelude::bellpepper::ConstraintSystem;
@@ -51,5 +52,11 @@ impl<F: PrimeField> bellpepper::Circuit<F> for Circuit<F> {
         }
 
         Ok(())
+    }
+}
+
+impl<F: PrimeField> bellpepper::Circuit<F> for TrivialCircuit<F> {
+    fn synthesize<CS: ConstraintSystem<F>>(self, _cs: &mut CS) -> Result<(), SynthesisError> {
+	Ok(())
     }
 }

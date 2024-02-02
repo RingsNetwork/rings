@@ -291,3 +291,25 @@ impl<F: PrimeField> StepCircuit<F> for Circuit<F> {
         Ok(z_out)
     }
 }
+
+
+/// A trivial step circuit that simply returns the input
+/// from <https://github.com/microsoft/Nova/blob/master/src/traits/circuit.rs#L25>
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TrivialCircuit<F: PrimeField> {
+  _p: core::marker::PhantomData<F>,
+}
+
+impl<F: PrimeField> StepCircuit<F> for TrivialCircuit<F> {
+  fn arity(&self) -> usize {
+    1
+  }
+
+  fn synthesize<CS: ConstraintSystem<F>>(
+    &self,
+    _cs: &mut CS,
+    z: &[AllocatedNum<F>],
+  ) -> core::result::Result<Vec<AllocatedNum<F>>, SynthesisError> {
+    Ok(z.to_vec())
+  }
+}
