@@ -1,0 +1,18 @@
+name: Notify New Issue to Developers
+
+on:
+  issues:
+    types:
+      - opened
+
+jobs:
+  label_issue:
+    runs-on: ubuntu-latest
+    steps:
+      - name: send telegram message on new issue
+        uses: appleboy/telegram-action@v0.1.1
+        with:
+          to: ${{ secrets.RINGS_NETWORK_TELEGRAM_GROUP_ID }}
+          token: ${{ secrets.RINGS_NETWORK_MONITOR_BOT_TOKEN }}
+          message: |
+            ${{ github.actor }} opened new issue: ${{ github.event.issue.html_url }}
