@@ -1,6 +1,6 @@
 #![warn(missing_docs)]
 
-//! This module defines distributed idendity for rings network.
+//! This module defines distributed identity for rings network.
 //! The Did of rings network is also a abstract Ring structure of abstract algebra.
 //! The Did is implemented with H160, which is a 160 bits, which can present as:
 //!
@@ -60,7 +60,7 @@ impl std::fmt::Display for Did {
     }
 }
 
-/// Bias Did is a special Did which set origin Did's idendity to bias
+/// Bias Did is a special Did which set origin Did's identity to bias
 /// The underlying concept of BiasId is that while we cannot determine the order between two Dids, such as `did_a` and `did_b`,
 /// we can establish a reference Did, referred to as `did_x`, and compare which one is closer to it. Hence, we introduced BiasId,
 /// where a bias value is applied. Essentially, it considers the midpoint `x` as the zero point within the Ring algebraic structure for observation.
