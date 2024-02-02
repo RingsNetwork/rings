@@ -85,12 +85,20 @@ impl Stabilization {
         });
         if self.chord.did != successor_min {
             for s in successor_list {
+		// because we have multiple successor,
+		// so self did may not the closest predecessor of target successor
+		// it may return self.did, if not closest predecessor
+		// found for target successor
+		let did = {
+		    let finger = self.chord.lock_finger()?;
+		    finger.closest_predecessor(s)
+		};
                 tracing::debug!("STABILIZATION notify_predecessor: {:?}", s);
                 let payload = MessagePayload::new_send(
                     msg.clone(),
                     self.swarm.session_sk(),
                     s,
-                    self.swarm.did(),
+                    did,
                 )?;
                 self.swarm.send_payload(payload).await?;
             }
