@@ -312,8 +312,8 @@ impl Chord<PeerRingAction> for PeerRing {
     /// Handle notification from a node that thinks a did is the predecessor of current node.
     /// The `did` in parameters is the Did of that predecessor.
     /// If that node is closer to current node or current node has no predecessor, set it to the did.
-    /// This method will return current predecessor after setting.
-    fn notify(&self, did: Did) -> Result<Did> {
+    /// If this function return None, means no side-effect applied.
+    fn notify(&self, did: Did) -> Result<Option<Did>> {
         let mut predecessor = self.lock_predecessor()?;
 
         match *predecessor {
@@ -322,15 +322,15 @@ impl Chord<PeerRingAction> for PeerRing {
                 // Otherwise tell the real predecessor back.
                 if self.bias(pre) < self.bias(did) {
                     *predecessor = Some(did);
-                    Ok(did)
+                    Ok(Some(did))
                 } else {
-                    Ok(pre)
+                    Ok(None)
                 }
             }
             None => {
                 // Self has no predecessor, set it to the did directly.
                 *predecessor = Some(did);
-                Ok(did)
+                Ok(Some(did))
             }
         }
     }

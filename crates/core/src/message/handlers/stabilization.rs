@@ -22,15 +22,22 @@ impl HandleMsg<NotifyPredecessorSend> for MessageHandler {
         ctx: &MessagePayload,
         msg: &NotifyPredecessorSend,
     ) -> Result<Vec<MessageHandlerEvent>> {
-        let predecessor = self.dht.notify(msg.did)?;
+	// side-effect here
+	if let Some(d) = self.dht.notify(msg.did)? {
+	    tracing::debug!("Predecessor changed to {}", d);
+	}
+	let predecessor = { *self.dht.lock_predecessor()? };
 
-        if predecessor != ctx.relay.origin_sender() {
-            return Ok(vec![MessageHandlerEvent::SendReportMessage(
-                ctx.clone(),
-                Message::NotifyPredecessorReport(NotifyPredecessorReport { did: predecessor }),
-            )]);
-        }
-
+        if let Some(did) = predecessor {
+	    // if successor known some did more closer
+	    // response that did to msg sender
+            if did != ctx.relay.origin_sender() {
+                return Ok(vec![MessageHandlerEvent::SendReportMessage(
+                    ctx.clone(),
+                    Message::NotifyPredecessorReport(NotifyPredecessorReport { did }),
+                )]);
+            }
+	}
         Ok(vec![])
     }
 }

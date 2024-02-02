@@ -35,7 +35,8 @@ pub trait Chord<Action> {
     /// Notify the DHT that a node is its predecessor.
     /// According to the paper, this method should be called periodically.
     /// This method should return the predecessor after updating.
-    fn notify(&self, did: Did) -> Result<Did>;
+    /// If this function return None, means no side-effect applied.
+    fn notify(&self, did: Did) -> Result<Option<Did>>;
 
     /// Fix finger table by finding the successor for each finger.
     /// According to the paper, this method should be called periodically.
