@@ -225,6 +225,13 @@ impl PeerRing {
         self.predecessor.lock().map_err(|_| Error::DHTSyncLockError)
     }
 
+    /// set predecessor
+    pub fn set_predecessor(&self, did: Did) -> Result<()> {
+        let mut predecessor = self.lock_predecessor()?;
+	*predecessor = Some(did);
+	Ok(())
+    }
+
     /// Remove a node from finger table.
     /// Also remove it from successor sequence.
     /// If successor_seq become empty, try setting the closest node to it.
@@ -253,6 +260,8 @@ impl PeerRing {
     }
 }
 
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
 impl Chord<PeerRingAction> for PeerRing {
     /// Join a ring containing a node identified by `did`.
     /// This method is usually invoked to maintain successor sequence and finger table
@@ -313,25 +322,40 @@ impl Chord<PeerRingAction> for PeerRing {
     /// The `did` in parameters is the Did of that predecessor.
     /// If that node is closer to current node or current node has no predecessor, set it to the did.
     /// If this function return None, means no side-effect applied.
-    fn notify(&self, did: Did) -> Result<Option<Did>> {
-        let mut predecessor = self.lock_predecessor()?;
-
-        match *predecessor {
+    async fn notify(&self, wdid: impl LiveDid) -> Result<PeerRingAction> {
+	let did = wdid.clone().into();
+	let predecessor = {
+	    let pre = self.lock_predecessor()?;
+	    pre.clone()
+	};
+        match predecessor {
             Some(pre) => {
                 // If the did is closer to self than predecessor, set it to the predecessor.
                 // Otherwise tell the real predecessor back.
+		// check did is connected, else try connect to it
                 if self.bias(pre) < self.bias(did) {
-                    *predecessor = Some(did);
-                    Ok(Some(did))
+		    // check did is connected
+		    if wdid.live().await {
+			self.set_predecessor(did.clone())?;
+			Ok(PeerRingAction::Some(did))
+		    } else {
+			Ok(PeerRingAction::RemoteAction(did.into(), RemoteAction::TryConnect))
+		    }
                 } else {
-                    Ok(None)
+                    Ok(PeerRingAction::None)
                 }
             }
             None => {
                 // Self has no predecessor, set it to the did directly.
-                *predecessor = Some(did);
-                Ok(Some(did))
-            }
+		// check did is connected, else try connect to it
+		if wdid.live().await {
+		    self.set_predecessor(did.clone())?;
+                    Ok(PeerRingAction::Some(did))
+		}
+		else {
+		    Ok(PeerRingAction::RemoteAction(did, RemoteAction::TryConnect))
+		}
+	    }
         }
     }
 
@@ -570,12 +594,9 @@ impl CorrectChord<PeerRingAction> for PeerRing {
         Ok(PeerRingAction::MultiActions(ret))
     }
 
-    /// TODO: Please check this function and make sure it is correct.
-    /// TODO: Please comment this with clear description.
     /// Rectify Operation in the paper.
-    fn rectify(&self, pred: Did) -> Result<()> {
-        self.notify(pred)?;
-        Ok(())
+    async fn rectify(&self, pred: impl LiveDid) -> Result<PeerRingAction> {
+        self.notify(pred).await
     }
 
     /// Pre-Stabilize Operation:

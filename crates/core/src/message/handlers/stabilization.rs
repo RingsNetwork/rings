@@ -1,6 +1,5 @@
 use async_trait::async_trait;
-
-use crate::dht::Chord;
+use crate::dht::successor::SuccessorReader;
 use crate::dht::ChordStorageSync;
 use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
@@ -22,23 +21,8 @@ impl HandleMsg<NotifyPredecessorSend> for MessageHandler {
         ctx: &MessagePayload,
         msg: &NotifyPredecessorSend,
     ) -> Result<Vec<MessageHandlerEvent>> {
-	// side-effect here
-	if let Some(d) = self.dht.notify(msg.did)? {
-	    tracing::debug!("Predecessor changed to {}", d);
-	}
-	let predecessor = { *self.dht.lock_predecessor()? };
-
-        if let Some(did) = predecessor {
-	    // if successor known some did more closer
-	    // response that did to msg sender
-            if did != ctx.relay.origin_sender() {
-                return Ok(vec![MessageHandlerEvent::SendReportMessage(
-                    ctx.clone(),
-                    Message::NotifyPredecessorReport(NotifyPredecessorReport { did }),
-                )]);
-            }
-	}
-        Ok(vec![])
+	let ret = vec![MessageHandlerEvent::NotifyDHT(ctx.clone(), msg.did)];
+        Ok(ret)
     }
 }
 
@@ -50,20 +34,33 @@ impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
         _ctx: &MessagePayload,
         msg: &NotifyPredecessorReport,
     ) -> Result<Vec<MessageHandlerEvent>> {
-        let mut events = vec![MessageHandlerEvent::Connect(msg.did)];
+        let (successor_list, successor_max) = {
+            let successor = self.dht.successors();
+            (successor.list()?, successor.max()?)
+        };
+	// check if notified predecessor already included in successor_list
+	if successor_list.contains(&msg.did) {
+	    return Ok(vec![]);
 
-        if let Ok(PeerRingAction::RemoteAction(
-            next,
-            PeerRingRemoteAction::SyncVNodeWithSuccessor(data),
-        )) = self.dht.sync_vnode_with_successor(msg.did).await
-        {
-            events.push(MessageHandlerEvent::SendMessage(
-                Message::SyncVNodeWithSuccessor(SyncVNodeWithSuccessor { data }),
-                next,
-            ))
-        }
+	}
+	// check if notified predecessor are in range of (self did, successor max)
+	// then set notified predecessor into successor list by CONNECT event
+	if self.dht.bias(msg.did) < self.dht.bias(successor_max) {
+            let mut events = vec![MessageHandlerEvent::Connect(msg.did)];
 
-        Ok(events)
+            if let Ok(PeerRingAction::RemoteAction(
+		next,
+		PeerRingRemoteAction::SyncVNodeWithSuccessor(data),
+            )) = self.dht.sync_vnode_with_successor(msg.did).await
+            {
+		events.push(MessageHandlerEvent::SendMessage(
+                    Message::SyncVNodeWithSuccessor(SyncVNodeWithSuccessor { data }),
+                    next,
+		))
+            }
+            return Ok(events)
+	}
+	Ok(vec![])
     }
 }
 

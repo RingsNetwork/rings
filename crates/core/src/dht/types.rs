@@ -1,7 +1,6 @@
 //! DHT types about `Storage` and `PeerRing`.
 #![warn(missing_docs)]
 use async_trait::async_trait;
-
 use super::chord::TopoInfo;
 use super::did::Did;
 use super::vnode::VNodeOperation;
@@ -24,6 +23,8 @@ use crate::error::Result;
 /// Some methods return an `Action` which is used to tell outer the extra action to take
 /// after handling data inside the struct. It's useful since the struct may not work
 /// for managing whole data but for giving strategies by data inside.
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait Chord<Action> {
     /// Join a DHT containing a node identified by `did`.
     fn join(&self, did: Did) -> Result<Action>;
@@ -36,7 +37,7 @@ pub trait Chord<Action> {
     /// According to the paper, this method should be called periodically.
     /// This method should return the predecessor after updating.
     /// If this function return None, means no side-effect applied.
-    fn notify(&self, did: Did) -> Result<Option<Did>>;
+    async fn notify(&self, did: impl LiveDid) -> Result<Action>;
 
     /// Fix finger table by finding the successor for each finger.
     /// According to the paper, this method should be called periodically.
@@ -138,7 +139,7 @@ pub trait CorrectChord<Action>: Chord<Action> {
     /// Rectify Operation in the paper.
     ///
     /// A node rectifies when it is notified.
-    fn rectify(&self, pred: Did) -> Result<()>;
+    async fn rectify(&self, pred: impl LiveDid) -> Result<Action>;
 
     /// Steps before Stabilize Operation.
     ///

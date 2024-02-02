@@ -78,6 +78,9 @@ pub enum MessageHandlerEvent {
     StorageStore(VirtualNode),
     /// Notify a node
     Notify(Did),
+    /// Notify local dht
+    NotifyDHT(MessagePayload, Did),
+
 }
 
 /// MessageHandler will manage resources.

@@ -159,7 +159,7 @@ async fn test_stabilization_final_dht() -> Result<()> {
         for other in nodes.iter() {
             if dht.did != other.did() {
                 dht.join(other.did()).unwrap();
-                dht.notify(other.did()).unwrap();
+                dht.notify(other.did()).await.unwrap();
             }
         }
 
