@@ -97,7 +97,7 @@ impl Stabilization {
                 let payload = MessagePayload::new_send(
                     msg.clone(),
                     self.swarm.session_sk(),
-                    s.clone(),
+                    *s,
                     did,
                 )?;
                 self.swarm.send_payload(payload).await?;

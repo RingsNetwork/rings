@@ -326,7 +326,7 @@ impl Chord<PeerRingAction> for PeerRing {
 	let did = wdid.clone().into();
 	let predecessor = {
 	    let pre = self.lock_predecessor()?;
-	    pre.clone()
+	    *pre
 	};
         match predecessor {
             Some(pre) => {
@@ -336,10 +336,10 @@ impl Chord<PeerRingAction> for PeerRing {
                 if self.bias(pre) < self.bias(did) {
 		    // check did is connected
 		    if wdid.live().await {
-			self.set_predecessor(did.clone())?;
+			self.set_predecessor(did)?;
 			Ok(PeerRingAction::Some(did))
 		    } else {
-			Ok(PeerRingAction::RemoteAction(did.into(), RemoteAction::TryConnect))
+			Ok(PeerRingAction::RemoteAction(did, RemoteAction::TryConnect))
 		    }
                 } else {
                     Ok(PeerRingAction::None)
@@ -349,7 +349,7 @@ impl Chord<PeerRingAction> for PeerRing {
                 // Self has no predecessor, set it to the did directly.
 		// check did is connected, else try connect to it
 		if wdid.live().await {
-		    self.set_predecessor(did.clone())?;
+		    self.set_predecessor(did)?;
                     Ok(PeerRingAction::Some(did))
 		}
 		else {

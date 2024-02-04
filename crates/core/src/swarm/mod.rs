@@ -246,7 +246,7 @@ impl Swarm {
 		let wdid: WrappedDid = WrappedDid::new(self, *did);
 		let ev = self.dht.notify(wdid).await?;
 		match ev {
-		    PeerRingAction::RemoteAction(..) => crate::message::handlers::dht::handle_dht_events(&ev, &ctx).await,
+		    PeerRingAction::RemoteAction(..) => crate::message::handlers::dht::handle_dht_events(&ev, ctx).await,
 		    PeerRingAction::Some(_) | PeerRingAction::None => {
 			let predecessor = { *self.dht.lock_predecessor()? };
 			if let Some(did) = predecessor {
