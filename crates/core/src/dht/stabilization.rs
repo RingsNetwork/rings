@@ -84,22 +84,18 @@ impl Stabilization {
             did: self.chord.did,
         });
         if self.chord.did != successor_min {
-	    for (index, s) in successor_list.iter().enumerate() {
-		// we have multiple successor,
-		// so self did may not the closest predecessor of target successor
-		// it may return self.did, if not closest predecessor
-		let did = if index > 0 {
-		    successor_list[index - 1]
-		} else {
-		    self.swarm.did()
-		};
+            for (index, s) in successor_list.iter().enumerate() {
+                // we have multiple successor,
+                // so self did may not the closest predecessor of target successor
+                // it may return self.did, if not closest predecessor
+                let did = if index > 0 {
+                    successor_list[index - 1]
+                } else {
+                    self.swarm.did()
+                };
                 tracing::debug!("STABILIZATION notify_predecessor: {:?}", s);
-                let payload = MessagePayload::new_send(
-                    msg.clone(),
-                    self.swarm.session_sk(),
-                    *s,
-                    did,
-                )?;
+                let payload =
+                    MessagePayload::new_send(msg.clone(), self.swarm.session_sk(), *s, did)?;
                 self.swarm.send_payload(payload).await?;
             }
             Ok(())

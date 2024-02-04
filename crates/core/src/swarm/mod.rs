@@ -7,7 +7,6 @@ pub mod callback;
 /// Implementations of connection management traits for swarm
 pub mod impls;
 mod types;
-use crate::dht::PeerRingAction;
 use std::sync::Arc;
 use std::sync::RwLock;
 
@@ -31,12 +30,13 @@ use crate::dht::types::Chord;
 use crate::dht::CorrectChord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
+use crate::dht::PeerRingAction;
 use crate::error::Error;
 use crate::error::Result;
 use crate::inspect::SwarmInspect;
 use crate::message;
-use crate::message::types::NotifyPredecessorSend;
 use crate::message::types::NotifyPredecessorReport;
+use crate::message::types::NotifyPredecessorSend;
 use crate::message::ChordStorageInterface;
 use crate::message::Message;
 use crate::message::MessageHandler;
@@ -243,26 +243,30 @@ impl Swarm {
                 }
             }
             MessageHandlerEvent::NotifyDHT(ctx, did) => {
-		let wdid: WrappedDid = WrappedDid::new(self, *did);
-		let ev = self.dht.notify(wdid).await?;
-		match ev {
-		    PeerRingAction::RemoteAction(..) => crate::message::handlers::dht::handle_dht_events(&ev, ctx).await,
-		    PeerRingAction::Some(_) | PeerRingAction::None => {
-			let predecessor = { *self.dht.lock_predecessor()? };
-			if let Some(did) = predecessor {
-			    // if successor known some did more closer
-			    // response that did to msg sender
-			    if did != ctx.relay.origin_sender() {
-				return Ok(vec![MessageHandlerEvent::SendReportMessage(
-				    ctx.clone(),
-				    Message::NotifyPredecessorReport(NotifyPredecessorReport { did }),
-				)]);
-			    }
-			}
-			Ok(vec![])
-		    },
-		    _ => unreachable!()
-		}
+                let wdid: WrappedDid = WrappedDid::new(self, *did);
+                let ev = self.dht.notify(wdid).await?;
+                match ev {
+                    PeerRingAction::RemoteAction(..) => {
+                        crate::message::handlers::dht::handle_dht_events(&ev, ctx).await
+                    }
+                    PeerRingAction::Some(_) | PeerRingAction::None => {
+                        let predecessor = { *self.dht.lock_predecessor()? };
+                        if let Some(did) = predecessor {
+                            // if successor known some did more closer
+                            // response that did to msg sender
+                            if did != ctx.relay.origin_sender() {
+                                return Ok(vec![MessageHandlerEvent::SendReportMessage(
+                                    ctx.clone(),
+                                    Message::NotifyPredecessorReport(NotifyPredecessorReport {
+                                        did,
+                                    }),
+                                )]);
+                            }
+                        }
+                        Ok(vec![])
+                    }
+                    _ => unreachable!(),
+                }
             }
             MessageHandlerEvent::SendDirectMessage(msg, dest) => {
                 self.send_direct_message(msg.clone(), *dest).await?;

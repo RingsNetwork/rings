@@ -1,6 +1,7 @@
 //! DHT types about `Storage` and `PeerRing`.
 #![warn(missing_docs)]
 use async_trait::async_trait;
+
 use super::chord::TopoInfo;
 use super::did::Did;
 use super::vnode::VNodeOperation;

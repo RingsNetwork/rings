@@ -1,5 +1,6 @@
 #![warn(missing_docs)]
 use std::ops::Index;
+
 use derivative::Derivative;
 use num_bigint::BigUint;
 use serde::Deserialize;

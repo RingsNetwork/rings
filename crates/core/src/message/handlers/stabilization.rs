@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+
 use crate::dht::successor::SuccessorReader;
 use crate::dht::ChordStorageSync;
 use crate::dht::PeerRingAction;
@@ -21,7 +22,7 @@ impl HandleMsg<NotifyPredecessorSend> for MessageHandler {
         ctx: &MessagePayload,
         msg: &NotifyPredecessorSend,
     ) -> Result<Vec<MessageHandlerEvent>> {
-	let ret = vec![MessageHandlerEvent::NotifyDHT(ctx.clone(), msg.did)];
+        let ret = vec![MessageHandlerEvent::NotifyDHT(ctx.clone(), msg.did)];
         Ok(ret)
     }
 }
@@ -38,29 +39,28 @@ impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
             let successor = self.dht.successors();
             (successor.list()?, successor.max()?)
         };
-	// check if notified predecessor already included in successor_list
-	if successor_list.contains(&msg.did) {
-	    return Ok(vec![]);
-
-	}
-	// check if notified predecessor are in range of (self did, successor max)
-	// then set notified predecessor into successor list by CONNECT event
-	if self.dht.bias(msg.did) < self.dht.bias(successor_max) {
+        // check if notified predecessor already included in successor_list
+        if successor_list.contains(&msg.did) {
+            return Ok(vec![]);
+        }
+        // check if notified predecessor are in range of (self did, successor max)
+        // then set notified predecessor into successor list by CONNECT event
+        if self.dht.bias(msg.did) < self.dht.bias(successor_max) {
             let mut events = vec![MessageHandlerEvent::Connect(msg.did)];
 
             if let Ok(PeerRingAction::RemoteAction(
-		next,
-		PeerRingRemoteAction::SyncVNodeWithSuccessor(data),
+                next,
+                PeerRingRemoteAction::SyncVNodeWithSuccessor(data),
             )) = self.dht.sync_vnode_with_successor(msg.did).await
             {
-		events.push(MessageHandlerEvent::SendMessage(
+                events.push(MessageHandlerEvent::SendMessage(
                     Message::SyncVNodeWithSuccessor(SyncVNodeWithSuccessor { data }),
                     next,
-		))
+                ))
             }
-            return Ok(events)
-	}
-	Ok(vec![])
+            return Ok(events);
+        }
+        Ok(vec![])
     }
 }
 

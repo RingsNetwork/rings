@@ -228,8 +228,8 @@ impl PeerRing {
     /// set predecessor
     pub fn set_predecessor(&self, did: Did) -> Result<()> {
         let mut predecessor = self.lock_predecessor()?;
-	*predecessor = Some(did);
-	Ok(())
+        *predecessor = Some(did);
+        Ok(())
     }
 
     /// Remove a node from finger table.
@@ -323,39 +323,38 @@ impl Chord<PeerRingAction> for PeerRing {
     /// If that node is closer to current node or current node has no predecessor, set it to the did.
     /// If this function return None, means no side-effect applied.
     async fn notify(&self, wdid: impl LiveDid) -> Result<PeerRingAction> {
-	let did = wdid.clone().into();
-	let predecessor = {
-	    let pre = self.lock_predecessor()?;
-	    *pre
-	};
+        let did = wdid.clone().into();
+        let predecessor = {
+            let pre = self.lock_predecessor()?;
+            *pre
+        };
         match predecessor {
             Some(pre) => {
                 // If the did is closer to self than predecessor, set it to the predecessor.
                 // Otherwise tell the real predecessor back.
-		// check did is connected, else try connect to it
+                // check did is connected, else try connect to it
                 if self.bias(pre) < self.bias(did) {
-		    // check did is connected
-		    if wdid.live().await {
-			self.set_predecessor(did)?;
-			Ok(PeerRingAction::Some(did))
-		    } else {
-			Ok(PeerRingAction::RemoteAction(did, RemoteAction::TryConnect))
-		    }
+                    // check did is connected
+                    if wdid.live().await {
+                        self.set_predecessor(did)?;
+                        Ok(PeerRingAction::Some(did))
+                    } else {
+                        Ok(PeerRingAction::RemoteAction(did, RemoteAction::TryConnect))
+                    }
                 } else {
                     Ok(PeerRingAction::None)
                 }
             }
             None => {
                 // Self has no predecessor, set it to the did directly.
-		// check did is connected, else try connect to it
-		if wdid.live().await {
-		    self.set_predecessor(did)?;
+                // check did is connected, else try connect to it
+                if wdid.live().await {
+                    self.set_predecessor(did)?;
                     Ok(PeerRingAction::Some(did))
-		}
-		else {
-		    Ok(PeerRingAction::RemoteAction(did, RemoteAction::TryConnect))
-		}
-	    }
+                } else {
+                    Ok(PeerRingAction::RemoteAction(did, RemoteAction::TryConnect))
+                }
+            }
         }
     }
 

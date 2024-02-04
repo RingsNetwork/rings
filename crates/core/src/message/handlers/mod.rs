@@ -80,7 +80,6 @@ pub enum MessageHandlerEvent {
     Notify(Did),
     /// Notify local dht
     NotifyDHT(MessagePayload, Did),
-
 }
 
 /// MessageHandler will manage resources.
