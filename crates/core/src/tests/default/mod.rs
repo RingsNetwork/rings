@@ -9,6 +9,7 @@ use crate::storage::MemStorage;
 use crate::swarm::Swarm;
 use crate::swarm::SwarmBuilder;
 
+mod test_connection;
 mod test_message_handler;
 mod test_stabilization;
 
