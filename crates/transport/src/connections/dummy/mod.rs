@@ -153,7 +153,13 @@ impl ConnectionInterface for DummyConnection {
         if CHANNEL_OPEN_DELAY {
             random_delay().await;
         }
-        Ok(())
+        if self.webrtc_connection_state() == WebrtcConnectionState::Connected {
+            Ok(())
+        } else {
+            Err(Error::DataChannelOpen(
+                "State is not connected in dummy connection".to_string(),
+            ))
+        }
     }
 
     async fn close(&self) -> Result<()> {
