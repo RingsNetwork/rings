@@ -195,8 +195,11 @@ impl Swarm {
                 Ok(vec![])
             }
 
-            MessageHandlerEvent::Disconnect(did) => {
-                self.disconnect(*did).await?;
+            MessageHandlerEvent::LeaveDHT(did) => {
+                let did = *did;
+                if self.get_and_check_connection(did).await.is_none() {
+                    self.dht.remove(did)?
+                };
                 Ok(vec![])
             }
 
