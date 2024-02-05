@@ -2,7 +2,6 @@ use std::str::FromStr;
 
 use async_trait::async_trait;
 use rings_transport::core::transport::ConnectionInterface;
-use rings_transport::core::transport::WebrtcConnectionState;
 
 use super::callback::InnerSwarmCallback;
 use crate::dht::Did;
@@ -178,28 +177,31 @@ impl Swarm {
         self.transport.connection(&cid).map_err(|e| e.into())
     }
 
-    /// Get connection by did and check if it is connected.
+    /// Get connection by did and check if data channel is open.
+    /// This method will return None if the connection is not found.
+    /// This method will wait_for_data_channel_open.
+    /// If it's not ready in 8 seconds this method will close it and return None.
+    /// If it's ready in 8 seconds this method will return the connection.
+    /// See more infomation about [rings_transport::core::transport::WebrtcConnectionState].
+    /// See also method webrtc_wait_for_data_channel_open [rings_transport::core::transport::ConnectionInterface].
     pub async fn get_and_check_connection(&self, did: Did) -> Option<Connection> {
         let Some(c) = self.get_connection(did) else {
             return None;
         };
 
-        if matches!(
-            c.webrtc_connection_state(),
-            WebrtcConnectionState::Connecting | WebrtcConnectionState::Connected
-        ) {
-            return Some(c);
-        }
+        if let Err(e) = c.webrtc_wait_for_data_channel_open().await {
+            tracing::warn!(
+                "[get_and_check_connection] connection {did} data channel not open, will be dropped, reason: {e:?}"
+            );
 
-        tracing::debug!(
-            "[get_and_check_connection] connection {did} is not connected, will be dropped"
-        );
+            if let Err(e) = self.disconnect(did).await {
+                tracing::error!("Failed on close connection {did}: {e:?}");
+            }
 
-        if let Err(e) = self.disconnect(did).await {
-            tracing::error!("Failed on close connection {did}: {e:?}");
+            return None;
         };
 
-        None
+        Some(c)
     }
 
     /// Get connection by did.
