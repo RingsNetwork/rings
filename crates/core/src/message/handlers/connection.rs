@@ -79,7 +79,7 @@ impl HandleMsg<LeaveDHT> for MessageHandler {
         _ctx: &MessagePayload,
         msg: &LeaveDHT,
     ) -> Result<Vec<MessageHandlerEvent>> {
-        Ok(vec![MessageHandlerEvent::Disconnect(msg.did)])
+        Ok(vec![MessageHandlerEvent::LeaveDHT(msg.did)])
     }
 }
 

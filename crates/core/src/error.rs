@@ -124,11 +124,8 @@ pub enum Error {
     #[error("Found existing transport when answer offer from remote node")]
     AlreadyConnected,
 
-    #[error("Receive `AlreadyConnected`` but cannot get transport")]
-    MessageHandlerMissTransportAlreadyConnected,
-
-    #[error("Cannot get trans when handle connect node response")]
-    MessageHandlerMissTransportConnectedNode,
+    #[error("You should not connect to yourself")]
+    ShouldNotConnectSelf,
 
     #[error("Send message through channel failed")]
     ChannelSendMessageFailed,

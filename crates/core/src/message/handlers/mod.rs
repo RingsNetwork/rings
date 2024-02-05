@@ -44,8 +44,9 @@ pub enum MessageHandlerEvent {
     Connect(Did),
     /// Instructs the swarm to connect to a peer via given next hop.
     ConnectVia(Did, NextHop),
-    /// Instructs the swarm to disconnect from a peer.
-    Disconnect(Did),
+
+    /// Instructs the swarm to remove a peer in dht if it's not existed.
+    LeaveDHT(Did),
 
     /// Instructs the swarm to answer an offer inside payload by given
     /// sender's Did and Message.

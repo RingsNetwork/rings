@@ -247,13 +247,13 @@ pub trait PayloadSender {
     async fn do_send_payload(&self, did: Did, payload: MessagePayload) -> Result<()>;
 
     /// Infer the next hop for a message by calling `dht.find_successor()`.
-    fn infer_next_hop(&self, next_hop: Option<Did>, destination: Did) -> Result<Did> {
-        if let Some(next_hop) = next_hop {
-            return Ok(next_hop);
-        }
-
+    fn infer_next_hop(&self, destination: Did, next_hop: Option<Did>) -> Result<Did> {
         if self.is_connected(destination) {
             return Ok(destination);
+        }
+
+        if let Some(next_hop) = next_hop {
+            return Ok(next_hop);
         }
 
         match self.dht().find_successor(destination)? {
@@ -287,7 +287,7 @@ pub trait PayloadSender {
     /// Send a message to a specified destination.
     async fn send_message<T>(&self, msg: T, destination: Did) -> Result<uuid::Uuid>
     where T: Serialize + Send {
-        let next_hop = self.infer_next_hop(None, destination)?;
+        let next_hop = self.infer_next_hop(destination, None)?;
         self.send_message_by_hop(msg, destination, next_hop).await
     }
     /// Send a direct message to a specified destination.
@@ -322,7 +322,7 @@ pub trait PayloadSender {
 
     /// Forward a payload message, with the next hop inferred by the DHT.
     async fn forward_payload(&self, payload: &MessagePayload, next_hop: Option<Did>) -> Result<()> {
-        let next_hop = self.infer_next_hop(next_hop, payload.relay.destination)?;
+        let next_hop = self.infer_next_hop(payload.relay.destination, next_hop)?;
         let relay = payload.relay.forward(self.dht().did, next_hop)?;
         self.forward_by_relay(payload, relay).await
     }

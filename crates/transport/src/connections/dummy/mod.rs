@@ -69,9 +69,11 @@ impl DummyConnection {
             .clone()
     }
 
-    fn remote_conn(&self) -> Arc<DummyConnection> {
-        let cid = { self.remote_rand_id.lock().unwrap() }.clone().unwrap();
-        CONNS.get(&cid).unwrap().clone()
+    fn remote_conn(&self) -> Option<Arc<DummyConnection>> {
+        let Some(cid) = { self.remote_rand_id.lock().unwrap() }.clone() else {
+            return None;
+        };
+        Some(CONNS.get(&cid).unwrap().clone())
     }
 
     fn set_remote_rand_id(&self, rand_id: String) {
@@ -127,7 +129,7 @@ impl ConnectionInterface for DummyConnection {
     }
 
     async fn webrtc_create_offer(&self) -> Result<Self::Sdp> {
-        self.set_webrtc_connection_state(WebrtcConnectionState::Connecting)
+        self.set_webrtc_connection_state(WebrtcConnectionState::New)
             .await;
         Ok(self.rand_id.clone())
     }
@@ -143,9 +145,13 @@ impl ConnectionInterface for DummyConnection {
         self.set_webrtc_connection_state(WebrtcConnectionState::Connected)
             .await;
         self.set_remote_rand_id(answer);
-        self.remote_conn()
-            .set_webrtc_connection_state(WebrtcConnectionState::Connected)
-            .await;
+
+        if let Some(remote_conn) = self.remote_conn() {
+            remote_conn
+                .set_webrtc_connection_state(WebrtcConnectionState::Connected)
+                .await;
+        }
+
         Ok(())
     }
 
@@ -153,7 +159,13 @@ impl ConnectionInterface for DummyConnection {
         if CHANNEL_OPEN_DELAY {
             random_delay().await;
         }
-        Ok(())
+        if self.webrtc_connection_state() == WebrtcConnectionState::Connected {
+            Ok(())
+        } else {
+            Err(Error::DataChannelOpen(
+                "State is not connected in dummy connection".to_string(),
+            ))
+        }
     }
 
     async fn close(&self) -> Result<()> {
@@ -161,13 +173,15 @@ impl ConnectionInterface for DummyConnection {
             .await;
 
         // simulate remote closing if it's not closed
-        if self.remote_conn().webrtc_connection_state() != WebrtcConnectionState::Closed {
-            self.remote_conn()
-                .set_webrtc_connection_state(WebrtcConnectionState::Disconnected)
-                .await;
-            self.remote_conn()
-                .set_webrtc_connection_state(WebrtcConnectionState::Closed)
-                .await;
+        if let Some(remote_conn) = self.remote_conn() {
+            if remote_conn.webrtc_connection_state() != WebrtcConnectionState::Closed {
+                remote_conn
+                    .set_webrtc_connection_state(WebrtcConnectionState::Disconnected)
+                    .await;
+                remote_conn
+                    .set_webrtc_connection_state(WebrtcConnectionState::Closed)
+                    .await;
+            }
         }
 
         Ok(())
