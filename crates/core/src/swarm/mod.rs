@@ -174,7 +174,7 @@ impl Swarm {
         match event {
             MessageHandlerEvent::Connect(did) => {
                 let did = *did;
-                if self.get_and_check_connection(did).await.is_none() && did != self.did() {
+                if did != self.did() {
                     self.connect(did).await?;
                 }
                 Ok(vec![])
@@ -189,14 +189,17 @@ impl Swarm {
 
             MessageHandlerEvent::ConnectVia(did, next) => {
                 let did = *did;
-                if self.get_and_check_connection(did).await.is_none() && did != self.did() {
+                if did != self.did() {
                     self.connect_via(did, *next).await?;
                 }
                 Ok(vec![])
             }
 
-            MessageHandlerEvent::Disconnect(did) => {
-                self.disconnect(*did).await?;
+            MessageHandlerEvent::LeaveDHT(did) => {
+                let did = *did;
+                if self.get_and_check_connection(did).await.is_none() {
+                    self.dht.remove(did)?
+                };
                 Ok(vec![])
             }
 
@@ -218,16 +221,7 @@ impl Swarm {
             }
 
             MessageHandlerEvent::ForwardPayload(payload, next_hop) => {
-                if self
-                    .get_and_check_connection(payload.relay.destination)
-                    .await
-                    .is_some()
-                {
-                    self.forward_payload(payload, Some(payload.relay.destination))
-                        .await?;
-                } else {
-                    self.forward_payload(payload, *next_hop).await?;
-                }
+                self.forward_payload(payload, *next_hop).await?;
                 Ok(vec![])
             }
 
@@ -298,11 +292,17 @@ impl Swarm {
     /// else try prepare offer and establish connection by dht.
     /// This function may returns a pending connection or connected connection.
     pub async fn connect(&self, did: Did) -> Result<Connection> {
+        if did == self.did() {
+            return Err(Error::ShouldNotConnectSelf);
+        }
         JudgeConnection::connect(self, did).await
     }
 
     /// Similar to connect, but this function will try connect a Did by given hop.
     pub async fn connect_via(&self, did: Did, next_hop: Did) -> Result<Connection> {
+        if did == self.did() {
+            return Err(Error::ShouldNotConnectSelf);
+        }
         JudgeConnection::connect_via(self, did, next_hop).await
     }
 
