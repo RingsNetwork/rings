@@ -2,6 +2,7 @@ use std::str::FromStr;
 
 use async_trait::async_trait;
 use rings_transport::core::transport::ConnectionInterface;
+use rings_transport::core::transport::WebrtcConnectionState;
 
 use super::callback::InnerSwarmCallback;
 use crate::dht::Did;
@@ -182,14 +183,14 @@ impl Swarm {
     /// This method will wait_for_data_channel_open.
     /// If it's not ready in 8 seconds this method will close it and return None.
     /// If it's ready in 8 seconds this method will return the connection.
-    /// See more infomation about [rings_transport::core::transport::WebrtcConnectionState].
+    /// See more information about [rings_transport::core::transport::WebrtcConnectionState].
     /// See also method webrtc_wait_for_data_channel_open [rings_transport::core::transport::ConnectionInterface].
     pub async fn get_and_check_connection(&self, did: Did) -> Option<Connection> {
-        let Some(c) = self.get_connection(did) else {
+        let Some(conn) = self.get_connection(did) else {
             return None;
         };
 
-        if let Err(e) = c.webrtc_wait_for_data_channel_open().await {
+        if let Err(e) = conn.webrtc_wait_for_data_channel_open().await {
             tracing::warn!(
                 "[get_and_check_connection] connection {did} data channel not open, will be dropped, reason: {e:?}"
             );
@@ -201,7 +202,7 @@ impl Swarm {
             return None;
         };
 
-        Some(c)
+        Some(conn)
     }
 
     /// Get connection by did.
@@ -250,9 +251,29 @@ impl ConnectionHandshake for Swarm {
         peer: Did,
         offer_msg: &ConnectNodeSend,
     ) -> Result<(Connection, ConnectNodeReport)> {
-        if self.get_and_check_connection(peer).await.is_some() {
-            return Err(Error::AlreadyConnected);
+        if let Some(conn) = self.get_connection(peer) {
+            // Solve the scenario of creating offers simultaneously.
+            //
+            // When both sides create_offer at the same time and trigger answer_offer of the other side,
+            // they will got existed New state connection when answer_offer, which will prevent
+            // it to create new connection to answer the offer.
+            //
+            // The party with a larger Did (ranked lower on the ring) should abandon their own offer and instead answer_offer to the other party.
+            // The party with a smaller Did should reject answering the other party and report an Error::AlreadyConnected error.
+            if conn.webrtc_connection_state() == WebrtcConnectionState::New {
+                // drop local offer and continue answer remote offer
+                if peer > self.did() {
+                    // this connection will replaced by new connection created bellow
+                    self.disconnect(peer).await?;
+                } else {
+                    // ignore remote offer, and refuse to answer remote offer
+                    return Err(Error::AlreadyConnected);
+                }
+            } else if self.get_and_check_connection(peer).await.is_some() {
+                return Err(Error::AlreadyConnected);
+            };
         };
+
         let offer = serde_json::from_str(&offer_msg.sdp).map_err(Error::Deserialize)?;
         let conn = self.new_connection(peer).await?;
         let answer = conn
