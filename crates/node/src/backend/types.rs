@@ -7,7 +7,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use rings_core::message::MessagePayload;
 use rings_rpc::protos::rings_node::SendBackendMessageRequest;
-use rings_snark::prelude::nova::provider::mlkzg::Bn256EngineKZG;
+use rings_snark::prelude::nova::provider::hyperkzg::Bn256EngineKZG;
 use rings_snark::prelude::nova::provider::GrumpkinEngine;
 use rings_snark::prelude::nova::provider::PallasEngine;
 use rings_snark::prelude::nova::provider::VestaEngine;

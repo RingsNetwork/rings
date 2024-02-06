@@ -2238,13 +2238,14 @@ dependencies = [
 
 [[package]]
 name = "halo2curves"
-version = "0.4.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d0263c2933ee18bf416552719c5621f677f87acca8d50afe4ee74c81bb8ecca"
+checksum = "d3675880dc0cc7cd468943266297198a28f88210ba60ca5e0e04d121edf86b46"
 dependencies = [
  "blake2b_simd",
  "ff 0.13.0",
  "group 0.13.0",
+ "hex",
  "lazy_static",
  "num-bigint 0.4.4",
  "num-traits",
@@ -2253,6 +2254,7 @@ dependencies = [
  "paste",
  "rand 0.8.5",
  "rand_core 0.6.4",
+ "rayon",
  "serde",
  "serde_arrays",
  "static_assertions",
@@ -2681,6 +2683,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "itertools"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba291022dbbd398a455acf126c1e341954079855bc60dfdda641363bd6922569"
+dependencies = [
+ "either",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3068,8 +3079,8 @@ dependencies = [
 
 [[package]]
 name = "nova-snark"
-version = "0.33.0"
-source = "git+https://github.com/RingsNetwork/nova?rev=ea333243b57f3ae794f1d8f6ff00f89adc94bfac#ea333243b57f3ae794f1d8f6ff00f89adc94bfac"
+version = "0.34.0"
+source = "git+https://github.com/RingsNetwork/nova?rev=d77b65437575d392977cf85ca556b562bf207203#d77b65437575d392977cf85ca556b562bf207203"
 dependencies = [
  "bellpepper",
  "bellpepper-core",
@@ -3082,6 +3093,7 @@ dependencies = [
  "getrandom 0.2.12",
  "group 0.13.0",
  "halo2curves",
+ "itertools 0.12.1",
  "neptune",
  "num-bigint 0.4.4",
  "num-integer",

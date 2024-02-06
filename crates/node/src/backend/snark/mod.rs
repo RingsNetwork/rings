@@ -10,8 +10,8 @@ use rings_derive::wasm_export;
 use rings_rpc::method::Method;
 use rings_snark::circuit;
 use rings_snark::prelude::nova::provider;
+use rings_snark::prelude::nova::provider::hyperkzg;
 use rings_snark::prelude::nova::provider::ipa_pc;
-use rings_snark::prelude::nova::provider::mlkzg;
 use rings_snark::prelude::nova::spartan;
 use rings_snark::prelude::nova::traits::snark::RelaxedR1CSSNARKTrait;
 use rings_snark::prelude::nova::traits::Engine;
@@ -142,7 +142,7 @@ pub enum CircuitGenerator {
     /// Circuit based on pallas curve
     Pallas(circuit::WasmCircuitGenerator<<provider::PallasEngine as Engine>::Scalar>),
     /// Circuit based on KZG bn256
-    Bn256KZG(circuit::WasmCircuitGenerator<<provider::mlkzg::Bn256EngineKZG as Engine>::Scalar>),
+    Bn256KZG(circuit::WasmCircuitGenerator<<provider::hyperkzg::Bn256EngineKZG as Engine>::Scalar>),
 }
 
 /// Supported prime field
@@ -220,7 +220,7 @@ pub enum CircuitEnum {
     /// Based on pallas curve
     Pallas(circuit::Circuit<<provider::PallasEngine as Engine>::Scalar>),
     /// based on bn256 and KZG
-    Bn256KZG(circuit::Circuit<<provider::mlkzg::Bn256EngineKZG as Engine>::Scalar>),
+    Bn256KZG(circuit::Circuit<<provider::hyperkzg::Bn256EngineKZG as Engine>::Scalar>),
 }
 
 #[wasm_export]
@@ -251,7 +251,7 @@ pub enum FieldEnum {
     /// field of pallas curve
     Pallas(<provider::PallasEngine as Engine>::Scalar),
     /// bn256 with kzg
-    Bn256KZG(<provider::mlkzg::Bn256EngineKZG as Engine>::Scalar),
+    Bn256KZG(<provider::hyperkzg::Bn256EngineKZG as Engine>::Scalar),
 }
 
 #[wasm_export]
@@ -267,7 +267,7 @@ impl Field {
             },
             SupportedPrimeField::Bn256KZG => Self {
                 value: FieldEnum::Bn256KZG(
-                    <provider::mlkzg::Bn256EngineKZG as Engine>::Scalar::from(v),
+                    <provider::hyperkzg::Bn256EngineKZG as Engine>::Scalar::from(v),
                 ),
             },
         }
@@ -316,7 +316,7 @@ impl SNARKTaskBuilder {
                 })
             }
             SupportedPrimeField::Bn256KZG => {
-                type F = <provider::mlkzg::Bn256EngineKZG as Engine>::Scalar;
+                type F = <provider::hyperkzg::Bn256EngineKZG as Engine>::Scalar;
                 let r1cs =
                     r1cs::load_r1cs::<F>(r1cs::Path::Local(r1cs_path), r1cs::Format::Bin).await?;
                 let witness_calculator =
@@ -365,7 +365,7 @@ impl SNARKTaskBuilder {
                 })
             }
             SupportedPrimeField::Bn256KZG => {
-                type F = <provider::mlkzg::Bn256EngineKZG as Engine>::Scalar;
+                type F = <provider::hyperkzg::Bn256EngineKZG as Engine>::Scalar;
                 let r1cs =
                     r1cs::load_r1cs::<F>(r1cs::Path::Remote(r1cs_path), r1cs::Format::Bin).await?;
                 let witness_calculator =
@@ -495,7 +495,7 @@ impl SNARKTaskBuilder {
                 Ok(circuits)
             }
             CircuitGenerator::Bn256KZG(g) => {
-                type F = <provider::mlkzg::Bn256EngineKZG as Engine>::Scalar;
+                type F = <provider::hyperkzg::Bn256EngineKZG as Engine>::Scalar;
 
                 let input: circuit::Input<F> = public_input
                     .into_iter()
@@ -613,9 +613,9 @@ impl SNARKTaskBuilder {
                 })
             }
             CircuitEnum::Bn256KZG(_) => {
-                type E1 = provider::mlkzg::Bn256EngineKZG;
+                type E1 = provider::hyperkzg::Bn256EngineKZG;
                 type E2 = provider::GrumpkinEngine;
-                type EE1 = mlkzg::EvaluationEngine<E1>;
+                type EE1 = hyperkzg::EvaluationEngine<E1>;
                 type EE2 = ipa_pc::EvaluationEngine<E2>;
                 type S1 = spartan::snark::RelaxedR1CSSNARK<E1, EE1>; // non-preprocessing SNARK
                 type S2 = spartan::snark::RelaxedR1CSSNARK<E2, EE2>; // non-preprocessing SNARK
@@ -771,9 +771,9 @@ impl SNARKBehaviour {
                 Ok(SNARKVerifyTask::PallasVasta(serde_json::to_string(&proof)?))
             }
             SNARKProofTask::Bn256KZGGrumpkin(s) => {
-                type E1 = provider::mlkzg::Bn256EngineKZG;
+                type E1 = provider::hyperkzg::Bn256EngineKZG;
                 type E2 = provider::GrumpkinEngine;
-                type EE1 = mlkzg::EvaluationEngine<E1>;
+                type EE1 = hyperkzg::EvaluationEngine<E1>;
                 type EE2 = ipa_pc::EvaluationEngine<E2>;
                 type S1 = spartan::snark::RelaxedR1CSSNARK<E1, EE1>; // non-preprocessing SNARK
                 type S2 = spartan::snark::RelaxedR1CSSNARK<E2, EE2>; // non-preprocessing SNARK
@@ -833,9 +833,9 @@ impl SNARKBehaviour {
                 }
             }
             SNARKVerifyTask::Bn256KZGGrumpkin(p) => {
-                type E1 = provider::mlkzg::Bn256EngineKZG;
+                type E1 = provider::hyperkzg::Bn256EngineKZG;
                 type E2 = provider::GrumpkinEngine;
-                type EE1 = mlkzg::EvaluationEngine<E1>;
+                type EE1 = hyperkzg::EvaluationEngine<E1>;
                 type EE2 = ipa_pc::EvaluationEngine<E2>;
                 type S1 = spartan::snark::RelaxedR1CSSNARK<E1, EE1>; // non-preprocessing SNARK
                 type S2 = spartan::snark::RelaxedR1CSSNARK<E2, EE2>; // non-preprocessing SNARK
@@ -865,11 +865,11 @@ impl From<SNARKGenerator<provider::VestaEngine, provider::PallasEngine>> for SNA
     }
 }
 
-impl From<SNARKGenerator<provider::mlkzg::Bn256EngineKZG, provider::GrumpkinEngine>>
+impl From<SNARKGenerator<provider::hyperkzg::Bn256EngineKZG, provider::GrumpkinEngine>>
     for SNARKProofTask
 {
     fn from(
-        snark: SNARKGenerator<provider::mlkzg::Bn256EngineKZG, provider::GrumpkinEngine>,
+        snark: SNARKGenerator<provider::hyperkzg::Bn256EngineKZG, provider::GrumpkinEngine>,
     ) -> Self {
         Self::Bn256KZGGrumpkin(snark)
     }
