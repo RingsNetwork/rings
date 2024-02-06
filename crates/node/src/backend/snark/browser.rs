@@ -234,7 +234,7 @@ pub fn bigint_to_field(v: js_sys::BigInt, field: SupportedPrimeField) -> Result<
             }
         }
         SupportedPrimeField::Bn256KZG => {
-            type F = <provider::mlkzg::Bn256EngineKZG as Engine>::Scalar;
+            type F = <provider::hyperkzg::Bn256EngineKZG as Engine>::Scalar;
             Field {
                 value: FieldEnum::Bn256KZG(bigint2ff::<F>(v)?),
             }
