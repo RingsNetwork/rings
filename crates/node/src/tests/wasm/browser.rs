@@ -4,7 +4,6 @@ use wasm_bindgen_test::*;
 use super::create_connection;
 use super::get_peers;
 use super::new_provider;
-use crate::backend::browser::BackendBehaviour;
 use crate::backend::types::BackendMessage;
 use crate::prelude::rings_core::utils;
 use crate::prelude::rings_core::utils::js_value;
