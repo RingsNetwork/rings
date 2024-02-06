@@ -1,5 +1,6 @@
 //! special supported structure and functions for browser and wasm
 //! ===========
+use std::rc::Rc;
 use std::str::FromStr;
 
 use rings_snark::prelude::ff;
@@ -9,6 +10,7 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::future_to_promise;
 
 use super::*;
+use crate::backend::browser::BackendDynObj;
 use crate::backend::types;
 
 /// We need this ref to pass Task ref to js_sys
@@ -115,6 +117,11 @@ impl SNARKProofTaskRef {
 
 #[wasm_bindgen]
 impl SNARKBehaviour {
+    /// Get behaviour as dyn obj ref
+    pub fn as_dyn_obj(self) -> BackendDynObj {
+        BackendDynObj::new(Rc::new(self))
+    }
+
     /// gen proof task with circuits, this function is use for solo proof
     /// you can call [SNARKBehaviour::handle_snark_proof_task_ref] later to finalize the proof
     pub fn gen_proof_task_ref(circuits: Vec<Circuit>) -> Result<SNARKProofTaskRef> {
