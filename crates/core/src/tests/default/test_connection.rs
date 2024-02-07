@@ -8,9 +8,6 @@ use crate::message::handlers::tests::wait_for_msgs;
 use crate::tests::default::prepare_node;
 use crate::tests::manually_establish_connection;
 
-// this function not work for dummy test
-// TODO: need to fix it
-#[cfg(not(feature = "dummy"))]
 #[tokio::test]
 async fn test_handshake_on_both_sides() -> Result<()> {
     let key1 = SecretKey::random();
@@ -30,11 +27,20 @@ async fn test_handshake_on_both_sides() -> Result<()> {
     wait_for_msgs(&swarm1, &swarm2, &swarm3).await;
     assert_no_more_msg(&swarm1, &swarm2, &swarm3).await;
 
-    assert!(swarm3.get_connection(swarm1.did()).is_some());
-    assert!(swarm3.get_connection(swarm2.did()).is_some());
-
-    assert!(swarm1.get_connection(swarm3.did()).is_some());
-    assert!(swarm2.get_connection(swarm3.did()).is_some());
+    assert_eq!(
+        swarm3
+            .get_connection(swarm1.did())
+            .unwrap()
+            .webrtc_connection_state(),
+        WebrtcConnectionState::Connected
+    );
+    assert_eq!(
+        swarm3
+            .get_connection(swarm2.did())
+            .unwrap()
+            .webrtc_connection_state(),
+        WebrtcConnectionState::Connected
+    );
 
     assert_eq!(
         swarm1
@@ -80,9 +86,6 @@ async fn test_handshake_on_both_sides() -> Result<()> {
     // When node 1 got offer, node 1 may accept offer if did 1 < did 2, drop local connection
     // and response answer
     // When node 2 got offer, node 2 reject offer if did 1 < did 2
-
-    assert!(swarm1.get_connection(swarm2.did()).is_some());
-    assert!(swarm2.get_connection(swarm1.did()).is_some());
 
     assert_eq!(
         swarm1
