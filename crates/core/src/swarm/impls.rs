@@ -262,7 +262,7 @@ impl ConnectionHandshake for Swarm {
             // The party with a smaller Did should reject answering the other party and report an Error::AlreadyConnected error.
             if conn.webrtc_connection_state() == WebrtcConnectionState::New {
                 // drop local offer and continue answer remote offer
-                if peer > self.did() {
+                if self.did() > peer {
                     // this connection will replaced by new connection created bellow
                     self.disconnect(peer).await?;
                 } else {

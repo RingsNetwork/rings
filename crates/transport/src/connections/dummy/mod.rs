@@ -159,7 +159,13 @@ impl ConnectionInterface for DummyConnection {
         if CHANNEL_OPEN_DELAY {
             random_delay().await;
         }
-        if self.webrtc_connection_state() == WebrtcConnectionState::Connected {
+
+        // Will pass if the state is connecting to prevent release connection in the `test_handshake_on_both_sides` test.
+        // The connecting state means an offer is answered but not accepted by the other side.
+        if matches!(
+            self.webrtc_connection_state(),
+            WebrtcConnectionState::Connected | WebrtcConnectionState::Connecting
+        ) {
             Ok(())
         } else {
             Err(Error::DataChannelOpen(
