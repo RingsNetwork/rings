@@ -26,7 +26,10 @@ pub struct BackendBehaviour {
     extend_handler: RefCell<Option<Rc<dyn MessageHandler<BackendMessage>>>>,
 }
 
-/// This function is used to simulate `impl T`
+/// This struct is used to simulate `impl T`
+/// We need this structure because wasm_bindgen does not support general type such as
+/// `dyn T` or `impl T`
+/// We use Rc instead Box, to make it cloneable.
 #[wasm_export]
 pub struct BackendDynObj {
     inner: Rc<dyn MessageHandler<BackendMessage>>,
@@ -73,10 +76,7 @@ impl BackendBehaviour {
     }
 
     fn get_handler(&self, method: &str) -> Option<js_sys::Function> {
-        match self.handlers.get(method) {
-            Some(v) => Some(v.value().clone()),
-            None => None,
-        }
+        self.handlers.get(method).map(|v| v.value().clone())
     }
 
     async fn do_handle_message(

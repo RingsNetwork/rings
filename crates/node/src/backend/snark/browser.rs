@@ -136,10 +136,7 @@ impl SNARKBehaviour {
             let msg = js_value::deserialize::<SNARKTaskMessage>(msg)?;
             ins.handle_message(provider.into(), &ctx, &msg)
                 .await
-                .expect(
-                    "Failed on handle js message
-e",
-                );
+                .map_err(|e| Error::BackendError(e.to_string()))?;
             Ok(JsValue::NULL)
         })
     }
