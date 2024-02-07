@@ -88,12 +88,12 @@ async fn test_handle_backend_message() {
     let provider2 = new_provider().await;
     let behaviour = BackendBehaviour::new();
 
-    let js_code_args = "provider, ctx, msg";
+    let js_code_args = "ins, provider, ctx, msg";
     // write local msg to global window
     let js_code_body = r#"
 try {
     return new Promise((resolve, reject) => {
-        console.log("get message", msg)
+        console.log("js closure: get message", msg)
         window.recentMsg = msg
         resolve(undefined)
     })
@@ -103,13 +103,12 @@ try {
 "#;
     let func = js_sys::Function::new_with_args(js_code_args, js_code_body);
     behaviour.on("PlainText".to_string(), func);
+    // provider 1 send backend message to provider 2
+    // provider 2 set it to local variable
+    provider2.set_backend_callback(behaviour).unwrap();
 
-    provider1.set_backend_callback(behaviour).unwrap();
-    futures::try_join!(
-        JsFuture::from(provider1.listen()),
-        JsFuture::from(provider2.listen()),
-    )
-    .unwrap();
+    let _lis1 = provider1.listen();
+    let _lis2 = provider2.listen();
 
     create_connection(&provider1, &provider2).await;
     console_log!("wait for register");
