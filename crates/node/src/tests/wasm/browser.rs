@@ -130,7 +130,7 @@ try {
         js_value::serialize(&req).unwrap(),
     ))
     .await
-	.unwrap();
+    .unwrap();
     console_log!("send backend hello world done");
     utils::js_utils::window_sleep(3000).await.unwrap();
     let global = rings_core::utils::js_utils::global().unwrap();
