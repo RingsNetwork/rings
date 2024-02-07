@@ -126,7 +126,7 @@ try {
     ))
     .await
     .unwrap();
-    utils::js_utils::window_sleep(1000).await.unwrap();
+    utils::js_utils::window_sleep(3000).await.unwrap();
     let global = rings_core::utils::js_utils::global().unwrap();
     if let rings_core::utils::js_utils::Global::Window(window) = global {
         let ret = window
