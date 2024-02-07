@@ -11,6 +11,7 @@ use rings_core::message::CustomMessage;
 use rings_core::message::Message;
 use rings_core::message::MessagePayload;
 use rings_core::swarm::callback::SwarmCallback;
+use rings_derive::wasm_export;
 
 use crate::backend::types::BackendMessage;
 use crate::backend::types::MessageHandler;
@@ -49,6 +50,50 @@ impl Backend {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let provider = self.provider.clone();
         self.handler.handle_message(provider, payload, msg).await
+    }
+}
+
+/// This struct is used to simulate `impl T`
+/// We need this structure because wasm_bindgen does not support general type such as
+/// `dyn T` or `impl T`
+/// We use Arc instead Box, to make it cloneable.
+#[wasm_export]
+pub struct BackendMessageHandlerDynObj {
+    #[allow(dead_code)]
+    inner: Arc<HandlerTrait>,
+}
+
+impl BackendMessageHandlerDynObj {
+    /// create new instance
+    #[cfg(not(feature = "browser"))]
+    pub fn new<T: MessageHandler<BackendMessage> + Send + Sync + 'static>(a: Arc<T>) -> Self {
+        Self { inner: a.clone() }
+    }
+
+    /// create new instance
+    #[cfg(feature = "browser")]
+    pub fn new<T: MessageHandler<BackendMessage> + 'static>(a: Arc<T>) -> Self {
+        Self { inner: a.clone() }
+    }
+}
+
+impl From<BackendMessageHandlerDynObj> for Arc<dyn MessageHandler<BackendMessage>> {
+    fn from(impl_backend: BackendMessageHandlerDynObj) -> Arc<dyn MessageHandler<BackendMessage>> {
+        impl_backend.inner
+    }
+}
+
+#[cfg_attr(feature = "browser", async_trait(?Send))]
+#[cfg_attr(not(feature = "browser"), async_trait)]
+impl MessageHandler<BackendMessage> for BackendMessageHandlerDynObj {
+    async fn handle_message(
+        &self,
+        provider: Arc<Provider>,
+        ctx: &MessagePayload,
+        msg: &BackendMessage,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        self.handle_message(provider.clone(), ctx, msg).await?;
+        Ok(())
     }
 }
 

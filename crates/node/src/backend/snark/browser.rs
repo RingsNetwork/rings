@@ -1,6 +1,5 @@
 //! special supported structure and functions for browser and wasm
 //! ===========
-use std::rc::Rc;
 use std::str::FromStr;
 
 use rings_snark::prelude::ff;
@@ -10,8 +9,8 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::future_to_promise;
 
 use super::*;
-use crate::backend::browser::BackendDynObj;
 use crate::backend::types;
+use crate::backend::BackendMessageHandlerDynObj;
 use crate::prelude::rings_core::utils::js_value;
 
 /// We need this ref to pass Task ref to js_sys
@@ -119,8 +118,8 @@ impl SNARKProofTaskRef {
 #[wasm_bindgen]
 impl SNARKBehaviour {
     /// Get behaviour as dyn obj ref
-    pub fn as_dyn_obj(self) -> BackendDynObj {
-        BackendDynObj::new(Rc::new(self))
+    pub fn as_dyn_obj(self) -> BackendMessageHandlerDynObj {
+        BackendMessageHandlerDynObj::new(self.into())
     }
 
     /// Handle js native message

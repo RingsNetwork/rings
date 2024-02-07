@@ -1,7 +1,6 @@
 #![warn(missing_docs)]
 //! BackendBehaviour implementation for browser
 use core::cell::RefCell;
-use std::rc::Rc;
 use std::result::Result;
 use std::sync::Arc;
 
@@ -13,6 +12,7 @@ use rings_core::utils::js_value;
 use rings_derive::wasm_export;
 use wasm_bindgen::JsValue;
 
+use super::BackendMessageHandlerDynObj;
 use crate::backend::types::BackendMessage;
 use crate::backend::types::MessageHandler;
 use crate::error::Error;
@@ -23,29 +23,7 @@ use crate::provider::Provider;
 #[derive(Clone)]
 pub struct BackendBehaviour {
     handlers: dashmap::DashMap<String, Function>,
-    extend_handler: RefCell<Option<Rc<dyn MessageHandler<BackendMessage>>>>,
-}
-
-/// This struct is used to simulate `impl T`
-/// We need this structure because wasm_bindgen does not support general type such as
-/// `dyn T` or `impl T`
-/// We use Rc instead Box, to make it cloneable.
-#[wasm_export]
-pub struct BackendDynObj {
-    inner: Rc<dyn MessageHandler<BackendMessage>>,
-}
-
-impl BackendDynObj {
-    /// create new instance
-    pub fn new<T: MessageHandler<BackendMessage> + 'static>(a: Rc<T>) -> Self {
-        Self { inner: a.clone() }
-    }
-}
-
-impl From<BackendDynObj> for Rc<dyn MessageHandler<BackendMessage>> {
-    fn from(impl_backend: BackendDynObj) -> Rc<dyn MessageHandler<BackendMessage>> {
-        impl_backend.inner
-    }
+    extend_handler: RefCell<Option<Arc<dyn MessageHandler<BackendMessage>>>>,
 }
 
 #[wasm_export]
@@ -61,12 +39,12 @@ impl BackendBehaviour {
     }
 
     /// Get behaviour as dyn obj ref
-    pub fn as_dyn_obj(self) -> BackendDynObj {
-        BackendDynObj::new(Rc::new(self))
+    pub fn as_dyn_obj(self) -> BackendMessageHandlerDynObj {
+        BackendMessageHandlerDynObj::new(Arc::new(self))
     }
 
     /// Extend backend with other backend
-    pub fn extend(self, impl_backend: BackendDynObj) {
+    pub fn extend(self, impl_backend: BackendMessageHandlerDynObj) {
         self.extend_handler.replace(Some(impl_backend.into()));
     }
 
@@ -105,7 +83,7 @@ impl BackendBehaviour {
                 }
             }
             BackendMessage::PlainText(m) => {
-                if let Some(func) = &self.get_handler("Plaintext") {
+                if let Some(func) = &self.get_handler("PlainText") {
                     let m = js_value::serialize(m)?;
                     let cb = js_func::of4::<BackendBehaviour, Provider, JsValue, JsValue>(func);
                     cb(self.clone(), provider.clone(), ctx, m).await?;

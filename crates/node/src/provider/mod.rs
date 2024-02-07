@@ -119,8 +119,20 @@ impl Provider {
     }
 
     /// Set callback for swarm, it can be T, or (T0, T1, T2)
+    #[cfg(not(feature = "browser"))]
     pub fn set_backend_callback<T>(&self, callback: T) -> Result<()>
     where T: MessageHandler<BackendMessage> + Send + Sync + Sized + 'static {
+        let backend = Backend::new(Arc::new(self.clone()), Box::new(callback));
+        self.processor
+            .swarm
+            .set_callback(Arc::new(backend))
+            .map_err(Error::InternalError)
+    }
+
+    /// Set callback for swarm, it can be T, or (T0, T1, T2)
+    #[cfg(feature = "browser")]
+    pub fn set_backend_callback<T>(&self, callback: T) -> Result<()>
+    where T: MessageHandler<BackendMessage> + Sized + 'static {
         let backend = Backend::new(Arc::new(self.clone()), Box::new(callback));
         self.processor
             .swarm
