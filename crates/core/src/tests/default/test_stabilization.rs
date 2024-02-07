@@ -126,9 +126,6 @@ async fn test_stabilization() -> Result<()> {
     Ok(())
 }
 
-// this function not work for dummy test
-// TODO: need to fix it
-#[cfg(not(feature = "dummy"))]
 #[tokio::test]
 async fn test_stabilization_final_dht() -> Result<()> {
     let mut nodes = vec![];
