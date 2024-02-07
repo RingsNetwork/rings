@@ -51,6 +51,7 @@ impl From<BackendDynObj> for Rc<dyn MessageHandler<BackendMessage>> {
 #[wasm_export]
 impl BackendBehaviour {
     /// Create a new instance of message callback, this function accept one argument:
+    #[allow(clippy::new_without_default)]
     #[wasm_bindgen(constructor)]
     pub fn new() -> BackendBehaviour {
         BackendBehaviour {
