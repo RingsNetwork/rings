@@ -113,7 +113,12 @@ try {
 
     create_connection(&provider1, &provider2).await;
     console_log!("wait for register");
+
     utils::js_utils::window_sleep(1000).await.unwrap();
+
+    let peers = get_peers(&provider1).await;
+    assert!(peers.len() == 1, "peers len should be 1");
+    let _peer2 = peers.first().unwrap();
 
     let msg = BackendMessage::PlainText("hello world".to_string());
     let req = msg
@@ -125,7 +130,8 @@ try {
         js_value::serialize(&req).unwrap(),
     ))
     .await
-    .unwrap();
+	.unwrap();
+    console_log!("send backend hello world done");
     utils::js_utils::window_sleep(3000).await.unwrap();
     let global = rings_core::utils::js_utils::global().unwrap();
     if let rings_core::utils::js_utils::Global::Window(window) = global {
