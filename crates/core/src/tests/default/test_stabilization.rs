@@ -44,9 +44,6 @@ async fn run_node(swarm: Arc<Swarm>) {
     futures::future::join(message_handler, stabilization).await;
 }
 
-// this function not work for dummy test
-// TODO: need to fix it
-#[cfg(not(feature = "dummy"))]
 #[tokio::test]
 async fn test_stabilization_once() -> Result<()> {
     let mut key1 = SecretKey::random();
@@ -129,6 +126,9 @@ async fn test_stabilization() -> Result<()> {
     Ok(())
 }
 
+// this function not work for dummy test
+// TODO: need to fix it
+#[cfg(not(feature = "dummy"))]
 #[tokio::test]
 async fn test_stabilization_final_dht() -> Result<()> {
     let mut nodes = vec![];
