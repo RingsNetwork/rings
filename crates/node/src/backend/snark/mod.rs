@@ -579,7 +579,7 @@ impl SNARKTaskBuilder {
                 ])?;
 
                 SNARKProofTask::VastaPallas(SNARKGenerator {
-                    pp,
+                    pp: pp.into(),
                     snark,
                     circuits,
                 })
@@ -607,7 +607,7 @@ impl SNARKTaskBuilder {
                     <E2 as Engine>::Scalar::from(0),
                 ])?;
                 SNARKProofTask::PallasVasta(SNARKGenerator {
-                    pp,
+                    pp: pp.into(),
                     snark,
                     circuits,
                 })
@@ -635,7 +635,7 @@ impl SNARKTaskBuilder {
                     <E2 as Engine>::Scalar::from(0),
                 ])?;
                 SNARKProofTask::Bn256KZGGrumpkin(SNARKGenerator {
-                    pp,
+                    pp: pp.into(),
                     snark,
                     circuits,
                 })
@@ -677,7 +677,7 @@ where
 {
     snark: SNARK<E1, E2>,
     circuits: Vec<circuit::Circuit<<E1 as Engine>::Scalar>>,
-    pp: PublicParams<E1, E2>,
+    pp: Arc<PublicParams<E1, E2>>,
 }
 
 impl<E1, E2> SNARKGenerator<E1, E2>
