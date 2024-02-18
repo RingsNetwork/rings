@@ -1,5 +1,6 @@
 #![warn(missing_docs)]
 //! BackendBehaviour implementation for browser
+use core::cell::RefCell;
 use std::result::Result;
 use std::sync::Arc;
 
@@ -11,7 +12,7 @@ use rings_core::utils::js_value;
 use rings_derive::wasm_export;
 use wasm_bindgen::JsValue;
 
-use crate::backend::snark::SNARKBehaviour;
+use super::BackendMessageHandlerDynObj;
 use crate::backend::types::BackendMessage;
 use crate::backend::types::MessageHandler;
 use crate::error::Error;
@@ -21,30 +22,40 @@ use crate::provider::Provider;
 #[wasm_export]
 #[derive(Clone)]
 pub struct BackendBehaviour {
-    service_message_handler: Option<Function>,
-    plain_text_message_handler: Option<Function>,
-    extension_message_handler: Option<Function>,
-    snark_message_handler: Option<SNARKBehaviour>,
+    handlers: dashmap::DashMap<String, Function>,
+    extend_handler: RefCell<Option<Arc<dyn MessageHandler<BackendMessage>>>>,
 }
 
 #[wasm_export]
 impl BackendBehaviour {
     /// Create a new instance of message callback, this function accept one argument:
-    ///
-    /// * backend_message_handler: `function(provider: Arc<Provider>, payload: string, message: string) -> Promise<()>`;
+    #[allow(clippy::new_without_default)]
     #[wasm_bindgen(constructor)]
-    pub fn new(
-        service_message_handler: Option<js_sys::Function>,
-        plain_text_message_handler: Option<js_sys::Function>,
-        extension_message_handler: Option<Function>,
-        snark_message_handler: Option<SNARKBehaviour>,
-    ) -> BackendBehaviour {
+    pub fn new() -> BackendBehaviour {
         BackendBehaviour {
-            service_message_handler,
-            plain_text_message_handler,
-            extension_message_handler,
-            snark_message_handler,
+            handlers: dashmap::DashMap::<String, Function>::new(),
+            extend_handler: RefCell::new(None),
         }
+    }
+
+    /// Get behaviour as dyn obj ref
+    pub fn as_dyn_obj(self) -> BackendMessageHandlerDynObj {
+        BackendMessageHandlerDynObj::new(Arc::new(self))
+    }
+
+    /// Extend backend with other backend
+    pub fn extend(self, impl_backend: BackendMessageHandlerDynObj) {
+        self.extend_handler.replace(Some(impl_backend.into()));
+    }
+
+    /// register call back function
+    /// * func: `function(provider: Arc<Provider>, payload: string, message: string) -> Promise<()>`;
+    pub fn on(&self, method: String, func: js_sys::Function) {
+        self.handlers.insert(method, func);
+    }
+
+    fn get_handler(&self, method: &str) -> Option<js_sys::Function> {
+        self.handlers.get(method).map(|v| v.value().clone())
     }
 
     async fn do_handle_message(
@@ -55,34 +66,41 @@ impl BackendBehaviour {
     ) -> Result<(), Error> {
         let provider = provider.clone().as_ref().clone();
         let ctx = js_value::serialize(&payload)?;
+
         match msg {
             BackendMessage::ServiceMessage(m) => {
-                if let Some(func) = &self.service_message_handler {
+                if let Some(func) = &self.get_handler("ServiceMessage") {
                     let m = js_value::serialize(m)?;
                     let cb = js_func::of4::<BackendBehaviour, Provider, JsValue, JsValue>(func);
-                    cb(self.clone(), provider, ctx, m).await?;
+                    cb(self.clone(), provider.clone(), ctx, m).await?;
                 }
             }
             BackendMessage::Extension(m) => {
-                if let Some(func) = &self.extension_message_handler {
+                if let Some(func) = &self.get_handler("Extension") {
                     let m = js_value::serialize(m)?;
                     let cb = js_func::of4::<BackendBehaviour, Provider, JsValue, JsValue>(func);
-                    cb(self.clone(), provider, ctx, m).await?;
+                    cb(self.clone(), provider.clone(), ctx, m).await?;
                 }
             }
             BackendMessage::PlainText(m) => {
-                if let Some(func) = &self.plain_text_message_handler {
-                    let cb = js_func::of4::<BackendBehaviour, Provider, JsValue, String>(func);
-                    cb(self.clone(), provider, ctx, m.to_string()).await?;
+                if let Some(func) = &self.get_handler("PlainText") {
+                    let m = js_value::serialize(m)?;
+                    let cb = js_func::of4::<BackendBehaviour, Provider, JsValue, JsValue>(func);
+                    cb(self.clone(), provider.clone(), ctx, m).await?;
                 }
             }
             BackendMessage::SNARKTaskMessage(m) => {
-                if let Some(h) = &self.snark_message_handler {
-                    h.handle_message(provider.into(), payload, m)
-                        .await
-                        .map_err(|e| Error::SNARKHandleMessage(e.to_string()))?;
+                if let Some(func) = &self.get_handler("SNARKTaskMessage") {
+                    let m = js_value::serialize(m)?;
+                    let cb = js_func::of4::<BackendBehaviour, Provider, JsValue, JsValue>(func);
+                    cb(self.clone(), provider.clone(), ctx, m).await?;
                 }
             }
+        }
+        if let Some(ext) = &self.extend_handler.clone().into_inner() {
+            ext.handle_message(provider.into(), payload, msg)
+                .await
+                .map_err(|e| Error::BackendError(e.to_string()))?;
         }
         Ok(())
     }

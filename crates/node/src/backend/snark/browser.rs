@@ -10,6 +10,8 @@ use wasm_bindgen_futures::future_to_promise;
 
 use super::*;
 use crate::backend::types;
+use crate::backend::BackendMessageHandlerDynObj;
+use crate::prelude::rings_core::utils::js_value;
 
 /// We need this ref to pass Task ref to js_sys
 #[wasm_bindgen]
@@ -115,6 +117,29 @@ impl SNARKProofTaskRef {
 
 #[wasm_bindgen]
 impl SNARKBehaviour {
+    /// Get behaviour as dyn obj ref
+    pub fn as_dyn_obj(self) -> BackendMessageHandlerDynObj {
+        BackendMessageHandlerDynObj::new(self.into())
+    }
+
+    /// Handle js native message
+    pub fn handle_snark_task_message(
+        self,
+        provider: Provider,
+        ctx: JsValue,
+        msg: JsValue,
+    ) -> js_sys::Promise {
+        let ins = self.clone();
+        future_to_promise(async move {
+            let ctx = js_value::deserialize::<MessagePayload>(ctx)?;
+            let msg = js_value::deserialize::<SNARKTaskMessage>(msg)?;
+            ins.handle_message(provider.into(), &ctx, &msg)
+                .await
+                .map_err(|e| Error::BackendError(e.to_string()))?;
+            Ok(JsValue::NULL)
+        })
+    }
+
     /// gen proof task with circuits, this function is use for solo proof
     /// you can call [SNARKBehaviour::handle_snark_proof_task_ref] later to finalize the proof
     pub fn gen_proof_task_ref(circuits: Vec<Circuit>) -> Result<SNARKProofTaskRef> {

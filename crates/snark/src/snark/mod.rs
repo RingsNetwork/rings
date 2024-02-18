@@ -56,7 +56,7 @@ where
 }
 
 /// Wrap of nova's public params
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize)]
 pub struct PublicParams<E1, E2>
 where
     E1: Engine<Base = <E2 as Engine>::Scalar>,

@@ -138,6 +138,8 @@ pub enum Error {
     SNARKBigIntValueEmpty() = 1405,
     #[error("Failed to load string to PrimeField")]
     FailedToLoadFF() = 1406,
+    #[error("Extend Backend Error {0}")]
+    BackendError(String) = 1501,
 }
 
 impl Error {
