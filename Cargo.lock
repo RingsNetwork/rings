@@ -228,6 +228,12 @@ checksum = "6b4930d2cb77ce62f89ee5d5289b4ac049559b1c45539271f5ed4fdc7db34545"
 
 [[package]]
 name = "arrayvec"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "23b62fc65de8e4e7f52534fb52b0f3ed04746ae267519eef2a83941e8085068b"
+
+[[package]]
+name = "arrayvec"
 version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "96d30a06541fbafbc7f82ed10c06164cfbd2c401138f6addd8404629c4b16711"
@@ -488,7 +494,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "935c90240f9b7749c80746bf88ad9cb346f34b01ee30ad4d566dfdecd6e3cc6a"
 dependencies = [
  "thiserror",
- "tiny-keccak",
+ "tiny-keccak 2.0.2",
 ]
 
 [[package]]
@@ -511,18 +517,25 @@ checksum = "8c3c1a368f70d6cf7302d78f8f7093da241fb8e8807c05cc9e51a125895a6d5b"
 
 [[package]]
 name = "bellman_ce"
-version = "0.3.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5ca1343d8690bb4d62e0665116bd4f109e33a642f86908ed107d226a402b0ef"
+version = "0.3.2"
+source = "git+https://github.com/matter-labs/bellman.git?rev=5520aa2#5520aa2274afe73d281373c92b007a2ecdebfbea"
 dependencies = [
+ "arrayvec 0.7.4",
  "bit-vec",
+ "blake2s_const",
+ "blake2s_simd 0.5.11",
  "byteorder",
- "cfg-if 0.1.10",
+ "cfg-if 1.0.0",
  "crossbeam",
  "futures",
+ "hex",
+ "lazy_static",
  "num_cpus",
  "pairing_ce",
  "rand 0.4.6",
+ "serde",
+ "smallvec",
+ "tiny-keccak 1.5.0",
 ]
 
 [[package]]
@@ -542,7 +555,7 @@ version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d8abb418570756396d722841b19edfec21d4e89e1cf8990610663040ecb1aea"
 dependencies = [
- "blake2s_simd",
+ "blake2s_simd 1.0.2",
  "byteorder",
  "ff 0.13.0",
  "serde",
@@ -572,6 +585,9 @@ name = "bit-vec"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "349f9b6a179ed607305526ca489b34ad0a41aed5f7980fa90eb03160b69598fb"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "bitflags"
@@ -604,8 +620,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23285ad32269793932e830392f2fe2f83e26488fd3ec778883a93c8323735780"
 dependencies = [
  "arrayref",
- "arrayvec",
- "constant_time_eq",
+ "arrayvec 0.7.4",
+ "constant_time_eq 0.3.0",
+]
+
+[[package]]
+name = "blake2s_const"
+version = "0.6.0"
+source = "git+https://github.com/matter-labs/bellman.git?rev=5520aa2#5520aa2274afe73d281373c92b007a2ecdebfbea"
+dependencies = [
+ "arrayref",
+ "arrayvec 0.5.2",
+ "constant_time_eq 0.1.5",
+]
+
+[[package]]
+name = "blake2s_simd"
+version = "0.5.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e461a7034e85b211a4acb57ee2e6730b32912b06c08cc242243c39fc21ae6a2"
+dependencies = [
+ "arrayref",
+ "arrayvec 0.5.2",
+ "constant_time_eq 0.1.5",
 ]
 
 [[package]]
@@ -615,8 +652,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94230421e395b9920d23df13ea5d77a20e1725331f90fbbf6df6040b33f756ae"
 dependencies = [
  "arrayref",
- "arrayvec",
- "constant_time_eq",
+ "arrayvec 0.7.4",
+ "constant_time_eq 0.3.0",
 ]
 
 [[package]]
@@ -950,6 +987,12 @@ checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
 
 [[package]]
 name = "constant_time_eq"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "245097e9a4535ee1e3e3931fcfcd55a796a44c643e8596ff6566d68f09b87bbc"
+
+[[package]]
+name = "constant_time_eq"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f7144d30dcf0fafbce74250a3963025d8d52177934239851c917d29f1df280c2"
@@ -1007,7 +1050,7 @@ version = "0.91.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "98b022ed2a5913a38839dfbafe6cf135342661293b08049843362df4301261dc"
 dependencies = [
- "arrayvec",
+ "arrayvec 0.7.4",
  "bumpalo",
  "cranelift-bforest",
  "cranelift-codegen-meta",
@@ -1779,7 +1822,7 @@ dependencies = [
  "fixed-hash",
  "impl-rlp",
  "impl-serde",
- "tiny-keccak",
+ "tiny-keccak 2.0.2",
 ]
 
 [[package]]
@@ -1849,14 +1892,15 @@ dependencies = [
 
 [[package]]
 name = "ff_ce"
-version = "0.10.3"
+version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4592897f75fd1bd178e5ec12d9d7df3d1943464feda2cbce1e708a484e82c8f6"
+checksum = "5b538e4231443a5b9c507caee3356f016d832cf7393d2d90f03ea3180d4e3fbc"
 dependencies = [
  "byteorder",
  "ff_derive_ce",
  "hex",
  "rand 0.4.6",
+ "serde",
 ]
 
 [[package]]
@@ -1877,15 +1921,16 @@ dependencies = [
 
 [[package]]
 name = "ff_derive_ce"
-version = "0.8.0"
+version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50c052fa6d4c2f12305ec364bfb8ef884836f3f61ea015b202372ff996d1ac4b"
+checksum = "b96fbccd88dbb1fac4ee4a07c2fcc4ca719a74ffbd9d2b9d41d8c8eb073d8b20"
 dependencies = [
- "num-bigint 0.2.6",
+ "num-bigint 0.4.4",
  "num-integer",
  "num-traits",
  "proc-macro2",
  "quote",
+ "serde",
  "syn 1.0.109",
 ]
 
@@ -2692,7 +2737,7 @@ dependencies = [
  "regex-syntax 0.6.29",
  "string_cache",
  "term",
- "tiny-keccak",
+ "tiny-keccak 2.0.2",
  "unicode-xid",
 ]
 
@@ -2969,7 +3014,7 @@ checksum = "06626c9ac04c894e9a23d061ba1309f28506cdc5fe64156d28a15fb57fc8e438"
 dependencies = [
  "bellpepper",
  "bellpepper-core",
- "blake2s_simd",
+ "blake2s_simd 1.0.2",
  "blstrs",
  "byteorder",
  "ff 0.13.0",
@@ -3061,17 +3106,6 @@ checksum = "77a8165726e8236064dbb45459242600304b42a5ea24ee2948e18e023bf7ba84"
 dependencies = [
  "overload",
  "winapi",
-]
-
-[[package]]
-name = "num-bigint"
-version = "0.2.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "090c7f9998ee0ff65aa5b723e4009f7b217707f1fb5ea551329cc4d6231fb304"
-dependencies = [
- "autocfg",
- "num-integer",
- "num-traits",
 ]
 
 [[package]]
@@ -3318,13 +3352,15 @@ dependencies = [
 
 [[package]]
 name = "pairing_ce"
-version = "0.21.1"
+version = "0.28.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bfc00d65b1d29e0a067a967fcea83d8db261c149f76a557ba73f0304f01cdfde"
+checksum = "db007b21259660d025918e653508f03050bf23fb96a88601f9936329faadc597"
 dependencies = [
  "byteorder",
+ "cfg-if 1.0.0",
  "ff_ce",
  "rand 0.4.6",
+ "serde",
 ]
 
 [[package]]
@@ -3333,7 +3369,7 @@ version = "3.6.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "881331e34fa842a2fb61cc2db9643a8fedc615e47cfcc52597d1af0db9a7e8fe"
 dependencies = [
- "arrayvec",
+ "arrayvec 0.7.4",
  "bitvec",
  "byte-slice-cast",
  "impl-trait-for-tuples",
@@ -4266,7 +4302,7 @@ dependencies = [
  "sled",
  "subtle",
  "thiserror",
- "tiny-keccak",
+ "tiny-keccak 2.0.2",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -4404,6 +4440,7 @@ dependencies = [
  "memory-stats",
  "nova-snark",
  "pasta_curves",
+ "rand 0.4.6",
  "reqwest",
  "serde",
  "serde_json",
@@ -5363,6 +5400,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "26197e33420244aeb70c3e8c78376ca46571bc4e701e4791c2cd9f57dcb3a43f"
 dependencies = [
  "time-core",
+]
+
+[[package]]
+name = "tiny-keccak"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d8a021c69bb74a44ccedb824a046447e2c84a01df9e5c20779750acb38e11b2"
+dependencies = [
+ "crunchy",
 ]
 
 [[package]]

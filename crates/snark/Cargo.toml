@@ -26,7 +26,8 @@ log = { version = "0.4", features = ["std"] }
 pasta_curves = "0.5"
 
 # for load r1cs
-bellman_ce = "0.3.5"
+bellman_ce = { version = "0.3.2", features = ["plonk"], git = "https://github.com/matter-labs/bellman.git", rev = "5520aa2" }
+rand = "0.4.6"
 bellpepper-core = "0.4.0"
 byteorder = "1.4.3"
 crypto-bigint = { version = "0.5.2", features = ["serde"] }

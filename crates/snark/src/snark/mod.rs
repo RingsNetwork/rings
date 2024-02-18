@@ -19,6 +19,9 @@ use crate::prelude::nova::traits::snark::RelaxedR1CSSNARKTrait;
 use crate::prelude::nova::traits::Engine;
 use crate::prelude::nova::RecursiveSNARK;
 
+//pub mod plonk;
+pub mod engine;
+
 /// Rings Snark implementation, a wrapper of nova's recursion snark and compressed snark
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SNARK<E1, E2>

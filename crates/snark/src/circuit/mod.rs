@@ -25,7 +25,7 @@ pub mod bellpepper;
 
 /// Input of witness
 #[derive(Serialize, Deserialize, Clone)]
-pub struct Input<F: PrimeField> {
+pub struct Input<F: ff::PrimeField> {
     /// inner input
     pub input: Vec<(String, Vec<F>)>,
 }
