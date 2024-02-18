@@ -46,6 +46,69 @@ pub struct PrimeField<T: ff::PrimeField> {
 
 }
 
+/// bellman::PrimeField::Repr Sized + Copy + Clone + Eq + Ord + Send + Sync + Default + Debug + Display + 'static + Rand + AsRef<[u64]> + AsMut<[u64]> + From<u64> + Hash + Serialize + DeserializeOwned
+/// ff::PrimeField::Repr Copy + Default + Send + Sync + 'static + AsRef<[u8]> + AsMut<[u8]>
+#[derive(Clone, Debug)]
+pub struct PrimeFieldRepr<F: ff::PrimeField> {
+    _phantom: PhantomData<F::Repr>,
+    data: Vec<u64>,
+}
+
+impl <F> From<PrimeField<F>> for PrimeFieldRepr<F>
+where
+    F: ff::PrimeField,
+{
+    fn from(field: PrimeField<F>) -> Self {
+	let repr = field.inner.to_repr();
+	let data: &[u8] = repr.as_ref();
+	let data = bytes_to_u64_vec_with_padding(data);
+	Self {
+	    _phantom: PhantomData,
+	    data: data
+	}
+    }
+}
+
+
+impl<F> std::fmt::Display for PrimeFieldRepr<F>
+where
+    F: ff::PrimeField
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.data)
+    }
+}
+
+impl<F> From<u64> for PrimeFieldRepr<F>
+where
+    F: ff::PrimeField
+{
+    fn from(value: u64) -> Self {
+	let value = value as u128;
+	let field: PrimeField<F> = F::from_u128(value).into();
+	field.into()
+    }
+}
+
+impl<F> AsRef<[u64]> for PrimeFieldRepr<F>
+where
+    F: ff::PrimeField
+{
+    fn as_ref(&self) -> &[u64] {
+	&self.data
+    }
+}
+
+impl<F> AsMut<[u64]> for PrimeFieldRepr<F>
+where
+    F: ff::PrimeField
+{
+    fn as_mut(&mut self) -> &mut [u64] {
+	&mut self.data
+    }
+}
+
+
 impl <T: ff::PrimeField> From<T> for PrimeField<T> {
     fn from(f: T) -> PrimeField<T> {
 	Self {
@@ -181,20 +244,20 @@ impl <T: ff::PrimeField> bellman::Field for PrimeField<T> {
 //     const CAPACITY: u32 = T::CAPACITY;
 //     const S: u32 = T::S;
 
-//     fn from_repr(repr: Self::Repr) -> Result<Self, PrimeFieldDecodingError> {
+//     fn from_repr(repr: Self::Repr) -> Result<Self, bellman::PrimeFieldDecodingError> {
 // 	T::from_repr(repr)
 //     }
-//     fn from_raw_repr(repr: Self::Repr) -> Result<Self, PrimeFieldDecodingError> {
+//     fn from_raw_repr(repr: Self::Repr) -> Result<Self, bellman::PrimeFieldDecodingError> {
 // 	T::from_repr(repr)
 //     }
 //     fn into_repr(&self) -> Self::Repr {
-// 	self.to_repr()
+// 	self.inner.to_repr()
 //     }
 //     fn into_raw_repr(&self) -> Self::Repr {
-// 	self.to_repr()
+// 	self.inner.to_repr()
 //     }
 //     fn char() -> Self::Repr {
-// 	Self::Repr
+// 	T::Repr
 //     }
 //     fn multiplicative_generator() -> Self {
 // 	Self
@@ -204,3 +267,37 @@ impl <T: ff::PrimeField> bellman::Field for PrimeField<T> {
 //     }
 
 // }
+
+
+pub(crate) fn bytes_to_u64_vec_with_padding(bytes: &[u8]) -> Vec<u64> {
+    // Calculate the number of bytes needed to pad the array to a multiple of 8
+    let padding = if bytes.len() % 8 == 0 { 0 } else { 8 - (bytes.len() % 8) };
+
+    // Create a new Vec<u8> and extend it with the original bytes plus necessary padding
+    let mut padded_bytes = Vec::with_capacity(bytes.len() + padding);
+    padded_bytes.extend_from_slice(bytes);
+
+    // Pad with zeros to make the length a multiple of 8
+    padded_bytes.resize(bytes.len() + padding, 0);
+
+    // Convert the padded byte slice into a Vec<u64>
+    padded_bytes
+        .chunks(8)
+        .map(|chunk| {
+            let mut arr = [0u8; 8];
+            arr.copy_from_slice(chunk);
+            u64::from_le_bytes(arr) // Or use from_be_bytes, depending on your byte order requirements
+        })
+        .collect()
+}
+
+
+#[cfg(test)]
+pub mod tests {
+    use super::*;
+
+    fn test_bytes_to_u64() {
+	let bytes = &[1, 2, 3, 4, 5]; // Length is not a multiple of 8
+	let u64_vec = bytes_to_u64_vec_with_padding(bytes);
+    }
+}
