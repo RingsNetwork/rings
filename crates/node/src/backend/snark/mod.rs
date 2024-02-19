@@ -683,19 +683,23 @@ where
 impl SNARKProofTask {
     /// Make snark proof task splitable
     pub fn split(&self, n: usize) -> Vec<SNARKProofTask> {
-	match self {
-	    SNARKProofTask::PallasVasta(g) => {
-		g.split(n).into_iter().map(|t| SNARKProofTask::PallasVasta(t)).collect()
-
-	    }
-	    SNARKProofTask::VastaPallas(g) => {
-		g.split(n).into_iter().map(|t| SNARKProofTask::VastaPallas(t)).collect()
-	    }
-	    SNARKProofTask::Bn256KZGGrumpkin(g) => {
-		g.split(n).into_iter().map(|t| SNARKProofTask::Bn256KZGGrumpkin(t)).collect()
-
-	    }
-	}
+        match self {
+            SNARKProofTask::PallasVasta(g) => g
+                .split(n)
+                .into_iter()
+                .map(SNARKProofTask::PallasVasta)
+                .collect(),
+            SNARKProofTask::VastaPallas(g) => g
+                .split(n)
+                .into_iter()
+                .map(SNARKProofTask::VastaPallas)
+                .collect(),
+            SNARKProofTask::Bn256KZGGrumpkin(g) => g
+                .split(n)
+                .into_iter()
+                .map(SNARKProofTask::Bn256KZGGrumpkin)
+                .collect(),
+        }
     }
 }
 
@@ -718,20 +722,24 @@ where
 
     /// Split a SNARKGenerator task to multiple, by split circuits into multiple
     pub fn split(&self, n: usize) -> Vec<Self> {
-        let SNARKGenerator { snark, circuits, pp } = self;
+        let SNARKGenerator {
+            snark,
+            circuits,
+            pp,
+        } = self;
 
-        let mut splitted = Vec::new();
+        let mut split = Vec::new();
         let chunk_size = (circuits.len() + n - 1) / n;
 
         for circuit_chunk in circuits.chunks(chunk_size) {
             let new_generator = SNARKGenerator {
                 snark: snark.clone(),
                 circuits: circuit_chunk.to_vec(),
-                pp: Arc::clone(&pp),
+                pp: Arc::clone(pp),
             };
-            splitted.push(new_generator);
+            split.push(new_generator);
         }
-        splitted
+        split
     }
 
     /// setup compressed snark, get (pk, vk)
