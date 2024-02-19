@@ -680,6 +680,25 @@ where
     pp: Arc<PublicParams<E1, E2>>,
 }
 
+impl SNARKProofTask {
+    /// Make snark proof task splitable
+    pub fn split(&self, n: usize) -> Vec<SNARKProofTask> {
+	match self {
+	    SNARKProofTask::PallasVasta(g) => {
+		g.split(n).into_iter().map(|t| SNARKProofTask::PallasVasta(t)).collect()
+
+	    }
+	    SNARKProofTask::VastaPallas(g) => {
+		g.split(n).into_iter().map(|t| SNARKProofTask::VastaPallas(t)).collect()
+	    }
+	    SNARKProofTask::Bn256KZGGrumpkin(g) => {
+		g.split(n).into_iter().map(|t| SNARKProofTask::Bn256KZGGrumpkin(t)).collect()
+
+	    }
+	}
+    }
+}
+
 impl<E1, E2> SNARKGenerator<E1, E2>
 where
     E1: Engine<Base = <E2 as Engine>::Scalar>,
@@ -695,6 +714,24 @@ where
                 .verify(&self.pp, steps, first_input, vec![E2::Scalar::from(0)])?;
         }
         Ok(())
+    }
+
+    /// Split a SNARKGenerator task to multiple, by split circuits into multiple
+    pub fn split(&self, n: usize) -> Vec<Self> {
+        let SNARKGenerator { snark, circuits, pp } = self;
+
+        let mut splitted = Vec::new();
+        let chunk_size = (circuits.len() + n - 1) / n;
+
+        for circuit_chunk in circuits.chunks(chunk_size) {
+            let new_generator = SNARKGenerator {
+                snark: snark.clone(),
+                circuits: circuit_chunk.to_vec(),
+                pp: Arc::clone(&pp),
+            };
+            splitted.push(new_generator);
+        }
+        splitted
     }
 
     /// setup compressed snark, get (pk, vk)
