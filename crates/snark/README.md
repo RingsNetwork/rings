@@ -11,7 +11,7 @@
 [![docs](https://docs.rs/rings-node/badge.svg)](https://docs.rs/rings-node/latest/rings_node/)
 ![GitHub](https://img.shields.io/github/license/RingsNetwork/rings-node)
 
-This create contains the implementation of Rings SNARK, which is based on Nova
+This crate contains the implementation of Rings SNARK, which is based on Nova
 
 ### TL;DR
 
