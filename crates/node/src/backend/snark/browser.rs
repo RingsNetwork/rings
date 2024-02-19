@@ -20,15 +20,13 @@ pub struct SNARKProofTaskRef {
     inner: Arc<types::SNARKProofTask>,
 }
 
+#[wasm_bindgen]
 impl SNARKProofTaskRef {
     /// Make snark proof task ref splitable
     pub fn split(&self, n: usize) -> Vec<SNARKProofTaskRef> {
         self.inner.split(n).into_iter().map(|t| t.into()).collect()
     }
-}
 
-#[wasm_bindgen]
-impl SNARKProofTaskRef {
     /// serialize SNARKProofTaskRef to json
     pub fn to_json(&self) -> Result<String> {
         Ok(serde_json::to_string(self)?)
