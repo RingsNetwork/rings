@@ -84,14 +84,14 @@ rings help
 
 ## Resource
 
-| Resource                        | Link                                          | Status  |
-|---------------------------------|-----------------------------------------------|---------|
-| Rings Whitepaper                | [Rings Whitepaper](https://github.com/RingsNetwork/whitepaper) | [![rings-ext-v2](https://github.com/RingsNetwork/rings_ext_v2/actions/workflows/dev.yml/badge.svg)](https://github.com/RingsNetwork/rings_ext_v2/actions/workflows/dev.yml)|
-| Rings Documentation             | [Rings Docs](https://rings.gitbook.io/)       |  |
-| Rings Browser Handshakes Example| [Rings Browser Handshakes](https://github.com/RingsNetwork/rings-wasm-p2p) | Demo / PoC |
-| Rings Browser Extension         | [Rings Browser Extension](https://github.com/RingsNetwork/rings_ext_v2) | Beta |
-| Rings dWeb Demo                 | [Rings dWeb Demo](https://github.com/RingsNetwork/rings-dweb) |  [![rings-ext-v2](https://github.com/RingsNetwork/rings_dweb/actions/workflows/nextjs.yml/badge.svg?branch=page)](https://github.com/RingsNetwork/rings_dweb/actions/workflows/nextjs.yml)|
-
+| Resource                         | Link                                                                       | Status                                                                                                                                                                                    |
+|----------------------------------|----------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Rings Whitepaper                 | [Rings Whitepaper](https://github.com/RingsNetwork/whitepaper)             | [![rings-ext-v2](https://github.com/RingsNetwork/rings_ext_v2/actions/workflows/dev.yml/badge.svg)](https://github.com/RingsNetwork/rings_ext_v2/actions/workflows/dev.yml)               |
+| Rings Documentation              | [Rings Docs](https://rings.gitbook.io/)                                    |                                                                                                                                                                                           |
+| Rings Browser Handshakes Example | [Rings Browser Handshakes](https://github.com/RingsNetwork/rings-wasm-p2p) | Demo / PoC                                                                                                                                                                                |
+| Rings Browser Extension          | [Rings Browser Extension](https://github.com/RingsNetwork/rings_ext_v2)    | Beta                                                                                                                                                                                      |
+| Rings dWeb Demo                  | [Rings dWeb Demo](https://github.com/RingsNetwork/rings-dweb)              | [![rings-ext-v2](https://github.com/RingsNetwork/rings_dweb/actions/workflows/nextjs.yml/badge.svg?branch=page)](https://github.com/RingsNetwork/rings_dweb/actions/workflows/nextjs.yml) |
+|Rings zkProof Demo             | [Rings zkProof Demo](https://zkp.rings.rs)  |![rings-snark-demo](https://github.com/RingsNetwork/rings-proof-demo/actions/workflows/nextjs.yml/badge.svg?branch=page)|
 
 ## Components:
 
@@ -104,6 +104,8 @@ rings help
 * derive: Rings macros, including `wasm_export` macro.
 
 * transport: Rings Transport implementation, including native transport and `web_sys` based transport.
+
+* snark: Rings SNARK is based on fold scheme and zkSNARK
 
 ## Architecture
 
