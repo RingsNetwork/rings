@@ -17,7 +17,7 @@
   },
   "dependencies": {
     "circomlib": "^2.0.5",
-    "protobufjs": "^7.2.5"
+    "protobufjs": "https://github.com/RingsNetwork/protobuf.js#83686a0"
   },
   "devDependencies": {
     "protobufjs-cli": "^1.1.2",
