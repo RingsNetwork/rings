@@ -9,7 +9,8 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::future_to_promise;
 
 use super::*;
-use crate::backend::types;
+use crate::backend::types::snark::SNARKProofTask;
+use crate::backend::types::snark::SNARKVerifyTask;
 use crate::backend::BackendMessageHandlerDynObj;
 use crate::prelude::rings_core::utils::js_value;
 
@@ -17,7 +18,7 @@ use crate::prelude::rings_core::utils::js_value;
 #[wasm_bindgen]
 #[derive(Deserialize, Serialize)]
 pub struct SNARKProofTaskRef {
-    inner: Arc<types::SNARKProofTask>,
+    inner: Arc<SNARKProofTask>,
 }
 
 #[wasm_bindgen]
@@ -45,7 +46,7 @@ impl AsRef<SNARKProofTask> for SNARKProofTaskRef {
 }
 
 impl std::ops::Deref for SNARKProofTaskRef {
-    type Target = Arc<types::SNARKProofTask>;
+    type Target = Arc<SNARKProofTask>;
     fn deref(&self) -> &Self::Target {
         &self.inner
     }
@@ -61,7 +62,7 @@ impl From<SNARKProofTask> for SNARKProofTaskRef {
 #[wasm_bindgen]
 #[derive(Deserialize, Serialize)]
 pub struct SNARKVerifyTaskRef {
-    inner: Arc<types::SNARKVerifyTask>,
+    inner: Arc<SNARKVerifyTask>,
 }
 
 #[wasm_bindgen]
@@ -84,7 +85,7 @@ impl AsRef<SNARKVerifyTask> for SNARKVerifyTaskRef {
 }
 
 impl std::ops::Deref for SNARKVerifyTaskRef {
-    type Target = Arc<types::SNARKVerifyTask>;
+    type Target = Arc<SNARKVerifyTask>;
     fn deref(&self) -> &Self::Target {
         &self.inner
     }

@@ -1,6 +1,7 @@
 #![warn(missing_docs)]
 //! This module provide basic mechanism.
 
+#[cfg(feature = "snark")]
 pub mod snark;
 pub mod types;
 use std::result::Result;

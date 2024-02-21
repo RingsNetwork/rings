@@ -18,11 +18,15 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["node"]
+snark = [
+    "rings-snark",
+]
 ffi = [
     "node",
     "cbindgen",
 ]
-node = [
+node = ["node_minimal", "snark"]
+node_minimal = [
     "tokio",
     "tokio-util",
     "hyper",
@@ -44,7 +48,8 @@ node = [
     "wasmer-types",
     "home",
 ]
-browser = [
+browser = ["browser_minimal", "snark"]
+browser_minimal = [
     "backtrace",
     "clap",
     "tracing-wasm",
@@ -80,7 +85,7 @@ log = { version = "0.4", features = ["std"] }
 rings-core = { workspace = true, optional = true }
 rings-derive = { workspace = true, optional = true }
 rings-rpc = { workspace = true, optional = true }
-rings-snark = { workspace = true }
+rings-snark = { workspace = true, optional = true }
 rings-transport = { workspace = true }
 serde = { version = "1.0.136", features = ["derive"] }
 serde_json = "1.0.70"

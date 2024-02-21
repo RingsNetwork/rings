@@ -24,10 +24,10 @@ use rings_snark::snark::SNARK;
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::types::SNARKProofTask;
-use super::types::SNARKTask;
-use super::types::SNARKTaskMessage;
-use super::types::SNARKVerifyTask;
+use super::types::snark::SNARKProofTask;
+use super::types::snark::SNARKTask;
+use super::types::snark::SNARKTaskMessage;
+use super::types::snark::SNARKVerifyTask;
 use crate::backend::types::BackendMessage;
 use crate::backend::types::MessageHandler;
 use crate::error::Error;
