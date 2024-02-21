@@ -18,7 +18,7 @@ use crate::prelude::rings_core::utils::js_value;
 #[wasm_bindgen]
 #[derive(Deserialize, Serialize)]
 pub struct SNARKProofTaskRef {
-    inner: Arc<types::SNARKProofTask>,
+    inner: Arc<SNARKProofTask>,
 }
 
 #[wasm_bindgen]
