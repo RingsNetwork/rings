@@ -45,7 +45,7 @@ jobs:
         run: cargo clippy -p rings-core --features wasm --no-deps --no-default-features --target=wasm32-unknown-unknown --tests -- -D warnings
 
       - name: Run clippy for node browser
-        run: cargo clippy -p rings-node --features browser --no-deps --no-default-features --target=wasm32-unknown-unknown --tests -- -D warnings
+        run: cargo clippy -p rings-node --features browser_default --no-deps --no-default-features --target=wasm32-unknown-unknown --tests -- -D warnings
 
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
@@ -59,7 +59,7 @@ jobs:
       - name: Run node browser tests
         uses: coactions/setup-xvfb@v1
         with:
-          run: cargo test -p rings-node --release --target=wasm32-unknown-unknown --features browser --no-default-features
+          run: cargo test -p rings-node --release --target=wasm32-unknown-unknown --features browser_default --no-default-features
           working-directory: ./
 
   build:

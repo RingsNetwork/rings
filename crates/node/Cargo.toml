@@ -17,7 +17,7 @@ repository.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["node"]
+default = ["node_default"]
 snark = [
     "rings-snark",
 ]
@@ -25,8 +25,8 @@ ffi = [
     "node",
     "cbindgen",
 ]
-node = ["node_minimal", "snark"]
-node_minimal = [
+node_default = ["node", "snark"]
+node = [
     "tokio",
     "tokio-util",
     "hyper",
@@ -48,8 +48,9 @@ node_minimal = [
     "wasmer-types",
     "home",
 ]
-browser = ["browser_minimal", "snark"]
-browser_minimal = [
+
+browser_default = ["browser", "snark"]
+browser = [
     "backtrace",
     "clap",
     "tracing-wasm",
@@ -65,7 +66,8 @@ browser_minimal = [
     "wasm-bindgen-futures",
     "js-sys",
 ]
-browser_chrome_test = ["browser"]
+# run unittest with snark
+browser_chrome_test = ["browser_default"]
 
 [dependencies]
 anyhow = "1.0.45"
