@@ -23,7 +23,7 @@ serde-wasm-bindgen = "0.6.1"
 wasm-bindgen = "0.2.87"
 wasm-bindgen-futures = "0.4.37"
 wasm-bindgen-macro-support = "0.2.84"
-webrtc = { version = "0.9.0" }
+webrtc = { version = "0.10.1" }
 
 [profile.release]
 opt-level = 3
