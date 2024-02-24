@@ -15,6 +15,7 @@ use serde::Serializer;
 #[cfg(feature = "node")]
 use crate::error::Error;
 
+#[allow(dead_code)]
 pub(crate) fn serialize_forward<T, S>(value: &T, serializer: S) -> Result<S::Ok, S::Error>
 where
     T: Serialize,
@@ -23,6 +24,7 @@ where
     value.serialize(serializer)
 }
 
+#[allow(dead_code)]
 pub(crate) fn deserialize_forward<'de, T, D>(deserializer: D) -> Result<T, D::Error>
 where
     T: Deserialize<'de>,
@@ -31,6 +33,7 @@ where
     T::deserialize(deserializer)
 }
 
+#[allow(dead_code)]
 pub(crate) fn serialize_gzip<T, S>(value: &T, serializer: S) -> Result<S::Ok, S::Error>
 where
     T: Serialize,
@@ -42,6 +45,7 @@ where
     serializer.serialize_bytes(&compressed_data)
 }
 
+#[allow(dead_code)]
 pub(crate) fn deserialize_gzip<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     T: DeserializeOwned,

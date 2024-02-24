@@ -11,7 +11,7 @@
     "url": "https://github.com/RingsNetwork/rings-node"
   },
   "scripts": {
-    "wasm_pack": "wasm-pack build crates/node --release --scope ringsnetwork -t web --no-default-features --features browser --features console_error_panic_hook",
+    "wasm_pack": "wasm-pack build crates/node --release --scope ringsnetwork -t web --no-default-features --features browser_default --features console_error_panic_hook",
     "proto_generate": "mkdir -p dist && pbjs -t static-module --keep-case -o dist/rings_node_proto.js crates/rpc/src/protos/rings_node.proto && pbts -o dist/rings_node_proto.d.ts dist/rings_node_proto.js",
     "prepare": "npm run wasm_pack && npm run proto_generate && cp crates/node/pkg/rings_node* ./dist && cp index.ts ./dist && tsc ./dist/index.ts"
   },

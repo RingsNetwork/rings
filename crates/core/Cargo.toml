@@ -90,7 +90,7 @@ uuid = { version = "0.8.2", optional = true }
 # default and dummy
 async-channel = { version = "1.6.1", optional = true }
 sled = { version = "0.34.7", optional = true }
-webrtc = { version = "0.9.0", optional = true }
+webrtc = { workspace = true, optional = true }
 
 # dummy
 lazy_static = { version = "1.4.0", optional = true }

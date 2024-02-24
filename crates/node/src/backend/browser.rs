@@ -89,6 +89,7 @@ impl BackendBehaviour {
                     cb(self.clone(), provider.clone(), ctx, m).await?;
                 }
             }
+            #[cfg(feature = "snark")]
             BackendMessage::SNARKTaskMessage(m) => {
                 if let Some(func) = &self.get_handler("SNARKTaskMessage") {
                     let m = js_value::serialize(m)?;

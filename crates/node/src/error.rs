@@ -122,6 +122,7 @@ pub enum Error {
     TunnelNotFound = 1303,
     #[error("Tunnel error: {0:?}")]
     TunnelError(TunnelDefeat) = 1304,
+    #[cfg(feature = "snark")]
     #[error("Snark error: {0}")]
     RingsSNARKError(#[from] rings_snark::error::Error) = 1400,
     #[error("Snark curve not match")]
