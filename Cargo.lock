@@ -422,7 +422,7 @@ checksum = "8c3c1a368f70d6cf7302d78f8f7093da241fb8e8807c05cc9e51a125895a6d5b"
 [[package]]
 name = "bellman_ce"
 version = "0.3.2"
-source = "git+https://github.com/matter-labs/bellman#5520aa2274afe73d281373c92b007a2ecdebfbea"
+source = "git+https://github.com/matter-labs/bellman.git?rev=5520aa2#5520aa2274afe73d281373c92b007a2ecdebfbea"
 dependencies = [
  "arrayvec 0.7.4",
  "bit-vec",
@@ -531,7 +531,7 @@ dependencies = [
 [[package]]
 name = "blake2s_const"
 version = "0.6.0"
-source = "git+https://github.com/matter-labs/bellman#5520aa2274afe73d281373c92b007a2ecdebfbea"
+source = "git+https://github.com/matter-labs/bellman.git?rev=5520aa2#5520aa2274afe73d281373c92b007a2ecdebfbea"
 dependencies = [
  "arrayref",
  "arrayvec 0.5.2",
@@ -3967,6 +3967,7 @@ dependencies = [
  "memory-stats",
  "nova-snark",
  "pasta_curves",
+ "rand 0.4.6",
  "reqwest",
  "serde",
  "serde_json",

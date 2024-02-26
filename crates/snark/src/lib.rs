@@ -12,3 +12,4 @@ pub mod snark;
 #[cfg(test)]
 mod tests;
 pub mod witness;
+pub mod ff;

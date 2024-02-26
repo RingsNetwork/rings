@@ -8,7 +8,7 @@ use super::VerifierKey;
 use super::SNARK;
 use crate::circuit::Circuit;
 use crate::prelude::nova;
-use crate::prelude::nova::traits::circuit::TrivialCircuit;
+use crate::circuit::TrivialCircuit;
 use crate::prelude::nova::traits::snark::RelaxedR1CSSNARKTrait;
 use crate::prelude::nova::traits::Engine;
 use crate::prelude::nova::RecursiveSNARK;
