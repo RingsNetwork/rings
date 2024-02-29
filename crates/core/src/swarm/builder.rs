@@ -14,8 +14,8 @@ use crate::swarm::callback::SharedSwarmCallback;
 use crate::swarm::callback::SwarmCallback;
 use crate::swarm::MeasureImpl;
 use crate::swarm::Swarm;
+use crate::transport::SwarmTransport;
 use crate::types::channel::Channel as ChannelTrait;
-use crate::types::Transport;
 
 struct DefaultCallback;
 impl SwarmCallback for DefaultCallback {}
@@ -91,7 +91,7 @@ impl SwarmBuilder {
         let message_handler = MessageHandler::new(dht.clone());
 
         let transport_event_channel = Channel::new();
-        let transport = Box::new(Transport::new(&self.ice_servers, self.external_address));
+        let transport = SwarmTransport::new(&self.ice_servers, self.external_address, dht.clone());
 
         let callback = RwLock::new(
             self.callback

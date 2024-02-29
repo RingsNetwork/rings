@@ -40,13 +40,13 @@ impl SwarmInspect {
     pub async fn inspect(swarm: &Swarm) -> Self {
         let dht = DHTInspect::inspect(&swarm.dht());
         let connections = {
-            let connections = swarm.get_connections();
+            let connections = swarm.transport.get_connections();
 
             connections
                 .iter()
                 .map(|(did, c)| ConnectionInspect {
                     did: did.to_string(),
-                    state: format!("{:?}", c.ice_connection_state()),
+                    state: format!("{:?}", c.webrtc_connection_state()),
                 })
                 .collect()
         };

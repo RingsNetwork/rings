@@ -15,11 +15,7 @@ use async_recursion::async_recursion;
 use async_trait::async_trait;
 pub use builder::SwarmBuilder;
 use rings_derive::JudgeConnection;
-use rings_transport::core::transport::BoxedTransport;
-use rings_transport::core::transport::ConnectionInterface;
-use rings_transport::core::transport::TransportMessage;
 use rings_transport::core::transport::WebrtcConnectionState;
-use rings_transport::error::Error as TransportError;
 pub use types::MeasureImpl;
 pub use types::WrappedDid;
 
@@ -44,12 +40,11 @@ use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
 use crate::message::PayloadSender;
 use crate::session::SessionSk;
+use crate::swarm::callback::InnerSwarmCallback;
 use crate::swarm::callback::SharedSwarmCallback;
-use crate::swarm::impls::ConnectionHandshake;
+use crate::transport::SwarmTransport;
 use crate::types::channel::Channel as ChannelTrait;
 use crate::types::channel::TransportEvent;
-use crate::types::Connection;
-use crate::types::ConnectionOwner;
 
 /// The transport and dht management.
 #[derive(JudgeConnection)]
@@ -62,7 +57,7 @@ pub struct Swarm {
     pub(crate) measure: Option<MeasureImpl>,
     session_sk: SessionSk,
     message_handler: MessageHandler,
-    transport: BoxedTransport<ConnectionOwner, TransportError>,
+    pub(crate) transport: SwarmTransport,
     callback: RwLock<SharedSwarmCallback>,
 }
 
@@ -84,6 +79,32 @@ impl Swarm {
         &self.session_sk
     }
 
+    fn callback(&self) -> Result<InnerSwarmCallback> {
+        let shared = self
+            .callback
+            .read()
+            .map_err(|_| Error::CallbackSyncLockError)?
+            .clone();
+
+        Ok(InnerSwarmCallback::new(
+            self.did(),
+            self.transport_event_channel.sender(),
+            shared,
+        ))
+    }
+
+    /// Set callback for swarm.
+    pub fn set_callback(&self, callback: SharedSwarmCallback) -> Result<()> {
+        let mut inner = self
+            .callback
+            .write()
+            .map_err(|_| Error::CallbackSyncLockError)?;
+
+        *inner = callback;
+
+        Ok(())
+    }
+
     /// Load message from a TransportEvent.
     async fn load_message(&self, ev: TransportEvent) -> Result<Option<MessagePayload>> {
         match ev {
@@ -92,7 +113,7 @@ impl Swarm {
                 tracing::debug!("load message from channel: {:?}", payload);
                 Ok(Some(payload))
             }
-            TransportEvent::Connected(did) => match self.get_connection(did) {
+            TransportEvent::Connected(did) => match self.transport.get_connection(did) {
                 Some(_) => {
                     let payload = MessagePayload::new_send(
                         Message::JoinDHT(message::JoinDHT { did }),
@@ -197,15 +218,16 @@ impl Swarm {
 
             MessageHandlerEvent::LeaveDHT(did) => {
                 let did = *did;
-                if self.get_and_check_connection(did).await.is_none() {
+                if self.transport.get_and_check_connection(did).await.is_none() {
                     self.dht.remove(did)?
                 };
                 Ok(vec![])
             }
 
             MessageHandlerEvent::AnswerOffer(relay, msg) => {
-                let (_, answer) = self
-                    .answer_remote_connection(relay.relay.origin_sender(), msg)
+                let answer = self
+                    .transport
+                    .answer_remote_connection(relay.relay.origin_sender(), self.callback()?, msg)
                     .await?;
 
                 Ok(vec![MessageHandlerEvent::SendReportMessage(
@@ -215,7 +237,8 @@ impl Swarm {
             }
 
             MessageHandlerEvent::AcceptAnswer(origin_sender, msg) => {
-                self.accept_remote_connection(origin_sender.to_owned(), msg)
+                self.transport
+                    .accept_remote_connection(origin_sender.to_owned(), msg)
                     .await?;
                 Ok(vec![])
             }
@@ -291,7 +314,7 @@ impl Swarm {
     /// Connect a given Did. If the did is already connected, return directly,
     /// else try prepare offer and establish connection by dht.
     /// This function may returns a pending connection or connected connection.
-    pub async fn connect(&self, did: Did) -> Result<Connection> {
+    pub async fn connect(&self, did: Did) -> Result<()> {
         if did == self.did() {
             return Err(Error::ShouldNotConnectSelf);
         }
@@ -299,7 +322,7 @@ impl Swarm {
     }
 
     /// Similar to connect, but this function will try connect a Did by given hop.
-    pub async fn connect_via(&self, did: Did, next_hop: Did) -> Result<Connection> {
+    pub async fn connect_via(&self, did: Did, next_hop: Did) -> Result<()> {
         if did == self.did() {
             return Err(Error::ShouldNotConnectSelf);
         }
@@ -324,7 +347,7 @@ impl PayloadSender for Swarm {
     }
 
     fn is_connected(&self, did: Did) -> bool {
-        let Some(conn) = self.get_connection(did) else {
+        let Some(conn) = self.transport.get_connection(did) else {
             return false;
         };
         conn.webrtc_connection_state() == WebrtcConnectionState::Connected
@@ -332,6 +355,7 @@ impl PayloadSender for Swarm {
 
     async fn do_send_payload(&self, did: Did, payload: MessagePayload) -> Result<()> {
         let conn = self
+            .transport
             .get_and_check_connection(did)
             .await
             .ok_or(Error::SwarmMissDidInTable(did))?;
@@ -354,13 +378,11 @@ impl PayloadSender for Swarm {
                 let data =
                     MessagePayload::new_send(Message::Chunk(chunk), &self.session_sk, did, did)?
                         .to_bincode()?;
-                conn.send_message(TransportMessage::Custom(data.to_vec()))
-                    .await?;
+                conn.send_payload(data).await?;
             }
             Ok(())
         } else {
-            conn.send_message(TransportMessage::Custom(data.to_vec()))
-                .await
+            conn.send_payload(&payload).await
         };
 
         tracing::debug!(

@@ -2,7 +2,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rings_transport::core::transport::ConnectionInterface;
+use rings_transport::core::transport::WebrtcConnectionState;
 
 use crate::dht::successor::SuccessorReader;
 use crate::dht::types::CorrectChord;
@@ -43,10 +43,15 @@ pub trait TStabilize {
 impl Stabilization {
     /// Clean unavailable connections in transport.
     pub async fn clean_unavailable_connections(&self) -> Result<()> {
-        let conns = self.swarm.get_connections();
+        let conns = self.swarm.transport.get_connections();
 
         for (did, conn) in conns.into_iter() {
-            if conn.is_disconnected().await {
+            if matches!(
+                conn.webrtc_connection_state(),
+                WebrtcConnectionState::Disconnected
+                    | WebrtcConnectionState::Failed
+                    | WebrtcConnectionState::Closed
+            ) {
                 tracing::info!("STABILIZATION clean_unavailable_transports: {:?}", did);
                 self.swarm.disconnect(did).await?;
             }
