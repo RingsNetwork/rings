@@ -1,6 +1,8 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
+use async_trait::async_trait;
+use bytes::Bytes;
 use rings_transport::connection_ref::ConnectionRef;
 #[cfg(feature = "dummy")]
 pub use rings_transport::connections::DummyConnection as ConnectionOwner;
@@ -19,6 +21,8 @@ use rings_transport::core::transport::TransportInterface;
 use rings_transport::core::transport::TransportMessage;
 use rings_transport::core::transport::WebrtcConnectionState;
 
+use crate::chunk::ChunkList;
+use crate::consts::TRANSPORT_MAX_SIZE;
 use crate::consts::TRANSPORT_MTU;
 use crate::dht::Did;
 use crate::dht::PeerRing;
@@ -26,11 +30,15 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::message::ConnectNodeReport;
 use crate::message::ConnectNodeSend;
+use crate::message::Message;
 use crate::message::MessagePayload;
+use crate::message::PayloadSender;
+use crate::session::SessionSk;
 use crate::swarm::callback::InnerSwarmCallback;
 
 pub struct SwarmTransport {
     transport: Transport,
+    session_sk: SessionSk,
     dht: Arc<PeerRing>,
 }
 
@@ -40,9 +48,15 @@ pub struct SwarmConnection {
 }
 
 impl SwarmTransport {
-    pub fn new(ice_servers: &str, external_address: Option<String>, dht: Arc<PeerRing>) -> Self {
+    pub fn new(
+        ice_servers: &str,
+        external_address: Option<String>,
+        dht: Arc<PeerRing>,
+        session_sk: SessionSk,
+    ) -> Self {
         Self {
             transport: Transport::new(ice_servers, external_address),
+            session_sk,
             dht,
         }
     }
@@ -228,19 +242,7 @@ impl SwarmTransport {
 }
 
 impl SwarmConnection {
-    pub async fn send_payload(&self, payload: &MessagePayload) -> Result<()> {
-        tracing::debug!(
-            "Try send {:?}, to node {:?}",
-            payload,
-            payload.relay.next_hop,
-        );
-
-        let data = payload.to_bincode()?;
-        if data.len() > TRANSPORT_MTU {
-            tracing::error!("Transport data is too large: {:?}", payload);
-            return Err(Error::MessageTooLarge(data.len()));
-        }
-
+    pub async fn send_data(&self, data: Bytes) -> Result<()> {
         self.connection
             .send_message(TransportMessage::Custom(data.to_vec()))
             .await
@@ -249,5 +251,70 @@ impl SwarmConnection {
 
     pub fn webrtc_connection_state(&self) -> WebrtcConnectionState {
         self.connection.webrtc_connection_state()
+    }
+}
+
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl PayloadSender for SwarmTransport {
+    fn session_sk(&self) -> &SessionSk {
+        &self.session_sk
+    }
+
+    fn dht(&self) -> Arc<PeerRing> {
+        self.dht.clone()
+    }
+
+    fn is_connected(&self, did: Did) -> bool {
+        let Some(conn) = self.get_connection(did) else {
+            return false;
+        };
+        conn.webrtc_connection_state() == WebrtcConnectionState::Connected
+    }
+
+    async fn do_send_payload(&self, did: Did, payload: MessagePayload) -> Result<()> {
+        let conn = self
+            .get_and_check_connection(did)
+            .await
+            .ok_or(Error::SwarmMissDidInTable(did))?;
+
+        tracing::debug!(
+            "Try send {:?}, to node {:?}",
+            payload.clone(),
+            payload.relay.next_hop,
+        );
+
+        let data = payload.to_bincode()?;
+        if data.len() > TRANSPORT_MAX_SIZE {
+            tracing::error!("Message is too large: {:?}", payload);
+            return Err(Error::MessageTooLarge(data.len()));
+        }
+
+        let result = if data.len() > TRANSPORT_MTU {
+            let chunks = ChunkList::<TRANSPORT_MTU>::from(&data);
+            for chunk in chunks {
+                let data =
+                    MessagePayload::new_send(Message::Chunk(chunk), &self.session_sk, did, did)?
+                        .to_bincode()?;
+                conn.send_data(data).await?;
+            }
+            Ok(())
+        } else {
+            conn.send_data(data).await
+        };
+
+        tracing::debug!(
+            "Sent {:?}, to node {:?}",
+            payload.clone(),
+            payload.relay.next_hop,
+        );
+
+        if result.is_ok() {
+            self.record_sent(payload.relay.next_hop).await
+        } else {
+            self.record_sent_failed(payload.relay.next_hop).await
+        }
+
+        result.map_err(|e| e.into())
     }
 }

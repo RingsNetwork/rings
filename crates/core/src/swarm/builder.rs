@@ -91,7 +91,12 @@ impl SwarmBuilder {
         let message_handler = MessageHandler::new(dht.clone());
 
         let transport_event_channel = Channel::new();
-        let transport = SwarmTransport::new(&self.ice_servers, self.external_address, dht.clone());
+        let transport = SwarmTransport::new(
+            &self.ice_servers,
+            self.external_address,
+            dht.clone(),
+            self.session_sk,
+        );
 
         let callback = RwLock::new(
             self.callback
@@ -102,7 +107,6 @@ impl SwarmBuilder {
             transport_event_channel,
             dht,
             measure: self.measure,
-            session_sk: self.session_sk,
             message_handler,
             transport,
             callback,

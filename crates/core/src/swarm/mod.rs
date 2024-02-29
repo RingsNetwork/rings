@@ -12,17 +12,12 @@ use std::sync::Arc;
 use std::sync::RwLock;
 
 use async_recursion::async_recursion;
-use async_trait::async_trait;
 pub use builder::SwarmBuilder;
 use rings_derive::JudgeConnection;
-use rings_transport::core::transport::WebrtcConnectionState;
 pub use types::MeasureImpl;
 pub use types::WrappedDid;
 
 use crate::channels::Channel;
-use crate::chunk::ChunkList;
-use crate::consts::TRANSPORT_MAX_SIZE;
-use crate::consts::TRANSPORT_MTU;
 use crate::dht::types::Chord;
 use crate::dht::CorrectChord;
 use crate::dht::Did;
@@ -38,8 +33,6 @@ use crate::message::MessageHandler;
 use crate::message::MessageHandlerEvent;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
-use crate::message::PayloadSender;
-use crate::session::SessionSk;
 use crate::swarm::callback::InnerSwarmCallback;
 use crate::swarm::callback::SharedSwarmCallback;
 use crate::transport::SwarmTransport;
@@ -55,7 +48,6 @@ pub struct Swarm {
     pub(crate) dht: Arc<PeerRing>,
     /// Implementationof measurement.
     pub(crate) measure: Option<MeasureImpl>,
-    session_sk: SessionSk,
     message_handler: MessageHandler,
     pub(crate) transport: SwarmTransport,
     callback: RwLock<SharedSwarmCallback>,
@@ -70,13 +62,6 @@ impl Swarm {
     /// Get DHT(Distributed Hash Table) of self.
     pub fn dht(&self) -> Arc<PeerRing> {
         self.dht.clone()
-    }
-
-    /// Retrieves the session sk associated with the current instance.
-    /// The session sk provides a segregated approach to manage private keys.
-    /// It generates session secret keys for the bound entries of PKIs (Public Key Infrastructure).
-    pub fn session_sk(&self) -> &SessionSk {
-        &self.session_sk
     }
 
     fn callback(&self) -> Result<InnerSwarmCallback> {
@@ -332,72 +317,6 @@ impl Swarm {
     /// Check the status of swarm
     pub async fn inspect(&self) -> SwarmInspect {
         SwarmInspect::inspect(self).await
-    }
-}
-
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
-impl PayloadSender for Swarm {
-    fn session_sk(&self) -> &SessionSk {
-        Swarm::session_sk(self)
-    }
-
-    fn dht(&self) -> Arc<PeerRing> {
-        Swarm::dht(self)
-    }
-
-    fn is_connected(&self, did: Did) -> bool {
-        let Some(conn) = self.transport.get_connection(did) else {
-            return false;
-        };
-        conn.webrtc_connection_state() == WebrtcConnectionState::Connected
-    }
-
-    async fn do_send_payload(&self, did: Did, payload: MessagePayload) -> Result<()> {
-        let conn = self
-            .transport
-            .get_and_check_connection(did)
-            .await
-            .ok_or(Error::SwarmMissDidInTable(did))?;
-
-        tracing::debug!(
-            "Try send {:?}, to node {:?}",
-            payload.clone(),
-            payload.relay.next_hop,
-        );
-
-        let data = payload.to_bincode()?;
-        if data.len() > TRANSPORT_MAX_SIZE {
-            tracing::error!("Message is too large: {:?}", payload);
-            return Err(Error::MessageTooLarge(data.len()));
-        }
-
-        let result = if data.len() > TRANSPORT_MTU {
-            let chunks = ChunkList::<TRANSPORT_MTU>::from(&data);
-            for chunk in chunks {
-                let data =
-                    MessagePayload::new_send(Message::Chunk(chunk), &self.session_sk, did, did)?
-                        .to_bincode()?;
-                conn.send_payload(data).await?;
-            }
-            Ok(())
-        } else {
-            conn.send_payload(&payload).await
-        };
-
-        tracing::debug!(
-            "Sent {:?}, to node {:?}",
-            payload.clone(),
-            payload.relay.next_hop,
-        );
-
-        if result.is_ok() {
-            self.record_sent(payload.relay.next_hop).await
-        } else {
-            self.record_sent_failed(payload.relay.next_hop).await
-        }
-
-        result.map_err(|e| e.into())
     }
 }
 
