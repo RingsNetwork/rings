@@ -49,7 +49,7 @@ pub struct Swarm {
     /// Implementationof measurement.
     pub(crate) measure: Option<MeasureImpl>,
     message_handler: MessageHandler,
-    pub(crate) transport: SwarmTransport,
+    pub(crate) transport: Arc<SwarmTransport>,
     callback: RwLock<SharedSwarmCallback>,
 }
 

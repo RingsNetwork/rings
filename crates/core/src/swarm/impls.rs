@@ -4,13 +4,11 @@ use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
 use crate::measure::MeasureCounter;
-use crate::message::ConnectNodeSend;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
 use crate::message::PayloadSender;
 use crate::swarm::Swarm;
-use crate::types::Connection;
 
 /// ConnectionHandshake defined how to connect two connections between two swarms.
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
@@ -18,18 +16,15 @@ use crate::types::Connection;
 pub trait ConnectionHandshake {
     /// Creaet new connection and its answer. This function will wrap the offer inside a payload
     /// with verification.
-    async fn create_offer(&self, peer: Did) -> Result<(Connection, MessagePayload)>;
+    async fn create_offer(&self, peer: Did) -> Result<MessagePayload>;
 
     /// Answer the offer of remote connection. This function will verify the answer payload and
     /// will wrap the answer inside a payload with verification.
-    async fn answer_offer(
-        &self,
-        offer_payload: MessagePayload,
-    ) -> Result<(Connection, MessagePayload)>;
+    async fn answer_offer(&self, offer_payload: MessagePayload) -> Result<MessagePayload>;
 
     /// Accept the answer of remote connection. This function will verify the answer payload and
     /// will return its did with the connection.
-    async fn accept_answer(&self, answer_payload: MessagePayload) -> Result<(Did, Connection)>;
+    async fn accept_answer(&self, answer_payload: MessagePayload) -> Result<()>;
 }
 
 /// A trait for managing connections.
@@ -120,25 +115,25 @@ impl Swarm {
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl ConnectionHandshake for Swarm {
-    async fn create_offer(&self, peer: Did) -> Result<(Connection, MessagePayload)> {
-        let (conn, offer_msg) = self.prepare_connection_offer(peer).await?;
+    async fn create_offer(&self, peer: Did) -> Result<MessagePayload> {
+        let offer_msg = self
+            .transport
+            .prepare_connection_offer(peer, self.callback()?)
+            .await?;
 
         // This payload has fake next_hop.
         // The invoker should fix it before sending.
         let payload = MessagePayload::new_send(
             Message::ConnectNodeSend(offer_msg),
-            self.session_sk(),
+            self.transport.session_sk(),
             self.did(),
             peer,
         )?;
 
-        Ok((conn, payload))
+        Ok(payload)
     }
 
-    async fn answer_offer(
-        &self,
-        offer_payload: MessagePayload,
-    ) -> Result<(Connection, MessagePayload)> {
+    async fn answer_offer(&self, offer_payload: MessagePayload) -> Result<MessagePayload> {
         if !offer_payload.verify() {
             return Err(Error::VerifySignatureFailed);
         }
@@ -150,23 +145,24 @@ impl ConnectionHandshake for Swarm {
         };
 
         let peer = offer_payload.relay.origin_sender();
-        let (conn, answer_msg) = self.answer_remote_connection(peer, &msg).await?;
+        let answer_msg = self
+            .transport
+            .answer_remote_connection(peer, self.callback()?, &msg)
+            .await?;
 
         // This payload has fake next_hop.
         // The invoker should fix it before sending.
         let answer_payload = MessagePayload::new_send(
             Message::ConnectNodeReport(answer_msg),
-            self.session_sk(),
+            self.transport.session_sk(),
             self.did(),
             self.did(),
         )?;
 
-        Ok((conn, answer_payload))
+        Ok(answer_payload)
     }
 
-    async fn accept_answer(&self, answer_payload: MessagePayload) -> Result<(Did, Connection)> {
-        tracing::debug!("accept_answer: {:?}", answer_payload);
-
+    async fn accept_answer(&self, answer_payload: MessagePayload) -> Result<()> {
         if !answer_payload.verify() {
             return Err(Error::VerifySignatureFailed);
         }
@@ -178,9 +174,7 @@ impl ConnectionHandshake for Swarm {
         };
 
         let peer = answer_payload.relay.origin_sender();
-        let conn = self.accept_remote_connection(peer, msg).await?;
-
-        Ok((peer, conn))
+        self.transport.accept_remote_connection(peer, msg).await
     }
 }
 
@@ -191,49 +185,36 @@ impl ConnectionManager for Swarm {
     /// 1) remove from DHT;
     /// 2) remove from Transport;
     /// 3) close the connection;
-    async fn disconnect(&self, did: Did) -> Result<()> {
-        self.transport.disconnect(did).await
+    async fn disconnect(&self, peer: Did) -> Result<()> {
+        self.transport.disconnect(peer).await
     }
 
     /// Connect a given Did. If the did is already connected, return directly,
     /// else try prepare offer and establish connection by dht.
     /// This function may returns a pending connection or connected connection.
-    async fn connect(&self, did: Did) -> Result<()> {
-        tracing::info!("Try connect Did {:?}", &did);
-        if let Some(t) = self.get_and_check_connection(did).await {
-            return Ok(t);
-        }
-
-        let conn = self.new_connection(did).await?;
-
-        let offer = conn.webrtc_create_offer().await.map_err(Error::Transport)?;
-        let offer_str = serde_json::to_string(&offer).map_err(|_| Error::SerializeToString)?;
-        let offer_msg = ConnectNodeSend { sdp: offer_str };
-
-        self.send_message(Message::ConnectNodeSend(offer_msg), did)
+    async fn connect(&self, peer: Did) -> Result<()> {
+        let offer_msg = self
+            .transport
+            .prepare_connection_offer(peer, self.callback()?)
             .await?;
-
-        Ok(conn)
+        self.transport
+            .send_message(Message::ConnectNodeSend(offer_msg), peer)
+            .await?;
+        Ok(())
     }
 
     /// Similar to connect, but this function will try connect a Did by given hop.
-    async fn connect_via(&self, did: Did, next_hop: Did) -> Result<()> {
-        if let Some(t) = self.get_and_check_connection(did).await {
-            return Ok(t);
-        }
-
-        tracing::info!("Try connect Did {:?}", &did);
-
-        let conn = self.new_connection(did).await?;
-
-        let offer = conn.webrtc_create_offer().await.map_err(Error::Transport)?;
-        let offer_str = serde_json::to_string(&offer).map_err(|_| Error::SerializeToString)?;
-        let offer_msg = ConnectNodeSend { sdp: offer_str };
-
-        self.send_message_by_hop(Message::ConnectNodeSend(offer_msg), did, next_hop)
+    async fn connect_via(&self, peer: Did, next_hop: Did) -> Result<()> {
+        let offer_msg = self
+            .transport
+            .prepare_connection_offer(peer, self.callback()?)
             .await?;
 
-        Ok(conn)
+        self.transport
+            .send_message_by_hop(Message::ConnectNodeSend(offer_msg), peer, next_hop)
+            .await?;
+
+        Ok(())
     }
 }
 

@@ -91,12 +91,12 @@ impl SwarmBuilder {
         let message_handler = MessageHandler::new(dht.clone());
 
         let transport_event_channel = Channel::new();
-        let transport = SwarmTransport::new(
+        let transport = Arc::new(SwarmTransport::new(
             &self.ice_servers,
             self.external_address,
             dht.clone(),
             self.session_sk,
-        );
+        ));
 
         let callback = RwLock::new(
             self.callback
