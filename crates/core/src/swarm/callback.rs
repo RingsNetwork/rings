@@ -6,18 +6,16 @@ use futures::lock::Mutex as FuturesMutex;
 use rings_transport::core::callback::TransportCallback;
 use rings_transport::core::transport::WebrtcConnectionState;
 
-use crate::channels::Channel;
 use crate::chunk::ChunkList;
 use crate::chunk::ChunkManager;
 use crate::consts::TRANSPORT_MTU;
 use crate::dht::Did;
+use crate::error::Error;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
-use crate::types::channel::Channel as ChannelTrait;
-use crate::types::channel::TransportEvent;
+use crate::transport::SwarmTransport;
 
-type TransportEventSender = <Channel<TransportEvent> as ChannelTrait<TransportEvent>>::Sender;
 type CallbackError = Box<dyn std::error::Error>;
 
 /// The [InnerSwarmCallback] will accept shared [SwarmCallback] trait object.
@@ -65,21 +63,17 @@ pub trait SwarmCallback {
 /// [InnerSwarmCallback] wraps [SharedSwarmCallback] with inner handling for a specific connection.
 pub struct InnerSwarmCallback {
     did: Did,
-    transport_event_sender: TransportEventSender,
+    transport: Arc<SwarmTransport>,
     callback: SharedSwarmCallback,
-    chunk_list: Arc<FuturesMutex<ChunkList<TRANSPORT_MTU>>>,
+    chunk_list: FuturesMutex<ChunkList<TRANSPORT_MTU>>,
 }
 
 impl InnerSwarmCallback {
     /// Create a new [InnerSwarmCallback] with the provided did, transport_event_sender and callback.
-    pub fn new(
-        did: Did,
-        transport_event_sender: TransportEventSender,
-        callback: SharedSwarmCallback,
-    ) -> Self {
+    pub fn new(did: Did, transport: Arc<SwarmTransport>, callback: SharedSwarmCallback) -> Self {
         Self {
             did,
-            transport_event_sender,
+            transport,
             callback,
             chunk_list: Default::default(),
         }
@@ -117,14 +111,6 @@ impl TransportCallback for InnerSwarmCallback {
             return Err("Cannot verify msg or it's expired".into());
         }
         self.callback.on_validate(&payload).await?;
-
-        Channel::send(
-            &self.transport_event_sender,
-            TransportEvent::DataChannelMessage(msg.into()),
-        )
-        .await
-        .map_err(Box::new)?;
-
         self.handle_payload(cid, &payload).await
     }
 
@@ -140,16 +126,27 @@ impl TransportCallback for InnerSwarmCallback {
 
         match s {
             WebrtcConnectionState::Connected => {
-                Channel::send(&self.transport_event_sender, TransportEvent::Connected(did)).await
+                if cfg!(feature = "experimental") {
+                    let conn = self
+                        .transport
+                        .get_connection(did)
+                        .ok_or(Error::SwarmMissDidInTable(did))?;
+                    let dht_ev = self.transport.dht.join_then_sync(conn).await?;
+                    crate::message::handlers::dht::handle_dht_events(&dht_ev, ctx).await?;
+                } else {
+                    let dht_ev = self.transport.dht.join(*did)?;
+                    crate::message::handlers::dht::handle_dht_events(&dht_ev, ctx).await?;
+                }
             }
             WebrtcConnectionState::Failed
             | WebrtcConnectionState::Disconnected
             | WebrtcConnectionState::Closed => {
-                Channel::send(&self.transport_event_sender, TransportEvent::Closed(did)).await
+                if self.transport.get_and_check_connection(did).await.is_none() {
+                    self.transport.dht.remove(did)?
+                };
             }
-            _ => Ok(()),
-        }
-        .map_err(Box::new)?;
+            _ => {}
+        };
 
         self.callback
             .on_event(&SwarmEvent::ConnectionStateChange {

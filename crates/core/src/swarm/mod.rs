@@ -33,6 +33,7 @@ use crate::message::MessageHandler;
 use crate::message::MessageHandlerEvent;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
+use crate::message::PayloadSender;
 use crate::swarm::callback::InnerSwarmCallback;
 use crate::swarm::callback::SharedSwarmCallback;
 use crate::transport::SwarmTransport;
@@ -73,7 +74,7 @@ impl Swarm {
 
         Ok(InnerSwarmCallback::new(
             self.did(),
-            self.transport_event_channel.sender(),
+            self.transport.clone(),
             shared,
         ))
     }
@@ -229,7 +230,7 @@ impl Swarm {
             }
 
             MessageHandlerEvent::ForwardPayload(payload, next_hop) => {
-                self.forward_payload(payload, *next_hop).await?;
+                self.transport.forward_payload(payload, *next_hop).await?;
                 Ok(vec![])
             }
 
@@ -245,22 +246,26 @@ impl Swarm {
             }
 
             MessageHandlerEvent::SendDirectMessage(msg, dest) => {
-                self.send_direct_message(msg.clone(), *dest).await?;
+                self.transport
+                    .send_direct_message(msg.clone(), *dest)
+                    .await?;
                 Ok(vec![])
             }
 
             MessageHandlerEvent::SendMessage(msg, dest) => {
-                self.send_message(msg.clone(), *dest).await?;
+                self.transport.send_message(msg.clone(), *dest).await?;
                 Ok(vec![])
             }
 
             MessageHandlerEvent::SendReportMessage(payload, msg) => {
-                self.send_report_message(payload, msg.clone()).await?;
+                self.transport
+                    .send_report_message(payload, msg.clone())
+                    .await?;
                 Ok(vec![])
             }
 
             MessageHandlerEvent::ResetDestination(payload, next_hop) => {
-                self.reset_destination(payload, *next_hop).await?;
+                self.transport.reset_destination(payload, *next_hop).await?;
                 Ok(vec![])
             }
 
