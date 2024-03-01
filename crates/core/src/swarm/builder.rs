@@ -5,7 +5,6 @@
 use std::sync::Arc;
 use std::sync::RwLock;
 
-use crate::channels::Channel;
 use crate::dht::PeerRing;
 use crate::dht::VNodeStorage;
 use crate::message::MessageHandler;
@@ -15,7 +14,6 @@ use crate::swarm::callback::SwarmCallback;
 use crate::swarm::MeasureImpl;
 use crate::swarm::Swarm;
 use crate::transport::SwarmTransport;
-use crate::types::channel::Channel as ChannelTrait;
 
 struct DefaultCallback;
 impl SwarmCallback for DefaultCallback {}
@@ -88,9 +86,6 @@ impl SwarmBuilder {
             self.dht_storage,
         ));
 
-        let message_handler = MessageHandler::new(dht.clone());
-
-        let transport_event_channel = Channel::new();
         let transport = Arc::new(SwarmTransport::new(
             &self.ice_servers,
             self.external_address,
@@ -103,8 +98,9 @@ impl SwarmBuilder {
                 .unwrap_or_else(|| Arc::new(DefaultCallback {})),
         );
 
+        let message_handler = MessageHandler::new(transport.clone());
+
         Swarm {
-            transport_event_channel,
             dht,
             measure: self.measure,
             message_handler,

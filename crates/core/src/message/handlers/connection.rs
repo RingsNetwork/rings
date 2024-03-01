@@ -1,10 +1,6 @@
-use std::ops::Deref;
-
 use async_trait::async_trait;
 
 use super::dht;
-use crate::dht::types::CorrectChord;
-use crate::dht::Chord;
 use crate::dht::PeerRingAction;
 use crate::dht::TopoInfo;
 use crate::error::Error;
@@ -13,7 +9,6 @@ use crate::message::types::ConnectNodeReport;
 use crate::message::types::ConnectNodeSend;
 use crate::message::types::FindSuccessorReport;
 use crate::message::types::FindSuccessorSend;
-use crate::message::types::JoinDHT;
 use crate::message::types::Message;
 use crate::message::types::QueryForTopoInfoReport;
 use crate::message::types::QueryForTopoInfoSend;
@@ -21,7 +16,6 @@ use crate::message::types::Then;
 use crate::message::FindSuccessorReportHandler;
 use crate::message::FindSuccessorThen;
 use crate::message::HandleMsg;
-use crate::message::LeaveDHT;
 use crate::message::MessageHandler;
 use crate::message::MessageHandlerEvent;
 use crate::message::MessagePayload;
@@ -68,35 +62,6 @@ impl HandleMsg<QueryForTopoInfoReport> for MessageHandler {
                 dht::handle_dht_events(&ev, ctx).await
             }
         }
-    }
-}
-
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
-impl HandleMsg<LeaveDHT> for MessageHandler {
-    async fn handle(
-        &self,
-        _ctx: &MessagePayload,
-        msg: &LeaveDHT,
-    ) -> Result<Vec<MessageHandlerEvent>> {
-        Ok(vec![MessageHandlerEvent::LeaveDHT(msg.did)])
-    }
-}
-
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
-impl HandleMsg<JoinDHT> for MessageHandler {
-    async fn handle(
-        &self,
-        ctx: &MessagePayload,
-        msg: &JoinDHT,
-    ) -> Result<Vec<MessageHandlerEvent>> {
-        // here is two situation.
-        // finger table just have no other node(beside next), it will be a `create` op
-        // otherwise, it will be a `send` op
-        // let act = self.dht.join(msg.did)?;
-        // handle_join_dht(&self, act, ctx).await
-        Ok(vec![MessageHandlerEvent::JoinDHT(ctx.clone(), msg.did)])
     }
 }
 

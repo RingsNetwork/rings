@@ -131,20 +131,6 @@ impl Then for QueryForTopoInfoSend {
     type Then = QueryFor;
 }
 
-/// MessageType use to join chord ring, add did into fingers table.
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct JoinDHT {
-    /// The did for joining
-    pub did: Did,
-}
-
-/// MessageType use to leave chord ring.
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct LeaveDHT {
-    /// The did for dropping
-    pub did: Did,
-}
-
 /// MessageType use to search virtual node.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SearchVNode {
@@ -196,10 +182,6 @@ pub enum FindSuccessorReportHandler {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[non_exhaustive]
 pub enum Message {
-    /// Local message of Join a node to DHT
-    JoinDHT(JoinDHT),
-    /// Local message of drop a node from DHT
-    LeaveDHT(LeaveDHT),
     /// Remote message of try connecting a node.
     ConnectNodeSend(ConnectNodeSend),
     /// Response of ConnectNodeSend

@@ -21,6 +21,7 @@ use crate::dht::PeerRing;
 use crate::error::Result;
 use crate::message::ConnectNodeReport;
 use crate::message::ConnectNodeSend;
+use crate::transport::SwarmTransport;
 
 /// Operator and Handler for Connection
 pub mod connection;
@@ -45,9 +46,6 @@ pub enum MessageHandlerEvent {
     /// Instructs the swarm to connect to a peer via given next hop.
     ConnectVia(Did, NextHop),
 
-    /// Instructs the swarm to remove a peer in dht if it's not existed.
-    LeaveDHT(Did),
-
     /// Instructs the swarm to answer an offer inside payload by given
     /// sender's Did and Message.
     AnswerOffer(MessagePayload, ConnectNodeSend),
@@ -59,9 +57,6 @@ pub enum MessageHandlerEvent {
     /// Tell swarm to forward the payload to destination by given
     /// Payload and optional next hop.
     ForwardPayload(MessagePayload, Option<Did>),
-
-    /// Instructs the swarm to notify the dht about new peer.
-    JoinDHT(MessagePayload, Did),
 
     /// Instructs the swarm to send a direct message to a peer.
     SendDirectMessage(Message, Did),
@@ -84,7 +79,7 @@ pub enum MessageHandlerEvent {
 /// MessageHandler will manage resources.
 #[derive(Clone)]
 pub struct MessageHandler {
-    dht: Arc<PeerRing>,
+    transport: Arc<SwarmTransport>,
 }
 
 /// Generic trait for handle message ,inspired by Actor-Model.
@@ -97,8 +92,8 @@ pub trait HandleMsg<T> {
 
 impl MessageHandler {
     /// Create a new MessageHandler Instance.
-    pub fn new(dht: Arc<PeerRing>) -> Self {
-        Self { dht }
+    pub fn new(transport: Arc<SwarmTransport>) -> Self {
+        Self { transport }
     }
 
     /// Handle builtin message.
@@ -117,8 +112,6 @@ impl MessageHandler {
         );
 
         let events = match &message {
-            Message::JoinDHT(ref msg) => self.handle(payload, msg).await,
-            Message::LeaveDHT(ref msg) => self.handle(payload, msg).await,
             Message::ConnectNodeSend(ref msg) => self.handle(payload, msg).await,
             Message::ConnectNodeReport(ref msg) => self.handle(payload, msg).await,
             Message::FindSuccessorSend(ref msg) => self.handle(payload, msg).await,
