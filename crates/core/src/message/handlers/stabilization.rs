@@ -11,52 +11,51 @@ use crate::message::types::NotifyPredecessorSend;
 use crate::message::types::SyncVNodeWithSuccessor;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
-use crate::message::MessageHandlerEvent;
 use crate::message::MessagePayload;
+use crate::message::PayloadSender;
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<NotifyPredecessorSend> for MessageHandler {
-    async fn handle(
-        &self,
-        ctx: &MessagePayload,
-        msg: &NotifyPredecessorSend,
-    ) -> Result<Vec<MessageHandlerEvent>> {
+    async fn handle(&self, ctx: &MessagePayload, msg: &NotifyPredecessorSend) -> Result<()> {
         let predecessor = self.dht.notify(msg.did)?;
 
         if predecessor != ctx.relay.origin_sender() {
-            return Ok(vec![MessageHandlerEvent::SendReportMessage(
-                ctx.clone(),
-                Message::NotifyPredecessorReport(NotifyPredecessorReport { did: predecessor }),
-            )]);
+            return self
+                .transport
+                .send_report_message(
+                    ctx,
+                    Message::NotifyPredecessorReport(NotifyPredecessorReport { did: predecessor }),
+                )
+                .await;
         }
 
-        Ok(vec![])
+        Ok(())
     }
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
-    async fn handle(
-        &self,
-        _ctx: &MessagePayload,
-        msg: &NotifyPredecessorReport,
-    ) -> Result<Vec<MessageHandlerEvent>> {
-        let mut events = vec![MessageHandlerEvent::Connect(msg.did)];
+    async fn handle(&self, _ctx: &MessagePayload, msg: &NotifyPredecessorReport) -> Result<()> {
+        self.transport
+            .connect(msg.did, self.inner_callback())
+            .await?;
 
         if let Ok(PeerRingAction::RemoteAction(
             next,
             PeerRingRemoteAction::SyncVNodeWithSuccessor(data),
         )) = self.dht.sync_vnode_with_successor(msg.did).await
         {
-            events.push(MessageHandlerEvent::SendMessage(
-                Message::SyncVNodeWithSuccessor(SyncVNodeWithSuccessor { data }),
-                next,
-            ))
+            self.transport
+                .send_message(
+                    Message::SyncVNodeWithSuccessor(SyncVNodeWithSuccessor { data }),
+                    next,
+                )
+                .await?;
         }
 
-        Ok(events)
+        Ok(())
     }
 }
 

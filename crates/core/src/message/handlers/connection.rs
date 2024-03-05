@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 
-use super::dht;
+use crate::dht::types::Chord;
+use crate::dht::types::CorrectChord;
 use crate::dht::PeerRingAction;
 use crate::dht::TopoInfo;
 use crate::error::Error;
@@ -17,27 +18,21 @@ use crate::message::FindSuccessorReportHandler;
 use crate::message::FindSuccessorThen;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
-use crate::message::MessageHandlerEvent;
 use crate::message::MessagePayload;
+use crate::message::PayloadSender;
 
 /// QueryForTopoInfoSend is direct message
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<QueryForTopoInfoSend> for MessageHandler {
-    async fn handle(
-        &self,
-        ctx: &MessagePayload,
-        msg: &QueryForTopoInfoSend,
-    ) -> Result<Vec<MessageHandlerEvent>> {
-        let info: TopoInfo = TopoInfo::try_from(self.dht.deref())?;
+    async fn handle(&self, ctx: &MessagePayload, msg: &QueryForTopoInfoSend) -> Result<()> {
+        let info: TopoInfo = TopoInfo::try_from(self.dht.as_ref())?;
         if msg.did == self.dht.did {
-            Ok(vec![MessageHandlerEvent::SendReportMessage(
-                ctx.clone(),
-                Message::QueryForTopoInfoReport(msg.resp(info)),
-            )])
-        } else {
-            Ok(vec![])
+            self.transport
+                .send_report_message(ctx, Message::QueryForTopoInfoReport(msg.resp(info)))
+                .await?
         }
+        Ok(())
     }
 }
 
@@ -45,41 +40,36 @@ impl HandleMsg<QueryForTopoInfoSend> for MessageHandler {
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<QueryForTopoInfoReport> for MessageHandler {
-    async fn handle(
-        &self,
-        ctx: &MessagePayload,
-        msg: &QueryForTopoInfoReport,
-    ) -> Result<Vec<MessageHandlerEvent>> {
+    async fn handle(&self, _ctx: &MessagePayload, msg: &QueryForTopoInfoReport) -> Result<()> {
         match msg.then {
-            <QueryForTopoInfoReport as Then>::Then::SyncSuccessor => Ok(msg
-                .info
-                .successors
-                .iter()
-                .map(|did| MessageHandlerEvent::JoinDHT(ctx.clone(), *did))
-                .collect()),
+            <QueryForTopoInfoReport as Then>::Then::SyncSuccessor => {
+                for peer in msg.info.successors.iter() {
+                    self.join_dht(*peer).await?;
+                }
+            }
             <QueryForTopoInfoReport as Then>::Then::Stabilization => {
                 let ev = self.dht.stabilize(msg.info.clone())?;
-                dht::handle_dht_events(&ev, ctx).await
+                self.handle_dht_events(&ev).await?;
             }
         }
+        Ok(())
     }
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<ConnectNodeSend> for MessageHandler {
-    async fn handle(
-        &self,
-        ctx: &MessagePayload,
-        msg: &ConnectNodeSend,
-    ) -> Result<Vec<MessageHandlerEvent>> {
+    async fn handle(&self, ctx: &MessagePayload, msg: &ConnectNodeSend) -> Result<()> {
         if self.dht.did != ctx.relay.destination {
-            Ok(vec![MessageHandlerEvent::ForwardPayload(ctx.clone(), None)])
+            self.transport.forward_payload(ctx, None).await
         } else {
-            Ok(vec![MessageHandlerEvent::AnswerOffer(
-                ctx.clone(),
-                msg.clone(),
-            )])
+            let answer = self
+                .transport
+                .answer_remote_connection(ctx.relay.origin_sender(), self.inner_callback(), msg)
+                .await?;
+            self.transport
+                .send_report_message(ctx, Message::ConnectNodeReport(answer))
+                .await
         }
     }
 }
@@ -87,18 +77,13 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<ConnectNodeReport> for MessageHandler {
-    async fn handle(
-        &self,
-        ctx: &MessagePayload,
-        msg: &ConnectNodeReport,
-    ) -> Result<Vec<MessageHandlerEvent>> {
+    async fn handle(&self, ctx: &MessagePayload, msg: &ConnectNodeReport) -> Result<()> {
         if self.dht.did != ctx.relay.destination {
-            Ok(vec![MessageHandlerEvent::ForwardPayload(ctx.clone(), None)])
+            self.transport.forward_payload(ctx, None).await
         } else {
-            Ok(vec![MessageHandlerEvent::AcceptAnswer(
-                ctx.relay.origin_sender(),
-                msg.clone(),
-            )])
+            self.transport
+                .accept_remote_connection(ctx.relay.origin_sender(), msg)
+                .await
         }
     }
 }
@@ -106,37 +91,29 @@ impl HandleMsg<ConnectNodeReport> for MessageHandler {
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<FindSuccessorSend> for MessageHandler {
-    async fn handle(
-        &self,
-        ctx: &MessagePayload,
-        msg: &FindSuccessorSend,
-    ) -> Result<Vec<MessageHandlerEvent>> {
+    async fn handle(&self, ctx: &MessagePayload, msg: &FindSuccessorSend) -> Result<()> {
         match self.dht.find_successor(msg.did)? {
             PeerRingAction::Some(did) => {
                 if !msg.strict || self.dht.did == msg.did {
                     match &msg.then {
                         FindSuccessorThen::Report(handler) => {
-                            Ok(vec![MessageHandlerEvent::SendReportMessage(
-                                ctx.clone(),
-                                Message::FindSuccessorReport(FindSuccessorReport {
-                                    did,
-                                    handler: handler.clone(),
-                                }),
-                            )])
+                            self.transport
+                                .send_report_message(
+                                    ctx,
+                                    Message::FindSuccessorReport(FindSuccessorReport {
+                                        did,
+                                        handler: handler.clone(),
+                                    }),
+                                )
+                                .await
                         }
                     }
                 } else {
-                    Ok(vec![MessageHandlerEvent::ForwardPayload(
-                        ctx.clone(),
-                        Some(did),
-                    )])
+                    self.transport.forward_payload(ctx, Some(did)).await
                 }
             }
             PeerRingAction::RemoteAction(next, _) => {
-                Ok(vec![MessageHandlerEvent::ResetDestination(
-                    ctx.clone(),
-                    next,
-                )])
+                self.transport.reset_destination(ctx, next).await
             }
             act => Err(Error::PeerRingUnexpectedAction(act)),
         }
@@ -146,22 +123,27 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<FindSuccessorReport> for MessageHandler {
-    async fn handle(
-        &self,
-        ctx: &MessagePayload,
-        msg: &FindSuccessorReport,
-    ) -> Result<Vec<MessageHandlerEvent>> {
+    async fn handle(&self, ctx: &MessagePayload, msg: &FindSuccessorReport) -> Result<()> {
         if self.dht.did != ctx.relay.destination {
-            return Ok(vec![MessageHandlerEvent::ForwardPayload(ctx.clone(), None)]);
+            return self.transport.forward_payload(ctx, None).await;
         }
 
         match &msg.handler {
-            FindSuccessorReportHandler::FixFingerTable => {
-                Ok(vec![MessageHandlerEvent::Connect(msg.did)])
+            FindSuccessorReportHandler::FixFingerTable | FindSuccessorReportHandler::Connect => {
+                if msg.did != self.dht.did {
+                    let offer_msg = self
+                        .transport
+                        .prepare_connection_offer(msg.did, self.inner_callback())
+                        .await?;
+                    self.transport
+                        .send_message(Message::ConnectNodeSend(offer_msg), msg.did)
+                        .await?;
+                }
             }
-            FindSuccessorReportHandler::Connect => Ok(vec![MessageHandlerEvent::Connect(msg.did)]),
-            _ => Ok(vec![]),
+            _ => {}
         }
+
+        Ok(())
     }
 }
 

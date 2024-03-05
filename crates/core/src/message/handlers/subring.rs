@@ -24,7 +24,7 @@ impl<const REDUNDANT: u16> SubringInterface<REDUNDANT> for Swarm {
     async fn subring_join(&self, name: &str) -> Result<()> {
         let op = VNodeOperation::JoinSubring(name.to_string(), self.dht.did);
         let act = <PeerRing as ChordStorage<_, REDUNDANT>>::vnode_operate(&self.dht, op).await?;
-        handle_storage_store_act(self, act).await?;
+        handle_storage_store_act(self.transport.clone(), act).await?;
         Ok(())
     }
 }

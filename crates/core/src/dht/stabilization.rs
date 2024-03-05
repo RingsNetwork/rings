@@ -11,7 +11,6 @@ use crate::dht::PeerRing;
 use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
 use crate::error::Result;
-use crate::message::handlers::MessageHandlerEvent;
 use crate::message::FindSuccessorReportHandler;
 use crate::message::FindSuccessorSend;
 use crate::message::FindSuccessorThen;
@@ -93,11 +92,11 @@ impl Stabilization {
                 tracing::debug!("STABILIZATION notify_predecessor: {:?}", s);
                 let payload = MessagePayload::new_send(
                     msg.clone(),
-                    self.swarm.session_sk(),
+                    self.swarm.transport.session_sk(),
                     s,
                     self.swarm.did(),
                 )?;
-                self.swarm.send_payload(payload).await?;
+                self.swarm.transport.send_payload(payload).await?;
             }
             Ok(())
         } else {
@@ -122,11 +121,11 @@ impl Stabilization {
                     });
                     let payload = MessagePayload::new_send(
                         msg.clone(),
-                        self.swarm.session_sk(),
+                        self.swarm.transport.session_sk(),
                         closest_predecessor,
                         closest_predecessor,
                     )?;
-                    self.swarm.send_payload(payload).await?;
+                    self.swarm.transport.send_payload(payload).await?;
                     Ok(())
                 }
                 _ => {
@@ -150,11 +149,13 @@ impl Stabilization {
             PeerRingRemoteAction::QueryForSuccessorListAndPred,
         ) = self.chord.pre_stabilize()?
         {
-            let evs = vec![MessageHandlerEvent::SendDirectMessage(
-                Message::QueryForTopoInfoSend(QueryForTopoInfoSend::new_for_stab(next)),
-                next,
-            )];
-            return self.swarm.handle_message_handler_events(&evs).await;
+            self.swarm
+                .transport
+                .send_direct_message(
+                    Message::QueryForTopoInfoSend(QueryForTopoInfoSend::new_for_stab(next)),
+                    next,
+                )
+                .await?;
         }
         Ok(())
     }

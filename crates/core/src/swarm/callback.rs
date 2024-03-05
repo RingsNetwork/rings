@@ -10,8 +10,9 @@ use crate::chunk::ChunkList;
 use crate::chunk::ChunkManager;
 use crate::consts::TRANSPORT_MTU;
 use crate::dht::Did;
-use crate::error::Error;
+use crate::message::HandleMsg;
 use crate::message::Message;
+use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
 use crate::transport::SwarmTransport;
@@ -62,18 +63,19 @@ pub trait SwarmCallback {
 
 /// [InnerSwarmCallback] wraps [SharedSwarmCallback] with inner handling for a specific connection.
 pub struct InnerSwarmCallback {
-    did: Did,
     transport: Arc<SwarmTransport>,
+    message_handler: MessageHandler,
     callback: SharedSwarmCallback,
     chunk_list: FuturesMutex<ChunkList<TRANSPORT_MTU>>,
 }
 
 impl InnerSwarmCallback {
-    /// Create a new [InnerSwarmCallback] with the provided did, transport_event_sender and callback.
-    pub fn new(did: Did, transport: Arc<SwarmTransport>, callback: SharedSwarmCallback) -> Self {
+    /// Create a new [InnerSwarmCallback] with the provided transport and callback.
+    pub fn new(transport: Arc<SwarmTransport>, callback: SharedSwarmCallback) -> Self {
+        let message_handler = MessageHandler::new(transport.clone(), callback.clone());
         Self {
-            did,
             transport,
+            message_handler,
             callback,
             chunk_list: Default::default(),
         }
@@ -86,14 +88,44 @@ impl InnerSwarmCallback {
     ) -> Result<(), CallbackError> {
         let message: Message = payload.transaction.data()?;
 
-        if let Message::Chunk(msg) = message {
-            if let Some(data) = self.chunk_list.lock().await.handle(msg.clone()) {
-                return self.on_message(cid, &data).await;
+        match &message {
+            Message::ConnectNodeSend(ref msg) => self.message_handler.handle(payload, msg).await?,
+            Message::ConnectNodeReport(ref msg) => {
+                self.message_handler.handle(payload, msg).await?
             }
-            return Ok(());
+            Message::FindSuccessorSend(ref msg) => {
+                self.message_handler.handle(payload, msg).await?
+            }
+            Message::FindSuccessorReport(ref msg) => {
+                self.message_handler.handle(payload, msg).await?
+            }
+            Message::NotifyPredecessorSend(ref msg) => {
+                self.message_handler.handle(payload, msg).await?
+            }
+            Message::NotifyPredecessorReport(ref msg) => {
+                self.message_handler.handle(payload, msg).await?
+            }
+            Message::SearchVNode(ref msg) => self.message_handler.handle(payload, msg).await?,
+            Message::FoundVNode(ref msg) => self.message_handler.handle(payload, msg).await?,
+            Message::SyncVNodeWithSuccessor(ref msg) => {
+                self.message_handler.handle(payload, msg).await?
+            }
+            Message::OperateVNode(ref msg) => self.message_handler.handle(payload, msg).await?,
+            Message::CustomMessage(ref msg) => self.message_handler.handle(payload, msg).await?,
+            Message::QueryForTopoInfoSend(ref msg) => {
+                self.message_handler.handle(payload, msg).await?
+            }
+            Message::QueryForTopoInfoReport(ref msg) => {
+                self.message_handler.handle(payload, msg).await?
+            }
+            Message::Chunk(ref msg) => {
+                if let Some(data) = self.chunk_list.lock().await.handle(msg.clone()) {
+                    return self.on_message(cid, &data).await;
+                }
+            }
         };
 
-        if payload.transaction.destination == self.did {
+        if payload.transaction.destination == self.transport.dht.did {
             self.callback.on_inbound(payload).await?;
         }
 
@@ -126,24 +158,12 @@ impl TransportCallback for InnerSwarmCallback {
 
         match s {
             WebrtcConnectionState::Connected => {
-                if cfg!(feature = "experimental") {
-                    let conn = self
-                        .transport
-                        .get_connection(did)
-                        .ok_or(Error::SwarmMissDidInTable(did))?;
-                    let dht_ev = self.transport.dht.join_then_sync(conn).await?;
-                    crate::message::handlers::dht::handle_dht_events(&dht_ev, ctx).await?;
-                } else {
-                    let dht_ev = self.transport.dht.join(*did)?;
-                    crate::message::handlers::dht::handle_dht_events(&dht_ev, ctx).await?;
-                }
+                self.message_handler.join_dht(did).await?;
             }
             WebrtcConnectionState::Failed
             | WebrtcConnectionState::Disconnected
             | WebrtcConnectionState::Closed => {
-                if self.transport.get_and_check_connection(did).await.is_none() {
-                    self.transport.dht.remove(did)?
-                };
+                self.message_handler.leave_dht(did).await?;
             }
             _ => {}
         };

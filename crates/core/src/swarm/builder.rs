@@ -7,12 +7,11 @@ use std::sync::RwLock;
 
 use crate::dht::PeerRing;
 use crate::dht::VNodeStorage;
-use crate::message::MessageHandler;
 use crate::session::SessionSk;
 use crate::swarm::callback::SharedSwarmCallback;
 use crate::swarm::callback::SwarmCallback;
-use crate::swarm::MeasureImpl;
 use crate::swarm::Swarm;
+use crate::transport::MeasureImpl;
 use crate::transport::SwarmTransport;
 
 struct DefaultCallback;
@@ -86,24 +85,21 @@ impl SwarmBuilder {
             self.dht_storage,
         ));
 
-        let transport = Arc::new(SwarmTransport::new(
-            &self.ice_servers,
-            self.external_address,
-            dht.clone(),
-            self.session_sk,
-        ));
-
         let callback = RwLock::new(
             self.callback
                 .unwrap_or_else(|| Arc::new(DefaultCallback {})),
         );
 
-        let message_handler = MessageHandler::new(transport.clone());
+        let transport = Arc::new(SwarmTransport::new(
+            &self.ice_servers,
+            self.external_address,
+            self.session_sk,
+            dht.clone(),
+            self.measure,
+        ));
 
         Swarm {
             dht,
-            measure: self.measure,
-            message_handler,
             transport,
             callback,
         }

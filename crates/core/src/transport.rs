@@ -25,9 +25,11 @@ use crate::chunk::ChunkList;
 use crate::consts::TRANSPORT_MAX_SIZE;
 use crate::consts::TRANSPORT_MTU;
 use crate::dht::Did;
+use crate::dht::LiveDid;
 use crate::dht::PeerRing;
 use crate::error::Error;
 use crate::error::Result;
+use crate::measure::BehaviourJudgement;
 use crate::message::ConnectNodeReport;
 use crate::message::ConnectNodeSend;
 use crate::message::Message;
@@ -36,12 +38,23 @@ use crate::message::PayloadSender;
 use crate::session::SessionSk;
 use crate::swarm::callback::InnerSwarmCallback;
 
+/// Type of Measure, see [crate::measure::Measure].
+#[cfg(not(feature = "wasm"))]
+pub type MeasureImpl = Box<dyn BehaviourJudgement + Send + Sync>;
+
+/// Type of Measure, see [crate::measure::Measure].
+#[cfg(feature = "wasm")]
+pub type MeasureImpl = Box<dyn BehaviourJudgement>;
+
 pub struct SwarmTransport {
     transport: Transport,
     session_sk: SessionSk,
-    dht: Arc<PeerRing>,
+    pub(crate) dht: Arc<PeerRing>,
+    #[allow(dead_code)]
+    measure: Option<MeasureImpl>,
 }
 
+#[derive(Clone)]
 pub struct SwarmConnection {
     peer: Did,
     connection: ConnectionRef<ConnectionOwner>,
@@ -51,13 +64,15 @@ impl SwarmTransport {
     pub fn new(
         ice_servers: &str,
         external_address: Option<String>,
-        dht: Arc<PeerRing>,
         session_sk: SessionSk,
+        dht: Arc<PeerRing>,
+        measure: Option<MeasureImpl>,
     ) -> Self {
         Self {
             transport: Transport::new(ice_servers, external_address),
             session_sk,
             dht,
+            measure,
         }
     }
 
@@ -121,6 +136,15 @@ impl SwarmTransport {
             .close_connection(&peer.to_string())
             .await
             .map_err(|e| e.into())
+    }
+
+    /// Connect a given Did. If the did is already connected, return Err,
+    /// else try prepare offer and establish connection by dht.
+    pub async fn connect(&self, peer: Did, callback: InnerSwarmCallback) -> Result<()> {
+        let offer_msg = self.prepare_connection_offer(peer, callback).await?;
+        self.send_message(Message::ConnectNodeSend(offer_msg), peer)
+            .await?;
+        Ok(())
     }
 
     /// Get connection by did and check if data channel is open.
@@ -309,12 +333,20 @@ impl PayloadSender for SwarmTransport {
             payload.relay.next_hop,
         );
 
-        if result.is_ok() {
-            self.record_sent(payload.relay.next_hop).await
-        } else {
-            self.record_sent_failed(payload.relay.next_hop).await
-        }
+        result
+    }
+}
 
-        result.map_err(|e| e.into())
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl LiveDid for SwarmConnection {
+    async fn live(&self) -> bool {
+        self.webrtc_connection_state() == WebrtcConnectionState::Connected
+    }
+}
+
+impl From<SwarmConnection> for Did {
+    fn from(conn: SwarmConnection) -> Self {
+        conn.peer
     }
 }

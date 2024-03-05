@@ -1,34 +1,35 @@
 #![warn(missing_docs)]
 //! This module implemented message handler of rings network.
-/// Message Flow:
-/// +---------+    +--------------------------------+
-/// | Message | -> | MessageHandler.handler_payload |
-/// +---------+    +--------------------------------+
-///                 ||                            ||
-///     +--------------------------+  +--------------------------+
-///     | Builtin Message Callback |  |  Custom Message Callback |
-///     +--------------------------+  +--------------------------+
+
 use std::sync::Arc;
 
 use async_recursion::async_recursion;
 use async_trait::async_trait;
 
-use super::Message;
 use super::MessagePayload;
-use crate::dht::vnode::VirtualNode;
+use crate::dht::Chord;
+use crate::dht::CorrectChord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
+use crate::dht::PeerRingAction;
+use crate::dht::PeerRingRemoteAction;
+use crate::error::Error;
 use crate::error::Result;
-use crate::message::ConnectNodeReport;
-use crate::message::ConnectNodeSend;
+use crate::message::types::FindSuccessorSend;
+use crate::message::types::Message;
+use crate::message::types::QueryForTopoInfoSend;
+use crate::message::FindSuccessorReportHandler;
+use crate::message::FindSuccessorThen;
+use crate::message::NotifyPredecessorSend;
+use crate::message::PayloadSender;
+use crate::swarm::callback::InnerSwarmCallback;
+use crate::swarm::callback::SharedSwarmCallback;
 use crate::transport::SwarmTransport;
 
 /// Operator and Handler for Connection
 pub mod connection;
 /// Operator and Handler for CustomMessage
 pub mod custom;
-/// For handle dht related actions
-pub mod dht;
 /// Operator and handler for DHT stablization
 pub mod stabilization;
 /// Operator and Handler for Storage
@@ -36,50 +37,12 @@ pub mod storage;
 /// Operator and Handler for Subring
 pub mod subring;
 
-type NextHop = Did;
-
-/// MessageHandlerEvent that will be handled by Swarm.
-#[derive(Debug, Clone)]
-pub enum MessageHandlerEvent {
-    /// Instructs the swarm to connect to a peer.
-    Connect(Did),
-    /// Instructs the swarm to connect to a peer via given next hop.
-    ConnectVia(Did, NextHop),
-
-    /// Instructs the swarm to answer an offer inside payload by given
-    /// sender's Did and Message.
-    AnswerOffer(MessagePayload, ConnectNodeSend),
-
-    /// Instructs the swarm to accept an answer inside payload by given
-    /// sender's Did and Message.
-    AcceptAnswer(Did, ConnectNodeReport),
-
-    /// Tell swarm to forward the payload to destination by given
-    /// Payload and optional next hop.
-    ForwardPayload(MessagePayload, Option<Did>),
-
-    /// Instructs the swarm to send a direct message to a peer.
-    SendDirectMessage(Message, Did),
-
-    /// Instructs the swarm to send a message to a peer via the dht network.
-    SendMessage(Message, Did),
-
-    /// Instructs the swarm to send a message as a response to the received message.
-    SendReportMessage(MessagePayload, Message),
-
-    /// Instructs the swarm to send a message to a peer via the dht network with a specific next hop.
-    ResetDestination(MessagePayload, Did),
-
-    /// Instructs the swarm to store vnode.
-    StorageStore(VirtualNode),
-    /// Notify a node
-    Notify(Did),
-}
-
 /// MessageHandler will manage resources.
 #[derive(Clone)]
 pub struct MessageHandler {
     transport: Arc<SwarmTransport>,
+    dht: Arc<PeerRing>,
+    swarm_callback: SharedSwarmCallback,
 }
 
 /// Generic trait for handle message ,inspired by Actor-Model.
@@ -87,49 +50,120 @@ pub struct MessageHandler {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait HandleMsg<T> {
     /// Message handler.
-    async fn handle(&self, ctx: &MessagePayload, msg: &T) -> Result<Vec<MessageHandlerEvent>>;
+    async fn handle(&self, ctx: &MessagePayload, msg: &T) -> Result<()>;
 }
 
 impl MessageHandler {
-    /// Create a new MessageHandler Instance.
-    pub fn new(transport: Arc<SwarmTransport>) -> Self {
-        Self { transport }
+    /// Create a new MessageHandler instance.
+    pub fn new(transport: Arc<SwarmTransport>, swarm_callback: SharedSwarmCallback) -> Self {
+        let dht = transport.dht.clone();
+        Self {
+            transport,
+            dht,
+            swarm_callback,
+        }
     }
 
-    /// Handle builtin message.
+    fn inner_callback(&self) -> InnerSwarmCallback {
+        InnerSwarmCallback::new(self.transport.clone(), self.swarm_callback.clone())
+    }
+
+    pub(crate) async fn join_dht(&self, peer: Did) -> Result<()> {
+        if cfg!(feature = "experimental") {
+            let conn = self
+                .transport
+                .get_connection(peer)
+                .ok_or(Error::SwarmMissDidInTable(peer))?;
+            let dht_ev = self.dht.join_then_sync(conn).await?;
+            self.handle_dht_events(&dht_ev).await
+        } else {
+            let dht_ev = self.dht.join(peer)?;
+            self.handle_dht_events(&dht_ev).await
+        }
+    }
+
+    pub(crate) async fn leave_dht(&self, peer: Did) -> Result<()> {
+        if self
+            .transport
+            .get_and_check_connection(peer)
+            .await
+            .is_none()
+        {
+            self.dht.remove(peer)?
+        };
+        Ok(())
+    }
+
     #[cfg_attr(feature = "wasm", async_recursion(?Send))]
     #[cfg_attr(not(feature = "wasm"), async_recursion)]
-    pub async fn handle_message(
-        &self,
-        payload: &MessagePayload,
-    ) -> Result<Vec<MessageHandlerEvent>> {
-        let message: Message = payload.transaction.data()?;
+    pub(crate) async fn handle_dht_events(&self, act: &PeerRingAction) -> Result<()> {
+        match act {
+            PeerRingAction::None => Ok(()),
+            // Ask next hop to find successor for did,
+            // if there is only two nodes A, B, it may cause loop, for example
+            // A's successor is B, B ask A to find successor for B
+            // A may send message to it's successor, which is B
+            PeerRingAction::RemoteAction(
+                next,
+                PeerRingRemoteAction::FindSuccessorForConnect(did),
+            ) => {
+                if next != did {
+                    self.transport
+                        .send_direct_message(
+                            Message::FindSuccessorSend(FindSuccessorSend {
+                                did: *did,
+                                strict: false,
+                                then: FindSuccessorThen::Report(
+                                    FindSuccessorReportHandler::Connect,
+                                ),
+                            }),
+                            *next,
+                        )
+                        .await?;
+                    Ok(())
+                } else {
+                    Ok(())
+                }
+            }
+            // A new successor is set, request the new successor for it's successor list
+            PeerRingAction::RemoteAction(next, PeerRingRemoteAction::QueryForSuccessorList) => {
+                self.transport
+                    .send_direct_message(
+                        Message::QueryForTopoInfoSend(QueryForTopoInfoSend::new_for_sync(*next)),
+                        *next,
+                    )
+                    .await?;
+                Ok(())
+            }
+            PeerRingAction::RemoteAction(did, PeerRingRemoteAction::TryConnect) => {
+                self.transport.connect(*did, self.inner_callback()).await?;
+                Ok(())
+            }
+            PeerRingAction::RemoteAction(did, PeerRingRemoteAction::Notify(target_id)) => {
+                if did == target_id {
+                    tracing::warn!("Did is equal to target_id, may implement wrong.");
+                    return Ok(());
+                }
+                let msg =
+                    Message::NotifyPredecessorSend(NotifyPredecessorSend { did: self.dht.did });
+                self.transport.send_message(msg, *target_id).await?;
+                Ok(())
+            }
+            PeerRingAction::MultiActions(acts) => {
+                let jobs = acts
+                    .iter()
+                    .map(|act| async move { self.handle_dht_events(act).await });
 
-        tracing::debug!(
-            "START HANDLE MESSAGE: {} {}",
-            &payload.transaction.tx_id,
-            &message
-        );
+                for res in futures::future::join_all(jobs).await {
+                    if res.is_err() {
+                        tracing::error!("Failed on handle multi actions: {:#?}", res)
+                    }
+                }
 
-        let events = match &message {
-            Message::ConnectNodeSend(ref msg) => self.handle(payload, msg).await,
-            Message::ConnectNodeReport(ref msg) => self.handle(payload, msg).await,
-            Message::FindSuccessorSend(ref msg) => self.handle(payload, msg).await,
-            Message::FindSuccessorReport(ref msg) => self.handle(payload, msg).await,
-            Message::NotifyPredecessorSend(ref msg) => self.handle(payload, msg).await,
-            Message::NotifyPredecessorReport(ref msg) => self.handle(payload, msg).await,
-            Message::SearchVNode(ref msg) => self.handle(payload, msg).await,
-            Message::FoundVNode(ref msg) => self.handle(payload, msg).await,
-            Message::SyncVNodeWithSuccessor(ref msg) => self.handle(payload, msg).await,
-            Message::OperateVNode(ref msg) => self.handle(payload, msg).await,
-            Message::CustomMessage(ref msg) => self.handle(payload, msg).await,
-            Message::QueryForTopoInfoSend(ref msg) => self.handle(payload, msg).await,
-            Message::QueryForTopoInfoReport(ref msg) => self.handle(payload, msg).await,
-            Message::Chunk(_) => Ok(vec![]),
-        }?;
-
-        tracing::debug!("FINISH HANDLE MESSAGE {}", &payload.transaction.tx_id);
-        Ok(events)
+                Ok(())
+            }
+            _ => unreachable!(),
+        }
     }
 }
 
