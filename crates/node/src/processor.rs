@@ -5,9 +5,19 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
+use rings_core::dht::Did;
+use rings_core::dht::Stabilization;
+use rings_core::dht::TStabilize;
+use rings_core::dht::VNodeStorage;
+use rings_core::message::Encoded;
+use rings_core::message::Encoder;
+use rings_core::message::Message;
+use rings_core::prelude::uuid;
 use rings_core::storage::MemStorage;
+use rings_core::swarm::Swarm;
+use rings_core::swarm::SwarmBuilder;
+use rings_core::transport::MeasureImpl;
 use rings_rpc::protos::rings_node::*;
-use rings_transport::core::transport::ConnectionInterface;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -16,18 +26,6 @@ use crate::consts::DATA_REDUNDANT;
 use crate::error::Error;
 use crate::error::Result;
 use crate::measure::PeriodicMeasure;
-use crate::prelude::rings_core::dht::Did;
-use crate::prelude::rings_core::dht::Stabilization;
-use crate::prelude::rings_core::dht::TStabilize;
-use crate::prelude::rings_core::dht::VNodeStorage;
-use crate::prelude::rings_core::message::Encoded;
-use crate::prelude::rings_core::message::Encoder;
-use crate::prelude::rings_core::message::Message;
-use crate::prelude::rings_core::message::PayloadSender;
-use crate::prelude::rings_core::prelude::uuid;
-use crate::prelude::rings_core::swarm::MeasureImpl;
-use crate::prelude::rings_core::swarm::Swarm;
-use crate::prelude::rings_core::swarm::SwarmBuilder;
 use crate::prelude::vnode;
 use crate::prelude::wasm_export;
 use crate::prelude::ChordStorageInterface;
@@ -264,22 +262,14 @@ impl ProcessorBuilder {
 }
 
 impl Processor {
-    /// Listen processor message
-    pub async fn listen(&self) {
-        let swarm = self.swarm.clone();
-        let message_listener = async { swarm.listen().await };
-
-        let stb = self.stabilization.clone();
-        let stabilization = async { stb.wait().await };
-
-        futures::future::join(message_listener, stabilization).await;
-    }
-}
-
-impl Processor {
     /// Get current did
     pub fn did(&self) -> Did {
         self.swarm.did()
+    }
+
+    /// Run stabilization daemon
+    pub async fn listen(&self) {
+        self.stabilization.clone().wait().await
     }
 
     /// Connect peer with web3 did.
@@ -287,14 +277,8 @@ impl Processor {
     /// 1. PeerA has a connection with PeerB.
     /// 2. PeerC has a connection with PeerB.
     /// 3. PeerC can connect PeerA with PeerA's web3 address.
-    pub async fn connect_with_did(&self, did: Did, wait_for_open: bool) -> Result<()> {
-        let conn = self.swarm.connect(did).await.map_err(Error::ConnectError)?;
-        if wait_for_open {
-            tracing::debug!("wait for connection connected");
-            conn.webrtc_wait_for_data_channel_open()
-                .await
-                .map_err(|e| Error::ConnectError(rings_core::error::Error::Transport(e)))?;
-        }
+    pub async fn connect_with_did(&self, did: Did) -> Result<()> {
+        self.swarm.connect(did).await.map_err(Error::ConnectError)?;
         Ok(())
     }
 
@@ -304,18 +288,6 @@ impl Processor {
             .disconnect(did)
             .await
             .map_err(Error::CloseConnectionError)
-    }
-
-    /// Disconnect all connections.
-    pub async fn disconnect_all(&self) {
-        let dids = self.swarm.get_connection_ids();
-
-        let close_async = dids
-            .into_iter()
-            .map(|did| self.swarm.disconnect(did))
-            .collect::<Vec<_>>();
-
-        futures::future::join_all(close_async).await;
     }
 
     /// Send custom message to a did.

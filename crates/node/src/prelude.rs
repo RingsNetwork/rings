@@ -9,7 +9,6 @@ pub use self::rings_core::ecc::SecretKey;
 pub use self::rings_core::message::CustomMessage;
 pub use self::rings_core::message::Message;
 pub use self::rings_core::message::MessageHandler;
-pub use self::rings_core::message::MessageHandlerEvent;
 pub use self::rings_core::message::MessagePayload;
 pub use self::rings_core::message::PayloadSender;
 pub use self::rings_core::prelude::async_trait::async_trait;

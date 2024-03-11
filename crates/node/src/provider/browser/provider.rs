@@ -316,15 +316,6 @@ impl Provider {
         })
     }
 
-    /// disconnect all connected nodes
-    pub fn disconnect_all(&self) -> js_sys::Promise {
-        let p = self.processor.clone();
-        future_to_promise(async move {
-            p.disconnect_all().await;
-            Ok(JsValue::from_str("ok"))
-        })
-    }
-
     /// send custom message to peer.
     pub fn send_message(&self, destination: String, msg: js_sys::Uint8Array) -> js_sys::Promise {
         let p = self.processor.clone();

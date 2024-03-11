@@ -290,6 +290,7 @@ pub trait PayloadSender {
         let next_hop = self.infer_next_hop(destination, None)?;
         self.send_message_by_hop(msg, destination, next_hop).await
     }
+
     /// Send a direct message to a specified destination.
     async fn send_direct_message<T>(&self, msg: T, destination: Did) -> Result<uuid::Uuid>
     where T: Serialize + Send {

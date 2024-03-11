@@ -28,8 +28,8 @@ use crate::transport::SwarmTransport;
 pub struct Swarm {
     /// Reference of DHT.
     pub(crate) dht: Arc<PeerRing>,
-    /// Implementationof measurement.
-    pub(crate) transport: Arc<SwarmTransport>,
+    /// Swarm tansport.
+    pub transport: Arc<SwarmTransport>,
     callback: RwLock<SharedSwarmCallback>,
 }
 
@@ -89,6 +89,11 @@ impl Swarm {
         self.transport.connect(peer, self.inner_callback()?).await
     }
 
+    /// Send [Message] to peer.
+    pub async fn send_message(&self, msg: Message, destination: Did) -> Result<uuid::Uuid> {
+        self.transport.send_message(msg, destination).await
+    }
+
     /// Check the status of swarm
     pub async fn inspect(&self) -> SwarmInspect {
         SwarmInspect::inspect(self).await
@@ -144,7 +149,7 @@ impl ConnectionHandshake for Swarm {
             ));
         };
 
-        let peer = offer_payload.relay.origin_sender();
+        let peer = offer_payload.transaction.signer();
         let answer_msg = self
             .transport
             .answer_remote_connection(peer, self.inner_callback()?, &msg)
@@ -173,7 +178,7 @@ impl ConnectionHandshake for Swarm {
             ));
         };
 
-        let peer = answer_payload.relay.origin_sender();
+        let peer = answer_payload.transaction.signer();
         self.transport.accept_remote_connection(peer, msg).await
     }
 }

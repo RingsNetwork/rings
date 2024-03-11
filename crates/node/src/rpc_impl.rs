@@ -18,11 +18,12 @@ use rings_core::message::Decoder;
 use rings_core::message::Encoded;
 use rings_core::message::Encoder;
 use rings_core::message::MessagePayload;
+use rings_core::message::MessageVerificationExt;
 use rings_core::prelude::vnode::VirtualNode;
-use rings_core::swarm::impls::ConnectionHandshake;
+use rings_core::swarm::ConnectionHandshake;
+use rings_core::transport::SwarmConnection;
 use rings_rpc::protos::rings_node::*;
 use rings_rpc::protos::rings_node_handler::HandleRpc;
-use rings_transport::core::transport::ConnectionInterface;
 
 use crate::error::Error as ServerError;
 use crate::processor::Processor;
@@ -62,10 +63,7 @@ impl HandleRpc<ConnectPeerViaHttpRequest, ConnectPeerViaHttpResponse> for Proces
 impl HandleRpc<ConnectWithDidRequest, ConnectWithDidResponse> for Processor {
     async fn handle_rpc(&self, req: ConnectWithDidRequest) -> Result<ConnectWithDidResponse> {
         let did = s2d(&req.did)?;
-        self.connect_with_did(did, true)
-            .await
-            .map_err(Error::from)?;
-
+        self.connect_with_did(did).await.map_err(Error::from)?;
         Ok(ConnectWithDidResponse {})
     }
 }
@@ -76,7 +74,8 @@ impl HandleRpc<ConnectWithSeedRequest, ConnectWithSeedResponse> for Processor {
     async fn handle_rpc(&self, req: ConnectWithSeedRequest) -> Result<ConnectWithSeedResponse> {
         let seed: Seed = Seed::try_from(req)?;
 
-        let mut connected: HashSet<Did> = HashSet::from_iter(self.swarm.get_connection_ids());
+        let mut connected: HashSet<Did> =
+            HashSet::from_iter(self.swarm.transport.get_connection_ids());
         connected.insert(self.swarm.did());
 
         let tasks = seed
@@ -104,7 +103,13 @@ impl HandleRpc<ConnectWithSeedRequest, ConnectWithSeedResponse> for Processor {
 #[cfg_attr(not(feature = "browser"), async_trait)]
 impl HandleRpc<ListPeersRequest, ListPeersResponse> for Processor {
     async fn handle_rpc(&self, _req: ListPeersRequest) -> Result<ListPeersResponse> {
-        let peers = self.swarm.get_connections().into_iter().map(dc2p).collect();
+        let peers = self
+            .swarm
+            .transport
+            .get_connections()
+            .into_iter()
+            .map(dc2p)
+            .collect();
         Ok(ListPeersResponse { peers })
     }
 }
@@ -114,7 +119,7 @@ impl HandleRpc<ListPeersRequest, ListPeersResponse> for Processor {
 impl HandleRpc<CreateOfferRequest, CreateOfferResponse> for Processor {
     async fn handle_rpc(&self, req: CreateOfferRequest) -> Result<CreateOfferResponse> {
         let did = s2d(&req.did)?;
-        let (_, offer_payload) = self
+        let offer_payload = self
             .swarm
             .create_offer(did)
             .await
@@ -143,7 +148,7 @@ impl HandleRpc<AnswerOfferRequest, AnswerOfferResponse> for Processor {
         let offer_payload =
             MessagePayload::from_encoded(&encoded).map_err(|_| ServerError::DecodeError)?;
 
-        let (_, answer_payload) = self
+        let answer_payload = self
             .swarm
             .answer_offer(offer_payload)
             .await
@@ -172,15 +177,21 @@ impl HandleRpc<AcceptAnswerRequest, AcceptAnswerResponse> for Processor {
 
         let answer_payload =
             MessagePayload::from_encoded(&encoded).map_err(|_| ServerError::DecodeError)?;
+        let peer = answer_payload.transaction.signer();
 
-        let dc = self
-            .swarm
+        self.swarm
             .accept_answer(answer_payload)
             .await
             .map_err(ServerError::AcceptAnswer)?;
 
+        let conn = self
+            .swarm
+            .transport
+            .get_connection(peer)
+            .ok_or_else(|| ServerError::ConnectionNotFound)?;
+
         Ok(AcceptAnswerResponse {
-            peer: Some(dc2p(dc)),
+            peer: Some(dc2p((peer, conn))),
         })
     }
 }
@@ -323,7 +334,7 @@ impl HandleRpc<NodeDidRequest, NodeDidResponse> for Processor {
 }
 
 /// Convert did and connection to Peer
-fn dc2p((did, conn): (Did, impl ConnectionInterface)) -> PeerInfo {
+fn dc2p((did, conn): (Did, SwarmConnection)) -> PeerInfo {
     PeerInfo {
         did: did.to_string(),
         state: format!("{:?}", conn.webrtc_connection_state()),
