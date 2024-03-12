@@ -25,4 +25,3 @@ pub use self::rings_core::session::SessionSk;
 pub use self::rings_core::session::SessionSkBuilder;
 pub use self::rings_core::swarm::Swarm;
 pub use self::rings_core::swarm::SwarmBuilder;
-pub use self::rings_core::types::Connection;

@@ -8,7 +8,6 @@ use crate::storage::idb::IdbStorage;
 use crate::swarm::Swarm;
 use crate::swarm::SwarmBuilder;
 
-mod test_channel;
 mod test_fn_macro;
 mod test_ice_servers;
 mod test_idb_storage;

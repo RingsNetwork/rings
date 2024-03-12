@@ -18,7 +18,6 @@ experimental = ["std"]
 default = ["std"]
 std = [
     "webrtc",
-    "async-channel",
     "sled",
     "uuid/v4",
     "uuid/serde",
@@ -88,7 +87,6 @@ tiny-keccak = { version = "2.0.1", features = ["keccak"] }
 uuid = { version = "0.8.2", optional = true }
 
 # default and dummy
-async-channel = { version = "1.6.1", optional = true }
 sled = { version = "0.34.7", optional = true }
 webrtc = { workspace = true, optional = true }
 
