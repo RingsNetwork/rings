@@ -376,7 +376,7 @@ impl Processor {
 mod test {
     use futures::lock::Mutex;
     use rings_core::swarm::callback::SwarmCallback;
-    use rings_core::swarm::impls::ConnectionHandshake;
+    use rings_core::swarm::ConnectionHandshake;
     use rings_transport::core::transport::WebrtcConnectionState;
 
     use super::*;
@@ -388,7 +388,7 @@ mod test {
         let peer_did = SecretKey::random().address().into();
         let processor = prepare_processor().await;
         processor.swarm.create_offer(peer_did).await.unwrap();
-        let conn_dids = processor.swarm.get_connection_ids();
+        let conn_dids = processor.swarm.transport.get_connection_ids();
         assert_eq!(conn_dids.len(), 1);
         assert_eq!(conn_dids.first().unwrap(), &peer_did);
     }
@@ -436,52 +436,40 @@ mod test {
         println!("p1_did: {}", did1);
         println!("p2_did: {}", did2);
 
-        let swarm1 = p1.swarm.clone();
-        let swarm2 = p2.swarm.clone();
-        tokio::spawn(async { swarm1.listen().await });
-        tokio::spawn(async { swarm2.listen().await });
-
-        let (conn1, offer) = p1.swarm.create_offer(p2.did()).await.unwrap();
+        let offer = p1.swarm.create_offer(p2.did()).await.unwrap();
         assert_eq!(
             p1.swarm
+                .transport
                 .get_connection(p2.did())
                 .unwrap()
                 .webrtc_connection_state(),
             WebrtcConnectionState::New,
         );
 
-        let (conn2, answer) = p2.swarm.answer_offer(offer).await.unwrap();
-        let (peer_did, _) = p1.swarm.accept_answer(answer).await.unwrap();
-        assert_eq!(
-            peer_did, did2,
-            "peer.address got {}, expect: {}",
-            peer_did, did2
-        );
+        let answer = p2.swarm.answer_offer(offer).await.unwrap();
+        p1.swarm.accept_answer(answer).await.unwrap();
 
         println!("waiting for connection");
-        conn1.webrtc_wait_for_data_channel_open().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
-        assert!(conn1.is_connected().await, "conn1 not connected");
-        assert!(
+        assert_eq!(
             p1.swarm
+                .transport
                 .get_connection(p2.did())
                 .unwrap()
-                .is_connected()
-                .await,
+                .webrtc_connection_state(),
+            WebrtcConnectionState::Connected,
             "p1 connection not connected"
         );
-        assert!(conn2.is_connected().await, "conn2 not connected");
-        assert!(
+        assert_eq!(
             p2.swarm
+                .transport
                 .get_connection(p1.did())
                 .unwrap()
-                .is_connected()
-                .await,
+                .webrtc_connection_state(),
+            WebrtcConnectionState::Connected,
             "p2 connection not connected"
         );
-
-        println!("waiting for data channel ready");
-        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
 
         let test_text1 = "test1";
         let test_text2 = "test2";
@@ -490,13 +478,9 @@ mod test {
         let uuid1 = p1.send_message(did2, test_text1.as_bytes()).await.unwrap();
         println!("send_message 1 done, msg id: {}", uuid1);
 
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
         println!("send_message 2");
         let uuid2 = p2.send_message(did1, test_text2.as_bytes()).await.unwrap();
         println!("send_message 2 done, msg id: {}", uuid2);
-
-        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
 
         println!("check received");
 

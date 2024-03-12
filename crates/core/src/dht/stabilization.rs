@@ -279,13 +279,15 @@ pub mod tests {
         // Shouldn't listen to message handler here,
         // otherwise it will automatically remove disconnected transport.
 
-        manually_establish_connection(&node1, &node2).await;
-        manually_establish_connection(&node1, &node3).await;
+        manually_establish_connection(&node1.swarm, &node2.swarm).await;
+        manually_establish_connection(&node1.swarm, &node3.swarm).await;
 
         tokio::time::sleep(Duration::from_secs(5)).await;
 
         assert_eq!(
             node1
+                .swarm
+                .transport
                 .get_connection(node2.did())
                 .unwrap()
                 .webrtc_connection_state(),
@@ -293,18 +295,22 @@ pub mod tests {
         );
         assert_eq!(
             node1
+                .swarm
+                .transport
                 .get_connection(node3.did())
                 .unwrap()
                 .webrtc_connection_state(),
             WebrtcConnectionState::Connected,
         );
 
-        node2.disconnect(node1.did()).await.unwrap();
-        node3.disconnect(node1.did()).await.unwrap();
+        node2.swarm.disconnect(node1.did()).await.unwrap();
+        node3.swarm.disconnect(node1.did()).await.unwrap();
 
         tokio::time::sleep(Duration::from_secs(10)).await;
         assert_eq!(
             node1
+                .swarm
+                .transport
                 .get_connection(node2.did())
                 .unwrap()
                 .webrtc_connection_state(),
@@ -312,16 +318,18 @@ pub mod tests {
         );
         assert_eq!(
             node1
+                .swarm
+                .transport
                 .get_connection(node3.did())
                 .unwrap()
                 .webrtc_connection_state(),
             WebrtcConnectionState::Disconnected,
         );
 
-        let stb = Stabilization::new(node1.clone(), 3);
+        let stb = Stabilization::new(node1.swarm.clone(), 3);
         stb.clean_unavailable_connections().await.unwrap();
 
-        assert!(node1.get_connection(node2.did()).is_none());
-        assert!(node1.get_connection(node3.did()).is_none());
+        assert!(node1.swarm.transport.get_connection(node2.did()).is_none());
+        assert!(node1.swarm.transport.get_connection(node3.did()).is_none());
     }
 }

@@ -91,21 +91,6 @@ pub trait ConnectionInterface {
 
     /// Close the webrtc connection.
     async fn close(&self) -> Result<(), Self::Error>;
-
-    /// Deprecated, should check the state of `webrtc_connection_state`.
-    async fn is_connected(&self) -> bool {
-        self.webrtc_connection_state() == WebrtcConnectionState::Connected
-    }
-
-    /// Deprecated, should check the state of `webrtc_connection_state`.
-    async fn is_disconnected(&self) -> bool {
-        matches!(
-            self.webrtc_connection_state(),
-            WebrtcConnectionState::Disconnected
-                | WebrtcConnectionState::Failed
-                | WebrtcConnectionState::Closed
-        )
-    }
 }
 
 /// This trait specifies how to management [ConnectionInterface] objects.

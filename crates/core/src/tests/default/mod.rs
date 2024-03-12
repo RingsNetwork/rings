@@ -1,8 +1,8 @@
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
+use futures::lock::Mutex;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tokio::time::Duration;
@@ -36,7 +36,7 @@ impl Node {
     pub fn new(swarm: Arc<Swarm>) -> Self {
         let (message_tx, message_rx) = mpsc::unbounded_channel();
         let callback = NodeCallback { message_tx };
-        swarm.set_callback(Arc::new(callback));
+        swarm.set_callback(Arc::new(callback)).unwrap();
         Self {
             swarm,
             message_rx: Mutex::new(message_rx),
@@ -44,7 +44,7 @@ impl Node {
     }
 
     pub async fn listen_once(&self) -> Option<MessagePayload> {
-        self.message_rx.lock().unwrap().recv().await
+        self.message_rx.lock().await.recv().await
     }
 
     pub fn did(&self) -> Did {

@@ -52,6 +52,7 @@ impl Swarm {
             .clone())
     }
 
+    /// Generate [InnerSwarmCallback] for [SwarmTransport].
     pub fn inner_callback(&self) -> Result<InnerSwarmCallback> {
         Ok(InnerSwarmCallback::new(
             self.transport.clone(),

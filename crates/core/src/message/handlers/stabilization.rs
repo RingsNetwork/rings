@@ -71,18 +71,17 @@ mod test {
     use crate::ecc::SecretKey;
     use crate::message::handlers::connection::tests::test_listen_join_and_init_find_succeesor;
     use crate::message::handlers::connection::tests::test_only_two_nodes_establish_connection;
-    use crate::message::handlers::tests::assert_no_more_msg;
-    use crate::message::handlers::tests::wait_for_msgs;
     use crate::message::ConnectNodeReport;
     use crate::message::ConnectNodeSend;
     use crate::message::FindSuccessorReport;
     use crate::message::FindSuccessorReportHandler;
     use crate::message::FindSuccessorSend;
     use crate::message::FindSuccessorThen;
-    use crate::message::JoinDHT;
     use crate::message::MessageVerificationExt;
     use crate::swarm::Swarm;
+    use crate::tests::default::assert_no_more_msg;
     use crate::tests::default::prepare_node;
+    use crate::tests::default::wait_for_msgs;
     use crate::tests::manually_establish_connection;
 
     #[tokio::test]
@@ -147,7 +146,7 @@ mod test {
         println!("||  now we start join node3 to node2  ||");
         println!("========================================");
 
-        manually_establish_connection(&node3, &node2).await;
+        manually_establish_connection(&node3.swarm, &node2.swarm).await;
         test_listen_join_and_init_find_succeesor(&node3, &node2).await?;
         node3.listen_once().await.unwrap();
         node2.listen_once().await.unwrap();
@@ -168,12 +167,12 @@ mod test {
         println!("||  now we start first stabilization  ||");
         println!("========================================");
 
-        run_stabilize_once(node1.clone()).await?;
-        run_stabilize_once(node2.clone()).await?;
-        run_stabilize_once(node3.clone()).await?;
+        run_stabilize_once(node1.swarm.clone()).await?;
+        run_stabilize_once(node2.swarm.clone()).await?;
+        run_stabilize_once(node3.swarm.clone()).await?;
 
         // node2 notify node1
-        let ev1 = node1.listen_once().await.unwrap().0;
+        let ev1 = node1.listen_once().await.unwrap();
         assert_eq!(ev1.signer(), node2.did());
         assert_eq!(ev1.relay.path, vec![node2.did()]);
         assert!(matches!(
@@ -182,7 +181,7 @@ mod test {
         ));
 
         // node1 notify node2
-        let ev2 = node2.listen_once().await.unwrap().0;
+        let ev2 = node2.listen_once().await.unwrap();
         assert_eq!(ev2.signer(), node1.did());
         assert_eq!(ev2.relay.path, vec![node1.did()]);
         assert!(matches!(
@@ -191,7 +190,7 @@ mod test {
         ));
 
         // node2 notify node3
-        let ev3 = node3.listen_once().await.unwrap().0;
+        let ev3 = node3.listen_once().await.unwrap();
         assert_eq!(ev3.signer(), node2.did());
         assert_eq!(ev3.relay.path, vec![node2.did()]);
         assert!(matches!(
@@ -200,7 +199,7 @@ mod test {
         ));
 
         // node3 notify node2
-        let ev2 = node2.listen_once().await.unwrap().0;
+        let ev2 = node2.listen_once().await.unwrap();
         assert_eq!(ev2.signer(), node3.did());
         assert_eq!(ev2.relay.path, vec![node3.did()]);
         assert!(matches!(
@@ -209,7 +208,7 @@ mod test {
         ));
 
         // node2 report node3
-        let ev3 = node3.listen_once().await.unwrap().0;
+        let ev3 = node3.listen_once().await.unwrap();
         assert_eq!(ev3.signer(), node2.did());
         assert_eq!(ev3.relay.path, vec![node2.did()]);
         assert!(matches!(
@@ -260,12 +259,12 @@ mod test {
         println!("||  now we start second stabilization  ||");
         println!("=========================================");
 
-        run_stabilize_once(node1.clone()).await?;
-        run_stabilize_once(node2.clone()).await?;
-        run_stabilize_once(node3.clone()).await?;
+        run_stabilize_once(node1.swarm.clone()).await?;
+        run_stabilize_once(node2.swarm.clone()).await?;
+        run_stabilize_once(node3.swarm.clone()).await?;
 
         // node1 notify node3
-        let ev3 = node3.listen_once().await.unwrap().0;
+        let ev3 = node3.listen_once().await.unwrap();
         assert_eq!(ev3.signer(), node1.did());
         assert_eq!(ev3.relay.path, vec![node1.did()]);
         assert!(matches!(
@@ -274,7 +273,7 @@ mod test {
         ));
 
         // node2 notify node1
-        let ev1 = node1.listen_once().await.unwrap().0;
+        let ev1 = node1.listen_once().await.unwrap();
         assert_eq!(ev1.signer(), node2.did());
         assert_eq!(ev1.relay.path, vec![node2.did()]);
         assert!(matches!(
@@ -283,7 +282,7 @@ mod test {
         ));
 
         // node3 notify node1
-        let ev1 = node1.listen_once().await.unwrap().0;
+        let ev1 = node1.listen_once().await.unwrap();
         assert_eq!(ev1.signer(), node3.did());
         assert_eq!(ev1.relay.path, vec![node3.did()]);
         assert!(matches!(
@@ -292,7 +291,7 @@ mod test {
         ));
 
         // node1 notify node2
-        let ev2 = node2.listen_once().await.unwrap().0;
+        let ev2 = node2.listen_once().await.unwrap();
         assert_eq!(ev2.signer(), node1.did());
         assert_eq!(ev2.relay.path, vec![node1.did()]);
         assert!(matches!(
@@ -301,7 +300,7 @@ mod test {
         ));
 
         // node3 notify node2
-        let ev2 = node2.listen_once().await.unwrap().0;
+        let ev2 = node2.listen_once().await.unwrap();
         assert_eq!(ev2.signer(), node3.did());
         assert_eq!(ev2.relay.path, vec![node3.did()]);
         assert!(matches!(
@@ -310,7 +309,7 @@ mod test {
         ));
 
         // node2 notify node3
-        let ev3 = node3.listen_once().await.unwrap().0;
+        let ev3 = node3.listen_once().await.unwrap();
         assert_eq!(ev3.signer(), node2.did());
         assert_eq!(ev3.relay.path, vec![node2.did()]);
         assert!(matches!(
@@ -319,7 +318,7 @@ mod test {
         ));
 
         // node2 report node3
-        let ev3 = node3.listen_once().await.unwrap().0;
+        let ev3 = node3.listen_once().await.unwrap();
         assert_eq!(ev3.signer(), node2.did());
         assert_eq!(ev3.relay.path, vec![node2.did()]);
         assert!(matches!(
@@ -328,7 +327,7 @@ mod test {
         ));
 
         // node3 report node1
-        let ev1 = node1.listen_once().await.unwrap().0;
+        let ev1 = node1.listen_once().await.unwrap();
         assert_eq!(ev1.signer(), node3.did());
         assert_eq!(ev1.relay.path, vec![node3.did()]);
         assert!(matches!(
@@ -382,7 +381,7 @@ mod test {
         println!("||  now we start join node3 to node2  ||");
         println!("========================================");
 
-        manually_establish_connection(&node3, &node2).await;
+        manually_establish_connection(&node3.swarm, &node2.swarm).await;
         test_listen_join_and_init_find_succeesor(&node3, &node2).await?;
         node1.listen_once().await.unwrap();
         node2.listen_once().await.unwrap();
@@ -405,12 +404,12 @@ mod test {
         println!("||  now we start first stabilization  ||");
         println!("========================================");
 
-        run_stabilize_once(node1.clone()).await?;
-        run_stabilize_once(node2.clone()).await?;
-        run_stabilize_once(node3.clone()).await?;
+        run_stabilize_once(node1.swarm.clone()).await?;
+        run_stabilize_once(node2.swarm.clone()).await?;
+        run_stabilize_once(node3.swarm.clone()).await?;
 
         // node2 notify node1
-        let ev1 = node1.listen_once().await.unwrap().0;
+        let ev1 = node1.listen_once().await.unwrap();
         assert_eq!(ev1.signer(), node2.did());
         assert_eq!(ev1.relay.path, vec![node2.did()]);
         assert!(matches!(
@@ -419,7 +418,7 @@ mod test {
         ));
 
         // node1 notify node2
-        let ev2 = node2.listen_once().await.unwrap().0;
+        let ev2 = node2.listen_once().await.unwrap();
         assert_eq!(ev2.signer(), node1.did());
         assert_eq!(ev2.relay.path, vec![node1.did()]);
         assert!(matches!(
@@ -428,7 +427,7 @@ mod test {
         ));
 
         // node3 notify node2
-        let ev2 = node2.listen_once().await.unwrap().0;
+        let ev2 = node2.listen_once().await.unwrap();
         assert_eq!(ev2.signer(), node3.did());
         assert_eq!(ev2.relay.path, vec![node3.did()]);
         assert!(matches!(
@@ -437,7 +436,7 @@ mod test {
         ));
 
         // node2 notify node3
-        let ev3 = node3.listen_once().await.unwrap().0;
+        let ev3 = node3.listen_once().await.unwrap();
         assert_eq!(ev3.signer(), node2.did());
         assert_eq!(ev3.relay.path, vec![node2.did()]);
         assert!(matches!(
@@ -468,12 +467,12 @@ mod test {
         println!("||  now we start second stabilization  ||");
         println!("=========================================");
 
-        run_stabilize_once(node1.clone()).await?;
-        run_stabilize_once(node2.clone()).await?;
-        run_stabilize_once(node3.clone()).await?;
+        run_stabilize_once(node1.swarm.clone()).await?;
+        run_stabilize_once(node2.swarm.clone()).await?;
+        run_stabilize_once(node3.swarm.clone()).await?;
 
         // node2 notify node3
-        let ev3 = node3.listen_once().await.unwrap().0;
+        let ev3 = node3.listen_once().await.unwrap();
         assert_eq!(ev3.signer(), node2.did());
         assert_eq!(ev3.relay.path, vec![node2.did()]);
         assert!(matches!(
@@ -482,7 +481,7 @@ mod test {
         ));
 
         // node2 notify node1
-        let ev1 = node1.listen_once().await.unwrap().0;
+        let ev1 = node1.listen_once().await.unwrap();
         assert_eq!(ev1.signer(), node2.did());
         assert_eq!(ev1.relay.path, vec![node2.did()]);
         assert!(matches!(
@@ -491,7 +490,7 @@ mod test {
         ));
 
         // node1 notify node2
-        let ev2 = node2.listen_once().await.unwrap().0;
+        let ev2 = node2.listen_once().await.unwrap();
         assert_eq!(ev2.signer(), node1.did());
         assert_eq!(ev2.relay.path, vec![node1.did()]);
         assert!(matches!(
@@ -500,7 +499,7 @@ mod test {
         ));
 
         // node3 notify node2
-        let ev2 = node2.listen_once().await.unwrap().0;
+        let ev2 = node2.listen_once().await.unwrap();
         assert_eq!(ev2.signer(), node3.did());
         assert_eq!(ev2.relay.path, vec![node3.did()]);
         assert!(matches!(
@@ -509,7 +508,7 @@ mod test {
         ));
 
         // node2 notify node1 the existence of node3
-        let ev1 = node1.listen_once().await.unwrap().0;
+        let ev1 = node1.listen_once().await.unwrap();
         assert_eq!(ev1.signer(), node2.did());
         assert_eq!(ev1.relay.path, vec![node2.did()]);
         assert!(matches!(
@@ -518,7 +517,7 @@ mod test {
         ));
 
         // node1 connect node3 via node2
-        let ev2 = node2.listen_once().await.unwrap().0;
+        let ev2 = node2.listen_once().await.unwrap();
         assert_eq!(ev2.signer(), node1.did());
         assert_eq!(ev2.relay.path, vec![node1.did()]);
         assert!(matches!(
@@ -528,7 +527,7 @@ mod test {
         assert_eq!(ev2.transaction.destination, node3.did());
 
         // node2 forward the message to node3
-        let ev3 = node3.listen_once().await.unwrap().0;
+        let ev3 = node3.listen_once().await.unwrap();
         assert_eq!(ev3.signer(), node2.did());
         assert_eq!(ev3.relay.path, vec![node1.did(), node2.did()]);
         assert!(matches!(
@@ -538,7 +537,7 @@ mod test {
         assert_eq!(ev3.transaction.destination, node3.did());
 
         // node3 respond node1 via node2
-        let ev2 = node2.listen_once().await.unwrap().0;
+        let ev2 = node2.listen_once().await.unwrap();
         assert_eq!(ev2.signer(), node3.did());
         assert_eq!(ev2.relay.path, vec![node3.did()]);
         assert!(matches!(
@@ -548,7 +547,7 @@ mod test {
         assert_eq!(ev2.transaction.destination, node1.did());
 
         // node2 forward the message to node1
-        let ev1 = node1.listen_once().await.unwrap().0;
+        let ev1 = node1.listen_once().await.unwrap();
         assert_eq!(ev1.signer(), node2.did());
         assert_eq!(ev1.relay.path, vec![node3.did(), node2.did()]);
         assert!(matches!(
@@ -557,24 +556,8 @@ mod test {
         ));
         assert_eq!(ev1.transaction.destination, node1.did());
 
-        // node1 JoinDHT
-        let ev1 = node1.listen_once().await.unwrap().0;
-        assert_eq!(ev1.signer(), node1.did());
-        assert_eq!(ev1.relay.path, vec![node1.did()]);
-        assert!(
-            matches!(ev1.transaction.data()?, Message::JoinDHT(JoinDHT{did}) if did == node3.did())
-        );
-
-        // node3 JoinDHT
-        let ev3 = node3.listen_once().await.unwrap().0;
-        assert_eq!(ev3.signer(), node3.did());
-        assert_eq!(ev3.relay.path, vec![node3.did()]);
-        assert!(
-            matches!(ev3.transaction.data()?, Message::JoinDHT(JoinDHT{did}) if did == node1.did())
-        );
-
         // node3 FindSuccessorSend to node1
-        let ev1 = node1.listen_once().await.unwrap().0;
+        let ev1 = node1.listen_once().await.unwrap();
         assert_eq!(ev1.signer(), node3.did());
         assert_eq!(ev1.relay.path, vec![node3.did()]);
         assert!(matches!(
@@ -590,7 +573,7 @@ mod test {
         ));
 
         // node1 FindSuccessorSend to node3
-        let ev3 = node3.listen_once().await.unwrap().0;
+        let ev3 = node3.listen_once().await.unwrap();
         assert_eq!(ev3.signer(), node1.did());
         assert_eq!(ev3.relay.path, vec![node1.did()]);
         assert!(matches!(
@@ -606,7 +589,7 @@ mod test {
         ));
 
         // node1 FindSuccessorReport to node3
-        let ev3 = node3.listen_once().await.unwrap().0;
+        let ev3 = node3.listen_once().await.unwrap();
         assert_eq!(ev3.signer(), node1.did());
         assert_eq!(ev3.relay.path, vec![node1.did()]);
         assert!(matches!(
@@ -619,7 +602,7 @@ mod test {
         ));
 
         // node3 forward FindSuccessorSend to node2
-        let ev2 = node2.listen_once().await.unwrap().0;
+        let ev2 = node2.listen_once().await.unwrap();
         assert_eq!(ev2.signer(), node3.did());
         assert_eq!(ev2.relay.path, vec![node1.did(), node3.did()]);
         assert!(matches!(
@@ -635,7 +618,7 @@ mod test {
         ));
 
         // node2 FindSuccessorReport to node3
-        let ev3 = node3.listen_once().await.unwrap().0;
+        let ev3 = node3.listen_once().await.unwrap();
         assert_eq!(ev3.signer(), node2.did());
         assert_eq!(ev3.relay.path, vec![node2.did()]);
         assert!(matches!(
@@ -650,7 +633,7 @@ mod test {
         ));
 
         // node3 forward FindSuccessorReport to node1
-        let ev1 = node1.listen_once().await.unwrap().0;
+        let ev1 = node1.listen_once().await.unwrap();
         assert_eq!(ev1.signer(), node3.did());
         assert_eq!(ev1.relay.path, vec![node2.did(), node3.did()]);
         assert!(matches!(
@@ -693,9 +676,9 @@ mod test {
         println!("||  now we start third stabilization   ||");
         println!("=========================================");
 
-        run_stabilize_once(node1.clone()).await?;
-        run_stabilize_once(node2.clone()).await?;
-        run_stabilize_once(node3.clone()).await?;
+        run_stabilize_once(node1.swarm.clone()).await?;
+        run_stabilize_once(node2.swarm.clone()).await?;
+        run_stabilize_once(node3.swarm.clone()).await?;
 
         wait_for_msgs(&node1, &node2, &node3).await;
         assert_no_more_msg(&node1, &node2, &node3).await;
