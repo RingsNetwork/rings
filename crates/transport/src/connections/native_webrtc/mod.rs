@@ -17,6 +17,10 @@ use webrtc::peer_connection::RTCPeerConnection;
 
 use crate::callback::InnerTransportCallback;
 use crate::connection_ref::ConnectionRef;
+use crate::connections::channel_pool::ChannelPool;
+use crate::connections::channel_pool::ChannelPoolStatus;
+use crate::connections::channel_pool::RoundRobin;
+use crate::connections::channel_pool::RoundRobinPool;
 use crate::core::callback::BoxedTransportCallback;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::TransportInterface;
@@ -28,10 +32,6 @@ use crate::ice_server::IceCredentialType;
 use crate::ice_server::IceServer;
 use crate::notifier::Notifier;
 use crate::pool::Pool;
-use crate::connections::channel_pool::RoundRobin;
-use crate::connections::channel_pool::RoundRobinPool;
-use crate::connections::channel_pool::ChannelPool;
-use crate::connections::channel_pool::ChannelPoolStatus;
 
 const WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT: u8 = 8; // seconds
 const WEBRTC_GATHER_TIMEOUT: u8 = 60; // seconds
@@ -41,22 +41,23 @@ const DATA_CHANNEL_POOL_SIZE: u8 = 4; /// pool size of data channel
 #[cfg_attr(not(arch_family = "wasm"), async_trait)]
 impl ChannelPool<Arc<RTCDataChannel>> for RoundRobinPool<Arc<RTCDataChannel>> {
     async fn send(&self, msg: TransportMessage) -> Result<()> {
-	let channel = self.select();
+        let channel = self.select();
         let data = bincode::serialize(&msg).map(Bytes::from)?;
         if let Err(e) = channel.send(&data).await {
             tracing::error!("{:?}, Data size: {:?}", e, data.len());
             return Err(e.into());
         }
-	Ok(())
+        Ok(())
     }
 }
 
 impl ChannelPoolStatus<Arc<RTCDataChannel>> for RoundRobinPool<Arc<RTCDataChannel>> {
     fn all_ready(&self) -> bool {
-	self.all().iter().all(|c| c.ready_state() == RTCDataChannelState::Open)
+        self.all()
+            .iter()
+            .all(|c| c.ready_state() == RTCDataChannelState::Open)
     }
 }
-
 
 /// A connection that implemented by webrtc-rs library.
 /// Used for native environment.
@@ -319,11 +320,13 @@ impl TransportInterface for WebrtcTransport {
         //
         // Create data channel
         //
-	let mut channel_pool = vec![];
-	for i in 0..DATA_CHANNEL_POOL_SIZE {
-            let ch = webrtc_conn.create_data_channel(&format!("rings_data_channel_{}", i), None).await?;
-	    channel_pool.push(ch);
-	}
+        let mut channel_pool = vec![];
+        for i in 0..DATA_CHANNEL_POOL_SIZE {
+            let ch = webrtc_conn
+                .create_data_channel(&format!("rings_data_channel_{}", i), None)
+                .await?;
+            channel_pool.push(ch);
+        }
 
         //
         // Construct the Connection
