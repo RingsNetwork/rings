@@ -23,6 +23,10 @@ use web_sys::RtcStatsReport;
 
 use crate::callback::InnerTransportCallback;
 use crate::connection_ref::ConnectionRef;
+use crate::connections::channel_pool::ChannelPool;
+use crate::connections::channel_pool::ChannelPoolStatus;
+use crate::connections::channel_pool::RoundRobin;
+use crate::connections::channel_pool::RoundRobinPool;
 use crate::core::callback::BoxedTransportCallback;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::TransportInterface;
@@ -34,35 +38,35 @@ use crate::ice_server::IceCredentialType;
 use crate::ice_server::IceServer;
 use crate::notifier::Notifier;
 use crate::pool::Pool;
-use crate::connections::channel_pool::RoundRobin;
-use crate::connections::channel_pool::RoundRobinPool;
-use crate::connections::channel_pool::ChannelPool;
-use crate::connections::channel_pool::ChannelPoolStatus;
-
 
 const WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT: u8 = 8; // seconds
 const WEBRTC_GATHER_TIMEOUT: u8 = 60; // seconds
-const DATA_CHANNEL_POOL_SIZE: u8 = 4; /// pool size of data channel
+const DATA_CHANNEL_POOL_SIZE: u8 = 4;
+/// pool size of data channel
 
 #[async_trait(?Send)]
 impl ChannelPool<RtcDataChannel> for RoundRobinPool<RtcDataChannel> {
     async fn send(&self, msg: TransportMessage) -> Result<()> {
-	let channel = self.select();
+        let channel = self.select();
         let data = bincode::serialize(&msg)?;
-        if let Err(e) = channel.send_with_u8_array(&data).map_err(Error::WebSysWebrtc) {
+        if let Err(e) = channel
+            .send_with_u8_array(&data)
+            .map_err(Error::WebSysWebrtc)
+        {
             tracing::error!("{:?}, Data size: {:?}", e, data.len());
             return Err(e.into());
         }
-	Ok(())
+        Ok(())
     }
 }
 
 impl ChannelPoolStatus<RtcDataChannel> for RoundRobinPool<RtcDataChannel> {
     fn all_ready(&self) -> bool {
-	self.all().iter().all(|c| c.ready_state() == RtcDataChannelState::Open )
+        self.all()
+            .iter()
+            .all(|c| c.ready_state() == RtcDataChannelState::Open)
     }
 }
-
 
 /// A connection that implemented by web_sys library.
 /// Used for browser environment.
@@ -383,11 +387,11 @@ impl TransportInterface for WebSysWebrtcTransport {
         //
         // Create data channel
         //
-	let mut channel_pool = vec![];
-	for i in 0..DATA_CHANNEL_POOL_SIZE {
-            let ch = webrtc_conn.create_data_channel(&format!("rings_data_chanel_{}", i));
-	    channel_pool.push(ch);
-	}
+        let mut channel_pool = vec![];
+        for i in 0..DATA_CHANNEL_POOL_SIZE {
+            let ch = webrtc_conn.create_data_channel(&format!("rings_data_channel_{}", i));
+            channel_pool.push(ch);
+        }
 
         //
         // Construct the Connection
