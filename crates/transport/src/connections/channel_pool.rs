@@ -40,7 +40,7 @@ impl<T: Clone> RoundRobin<T> for RoundRobinPool<T> {
             .idx
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |x| Some((x + 1) % len))
             .expect("channel pool: cannot update index");
-        
+
         self.pool[idx].clone()
     }
 
