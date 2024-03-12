@@ -50,6 +50,12 @@ pub trait SwarmCallback {
     }
 
     /// This method is invoked when a new message is received and after handling.
+    /// Will be invoked no matter if the message is for this node or not.
+    async fn on_relay(&self, _payload: &MessagePayload) -> Result<(), CallbackError> {
+        Ok(())
+    }
+
+    /// This method is invoked when a new message is received and after handling.
     /// Will not be invoked if the message is not for this node.
     async fn on_inbound(&self, _payload: &MessagePayload) -> Result<(), CallbackError> {
         Ok(())
@@ -124,6 +130,8 @@ impl InnerSwarmCallback {
                 }
             }
         };
+
+        self.callback.on_relay(payload).await?;
 
         if payload.transaction.destination == self.transport.dht.did {
             self.callback.on_inbound(payload).await?;

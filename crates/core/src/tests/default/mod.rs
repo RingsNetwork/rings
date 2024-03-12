@@ -1,10 +1,14 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
+
 use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::ecc::SecretKey;
+use crate::message::MessagePayload;
 use crate::session::SessionSk;
 use crate::storage::MemStorage;
+use crate::swarm::callback::SwarmCallback;
 use crate::swarm::Swarm;
 use crate::swarm::SwarmBuilder;
 
@@ -12,7 +16,36 @@ mod test_connection;
 mod test_message_handler;
 mod test_stabilization;
 
-pub async fn prepare_node(key: SecretKey) -> Arc<Swarm> {
+pub struct Node {
+    swarm: Arc<Swarm>,
+    message_rx: tokio::sync::mpsc::UnboundedReceiver<MessagePayload>,
+}
+
+pub struct NodeCallback {
+    message_tx: tokio::sync::mpsc::UnboundedSender<MessagePayload>,
+}
+
+impl Node {
+    pub fn new(swarm: Arc<Swarm>) -> Self {
+        let (message_tx, message_rx) = tokio::sync::mpsc::unbounded_channel();
+        let callback = NodeCallback { message_tx };
+        swarm.set_callback(Arc::new(callback));
+        Self { swarm, message_rx }
+    }
+
+    pub async fn listen_once(&mut self) -> Option<MessagePayload> {
+        self.message_rx.recv().await
+    }
+}
+
+#[async_trait]
+impl SwarmCallback for NodeCallback {
+    async fn on_relay(&self, payload: &MessagePayload) -> Result<(), Box<dyn std::error::Error>> {
+        self.message_tx.send(payload.clone()).map_err(|e| e.into())
+    }
+}
+
+pub async fn prepare_node(key: SecretKey) -> Node {
     let stun = "stun://stun.l.google.com:19302";
     let storage = Box::new(MemStorage::new());
 
@@ -22,7 +55,7 @@ pub async fn prepare_node(key: SecretKey) -> Arc<Swarm> {
     println!("key: {:?}", key.to_string());
     println!("did: {:?}", swarm.did());
 
-    swarm
+    Node::new(swarm)
 }
 
 pub fn gen_pure_dht(did: Did) -> PeerRing {
