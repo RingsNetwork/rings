@@ -9,8 +9,6 @@ mod native_webrtc;
 #[cfg(feature = "web-sys-webrtc")]
 mod web_sys_webrtc;
 
-pub mod channel_pool;
-
 #[cfg(feature = "dummy")]
 pub use crate::connections::dummy::DummyConnection;
 #[cfg(feature = "dummy")]

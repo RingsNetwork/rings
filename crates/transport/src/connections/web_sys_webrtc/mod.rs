@@ -23,11 +23,11 @@ use web_sys::RtcStatsReport;
 
 use crate::callback::InnerTransportCallback;
 use crate::connection_ref::ConnectionRef;
-use crate::connections::channel_pool::ChannelPool;
-use crate::connections::channel_pool::ChannelPoolStatus;
-use crate::connections::channel_pool::RoundRobin;
-use crate::connections::channel_pool::RoundRobinPool;
 use crate::core::callback::BoxedTransportCallback;
+use crate::core::pool::MessageSenderPool;
+use crate::core::pool::RoundRobin;
+use crate::core::pool::RoundRobinPool;
+use crate::core::pool::StatusPool;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::TransportInterface;
 use crate::core::transport::TransportMessage;
@@ -45,7 +45,8 @@ const DATA_CHANNEL_POOL_SIZE: u8 = 4;
 /// pool size of data channel
 
 #[async_trait(?Send)]
-impl ChannelPool<RtcDataChannel> for RoundRobinPool<RtcDataChannel> {
+impl MessageSenderPool<RtcDataChannel> for RoundRobinPool<RtcDataChannel> {
+    type Message = TransportMessage;
     async fn send(&self, msg: TransportMessage) -> Result<()> {
         let channel = self.select();
         let data = bincode::serialize(&msg)?;
@@ -60,7 +61,7 @@ impl ChannelPool<RtcDataChannel> for RoundRobinPool<RtcDataChannel> {
     }
 }
 
-impl ChannelPoolStatus<RtcDataChannel> for RoundRobinPool<RtcDataChannel> {
+impl StatusPool<RtcDataChannel> for RoundRobinPool<RtcDataChannel> {
     fn all_ready(&self) -> bool {
         self.all()
             .iter()
