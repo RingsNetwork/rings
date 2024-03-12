@@ -152,7 +152,7 @@ async fn test_stabilization_final_dht() -> Result<()> {
 
     let mut expected_dhts = vec![];
     for node in nodes.iter() {
-        let dht = gen_pure_dht(node.did()).await.unwrap();
+        let dht = gen_pure_dht(node.did());
         for other in nodes.iter() {
             if dht.did != other.did() {
                 dht.join(other.did()).unwrap();

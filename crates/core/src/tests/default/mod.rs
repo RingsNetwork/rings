@@ -3,7 +3,6 @@ use std::sync::Arc;
 use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::ecc::SecretKey;
-use crate::error::Result;
 use crate::session::SessionSk;
 use crate::storage::MemStorage;
 use crate::swarm::Swarm;
@@ -26,12 +25,12 @@ pub async fn prepare_node(key: SecretKey) -> Arc<Swarm> {
     swarm
 }
 
-pub async fn gen_pure_dht(did: Did) -> Result<PeerRing> {
+pub fn gen_pure_dht(did: Did) -> PeerRing {
     let storage = Box::new(MemStorage::new());
-    Ok(PeerRing::new_with_storage(did, 3, storage))
+    PeerRing::new_with_storage(did, 3, storage)
 }
 
-pub async fn gen_sorted_dht(s: usize) -> Vec<PeerRing> {
+pub fn gen_sorted_dht(s: usize) -> Vec<PeerRing> {
     let mut keys: Vec<crate::ecc::SecretKey> = vec![];
     for _i in 0..s {
         keys.push(crate::ecc::SecretKey::random());
@@ -47,11 +46,7 @@ pub async fn gen_sorted_dht(s: usize) -> Vec<PeerRing> {
     let mut iter = dids.into_iter();
     let mut ret: Vec<crate::dht::PeerRing> = vec![];
     for _ in 0..s {
-        ret.push(
-            crate::tests::default::gen_pure_dht(iter.next().unwrap())
-                .await
-                .unwrap(),
-        )
+        ret.push(crate::tests::default::gen_pure_dht(iter.next().unwrap()))
     }
     ret
 }
