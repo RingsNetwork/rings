@@ -18,7 +18,6 @@ use rings_core::utils::js_utils;
 use rings_core::utils::js_value;
 use rings_derive::wasm_export;
 use rings_rpc::protos::rings_node::*;
-use rings_transport::core::transport::ConnectionInterface;
 use rings_transport::core::transport::WebrtcConnectionState;
 use serde::Deserialize;
 use serde::Serialize;
@@ -239,23 +238,7 @@ impl Provider {
         )
     }
 
-    /// connect peer with web3 address, without waiting for connection channel connected
-    pub fn connect_with_address_without_wait(
-        &self,
-        address: String,
-        addr_type: Option<AddressType>,
-    ) -> js_sys::Promise {
-        let p = self.processor.clone();
-        future_to_promise(async move {
-            let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
-            p.connect_with_did(did, false)
-                .await
-                .map_err(JsError::from)?;
-            Ok(JsValue::null())
-        })
-    }
-
-    /// connect peer with web3 address, and wait for connection channel connected
+    /// connect peer with web3 address
     /// example:
     /// ```typescript
     /// const provider1 = new Provider()
@@ -273,7 +256,7 @@ impl Provider {
         let p = self.processor.clone();
         future_to_promise(async move {
             let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
-            p.connect_with_did(did, true).await.map_err(JsError::from)?;
+            p.connect_with_did(did).await.map_err(JsError::from)?;
             Ok(JsValue::null())
         })
     }
@@ -284,6 +267,7 @@ impl Provider {
         future_to_promise(async move {
             let peers = p
                 .swarm
+                .transport
                 .get_connections()
                 .into_iter()
                 .flat_map(|(did, conn)| {
@@ -333,48 +317,13 @@ impl Provider {
         let p = self.processor.clone();
         future_to_promise(async move {
             let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
-            match p.swarm.get_connection(did) {
+            match p.swarm.transport.get_connection(did) {
                 None => Ok(JsValue::null()),
                 Some(conn) => {
                     let peer = Peer::new(did, conn.webrtc_connection_state());
                     Ok(JsValue::try_from(&peer)?)
                 }
             }
-        })
-    }
-
-    /// wait for connection connected
-    /// * address: peer's address
-    pub fn wait_for_connected(
-        &self,
-        address: String,
-        addr_type: Option<AddressType>,
-    ) -> js_sys::Promise {
-        self.wait_for_data_channel_open(address, addr_type)
-    }
-
-    /// wait for data channel open
-    ///   * address: peer's address
-    pub fn wait_for_data_channel_open(
-        &self,
-        address: String,
-        addr_type: Option<AddressType>,
-    ) -> js_sys::Promise {
-        let p = self.processor.clone();
-        future_to_promise(async move {
-            let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
-            let conn = p
-                .swarm
-                .get_connection(did)
-                .ok_or_else(|| JsError::new("peer not found"))?;
-
-            log::debug!("wait_for_data_channel_open start");
-            if let Err(e) = conn.webrtc_wait_for_data_channel_open().await {
-                log::warn!("wait_for_data_channel_open failed: {}", e);
-            }
-
-            log::debug!("wait_for_data_channel_open done");
-            Ok(JsValue::null())
         })
     }
 
