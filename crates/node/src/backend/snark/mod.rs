@@ -939,18 +939,7 @@ impl MessageHandler<SNARKTaskMessage> for SNARKBehaviour {
                 }
                 .into();
                 let params = resp.into_send_backend_message_request(verifier)?;
-                #[cfg(not(target_arch = "wasm32"))]
-                provider.request(Method::SendBackendMessage, params).await?;
-                #[cfg(target_arch = "wasm32")]
-                {
-                    let req = rings_core::utils::js_value::serialize(&params)?;
-                    let promise = provider.request(Method::SendBackendMessage.to_string(), req);
-                    wasm_bindgen_futures::JsFuture::from(promise)
-                        .await
-                        .map_err(|e| {
-                            Error::JsError(format!("Failed send backend message: {:?}", e))
-                        })?;
-                }
+		provider.request_internal(Method::SendBackendMessage.to_string(), serde_json::to_value(params)?).await?;
                 Ok(())
             }
             SNARKTask::SNARKVerify(t) => {

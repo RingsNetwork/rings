@@ -3825,7 +3825,7 @@ dependencies = [
  "rings-derive",
  "rings-transport",
  "serde",
- "serde-wasm-bindgen 0.6.3",
+ "serde-wasm-bindgen 0.6.5",
  "serde_json",
  "sha1",
  "sha2 0.10.8",
@@ -3909,7 +3909,7 @@ dependencies = [
  "rings-snark",
  "rings-transport",
  "serde",
- "serde-wasm-bindgen 0.6.3",
+ "serde-wasm-bindgen 0.6.5",
  "serde_json",
  "serde_yaml",
  "strum",
@@ -4275,9 +4275,9 @@ dependencies = [
 
 [[package]]
 name = "serde-wasm-bindgen"
-version = "0.6.3"
+version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9b713f70513ae1f8d92665bbbbda5c295c2cf1da5542881ae5eefe20c9af132"
+checksum = "8302e169f0eddcc139c70f139d19d6467353af16f9fce27e8c30158036a1e16b"
 dependencies = [
  "js-sys",
  "serde",
