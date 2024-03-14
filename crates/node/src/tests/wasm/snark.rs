@@ -66,6 +66,6 @@ async fn test_send_snark_backend_message() {
     js_utils::window_sleep(1000).await.unwrap();
     console_log!("gen snark task and send");
     let promise =
-        snark_behaviour.gen_and_send_proof_task_to(provider1, circuits, provider2.address());
+        snark_behaviour.gen_and_send_proof_task_to(provider1.as_ref(), circuits, provider2.address());
     wasm_bindgen_futures::JsFuture::from(promise).await.unwrap();
 }
