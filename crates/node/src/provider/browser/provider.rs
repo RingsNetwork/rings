@@ -79,6 +79,7 @@ pub struct ProviderRef {
 }
 
 impl ProviderRef {
+    /// get wrapped arc, this is useful for wasm case
     pub fn inner(&self) -> Arc<Provider> {
 	self.inner.clone()
     }
