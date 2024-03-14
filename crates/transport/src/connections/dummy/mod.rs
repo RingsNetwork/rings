@@ -135,16 +135,18 @@ impl ConnectionInterface for DummyConnection {
     }
 
     async fn webrtc_answer_offer(&self, offer: Self::Sdp) -> Result<Self::Sdp> {
+        // Set remote rand id before setting state so that the remote connection can be found in callback.
+        self.set_remote_rand_id(offer);
         self.set_webrtc_connection_state(WebrtcConnectionState::Connecting)
             .await;
-        self.set_remote_rand_id(offer);
         Ok(self.rand_id.clone())
     }
 
     async fn webrtc_accept_answer(&self, answer: Self::Sdp) -> Result<()> {
+        // Set remote rand id before setting state so that the remote connection can be found in callback.
+        self.set_remote_rand_id(answer);
         self.set_webrtc_connection_state(WebrtcConnectionState::Connected)
             .await;
-        self.set_remote_rand_id(answer);
 
         if let Some(remote_conn) = self.remote_conn() {
             remote_conn
