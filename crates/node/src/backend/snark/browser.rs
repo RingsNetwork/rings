@@ -13,6 +13,7 @@ use crate::backend::types::snark::SNARKProofTask;
 use crate::backend::types::snark::SNARKVerifyTask;
 use crate::backend::BackendMessageHandlerDynObj;
 use crate::prelude::rings_core::utils::js_value;
+use crate::provider::browser::ProviderRef;
 
 /// We need this ref to pass Task ref to js_sys
 #[wasm_bindgen]
@@ -131,7 +132,7 @@ impl SNARKBehaviour {
     /// Handle js native message
     pub fn handle_snark_task_message(
         self,
-        provider: Provider,
+        provider: ProviderRef,
         ctx: JsValue,
         msg: JsValue,
     ) -> js_sys::Promise {
@@ -139,7 +140,7 @@ impl SNARKBehaviour {
         future_to_promise(async move {
             let ctx = js_value::deserialize::<MessagePayload>(ctx)?;
             let msg = js_value::deserialize::<SNARKTaskMessage>(msg)?;
-            ins.handle_message(provider.into(), &ctx, &msg)
+            ins.handle_message(provider.inner(), &ctx, &msg)
                 .await
                 .map_err(|e| Error::BackendError(e.to_string()))?;
             Ok(JsValue::NULL)
@@ -168,14 +169,14 @@ impl SNARKBehaviour {
     /// send proof task to did
     pub fn send_proof_task_to(
         &self,
-        provider: Provider,
+        provider: ProviderRef,
         task: SNARKProofTaskRef,
         did: String,
     ) -> js_sys::Promise {
         let ins = self.clone();
         future_to_promise(async move {
             let ret = ins
-                .send_proof_task(provider.clone().into(), task.as_ref(), Did::from_str(&did)?)
+                .send_proof_task(provider.inner().clone(), task.as_ref(), Did::from_str(&did)?)
                 .await
                 .map_err(JsError::from)?;
             Ok(JsValue::from(ret))
@@ -185,14 +186,14 @@ impl SNARKBehaviour {
     /// Generate a proof task and send it to did
     pub fn gen_and_send_proof_task_to(
         &self,
-        provider: Provider,
+        provider: ProviderRef,
         circuits: Vec<Circuit>,
         did: String,
     ) -> js_sys::Promise {
         let ins = self.clone();
         future_to_promise(async move {
             let ret = ins
-                .gen_and_send_proof_task(provider.clone().into(), circuits, Did::from_str(&did)?)
+                .gen_and_send_proof_task(provider.inner().clone(), circuits, Did::from_str(&did)?)
                 .await
                 .map_err(JsError::from)?;
             Ok(JsValue::from(ret))

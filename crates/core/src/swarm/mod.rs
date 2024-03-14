@@ -337,8 +337,8 @@ impl PayloadSender for Swarm {
             .ok_or(Error::SwarmMissDidInTable(did))?;
 
         tracing::debug!(
-            "Try send {:?}, to node {:?}",
-            payload.clone(),
+            "Try send tx {}, to node {:?}",
+            payload.transaction.tx_id,
             payload.relay.next_hop,
         );
 
