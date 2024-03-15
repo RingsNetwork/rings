@@ -95,41 +95,41 @@ impl InnerSwarmCallback {
         let message: Message = payload.transaction.data()?;
 
         match &message {
-            Message::ConnectNodeSend(ref msg) => self.message_handler.handle(payload, msg).await?,
-            Message::ConnectNodeReport(ref msg) => {
-                self.message_handler.handle(payload, msg).await?
-            }
-            Message::FindSuccessorSend(ref msg) => {
-                self.message_handler.handle(payload, msg).await?
-            }
+            Message::ConnectNodeSend(ref msg) => self.message_handler.handle(payload, msg).await,
+            Message::ConnectNodeReport(ref msg) => self.message_handler.handle(payload, msg).await,
+            Message::FindSuccessorSend(ref msg) => self.message_handler.handle(payload, msg).await,
             Message::FindSuccessorReport(ref msg) => {
-                self.message_handler.handle(payload, msg).await?
+                self.message_handler.handle(payload, msg).await
             }
             Message::NotifyPredecessorSend(ref msg) => {
-                self.message_handler.handle(payload, msg).await?
+                self.message_handler.handle(payload, msg).await
             }
             Message::NotifyPredecessorReport(ref msg) => {
-                self.message_handler.handle(payload, msg).await?
+                self.message_handler.handle(payload, msg).await
             }
-            Message::SearchVNode(ref msg) => self.message_handler.handle(payload, msg).await?,
-            Message::FoundVNode(ref msg) => self.message_handler.handle(payload, msg).await?,
+            Message::SearchVNode(ref msg) => self.message_handler.handle(payload, msg).await,
+            Message::FoundVNode(ref msg) => self.message_handler.handle(payload, msg).await,
             Message::SyncVNodeWithSuccessor(ref msg) => {
-                self.message_handler.handle(payload, msg).await?
+                self.message_handler.handle(payload, msg).await
             }
-            Message::OperateVNode(ref msg) => self.message_handler.handle(payload, msg).await?,
-            Message::CustomMessage(ref msg) => self.message_handler.handle(payload, msg).await?,
+            Message::OperateVNode(ref msg) => self.message_handler.handle(payload, msg).await,
+            Message::CustomMessage(ref msg) => self.message_handler.handle(payload, msg).await,
             Message::QueryForTopoInfoSend(ref msg) => {
-                self.message_handler.handle(payload, msg).await?
+                self.message_handler.handle(payload, msg).await
             }
             Message::QueryForTopoInfoReport(ref msg) => {
-                self.message_handler.handle(payload, msg).await?
+                self.message_handler.handle(payload, msg).await
             }
             Message::Chunk(ref msg) => {
                 if let Some(data) = self.chunk_list.lock().await.handle(msg.clone()) {
                     return self.on_message(cid, &data).await;
                 }
+                Ok(())
             }
-        };
+        }
+        .unwrap_or_else(|e| {
+            tracing::error!("Failed to handle_payload: {:?}", e);
+        });
 
         self.callback.on_relay(payload).await?;
 
