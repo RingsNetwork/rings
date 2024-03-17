@@ -58,7 +58,7 @@ impl<T: Clone> RoundRobin<T> for RoundRobinPool<T> {
         let len = self.pool.len();
         let idx = self
             .idx
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |x| Some((x + 1) % len))
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |x| Some((x + 1) % len))
             .expect("Unable to update index for round-robin selection.");
 
         self.pool[idx].clone()
@@ -107,4 +107,22 @@ pub trait StatusPool<T>: RoundRobin<T> {
     /// Determines whether every resource in the pool is ready for operations, facilitating decision-making
     /// processes in resource management and task allocation.
     fn all_ready(&self) -> bool;
+}
+
+
+#[cfg(test)]
+pub mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rr_pool() {
+	let pool = RoundRobinPool::<usize>::from_vec(vec![1, 2, 3, 4]);
+	assert_eq!(pool.select(), 1);
+	assert_eq!(pool.select(), 2);
+	assert_eq!(pool.select(), 3);
+	assert_eq!(pool.select(), 4);
+	assert_eq!(pool.select(), 1);
+	assert_eq!(pool.select(), 2);
+	assert_eq!(pool.select(), 3);
+    }
 }
