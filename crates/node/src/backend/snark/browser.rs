@@ -176,7 +176,11 @@ impl SNARKBehaviour {
         let ins = self.clone();
         future_to_promise(async move {
             let ret = ins
-                .send_proof_task(provider.inner().clone(), task.as_ref(), Did::from_str(&did)?)
+                .send_proof_task(
+                    provider.inner().clone(),
+                    task.as_ref(),
+                    Did::from_str(&did)?,
+                )
                 .await
                 .map_err(JsError::from)?;
             Ok(JsValue::from(ret))
