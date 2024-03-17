@@ -41,8 +41,8 @@ use crate::pool::Pool;
 
 const WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT: u8 = 8; // seconds
 const WEBRTC_GATHER_TIMEOUT: u8 = 60; // seconds
-const DATA_CHANNEL_POOL_SIZE: u8 = 4;
 /// pool size of data channel
+const DATA_CHANNEL_POOL_SIZE: u8 = 4;
 
 #[async_trait(?Send)]
 impl MessageSenderPool<RtcDataChannel> for RoundRobinPool<RtcDataChannel> {
