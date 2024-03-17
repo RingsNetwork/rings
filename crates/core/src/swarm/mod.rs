@@ -350,7 +350,7 @@ impl PayloadSender for Swarm {
 
         let result = if data.len() > TRANSPORT_MTU {
             let chunks = ChunkList::<TRANSPORT_MTU>::from(&data);
-	    tracing::info!("data splited to chunk, len {}", chunks.to_vec().len());
+            tracing::info!("data split to chunk, len {}", chunks.to_vec().len());
             for chunk in chunks {
                 let data =
                     MessagePayload::new_send(Message::Chunk(chunk), &self.session_sk, did, did)?

@@ -70,18 +70,17 @@ impl TryFrom<&Peer> for JsValue {
     }
 }
 
-
 /// A wrapper of Arc Ref of Provider
 #[derive(Clone)]
 #[wasm_export]
 pub struct ProviderRef {
-    inner: Arc<Provider>
+    inner: Arc<Provider>,
 }
 
 impl ProviderRef {
     /// get wrapped arc, this is useful for wasm case
     pub fn inner(&self) -> Arc<Provider> {
-	self.inner.clone()
+        self.inner.clone()
     }
 }
 
@@ -89,9 +88,9 @@ impl ProviderRef {
 impl Provider {
     /// make provider as an As arc ref
     pub fn as_ref(&self) -> ProviderRef {
-	ProviderRef {
-	    inner: Arc::new(self.clone())
-	}
+        ProviderRef {
+            inner: Arc::new(self.clone()),
+        }
     }
 }
 

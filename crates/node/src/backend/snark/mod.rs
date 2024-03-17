@@ -939,7 +939,12 @@ impl MessageHandler<SNARKTaskMessage> for SNARKBehaviour {
                 }
                 .into();
                 let params = resp.into_send_backend_message_request(verifier)?;
-		provider.request_internal(Method::SendBackendMessage.to_string(), serde_json::to_value(params)?).await?;
+                provider
+                    .request_internal(
+                        Method::SendBackendMessage.to_string(),
+                        serde_json::to_value(params)?,
+                    )
+                    .await?;
                 Ok(())
             }
             SNARKTask::SNARKVerify(t) => {
