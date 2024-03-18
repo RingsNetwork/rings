@@ -15,6 +15,11 @@ type CallbackError = Box<dyn std::error::Error>;
 #[cfg_attr(feature = "web-sys-webrtc", async_trait(?Send))]
 #[cfg_attr(not(feature = "web-sys-webrtc"), async_trait)]
 pub trait TransportCallback {
+    /// Notify the data channel is open.
+    async fn on_data_channel_open(&self, _cid: &str) -> Result<(), CallbackError> {
+        Ok(())
+    }
+
     /// This method is invoked on a binary message arrival over the data channel of webrtc.
     async fn on_message(&self, _cid: &str, _msg: &[u8]) -> Result<(), CallbackError> {
         Ok(())

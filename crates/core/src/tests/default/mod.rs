@@ -138,8 +138,10 @@ pub async fn wait_for_msgs(node1: &Node, node2: &Node, node3: &Node) {
             tokio::select! {
                 Some(payload) = node1.listen_once() => {
                     println!(
-                        "Msg {} => node1 : {:?}",
+                        "Msg {} -> node1 [{} => {}] : {:?}",
                         *did_names.get(&payload.signer()).unwrap(),
+                        *did_names.get(&payload.transaction.signer()).unwrap(),
+                        *did_names.get(&payload.transaction.destination).unwrap(),
                         payload.transaction.data::<Message>().unwrap()
                     )
                 }
@@ -153,8 +155,10 @@ pub async fn wait_for_msgs(node1: &Node, node2: &Node, node3: &Node) {
             tokio::select! {
                 Some(payload) = node2.listen_once() => {
                     println!(
-                        "Msg {} => node2 : {:?}",
+                        "Msg {} -> node2 [{} => {}] : {:?}",
                         *did_names.get(&payload.signer()).unwrap(),
+                        *did_names.get(&payload.transaction.signer()).unwrap(),
+                        *did_names.get(&payload.transaction.destination).unwrap(),
                         payload.transaction.data::<Message>().unwrap()
                     )
                 }
@@ -168,8 +172,10 @@ pub async fn wait_for_msgs(node1: &Node, node2: &Node, node3: &Node) {
             tokio::select! {
                 Some(payload) = node3.listen_once() => {
                     println!(
-                        "Msg {} => node3 : {:?}",
+                        "Msg {} -> node3 [{} => {}] : {:?}",
                         *did_names.get(&payload.signer()).unwrap(),
+                        *did_names.get(&payload.transaction.signer()).unwrap(),
+                        *did_names.get(&payload.transaction.destination).unwrap(),
                         payload.transaction.data::<Message>().unwrap()
                     )
                 }

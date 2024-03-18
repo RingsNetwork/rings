@@ -277,7 +277,10 @@ impl TransportInterface for WebSysWebrtcTransport {
 
             let on_open_inner_cb = data_channel_inner_cb.clone();
             let on_open = Box::new(move || {
-                on_open_inner_cb.on_data_channel_open();
+                let inner_cb = on_open_inner_cb.clone();
+                spawn_local(async move {
+                    inner_cb.on_data_channel_open().await;
+                })
             });
 
             let on_close_inner_cb = data_channel_inner_cb.clone();

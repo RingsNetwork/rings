@@ -69,8 +69,6 @@ mod test {
     use crate::dht::Stabilization;
     use crate::ecc::tests::gen_ordered_keys;
     use crate::ecc::SecretKey;
-    use crate::message::handlers::connection::tests::test_listen_join_and_init_find_succeesor;
-    use crate::message::handlers::connection::tests::test_only_two_nodes_establish_connection;
     use crate::message::ConnectNodeReport;
     use crate::message::ConnectNodeSend;
     use crate::message::FindSuccessorReport;
@@ -140,16 +138,16 @@ mod test {
         println!("||  now we connect node1 and node2    ||");
         println!("========================================");
 
-        test_only_two_nodes_establish_connection(&node1, &node2).await?;
+        manually_establish_connection(&node1.swarm, &node2.swarm).await;
+        wait_for_msgs(&node1, &node2, &node3).await;
+        assert_no_more_msg(&node1, &node2, &node3).await;
 
         println!("========================================");
         println!("||  now we start join node3 to node2  ||");
         println!("========================================");
 
         manually_establish_connection(&node3.swarm, &node2.swarm).await;
-        test_listen_join_and_init_find_succeesor(&node3, &node2).await?;
-        node3.listen_once().await.unwrap();
-        node2.listen_once().await.unwrap();
+        wait_for_msgs(&node1, &node2, &node3).await;
         assert_no_more_msg(&node1, &node2, &node3).await;
 
         println!("=== Check state before stabilization ===");
@@ -375,18 +373,16 @@ mod test {
         println!("||  now we connect node1 and node2    ||");
         println!("========================================");
 
-        test_only_two_nodes_establish_connection(&node1, &node2).await?;
+        manually_establish_connection(&node1.swarm, &node2.swarm).await;
+        wait_for_msgs(&node1, &node2, &node3).await;
+        assert_no_more_msg(&node1, &node2, &node3).await;
 
         println!("========================================");
         println!("||  now we start join node3 to node2  ||");
         println!("========================================");
 
         manually_establish_connection(&node3.swarm, &node2.swarm).await;
-        test_listen_join_and_init_find_succeesor(&node3, &node2).await?;
-        node1.listen_once().await.unwrap();
-        node2.listen_once().await.unwrap();
-        node2.listen_once().await.unwrap();
-        node3.listen_once().await.unwrap();
+        wait_for_msgs(&node1, &node2, &node3).await;
         assert_no_more_msg(&node1, &node2, &node3).await;
 
         println!("=== Check state before stabilization ===");

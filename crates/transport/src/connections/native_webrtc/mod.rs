@@ -168,6 +168,8 @@ impl ConnectionInterface for WebrtcConnection {
             .set_timeout(WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT);
         self.webrtc_data_channel_state_notifier.clone().await;
 
+        dbg!(self.webrtc_data_channel.ready_state());
+
         if self.webrtc_data_channel.ready_state() == RTCDataChannelState::Open {
             return Ok(());
         } else {
@@ -245,8 +247,7 @@ impl TransportInterface for WebrtcTransport {
 
             let on_open_inner_cb = data_channel_inner_cb.clone();
             d.on_open(Box::new(move || {
-                on_open_inner_cb.on_data_channel_open();
-                Box::pin(async move {})
+                Box::pin(async move { on_open_inner_cb.on_data_channel_open().await })
             }));
 
             let on_close_inner_cb = data_channel_inner_cb.clone();

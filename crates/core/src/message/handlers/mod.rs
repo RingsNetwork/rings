@@ -78,7 +78,8 @@ impl MessageHandler {
             self.handle_dht_events(&dht_ev).await
         } else {
             let dht_ev = self.dht.join(peer)?;
-            self.handle_dht_events(&dht_ev).await
+            self.handle_dht_events(&dht_ev).await.unwrap();
+            Ok(())
         }
     }
 

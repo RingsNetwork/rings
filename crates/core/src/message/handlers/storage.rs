@@ -278,18 +278,26 @@ impl HandleMsg<SyncVNodeWithSuccessor> for MessageHandler {
 mod test {
     use super::*;
     use crate::ecc::tests::gen_ordered_keys;
-    use crate::message::handlers::connection::tests::test_only_two_nodes_establish_connection;
     use crate::message::Encoder;
     use crate::prelude::vnode::VNodeType;
+    use crate::tests::default::assert_no_more_msg;
     use crate::tests::default::prepare_node;
+    use crate::tests::default::wait_for_msgs;
+    use crate::tests::manually_establish_connection;
 
     #[tokio::test]
     async fn test_store_vnode() -> Result<()> {
-        let keys = gen_ordered_keys(2);
-        let (key1, key2) = (keys[0], keys[1]);
+        let keys = gen_ordered_keys(3);
+        let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
         let node1 = prepare_node(key1).await;
         let node2 = prepare_node(key2).await;
-        test_only_two_nodes_establish_connection(&node1, &node2).await?;
+
+        // This is only a dummy node for using assert_no_more_msg function
+        let node3 = prepare_node(key3).await;
+
+        manually_establish_connection(&node1.swarm, &node2.swarm).await;
+        wait_for_msgs(&node1, &node2, &node3).await;
+        assert_no_more_msg(&node1, &node2, &node3).await;
 
         // Now, node1 is the successor of node2, and node2 is the successor of node1.
         // Following tests storing data on node2 and query it from node1.
@@ -359,10 +367,16 @@ mod test {
     #[tokio::test]
     async fn test_extend_data() -> Result<()> {
         let keys = gen_ordered_keys(2);
-        let (key1, key2) = (keys[0], keys[1]);
+        let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
         let node1 = prepare_node(key1).await;
         let node2 = prepare_node(key2).await;
-        test_only_two_nodes_establish_connection(&node1, &node2).await?;
+
+        // This is only a dummy node for using assert_no_more_msg function
+        let node3 = prepare_node(key3).await;
+
+        manually_establish_connection(&node1.swarm, &node2.swarm).await;
+        wait_for_msgs(&node1, &node2, &node3).await;
+        assert_no_more_msg(&node1, &node2, &node3).await;
 
         // Now, node1 is the successor of node2, and node2 is the successor of node1.
         // Following tests storing data on node2 and query it from node1.

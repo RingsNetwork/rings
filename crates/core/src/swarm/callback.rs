@@ -165,9 +165,6 @@ impl TransportCallback for InnerSwarmCallback {
         };
 
         match s {
-            WebrtcConnectionState::Connected => {
-                self.message_handler.join_dht(did).await?;
-            }
             WebrtcConnectionState::Failed
             | WebrtcConnectionState::Disconnected
             | WebrtcConnectionState::Closed => {
@@ -176,10 +173,36 @@ impl TransportCallback for InnerSwarmCallback {
             _ => {}
         };
 
+        // Should use the `on_data_channel_open` function to notify the Connected state.
+        // It prevents users from blocking the channel creation while
+        // waiting for data channel opening in send_message.
+        if s != WebrtcConnectionState::Connected {
+            self.callback
+                .on_event(&SwarmEvent::ConnectionStateChange {
+                    peer: did,
+                    state: s,
+                })
+                .await?
+        }
+
+        Ok(())
+    }
+
+    async fn on_data_channel_open(&self, cid: &str) -> Result<(), CallbackError> {
+        let Ok(did) = Did::from_str(cid) else {
+            tracing::warn!("on_data_channel_open parse did failed: {}", cid);
+            return Ok(());
+        };
+
+        self.message_handler.join_dht(did).await?;
+
+        // Notify Connected state here instead of on_peer_connection_state_change.
+        // It prevents users from blocking the channel creation while
+        // waiting for data channel opening in send_message.
         self.callback
             .on_event(&SwarmEvent::ConnectionStateChange {
-                peer: did,
-                state: s,
+                peer: self.transport.dht.did,
+                state: WebrtcConnectionState::Connected,
             })
             .await
     }

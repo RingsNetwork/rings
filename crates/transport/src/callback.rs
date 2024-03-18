@@ -30,8 +30,11 @@ impl InnerTransportCallback {
     }
 
     /// Notify the data channel is open.
-    pub fn on_data_channel_open(&self) {
-        self.data_channel_state_notifier.wake()
+    pub async fn on_data_channel_open(&self) {
+        self.data_channel_state_notifier.wake();
+        if let Err(e) = self.callback.on_data_channel_open(&self.cid).await {
+            tracing::error!("Callback on_data_channel_open failed: {e:?}");
+        }
     }
 
     /// Notify the data channel is close.
