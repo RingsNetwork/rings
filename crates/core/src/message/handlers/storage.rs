@@ -366,7 +366,7 @@ mod test {
     #[cfg(not(feature = "redundant"))]
     #[tokio::test]
     async fn test_extend_data() -> Result<()> {
-        let keys = gen_ordered_keys(2);
+        let keys = gen_ordered_keys(3);
         let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
         let node1 = prepare_node(key1).await;
         let node2 = prepare_node(key2).await;
