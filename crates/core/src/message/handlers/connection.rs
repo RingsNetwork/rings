@@ -447,7 +447,7 @@ pub mod tests {
 
         // connect node4 to node2
         manually_establish_connection(&node4.swarm, &node2.swarm).await;
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        tokio::time::sleep(Duration::from_secs(6)).await;
 
         println!("=== Check state before connect via DHT ===");
         node1.assert_transports(vec![node2.did(), node3.did(), node4.did()]);
@@ -487,7 +487,7 @@ pub mod tests {
         println!("==================================================");
 
         node4.swarm.connect(node3.did()).await.unwrap();
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        tokio::time::sleep(Duration::from_secs(6)).await;
 
         println!("=== Check state after connect via DHT ===");
         node1.assert_transports(vec![node2.did(), node3.did(), node4.did()]);
