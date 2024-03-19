@@ -403,7 +403,57 @@ mod test {
         )
         .await
         .unwrap();
+        wait_for_msgs(&node1, &node2, &node3).await;
+        assert_no_more_msg(&node1, &node2, &node3).await;
 
+        <Swarm as ChordStorageInterface<1>>::storage_append_data(
+            &node1.swarm,
+            &topic,
+            "222".to_string().encode()?,
+        )
+        .await
+        .unwrap();
+        wait_for_msgs(&node1, &node2, &node3).await;
+        assert_no_more_msg(&node1, &node2, &node3).await;
+
+        assert!(node1.swarm.storage_check_cache(vid).await.is_none());
+        assert!(node2.swarm.storage_check_cache(vid).await.is_none());
+        assert!(node1.dht().storage.count().await.unwrap() == 0);
+        assert!(node2.dht().storage.count().await.unwrap() != 0);
+
+        // test remote query
+        println!("vid is on node2 {:?}", node2.did());
+        <Swarm as ChordStorageInterface<1>>::storage_fetch(&node1.swarm, vid)
+            .await
+            .unwrap();
+        wait_for_msgs(&node1, &node2, &node3).await;
+        assert_no_more_msg(&node1, &node2, &node3).await;
+
+        assert_eq!(
+            node1.swarm.storage_check_cache(vid).await,
+            Some(VirtualNode {
+                did: vid,
+                data: vec!["111".to_string().encode()?, "222".to_string().encode()?],
+                kind: VNodeType::Data
+            })
+        );
+
+        // Append more data
+        <Swarm as ChordStorageInterface<1>>::storage_append_data(
+            &node1.swarm,
+            &topic,
+            "333".to_string().encode()?,
+        )
+        .await
+        .unwrap();
+        wait_for_msgs(&node1, &node2, &node3).await;
+        assert_no_more_msg(&node1, &node2, &node3).await;
+
+        // test remote query agagin
+        println!("vid is on node2 {:?}", node2.did());
+        <Swarm as ChordStorageInterface<1>>::storage_fetch(&node1.swarm, vid)
+            .await
+            .unwrap();
         wait_for_msgs(&node1, &node2, &node3).await;
         assert_no_more_msg(&node1, &node2, &node3).await;
 
