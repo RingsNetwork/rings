@@ -22,9 +22,9 @@ use crate::notifier::Notifier;
 use crate::pool::Pool;
 
 /// Max delay in ms on sending message
-const DUMMY_DELAY_MAX: u64 = 100;
+const DUMMY_DELAY_MAX: u64 = 1000;
 /// Min delay in ms on sending message
-const DUMMY_DELAY_MIN: u64 = 0;
+const DUMMY_DELAY_MIN: u64 = 100;
 /// Config random delay when send message
 const SEND_MESSAGE_DELAY: bool = true;
 /// Config random delay when channel opening
@@ -93,6 +93,18 @@ impl DummyConnection {
         }
 
         self.callback().on_peer_connection_state_change(state).await;
+
+        // Simulate the behavior where the data channel is not opened immediately upon connection,
+        // but rather after a certain number of milliseconds.
+        if state == WebrtcConnectionState::Connected {
+            let cb = self.callback();
+            tokio::spawn(async move {
+                if CHANNEL_OPEN_DELAY {
+                    random_delay().await;
+                }
+                cb.on_data_channel_open().await;
+            });
+        }
     }
 }
 
