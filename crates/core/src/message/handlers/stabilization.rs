@@ -69,13 +69,6 @@ mod test {
     use crate::dht::Stabilization;
     use crate::ecc::tests::gen_ordered_keys;
     use crate::ecc::SecretKey;
-    use crate::message::ConnectNodeReport;
-    use crate::message::ConnectNodeSend;
-    use crate::message::FindSuccessorReport;
-    use crate::message::FindSuccessorReportHandler;
-    use crate::message::FindSuccessorSend;
-    use crate::message::FindSuccessorThen;
-    use crate::message::MessageVerificationExt;
     use crate::swarm::Swarm;
     use crate::tests::default::assert_no_more_msg;
     use crate::tests::default::prepare_node;
@@ -169,65 +162,7 @@ mod test {
         run_stabilize_once(node2.swarm.clone()).await?;
         run_stabilize_once(node3.swarm.clone()).await?;
 
-        // node2 notify node1
-        let ev1 = node1.listen_once().await.unwrap();
-        assert_eq!(ev1.signer(), node2.did());
-        assert_eq!(ev1.relay.path, vec![node2.did()]);
-        assert!(matches!(
-            ev1.transaction.data()?,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == node2.did()
-        ));
-
-        // node1 notify node2
-        let ev2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev2.signer(), node1.did());
-        assert_eq!(ev2.relay.path, vec![node1.did()]);
-        assert!(matches!(
-            ev2.transaction.data()?,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == node1.did()
-        ));
-
-        // node2 notify node3
-        let ev3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev3.signer(), node2.did());
-        assert_eq!(ev3.relay.path, vec![node2.did()]);
-        assert!(matches!(
-            ev3.transaction.data()?,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == node2.did()
-        ));
-
-        // node3 notify node2
-        let ev2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev2.signer(), node3.did());
-        assert_eq!(ev2.relay.path, vec![node3.did()]);
-        assert!(matches!(
-            ev2.transaction.data()?,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == node3.did()
-        ));
-
-        // node2 report node3
-        let ev3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev3.signer(), node2.did());
-        assert_eq!(ev3.relay.path, vec![node2.did()]);
-        assert!(matches!(
-            ev3.transaction.data()?,
-            Message::NotifyPredecessorReport(NotifyPredecessorReport{did}) if did == node1.did()
-        ));
-
-        // handle messages of connection after stabilization
-        node2.listen_once().await.unwrap();
-        node1.listen_once().await.unwrap();
-        node2.listen_once().await.unwrap();
-        node3.listen_once().await.unwrap();
-        node1.listen_once().await.unwrap();
-        node3.listen_once().await.unwrap();
-        node3.listen_once().await.unwrap();
-        node1.listen_once().await.unwrap();
-        node1.listen_once().await.unwrap();
-        node2.listen_once().await.unwrap();
-        node1.listen_once().await.unwrap();
-        node3.listen_once().await.unwrap();
-
+        wait_for_msgs(&node1, &node2, &node3).await;
         assert_no_more_msg(&node1, &node2, &node3).await;
 
         println!("=== Check state after first stabilization ===");
@@ -261,78 +196,7 @@ mod test {
         run_stabilize_once(node2.swarm.clone()).await?;
         run_stabilize_once(node3.swarm.clone()).await?;
 
-        // node1 notify node3
-        let ev3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev3.signer(), node1.did());
-        assert_eq!(ev3.relay.path, vec![node1.did()]);
-        assert!(matches!(
-            ev3.transaction.data()?,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == node1.did()
-        ));
-
-        // node2 notify node1
-        let ev1 = node1.listen_once().await.unwrap();
-        assert_eq!(ev1.signer(), node2.did());
-        assert_eq!(ev1.relay.path, vec![node2.did()]);
-        assert!(matches!(
-            ev1.transaction.data()?,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == node2.did()
-        ));
-
-        // node3 notify node1
-        let ev1 = node1.listen_once().await.unwrap();
-        assert_eq!(ev1.signer(), node3.did());
-        assert_eq!(ev1.relay.path, vec![node3.did()]);
-        assert!(matches!(
-            ev1.transaction.data()?,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == node3.did()
-        ));
-
-        // node1 notify node2
-        let ev2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev2.signer(), node1.did());
-        assert_eq!(ev2.relay.path, vec![node1.did()]);
-        assert!(matches!(
-            ev2.transaction.data()?,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == node1.did()
-        ));
-
-        // node3 notify node2
-        let ev2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev2.signer(), node3.did());
-        assert_eq!(ev2.relay.path, vec![node3.did()]);
-        assert!(matches!(
-            ev2.transaction.data()?,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == node3.did()
-        ));
-
-        // node2 notify node3
-        let ev3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev3.signer(), node2.did());
-        assert_eq!(ev3.relay.path, vec![node2.did()]);
-        assert!(matches!(
-            ev2.transaction.data()?,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == node3.did()
-        ));
-
-        // node2 report node3
-        let ev3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev3.signer(), node2.did());
-        assert_eq!(ev3.relay.path, vec![node2.did()]);
-        assert!(matches!(
-            ev3.transaction.data()?,
-            Message::NotifyPredecessorReport(NotifyPredecessorReport{did}) if did == node1.did()
-        ));
-
-        // node3 report node1
-        let ev1 = node1.listen_once().await.unwrap();
-        assert_eq!(ev1.signer(), node3.did());
-        assert_eq!(ev1.relay.path, vec![node3.did()]);
-        assert!(matches!(
-            ev1.transaction.data()?,
-            Message::NotifyPredecessorReport(NotifyPredecessorReport{did}) if did == node2.did()
-        ));
-
+        wait_for_msgs(&node1, &node2, &node3).await;
         assert_no_more_msg(&node1, &node2, &node3).await;
 
         println!("=== Check state after second stabilization ===");
@@ -404,42 +268,7 @@ mod test {
         run_stabilize_once(node2.swarm.clone()).await?;
         run_stabilize_once(node3.swarm.clone()).await?;
 
-        // node2 notify node1
-        let ev1 = node1.listen_once().await.unwrap();
-        assert_eq!(ev1.signer(), node2.did());
-        assert_eq!(ev1.relay.path, vec![node2.did()]);
-        assert!(matches!(
-            ev1.transaction.data()?,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == node2.did()
-        ));
-
-        // node1 notify node2
-        let ev2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev2.signer(), node1.did());
-        assert_eq!(ev2.relay.path, vec![node1.did()]);
-        assert!(matches!(
-            ev2.transaction.data()?,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == node1.did()
-        ));
-
-        // node3 notify node2
-        let ev2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev2.signer(), node3.did());
-        assert_eq!(ev2.relay.path, vec![node3.did()]);
-        assert!(matches!(
-            ev2.transaction.data()?,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == node3.did()
-        ));
-
-        // node2 notify node3
-        let ev3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev3.signer(), node2.did());
-        assert_eq!(ev3.relay.path, vec![node2.did()]);
-        assert!(matches!(
-            ev3.transaction.data()?,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == node2.did()
-        ));
-
+        wait_for_msgs(&node1, &node2, &node3).await;
         assert_no_more_msg(&node1, &node2, &node3).await;
 
         println!("=== Check state after first stabilization ===");
@@ -467,182 +296,7 @@ mod test {
         run_stabilize_once(node2.swarm.clone()).await?;
         run_stabilize_once(node3.swarm.clone()).await?;
 
-        // node2 notify node3
-        let ev3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev3.signer(), node2.did());
-        assert_eq!(ev3.relay.path, vec![node2.did()]);
-        assert!(matches!(
-            ev3.transaction.data()?,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == node2.did()
-        ));
-
-        // node2 notify node1
-        let ev1 = node1.listen_once().await.unwrap();
-        assert_eq!(ev1.signer(), node2.did());
-        assert_eq!(ev1.relay.path, vec![node2.did()]);
-        assert!(matches!(
-            ev1.transaction.data()?,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == node2.did()
-        ));
-
-        // node1 notify node2
-        let ev2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev2.signer(), node1.did());
-        assert_eq!(ev2.relay.path, vec![node1.did()]);
-        assert!(matches!(
-            ev2.transaction.data()?,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == node1.did()
-        ));
-
-        // node3 notify node2
-        let ev2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev2.signer(), node3.did());
-        assert_eq!(ev2.relay.path, vec![node3.did()]);
-        assert!(matches!(
-            ev2.transaction.data()?,
-            Message::NotifyPredecessorSend(NotifyPredecessorSend{did}) if did == node3.did()
-        ));
-
-        // node2 notify node1 the existence of node3
-        let ev1 = node1.listen_once().await.unwrap();
-        assert_eq!(ev1.signer(), node2.did());
-        assert_eq!(ev1.relay.path, vec![node2.did()]);
-        assert!(matches!(
-            ev1.transaction.data()?,
-            Message::NotifyPredecessorReport(NotifyPredecessorReport{did}) if did == node3.did()
-        ));
-
-        // node1 connect node3 via node2
-        let ev2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev2.signer(), node1.did());
-        assert_eq!(ev2.relay.path, vec![node1.did()]);
-        assert!(matches!(
-            ev2.transaction.data()?,
-            Message::ConnectNodeSend(ConnectNodeSend { .. })
-        ));
-        assert_eq!(ev2.transaction.destination, node3.did());
-
-        // node2 forward the message to node3
-        let ev3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev3.signer(), node2.did());
-        assert_eq!(ev3.relay.path, vec![node1.did(), node2.did()]);
-        assert!(matches!(
-            ev3.transaction.data()?,
-            Message::ConnectNodeSend(ConnectNodeSend { .. })
-        ));
-        assert_eq!(ev3.transaction.destination, node3.did());
-
-        // node3 respond node1 via node2
-        let ev2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev2.signer(), node3.did());
-        assert_eq!(ev2.relay.path, vec![node3.did()]);
-        assert!(matches!(
-            ev2.transaction.data()?,
-            Message::ConnectNodeReport(ConnectNodeReport { .. })
-        ));
-        assert_eq!(ev2.transaction.destination, node1.did());
-
-        // node2 forward the message to node1
-        let ev1 = node1.listen_once().await.unwrap();
-        assert_eq!(ev1.signer(), node2.did());
-        assert_eq!(ev1.relay.path, vec![node3.did(), node2.did()]);
-        assert!(matches!(
-            ev1.transaction.data()?,
-            Message::ConnectNodeReport(ConnectNodeReport { .. })
-        ));
-        assert_eq!(ev1.transaction.destination, node1.did());
-
-        // node3 FindSuccessorSend to node1
-        let ev1 = node1.listen_once().await.unwrap();
-        assert_eq!(ev1.signer(), node3.did());
-        assert_eq!(ev1.relay.path, vec![node3.did()]);
-        assert!(matches!(
-            ev1.transaction.data()?,
-            Message::FindSuccessorSend(
-                FindSuccessorSend{
-                    did,
-                    then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect),
-                    strict: false
-                }
-            )
-            if did == node3.did()
-        ));
-
-        // node1 FindSuccessorSend to node3
-        let ev3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev3.signer(), node1.did());
-        assert_eq!(ev3.relay.path, vec![node1.did()]);
-        assert!(matches!(
-            ev3.transaction.data()?,
-            Message::FindSuccessorSend(
-                FindSuccessorSend{
-                    did,
-                    then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect),
-                    strict: false
-                }
-            )
-            if did == node1.did()
-        ));
-
-        // node1 FindSuccessorReport to node3
-        let ev3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev3.signer(), node1.did());
-        assert_eq!(ev3.relay.path, vec![node1.did()]);
-        assert!(matches!(
-            ev3.transaction.data()?,
-            Message::FindSuccessorReport(FindSuccessorReport {
-                did,
-                handler: FindSuccessorReportHandler::Connect,
-            })
-            if did == node3.did()
-        ));
-
-        // node3 forward FindSuccessorSend to node2
-        let ev2 = node2.listen_once().await.unwrap();
-        assert_eq!(ev2.signer(), node3.did());
-        assert_eq!(ev2.relay.path, vec![node1.did(), node3.did()]);
-        assert!(matches!(
-            ev2.transaction.data()?,
-            Message::FindSuccessorSend(
-                FindSuccessorSend{
-                    did,
-                    then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect),
-                    strict: false
-                }
-            )
-            if did == node1.did()
-        ));
-
-        // node2 FindSuccessorReport to node3
-        let ev3 = node3.listen_once().await.unwrap();
-        assert_eq!(ev3.signer(), node2.did());
-        assert_eq!(ev3.relay.path, vec![node2.did()]);
-        assert!(matches!(
-            ev3.transaction.data()?,
-            Message::FindSuccessorReport(
-                FindSuccessorReport {
-                    did,
-                    handler: FindSuccessorReportHandler::Connect,
-                }
-            )
-            if did == node1.did()
-        ));
-
-        // node3 forward FindSuccessorReport to node1
-        let ev1 = node1.listen_once().await.unwrap();
-        assert_eq!(ev1.signer(), node3.did());
-        assert_eq!(ev1.relay.path, vec![node2.did(), node3.did()]);
-        assert!(matches!(
-            ev1.transaction.data()?,
-            Message::FindSuccessorReport(
-                FindSuccessorReport {
-                    did,
-                    handler: FindSuccessorReportHandler::Connect,
-                }
-            )
-            if did == node1.did()
-        ));
-
+        wait_for_msgs(&node1, &node2, &node3).await;
         assert_no_more_msg(&node1, &node2, &node3).await;
 
         println!("=== Check state after second stabilization ===");
