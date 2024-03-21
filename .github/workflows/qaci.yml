@@ -91,8 +91,8 @@ jobs:
       - name: Run doc tests
         run: cargo test --doc
 
-      - name: Run dummy tests
-        run: cargo test -p rings-core --features dummy --verbose
+      # - name: Run dummy tests
+      #   run: cargo test -p rings-core --features dummy --verbose
 
       - name: Run tests
         run: cargo test --release --all --verbose

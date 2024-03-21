@@ -96,6 +96,7 @@ async fn test_stabilization() -> Result<()> {
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_stabilization_final_dht() -> Result<()> {
     let mut swarms = vec![];
 

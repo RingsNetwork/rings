@@ -285,10 +285,12 @@ impl Chord<PeerRingAction> for PeerRing {
 
         let succ = {
             if successor.is_empty()? || self.bias(did) <= self.bias(successor.min()?) {
+                println!("===> 1");
                 // If the did is closer to self than successor, return successor as the
                 // successor of that did.
                 Ok(PeerRingAction::Some(successor.min()?))
             } else {
+                println!("===> 2");
                 // Otherwise, find the closest preceding node and ask it to find the successor.
                 let closest_predecessor = finger.closest_predecessor(did);
                 Ok(PeerRingAction::RemoteAction(
