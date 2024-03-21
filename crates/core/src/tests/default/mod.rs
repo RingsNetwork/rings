@@ -74,7 +74,10 @@ impl Node {
 
 #[async_trait]
 impl SwarmCallback for NodeCallback {
-    async fn on_relay(&self, payload: &MessagePayload) -> Result<(), Box<dyn std::error::Error>> {
+    async fn on_validate(
+        &self,
+        payload: &MessagePayload,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         self.message_tx.send(payload.clone()).map_err(|e| e.into())
     }
 }
