@@ -482,6 +482,7 @@ mod test {
         let uuid2 = p2.send_message(did1, test_text2.as_bytes()).await.unwrap();
         println!("send_message 2 done, msg id: {}", uuid2);
 
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         println!("check received");
 
         let mut msgs2 = callback2.msgs.try_lock().unwrap();
