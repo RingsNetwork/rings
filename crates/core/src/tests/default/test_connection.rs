@@ -8,7 +8,6 @@ use crate::tests::default::wait_for_msgs;
 use crate::tests::manually_establish_connection;
 
 #[tokio::test]
-#[ignore]
 async fn test_handshake_on_both_sides_ordered() {
     let keys = gen_ordered_keys(3);
     let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
@@ -16,7 +15,6 @@ async fn test_handshake_on_both_sides_ordered() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_handshake_on_both_sides_desc_ordered() {
     let keys = gen_ordered_keys(3);
     let (key3, key2, key1) = (keys[0], keys[1], keys[2]);
@@ -78,8 +76,8 @@ async fn test_handshake_on_both_sides(key1: SecretKey, key2: SecretKey, key3: Se
     // connect to each at same time
     // Node 1 -> Offer -> Node 2
     // Node 2 -> Offer -> Node 1
-    node1.swarm.connect(node2.did()).await.unwrap();
-    node2.swarm.connect(node1.did()).await.unwrap();
+    _ = node1.swarm.connect(node2.did()).await;
+    _ = node2.swarm.connect(node1.did()).await;
 
     // The conn state of swarm1 -> swarm2 is new
     assert_eq!(
