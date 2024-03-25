@@ -96,9 +96,12 @@ async fn test_stabilization() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_stabilization_final_dht() -> Result<()> {
     let mut swarms = vec![];
+
+    // Save nodes to prevent the receiver from being lost,
+    // which would lead to a panic in the monitoring callback when recording messages.
+    let mut nodes = vec![];
 
     let keys = vec![
         "af3543cde0c40fd217c536a358fb5f3c609eb1135f68daf7e2f2fbd51f164221", // 0xfe81c75f0ef75d7436b84089c5be31b692518d73
@@ -111,6 +114,7 @@ async fn test_stabilization_final_dht() -> Result<()> {
         let node = prepare_node(key).await;
         swarms.push(node.swarm.clone());
         let stabilization = Arc::new(Stabilization::new(node.swarm.clone(), 3));
+        nodes.push(node);
         tokio::spawn(stabilization.wait());
     }
 

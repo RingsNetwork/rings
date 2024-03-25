@@ -78,7 +78,11 @@ impl SwarmCallback for NodeCallback {
         &self,
         payload: &MessagePayload,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.message_tx.send(payload.clone()).map_err(|e| e.into())
+        // Here we are using on_validate to record messages.
+        // When on_validate return error, the message will be ignored, which is not on purpose.
+        // To prevent returning errors when sending fails, we choose to panic instead.
+        self.message_tx.send(payload.clone()).unwrap();
+        Ok(())
     }
 }
 
