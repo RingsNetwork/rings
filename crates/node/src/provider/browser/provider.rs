@@ -82,7 +82,7 @@ impl Provider {
     #[wasm_bindgen(constructor)]
     pub fn new_instance(
         ice_servers: String,
-        stabilize_timeout: u64,
+        stabilize_interval: u64,
         account: String,
         account_type: String,
         signer: js_sys::Function,
@@ -126,7 +126,7 @@ impl Provider {
 
             let provider = Provider::new_provider_internal(
                 ice_servers,
-                stabilize_timeout,
+                stabilize_interval,
                 account,
                 account_type,
                 Signer::Async(Box::new(signer)),

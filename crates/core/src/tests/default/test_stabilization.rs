@@ -5,8 +5,6 @@ use tokio::time::sleep;
 
 use crate::dht::successor::SuccessorReader;
 use crate::dht::Chord;
-use crate::dht::Stabilization;
-use crate::dht::TStabilize;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
@@ -41,8 +39,8 @@ async fn test_stabilization_once() -> Result<()> {
         .list()?
         .contains(&key1.address().into()));
 
-    let stabilization = Stabilization::new(node1.swarm.clone(), 5);
-    let _ = stabilization.stabilize().await;
+    let stabilizer = node1.swarm.stabilizer();
+    let _ = stabilizer.stabilize().await;
     sleep(Duration::from_millis(10000)).await;
     assert_eq!(
         *node2.dht().lock_predecessor()?,
@@ -73,12 +71,12 @@ async fn test_stabilization() -> Result<()> {
         _ = async {
             tokio::join!(
                 async {
-                    let stabilization = Arc::new(Stabilization::new(node1.swarm.clone(), 5));
-                    stabilization.wait().await;
+                    let stabilizer = Arc::new(node1.swarm.stabilizer());
+                    stabilizer.wait(Duration::from_secs(5)).await;
                 },
                 async {
-                    let stabilization = Arc::new(Stabilization::new(node2.swarm.clone(), 5));
-                    stabilization.wait().await;
+                    let stabilizer = Arc::new(node2.swarm.stabilizer());
+                    stabilizer.wait(Duration::from_secs(5)).await;
                 }
             );
         } => { unreachable!(); }
@@ -113,9 +111,9 @@ async fn test_stabilization_final_dht() -> Result<()> {
         let key = SecretKey::try_from(s).unwrap();
         let node = prepare_node(key).await;
         swarms.push(node.swarm.clone());
-        let stabilization = Arc::new(Stabilization::new(node.swarm.clone(), 3));
+        let stabilizer = Arc::new(node.swarm.stabilizer());
         nodes.push(node);
-        tokio::spawn(stabilization.wait());
+        tokio::spawn(stabilizer.wait(Duration::from_secs(3)));
     }
 
     let swarm1 = Arc::clone(&swarms[0]);

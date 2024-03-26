@@ -66,7 +66,6 @@ mod test {
 
     use super::*;
     use crate::dht::successor::SuccessorReader;
-    use crate::dht::Stabilization;
     use crate::ecc::tests::gen_ordered_keys;
     use crate::ecc::SecretKey;
     use crate::swarm::Swarm;
@@ -158,9 +157,9 @@ mod test {
         println!("||  now we start first stabilization  ||");
         println!("========================================");
 
-        run_stabilize_once(node1.swarm.clone()).await?;
-        run_stabilize_once(node2.swarm.clone()).await?;
-        run_stabilize_once(node3.swarm.clone()).await?;
+        run_stabilization_once(node1.swarm.clone()).await?;
+        run_stabilization_once(node2.swarm.clone()).await?;
+        run_stabilization_once(node3.swarm.clone()).await?;
 
         wait_for_msgs(&node1, &node2, &node3).await;
         assert_no_more_msg(&node1, &node2, &node3).await;
@@ -192,9 +191,9 @@ mod test {
         println!("||  now we start second stabilization  ||");
         println!("=========================================");
 
-        run_stabilize_once(node1.swarm.clone()).await?;
-        run_stabilize_once(node2.swarm.clone()).await?;
-        run_stabilize_once(node3.swarm.clone()).await?;
+        run_stabilization_once(node1.swarm.clone()).await?;
+        run_stabilization_once(node2.swarm.clone()).await?;
+        run_stabilization_once(node3.swarm.clone()).await?;
 
         wait_for_msgs(&node1, &node2, &node3).await;
         assert_no_more_msg(&node1, &node2, &node3).await;
@@ -264,9 +263,9 @@ mod test {
         println!("||  now we start first stabilization  ||");
         println!("========================================");
 
-        run_stabilize_once(node1.swarm.clone()).await?;
-        run_stabilize_once(node2.swarm.clone()).await?;
-        run_stabilize_once(node3.swarm.clone()).await?;
+        run_stabilization_once(node1.swarm.clone()).await?;
+        run_stabilization_once(node2.swarm.clone()).await?;
+        run_stabilization_once(node3.swarm.clone()).await?;
 
         wait_for_msgs(&node1, &node2, &node3).await;
         assert_no_more_msg(&node1, &node2, &node3).await;
@@ -292,9 +291,9 @@ mod test {
         println!("||  now we start second stabilization  ||");
         println!("=========================================");
 
-        run_stabilize_once(node1.swarm.clone()).await?;
-        run_stabilize_once(node2.swarm.clone()).await?;
-        run_stabilize_once(node3.swarm.clone()).await?;
+        run_stabilization_once(node1.swarm.clone()).await?;
+        run_stabilization_once(node2.swarm.clone()).await?;
+        run_stabilization_once(node3.swarm.clone()).await?;
 
         wait_for_msgs(&node1, &node2, &node3).await;
         assert_no_more_msg(&node1, &node2, &node3).await;
@@ -326,9 +325,9 @@ mod test {
         println!("||  now we start third stabilization   ||");
         println!("=========================================");
 
-        run_stabilize_once(node1.swarm.clone()).await?;
-        run_stabilize_once(node2.swarm.clone()).await?;
-        run_stabilize_once(node3.swarm.clone()).await?;
+        run_stabilization_once(node1.swarm.clone()).await?;
+        run_stabilization_once(node2.swarm.clone()).await?;
+        run_stabilization_once(node3.swarm.clone()).await?;
 
         wait_for_msgs(&node1, &node2, &node3).await;
         assert_no_more_msg(&node1, &node2, &node3).await;
@@ -359,8 +358,8 @@ mod test {
         Ok(())
     }
 
-    async fn run_stabilize_once(swarm: Arc<Swarm>) -> Result<()> {
-        let stab = Stabilization::new(swarm, 5);
+    async fn run_stabilization_once(swarm: Arc<Swarm>) -> Result<()> {
+        let stab = swarm.stabilizer();
         stab.notify_predecessor().await
     }
 }

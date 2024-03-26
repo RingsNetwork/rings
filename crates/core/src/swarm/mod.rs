@@ -14,6 +14,7 @@ pub use builder::SwarmBuilder;
 use self::callback::InnerSwarmCallback;
 use crate::dht::Did;
 use crate::dht::PeerRing;
+use crate::dht::Stabilizer;
 use crate::error::Error;
 use crate::error::Result;
 use crate::inspect::SwarmInspect;
@@ -70,6 +71,11 @@ impl Swarm {
         *inner = callback;
 
         Ok(())
+    }
+
+    /// Create [Stabilizer] for swarm.
+    pub fn stabilizer(&self) -> Stabilizer {
+        Stabilizer::new(self.transport.clone())
     }
 
     /// Disconnect a connection. There are three steps:

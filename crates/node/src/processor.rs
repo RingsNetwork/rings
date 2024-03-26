@@ -4,10 +4,9 @@
 
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use rings_core::dht::Did;
-use rings_core::dht::Stabilization;
-use rings_core::dht::TStabilize;
 use rings_core::dht::VNodeStorage;
 use rings_core::message::Encoded;
 use rings_core::message::Encoder;
@@ -43,19 +42,19 @@ pub struct ProcessorConfig {
     external_address: Option<String>,
     /// [SessionSk].
     session_sk: SessionSk,
-    /// Stabilization timeout.
-    stabilize_timeout: u64,
+    /// Stabilization interval.
+    stabilize_interval: Duration,
 }
 
 #[wasm_export]
 impl ProcessorConfig {
     /// Creates a new `ProcessorConfig` instance without an external address.
-    pub fn new(ice_servers: String, session_sk: SessionSk, stabilize_timeout: u64) -> Self {
+    pub fn new(ice_servers: String, session_sk: SessionSk, stabilize_interval: u64) -> Self {
         Self {
             ice_servers,
             external_address: None,
             session_sk,
-            stabilize_timeout,
+            stabilize_interval: Duration::from_secs(stabilize_interval),
         }
     }
 
@@ -63,14 +62,14 @@ impl ProcessorConfig {
     pub fn new_with_ext_addr(
         ice_servers: String,
         session_sk: SessionSk,
-        stabilize_timeout: u64,
+        stabilize_interval: u64,
         external_address: String,
     ) -> Self {
         Self {
             ice_servers,
             external_address: Some(external_address),
             session_sk,
-            stabilize_timeout,
+            stabilize_interval: Duration::from_secs(stabilize_interval),
         }
     }
 
@@ -99,18 +98,18 @@ pub struct ProcessorConfigSerialized {
     external_address: Option<String>,
     /// A string representing the dumped `SessionSk`.
     session_sk: String,
-    /// An unsigned integer representing the stabilization timeout.
-    stabilize_timeout: u64,
+    /// An unsigned integer representing the stabilization interval in seconds.
+    stabilize_interval: u64,
 }
 
 impl ProcessorConfigSerialized {
     /// Creates a new `ProcessorConfigSerialized` instance without an external address.
-    pub fn new(ice_servers: String, session_sk: String, stabilize_timeout: u64) -> Self {
+    pub fn new(ice_servers: String, session_sk: String, stabilize_interval: u64) -> Self {
         Self {
             ice_servers,
             external_address: None,
             session_sk,
-            stabilize_timeout,
+            stabilize_interval,
         }
     }
 
@@ -118,14 +117,14 @@ impl ProcessorConfigSerialized {
     pub fn new_with_ext_addr(
         ice_servers: String,
         session_sk: String,
-        stabilize_timeout: u64,
+        stabilize_interval: u64,
         external_address: String,
     ) -> Self {
         Self {
             ice_servers,
             external_address: Some(external_address),
             session_sk,
-            stabilize_timeout,
+            stabilize_interval,
         }
     }
 }
@@ -137,7 +136,7 @@ impl TryFrom<ProcessorConfig> for ProcessorConfigSerialized {
             ice_servers: ins.ice_servers.clone(),
             external_address: ins.external_address.clone(),
             session_sk: ins.session_sk.dump()?,
-            stabilize_timeout: ins.stabilize_timeout,
+            stabilize_interval: ins.stabilize_interval.as_secs(),
         })
     }
 }
@@ -149,7 +148,7 @@ impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
             ice_servers: ins.ice_servers.clone(),
             external_address: ins.external_address.clone(),
             session_sk: SessionSk::from_str(&ins.session_sk)?,
-            stabilize_timeout: ins.stabilize_timeout,
+            stabilize_interval: Duration::from_secs(ins.stabilize_interval),
         })
     }
 }
@@ -189,7 +188,7 @@ pub struct ProcessorBuilder {
     session_sk: SessionSk,
     storage: Option<VNodeStorage>,
     measure: Option<MeasureImpl>,
-    stabilize_timeout: u64,
+    stabilize_interval: Duration,
 }
 
 /// Processor for rings-node rpc server
@@ -197,8 +196,7 @@ pub struct ProcessorBuilder {
 pub struct Processor {
     /// a swarm instance
     pub swarm: Arc<Swarm>,
-    /// a stabilization instance,
-    pub stabilization: Arc<Stabilization>,
+    stabilize_interval: Duration,
 }
 
 impl ProcessorBuilder {
@@ -217,7 +215,7 @@ impl ProcessorBuilder {
             session_sk: config.session_sk.clone(),
             storage: None,
             measure: None,
-            stabilize_timeout: config.stabilize_timeout,
+            stabilize_interval: config.stabilize_interval,
         })
     }
 
@@ -252,11 +250,10 @@ impl ProcessorBuilder {
             swarm_builder = swarm_builder.measure(measure);
         }
         let swarm = Arc::new(swarm_builder.build());
-        let stabilization = Arc::new(Stabilization::new(swarm.clone(), self.stabilize_timeout));
 
         Ok(Processor {
             swarm,
-            stabilization,
+            stabilize_interval: self.stabilize_interval,
         })
     }
 }
@@ -269,7 +266,8 @@ impl Processor {
 
     /// Run stabilization daemon
     pub async fn listen(&self) {
-        self.stabilization.clone().wait().await
+        let stabilizer = self.swarm.stabilizer();
+        Arc::new(stabilizer).wait(self.stabilize_interval).await
     }
 
     /// Connect peer with web3 did.

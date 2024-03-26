@@ -14,7 +14,7 @@ pub async fn prepare_processor() -> Processor {
     let config = serde_yaml::to_string(&ProcessorConfig::new(
         "stun://stun.l.google.com:19302".to_string(),
         sm,
-        200,
+        3,
     ))
     .unwrap();
 
