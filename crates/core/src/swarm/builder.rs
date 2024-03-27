@@ -7,12 +7,12 @@ use std::sync::RwLock;
 
 use crate::dht::PeerRing;
 use crate::dht::VNodeStorage;
+use crate::measure::MeasureImpl;
 use crate::session::SessionSk;
 use crate::swarm::callback::SharedSwarmCallback;
 use crate::swarm::callback::SwarmCallback;
+use crate::swarm::transport::SwarmTransport;
 use crate::swarm::Swarm;
-use crate::transport::MeasureImpl;
-use crate::transport::SwarmTransport;
 
 struct DefaultCallback;
 impl SwarmCallback for DefaultCallback {}

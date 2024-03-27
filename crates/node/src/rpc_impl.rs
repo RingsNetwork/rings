@@ -20,8 +20,6 @@ use rings_core::message::Encoder;
 use rings_core::message::MessagePayload;
 use rings_core::message::MessageVerificationExt;
 use rings_core::prelude::vnode::VirtualNode;
-use rings_core::swarm::ConnectionHandshake;
-use rings_core::transport::SwarmConnection;
 use rings_rpc::protos::rings_node::*;
 use rings_rpc::protos::rings_node_handler::HandleRpc;
 
@@ -44,7 +42,10 @@ impl HandleRpc<ConnectPeerViaHttpRequest, ConnectPeerViaHttpResponse> for Proces
             .map_err(|e| ServerError::RemoteRpcError(e.to_string()))?
             .did;
 
-        let offer = self.handle_rpc(CreateOfferRequest { did }).await?.offer;
+        let offer = self
+            .handle_rpc(CreateOfferRequest { did: did.clone() })
+            .await?
+            .offer;
 
         let answer = client
             .answer_offer(&AnswerOfferRequest { offer })
@@ -52,9 +53,9 @@ impl HandleRpc<ConnectPeerViaHttpRequest, ConnectPeerViaHttpResponse> for Proces
             .map_err(|e| ServerError::RemoteRpcError(e.to_string()))?
             .answer;
 
-        let peer = self.handle_rpc(AcceptAnswerRequest { answer }).await?.peer;
+        self.handle_rpc(AcceptAnswerRequest { answer }).await?;
 
-        Ok(ConnectPeerViaHttpResponse { peer })
+        Ok(ConnectPeerViaHttpResponse { did })
     }
 }
 
@@ -74,9 +75,9 @@ impl HandleRpc<ConnectWithSeedRequest, ConnectWithSeedResponse> for Processor {
     async fn handle_rpc(&self, req: ConnectWithSeedRequest) -> Result<ConnectWithSeedResponse> {
         let seed: Seed = Seed::try_from(req)?;
 
-        let mut connected: HashSet<Did> =
-            HashSet::from_iter(self.swarm.transport.get_connection_ids());
-        connected.insert(self.swarm.did());
+        let mut connected: HashSet<String> =
+            HashSet::from_iter(self.swarm.peers().into_iter().map(|peer| peer.did));
+        connected.insert(self.swarm.did().to_string());
 
         let tasks = seed
             .peers
@@ -105,10 +106,9 @@ impl HandleRpc<ListPeersRequest, ListPeersResponse> for Processor {
     async fn handle_rpc(&self, _req: ListPeersRequest) -> Result<ListPeersResponse> {
         let peers = self
             .swarm
-            .transport
-            .get_connections()
+            .peers()
             .into_iter()
-            .map(dc2p)
+            .map(|peer| peer.into())
             .collect();
         Ok(ListPeersResponse { peers })
     }
@@ -177,22 +177,14 @@ impl HandleRpc<AcceptAnswerRequest, AcceptAnswerResponse> for Processor {
 
         let answer_payload =
             MessagePayload::from_encoded(&encoded).map_err(|_| ServerError::DecodeError)?;
-        let peer = answer_payload.transaction.signer();
+        answer_payload.transaction.signer();
 
         self.swarm
             .accept_answer(answer_payload)
             .await
             .map_err(ServerError::AcceptAnswer)?;
 
-        let conn = self
-            .swarm
-            .transport
-            .get_connection(peer)
-            .ok_or_else(|| ServerError::ConnectionNotFound)?;
-
-        Ok(AcceptAnswerResponse {
-            peer: Some(dc2p((peer, conn))),
-        })
+        Ok(AcceptAnswerResponse {})
     }
 }
 
@@ -330,14 +322,6 @@ impl HandleRpc<NodeDidRequest, NodeDidResponse> for Processor {
         Ok(NodeDidResponse {
             did: did.to_string(),
         })
-    }
-}
-
-/// Convert did and connection to Peer
-fn dc2p((did, conn): (Did, SwarmConnection)) -> PeerInfo {
-    PeerInfo {
-        did: did.to_string(),
-        state: format!("{:?}", conn.webrtc_connection_state()),
     }
 }
 

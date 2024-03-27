@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use rings_core::dht::Did;
 use rings_core::dht::VNodeStorage;
+use rings_core::measure::MeasureImpl;
 use rings_core::message::Encoded;
 use rings_core::message::Encoder;
 use rings_core::message::Message;
@@ -15,7 +16,6 @@ use rings_core::prelude::uuid;
 use rings_core::storage::MemStorage;
 use rings_core::swarm::Swarm;
 use rings_core::swarm::SwarmBuilder;
-use rings_core::transport::MeasureImpl;
 use rings_rpc::protos::rings_node::*;
 use serde::Deserialize;
 use serde::Serialize;
@@ -374,8 +374,6 @@ impl Processor {
 mod test {
     use futures::lock::Mutex;
     use rings_core::swarm::callback::SwarmCallback;
-    use rings_core::swarm::ConnectionHandshake;
-    use rings_transport::core::transport::WebrtcConnectionState;
 
     use super::*;
     use crate::prelude::*;
@@ -386,9 +384,9 @@ mod test {
         let peer_did = SecretKey::random().address().into();
         let processor = prepare_processor().await;
         processor.swarm.create_offer(peer_did).await.unwrap();
-        let conn_dids = processor.swarm.transport.get_connection_ids();
+        let conn_dids = processor.swarm.peers();
         assert_eq!(conn_dids.len(), 1);
-        assert_eq!(conn_dids.first().unwrap(), &peer_did);
+        assert_eq!(conn_dids.first().unwrap().did, peer_did.to_string());
     }
 
     struct SwarmCallbackInstance {
@@ -437,11 +435,12 @@ mod test {
         let offer = p1.swarm.create_offer(p2.did()).await.unwrap();
         assert_eq!(
             p1.swarm
-                .transport
-                .get_connection(p2.did())
+                .peers()
+                .into_iter()
+                .find(|peer| peer.did == p2.did().to_string())
                 .unwrap()
-                .webrtc_connection_state(),
-            WebrtcConnectionState::New,
+                .state,
+            "New"
         );
 
         let answer = p2.swarm.answer_offer(offer).await.unwrap();
@@ -452,20 +451,22 @@ mod test {
 
         assert_eq!(
             p1.swarm
-                .transport
-                .get_connection(p2.did())
+                .peers()
+                .into_iter()
+                .find(|peer| peer.did == p2.did().to_string())
                 .unwrap()
-                .webrtc_connection_state(),
-            WebrtcConnectionState::Connected,
+                .state,
+            "Connected",
             "p1 connection not connected"
         );
         assert_eq!(
             p2.swarm
-                .transport
-                .get_connection(p1.did())
+                .peers()
+                .into_iter()
+                .find(|peer| peer.did == p1.did().to_string())
                 .unwrap()
-                .webrtc_connection_state(),
-            WebrtcConnectionState::Connected,
+                .state,
+            "Connected",
             "p2 connection not connected"
         );
 

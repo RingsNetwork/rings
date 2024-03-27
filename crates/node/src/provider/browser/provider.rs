@@ -18,9 +18,6 @@ use rings_core::utils::js_utils;
 use rings_core::utils::js_value;
 use rings_derive::wasm_export;
 use rings_rpc::protos::rings_node::*;
-use rings_transport::core::transport::WebrtcConnectionState;
-use serde::Deserialize;
-use serde::Serialize;
 use wasm_bindgen;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures;
@@ -44,29 +41,6 @@ pub enum AddressType {
     DEFAULT,
     /// Ed25519 style address type, hex string of pubkey
     Ed25519,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub(crate) struct Peer {
-    pub did: String,
-    pub state: String,
-}
-
-impl Peer {
-    fn new(did: Did, state: WebrtcConnectionState) -> Self {
-        Self {
-            did: did.to_string(),
-            state: format!("{:?}", state),
-        }
-    }
-}
-
-impl TryFrom<&Peer> for JsValue {
-    type Error = JsError;
-
-    fn try_from(value: &Peer) -> Result<Self, Self::Error> {
-        js_value::serialize(value).map_err(JsError::from)
-    }
 }
 
 #[wasm_export]
@@ -261,24 +235,6 @@ impl Provider {
         })
     }
 
-    /// list all connect peers
-    pub fn list_peers(&self) -> js_sys::Promise {
-        let p = self.processor.clone();
-        future_to_promise(async move {
-            let peers = p
-                .swarm
-                .transport
-                .get_connections()
-                .into_iter()
-                .flat_map(|(did, conn)| {
-                    JsValue::try_from(&Peer::new(did, conn.webrtc_connection_state()))
-                });
-
-            let js_array = js_sys::Array::from_iter(peers);
-            Ok(js_array.into())
-        })
-    }
-
     /// get info for self, will return build version and inspection of swarm
     pub fn get_node_info(&self) -> js_sys::Promise {
         let p = self.processor.clone();
@@ -309,21 +265,6 @@ impl Provider {
                 .await
                 .map_err(JsError::from)?;
             Ok(JsValue::from_bool(true))
-        })
-    }
-
-    /// get peer by address
-    pub fn get_peer(&self, address: String, addr_type: Option<AddressType>) -> js_sys::Promise {
-        let p = self.processor.clone();
-        future_to_promise(async move {
-            let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
-            match p.swarm.transport.get_connection(did) {
-                None => Ok(JsValue::null()),
-                Some(conn) => {
-                    let peer = Peer::new(did, conn.webrtc_connection_state());
-                    Ok(JsValue::try_from(&peer)?)
-                }
-            }
         })
     }
 

@@ -1,19 +1,13 @@
 pub mod rings_node;
 pub mod rings_node_handler;
 
+use rings_core::inspect::ConnectionInspect;
 use rings_core::inspect::StorageInspect;
 use rings_core::inspect::SwarmInspect;
 
 impl From<SwarmInspect> for rings_node::SwarmInfo {
     fn from(inspect: SwarmInspect) -> Self {
-        let peers = inspect
-            .connections
-            .into_iter()
-            .map(|conn| rings_node::PeerInfo {
-                did: conn.did,
-                state: conn.state,
-            })
-            .collect();
+        let peers = inspect.peers.into_iter().map(|conn| conn.into()).collect();
 
         let dht = rings_node::DhtInfo {
             did: inspect.dht.did,
@@ -51,6 +45,15 @@ impl From<StorageInspect> for rings_node::StorageInfo {
                     }),
                 })
                 .collect(),
+        }
+    }
+}
+
+impl From<ConnectionInspect> for rings_node::PeerInfo {
+    fn from(value: ConnectionInspect) -> Self {
+        rings_node::PeerInfo {
+            did: value.did,
+            state: value.state,
         }
     }
 }

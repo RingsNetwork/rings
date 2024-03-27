@@ -140,15 +140,12 @@ async fn test_stabilization_final_dht() -> Result<()> {
     for swarm in swarms.iter() {
         println!(
             "Connected peers: {:?}",
-            SwarmInspect::inspect(swarm).await.connections
+            SwarmInspect::inspect(swarm).await.peers
         );
         current_dhts.push(DHTInspect::inspect(&swarm.dht()));
     }
 
-    for (i, (cur, exp)) in std::iter::zip(current_dhts, expected_dhts)
-        .enumerate()
-        .skip(2)
-    {
+    for (i, (cur, exp)) in std::iter::zip(current_dhts, expected_dhts).enumerate() {
         println!("Check node{}", i);
         pretty_assertions::assert_eq!(cur, exp);
     }

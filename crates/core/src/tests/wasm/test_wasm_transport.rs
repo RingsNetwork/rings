@@ -8,8 +8,8 @@ use wasm_bindgen_test::*;
 
 use super::prepare_node;
 use crate::ecc::SecretKey;
+use crate::swarm::transport::Transport;
 use crate::tests::manually_establish_connection;
-use crate::transport::Transport;
 
 struct DefaultCallback;
 impl TransportCallback for DefaultCallback {}

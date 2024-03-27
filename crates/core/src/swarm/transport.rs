@@ -29,7 +29,7 @@ use crate::dht::LiveDid;
 use crate::dht::PeerRing;
 use crate::error::Error;
 use crate::error::Result;
-use crate::measure::BehaviourJudgement;
+use crate::measure::MeasureImpl;
 use crate::message::ConnectNodeReport;
 use crate::message::ConnectNodeSend;
 use crate::message::Message;
@@ -37,14 +37,6 @@ use crate::message::MessagePayload;
 use crate::message::PayloadSender;
 use crate::session::SessionSk;
 use crate::swarm::callback::InnerSwarmCallback;
-
-/// Type of Measure, see [crate::measure::Measure].
-#[cfg(not(feature = "wasm"))]
-pub type MeasureImpl = Box<dyn BehaviourJudgement + Send + Sync>;
-
-/// Type of Measure, see [crate::measure::Measure].
-#[cfg(feature = "wasm")]
-pub type MeasureImpl = Box<dyn BehaviourJudgement>;
 
 pub struct SwarmTransport {
     transport: Transport,

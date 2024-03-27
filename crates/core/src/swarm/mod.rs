@@ -1,14 +1,15 @@
 #![warn(missing_docs)]
-//! Tranposrt management
+
+//! This mod is the main entrance of swarm.
 
 mod builder;
 /// Callback interface for swarm
 pub mod callback;
+pub(crate) mod transport;
 
 use std::sync::Arc;
 use std::sync::RwLock;
 
-use async_trait::async_trait;
 pub use builder::SwarmBuilder;
 
 use self::callback::InnerSwarmCallback;
@@ -17,20 +18,21 @@ use crate::dht::PeerRing;
 use crate::dht::Stabilizer;
 use crate::error::Error;
 use crate::error::Result;
+use crate::inspect::ConnectionInspect;
 use crate::inspect::SwarmInspect;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
 use crate::message::PayloadSender;
 use crate::swarm::callback::SharedSwarmCallback;
-use crate::transport::SwarmTransport;
+use crate::swarm::transport::SwarmTransport;
 
 /// The transport and dht management.
 pub struct Swarm {
     /// Reference of DHT.
     pub(crate) dht: Arc<PeerRing>,
     /// Swarm tansport.
-    pub transport: Arc<SwarmTransport>,
+    pub(crate) transport: Arc<SwarmTransport>,
     callback: RwLock<SharedSwarmCallback>,
 }
 
@@ -53,8 +55,7 @@ impl Swarm {
             .clone())
     }
 
-    /// Generate [InnerSwarmCallback] for [SwarmTransport].
-    pub fn inner_callback(&self) -> Result<InnerSwarmCallback> {
+    fn inner_callback(&self) -> Result<InnerSwarmCallback> {
         Ok(InnerSwarmCallback::new(
             self.transport.clone(),
             self.callback()?,
@@ -101,33 +102,28 @@ impl Swarm {
         self.transport.send_message(msg, destination).await
     }
 
+    /// List peers and their connection status.
+    pub fn peers(&self) -> Vec<ConnectionInspect> {
+        self.transport
+            .get_connections()
+            .iter()
+            .map(|(did, c)| ConnectionInspect {
+                did: did.to_string(),
+                state: format!("{:?}", c.webrtc_connection_state()),
+            })
+            .collect()
+    }
+
     /// Check the status of swarm
     pub async fn inspect(&self) -> SwarmInspect {
         SwarmInspect::inspect(self).await
     }
 }
 
-/// ConnectionHandshake defined how to connect two connections between two swarms.
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
-pub trait ConnectionHandshake {
+impl Swarm {
     /// Creaet new connection and its answer. This function will wrap the offer inside a payload
     /// with verification.
-    async fn create_offer(&self, peer: Did) -> Result<MessagePayload>;
-
-    /// Answer the offer of remote connection. This function will verify the answer payload and
-    /// will wrap the answer inside a payload with verification.
-    async fn answer_offer(&self, offer_payload: MessagePayload) -> Result<MessagePayload>;
-
-    /// Accept the answer of remote connection. This function will verify the answer payload and
-    /// will return its did with the connection.
-    async fn accept_answer(&self, answer_payload: MessagePayload) -> Result<()>;
-}
-
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
-impl ConnectionHandshake for Swarm {
-    async fn create_offer(&self, peer: Did) -> Result<MessagePayload> {
+    pub async fn create_offer(&self, peer: Did) -> Result<MessagePayload> {
         let offer_msg = self
             .transport
             .prepare_connection_offer(peer, self.inner_callback()?)
@@ -145,7 +141,9 @@ impl ConnectionHandshake for Swarm {
         Ok(payload)
     }
 
-    async fn answer_offer(&self, offer_payload: MessagePayload) -> Result<MessagePayload> {
+    /// Answer the offer of remote connection. This function will verify the answer payload and
+    /// will wrap the answer inside a payload with verification.
+    pub async fn answer_offer(&self, offer_payload: MessagePayload) -> Result<MessagePayload> {
         if !offer_payload.verify() {
             return Err(Error::VerifySignatureFailed);
         }
@@ -174,7 +172,9 @@ impl ConnectionHandshake for Swarm {
         Ok(answer_payload)
     }
 
-    async fn accept_answer(&self, answer_payload: MessagePayload) -> Result<()> {
+    /// Accept the answer of remote connection. This function will verify the answer payload and
+    /// will return its did with the connection.
+    pub async fn accept_answer(&self, answer_payload: MessagePayload) -> Result<()> {
         if !answer_payload.verify() {
             return Err(Error::VerifySignatureFailed);
         }

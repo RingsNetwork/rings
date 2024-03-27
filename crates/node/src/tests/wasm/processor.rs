@@ -1,13 +1,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use futures::lock::Mutex;
 use rings_core::swarm::callback::SwarmCallback;
-use rings_core::swarm::ConnectionHandshake;
-use rings_transport::core::transport::WebrtcConnectionState;
 use wasm_bindgen_test::*;
 
-use crate::prelude::rings_core::async_trait;
 use crate::prelude::*;
 use crate::processor::*;
 use crate::tests::wasm::prepare_processor;
@@ -15,10 +13,9 @@ use crate::tests::wasm::prepare_processor;
 async fn close_all_connections(p: &Processor) {
     futures::future::join_all(
         p.swarm
-            .transport
-            .get_connection_ids()
+            .peers()
             .iter()
-            .map(|did| p.swarm.transport.disconnect(*did)),
+            .map(|peer| p.swarm.disconnect(peer.did.parse().unwrap())),
     )
     .await;
 }
@@ -160,11 +157,9 @@ async fn test_processor_connect_with_did() {
     create_connection(&p2, &p3).await;
     console_log!("processor_connect_p2_and_p3, done");
 
-    let p1_peer_dids = p1.swarm.transport.get_connection_ids();
+    let peers = p1.swarm.peers();
     assert!(
-        p1_peer_dids
-            .iter()
-            .any(|did| did.to_string().eq(&p2.did().to_string())),
+        peers.iter().any(|peer| peer.did.eq(&p2.did().to_string())),
         "p2 not in p1's peer list"
     );
 
@@ -175,23 +170,24 @@ async fn test_processor_connect_with_did() {
     console_log!("connect p1 and p3");
     // p1 create connect with p3's address
     p1.connect_with_did(p3.did()).await.unwrap();
-    let conn3 = p1.swarm.transport.get_connection(p3.did()).unwrap();
-    console_log!("processor_p1_p3_conntected");
     fluvio_wasm_timer::Delay::new(Duration::from_millis(1000))
         .await
         .unwrap();
     console_log!("processor_detect_connection_state");
-    assert_eq!(
-        conn3.webrtc_connection_state(),
-        WebrtcConnectionState::Connected,
-    );
+    let peer3 = p1
+        .swarm
+        .peers()
+        .into_iter()
+        .find(|peer| peer.did == p3.did().to_string())
+        .unwrap();
+    assert_eq!(peer3.state, "Connected");
 
     console_log!("check peers");
-    let peer_dids = p1.swarm.transport.get_connection_ids();
+    let peers = p1.swarm.peers();
     assert!(
-        peer_dids
+        peers
             .iter()
-            .any(|did| did.to_string().eq(p3.did().to_string().as_str())),
+            .any(|peer| peer.did.eq(p3.did().to_string().as_str())),
         "peer list dose NOT contains p3 address"
     );
     console_log!("processor_close_all_connections");

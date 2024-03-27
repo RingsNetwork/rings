@@ -19,7 +19,7 @@ use crate::message::MessagePayload;
 use crate::message::NotifyPredecessorSend;
 use crate::message::PayloadSender;
 use crate::message::QueryForTopoInfoSend;
-use crate::transport::SwarmTransport;
+use crate::swarm::transport::SwarmTransport;
 
 /// The stabilization runner.
 #[derive(Clone)]

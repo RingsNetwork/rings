@@ -90,7 +90,7 @@ async fn main() {
     .unwrap();
     println!("<=== ConnectPeerViaHttpResponse: {:?}", resp);
 
-    let remote_did = resp.peer.unwrap().did;
+    let remote_did = resp.did;
 
     let connected = 'connected: {
         for _ in 0..10 {

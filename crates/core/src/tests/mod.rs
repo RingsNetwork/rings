@@ -1,4 +1,3 @@
-use crate::swarm::ConnectionHandshake;
 use crate::swarm::Swarm;
 
 #[cfg(feature = "wasm")]

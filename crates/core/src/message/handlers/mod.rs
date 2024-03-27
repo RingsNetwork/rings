@@ -24,7 +24,7 @@ use crate::message::NotifyPredecessorSend;
 use crate::message::PayloadSender;
 use crate::swarm::callback::InnerSwarmCallback;
 use crate::swarm::callback::SharedSwarmCallback;
-use crate::transport::SwarmTransport;
+use crate::swarm::transport::SwarmTransport;
 
 /// Operator and Handler for Connection
 pub mod connection;

@@ -9,7 +9,6 @@ use crate::backend::types::BackendMessage;
 use crate::prelude::rings_core::utils;
 use crate::prelude::rings_core::utils::js_value;
 use crate::provider::browser;
-use crate::provider::browser::Peer;
 
 #[cfg(feature = "browser_chrome_test")]
 wasm_bindgen_test_configure!(run_in_browser);
@@ -34,17 +33,10 @@ async fn test_two_provider_connect_and_list() {
     assert!(peers.len() == 1, "peers len should be 1");
     let peer2 = peers.first().unwrap();
 
-    console_log!("get peer");
-    let peer2: Peer = js_value::deserialize(
-        &JsFuture::from(provider1.get_peer(peer2.did.clone(), None))
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-    assert!(
-        peer2.state.eq("Connected"),
+    assert_eq!(
+        peer2.state, "Connected",
         "peer2 state got {:?}",
-        peer2.state,
+        peer2.state
     );
 
     JsFuture::from(provider1.disconnect(peer2.did.clone(), None))

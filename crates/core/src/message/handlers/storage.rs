@@ -24,8 +24,8 @@ use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
 use crate::prelude::vnode::VNodeOperation;
+use crate::swarm::transport::SwarmTransport;
 use crate::swarm::Swarm;
-use crate::transport::SwarmTransport;
 
 /// ChordStorageInterface should imply necessary method for DHT storage
 #[cfg_attr(feature = "wasm", async_trait(?Send))]

@@ -15,7 +15,7 @@ use crate::message::Message;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
-use crate::transport::SwarmTransport;
+use crate::swarm::transport::SwarmTransport;
 
 type CallbackError = Box<dyn std::error::Error>;
 

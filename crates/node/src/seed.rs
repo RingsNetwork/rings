@@ -1,7 +1,5 @@
 //! Seed and SeedLoader use for getting peers from endpoint.
-use std::str::FromStr;
 
-use rings_core::dht::Did;
 use rings_rpc::protos::rings_node::ConnectWithSeedRequest;
 use serde::Deserialize;
 use serde::Serialize;
@@ -18,7 +16,7 @@ pub struct Seed {
 #[derive(Deserialize, Serialize, Debug)]
 pub struct SeedPeer {
     /// an unique identify.
-    pub did: Did,
+    pub did: String,
     /// remote client endpoint
     pub url: String,
 }
@@ -30,8 +28,10 @@ impl TryFrom<ConnectWithSeedRequest> for Seed {
         let mut peers = Vec::new();
 
         for peer in req.peers {
-            let did = Did::from_str(&peer.did).map_err(|_| Error::InvalidDid(peer.did.clone()))?;
-            peers.push(SeedPeer { did, url: peer.url });
+            peers.push(SeedPeer {
+                did: peer.did,
+                url: peer.url,
+            });
         }
 
         Ok(Seed { peers })
@@ -44,7 +44,7 @@ impl Seed {
 
         for peer in self.peers {
             peers.push(rings_rpc::protos::rings_node::SeedPeer {
-                did: peer.did.to_string(),
+                did: peer.did,
                 url: peer.url,
             });
         }
