@@ -165,7 +165,7 @@ impl Provider {
         method: String,
         params: serde_json::Value,
     ) -> Result<serde_json::Value> {
-        tracing::debug!("request {} params: {:?}", method, params);
+        tracing::debug!("request {}", method);
         self.handler
             .handle_request(self.processor.clone(), method, params)
             .await

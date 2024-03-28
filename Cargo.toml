@@ -19,7 +19,7 @@ rings-node = { path = "crates/node" }
 rings-rpc = { path = "crates/rpc", default-features = false }
 rings-snark = { path = "crates/snark", default-features = false }
 rings-transport = { path = "crates/transport" }
-serde-wasm-bindgen = "0.6.1"
+serde-wasm-bindgen = "0.6.5"
 wasm-bindgen = "0.2.87"
 wasm-bindgen-futures = "0.4.37"
 wasm-bindgen-macro-support = "0.2.84"

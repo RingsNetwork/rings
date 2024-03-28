@@ -47,6 +47,12 @@ pub enum Error {
 
     #[error("Connection {0} is released")]
     ConnectionReleased(String),
+
+    #[error("Rwlock try write failed: {0}")]
+    RwLockWrite(String),
+
+    #[error("Rwlock try read failed: {0}")]
+    RwLockRead(String),
 }
 
 #[cfg(feature = "web-sys-webrtc")]

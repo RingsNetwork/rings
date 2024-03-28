@@ -18,6 +18,10 @@ use webrtc::peer_connection::RTCPeerConnection;
 use crate::callback::InnerTransportCallback;
 use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
+use crate::core::pool::MessageSenderPool;
+use crate::core::pool::RoundRobin;
+use crate::core::pool::RoundRobinPool;
+use crate::core::pool::StatusPool;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::TransportInterface;
 use crate::core::transport::TransportMessage;
@@ -31,12 +35,35 @@ use crate::pool::Pool;
 
 const WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT: u8 = 8; // seconds
 const WEBRTC_GATHER_TIMEOUT: u8 = 60; // seconds
+/// pool size of data channel
+const DATA_CHANNEL_POOL_SIZE: u8 = 4;
+
+#[cfg_attr(arch_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(arch_family = "wasm"), async_trait)]
+impl MessageSenderPool<Arc<RTCDataChannel>> for RoundRobinPool<Arc<RTCDataChannel>> {
+    type Message = TransportMessage;
+    async fn send(&self, msg: TransportMessage) -> Result<()> {
+        let channel = self.select()?;
+        let data = bincode::serialize(&msg).map(Bytes::from)?;
+        if let Err(e) = channel.send(&data).await {
+            tracing::error!("{:?}, Data size: {:?}", e, data.len());
+            return Err(e.into());
+        }
+        Ok(())
+    }
+}
+
+impl StatusPool<Arc<RTCDataChannel>> for RoundRobinPool<Arc<RTCDataChannel>> {
+    fn all_ready(&self) -> Result<bool> {
+        self.all(|c| c.ready_state() == RTCDataChannelState::Open)
+    }
+}
 
 /// A connection that implemented by webrtc-rs library.
 /// Used for native environment.
 pub struct WebrtcConnection {
     webrtc_conn: RTCPeerConnection,
-    webrtc_data_channel: Arc<RTCDataChannel>,
+    webrtc_data_channel: Arc<RoundRobinPool<Arc<RTCDataChannel>>>,
     webrtc_data_channel_state_notifier: Notifier,
     cancel_token: CancellationToken,
 }
@@ -52,7 +79,7 @@ pub struct WebrtcTransport {
 impl WebrtcConnection {
     fn new(
         webrtc_conn: RTCPeerConnection,
-        webrtc_data_channel: Arc<RTCDataChannel>,
+        webrtc_data_channel: Arc<RoundRobinPool<Arc<RTCDataChannel>>>,
         webrtc_data_channel_state_notifier: Notifier,
     ) -> Self {
         Self {
@@ -108,12 +135,7 @@ impl ConnectionInterface for WebrtcConnection {
 
     async fn send_message(&self, msg: TransportMessage) -> Result<()> {
         self.webrtc_wait_for_data_channel_open().await?;
-        let data = bincode::serialize(&msg).map(Bytes::from)?;
-        if let Err(e) = self.webrtc_data_channel.send(&data).await {
-            tracing::error!("{:?}, Data size: {:?}", e, data.len());
-            return Err(e.into());
-        }
-        Ok(())
+        self.webrtc_data_channel.send(msg).await
     }
 
     async fn get_stats(&self) -> Vec<String> {
@@ -171,7 +193,7 @@ impl ConnectionInterface for WebrtcConnection {
             return Err(Error::DataChannelOpen("Connection unavailable".to_string()));
         }
 
-        if self.webrtc_data_channel.ready_state() == RTCDataChannelState::Open {
+        if self.webrtc_data_channel.all_ready()? {
             return Ok(());
         }
 
@@ -179,9 +201,7 @@ impl ConnectionInterface for WebrtcConnection {
             .set_timeout(WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT);
         self.webrtc_data_channel_state_notifier.clone().await;
 
-        dbg!(self.webrtc_data_channel.ready_state());
-
-        if self.webrtc_data_channel.ready_state() == RTCDataChannelState::Open {
+        if self.webrtc_data_channel.all_ready()? {
             return Ok(());
         } else {
             return Err(Error::DataChannelOpen(format!(
@@ -239,7 +259,7 @@ impl TransportInterface for WebrtcTransport {
         //
         // Create webrtc connection
         //
-        let webrtc_conn = webrtc_api.new_peer_connection(webrtc_config).await?;
+        let webrtc_conn: RTCPeerConnection = webrtc_api.new_peer_connection(webrtc_config).await?;
 
         //
         // Set callbacks
@@ -251,15 +271,23 @@ impl TransportInterface for WebrtcTransport {
             webrtc_data_channel_state_notifier.clone(),
         ));
 
+        let channel_pool = Arc::new(RoundRobinPool::default());
+        let channel_pool_ref = channel_pool.clone();
         let data_channel_inner_cb = inner_cb.clone();
         webrtc_conn.on_data_channel(Box::new(move |d: Arc<RTCDataChannel>| {
             let d_label = d.label();
             let d_id = d.id();
             tracing::debug!("New DataChannel {d_label} {d_id}");
-
+            let channel_pool = channel_pool_ref.clone();
             let on_open_inner_cb = data_channel_inner_cb.clone();
             d.on_open(Box::new(move || {
-                Box::pin(async move { on_open_inner_cb.on_data_channel_open().await })
+                Box::pin(async move {
+                    // check all channels are ready
+                    // trigger on_data_channel_open callback iff all channels ready (open)
+                    if let Ok(true) = channel_pool.all_ready() {
+                        on_open_inner_cb.on_data_channel_open().await
+                    }
+                })
             }));
 
             let on_close_inner_cb = data_channel_inner_cb.clone();
@@ -300,14 +328,19 @@ impl TransportInterface for WebrtcTransport {
         //
         // Create data channel
         //
-        let webrtc_data_channel = webrtc_conn.create_data_channel("rings", None).await?;
+        for i in 0..DATA_CHANNEL_POOL_SIZE {
+            let ch = webrtc_conn
+                .create_data_channel(&format!("rings_data_channel_{}", i), None)
+                .await?;
+            channel_pool.push(ch)?;
+        }
 
         //
         // Construct the Connection
         //
         let conn = WebrtcConnection::new(
             webrtc_conn,
-            webrtc_data_channel,
+            channel_pool,
             webrtc_data_channel_state_notifier,
         );
 
