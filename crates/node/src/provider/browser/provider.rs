@@ -43,29 +43,6 @@ pub enum AddressType {
     Ed25519,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-pub(crate) struct Peer {
-    pub did: String,
-    pub state: String,
-}
-
-impl Peer {
-    fn new(did: Did, state: WebrtcConnectionState) -> Self {
-        Self {
-            did: did.to_string(),
-            state: format!("{:?}", state),
-        }
-    }
-}
-
-impl TryFrom<&Peer> for JsValue {
-    type Error = JsError;
-
-    fn try_from(value: &Peer) -> Result<Self, Self::Error> {
-        js_value::serialize(value).map_err(JsError::from)
-    }
-}
-
 /// A wrapper of Arc Ref of Provider
 #[derive(Clone)]
 #[wasm_export]
