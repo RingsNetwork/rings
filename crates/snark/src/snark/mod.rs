@@ -140,20 +140,20 @@ where
 {
     /// Create public params
     #[inline]
-    pub fn gen_pp<S1, S2>(circom: Circuit<E1::Scalar>) -> PublicParams<E1, E2>
+    pub fn gen_pp<S1, S2>(circom: Circuit<E1::Scalar>) -> Result<PublicParams<E1, E2>>
     where
         S1: RelaxedR1CSSNARKTrait<E1>,
         S2: RelaxedR1CSSNARKTrait<E2>,
     {
         let circuit_primary = circom.clone();
         let circuit_secondary = TrivialCircuit::<E2::Scalar>::default();
-        nova::PublicParams::setup(
+        let pp = nova::PublicParams::setup(
             &circuit_primary,
             &circuit_secondary,
             S1::ck_floor().deref(),
             S2::ck_floor().deref(),
-        )
-        .into()
+        )?;
+	Ok(pp.into())
     }
 
     /// Create public params with circom, and public input

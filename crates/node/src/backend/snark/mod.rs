@@ -142,7 +142,7 @@ pub enum CircuitGenerator {
     /// Circuit based on pallas curve
     Pallas(circuit::WasmCircuitGenerator<<provider::PallasEngine as Engine>::Scalar>),
     /// Circuit based on KZG bn256
-    Bn256KZG(circuit::WasmCircuitGenerator<<provider::hyperkzg::Bn256EngineKZG as Engine>::Scalar>),
+    Bn256KZG(circuit::WasmCircuitGenerator<<provider::Bn256EngineKZG as Engine>::Scalar>),
 }
 
 /// Supported prime field
@@ -220,7 +220,7 @@ pub enum CircuitEnum {
     /// Based on pallas curve
     Pallas(circuit::Circuit<<provider::PallasEngine as Engine>::Scalar>),
     /// based on bn256 and KZG
-    Bn256KZG(circuit::Circuit<<provider::hyperkzg::Bn256EngineKZG as Engine>::Scalar>),
+    Bn256KZG(circuit::Circuit<<provider::Bn256EngineKZG as Engine>::Scalar>),
 }
 
 #[wasm_export]
@@ -251,7 +251,7 @@ pub enum FieldEnum {
     /// field of pallas curve
     Pallas(<provider::PallasEngine as Engine>::Scalar),
     /// bn256 with kzg
-    Bn256KZG(<provider::hyperkzg::Bn256EngineKZG as Engine>::Scalar),
+    Bn256KZG(<provider::Bn256EngineKZG as Engine>::Scalar),
 }
 
 #[wasm_export]
@@ -267,7 +267,7 @@ impl Field {
             },
             SupportedPrimeField::Bn256KZG => Self {
                 value: FieldEnum::Bn256KZG(
-                    <provider::hyperkzg::Bn256EngineKZG as Engine>::Scalar::from(v),
+                    <provider::Bn256EngineKZG as Engine>::Scalar::from(v),
                 ),
             },
         }
@@ -316,7 +316,7 @@ impl SNARKTaskBuilder {
                 })
             }
             SupportedPrimeField::Bn256KZG => {
-                type F = <provider::hyperkzg::Bn256EngineKZG as Engine>::Scalar;
+                type F = <provider::Bn256EngineKZG as Engine>::Scalar;
                 let r1cs =
                     r1cs::load_r1cs::<F>(r1cs::Path::Local(r1cs_path), r1cs::Format::Bin).await?;
                 let witness_calculator =
@@ -365,7 +365,7 @@ impl SNARKTaskBuilder {
                 })
             }
             SupportedPrimeField::Bn256KZG => {
-                type F = <provider::hyperkzg::Bn256EngineKZG as Engine>::Scalar;
+                type F = <provider::Bn256EngineKZG as Engine>::Scalar;
                 let r1cs =
                     r1cs::load_r1cs::<F>(r1cs::Path::Remote(r1cs_path), r1cs::Format::Bin).await?;
                 let witness_calculator =
@@ -495,7 +495,7 @@ impl SNARKTaskBuilder {
                 Ok(circuits)
             }
             CircuitGenerator::Bn256KZG(g) => {
-                type F = <provider::hyperkzg::Bn256EngineKZG as Engine>::Scalar;
+                type F = <provider::Bn256EngineKZG as Engine>::Scalar;
 
                 let input: circuit::Input<F> = public_input
                     .into_iter()
@@ -573,7 +573,7 @@ impl SNARKTaskBuilder {
                     })
                     .collect();
                 let inputs = circuits[0].get_public_inputs();
-                let pp = SNARK::<E1, E2>::gen_pp::<S1, S2>(circuits[0].clone());
+                let pp = SNARK::<E1, E2>::gen_pp::<S1, S2>(circuits[0].clone())?;
                 let snark = SNARK::<E1, E2>::new(&circuits[0], &pp, &inputs, &vec![
                     <E2 as Engine>::Scalar::from(0),
                 ])?;
@@ -602,7 +602,7 @@ impl SNARKTaskBuilder {
                     })
                     .collect();
                 let inputs = circuits[0].get_public_inputs();
-                let pp = SNARK::<E1, E2>::gen_pp::<S1, S2>(circuits[0].clone());
+                let pp = SNARK::<E1, E2>::gen_pp::<S1, S2>(circuits[0].clone())?;
                 let snark = SNARK::<E1, E2>::new(&circuits[0], &pp, &inputs, &vec![
                     <E2 as Engine>::Scalar::from(0),
                 ])?;
@@ -613,7 +613,7 @@ impl SNARKTaskBuilder {
                 })
             }
             CircuitEnum::Bn256KZG(_) => {
-                type E1 = provider::hyperkzg::Bn256EngineKZG;
+                type E1 = provider::Bn256EngineKZG;
                 type E2 = provider::GrumpkinEngine;
                 type EE1 = hyperkzg::EvaluationEngine<E1>;
                 type EE2 = ipa_pc::EvaluationEngine<E2>;
@@ -630,7 +630,7 @@ impl SNARKTaskBuilder {
                     })
                     .collect();
                 let inputs = circuits[0].get_public_inputs();
-                let pp = SNARK::<E1, E2>::gen_pp::<S1, S2>(circuits[0].clone());
+                let pp = SNARK::<E1, E2>::gen_pp::<S1, S2>(circuits[0].clone())?;
                 let snark = SNARK::<E1, E2>::new(&circuits[0], &pp, &inputs, &vec![
                     <E2 as Engine>::Scalar::from(0),
                 ])?;
@@ -816,7 +816,7 @@ impl SNARKBehaviour {
                 Ok(SNARKVerifyTask::PallasVasta(serde_json::to_string(&proof)?))
             }
             SNARKProofTask::Bn256KZGGrumpkin(s) => {
-                type E1 = provider::hyperkzg::Bn256EngineKZG;
+                type E1 = provider::Bn256EngineKZG;
                 type E2 = provider::GrumpkinEngine;
                 type EE1 = hyperkzg::EvaluationEngine<E1>;
                 type EE2 = ipa_pc::EvaluationEngine<E2>;
@@ -878,7 +878,7 @@ impl SNARKBehaviour {
                 }
             }
             SNARKVerifyTask::Bn256KZGGrumpkin(p) => {
-                type E1 = provider::hyperkzg::Bn256EngineKZG;
+                type E1 = provider::Bn256EngineKZG;
                 type E2 = provider::GrumpkinEngine;
                 type EE1 = hyperkzg::EvaluationEngine<E1>;
                 type EE2 = ipa_pc::EvaluationEngine<E2>;
@@ -910,11 +910,11 @@ impl From<SNARKGenerator<provider::VestaEngine, provider::PallasEngine>> for SNA
     }
 }
 
-impl From<SNARKGenerator<provider::hyperkzg::Bn256EngineKZG, provider::GrumpkinEngine>>
+impl From<SNARKGenerator<provider::Bn256EngineKZG, provider::GrumpkinEngine>>
     for SNARKProofTask
 {
     fn from(
-        snark: SNARKGenerator<provider::hyperkzg::Bn256EngineKZG, provider::GrumpkinEngine>,
+        snark: SNARKGenerator<provider::Bn256EngineKZG, provider::GrumpkinEngine>,
     ) -> Self {
         Self::Bn256KZGGrumpkin(snark)
     }
