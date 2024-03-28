@@ -13,7 +13,7 @@ llvm = ["wasmer-compiler-llvm"]
 
 [dependencies]
 # https://github.com/microsoft/Nova
-nova-snark = { git = "https://github.com/RingsNetwork/nova", version = "0.34", rev = "d77b65437575d392977cf85ca556b562bf207203" }
+nova-snark = { git = "https://github.com/RingsNetwork/Rings-Nova", version = "0.34", rev = "95a65981b009dceb2f6b0bf2fe706110ac4d2a0e" }
 
 ff = { version = "0.13", features = ["derive"] }
 
