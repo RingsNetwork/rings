@@ -18,8 +18,8 @@ pub struct ConnectPeerViaHttpRequest {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ConnectPeerViaHttpResponse {
-    #[prost(message, optional, tag = "1")]
-    pub peer: ::core::option::Option<PeerInfo>,
+    #[prost(string, tag = "1")]
+    pub did: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -101,10 +101,7 @@ pub struct AcceptAnswerRequest {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct AcceptAnswerResponse {
-    #[prost(message, optional, tag = "1")]
-    pub peer: ::core::option::Option<PeerInfo>,
-}
+pub struct AcceptAnswerResponse {}
 #[derive(serde::Serialize, serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

@@ -5,6 +5,14 @@ use async_trait::async_trait;
 
 use crate::dht::Did;
 
+/// Type of Measure, see [Measure].
+#[cfg(not(feature = "wasm"))]
+pub type MeasureImpl = Box<dyn BehaviourJudgement + Send + Sync>;
+
+/// Type of Measure, see [crate::measure::Measure].
+#[cfg(feature = "wasm")]
+pub type MeasureImpl = Box<dyn BehaviourJudgement>;
+
 /// The tag of counters in measure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MeasureCounter {

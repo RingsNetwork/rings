@@ -92,7 +92,7 @@ const char *request(const struct ProviderPtr *provider_ptr, const char *method, 
  * * This function cast CStr into Str
  */
 struct ProviderPtr new_provider_with_callback(const char *ice_server,
-                                              uint64_t stabilize_timeout,
+                                              uint64_t stabilize_interval,
                                               const char *account,
                                               const char *account_type,
                                               void (*signer)(const char*, char*),

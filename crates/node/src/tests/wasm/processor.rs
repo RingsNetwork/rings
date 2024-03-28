@@ -1,36 +1,23 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use futures::lock::Mutex;
 use rings_core::swarm::callback::SwarmCallback;
-use rings_core::swarm::impls::ConnectionHandshake;
-use rings_transport::core::transport::ConnectionInterface;
-use rings_transport::core::transport::WebrtcConnectionState;
 use wasm_bindgen_test::*;
 
-use crate::prelude::rings_core::async_trait;
-use crate::prelude::rings_core::dht::TStabilize;
-use crate::prelude::rings_core::utils;
 use crate::prelude::*;
 use crate::processor::*;
 use crate::tests::wasm::prepare_processor;
 
-async fn listen(p: &Processor) {
-    let h = p.swarm.clone();
-    let s = Arc::clone(&p.stabilization);
-
-    futures::join!(
-        async {
-            h.listen().await;
-        },
-        async {
-            s.wait().await;
-        }
-    );
-}
-
 async fn close_all_connections(p: &Processor) {
-    futures::future::join_all(p.swarm.get_connections().iter().map(|(_, t)| t.close())).await;
+    futures::future::join_all(
+        p.swarm
+            .peers()
+            .iter()
+            .map(|peer| p.swarm.disconnect(peer.did.parse().unwrap())),
+    )
+    .await;
 }
 
 struct SwarmCallbackStruct {
@@ -53,47 +40,13 @@ impl SwarmCallback for SwarmCallbackStruct {
 
 async fn create_connection(p1: &Processor, p2: &Processor) {
     console_log!("create_offer");
-    let (conn_1, offer) = p1.swarm.create_offer(p2.did()).await.unwrap();
+    let offer = p1.swarm.create_offer(p2.did()).await.unwrap();
 
     console_log!("answer_offer");
-    let (conn_2, answer) = p2.swarm.answer_offer(offer).await.unwrap();
+    let answer = p2.swarm.answer_offer(offer).await.unwrap();
 
     console_log!("accept_answer");
     p1.swarm.accept_answer(answer).await.unwrap();
-
-    loop {
-        console_log!("waiting for connection");
-        utils::js_utils::window_sleep(1000).await.unwrap();
-
-        console_log!("conn_1 state: {:?}", conn_1.webrtc_connection_state());
-        console_log!("conn_2 state: {:?}", conn_2.webrtc_connection_state());
-
-        let s1 = conn_1.get_stats().await;
-        let s2 = conn_2.get_stats().await;
-
-        console_log!("conn_1 stats: {:?}", s1);
-        console_log!("conn_2 stats: {:?}", s2);
-
-        if conn_1.is_connected().await && conn_2.is_connected().await {
-            break;
-        }
-    }
-
-    futures::try_join!(
-        async {
-            if conn_1.is_connected().await {
-                return Ok(());
-            }
-            conn_1.webrtc_wait_for_data_channel_open().await
-        },
-        async {
-            if conn_2.is_connected().await {
-                return Ok(());
-            }
-            conn_2.webrtc_wait_for_data_channel_open().await
-        }
-    )
-    .unwrap();
 }
 
 #[wasm_bindgen_test]
@@ -123,8 +76,8 @@ async fn test_processor_handshake_and_msg() {
     console_log!("p2_did: {}", p2_did);
 
     console_log!("listen");
-    listen(&p1).await;
-    listen(&p2).await;
+    p1.listen().await;
+    p2.listen().await;
 
     console_log!("processor_hs_connect_1_2");
     create_connection(&p1, &p2).await;
@@ -196,10 +149,6 @@ async fn test_processor_connect_with_did() {
     let p3 = prepare_processor().await;
     console_log!("p3 address: {}", p3.did());
 
-    p1.swarm.clone().listen().await;
-    p2.swarm.clone().listen().await;
-    p3.swarm.clone().listen().await;
-
     console_log!("processor_connect_p1_and_p2");
     create_connection(&p1, &p2).await;
     console_log!("processor_connect_p1_and_p2, done");
@@ -208,11 +157,9 @@ async fn test_processor_connect_with_did() {
     create_connection(&p2, &p3).await;
     console_log!("processor_connect_p2_and_p3, done");
 
-    let p1_peer_dids = p1.swarm.get_connection_ids();
+    let peers = p1.swarm.peers();
     assert!(
-        p1_peer_dids
-            .iter()
-            .any(|did| did.to_string().eq(&p2.did().to_string())),
+        peers.iter().any(|peer| peer.did.eq(&p2.did().to_string())),
         "p2 not in p1's peer list"
     );
 
@@ -222,24 +169,25 @@ async fn test_processor_connect_with_did() {
 
     console_log!("connect p1 and p3");
     // p1 create connect with p3's address
-    p1.connect_with_did(p3.did(), true).await.unwrap();
-    let conn3 = p1.swarm.get_connection(p3.did()).unwrap();
-    console_log!("processor_p1_p3_conntected");
+    p1.connect_with_did(p3.did()).await.unwrap();
     fluvio_wasm_timer::Delay::new(Duration::from_millis(1000))
         .await
         .unwrap();
     console_log!("processor_detect_connection_state");
-    assert_eq!(
-        conn3.webrtc_connection_state(),
-        WebrtcConnectionState::Connected,
-    );
+    let peer3 = p1
+        .swarm
+        .peers()
+        .into_iter()
+        .find(|peer| peer.did == p3.did().to_string())
+        .unwrap();
+    assert_eq!(peer3.state, "Connected");
 
     console_log!("check peers");
-    let peer_dids = p1.swarm.get_connection_ids();
+    let peers = p1.swarm.peers();
     assert!(
-        peer_dids
+        peers
             .iter()
-            .any(|did| did.to_string().eq(p3.did().to_string().as_str())),
+            .any(|peer| peer.did.eq(p3.did().to_string().as_str())),
         "peer list dose NOT contains p3 address"
     );
     console_log!("processor_close_all_connections");

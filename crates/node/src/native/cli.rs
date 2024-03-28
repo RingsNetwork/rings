@@ -71,8 +71,6 @@ impl Client {
             })
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?
-            .peer
-            .ok_or_else(|| anyhow::anyhow!("peer did not return"))?
             .did;
 
         ClientOutput::ok(format!("Remote did: {}", peer_did), peer_did)

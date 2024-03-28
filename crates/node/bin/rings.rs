@@ -133,10 +133,10 @@ struct RunCommand {
 
     #[arg(
         long,
-        help = "Stabilize service timeout. If not provided, use stabilize_timeout in config file or 3",
+        help = "Stabilization interval in seconds. If not provided, use stabilize_interval in config file or 3",
         env
     )]
-    pub stabilize_timeout: Option<u64>,
+    pub stabilize_interval: Option<u64>,
 
     #[arg(long, help = "external ip address", env)]
     pub external_ip: Option<String>,
@@ -403,8 +403,8 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     if let Some(external_ip) = args.external_ip {
         c.external_ip = Some(external_ip);
     }
-    if let Some(stabilize_timeout) = args.stabilize_timeout {
-        c.stabilize_timeout = stabilize_timeout;
+    if let Some(stabilize_interval) = args.stabilize_interval {
+        c.stabilize_interval = stabilize_interval;
     }
     if let Some(external_api_addr) = args.external_api_addr {
         c.external_api_addr = external_api_addr;

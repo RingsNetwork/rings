@@ -1,4 +1,7 @@
 #![warn(missing_docs)]
+
+use std::sync::Arc;
+
 use async_recursion::async_recursion;
 use async_trait::async_trait;
 
@@ -11,7 +14,6 @@ use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
 use crate::error::Error;
 use crate::error::Result;
-use crate::handle_multi_actions;
 use crate::message::types::FoundVNode;
 use crate::message::types::Message;
 use crate::message::types::SearchVNode;
@@ -19,10 +21,10 @@ use crate::message::types::SyncVNodeWithSuccessor;
 use crate::message::Encoded;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
-use crate::message::MessageHandlerEvent;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
 use crate::prelude::vnode::VNodeOperation;
+use crate::swarm::transport::SwarmTransport;
 use crate::swarm::Swarm;
 
 /// ChordStorageInterface should imply necessary method for DHT storage
@@ -52,11 +54,14 @@ pub trait ChordStorageInterfaceCacheChecker {
 /// Handle the storage fetch action of the peer ring.
 #[cfg_attr(feature = "wasm", async_recursion(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_recursion)]
-async fn handle_storage_fetch_act(swarm: &Swarm, act: PeerRingAction) -> Result<()> {
+async fn handle_storage_fetch_act(
+    transport: Arc<SwarmTransport>,
+    act: PeerRingAction,
+) -> Result<()> {
     match act {
         PeerRingAction::None => (),
         PeerRingAction::SomeVNode(v) => {
-            swarm.dht.local_cache_put(v).await?;
+            transport.dht.local_cache_put(v).await?;
         }
         PeerRingAction::RemoteAction(next, dht_act) => {
             if let PeerRingRemoteAction::FindVNode(vid) = dht_act {
@@ -65,14 +70,14 @@ async fn handle_storage_fetch_act(swarm: &Swarm, act: PeerRingAction) -> Result<
                     vid,
                     next
                 );
-                swarm
+                transport
                     .send_message(Message::SearchVNode(SearchVNode { vid }), next)
                     .await?;
             }
         }
         PeerRingAction::MultiActions(acts) => {
             for act in acts {
-                handle_storage_fetch_act(swarm, act).await?;
+                handle_storage_fetch_act(transport.clone(), act).await?;
             }
         }
         act => return Err(Error::PeerRingUnexpectedAction(act)),
@@ -83,17 +88,20 @@ async fn handle_storage_fetch_act(swarm: &Swarm, act: PeerRingAction) -> Result<
 /// Handle the storage store operations of the peer ring.
 #[cfg_attr(feature = "wasm", async_recursion(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_recursion)]
-pub(super) async fn handle_storage_store_act(swarm: &Swarm, act: PeerRingAction) -> Result<()> {
+pub(super) async fn handle_storage_store_act(
+    transport: Arc<SwarmTransport>,
+    act: PeerRingAction,
+) -> Result<()> {
     match act {
         PeerRingAction::None => (),
         PeerRingAction::RemoteAction(target, PeerRingRemoteAction::FindVNodeForOperate(op)) => {
-            swarm
+            transport
                 .send_message(Message::OperateVNode(op), target)
                 .await?;
         }
         PeerRingAction::MultiActions(acts) => {
             for act in acts {
-                handle_storage_store_act(swarm, act).await?;
+                handle_storage_store_act(transport.clone(), act).await?;
             }
         }
         act => return Err(Error::PeerRingUnexpectedAction(act)),
@@ -104,28 +112,34 @@ pub(super) async fn handle_storage_store_act(swarm: &Swarm, act: PeerRingAction)
 /// Handle the storage store operations of the peer ring.
 #[cfg_attr(feature = "wasm", async_recursion(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_recursion)]
-pub(super) async fn handle_storage_search_act(
+async fn handle_storage_search_act(
+    transport: Arc<SwarmTransport>,
     ctx: &MessagePayload,
     act: PeerRingAction,
-) -> Result<Vec<MessageHandlerEvent>> {
+) -> Result<()> {
     match act {
-        PeerRingAction::None => Ok(vec![]),
-        PeerRingAction::SomeVNode(v) => Ok(vec![MessageHandlerEvent::SendReportMessage(
-            ctx.clone(),
-            Message::FoundVNode(FoundVNode { data: vec![v] }),
-        )]),
-        PeerRingAction::RemoteAction(next, _) => Ok(vec![MessageHandlerEvent::ResetDestination(
-            ctx.clone(),
-            next,
-        )]),
-        PeerRingAction::MultiActions(acts) => {
-            handle_multi_actions!(
-                acts,
-                |act| async move { handle_storage_search_act(ctx, act.clone()).await },
-                "Failed on handle multi actions: {:#?}"
-            )
+        PeerRingAction::None => Ok(()),
+        PeerRingAction::SomeVNode(v) => {
+            transport
+                .send_report_message(ctx, Message::FoundVNode(FoundVNode { data: vec![v] }))
+                .await
         }
-        act => Err(Error::PeerRingUnexpectedAction(act)),
+        PeerRingAction::RemoteAction(next, _) => transport.reset_destination(ctx, next).await,
+        PeerRingAction::MultiActions(acts) => {
+            let jobs = acts.iter().map(|act| {
+                let transport_clone = transport.clone();
+                async move { handle_storage_operate_act(transport_clone, ctx, act).await }
+            });
+
+            for res in futures::future::join_all(jobs).await {
+                if res.is_err() {
+                    tracing::error!("Failed on handle multi actions: {:#?}", res)
+                }
+            }
+
+            Ok(())
+        }
+        act => Err(Error::PeerRingUnexpectedAction(act.clone())),
     }
 }
 
@@ -133,21 +147,26 @@ pub(super) async fn handle_storage_search_act(
 #[cfg_attr(feature = "wasm", async_recursion(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_recursion)]
 pub(super) async fn handle_storage_operate_act(
+    transport: Arc<SwarmTransport>,
     ctx: &MessagePayload,
     act: &PeerRingAction,
-) -> Result<Vec<MessageHandlerEvent>> {
+) -> Result<()> {
     match act {
-        PeerRingAction::None => Ok(vec![]),
-        PeerRingAction::RemoteAction(next, _) => Ok(vec![MessageHandlerEvent::ResetDestination(
-            ctx.clone(),
-            *next,
-        )]),
+        PeerRingAction::None => Ok(()),
+        PeerRingAction::RemoteAction(next, _) => transport.reset_destination(ctx, *next).await,
         PeerRingAction::MultiActions(acts) => {
-            handle_multi_actions!(
-                acts,
-                |act| async move { handle_storage_operate_act(ctx, act).await },
-                "Failed on handle multi actions: {:#?}"
-            )
+            let jobs = acts.iter().map(|act| {
+                let transport_clone = transport.clone();
+                async move { handle_storage_operate_act(transport_clone, ctx, act).await }
+            });
+
+            for res in futures::future::join_all(jobs).await {
+                if res.is_err() {
+                    tracing::error!("Failed on handle multi actions: {:#?}", res)
+                }
+            }
+
+            Ok(())
         }
         act => Err(Error::PeerRingUnexpectedAction(act.clone())),
     }
@@ -170,7 +189,7 @@ impl<const REDUNDANT: u16> ChordStorageInterface<REDUNDANT> for Swarm {
     async fn storage_fetch(&self, vid: Did) -> Result<()> {
         // If peer found that data is on it's localstore, copy it to the cache
         let act = <PeerRing as ChordStorage<_, REDUNDANT>>::vnode_lookup(&self.dht, vid).await?;
-        handle_storage_fetch_act(self, act).await?;
+        handle_storage_fetch_act(self.transport.clone(), act).await?;
         Ok(())
     }
 
@@ -178,7 +197,7 @@ impl<const REDUNDANT: u16> ChordStorageInterface<REDUNDANT> for Swarm {
     async fn storage_store(&self, vnode: VirtualNode) -> Result<()> {
         let op = VNodeOperation::Overwrite(vnode);
         let act = <PeerRing as ChordStorage<_, REDUNDANT>>::vnode_operate(&self.dht, op).await?;
-        handle_storage_store_act(self, act).await?;
+        handle_storage_store_act(self.transport.clone(), act).await?;
         Ok(())
     }
 
@@ -186,7 +205,7 @@ impl<const REDUNDANT: u16> ChordStorageInterface<REDUNDANT> for Swarm {
         let vnode: VirtualNode = (topic.to_string(), data).try_into()?;
         let op = VNodeOperation::Extend(vnode);
         let act = <PeerRing as ChordStorage<_, REDUNDANT>>::vnode_operate(&self.dht, op).await?;
-        handle_storage_store_act(self, act).await?;
+        handle_storage_store_act(self.transport.clone(), act).await?;
         Ok(())
     }
 
@@ -194,7 +213,7 @@ impl<const REDUNDANT: u16> ChordStorageInterface<REDUNDANT> for Swarm {
         let vnode: VirtualNode = (topic.to_string(), data).try_into()?;
         let op = VNodeOperation::Touch(vnode);
         let act = <PeerRing as ChordStorage<_, REDUNDANT>>::vnode_operate(&self.dht, op).await?;
-        handle_storage_store_act(self, act).await?;
+        handle_storage_store_act(self.transport.clone(), act).await?;
         Ok(())
     }
 }
@@ -204,14 +223,10 @@ impl<const REDUNDANT: u16> ChordStorageInterface<REDUNDANT> for Swarm {
 impl HandleMsg<SearchVNode> for MessageHandler {
     /// Search VNode via successor
     /// If a VNode is storead local, it will response immediately.(See Chordstorageinterface::storage_fetch)
-    async fn handle(
-        &self,
-        ctx: &MessagePayload,
-        msg: &SearchVNode,
-    ) -> Result<Vec<MessageHandlerEvent>> {
+    async fn handle(&self, ctx: &MessagePayload, msg: &SearchVNode) -> Result<()> {
         // For relay message, set redundant to 1
         match <PeerRing as ChordStorage<_, 1>>::vnode_lookup(&self.dht, msg.vid).await {
-            Ok(action) => handle_storage_search_act(ctx, action).await,
+            Ok(action) => handle_storage_search_act(self.transport.clone(), ctx, action).await,
             Err(e) => Err(e),
         }
     }
@@ -220,33 +235,25 @@ impl HandleMsg<SearchVNode> for MessageHandler {
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<FoundVNode> for MessageHandler {
-    async fn handle(
-        &self,
-        ctx: &MessagePayload,
-        msg: &FoundVNode,
-    ) -> Result<Vec<MessageHandlerEvent>> {
+    async fn handle(&self, ctx: &MessagePayload, msg: &FoundVNode) -> Result<()> {
         if self.dht.did != ctx.relay.destination {
-            return Ok(vec![MessageHandlerEvent::ForwardPayload(ctx.clone(), None)]);
+            return self.transport.forward_payload(ctx, None).await;
         }
         for data in msg.data.iter().cloned() {
             self.dht.local_cache_put(data).await?;
         }
-        Ok(vec![])
+        Ok(())
     }
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<VNodeOperation> for MessageHandler {
-    async fn handle(
-        &self,
-        ctx: &MessagePayload,
-        msg: &VNodeOperation,
-    ) -> Result<Vec<MessageHandlerEvent>> {
+    async fn handle(&self, ctx: &MessagePayload, msg: &VNodeOperation) -> Result<()> {
         // For relay message, set redundant to 1
         let action =
             <PeerRing as ChordStorage<_, 1>>::vnode_operate(&self.dht, msg.clone()).await?;
-        handle_storage_operate_act(ctx, &action).await
+        handle_storage_operate_act(self.transport.clone(), ctx, &action).await
     }
 }
 
@@ -254,18 +261,15 @@ impl HandleMsg<VNodeOperation> for MessageHandler {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<SyncVNodeWithSuccessor> for MessageHandler {
     // received remote sync vnode request
-    async fn handle(
-        &self,
-        _ctx: &MessagePayload,
-        msg: &SyncVNodeWithSuccessor,
-    ) -> Result<Vec<MessageHandlerEvent>> {
-        let mut events = vec![];
+    async fn handle(&self, _ctx: &MessagePayload, msg: &SyncVNodeWithSuccessor) -> Result<()> {
         for data in msg.data.iter().cloned() {
             // only simply store here
             // For relay message, set redundant to 1
-            events.push(MessageHandlerEvent::StorageStore(data));
+            let op = VNodeOperation::Overwrite(data);
+            let act = <PeerRing as ChordStorage<_, 1>>::vnode_operate(&self.dht, op).await?;
+            handle_storage_store_act(self.transport.clone(), act).await?;
         }
-        Ok(events)
+        Ok(())
     }
 }
 
@@ -274,18 +278,26 @@ impl HandleMsg<SyncVNodeWithSuccessor> for MessageHandler {
 mod test {
     use super::*;
     use crate::ecc::tests::gen_ordered_keys;
-    use crate::message::handlers::connection::tests::test_only_two_nodes_establish_connection;
     use crate::message::Encoder;
     use crate::prelude::vnode::VNodeType;
+    use crate::tests::default::assert_no_more_msg;
     use crate::tests::default::prepare_node;
+    use crate::tests::default::wait_for_msgs;
+    use crate::tests::manually_establish_connection;
 
     #[tokio::test]
     async fn test_store_vnode() -> Result<()> {
-        let keys = gen_ordered_keys(2);
-        let (key1, key2) = (keys[0], keys[1]);
+        let keys = gen_ordered_keys(3);
+        let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
         let node1 = prepare_node(key1).await;
         let node2 = prepare_node(key2).await;
-        test_only_two_nodes_establish_connection(&node1, &node2).await?;
+
+        // This is only a dummy node for using assert_no_more_msg function
+        let node3 = prepare_node(key3).await;
+
+        manually_establish_connection(&node1.swarm, &node2.swarm).await;
+        wait_for_msgs(&node1, &node2, &node3).await;
+        assert_no_more_msg(&node1, &node2, &node3).await;
 
         // Now, node1 is the successor of node2, and node2 is the successor of node1.
         // Following tests storing data on node2 and query it from node1.
@@ -302,45 +314,45 @@ mod test {
 
         assert_eq!(node1.dht().cache.count().await.unwrap(), 0);
         assert_eq!(node2.dht().cache.count().await.unwrap(), 0);
-        assert!(node1.storage_check_cache(vid).await.is_none());
-        assert!(node2.storage_check_cache(vid).await.is_none());
+        assert!(node1.swarm.storage_check_cache(vid).await.is_none());
+        assert!(node2.swarm.storage_check_cache(vid).await.is_none());
 
-        <Swarm as ChordStorageInterface<1>>::storage_store(&node1, vnode.clone())
+        <Swarm as ChordStorageInterface<1>>::storage_store(&node1.swarm, vnode.clone())
             .await
             .unwrap();
-        let ev = node2.listen_once().await.unwrap().0;
+        let ev = node2.listen_once().await.unwrap();
         assert!(matches!(
             ev.transaction.data()?,
             Message::OperateVNode(VNodeOperation::Overwrite(x)) if x.did == vid
         ));
 
-        assert!(node1.storage_check_cache(vid).await.is_none());
-        assert!(node2.storage_check_cache(vid).await.is_none());
+        assert!(node1.swarm.storage_check_cache(vid).await.is_none());
+        assert!(node2.swarm.storage_check_cache(vid).await.is_none());
         assert!(node1.dht().storage.count().await.unwrap() == 0);
         assert!(node2.dht().storage.count().await.unwrap() != 0);
 
         // test remote query
         println!("vid is on node2 {:?}", node2.did());
-        <Swarm as ChordStorageInterface<1>>::storage_fetch(&node1, vid)
+        <Swarm as ChordStorageInterface<1>>::storage_fetch(&node1.swarm, vid)
             .await
             .unwrap();
 
         // it will send request to node2
-        let ev = node2.listen_once().await.unwrap().0;
+        let ev = node2.listen_once().await.unwrap();
         // node2 received search vnode request
         assert!(matches!(
             ev.transaction.data()?,
             Message::SearchVNode(x) if x.vid == vid
         ));
 
-        let ev = node1.listen_once().await.unwrap().0;
+        let ev = node1.listen_once().await.unwrap();
         assert!(matches!(
             ev.transaction.data()?,
             Message::FoundVNode(x) if x.data[0].did == vid
         ));
 
         assert_eq!(
-            node1.storage_check_cache(vid).await,
+            node1.swarm.storage_check_cache(vid).await,
             Some(VirtualNode {
                 did: vid,
                 data: vec![data.encode()?],
@@ -354,11 +366,17 @@ mod test {
     #[cfg(not(feature = "redundant"))]
     #[tokio::test]
     async fn test_extend_data() -> Result<()> {
-        let keys = gen_ordered_keys(2);
-        let (key1, key2) = (keys[0], keys[1]);
+        let keys = gen_ordered_keys(3);
+        let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
         let node1 = prepare_node(key1).await;
         let node2 = prepare_node(key2).await;
-        test_only_two_nodes_establish_connection(&node1, &node2).await?;
+
+        // This is only a dummy node for using assert_no_more_msg function
+        let node3 = prepare_node(key3).await;
+
+        manually_establish_connection(&node1.swarm, &node2.swarm).await;
+        wait_for_msgs(&node1, &node2, &node3).await;
+        assert_no_more_msg(&node1, &node2, &node3).await;
 
         // Now, node1 is the successor of node2, and node2 is the successor of node1.
         // Following tests storing data on node2 and query it from node1.
@@ -375,63 +393,44 @@ mod test {
 
         assert_eq!(node1.dht().cache.count().await.unwrap(), 0);
         assert_eq!(node2.dht().cache.count().await.unwrap(), 0);
-        assert!(node1.storage_check_cache(vid).await.is_none());
-        assert!(node2.storage_check_cache(vid).await.is_none());
+        assert!(node1.swarm.storage_check_cache(vid).await.is_none());
+        assert!(node2.swarm.storage_check_cache(vid).await.is_none());
 
         <Swarm as ChordStorageInterface<1>>::storage_append_data(
-            &node1,
+            &node1.swarm,
             &topic,
             "111".to_string().encode()?,
         )
         .await
         .unwrap();
+        wait_for_msgs(&node1, &node2, &node3).await;
+        assert_no_more_msg(&node1, &node2, &node3).await;
 
-        let ev = node2.listen_once().await.unwrap().0;
-        assert!(matches!(
-            ev.transaction.data()?,
-            Message::OperateVNode(VNodeOperation::Extend(VirtualNode { did, data, kind: VNodeType::Data }))
-                if did == vid && data == vec!["111".to_string().encode()?]
-        ));
         <Swarm as ChordStorageInterface<1>>::storage_append_data(
-            &node1,
+            &node1.swarm,
             &topic,
             "222".to_string().encode()?,
         )
         .await
         .unwrap();
-        let ev = node2.listen_once().await.unwrap().0;
-        assert!(matches!(
-            ev.transaction.data()?,
-            Message::OperateVNode(VNodeOperation::Extend(VirtualNode { did, data, kind: VNodeType::Data }))
-                if did == vid && data == vec!["222".to_string().encode()?]
-        ));
-        assert!(node1.storage_check_cache(vid).await.is_none());
-        assert!(node2.storage_check_cache(vid).await.is_none());
+        wait_for_msgs(&node1, &node2, &node3).await;
+        assert_no_more_msg(&node1, &node2, &node3).await;
+
+        assert!(node1.swarm.storage_check_cache(vid).await.is_none());
+        assert!(node2.swarm.storage_check_cache(vid).await.is_none());
         assert!(node1.dht().storage.count().await.unwrap() == 0);
         assert!(node2.dht().storage.count().await.unwrap() != 0);
+
         // test remote query
         println!("vid is on node2 {:?}", node2.did());
-        <Swarm as ChordStorageInterface<1>>::storage_fetch(&node1, vid)
+        <Swarm as ChordStorageInterface<1>>::storage_fetch(&node1.swarm, vid)
             .await
             .unwrap();
-
-        // it will send request to node2
-        let ev = node2.listen_once().await.unwrap().0;
-
-        // node2 received search vnode request
-        assert!(matches!(
-            ev.transaction.data()?,
-            Message::SearchVNode(x) if x.vid == vid
-        ));
-        let ev = node1.listen_once().await.unwrap().0;
-
-        assert!(matches!(
-            ev.transaction.data()?,
-            Message::FoundVNode(x) if x.data[0].did == vid
-        ));
+        wait_for_msgs(&node1, &node2, &node3).await;
+        assert_no_more_msg(&node1, &node2, &node3).await;
 
         assert_eq!(
-            node1.storage_check_cache(vid).await,
+            node1.swarm.storage_check_cache(vid).await,
             Some(VirtualNode {
                 did: vid,
                 data: vec!["111".to_string().encode()?, "222".to_string().encode()?],
@@ -441,42 +440,25 @@ mod test {
 
         // Append more data
         <Swarm as ChordStorageInterface<1>>::storage_append_data(
-            &node1,
+            &node1.swarm,
             &topic,
             "333".to_string().encode()?,
         )
         .await
         .unwrap();
-
-        let ev = node2.listen_once().await.unwrap().0;
-        assert!(matches!(
-            ev.transaction.data()?,
-            Message::OperateVNode(VNodeOperation::Extend(VirtualNode { did, data, kind: VNodeType::Data }))
-                if did == vid && data == vec!["333".to_string().encode()?]
-        ));
+        wait_for_msgs(&node1, &node2, &node3).await;
+        assert_no_more_msg(&node1, &node2, &node3).await;
 
         // test remote query agagin
         println!("vid is on node2 {:?}", node2.did());
-        <Swarm as ChordStorageInterface<1>>::storage_fetch(&node1, vid)
+        <Swarm as ChordStorageInterface<1>>::storage_fetch(&node1.swarm, vid)
             .await
             .unwrap();
-
-        // it will send request to node2
-        let ev = node2.listen_once().await.unwrap().0;
-        // node2 received search vnode request
-        assert!(matches!(
-            ev.transaction.data()?,
-            Message::SearchVNode(x) if x.vid == vid
-        ));
-
-        let ev = node1.listen_once().await.unwrap().0;
-        assert!(matches!(
-            ev.transaction.data()?,
-            Message::FoundVNode(x) if x.data[0].did == vid
-        ));
+        wait_for_msgs(&node1, &node2, &node3).await;
+        assert_no_more_msg(&node1, &node2, &node3).await;
 
         assert_eq!(
-            node1.storage_check_cache(vid).await,
+            node1.swarm.storage_check_cache(vid).await,
             Some(VirtualNode {
                 did: vid,
                 data: vec![

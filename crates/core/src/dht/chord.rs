@@ -903,7 +903,7 @@ mod tests {
             }
         }
 
-        let dhts = gen_sorted_dht(5).await;
+        let dhts = gen_sorted_dht(5);
         let [n1, n2, n3, n4, n5] = dhts.as_slice() else {
             panic!("wrong dhts length");
         };

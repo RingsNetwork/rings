@@ -33,7 +33,7 @@ pub const DEFAULT_INTERNAL_API_PORT: u16 = 50000;
 pub const DEFAULT_EXTERNAL_API_ADDR: &str = "127.0.0.1:50001";
 pub const DEFAULT_ENDPOINT_URL: &str = "http://127.0.0.1:50000";
 pub const DEFAULT_ICE_SERVERS: &str = "stun://stun.l.google.com:19302";
-pub const DEFAULT_STABILIZE_TIMEOUT: u64 = 3;
+pub const DEFAULT_STABILIZE_INTERVAL: u64 = 3;
 pub const DEFAULT_STORAGE_CAPACITY: u32 = 200000000;
 
 pub fn get_storage_location<P>(prefix: P, path: P) -> String
@@ -57,7 +57,7 @@ pub struct Config {
     pub external_api_addr: String,
     pub endpoint_url: String,
     pub ice_servers: String,
-    pub stabilize_timeout: u64,
+    pub stabilize_interval: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_ip: Option<String>,
     /// When there is no configuration in the YAML file,
@@ -98,14 +98,14 @@ impl TryFrom<Config> for ProcessorConfigSerialized {
             Ok(Self::new_with_ext_addr(
                 config.ice_servers,
                 session_sk,
-                config.stabilize_timeout,
+                config.stabilize_interval,
                 ext_ip,
             ))
         } else {
             Ok(Self::new(
                 config.ice_servers,
                 session_sk,
-                config.stabilize_timeout,
+                config.stabilize_interval,
             ))
         }
     }
@@ -139,7 +139,7 @@ impl Config {
             external_api_addr: DEFAULT_EXTERNAL_API_ADDR.to_string(),
             endpoint_url: DEFAULT_ENDPOINT_URL.to_string(),
             ice_servers: DEFAULT_ICE_SERVERS.to_string(),
-            stabilize_timeout: DEFAULT_STABILIZE_TIMEOUT,
+            stabilize_interval: DEFAULT_STABILIZE_INTERVAL,
             external_ip: None,
             services: vec![],
             data_storage: DEFAULT_DATA_STORAGE_CONFIG.clone(),
@@ -196,7 +196,7 @@ internal_api_port: 50000
 external_api_addr: 127.0.0.1:50001
 endpoint_url: http://127.0.0.1:50000
 ice_servers: stun://stun.l.google.com:19302
-stabilize_timeout: 3
+stabilize_interval: 3
 external_ip: null
 data_storage:
   path: /Users/foo/.rings/data

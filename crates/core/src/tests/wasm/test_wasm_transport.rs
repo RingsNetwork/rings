@@ -1,6 +1,4 @@
-use std::str::FromStr;
-use std::sync::Arc;
-
+use rings_transport::core::callback::TransportCallback;
 use rings_transport::core::transport::ConnectionInterface;
 use rings_transport::core::transport::TransportInterface;
 use rings_transport::core::transport::WebrtcConnectionState;
@@ -9,20 +7,12 @@ use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::*;
 
 use super::prepare_node;
-use crate::channels::Channel as CbChannel;
-use crate::dht::Did;
 use crate::ecc::SecretKey;
-use crate::error::Result;
-use crate::swarm::callback::InnerSwarmCallback;
-use crate::swarm::callback::SwarmCallback;
+use crate::swarm::transport::Transport;
 use crate::tests::manually_establish_connection;
-use crate::types::channel::Channel;
-use crate::types::channel::TransportEvent;
-use crate::types::Connection;
-use crate::types::Transport;
 
 struct DefaultCallback;
-impl SwarmCallback for DefaultCallback {}
+impl TransportCallback for DefaultCallback {}
 
 async fn get_fake_permission() {
     let window = web_sys::window().unwrap();
@@ -36,25 +26,23 @@ async fn get_fake_permission() {
     JsFuture::from(promise).await.unwrap();
 }
 
-async fn prepare_transport(channel: Option<Arc<CbChannel<TransportEvent>>>) -> Transport {
-    let ch = match channel {
-        Some(c) => Arc::clone(&c),
-        None => Arc::new(<CbChannel<TransportEvent> as Channel<TransportEvent>>::new()),
-    };
+async fn prepare_transport() -> Transport {
     let trans = Transport::new("stun://stun.l.google.com:19302", None);
-    let callback = InnerSwarmCallback::new(
-        Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap(),
-        ch.sender(),
-        Arc::new(DefaultCallback {}),
-    );
     trans
-        .new_connection("test", Box::new(callback))
+        .new_connection("test", Box::new(DefaultCallback))
         .await
         .unwrap();
     trans
 }
 
-pub async fn establish_ice_connection(conn1: &Connection, conn2: &Connection) -> Result<()> {
+#[wasm_bindgen_test]
+async fn test_ice_connection_establish() {
+    get_fake_permission().await;
+    let trans1 = prepare_transport().await;
+    let conn1 = trans1.connection("test").unwrap();
+    let trans2 = prepare_transport().await;
+    let conn2 = trans2.connection("test").unwrap();
+
     assert_eq!(conn1.webrtc_connection_state(), WebrtcConnectionState::New);
     assert_eq!(conn2.webrtc_connection_state(), WebrtcConnectionState::New);
 
@@ -70,18 +58,6 @@ pub async fn establish_ice_connection(conn1: &Connection, conn2: &Connection) ->
             WebrtcConnectionState::Connected
         );
     }
-
-    Ok(())
-}
-
-#[wasm_bindgen_test]
-async fn test_ice_connection_establish() {
-    get_fake_permission().await;
-    let trans1 = prepare_transport(None).await;
-    let conn1 = trans1.connection("test").unwrap();
-    let trans2 = prepare_transport(None).await;
-    let conn2 = trans2.connection("test").unwrap();
-    establish_ice_connection(&conn1, &conn2).await.unwrap();
 }
 
 #[wasm_bindgen_test]

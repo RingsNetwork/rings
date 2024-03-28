@@ -18,10 +18,6 @@ use rings_core::utils::js_utils;
 use rings_core::utils::js_value;
 use rings_derive::wasm_export;
 use rings_rpc::protos::rings_node::*;
-use rings_transport::core::transport::ConnectionInterface;
-use rings_transport::core::transport::WebrtcConnectionState;
-use serde::Deserialize;
-use serde::Serialize;
 use wasm_bindgen;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures;
@@ -47,29 +43,6 @@ pub enum AddressType {
     Ed25519,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-pub(crate) struct Peer {
-    pub did: String,
-    pub state: String,
-}
-
-impl Peer {
-    fn new(did: Did, state: WebrtcConnectionState) -> Self {
-        Self {
-            did: did.to_string(),
-            state: format!("{:?}", state),
-        }
-    }
-}
-
-impl TryFrom<&Peer> for JsValue {
-    type Error = JsError;
-
-    fn try_from(value: &Peer) -> Result<Self, Self::Error> {
-        js_value::serialize(value).map_err(JsError::from)
-    }
-}
-
 #[wasm_export]
 impl Provider {
     /// Create new instance of Provider, return Promise
@@ -83,7 +56,7 @@ impl Provider {
     #[wasm_bindgen(constructor)]
     pub fn new_instance(
         ice_servers: String,
-        stabilize_timeout: u64,
+        stabilize_interval: u64,
         account: String,
         account_type: String,
         signer: js_sys::Function,
@@ -127,7 +100,7 @@ impl Provider {
 
             let provider = Provider::new_provider_internal(
                 ice_servers,
-                stabilize_timeout,
+                stabilize_interval,
                 account,
                 account_type,
                 Signer::Async(Box::new(signer)),
@@ -239,23 +212,7 @@ impl Provider {
         )
     }
 
-    /// connect peer with web3 address, without waiting for connection channel connected
-    pub fn connect_with_address_without_wait(
-        &self,
-        address: String,
-        addr_type: Option<AddressType>,
-    ) -> js_sys::Promise {
-        let p = self.processor.clone();
-        future_to_promise(async move {
-            let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
-            p.connect_with_did(did, false)
-                .await
-                .map_err(JsError::from)?;
-            Ok(JsValue::null())
-        })
-    }
-
-    /// connect peer with web3 address, and wait for connection channel connected
+    /// connect peer with web3 address
     /// example:
     /// ```typescript
     /// const provider1 = new Provider()
@@ -273,25 +230,8 @@ impl Provider {
         let p = self.processor.clone();
         future_to_promise(async move {
             let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
-            p.connect_with_did(did, true).await.map_err(JsError::from)?;
+            p.connect_with_did(did).await.map_err(JsError::from)?;
             Ok(JsValue::null())
-        })
-    }
-
-    /// list all connect peers
-    pub fn list_peers(&self) -> js_sys::Promise {
-        let p = self.processor.clone();
-        future_to_promise(async move {
-            let peers = p
-                .swarm
-                .get_connections()
-                .into_iter()
-                .flat_map(|(did, conn)| {
-                    JsValue::try_from(&Peer::new(did, conn.webrtc_connection_state()))
-                });
-
-            let js_array = js_sys::Array::from_iter(peers);
-            Ok(js_array.into())
         })
     }
 
@@ -316,15 +256,6 @@ impl Provider {
         })
     }
 
-    /// disconnect all connected nodes
-    pub fn disconnect_all(&self) -> js_sys::Promise {
-        let p = self.processor.clone();
-        future_to_promise(async move {
-            p.disconnect_all().await;
-            Ok(JsValue::from_str("ok"))
-        })
-    }
-
     /// send custom message to peer.
     pub fn send_message(&self, destination: String, msg: js_sys::Uint8Array) -> js_sys::Promise {
         let p = self.processor.clone();
@@ -334,56 +265,6 @@ impl Provider {
                 .await
                 .map_err(JsError::from)?;
             Ok(JsValue::from_bool(true))
-        })
-    }
-
-    /// get peer by address
-    pub fn get_peer(&self, address: String, addr_type: Option<AddressType>) -> js_sys::Promise {
-        let p = self.processor.clone();
-        future_to_promise(async move {
-            let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
-            match p.swarm.get_connection(did) {
-                None => Ok(JsValue::null()),
-                Some(conn) => {
-                    let peer = Peer::new(did, conn.webrtc_connection_state());
-                    Ok(JsValue::try_from(&peer)?)
-                }
-            }
-        })
-    }
-
-    /// wait for connection connected
-    /// * address: peer's address
-    pub fn wait_for_connected(
-        &self,
-        address: String,
-        addr_type: Option<AddressType>,
-    ) -> js_sys::Promise {
-        self.wait_for_data_channel_open(address, addr_type)
-    }
-
-    /// wait for data channel open
-    ///   * address: peer's address
-    pub fn wait_for_data_channel_open(
-        &self,
-        address: String,
-        addr_type: Option<AddressType>,
-    ) -> js_sys::Promise {
-        let p = self.processor.clone();
-        future_to_promise(async move {
-            let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
-            let conn = p
-                .swarm
-                .get_connection(did)
-                .ok_or_else(|| JsError::new("peer not found"))?;
-
-            log::debug!("wait_for_data_channel_open start");
-            if let Err(e) = conn.webrtc_wait_for_data_channel_open().await {
-                log::warn!("wait_for_data_channel_open failed: {}", e);
-            }
-
-            log::debug!("wait_for_data_channel_open done");
-            Ok(JsValue::null())
         })
     }
 

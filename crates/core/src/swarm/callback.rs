@@ -6,18 +6,17 @@ use futures::lock::Mutex as FuturesMutex;
 use rings_transport::core::callback::TransportCallback;
 use rings_transport::core::transport::WebrtcConnectionState;
 
-use crate::channels::Channel;
 use crate::chunk::ChunkList;
 use crate::chunk::ChunkManager;
 use crate::consts::TRANSPORT_MTU;
 use crate::dht::Did;
+use crate::message::HandleMsg;
 use crate::message::Message;
+use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
-use crate::types::channel::Channel as ChannelTrait;
-use crate::types::channel::TransportEvent;
+use crate::swarm::transport::SwarmTransport;
 
-type TransportEventSender = <Channel<TransportEvent> as ChannelTrait<TransportEvent>>::Sender;
 type CallbackError = Box<dyn std::error::Error>;
 
 /// The [InnerSwarmCallback] will accept shared [SwarmCallback] trait object.
@@ -64,22 +63,19 @@ pub trait SwarmCallback {
 
 /// [InnerSwarmCallback] wraps [SharedSwarmCallback] with inner handling for a specific connection.
 pub struct InnerSwarmCallback {
-    did: Did,
-    transport_event_sender: TransportEventSender,
+    transport: Arc<SwarmTransport>,
+    message_handler: MessageHandler,
     callback: SharedSwarmCallback,
-    chunk_list: Arc<FuturesMutex<ChunkList<TRANSPORT_MTU>>>,
+    chunk_list: FuturesMutex<ChunkList<TRANSPORT_MTU>>,
 }
 
 impl InnerSwarmCallback {
-    /// Create a new [InnerSwarmCallback] with the provided did, transport_event_sender and callback.
-    pub fn new(
-        did: Did,
-        transport_event_sender: TransportEventSender,
-        callback: SharedSwarmCallback,
-    ) -> Self {
+    /// Create a new [InnerSwarmCallback] with the provided transport and callback.
+    pub fn new(transport: Arc<SwarmTransport>, callback: SharedSwarmCallback) -> Self {
+        let message_handler = MessageHandler::new(transport.clone(), callback.clone());
         Self {
-            did,
-            transport_event_sender,
+            transport,
+            message_handler,
             callback,
             chunk_list: Default::default(),
         }
@@ -92,14 +88,44 @@ impl InnerSwarmCallback {
     ) -> Result<(), CallbackError> {
         let message: Message = payload.transaction.data()?;
 
-        if let Message::Chunk(msg) = message {
-            if let Some(data) = self.chunk_list.lock().await.handle(msg.clone()) {
-                return self.on_message(cid, &data).await;
+        match &message {
+            Message::ConnectNodeSend(ref msg) => self.message_handler.handle(payload, msg).await,
+            Message::ConnectNodeReport(ref msg) => self.message_handler.handle(payload, msg).await,
+            Message::FindSuccessorSend(ref msg) => self.message_handler.handle(payload, msg).await,
+            Message::FindSuccessorReport(ref msg) => {
+                self.message_handler.handle(payload, msg).await
             }
-            return Ok(());
-        };
+            Message::NotifyPredecessorSend(ref msg) => {
+                self.message_handler.handle(payload, msg).await
+            }
+            Message::NotifyPredecessorReport(ref msg) => {
+                self.message_handler.handle(payload, msg).await
+            }
+            Message::SearchVNode(ref msg) => self.message_handler.handle(payload, msg).await,
+            Message::FoundVNode(ref msg) => self.message_handler.handle(payload, msg).await,
+            Message::SyncVNodeWithSuccessor(ref msg) => {
+                self.message_handler.handle(payload, msg).await
+            }
+            Message::OperateVNode(ref msg) => self.message_handler.handle(payload, msg).await,
+            Message::CustomMessage(ref msg) => self.message_handler.handle(payload, msg).await,
+            Message::QueryForTopoInfoSend(ref msg) => {
+                self.message_handler.handle(payload, msg).await
+            }
+            Message::QueryForTopoInfoReport(ref msg) => {
+                self.message_handler.handle(payload, msg).await
+            }
+            Message::Chunk(ref msg) => {
+                if let Some(data) = self.chunk_list.lock().await.handle(msg.clone()) {
+                    return self.on_message(cid, &data).await;
+                }
+                Ok(())
+            }
+        }
+        .unwrap_or_else(|e| {
+            tracing::error!("Failed to handle_payload: {:?}", e);
+        });
 
-        if payload.transaction.destination == self.did {
+        if payload.transaction.destination == self.transport.dht.did {
             self.callback.on_inbound(payload).await?;
         }
 
@@ -117,14 +143,6 @@ impl TransportCallback for InnerSwarmCallback {
             return Err("Cannot verify msg or it's expired".into());
         }
         self.callback.on_validate(&payload).await?;
-
-        Channel::send(
-            &self.transport_event_sender,
-            TransportEvent::DataChannelMessage(msg.into()),
-        )
-        .await
-        .map_err(Box::new)?;
-
         self.handle_payload(cid, &payload).await
     }
 
@@ -139,22 +157,44 @@ impl TransportCallback for InnerSwarmCallback {
         };
 
         match s {
-            WebrtcConnectionState::Connected => {
-                Channel::send(&self.transport_event_sender, TransportEvent::Connected(did)).await
-            }
             WebrtcConnectionState::Failed
             | WebrtcConnectionState::Disconnected
             | WebrtcConnectionState::Closed => {
-                Channel::send(&self.transport_event_sender, TransportEvent::Closed(did)).await
+                self.message_handler.leave_dht(did).await?;
             }
-            _ => Ok(()),
-        }
-        .map_err(Box::new)?;
+            _ => {}
+        };
 
+        // Should use the `on_data_channel_open` function to notify the Connected state.
+        // It prevents users from blocking the channel creation while
+        // waiting for data channel opening in send_message.
+        if s != WebrtcConnectionState::Connected {
+            self.callback
+                .on_event(&SwarmEvent::ConnectionStateChange {
+                    peer: did,
+                    state: s,
+                })
+                .await?
+        }
+
+        Ok(())
+    }
+
+    async fn on_data_channel_open(&self, cid: &str) -> Result<(), CallbackError> {
+        let Ok(did) = Did::from_str(cid) else {
+            tracing::warn!("on_data_channel_open parse did failed: {}", cid);
+            return Ok(());
+        };
+
+        self.message_handler.join_dht(did).await?;
+
+        // Notify Connected state here instead of on_peer_connection_state_change.
+        // It prevents users from blocking the channel creation while
+        // waiting for data channel opening in send_message.
         self.callback
             .on_event(&SwarmEvent::ConnectionStateChange {
-                peer: did,
-                state: s,
+                peer: self.transport.dht.did,
+                state: WebrtcConnectionState::Connected,
             })
             .await
     }

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use rings_core::dht::Did;
@@ -89,11 +90,11 @@ async fn main() {
     .unwrap();
     println!("<=== ConnectPeerViaHttpResponse: {:?}", resp);
 
-    let remote_did = resp.peer.unwrap().did;
+    let remote_did = resp.did;
 
     let connected = 'connected: {
         for _ in 0..10 {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
 
             println!("===> request ListPeers api...");
             let resp: ListPeersResponse = serde_json::from_value(
@@ -132,5 +133,5 @@ async fn main() {
     println!("<=== SendBackendMessage: {:?}", resp);
 
     // Wait for message sent.
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
 }

@@ -11,7 +11,7 @@ message ConnectPeerViaHttpRequest {
 }
 
 message ConnectPeerViaHttpResponse {
-    PeerInfo peer = 1;
+    string did = 1;
 }
 
 message ConnectWithDidRequest {
@@ -57,9 +57,7 @@ message AcceptAnswerRequest {
     string answer = 1;
 }
 
-message AcceptAnswerResponse {
-    PeerInfo peer = 1;
-}
+message AcceptAnswerResponse {}
 
 message DisconnectRequest {
     string did = 1;

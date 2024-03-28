@@ -4,10 +4,19 @@
 
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
+use rings_core::dht::Did;
+use rings_core::dht::VNodeStorage;
+use rings_core::measure::MeasureImpl;
+use rings_core::message::Encoded;
+use rings_core::message::Encoder;
+use rings_core::message::Message;
+use rings_core::prelude::uuid;
 use rings_core::storage::MemStorage;
+use rings_core::swarm::Swarm;
+use rings_core::swarm::SwarmBuilder;
 use rings_rpc::protos::rings_node::*;
-use rings_transport::core::transport::ConnectionInterface;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -16,18 +25,6 @@ use crate::consts::DATA_REDUNDANT;
 use crate::error::Error;
 use crate::error::Result;
 use crate::measure::PeriodicMeasure;
-use crate::prelude::rings_core::dht::Did;
-use crate::prelude::rings_core::dht::Stabilization;
-use crate::prelude::rings_core::dht::TStabilize;
-use crate::prelude::rings_core::dht::VNodeStorage;
-use crate::prelude::rings_core::message::Encoded;
-use crate::prelude::rings_core::message::Encoder;
-use crate::prelude::rings_core::message::Message;
-use crate::prelude::rings_core::message::PayloadSender;
-use crate::prelude::rings_core::prelude::uuid;
-use crate::prelude::rings_core::swarm::MeasureImpl;
-use crate::prelude::rings_core::swarm::Swarm;
-use crate::prelude::rings_core::swarm::SwarmBuilder;
 use crate::prelude::vnode;
 use crate::prelude::wasm_export;
 use crate::prelude::ChordStorageInterface;
@@ -45,19 +42,19 @@ pub struct ProcessorConfig {
     external_address: Option<String>,
     /// [SessionSk].
     session_sk: SessionSk,
-    /// Stabilization timeout.
-    stabilize_timeout: u64,
+    /// Stabilization interval.
+    stabilize_interval: Duration,
 }
 
 #[wasm_export]
 impl ProcessorConfig {
     /// Creates a new `ProcessorConfig` instance without an external address.
-    pub fn new(ice_servers: String, session_sk: SessionSk, stabilize_timeout: u64) -> Self {
+    pub fn new(ice_servers: String, session_sk: SessionSk, stabilize_interval: u64) -> Self {
         Self {
             ice_servers,
             external_address: None,
             session_sk,
-            stabilize_timeout,
+            stabilize_interval: Duration::from_secs(stabilize_interval),
         }
     }
 
@@ -65,14 +62,14 @@ impl ProcessorConfig {
     pub fn new_with_ext_addr(
         ice_servers: String,
         session_sk: SessionSk,
-        stabilize_timeout: u64,
+        stabilize_interval: u64,
         external_address: String,
     ) -> Self {
         Self {
             ice_servers,
             external_address: Some(external_address),
             session_sk,
-            stabilize_timeout,
+            stabilize_interval: Duration::from_secs(stabilize_interval),
         }
     }
 
@@ -101,18 +98,18 @@ pub struct ProcessorConfigSerialized {
     external_address: Option<String>,
     /// A string representing the dumped `SessionSk`.
     session_sk: String,
-    /// An unsigned integer representing the stabilization timeout.
-    stabilize_timeout: u64,
+    /// An unsigned integer representing the stabilization interval in seconds.
+    stabilize_interval: u64,
 }
 
 impl ProcessorConfigSerialized {
     /// Creates a new `ProcessorConfigSerialized` instance without an external address.
-    pub fn new(ice_servers: String, session_sk: String, stabilize_timeout: u64) -> Self {
+    pub fn new(ice_servers: String, session_sk: String, stabilize_interval: u64) -> Self {
         Self {
             ice_servers,
             external_address: None,
             session_sk,
-            stabilize_timeout,
+            stabilize_interval,
         }
     }
 
@@ -120,14 +117,14 @@ impl ProcessorConfigSerialized {
     pub fn new_with_ext_addr(
         ice_servers: String,
         session_sk: String,
-        stabilize_timeout: u64,
+        stabilize_interval: u64,
         external_address: String,
     ) -> Self {
         Self {
             ice_servers,
             external_address: Some(external_address),
             session_sk,
-            stabilize_timeout,
+            stabilize_interval,
         }
     }
 }
@@ -139,7 +136,7 @@ impl TryFrom<ProcessorConfig> for ProcessorConfigSerialized {
             ice_servers: ins.ice_servers.clone(),
             external_address: ins.external_address.clone(),
             session_sk: ins.session_sk.dump()?,
-            stabilize_timeout: ins.stabilize_timeout,
+            stabilize_interval: ins.stabilize_interval.as_secs(),
         })
     }
 }
@@ -151,7 +148,7 @@ impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
             ice_servers: ins.ice_servers.clone(),
             external_address: ins.external_address.clone(),
             session_sk: SessionSk::from_str(&ins.session_sk)?,
-            stabilize_timeout: ins.stabilize_timeout,
+            stabilize_interval: Duration::from_secs(ins.stabilize_interval),
         })
     }
 }
@@ -191,7 +188,7 @@ pub struct ProcessorBuilder {
     session_sk: SessionSk,
     storage: Option<VNodeStorage>,
     measure: Option<MeasureImpl>,
-    stabilize_timeout: u64,
+    stabilize_interval: Duration,
 }
 
 /// Processor for rings-node rpc server
@@ -199,8 +196,7 @@ pub struct ProcessorBuilder {
 pub struct Processor {
     /// a swarm instance
     pub swarm: Arc<Swarm>,
-    /// a stabilization instance,
-    pub stabilization: Arc<Stabilization>,
+    stabilize_interval: Duration,
 }
 
 impl ProcessorBuilder {
@@ -219,7 +215,7 @@ impl ProcessorBuilder {
             session_sk: config.session_sk.clone(),
             storage: None,
             measure: None,
-            stabilize_timeout: config.stabilize_timeout,
+            stabilize_interval: config.stabilize_interval,
         })
     }
 
@@ -254,25 +250,11 @@ impl ProcessorBuilder {
             swarm_builder = swarm_builder.measure(measure);
         }
         let swarm = Arc::new(swarm_builder.build());
-        let stabilization = Arc::new(Stabilization::new(swarm.clone(), self.stabilize_timeout));
 
         Ok(Processor {
             swarm,
-            stabilization,
+            stabilize_interval: self.stabilize_interval,
         })
-    }
-}
-
-impl Processor {
-    /// Listen processor message
-    pub async fn listen(&self) {
-        let swarm = self.swarm.clone();
-        let message_listener = async { swarm.listen().await };
-
-        let stb = self.stabilization.clone();
-        let stabilization = async { stb.wait().await };
-
-        futures::future::join(message_listener, stabilization).await;
     }
 }
 
@@ -282,19 +264,19 @@ impl Processor {
         self.swarm.did()
     }
 
+    /// Run stabilization daemon
+    pub async fn listen(&self) {
+        let stabilizer = self.swarm.stabilizer();
+        Arc::new(stabilizer).wait(self.stabilize_interval).await
+    }
+
     /// Connect peer with web3 did.
     /// There are 3 peers: PeerA, PeerB, PeerC.
     /// 1. PeerA has a connection with PeerB.
     /// 2. PeerC has a connection with PeerB.
     /// 3. PeerC can connect PeerA with PeerA's web3 address.
-    pub async fn connect_with_did(&self, did: Did, wait_for_open: bool) -> Result<()> {
-        let conn = self.swarm.connect(did).await.map_err(Error::ConnectError)?;
-        if wait_for_open {
-            tracing::debug!("wait for connection connected");
-            conn.webrtc_wait_for_data_channel_open()
-                .await
-                .map_err(|e| Error::ConnectError(rings_core::error::Error::Transport(e)))?;
-        }
+    pub async fn connect_with_did(&self, did: Did) -> Result<()> {
+        self.swarm.connect(did).await.map_err(Error::ConnectError)?;
         Ok(())
     }
 
@@ -304,18 +286,6 @@ impl Processor {
             .disconnect(did)
             .await
             .map_err(Error::CloseConnectionError)
-    }
-
-    /// Disconnect all connections.
-    pub async fn disconnect_all(&self) {
-        let dids = self.swarm.get_connection_ids();
-
-        let close_async = dids
-            .into_iter()
-            .map(|did| self.swarm.disconnect(did))
-            .collect::<Vec<_>>();
-
-        futures::future::join_all(close_async).await;
     }
 
     /// Send custom message to a did.
@@ -404,8 +374,6 @@ impl Processor {
 mod test {
     use futures::lock::Mutex;
     use rings_core::swarm::callback::SwarmCallback;
-    use rings_core::swarm::impls::ConnectionHandshake;
-    use rings_transport::core::transport::WebrtcConnectionState;
 
     use super::*;
     use crate::prelude::*;
@@ -416,9 +384,9 @@ mod test {
         let peer_did = SecretKey::random().address().into();
         let processor = prepare_processor().await;
         processor.swarm.create_offer(peer_did).await.unwrap();
-        let conn_dids = processor.swarm.get_connection_ids();
+        let conn_dids = processor.swarm.peers();
         assert_eq!(conn_dids.len(), 1);
-        assert_eq!(conn_dids.first().unwrap(), &peer_did);
+        assert_eq!(conn_dids.first().unwrap().did, peer_did.to_string());
     }
 
     struct SwarmCallbackInstance {
@@ -464,52 +432,43 @@ mod test {
         println!("p1_did: {}", did1);
         println!("p2_did: {}", did2);
 
-        let swarm1 = p1.swarm.clone();
-        let swarm2 = p2.swarm.clone();
-        tokio::spawn(async { swarm1.listen().await });
-        tokio::spawn(async { swarm2.listen().await });
-
-        let (conn1, offer) = p1.swarm.create_offer(p2.did()).await.unwrap();
+        let offer = p1.swarm.create_offer(p2.did()).await.unwrap();
         assert_eq!(
             p1.swarm
-                .get_connection(p2.did())
+                .peers()
+                .into_iter()
+                .find(|peer| peer.did == p2.did().to_string())
                 .unwrap()
-                .webrtc_connection_state(),
-            WebrtcConnectionState::New,
+                .state,
+            "New"
         );
 
-        let (conn2, answer) = p2.swarm.answer_offer(offer).await.unwrap();
-        let (peer_did, _) = p1.swarm.accept_answer(answer).await.unwrap();
-        assert_eq!(
-            peer_did, did2,
-            "peer.address got {}, expect: {}",
-            peer_did, did2
-        );
+        let answer = p2.swarm.answer_offer(offer).await.unwrap();
+        p1.swarm.accept_answer(answer).await.unwrap();
 
         println!("waiting for connection");
-        conn1.webrtc_wait_for_data_channel_open().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
-        assert!(conn1.is_connected().await, "conn1 not connected");
-        assert!(
+        assert_eq!(
             p1.swarm
-                .get_connection(p2.did())
+                .peers()
+                .into_iter()
+                .find(|peer| peer.did == p2.did().to_string())
                 .unwrap()
-                .is_connected()
-                .await,
+                .state,
+            "Connected",
             "p1 connection not connected"
         );
-        assert!(conn2.is_connected().await, "conn2 not connected");
-        assert!(
+        assert_eq!(
             p2.swarm
-                .get_connection(p1.did())
+                .peers()
+                .into_iter()
+                .find(|peer| peer.did == p1.did().to_string())
                 .unwrap()
-                .is_connected()
-                .await,
+                .state,
+            "Connected",
             "p2 connection not connected"
         );
-
-        println!("waiting for data channel ready");
-        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
 
         let test_text1 = "test1";
         let test_text2 = "test2";
@@ -518,14 +477,11 @@ mod test {
         let uuid1 = p1.send_message(did2, test_text1.as_bytes()).await.unwrap();
         println!("send_message 1 done, msg id: {}", uuid1);
 
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
         println!("send_message 2");
         let uuid2 = p2.send_message(did1, test_text2.as_bytes()).await.unwrap();
         println!("send_message 2 done, msg id: {}", uuid2);
 
-        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         println!("check received");
 
         let mut msgs2 = callback2.msgs.try_lock().unwrap();

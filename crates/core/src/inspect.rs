@@ -1,4 +1,3 @@
-use rings_transport::core::transport::ConnectionInterface;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -10,7 +9,7 @@ use crate::swarm::Swarm;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SwarmInspect {
-    pub connections: Vec<ConnectionInspect>,
+    pub peers: Vec<ConnectionInspect>,
     pub dht: DHTInspect,
     pub persistence_storage: StorageInspect,
     pub cache_storage: StorageInspect,
@@ -39,22 +38,12 @@ pub struct StorageInspect {
 impl SwarmInspect {
     pub async fn inspect(swarm: &Swarm) -> Self {
         let dht = DHTInspect::inspect(&swarm.dht());
-        let connections = {
-            let connections = swarm.get_connections();
-
-            connections
-                .iter()
-                .map(|(did, c)| ConnectionInspect {
-                    did: did.to_string(),
-                    state: format!("{:?}", c.ice_connection_state()),
-                })
-                .collect()
-        };
+        let peers = swarm.peers();
         let persistence_storage = StorageInspect::inspect_kv_storage(&swarm.dht().storage).await;
         let cache_storage = StorageInspect::inspect_kv_storage(&swarm.dht().cache).await;
 
         Self {
-            connections,
+            peers,
             dht,
             persistence_storage,
             cache_storage,

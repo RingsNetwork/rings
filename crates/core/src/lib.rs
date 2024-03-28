@@ -60,7 +60,6 @@
 //! ```
 #![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
 
-pub mod channels;
 pub mod dht;
 pub mod ecc;
 pub mod error;
@@ -72,7 +71,6 @@ pub mod storage;
 pub mod swarm;
 #[cfg(test)]
 mod tests;
-pub mod types;
 pub mod utils;
 pub use async_trait::async_trait;
 pub use futures;

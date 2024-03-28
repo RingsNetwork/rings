@@ -22,7 +22,6 @@ pub use handlers::storage::ChordStorageInterfaceCacheChecker;
 pub use handlers::subring::SubringInterface;
 pub use handlers::HandleMsg;
 pub use handlers::MessageHandler;
-pub use handlers::MessageHandlerEvent;
 
 mod protocols;
 pub use protocols::MessageRelay;

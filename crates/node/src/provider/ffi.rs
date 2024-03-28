@@ -222,7 +222,7 @@ pub extern "C" fn request(
 #[no_mangle]
 pub unsafe extern "C" fn new_provider_with_callback(
     ice_server: *const c_char,
-    stabilize_timeout: u64,
+    stabilize_interval: u64,
     account: *const c_char,
     account_type: *const c_char,
     signer: extern "C" fn(*const c_char, *mut c_char) -> (),
@@ -255,7 +255,7 @@ pub unsafe extern "C" fn new_provider_with_callback(
 
         executor::block_on(Provider::new_provider_internal(
             ice,
-            stabilize_timeout,
+            stabilize_interval,
             acc,
             acc_ty,
             Signer::Sync(Box::new(wrapped_signer(signer))),

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use tokio_util::sync::CancellationToken;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::data_channel_state::RTCDataChannelState;
 use webrtc::data_channel::RTCDataChannel;
@@ -29,6 +30,7 @@ use crate::notifier::Notifier;
 use crate::pool::Pool;
 
 const WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT: u8 = 8; // seconds
+const WEBRTC_GATHER_TIMEOUT: u8 = 60; // seconds
 
 /// A connection that implemented by webrtc-rs library.
 /// Used for native environment.
@@ -36,6 +38,7 @@ pub struct WebrtcConnection {
     webrtc_conn: RTCPeerConnection,
     webrtc_data_channel: Arc<RTCDataChannel>,
     webrtc_data_channel_state_notifier: Notifier,
+    cancel_token: CancellationToken,
 }
 
 /// [WebrtcTransport] manages all the [WebrtcConnection] and
@@ -56,15 +59,23 @@ impl WebrtcConnection {
             webrtc_conn,
             webrtc_data_channel,
             webrtc_data_channel_state_notifier,
+            cancel_token: CancellationToken::new(),
         }
     }
 
     async fn webrtc_gather(&self) -> Result<String> {
-        self.webrtc_conn
-            .gathering_complete_promise()
-            .await
-            .recv()
-            .await;
+        let mut gathering_complete_promise = self.webrtc_conn.gathering_complete_promise().await;
+        let gathering_complete_promise_with_timeout = tokio::time::timeout(
+            std::time::Duration::from_secs(WEBRTC_GATHER_TIMEOUT.into()),
+            gathering_complete_promise.recv(),
+        );
+
+        tokio::select! {
+            _ = self.cancel_token.cancelled() => {
+                return Err(Error::WebrtcLocalSdpGenerationError("Local connection closed".to_string()))
+            }
+            _ = gathering_complete_promise_with_timeout => {}
+        }
 
         Ok(self
             .webrtc_conn
@@ -168,6 +179,8 @@ impl ConnectionInterface for WebrtcConnection {
             .set_timeout(WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT);
         self.webrtc_data_channel_state_notifier.clone().await;
 
+        dbg!(self.webrtc_data_channel.ready_state());
+
         if self.webrtc_data_channel.ready_state() == RTCDataChannelState::Open {
             return Ok(());
         } else {
@@ -178,6 +191,7 @@ impl ConnectionInterface for WebrtcConnection {
     }
 
     async fn close(&self) -> Result<()> {
+        self.cancel_token.cancel();
         self.webrtc_conn.close().await.map_err(|e| e.into())
     }
 }
@@ -245,8 +259,7 @@ impl TransportInterface for WebrtcTransport {
 
             let on_open_inner_cb = data_channel_inner_cb.clone();
             d.on_open(Box::new(move || {
-                on_open_inner_cb.on_data_channel_open();
-                Box::pin(async move {})
+                Box::pin(async move { on_open_inner_cb.on_data_channel_open().await })
             }));
 
             let on_close_inner_cb = data_channel_inner_cb.clone();
