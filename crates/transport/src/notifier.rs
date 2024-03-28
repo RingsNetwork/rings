@@ -33,7 +33,7 @@ impl Notifier {
     }
 
     /// Wake the notifier after the specified time.
-    #[cfg(not(feature = "web-sys-webrtc"))]
+    #[cfg(feature = "native-webrtc")]
     pub fn set_timeout(&self, seconds: u8) {
         let this = self.clone();
         tokio::spawn(async move {
