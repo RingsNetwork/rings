@@ -272,8 +272,6 @@ impl TransportInterface for WebrtcTransport {
         ));
 
         let channel_pool = Arc::new(RoundRobinPool::default());
-        // because all element in RoundRobinPool are wrapped with ARC
-        // this clone is equal as Arc<channel_pool>
         let channel_pool_ref = channel_pool.clone();
         let data_channel_inner_cb = inner_cb.clone();
         webrtc_conn.on_data_channel(Box::new(move |d: Arc<RTCDataChannel>| {
