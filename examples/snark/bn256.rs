@@ -54,7 +54,7 @@ async fn main() {
 
     assert_eq!(recursive_circuits.len(), 3);
     // init pp with ouptn inputs
-    let pp = snark::SNARK::<E1, E2>::gen_pp::<S1, S2>(circuit_0.clone());
+    let pp = snark::SNARK::<E1, E2>::gen_pp::<S1, S2>(circuit_0.clone()).unwrap();
     let mut rec_snark_iter = snark::SNARK::<E1, E2>::new(
         &recursive_circuits[0].clone(),
         &pp,
