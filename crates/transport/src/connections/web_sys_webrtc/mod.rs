@@ -71,7 +71,7 @@ impl StatusPool<RtcDataChannel> for RoundRobinPool<RtcDataChannel> {
 /// Used for browser environment.
 pub struct WebSysWebrtcConnection {
     webrtc_conn: RtcPeerConnection,
-    webrtc_data_channel: RoundRobinPool<RtcDataChannel>,
+    webrtc_data_channel: Arc<RoundRobinPool<RtcDataChannel>>,
     webrtc_data_channel_state_notifier: Notifier,
 }
 
@@ -85,7 +85,7 @@ pub struct WebSysWebrtcTransport {
 impl WebSysWebrtcConnection {
     fn new(
         webrtc_conn: RtcPeerConnection,
-        webrtc_data_channel: RoundRobinPool<RtcDataChannel>,
+        webrtc_data_channel: Arc<RoundRobinPool<RtcDataChannel>>,
         webrtc_data_channel_state_notifier: Notifier,
     ) -> Self {
         Self {
@@ -296,9 +296,7 @@ impl TransportInterface for WebSysWebrtcTransport {
         ));
 
         let data_channel_inner_cb = inner_cb.clone();
-        let channel_pool = RoundRobinPool::default();
-        // because all element in RoundRobinPool are wrapped with ARC
-        // this clone is equal as Arc<channel_pool>
+        let channel_pool = Arc::new(RoundRobinPool::default());
         let channel_pool_ref = channel_pool.clone();
 
         let on_data_channel = Box::new(move |ev: RtcDataChannelEvent| {

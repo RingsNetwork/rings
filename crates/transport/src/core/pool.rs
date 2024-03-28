@@ -7,11 +7,8 @@
 
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::sync::RwLock;
-
 use async_trait::async_trait;
-
 use crate::error::Error;
 use crate::error::Result;
 
@@ -33,17 +30,16 @@ pub trait RoundRobin<T> {
 /// This structure provides a concrete round-robin pooling mechanism, supporting the sequential
 /// selection of resources. It's generic over the resource type, requiring only that they implement
 /// the `Clone` trait, thus ensuring wide applicability to various types of resources.
-#[derive(Clone)]
 pub struct RoundRobinPool<T: Clone> {
-    pool: Arc<RwLock<Vec<T>>>,
-    idx: Arc<AtomicUsize>,
+    pool: RwLock<Vec<T>>,
+    idx: AtomicUsize,
 }
 
 impl<T: Clone> Default for RoundRobinPool<T> {
     fn default() -> Self {
         Self {
-            pool: Arc::new(RwLock::new(vec![])),
-            idx: Arc::new(AtomicUsize::from(0)),
+            pool: RwLock::new(vec![]),
+            idx: AtomicUsize::from(0),
         }
     }
 }
@@ -55,8 +51,8 @@ impl<T: Clone> RoundRobinPool<T> {
     /// This is the entry point for creating a pool and managing resource selection in a round-robin fashion.
     pub fn from_vec(conns: Vec<T>) -> Self {
         Self {
-            pool: Arc::new(RwLock::new(conns)),
-            idx: Arc::new(AtomicUsize::from(0)),
+            pool: RwLock::new(conns),
+            idx: AtomicUsize::from(0),
         }
     }
 

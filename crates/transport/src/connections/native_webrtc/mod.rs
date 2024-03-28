@@ -63,7 +63,7 @@ impl StatusPool<Arc<RTCDataChannel>> for RoundRobinPool<Arc<RTCDataChannel>> {
 /// Used for native environment.
 pub struct WebrtcConnection {
     webrtc_conn: RTCPeerConnection,
-    webrtc_data_channel: RoundRobinPool<Arc<RTCDataChannel>>,
+    webrtc_data_channel: Arc<RoundRobinPool<Arc<RTCDataChannel>>>,
     webrtc_data_channel_state_notifier: Notifier,
     cancel_token: CancellationToken,
 }
@@ -79,7 +79,7 @@ pub struct WebrtcTransport {
 impl WebrtcConnection {
     fn new(
         webrtc_conn: RTCPeerConnection,
-        webrtc_data_channel: RoundRobinPool<Arc<RTCDataChannel>>,
+        webrtc_data_channel: Arc<RoundRobinPool<Arc<RTCDataChannel>>>,
         webrtc_data_channel_state_notifier: Notifier,
     ) -> Self {
         Self {
@@ -271,7 +271,7 @@ impl TransportInterface for WebrtcTransport {
             webrtc_data_channel_state_notifier.clone(),
         ));
 
-        let channel_pool = RoundRobinPool::default();
+        let channel_pool = Arc::new(RoundRobinPool::default());
         // because all element in RoundRobinPool are wrapped with ARC
         // this clone is equal as Arc<channel_pool>
         let channel_pool_ref = channel_pool.clone();
