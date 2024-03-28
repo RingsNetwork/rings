@@ -48,7 +48,7 @@ const DATA_CHANNEL_POOL_SIZE: u8 = 4;
 impl MessageSenderPool<RtcDataChannel> for RoundRobinPool<RtcDataChannel> {
     type Message = TransportMessage;
     async fn send(&self, msg: TransportMessage) -> Result<()> {
-        let channel = self.select();
+        let channel = self.select()?;
         let data = bincode::serialize(&msg)?;
         if let Err(e) = channel
             .send_with_u8_array(&data)
@@ -62,10 +62,8 @@ impl MessageSenderPool<RtcDataChannel> for RoundRobinPool<RtcDataChannel> {
 }
 
 impl StatusPool<RtcDataChannel> for RoundRobinPool<RtcDataChannel> {
-    fn all_ready(&self) -> bool {
-        self.all()
-            .iter()
-            .all(|c| c.ready_state() == RtcDataChannelState::Open)
+    fn all_ready(&self) -> Result<bool> {
+        self.all(|c| c.ready_state() == RtcDataChannelState::Open)
     }
 }
 
@@ -233,7 +231,7 @@ impl ConnectionInterface for WebSysWebrtcConnection {
             return Err(Error::DataChannelOpen("Connection unavailable".to_string()));
         }
 
-        if self.webrtc_data_channel.all_ready() {
+        if self.webrtc_data_channel.all_ready()? {
             return Ok(());
         }
 
@@ -241,7 +239,7 @@ impl ConnectionInterface for WebSysWebrtcConnection {
             .set_timeout(WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT);
         self.webrtc_data_channel_state_notifier.clone().await;
 
-        if self.webrtc_data_channel.all_ready() {
+        if self.webrtc_data_channel.all_ready()? {
             return Ok(());
         } else {
             return Err(Error::DataChannelOpen(format!(
@@ -298,16 +296,26 @@ impl TransportInterface for WebSysWebrtcTransport {
         ));
 
         let data_channel_inner_cb = inner_cb.clone();
+        let channel_pool = RoundRobinPool::default();
+        // because all element in RoundRobinPool are wrapped with ARC
+        // this clone is equal as Arc<channel_pool>
+        let channel_pool_ref = channel_pool.clone();
+
         let on_data_channel = Box::new(move |ev: RtcDataChannelEvent| {
             let d = ev.channel();
             let d_label = d.label();
             tracing::debug!("New DataChannel {d_label}");
-
+            let channel_pool = channel_pool_ref.clone();
             let on_open_inner_cb = data_channel_inner_cb.clone();
             let on_open = Box::new(move || {
+                let channel_pool = channel_pool.clone();
                 let inner_cb = on_open_inner_cb.clone();
                 spawn_local(async move {
-                    inner_cb.on_data_channel_open().await;
+                    // check all channels are ready
+                    // trigger on_data_channel_open callback iff all channels ready (open)
+                    if let Ok(true) = channel_pool.all_ready() {
+                        inner_cb.on_data_channel_open().await;
+                    }
                 })
             });
 
@@ -391,10 +399,9 @@ impl TransportInterface for WebSysWebrtcTransport {
         //
         // Create data channel
         //
-        let mut channel_pool = vec![];
         for i in 0..DATA_CHANNEL_POOL_SIZE {
             let ch = webrtc_conn.create_data_channel(&format!("rings_data_channel_{}", i));
-            channel_pool.push(ch);
+            channel_pool.push(ch)?;
         }
 
         //
@@ -402,7 +409,7 @@ impl TransportInterface for WebSysWebrtcTransport {
         //
         let conn = WebSysWebrtcConnection::new(
             webrtc_conn,
-            RoundRobinPool::from_vec(channel_pool),
+            channel_pool,
             webrtc_data_channel_state_notifier,
         );
 

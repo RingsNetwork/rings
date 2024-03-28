@@ -7,9 +7,12 @@
 
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::RwLock;
 
 use async_trait::async_trait;
 
+use crate::error::Error;
 use crate::error::Result;
 
 /// Defines the behavior for managing resources in a round-robin manner.
@@ -19,10 +22,10 @@ use crate::error::Result;
 /// managing a collection of elements (e.g., network connections, data channels) efficiently is crucial.
 pub trait RoundRobin<T> {
     /// Selects a resource from the pool, ensuring it is in a ready state for use.
-    fn select(&self) -> T;
+    fn select(&self) -> Result<T>;
 
-    /// Provides a reference to all resources within the pool.
-    fn all(&self) -> &Vec<T>;
+    /// Check if all contained element of pool match the statement.
+    fn all(&self, statement: fn(&T) -> bool) -> Result<bool>;
 }
 
 /// Implements a round-robin pool for resources that can be cloned.
@@ -30,9 +33,19 @@ pub trait RoundRobin<T> {
 /// This structure provides a concrete round-robin pooling mechanism, supporting the sequential
 /// selection of resources. It's generic over the resource type, requiring only that they implement
 /// the `Clone` trait, thus ensuring wide applicability to various types of resources.
+#[derive(Clone)]
 pub struct RoundRobinPool<T: Clone> {
-    pool: Vec<T>,
-    idx: AtomicUsize,
+    pool: Arc<RwLock<Vec<T>>>,
+    idx: Arc<AtomicUsize>,
+}
+
+impl<T: Clone> Default for RoundRobinPool<T> {
+    fn default() -> Self {
+        Self {
+            pool: Arc::new(RwLock::new(vec![])),
+            idx: Arc::new(AtomicUsize::from(0)),
+        }
+    }
 }
 
 impl<T: Clone> RoundRobinPool<T> {
@@ -42,9 +55,19 @@ impl<T: Clone> RoundRobinPool<T> {
     /// This is the entry point for creating a pool and managing resource selection in a round-robin fashion.
     pub fn from_vec(conns: Vec<T>) -> Self {
         Self {
-            pool: conns,
-            idx: AtomicUsize::from(0),
+            pool: Arc::new(RwLock::new(conns)),
+            idx: Arc::new(AtomicUsize::from(0)),
         }
+    }
+
+    /// Push a item with type T to the pool, this operator will increate the pool size
+    pub fn push(&self, item: T) -> Result<()> {
+        let mut pool = self
+            .pool
+            .write()
+            .map_err(|_| Error::RwLockWrite("Failed to write RR pool".to_string()))?;
+        pool.push(item);
+        Ok(())
     }
 }
 
@@ -54,8 +77,12 @@ impl<T: Clone> RoundRobin<T> for RoundRobinPool<T> {
     /// Safely increments the internal index to cycle through resources, ensuring each is selected
     /// sequentially. The method ensures thread-safety and atomicity in its operations, suitable for
     /// concurrent environments.
-    fn select(&self) -> T {
-        let len = self.pool.len();
+    fn select(&self) -> Result<T> {
+        let pool = self
+            .pool
+            .read()
+            .map_err(|_| Error::RwLockRead("Failed to read RR pool when selecting".to_string()))?;
+        let len = pool.len();
         let idx = self
             .idx
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |x| {
@@ -63,15 +90,20 @@ impl<T: Clone> RoundRobin<T> for RoundRobinPool<T> {
             })
             .expect("Unable to update index for round-robin selection.");
 
-        self.pool[idx].clone()
+        Ok(pool[idx].clone())
     }
 
     /// Accesses all resources pooled, potentially for inspection or bulk operations.
     ///
     /// Offers direct access to the pool's underlying resources, enabling operations that require knowledge
     /// or manipulation of the entire collection of resources.
-    fn all(&self) -> &Vec<T> {
-        &self.pool
+    fn all(&self, statement: fn(&T) -> bool) -> Result<bool> {
+        let pool = self.pool.read().map_err(|_| {
+            Error::RwLockRead(
+                "Failed to read RR pool when fetching all contained element".to_string(),
+            )
+        })?;
+        Ok(pool.iter().all(statement))
     }
 }
 
@@ -108,7 +140,7 @@ pub trait StatusPool<T>: RoundRobin<T> {
     ///
     /// Determines whether every resource in the pool is ready for operations, facilitating decision-making
     /// processes in resource management and task allocation.
-    fn all_ready(&self) -> bool;
+    fn all_ready(&self) -> Result<bool>;
 }
 
 #[cfg(test)]
@@ -118,12 +150,12 @@ pub mod tests {
     #[test]
     fn test_rr_pool() {
         let pool = RoundRobinPool::<usize>::from_vec(vec![1, 2, 3, 4]);
-        assert_eq!(pool.select(), 1);
-        assert_eq!(pool.select(), 2);
-        assert_eq!(pool.select(), 3);
-        assert_eq!(pool.select(), 4);
-        assert_eq!(pool.select(), 1);
-        assert_eq!(pool.select(), 2);
-        assert_eq!(pool.select(), 3);
+        assert_eq!(pool.select().unwrap(), 1);
+        assert_eq!(pool.select().unwrap(), 2);
+        assert_eq!(pool.select().unwrap(), 3);
+        assert_eq!(pool.select().unwrap(), 4);
+        assert_eq!(pool.select().unwrap(), 1);
+        assert_eq!(pool.select().unwrap(), 2);
+        assert_eq!(pool.select().unwrap(), 3);
     }
 }
