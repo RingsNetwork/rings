@@ -2735,7 +2735,7 @@ dependencies = [
 [[package]]
 name = "nova-snark"
 version = "0.34.0"
-source = "git+https://github.com/RingsNetwork/nova?rev=d77b65437575d392977cf85ca556b562bf207203#d77b65437575d392977cf85ca556b562bf207203"
+source = "git+https://github.com/RingsNetwork/Rings-Nova?rev=95a65981b009dceb2f6b0bf2fe706110ac4d2a0e#95a65981b009dceb2f6b0bf2fe706110ac4d2a0e"
 dependencies = [
  "bellpepper",
  "bellpepper-core",
