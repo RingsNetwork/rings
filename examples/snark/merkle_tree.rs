@@ -65,7 +65,7 @@ pub async fn merkle_tree_path_proof() {
 
     let start = Instant::now();
     // init pp with ouptn inputs
-    let pp = snark::SNARK::<E1, E2>::gen_pp::<S1, S2>(circuit_0.clone());
+    let pp = snark::SNARK::<E1, E2>::gen_pp::<S1, S2>(circuit_0.clone()).unwrap();
     println!("gen public parasm, took {:?} ", start.elapsed());
 
     let start = Instant::now();

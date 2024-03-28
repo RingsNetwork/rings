@@ -266,9 +266,7 @@ impl Field {
                 value: FieldEnum::Pallas(<provider::PallasEngine as Engine>::Scalar::from(v)),
             },
             SupportedPrimeField::Bn256KZG => Self {
-                value: FieldEnum::Bn256KZG(
-                    <provider::Bn256EngineKZG as Engine>::Scalar::from(v),
-                ),
+                value: FieldEnum::Bn256KZG(<provider::Bn256EngineKZG as Engine>::Scalar::from(v)),
             },
         }
     }
@@ -910,12 +908,8 @@ impl From<SNARKGenerator<provider::VestaEngine, provider::PallasEngine>> for SNA
     }
 }
 
-impl From<SNARKGenerator<provider::Bn256EngineKZG, provider::GrumpkinEngine>>
-    for SNARKProofTask
-{
-    fn from(
-        snark: SNARKGenerator<provider::Bn256EngineKZG, provider::GrumpkinEngine>,
-    ) -> Self {
+impl From<SNARKGenerator<provider::Bn256EngineKZG, provider::GrumpkinEngine>> for SNARKProofTask {
+    fn from(snark: SNARKGenerator<provider::Bn256EngineKZG, provider::GrumpkinEngine>) -> Self {
         Self::Bn256KZGGrumpkin(snark)
     }
 }

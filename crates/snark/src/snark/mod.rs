@@ -153,7 +153,7 @@ where
             S1::ck_floor().deref(),
             S2::ck_floor().deref(),
         )?;
-	Ok(pp.into())
+        Ok(pp.into())
     }
 
     /// Create public params with circom, and public input
