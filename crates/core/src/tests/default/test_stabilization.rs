@@ -116,7 +116,7 @@ async fn test_stabilization_final_dht() -> Result<()> {
         swarms.push(node.swarm.clone());
         let stabilizer = Arc::new(node.swarm.stabilizer());
         nodes.push(node);
-        tokio::spawn(stabilizer.wait(Duration::from_secs(3)));
+        tokio::spawn(stabilizer.wait(Duration::from_secs(1)));
     }
 
     let swarm1 = Arc::clone(&swarms[0]);
