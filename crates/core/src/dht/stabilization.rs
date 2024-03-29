@@ -96,12 +96,8 @@ impl Stabilizer {
         if self.dht.did != successor_min {
             for s in successor_list {
                 tracing::debug!("STABILIZATION notify_predecessor: {:?}", s);
-                let payload = MessagePayload::new_send(
-                    msg.clone(),
-                    self.transport.session_sk(),
-                    s,
-                    self.dht.did,
-                )?;
+                let payload =
+                    MessagePayload::new_send(msg.clone(), self.transport.session_sk(), s, s)?;
                 self.transport.send_payload(payload).await?;
             }
             Ok(())
