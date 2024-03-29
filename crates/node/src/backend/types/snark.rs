@@ -1,6 +1,6 @@
 //! Backend message types for SNARK
 //! ==============================
-use rings_snark::prelude::nova::provider::hyperkzg::Bn256EngineKZG;
+use rings_snark::prelude::nova::provider::Bn256EngineKZG;
 use rings_snark::prelude::nova::provider::GrumpkinEngine;
 use rings_snark::prelude::nova::provider::PallasEngine;
 use rings_snark::prelude::nova::provider::VestaEngine;

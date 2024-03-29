@@ -13,7 +13,7 @@ llvm = ["wasmer-compiler-llvm"]
 
 [dependencies]
 # https://github.com/microsoft/Nova
-nova-snark = { git = "https://github.com/RingsNetwork/Rings-Nova", version = "0.34", rev = "95a65981b009dceb2f6b0bf2fe706110ac4d2a0e" }
+# nova-snark = { git = "https://github.com/RingsNetwork/Rings-Nova", version = "0.34", rev = "95a65981b009dceb2f6b0bf2fe706110ac4d2a0e" }
 
 ff = { version = "0.13", features = ["derive"] }
 
@@ -40,10 +40,12 @@ thiserror = "1"
 eyre = "0.6.11"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+nova-snark = { version = "0.35" }
 wasmer = "4.2.5"
 wasmer-compiler-llvm = { version = "4.1.1", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+nova-snark = { version = "0.35", features = ["portable"], default-features = false }
 wasmer = { version = "4.2.5", features = ["js-default"], default-features = false }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
