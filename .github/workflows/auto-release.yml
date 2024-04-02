@@ -236,12 +236,9 @@ jobs:
         id: git-cliff
         with:
           config: cliff.toml
-          args: -vv --latest --strip header
-        env:
-          OUTPUT: CHANGES.md
+          args: "-vv --strip header ${{ needs.gen_version.outputs.version == 'prerelease' && '--unreleased' || '--latest' }}"
 
       - uses: actions/download-artifact@v3
-
       - name: Display fetched artifacts
         run: ls -R
 
