@@ -93,7 +93,7 @@ impl Provider {
     /// Ice_servers should obey forrmat: "[turn|strun]://<Address>:<Port>;..."
     /// Account is hex string
     /// Account should format as same as account_type declared
-    /// Account_type is lowercase string, possible input are: `eip191`, `ed25519`, `bip137`, for more imformation,
+    /// Account_type is lowercase string, possible input are: `eip191`, `ed25519`, `bip137`, for more information,
     /// please check [rings_core::ecc]
     /// Signer should accept a String and returns bytes.
     /// Signer should function as same as account_type declared, Eg: eip191 or secp256k1 or ed25519.

@@ -151,7 +151,7 @@ struct RunCommand {
     #[arg(
         long,
         default_value = "200000000",
-        help = "Storage capcity. If not provider, use storage.capacity in config file or 200000000",
+        help = "Storage capacity. If not provider, use storage.capacity in config file or 200000000",
         env
     )]
     pub storage_capacity: Option<u32>,
