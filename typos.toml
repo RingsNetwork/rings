@@ -1,0 +1,2 @@
+[type.rust]
+extend-ignore-re = ["[wW]s", "WS"]

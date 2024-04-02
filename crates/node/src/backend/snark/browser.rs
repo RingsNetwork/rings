@@ -286,12 +286,12 @@ impl Input {
         let data: Vec<(String, Vec<Field>)> = input
             .into_iter()
             .map(|s| {
-                let lst = js_sys::Array::from(&s);
-                let p = lst
+                let last = js_sys::Array::from(&s);
+                let p = last
                     .get(0)
                     .as_string()
                     .expect("first argument should be string like");
-                let v: Vec<Field> = js_sys::Array::from(&lst.get(1))
+                let v: Vec<Field> = js_sys::Array::from(&last.get(1))
                     .into_iter()
                     .map(|p| {
                         bigint_to_field(p.into(), field.clone())
