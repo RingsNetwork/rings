@@ -32,8 +32,8 @@ async fn test_handshake_on_both_sides(key1: SecretKey, key2: SecretKey, key3: Se
     // connect to middle peer
     manually_establish_connection(&node1.swarm, &node3.swarm).await;
     manually_establish_connection(&node2.swarm, &node3.swarm).await;
-    wait_for_msgs(&node1, &node2, &node3).await;
-    assert_no_more_msg(&node1, &node2, &node3).await;
+    wait_for_msgs([&node1, &node2, &node3]).await;
+    assert_no_more_msg([&node1, &node2, &node3]).await;
 
     assert_eq!(
         node3
@@ -100,8 +100,8 @@ async fn test_handshake_on_both_sides(key1: SecretKey, key2: SecretKey, key3: Se
         WebrtcConnectionState::New,
     );
 
-    wait_for_msgs(&node1, &node2, &node3).await;
-    assert_no_more_msg(&node1, &node2, &node3).await;
+    wait_for_msgs([&node1, &node2, &node3]).await;
+    assert_no_more_msg([&node1, &node2, &node3]).await;
 
     // When node 1 got offer, node 1 may accept offer if did 1 < did 2, drop local connection
     // and response answer
