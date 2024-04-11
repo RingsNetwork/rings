@@ -3,6 +3,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use futures::lock::Mutex;
+use futures::stream::FuturesUnordered;
+use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tokio::time::Duration;
@@ -125,71 +127,62 @@ pub fn gen_sorted_dht(s: usize) -> Vec<PeerRing> {
     ret
 }
 
-pub async fn assert_no_more_msg(node1: &Node, node2: &Node, node3: &Node) {
+pub async fn assert_no_more_msg(nodes: impl IntoIterator<Item = &Node>) {
+    let did_names: DashMap<Did, String> = DashMap::new();
+    let mut listeners = vec![];
+
+    for (i, node) in nodes.into_iter().enumerate() {
+        let name = format!("node{}", i + 1);
+        did_names.insert(node.did(), name);
+
+        listeners.push(async {
+            let payload = node.listen_once().await.unwrap();
+            format!(
+                "{} should not receive any Msg, but got Msg {} -> {} [{} => {}] : {:?}",
+                *did_names.get(&node.did()).unwrap(),
+                *did_names.get(&payload.signer()).unwrap(),
+                *did_names.get(&node.did()).unwrap(),
+                *did_names.get(&payload.transaction.signer()).unwrap(),
+                *did_names.get(&payload.transaction.destination).unwrap(),
+                payload.transaction.data::<Message>().unwrap()
+            )
+        });
+    }
+
+    let mut listeners = FuturesUnordered::from_iter(listeners);
+
     tokio::select! {
-        _ = node1.listen_once() => unreachable!("node1 should not receive any message"),
-        _ = node2.listen_once() => unreachable!("node2 should not receive any message"),
-        _ = node3.listen_once() => unreachable!("node3 should not receive any message"),
+        error_msg = listeners.next() => unreachable!("{}", error_msg.unwrap()),
         _ = sleep(Duration::from_secs(3)) => {}
     }
 }
 
-pub async fn wait_for_msgs(node1: &Node, node2: &Node, node3: &Node) {
-    let did_names: DashMap<Did, &str, _> = DashMap::new();
-    did_names.insert(node1.did(), "node1");
-    did_names.insert(node2.did(), "node2");
-    did_names.insert(node3.did(), "node3");
+pub async fn wait_for_msgs(nodes: impl IntoIterator<Item = &Node>) {
+    let did_names: DashMap<Did, String> = DashMap::new();
+    let mut listeners = vec![];
 
-    let listen1 = async {
-        loop {
-            tokio::select! {
-                Some(payload) = node1.listen_once() => {
-                    println!(
-                        "Msg {} -> node1 [{} => {}] : {:?}",
+    for (i, node) in nodes.into_iter().enumerate() {
+        let name = format!("node{}", i + 1);
+        did_names.insert(node.did(), name);
+
+        listeners.push(async {
+            loop {
+                tokio::select! {
+                    Some(payload) = node.listen_once() => {
+                        println!(
+                        "Msg {} -> {} [{} => {}] : {:?}",
                         *did_names.get(&payload.signer()).unwrap(),
+                        *did_names.get(&node.did()).unwrap(),
                         *did_names.get(&payload.transaction.signer()).unwrap(),
                         *did_names.get(&payload.transaction.destination).unwrap(),
                         payload.transaction.data::<Message>().unwrap()
-                    )
+                        )
+                    }
+                    _ = sleep(Duration::from_secs(3)) => break
                 }
-                _ = sleep(Duration::from_secs(3)) => break
             }
-        }
-    };
+        });
+    }
 
-    let listen2 = async {
-        loop {
-            tokio::select! {
-                Some(payload) = node2.listen_once() => {
-                    println!(
-                        "Msg {} -> node2 [{} => {}] : {:?}",
-                        *did_names.get(&payload.signer()).unwrap(),
-                        *did_names.get(&payload.transaction.signer()).unwrap(),
-                        *did_names.get(&payload.transaction.destination).unwrap(),
-                        payload.transaction.data::<Message>().unwrap()
-                    )
-                }
-                _ = sleep(Duration::from_secs(3)) => break
-            }
-        }
-    };
-
-    let listen3 = async {
-        loop {
-            tokio::select! {
-                Some(payload) = node3.listen_once() => {
-                    println!(
-                        "Msg {} -> node3 [{} => {}] : {:?}",
-                        *did_names.get(&payload.signer()).unwrap(),
-                        *did_names.get(&payload.transaction.signer()).unwrap(),
-                        *did_names.get(&payload.transaction.destination).unwrap(),
-                        payload.transaction.data::<Message>().unwrap()
-                    )
-                }
-                _ = sleep(Duration::from_secs(3)) => break
-            }
-        }
-    };
-
-    futures::join!(listen1, listen2, listen3);
+    futures::future::join_all(listeners).await;
 }

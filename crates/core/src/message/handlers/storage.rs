@@ -287,17 +287,14 @@ mod test {
 
     #[tokio::test]
     async fn test_store_vnode() -> Result<()> {
-        let keys = gen_ordered_keys(3);
-        let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
+        let keys = gen_ordered_keys(2);
+        let (key1, key2) = (keys[0], keys[1]);
         let node1 = prepare_node(key1).await;
         let node2 = prepare_node(key2).await;
 
-        // This is only a dummy node for using assert_no_more_msg function
-        let node3 = prepare_node(key3).await;
-
         manually_establish_connection(&node1.swarm, &node2.swarm).await;
-        wait_for_msgs(&node1, &node2, &node3).await;
-        assert_no_more_msg(&node1, &node2, &node3).await;
+        wait_for_msgs([&node1, &node2]).await;
+        assert_no_more_msg([&node1, &node2]).await;
 
         // Now, node1 is the successor of node2, and node2 is the successor of node1.
         // Following tests storing data on node2 and query it from node1.
@@ -366,17 +363,14 @@ mod test {
     #[cfg(not(feature = "redundant"))]
     #[tokio::test]
     async fn test_extend_data() -> Result<()> {
-        let keys = gen_ordered_keys(3);
-        let (key1, key2, key3) = (keys[0], keys[1], keys[2]);
+        let keys = gen_ordered_keys(2);
+        let (key1, key2) = (keys[0], keys[1]);
         let node1 = prepare_node(key1).await;
         let node2 = prepare_node(key2).await;
 
-        // This is only a dummy node for using assert_no_more_msg function
-        let node3 = prepare_node(key3).await;
-
         manually_establish_connection(&node1.swarm, &node2.swarm).await;
-        wait_for_msgs(&node1, &node2, &node3).await;
-        assert_no_more_msg(&node1, &node2, &node3).await;
+        wait_for_msgs([&node1, &node2]).await;
+        assert_no_more_msg([&node1, &node2]).await;
 
         // Now, node1 is the successor of node2, and node2 is the successor of node1.
         // Following tests storing data on node2 and query it from node1.
@@ -403,8 +397,8 @@ mod test {
         )
         .await
         .unwrap();
-        wait_for_msgs(&node1, &node2, &node3).await;
-        assert_no_more_msg(&node1, &node2, &node3).await;
+        wait_for_msgs([&node1, &node2]).await;
+        assert_no_more_msg([&node1, &node2]).await;
 
         <Swarm as ChordStorageInterface<1>>::storage_append_data(
             &node1.swarm,
@@ -413,8 +407,8 @@ mod test {
         )
         .await
         .unwrap();
-        wait_for_msgs(&node1, &node2, &node3).await;
-        assert_no_more_msg(&node1, &node2, &node3).await;
+        wait_for_msgs([&node1, &node2]).await;
+        assert_no_more_msg([&node1, &node2]).await;
 
         assert!(node1.swarm.storage_check_cache(vid).await.is_none());
         assert!(node2.swarm.storage_check_cache(vid).await.is_none());
@@ -426,8 +420,8 @@ mod test {
         <Swarm as ChordStorageInterface<1>>::storage_fetch(&node1.swarm, vid)
             .await
             .unwrap();
-        wait_for_msgs(&node1, &node2, &node3).await;
-        assert_no_more_msg(&node1, &node2, &node3).await;
+        wait_for_msgs([&node1, &node2]).await;
+        assert_no_more_msg([&node1, &node2]).await;
 
         assert_eq!(
             node1.swarm.storage_check_cache(vid).await,
@@ -446,16 +440,16 @@ mod test {
         )
         .await
         .unwrap();
-        wait_for_msgs(&node1, &node2, &node3).await;
-        assert_no_more_msg(&node1, &node2, &node3).await;
+        wait_for_msgs([&node1, &node2]).await;
+        assert_no_more_msg([&node1, &node2]).await;
 
         // test remote query agagin
         println!("vid is on node2 {:?}", node2.did());
         <Swarm as ChordStorageInterface<1>>::storage_fetch(&node1.swarm, vid)
             .await
             .unwrap();
-        wait_for_msgs(&node1, &node2, &node3).await;
-        assert_no_more_msg(&node1, &node2, &node3).await;
+        wait_for_msgs([&node1, &node2]).await;
+        assert_no_more_msg([&node1, &node2]).await;
 
         assert_eq!(
             node1.swarm.storage_check_cache(vid).await,
