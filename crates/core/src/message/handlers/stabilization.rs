@@ -172,30 +172,34 @@ mod test {
         ]);
         assert!(node3.dht().successors().list()?.contains(&node2.did()));
 
-        println!("=========================================");
-        println!("||  now we start second stabilization  ||");
-        println!("=========================================");
+        println!("==========================================");
+        println!("||  now we start 5 times stabilization  ||");
+        println!("==========================================");
 
-        run_stabilization_once(node1.swarm.clone()).await?;
-        run_stabilization_once(node2.swarm.clone()).await?;
-        run_stabilization_once(node3.swarm.clone()).await?;
+        for _ in 0..5 {
+            run_stabilization_once(node1.swarm.clone()).await?;
+            run_stabilization_once(node2.swarm.clone()).await?;
+            run_stabilization_once(node3.swarm.clone()).await?;
 
-        wait_for_msgs([&node1, &node2, &node3]).await;
-        assert_no_more_msg([&node1, &node2, &node3]).await;
+            wait_for_msgs([&node1, &node2, &node3]).await;
+            assert_no_more_msg([&node1, &node2, &node3]).await;
 
-        println!("=== Check state after second stabilization ===");
-        assert_eq!(node1.dht().successors().list()?, vec![
-            node2.did(),
-            node3.did()
-        ]);
-        assert_eq!(node2.dht().successors().list()?, vec![
-            node3.did(),
-            node1.did()
-        ]);
-        assert_eq!(node3.dht().successors().list()?, vec![
-            node1.did(),
-            node2.did()
-        ]);
+            println!("=== Check state after stabilization ===");
+            assert_eq!(node1.dht().successors().list()?, vec![
+                node2.did(),
+                node3.did()
+            ]);
+            assert_eq!(node2.dht().successors().list()?, vec![
+                node3.did(),
+                node1.did()
+            ]);
+            assert_eq!(node3.dht().successors().list()?, vec![
+                node1.did(),
+                node2.did()
+            ]);
+        }
+
+        println!("=== Check predecessor after all stabilization ===");
         assert_eq!(*node1.dht().lock_predecessor()?, Some(node3.did()));
         assert_eq!(*node2.dht().lock_predecessor()?, Some(node1.did()));
         assert_eq!(*node3.dht().lock_predecessor()?, Some(node2.did()));
@@ -257,55 +261,34 @@ mod test {
         ]);
         assert!(node3.dht().successors().list()?.contains(&node2.did()));
 
-        println!("=========================================");
-        println!("||  now we start second stabilization  ||");
-        println!("=========================================");
+        println!("==========================================");
+        println!("||  now we start 5 times stabilization  ||");
+        println!("==========================================");
 
-        run_stabilization_once(node1.swarm.clone()).await?;
-        run_stabilization_once(node2.swarm.clone()).await?;
-        run_stabilization_once(node3.swarm.clone()).await?;
+        for _ in 0..5 {
+            run_stabilization_once(node1.swarm.clone()).await?;
+            run_stabilization_once(node2.swarm.clone()).await?;
+            run_stabilization_once(node3.swarm.clone()).await?;
 
-        wait_for_msgs([&node1, &node2, &node3]).await;
-        assert_no_more_msg([&node1, &node2, &node3]).await;
+            wait_for_msgs([&node1, &node2, &node3]).await;
+            assert_no_more_msg([&node1, &node2, &node3]).await;
 
-        println!("=== Check state after second stabilization ===");
-        assert_eq!(node1.dht().successors().list()?, vec![
-            node3.did(),
-            node2.did()
-        ]);
-        assert_eq!(node2.dht().successors().list()?, vec![
-            node1.did(),
-            node3.did()
-        ]);
-        assert_eq!(node3.dht().successors().list()?, vec![
-            node2.did(),
-            node1.did()
-        ]);
+            println!("=== Check state after stabilization ===");
+            assert_eq!(node1.dht().successors().list()?, vec![
+                node3.did(),
+                node2.did()
+            ]);
+            assert_eq!(node2.dht().successors().list()?, vec![
+                node1.did(),
+                node3.did()
+            ]);
+            assert_eq!(node3.dht().successors().list()?, vec![
+                node2.did(),
+                node1.did()
+            ]);
+        }
 
-        println!("=========================================");
-        println!("||  now we start third stabilization   ||");
-        println!("=========================================");
-
-        run_stabilization_once(node1.swarm.clone()).await?;
-        run_stabilization_once(node2.swarm.clone()).await?;
-        run_stabilization_once(node3.swarm.clone()).await?;
-
-        wait_for_msgs([&node1, &node2, &node3]).await;
-        assert_no_more_msg([&node1, &node2, &node3]).await;
-
-        println!("=== Check state after third stabilization ===");
-        assert_eq!(node1.dht().successors().list()?, vec![
-            node3.did(),
-            node2.did()
-        ]);
-        assert_eq!(node2.dht().successors().list()?, vec![
-            node1.did(),
-            node3.did()
-        ]);
-        assert_eq!(node3.dht().successors().list()?, vec![
-            node2.did(),
-            node1.did()
-        ]);
+        println!("=== Check predecessor after all stabilization ===");
         assert_eq!(*node1.dht().lock_predecessor()?, Some(node2.did()));
         assert_eq!(*node2.dht().lock_predecessor()?, Some(node3.did()));
         assert_eq!(*node3.dht().lock_predecessor()?, Some(node1.did()));
