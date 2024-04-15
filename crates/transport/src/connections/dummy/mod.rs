@@ -7,6 +7,8 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use lazy_static::lazy_static;
 use rand::distributions::Distribution;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 use crate::callback::InnerTransportCallback;
 use crate::connection_ref::ConnectionRef;
@@ -22,24 +24,31 @@ use crate::notifier::Notifier;
 use crate::pool::Pool;
 
 /// Max delay in ms on sending message
-const DUMMY_DELAY_MAX: u64 = 1000;
+const DUMMY_DELAY_MAX: u64 = 100;
 /// Min delay in ms on sending message
-const DUMMY_DELAY_MIN: u64 = 100;
+const DUMMY_DELAY_MIN: u64 = 10;
 /// Config random delay when send message
 const SEND_MESSAGE_DELAY: bool = true;
-/// Config random delay when channel opening
-const CHANNEL_OPEN_DELAY: bool = false;
 
 lazy_static! {
-    static ref CBS: DashMap<String, Arc<InnerTransportCallback>> = DashMap::new();
     static ref CONNS: DashMap<String, Arc<DummyConnection>> = DashMap::new();
+}
+
+enum Event {
+    PeerConnectionStateChange(WebrtcConnectionState),
+    DataChannelOpen,
+    DataChannelClose,
+    Message(Bytes),
 }
 
 /// A dummy connection for local testing.
 /// Implements the [ConnectionInterface] trait with no real network.
 pub struct DummyConnection {
-    pub(crate) rand_id: String,
+    rand_id: String,
+    callback: InnerTransportCallback,
+    event_sender: mpsc::UnboundedSender<Event>,
     remote_rand_id: Arc<Mutex<Option<String>>>,
+    event_listener: JoinHandle<()>,
     webrtc_connection_state: Arc<Mutex<WebrtcConnectionState>>,
 }
 
@@ -50,23 +59,45 @@ pub struct DummyTransport {
 }
 
 impl DummyConnection {
-    fn new() -> Self {
+    fn new(callback: InnerTransportCallback) -> Self {
+        let rand_id = random(0, 10000000000).to_string();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        let event_listener = {
+            let rand_id = rand_id.clone();
+            tokio::spawn(async move {
+                while let Some(ev) = rx.recv().await {
+                    let conn = { CONNS.get(&rand_id).unwrap().clone() };
+                    conn.handle_event(ev).await;
+                }
+            })
+        };
+
         Self {
-            rand_id: random(0, 10000000000).to_string(),
-            remote_rand_id: Arc::new(Mutex::new(None)),
+            rand_id,
+            callback,
+            event_sender: tx,
+            remote_rand_id: Default::default(),
+            event_listener,
             webrtc_connection_state: Arc::new(Mutex::new(WebrtcConnectionState::New)),
         }
     }
 
-    fn callback(&self) -> Arc<InnerTransportCallback> {
-        CBS.get(&self.rand_id).unwrap().clone()
-    }
-
-    fn remote_callback(&self) -> Arc<InnerTransportCallback> {
-        let cid: String = { self.remote_rand_id.lock().unwrap() }.clone().unwrap();
-        CBS.get(&cid)
-            .expect(&format!("Failed to get cid {:?}", &cid))
-            .clone()
+    async fn handle_event(&self, event: Event) {
+        match event {
+            Event::PeerConnectionStateChange(state) => {
+                self.callback.on_peer_connection_state_change(state).await
+            }
+            Event::DataChannelOpen => self.callback.on_data_channel_open().await,
+            Event::DataChannelClose => self.callback.on_data_channel_close(),
+            Event::Message(data) => {
+                if SEND_MESSAGE_DELAY {
+                    random_delay().await;
+                }
+                self.callback.on_message(&data).await
+            }
+        }
     }
 
     fn remote_conn(&self) -> Option<Arc<DummyConnection>> {
@@ -92,18 +123,19 @@ impl DummyConnection {
             *webrtc_connection_state = state;
         }
 
-        self.callback().on_peer_connection_state_change(state).await;
+        self.event_sender
+            .send(Event::PeerConnectionStateChange(state))
+            .unwrap();
 
-        // Simulate the behavior where the data channel is not opened immediately upon connection,
-        // but rather after a certain number of milliseconds.
         if state == WebrtcConnectionState::Connected {
-            let cb = self.callback();
-            tokio::spawn(async move {
-                if CHANNEL_OPEN_DELAY {
-                    random_delay().await;
-                }
-                cb.on_data_channel_open().await;
-            });
+            self.event_sender.send(Event::DataChannelOpen).unwrap();
+        }
+
+        if matches!(
+            state,
+            WebrtcConnectionState::Closed | WebrtcConnectionState::Disconnected
+        ) {
+            self.event_sender.send(Event::DataChannelClose).unwrap();
         }
     }
 }
@@ -123,12 +155,15 @@ impl ConnectionInterface for DummyConnection {
     type Error = Error;
 
     async fn send_message(&self, msg: TransportMessage) -> Result<()> {
-        if SEND_MESSAGE_DELAY {
-            random_delay().await;
-        }
         self.webrtc_wait_for_data_channel_open().await?;
+
         let data = bincode::serialize(&msg).map(Bytes::from)?;
-        self.remote_callback().on_message(&data).await;
+        self.remote_conn()
+            .unwrap()
+            .event_sender
+            .send(Event::Message(data))
+            .unwrap();
+
         Ok(())
     }
 
@@ -170,10 +205,6 @@ impl ConnectionInterface for DummyConnection {
     }
 
     async fn webrtc_wait_for_data_channel_open(&self) -> Result<()> {
-        if CHANNEL_OPEN_DELAY {
-            random_delay().await;
-        }
-
         // Will pass if the state is connecting to prevent release connection in the `test_handshake_on_both_sides` test.
         // The connecting state means an offer is answered but not accepted by the other side.
         if matches!(
@@ -189,6 +220,9 @@ impl ConnectionInterface for DummyConnection {
     }
 
     async fn close(&self) -> Result<()> {
+        CONNS.remove(&self.rand_id);
+        self.event_listener.abort();
+
         self.set_webrtc_connection_state(WebrtcConnectionState::Closed)
             .await;
 
@@ -225,19 +259,14 @@ impl TransportInterface for DummyTransport {
             }
         }
 
-        let conn = DummyConnection::new();
-        let conn_rand_id = conn.rand_id.clone();
+        let inner_callback = InnerTransportCallback::new(cid, callback, Notifier::default());
+        let conn = DummyConnection::new(inner_callback);
 
         self.pool.safely_insert(cid, conn)?;
-        CONNS.insert(conn_rand_id.clone(), self.connection(cid)?.upgrade()?);
-        CBS.insert(
-            conn_rand_id.clone(),
-            Arc::new(InnerTransportCallback::new(
-                cid,
-                callback,
-                Notifier::default(),
-            )),
-        );
+
+        let conn = self.connection(cid)?.upgrade()?;
+        CONNS.insert(conn.rand_id.clone(), conn);
+
         Ok(())
     }
 

@@ -170,12 +170,12 @@ pub async fn wait_for_msgs(nodes: impl IntoIterator<Item = &Node>) {
                 tokio::select! {
                     Some(payload) = node.listen_once() => {
                         println!(
-                        "Msg {} -> {} [{} => {}] : {:?}",
-                        *did_names.get(&payload.signer()).unwrap(),
-                        *did_names.get(&node.did()).unwrap(),
-                        *did_names.get(&payload.transaction.signer()).unwrap(),
-                        *did_names.get(&payload.transaction.destination).unwrap(),
-                        payload.transaction.data::<Message>().unwrap()
+                            "Msg {} -> {} [{} => {}] : {:?}",
+                            *did_names.get(&payload.signer()).unwrap(),
+                            *did_names.get(&node.did()).unwrap(),
+                            *did_names.get(&payload.transaction.signer()).unwrap(),
+                            *did_names.get(&payload.transaction.destination).unwrap(),
+                            payload.transaction.data::<Message>().unwrap()
                         )
                     }
                     _ = sleep(Duration::from_secs(3)) => break
