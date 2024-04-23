@@ -6,6 +6,7 @@
   "description": "Rings is a structured peer-to-peer network implementation using WebRTC, Chord algorithm, and full WebAssembly (WASM) support.\n",
   "version": "0.6.1",
   "license": "GPL-3.0",
+  "type": "module",
   "repository": {
     "type": "git",
     "url": "https://github.com/RingsNetwork/rings-node"
