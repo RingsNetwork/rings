@@ -292,8 +292,8 @@ pub mod tests {
         println!("========================================");
 
         manually_establish_connection(&node1.swarm, &node2.swarm).await;
-        wait_for_msgs(&node1, &node2, &node3).await;
-        assert_no_more_msg(&node1, &node2, &node3).await;
+        wait_for_msgs([&node1, &node2, &node3]).await;
+        assert_no_more_msg([&node1, &node2, &node3]).await;
 
         node1.assert_transports(vec![node2.did()]);
         node2.assert_transports(vec![node1.did()]);
@@ -307,8 +307,8 @@ pub mod tests {
         println!("========================================");
 
         manually_establish_connection(&node3.swarm, &node2.swarm).await;
-        wait_for_msgs(&node1, &node2, &node3).await;
-        assert_no_more_msg(&node1, &node2, &node3).await;
+        wait_for_msgs([&node1, &node2, &node3]).await;
+        assert_no_more_msg([&node1, &node2, &node3]).await;
 
         println!("=== Check state before connect via DHT ===");
         node1.assert_transports(vec![node2.did()]);
@@ -331,8 +331,8 @@ pub mod tests {
         assert_eq!(node1.dht().successors().max()?, node2.did());
 
         node1.swarm.connect(node3.did()).await.unwrap();
-        wait_for_msgs(&node1, &node2, &node3).await;
-        assert_no_more_msg(&node1, &node2, &node3).await;
+        wait_for_msgs([&node1, &node2, &node3]).await;
+        assert_no_more_msg([&node1, &node2, &node3]).await;
 
         println!("=== Check state after connect via DHT ===");
         node1.assert_transports(vec![node2.did(), node3.did()]);
@@ -368,8 +368,8 @@ pub mod tests {
         println!("========================================");
 
         manually_establish_connection(&node1.swarm, &node2.swarm).await;
-        wait_for_msgs(&node1, &node2, &node3).await;
-        assert_no_more_msg(&node1, &node2, &node3).await;
+        wait_for_msgs([&node1, &node2, &node3]).await;
+        assert_no_more_msg([&node1, &node2, &node3]).await;
 
         assert_eq!(node1.dht().successors().list()?, vec![node2.did()]);
         assert_eq!(node2.dht().successors().list()?, vec![node1.did()]);
@@ -380,8 +380,8 @@ pub mod tests {
         println!("========================================");
 
         manually_establish_connection(&node3.swarm, &node2.swarm).await;
-        wait_for_msgs(&node1, &node2, &node3).await;
-        assert_no_more_msg(&node1, &node2, &node3).await;
+        wait_for_msgs([&node1, &node2, &node3]).await;
+        assert_no_more_msg([&node1, &node2, &node3]).await;
 
         println!("=== Check state before connect via DHT ===");
         node1.assert_transports(vec![node2.did()]);
@@ -404,8 +404,8 @@ pub mod tests {
         assert_eq!(node1.dht().successors().max()?, node2.did());
 
         node1.swarm.connect(node3.did()).await.unwrap();
-        wait_for_msgs(&node1, &node2, &node3).await;
-        assert_no_more_msg(&node1, &node2, &node3).await;
+        wait_for_msgs([&node1, &node2, &node3]).await;
+        assert_no_more_msg([&node1, &node2, &node3]).await;
 
         println!("=== Check state after connect via DHT ===");
         node1.assert_transports(vec![node2.did(), node3.did()]);
@@ -522,13 +522,9 @@ pub mod tests {
     async fn test_finger_when_disconnect() -> Result<()> {
         let key1 = SecretKey::random();
         let key2 = SecretKey::random();
-        let key3 = SecretKey::random();
 
         let node1 = prepare_node(key1).await;
         let node2 = prepare_node(key2).await;
-
-        // This is only a dummy node for using assert_no_more_msg function
-        let node3 = prepare_node(key3).await;
 
         {
             assert!(node1.dht().lock_finger()?.is_empty());
@@ -536,8 +532,8 @@ pub mod tests {
         }
 
         manually_establish_connection(&node1.swarm, &node2.swarm).await;
-        wait_for_msgs(&node1, &node2, &node3).await;
-        assert_no_more_msg(&node1, &node2, &node3).await;
+        wait_for_msgs([&node1, &node2]).await;
+        assert_no_more_msg([&node1, &node2]).await;
 
         node1.assert_transports(vec![node2.did()]);
         node2.assert_transports(vec![node1.did()]);
@@ -571,7 +567,7 @@ pub mod tests {
             }
         }
 
-        assert_no_more_msg(&node1, &node2, &node3).await;
+        assert_no_more_msg([&node1, &node2]).await;
 
         node1.assert_transports(vec![]);
         node2.assert_transports(vec![]);

@@ -152,7 +152,6 @@ impl SwarmTransport {
         };
 
         if let Err(e) = conn.connection.webrtc_wait_for_data_channel_open().await {
-            dbg!(&e);
             tracing::warn!(
                 "[get_and_check_connection] connection {peer} data channel not open, will be dropped, reason: {e:?}"
             );
