@@ -39,6 +39,7 @@ use crate::session::SessionSk;
 use crate::swarm::callback::InnerSwarmCallback;
 
 pub struct SwarmTransport {
+    pub(crate) network_id: u32,
     transport: Transport,
     session_sk: SessionSk,
     pub(crate) dht: Arc<PeerRing>,
@@ -54,6 +55,7 @@ pub struct SwarmConnection {
 
 impl SwarmTransport {
     pub fn new(
+        network_id: u32,
         ice_servers: &str,
         external_address: Option<String>,
         session_sk: SessionSk,
@@ -61,6 +63,7 @@ impl SwarmTransport {
         measure: Option<MeasureImpl>,
     ) -> Self {
         Self {
+            network_id,
             transport: Transport::new(ice_servers, external_address),
             session_sk,
             dht,
@@ -184,7 +187,10 @@ impl SwarmTransport {
 
         let offer = conn.webrtc_create_offer().await.map_err(Error::Transport)?;
         let offer_str = serde_json::to_string(&offer).map_err(|_| Error::SerializeToString)?;
-        let offer_msg = ConnectNodeSend { sdp: offer_str };
+        let offer_msg = ConnectNodeSend {
+            sdp: offer_str,
+            network_id: self.network_id,
+        };
 
         Ok(offer_msg)
     }
