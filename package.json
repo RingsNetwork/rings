@@ -6,7 +6,6 @@
   "description": "Rings is a structured peer-to-peer network implementation using WebRTC, Chord algorithm, and full WebAssembly (WASM) support.\n",
   "version": "0.6.1",
   "license": "GPL-3.0",
-  "type": "module",
   "repository": {
     "type": "git",
     "url": "https://github.com/RingsNetwork/rings-node"
@@ -14,16 +13,15 @@
   "scripts": {
     "wasm_pack": "wasm-pack build crates/node --release --scope ringsnetwork -t web --no-default-features --features browser_default --features console_error_panic_hook",
     "proto_generate": "mkdir -p dist && pbjs -t static-module --keep-case -o dist/rings_node_proto.js crates/rpc/src/protos/rings_node.proto && pbts -o dist/rings_node_proto.d.ts dist/rings_node_proto.js",
-    "prepare": "npm run wasm_pack && npm run proto_generate && cp crates/node/pkg/rings_node* ./dist && cp index.ts ./dist && tsc --target es6 --moduleResolution nodenext --module nodenext ./dist/index.ts"
+    "prepare": "npm run wasm_pack && npm run proto_generate && cp crates/node/pkg/rings_node* ./dist && cp index.ts ./dist && tsc ./dist/index.ts"
   },
   "dependencies": {
     "circomlib": "^2.0.5",
-    "protobufjs": "https://github.com/RingsNetwork/protobuf.js#83686a0",
-    "long": "^3.2.0"
+    "protobufjs": "https://github.com/RingsNetwork/protobuf.js#83686a0"
   },
   "devDependencies": {
     "protobufjs-cli": "^1.1.2",
-    "typescript": "^5"
+    "typescript": "^4.9.5"
   },
   "files": [
     "dist/"
