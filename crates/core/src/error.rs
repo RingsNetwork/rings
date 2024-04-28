@@ -88,6 +88,9 @@ pub enum Error {
     #[error("Failed on verify message signature")]
     VerifySignatureFailed,
 
+    #[error("ECDSA Invalid recover Id {0}")]
+    InvalidRecoverId(u8),
+
     #[error("Gzip encode error.")]
     GzipEncode,
 
