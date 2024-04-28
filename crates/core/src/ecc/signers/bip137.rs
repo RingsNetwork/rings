@@ -6,16 +6,34 @@ use sha2::Sha256;
 
 use crate::ecc::PublicKey;
 use crate::ecc::PublicKeyAddress;
+use crate::error::Error;
 use crate::error::Result;
 
 /// recover pubkey according to signature.
+/// | y-parity | x-order       | compression | recovery id | v  |
+/// |----------|---------------|-------------|-------------|----|
+/// | even     | less than n   | false       | 0           | 27 |
+/// | odd      | less than n   | false       | 1           | 28 |
+/// | even     | more than n   | false       | 2           | 29 |
+/// | odd      | more than n   | false       | 3           | 30 |
+/// | even     | less than n   | true        | 0           | 31 |
+/// | odd      | less than n   | true        | 1           | 32 |
+/// | even     | more than n   | true        | 2           | 33 |
+/// | odd      | more than n   | true        | 3           | 34 |
 pub fn recover(msg: &[u8], sig: impl AsRef<[u8]>) -> Result<PublicKey> {
     let mut sig = sig.as_ref().to_vec();
     sig.rotate_left(1);
     let sig = sig.as_mut_slice();
     let sig_byte = array_mut_ref![sig, 0, 65];
     let hash = self::magic_hash(msg);
-    sig_byte[64] -= 27;
+
+    if sig_byte[64] >= 27 && sig_byte[64] <= 30 {
+        sig_byte[64] -= 27;
+    } else if sig_byte[64] >= 31 && sig_byte[64] <= 34 {
+        sig_byte[64] -= 31;
+    } else {
+        return Err(Error::InvalidRecoverId(sig_byte[64]));
+    }
     crate::ecc::recover_hash(&hash, sig_byte)
 }
 
