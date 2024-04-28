@@ -27,6 +27,7 @@ pub async fn prepare_processor() -> Processor {
     let sm = SessionSk::new_with_seckey(&key).unwrap();
 
     let config = serde_yaml::to_string(&ProcessorConfig::new(
+        0,
         "stun://stun.l.google.com:19302".to_string(),
         sm,
         200,

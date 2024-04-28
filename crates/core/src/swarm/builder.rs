@@ -19,6 +19,7 @@ impl SwarmCallback for DefaultCallback {}
 
 /// Creates a SwarmBuilder to configure a Swarm.
 pub struct SwarmBuilder {
+    network_id: u32,
     ice_servers: String,
     external_address: Option<String>,
     dht_succ_max: u8,
@@ -31,8 +32,14 @@ pub struct SwarmBuilder {
 
 impl SwarmBuilder {
     /// Creates new instance of [SwarmBuilder]
-    pub fn new(ice_servers: &str, dht_storage: VNodeStorage, session_sk: SessionSk) -> Self {
+    pub fn new(
+        network_id: u32,
+        ice_servers: &str,
+        dht_storage: VNodeStorage,
+        session_sk: SessionSk,
+    ) -> Self {
         SwarmBuilder {
+            network_id,
             ice_servers: ice_servers.to_string(),
             external_address: None,
             dht_succ_max: 3,
@@ -91,6 +98,7 @@ impl SwarmBuilder {
         );
 
         let transport = Arc::new(SwarmTransport::new(
+            self.network_id,
             &self.ice_servers,
             self.external_address,
             self.session_sk,

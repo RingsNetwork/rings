@@ -29,6 +29,7 @@ lazy_static::lazy_static! {
   };
 }
 
+pub const DEFAULT_NETWORK_ID: u32 = 1;
 pub const DEFAULT_INTERNAL_API_PORT: u16 = 50000;
 pub const DEFAULT_EXTERNAL_API_ADDR: &str = "127.0.0.1:50001";
 pub const DEFAULT_ENDPOINT_URL: &str = "http://127.0.0.1:50000";
@@ -48,6 +49,7 @@ where P: AsRef<std::path::Path> {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
+    pub network_id: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ecdsa_key: Option<SecretKey>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -94,20 +96,20 @@ impl TryFrom<Config> for ProcessorConfigSerialized {
             })
         };
 
-        if let Some(ext_ip) = config.external_ip {
-            Ok(Self::new_with_ext_addr(
-                config.ice_servers,
-                session_sk,
-                config.stabilize_interval,
-                ext_ip,
-            ))
+        let mut cs = Self::new(
+            config.network_id,
+            config.ice_servers,
+            session_sk,
+            config.stabilize_interval,
+        );
+
+        cs = if let Some(ext_ip) = config.external_ip {
+            cs.external_address(ext_ip)
         } else {
-            Ok(Self::new(
-                config.ice_servers,
-                session_sk,
-                config.stabilize_interval,
-            ))
-        }
+            cs
+        };
+
+        Ok(cs)
     }
 }
 
@@ -132,6 +134,7 @@ impl Config {
     where P: AsRef<std::path::Path> {
         let session_sk = session_sk.as_ref().to_string_lossy().to_string();
         Self {
+            network_id: DEFAULT_NETWORK_ID,
             ecdsa_key: None,
             session_manager: None,
             session_sk: Some(session_sk),
@@ -191,6 +194,7 @@ mod tests {
     #[test]
     fn test_deserialization_with_missed_field() {
         let yaml = r#"
+network_id: 1
 session_sk: session_sk
 internal_api_port: 50000
 external_api_addr: 127.0.0.1:50001
