@@ -52,7 +52,9 @@ async fn main() {
     let sk = skb.build().unwrap();
 
     // Build processor
-    let config = ProcessorConfig::new("stun://stun.l.google.com:19302".to_string(), sk, 3);
+    let config = ProcessorConfig::new(0, "stun://stun.l.google.com:19302".to_string(), sk, 3);
+    println!("===> Use network_id: 0");
+
     let storage = Box::new(MemStorage::new());
     let processor = Arc::new(
         ProcessorBuilder::from_config(&config)

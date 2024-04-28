@@ -24,6 +24,9 @@ pub trait Then {
 pub struct ConnectNodeSend {
     /// sdp offer of webrtc
     pub sdp: String,
+    /// The network_id is used to distinguish different networks.
+    /// Use 1 for main network.
+    pub network_id: u32,
 }
 
 /// MessageType report to origin with own transport_uuid and handshake_info.

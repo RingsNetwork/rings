@@ -97,7 +97,9 @@ impl Provider {
     /// please check [rings_core::ecc]
     /// Signer should accept a String and returns bytes.
     /// Signer should function as same as account_type declared, Eg: eip191 or secp256k1 or ed25519.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn new_provider_internal(
+        network_id: u32,
         ice_servers: String,
         stabilize_interval: u64,
         account: String,
@@ -114,7 +116,7 @@ impl Provider {
         };
         sk_builder = sk_builder.set_session_sig(sig.to_vec());
         let session_sk = sk_builder.build().map_err(Error::InternalError)?;
-        let config = ProcessorConfig::new(ice_servers, session_sk, stabilize_interval);
+        let config = ProcessorConfig::new(network_id, ice_servers, session_sk, stabilize_interval);
         Self::new_provider_with_storage_internal(config, vnode_storage, measure_storage).await
     }
 

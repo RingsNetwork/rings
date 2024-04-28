@@ -80,6 +80,7 @@ impl Provider {
     /// Signer should function as same as account_type declared, Eg: eip191 or secp256k1 or ed25519.
     #[wasm_bindgen(constructor)]
     pub fn new_instance(
+        network_id: u32,
         ice_servers: String,
         stabilize_interval: u64,
         account: String,
@@ -124,6 +125,7 @@ impl Provider {
             );
 
             let provider = Provider::new_provider_internal(
+                network_id,
                 ice_servers,
                 stabilize_interval,
                 account,

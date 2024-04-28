@@ -36,6 +36,9 @@ use crate::prelude::SessionSk;
 #[derive(Clone, Debug)]
 #[wasm_export]
 pub struct ProcessorConfig {
+    /// The network_id is used to distinguish different networks.
+    /// Use 1 for main network.
+    network_id: u32,
     /// ICE servers for webrtc
     ice_servers: String,
     /// External address for webrtc
@@ -49,25 +52,16 @@ pub struct ProcessorConfig {
 #[wasm_export]
 impl ProcessorConfig {
     /// Creates a new `ProcessorConfig` instance without an external address.
-    pub fn new(ice_servers: String, session_sk: SessionSk, stabilize_interval: u64) -> Self {
-        Self {
-            ice_servers,
-            external_address: None,
-            session_sk,
-            stabilize_interval: Duration::from_secs(stabilize_interval),
-        }
-    }
-
-    /// Creates a new `ProcessorConfig` instance with an external address.
-    pub fn new_with_ext_addr(
+    pub fn new(
+        network_id: u32,
         ice_servers: String,
         session_sk: SessionSk,
         stabilize_interval: u64,
-        external_address: String,
     ) -> Self {
         Self {
+            network_id,
             ice_servers,
-            external_address: Some(external_address),
+            external_address: None,
             session_sk,
             stabilize_interval: Duration::from_secs(stabilize_interval),
         }
@@ -92,6 +86,9 @@ impl FromStr for ProcessorConfig {
 #[derive(Serialize, Deserialize, Clone)]
 #[wasm_export]
 pub struct ProcessorConfigSerialized {
+    /// The network_id is used to distinguish different networks.
+    /// Use 1 for main network.
+    network_id: u32,
     /// A string representing ICE servers for WebRTC
     ice_servers: String,
     /// An optional string representing the external address for WebRTC
@@ -104,8 +101,14 @@ pub struct ProcessorConfigSerialized {
 
 impl ProcessorConfigSerialized {
     /// Creates a new `ProcessorConfigSerialized` instance without an external address.
-    pub fn new(ice_servers: String, session_sk: String, stabilize_interval: u64) -> Self {
+    pub fn new(
+        network_id: u32,
+        ice_servers: String,
+        session_sk: String,
+        stabilize_interval: u64,
+    ) -> Self {
         Self {
+            network_id,
             ice_servers,
             external_address: None,
             session_sk,
@@ -113,19 +116,11 @@ impl ProcessorConfigSerialized {
         }
     }
 
-    /// Creates a new `ProcessorConfigSerialized` instance with an external address.
-    pub fn new_with_ext_addr(
-        ice_servers: String,
-        session_sk: String,
-        stabilize_interval: u64,
-        external_address: String,
-    ) -> Self {
-        Self {
-            ice_servers,
-            external_address: Some(external_address),
-            session_sk,
-            stabilize_interval,
-        }
+    /// Sets up the external address for WebRTC.
+    /// This will be used to configure the transport to listen for WebRTC connections in "HOST" mode.
+    pub fn external_address(mut self, external_address: String) -> Self {
+        self.external_address = Some(external_address);
+        self
     }
 }
 
@@ -133,6 +128,7 @@ impl TryFrom<ProcessorConfig> for ProcessorConfigSerialized {
     type Error = Error;
     fn try_from(ins: ProcessorConfig) -> Result<Self> {
         Ok(Self {
+            network_id: ins.network_id,
             ice_servers: ins.ice_servers.clone(),
             external_address: ins.external_address.clone(),
             session_sk: ins.session_sk.dump()?,
@@ -145,6 +141,7 @@ impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
     type Error = Error;
     fn try_from(ins: ProcessorConfigSerialized) -> Result<Self> {
         Ok(Self {
+            network_id: ins.network_id,
             ice_servers: ins.ice_servers.clone(),
             external_address: ins.external_address.clone(),
             session_sk: SessionSk::from_str(&ins.session_sk)?,
@@ -183,6 +180,7 @@ impl<'de> serde::de::Deserialize<'de> for ProcessorConfig {
 
 /// ProcessorBuilder is used to initialize a [Processor] instance.
 pub struct ProcessorBuilder {
+    network_id: u32,
     ice_servers: String,
     external_address: Option<String>,
     session_sk: SessionSk,
@@ -210,6 +208,7 @@ impl ProcessorBuilder {
     /// initialize a [ProcessorBuilder] with a [ProcessorConfig].
     pub fn from_config(config: &ProcessorConfig) -> Result<Self> {
         Ok(Self {
+            network_id: config.network_id,
             ice_servers: config.ice_servers.clone(),
             external_address: config.external_address.clone(),
             session_sk: config.session_sk.clone(),
@@ -240,7 +239,8 @@ impl ProcessorBuilder {
 
         let storage = self.storage.unwrap_or_else(|| Box::new(MemStorage::new()));
 
-        let mut swarm_builder = SwarmBuilder::new(&self.ice_servers, storage, self.session_sk);
+        let mut swarm_builder =
+            SwarmBuilder::new(self.network_id, &self.ice_servers, storage, self.session_sk);
 
         if let Some(external_address) = self.external_address {
             swarm_builder = swarm_builder.external_address(external_address);

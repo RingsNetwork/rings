@@ -30,7 +30,7 @@ pub async fn prepare_node(key: SecretKey) -> Arc<Swarm> {
             .unwrap(),
     );
 
-    let swarm = Arc::new(SwarmBuilder::new(stun, storage, session_sk).build());
+    let swarm = Arc::new(SwarmBuilder::new(0, stun, storage, session_sk).build());
 
     println!("key: {:?}", key.to_string());
     println!("did: {:?}", swarm.did());

@@ -58,6 +58,7 @@ def create_provider(acc,
     rings.init_logging(rings.Debug)
     callback = rings.new_ffi_backend_behaviour(on_paintext_message, on_service_message, on_extension_message)
     provider = rings.new_provider_with_callback(
+        0,
         "stun://stun.l.google.com".encode(),
         10,
         acc.address.encode(),

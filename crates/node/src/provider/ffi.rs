@@ -221,6 +221,7 @@ pub extern "C" fn request(
 /// * This function cast CStr into Str
 #[no_mangle]
 pub unsafe extern "C" fn new_provider_with_callback(
+    network_id: u32,
     ice_server: *const c_char,
     stabilize_interval: u64,
     account: *const c_char,
@@ -254,6 +255,7 @@ pub unsafe extern "C" fn new_provider_with_callback(
         let acc_ty: String = c_char_to_string(account_type)?;
 
         executor::block_on(Provider::new_provider_internal(
+            network_id,
             ice,
             stabilize_interval,
             acc,
