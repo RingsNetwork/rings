@@ -17,6 +17,7 @@ use rings_core::storage::idb::IdbStorage;
 use rings_core::utils::js_utils;
 use rings_core::utils::js_value;
 use rings_derive::wasm_export;
+use rings_rpc::method::Method;
 use rings_rpc::protos::rings_node::*;
 use wasm_bindgen;
 use wasm_bindgen::prelude::*;
@@ -281,14 +282,19 @@ impl Provider {
     }
 
     /// send custom message to peer.
-    pub fn send_message(&self, destination: String, msg: js_sys::Uint8Array) -> js_sys::Promise {
-        let p = self.processor.clone();
+    pub fn send_message(&self, destination: String, msg: String) -> js_sys::Promise {
+        let ins = self.clone();
         future_to_promise(async move {
-            let destination_did = get_did(destination.as_str(), AddressType::DEFAULT)?;
-            p.send_message(destination_did, &msg.to_vec())
-                .await
-                .map_err(JsError::from)?;
-            Ok(JsValue::from_bool(true))
+            let did = get_did(destination.as_str(), AddressType::DEFAULT)?;
+            let req: BackendMessage = BackendMessage::PlainText(msg);
+            let params = req.into_send_backend_message_request(did)?;
+            let ret = ins
+                .request_internal(
+                    Method::SendBackendMessage.to_string(),
+                    serde_json::to_value(params).map_err(JsError::from)?,
+                )
+                .await?;
+            Ok(js_value::serialize(&ret).map_err(JsError::from)?)
         })
     }
 
