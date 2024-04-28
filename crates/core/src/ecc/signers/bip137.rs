@@ -26,9 +26,10 @@ pub fn recover(msg: &[u8], sig: impl AsRef<[u8]>) -> Result<PublicKey> {
     let sig = sig.as_mut_slice();
     let sig_byte = array_mut_ref![sig, 0, 65];
     let hash = self::magic_hash(msg);
-    if sig_byte[64] >= 27 && sig_byte[64] <= 31 {
+
+    if sig_byte[64] >= 27 && sig_byte[64] <= 30 {
 	sig_byte[64] -= 27;
-    } else if sig_byte[64] >=32 && sig_byte[64] <= 34 {
+    } else if sig_byte[64] >=31 && sig_byte[64] <= 34 {
 	sig_byte[64] -= 31;
     } else {
 	return Err(Error::InvalidRecoverId(sig_byte[64]))
