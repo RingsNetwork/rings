@@ -290,7 +290,7 @@ impl Session {
             Account::Ed25519(ref pk) => {
                 signers::ed25519::verify(&auth_bytes, &pk.address(), &self.sig, pk)
             }
-	    Account::Secp256r1(ref pk) => {
+            Account::Secp256r1(ref pk) => {
                 signers::secp256r1::verify(&auth_bytes, &pk.address(), &self.sig, pk)
             }
         }) {

@@ -83,7 +83,10 @@ impl From<SecretKey> for libsecp256k1::SecretKey {
 impl TryFrom<PublicKey> for libsecp256k1::PublicKey {
     type Error = Error;
     fn try_from(key: PublicKey) -> Result<Self> {
-	let data: [u8; 33] = key.0.try_into().map_err(|_| Error::ECDSAPublicKeyBadFormat)?;
+        let data: [u8; 33] = key
+            .0
+            .try_into()
+            .map_err(|_| Error::ECDSAPublicKeyBadFormat)?;
         Self::parse_compressed(&data).map_err(|_| Error::ECDSAPublicKeyBadFormat)
     }
 }
