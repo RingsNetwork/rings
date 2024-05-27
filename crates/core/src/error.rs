@@ -19,6 +19,9 @@ pub enum Error {
     #[error("ECDSA or EdDSA pubkey bad format")]
     PublicKeyBadFormat,
 
+    #[error("private bad format")]
+    PrivateKeyBadFormat,
+
     #[error("Invalid Transport")]
     InvalidTransport,
 
@@ -109,8 +112,8 @@ pub enum Error {
     #[error("Ice server get url without host")]
     IceServerURLMissHost,
 
-    #[error("SecretKey parse error, {0}")]
-    Libsecp256k1SecretKeyParse(String),
+    #[error("Libsecp256k1 error")]
+    Libsecp256k1Error(#[from] libsecp256k1::Error),
 
     #[error("Signature standard parse failed, {0}")]
     Libsecp256k1SignatureParseStandard(String),

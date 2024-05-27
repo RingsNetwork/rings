@@ -7,8 +7,8 @@ use crate::error::Error;
 use crate::error::Result;
 
 /// PublicKey for ECDSA and EdDSA.
-#[derive(PartialEq, Eq, Debug, Clone, Copy)]
-pub struct PublicKey(pub [u8; 33]);
+#[derive(PartialEq, Eq, Debug, Clone)]
+pub struct PublicKey(pub Vec<u8>);
 
 struct PublicKeyVisitor;
 // /// twist from https://docs.rs/libsecp256k1/latest/src/libsecp256k1/lib.rs.html#335-344
@@ -69,8 +69,7 @@ impl PublicKey {
             }
             _ => Err(Error::PublicKeyBadFormat),
         }?;
-        let pub_data: [u8; 33] = data.as_slice().try_into()?;
-        Ok(PublicKey(pub_data))
+        Ok(PublicKey(data))
     }
 
     /// convert pubkey to base58_string

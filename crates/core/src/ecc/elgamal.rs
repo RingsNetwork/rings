@@ -156,8 +156,8 @@ pub fn decrypt(m: &[(CurveEle, CurveEle)], k: SecretKey) -> Result<String> {
     affine_to_str(
         m.iter()
             .map(|(c1, c2)| {
-                let c1: Affine = (*c1).try_into().expect("bad curve point");
-                let c2: Affine = (*c2).try_into().expect("bad curve point");
+                let c1: Affine = c1.clone().try_into().expect("bad curve point");
+                let c2: Affine = c2.clone().try_into().expect("bad curve point");
                 let mut t = Jacobian::default();
                 cxt.ecmult_const(&mut t, &c1, &sar);
                 let a_t = Affine::from_gej(&t).neg();

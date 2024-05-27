@@ -38,6 +38,7 @@ pub type CurveEle = PublicKey;
 pub type PublicKeyAddress = H160;
 
 /// Wrap libsecp256k1::SecretKey.
+/// which is a A 256-bit scalar value, present as [u32; 4]
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub struct SecretKey(libsecp256k1::SecretKey);
 
@@ -82,7 +83,8 @@ impl From<SecretKey> for libsecp256k1::SecretKey {
 impl TryFrom<PublicKey> for libsecp256k1::PublicKey {
     type Error = Error;
     fn try_from(key: PublicKey) -> Result<Self> {
-        Self::parse_compressed(&key.0).map_err(|_| Error::ECDSAPublicKeyBadFormat)
+	let data: [u8; 33] = key.0.try_into().map_err(|_| Error::ECDSAPublicKeyBadFormat)?;
+        Self::parse_compressed(&data).map_err(|_| Error::ECDSAPublicKeyBadFormat)
     }
 }
 
@@ -182,7 +184,7 @@ impl From<libsecp256k1::SecretKey> for SecretKey {
 
 impl From<libsecp256k1::PublicKey> for PublicKey {
     fn from(key: libsecp256k1::PublicKey) -> Self {
-        Self(key.serialize_compressed())
+        Self(key.serialize_compressed().to_vec())
     }
 }
 
@@ -213,10 +215,7 @@ impl TryFrom<&str> for SecretKey {
     fn try_from(s: &str) -> Result<Self> {
         let key = hex::decode(s)?;
         let key_arr: [u8; 32] = key.as_slice().try_into()?;
-        match libsecp256k1::SecretKey::parse(&key_arr) {
-            Ok(key) => Ok(key.into()),
-            Err(e) => Err(Error::Libsecp256k1SecretKeyParse(format!("{:?}", e))),
-        }
+        Ok(libsecp256k1::SecretKey::parse(&key_arr)?.into())
     }
 }
 
@@ -263,7 +262,7 @@ impl Serialize for SecretKey {
 }
 
 fn public_key_address(pubkey: &PublicKey) -> PublicKeyAddress {
-    let hash = match TryInto::<libsecp256k1::PublicKey>::try_into(*pubkey) {
+    let hash = match TryInto::<libsecp256k1::PublicKey>::try_into(pubkey.clone()) {
         // if pubkey is ecdsa key
         Ok(pk) => {
             let data = pk.serialize();

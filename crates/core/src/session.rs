@@ -287,10 +287,10 @@ impl Session {
             }
             Account::EIP191(did) => signers::eip191::verify(&auth_bytes, &did.into(), &self.sig),
             Account::BIP137(did) => signers::bip137::verify(&auth_bytes, &did.into(), &self.sig),
-            Account::Ed25519(pk) => {
+            Account::Ed25519(ref pk) => {
                 signers::ed25519::verify(&auth_bytes, &pk.address(), &self.sig, pk)
             }
-            Account::Secp256r1(pk) => {
+	    Account::Secp256r1(ref pk) => {
                 signers::secp256r1::verify(&auth_bytes, &pk.address(), &self.sig, pk)
             }
         }) {
@@ -316,8 +316,8 @@ impl Session {
             Account::Secp256k1(_) => signers::secp256k1::recover(&auth_bytes, &self.sig),
             Account::BIP137(_) => signers::bip137::recover(&auth_bytes, &self.sig),
             Account::EIP191(_) => signers::eip191::recover(&auth_bytes, &self.sig),
-            Account::Ed25519(pk) => Ok(pk),
-            Account::Secp256r1(pk) => Ok(pk),
+            Account::Ed25519(ref pk) => Ok(pk.clone()),
+            Account::Secp256r1(ref pk) => Ok(pk.clone()),
         }
     }
 
@@ -327,8 +327,8 @@ impl Session {
             Account::Secp256k1(did) => did,
             Account::BIP137(did) => did,
             Account::EIP191(did) => did,
-            Account::Ed25519(pk) => pk.address().into(),
-            Account::Secp256r1(pk) => pk.address().into(),
+            Account::Ed25519(ref pk) => pk.address().into(),
+            Account::Secp256r1(ref pk) => pk.address().into(),
         }
     }
 }

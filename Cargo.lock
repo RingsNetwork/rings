@@ -577,6 +577,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "bls-signatures"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ecc7fce0356b52c2483bb6188cc8bdc11add526bce75d1a44e5e5d889a6ab008"
+dependencies = [
+ "bls12_381",
+ "blst",
+ "blstrs",
+ "ff",
+ "group",
+ "hkdf 0.11.0",
+ "pairing",
+ "rand_core 0.6.4",
+ "rayon",
+ "sha2 0.9.9",
+ "subtle",
+ "thiserror",
+]
+
+[[package]]
+name = "bls12_381"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7bc6d6292be3a19e6379786dac800f551e5865a5bb51ebbe3064ab80433f403"
+dependencies = [
+ "digest 0.9.0",
+ "ff",
+ "group",
+ "pairing",
+ "rand_core 0.6.4",
+ "subtle",
+]
+
+[[package]]
 name = "blst"
 version = "0.3.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1128,6 +1162,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "crypto-mac"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "25fab6889090c8133f3deb8f73ba3c65a7f456f66436fc012a1b1e272b1e103e"
+dependencies = [
+ "generic-array 0.14.7",
+ "subtle",
+]
+
+[[package]]
 name = "ctr"
 version = "0.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1361,7 +1405,7 @@ checksum = "53f43496fc04523aa716c5dd76133cb6d7c81eb213375684d06a8b1683f8bc1e"
 dependencies = [
  "aes-gcm",
  "getrandom 0.2.12",
- "hkdf",
+ "hkdf 0.12.4",
  "libsecp256k1",
  "once_cell",
  "parking_lot 0.12.1",
@@ -1412,7 +1456,7 @@ dependencies = [
  "ff",
  "generic-array 0.14.7",
  "group",
- "hkdf",
+ "hkdf 0.12.4",
  "pem-rfc7468",
  "pkcs8",
  "rand_core 0.6.4",
@@ -2004,6 +2048,16 @@ dependencies = [
 
 [[package]]
 name = "hkdf"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01706d578d5c281058480e673ae4086a9f4710d8df1ad80a5b03e39ece5f886b"
+dependencies = [
+ "digest 0.9.0",
+ "hmac 0.11.0",
+]
+
+[[package]]
+name = "hkdf"
 version = "0.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b5f8eb2ad728638ea2c7d47a21db23b7b58a72ed6a38256b8a1849f15fbbdf7"
@@ -2017,7 +2071,17 @@ version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "126888268dcc288495a26bf004b38c5fdbb31682f992c84ceb046a1f0fe38840"
 dependencies = [
- "crypto-mac",
+ "crypto-mac 0.8.0",
+ "digest 0.9.0",
+]
+
+[[package]]
+name = "hmac"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a2a2320eb7ec0ebe8da8f744d7812d9fc4cb4d09344ac01898dbcb6a20ae69b"
+dependencies = [
+ "crypto-mac 0.11.0",
  "digest 0.9.0",
 ]
 
@@ -3775,7 +3839,7 @@ dependencies = [
 
 [[package]]
 name = "rings-core"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "arrayref",
  "async-lock",
@@ -3785,6 +3849,8 @@ dependencies = [
  "base58",
  "base58-monero",
  "bincode",
+ "bls-signatures",
+ "bls12_381",
  "bytes",
  "chrono",
  "dashmap",
@@ -3838,7 +3904,7 @@ dependencies = [
 
 [[package]]
 name = "rings-derive"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3848,7 +3914,7 @@ dependencies = [
 
 [[package]]
 name = "rings-native-example"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "rings-core",
@@ -3860,7 +3926,7 @@ dependencies = [
 
 [[package]]
 name = "rings-node"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "arrayref",
@@ -3920,7 +3986,7 @@ dependencies = [
 
 [[package]]
 name = "rings-rpc"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "base64 0.13.1",
@@ -3940,7 +4006,7 @@ dependencies = [
 
 [[package]]
 name = "rings-snark"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "bellman_ce",
  "bellpepper-core",
@@ -3969,7 +4035,7 @@ dependencies = [
 
 [[package]]
 name = "rings-snark-example"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "rings-core",
@@ -3981,7 +4047,7 @@ dependencies = [
 
 [[package]]
 name = "rings-transport"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "bincode",
@@ -5716,7 +5782,7 @@ dependencies = [
  "cbc",
  "ccm",
  "der-parser",
- "hkdf",
+ "hkdf 0.12.4",
  "hmac 0.12.1",
  "log",
  "p256",
