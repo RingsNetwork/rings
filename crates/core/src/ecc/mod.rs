@@ -154,7 +154,7 @@ impl From<ed25519_dalek::PublicKey> for PublicKey {
         s.reverse();
         s.push(0);
         s.reverse();
-        Self(s.as_slice().try_into().unwrap())
+        Self(s.as_slice().into())
     }
 }
 

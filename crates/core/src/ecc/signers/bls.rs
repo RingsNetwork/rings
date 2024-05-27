@@ -37,9 +37,9 @@ impl TryInto<bls::PrivateKey> for SecretKey {
     }
 }
 
-impl Into<PublicKey> for bls::PublicKey {
-    fn into(self) -> PublicKey {
-        let data: [u8; 48] = self.as_affine().to_compressed();
+impl From<bls::PublicKey> for PublicKey {
+    fn from(val: bls::PublicKey) -> Self {
+        let data: [u8; 48] = val.as_affine().to_compressed();
         PublicKey(data.to_vec())
     }
 }
@@ -114,7 +114,7 @@ pub fn verify_msg(msgs: &[&[u8]], sig: &[u8; 96], public_keys: &[PublicKey]) -> 
         let pk: Result<Vec<bls::PublicKey>> =
             public_keys.iter().map(|pk| pk.clone().try_into()).collect();
         if let Ok(p) = pk {
-            Ok(bls::verify_messages(&signature, &msgs, &p))
+            Ok(bls::verify_messages(&signature, msgs, &p))
         } else {
             Err(Error::BlsAffineDecodeFailed)
         }
