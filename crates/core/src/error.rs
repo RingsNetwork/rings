@@ -19,6 +19,9 @@ pub enum Error {
     #[error("ECDSA or EdDSA pubkey bad format")]
     PublicKeyBadFormat,
 
+    #[error("Failed to decode vector to bls affine")]
+    BlsAffineDecodeFailed,
+
     #[error("private bad format")]
     PrivateKeyBadFormat,
 
