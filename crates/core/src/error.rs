@@ -7,6 +7,15 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
+    #[error("Serialize affine failed")]
+    EccSerializeFailed,
+    #[error("desrialize affine failed")]
+    EccDeserializeFailed,
+    #[error("Failed to initialize Curve hasher")]
+    CurveHasherInitFailed,
+    #[error("Failed to hash data into cruve")]
+    CurveHasherFailed,
+
     #[error("Ed25519/EdDSA pubkey bad format")]
     EdDSAPublicKeyBadFormat,
 
