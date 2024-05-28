@@ -120,7 +120,6 @@ pub fn hash_to_curve(msg: &[u8]) -> Result<[u8; 96]> {
 }
 
 /// Sign message with bls privatekey
-/// reimplemented via https://docs.rs/bls-signatures/latest/src/bls_signatures/key.rs.html#103
 /// signature = hash_into_g2(message) * sk
 pub fn sign(sk: SecretKey, hashed_msg: &[u8; 96]) -> Result<Signature> {
     let sk: Fr = sk.try_into()?;
