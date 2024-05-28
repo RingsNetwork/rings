@@ -102,9 +102,9 @@ impl TryFrom<PublicKey> for G1Projective {
 }
 
 /// Hashes a message to a 96-byte array using BLS
-// https://datatracker.ietf.org/doc/draft-irtf-cfrg-hash-to-curve/
+/// `<https://datatracker.ietf.org/doc/draft-irtf-cfrg-hash-to-curve/>`
 /// TODO:
-/// https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-hash-to-curve-12#appendix-K.1
+/// `<https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-hash-to-curve-12#appendix-K.1>`
 /// Xmd is not implemented here
 pub fn hash_to_curve(msg: &[u8]) -> Result<[u8; 96]> {
     // let swu_map: WBMap<G1Config> = WBMap::new().unwrap();
