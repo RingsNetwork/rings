@@ -114,7 +114,7 @@ pub fn hash_to_curve(msg: &[u8]) -> Result<[u8; 96]> {
         WBMap<G2Config>,
     >::new(&[])
     .map_err(|_| Error::CurveHasherInitFailed)?;
-    let hashed = hasher.hash(&msg).map_err(|_| Error::CurveHasherFailed)?;
+    let hashed = hasher.hash(msg).map_err(|_| Error::CurveHasherFailed)?;
     let ret: [u8; 96] = to_compressed(&hashed)?;
     Ok(ret)
 }
@@ -124,7 +124,7 @@ pub fn hash_to_curve(msg: &[u8]) -> Result<[u8; 96]> {
 /// signature = hash_into_g2(message) * sk
 pub fn sign(sk: SecretKey, hashed_msg: &[u8; 96]) -> Result<Signature> {
     let sk: Fr = sk.try_into()?;
-    let msg: G2Projective = from_compressed(&hashed_msg).unwrap();
+    let msg: G2Projective = from_compressed(hashed_msg).unwrap();
     Ok(Signature(to_compressed(&(msg * sk))?))
 }
 
@@ -133,11 +133,11 @@ pub fn sign(sk: SecretKey, hashed_msg: &[u8; 96]) -> Result<Signature> {
 pub fn verify(hashes: &[[u8; 96]], sig: &Signature, pks: &[PublicKey]) -> Result<bool> {
     let sig: G2Projective = sig.clone().try_into()?;
     let g1 = G1Projective::generator();
-    let e1 = Bls12_381::pairing(&g1, &sig);
+    let e1 = Bls12_381::pairing(g1, sig);
 
     let hashes: Vec<G2Projective> = hashes
         .iter()
-        .map(|h| from_compressed(h))
+        .map(from_compressed)
         .collect::<Result<Vec<G2Projective>>>()?;
 
     let pks: Vec<G1Projective> = pks
@@ -156,7 +156,7 @@ pub fn verify(hashes: &[[u8; 96]], sig: &Signature, pks: &[PublicKey]) -> Result
 /// Converts a BLS private key to a BLS public key.
 /// Get the public key for this private key. Calculated by pk = g1 * sk.
 pub fn public_key(key: &SecretKey) -> Result<PublicKey> {
-    let sk: Fr = key.clone().try_into()?;
+    let sk: Fr = (*key).try_into()?;
     let g1 = G1Projective::generator();
     (g1 * sk).try_into()
 }
