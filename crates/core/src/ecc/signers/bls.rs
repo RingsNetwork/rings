@@ -1,6 +1,10 @@
 //! signer of bls
-//! based on [bls_signatures](https://docs.rs/bls-signatures/latest/bls_signatures/)
-//! This module implement transform of [libsecp256k1::Secretkey] and [bls_signature::PrivateKey]
+//! A module for signing messages using BLS (Boneh-Lynn-Shacham) and interfacing with secp256k1 cryptographic libraries.
+//!
+//! This module provides functionality for generating private and public keys, signing messages,
+//! and verifying signatures using both BLS and secp256k1 cryptographic standards.
+//! It integrates the use of random number generation for key creation and provides conversions
+//! between different key types.
 
 use bls12_381::G1Affine;
 use bls12_381::G1Projective;
@@ -9,11 +13,41 @@ use bls12_381::G2Projective;
 use bls12_381::Scalar;
 use bls_signatures as bls;
 use libsecp256k1;
+use rand::SeedableRng;
+use rand_hc::Hc128Rng;
 
 use crate::ecc::PublicKey;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
+
+/// Represents a BLS signature, stored as a 96-byte array.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Signature(pub [u8; 96]);
+
+impl From<bls::Signature> for Signature {
+    fn from(s: bls::Signature) -> Self {
+        Self(G2Affine::from(s).to_compressed())
+    }
+}
+
+impl TryInto<bls::Signature> for Signature {
+    type Error = Error;
+    fn try_into(self) -> Result<bls::Signature> {
+        let affine: Option<G2Affine> = G2Affine::from_compressed(&self.0).into();
+        if let Some(af) = affine {
+            Ok(bls::Signature::from(af))
+        } else {
+            Err(Error::BlsAffineDecodeFailed)
+        }
+    }
+}
+
+/// Generates a random BLS private key.
+pub fn random_sk() -> Result<SecretKey> {
+    let mut rng = Hc128Rng::from_entropy();
+    bls::PrivateKey::generate(&mut rng).try_into()
+}
 
 impl TryInto<SecretKey> for bls::PrivateKey {
     type Error = Error;
@@ -57,6 +91,7 @@ impl TryInto<bls::PublicKey> for PublicKey {
     }
 }
 
+/// Hashes a message to a 96-byte array using BLS hashing.
 pub fn hash(msg: &[u8]) -> [u8; 96] {
     let hash: G2Affine = bls::hash(msg).into();
     hash.to_compressed()
@@ -65,67 +100,52 @@ pub fn hash(msg: &[u8]) -> [u8; 96] {
 /// Sign message with bls privatekey
 /// reimplemented via https://docs.rs/bls-signatures/latest/src/bls_signatures/key.rs.html#103
 /// signature = hash_into_g2(message) * sk
-pub fn sign(sec: SecretKey, hash: &[u8; 96]) -> Result<[u8; 96]> {
+pub fn sign(sec: SecretKey, hash: &[u8; 96]) -> Result<Signature> {
     let sk: bls::PrivateKey = sec.try_into()?;
     let affine: Option<G2Affine> = G2Affine::from_compressed(hash).into();
     if let Some(af) = affine {
         let mut proj: G2Projective = af.into();
         proj *= Into::<Scalar>::into(sk);
-        Ok(G2Affine::from(proj).to_compressed())
+        Ok(Signature(G2Affine::from(proj).to_compressed()))
     } else {
         Err(Error::PublicKeyBadFormat)
     }
 }
 
-/// Sign message with bls privatekey and message
-pub fn sign_raw(sec: SecretKey, msg: &[u8]) -> Result<[u8; 96]> {
-    let sk: bls::PrivateKey = sec.try_into()?;
-    let sig = sk.sign(hash(msg));
-    Ok(G2Affine::from(sig).to_compressed())
+/// Signs a message with a BLS private key by first hashing the message.
+pub fn sign_raw(sec: SecretKey, msg: &[u8]) -> Result<Signature> {
+    sign(sec, &hash(msg))
 }
 
-/// Verify message
-pub fn verify(hashes: &[[u8; 96]], sig: &[u8; 96], public_keys: &[PublicKey]) -> Result<bool> {
-    let sig_affine: Option<G2Affine> = G2Affine::from_compressed(sig).into();
-    if let Some(affine) = sig_affine {
-        let signature = bls::Signature::from(affine);
-        let hash: Option<Vec<G2Projective>> = hashes
-            .iter()
-            .map(|h| Into::<Option<G2Affine>>::into(G2Affine::from_compressed(h)))
-            .map(|a| a.map(|b| b.into()))
-            .collect::<Option<Vec<G2Projective>>>();
-        let pk: Result<Vec<bls::PublicKey>> =
-            public_keys.iter().map(|pk| pk.clone().try_into()).collect();
-        if let (Some(h), Ok(p)) = (hash, pk) {
-            Ok(bls::verify(&signature, &h, &p))
-        } else {
-            Err(Error::BlsAffineDecodeFailed)
-        }
-    } else {
-        Err(Error::PublicKeyBadFormat)
-    }
+/// Verifies a BLS signature against a set of hashes and public keys.
+pub fn verify(hashes: &[[u8; 96]], sig: &Signature, public_keys: &[PublicKey]) -> Result<bool> {
+    let sig: bls::Signature = sig.clone().try_into()?;
+    let hash: Vec<G2Projective> = hashes
+        .iter()
+        .map(|h| Into::<Option<G2Affine>>::into(G2Affine::from_compressed(h)))
+        .map(|a| a.map(|b| b.into()))
+        .collect::<Option<Vec<G2Projective>>>()
+        .ok_or(Error::BlsAffineDecodeFailed)?;
+    let pk: Vec<bls::PublicKey> = public_keys
+        .iter()
+        .map(|pk| pk.clone().try_into())
+        .collect::<Result<Vec<bls::PublicKey>>>()?;
+    Ok(bls::verify(&sig, &hash, &pk))
 }
 
-/// Verify message
-pub fn verify_msg(msgs: &[&[u8]], sig: &[u8; 96], public_keys: &[PublicKey]) -> Result<bool> {
-    let sig_affine: Option<G2Affine> = G2Affine::from_compressed(sig).into();
-    if let Some(affine) = sig_affine {
-        let signature = bls::Signature::from(affine);
-        let pk: Result<Vec<bls::PublicKey>> =
-            public_keys.iter().map(|pk| pk.clone().try_into()).collect();
-        if let Ok(p) = pk {
-            Ok(bls::verify_messages(&signature, msgs, &p))
-        } else {
-            Err(Error::BlsAffineDecodeFailed)
-        }
-    } else {
-        Err(Error::PublicKeyBadFormat)
-    }
+/// Verifies a BLS signature against a set of messages and public keys.
+pub fn verify_msg(msgs: &[&[u8]], sig: &Signature, public_keys: &[PublicKey]) -> Result<bool> {
+    let sig: bls::Signature = sig.clone().try_into()?;
+    let pk: Vec<bls::PublicKey> = public_keys
+        .iter()
+        .map(|pk| pk.clone().try_into())
+        .collect::<Result<Vec<bls::PublicKey>>>()?;
+    Ok(bls::verify_messages(&sig, msgs, &pk))
 }
 
-/// Cast bls publickey from bls secretkey
-pub fn to_bls_pk(sk: SecretKey) -> Result<PublicKey> {
-    let seckey: bls::PrivateKey = sk.try_into()?;
+/// Converts a BLS private key to a BLS public key.
+pub fn to_bls_pk(sk: &SecretKey) -> Result<PublicKey> {
+    let seckey: bls::PrivateKey = sk.clone().try_into()?;
     let pk = seckey.public_key();
     Ok(pk.into())
 }
@@ -133,23 +153,45 @@ pub fn to_bls_pk(sk: SecretKey) -> Result<PublicKey> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::ecc::SecretKey;
+
+    #[test]
+    fn test_types() {
+        let key1: SecretKey = random_sk().unwrap();
+        let bls_key: bls::PrivateKey = key1.try_into().unwrap();
+        let key2: SecretKey = bls_key.try_into().unwrap();
+        assert_eq!(key1, key2);
+
+        let pk1: PublicKey = to_bls_pk(&key1).unwrap();
+        let bls_pk: bls::PublicKey = bls_key.public_key();
+        let pk2: PublicKey = bls_pk.try_into().unwrap();
+        assert_eq!(pk1, pk2);
+    }
 
     #[test]
     fn test_sign_and_verify() {
-        let key =
-            SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0")
-                .unwrap();
+        let key = random_sk().unwrap();
         let msg = "hello";
+        let pk = to_bls_pk(&key).unwrap();
         let sig = sign_raw(key, msg.as_bytes()).unwrap();
-        let pk = to_bls_pk(key).unwrap();
         let hash = hash(msg.as_bytes());
+
+        // test sign with bls
+        let bls_sk: bls::PrivateKey = key.try_into().unwrap();
+        let bls_pk: bls::PublicKey = bls_sk.public_key();
+        let bls_sig = bls_sk.sign(msg.as_bytes());
+        assert!(bls::verify_messages(
+            &bls_sig,
+            vec![msg.as_bytes()].as_slice(),
+            vec![bls_pk].as_slice()
+        ));
+        assert_eq!(Signature::from(bls_sig), sig);
+
         assert!(verify_msg(
             vec![msg.as_bytes()].as_slice(),
             &sig,
             vec![pk.clone()].as_slice()
         )
-        .unwrap());
+        .expect("panic on verify msg"));
         assert!(verify(vec![hash].as_slice(), &sig, vec![pk].as_slice()).unwrap());
     }
 }
