@@ -7,6 +7,15 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
+    #[error("Serialize affine failed")]
+    EccSerializeFailed,
+    #[error("desrialize affine failed")]
+    EccDeserializeFailed,
+    #[error("Failed to initialize Curve hasher")]
+    CurveHasherInitFailed,
+    #[error("Failed to hash data into cruve")]
+    CurveHasherFailed,
+
     #[error("Ed25519/EdDSA pubkey bad format")]
     EdDSAPublicKeyBadFormat,
 
@@ -18,6 +27,12 @@ pub enum Error {
 
     #[error("ECDSA or EdDSA pubkey bad format")]
     PublicKeyBadFormat,
+
+    #[error("Failed to decode vector to bls affine")]
+    BlsAffineDecodeFailed,
+
+    #[error("private bad format")]
+    PrivateKeyBadFormat,
 
     #[error("Invalid Transport")]
     InvalidTransport,
@@ -109,8 +124,8 @@ pub enum Error {
     #[error("Ice server get url without host")]
     IceServerURLMissHost,
 
-    #[error("SecretKey parse error, {0}")]
-    Libsecp256k1SecretKeyParse(String),
+    #[error("Libsecp256k1 error")]
+    Libsecp256k1Error(#[from] libsecp256k1::Error),
 
     #[error("Signature standard parse failed, {0}")]
     Libsecp256k1SignatureParseStandard(String),

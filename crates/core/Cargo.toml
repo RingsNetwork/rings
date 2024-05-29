@@ -42,6 +42,11 @@ browser_chrome_test = ["wasm"]
 
 [dependencies]
 # global
+ark-bls12-381 = "0.4.0"
+ark-ec = "0.4.2"
+ark-ff = "0.4.2"
+ark-serialize = "0.4.2"
+ark-std = "0.4.0"
 arrayref = "0.3.6"
 async-lock = "2.5.0"
 async-recursion = "1.0.0"

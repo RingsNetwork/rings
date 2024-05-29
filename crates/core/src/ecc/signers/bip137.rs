@@ -20,7 +20,7 @@ use crate::error::Result;
 /// | odd      | less than n   | true        | 1           | 32 |
 /// | even     | more than n   | true        | 2           | 33 |
 /// | odd      | more than n   | true        | 3           | 34 |
-pub fn recover(msg: &[u8], sig: impl AsRef<[u8]>) -> Result<PublicKey> {
+pub fn recover(msg: &[u8], sig: impl AsRef<[u8]>) -> Result<PublicKey<33>> {
     let mut sig = sig.as_ref().to_vec();
     sig.rotate_left(1);
     let sig = sig.as_mut_slice();

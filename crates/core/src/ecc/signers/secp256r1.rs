@@ -94,7 +94,7 @@ pub fn verify(
     msg: &[u8],
     address: &PublicKeyAddress,
     sig: impl AsRef<[u8]>,
-    pubkey: PublicKey,
+    pubkey: &PublicKey<33>,
 ) -> bool {
     if pubkey.address() != *address {
         return false;
@@ -103,7 +103,7 @@ pub fn verify(
         return false;
     }
     let ct_pk: CtOption<Result<ecdsa::VerifyingKey<p256::NistP256>>> =
-        pubkey.ct_try_into_secp256r1_pubkey();
+        (*pubkey).ct_try_into_secp256r1_pubkey();
     let msg_hash = hash(msg);
     if ct_pk.is_some().into() {
         let res: Result<()> = ct_pk.unwrap().and_then(|pk| {
@@ -176,7 +176,7 @@ mod test {
     /// ```
     #[test]
     fn test_secp256r1_sign_and_verify() {
-        let pk: PublicKey = PublicKey::from_hex_string(
+        let pk: PublicKey<33> = PublicKey::<33>::from_hex_string(
 	    "17a6afd392fcbe4ac9270a599a9c5732c4f838ce35ea2234d389d8f0c367f3f5dcab906352e27289002c7f2c96039ddce7c1b5aad8b87ba94984d4c8b4f95702"
 	).unwrap();
         let sk =
@@ -194,7 +194,7 @@ mod test {
 
         // Check our sign and verify work right
         let our_sig = sign(sk, &hash(msg.as_bytes()));
-        assert!(verify(msg.as_bytes(), &pk.address(), our_sig, pk));
+        assert!(verify(msg.as_bytes(), &pk.address(), our_sig, &pk));
 
         let hash_msg: [u8; 32] =
             hex::decode("5e230abb2ae1cb0717986854d6e16b998da03b827b736c9ac32f6ec9e47e3670")
@@ -204,6 +204,6 @@ mod test {
         let hashed = hash(msg.as_bytes());
         assert_eq!(hashed, hash_msg, "hash ret not equal");
 
-        assert!(verify(msg.as_bytes(), &pk.address(), sig, pk));
+        assert!(verify(msg.as_bytes(), &pk.address(), sig, &pk));
     }
 }

@@ -53,7 +53,7 @@ jobs:
       - name: Run core browser tests
         uses: coactions/setup-xvfb@v1
         with:
-          run: cargo test -p rings-core --target=wasm32-unknown-unknown --features wasm --no-default-features
+          run: cargo test -p rings-core --release --target=wasm32-unknown-unknown --features wasm --no-default-features
           working-directory: ./
 
       - name: Run node browser tests
@@ -64,7 +64,7 @@ jobs:
 
   build:
     name: Build and test
-    timeout-minutes: 25
+    timeout-minutes: 30
     strategy:
       matrix:
         os: ["ubuntu-latest"]

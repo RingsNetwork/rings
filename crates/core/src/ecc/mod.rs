@@ -33,11 +33,12 @@ pub use types::PublicKey;
 /// length r: 32, length s: 32, length v(recovery_id): 1
 pub type SigBytes = [u8; 65];
 /// Alias PublicKey.
-pub type CurveEle = PublicKey;
+pub type CurveEle<const SIZE: usize> = PublicKey<SIZE>;
 /// PublicKeyAddress is H160.
 pub type PublicKeyAddress = H160;
 
 /// Wrap libsecp256k1::SecretKey.
+/// which is a A 256-bit scalar value, present as [u32; 4]
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub struct SecretKey(libsecp256k1::SecretKey);
 
@@ -79,22 +80,23 @@ impl From<SecretKey> for libsecp256k1::SecretKey {
     }
 }
 
-impl TryFrom<PublicKey> for libsecp256k1::PublicKey {
+impl TryFrom<PublicKey<33>> for libsecp256k1::PublicKey {
     type Error = Error;
-    fn try_from(key: PublicKey) -> Result<Self> {
-        Self::parse_compressed(&key.0).map_err(|_| Error::ECDSAPublicKeyBadFormat)
+    fn try_from(key: PublicKey<33>) -> Result<Self> {
+        let data: [u8; 33] = key.0;
+        Self::parse_compressed(&data).map_err(|_| Error::ECDSAPublicKeyBadFormat)
     }
 }
 
-impl TryFrom<PublicKey> for ed25519_dalek::PublicKey {
+impl TryFrom<PublicKey<33>> for ed25519_dalek::PublicKey {
     type Error = Error;
-    fn try_from(key: PublicKey) -> Result<Self> {
+    fn try_from(key: PublicKey<33>) -> Result<Self> {
         // pubkey[0] == 0
         Self::from_bytes(&key.0[1..]).map_err(|_| Error::EdDSAPublicKeyBadFormat)
     }
 }
 
-impl AffineCoordinates for PublicKey {
+impl AffineCoordinates for PublicKey<33> {
     type FieldRepr = GenericArray<u8, U32>;
 
     fn x(&self) -> Self::FieldRepr {
@@ -111,7 +113,7 @@ impl AffineCoordinates for PublicKey {
     }
 }
 
-impl PublicKey {
+impl PublicKey<33> {
     /// Map a PublicKey into secp256r1 affine point,
     /// This function is an constant-time cryptographic implementations
     pub fn ct_into_secp256r1_affine(self) -> CtOption<primeorder::AffinePoint<NistP256>> {
@@ -140,7 +142,7 @@ impl From<SecretKey> for FieldBytes<NistP256> {
     }
 }
 
-impl From<ed25519_dalek::PublicKey> for PublicKey {
+impl From<ed25519_dalek::PublicKey> for PublicKey<33> {
     fn from(key: ed25519_dalek::PublicKey) -> Self {
         // [u8;32] here
         // ref: https://docs.rs/ed25519-dalek/latest/ed25519_dalek/struct.PublicKey.html
@@ -153,14 +155,14 @@ impl From<ed25519_dalek::PublicKey> for PublicKey {
     }
 }
 
-impl TryFrom<PublicKey> for libsecp256k1::curve::Affine {
+impl TryFrom<PublicKey<33>> for libsecp256k1::curve::Affine {
     type Error = Error;
-    fn try_from(key: PublicKey) -> Result<Self> {
+    fn try_from(key: PublicKey<33>) -> Result<Self> {
         Ok(TryInto::<libsecp256k1::PublicKey>::try_into(key)?.into())
     }
 }
 
-impl TryFrom<libsecp256k1::curve::Affine> for PublicKey {
+impl TryFrom<libsecp256k1::curve::Affine> for PublicKey<33> {
     type Error = Error;
     fn try_from(a: libsecp256k1::curve::Affine) -> Result<Self> {
         let pubkey: libsecp256k1::PublicKey = a.try_into().map_err(|_| Error::InvalidPublicKey)?;
@@ -180,13 +182,13 @@ impl From<libsecp256k1::SecretKey> for SecretKey {
     }
 }
 
-impl From<libsecp256k1::PublicKey> for PublicKey {
+impl From<libsecp256k1::PublicKey> for PublicKey<33> {
     fn from(key: libsecp256k1::PublicKey) -> Self {
         Self(key.serialize_compressed())
     }
 }
 
-impl From<SecretKey> for PublicKey {
+impl From<SecretKey> for PublicKey<33> {
     fn from(secret_key: SecretKey) -> Self {
         libsecp256k1::PublicKey::from_secret_key(&secret_key.0).into()
     }
@@ -213,10 +215,7 @@ impl TryFrom<&str> for SecretKey {
     fn try_from(s: &str) -> Result<Self> {
         let key = hex::decode(s)?;
         let key_arr: [u8; 32] = key.as_slice().try_into()?;
-        match libsecp256k1::SecretKey::parse(&key_arr) {
-            Ok(key) => Ok(key.into()),
-            Err(e) => Err(Error::Libsecp256k1SecretKeyParse(format!("{:?}", e))),
-        }
+        Ok(libsecp256k1::SecretKey::parse(&key_arr)?.into())
     }
 }
 
@@ -262,7 +261,7 @@ impl Serialize for SecretKey {
     }
 }
 
-fn public_key_address(pubkey: &PublicKey) -> PublicKeyAddress {
+fn public_key_address(pubkey: &PublicKey<33>) -> PublicKeyAddress {
     let hash = match TryInto::<libsecp256k1::PublicKey>::try_into(*pubkey) {
         // if pubkey is ecdsa key
         Ok(pk) => {
@@ -310,7 +309,7 @@ impl SecretKey {
         sig_bytes
     }
 
-    pub fn pubkey(&self) -> PublicKey {
+    pub fn pubkey(&self) -> PublicKey<33> {
         libsecp256k1::PublicKey::from_secret_key(&(*self).into()).into()
     }
 
@@ -319,14 +318,14 @@ impl SecretKey {
     }
 }
 
-impl PublicKey {
+impl PublicKey<33> {
     pub fn address(&self) -> PublicKeyAddress {
         public_key_address(self)
     }
 }
 
 /// Recover PublicKey from RawMessage using signature.
-pub fn recover<S>(message: &[u8], signature: S) -> Result<PublicKey>
+pub fn recover<S>(message: &[u8], signature: S) -> Result<PublicKey<33>>
 where S: AsRef<[u8]> {
     let sig_bytes: SigBytes = signature.as_ref().try_into()?;
     let message_hash: [u8; 32] = keccak256(message);
@@ -334,7 +333,7 @@ where S: AsRef<[u8]> {
 }
 
 /// Recover PublicKey from HashMessage using signature.
-pub fn recover_hash(message_hash: &[u8; 32], sig: &[u8; 65]) -> Result<PublicKey> {
+pub fn recover_hash(message_hash: &[u8; 32], sig: &[u8; 65]) -> Result<PublicKey<33>> {
     let r_s_signature: [u8; 64] = sig[..64].try_into()?;
     let recovery_id: u8 = sig[64];
     Ok(libsecp256k1::recover(
