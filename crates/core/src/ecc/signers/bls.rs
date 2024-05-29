@@ -29,6 +29,9 @@ use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
 
+/// this is from `<https://docs.rs/bls-signatures/latest/src/bls_signatures/signature.rs.html#24>`
+const CSUITE: &[u8] = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_";
+
 /// Represents a BLS signature, stored as a 96-byte array.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Signature(pub [u8; 96]);
@@ -103,33 +106,38 @@ impl TryFrom<PublicKey> for G1Projective {
 
 /// Hashes a message to a 96-byte array using BLS
 /// `<https://datatracker.ietf.org/doc/draft-irtf-cfrg-hash-to-curve/>`
-/// TODO:
-/// `<https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-hash-to-curve-12#appendix-K.1>`
-/// Xmd is not implemented here
 pub fn hash_to_curve(msg: &[u8]) -> Result<[u8; 96]> {
     // let swu_map: WBMap<G1Config> = WBMap::new().unwrap();
     let hasher = MapToCurveBasedHasher::<
         G2Projective,
         DefaultFieldHasher<sha2::Sha256, 128>,
         WBMap<G2Config>,
-    >::new(&[])
+    >::new(CSUITE)
     .map_err(|_| Error::CurveHasherInitFailed)?;
     let hashed = hasher.hash(msg).map_err(|_| Error::CurveHasherFailed)?;
     let ret: [u8; 96] = to_compressed(&hashed)?;
     Ok(ret)
 }
 
-/// Sign message with bls privatekey
-/// signature = hash_into_g2(message) * sk
-pub fn sign(sk: SecretKey, hashed_msg: &[u8; 96]) -> Result<Signature> {
+/// Sign hashed message with bls privatekey
+pub fn sign_hash(sk: SecretKey, hashed_msg: &[u8; 96]) -> Result<Signature> {
     let sk: Fr = sk.try_into()?;
     let msg: G2Projective = from_compressed(hashed_msg).unwrap();
     Ok(Signature(to_compressed(&(msg * sk))?))
 }
 
+/// Sign message with bls privatekey
+/// signature = hash_into_g2(message) * sk
+pub fn sign(sk: SecretKey, msg: &[u8]) -> Result<Signature> {
+    let sk: Fr = sk.try_into()?;
+    let hashed_msg = hash_to_curve(msg)?;
+    let msg: G2Projective = from_compressed(&hashed_msg).unwrap();
+    Ok(Signature(to_compressed(&(msg * sk))?))
+}
+
 /// Verifies that the signature is the actual aggregated signature of hashes - pubkeys. Calculated by
 /// e(g1, signature) == \prod_{i = 0}^n e(pk_i, hash_i).
-pub fn verify(hashes: &[[u8; 96]], sig: &Signature, pks: &[PublicKey]) -> Result<bool> {
+pub fn verify_hash(hashes: &[[u8; 96]], sig: &Signature, pks: &[PublicKey]) -> Result<bool> {
     let sig: G2Projective = sig.clone().try_into()?;
     let g1 = G1Projective::generator();
     let e1 = Bls12_381::pairing(g1, sig);
@@ -152,6 +160,16 @@ pub fn verify(hashes: &[[u8; 96]], sig: &Signature, pks: &[PublicKey]) -> Result
     }
 }
 
+/// Verifies that the signature is the actual aggregated signature of messages - pubkeys. Calculated by
+/// e(g1, signature) == \prod_{i = 0}^n e(pk_i, hash_to_curve(message_i)).
+pub fn verify(msgs: &[&[u8]], sig: &Signature, pks: &[PublicKey]) -> Result<bool> {
+    let hashes: Vec<[u8; 96]> = msgs
+        .iter()
+        .map(|msg| hash_to_curve(msg))
+        .collect::<Result<Vec<[u8; 96]>>>()?;
+    verify_hash(hashes.as_slice(), sig, pks)
+}
+
 /// Converts a BLS private key to a BLS public key.
 /// Get the public key for this private key. Calculated by pk = g1 * sk.
 pub fn public_key(key: &SecretKey) -> Result<PublicKey> {
@@ -170,7 +188,25 @@ mod test {
         let msg = "hello world";
         let pk = public_key(&key).unwrap();
         let h = hash_to_curve(msg.as_bytes()).unwrap();
-        let sig = sign(key, &h).unwrap();
-        assert!(super::verify(vec![h].as_slice(), &sig, vec![pk].as_slice()).unwrap());
+        let sig = sign_hash(key, &h).unwrap();
+        assert!(super::verify_hash(vec![h].as_slice(), &sig, vec![pk.clone()].as_slice()).unwrap());
+        assert!(super::verify(vec![msg.as_bytes()].as_slice(), &sig, vec![pk].as_slice()).unwrap());
+    }
+
+    #[test]
+    fn test_hash_result() {
+        // this is from hash("hello world") via bls_signature
+        // `<https://docs.rs/bls-signatures/latest/bls_signatures/fn.hash.html`>
+        let hashed_data: [u8; 96] = [
+            138, 203, 106, 10, 25, 0, 11, 120, 167, 254, 109, 207, 27, 42, 63, 46, 108, 179, 30,
+            196, 146, 10, 94, 148, 237, 209, 198, 48, 23, 211, 67, 188, 147, 170, 94, 52, 176, 113,
+            111, 214, 28, 35, 235, 16, 215, 69, 185, 65, 15, 66, 199, 2, 245, 101, 145, 144, 209,
+            52, 71, 179, 27, 209, 127, 155, 231, 9, 235, 11, 82, 89, 83, 171, 47, 179, 253, 128,
+            26, 104, 238, 91, 182, 207, 152, 70, 243, 206, 65, 226, 81, 113, 69, 125, 85, 142, 27,
+            254,
+        ];
+        let msg = "hello world";
+        let h = hash_to_curve(msg.as_bytes()).unwrap();
+        assert_eq!(h, hashed_data);
     }
 }
