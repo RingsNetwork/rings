@@ -88,17 +88,17 @@ impl TryFrom<G2Projective> for Signature {
     }
 }
 
-impl TryFrom<G1Projective> for PublicKey {
+impl TryFrom<G1Projective> for PublicKey<48> {
     type Error = Error;
     fn try_from(p: G1Projective) -> Result<Self> {
-        Ok(PublicKey(to_compressed::<G1Projective, 48>(&p)?.to_vec()))
+        Ok(PublicKey(to_compressed::<G1Projective, 48>(&p)?))
     }
 }
 
-impl TryFrom<PublicKey> for G1Projective {
+impl TryFrom<PublicKey<48>> for G1Projective {
     type Error = Error;
-    fn try_from(pk: PublicKey) -> Result<Self> {
-        let data: [u8; 48] = pk.0.try_into().map_err(|_| Error::PublicKeyBadFormat)?;
+    fn try_from(pk: PublicKey<48>) -> Result<Self> {
+        let data: [u8; 48] = pk.0;
         let ret: Self = from_compressed(&data)?;
         Ok(ret)
     }
@@ -137,7 +137,7 @@ pub fn sign(sk: SecretKey, msg: &[u8]) -> Result<Signature> {
 
 /// Verifies that the signature is the actual aggregated signature of hashes - pubkeys. Calculated by
 /// e(g1, signature) == \prod_{i = 0}^n e(pk_i, hash_i).
-pub fn verify_hash(hashes: &[[u8; 96]], sig: &Signature, pks: &[PublicKey]) -> Result<bool> {
+pub fn verify_hash(hashes: &[[u8; 96]], sig: &Signature, pks: &[PublicKey<48>]) -> Result<bool> {
     let sig: G2Projective = sig.clone().try_into()?;
     let g1 = G1Projective::generator();
     let e1 = Bls12_381::pairing(g1, sig);
@@ -149,7 +149,7 @@ pub fn verify_hash(hashes: &[[u8; 96]], sig: &Signature, pks: &[PublicKey]) -> R
 
     let pks: Vec<G1Projective> = pks
         .iter()
-        .map(|pk| pk.clone().try_into())
+        .map(|pk| (*pk).try_into())
         .collect::<Result<Vec<G1Projective>>>()?;
 
     let mm_out = Bls12_381::multi_miller_loop(pks, hashes);
@@ -162,7 +162,7 @@ pub fn verify_hash(hashes: &[[u8; 96]], sig: &Signature, pks: &[PublicKey]) -> R
 
 /// Verifies that the signature is the actual aggregated signature of messages - pubkeys. Calculated by
 /// e(g1, signature) == \prod_{i = 0}^n e(pk_i, hash_to_curve(message_i)).
-pub fn verify(msgs: &[&[u8]], sig: &Signature, pks: &[PublicKey]) -> Result<bool> {
+pub fn verify(msgs: &[&[u8]], sig: &Signature, pks: &[PublicKey<48>]) -> Result<bool> {
     let hashes: Vec<[u8; 96]> = msgs
         .iter()
         .map(|msg| hash_to_curve(msg))
@@ -183,7 +183,7 @@ pub fn aggregate(signatures: &[Signature]) -> Result<Signature> {
 
 /// Converts a BLS private key to a BLS public key.
 /// Get the public key for this private key. Calculated by pk = g1 * sk.
-pub fn public_key(key: &SecretKey) -> Result<PublicKey> {
+pub fn public_key(key: &SecretKey) -> Result<PublicKey<48>> {
     let sk: Fr = (*key).try_into()?;
     let g1 = G1Projective::generator();
     (g1 * sk).try_into()
@@ -200,7 +200,7 @@ mod test {
         let pk = public_key(&key).unwrap();
         let h = hash_to_curve(msg.as_bytes()).unwrap();
         let sig = sign_hash(key, &h).unwrap();
-        assert!(super::verify_hash(vec![h].as_slice(), &sig, vec![pk.clone()].as_slice()).unwrap());
+        assert!(super::verify_hash(vec![h].as_slice(), &sig, vec![pk].as_slice()).unwrap());
         assert!(super::verify(vec![msg.as_bytes()].as_slice(), &sig, vec![pk].as_slice()).unwrap());
     }
 
@@ -243,7 +243,7 @@ mod test {
         assert!(super::verify_hash(
             vec![h1, h2].as_slice(),
             &sig_agg,
-            vec![pk1.clone(), pk2.clone()].as_slice()
+            vec![pk1, pk2].as_slice()
         )
         .unwrap());
     }

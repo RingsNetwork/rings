@@ -22,7 +22,7 @@ pub fn hash(msg: &[u8]) -> [u8; 32] {
 }
 
 /// recover public key from message and signature.
-pub fn recover(msg: &[u8], sig: impl AsRef<[u8]>) -> Result<PublicKey> {
+pub fn recover(msg: &[u8], sig: impl AsRef<[u8]>) -> Result<PublicKey<33>> {
     let sig_byte: [u8; 65] = sig.as_ref().try_into()?;
     crate::ecc::recover(msg, sig_byte)
 }

@@ -94,7 +94,7 @@ pub fn verify(
     msg: &[u8],
     address: &PublicKeyAddress,
     sig: impl AsRef<[u8]>,
-    pubkey: &PublicKey,
+    pubkey: &PublicKey<33>,
 ) -> bool {
     if pubkey.address() != *address {
         return false;
@@ -103,7 +103,7 @@ pub fn verify(
         return false;
     }
     let ct_pk: CtOption<Result<ecdsa::VerifyingKey<p256::NistP256>>> =
-        pubkey.clone().ct_try_into_secp256r1_pubkey();
+        (*pubkey).ct_try_into_secp256r1_pubkey();
     let msg_hash = hash(msg);
     if ct_pk.is_some().into() {
         let res: Result<()> = ct_pk.unwrap().and_then(|pk| {
@@ -176,7 +176,7 @@ mod test {
     /// ```
     #[test]
     fn test_secp256r1_sign_and_verify() {
-        let pk: PublicKey = PublicKey::from_hex_string(
+        let pk: PublicKey<33> = PublicKey::<33>::from_hex_string(
 	    "17a6afd392fcbe4ac9270a599a9c5732c4f838ce35ea2234d389d8f0c367f3f5dcab906352e27289002c7f2c96039ddce7c1b5aad8b87ba94984d4c8b4f95702"
 	).unwrap();
         let sk =

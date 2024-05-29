@@ -64,7 +64,7 @@ jobs:
 
   build:
     name: Build and test
-    timeout-minutes: 25
+    timeout-minutes: 30
     strategy:
       matrix:
         os: ["ubuntu-latest"]

@@ -9,7 +9,7 @@ pub fn verify(
     msg: &[u8],
     address: &PublicKeyAddress,
     sig: impl AsRef<[u8]>,
-    pubkey: &PublicKey,
+    pubkey: &PublicKey<33>,
 ) -> bool {
     if pubkey.address() != *address {
         return false;
@@ -19,7 +19,7 @@ pub fn verify(
     }
     let sig_data: [u8; 64] = sig.as_ref().try_into().unwrap();
     if let (Ok(p), Ok(s)) = (
-        TryInto::<ed25519_dalek::PublicKey>::try_into(pubkey.clone()),
+        TryInto::<ed25519_dalek::PublicKey>::try_into(*pubkey),
         ed25519_dalek::Signature::from_bytes(&sig_data),
     ) {
         match p.verify(msg, &s) {

@@ -27,7 +27,7 @@ pub fn hash(msg: &[u8]) -> [u8; 32] {
 }
 
 /// recover pubkey according to signature.
-pub fn recover(msg: &[u8], sig: impl AsRef<[u8]>) -> Result<PublicKey> {
+pub fn recover(msg: &[u8], sig: impl AsRef<[u8]>) -> Result<PublicKey<33>> {
     let sig_byte: [u8; 65] = sig.as_ref().try_into()?;
     let hash = hash(msg);
     let mut sig712 = sig_byte;

@@ -157,13 +157,13 @@ pub enum Account {
     /// ecdsa
     Secp256k1(Did),
     /// ref: <https://eips.ethereum.org/EIPS/eip-191>
-    Secp256r1(PublicKey),
+    Secp256r1(PublicKey<33>),
     /// ref: <https://developer.mozilla.org/en-US/docs/Web/API/Web_Crypto_API>
     EIP191(Did),
     /// bitcoin bip137 ref: <https://github.com/bitcoin/bips/blob/master/bip-0137.mediawiki>
     BIP137(Did),
     /// ed25519
-    Ed25519(PublicKey),
+    Ed25519(PublicKey<33>),
 }
 
 impl TryFrom<(String, String)> for Account {
@@ -310,14 +310,14 @@ impl Session {
     }
 
     /// Get public key from session for encryption.
-    pub fn account_pubkey(&self) -> Result<PublicKey> {
+    pub fn account_pubkey(&self) -> Result<PublicKey<33>> {
         let auth_bytes = self.pack();
         match self.account {
             Account::Secp256k1(_) => signers::secp256k1::recover(&auth_bytes, &self.sig),
             Account::BIP137(_) => signers::bip137::recover(&auth_bytes, &self.sig),
             Account::EIP191(_) => signers::eip191::recover(&auth_bytes, &self.sig),
-            Account::Ed25519(ref pk) => Ok(pk.clone()),
-            Account::Secp256r1(ref pk) => Ok(pk.clone()),
+            Account::Ed25519(ref pk) => Ok(*pk),
+            Account::Secp256r1(ref pk) => Ok(*pk),
         }
     }
 
