@@ -170,6 +170,17 @@ pub fn verify(msgs: &[&[u8]], sig: &Signature, pks: &[PublicKey]) -> Result<bool
     verify_hash(hashes.as_slice(), sig, pks)
 }
 
+// Aggregate signatures by multiplying them together. Calculated by signature = \sum_{i = 0}^n signature_i.
+pub fn aggregate(signatures: &[Signature]) -> Result<Signature> {
+    signatures
+        .iter()
+        .map(|sig| sig.clone().try_into())
+        .collect::<Result<Vec<G2Projective>>>()?
+        .iter()
+        .sum::<G2Projective>()
+        .try_into()
+}
+
 /// Converts a BLS private key to a BLS public key.
 /// Get the public key for this private key. Calculated by pk = g1 * sk.
 pub fn public_key(key: &SecretKey) -> Result<PublicKey> {
@@ -208,5 +219,32 @@ mod test {
         let msg = "hello world";
         let h = hash_to_curve(msg.as_bytes()).unwrap();
         assert_eq!(h, hashed_data);
+    }
+
+    #[test]
+    fn test_aggregate() {
+        let key1 = random_sk().unwrap();
+        let key2 = random_sk().unwrap();
+
+        let msg1 = "hello alice";
+        let msg2 = "hello bob";
+
+        let pk1 = public_key(&key1).unwrap();
+        let pk2 = public_key(&key2).unwrap();
+
+        let h1 = hash_to_curve(msg1.as_bytes()).unwrap();
+        let h2 = hash_to_curve(msg2.as_bytes()).unwrap();
+
+        let sig1 = sign_hash(key1, &h1).unwrap();
+        let sig2 = sign_hash(key2, &h2).unwrap();
+
+        let sig_agg = aggregate(&[sig1, sig2]).unwrap();
+
+        assert!(super::verify_hash(
+            vec![h1, h2].as_slice(),
+            &sig_agg,
+            vec![pk1.clone(), pk2.clone()].as_slice()
+        )
+        .unwrap());
     }
 }
