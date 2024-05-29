@@ -240,11 +240,9 @@ mod test {
 
         let sig_agg = aggregate(&[sig1, sig2]).unwrap();
 
-        assert!(super::verify_hash(
-            vec![h1, h2].as_slice(),
-            &sig_agg,
-            vec![pk1, pk2].as_slice()
-        )
-        .unwrap());
+        assert!(
+            super::verify_hash(vec![h1, h2].as_slice(), &sig_agg, vec![pk1, pk2].as_slice())
+                .unwrap()
+        );
     }
 }
