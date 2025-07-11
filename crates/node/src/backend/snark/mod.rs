@@ -39,7 +39,7 @@ type TaskId = uuid::Uuid;
 #[cfg(feature = "browser")]
 pub mod browser;
 
-/// Task Manageer of SNARK provier and verifier
+/// Task Manageer of SNARK provider and verifier
 #[derive(Default, Clone)]
 pub struct SNARKTaskManager {
     /// map of task_id and task

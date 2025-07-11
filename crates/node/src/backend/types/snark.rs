@@ -40,7 +40,7 @@ pub enum SNARKProofTask {
     PallasVasta(SNARKGenerator<PallasEngine, VestaEngine>),
     /// SNARK with curve vesta and pallas
     VastaPallas(SNARKGenerator<VestaEngine, PallasEngine>),
-    /// SNARK with curve bn256 whth KZG multi linear commitment and grumpkin
+    /// SNARK with curve bn256 with KZG multi linear commitment and grumpkin
     Bn256KZGGrumpkin(SNARKGenerator<Bn256EngineKZG, GrumpkinEngine>),
 }
 
@@ -51,7 +51,7 @@ pub enum SNARKVerifyTask {
     PallasVasta(String),
     /// SNARK with curve vesta and pallas
     VastaPallas(String),
-    /// SNARK with curve bn256 whth KZG multi linear commitment and grumpkin
+    /// SNARK with curve bn256 with KZG multi linear commitment and grumpkin
     Bn256KZGGrumpkin(String),
 }
 
