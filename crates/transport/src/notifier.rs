@@ -33,6 +33,12 @@ impl Notifier {
     }
 
     /// Wake the notifier after the specified time.
+    #[cfg(not(any(feature = "web-sys-webrtc", feature = "native-webrtc")))]
+    pub fn set_timeout(&self, _: u8) {
+        unimplemented!()
+    }
+
+    /// Wake the notifier after the specified time.
     #[cfg(feature = "native-webrtc")]
     pub fn set_timeout(&self, seconds: u8) {
         let this = self.clone();

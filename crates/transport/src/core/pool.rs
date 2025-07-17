@@ -1,6 +1,7 @@
 //! A module implementing a generic round-robin pool for various transport systems.
 //!
 //! This module provides the foundation for creating a pool of resources (e.g., connections, channels) and
+
 //! enables round-robin selection among these resources. It's designed with flexibility in mind, allowing
 //! integration with different types of transport mechanisms. This ensures efficient and balanced resource
 //! utilization across multiple channels or connections, irrespective of their specific implementation details.
@@ -143,6 +144,7 @@ pub trait StatusPool<T>: RoundRobin<T> {
 
 #[cfg(test)]
 pub mod tests {
+    //! Tests
     use super::*;
 
     #[test]

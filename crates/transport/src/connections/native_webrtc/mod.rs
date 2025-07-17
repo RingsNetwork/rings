@@ -38,8 +38,8 @@ const WEBRTC_GATHER_TIMEOUT: u8 = 60; // seconds
 /// pool size of data channel
 const DATA_CHANNEL_POOL_SIZE: u8 = 4;
 
-#[cfg_attr(arch_family = "wasm", async_trait(?Send))]
-#[cfg_attr(not(arch_family = "wasm"), async_trait)]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl MessageSenderPool<Arc<RTCDataChannel>> for RoundRobinPool<Arc<RTCDataChannel>> {
     type Message = TransportMessage;
     async fn send(&self, msg: TransportMessage) -> Result<()> {

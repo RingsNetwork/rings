@@ -60,7 +60,7 @@ chrono = { version = "0.4.19", features = ["wasmbind"] }
 dashmap = "5"
 derivative = "2.2.0"
 ecdsa = { version = "0.16.6", features = ["signing"] }
-ecies = { version = "0.2", default-features = false, features = ["pure"] }
+ecies = { version = "0.2.0", default-features = false, features = ["pure", "std"] }
 ed25519 = "1.5.2"
 ed25519-dalek = "1.0.1"
 elliptic-curve = "0.13.6"
