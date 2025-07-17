@@ -177,8 +177,8 @@ impl ConnectionInterface for WebSysWebrtcConnection {
         let offer = RtcSessionDescription::from(offer_js_value);
         let sdp = offer.sdp();
 
-        let mut set_local_init = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
-        set_local_init.sdp(&sdp);
+        let set_local_init = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
+        set_local_init.set_sdp(&sdp);
 
         let promise = self.webrtc_conn.set_local_description(&set_local_init);
         JsFuture::from(promise).await.map_err(Error::WebSysWebrtc)?;
@@ -189,8 +189,8 @@ impl ConnectionInterface for WebSysWebrtcConnection {
     async fn webrtc_answer_offer(&self, offer: Self::Sdp) -> Result<Self::Sdp> {
         tracing::debug!("webrtc_answer_offer, offer: {offer:?}");
 
-        let mut set_remote_init = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
-        set_remote_init.sdp(&offer);
+        let set_remote_init = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
+        set_remote_init.set_sdp(&offer);
 
         let promise = self.webrtc_conn.set_remote_description(&set_remote_init);
         JsFuture::from(promise).await.map_err(Error::WebSysWebrtc)?;
@@ -200,8 +200,8 @@ impl ConnectionInterface for WebSysWebrtcConnection {
         let answer = RtcSessionDescription::from(answer_js_value);
         let sdp = answer.sdp();
 
-        let mut set_local_init = RtcSessionDescriptionInit::new(RtcSdpType::Answer);
-        set_local_init.sdp(&sdp);
+        let set_local_init = RtcSessionDescriptionInit::new(RtcSdpType::Answer);
+        set_local_init.set_sdp(&sdp);
 
         let promise = self.webrtc_conn.set_local_description(&set_local_init);
         JsFuture::from(promise).await.map_err(Error::WebSysWebrtc)?;
@@ -212,8 +212,8 @@ impl ConnectionInterface for WebSysWebrtcConnection {
     async fn webrtc_accept_answer(&self, answer: Self::Sdp) -> Result<()> {
         tracing::debug!("webrtc_accept_answer, answer: {answer:?}");
 
-        let mut set_remote_init = RtcSessionDescriptionInit::new(RtcSdpType::Answer);
-        set_remote_init.sdp(&answer);
+        let set_remote_init = RtcSessionDescriptionInit::new(RtcSdpType::Answer);
+        set_remote_init.set_sdp(&answer);
 
         let promise = self.webrtc_conn.set_remote_description(&set_remote_init);
         JsFuture::from(promise).await.map_err(Error::WebSysWebrtc)?;
@@ -274,10 +274,10 @@ impl TransportInterface for WebSysWebrtcTransport {
         //
         // Setup webrtc connection env
         //
-        let mut config = RtcConfiguration::new();
+        let config = RtcConfiguration::new();
         let ice_servers: js_sys::Array =
             js_sys::Array::from_iter(self.ice_servers.iter().cloned().map(RtcIceServer::from));
-        config.ice_servers(&ice_servers.into());
+        config.set_ice_servers(&ice_servers.into());
 
         //
         // Create webrtc connection
@@ -444,20 +444,20 @@ impl From<IceCredentialType> for RtcIceCredentialType {
 
 impl From<IceServer> for RtcIceServer {
     fn from(s: IceServer) -> Self {
-        let mut ret = RtcIceServer::new();
+        let ret = RtcIceServer::new();
         let urls = Array::new();
         for u in s.urls {
             let url = JsValue::from_str(&u);
             urls.push(&url);
         }
         if !s.username.is_empty() {
-            ret.username(&s.username);
+            ret.set_username(&s.username);
         }
         if !s.credential.is_empty() {
-            ret.credential(&s.credential);
+            ret.set_credential(&s.credential);
         }
-        ret.credential_type(s.credential_type.into());
-        ret.urls(&urls);
+        ret.set_credential_type(s.credential_type.into());
+        ret.set_urls(&urls);
         ret
     }
 }

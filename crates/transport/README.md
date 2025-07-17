@@ -40,7 +40,7 @@ Based on `wasm_bindgen`, `web_sys`, for Browser usecase
 To build for webrtc in browser:
 
 ```sh
-cargo build --features web-sys-webrtc
+cargo build --features web-sys-webrtc --no-default-features
 ```
 
 or

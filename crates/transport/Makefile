@@ -2,7 +2,7 @@ native:
 	cargo build --features native-webrtc
 
 web:
-	cargo build --features web-sys-webrtc
+	cargo build --features web-sys-webrtc --no-default-features
 
 dummy:
 
