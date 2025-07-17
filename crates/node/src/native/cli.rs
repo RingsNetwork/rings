@@ -73,7 +73,7 @@ impl Client {
             .map_err(|e| anyhow::anyhow!("{}", e))?
             .did;
 
-        ClientOutput::ok(format!("Remote did: {}", peer_did), peer_did)
+        ClientOutput::ok(format!("Remote did: {peer_did}"), peer_did)
     }
 
     /// Attempts to connect to a peer using a seed file located at the specified source path.

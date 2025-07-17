@@ -72,8 +72,8 @@ pub async fn run_internal_api(port: u16, processor: Arc<Processor>) -> anyhow::R
         .layer(axum::middleware::from_fn(node_info_header))
         .into_make_service_with_connect_info::<SocketAddr>();
 
-    println!("JSON-RPC endpoint: http://{}", binding_addr);
-    println!("WebSocket endpoint: http://{}/ws", binding_addr);
+    println!("JSON-RPC endpoint: http://{binding_addr}");
+    println!("WebSocket endpoint: http://{binding_addr}/ws");
     axum::Server::bind(&binding_addr)
         .serve(axum_make_service)
         .await?;
@@ -102,7 +102,7 @@ pub async fn run_external_api(addr: String, processor: Arc<Processor>) -> anyhow
         .layer(axum::middleware::from_fn(node_info_header))
         .into_make_service_with_connect_info::<SocketAddr>();
 
-    println!("JSON-RPC endpoint: http://{}", addr);
+    println!("JSON-RPC endpoint: http://{addr}");
     axum::Server::bind(&binding_addr)
         .serve(axum_make_service)
         .await?;

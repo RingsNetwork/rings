@@ -480,7 +480,7 @@ async fn pubsub_run(client_args: ClientArgs, topic: String) -> anyhow::Result<()
             }
             msg = stream.next() => {
                 let msg = msg.expect("sub stream closed");
-                println!("{}", msg);
+                println!("{msg}");
             }
         }
     }
@@ -611,7 +611,7 @@ async fn main() -> anyhow::Result<()> {
             let session_sk_path = args.session_args.new_session_then_write_to_fs()?;
             let config = config::Config::new(session_sk_path);
             let p = config.write_fs(&args.location)?;
-            println!("Your config file has saved to: {}", p);
+            println!("Your config file has saved to: {p}");
             Ok(())
         }
         Command::NewSession(args) => {
@@ -648,7 +648,7 @@ async fn service_loop_register(processor: &Processor, names: Vec<String>) {
         let timeout = Delay::new(Duration::from_secs(30)).fuse();
         pin_mut!(timeout);
         select! {
-            _ = timeout => register_services(processor, names.clone()).await.unwrap_or_else(|e| eprintln!("Error: {}", e)),
+            _ = timeout => register_services(processor, names.clone()).await.unwrap_or_else(|e| eprintln!("Error: {e}")),
         }
     }
 }

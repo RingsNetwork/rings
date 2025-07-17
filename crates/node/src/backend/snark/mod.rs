@@ -102,7 +102,7 @@ impl SNARKBehaviour {
         let task = task_ref.as_ref().clone();
         let msg: BackendMessage = SNARKTaskMessage {
             task_id,
-            task: SNARKTask::SNARKProof(task.clone()),
+            task: Box::new(SNARKTask::SNARKProof(task.clone())),
         }
         .into();
         let params = msg.into_send_backend_message_request(did)?;
@@ -572,9 +572,12 @@ impl SNARKTaskBuilder {
                     .collect();
                 let inputs = circuits[0].get_public_inputs();
                 let pp = SNARK::<E1, E2>::gen_pp::<S1, S2>(circuits[0].clone())?;
-                let snark = SNARK::<E1, E2>::new(&circuits[0], &pp, &inputs, &vec![
-                    <E2 as Engine>::Scalar::from(0),
-                ])?;
+                let snark = SNARK::<E1, E2>::new(
+                    &circuits[0],
+                    &pp,
+                    &inputs,
+                    &vec![<E2 as Engine>::Scalar::from(0)],
+                )?;
 
                 SNARKProofTask::VastaPallas(SNARKGenerator {
                     pp: pp.into(),
@@ -601,9 +604,12 @@ impl SNARKTaskBuilder {
                     .collect();
                 let inputs = circuits[0].get_public_inputs();
                 let pp = SNARK::<E1, E2>::gen_pp::<S1, S2>(circuits[0].clone())?;
-                let snark = SNARK::<E1, E2>::new(&circuits[0], &pp, &inputs, &vec![
-                    <E2 as Engine>::Scalar::from(0),
-                ])?;
+                let snark = SNARK::<E1, E2>::new(
+                    &circuits[0],
+                    &pp,
+                    &inputs,
+                    &vec![<E2 as Engine>::Scalar::from(0)],
+                )?;
                 SNARKProofTask::PallasVasta(SNARKGenerator {
                     pp: pp.into(),
                     snark,
@@ -629,9 +635,12 @@ impl SNARKTaskBuilder {
                     .collect();
                 let inputs = circuits[0].get_public_inputs();
                 let pp = SNARK::<E1, E2>::gen_pp::<S1, S2>(circuits[0].clone())?;
-                let snark = SNARK::<E1, E2>::new(&circuits[0], &pp, &inputs, &vec![
-                    <E2 as Engine>::Scalar::from(0),
-                ])?;
+                let snark = SNARK::<E1, E2>::new(
+                    &circuits[0],
+                    &pp,
+                    &inputs,
+                    &vec![<E2 as Engine>::Scalar::from(0)],
+                )?;
                 SNARKProofTask::Bn256KZGGrumpkin(SNARKGenerator {
                     pp: pp.into(),
                     snark,
@@ -727,7 +736,7 @@ where
         } = self;
 
         let mut split = Vec::new();
-        let chunk_size = (circuits.len() + n - 1) / n;
+        let chunk_size = circuits.len().div_ceil(n);
 
         for circuit_chunk in circuits.chunks(chunk_size) {
             let new_generator = SNARKGenerator {

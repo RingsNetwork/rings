@@ -22,6 +22,7 @@
 //! * Multiplication is closed: For any two elements a and b in R, their product a · b belongs to R.
 //!
 //! * Multiplication satisfies the distributive law:
+//!
 //! For any three elements a, b, and c in R, a · (b + c) = a · b + a · c and (a + b) · c = a · c + b · c.
 //!
 //! ## Concrete Did
@@ -221,7 +222,7 @@ impl From<BigUint> for Did {
         let mut va: Vec<u8> = ff.to_bytes_be();
         let mut res = vec![0u8; 20 - va.len()];
         res.append(&mut va);
-        assert_eq!(res.len(), 20, "{:?}", res);
+        assert_eq!(res.len(), 20, "{res:?}");
         Self(H160::from_slice(&res))
     }
 }
@@ -248,7 +249,7 @@ impl Neg for Did {
     }
 }
 
-impl<'a> Neg for &'a Did {
+impl Neg for &Did {
     type Output = Did;
 
     fn neg(self) -> Self::Output {
@@ -372,11 +373,11 @@ mod tests {
         // Debug and Display
         let did = Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
         assert_eq!(
-            format!("{}", did),
+            format!("{did}"),
             "0x11e807fcc88dd319270493fb2e822e388fe36ab0"
         );
         assert_eq!(
-            format!("{:?}", did),
+            format!("{did:?}"),
             "Did(0x11e807fcc88dd319270493fb2e822e388fe36ab0)"
         );
     }

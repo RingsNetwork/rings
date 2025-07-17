@@ -330,7 +330,7 @@ impl TransportInterface for WebrtcTransport {
         //
         for i in 0..DATA_CHANNEL_POOL_SIZE {
             let ch = webrtc_conn
-                .create_data_channel(&format!("rings_data_channel_{}", i), None)
+                .create_data_channel(&format!("rings_data_channel_{i}"), None)
                 .await?;
             channel_pool.push(ch)?;
         }

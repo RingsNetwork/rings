@@ -16,6 +16,7 @@ repository.workspace = true
 # The corresponding API may be deprecated or adjusted in the future.
 experimental = ["std"]
 default = ["std"]
+redundant = ["default"]
 std = [
     "webrtc",
     "sled",

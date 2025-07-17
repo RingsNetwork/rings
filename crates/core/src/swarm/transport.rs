@@ -102,10 +102,13 @@ impl SwarmTransport {
             .into_iter()
             .filter_map(|(k, v)| {
                 Did::from_str(&k).ok().map(|did| {
-                    (did, SwarmConnection {
-                        peer: did,
-                        connection: v,
-                    })
+                    (
+                        did,
+                        SwarmConnection {
+                            peer: did,
+                            connection: v,
+                        },
+                    )
                 })
             })
             .collect()
@@ -150,9 +153,7 @@ impl SwarmTransport {
     /// See more information about [rings_transport::core::transport::WebrtcConnectionState].
     /// See also method webrtc_wait_for_data_channel_open [rings_transport::core::transport::ConnectionInterface].
     pub async fn get_and_check_connection(&self, peer: Did) -> Option<SwarmConnection> {
-        let Some(conn) = self.get_connection(peer) else {
-            return None;
-        };
+        let conn = self.get_connection(peer)?;
 
         if let Err(e) = conn.connection.webrtc_wait_for_data_channel_open().await {
             tracing::warn!(

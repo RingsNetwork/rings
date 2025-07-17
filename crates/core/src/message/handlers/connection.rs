@@ -154,6 +154,7 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
 #[cfg(not(feature = "wasm"))]
 #[cfg(test)]
 pub mod tests {
+    //! tests
     use std::matches;
 
     use rings_transport::core::transport::WebrtcConnectionState;
@@ -319,10 +320,10 @@ pub mod tests {
         node2.assert_transports(vec![node1.did(), node3.did()]);
         node3.assert_transports(vec![node2.did()]);
         assert_eq!(node1.dht().successors().list()?, vec![node2.did(),]);
-        assert_eq!(node2.dht().successors().list()?, vec![
-            node3.did(),
-            node1.did()
-        ]);
+        assert_eq!(
+            node2.dht().successors().list()?,
+            vec![node3.did(), node1.did()]
+        );
         assert_eq!(node3.dht().successors().list()?, vec![node2.did()]);
 
         println!("=============================================");
@@ -342,18 +343,18 @@ pub mod tests {
         node1.assert_transports(vec![node2.did(), node3.did()]);
         node2.assert_transports(vec![node1.did(), node3.did()]);
         node3.assert_transports(vec![node1.did(), node2.did()]);
-        assert_eq!(node1.dht().successors().list()?, vec![
-            node2.did(),
-            node3.did()
-        ]);
-        assert_eq!(node2.dht().successors().list()?, vec![
-            node3.did(),
-            node1.did()
-        ]);
-        assert_eq!(node3.dht().successors().list()?, vec![
-            node1.did(),
-            node2.did()
-        ]);
+        assert_eq!(
+            node1.dht().successors().list()?,
+            vec![node2.did(), node3.did()]
+        );
+        assert_eq!(
+            node2.dht().successors().list()?,
+            vec![node3.did(), node1.did()]
+        );
+        assert_eq!(
+            node3.dht().successors().list()?,
+            vec![node1.did(), node2.did()]
+        );
 
         Ok((node1, node2, node3))
     }
@@ -392,10 +393,10 @@ pub mod tests {
         node2.assert_transports(vec![node1.did(), node3.did()]);
         node3.assert_transports(vec![node2.did()]);
         assert_eq!(node1.dht().successors().list()?, vec![node2.did()]);
-        assert_eq!(node2.dht().successors().list()?, vec![
-            node1.did(),
-            node3.did()
-        ]);
+        assert_eq!(
+            node2.dht().successors().list()?,
+            vec![node1.did(), node3.did()]
+        );
         assert_eq!(node3.dht().successors().list()?, vec![node2.did()]);
 
         println!("=============================================");
@@ -415,18 +416,18 @@ pub mod tests {
         node1.assert_transports(vec![node2.did(), node3.did()]);
         node2.assert_transports(vec![node1.did(), node3.did()]);
         node3.assert_transports(vec![node1.did(), node2.did()]);
-        assert_eq!(node1.dht().successors().list()?, vec![
-            node3.did(),
-            node2.did()
-        ]);
-        assert_eq!(node2.dht().successors().list()?, vec![
-            node1.did(),
-            node3.did()
-        ]);
-        assert_eq!(node3.dht().successors().list()?, vec![
-            node2.did(),
-            node1.did()
-        ]);
+        assert_eq!(
+            node1.dht().successors().list()?,
+            vec![node3.did(), node2.did()]
+        );
+        assert_eq!(
+            node2.dht().successors().list()?,
+            vec![node1.did(), node3.did()]
+        );
+        assert_eq!(
+            node3.dht().successors().list()?,
+            vec![node2.did(), node1.did()]
+        );
 
         Ok((node1, node2, node3))
     }
@@ -459,24 +460,22 @@ pub mod tests {
         node3.assert_transports(vec![node1.did(), node2.did()]);
         // node4 will connect node1 after connecting node2, because node2 notified node4 that node1 is its predecessor.
         node4.assert_transports(vec![node1.did(), node2.did()]);
-        assert_eq!(node1.dht().successors().list().unwrap(), vec![
-            node2.did(),
-            node3.did(),
-            node4.did(),
-        ]);
-        assert_eq!(node2.dht().successors().list().unwrap(), vec![
-            node3.did(),
-            node4.did(),
-            node1.did(),
-        ]);
-        assert_eq!(node3.dht().successors().list().unwrap(), vec![
-            node1.did(),
-            node2.did(),
-        ]);
-        assert_eq!(node4.dht().successors().list().unwrap(), vec![
-            node1.did(),
-            node2.did(),
-        ]);
+        assert_eq!(
+            node1.dht().successors().list().unwrap(),
+            vec![node2.did(), node3.did(), node4.did(),]
+        );
+        assert_eq!(
+            node2.dht().successors().list().unwrap(),
+            vec![node3.did(), node4.did(), node1.did(),]
+        );
+        assert_eq!(
+            node3.dht().successors().list().unwrap(),
+            vec![node1.did(), node2.did(),]
+        );
+        assert_eq!(
+            node4.dht().successors().list().unwrap(),
+            vec![node1.did(), node2.did(),]
+        );
 
         println!("========================================");
         println!("| test node4 connect node3 via dht     |");
@@ -498,26 +497,22 @@ pub mod tests {
         node2.assert_transports(vec![node3.did(), node4.did(), node1.did()]);
         node3.assert_transports(vec![node4.did(), node1.did(), node2.did()]);
         node4.assert_transports(vec![node1.did(), node2.did(), node3.did()]);
-        assert_eq!(node1.dht().successors().list().unwrap(), vec![
-            node2.did(),
-            node3.did(),
-            node4.did()
-        ]);
-        assert_eq!(node2.dht().successors().list().unwrap(), vec![
-            node3.did(),
-            node4.did(),
-            node1.did(),
-        ]);
-        assert_eq!(node3.dht().successors().list().unwrap(), vec![
-            node4.did(),
-            node1.did(),
-            node2.did(),
-        ]);
-        assert_eq!(node4.dht().successors().list().unwrap(), vec![
-            node1.did(),
-            node2.did(),
-            node3.did(),
-        ]);
+        assert_eq!(
+            node1.dht().successors().list().unwrap(),
+            vec![node2.did(), node3.did(), node4.did()]
+        );
+        assert_eq!(
+            node2.dht().successors().list().unwrap(),
+            vec![node3.did(), node4.did(), node1.did(),]
+        );
+        assert_eq!(
+            node3.dht().successors().list().unwrap(),
+            vec![node4.did(), node1.did(), node2.did(),]
+        );
+        assert_eq!(
+            node4.dht().successors().list().unwrap(),
+            vec![node1.did(), node2.did(), node3.did(),]
+        );
 
         Ok(())
     }

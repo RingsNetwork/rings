@@ -52,8 +52,8 @@ pub enum VNodeOperation {
 /// * If type value is [VNodeType::Data], it's sha1 of data topic.
 /// * If type value is [VNodeType::Subring], it's sha1 of Subring name.
 /// * If type value is [VNodeType::RelayMessage], it's the destination Did of
-/// message plus 1 (to ensure that the message is sent to the successor of destination),
-/// thus while destination node going online, it will sync message from its successor.
+///   message plus 1 (to ensure that the message is sent to the successor of destination),
+///   thus while destination node going online, it will sync message from its successor.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VirtualNode {
     /// The did of `VirtualNode` make it unique, and can be stored and retrieved on DHT.
@@ -282,7 +282,7 @@ mod tests {
 
         for i in 1..VNODE_DATA_MAX_LEN {
             let topic = topic.clone();
-            let data = format!("test{}", i);
+            let data = format!("test{i}");
 
             let other = (topic, data).try_into().unwrap();
             vnode = vnode.extend(other).unwrap();
@@ -292,7 +292,7 @@ mod tests {
 
         for i in VNODE_DATA_MAX_LEN..VNODE_DATA_MAX_LEN + 10 {
             let topic = topic.clone();
-            let data = format!("test{}", i);
+            let data = format!("test{i}");
 
             let other = (topic, data.clone()).try_into().unwrap();
             vnode = vnode.extend(other).unwrap();

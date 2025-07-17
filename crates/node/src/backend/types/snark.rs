@@ -28,7 +28,7 @@ pub struct SNARKTaskMessage {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum SNARKTask {
     /// Proof task
-    SNARKProof(SNARKProofTask),
+    SNARKProof(Box<SNARKProofTask>),
     /// Verify task
     SNARKVerify(SNARKVerifyTask),
 }
