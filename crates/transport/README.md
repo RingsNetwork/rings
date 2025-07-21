@@ -67,10 +67,10 @@ make dummy
 
 ## Tests
 
-```
+```sh
 cargo test --features native-webrtc
 ```
 
-```
+```sh
 cargo test --features web-sys-webrtc
 ```

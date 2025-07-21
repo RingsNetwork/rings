@@ -75,11 +75,9 @@ async fn test_create_put_data() {
         .as_i64()
         .unwrap();
 
-    #[allow(clippy::uninlined_format_args)]
     assert!(
         last_visit_1 != last_visit_2,
-        "last_visit_1 and last_visit_2 is same, {}",
-        last_visit_1
+        "last_visit_1 and last_visit_2 is same, {last_visit_1}"
     );
     assert!(
         real_value_2.get("visit_count").unwrap().as_i64().unwrap() == 1,

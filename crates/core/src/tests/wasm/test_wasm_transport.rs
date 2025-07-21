@@ -18,7 +18,7 @@ async fn get_fake_permission() {
     let window = web_sys::window().unwrap();
     let nav = window.navigator();
     let media = nav.media_devices().unwrap();
-    let mut cons = web_sys::MediaStreamConstraints::new();
+    let cons = web_sys::MediaStreamConstraints::new();
     cons.set_audio(&JsValue::from(true));
     cons.set_video(&JsValue::from(false));
     cons.set_fake(true);
