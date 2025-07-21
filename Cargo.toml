@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*", "examples/native", "examples/snark"]
 
 [workspace.package]
-version = "0.7.1"
+version = "0.7.0"
 edition = "2021"
 license = "GPL-3.0"
 authors = ["RND <dev@ringsnetwork.io>"]
@@ -27,6 +27,6 @@ wasm-bindgen-test = "0.3.50"
 webrtc = { version = "0.10.1" }
 
 [profile.release]
-opt-level = false
+opt-level = 3
 lto = true
 strip = true
