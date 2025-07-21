@@ -157,9 +157,7 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
                     if let Some(item) = iter.next() {
                         new_vec.push(*item);
                     } else {
-                        panic!(
-                            "Failed on reshape output {output:?} as input format {input:?}"
-                        )
+                        panic!("Failed on reshape output {output:?} as input format {input:?}")
                     }
                 }
                 ret.push((val.clone(), new_vec));

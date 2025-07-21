@@ -1,9 +1,10 @@
 //! Logging configuration contains both `node` and `browser`.
-use backtrace::Backtrace;
-use clap::ValueEnum;
 use std::fmt;
 use std::panic::Location;
 use std::panic::PanicHookInfo;
+
+use backtrace::Backtrace;
+use clap::ValueEnum;
 use tracing::Level;
 use tracing_log::LogTracer;
 use tracing_subscriber::layer::SubscriberExt;
@@ -61,8 +62,7 @@ pub struct PanicLocation {
 }
 
 impl<'a, T> From<T> for PanicLocation
-where
-    T: Into<Location<'a>>,
+where T: Into<Location<'a>>
 {
     fn from(lo: T) -> Self {
         let lo: Location = lo.into();
@@ -83,8 +83,7 @@ pub struct PanicData<'a> {
 }
 
 impl<'a, T> From<T> for PanicData<'a>
-where
-    T: Into<&'a PanicHookInfo<'a>>,
+where T: Into<&'a PanicHookInfo<'a>>
 {
     fn from(panic: T) -> PanicData<'a> {
         let panic = panic.into();

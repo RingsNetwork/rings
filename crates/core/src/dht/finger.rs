@@ -169,7 +169,7 @@ impl FingerTable {
         &self.finger
     }
 
-    /// Reset finger table to emply vector
+    /// Reset finger table to empty vector
     #[cfg(test)]
     pub fn reset_finger(&mut self) {
         self.finger = vec![None; self.size]

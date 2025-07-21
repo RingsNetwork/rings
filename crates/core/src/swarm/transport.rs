@@ -102,13 +102,10 @@ impl SwarmTransport {
             .into_iter()
             .filter_map(|(k, v)| {
                 Did::from_str(&k).ok().map(|did| {
-                    (
-                        did,
-                        SwarmConnection {
-                            peer: did,
-                            connection: v,
-                        },
-                    )
+                    (did, SwarmConnection {
+                        peer: did,
+                        connection: v,
+                    })
                 })
             })
             .collect()

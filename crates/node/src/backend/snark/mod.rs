@@ -572,12 +572,9 @@ impl SNARKTaskBuilder {
                     .collect();
                 let inputs = circuits[0].get_public_inputs();
                 let pp = SNARK::<E1, E2>::gen_pp::<S1, S2>(circuits[0].clone())?;
-                let snark = SNARK::<E1, E2>::new(
-                    &circuits[0],
-                    &pp,
-                    &inputs,
-                    &vec![<E2 as Engine>::Scalar::from(0)],
-                )?;
+                let snark = SNARK::<E1, E2>::new(&circuits[0], &pp, &inputs, &vec![
+                    <E2 as Engine>::Scalar::from(0),
+                ])?;
 
                 SNARKProofTask::VastaPallas(SNARKGenerator {
                     pp: pp.into(),
@@ -604,12 +601,9 @@ impl SNARKTaskBuilder {
                     .collect();
                 let inputs = circuits[0].get_public_inputs();
                 let pp = SNARK::<E1, E2>::gen_pp::<S1, S2>(circuits[0].clone())?;
-                let snark = SNARK::<E1, E2>::new(
-                    &circuits[0],
-                    &pp,
-                    &inputs,
-                    &vec![<E2 as Engine>::Scalar::from(0)],
-                )?;
+                let snark = SNARK::<E1, E2>::new(&circuits[0], &pp, &inputs, &vec![
+                    <E2 as Engine>::Scalar::from(0),
+                ])?;
                 SNARKProofTask::PallasVasta(SNARKGenerator {
                     pp: pp.into(),
                     snark,
@@ -635,12 +629,9 @@ impl SNARKTaskBuilder {
                     .collect();
                 let inputs = circuits[0].get_public_inputs();
                 let pp = SNARK::<E1, E2>::gen_pp::<S1, S2>(circuits[0].clone())?;
-                let snark = SNARK::<E1, E2>::new(
-                    &circuits[0],
-                    &pp,
-                    &inputs,
-                    &vec![<E2 as Engine>::Scalar::from(0)],
-                )?;
+                let snark = SNARK::<E1, E2>::new(&circuits[0], &pp, &inputs, &vec![
+                    <E2 as Engine>::Scalar::from(0),
+                ])?;
                 SNARKProofTask::Bn256KZGGrumpkin(SNARKGenerator {
                     pp: pp.into(),
                     snark,
