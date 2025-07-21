@@ -94,7 +94,7 @@ jobs:
           cargo build --features node --no-default-features --release --target ${{ steps.target.outputs.target }}
           zip -j rings-${{ needs.gen_version.outputs.version }}-${{ steps.target.outputs.target }}.zip ./target/${{ steps.target.outputs.target }}/release/rings
 
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         name: Upload artifacts
         with:
           name: rings-${{ needs.gen_version.outputs.version }}-${{ steps.target.outputs.target }}
@@ -155,7 +155,7 @@ jobs:
           cargo build --features node --no-default-features --release --target ${{ steps.target.outputs.target }}
           zip -j rings-${{ needs.gen_version.outputs.version }}-${{ steps.target.outputs.target }}.zip ./target/${{ steps.target.outputs.target }}/release/rings
 
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         name: Upload artifacts
         with:
           name: rings-${{ needs.gen_version.outputs.version }}-${{ steps.target.outputs.target }}
@@ -216,7 +216,7 @@ jobs:
           npm install && npm pack
           mv ringsnetwork-rings-node-*.tgz rings-${{ needs.gen_version.outputs.version }}-${{ steps.target.outputs.target }}.tgz
 
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         name: Upload artifacts
         with:
           name: rings-${{ needs.gen_version.outputs.version }}-${{ steps.target.outputs.target }}
@@ -238,7 +238,7 @@ jobs:
           config: cliff.toml
           args: "-vv --strip header ${{ needs.gen_version.outputs.version == 'prerelease' && '--unreleased' || '--latest' }}"
 
-      - uses: actions/download-artifact@v3
+      - uses: actions/download-artifact@v4
       - name: Display fetched artifacts
         run: ls -R
 
