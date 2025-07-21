@@ -42,7 +42,7 @@ thiserror = "1"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasmer = { version = "5.0.6", features = ["js-default"], default-features = false }
 wasm-bindgen = { workspace = true, features = ["serde-serialize"] }
-wasm-bindgen-test = { version = "0.3.0" }
+wasm-bindgen-test = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 wasmer = "5.0.6"
