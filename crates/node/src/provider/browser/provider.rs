@@ -184,7 +184,7 @@ impl Provider {
             );
 
             let measure_storage = Box::new(
-                IdbStorage::new_with_cap_and_name(50000, &format!("{}/measure", storage_name))
+                IdbStorage::new_with_cap_and_name(50000, &format!("{storage_name}/measure"))
                     .await
                     .expect("Failed on create measure storage"),
             );
@@ -232,7 +232,7 @@ impl Provider {
 
     /// connect peer with remote jsonrpc server url
     pub fn connect_peer_via_http(&self, remote_url: String) -> js_sys::Promise {
-        log::debug!("remote_url: {}", remote_url);
+        log::debug!("remote_url: {remote_url}");
         self.request(
             "ConnectPeerViaHttp".to_string(),
             js_value::serialize(&ConnectPeerViaHttpRequest { url: remote_url }).unwrap(),

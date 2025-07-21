@@ -88,6 +88,7 @@ impl Decoder for Bytes {
     }
 }
 
+#[allow(clippy::to_string_trait_impl)]
 impl ToString for Encoded {
     fn to_string(&self) -> String {
         self.deref().to_owned()

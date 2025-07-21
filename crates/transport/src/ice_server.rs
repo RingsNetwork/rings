@@ -80,10 +80,10 @@ impl FromStr for IceServer {
         // parse port as `:<port>`
         let port = parsed
             .port()
-            .map(|p| format!(":{}", p))
+            .map(|p| format!(":{p}"))
             .unwrap_or_else(|| "".to_string());
         let path = parsed.path();
-        let url = format!("{}:{}{}{}", scheme, host, port, path);
+        let url = format!("{scheme}:{host}{port}{path}");
         Ok(Self {
             urls: vec![url],
             username: username.to_string(),

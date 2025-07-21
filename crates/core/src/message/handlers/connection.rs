@@ -154,6 +154,7 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
 #[cfg(not(feature = "wasm"))]
 #[cfg(test)]
 pub mod tests {
+    //! tests
     use std::matches;
 
     use rings_transport::core::transport::WebrtcConnectionState;

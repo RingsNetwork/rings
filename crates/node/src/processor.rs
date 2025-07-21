@@ -429,8 +429,8 @@ mod test {
         let did1 = p1.did();
         let did2 = p2.did();
 
-        println!("p1_did: {}", did1);
-        println!("p2_did: {}", did2);
+        println!("p1_did: {did1}");
+        println!("p2_did: {did2}");
 
         let offer = p1.swarm.create_offer(p2.did()).await.unwrap();
         assert_eq!(
@@ -475,11 +475,11 @@ mod test {
 
         println!("send_message 1");
         let uuid1 = p1.send_message(did2, test_text1.as_bytes()).await.unwrap();
-        println!("send_message 1 done, msg id: {}", uuid1);
+        println!("send_message 1 done, msg id: {uuid1}");
 
         println!("send_message 2");
         let uuid2 = p2.send_message(did1, test_text2.as_bytes()).await.unwrap();
-        println!("send_message 2 done, msg id: {}", uuid2);
+        println!("send_message 2 done, msg id: {uuid2}");
 
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         println!("check received");
@@ -488,18 +488,14 @@ mod test {
         let got_msg2 = msgs2.pop().unwrap();
         assert!(
             got_msg2.eq(test_text1),
-            "msg received, expect {}, got {}",
-            test_text1,
-            got_msg2
+            "msg received, expect {test_text1}, got {got_msg2}"
         );
 
         let mut msgs1 = callback1.msgs.try_lock().unwrap();
         let got_msg1 = msgs1.pop().unwrap();
         assert!(
             got_msg1.eq(test_text2),
-            "msg received, expect {}, got {}",
-            test_text2,
-            got_msg1
+            "msg received, expect {test_text2}, got {got_msg1}"
         );
     }
 }

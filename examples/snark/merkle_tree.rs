@@ -48,7 +48,7 @@ pub async fn merkle_tree_path_proof() {
     ];
 
     let round = private_inputs.len();
-    println!("total round {:?}", round);
+    println!("total round {round:?}");
     // Gen recursived circuit
     let start = Instant::now();
 

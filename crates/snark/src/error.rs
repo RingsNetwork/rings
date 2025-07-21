@@ -16,7 +16,7 @@ pub enum Error {
     #[error("Failed to load witnesses: {0}")]
     WitnessFailedOnLoad(String),
     /// Error on compiling witness
-    #[error("Error on witness compilling: {0}")]
+    #[error("Error on witness compiling: {0}")]
     WitnessWasmRuntimeError(Box<wasmer::RuntimeError>),
     /// Error on create wasm instance
     #[error("Error on create wasm instance: {0}")]

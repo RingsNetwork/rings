@@ -39,7 +39,7 @@ type TaskId = uuid::Uuid;
 #[cfg(feature = "browser")]
 pub mod browser;
 
-/// Task Manageer of SNARK provier and verifier
+/// Task Manageer of SNARK provider and verifier
 #[derive(Default, Clone)]
 pub struct SNARKTaskManager {
     /// map of task_id and task
@@ -99,10 +99,10 @@ impl SNARKBehaviour {
         did: Did,
     ) -> Result<String> {
         let task_id = uuid::Uuid::new_v4();
-        let task = task_ref.as_ref().clone();
+        let task = task_ref.as_ref();
         let msg: BackendMessage = SNARKTaskMessage {
             task_id,
-            task: SNARKTask::SNARKProof(task.clone()),
+            task: SNARKTask::SNARKProof(Box::new(task.clone())),
         }
         .into();
         let params = msg.into_send_backend_message_request(did)?;
@@ -114,9 +114,9 @@ impl SNARKBehaviour {
             let promise = provider.request(Method::SendBackendMessage.to_string(), req);
             wasm_bindgen_futures::JsFuture::from(promise)
                 .await
-                .map_err(|e| Error::JsError(format!("Failed to send backend messate: {:?}", e)))?;
+                .map_err(|e| Error::JsError(format!("Failed to send backend messate: {e:?}")))?;
         }
-        self.task.insert(task_id, task);
+        self.task.insert(task_id, task.clone());
         tracing::info!("sent proof request");
         Ok(task_id.to_string())
     }
@@ -727,7 +727,7 @@ where
         } = self;
 
         let mut split = Vec::new();
-        let chunk_size = (circuits.len() + n - 1) / n;
+        let chunk_size = circuits.len().div_ceil(n);
 
         for circuit_chunk in circuits.chunks(chunk_size) {
             let new_generator = SNARKGenerator {

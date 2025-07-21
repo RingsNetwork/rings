@@ -348,10 +348,10 @@ pub enum Error {
     InvalidMessage(String),
 
     #[error("Message encryption failed")]
-    MessageEncryptionFailed(ecies::SecpError),
+    MessageEncryptionFailed(String),
 
     #[error("Message decryption failed")]
-    MessageDecryptionFailed(ecies::SecpError),
+    MessageDecryptionFailed(String),
 
     #[error("Message has {0} bytes which is too large")]
     MessageTooLarge(usize),

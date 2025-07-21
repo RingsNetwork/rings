@@ -138,8 +138,7 @@ pub fn load_witness_from_bin_reader<Fr: PrimeField, R: Read>(mut reader: R) -> R
     let sec_size = reader.read_u64::<LittleEndian>()?;
     if sec_size != u64::from(witness_len * field_size) {
         return Err(Error::LoadR1CS(format!(
-            "invalid witness section size {}",
-            sec_size
+            "invalid witness section size {sec_size}"
         )));
     }
     let mut result = Vec::with_capacity(witness_len as usize);

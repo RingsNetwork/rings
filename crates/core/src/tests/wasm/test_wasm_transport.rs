@@ -18,10 +18,10 @@ async fn get_fake_permission() {
     let window = web_sys::window().unwrap();
     let nav = window.navigator();
     let media = nav.media_devices().unwrap();
-    let mut cons = web_sys::MediaStreamConstraints::new();
-    cons.audio(&JsValue::from(true));
-    cons.video(&JsValue::from(false));
-    cons.fake(true);
+    let cons = web_sys::MediaStreamConstraints::new();
+    cons.set_audio(&JsValue::from(true));
+    cons.set_video(&JsValue::from(false));
+    cons.set_fake(true);
     let promise = media.get_user_media_with_constraints(&cons).unwrap();
     JsFuture::from(promise).await.unwrap();
 }

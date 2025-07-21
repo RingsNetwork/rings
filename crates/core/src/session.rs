@@ -88,7 +88,7 @@ use crate::error::Result;
 use crate::utils;
 
 fn pack_session(session_id: Did, ts_ms: u128, ttl_ms: u64) -> String {
-    format!("{}\n{}\n{}", session_id, ts_ms, ttl_ms)
+    format!("{session_id}\n{ts_ms}\n{ttl_ms}")
 }
 
 /// SessionSkBuilder is used to build a [SessionSk].

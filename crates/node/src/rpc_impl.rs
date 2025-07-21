@@ -93,7 +93,7 @@ impl HandleRpc<ConnectWithSeedRequest, ConnectWithSeedResponse> for Processor {
 
         let first_err = results.into_iter().find(|x| x.is_err());
         if let Some(err) = first_err {
-            err.map_err(Error::from)?;
+            err?;
         }
 
         Ok(ConnectWithSeedResponse {})

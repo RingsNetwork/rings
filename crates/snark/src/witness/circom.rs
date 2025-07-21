@@ -247,7 +247,7 @@ impl CircomBase for Wasm {
         self.0
             .exports
             .get_function(name)
-            .unwrap_or_else(|_| panic!("function {} not found", name))
+            .unwrap_or_else(|_| panic!("function {name} not found"))
     }
 }
 

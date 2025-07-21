@@ -52,7 +52,7 @@ impl InternalRpcHandler {
     {
         let method = Method::try_from(method.as_str()).map_err(|_| Error {
             code: ErrorCode::MethodNotFound,
-            message: format!("method {} is not found", method),
+            message: format!("method {method} is not found"),
             data: None,
         })?;
 
@@ -172,7 +172,7 @@ impl ExternalRpcHandler {
     {
         let method = Method::try_from(method.as_str()).map_err(|_| Error {
             code: ErrorCode::MethodNotFound,
-            message: format!("method {} is not found", method),
+            message: format!("method {method} is not found"),
             data: None,
         })?;
 

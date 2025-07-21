@@ -1,6 +1,7 @@
 //! A module implementing a generic round-robin pool for various transport systems.
 //!
 //! This module provides the foundation for creating a pool of resources (e.g., connections, channels) and
+
 //! enables round-robin selection among these resources. It's designed with flexibility in mind, allowing
 //! integration with different types of transport mechanisms. This ensures efficient and balanced resource
 //! utilization across multiple channels or connections, irrespective of their specific implementation details.
@@ -110,8 +111,11 @@ impl<T: Clone> RoundRobin<T> for RoundRobinPool<T> {
 /// Extends `RoundRobin` with functionality for asynchronous message transmission, leveraging the pooled
 /// resources for communication. It's adaptable to various messaging patterns and data types, specified
 /// by the generic `Message` associated type.
-#[cfg_attr(target_family = "wasm", async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait)]
+#[cfg_attr(any(feature = "web-sys-webrtc", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(
+    not(any(feature = "web-sys-webrtc", target_family = "wasm")),
+    async_trait
+)]
 pub trait MessageSenderPool<T>: RoundRobin<T> {
     /// The type of messages that can be sent through the pool.
     ///
@@ -143,6 +147,7 @@ pub trait StatusPool<T>: RoundRobin<T> {
 
 #[cfg(test)]
 pub mod tests {
+    //! Tests
     use super::*;
 
     #[test]

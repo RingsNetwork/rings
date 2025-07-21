@@ -106,7 +106,7 @@ impl PeriodicMeasure {
     }
 
     fn gen_storage_key(did: Did, counter: MeasureCounter) -> String {
-        format!("PeriodicMeasure/counters/{}/{:?}", did, counter)
+        format!("PeriodicMeasure/counters/{did}/{counter:?}")
     }
 
     // Get count from storage, or create a new count instance.
@@ -121,7 +121,7 @@ impl PeriodicMeasure {
             .get(&k)
             .await
             .unwrap_or_else(|e| {
-                log::error!("Failed to get counter: {:?}", e);
+                log::error!("Failed to get counter: {e:?}");
                 Some(0)
             })
             .unwrap_or(0);
@@ -133,7 +133,7 @@ impl PeriodicMeasure {
     async fn save_counter(&self, did: Did, counter: MeasureCounter, count: u64) {
         let k = Self::gen_storage_key(did, counter);
         self.storage.put(&k, &count).await.unwrap_or_else(|e| {
-            log::error!("Failed to save counter: {:?}", e);
+            log::error!("Failed to save counter: {e:?}");
         })
     }
 }
