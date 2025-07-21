@@ -28,7 +28,7 @@ cargo build --features native-webrtc
 
 or
 
-```
+```sh
 make native
 
 ```
@@ -60,7 +60,7 @@ cargo build --features dummy
 
 or
 
-```
+```sh
 make dummy
 ```
 

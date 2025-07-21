@@ -1,6 +1,5 @@
 #![warn(missing_docs)]
 #![doc = include_str!("../README.md")]
-
 pub mod callback;
 pub mod connection_ref;
 pub mod connections;
