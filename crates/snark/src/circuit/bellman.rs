@@ -18,11 +18,11 @@ where E::Fr: ff::PrimeField
     //noinspection RsBorrowChecker
     fn synthesize<CS: ConstraintSystem<E>>(self, cs: &mut CS) -> Result<(), SynthesisError> {
         for i in 1..self.r1cs.num_inputs {
-            cs.alloc_input(|| format!("variable {}", i), || Ok(self.witness[i]))?;
+            cs.alloc_input(|| format!("variable {i}"), || Ok(self.witness[i]))?;
         }
         for i in 0..self.r1cs.num_aux {
             let f = self.witness[i + self.r1cs.num_inputs];
-            cs.alloc(|| format!("aux {}", i), || Ok(f))?;
+            cs.alloc(|| format!("aux {i}"), || Ok(f))?;
         }
 
         let make_index = |index| {
@@ -44,7 +44,7 @@ where E::Fr: ff::PrimeField
             // 0 * LC = 0 must be ignored
             if !((constraint.0.is_empty() || constraint.1.is_empty()) && constraint.2.is_empty()) {
                 cs.enforce(
-                    || format!("{}", i),
+                    || format!("{i}"),
                     |_| make_lc(constraint.0.clone()),
                     |_| make_lc(constraint.1.clone()),
                     |_| make_lc(constraint.2.clone()),

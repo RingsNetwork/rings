@@ -133,7 +133,7 @@ impl Extension {
             if let Ok(h) = Self::load(p).await {
                 handlers.push(h)
             } else {
-                log::error!("Failed on loading extension {:?}", p)
+                log::error!("Failed on loading extension {p:?}")
             }
         }
         Ok(Self { handlers })
@@ -157,8 +157,8 @@ impl MessageHandler<bytes::Bytes> for Extension {
     }
 }
 
-/// Loader of wasm, including ABI generator
 pub mod loader {
+    //! Loader of wasm, including ABI generator
     //! Wasm Loader module
     use core::any::Any;
     use std::ffi::CStr;
@@ -257,8 +257,7 @@ pub mod loader {
                     Ok(vec![])
                 }
                 x => Err(wasmer::RuntimeError::new(format!(
-                    "Expect [Externef, i32], got {:?}",
-                    x
+                    "Expect [Externef, i32], got {x:?}"
                 ))),
             }
         }
@@ -283,7 +282,7 @@ pub mod loader {
                     }
                 }
                 Err(e) => {
-                    log::error!("{:?}", e);
+                    log::error!("{e:?}");
                     Self::default()
                 }
             }
@@ -305,7 +304,7 @@ pub mod loader {
                     }
                 }
                 Err(e) => {
-                    log::error!("{:?}", e);
+                    log::error!("{e:?}");
                     None
                 }
             }

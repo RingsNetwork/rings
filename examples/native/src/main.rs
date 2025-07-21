@@ -90,7 +90,7 @@ async fn main() {
             .unwrap(),
     )
     .unwrap();
-    println!("<=== ConnectPeerViaHttpResponse: {:?}", resp);
+    println!("<=== ConnectPeerViaHttpResponse: {resp:?}");
 
     let remote_did = resp.did;
 
@@ -106,7 +106,7 @@ async fn main() {
                     .unwrap(),
             )
             .unwrap();
-            println!("<=== ListPeersResponse: {:?}", resp);
+            println!("<=== ListPeersResponse: {resp:?}");
 
             if resp
                 .peers
@@ -132,7 +132,7 @@ async fn main() {
         .request(Method::SendBackendMessage, rpc_req)
         .await
         .unwrap();
-    println!("<=== SendBackendMessage: {:?}", resp);
+    println!("<=== SendBackendMessage: {resp:?}");
 
     // Wait for message sent.
     tokio::time::sleep(Duration::from_secs(3)).await;

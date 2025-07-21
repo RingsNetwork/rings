@@ -1,7 +1,7 @@
 //! Logging configuration contains both `node` and `browser`.
 use std::fmt;
 use std::panic::Location;
-use std::panic::PanicInfo;
+use std::panic::PanicHookInfo;
 
 use backtrace::Backtrace;
 use clap::ValueEnum;
@@ -77,18 +77,18 @@ where T: Into<Location<'a>>
 /// Necessary information for recording panic
 #[derive(Debug, Clone)]
 pub struct PanicData<'a> {
-    message: &'a PanicInfo<'a>,
+    message: &'a PanicHookInfo<'a>,
     backtrace: String,
     location: Option<PanicLocation>,
 }
 
 impl<'a, T> From<T> for PanicData<'a>
-where T: Into<&'a PanicInfo<'a>>
+where T: Into<&'a PanicHookInfo<'a>>
 {
     fn from(panic: T) -> PanicData<'a> {
         let panic = panic.into();
         let backtrace = Backtrace::new();
-        let backtrace = format!("{:?}", backtrace);
+        let backtrace = format!("{backtrace:?}");
         let location: Option<PanicLocation> = panic.location().map(|l| PanicLocation::from(*l));
         PanicData {
             message: panic,
@@ -113,7 +113,7 @@ impl<'a> fmt::Display for PanicData<'a> {
     }
 }
 
-fn log_panic(panic: &PanicInfo) {
+fn log_panic(panic: &PanicHookInfo) {
     let data: PanicData = panic.into();
     tracing::error!("{}", data)
 }

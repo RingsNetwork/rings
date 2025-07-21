@@ -70,7 +70,7 @@ pub fn sign(sec: SecretKey, hash: &[u8; 32]) -> [u8; 64] {
     })() {
         Ok(s) => s,
         Err(e) => {
-            panic!("Got error on signing msg with secp256r1 {:?}", e)
+            panic!("Got error on signing msg with secp256r1 {e:?}")
         }
     }
 }

@@ -132,7 +132,7 @@ try {
             .to_string()
             .as_string()
             .unwrap();
-        assert_eq!(&ret, "hello world", "{:?}", ret);
+        assert_eq!(&ret, "hello world", "{ret:?}");
     } else {
         panic!("cannot get dom window");
     }
@@ -147,8 +147,7 @@ async fn test_get_address_from_hex_pubkey() {
     let addr = addr_result.ok().unwrap();
     assert!(
         addr.eq_ignore_ascii_case("0xfada88633e01d2f6704a7f2a6ebc57263aca6978"),
-        "got addr {:?}",
-        addr
+        "got addr {addr:?}"
     );
 }
 
@@ -163,9 +162,7 @@ async fn test_get_address() {
     .unwrap();
     assert!(
         expect_address.eq_ignore_ascii_case(got_address.as_str()),
-        "got address: {}, expect: {}",
-        got_address,
-        expect_address
+        "got address: {got_address}, expect: {expect_address}"
     );
     let got_address = browser::get_address(expect_address, browser::AddressType::DEFAULT)
         .ok()
@@ -173,8 +170,6 @@ async fn test_get_address() {
 
     assert!(
         got_address.eq_ignore_ascii_case(expect_address),
-        "got address: {}, expect: {}",
-        got_address,
-        expect_address
+        "got address: {got_address}, expect: {expect_address}"
     )
 }

@@ -10,8 +10,7 @@
 //! 1. Compute 𝑠:=ℎ𝑦 This is called the shared secret.
 //! 2. Compute 𝑐1:=𝑔𝑦
 //! 3. Compute 𝑐2:=𝑚⋅𝑠
-//! 4. Bob sends the ciphertext (𝑐1,𝑐2)
-//! to Alice.
+//! 4. Bob sends the ciphertext (𝑐1,𝑐2) to Alice.
 //!
 //! # Decrypt
 //! Alice decrypts a ciphertext 𝑐1,𝑐2 with her private key 𝑠𝑘 as follows:
@@ -58,7 +57,7 @@ pub fn field_to_str(f: &[Field]) -> Result<String> {
                 let mut field = *x;
                 field.normalize();
                 let mut v = field.b32();
-                println!("{:?}", v);
+                println!("{v:?}");
                 if v.len() > 1 {
                     v[0] = 0u8;
                 }
@@ -165,7 +164,7 @@ pub fn decrypt(m: &[(CurveEle<33>, CurveEle<33>)], k: SecretKey) -> Result<Strin
                 let mut ret = Affine::from_gej(&j_c2.add_ge(&a_t));
                 ret.x.normalize();
                 ret.y.normalize();
-                println!("{:?}", ret);
+                println!("{ret:?}");
                 ret
             })
             .collect::<Vec<Affine>>()

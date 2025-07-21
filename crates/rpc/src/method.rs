@@ -66,6 +66,7 @@ impl Method {
     }
 }
 
+#[allow(clippy::to_string_trait_impl)]
 impl ToString for Method {
     fn to_string(&self) -> String {
         self.as_str().to_owned()

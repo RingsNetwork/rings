@@ -157,10 +157,7 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
                     if let Some(item) = iter.next() {
                         new_vec.push(*item);
                     } else {
-                        panic!(
-                            "Failed on reshape output {:?} as input format {:?}",
-                            output, input
-                        )
+                        panic!("Failed on reshape output {output:?} as input format {input:?}")
                     }
                 }
                 ret.push((val.clone(), new_vec));
@@ -242,7 +239,7 @@ impl<F: PrimeField> StepCircuit<F> for Circuit<F> {
         for i in 1..self.r1cs.num_inputs {
             // Public inputs do not exist, so we alloc, and later enforce equality from z values
             let f: F = self.witness[i];
-            let v = AllocatedNum::alloc(cs.namespace(|| format!("public_{}", i)), || Ok(f))?;
+            let v = AllocatedNum::alloc(cs.namespace(|| format!("public_{i}")), || Ok(f))?;
 
             vars.push(v.clone());
             if i <= pub_output_count {
@@ -253,7 +250,7 @@ impl<F: PrimeField> StepCircuit<F> for Circuit<F> {
         for i in 0..self.r1cs.num_aux {
             // Private witness trace
             let f: F = self.witness[i + self.r1cs.num_inputs];
-            let v = AllocatedNum::alloc(cs.namespace(|| format!("aux_{}", i)), || Ok(f))?;
+            let v = AllocatedNum::alloc(cs.namespace(|| format!("aux_{i}")), || Ok(f))?;
             vars.push(v);
         }
 
@@ -272,7 +269,7 @@ impl<F: PrimeField> StepCircuit<F> for Circuit<F> {
         };
         for (i, constraint) in self.r1cs.constraints.iter().enumerate() {
             cs.enforce(
-                || format!("constraint {}", i),
+                || format!("constraint {i}"),
                 |_| make_lc(constraint.0.clone()),
                 |_| make_lc(constraint.1.clone()),
                 |_| make_lc(constraint.2.clone()),
@@ -281,7 +278,7 @@ impl<F: PrimeField> StepCircuit<F> for Circuit<F> {
 
         for i in (pub_output_count + 1)..self.r1cs.num_inputs {
             cs.enforce(
-                || format!("pub input enforce {}", i),
+                || format!("pub input enforce {i}"),
                 |lc| lc + z[i - 1 - pub_output_count].get_variable(),
                 |lc| lc + CS::one(),
                 |lc| lc + vars[i - 1].get_variable(),

@@ -146,7 +146,7 @@ mod test {
             <SledStorage as KvStorageInterface<TestStorageStruct>>::count::<'_, '_>(&storage)
                 .await
                 .unwrap();
-        assert!(count_got_2 == 2, "expect count 2, got {}", count_got_2);
+        assert!(count_got_2 == 2, "expect count 2, got {count_got_2}");
 
         let all_entries: Vec<(String, TestStorageStruct)> = storage.get_all().await.unwrap();
         assert!(
@@ -155,8 +155,8 @@ mod test {
             all_entries.len()
         );
 
-        let keys = vec![key1, key2];
-        let values = vec![data1.content, data2.content];
+        let keys = [key1, key2];
+        let values = [data1.content, data2.content];
 
         assert!(
             all_entries
@@ -168,7 +168,7 @@ mod test {
         let key3 = "key3".to_owned();
         storage.put(&key3, &data3).await.unwrap();
         let got_d3: u64 = storage.get(&key3).await.unwrap().unwrap();
-        assert!(data3 == got_d3, "expect {}, got {}", data3, got_d3);
+        assert!(data3 == got_d3, "expect {data3}, got {got_d3}");
 
         // Clear full db and check if it's count is zero now.
         <SledStorage as KvStorageInterface<TestStorageStruct>>::clear::<'_, '_>(&storage)

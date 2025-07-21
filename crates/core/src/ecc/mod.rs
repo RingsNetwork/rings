@@ -204,7 +204,7 @@ where T: Into<String>
         let bytes = hasher.finalize();
         let mut ret = String::with_capacity(bytes.len() * 2);
         for &b in &bytes {
-            write!(ret, "{:02x}", b).unwrap();
+            write!(ret, "{b:02x}").unwrap();
         }
         HashStr(ret)
     }
@@ -227,6 +227,7 @@ impl std::str::FromStr for SecretKey {
     }
 }
 
+#[allow(clippy::to_string_trait_impl)]
 impl ToString for SecretKey {
     fn to_string(&self) -> String {
         hex::encode(self.0.serialize())

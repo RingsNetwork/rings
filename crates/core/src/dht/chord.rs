@@ -632,7 +632,7 @@ impl CorrectChord<PeerRingAction> for PeerRing {
 #[cfg(not(feature = "wasm"))]
 #[cfg(test)]
 mod tests {
-    use std::iter::repeat;
+    //! test module
     use std::str::FromStr;
 
     use super::*;
@@ -689,8 +689,8 @@ mod tests {
 
         // After join, the finger table of node_a should be like:
         // [b] * 157 + [None] * 3
-        let mut expected_finger_list = repeat(Some(b)).take(157).collect::<Vec<_>>();
-        expected_finger_list.extend(repeat(None).take(3));
+        let mut expected_finger_list = std::iter::repeat_n(Some(b), 157).collect::<Vec<_>>();
+        expected_finger_list.extend(std::iter::repeat_n(None, 3));
         assert_eq!(node_a.lock_finger()?.list(), &expected_finger_list);
 
         // After join, the successor sequence of node_a should be [b].
@@ -722,8 +722,8 @@ mod tests {
 
         // After join, the finger table of node_a should be like:
         // [b] * 157 + [c] * 3
-        let mut expected_finger_list = repeat(Some(b)).take(157).collect::<Vec<_>>();
-        expected_finger_list.extend(repeat(Some(c)).take(3));
+        let mut expected_finger_list = std::iter::repeat_n(Some(b), 157).collect::<Vec<_>>();
+        expected_finger_list.extend(std::iter::repeat_n(Some(c), 3));
         assert_eq!(node_a.lock_finger()?.list(), &expected_finger_list);
 
         // After join, the successor sequence of node_a should be [b, c].
@@ -749,7 +749,7 @@ mod tests {
             node_a.join(c)?,
             PeerRingAction::RemoteAction(c, RemoteAction::FindSuccessorForConnect(a))
         );
-        let expected_finger_list = repeat(Some(c)).take(160).collect::<Vec<_>>();
+        let expected_finger_list = std::iter::repeat_n(Some(c), 160).collect::<Vec<_>>();
         assert_eq!(node_a.lock_finger()?.list(), &expected_finger_list);
         assert_eq!(node_a.successors().list()?, vec![c]);
 
@@ -758,8 +758,8 @@ mod tests {
             node_a.join(b)?,
             PeerRingAction::RemoteAction(b, RemoteAction::FindSuccessorForConnect(a))
         );
-        let mut expected_finger_list = repeat(Some(b)).take(157).collect::<Vec<_>>();
-        expected_finger_list.extend(repeat(Some(c)).take(3));
+        let mut expected_finger_list = std::iter::repeat_n(Some(b), 157).collect::<Vec<_>>();
+        expected_finger_list.extend(std::iter::repeat_n(Some(c), 3));
         assert_eq!(node_a.lock_finger()?.list(), &expected_finger_list);
         assert_eq!(node_a.successors().list()?, vec![b, c]);
 
@@ -777,8 +777,8 @@ mod tests {
 
         // After join, the finger table of node_d should be like:
         // [a] * 152 + [None] * 8
-        let mut expected_finger_list = repeat(Some(a)).take(152).collect::<Vec<_>>();
-        expected_finger_list.extend(repeat(None).take(8));
+        let mut expected_finger_list = std::iter::repeat_n(Some(a), 152).collect::<Vec<_>>();
+        expected_finger_list.extend(std::iter::repeat_n(None, 8));
         assert_eq!(node_d.lock_finger()?.list(), &expected_finger_list);
 
         // After join, the successor sequence of node_a should be [a].
@@ -797,9 +797,9 @@ mod tests {
 
         // After join, the finger table of node_d should be like:
         // [a] * 152 + [b] * 5 + [None] * 3
-        let mut expected_finger_list = repeat(Some(a)).take(152).collect::<Vec<_>>();
-        expected_finger_list.extend(repeat(Some(b)).take(5));
-        expected_finger_list.extend(repeat(None).take(3));
+        let mut expected_finger_list = std::iter::repeat_n(Some(a), 152).collect::<Vec<_>>();
+        expected_finger_list.extend(std::iter::repeat_n(Some(b), 5));
+        expected_finger_list.extend(std::iter::repeat_n(None, 3));
         assert_eq!(node_d.lock_finger()?.list(), &expected_finger_list);
 
         // Note the max successor sequence size of node_d is set to 1 when created.
@@ -829,15 +829,11 @@ mod tests {
 
         assert!(
             node1.lock_finger()?.contains(Some(did2)),
-            "did1:{:?}; did2:{:?}",
-            did1,
-            did2
+            "did1:{did1:?}; did2:{did2:?}"
         );
         assert!(
             node2.lock_finger()?.contains(Some(did1)),
-            "did1:{:?}; did2:{:?}",
-            did1,
-            did2
+            "did1:{did1:?}; did2:{did2:?}"
         );
 
         Ok(())
@@ -859,22 +855,18 @@ mod tests {
         assert!(node2.successors().list()?.contains(&did1));
         let pos_159 = did2 + Did::from(BigUint::from(2u16).pow(159));
         assert!(pos_159 > did2);
-        assert!(pos_159 < max, "{:?};{:?}", pos_159, max);
+        assert!(pos_159 < max, "{pos_159:?};{max:?}");
         let pos_160 = did2 + zero;
         assert_eq!(pos_160, did2);
         assert!(pos_160 > did1);
 
         assert!(
             node1.lock_finger()?.contains(Some(did2)),
-            "did1:{:?}; did2:{:?}",
-            did1,
-            did2
+            "did1:{did1:?}; did2:{did2:?}"
         );
         assert!(
             node2.lock_finger()?.contains(Some(did1)),
-            "did2:{:?} dont contains did1:{:?}",
-            did2,
-            did1
+            "did2:{did2:?} dont contains did1:{did1:?}"
         );
 
         Ok(())
@@ -926,6 +918,7 @@ mod tests {
         // n5 is not in n1's successor list
         assert!(!assert_successor(n1, &n5.did));
 
+        #[allow(non_local_definitions)]
         #[cfg_attr(feature = "wasm", async_trait(?Send))]
         #[cfg_attr(not(feature = "wasm"), async_trait)]
         impl LiveDid for Did {

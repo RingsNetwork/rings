@@ -1,3 +1,5 @@
+//! FingerTable
+
 #![warn(missing_docs)]
 use std::ops::Index;
 
@@ -167,11 +169,13 @@ impl FingerTable {
         &self.finger
     }
 
+    /// Reset finger table to empty vector
     #[cfg(test)]
     pub fn reset_finger(&mut self) {
         self.finger = vec![None; self.size]
     }
 
+    /// Clone a finger table
     #[cfg(test)]
     pub fn clone_finger(self) -> Vec<Option<Did>> {
         self.finger

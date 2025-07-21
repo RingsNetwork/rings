@@ -13,7 +13,7 @@ use crate::snark;
 
 fn print_mem_status(desc: Option<&str>) {
     if let Some(usage) = memory_stats() {
-        println!("Memory STATUS: <{:?}>", desc);
+        println!("Memory STATUS: <{desc:?}>");
         println!(
             "Current physical memory usage: {} Mb",
             usage.physical_mem / 1000000

@@ -34,9 +34,11 @@ pub use types::LiveDid;
 
 #[cfg(test)]
 pub mod tests {
+    //! test
     use super::*;
     use crate::ecc::tests::gen_ordered_keys;
 
+    /// Test get ordered did list
     pub fn gen_ordered_dids(n: usize) -> Vec<Did> {
         gen_ordered_keys(n)
             .iter()

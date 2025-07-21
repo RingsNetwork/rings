@@ -70,9 +70,9 @@ async fn test_handle_connect_node() -> Result<()> {
         let dht1_successor = dht1.successors();
         let dht2_successor = dht2.successors();
         let dht3_successor = dht3.successors();
-        println!("node1.dht() successor: {:?}", dht1_successor);
-        println!("node2.dht() successor: {:?}", dht2_successor);
-        println!("node3.dht() successor: {:?}", dht3_successor);
+        println!("node1.dht() successor: {dht1_successor:?}");
+        println!("node2.dht() successor: {dht2_successor:?}");
+        println!("node3.dht() successor: {dht3_successor:?}");
 
         assert!(
             dht1_successor.list()?.contains(&key2.address().into()),

@@ -56,3 +56,18 @@ At the protocol layer, we have implemented the concept of a Delegated Session Ke
 #### Application Layer
 
 The nucleus of Rings Network is similar to the Actor Model, and it requires that each message type possess a Handler Trait. This allows for the separation of processing system messages, network messages, internal messages, and application-layer messages.
+
+
+# Build
+
+#### Build for native
+
+```
+cargo build
+```
+
+#### Build for wasm
+
+```
+cargo build --features wasm --no-default-features
+```

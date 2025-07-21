@@ -244,7 +244,7 @@ impl SNARKTaskBuilder {
 pub(crate) fn bigint2ff<F: ff::PrimeField>(v: js_sys::BigInt) -> Result<F> {
     let repr = v
         .to_string(10)
-        .map_err(|e| Error::SNARKFFRangeError(format!("{:?}", e)))?
+        .map_err(|e| Error::SNARKFFRangeError(format!("{e:?}")))?
         .as_string();
     if let Some(v) = &repr {
         Ok(F::from_str_vartime(v).ok_or(Error::FailedToLoadFF())?)

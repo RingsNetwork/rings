@@ -149,7 +149,7 @@ async fn test_stabilization_final_dht() -> Result<()> {
     }
 
     for (i, (cur, exp)) in std::iter::zip(current_dhts, expected_dhts).enumerate() {
-        println!("Check node{}", i);
+        println!("Check node{i}");
         pretty_assertions::assert_eq!(cur, exp);
     }
 
