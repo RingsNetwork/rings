@@ -114,7 +114,7 @@ impl SNARKBehaviour {
             let promise = provider.request(Method::SendBackendMessage.to_string(), req);
             wasm_bindgen_futures::JsFuture::from(promise)
                 .await
-                .map_err(|e| Error::JsError(format!("Failed to send backend messate: {:?}", e)))?;
+                .map_err(|e| Error::JsError(format!("Failed to send backend messate: {e:?}")))?;
         }
         self.task.insert(task_id, task.clone());
         tracing::info!("sent proof request");
