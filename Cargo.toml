@@ -30,4 +30,3 @@ webrtc = { version = "0.10.1" }
 opt-level = 3
 lto = true
 strip = true
-wasm-opt = false
