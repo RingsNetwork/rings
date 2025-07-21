@@ -157,8 +157,8 @@ impl MessageHandler<bytes::Bytes> for Extension {
     }
 }
 
-/// Loader of wasm, including ABI generator
 pub mod loader {
+    //! Loader of wasm, including ABI generator
     //! Wasm Loader module
     use core::any::Any;
     use std::ffi::CStr;

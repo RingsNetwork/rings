@@ -99,10 +99,10 @@ impl SNARKBehaviour {
         did: Did,
     ) -> Result<String> {
         let task_id = uuid::Uuid::new_v4();
-        let task = task_ref.as_ref().clone();
+        let task = task_ref.as_ref();
         let msg: BackendMessage = SNARKTaskMessage {
             task_id,
-            task: Box::new(SNARKTask::SNARKProof(task.clone())),
+            task: SNARKTask::SNARKProof(Box::new(task.clone())),
         }
         .into();
         let params = msg.into_send_backend_message_request(did)?;
@@ -116,7 +116,7 @@ impl SNARKBehaviour {
                 .await
                 .map_err(|e| Error::JsError(format!("Failed to send backend messate: {:?}", e)))?;
         }
-        self.task.insert(task_id, task);
+        self.task.insert(task_id, task.clone());
         tracing::info!("sent proof request");
         Ok(task_id.to_string())
     }

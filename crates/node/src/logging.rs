@@ -1,10 +1,9 @@
 //! Logging configuration contains both `node` and `browser`.
-use std::fmt;
-use std::panic::Location;
-use std::panic::PanicInfo;
-
 use backtrace::Backtrace;
 use clap::ValueEnum;
+use std::fmt;
+use std::panic::Location;
+use std::panic::PanicHookInfo;
 use tracing::Level;
 use tracing_log::LogTracer;
 use tracing_subscriber::layer::SubscriberExt;
