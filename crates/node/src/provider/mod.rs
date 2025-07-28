@@ -5,12 +5,6 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use rings_core::dht::VNodeStorage;
-use rings_core::session::SessionSkBuilder;
-use rings_core::storage::MemStorage;
-use rings_core::swarm::callback::SharedSwarmCallback;
-use rings_rpc::protos::rings_node_handler::InternalRpcHandler;
-
 use crate::backend::types::BackendMessage;
 use crate::backend::types::MessageHandler;
 use crate::backend::Backend;
@@ -18,10 +12,17 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::measure::MeasureStorage;
 use crate::measure::PeriodicMeasure;
+use crate::prelude::async_trait;
 use crate::prelude::wasm_export;
 use crate::processor::Processor;
 use crate::processor::ProcessorBuilder;
 use crate::processor::ProcessorConfig;
+use rings_core::dht::VNodeStorage;
+use rings_core::session::SessionSkBuilder;
+use rings_core::storage::MemStorage;
+use rings_core::swarm::callback::SharedSwarmCallback;
+use rings_rpc::protos::rings_node_handler::InternalRpcHandler;
+use rings_types::AsyncProvider;
 
 #[cfg(feature = "browser")]
 pub mod browser;
@@ -123,7 +124,9 @@ impl Provider {
     /// Set callback for swarm, it can be T, or (T0, T1, T2)
     #[cfg(not(feature = "browser"))]
     pub fn set_backend_callback<T>(&self, callback: T) -> Result<()>
-    where T: MessageHandler<BackendMessage> + Send + Sync + Sized + 'static {
+    where
+        T: MessageHandler<BackendMessage> + Send + Sync + Sized + 'static,
+    {
         let backend = Backend::new(Arc::new(self.clone()), Box::new(callback));
         self.processor
             .swarm
@@ -134,7 +137,9 @@ impl Provider {
     /// Set callback for swarm, it can be T, or (T0, T1, T2)
     #[cfg(feature = "browser")]
     pub fn set_backend_callback<T>(&self, callback: T) -> Result<()>
-    where T: MessageHandler<BackendMessage> + Sized + 'static {
+    where
+        T: MessageHandler<BackendMessage> + Sized + 'static,
+    {
         let backend = Backend::new(Arc::new(self.clone()), Box::new(callback));
         self.processor
             .swarm
@@ -176,22 +181,23 @@ impl Provider {
 }
 
 #[cfg(feature = "node")]
-impl Provider {
+#[async_trait]
+impl AsyncProvider<Error> for Provider {
     /// A request function implementation for native provider
-    pub async fn request<T>(
+    async fn request<T>(
         &self,
         method: rings_rpc::method::Method,
         params: T,
     ) -> Result<serde_json::Value>
     where
-        T: serde::Serialize,
+        T: serde::Serialize + Send,
     {
         let params = serde_json::to_value(params)?;
         self.request_internal(method.to_string(), params).await
     }
 
     /// Listen messages
-    pub async fn listen(&self) {
+    async fn listen(&self) {
         self.processor.listen().await;
     }
 }

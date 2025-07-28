@@ -102,7 +102,7 @@ tokio = { version = "1.13.0", features = ["full"], optional = true }
 
 # wasm
 js-sys = { workspace = true, optional = true }
-rexie = { version = "0.4.1", optional = true }
+rexie = { version = "0.4.2", optional = true }
 serde-wasm-bindgen = { workspace = true, optional = true }
 wasm-bindgen = { workspace = true, optional = true }
 wasm-bindgen-futures = { workspace = true, optional = true }
@@ -123,4 +123,4 @@ tracing-wasm = "0.2.1"
 wasm-bindgen-test = { workspace = true }
 
 [target.'cfg(not(target_family="wasm"))'.dev-dependencies]
-tokio = { version = "1.13.0", features = ["full"] }
+tokio = { version = "1.47", features = ["full"] }

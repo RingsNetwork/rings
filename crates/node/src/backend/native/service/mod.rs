@@ -40,6 +40,7 @@ use crate::consts::TCP_SERVER_TIMEOUT;
 use crate::error::Error;
 use crate::error::Result;
 use crate::provider::Provider;
+use rings_types::AsyncProvider;
 
 /// Service Config for creating a Server instance
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]

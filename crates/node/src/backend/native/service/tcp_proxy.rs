@@ -19,7 +19,7 @@ use crate::backend::types::ServiceMessage;
 use crate::backend::types::TunnelDefeat;
 use crate::backend::types::TunnelId;
 use crate::provider::Provider;
-
+use rings_types::AsyncProvider;
 /// Abstract Tcp Tunnel
 pub struct Tunnel {
     tid: TunnelId,

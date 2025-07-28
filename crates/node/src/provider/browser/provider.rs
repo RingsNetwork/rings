@@ -19,11 +19,11 @@ use rings_core::utils::js_value;
 use rings_derive::wasm_export;
 use rings_rpc::method::Method;
 use rings_rpc::protos::rings_node::*;
+use rings_types::websys::JsProvider;
 use wasm_bindgen;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures;
 use wasm_bindgen_futures::future_to_promise;
-use wasm_bindgen_futures::JsFuture;
 
 use crate::backend::browser::BackendBehaviour;
 use crate::backend::types::BackendMessage;
@@ -65,6 +65,33 @@ impl Provider {
         ProviderRef {
             inner: Arc::new(self.clone()),
         }
+    }
+}
+
+#[wasm_export]
+impl JsProvider for Provider {
+    /// Request local rpc interface
+    fn request(&self, method: String, params: JsValue) -> js_sys::Promise {
+        let ins = self.clone();
+        future_to_promise(async move {
+            let params =
+                js_value::json_value(params).map_err(|e| JsError::new(e.to_string().as_str()))?;
+            let ret = ins
+                .request_internal(method, params)
+                .await
+                .map_err(JsError::from)?;
+            Ok(js_value::serialize(&ret).map_err(JsError::from)?)
+        })
+    }
+
+    /// listen message.
+    pub fn listen(&self) -> js_sys::Promise {
+        let p = self.processor.clone();
+
+        future_to_promise(async move {
+            p.listen().await;
+            Ok(JsValue::null())
+        })
     }
 }
 
@@ -203,30 +230,6 @@ impl Provider {
                     .expect("Failed on set swarm callback");
             }
             Ok(JsValue::from(provider))
-        })
-    }
-
-    /// Request local rpc interface
-    pub fn request(&self, method: String, params: JsValue) -> js_sys::Promise {
-        let ins = self.clone();
-        future_to_promise(async move {
-            let params =
-                js_value::json_value(params).map_err(|e| JsError::new(e.to_string().as_str()))?;
-            let ret = ins
-                .request_internal(method, params)
-                .await
-                .map_err(JsError::from)?;
-            Ok(js_value::serialize(&ret).map_err(JsError::from)?)
-        })
-    }
-
-    /// listen message.
-    pub fn listen(&self) -> js_sys::Promise {
-        let p = self.processor.clone();
-
-        future_to_promise(async move {
-            p.listen().await;
-            Ok(JsValue::null())
         })
     }
 

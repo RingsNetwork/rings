@@ -1,8 +1,6 @@
 //! SNARK Backend
 //! ================
 
-use std::sync::Arc;
-
 use dashmap::DashMap;
 use rings_core::dht::Did;
 use rings_core::message::MessagePayload;
@@ -21,8 +19,10 @@ use rings_snark::snark::ProverKey;
 use rings_snark::snark::PublicParams;
 use rings_snark::snark::VerifierKey;
 use rings_snark::snark::SNARK;
+use rings_types::AsyncProvider;
 use serde::Deserialize;
 use serde::Serialize;
+use std::sync::Arc;
 
 use super::types::snark::SNARKProofTask;
 use super::types::snark::SNARKTask;
@@ -572,9 +572,12 @@ impl SNARKTaskBuilder {
                     .collect();
                 let inputs = circuits[0].get_public_inputs();
                 let pp = SNARK::<E1, E2>::gen_pp::<S1, S2>(circuits[0].clone())?;
-                let snark = SNARK::<E1, E2>::new(&circuits[0], &pp, &inputs, &vec![
-                    <E2 as Engine>::Scalar::from(0),
-                ])?;
+                let snark = SNARK::<E1, E2>::new(
+                    &circuits[0],
+                    &pp,
+                    &inputs,
+                    &vec![<E2 as Engine>::Scalar::from(0)],
+                )?;
 
                 SNARKProofTask::VastaPallas(SNARKGenerator {
                     pp: pp.into(),
@@ -601,9 +604,12 @@ impl SNARKTaskBuilder {
                     .collect();
                 let inputs = circuits[0].get_public_inputs();
                 let pp = SNARK::<E1, E2>::gen_pp::<S1, S2>(circuits[0].clone())?;
-                let snark = SNARK::<E1, E2>::new(&circuits[0], &pp, &inputs, &vec![
-                    <E2 as Engine>::Scalar::from(0),
-                ])?;
+                let snark = SNARK::<E1, E2>::new(
+                    &circuits[0],
+                    &pp,
+                    &inputs,
+                    &vec![<E2 as Engine>::Scalar::from(0)],
+                )?;
                 SNARKProofTask::PallasVasta(SNARKGenerator {
                     pp: pp.into(),
                     snark,
@@ -629,9 +635,12 @@ impl SNARKTaskBuilder {
                     .collect();
                 let inputs = circuits[0].get_public_inputs();
                 let pp = SNARK::<E1, E2>::gen_pp::<S1, S2>(circuits[0].clone())?;
-                let snark = SNARK::<E1, E2>::new(&circuits[0], &pp, &inputs, &vec![
-                    <E2 as Engine>::Scalar::from(0),
-                ])?;
+                let snark = SNARK::<E1, E2>::new(
+                    &circuits[0],
+                    &pp,
+                    &inputs,
+                    &vec![<E2 as Engine>::Scalar::from(0)],
+                )?;
                 SNARKProofTask::Bn256KZGGrumpkin(SNARKGenerator {
                     pp: pp.into(),
                     snark,
