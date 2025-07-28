@@ -19,6 +19,7 @@ use rings_core::utils::js_value;
 use rings_derive::wasm_export;
 use rings_rpc::method::Method;
 use rings_rpc::protos::rings_node::*;
+use rings_types::websys::JsProvider;
 use wasm_bindgen;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures;
@@ -65,6 +66,45 @@ impl Provider {
         ProviderRef {
             inner: Arc::new(self.clone()),
         }
+    }
+}
+
+impl JsProvider for Provider {
+    /// Request local rpc interface
+    fn request(&self, method: String, params: JsValue) -> js_sys::Promise {
+        let ins = self.clone();
+        future_to_promise(async move {
+            let params =
+                js_value::json_value(params).map_err(|e| JsError::new(e.to_string().as_str()))?;
+            let ret = ins
+                .request_internal(method, params)
+                .await
+                .map_err(JsError::from)?;
+            Ok(js_value::serialize(&ret).map_err(JsError::from)?)
+        })
+    }
+
+    /// listen message.
+    fn listen(&self) -> js_sys::Promise {
+        let p = self.processor.clone();
+
+        future_to_promise(async move {
+            p.listen().await;
+            Ok(JsValue::null())
+        })
+    }
+}
+
+#[wasm_export]
+impl Provider {
+    /// Request local rpc interface
+    pub fn request(&self, method: String, params: JsValue) -> js_sys::Promise {
+        <Self as JsProvider>::request(self, method, params)
+    }
+
+    /// listen message.
+    pub fn listen(&self) -> js_sys::Promise {
+        <Self as JsProvider>::listen(self)
     }
 }
 
@@ -206,34 +246,11 @@ impl Provider {
         })
     }
 
-    /// Request local rpc interface
-    pub fn request(&self, method: String, params: JsValue) -> js_sys::Promise {
-        let ins = self.clone();
-        future_to_promise(async move {
-            let params =
-                js_value::json_value(params).map_err(|e| JsError::new(e.to_string().as_str()))?;
-            let ret = ins
-                .request_internal(method, params)
-                .await
-                .map_err(JsError::from)?;
-            Ok(js_value::serialize(&ret).map_err(JsError::from)?)
-        })
-    }
-
-    /// listen message.
-    pub fn listen(&self) -> js_sys::Promise {
-        let p = self.processor.clone();
-
-        future_to_promise(async move {
-            p.listen().await;
-            Ok(JsValue::null())
-        })
-    }
-
     /// connect peer with remote jsonrpc server url
     pub fn connect_peer_via_http(&self, remote_url: String) -> js_sys::Promise {
         log::debug!("remote_url: {remote_url}");
-        self.request(
+        <Self as JsProvider>::request(
+            self,
             "ConnectPeerViaHttp".to_string(),
             js_value::serialize(&ConnectPeerViaHttpRequest { url: remote_url }).unwrap(),
         )

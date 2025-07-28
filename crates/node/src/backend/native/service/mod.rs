@@ -25,6 +25,7 @@ use dashmap::DashMap;
 use rings_core::message::MessagePayload;
 use rings_core::message::MessageVerificationExt;
 use rings_rpc::method::Method;
+use rings_types::AsyncProvider;
 use serde::Deserialize;
 use serde::Serialize;
 

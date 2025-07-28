@@ -21,6 +21,7 @@ use rings_snark::snark::ProverKey;
 use rings_snark::snark::PublicParams;
 use rings_snark::snark::VerifierKey;
 use rings_snark::snark::SNARK;
+use rings_types::AsyncProvider;
 use serde::Deserialize;
 use serde::Serialize;
 

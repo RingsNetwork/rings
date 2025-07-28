@@ -1,0 +1,27 @@
+[package]
+name = "rings-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+default = [
+    "rings-rpc/std",
+]
+websys = [
+    'js-sys',
+    'wasm-bindgen',
+    'rings-rpc/wasm',
+]
+
+[dependencies]
+async-trait = { workspace = true }
+rings-rpc = { workspace = true, optional = true, default-features = false }
+serde = { version = "1.0.136", features = ["derive"] }
+serde_json = { version = "1.0.70" }
+
+# wasm
+js-sys = { workspace = true, optional = true }
+wasm-bindgen = { workspace = true, features = ["serde-serialize"], optional = true }

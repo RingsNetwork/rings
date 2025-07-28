@@ -16,7 +16,7 @@ use rings_node::processor::ProcessorConfig;
 use rings_node::provider::Provider;
 use rings_rpc::method::Method;
 use rings_rpc::protos::rings_node::*;
-
+use rings_types::AsyncProvider;
 struct BackendBehaviour;
 
 #[async_trait]

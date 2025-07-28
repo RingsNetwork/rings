@@ -10,6 +10,7 @@ use rings_core::session::SessionSkBuilder;
 use rings_core::storage::MemStorage;
 use rings_core::swarm::callback::SharedSwarmCallback;
 use rings_rpc::protos::rings_node_handler::InternalRpcHandler;
+use rings_types::AsyncProvider;
 
 use crate::backend::types::BackendMessage;
 use crate::backend::types::MessageHandler;
@@ -175,23 +176,24 @@ impl Provider {
     }
 }
 
-#[cfg(feature = "node")]
-impl Provider {
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl AsyncProvider<Error> for Provider {
     /// A request function implementation for native provider
-    pub async fn request<T>(
+    async fn request<T>(
         &self,
         method: rings_rpc::method::Method,
         params: T,
     ) -> Result<serde_json::Value>
     where
-        T: serde::Serialize,
+        T: serde::Serialize + Send,
     {
         let params = serde_json::to_value(params)?;
         self.request_internal(method.to_string(), params).await
     }
 
     /// Listen messages
-    pub async fn listen(&self) {
+    async fn listen(&self) {
         self.processor.listen().await;
     }
 }
