@@ -11,16 +11,16 @@ default = [
     "rings-rpc/std",
 ]
 websys = [
-     'js-sys',
-     'wasm-bindgen',
-     'rings-rpc/wasm'
+    'js-sys',
+    'wasm-bindgen',
+    'rings-rpc/wasm',
 ]
 
 [dependencies]
+async-trait = { workspace = true }
+rings-rpc = { workspace = true, optional = true }
 serde = { version = "1.0.136", features = ["derive"] }
 serde_json = { version = "1.0.70" }
-rings-rpc = { workspace = true, optional = true }
-async-trait = { workspace = true }
 
 # wasm
 js-sys = { workspace = true, optional = true }

@@ -25,6 +25,7 @@ use dashmap::DashMap;
 use rings_core::message::MessagePayload;
 use rings_core::message::MessageVerificationExt;
 use rings_rpc::method::Method;
+use rings_types::AsyncProvider;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -40,7 +41,6 @@ use crate::consts::TCP_SERVER_TIMEOUT;
 use crate::error::Error;
 use crate::error::Result;
 use crate::provider::Provider;
-use rings_types::AsyncProvider;
 
 /// Service Config for creating a Server instance
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]

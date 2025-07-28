@@ -83,10 +83,9 @@ async fn main() {
     println!("===> request ConnectPeerViaHttp api...");
     let resp: ConnectPeerViaHttpResponse = serde_json::from_value(
         provider
-            .request(
-                Method::ConnectPeerViaHttp,
-                ConnectPeerViaHttpRequest { url },
-            )
+            .request(Method::ConnectPeerViaHttp, ConnectPeerViaHttpRequest {
+                url,
+            })
             .await
             .unwrap(),
     )

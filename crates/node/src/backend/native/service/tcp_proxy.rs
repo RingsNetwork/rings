@@ -7,6 +7,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use rings_core::dht::Did;
 use rings_rpc::method::Method;
+use rings_types::AsyncProvider;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -19,7 +20,6 @@ use crate::backend::types::ServiceMessage;
 use crate::backend::types::TunnelDefeat;
 use crate::backend::types::TunnelId;
 use crate::provider::Provider;
-use rings_types::AsyncProvider;
 /// Abstract Tcp Tunnel
 pub struct Tunnel {
     tid: TunnelId,

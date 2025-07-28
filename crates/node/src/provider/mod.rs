@@ -5,6 +5,13 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use rings_core::dht::VNodeStorage;
+use rings_core::session::SessionSkBuilder;
+use rings_core::storage::MemStorage;
+use rings_core::swarm::callback::SharedSwarmCallback;
+use rings_rpc::protos::rings_node_handler::InternalRpcHandler;
+use rings_types::AsyncProvider;
+
 use crate::backend::types::BackendMessage;
 use crate::backend::types::MessageHandler;
 use crate::backend::Backend;
@@ -17,12 +24,6 @@ use crate::prelude::wasm_export;
 use crate::processor::Processor;
 use crate::processor::ProcessorBuilder;
 use crate::processor::ProcessorConfig;
-use rings_core::dht::VNodeStorage;
-use rings_core::session::SessionSkBuilder;
-use rings_core::storage::MemStorage;
-use rings_core::swarm::callback::SharedSwarmCallback;
-use rings_rpc::protos::rings_node_handler::InternalRpcHandler;
-use rings_types::AsyncProvider;
 
 #[cfg(feature = "browser")]
 pub mod browser;
@@ -124,9 +125,7 @@ impl Provider {
     /// Set callback for swarm, it can be T, or (T0, T1, T2)
     #[cfg(not(feature = "browser"))]
     pub fn set_backend_callback<T>(&self, callback: T) -> Result<()>
-    where
-        T: MessageHandler<BackendMessage> + Send + Sync + Sized + 'static,
-    {
+    where T: MessageHandler<BackendMessage> + Send + Sync + Sized + 'static {
         let backend = Backend::new(Arc::new(self.clone()), Box::new(callback));
         self.processor
             .swarm
@@ -137,9 +136,7 @@ impl Provider {
     /// Set callback for swarm, it can be T, or (T0, T1, T2)
     #[cfg(feature = "browser")]
     pub fn set_backend_callback<T>(&self, callback: T) -> Result<()>
-    where
-        T: MessageHandler<BackendMessage> + Sized + 'static,
-    {
+    where T: MessageHandler<BackendMessage> + Sized + 'static {
         let backend = Backend::new(Arc::new(self.clone()), Box::new(callback));
         self.processor
             .swarm

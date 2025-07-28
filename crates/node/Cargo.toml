@@ -88,10 +88,10 @@ jsonrpc-core = { workspace = true }
 log = { version = "0.4", features = ["std"] }
 rings-core = { workspace = true, optional = true }
 rings-derive = { workspace = true, optional = true }
-rings-types = { workspace = true, optional = true }
 rings-rpc = { workspace = true, optional = true }
 rings-snark = { workspace = true, optional = true }
 rings-transport = { workspace = true, optional = true }
+rings-types = { workspace = true, optional = true }
 serde = { version = "1.0.136", features = ["derive"] }
 serde_json = "1.0.70"
 serde_yaml = "0.9.17"
