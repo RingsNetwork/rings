@@ -19,7 +19,6 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::measure::MeasureStorage;
 use crate::measure::PeriodicMeasure;
-use crate::prelude::async_trait;
 use crate::prelude::wasm_export;
 use crate::processor::Processor;
 use crate::processor::ProcessorBuilder;
@@ -177,8 +176,8 @@ impl Provider {
     }
 }
 
-#[cfg(feature = "node")]
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl AsyncProvider<Error> for Provider {
     /// A request function implementation for native provider
     async fn request<T>(

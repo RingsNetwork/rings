@@ -24,6 +24,7 @@ use wasm_bindgen;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures;
 use wasm_bindgen_futures::future_to_promise;
+use wasm_bindgen_futures::JsFuture;
 
 use crate::backend::browser::BackendBehaviour;
 use crate::backend::types::BackendMessage;
@@ -68,7 +69,6 @@ impl Provider {
     }
 }
 
-#[wasm_export]
 impl JsProvider for Provider {
     /// Request local rpc interface
     fn request(&self, method: String, params: JsValue) -> js_sys::Promise {
@@ -85,13 +85,26 @@ impl JsProvider for Provider {
     }
 
     /// listen message.
-    pub fn listen(&self) -> js_sys::Promise {
+    fn listen(&self) -> js_sys::Promise {
         let p = self.processor.clone();
 
         future_to_promise(async move {
             p.listen().await;
             Ok(JsValue::null())
         })
+    }
+}
+
+#[wasm_export]
+impl Provider {
+    /// Request local rpc interface
+    pub fn request(&self, method: String, params: JsValue) -> js_sys::Promise {
+        <Self as JsProvider>::request(self, method, params)
+    }
+
+    /// listen message.
+    pub fn listen(&self) -> js_sys::Promise {
+        <Self as JsProvider>::listen(self)
     }
 }
 
@@ -236,7 +249,8 @@ impl Provider {
     /// connect peer with remote jsonrpc server url
     pub fn connect_peer_via_http(&self, remote_url: String) -> js_sys::Promise {
         log::debug!("remote_url: {remote_url}");
-        self.request(
+        <Self as JsProvider>::request(
+            self,
             "ConnectPeerViaHttp".to_string(),
             js_value::serialize(&ConnectPeerViaHttpRequest { url: remote_url }).unwrap(),
         )
