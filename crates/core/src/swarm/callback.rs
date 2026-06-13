@@ -157,10 +157,19 @@ impl TransportCallback for InnerSwarmCallback {
         };
 
         match s {
-            WebrtcConnectionState::Failed
-            | WebrtcConnectionState::Disconnected
-            | WebrtcConnectionState::Closed => {
+            // `Failed` and `Closed` are terminal states, so we remove the peer
+            // from the DHT here.
+            WebrtcConnectionState::Failed | WebrtcConnectionState::Closed => {
                 self.message_handler.leave_dht(did).await?;
+            }
+            // `Disconnected` is a transient ICE state that frequently recovers
+            // back to `Connected` on its own (e.g. a brief network blip or ICE
+            // consent refresh). Tearing the connection down here would kill a
+            // link that WebRTC could have healed, and drop the peer from the DHT
+            // with no reconnect path. We leave it alone: it will either recover,
+            // or degrade to `Failed`, which is handled above.
+            WebrtcConnectionState::Disconnected => {
+                tracing::info!("Connection to {did} is disconnected, waiting for recovery");
             }
             _ => {}
         };
