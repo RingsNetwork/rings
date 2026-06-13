@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::lock::Mutex;
+use rings_core::dht::Did;
 use rings_core::swarm::callback::SwarmCallback;
 use wasm_bindgen_test::*;
 
@@ -38,6 +39,28 @@ impl SwarmCallback for SwarmCallbackStruct {
     }
 }
 
+/// Wait until `did` shows up in `p`'s DHT successor list.
+///
+/// The WebRTC data channel opens asynchronously after `accept_answer`, and the
+/// DHT successors are only populated in the `on_data_channel_open -> join_dht`
+/// callback. Polling the DHT here (instead of relying on a fixed sleep) makes
+/// the test robust against slow connection setup on CI, where an empty
+/// successor list would cause `find_successor` to route a message to the node
+/// itself and fail with `SwarmMissDidInTable`.
+async fn wait_for_dht_successor(p: &Processor, did: Did) {
+    let did = did.to_string();
+    for _ in 0..100 {
+        let successors = p.swarm.inspect().await.dht.successors;
+        if successors.iter().any(|s| s == &did) {
+            return;
+        }
+        fluvio_wasm_timer::Delay::new(Duration::from_millis(200))
+            .await
+            .unwrap();
+    }
+    panic!("timeout waiting for {did} to appear in DHT successors");
+}
+
 async fn create_connection(p1: &Processor, p2: &Processor) {
     console_log!("create_offer");
     let offer = p1.swarm.create_offer(p2.did()).await.unwrap();
@@ -47,6 +70,13 @@ async fn create_connection(p1: &Processor, p2: &Processor) {
 
     console_log!("accept_answer");
     p1.swarm.accept_answer(answer).await.unwrap();
+
+    // Wait for the data channel to open and the DHT to converge on both sides
+    // before returning, so callers can rely on the routing tables being ready.
+    futures::join!(
+        wait_for_dht_successor(p1, p2.did()),
+        wait_for_dht_successor(p2, p1.did()),
+    );
 }
 
 #[wasm_bindgen_test]
@@ -163,9 +193,9 @@ async fn test_processor_connect_with_did() {
         "p2 not in p1's peer list"
     );
 
-    fluvio_wasm_timer::Delay::new(Duration::from_secs(2))
-        .await
-        .unwrap();
+    // No sleep needed here: `create_connection` already waited for both links to
+    // converge in the DHT, so the relay node p2 knows p1 and p3 and can forward
+    // p1's offer to p3 (and route p3's answer back to p1).
 
     console_log!("connect p1 and p3");
     // p1 create connect with p3's address
