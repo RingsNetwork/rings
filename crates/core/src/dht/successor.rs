@@ -1,5 +1,5 @@
 #![warn(missing_docs)]
-//! Successor Sequance for PeerRing
+//! Successor Sequence for PeerRing
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::RwLockReadGuard;

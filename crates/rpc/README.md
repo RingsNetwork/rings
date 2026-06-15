@@ -406,7 +406,7 @@ curl -X POST \
 ```
 
 
-### listPendings
+### listPending
 
 List all pending connections
 
@@ -469,7 +469,7 @@ Close a specific pending transport
 
 ```
 ## Replace YOUR-SIGNATURE with your signature
-## Replace TRANSPORT-ID with the transport_id which in listPendings
+## Replace TRANSPORT-ID with the transport_id which in listPending
 curl -X POST \
 -H "Content-Type: application/json" \
 -H "X-SIGNATURE: YOUR-SIGNATURE" \

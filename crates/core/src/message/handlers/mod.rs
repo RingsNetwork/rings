@@ -30,7 +30,7 @@ use crate::swarm::transport::SwarmTransport;
 pub mod connection;
 /// Operator and Handler for CustomMessage
 pub mod custom;
-/// Operator and handler for DHT stablization
+/// Operator and handler for DHT stabilization
 pub mod stabilization;
 /// Operator and Handler for Storage
 pub mod storage;

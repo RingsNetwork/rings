@@ -31,7 +31,7 @@ use crate::swarm::transport::SwarmTransport;
 pub struct Swarm {
     /// Reference of DHT.
     pub(crate) dht: Arc<PeerRing>,
-    /// Swarm tansport.
+    /// Swarm transport.
     pub(crate) transport: Arc<SwarmTransport>,
     callback: RwLock<SharedSwarmCallback>,
 }
@@ -121,7 +121,7 @@ impl Swarm {
 }
 
 impl Swarm {
-    /// Creaet new connection and its answer. This function will wrap the offer inside a payload
+    /// Create new connection and its answer. This function will wrap the offer inside a payload
     /// with verification.
     pub async fn create_offer(&self, peer: Did) -> Result<MessagePayload> {
         let offer_msg = self

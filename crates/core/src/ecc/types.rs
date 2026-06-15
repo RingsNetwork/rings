@@ -44,7 +44,7 @@ impl PublicKey<33> {
 
     /// from raw [u8], the length can be 32, or 33
     /// Odd flag can be "02" (odd), "03" (even) or "00" (unknown)
-    /// The format is <odd_flat (1 bytes), x_cordinate (32 bytes)>
+    /// The format is <odd_flat (1 bytes), x_coordinate (32 bytes)>
     /// For 32 bytes case, we mark the odd flas as 00 (unknown)
     /// For 64 bytes case, we compress the public key into compressed public key
     pub fn from_u8(value: &[u8]) -> Result<PublicKey<33>> {
