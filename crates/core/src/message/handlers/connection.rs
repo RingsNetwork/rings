@@ -449,7 +449,18 @@ pub mod tests {
 
         // connect node4 to node2
         manually_establish_connection(&node4.swarm, &node2.swarm).await;
-        tokio::time::sleep(Duration::from_secs(6)).await;
+        // Poll for convergence rather than sleeping a fixed amount: under the
+        // release-LTO CI run with native WebRTC, 6s is not always enough and the
+        // assertions below would flake. The expected final state is unchanged.
+        wait_until("node4 joined: DHT successors converged", || {
+            node1.dht().successors().list().ok()
+                == Some(vec![node2.did(), node3.did(), node4.did()])
+                && node2.dht().successors().list().ok()
+                    == Some(vec![node3.did(), node4.did(), node1.did()])
+                && node3.dht().successors().list().ok() == Some(vec![node1.did(), node2.did()])
+                && node4.dht().successors().list().ok() == Some(vec![node1.did(), node2.did()])
+        })
+        .await;
 
         println!("=== Check state before connect via DHT ===");
         node1.assert_transports(vec![node2.did(), node3.did(), node4.did()]);
@@ -489,7 +500,19 @@ pub mod tests {
         println!("==================================================");
 
         node4.swarm.connect(node3.did()).await.unwrap();
-        tokio::time::sleep(Duration::from_secs(6)).await;
+        // Same as above: poll for the post-connect converged state instead of a
+        // fixed 6s sleep so the test is robust under CI contention.
+        wait_until("node4 connected node3: DHT successors converged", || {
+            node1.dht().successors().list().ok()
+                == Some(vec![node2.did(), node3.did(), node4.did()])
+                && node2.dht().successors().list().ok()
+                    == Some(vec![node3.did(), node4.did(), node1.did()])
+                && node3.dht().successors().list().ok()
+                    == Some(vec![node4.did(), node1.did(), node2.did()])
+                && node4.dht().successors().list().ok()
+                    == Some(vec![node1.did(), node2.did(), node3.did()])
+        })
+        .await;
 
         println!("=== Check state after connect via DHT ===");
         node1.assert_transports(vec![node2.did(), node3.did(), node4.did()]);
