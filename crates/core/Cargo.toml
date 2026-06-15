@@ -20,6 +20,7 @@ redundant = ["default"]
 std = [
     "webrtc",
     "sled",
+    "tokio",
     "uuid/v4",
     "uuid/serde",
     "rings-derive/default",

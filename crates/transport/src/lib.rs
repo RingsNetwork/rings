@@ -4,6 +4,7 @@ pub mod callback;
 pub mod connection_ref;
 pub mod connections;
 pub mod core;
+pub mod delivery;
 pub mod error;
 pub mod ice_server;
 pub mod notifier;

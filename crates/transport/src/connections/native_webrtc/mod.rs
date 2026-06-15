@@ -1,4 +1,7 @@
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -26,6 +29,7 @@ use crate::core::transport::ConnectionInterface;
 use crate::core::transport::TransportInterface;
 use crate::core::transport::TransportMessage;
 use crate::core::transport::WebrtcConnectionState;
+use crate::delivery::DeliveryFuture;
 use crate::error::Error;
 use crate::error::Result;
 use crate::ice_server::IceCredentialType;
@@ -38,24 +42,64 @@ const WEBRTC_GATHER_TIMEOUT: u8 = 60; // seconds
 /// pool size of data channel
 const DATA_CHANNEL_POOL_SIZE: u8 = 4;
 
+/// How often the delivery future re-checks whether a message has been flushed.
+const DELIVERY_POLL_INTERVAL: Duration = Duration::from_millis(300);
+
+/// A data channel paired with a monotonic counter of the total bytes ever
+/// enqueued onto it. The counter lets the delivery future tell, per message,
+/// whether the bytes have been flushed to the wire: `enqueued_total -
+/// buffered_amount` is the number of bytes already handed off, so a message
+/// whose end offset is below that has left the local send buffer.
+type TrackedChannel = (Arc<RTCDataChannel>, Arc<AtomicU64>);
+
+/// Build the future that resolves once the message ending at `end_offset` on
+/// this channel has been flushed to the wire, or errors if the channel closes
+/// first. It re-checks on a timer, driving its own wake-ups.
+fn delivery_future(
+    channel: Arc<RTCDataChannel>,
+    enqueued: Arc<AtomicU64>,
+    end_offset: u64,
+) -> DeliveryFuture {
+    Box::pin(async move {
+        loop {
+            let buffered = channel.buffered_amount().await as u64;
+            if enqueued.load(Ordering::SeqCst).saturating_sub(buffered) >= end_offset {
+                return Ok(());
+            }
+            if matches!(
+                channel.ready_state(),
+                RTCDataChannelState::Closing | RTCDataChannelState::Closed
+            ) {
+                return Err(Error::MessageNotDelivered(
+                    "data channel closed before the message was flushed".to_string(),
+                ));
+            }
+            tokio::time::sleep(DELIVERY_POLL_INTERVAL).await;
+        }
+    })
+}
+
 #[cfg_attr(target_family = "wasm", async_trait(?Send))]
 #[cfg_attr(not(target_family = "wasm"), async_trait)]
-impl MessageSenderPool<Arc<RTCDataChannel>> for RoundRobinPool<Arc<RTCDataChannel>> {
+impl MessageSenderPool<TrackedChannel> for RoundRobinPool<TrackedChannel> {
     type Message = TransportMessage;
-    async fn send(&self, msg: TransportMessage) -> Result<()> {
-        let channel = self.select()?;
+    async fn send(&self, msg: TransportMessage) -> Result<DeliveryFuture> {
+        let (channel, enqueued) = self.select()?;
         let data = bincode::serialize(&msg).map(Bytes::from)?;
+        // Reserve this message's byte range on the channel before sending, so
+        // the end offset reflects FIFO order even under concurrent senders.
+        let end_offset = enqueued.fetch_add(data.len() as u64, Ordering::SeqCst) + data.len() as u64;
         if let Err(e) = channel.send(&data).await {
             tracing::error!("{:?}, Data size: {:?}", e, data.len());
             return Err(e.into());
         }
-        Ok(())
+        Ok(delivery_future(channel, enqueued, end_offset))
     }
 }
 
-impl StatusPool<Arc<RTCDataChannel>> for RoundRobinPool<Arc<RTCDataChannel>> {
+impl StatusPool<TrackedChannel> for RoundRobinPool<TrackedChannel> {
     fn all_ready(&self) -> Result<bool> {
-        self.all(|c| c.ready_state() == RTCDataChannelState::Open)
+        self.all(|(c, _)| c.ready_state() == RTCDataChannelState::Open)
     }
 }
 
@@ -63,7 +107,7 @@ impl StatusPool<Arc<RTCDataChannel>> for RoundRobinPool<Arc<RTCDataChannel>> {
 /// Used for native environment.
 pub struct WebrtcConnection {
     webrtc_conn: RTCPeerConnection,
-    webrtc_data_channel: Arc<RoundRobinPool<Arc<RTCDataChannel>>>,
+    webrtc_data_channel: Arc<RoundRobinPool<TrackedChannel>>,
     webrtc_data_channel_state_notifier: Notifier,
     cancel_token: CancellationToken,
 }
@@ -79,7 +123,7 @@ pub struct WebrtcTransport {
 impl WebrtcConnection {
     fn new(
         webrtc_conn: RTCPeerConnection,
-        webrtc_data_channel: Arc<RoundRobinPool<Arc<RTCDataChannel>>>,
+        webrtc_data_channel: Arc<RoundRobinPool<TrackedChannel>>,
         webrtc_data_channel_state_notifier: Notifier,
     ) -> Self {
         Self {
@@ -133,7 +177,7 @@ impl ConnectionInterface for WebrtcConnection {
     type Sdp = String;
     type Error = Error;
 
-    async fn send_message(&self, msg: TransportMessage) -> Result<()> {
+    async fn send_message(&self, msg: TransportMessage) -> Result<DeliveryFuture> {
         self.webrtc_wait_for_data_channel_open().await?;
         self.webrtc_data_channel.send(msg).await
     }
@@ -184,11 +228,13 @@ impl ConnectionInterface for WebrtcConnection {
     }
 
     async fn webrtc_wait_for_data_channel_open(&self) -> Result<()> {
+        // `Disconnected` is intentionally not treated as unavailable: it is a
+        // transient ICE state in which the data channel stays open, so we let
+        // the send proceed (the bytes buffer and flush on recovery). The
+        // returned `DeliveryFuture` reports whether they actually made it out.
         if matches!(
             self.webrtc_connection_state(),
-            WebrtcConnectionState::Failed
-                | WebrtcConnectionState::Closed
-                | WebrtcConnectionState::Disconnected
+            WebrtcConnectionState::Failed | WebrtcConnectionState::Closed
         ) {
             return Err(Error::DataChannelOpen("Connection unavailable".to_string()));
         }
@@ -332,7 +378,7 @@ impl TransportInterface for WebrtcTransport {
             let ch = webrtc_conn
                 .create_data_channel(&format!("rings_data_channel_{i}"), None)
                 .await?;
-            channel_pool.push(ch)?;
+            channel_pool.push((ch, Arc::new(AtomicU64::new(0))))?;
         }
 
         //

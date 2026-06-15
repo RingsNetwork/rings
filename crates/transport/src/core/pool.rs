@@ -129,7 +129,10 @@ pub trait MessageSenderPool<T>: RoundRobin<T> {
     /// A generic method accommodating different message types, facilitating their transmission
     /// through the pool's resources selected in a round-robin manner. It underscores the pool's
     /// versatility in handling diverse communication scenarios.
-    async fn send(&self, msg: Self::Message) -> Result<()>;
+    ///
+    /// Returns a [crate::delivery::DeliveryFuture] resolving to whether the
+    /// message was eventually flushed to the wire or lost.
+    async fn send(&self, msg: Self::Message) -> Result<crate::delivery::DeliveryFuture>;
 }
 
 /// A trait for assessing the readiness of all resources in a pool.

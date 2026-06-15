@@ -17,6 +17,7 @@ use crate::core::transport::ConnectionInterface;
 use crate::core::transport::TransportInterface;
 use crate::core::transport::TransportMessage;
 use crate::core::transport::WebrtcConnectionState;
+use crate::delivery::DeliveryFuture;
 use crate::error::Error;
 use crate::error::Result;
 use crate::ice_server::IceServer;
@@ -154,7 +155,7 @@ impl ConnectionInterface for DummyConnection {
     type Sdp = String;
     type Error = Error;
 
-    async fn send_message(&self, msg: TransportMessage) -> Result<()> {
+    async fn send_message(&self, msg: TransportMessage) -> Result<DeliveryFuture> {
         self.webrtc_wait_for_data_channel_open().await?;
 
         let data = bincode::serialize(&msg).map(Bytes::from)?;
@@ -164,7 +165,9 @@ impl ConnectionInterface for DummyConnection {
             .send(Event::Message(data))
             .unwrap();
 
-        Ok(())
+        // The dummy backend delivers synchronously in-memory, so delivery is
+        // immediately complete.
+        Ok(Box::pin(async { Ok(()) }))
     }
 
     fn webrtc_connection_state(&self) -> WebrtcConnectionState {

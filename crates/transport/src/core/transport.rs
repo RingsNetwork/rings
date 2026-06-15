@@ -11,6 +11,7 @@ use serde::Serialize;
 
 use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
+use crate::delivery::DeliveryFuture;
 
 /// Wrapper for the data that is sent over the data channel.
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -69,7 +70,14 @@ pub trait ConnectionInterface {
     type Error: std::error::Error;
 
     /// Send a [TransportMessage] to the remote peer.
-    async fn send_message(&self, msg: TransportMessage) -> Result<(), Self::Error>;
+    ///
+    /// The returned `Result` reflects whether the bytes were accepted into the
+    /// local send buffer. The [DeliveryFuture] it yields resolves later to the
+    /// message's actual fate: `Ok(())` once flushed to the wire, or `Err(..)`
+    /// if the channel closed while the bytes were still buffered. Callers that
+    /// don't care can drop it; callers that do can spawn it (see
+    /// [crate::delivery]).
+    async fn send_message(&self, msg: TransportMessage) -> Result<DeliveryFuture, Self::Error>;
 
     /// Get current webrtc connection state.
     fn webrtc_connection_state(&self) -> WebrtcConnectionState;

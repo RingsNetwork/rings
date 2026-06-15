@@ -36,6 +36,9 @@ pub enum Error {
     #[error("Failed when waiting for data channel open: {0}")]
     DataChannelOpen(String),
 
+    #[error("Message was not delivered: {0}")]
+    MessageNotDelivered(String),
+
     #[error("WebRTC local SDP generation error: {0}")]
     WebrtcLocalSdpGenerationError(String),
 

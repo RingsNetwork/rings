@@ -48,12 +48,34 @@ impl Notifier {
         });
     }
 
+    /// Wake the notifier after the specified number of milliseconds.
+    #[cfg(feature = "native-webrtc")]
+    pub fn set_timeout_ms(&self, millis: u64) {
+        let this = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(millis)).await;
+            this.wake();
+        });
+    }
+
+    /// Wake the notifier after the specified number of milliseconds.
+    #[cfg(not(any(feature = "web-sys-webrtc", feature = "native-webrtc")))]
+    pub fn set_timeout_ms(&self, _: u64) {
+        unimplemented!()
+    }
+
     /// Wake the notifier after the specified time.
     #[cfg(feature = "web-sys-webrtc")]
     pub fn set_timeout(&self, seconds: u8) {
+        self.set_timeout_ms(seconds as u64 * 1000);
+    }
+
+    /// Wake the notifier after the specified number of milliseconds.
+    #[cfg(feature = "web-sys-webrtc")]
+    pub fn set_timeout_ms(&self, millis: u64) {
         use wasm_bindgen::JsCast;
 
-        let millis = seconds as i32 * 1000;
+        let millis = millis as i32;
 
         let this = self.clone();
         let wake = wasm_bindgen::closure::Closure::once_into_js(move || {

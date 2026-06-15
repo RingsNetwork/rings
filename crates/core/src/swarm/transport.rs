@@ -20,6 +20,7 @@ use rings_transport::core::transport::ConnectionInterface;
 use rings_transport::core::transport::TransportInterface;
 use rings_transport::core::transport::TransportMessage;
 use rings_transport::core::transport::WebrtcConnectionState;
+use rings_transport::delivery::DeliveryFuture;
 
 use crate::chunk::ChunkList;
 use crate::consts::TRANSPORT_MAX_SIZE;
@@ -51,6 +52,30 @@ pub struct SwarmTransport {
 pub struct SwarmConnection {
     peer: Did,
     pub connection: ConnectionRef<ConnectionOwner>,
+}
+
+/// Drive a message's [DeliveryFuture] to completion on the runtime, logging if
+/// the message was lost before it could be flushed. This keeps delivery
+/// tracking confined to the send site: the status never propagates up through
+/// the swarm/node layers.
+#[cfg(feature = "wasm")]
+fn spawn_delivery(fut: DeliveryFuture, did: Did) {
+    wasm_bindgen_futures::spawn_local(async move {
+        if let Err(e) = fut.await {
+            tracing::warn!("Message to {did} was not delivered: {e}");
+        }
+    });
+}
+
+/// Drive a message's [DeliveryFuture] to completion on the runtime, logging if
+/// the message was lost before it could be flushed.
+#[cfg(not(feature = "wasm"))]
+fn spawn_delivery(fut: DeliveryFuture, did: Did) {
+    tokio::spawn(async move {
+        if let Err(e) = fut.await {
+            tracing::warn!("Message to {did} was not delivered: {e}");
+        }
+    });
 }
 
 impl SwarmTransport {
@@ -262,7 +287,7 @@ impl SwarmTransport {
 }
 
 impl SwarmConnection {
-    pub async fn send_data(&self, data: Bytes) -> Result<()> {
+    pub async fn send_data(&self, data: Bytes) -> Result<DeliveryFuture> {
         self.connection
             .send_message(TransportMessage::Custom(data.to_vec()))
             .await
@@ -310,18 +335,22 @@ impl PayloadSender for SwarmTransport {
             return Err(Error::MessageTooLarge(data.len()));
         }
 
-        let result = if data.len() > TRANSPORT_MTU {
+        // Each send returns a `DeliveryFuture` resolving to whether the bytes
+        // were actually flushed to the wire. We toss it to the runtime rather
+        // than awaiting it, so the send itself stays fire-and-forget; a message
+        // lost before flush (e.g. the connection died while buffered) is logged
+        // here instead of propagating a delivery status up through every layer.
+        if data.len() > TRANSPORT_MTU {
             let chunks = ChunkList::<TRANSPORT_MTU>::from(&data);
             for chunk in chunks {
                 let data =
                     MessagePayload::new_send(Message::Chunk(chunk), &self.session_sk, did, did)?
                         .to_bincode()?;
-                conn.send_data(data).await?;
+                spawn_delivery(conn.send_data(data).await?, did);
             }
-            Ok(())
         } else {
-            conn.send_data(data).await
-        };
+            spawn_delivery(conn.send_data(data).await?, did);
+        }
 
         tracing::debug!(
             "Sent {:?}, to node {:?}",
@@ -329,7 +358,7 @@ impl PayloadSender for SwarmTransport {
             payload.relay.next_hop,
         );
 
-        result
+        Ok(())
     }
 }
 

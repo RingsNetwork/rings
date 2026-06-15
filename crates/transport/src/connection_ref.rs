@@ -10,6 +10,7 @@ use serde::Serialize;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::TransportMessage;
 use crate::core::transport::WebrtcConnectionState;
+use crate::delivery::DeliveryFuture;
 use crate::error::Error;
 use crate::error::Result;
 
@@ -57,7 +58,7 @@ where
     type Sdp = C::Sdp;
     type Error = C::Error;
 
-    async fn send_message(&self, msg: TransportMessage) -> Result<()> {
+    async fn send_message(&self, msg: TransportMessage) -> Result<DeliveryFuture> {
         self.upgrade()?.send_message(msg).await
     }
 
@@ -105,7 +106,7 @@ where
     type Sdp = C::Sdp;
     type Error = C::Error;
 
-    async fn send_message(&self, msg: TransportMessage) -> Result<()> {
+    async fn send_message(&self, msg: TransportMessage) -> Result<DeliveryFuture> {
         self.upgrade()?.send_message(msg).await
     }
 
