@@ -13,6 +13,7 @@ debug
 docs
 # project
 .vscode/
+.claude/settings.local.json
 
 # Tests
 *.log
