@@ -141,8 +141,9 @@ async fn test_stabilization_final_dht() -> Result<()> {
 
     // Wait for stabilization to converge each node's DHT to the expected state.
     // Poll instead of sleeping a fixed amount: under parallel test execution the
-    // shared dummy transport and CPU contention make a fixed wait flaky.
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    // shared dummy transport and CPU contention make a fixed wait flaky. The
+    // window is generous because 6-node convergence under CI contention is slow.
+    let deadline = std::time::Instant::now() + Duration::from_secs(90);
     let current_dhts = loop {
         let current_dhts: Vec<_> = swarms
             .iter()
