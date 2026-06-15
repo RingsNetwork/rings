@@ -456,8 +456,46 @@ impl TransportInterface for WebSysWebrtcTransport {
         //
         // Create data channel
         //
+        // Wire open/close on the channels this side creates (the pool), not only
+        // on received channels: a received channel's `onopen` can be missed if
+        // it opens before the handler is registered, so `on_data_channel_open`
+        // (and thus `join_dht`) would never fire. Created channels are wired
+        // before they can open, so this is reliable.
         for i in 0..DATA_CHANNEL_POOL_SIZE {
             let ch = webrtc_conn.create_data_channel(&format!("rings_data_channel_{}", i));
+
+            let on_open_pool = channel_pool.clone();
+            let on_open_cb = inner_cb.clone();
+            let on_open = Box::new(move || {
+                let pool = on_open_pool.clone();
+                let cb = on_open_cb.clone();
+                spawn_local(async move {
+                    if let Ok(true) = pool.all_ready() {
+                        cb.on_data_channel_open().await;
+                    }
+                });
+            });
+            let c = Closure::wrap(on_open as Box<dyn FnMut()>);
+            ch.set_onopen(Some(c.as_ref().unchecked_ref()));
+            c.forget();
+
+            let on_close_pool = channel_pool.clone();
+            let on_close_cb = inner_cb.clone();
+            let on_close = Box::new(move || {
+                let pool = on_close_pool.clone();
+                let cb = on_close_cb.clone();
+                spawn_local(async move {
+                    if let Ok(true) =
+                        pool.all(|(c, _)| c.ready_state() == RtcDataChannelState::Closed)
+                    {
+                        cb.on_data_channel_close().await;
+                    }
+                });
+            });
+            let c = Closure::wrap(on_close as Box<dyn FnMut()>);
+            ch.set_onclose(Some(c.as_ref().unchecked_ref()));
+            c.forget();
+
             channel_pool.push((ch, Arc::new(AtomicU64::new(0))))?;
         }
 

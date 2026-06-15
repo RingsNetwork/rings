@@ -387,10 +387,42 @@ impl TransportInterface for WebrtcTransport {
         //
         // Create data channel
         //
+        // Wire open/close on the channels *this* side creates (the pool), not
+        // only on received channels: a received channel's `on_open` can be
+        // missed if it opens before the handler is registered, which would mean
+        // `on_data_channel_open` (and thus `join_dht`) never fires. The created
+        // channels are registered before they can open, so this is reliable.
         for i in 0..DATA_CHANNEL_POOL_SIZE {
             let ch = webrtc_conn
                 .create_data_channel(&format!("rings_data_channel_{i}"), None)
                 .await?;
+
+            let on_open_pool = channel_pool.clone();
+            let on_open_cb = inner_cb.clone();
+            ch.on_open(Box::new(move || {
+                let pool = on_open_pool.clone();
+                let cb = on_open_cb.clone();
+                Box::pin(async move {
+                    if let Ok(true) = pool.all_ready() {
+                        cb.on_data_channel_open().await;
+                    }
+                })
+            }));
+
+            let on_close_pool = channel_pool.clone();
+            let on_close_cb = inner_cb.clone();
+            ch.on_close(Box::new(move || {
+                let pool = on_close_pool.clone();
+                let cb = on_close_cb.clone();
+                Box::pin(async move {
+                    if let Ok(true) =
+                        pool.all(|(c, _)| c.ready_state() == RTCDataChannelState::Closed)
+                    {
+                        cb.on_data_channel_close().await;
+                    }
+                })
+            }));
+
             channel_pool.push((ch, Arc::new(AtomicU64::new(0))))?;
         }
 
