@@ -1,0 +1,24 @@
+# Local reproducible environment for running the wasm browser tests.
+# A container has a single clean network interface, so WebRTC ICE doesn't drown
+# in the host's many virtual-interface candidate pairs.
+#
+# Build:  docker build -f Dockerfile.wasmtest -t rings-wasmtest .
+# Run:    docker run --rm -v "$PWD":/work -w /work rings-wasmtest \
+#           bash -lc "cd crates/node && wasm-pack test --chrome --headless \
+#             --features browser_chrome_test --no-default-features"
+FROM rust:1.88-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        chromium chromium-driver protobuf-compiler ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+RUN rustup target add wasm32-unknown-unknown
+
+# wasm-pack/wasm-bindgen-test-runner locate the browser/driver via these.
+ENV CHROME=/usr/bin/chromium
+ENV CHROMEDRIVER=/usr/bin/chromedriver
+# Keep the container's target dir separate from the host's (different arch).
+ENV CARGO_TARGET_DIR=/tmp/target
+
+WORKDIR /work

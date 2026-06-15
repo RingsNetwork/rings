@@ -319,42 +319,15 @@ impl TransportInterface for WebrtcTransport {
         ));
 
         let channel_pool = Arc::new(RoundRobinPool::default());
-        let channel_pool_ref = channel_pool.clone();
         let data_channel_inner_cb = inner_cb.clone();
         webrtc_conn.on_data_channel(Box::new(move |d: Arc<RTCDataChannel>| {
             let d_label = d.label();
             let d_id = d.id();
             tracing::debug!("New DataChannel {d_label} {d_id}");
-            let channel_pool = channel_pool_ref.clone();
-            let on_open_inner_cb = data_channel_inner_cb.clone();
-            d.on_open(Box::new(move || {
-                Box::pin(async move {
-                    // check all channels are ready
-                    // trigger on_data_channel_open callback iff all channels ready (open)
-                    if let Ok(true) = channel_pool.all_ready() {
-                        on_open_inner_cb.on_data_channel_open().await
-                    }
-                })
-            }));
-
-            let on_close_inner_cb = data_channel_inner_cb.clone();
-            let on_close_channel_pool = channel_pool_ref.clone();
-            d.on_close(Box::new(move || {
-                let on_close_inner_cb = on_close_inner_cb.clone();
-                let channel_pool = on_close_channel_pool.clone();
-                Box::pin(async move {
-                    // Mirror of the on_open gate: only treat this as the
-                    // connection going away once every channel in the pool is
-                    // closed, so a single channel flapping during setup or
-                    // renegotiation does not tear the connection down.
-                    if let Ok(true) =
-                        channel_pool.all(|(c, _)| c.ready_state() == RTCDataChannelState::Closed)
-                    {
-                        on_close_inner_cb.on_data_channel_close().await;
-                    }
-                })
-            }));
-
+            // Open/close are detected on the channels we create (the pool, wired
+            // below); a received channel only carries inbound messages. Wiring
+            // open/close here too would fire on_data_channel_open twice (created
+            // + received) and churn join_dht.
             let on_message_inner_cb = data_channel_inner_cb.clone();
             d.on_message(Box::new(move |msg: DataChannelMessage| {
                 tracing::debug!(
