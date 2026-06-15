@@ -78,7 +78,13 @@ impl MessageHandler {
             self.handle_dht_events(&dht_ev).await
         } else {
             let dht_ev = self.dht.join(peer)?;
-            self.handle_dht_events(&dht_ev).await.unwrap();
+            // `dht.join` already updated the local routing table synchronously;
+            // `handle_dht_events` only fires best-effort convergence messages.
+            // A send here can legitimately fail if the peer churned away, so log
+            // and continue instead of panicking.
+            if let Err(e) = self.handle_dht_events(&dht_ev).await {
+                tracing::warn!("Failed to handle dht events while joining {peer}: {e:?}");
+            }
             Ok(())
         }
     }

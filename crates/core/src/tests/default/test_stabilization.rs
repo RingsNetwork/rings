@@ -124,8 +124,8 @@ async fn test_stabilization_final_dht() -> Result<()> {
         manually_establish_connection(&swarm1, swarm).await;
     }
 
-    sleep(Duration::from_secs(9)).await;
-
+    // The fully-converged DHT each node should reach is deterministic, so build
+    // it up front.
     let mut expected_dhts = vec![];
     for swarm in swarms.iter() {
         let dht = gen_pure_dht(swarm.did());
@@ -139,13 +139,28 @@ async fn test_stabilization_final_dht() -> Result<()> {
         expected_dhts.push(DHTInspect::inspect(&dht));
     }
 
-    let mut current_dhts = vec![];
+    // Wait for stabilization to converge each node's DHT to the expected state.
+    // Poll instead of sleeping a fixed amount: under parallel test execution the
+    // shared dummy transport and CPU contention make a fixed wait flaky.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let current_dhts = loop {
+        let current_dhts: Vec<_> = swarms
+            .iter()
+            .map(|swarm| DHTInspect::inspect(&swarm.dht()))
+            .collect();
+
+        if current_dhts == expected_dhts || std::time::Instant::now() >= deadline {
+            break current_dhts;
+        }
+
+        sleep(Duration::from_millis(500)).await;
+    };
+
     for swarm in swarms.iter() {
         println!(
             "Connected peers: {:?}",
             SwarmInspect::inspect(swarm).await.peers
         );
-        current_dhts.push(DHTInspect::inspect(&swarm.dht()));
     }
 
     for (i, (cur, exp)) in std::iter::zip(current_dhts, expected_dhts).enumerate() {

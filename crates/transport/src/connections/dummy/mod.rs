@@ -105,7 +105,10 @@ impl DummyConnection {
         let Some(cid) = { self.remote_rand_id.lock().unwrap() }.clone() else {
             return None;
         };
-        Some(CONNS.get(&cid).unwrap().clone())
+        // The remote may already have been closed and removed from the global
+        // map (e.g. during a disconnect). Return None instead of panicking, so
+        // callers treat it like a closed connection.
+        CONNS.get(&cid).map(|c| c.clone())
     }
 
     fn set_remote_rand_id(&self, rand_id: String) {
@@ -159,11 +162,19 @@ impl ConnectionInterface for DummyConnection {
         self.webrtc_wait_for_data_channel_open().await?;
 
         let data = bincode::serialize(&msg).map(Bytes::from)?;
-        self.remote_conn()
-            .unwrap()
+        // The remote connection may have been torn down between the data
+        // channel check and here (the dummy analogue of sending on a channel
+        // that just closed). Mimic a real transport: fail gracefully instead of
+        // panicking.
+        let remote = self.remote_conn().ok_or_else(|| {
+            Error::MessageNotDelivered("dummy remote connection is gone".to_string())
+        })?;
+        remote
             .event_sender
             .send(Event::Message(data))
-            .unwrap();
+            .map_err(|_| {
+                Error::MessageNotDelivered("dummy remote connection is closed".to_string())
+            })?;
 
         // The dummy backend delivers synchronously in-memory, so delivery is
         // immediately complete.
