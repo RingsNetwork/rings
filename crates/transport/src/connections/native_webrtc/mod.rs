@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::data_channel_state::RTCDataChannelState;
@@ -46,11 +47,18 @@ const DATA_CHANNEL_POOL_SIZE: u8 = 4;
 const DELIVERY_POLL_INTERVAL: Duration = Duration::from_millis(300);
 
 /// A data channel paired with a monotonic counter of the total bytes ever
-/// enqueued onto it. The counter lets the delivery future tell, per message,
-/// whether the bytes have been flushed to the wire: `enqueued_total -
-/// buffered_amount` is the number of bytes already handed off, so a message
-/// whose end offset is below that has left the local send buffer.
-type TrackedChannel = (Arc<RTCDataChannel>, Arc<AtomicU64>);
+/// enqueued onto it, plus a lock that serializes sends. The counter lets the
+/// delivery future tell, per message, whether the bytes have been flushed to
+/// the wire: `enqueued_total - buffered_amount` is the number of bytes already
+/// handed off, so a message whose end offset is below that has left the local
+/// send buffer.
+///
+/// The lock is held across reserve+send so the reserved end offset always
+/// matches the order bytes are actually enqueued in. Without it, two concurrent
+/// senders could reserve offsets in one order but reach `channel.send().await`
+/// (which yields) in the other, making an earlier future resolve against a
+/// later message's bytes.
+type TrackedChannel = (Arc<RTCDataChannel>, Arc<AtomicU64>, Arc<Mutex<()>>);
 
 /// Build the future that resolves once the message ending at `end_offset` on
 /// this channel has been flushed to the wire, or errors if the channel closes
@@ -84,23 +92,30 @@ fn delivery_future(
 impl MessageSenderPool<TrackedChannel> for RoundRobinPool<TrackedChannel> {
     type Message = TransportMessage;
     async fn send(&self, msg: TransportMessage) -> Result<DeliveryFuture> {
-        let (channel, enqueued) = self.select()?;
+        let (channel, enqueued, send_lock) = self.select()?;
         let data = bincode::serialize(&msg).map(Bytes::from)?;
-        // Reserve this message's byte range on the channel before sending, so
-        // the end offset reflects FIFO order even under concurrent senders.
-        let end_offset =
-            enqueued.fetch_add(data.len() as u64, Ordering::SeqCst) + data.len() as u64;
-        if let Err(e) = channel.send(&data).await {
-            tracing::error!("{:?}, Data size: {:?}", e, data.len());
-            return Err(e.into());
-        }
+        // Hold the per-channel lock across reserve+send so the reserved end
+        // offset matches the order bytes are actually enqueued in: concurrent
+        // senders must not reserve in one order and reach the (yielding) send in
+        // another, or an earlier future would resolve against a later message's
+        // bytes.
+        let end_offset = {
+            let _guard = send_lock.lock().await;
+            let end_offset =
+                enqueued.fetch_add(data.len() as u64, Ordering::SeqCst) + data.len() as u64;
+            if let Err(e) = channel.send(&data).await {
+                tracing::error!("{:?}, Data size: {:?}", e, data.len());
+                return Err(e.into());
+            }
+            end_offset
+        };
         Ok(delivery_future(channel, enqueued, end_offset))
     }
 }
 
 impl StatusPool<TrackedChannel> for RoundRobinPool<TrackedChannel> {
     fn all_ready(&self) -> Result<bool> {
-        self.all(|(c, _)| c.ready_state() == RTCDataChannelState::Open)
+        self.all(|(c, _, _)| c.ready_state() == RTCDataChannelState::Open)
     }
 }
 
@@ -389,14 +404,14 @@ impl TransportInterface for WebrtcTransport {
                 let cb = on_close_cb.clone();
                 Box::pin(async move {
                     if let Ok(true) =
-                        pool.all(|(c, _)| c.ready_state() == RTCDataChannelState::Closed)
+                        pool.all(|(c, _, _)| c.ready_state() == RTCDataChannelState::Closed)
                     {
                         cb.on_data_channel_close().await;
                     }
                 })
             }));
 
-            channel_pool.push((ch, Arc::new(AtomicU64::new(0))))?;
+            channel_pool.push((ch, Arc::new(AtomicU64::new(0)), Arc::new(Mutex::new(()))))?;
         }
 
         //

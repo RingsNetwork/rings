@@ -69,7 +69,13 @@ impl DummyConnection {
             let rand_id = rand_id.clone();
             tokio::spawn(async move {
                 while let Some(ev) = rx.recv().await {
-                    let conn = { CONNS.get(&rand_id).unwrap().clone() };
+                    // The connection may already have been closed and removed
+                    // from the global map while events were still queued (a
+                    // disconnect racing with close()/abort()). Stop draining
+                    // instead of panicking on the missing entry.
+                    let Some(conn) = CONNS.get(&rand_id).map(|c| c.clone()) else {
+                        break;
+                    };
                     conn.handle_event(ev).await;
                 }
             })

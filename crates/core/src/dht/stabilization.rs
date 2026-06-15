@@ -71,11 +71,14 @@ impl Stabilizer {
         let conns = self.transport.get_connections();
 
         for (did, conn) in conns.into_iter() {
+            // Only terminal states are cleaned. `Disconnected` is transient: ICE
+            // can recover from it, so tearing it down here (the stabilizer runs
+            // every few seconds) would kill connections during a brief blip
+            // before WebRTC self-heals. This mirrors the swarm callback, which
+            // also only leaves the DHT on `Failed`/`Closed`.
             if matches!(
                 conn.webrtc_connection_state(),
-                WebrtcConnectionState::Disconnected
-                    | WebrtcConnectionState::Failed
-                    | WebrtcConnectionState::Closed
+                WebrtcConnectionState::Failed | WebrtcConnectionState::Closed
             ) {
                 tracing::info!("STABILIZATION clean_unavailable_transports: {:?}", did);
                 self.transport.disconnect(did).await?;
