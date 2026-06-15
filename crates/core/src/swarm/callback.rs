@@ -207,4 +207,19 @@ impl TransportCallback for InnerSwarmCallback {
             })
             .await
     }
+
+    async fn on_data_channel_close(&self, cid: &str) -> Result<(), CallbackError> {
+        let Ok(did) = Did::from_str(cid) else {
+            tracing::warn!("on_data_channel_close parse did failed: {}", cid);
+            return Ok(());
+        };
+
+        // The data channel closing is a reliable signal that the peer is gone
+        // (e.g. it closed the connection), so tear the connection down now
+        // instead of waiting for the ICE state to reach `Failed`. This is the
+        // graceful counterpart to a local `disconnect()`: the remote learns of
+        // it promptly without relying on the transient `Disconnected` state.
+        self.message_handler.leave_dht(did).await?;
+        Ok(())
+    }
 }

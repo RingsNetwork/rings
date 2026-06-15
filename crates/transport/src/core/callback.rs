@@ -20,6 +20,14 @@ pub trait TransportCallback {
         Ok(())
     }
 
+    /// Notify the data channel is closed. This is a reliable, prompt signal that
+    /// the peer has gone (e.g. it closed the connection): unlike the ICE
+    /// `Disconnected` state it does not fire on transient blips, so the swarm
+    /// can use it to tear the connection down without waiting for `Failed`.
+    async fn on_data_channel_close(&self, _cid: &str) -> Result<(), CallbackError> {
+        Ok(())
+    }
+
     /// This method is invoked on a binary message arrival over the data channel of webrtc.
     async fn on_message(&self, _cid: &str, _msg: &[u8]) -> Result<(), CallbackError> {
         Ok(())

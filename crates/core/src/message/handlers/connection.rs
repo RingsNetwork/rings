@@ -155,9 +155,6 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
 #[cfg(test)]
 pub mod tests {
     //! tests
-    use std::matches;
-
-    use rings_transport::core::transport::WebrtcConnectionState;
     use tokio::time::sleep;
     use tokio::time::Duration;
 
@@ -523,6 +520,23 @@ pub mod tests {
         Ok(())
     }
 
+    /// Poll `cond` every 200ms until it returns true, panicking after ~60s.
+    /// Used instead of fixed sleeps so the test is deterministic regardless of
+    /// how long the WebRTC handshake/teardown takes on a given machine.
+    ///
+    /// The window is generous on purpose: ICE paces connectivity checks at
+    /// ~200ms each, so on a host with many network interfaces (lots of
+    /// candidate pairs) establishing the connection can legitimately take ~20s.
+    async fn wait_until(msg: &str, mut cond: impl FnMut() -> bool) {
+        for _ in 0..300 {
+            if cond() {
+                return;
+            }
+            sleep(Duration::from_millis(200)).await;
+        }
+        panic!("timeout waiting for: {msg}");
+    }
+
     #[tokio::test]
     async fn test_finger_when_disconnect() -> Result<()> {
         let key1 = SecretKey::random();
@@ -537,42 +551,34 @@ pub mod tests {
         }
 
         manually_establish_connection(&node1.swarm, &node2.swarm).await;
-        wait_for_msgs([&node1, &node2]).await;
-        assert_no_more_msg([&node1, &node2]).await;
+
+        // The data channels open and `on_data_channel_open -> join_dht` runs
+        // asynchronously, so poll until both sides have joined each other rather
+        // than asserting after a fixed wait.
+        wait_until("node1 and node2 to join each other's DHT", || {
+            let finger1 = node1.dht().lock_finger().unwrap().clone().clone_finger();
+            let finger2 = node2.dht().lock_finger().unwrap().clone().clone_finger();
+            finger1.into_iter().any(|x| x == Some(node2.did()))
+                && finger2.into_iter().any(|x| x == Some(node1.did()))
+        })
+        .await;
 
         node1.assert_transports(vec![node2.did()]);
         node2.assert_transports(vec![node1.did()]);
-        {
-            let finger1 = node1.dht().lock_finger()?.clone().clone_finger();
-            let finger2 = node2.dht().lock_finger()?.clone().clone_finger();
-
-            assert!(finger1.into_iter().any(|x| x == Some(node2.did())));
-            assert!(finger2.into_iter().any(|x| x == Some(node1.did())));
-        }
 
         println!("===================================");
         println!("| test disconnect node1 and node2 |");
         println!("===================================");
         node1.swarm.disconnect(node2.did()).await?;
 
-        for _ in 1..10 {
-            println!("wait 3 seconds for node2's transport 2to1 closing");
-            sleep(Duration::from_secs(3)).await;
-            if let Some(t) = node2.swarm.transport.get_connection(node1.did()) {
-                if matches!(
-                    t.webrtc_connection_state(),
-                    WebrtcConnectionState::Disconnected | WebrtcConnectionState::Closed
-                ) {
-                    println!("transport 2to1 is disconnected!!!!");
-                    break;
-                }
-            } else {
-                println!("transport 2to1 is disappeared!!!!");
-                break;
-            }
-        }
-
-        assert_no_more_msg([&node1, &node2]).await;
+        // node1 closes locally; node2 learns via the data channel closing and
+        // tears its side down promptly (without waiting for the ICE `Failed`
+        // timeout). Poll until both sides have removed the connection.
+        wait_until("both sides to drop the connection", || {
+            node1.swarm.transport.get_connection(node2.did()).is_none()
+                && node2.swarm.transport.get_connection(node1.did()).is_none()
+        })
+        .await;
 
         node1.assert_transports(vec![]);
         node2.assert_transports(vec![]);

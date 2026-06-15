@@ -364,8 +364,21 @@ impl TransportInterface for WebSysWebrtcTransport {
             });
 
             let on_close_inner_cb = data_channel_inner_cb.clone();
+            let on_close_channel_pool = channel_pool_ref.clone();
             let on_close = Box::new(move || {
-                on_close_inner_cb.on_data_channel_close();
+                let inner_cb = on_close_inner_cb.clone();
+                let channel_pool = on_close_channel_pool.clone();
+                spawn_local(async move {
+                    // Mirror of the on_open gate: only treat this as the
+                    // connection going away once every channel in the pool is
+                    // closed, so a single channel flapping during setup or
+                    // renegotiation does not tear the connection down.
+                    if let Ok(true) =
+                        channel_pool.all(|(c, _)| c.ready_state() == RtcDataChannelState::Closed)
+                    {
+                        inner_cb.on_data_channel_close().await;
+                    }
+                });
             });
 
             let on_message_inner_cb = data_channel_inner_cb.clone();

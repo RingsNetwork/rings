@@ -91,7 +91,7 @@ impl DummyConnection {
                 self.callback.on_peer_connection_state_change(state).await
             }
             Event::DataChannelOpen => self.callback.on_data_channel_open().await,
-            Event::DataChannelClose => self.callback.on_data_channel_close(),
+            Event::DataChannelClose => self.callback.on_data_channel_close().await,
             Event::Message(data) => {
                 if SEND_MESSAGE_DELAY {
                     random_delay().await;

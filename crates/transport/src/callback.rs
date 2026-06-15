@@ -38,8 +38,11 @@ impl InnerTransportCallback {
     }
 
     /// Notify the data channel is close.
-    pub fn on_data_channel_close(&self) {
-        self.data_channel_state_notifier.wake()
+    pub async fn on_data_channel_close(&self) {
+        self.data_channel_state_notifier.wake();
+        if let Err(e) = self.callback.on_data_channel_close(&self.cid).await {
+            tracing::error!("Callback on_data_channel_close failed: {e:?}");
+        }
     }
 
     /// This method is invoked on a binary message arrival over the data channel of webrtc.

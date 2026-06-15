@@ -338,9 +338,21 @@ impl TransportInterface for WebrtcTransport {
             }));
 
             let on_close_inner_cb = data_channel_inner_cb.clone();
+            let on_close_channel_pool = channel_pool_ref.clone();
             d.on_close(Box::new(move || {
-                on_close_inner_cb.on_data_channel_close();
-                Box::pin(async move {})
+                let on_close_inner_cb = on_close_inner_cb.clone();
+                let channel_pool = on_close_channel_pool.clone();
+                Box::pin(async move {
+                    // Mirror of the on_open gate: only treat this as the
+                    // connection going away once every channel in the pool is
+                    // closed, so a single channel flapping during setup or
+                    // renegotiation does not tear the connection down.
+                    if let Ok(true) =
+                        channel_pool.all(|(c, _)| c.ready_state() == RTCDataChannelState::Closed)
+                    {
+                        on_close_inner_cb.on_data_channel_close().await;
+                    }
+                })
             }));
 
             let on_message_inner_cb = data_channel_inner_cb.clone();
