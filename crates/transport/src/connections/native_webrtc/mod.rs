@@ -88,7 +88,8 @@ impl MessageSenderPool<TrackedChannel> for RoundRobinPool<TrackedChannel> {
         let data = bincode::serialize(&msg).map(Bytes::from)?;
         // Reserve this message's byte range on the channel before sending, so
         // the end offset reflects FIFO order even under concurrent senders.
-        let end_offset = enqueued.fetch_add(data.len() as u64, Ordering::SeqCst) + data.len() as u64;
+        let end_offset =
+            enqueued.fetch_add(data.len() as u64, Ordering::SeqCst) + data.len() as u64;
         if let Err(e) = channel.send(&data).await {
             tracing::error!("{:?}, Data size: {:?}", e, data.len());
             return Err(e.into());
