@@ -50,8 +50,16 @@
 //!   CHOOSE x \in Others(n) : \A y \in Others(n) : dist(n,x) >= dist(n,y)
 //!
 //! \* Finger(n, k): nearest forward node at clockwise distance >= 2^k, else
-//! \* "none". Mirrors finger.join (set finger[k] to closest did with
-//! \* bias.pos() >= 2^k). Chord's fingers are 2^k spaced, NOT linear.
+//! \* "none". Fingers are 2^k spaced, NOT linear.
+//! \*
+//! \* DEVIATION from the Chord paper (intentional): the paper's finger[k] is
+//! \* successor((n + 2^k) mod M), which WRAPS, so it is always a live node. This
+//! \* operator returns "none" when no known node is at distance >= 2^k (no wrap)
+//! \* — deliberately, because it mirrors Rings' `finger.join`, which leaves
+//! \* finger[k] = None in that case. So these tests verify Rings' sparse/no-wrap
+//! \* finger table, not the paper-accurate wrapping one. Routing/liveness here do
+//! \* not lean on high-index wrap fingers (successor list + low/mid fingers
+//! \* carry it); a paper-accurate wrapping spec would be a separate exercise.
 //! Finger(n, k) ==
 //!   LET C == { x \in Others(n) : dist(n,x) >= 2^k } IN
 //!   IF C = {} THEN none
@@ -124,6 +132,9 @@ pub(super) mod spec {
     }
 
     /// `Finger(n, bit)` — nearest forward node at distance `>= 2^bit`, else None.
+    /// Mirrors Rings' `finger.join` (no wrap: None when nothing is far enough),
+    /// which intentionally differs from the Chord paper's wrapping
+    /// `successor((n + 2^bit) mod M)`. See the module-doc DEVIATION note.
     pub fn finger(all: &[Did], n: Did, bit: usize) -> Option<Did> {
         let threshold = BigUint::from(1u8) << bit;
         all.iter()

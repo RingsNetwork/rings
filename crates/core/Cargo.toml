@@ -118,11 +118,13 @@ web-sys = { version = "0.3.56", optional = true, features = [
 
 [dev-dependencies]
 pretty_assertions = "1.4.0"
-stateright = "0.31.0"
 tracing-subscriber = { version = "0.3.15", features = ["ansi"] }
 tracing-test = "0.2.4"
 tracing-wasm = "0.2.1"
 wasm-bindgen-test = { workspace = true }
 
 [target.'cfg(not(target_family="wasm"))'.dev-dependencies]
+# Model checker — pulls getrandom/tiny_http, which don't build for wasm32, so
+# it (and the dht_stateright module that uses it) is non-wasm only.
+stateright = "0.31.0"
 tokio = { version = "1.13.0", features = ["full"] }

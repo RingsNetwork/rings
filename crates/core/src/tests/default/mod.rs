@@ -22,6 +22,8 @@ use crate::swarm::Swarm;
 use crate::swarm::SwarmBuilder;
 
 mod dht_convergence;
+// Uses the `stateright` model checker, which doesn't build for wasm32.
+#[cfg(not(target_family = "wasm"))]
 mod dht_stateright;
 mod test_connection;
 mod test_message_handler;

@@ -142,7 +142,7 @@ async fn test_stabilization_final_dht() -> Result<()> {
     //   n3:<<n5,n0,n2>>  n4:<<n3,n5,n0>>  n5:<<n0,n2,n1>>
     // THEOREM Pred == Predecessor(ni)    \* immediate counter-clockwise neighbour
     //   n0=n5  n1=n2  n2=n0  n3=n4  n4=n1  n5=n3
-    // THEOREM Fing == Finger(ni,k), compressed (breaks where 2^k crosses a gap):
+    // THEOREM Fingers == Finger(ni,k), compressed (breaks where 2^k crosses a gap):
     //   n0: [0..155]=n2 [156..158]=n4 [159]=n3
     //   n1: [0..158]=n4 [159]=n3
     //   n2: [0..153]=n1 [154..158]=n4 [159]=n3

@@ -12,13 +12,19 @@
 //! (proven equal to production in `dht_convergence`) directly, which is far
 //! cheaper for the checker to expand than a `DashMap`-backed `PeerRing` per step.
 //!
+//! Both stages are deliberately scoped (see each stage's SCOPE note); they test
+//! sub-behaviours/abstractions, not a faithful model of the full 6-node regime.
+//!
 //! Staging:
-//!   * Stage 1 — the `notify` protocol on a full mesh: every predecessor
-//!     converges to the `spec` fixpoint under every message interleaving.
-//!   * Stage 2 — discovery from a star bootstrap: safety + reachability hold,
-//!     and the model PROVES there is no bounded-round convergence (a peer
-//!     learned after a node's stabilization budget is never notified), the
-//!     formal root of the integration test's order-sensitive flakiness.
+//!   * Stage 1 — the predecessor-update subprotocol under a full-mesh successor
+//!     ORACLE: every predecessor converges to the `spec` fixpoint under every
+//!     message interleaving. (Not successor discovery.)
+//!   * Stage 2 — a small (N=3 star) discovery ABSTRACTION: safety + reachability
+//!     hold, and the model exhibits a counterexample showing no bounded-round
+//!     convergence (a peer learned after a node's stabilization budget is never
+//!     notified) — illustrating the order-sensitivity mechanism behind the
+//!     integration test's residual flakiness, not formally pinning the 6-node
+//!     configuration.
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;
@@ -92,15 +98,20 @@ impl DhtSnapshot {
 }
 
 // ===================================================================
-// Stage 1: the `notify` protocol (predecessor convergence on a full mesh).
+// Stage 1: the `notify` predecessor-update subprotocol, under a FULL-MESH
+// successor ORACLE.
+//
+// SCOPE (important): each node notifies `spec::successors(all)` — the *global*
+// successor set, i.e. as if every node already knows its final successors.
+// Production `Stabilizer::notify_predecessor` instead sends to the node's
+// current, possibly stale/incomplete local successor list. So this stage does
+// NOT test successor discovery or full stabilization liveness; it isolates and
+// exhausts the delivery interleavings of the predecessor-update rule once
+// successors are known. Successor discovery is stage 2.
 //
 // Maps to the TLA+ `Notify` action and `handlers/stabilization.rs`:
-//   on_start : each node tells every successor "I might be your predecessor".
-//   on Send  : apply the `PeerRing::notify` rule to the predecessor.
-// The mesh is complete here, so discovery and the report-back/connect step are
-// out of scope (the reported peer is already known); this stage isolates and
-// exhausts the notify delivery interleavings. Stage 2 (below) adds discovery
-// from a star bootstrap.
+//   on_timeout : each node tells every (oracle) successor "I'm your predecessor".
+//   on Send    : apply the `PeerRing::notify` rule to the predecessor.
 // ===================================================================
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -142,12 +153,13 @@ impl ChordNode {
         )
     }
 
-    /// The predecessor update. Mirrors `PeerRing::notify` exactly — predecessor
-    /// becomes the candidate that is closer *behind* `me` (larger clockwise
-    /// distance) — computed directly rather than through a throwaway `PeerRing`
-    /// (which allocates a `DashMap`) so the model checker can expand states
-    /// cheaply. The heavyweight real-`PeerRing` path is reserved for stage 2's
-    /// `find_successor`, where the routing logic is non-trivial.
+    /// The predecessor update — a direct reimplementation of `PeerRing::notify`
+    /// (predecessor becomes the candidate closer *behind* `me`), used instead of
+    /// a throwaway `PeerRing` (which allocates a `DashMap`) so the checker can
+    /// expand states cheaply. It is NOT assumed equivalent: the test
+    /// `apply_notify_matches_peer_ring` checks it against the real
+    /// `PeerRing::notify` across representative states, so it remains a faithful
+    /// regression guard even though the model doesn't call the production fn.
     fn apply_notify(&self, me: Did, current: Option<Did>, from: Did) -> Did {
         match current {
             Some(cur) if spec::dist(me, cur) >= spec::dist(me, from) => cur,
@@ -261,16 +273,25 @@ fn notify_model(all: Vec<Did>) -> ActorModel<ChordNode, Cfg, ()> {
 }
 
 // ===================================================================
-// Stage 2: discovery from a star bootstrap (the REAL find_successor routing).
+// Stage 2: successor discovery from a star bootstrap — a small ABSTRACTION.
 //
-// This is the regime the integration test exercises and where the residual
-// flakiness lives. Unlike stage 1 (full mesh), each node's connected-peer set
-// grows DYNAMICALLY: the hub learns a spoke only when that spoke's join lookup
-// arrives, so the connect-time `find_successor(self)` race is modelled. Routing
-// uses the real `PeerRing::find_successor`; the join lookups plus the
-// notify/report chain are what must drive every node to its true successor and
-// predecessor. `Eventually` answers the open question: does the non-experimental
-// protocol converge under EVERY interleaving, or is there a stalling order?
+// Unlike stage 1, each node's connected-peer set grows DYNAMICALLY: the hub
+// learns a spoke only when that spoke's join lookup arrives, so the connect-time
+// `find_successor(self)` race is modelled, and the join lookups + notify/report
+// chain must drive discovery.
+//
+// SCOPE / FIDELITY (important):
+//   * Routing is NOT the production `PeerRing::find_successor`. `successor_of`
+//     returns the nearest forward node among `{me} ∪ connected` (spec-level,
+//     single hop); production routes via `successors().min()` then
+//     `finger.closest_predecessor`. The `Found -> Lookup` iteration models the
+//     multi-hop refinement, but this is a routing *abstraction*, not the real fn.
+//   * There is no `fix_fingers`/`FindSuccessorForFix` action.
+//   * It runs N=3, K=3, so every node's successor capacity spans all peers —
+//     it does NOT reproduce the production regime behind the 6-node integration
+//     flake (six clustered DIDs, K=3, successor truncation + high-index finger
+//     fixes). So this DEMONSTRATES the order-sensitivity *mechanism*; it does not
+//     formally model that specific 6-node configuration.
 // ===================================================================
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -294,26 +315,25 @@ enum DTimer {
     Stabilize,
 }
 
-/// Bound on stabilization rounds per node. Exhaustive liveness checking of a
-/// retry protocol over an accumulating network is not finite, so we verify the
-/// stronger, decidable claim: convergence within a bounded number of rounds
-/// under EVERY interleaving. A counterexample at this bound is a real stalling
-/// order; passing is strong evidence convergence is order-robust for small N.
-const STAB_ROUNDS: u8 = 2;
-
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct DState {
     /// Peers this node has connected to (its transport links / DHT knowledge).
     connected: BTreeSet<usize>,
     pred: Option<usize>,
-    /// Stabilization rounds elapsed (bounds the periodic notify; see above).
+    /// Stabilization rounds elapsed. Exhaustive liveness checking of a retry
+    /// protocol over an accumulating network is not finite, so the periodic
+    /// notify is bounded (`DiscoveryNode::rounds`); the model then verifies a
+    /// decidable claim about convergence *within that bound*.
     ticks: u8,
 }
 
-/// A node for the discovery model. As in stage 1, `all` is the shared DID set.
+/// A node for the discovery model. `all` is the shared DID set; `rounds` is the
+/// per-node stabilization budget (kept a field, not a const, so the
+/// no-bounded-convergence test can sweep several bounds).
 #[derive(Clone)]
 struct DiscoveryNode {
     all: Vec<Did>,
+    rounds: u8,
 }
 
 impl DiscoveryNode {
@@ -328,11 +348,11 @@ impl DiscoveryNode {
         v
     }
 
-    /// `find_successor(target)` as resolved from `me`'s current knowledge: the
-    /// nearest forward node among `{me} ∪ connected`. This is single-hop; the
-    /// real multi-hop routing is modelled by the `Found` -> `Lookup` iteration
-    /// (the requester re-asks the node it just discovered), which converges to
-    /// the same answer.
+    /// A spec-level *abstraction* of `find_successor(target)` (NOT the
+    /// production routing — see the stage-2 SCOPE note): the nearest forward node
+    /// among `{me} ∪ connected`, single hop. The real `chord.rs` finger-table
+    /// routing is approximated by the `Found` -> `Lookup` iteration, which
+    /// converges to the same answer over `connected`.
     fn successor_of(&self, me: usize, connected: &BTreeSet<usize>, target: Did) -> usize {
         std::iter::once(me)
             .chain(connected.iter().copied())
@@ -383,9 +403,9 @@ impl Actor for DiscoveryNode {
     }
 
     fn on_timeout(&self, id: Id, state: &mut Cow<DState>, _t: &DTimer, o: &mut Out<Self>) {
-        // Bounded periodic stabilization: stop after STAB_ROUNDS so the model is
+        // Bounded periodic stabilization: stop after `rounds` so the model is
         // finite (the network is consumed-on-delivery, not accumulating).
-        if state.ticks >= STAB_ROUNDS {
+        if state.ticks >= self.rounds {
             return;
         }
         let me = usize::from(id);
@@ -476,10 +496,13 @@ fn d_converged(
     })
 }
 
-fn discovery_model(all: Vec<Did>) -> ActorModel<DiscoveryNode, Cfg, ()> {
+fn discovery_model(all: Vec<Did>, rounds: u8) -> ActorModel<DiscoveryNode, Cfg, ()> {
     let actors: Vec<DiscoveryNode> = all
         .iter()
-        .map(|_| DiscoveryNode { all: all.clone() })
+        .map(|_| DiscoveryNode {
+            all: all.clone(),
+            rounds,
+        })
         .collect();
     // Consumed-on-delivery network (messages aren't retained): combined with the
     // bounded round count this keeps the state space finite. Reordering across
@@ -487,8 +510,8 @@ fn discovery_model(all: Vec<Did>) -> ActorModel<DiscoveryNode, Cfg, ()> {
     //
     // NOTE on properties: we assert `Always` (safety) and `Sometimes`
     // (convergence is reachable). We deliberately do NOT assert `Eventually`
-    // (convergence on *every* interleaving within STAB_ROUNDS): Stateright shows
-    // it is FALSE, and the counterexample is the whole point — see
+    // (convergence on *every* interleaving within `rounds`): Stateright shows it
+    // is FALSE, and the counterexample is the whole point — see
     // `discovery_has_no_bounded_convergence`.
     ActorModel::new(Cfg { all }, ())
         .actors(actors)
@@ -521,6 +544,33 @@ mod tests {
         dht
     }
 
+    /// `apply_notify` (the model's predecessor rule) must equal the production
+    /// `PeerRing::notify` on every representative (current, from) state, so the
+    /// model stays a regression guard even though it doesn't call the real fn.
+    #[test]
+    fn apply_notify_matches_peer_ring() {
+        let all: Vec<Did> = (0..4u64).map(|i| did_frac(i, 4)).collect();
+        let node = ChordNode { all: all.clone() };
+        let candidates = std::iter::once(None).chain(all.iter().copied().map(Some));
+        for &me in &all {
+            for current in candidates.clone() {
+                if current == Some(me) {
+                    continue;
+                }
+                for &from in all.iter().filter(|&&d| d != me) {
+                    let dht = PeerRing::new_with_storage(me, K as u8, Box::new(MemStorage::new()));
+                    *dht.lock_predecessor().unwrap() = current;
+                    let real = dht.notify(from).unwrap();
+                    assert_eq!(
+                        node.apply_notify(me, current, from),
+                        real,
+                        "apply_notify != PeerRing::notify (me={me}, cur={current:?}, from={from})"
+                    );
+                }
+            }
+        }
+    }
+
     /// The snapshot <-> PeerRing round-trip must be lossless: this is what lets
     /// the Stateright actor carry a hashable state yet run real chord operations.
     #[test]
@@ -535,11 +585,12 @@ mod tests {
         }
     }
 
-    /// Stage 1: under EVERY message interleaving (Stateright BFS over the
-    /// unordered reliable network), the real `notify` protocol drives every
-    /// node's predecessor to the `spec` fixpoint.
+    /// Stage 1: under EVERY message interleaving, the predecessor-update rule
+    /// (notify to the full-mesh/oracle successor set) drives every node's
+    /// predecessor to the `spec` fixpoint. This is the predecessor subprotocol,
+    /// not successor discovery (see the SCOPE note on the stage-1 model).
     #[test]
-    fn notify_converges_under_all_interleavings() {
+    fn notify_predecessor_converges_under_full_mesh() {
         let all: Vec<Did> = (0..3u64).map(|i| did_frac(i, 3)).collect();
         notify_model(all)
             .checker()
@@ -554,40 +605,51 @@ mod tests {
     #[test]
     fn discovery_is_safe_and_can_converge() {
         let all: Vec<Did> = (0..3u64).map(|i| did_frac(i, 3)).collect();
-        discovery_model(all)
+        discovery_model(all, 2)
             .checker()
             .spawn_bfs()
             .join()
             .assert_properties();
     }
 
-    /// Stage 2 — the key result. The non-experimental protocol does NOT converge
-    /// on every interleaving within a fixed number of stabilization rounds: a
-    /// node can learn a peer (via that peer's join `Lookup`) only AFTER it has
-    /// spent its `STAB_ROUNDS` rounds, so it never sends that peer the corrective
-    /// `NotifyPred`, leaving the peer's predecessor at a suboptimal value. So for
-    /// any fixed bound an adversarial order defeats convergence — it holds only
-    /// under Chord's fairness assumption (every node stabilizes infinitely
-    /// often). This is the formal root of the integration test's residual,
-    /// order-sensitive flakiness. We assert the counterexample EXISTS.
+    /// Stage 2 — the key (scoped) result. In this 3-node star abstraction, the
+    /// protocol does NOT converge on every interleaving within a fixed number of
+    /// stabilization rounds: a node can learn a peer (via that peer's join
+    /// `Lookup`) only AFTER it has spent its round budget, so it never sends that
+    /// peer the corrective `NotifyPred`, leaving the peer's predecessor at a
+    /// suboptimal value. We check this for several bounds (a counterexample
+    /// exists at each); the general "no fixed bound suffices" claim is the
+    /// matching analytical argument (the adversary delays a node learning a peer
+    /// until after its budget). Convergence therefore needs Chord's fairness
+    /// assumption (every node stabilizes infinitely often) — consistent with the
+    /// integration test's residual, order-sensitive flakiness. We assert the
+    /// counterexample EXISTS rather than chase it away.
     #[test]
     fn discovery_has_no_bounded_convergence() {
-        let all: Vec<Did> = (0..3u64).map(|i| did_frac(i, 3)).collect();
-        let actors: Vec<DiscoveryNode> = all
-            .iter()
-            .map(|_| DiscoveryNode { all: all.clone() })
-            .collect();
-        let checker = ActorModel::new(Cfg { all }, ())
-            .actors(actors)
-            .init_network(Network::new_unordered_nonduplicating([]))
-            .property(Expectation::Eventually, "bounded convergence", d_converged)
-            .checker()
-            .spawn_bfs()
-            .join();
-        assert!(
-            checker.discovery("bounded convergence").is_some(),
-            "expected a no-bounded-convergence counterexample (a peer learned \
-             after a node's stabilization budget is never notified)"
-        );
+        // Two bounds suffice as evidence; `rounds=3` blows the state space up
+        // without adding signal. The general "no fixed bound" claim is the
+        // analytical argument in the doc comment, not an exhaustive sweep.
+        for rounds in [1u8, 2] {
+            let all: Vec<Did> = (0..3u64).map(|i| did_frac(i, 3)).collect();
+            let actors: Vec<DiscoveryNode> = all
+                .iter()
+                .map(|_| DiscoveryNode {
+                    all: all.clone(),
+                    rounds,
+                })
+                .collect();
+            let checker = ActorModel::new(Cfg { all }, ())
+                .actors(actors)
+                .init_network(Network::new_unordered_nonduplicating([]))
+                .property(Expectation::Eventually, "bounded convergence", d_converged)
+                .checker()
+                .spawn_bfs()
+                .join();
+            assert!(
+                checker.discovery("bounded convergence").is_some(),
+                "expected a no-bounded-convergence counterexample at rounds={rounds} \
+                 (a peer learned after a node's stabilization budget is never notified)"
+            );
+        }
     }
 }
