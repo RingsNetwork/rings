@@ -15,10 +15,9 @@
 //! already-converged ring. The other layers each cover a different thing:
 //!   * `dht_convergence` proves the deterministic safety FIXPOINT — the
 //!     converged state is correct, not that it is reached;
-//!   * `dht_schedule` proves the six clustered DIDs actually REACH that fixpoint,
-//!     deterministically — driving stabilization under the dummy transport's
-//!     controlled delivery queue to quiescence (the confluence result), which
-//!     replaces the old wall-clock-bounded flaky convergence test;
+//!   * `dht_schedule` drives the six clustered DIDs to that fixpoint
+//!     deterministically under representative controlled delivery orders (FIFO /
+//!     LIFO), replacing the old wall-clock-bounded flaky convergence test;
 //!   * the stage-2 Stateright model is an N=3 routing ABSTRACTION (no
 //!     `fix_fingers`, not the six clustered DIDs + K=3 regime).
 //!

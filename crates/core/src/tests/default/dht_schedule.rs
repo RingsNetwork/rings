@@ -1,74 +1,55 @@
 //! Deterministic, controlled-ordering convergence test for the full 6-node
 //! stabilization — driven through the dummy transport's explicit delivery queue
 //! (see `dummy::controlled`), not random per-message jitter + a wall-clock
-//! deadline. The orderings to cover are *derived first* (below), then filled in
-//! as tests.
+//! deadline. The orderings are reasoned about first (below), then filled in as
+//! tests.
 //!
 //! ====================================================================
-//! FORMAL DERIVATION (TLA+) — why the ordering equivalence classes collapse.
+//! DERIVATION — what is order-independent here, and what these tests check.
 //!
-//! We don't have a runtime tool to force a particular async schedule, so we
-//! derive the timing-state structure on paper and let the controlled queue
-//! realise representative orders. The result is strong: the stabilization
-//! protocol is CONFLUENT — every fair delivery order reaches the SAME fixpoint.
+//! We have no runtime tool to force a particular async schedule, so we reason
+//! about the timing-state structure on paper and let the controlled queue
+//! realise representative orders.
 //!
-//! ---- MODULE ChordStabilizeConfluence --------------------------------
-//! EXTENDS Integers, FiniteSets, Bags
+//! ---- The FIXPOINT is unique (order-independent) --------------------
+//! The asserted converged state of a node — its successor list, predecessor AND
+//! finger table — is a DETERMINISTIC FUNCTION of the set of peers it knows:
+//!   Successors(n) = the K closest forward nodes of `known[n]`
+//!   Predecessor(n) = the closest node behind n among those that notify it
+//!   Finger(n,k)   = the no-wrap finger rule over `known[n]`
+//! This is exactly `MODULE ChordConvergence` (dht_convergence.rs) evaluated at a
+//! given `known[n]`. `known[n]` only grows (connections are not dropped on the
+//! happy path) and, for these six fully-discoverable DIDs, converges to "all
+//! other nodes". Once `known[n]` = all, those three functions each evaluate to a
+//! single value — so the fixpoint is unique and independent of delivery order.
 //!
-//! CONSTANTS Node, Id, M, K          \* as in MODULE ChordConvergence
+//! ---- Why this is NOT a full all-orders confluence proof ------------
+//! Reaching that fixpoint is liveness, and the production path is more than a
+//! monotone lattice in two ways this derivation deliberately does NOT model — so
+//! a blanket Knaster–Tarski / "every fair order converges" claim is unjustified:
+//!   (1) `notify_predecessor` emits to `successors().list()`, TRUNCATED to K:
+//!       when a closer peer is learned, a farther successor can drop OUT of the
+//!       top-K, so the set of notify targets is not monotone — "more knowledge
+//!       ⇒ more messages" is false. (`pred` still converges, because a node's
+//!       immediate predecessor always keeps it as successor #1 and so never
+//!       stops notifying it — but that is a separate argument, not monotonicity.)
+//!   (2) the finger table is part of the asserted state, and `fix_fingers`
+//!       mutates it through a 160-slot ROTATING index — sequential state, not a
+//!       single join.
+//! A rigorous all-orders theorem would have to model truncation + the finger
+//! actions; we do not claim it. Exhaustive interleaving exploration lives in the
+//! stage-2 Stateright model (on its abstraction).
 //!
-//! VARIABLES
-//!   pred,      \* pred  \in [Node -> Node \cup {NIL}]   — predecessor pointer
-//!   known,     \* known \in [Node -> SUBSET Node]       — connected peers
-//!   net        \* net : a Bag (multiset) of in-flight messages = the dummy
-//!              \*       transport's explicit delivery queue
-//!
-//! \* ---- The per-node local state is a JOIN-SEMILATTICE ----------------
-//! \* `known[n]` ordered by ⊆ ; `connect` only ever ADDS  → ∪ is the join.
-//! \* `pred[n]`  ordered by "closer behind wins": p1 ⊑ p2 iff
-//! \*            dist(n,p1) ≤ dist(n,p2). `notify` sets pred[n] to the join
-//! \*            (the farther-forward / closer-behind candidate). NIL is ⊥.
-//! \* Both are bounded-height lattices (height ≤ |Node|).
-//!
-//! \* ---- Every action is a MONOTONE, INFLATIONARY operator ------------
-//! \* Notify(s,n)  (s ∈ succ(known[s]))   : pred[n]  := pred[n]  ⊔ s
-//! \* Connect(n,p) (from a Report)        : known[n] := known[n] ∪ {p}
-//! \* Each only moves a node's state UP its lattice; none ever lowers it.
-//! \* Stabilize(n) emits messages determined by the current state, and is
-//! \* MONOTONE in that state (more knowledge ⇒ a superset of messages).
-//!
-//! \* ---- Independence / local confluence ------------------------------
-//! \* Any two deliveries commute:
-//! \*   - different target nodes        → disjoint state, trivially commute;
-//! \*   - same node, both `notify`      → two ⊔ on pred[n], ⊔ is commutative;
-//! \*   - same node, both `connect`     → two ∪ on known[n], ∪ is commutative;
-//! \*   - same node, notify + connect   → different fields, commute.
-//! \* Actions only ENABLE further actions (monotone), never disable them.
-//!
-//! \* ---- THEOREM Confluence -------------------------------------------
-//! \* The reachable quiescent state is the LEAST FIXPOINT of the combined
-//! \* monotone operator (Knaster–Tarski). A least fixpoint is unique and is
-//! \* reached by ANY fair chaotic iteration order (Kleene / Cousot chaotic
-//! \* iteration). Hence:
-//! \*
-//! \*   ASSUME  Fairness ==  \* every enabled delivery eventually happens AND
-//! \*                        \* every node stabilises infinitely often
-//! \*   PROVE   <>[]( (pred, known) = TheFixpoint )
-//! \*           /\ TheFixpoint = << [n ∈ Node |-> Predecessor(n)],
-//! \*                                [n ∈ Node |-> Successors(n) as a set] >>
-//! \*           \* i.e. exactly MODULE ChordConvergence's fixpoint,
-//! \*           \* INDEPENDENT of delivery order.
-//!
-//! \* ---- COROLLARY (what this means for the test) ---------------------
-//! \* Convergence is order-independent; the equivalence classes of orderings
-//! \* collapse to ONE w.r.t. the outcome. The previous integration test's flakiness was
-//! \* therefore NOT outcome nondeterminism — it was a TIME-BOUNDED drain
-//! \* (random per-message delay + a 90s wall-clock deadline) cut off before
-//! \* quiescence. Driving the dummy delivery queue to quiescence removes the
-//! \* wall clock and makes convergence deterministic; any representative order
-//! \* (FIFO, LIFO, reversed, a few hand-picked adversarial ones) lands on the
-//! \* same fixpoint. A non-converging order, if one existed, would be a real
-//! \* confluence violation — a genuine bug, reproducible by its exact sequence.
+//! ---- What the tests below actually check --------------------------
+//! Two REPRESENTATIVE deterministic schedules — FIFO (oldest pending first) and
+//! LIFO (newest first), the two extremes — each drive the six clustered DIDs to
+//! quiescence and reach the SAME unique fixpoint, with no timers / wall clock.
+//! That is reproducible evidence that convergence is insensitive to delivery
+//! order for this regime (not a proof over all orders). It replaces the old
+//! wall-clock-bounded flaky `test_stabilization_final_dht`, whose 90s deadline
+//! asserted bounded-time convergence — unsound without `correct_stabilize`
+//! (experimental/off). A schedule that did NOT converge would be a reproducible
+//! bug, pinned to its exact delivery sequence.
 //! ====================================================================
 
 #[cfg(test)]
@@ -97,8 +78,8 @@ mod tests {
         "e1d7f24e2b725df077627fc0337b9c53b37ce594ca84fccd0f36dc58423a0ed2",
     ];
 
-    /// Stabilize rounds before giving up. Generous: confluence guarantees
-    /// termination well within this; tripping it is a real non-convergence.
+    /// Stabilize rounds before giving up. Generous: these schedules reach the
+    /// fixpoint far inside this bound; tripping it is a real non-convergence.
     const MAX_ROUNDS: usize = 400;
     /// Guard against a routing self-route delivery loop (non-termination).
     const MAX_DELIVERIES: usize = 2_000_000;
@@ -200,14 +181,15 @@ mod tests {
         pending - 1
     }
 
-    /// Confluence representative #1: oldest-first delivery converges.
+    /// Representative schedule #1: oldest-first delivery converges.
     #[tokio::test]
     async fn schedule_fifo_converges() {
         run_schedule(fifo).await;
     }
 
-    /// Confluence representative #2: newest-first delivery reaches the SAME
-    /// fixpoint — the two extremes witnessing the order-independence proved above.
+    /// Representative schedule #2: newest-first delivery reaches the SAME
+    /// fixpoint — the two extremes giving reproducible evidence of the
+    /// order-insensitivity reasoned about above (not a proof over all orders).
     #[tokio::test]
     async fn schedule_lifo_converges() {
         run_schedule(lifo).await;
