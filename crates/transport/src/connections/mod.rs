@@ -10,6 +10,8 @@ mod native_webrtc;
 mod web_sys_webrtc;
 
 #[cfg(feature = "dummy")]
+pub use crate::connections::dummy::controlled as dummy_controlled;
+#[cfg(feature = "dummy")]
 pub use crate::connections::dummy::DummyConnection;
 #[cfg(feature = "dummy")]
 pub use crate::connections::dummy::DummyTransport;

@@ -11,18 +11,16 @@
 //! correct, which is the equivalence the abstraction relies on (followed to
 //! completion over full knowledge, `find_successor` == the nearest forward node).
 //!
-//! Scope (narrow — this does NOT cover bootstrap/stabilization liveness):
-//! it validates routing *correctness* only, on an already-converged ring. The
-//! other layers each cover a different, narrower thing, and none of them covers
-//! full async convergence:
+//! Scope (narrow): this validates routing *correctness* only, on an
+//! already-converged ring. The other layers each cover a different thing:
 //!   * `dht_convergence` proves the deterministic safety FIXPOINT — the
 //!     converged state is correct, not that it is reached;
+//!   * `dht_schedule` proves the six clustered DIDs actually REACH that fixpoint,
+//!     deterministically — driving stabilization under the dummy transport's
+//!     controlled delivery queue to quiescence (the confluence result), which
+//!     replaces the old wall-clock-bounded flaky convergence test;
 //!   * the stage-2 Stateright model is an N=3 routing ABSTRACTION (no
 //!     `fix_fingers`, not the six clustered DIDs + K=3 regime).
-//! Full multi-node async bootstrap/stabilization convergence is exercised only
-//! by the integration test `test_stabilization_final_dht`, which — per the
-//! formal finding (no bounded-time convergence without successor-stabilization)
-//! — remains the flaky CI concern; it is NOT subsumed by the layers above.
 //!
 //! Routing here is run on the converged (full-knowledge) ring, where
 //! `closest_predecessor` always has a closer node, so production never

@@ -4,13 +4,9 @@ use std::time::Duration;
 use tokio::time::sleep;
 
 use crate::dht::successor::SuccessorReader;
-use crate::dht::Chord;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
-use crate::inspect::DHTInspect;
-use crate::inspect::SwarmInspect;
-use crate::tests::default::gen_pure_dht;
 use crate::tests::default::prepare_node;
 use crate::tests::manually_establish_connection;
 
@@ -90,122 +86,5 @@ async fn test_stabilization() -> Result<()> {
             Ok::<(), Error>(())
         } => {}
     }
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_stabilization_final_dht() -> Result<()> {
-    let mut swarms = vec![];
-
-    // Save nodes to prevent the receiver from being lost,
-    // which would lead to a panic in the monitoring callback when recording messages.
-    let mut nodes = vec![];
-
-    let keys = vec![
-        "9c83fcb684af3dc71018b5a303245d2f2fed8a579096589f3234a67a52a7ac66", // 0xcc13321381c4be4d3264588d4573c9529c0167a0
-        "fd674cb6089663935cb061254602e343da8a2fa3908980ae4f7a27adb8b7ac8a", // 0xdbf2d77c3a8bb59379009ec2ec423b8b58d60dbe
-        "b9ce7159a2ad3b9fe885a7744d32afeec233e7ddeaed0759cbab2c00a1bd548b", // 0xd9863aad3267eaadca60adf51464e16d6f79465b
-        "4efb629f54a3f3dd91f5efffc4f9b51ab27eb082b2393067757681ed6439480d", // 0x8a5f987d1c2cc0fd6e0083df22ba9bd802706348
-        "f2cbca82fb82745c1f9d94c1c9d2b0606daaf6f15ac8a215fc72c8bc0478ecf5", // 0x2b5d1f769f346a08cee37f7382495b01126d480a
-        "e1d7f24e2b725df077627fc0337b9c53b37ce594ca84fccd0f36dc58423a0ed2", // 0xca82ac762999ef4438d09223b01f9bf194cea94e
-    ];
-
-    for s in keys {
-        let key = SecretKey::try_from(s).unwrap();
-        let node = prepare_node(key).await;
-        swarms.push(node.swarm.clone());
-        let stabilizer = Arc::new(node.swarm.stabilizer());
-        nodes.push(node);
-        tokio::spawn(stabilizer.wait(Duration::from_secs(1)));
-    }
-
-    let swarm1 = Arc::clone(&swarms[0]);
-    for swarm in swarms.iter().skip(1) {
-        manually_establish_connection(&swarm1, swarm).await;
-    }
-
-    // ====================================================================
-    // This is the *liveness* (eventual-convergence) integration test: the async
-    // stabilizer + transport must eventually reach the unique fixpoint. The
-    // fixpoint itself — the SAFETY spec, `Successors/Predecessor/Finger` as pure
-    // functions of the DID set — is defined and checked deterministically in
-    // `dht_convergence.rs` (the TLA+ `MODULE ChordConvergence`). Here we only
-    // (a) record the concrete fixpoint for these six fixed DIDs and (b) assert
-    // it is reached, by POLLING.
-    //
-    // ---- Concrete instance of ChordConvergence (the six fixed keys above) --
-    // Node == {n0..n5} = swarms[0..5];  ring order (clockwise, by Id):
-    //   n4(2b) -> n3(8a) -> n5(ca82) -> n0(cc13) -> n2(d986) -> n1(dbf2) -> wrap
-    //
-    // THEOREM Succ == Successors(ni)     \* the K=3 nearest forward nodes
-    //   n0:<<n2,n1,n4>>  n1:<<n4,n3,n5>>  n2:<<n1,n4,n3>>
-    //   n3:<<n5,n0,n2>>  n4:<<n3,n5,n0>>  n5:<<n0,n2,n1>>
-    // THEOREM Pred == Predecessor(ni)    \* immediate counter-clockwise neighbour
-    //   n0=n5  n1=n2  n2=n0  n3=n4  n4=n1  n5=n3
-    // THEOREM Fingers == Finger(ni,k), compressed (breaks where 2^k crosses a gap):
-    //   n0: [0..155]=n2 [156..158]=n4 [159]=n3
-    //   n1: [0..158]=n4 [159]=n3
-    //   n2: [0..153]=n1 [154..158]=n4 [159]=n3
-    //   n3: [0..158]=n5 [159]=n4
-    //   n4: [0..158]=n3 [159]=n5
-    //   n5: [0..152]=n0 [153..155]=n2 [156]=n1 [157..158]=n4 [159]=n3
-    //
-    // ---- Why this test POLLS (liveness has no bounded-time guarantee) ------
-    // WF on Notify/FixFinger => []<>Converged, but convergence TIME is
-    // order-sensitive: immediate-successor discovery rides only on FixFinger
-    // (one of 160 indices/round) + notify-report ordering, since the
-    // successor-stabilization step (`correct_stabilize`) is #[cfg(experimental)]
-    // and OFF here. Under the dummy transport's random per-message delay,
-    // convergence is jittery (empirically a FASTER stabilize interval makes it
-    // WORSE). So we assert *eventual* convergence by polling to a generous
-    // deadline, never at a fixed instant. These six DIDs are the pathological
-    // clustered worst case; see `Layout::Clustered` in dht_convergence.rs.
-    // ====================================================================
-    //
-    // Build the (deterministic) expected fixpoint up front, via the same
-    // production code path checked in dht_convergence.rs.
-    let mut expected_dhts = vec![];
-    for swarm in swarms.iter() {
-        let dht = gen_pure_dht(swarm.did());
-        for other in swarms.iter() {
-            if dht.did != other.did() {
-                dht.join(other.did()).unwrap();
-                dht.notify(other.did()).unwrap();
-            }
-        }
-
-        expected_dhts.push(DHTInspect::inspect(&dht));
-    }
-
-    // Wait for stabilization to converge each node's DHT to the expected state.
-    // Poll instead of sleeping a fixed amount: under parallel test execution the
-    // shared dummy transport and CPU contention make a fixed wait flaky. The
-    // window is generous because 6-node convergence under CI contention is slow.
-    let deadline = std::time::Instant::now() + Duration::from_secs(90);
-    let current_dhts = loop {
-        let current_dhts: Vec<_> = swarms
-            .iter()
-            .map(|swarm| DHTInspect::inspect(&swarm.dht()))
-            .collect();
-
-        if current_dhts == expected_dhts || std::time::Instant::now() >= deadline {
-            break current_dhts;
-        }
-
-        sleep(Duration::from_millis(500)).await;
-    };
-
-    for swarm in swarms.iter() {
-        println!(
-            "Connected peers: {:?}",
-            SwarmInspect::inspect(swarm).await.peers
-        );
-    }
-
-    for (i, (cur, exp)) in std::iter::zip(current_dhts, expected_dhts).enumerate() {
-        println!("Check node{i}");
-        pretty_assertions::assert_eq!(cur, exp);
-    }
-
     Ok(())
 }
