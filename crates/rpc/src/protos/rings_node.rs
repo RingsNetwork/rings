@@ -1,283 +1,205 @@
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+//! Request/response message types for the rings node RPC API.
+//!
+//! These were previously generated from `rings_node.proto` via prost, but the
+//! wire format has always been JSON-RPC (never protobuf binary), so they are
+//! now plain serde structs. Field names and types are kept identical to the
+//! previous prost-generated output to preserve the on-the-wire JSON shape.
+
+use serde::Deserialize;
+use serde::Serialize;
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct PeerInfo {
-    #[prost(string, tag = "1")]
-    pub did: ::prost::alloc::string::String,
-    #[prost(string, tag = "2")]
-    pub state: ::prost::alloc::string::String,
+    pub did: String,
+    pub state: String,
 }
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct ConnectPeerViaHttpRequest {
-    #[prost(string, tag = "1")]
-    pub url: ::prost::alloc::string::String,
+    pub url: String,
 }
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct ConnectPeerViaHttpResponse {
-    #[prost(string, tag = "1")]
-    pub did: ::prost::alloc::string::String,
+    pub did: String,
 }
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct ConnectWithDidRequest {
-    #[prost(string, tag = "1")]
-    pub did: ::prost::alloc::string::String,
+    pub did: String,
 }
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct ConnectWithDidResponse {}
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct SeedPeer {
-    #[prost(string, tag = "1")]
-    pub did: ::prost::alloc::string::String,
-    #[prost(string, tag = "2")]
-    pub url: ::prost::alloc::string::String,
+    pub did: String,
+    pub url: String,
 }
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct ConnectWithSeedRequest {
-    #[prost(message, repeated, tag = "1")]
-    pub peers: ::prost::alloc::vec::Vec<SeedPeer>,
+    pub peers: Vec<SeedPeer>,
 }
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct ConnectWithSeedResponse {}
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct ListPeersRequest {}
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct ListPeersResponse {
-    #[prost(message, repeated, tag = "1")]
-    pub peers: ::prost::alloc::vec::Vec<PeerInfo>,
+    pub peers: Vec<PeerInfo>,
 }
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct CreateOfferRequest {
-    #[prost(string, tag = "1")]
-    pub did: ::prost::alloc::string::String,
+    pub did: String,
 }
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct CreateOfferResponse {
-    #[prost(string, tag = "1")]
-    pub offer: ::prost::alloc::string::String,
+    pub offer: String,
 }
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct AnswerOfferRequest {
-    #[prost(string, tag = "1")]
-    pub offer: ::prost::alloc::string::String,
+    pub offer: String,
 }
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct AnswerOfferResponse {
-    #[prost(string, tag = "1")]
-    pub answer: ::prost::alloc::string::String,
+    pub answer: String,
 }
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct AcceptAnswerRequest {
-    #[prost(string, tag = "1")]
-    pub answer: ::prost::alloc::string::String,
+    pub answer: String,
 }
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct AcceptAnswerResponse {}
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct DisconnectRequest {
-    #[prost(string, tag = "1")]
-    pub did: ::prost::alloc::string::String,
+    pub did: String,
 }
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct DisconnectResponse {}
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct SendCustomMessageRequest {
-    #[prost(string, tag = "1")]
-    pub destination_did: ::prost::alloc::string::String,
-    #[prost(string, tag = "2")]
-    pub data: ::prost::alloc::string::String,
+    pub destination_did: String,
+    pub data: String,
 }
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct SendCustomMessageResponse {}
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct SendBackendMessageRequest {
-    #[prost(string, tag = "1")]
-    pub destination_did: ::prost::alloc::string::String,
-    #[prost(string, tag = "2")]
-    pub data: ::prost::alloc::string::String,
+    pub destination_did: String,
+    pub data: String,
 }
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct SendBackendMessageResponse {}
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct PublishMessageToTopicRequest {
-    #[prost(string, tag = "1")]
-    pub topic: ::prost::alloc::string::String,
-    #[prost(string, tag = "2")]
-    pub data: ::prost::alloc::string::String,
+    pub topic: String,
+    pub data: String,
 }
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct PublishMessageToTopicResponse {}
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct FetchTopicMessagesRequest {
-    #[prost(string, tag = "1")]
-    pub topic: ::prost::alloc::string::String,
-    #[prost(int64, tag = "2")]
+    pub topic: String,
     pub skip: i64,
 }
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct FetchTopicMessagesResponse {
-    #[prost(string, repeated, tag = "1")]
-    pub data: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    pub data: Vec<String>,
 }
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct RegisterServiceRequest {
-    #[prost(string, tag = "1")]
-    pub name: ::prost::alloc::string::String,
+    pub name: String,
 }
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct RegisterServiceResponse {}
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct LookupServiceRequest {
-    #[prost(string, tag = "1")]
-    pub name: ::prost::alloc::string::String,
+    pub name: String,
 }
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct LookupServiceResponse {
-    #[prost(string, repeated, tag = "1")]
-    pub dids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    pub dids: Vec<String>,
 }
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct NodeInfoRequest {}
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct FingerTableRange {
-    #[prost(string, optional, tag = "1")]
-    pub did: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(uint64, tag = "2")]
+    pub did: Option<String>,
     pub start: u64,
-    #[prost(uint64, tag = "3")]
     pub end: u64,
 }
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct DhtInfo {
-    #[prost(string, tag = "1")]
-    pub did: ::prost::alloc::string::String,
-    #[prost(string, repeated, tag = "2")]
-    pub successors: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-    #[prost(string, optional, tag = "3")]
-    pub predecessor: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(message, repeated, tag = "4")]
-    pub finger_table_ranges: ::prost::alloc::vec::Vec<FingerTableRange>,
+    pub did: String,
+    pub successors: Vec<String>,
+    pub predecessor: Option<String>,
+    pub finger_table_ranges: Vec<FingerTableRange>,
 }
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct StorageValue {
-    #[prost(string, tag = "1")]
-    pub did: ::prost::alloc::string::String,
-    #[prost(string, tag = "2")]
-    pub kind: ::prost::alloc::string::String,
-    #[prost(string, repeated, tag = "3")]
-    pub data: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    pub did: String,
+    pub kind: String,
+    pub data: Vec<String>,
 }
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct StorageItem {
-    #[prost(string, tag = "1")]
-    pub key: ::prost::alloc::string::String,
-    #[prost(message, optional, tag = "2")]
-    pub value: ::core::option::Option<StorageValue>,
+    pub key: String,
+    pub value: Option<StorageValue>,
 }
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct StorageInfo {
-    #[prost(message, repeated, tag = "1")]
-    pub items: ::prost::alloc::vec::Vec<StorageItem>,
+    pub items: Vec<StorageItem>,
 }
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct SwarmInfo {
-    #[prost(message, repeated, tag = "1")]
-    pub peers: ::prost::alloc::vec::Vec<PeerInfo>,
-    #[prost(message, optional, tag = "2")]
-    pub dht: ::core::option::Option<DhtInfo>,
-    #[prost(message, optional, tag = "3")]
-    pub persistence_storage: ::core::option::Option<StorageInfo>,
-    #[prost(message, optional, tag = "4")]
-    pub cache_storage: ::core::option::Option<StorageInfo>,
+    pub peers: Vec<PeerInfo>,
+    pub dht: Option<DhtInfo>,
+    pub persistence_storage: Option<StorageInfo>,
+    pub cache_storage: Option<StorageInfo>,
 }
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct NodeInfoResponse {
-    #[prost(string, tag = "1")]
-    pub version: ::prost::alloc::string::String,
-    #[prost(message, optional, tag = "2")]
-    pub swarm: ::core::option::Option<SwarmInfo>,
+    pub version: String,
+    pub swarm: Option<SwarmInfo>,
 }
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct NodeDidRequest {}
-#[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct NodeDidResponse {
-    #[prost(string, tag = "1")]
-    pub did: ::prost::alloc::string::String,
+    pub did: String,
 }

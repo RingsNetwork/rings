@@ -46,9 +46,7 @@ impl Client {
     }
 
     pub async fn call_method<T>(&self, method: Method, req: &impl Serialize) -> Result<T>
-    where
-        T: DeserializeOwned,
-    {
+    where T: DeserializeOwned {
         use jsonrpc_core::*;
 
         let params = serde_json::to_value(req)
