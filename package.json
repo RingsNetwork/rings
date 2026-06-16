@@ -20,7 +20,7 @@
     "protobufjs": "https://github.com/RingsNetwork/protobuf.js#83686a0"
   },
   "devDependencies": {
-    "protobufjs-cli": "^1.1.2",
+    "protobufjs-cli": "1.1.2",
     "typescript": "^4.9.5"
   },
   "files": [
