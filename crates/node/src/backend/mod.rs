@@ -1,6 +1,7 @@
 #![warn(missing_docs)]
 //! This module provide basic mechanism.
 
+pub mod ext;
 #[cfg(feature = "snark")]
 pub mod snark;
 pub mod types;

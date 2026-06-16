@@ -66,6 +66,12 @@ impl Provider {
             handler: InternalRpcHandler,
         }
     }
+
+    /// Build an extension capability [`Ctx`](crate::backend::ext::Ctx) over this
+    /// provider's processor.
+    pub fn ctx(&self) -> crate::backend::ext::Ctx {
+        crate::backend::ext::Ctx::new(self.processor.clone())
+    }
     /// Create a provider instance with storage name
     pub(crate) async fn new_provider_with_storage_internal(
         config: ProcessorConfig,
