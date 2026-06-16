@@ -571,6 +571,52 @@ mod tests {
         }
     }
 
+    /// Trace-validation (operation conformance, Tier 1): the model's successor
+    /// computation must equal the real `PeerRing` successor list after joining
+    /// `connected` — for EVERY partial-knowledge subset, not just the converged
+    /// full set. This is what justifies the stage-2 model using the fast
+    /// spec-level successor instead of a real `PeerRing` per step: it is proven
+    /// to agree with production on exactly the partial states the checker
+    /// explores. (Routing / multi-hop `find_successor` is out of scope here — it
+    /// stays a documented abstraction; see the stage-2 SCOPE note.)
+    #[test]
+    fn successors_match_peer_ring_on_partial_states() {
+        let all: Vec<Did> = (0..4u64).map(|i| did_frac(i, 4)).collect();
+        let node = DiscoveryNode {
+            all: all.clone(),
+            rounds: 1,
+        };
+        let n = all.len();
+        for me in 0..n {
+            let others: Vec<usize> = (0..n).filter(|&i| i != me).collect();
+            for mask in 0u32..(1 << others.len()) {
+                let connected: BTreeSet<usize> = others
+                    .iter()
+                    .enumerate()
+                    .filter(|(bit, _)| mask & (1 << bit) != 0)
+                    .map(|(_, &i)| i)
+                    .collect();
+
+                let model: Vec<Did> = node
+                    .successors(me, &connected)
+                    .into_iter()
+                    .map(|i| all[i])
+                    .collect();
+
+                let dht = PeerRing::new_with_storage(all[me], K as u8, Box::new(MemStorage::new()));
+                for &c in &connected {
+                    let _ = dht.join(all[c]);
+                }
+                let real = dht.successors().list().unwrap();
+
+                assert_eq!(
+                    model, real,
+                    "successors disagree with PeerRing (me={me}, connected={connected:?})"
+                );
+            }
+        }
+    }
+
     /// The snapshot <-> PeerRing round-trip must be lossless: this is what lets
     /// the Stateright actor carry a hashable state yet run real chord operations.
     #[test]
