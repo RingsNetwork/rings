@@ -91,10 +91,11 @@ impl MessageSenderPool<TrackedChannel> for RoundRobinPool<TrackedChannel> {
     async fn send(&self, msg: TransportMessage) -> Result<DeliveryFuture> {
         let (channel, enqueued) = self.select()?;
         let data = bincode::serialize(&msg)?;
-        // Reserve this message's byte range on the channel before sending, so
-        // the end offset reflects FIFO order even under concurrent senders.
-        let end_offset =
-            enqueued.fetch_add(data.len() as u64, Ordering::SeqCst) + data.len() as u64;
+        // `send_with_u8_array` is synchronous, so there's no interleaving to
+        // guard; just advance `enqueued` ONLY after a successful send. Advancing
+        // first would, on a rejected send, leave the counter ahead of the bytes
+        // actually buffered, making earlier messages' delivery futures resolve
+        // early on phantom bytes (`enqueued_total - buffered_amount`).
         if let Err(e) = channel
             .send_with_u8_array(&data)
             .map_err(Error::WebSysWebrtc)
@@ -102,6 +103,8 @@ impl MessageSenderPool<TrackedChannel> for RoundRobinPool<TrackedChannel> {
             tracing::error!("{:?}, Data size: {:?}", e, data.len());
             return Err(e.into());
         }
+        let end_offset =
+            enqueued.fetch_add(data.len() as u64, Ordering::SeqCst) + data.len() as u64;
         Ok(delivery_future(channel, enqueued, end_offset))
     }
 }

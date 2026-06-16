@@ -94,20 +94,19 @@ impl MessageSenderPool<TrackedChannel> for RoundRobinPool<TrackedChannel> {
     async fn send(&self, msg: TransportMessage) -> Result<DeliveryFuture> {
         let (channel, enqueued, send_lock) = self.select()?;
         let data = bincode::serialize(&msg).map(Bytes::from)?;
-        // Hold the per-channel lock across reserve+send so the reserved end
-        // offset matches the order bytes are actually enqueued in: concurrent
-        // senders must not reserve in one order and reach the (yielding) send in
-        // another, or an earlier future would resolve against a later message's
-        // bytes.
+        // Hold the per-channel lock across send + counter advance so the bytes
+        // are enqueued and accounted in the same (FIFO) order: concurrent senders
+        // can't interleave the yielding send and the counter update. Advance
+        // `enqueued` ONLY after a successful send — otherwise a failed send would
+        // leave the counter ahead of what was actually queued, making earlier
+        // messages' delivery futures resolve early on phantom bytes.
         let end_offset = {
             let _guard = send_lock.lock().await;
-            let end_offset =
-                enqueued.fetch_add(data.len() as u64, Ordering::SeqCst) + data.len() as u64;
             if let Err(e) = channel.send(&data).await {
                 tracing::error!("{:?}, Data size: {:?}", e, data.len());
                 return Err(e.into());
             }
-            end_offset
+            enqueued.fetch_add(data.len() as u64, Ordering::SeqCst) + data.len() as u64
         };
         Ok(delivery_future(channel, enqueued, end_offset))
     }
