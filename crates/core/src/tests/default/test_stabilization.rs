@@ -124,8 +124,46 @@ async fn test_stabilization_final_dht() -> Result<()> {
         manually_establish_connection(&swarm1, swarm).await;
     }
 
-    // The fully-converged DHT each node should reach is deterministic, so build
-    // it up front.
+    // ====================================================================
+    // This is the *liveness* (eventual-convergence) integration test: the async
+    // stabilizer + transport must eventually reach the unique fixpoint. The
+    // fixpoint itself — the SAFETY spec, `Successors/Predecessor/Finger` as pure
+    // functions of the DID set — is defined and checked deterministically in
+    // `dht_convergence.rs` (the TLA+ `MODULE ChordConvergence`). Here we only
+    // (a) record the concrete fixpoint for these six fixed DIDs and (b) assert
+    // it is reached, by POLLING.
+    //
+    // ---- Concrete instance of ChordConvergence (the six fixed keys above) --
+    // Node == {n0..n5} = swarms[0..5];  ring order (clockwise, by Id):
+    //   n4(2b) -> n3(8a) -> n5(ca82) -> n0(cc13) -> n2(d986) -> n1(dbf2) -> wrap
+    //
+    // THEOREM Succ == Successors(ni)     \* the K=3 nearest forward nodes
+    //   n0:<<n2,n1,n4>>  n1:<<n4,n3,n5>>  n2:<<n1,n4,n3>>
+    //   n3:<<n5,n0,n2>>  n4:<<n3,n5,n0>>  n5:<<n0,n2,n1>>
+    // THEOREM Pred == Predecessor(ni)    \* immediate counter-clockwise neighbour
+    //   n0=n5  n1=n2  n2=n0  n3=n4  n4=n1  n5=n3
+    // THEOREM Fing == Finger(ni,k), compressed (breaks where 2^k crosses a gap):
+    //   n0: [0..155]=n2 [156..158]=n4 [159]=n3
+    //   n1: [0..158]=n4 [159]=n3
+    //   n2: [0..153]=n1 [154..158]=n4 [159]=n3
+    //   n3: [0..158]=n5 [159]=n4
+    //   n4: [0..158]=n3 [159]=n5
+    //   n5: [0..152]=n0 [153..155]=n2 [156]=n1 [157..158]=n4 [159]=n3
+    //
+    // ---- Why this test POLLS (liveness has no bounded-time guarantee) ------
+    // WF on Notify/FixFinger => []<>Converged, but convergence TIME is
+    // order-sensitive: immediate-successor discovery rides only on FixFinger
+    // (one of 160 indices/round) + notify-report ordering, since the
+    // successor-stabilization step (`correct_stabilize`) is #[cfg(experimental)]
+    // and OFF here. Under the dummy transport's random per-message delay,
+    // convergence is jittery (empirically a FASTER stabilize interval makes it
+    // WORSE). So we assert *eventual* convergence by polling to a generous
+    // deadline, never at a fixed instant. These six DIDs are the pathological
+    // clustered worst case; see `Layout::Clustered` in dht_convergence.rs.
+    // ====================================================================
+    //
+    // Build the (deterministic) expected fixpoint up front, via the same
+    // production code path checked in dht_convergence.rs.
     let mut expected_dhts = vec![];
     for swarm in swarms.iter() {
         let dht = gen_pure_dht(swarm.did());
