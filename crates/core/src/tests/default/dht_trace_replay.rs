@@ -21,6 +21,7 @@
 use num_bigint::BigUint;
 
 use super::dht_convergence::spec;
+use super::dht_convergence::Layout;
 use super::dht_convergence::K;
 use crate::dht::Chord;
 use crate::dht::Did;
@@ -31,8 +32,25 @@ use crate::storage::MemStorage;
 /// Safety bound on routing hops (a converged ring resolves in O(log n)).
 const MAX_HOPS: usize = 64;
 
-fn did_frac(num: u64, den: u64) -> Did {
-    Did::from((BigUint::from(1u8) << 160) * BigUint::from(num) / BigUint::from(den))
+/// A point strictly between each pair of ring-adjacent nodes (sorted by ring
+/// position, including the wrap gap) — an unambiguous lookup target whose
+/// successor is the node just clockwise of it, for any layout.
+fn midpoints(all: &[Did]) -> Vec<Did> {
+    let m = BigUint::from(1u8) << 160;
+    let mut pos: Vec<BigUint> = all.iter().map(|&d| BigUint::from(d)).collect();
+    pos.sort();
+    let n = pos.len();
+    (0..n)
+        .map(|i| {
+            let a = pos[i].clone();
+            let b = if i + 1 < n {
+                pos[i + 1].clone()
+            } else {
+                &pos[0] + &m
+            };
+            Did::from((a + b) / BigUint::from(2u8))
+        })
+        .collect()
 }
 
 /// `n` real `PeerRing`s in their converged state: each has joined every other
@@ -89,26 +107,33 @@ mod tests {
 
     /// From every origin, the real multi-hop `find_successor` resolves to the
     /// true successor — for arbitrary ring positions (midpoints between every
-    /// pair of adjacent nodes, including the wrap gap). This exercises the
-    /// production routing the stage-2 model abstracts and shows it agrees with
-    /// the spec successor. (Targets are strictly between nodes: for a target
-    /// equal to a node's own DID, `find_successor` returns that node's successor
-    /// — the Chord boundary convention — which is a separate semantics question,
-    /// not routing.)
+    /// pair of adjacent nodes, including the wrap gap), across the SAME
+    /// representative finger-table regimes `dht_convergence` uses: evenly spaced,
+    /// `2^k`-aligned (fully populated), the clustered six production DIDs
+    /// (collapsed fingers — the hard `closest_predecessor` branch), and the
+    /// dyadic boundary. (Targets are strictly between nodes: for a target equal
+    /// to a node's own DID, `find_successor` returns that node's successor — the
+    /// Chord boundary convention — which is a separate semantics question, not
+    /// routing.)
     #[test]
     fn real_find_successor_routing_is_correct() {
-        for n in 3..=6u64 {
-            let all: Vec<Did> = (0..n).map(|i| did_frac(i, n)).collect();
+        let layouts = [
+            Layout::Even(5),
+            Layout::Pow2(8),
+            Layout::Clustered,
+            Layout::DyadicBoundary,
+        ];
+        for layout in layouts {
+            let all = layout.dids();
             let rings = converged_rings(&all);
-
-            let targets: Vec<Did> = (0..n).map(|i| did_frac(2 * i + 1, 2 * n)).collect();
+            let targets = midpoints(&all);
 
             for origin in 0..all.len() {
                 for &target in &targets {
                     assert_eq!(
                         route(&rings, &all, origin, target),
                         true_successor(&all, target),
-                        "wrong successor (n={n}, origin={origin}, target={target})"
+                        "wrong successor (origin={origin}, target={target}, all={all:?})"
                     );
                 }
             }

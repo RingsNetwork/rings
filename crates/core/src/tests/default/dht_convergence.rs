@@ -167,7 +167,9 @@ fn did_pow(bit: usize) -> Did {
 /// A placement strategy for the DID set under test. This is the test abstraction:
 /// every layout yields a `Vec<Did>`, and the assertion is identical across all of
 /// them — only the ring structure changes, exercising different operator branches.
-enum Layout {
+/// Shared with `dht_trace_replay` so the real-routing test covers the same
+/// representative finger-table regimes.
+pub(super) enum Layout {
     /// `n` evenly-spaced nodes. Smallest interesting rings / the base cases.
     Even(usize),
     /// `n` nodes at `2^k`-aligned offsets, so each finger slot resolves to a
@@ -184,7 +186,7 @@ enum Layout {
 
 impl Layout {
     /// The DID set for this layout (deterministic, distinct, no keys/transport).
-    fn dids(&self) -> Vec<Did> {
+    pub(super) fn dids(&self) -> Vec<Did> {
         match *self {
             Layout::Even(n) => (0..n as u64).map(|i| did_frac(i, n as u64)).collect(),
             // Nodes at 2^(BITS-1), 2^(BITS-2), ..., 2^(BITS-n): doubling gaps, so
