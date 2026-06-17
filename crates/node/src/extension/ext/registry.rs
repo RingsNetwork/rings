@@ -1,6 +1,11 @@
 #![warn(missing_docs)]
-//! Registry / router — type-erases pure [`Protocol`]s into uniform handlers and routes
-//! decoded [`Envelope`]s to them by namespace, driving the bounded re-injection fixpoint.
+//! Router + capability core.
+//!
+//! [`Extensions`] registers `(Protocol, Interpret)` pairs by namespace. [`Core`] is the
+//! small capability handle the runtime hands every interpreter — overlay `send`, `did`, and
+//! `inject` — and is also the entry point that routes an inbound [`Envelope`] to its
+//! protocol and drives the bounded re-injection fixpoint. The registry stays uniform
+//! (everything erased to [`Handler`]) while each extension's shell is its own.
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -9,26 +14,25 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
 
+use bytes::Bytes;
 use rings_core::dht::Did;
 
-use super::compute::ComputeFn;
-use super::compute::ComputeServices;
-use super::envelope::Envelope;
-use super::interpreter::Interpreter;
-use super::protocol::Ctx;
-use super::protocol::Event;
-use super::protocol::Inbound;
-use super::protocol::Protocol;
-use super::protocol::Transition;
+use super::Ctx;
+use super::Envelope;
+use super::Inbound;
+use super::Interpret;
 use super::MaybeSend;
+use super::Protocol;
+use super::Reject;
+use super::Transition;
+use super::Wire;
 use crate::error::Error;
 use crate::error::Result;
+use crate::processor::Processor;
 
 /// Upper bound on re-injection iterations per inbound message, so a misbehaving
-/// protocol/effect cycle cannot diverge. The driver computes a bounded fixpoint.
+/// protocol/effect cycle cannot diverge.
 const MAX_FIXPOINT_STEPS: u32 = 1024;
-
-// ── Erasure: wrap a pure Protocol + its state into a uniform handler ───────────
 
 /// Type-erased handler stored in the registry: native is `Send + Sync`, browser not.
 #[cfg(not(feature = "browser"))]
@@ -37,144 +41,66 @@ pub type DynHandler = dyn Handler + Send + Sync;
 #[cfg(feature = "browser")]
 pub type DynHandler = dyn Handler;
 
+type HandlerMap = RwLock<HashMap<String, Arc<DynHandler>>>;
+
 /// Erased, runtime-facing handler. Implemented once, generically, by `Runner`.
 #[cfg_attr(feature = "browser", async_trait::async_trait(?Send))]
 #[cfg_attr(not(feature = "browser"), async_trait::async_trait)]
 pub trait Handler {
     /// Routed namespace.
     fn namespace(&self) -> &str;
-    /// Load state, run the pure step, store the next state, then run its effects,
-    /// returning any re-injected messages. `handle : Event → IO [Inbound]`.
-    async fn handle(&self, interp: &Interpreter, event: Event) -> Result<Vec<Inbound>>;
+    /// Decode → step (pure, committed) → run the protocol's effects, returning re-injected
+    /// messages. `handle : (from, payload) → IO [Inbound]`.
+    async fn handle(&self, core: &Core, from: Did, payload: Bytes) -> Result<Vec<Inbound>>;
 }
 
-/// Adapter that owns a protocol's state and drives its pure `step`. This is the
-/// imperative shell around the pure core: it performs the state load/store and hands
-/// the produced effects to the [`Interpreter`]. Protocol authors never write this.
-struct Runner<P: Protocol> {
-    protocol: P,
-    state: Mutex<P::State>,
+/// The small capability surface handed to every interpreter. Cloneable and `'static` so a
+/// long-running engine task (e.g. a relay listener) can keep a copy and feed events back via
+/// [`inject`](Core::inject). Deliberately tiny: a P2P node's only universal capability is to
+/// put a message on the overlay.
+#[derive(Clone)]
+pub struct Core {
+    processor: Arc<Processor>,
+    handlers: Arc<HandlerMap>,
 }
 
-impl<P: Protocol> Runner<P> {
-    fn new(protocol: P) -> Self {
-        let state = Mutex::new(protocol.init());
-        Self { protocol, state }
-    }
-}
-
-#[cfg_attr(feature = "browser", async_trait::async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait::async_trait)]
-impl<P> Handler for Runner<P>
-where
-    P: Protocol + MaybeSend + 'static,
-    P::State: MaybeSend + 'static,
-{
-    fn namespace(&self) -> &str {
-        self.protocol.namespace()
+impl Core {
+    /// This node's DID.
+    pub fn did(&self) -> Did {
+        self.processor.did()
     }
 
-    async fn handle(&self, interp: &Interpreter, event: Event) -> Result<Vec<Inbound>> {
-        // Pure region: load state, run `step`, store next state. No IO, no await.
-        let effects = {
-            let mut guard = self.state.lock().map_err(|_| Error::Lock)?;
-            let ctx = Ctx {
-                did: interp.did(),
-                state: guard.deref(),
-            };
-            let Transition { state, effects } = self.protocol.step(ctx, &event);
-            *guard = state;
-            effects
-        };
-        // Impure region: the lock is released; run the described effects, returning
-        // any re-injected messages.
-        interp.run(effects).await
-    }
-}
-
-// ── Registry / router ──────────────────────────────────────────────────────────
-
-/// Routes inbound envelopes to protocols by namespace. Cheaply cloneable and shared
-/// (interior mutability) so the [`Provider`](crate::provider::Provider) and the
-/// inbound callback see the same table.
-#[derive(Default, Clone)]
-pub struct Extensions {
-    handlers: Arc<RwLock<HashMap<String, Arc<DynHandler>>>>,
-    compute: ComputeServices,
-}
-
-impl Extensions {
-    /// Empty registry.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// The shared [`ComputeServices`], handed to each [`Interpreter`] so the jobs a
-    /// protocol registers are visible when its [`Effect::Compute`](super::Effect::Compute)s
-    /// run.
-    pub fn computes(&self) -> ComputeServices {
-        self.compute.clone()
-    }
-
-    /// Register an impure [`ComputeFn`] for `namespace` (see
-    /// [`Effect::Compute`](super::Effect::Compute)).
-    pub fn register_compute(&self, namespace: impl Into<String>, job: ComputeFn) -> Result<()> {
-        self.compute.register(namespace, job)
-    }
-
-    /// Register a pure [`Protocol`] under its namespace (wrapped in a `Runner`).
-    /// Fails if the registry lock is poisoned.
-    pub fn register<P>(&self, protocol: P) -> Result<()>
-    where
-        P: Protocol + MaybeSend + 'static,
-        P::State: MaybeSend + 'static,
-    {
-        let runner: Arc<DynHandler> = Arc::new(Runner::new(protocol));
-        let mut handlers = self.handlers.write().map_err(|_| Error::Lock)?;
-        handlers.insert(runner.namespace().to_string(), runner);
+    /// Put a message on the overlay to `to` under `namespace`.
+    pub async fn send(&self, to: Did, namespace: &str, payload: Bytes) -> Result<()> {
+        let envelope = Envelope::new(namespace, payload);
+        self.processor.send_envelope(to, &envelope).await?;
         Ok(())
     }
 
-    /// Whether a namespace is registered.
-    pub fn contains(&self, namespace: &str) -> bool {
-        self.handlers
-            .read()
-            .map(|h| h.contains_key(namespace))
-            .unwrap_or(false)
+    /// Re-enter the router with a *self*-addressed message (`from = this node`): a locally
+    /// injected command, or an engine task feeding a lifecycle event back to its protocol.
+    pub async fn inject(&self, namespace: &str, payload: Bytes) -> Result<()> {
+        self.dispatch(self.did(), Envelope::new(namespace, payload))
+            .await
     }
 
-    fn get(&self, namespace: &str) -> Option<Arc<DynHandler>> {
-        self.handlers.read().ok()?.get(namespace).map(Arc::clone)
-    }
-
-    /// Route a decoded envelope and drive the re-injection loop to a bounded
-    /// fixpoint.
-    ///
-    /// Starting from the inbound message, repeatedly: route to the namespace's
-    /// protocol, run its `step` (pure) and effects (via the interpreter), and
-    /// re-enqueue any [`Inbound`]s the effects produced — until the queue drains or
-    /// `MAX_FIXPOINT_STEPS` is hit. This is the bounded least fixpoint of
-    /// `events ↦ ⋃ run(step(event))`.
-    ///
-    /// Unknown namespaces are logged and dropped (non-fatal): a peer speaking a
-    /// protocol this node lacks is expected.
-    pub async fn dispatch(
-        &self,
-        interp: &Interpreter,
-        from: Did,
-        envelope: Envelope,
-    ) -> Result<()> {
+    /// Route an inbound [`Envelope`] to its protocol and drive the bounded re-injection
+    /// fixpoint. Unknown namespaces are logged and dropped (non-fatal).
+    pub async fn dispatch(&self, from: Did, envelope: Envelope) -> Result<()> {
         let mut queue: VecDeque<Inbound> = VecDeque::new();
         queue.push_back(Inbound {
             namespace: envelope.namespace,
-            event: Event {
-                from,
-                payload: envelope.payload,
-            },
+            from,
+            payload: envelope.payload,
         });
 
         let mut budget = MAX_FIXPOINT_STEPS;
-        while let Some(Inbound { namespace, event }) = queue.pop_front() {
+        while let Some(Inbound {
+            namespace,
+            from,
+            payload,
+        }) = queue.pop_front()
+        {
             if budget == 0 {
                 return Err(Error::ExtensionError(format!(
                     "fixpoint budget ({MAX_FIXPOINT_STEPS}) exhausted; last namespace {namespace:?}"
@@ -182,11 +108,8 @@ impl Extensions {
             }
             budget -= 1;
 
-            match self.get(namespace.as_str()) {
-                Some(handler) => {
-                    let reinjected = handler.handle(interp, event).await?;
-                    queue.extend(reinjected);
-                }
+            match self.handler(namespace.as_str()) {
+                Some(handler) => queue.extend(handler.handle(self, from, payload).await?),
                 None => tracing::debug!(
                     "no protocol registered for namespace {:?}, dropping",
                     namespace
@@ -194,5 +117,160 @@ impl Extensions {
             }
         }
         Ok(())
+    }
+
+    fn handler(&self, namespace: &str) -> Option<Arc<DynHandler>> {
+        self.handlers.read().ok()?.get(namespace).map(Arc::clone)
+    }
+}
+
+/// Adapter binding a pure [`Protocol`] to its [`Interpret`] shell and owned state; erased to
+/// [`Handler`]. Protocol authors never write this.
+struct Runner<P: Protocol, I> {
+    protocol: P,
+    interpret: I,
+    state: Mutex<P::State>,
+}
+
+#[cfg_attr(feature = "browser", async_trait::async_trait(?Send))]
+#[cfg_attr(not(feature = "browser"), async_trait::async_trait)]
+impl<P, I> Handler for Runner<P, I>
+where
+    P: Protocol + MaybeSend + 'static,
+    P::State: MaybeSend + 'static,
+    P::Effect: MaybeSend,
+    I: Interpret<Effect = P::Effect> + MaybeSend + 'static,
+{
+    fn namespace(&self) -> &str {
+        self.protocol.namespace()
+    }
+
+    async fn handle(&self, core: &Core, from: Did, payload: Bytes) -> Result<Vec<Inbound>> {
+        // Boundary: decode raw bytes to a typed event. An undecodable/foreign message is an
+        // explicit drop here, not a silent `Transition::pure` deep in `step`.
+        let event = match self.protocol.decode(Wire {
+            from,
+            me: core.did(),
+            payload: payload.as_ref(),
+        }) {
+            Ok(event) => event,
+            Err(Reject(why)) => {
+                tracing::debug!("drop on {}: {why}", self.protocol.namespace());
+                return Ok(Vec::new());
+            }
+        };
+
+        // Pure region: a brief *synchronous* critical section — read state, run `step`,
+        // commit next state. No `.await` inside, so the std `Mutex` is correct and the state
+        // fold stays serial per protocol (state-machine semantics, not a limitation;
+        // different protocols and all effects below run concurrently). The commit is the
+        // logical transition point; effect failures that matter come back as events.
+        let effects = {
+            let mut guard = self.state.lock().map_err(|_| Error::Lock)?;
+            let Transition { state, effects } = self.protocol.step(
+                Ctx {
+                    did: core.did(),
+                    state: guard.deref(),
+                },
+                event,
+            );
+            *guard = state;
+            effects
+        };
+
+        // Impure region (lock released): run the protocol's own effects via its interpreter.
+        let mut reinjected = Vec::new();
+        for effect in effects {
+            reinjected.extend(self.interpret.run(core, effect).await?);
+        }
+        Ok(reinjected)
+    }
+}
+
+/// Registry of `(Protocol, Interpret)` pairs by namespace, plus the capability [`Core`].
+/// Cheaply cloneable and shared (interior mutability) so the
+/// [`Provider`](crate::provider::Provider) and the inbound callback see the same table.
+#[derive(Clone)]
+pub struct Extensions {
+    core: Core,
+}
+
+impl Extensions {
+    /// Empty registry over a processor (the source of overlay `send` / `did`).
+    pub fn new(processor: Arc<Processor>) -> Self {
+        Self {
+            core: Core {
+                processor,
+                handlers: Arc::new(RwLock::new(HashMap::new())),
+            },
+        }
+    }
+
+    /// The capability handle, for code that needs to dispatch / inject / send directly.
+    pub fn core(&self) -> Core {
+        self.core.clone()
+    }
+
+    /// Register a protocol together with its interpreter under the protocol's namespace.
+    /// Errors if the namespace is already taken — use [`replace`](Extensions::replace) for
+    /// intentional replacement (no more silent overwrite).
+    pub fn register<P, I>(&self, protocol: P, interpret: I) -> Result<()>
+    where
+        P: Protocol + MaybeSend + 'static,
+        P::State: MaybeSend + 'static,
+        P::Effect: MaybeSend,
+        I: Interpret<Effect = P::Effect> + MaybeSend + 'static,
+    {
+        self.insert(protocol, interpret, false)
+    }
+
+    /// Like [`register`](Extensions::register) but replaces an existing protocol on the same
+    /// namespace instead of erroring. For deliberate hot-swaps.
+    pub fn replace<P, I>(&self, protocol: P, interpret: I) -> Result<()>
+    where
+        P: Protocol + MaybeSend + 'static,
+        P::State: MaybeSend + 'static,
+        P::Effect: MaybeSend,
+        I: Interpret<Effect = P::Effect> + MaybeSend + 'static,
+    {
+        self.insert(protocol, interpret, true)
+    }
+
+    fn insert<P, I>(&self, protocol: P, interpret: I, replace: bool) -> Result<()>
+    where
+        P: Protocol + MaybeSend + 'static,
+        P::State: MaybeSend + 'static,
+        P::Effect: MaybeSend,
+        I: Interpret<Effect = P::Effect> + MaybeSend + 'static,
+    {
+        let namespace = protocol.namespace().to_string();
+        let state = Mutex::new(protocol.init());
+        let runner: Arc<DynHandler> = Arc::new(Runner {
+            protocol,
+            interpret,
+            state,
+        });
+        let mut handlers = self.core.handlers.write().map_err(|_| Error::Lock)?;
+        if !replace && handlers.contains_key(&namespace) {
+            return Err(Error::ExtensionError(format!(
+                "namespace {namespace:?} is already registered"
+            )));
+        }
+        handlers.insert(namespace, runner);
+        Ok(())
+    }
+
+    /// Whether a namespace is registered.
+    pub fn contains(&self, namespace: &str) -> bool {
+        self.core
+            .handlers
+            .read()
+            .map(|h| h.contains_key(namespace))
+            .unwrap_or(false)
+    }
+
+    /// Route a decoded envelope (inbound entry point). See [`Core::dispatch`].
+    pub async fn dispatch(&self, from: Did, envelope: Envelope) -> Result<()> {
+        self.core.dispatch(from, envelope).await
     }
 }

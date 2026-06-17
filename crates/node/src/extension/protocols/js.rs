@@ -1,11 +1,10 @@
 #![warn(missing_docs)]
 //! JavaScript protocol adapter (browser).
 //!
-//! Bridges a JS handler into the same pure [`Protocol`] model so the browser sees the
-//! exact abstraction native does: state lives in the runtime, the handler is a pure
-//! transition returning `{ state, effects }`, and the [`Interpreter`] runs the effects.
-//!
-//! The JS handler has the shape
+//! Bridges a JS handler into the same [`Protocol`] model so the browser sees the exact
+//! abstraction native does: state lives in the runtime, the handler is a (trusted-pure)
+//! transition returning `{ state, effects }`, and the extension's [`Interpret`] shell
+//! ([`JsShell`]) runs the effects.
 //!
 //! ```text
 //!   handler : (Ctx, Event) → { state, effects }
@@ -13,9 +12,6 @@
 //!     Event  = { from: string, payload: Uint8Array }
 //!     effects: Array<{ to: string, namespace: string, payload: Uint8Array }>
 //! ```
-//!
-//! i.e. `step : (Ctx S, Event) → Transition S` with `S = any` (an opaque JS value).
-//! The handler must be pure (no IO); side effects are returned and interpreted.
 
 use std::str::FromStr;
 
@@ -28,13 +24,23 @@ use js_sys::Uint8Array;
 use rings_core::dht::Did;
 use wasm_bindgen::JsValue;
 
+use crate::extension::ext::Core;
 use crate::extension::ext::Ctx;
-use crate::extension::ext::Effect;
-use crate::extension::ext::Event;
+use crate::extension::ext::Inbound;
+use crate::extension::ext::Interpret;
 use crate::extension::ext::Protocol;
+use crate::extension::ext::Reject;
 use crate::extension::ext::Transition;
+use crate::extension::ext::Wire;
 
-/// A protocol whose pure transition is a JS function. State is an opaque [`JsValue`].
+/// A JS handler effect: send `payload` to `to` under `namespace` over the overlay.
+pub struct JsSend {
+    to: Did,
+    namespace: String,
+    payload: Bytes,
+}
+
+/// A protocol whose transition is a JS function. State and event are opaque [`JsValue`]s.
 pub struct JsProtocol {
     namespace: String,
     initial: JsValue,
@@ -54,6 +60,8 @@ impl JsProtocol {
 
 impl Protocol for JsProtocol {
     type State = JsValue;
+    type Event = JsValue;
+    type Effect = JsSend;
 
     fn namespace(&self) -> &str {
         self.namespace.as_str()
@@ -63,11 +71,16 @@ impl Protocol for JsProtocol {
         self.initial.clone()
     }
 
-    /// Pure transition delegated to the JS handler. On any JS error the state is left
-    /// unchanged and no effects are produced (logged, non-fatal).
-    fn step(&self, ctx: Ctx<'_, JsValue>, event: &Event) -> Transition<JsValue> {
+    /// Build the JS `event` object `{ from, payload }` at the boundary.
+    fn decode(&self, wire: Wire<'_>) -> Result<JsValue, Reject> {
+        build_event(wire.from, wire.payload).map_err(|e| Reject(format!("js event build: {e:?}")))
+    }
+
+    /// Transition delegated to the JS handler. On any JS error the state is left unchanged
+    /// and no effects are produced (logged, non-fatal).
+    fn step(&self, ctx: Ctx<'_, JsValue>, event: JsValue) -> Transition<JsValue, JsSend> {
         let current = ctx.state.clone();
-        match call_handler(&self.handler, ctx.did, ctx.state, event) {
+        match call_handler(&self.handler, ctx.did, ctx.state, &event) {
             Ok(transition) => transition,
             Err(err) => {
                 tracing::error!("js protocol {:?} step failed: {:?}", self.namespace, err);
@@ -77,14 +90,44 @@ impl Protocol for JsProtocol {
     }
 }
 
+/// JS protocol interpreter: each parsed handler effect is an overlay `send`.
+pub struct JsShell;
+
+#[async_trait::async_trait(?Send)]
+impl Interpret for JsShell {
+    type Effect = JsSend;
+
+    async fn run(&self, core: &Core, effect: JsSend) -> crate::error::Result<Vec<Inbound>> {
+        core.send(effect.to, effect.namespace.as_str(), effect.payload)
+            .await?;
+        Ok(Vec::new())
+    }
+}
+
+/// Build the JS `event` object `{ from, payload }`.
+fn build_event(from: Did, payload: &[u8]) -> Result<JsValue, JsValue> {
+    let event_js = Object::new();
+    Reflect::set(
+        event_js.as_ref(),
+        JsValue::from_str("from").as_ref(),
+        JsValue::from_str(from.to_string().as_str()).as_ref(),
+    )?;
+    let payload = Uint8Array::from(payload);
+    Reflect::set(
+        event_js.as_ref(),
+        JsValue::from_str("payload").as_ref(),
+        payload.as_ref(),
+    )?;
+    Ok(event_js.into())
+}
+
 /// Call the JS handler and parse `{ state, effects }`.
-/// `call_handler : (Function, Did, S, Event) ⇀ Transition S`.
 fn call_handler(
     handler: &Function,
     did: Did,
     state: &JsValue,
-    event: &Event,
-) -> Result<Transition<JsValue>, JsValue> {
+    event: &JsValue,
+) -> Result<Transition<JsValue, JsSend>, JsValue> {
     let ctx_js = Object::new();
     Reflect::set(
         ctx_js.as_ref(),
@@ -93,20 +136,7 @@ fn call_handler(
     )?;
     Reflect::set(ctx_js.as_ref(), JsValue::from_str("state").as_ref(), state)?;
 
-    let event_js = Object::new();
-    Reflect::set(
-        event_js.as_ref(),
-        JsValue::from_str("from").as_ref(),
-        JsValue::from_str(event.from.to_string().as_str()).as_ref(),
-    )?;
-    let payload = Uint8Array::from(event.payload.as_ref());
-    Reflect::set(
-        event_js.as_ref(),
-        JsValue::from_str("payload").as_ref(),
-        payload.as_ref(),
-    )?;
-
-    let result = handler.call2(JsValue::NULL.as_ref(), ctx_js.as_ref(), event_js.as_ref())?;
+    let result = handler.call2(JsValue::NULL.as_ref(), ctx_js.as_ref(), event)?;
 
     let next_state = Reflect::get(result.as_ref(), JsValue::from_str("state").as_ref())?;
     let effects_value = Reflect::get(result.as_ref(), JsValue::from_str("effects").as_ref())?;
@@ -114,9 +144,8 @@ fn call_handler(
     Ok(Transition::with(next_state, effects))
 }
 
-/// Parse the `effects` array returned by a JS handler into [`Effect`]s.
-/// `parse_effects : Array → [Effect]`; absent/empty yields `ε`.
-fn parse_effects(value: JsValue) -> Result<Vec<Effect>, JsValue> {
+/// Parse the `effects` array returned by a JS handler into [`JsSend`]s; absent/empty → `ε`.
+fn parse_effects(value: JsValue) -> Result<Vec<JsSend>, JsValue> {
     if value.is_null() || value.is_undefined() {
         return Ok(Vec::new());
     }
@@ -129,7 +158,7 @@ fn parse_effects(value: JsValue) -> Result<Vec<Effect>, JsValue> {
         let namespace = string_field(item.as_ref(), "namespace")?;
         let payload_value = Reflect::get(item.as_ref(), JsValue::from_str("payload").as_ref())?;
         let payload = Uint8Array::new(payload_value.as_ref()).to_vec();
-        effects.push(Effect::Send {
+        effects.push(JsSend {
             to,
             namespace,
             payload: Bytes::from(payload),

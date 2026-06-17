@@ -1,6 +1,10 @@
 #![warn(missing_docs)]
-//! The SNARK effect/routing layer: the pure [`SnarkProtocol`] router plus the impure
-//! compute job ([`snark_compute`]) that runs the proving/verification crypto in the shell.
+//! The SNARK extension: the pure [`SnarkProtocol`] router and its `SnarkShell`
+//! interpreter, which owns the task store and runs the proving/verification crypto.
+//!
+//! Proving/verification is SNARK's **own** effect (`SnarkEffect::Prove`/`Verify`), not a
+//! core capability — it is feature-gated and a node need not enable it. The shell runs the
+//! heavy crypto and re-injects the result as a self-event, so `step` stays pure.
 
 use std::sync::Arc;
 
@@ -14,42 +18,22 @@ use super::SNARKTaskManager;
 use super::TaskId;
 use super::NAMESPACE;
 use crate::error::Error;
-use crate::error::Result;
+use crate::extension::ext::Core;
 use crate::extension::ext::Ctx;
-use crate::extension::ext::Effect;
-use crate::extension::ext::Event;
+use crate::extension::ext::Inbound;
+use crate::extension::ext::Interpret;
 use crate::extension::ext::Protocol;
+use crate::extension::ext::Reject;
 use crate::extension::ext::Transition;
+use crate::extension::ext::Wire;
 use crate::extension::types::snark::SNARKProofTask;
 use crate::extension::types::snark::SNARKTask;
 use crate::extension::types::snark::SNARKTaskMessage;
 use crate::extension::types::snark::SNARKVerifyTask;
 
-/// A SNARK compute request, handed to the shell via [`Effect::Compute`]. Carries the
-/// task plus enough context to route the result. Never on the wire (local only).
+/// The result of a SNARK compute job, re-injected as a self-event for the pure `step`.
 #[derive(Serialize, Deserialize)]
-pub(super) enum ComputeJob {
-    /// Prove `task` (prover side), then reply to `reply_to`.
-    Prove {
-        /// Task id.
-        task_id: TaskId,
-        /// DID to send the resulting verify task back to.
-        reply_to: Did,
-        /// Proof task to fold/prove (boxed: far larger than the other variant).
-        task: Box<SNARKProofTask>,
-    },
-    /// Verify `verify_task` against the locally-stored proof task (verifier side).
-    Verify {
-        /// Task id (used to look up the stored proof task).
-        task_id: TaskId,
-        /// Verify task received from the prover.
-        verify_task: SNARKVerifyTask,
-    },
-}
-
-/// The result of a [`ComputeJob`], re-injected as a self-event for the pure `step`.
-#[derive(Serialize, Deserialize)]
-enum ComputeResult {
+pub enum ComputeResult {
     /// A proof was produced; `step` sends the verify task back to `reply_to`.
     Proved {
         /// Task id.
@@ -66,61 +50,64 @@ enum ComputeResult {
     },
 }
 
-/// The impure SNARK compute job (the shell side). Runs the heavy crypto and, for
-/// verification, reads the stored proof task and records the boolean result.
-pub(super) fn snark_compute(manager: Arc<SNARKTaskManager>, input: Bytes) -> Result<Bytes> {
-    let job: ComputeJob = bincode::deserialize(input.as_ref()).map_err(|_| Error::DecodeError)?;
-    let result = match job {
-        ComputeJob::Prove {
-            task_id,
-            reply_to,
-            task,
-        } => {
-            let verify_task = SNARKBehaviour::handle_snark_proof_task(task.as_ref())?;
-            ComputeResult::Proved {
-                task_id,
-                reply_to,
-                verify_task,
-            }
-        }
-        ComputeJob::Verify {
-            task_id,
-            verify_task,
-        } => {
-            let Some(task) = manager.task.get(&task_id) else {
-                return Err(Error::ExtensionError(format!(
-                    "no pending SNARK proof task for {task_id}; cannot verify"
-                )));
-            };
-            let verified = SNARKBehaviour::handle_snark_verify_task(&verify_task, task.value())?;
-            manager.verified.insert(task_id, verified);
-            ComputeResult::Verified { task_id }
-        }
-    };
-    bincode::serialize(&result)
-        .map(Bytes::from)
-        .map_err(|_| Error::EncodeError)
+/// SNARK's typed input: a self re-injected [`ComputeResult`], or a network task message.
+pub enum SnarkEvent {
+    /// A compute result fed back into the router (provenance = self).
+    Result(ComputeResult),
+    /// A task message from an authenticated peer.
+    Task {
+        /// Authenticated sender (the prover to reply to, for a proof request).
+        from: Did,
+        /// The task message.
+        msg: SNARKTaskMessage,
+    },
+}
+
+/// SNARK's own effect algebra (run by `SnarkShell`).
+pub enum SnarkEffect {
+    /// Send a (verify) task message to a peer over the overlay.
+    SendTask {
+        /// Destination.
+        to: Did,
+        /// The message.
+        msg: SNARKTaskMessage,
+    },
+    /// Prove `task` (heavy crypto), then reply the verify task to `reply_to`.
+    Prove {
+        /// Task id.
+        task_id: TaskId,
+        /// DID to reply to.
+        reply_to: Did,
+        /// Proof task (boxed: far larger than the other variants).
+        task: Box<SNARKProofTask>,
+    },
+    /// Verify `verify_task` against the locally-stored proof task.
+    Verify {
+        /// Task id (used to look up the stored proof task).
+        task_id: TaskId,
+        /// Verify task received from the prover.
+        verify_task: SNARKVerifyTask,
+    },
 }
 
 /// SNARK relay protocol: a pure router over the `snark` namespace.
 ///
 /// ```text
-///   step (Ctx (), Event{from, p}) =
-///     | from = self  ∧ p = Proved(id, to, vt)  ↦ ((), [Send to (Verify id vt)])
-///     | from = self  ∧ p = Verified(id)        ↦ ((), ε)
-///     | p = SNARKProof(t)                       ↦ ((), [Compute (Prove id from t)])
-///     | p = SNARKVerify(vt)                     ↦ ((), [Compute (Verify id vt)])
+///   step (Ctx (), Result(Proved id to vt)) ↦ ((), [SendTask to (Verify id vt)])
+///   step (Ctx (), Result(Verified id))     ↦ ((), ε)
+///   step (Ctx (), Task(from, Proof t))     ↦ ((), [Prove id from t])
+///   step (Ctx (), Task(from, Verify vt))   ↦ ((), [Verify id vt])
 /// ```
 ///
-/// Provenance splits the two payload codecs purely: `from = self` is a re-injected
-/// `ComputeResult`; any other `from` is a network [`SNARKTaskMessage`]. The heavy
-/// proving/verification is described as [`Effect::Compute`] and performed by
-/// `snark_compute` in the shell, so `step` stays pure.
+/// The heavy proving/verification is SNARK's own `SnarkEffect`, performed by
+/// `SnarkShell`; `step` stays pure.
 #[derive(Clone)]
 pub struct SnarkProtocol;
 
 impl Protocol for SnarkProtocol {
     type State = ();
+    type Event = SnarkEvent;
+    type Effect = SnarkEffect;
 
     fn namespace(&self) -> &str {
         NAMESPACE
@@ -128,54 +115,113 @@ impl Protocol for SnarkProtocol {
 
     fn init(&self) {}
 
-    fn step(&self, ctx: Ctx<'_, ()>, event: &Event) -> Transition<()> {
-        if event.from == ctx.did {
-            let Ok(result) = bincode::deserialize::<ComputeResult>(event.payload.as_ref()) else {
-                return Transition::pure(());
-            };
-            return match result {
-                ComputeResult::Proved {
+    fn decode(&self, wire: Wire<'_>) -> Result<SnarkEvent, Reject> {
+        if wire.from == wire.me {
+            let result = bincode::deserialize::<ComputeResult>(wire.payload)
+                .map_err(|e| Reject(format!("bad snark result: {e}")))?;
+            Ok(SnarkEvent::Result(result))
+        } else {
+            let msg = bincode::deserialize::<SNARKTaskMessage>(wire.payload)
+                .map_err(|e| Reject(format!("bad snark task: {e}")))?;
+            Ok(SnarkEvent::Task {
+                from: wire.from,
+                msg,
+            })
+        }
+    }
+
+    fn step(&self, _ctx: Ctx<'_, ()>, event: SnarkEvent) -> Transition<(), SnarkEffect> {
+        match event {
+            SnarkEvent::Result(ComputeResult::Proved {
+                task_id,
+                reply_to,
+                verify_task,
+            }) => Transition::with((), vec![SnarkEffect::SendTask {
+                to: reply_to,
+                msg: SNARKTaskMessage {
+                    task_id,
+                    task: SNARKTask::SNARKVerify(verify_task),
+                },
+            }]),
+            SnarkEvent::Result(ComputeResult::Verified { .. }) => Transition::pure(()),
+            SnarkEvent::Task { from, msg } => match msg.task {
+                SNARKTask::SNARKProof(task) => Transition::with((), vec![SnarkEffect::Prove {
+                    task_id: msg.task_id,
+                    reply_to: from,
+                    task,
+                }]),
+                SNARKTask::SNARKVerify(verify_task) => {
+                    Transition::with((), vec![SnarkEffect::Verify {
+                        task_id: msg.task_id,
+                        verify_task,
+                    }])
+                }
+            },
+        }
+    }
+}
+
+/// SNARK's interpreter: owns the task store and runs the proving/verification crypto.
+pub struct SnarkShell {
+    manager: Arc<SNARKTaskManager>,
+}
+
+impl SnarkShell {
+    /// Build over a shared task store.
+    pub fn new(manager: Arc<SNARKTaskManager>) -> Self {
+        Self { manager }
+    }
+
+    /// Re-inject a [`ComputeResult`] as a self-event for the pure `step`.
+    fn reinject(&self, core: &Core, result: &ComputeResult) -> crate::error::Result<Vec<Inbound>> {
+        let payload = bincode::serialize(result).map_err(|_| Error::EncodeError)?;
+        Ok(vec![Inbound {
+            namespace: NAMESPACE.to_string(),
+            from: core.did(),
+            payload: Bytes::from(payload),
+        }])
+    }
+}
+
+#[cfg_attr(feature = "browser", async_trait::async_trait(?Send))]
+#[cfg_attr(not(feature = "browser"), async_trait::async_trait)]
+impl Interpret for SnarkShell {
+    type Effect = SnarkEffect;
+
+    async fn run(&self, core: &Core, effect: SnarkEffect) -> crate::error::Result<Vec<Inbound>> {
+        match effect {
+            SnarkEffect::SendTask { to, msg } => {
+                let payload = bincode::serialize(&msg).map_err(|_| Error::EncodeError)?;
+                core.send(to, NAMESPACE, Bytes::from(payload)).await?;
+                Ok(Vec::new())
+            }
+            SnarkEffect::Prove {
+                task_id,
+                reply_to,
+                task,
+            } => {
+                let verify_task = SNARKBehaviour::handle_snark_proof_task(task.as_ref())?;
+                self.reinject(core, &ComputeResult::Proved {
                     task_id,
                     reply_to,
                     verify_task,
-                } => {
-                    let msg = SNARKTaskMessage {
-                        task_id,
-                        task: SNARKTask::SNARKVerify(verify_task),
-                    };
-                    match bincode::serialize(&msg) {
-                        Ok(payload) => Transition::with((), vec![Effect::Send {
-                            to: reply_to,
-                            namespace: NAMESPACE.to_string(),
-                            payload: Bytes::from(payload),
-                        }]),
-                        Err(_) => Transition::pure(()),
-                    }
-                }
-                ComputeResult::Verified { .. } => Transition::pure(()),
-            };
-        }
-
-        let Ok(msg) = bincode::deserialize::<SNARKTaskMessage>(event.payload.as_ref()) else {
-            return Transition::pure(());
-        };
-        let job = match msg.task {
-            SNARKTask::SNARKProof(task) => ComputeJob::Prove {
-                task_id: msg.task_id,
-                reply_to: event.from,
-                task,
-            },
-            SNARKTask::SNARKVerify(verify_task) => ComputeJob::Verify {
-                task_id: msg.task_id,
+                })
+            }
+            SnarkEffect::Verify {
+                task_id,
                 verify_task,
-            },
-        };
-        match bincode::serialize(&job) {
-            Ok(input) => Transition::with((), vec![Effect::Compute {
-                namespace: NAMESPACE.to_string(),
-                input: Bytes::from(input),
-            }]),
-            Err(_) => Transition::pure(()),
+            } => {
+                let Some(task) = self.manager.task.get(&task_id) else {
+                    return Err(Error::ExtensionError(format!(
+                        "no pending SNARK proof task for {task_id}; cannot verify"
+                    )));
+                };
+                let verified =
+                    SNARKBehaviour::handle_snark_verify_task(&verify_task, task.value())?;
+                drop(task);
+                self.manager.verified.insert(task_id, verified);
+                self.reinject(core, &ComputeResult::Verified { task_id })
+            }
         }
     }
 }

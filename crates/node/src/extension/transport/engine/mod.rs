@@ -1,11 +1,10 @@
 #![warn(missing_docs)]
 //! Native transport-relay engine — the imperative shell that owns live sockets.
 //!
-//! The pure half of the relay is each transport's `Protocol::step`; this is the
-//! side-effecting half. It keys live OS resources by [`SessionId`] and is driven only
-//! through the transport [`Effect`](crate::extension::ext::Effect)s
-//! (`Connect`/`Listen`/`Write`/`Shutdown`/`Close`). Local reads flow back to the peer
-//! as [`Frame`]s (the event trace flowing outward).
+//! The pure half of the relay is `Relay::step`; this is the side-effecting half (the relay
+//! extension's interpreter). It keys live OS resources by [`SessionId`] and is driven by the
+//! relay's own `RelayEffect`s (`Connect`/`Write`/`Shutdown`/`Close`) plus the `listen` entry
+//! point. Local reads flow back to the peer as [`Frame`]s (the event trace flowing outward).
 //!
 //! ## Lifecycle, half-close and abrupt close
 //!

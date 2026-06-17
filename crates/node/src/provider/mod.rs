@@ -66,13 +66,18 @@ pub enum Signer {
 impl Provider {
     /// Create provider from processor directly
     pub fn from_processor(processor: Arc<Processor>) -> Self {
-        let extensions = crate::extension::ext::Extensions::new();
-        crate::extension::protocols::register_builtins(&extensions)
-            .expect("register builtins on a fresh registry");
         #[cfg(feature = "node")]
         let transport = Arc::new(crate::extension::transport::engine::TransportSessions::new());
         #[cfg(feature = "browser")]
         let transport = Arc::new(crate::extension::transport::wt::WtSessions::new());
+        let extensions = crate::extension::ext::Extensions::new(processor.clone());
+        #[cfg(any(feature = "node", feature = "browser"))]
+        crate::extension::protocols::register_builtins(
+            &extensions,
+            transport.clone(),
+            processor.clone(),
+        )
+        .expect("register builtins on a fresh registry");
         Self {
             processor,
             handler: InternalRpcHandler,
@@ -88,37 +93,28 @@ impl Provider {
         self.extensions.clone()
     }
 
-    /// The effect interpreter — the single side-effecting boundary used to run a
-    /// protocol's described [`Effect`](crate::extension::ext::Effect)s.
-    pub(crate) fn interpreter(&self) -> crate::extension::ext::Interpreter {
-        crate::extension::ext::Interpreter::new(
-            self.processor.clone(),
-            self.transport.clone(),
-            self.extensions.computes(),
-        )
+    /// The capability handle — overlay `send` / `did` / `inject` / `dispatch`.
+    pub(crate) fn core(&self) -> crate::extension::ext::Core {
+        self.extensions.core()
     }
 
-    /// Register a pure [`Protocol`](crate::extension::ext::Protocol) under its namespace.
-    pub fn register_protocol<P>(&self, protocol: P) -> Result<()>
+    /// Register a pure [`Protocol`](crate::extension::ext::Protocol) together with its
+    /// [`Interpret`](crate::extension::ext::Interpret) shell under the protocol's namespace.
+    /// Errors if the namespace is already taken.
+    pub fn register_protocol<P, I>(&self, protocol: P, interpret: I) -> Result<()>
     where
         P: crate::extension::ext::Protocol + crate::extension::ext::MaybeSend + 'static,
         P::State: crate::extension::ext::MaybeSend + 'static,
+        P::Effect: crate::extension::ext::MaybeSend,
+        I: crate::extension::ext::Interpret<Effect = P::Effect>
+            + crate::extension::ext::MaybeSend
+            + 'static,
     {
-        self.extensions.register(protocol)
-    }
-
-    /// Register an impure compute job for `namespace`, run when a protocol emits an
-    /// [`Effect::Compute`](crate::extension::ext::Effect::Compute). The escape hatch for
-    /// effectful protocols (e.g. SNARK) whose `step` stays pure.
-    pub fn register_compute(
-        &self,
-        namespace: impl Into<String>,
-        job: crate::extension::ext::ComputeFn,
-    ) -> Result<()> {
-        self.extensions.register_compute(namespace, job)
+        self.extensions.register(protocol, interpret)
     }
 
     /// Register (at runtime) a local service the TCP relay may dial.
+    #[cfg(feature = "node")]
     pub async fn register_tcp_service(
         &self,
         name: String,
@@ -129,6 +125,7 @@ impl Provider {
     }
 
     /// Register (at runtime) a local service the UDP relay may dial.
+    #[cfg(feature = "node")]
     pub async fn register_udp_service(
         &self,
         name: String,
@@ -159,32 +156,38 @@ impl Provider {
     /// self) into the relay protocol's pure `step`.
     #[cfg(feature = "browser")]
     async fn register_wt(&self, namespace: &str, name: String, url: String) -> Result<()> {
-        let command = crate::extension::protocols::relay::WtCommand::RegisterService { name, url };
+        let command =
+            crate::extension::protocols::relay::RelayCommand::RegisterService { name, target: url };
         let payload = bincode::serialize(&command).map_err(|_| Error::EncodeError)?;
         let envelope = crate::extension::ext::Envelope::new(namespace, bytes::Bytes::from(payload));
         self.extensions
-            .dispatch(&self.interpreter(), self.processor.did(), envelope)
+            .dispatch(self.processor.did(), envelope)
             .await
     }
 
     /// Map a service `name` → `addr` in a relay's registry, by re-injecting a local
     /// command into the relay protocol's pure `step` (provenance = self).
+    #[cfg(feature = "node")]
     async fn register_relay_service(
         &self,
         namespace: &str,
         name: String,
         addr: std::net::SocketAddr,
     ) -> Result<()> {
-        let command = crate::extension::protocols::relay::Command::RegisterService { name, addr };
+        let command = crate::extension::protocols::relay::RelayCommand::RegisterService {
+            name,
+            target: addr,
+        };
         let payload = bincode::serialize(&command).map_err(|_| Error::EncodeError)?;
         let envelope = crate::extension::ext::Envelope::new(namespace, bytes::Bytes::from(payload));
         self.extensions
-            .dispatch(&self.interpreter(), self.processor.did(), envelope)
+            .dispatch(self.processor.did(), envelope)
             .await
     }
 
     /// Open a local TCP tunnel: bind `local_addr` and relay each accepted connection to
     /// `peer`'s `service` (client side, forward proxy).
+    #[cfg(feature = "node")]
     pub async fn open_tcp_tunnel(
         &self,
         local_addr: std::net::SocketAddr,
@@ -203,6 +206,7 @@ impl Provider {
 
     /// Open a local UDP tunnel: bind `local_addr` and relay each datagram flow to
     /// `peer`'s `service` (client side, forward proxy).
+    #[cfg(feature = "node")]
     pub async fn open_udp_tunnel(
         &self,
         local_addr: std::net::SocketAddr,
@@ -219,6 +223,7 @@ impl Provider {
         .await
     }
 
+    #[cfg(feature = "node")]
     async fn open_tunnel(
         &self,
         local_addr: std::net::SocketAddr,
@@ -227,35 +232,32 @@ impl Provider {
         namespace: &str,
         kind: crate::extension::transport::TransportKind,
     ) -> Result<()> {
-        self.interpreter()
-            .run(vec![crate::extension::ext::Effect::Listen {
+        // Bind a local listener on the relay engine (the relay extension's resource). The
+        // accepted-connection lifecycle is the engine's for now; routing each accept through
+        // the pure relay `step` is the follow-up "full authority" work.
+        self.transport
+            .clone()
+            .listen(
+                self.processor.clone(),
                 local_addr,
                 peer,
                 service,
-                namespace: namespace.to_string(),
+                namespace.to_string(),
                 kind,
-            }])
-            .await?;
+            )
+            .await;
         Ok(())
     }
 
-    /// Send a namespaced payload to a peer. This is the uniform upper-layer send;
-    /// the transport/extension plumbing underneath is identical on native and
-    /// browser.
+    /// Send a namespaced payload to a peer. This is the uniform upper-layer send — a core
+    /// capability, identical on native and browser.
     pub async fn send(
         &self,
         to: rings_core::dht::Did,
         namespace: &str,
         payload: bytes::Bytes,
     ) -> Result<()> {
-        self.interpreter()
-            .run(vec![crate::extension::ext::Effect::Send {
-                to,
-                namespace: namespace.to_string(),
-                payload,
-            }])
-            .await?;
-        Ok(())
+        self.core().send(to, namespace, payload).await
     }
     /// Create a provider instance with storage name
     pub(crate) async fn new_provider_with_storage_internal(
@@ -274,12 +276,17 @@ impl Provider {
 
         let processor = Arc::new(processor_builder.build()?);
 
-        let extensions = crate::extension::ext::Extensions::new();
-        crate::extension::protocols::register_builtins(&extensions)?;
         #[cfg(feature = "node")]
         let transport = Arc::new(crate::extension::transport::engine::TransportSessions::new());
         #[cfg(feature = "browser")]
         let transport = Arc::new(crate::extension::transport::wt::WtSessions::new());
+        let extensions = crate::extension::ext::Extensions::new(processor.clone());
+        #[cfg(any(feature = "node", feature = "browser"))]
+        crate::extension::protocols::register_builtins(
+            &extensions,
+            transport.clone(),
+            processor.clone(),
+        )?;
 
         Ok(Provider {
             processor,

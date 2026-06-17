@@ -124,21 +124,13 @@ impl SNARKBehaviour {
         Ok(task_id.to_string())
     }
 
-    /// Register the SNARK protocol and its compute job on a provider.
-    ///
-    /// Installs a pure [`SnarkProtocol`] (routing) plus an impure compute job (the
-    /// proving/verification crypto) sharing this behaviour's task store. After this,
-    /// inbound `snark` envelopes are dispatched automatically; results are readable via
+    /// Register the SNARK extension on a provider: the pure [`SnarkProtocol`] router paired
+    /// with its `SnarkShell` interpreter (which owns this behaviour's task store and runs
+    /// the proving/verification crypto). After this, inbound `snark` envelopes are
+    /// dispatched automatically; results are readable via
     /// [`SNARKBehaviour::get_task_result`].
     pub fn register(&self, provider: &Provider) -> Result<()> {
-        provider.register_protocol(SnarkProtocol)?;
-        let manager = self.inner.clone();
-        let job: crate::extension::ext::ComputeFn = Arc::new(move |input: Bytes| {
-            let manager = manager.clone();
-            Box::pin(async move { protocol::snark_compute(manager, input) })
-        });
-        provider.register_compute(NAMESPACE, job)?;
-        Ok(())
+        provider.register_protocol(SnarkProtocol, protocol::SnarkShell::new(self.inner.clone()))
     }
 }
 

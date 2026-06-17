@@ -24,20 +24,17 @@ use crate::provider::Provider;
 /// Backend handles inbound custom messages from the Swarm, routing each decoded
 /// [`Envelope`] to its namespace's protocol via the [`Extensions`] registry. The
 /// registry is shared with the [`Provider`], so protocols registered there are visible
-/// to inbound dispatch here. The [`Interpreter`](ext::Interpreter) is the only
+/// to inbound dispatch here. The capability [`Core`](ext::Core) is the only
 /// side-effecting boundary.
 pub struct Backend {
-    provider: Arc<Provider>,
     extensions: Extensions,
 }
 
 impl Backend {
     /// Create a new backend over a provider, sharing its protocol registry.
     pub fn new(provider: Arc<Provider>) -> Self {
-        let extensions = provider.extensions();
         Self {
-            provider,
-            extensions,
+            extensions: provider.extensions(),
         }
     }
 }
@@ -54,10 +51,7 @@ impl SwarmCallback for Backend {
 
         let envelope = Envelope::decode(&msg)?;
         let from = payload.transaction.signer();
-        let interpreter = self.provider.interpreter();
-        self.extensions
-            .dispatch(&interpreter, from, envelope)
-            .await?;
+        self.extensions.dispatch(from, envelope).await?;
 
         Ok(())
     }

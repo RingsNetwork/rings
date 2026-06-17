@@ -1,22 +1,50 @@
 #![warn(missing_docs)]
-//! Echo protocol — the reference [`Protocol`] implementation.
+//! Echo protocol — the reference extension (pure [`Protocol`] + its [`Interpret`] shell).
 //!
-//! Demonstrates the pure model end to end: it is **stateful** (counts the messages
-//! seen) and **effectful** (echoes the payload back), yet `step` performs no IO.
+//! Demonstrates the model end to end: **stateful** (counts the messages seen), **typed**
+//! (its own `Event`/`Effect`), and **effectful** (echoes the payload back) — yet `step` is
+//! pure and the only IO (an overlay `send`) lives in the interpreter.
 //!
 //! ```text
 //!   S = ℕ
-//!   step (Ctx n, Event{from, p}) = Transition (n+1) [Send{to=from, ns="echo", p}]
+//!   step (Ctx n, Echoed{from, p}) = Transition (n+1) [Reply{to=from, p}]
 //! ```
 
+use bytes::Bytes;
+use rings_core::dht::Did;
+
+use crate::extension::ext::Core;
 use crate::extension::ext::Ctx;
-use crate::extension::ext::Effect;
-use crate::extension::ext::Event;
+use crate::extension::ext::Inbound;
+use crate::extension::ext::Interpret;
 use crate::extension::ext::Protocol;
+use crate::extension::ext::Reject;
 use crate::extension::ext::Transition;
+use crate::extension::ext::Wire;
 
 /// Namespace for the echo protocol.
 pub const NAMESPACE: &str = "echo";
+
+/// A decoded echo message: who sent it and what bytes to echo back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Echoed {
+    /// Sender to echo back to.
+    pub from: Did,
+    /// Payload to echo.
+    pub payload: Bytes,
+}
+
+/// Echo's own effect: reply to `to` with `payload` over the overlay.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EchoEffect {
+    /// Send `payload` back to `to` under the echo namespace.
+    Reply {
+        /// Destination.
+        to: Did,
+        /// Payload to send.
+        payload: Bytes,
+    },
+}
 
 /// Echo protocol: replies with the same payload and counts how many it has seen.
 #[derive(Default)]
@@ -25,6 +53,8 @@ pub struct Echo;
 impl Protocol for Echo {
     /// Number of messages seen so far.
     type State = u64;
+    type Event = Echoed;
+    type Effect = EchoEffect;
 
     fn namespace(&self) -> &str {
         NAMESPACE
@@ -34,12 +64,37 @@ impl Protocol for Echo {
         0
     }
 
-    /// Pure. `step (Ctx n, Event{from,p}) = ((n+1), [Send to=from ns="echo" p])`.
-    fn step(&self, ctx: Ctx<'_, u64>, event: &Event) -> Transition<u64> {
-        Transition::with(ctx.state + 1, vec![Effect::Send {
+    fn decode(&self, wire: Wire<'_>) -> Result<Echoed, Reject> {
+        Ok(Echoed {
+            from: wire.from,
+            payload: Bytes::copy_from_slice(wire.payload),
+        })
+    }
+
+    /// Pure. `step (Ctx n, Echoed{from,p}) = ((n+1), [Reply to=from p])`.
+    fn step(&self, ctx: Ctx<'_, u64>, event: Echoed) -> Transition<u64, EchoEffect> {
+        Transition::with(ctx.state + 1, vec![EchoEffect::Reply {
             to: event.from,
-            namespace: NAMESPACE.to_string(),
-            payload: event.payload.clone(),
+            payload: event.payload,
         }])
+    }
+}
+
+/// Echo's interpreter: it owns no resources; a `Reply` is just an overlay `send`.
+#[derive(Default)]
+pub struct EchoShell;
+
+#[cfg_attr(feature = "browser", async_trait::async_trait(?Send))]
+#[cfg_attr(not(feature = "browser"), async_trait::async_trait)]
+impl Interpret for EchoShell {
+    type Effect = EchoEffect;
+
+    async fn run(&self, core: &Core, effect: EchoEffect) -> crate::error::Result<Vec<Inbound>> {
+        match effect {
+            EchoEffect::Reply { to, payload } => {
+                core.send(to, NAMESPACE, payload).await?;
+                Ok(Vec::new())
+            }
+        }
     }
 }

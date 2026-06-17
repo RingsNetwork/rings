@@ -4,8 +4,8 @@
 //! Browsers have no raw sockets, so the relay's local backend here is a *WebTransport*
 //! server (a URL). This is the browser counterpart of the native socket engine
 //! ([`engine`](crate::extension::transport::engine)); it presents the same
-//! `write`/`shutdown`/`close` surface so the interpreter dispatches uniformly, and
-//! opens sessions via [`Effect::WtConnect`](crate::extension::ext::Effect::WtConnect).
+//! `write`/`shutdown`/`close` surface so the relay interpreter dispatches uniformly, and
+//! opens sessions via the relay's own `RelayEffect::Connect`.
 //!
 //! Mapping: `TransportKind::Tcp` → a WebTransport **bidirectional stream**;
 //! `TransportKind::Udp` → WebTransport **datagrams**. Reads from the local side become

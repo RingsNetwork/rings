@@ -201,7 +201,8 @@ impl Provider {
     ) -> Result<(), JsError> {
         let protocol =
             crate::extension::protocols::js::JsProtocol::new(namespace, initial_state, handler);
-        self.register_protocol(protocol).map_err(JsError::from)
+        self.register_protocol(protocol, crate::extension::protocols::js::JsShell)
+            .map_err(JsError::from)
     }
 
     /// Request local rpc interface

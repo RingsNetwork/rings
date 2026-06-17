@@ -1,57 +1,49 @@
 #![warn(missing_docs)]
 //! Unified, effect-separated protocol abstraction shared by `native` and `browser`.
 //!
-//! Design: *functional core, imperative shell*. A protocol author writes only a
-//! **pure** state transition; all IO (sending, storage) is described as data
-//! ([`Effect`]) and executed by the single impure boundary ([`Interpreter`]).
+//! Design: *functional core, imperative shell*. A protocol author writes only a **pure**
+//! state transition over its **own** typed events and effects; all IO is performed by the
+//! extension's own [`Interpret`] shell, which is handed the small core capability surface
+//! ([`Core`]).
 //!
 //! Notation (used throughout the doc-comments here):
 //!
 //! ```text
-//!   step : (Ctx S, Event) → Transition S        where   Transition S ≅ (S, [Effect])
+//!   decode : Wire ⇀ Event
+//!   step   : (Ctx S, Event) → Transition (S, Effect)     where Transition (S,E) ≅ (S, [E])
 //! ```
 //!
-//! Each event induces, via partial application, an endomorphism on the state paired
-//! with an effect log. Such pairs form a monoid (state under endomorphism
-//! composition, effects under list concatenation):
+//! The effect algebra is **not** global: each extension defines `Protocol::Effect` and the
+//! interpreter that runs it. The core owns no `Effect` enum — adding an extension never
+//! touches the core, and a protocol can only emit its own effects (no global command bus).
 //!
-//! ```text
-//!   (f, a) ⊗ (g, b) = (g ∘ f,  a ⧺ b)            unit = (id, ε)
-//! ```
-//!
-//! so a stream of events is reduced by `mconcat` / `fold` (the Writer-over-State
-//! monad). Because `step` is pure it is total, testable and replayable; only
-//! [`Interpreter::run`] touches the outside world.
-//!
-//! The abstraction and constraints are identical on both targets; the sole divergence
-//! is the `Send` / `?Send` bound, isolated in [`MaybeSend`] and the usual `cfg_attr`
-//! pair.
+//! `step` is pure (no IO, clocks, globals) and total over well-typed events; the decode
+//! boundary makes "undecodable/foreign input" an explicit [`Reject`] instead of a silent
+//! no-op. The abstraction is identical on both targets; the sole divergence is the `Send` /
+//! `?Send` bound, isolated in [`MaybeSend`].
 //!
 //! ## Module layout
 //!
 //! - `envelope` — the wire [`Envelope`].
-//! - `protocol` — the pure core: [`Event`], [`Effect`], [`Ctx`], [`Inbound`],
-//!   [`Transition`], and the [`Protocol`] trait.
-//! - `compute` — the effectful escape hatch ([`ComputeFn`] / [`ComputeServices`]).
-//! - `interpreter` — the imperative shell ([`Interpreter`]), the only IO boundary.
-//! - `registry` — type erasure ([`Handler`]) and the namespace router ([`Extensions`]).
+//! - `protocol` — the pure core: [`Wire`]/[`Reject`] (decode boundary), [`Ctx`],
+//!   [`Inbound`], [`Transition`], and the [`Protocol`] trait.
+//! - `interpret` — the per-extension imperative shell ([`Interpret`]).
+//! - `registry` — the capability [`Core`] + the namespace router ([`Extensions`], [`Handler`]).
 
-mod compute;
 mod envelope;
-mod interpreter;
+mod interpret;
 mod protocol;
 mod registry;
 
-pub use compute::ComputeFn;
-pub use compute::ComputeServices;
 pub use envelope::Envelope;
-pub use interpreter::Interpreter;
+pub use interpret::Interpret;
 pub use protocol::Ctx;
-pub use protocol::Effect;
-pub use protocol::Event;
 pub use protocol::Inbound;
 pub use protocol::Protocol;
+pub use protocol::Reject;
 pub use protocol::Transition;
+pub use protocol::Wire;
+pub use registry::Core;
 pub use registry::DynHandler;
 pub use registry::Extensions;
 pub use registry::Handler;

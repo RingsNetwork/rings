@@ -17,6 +17,7 @@
 //! the components call. Build with `wasm-pack build examples/browser`.
 
 use rings_node::extension::protocols::echo::Echo;
+use rings_node::extension::protocols::echo::EchoShell;
 use rings_node::provider::Provider;
 use wasm_bindgen::prelude::*;
 
@@ -26,7 +27,7 @@ use wasm_bindgen::prelude::*;
 #[wasm_bindgen]
 pub fn register_echo(provider: &Provider) -> Result<(), JsError> {
     provider
-        .register_protocol(Echo::default())
+        .register_protocol(Echo::default(), EchoShell)
         .map_err(|e| JsError::new(&e.to_string()))
 }
 
