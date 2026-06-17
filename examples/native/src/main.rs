@@ -5,6 +5,10 @@ use rings_core::dht::Did;
 use rings_core::ecc::SecretKey;
 use rings_core::session::SessionSkBuilder;
 use rings_core::storage::MemStorage;
+use rings_node::backend::ext::Ctx;
+use rings_node::backend::ext::Event;
+use rings_node::backend::ext::Protocol;
+use rings_node::backend::ext::Transition;
 use rings_node::logging::init_logging;
 use rings_node::logging::LogLevel;
 use rings_node::processor::ProcessorBuilder;
@@ -12,6 +16,34 @@ use rings_node::processor::ProcessorConfig;
 use rings_node::provider::Provider;
 use rings_rpc::method::Method;
 use rings_rpc::protos::rings_node::*;
+
+/// Namespace this example speaks over.
+const EXAMPLE_NAMESPACE: &str = "example";
+
+/// A minimal pure protocol for this demo: it logs each message it receives and replies
+/// with nothing. Unlike the built-in `Echo`, it does not echo, so two peers both running
+/// this example do not bounce a message back and forth forever.
+struct Example;
+
+impl Protocol for Example {
+    type State = ();
+
+    fn namespace(&self) -> &str {
+        EXAMPLE_NAMESPACE
+    }
+
+    fn init(&self) {}
+
+    fn step(&self, _ctx: Ctx<'_, ()>, event: &Event) -> Transition<()> {
+        // `event.payload` is the raw bytes (the RPC boundary already base64-decoded it).
+        println!(
+            "<=== example protocol received from {}: {:?}",
+            event.from,
+            String::from_utf8_lossy(event.payload.as_ref())
+        );
+        Transition::pure(())
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -49,8 +81,11 @@ async fn main() {
     let provider = Arc::new(Provider::from_processor(processor));
 
     // Install the extension backend so inbound namespaced messages are dispatched to
-    // registered protocols (register yours with `provider.register_protocol(..)`).
+    // registered protocols, then register this example's protocol so a peer running the
+    // same binary has a handler for the `example` namespace (otherwise it would drop the
+    // message as unknown).
     provider.set_backend().unwrap();
+    provider.register_protocol(Example).unwrap();
 
     // Listen messages from peers.
     let listening_provider = provider.clone();
@@ -107,8 +142,9 @@ async fn main() {
 
     let rpc_req = SendBackendMessageRequest {
         destination_did,
-        namespace: "example".to_string(),
-        data: "Hello from native provider example".to_string(),
+        namespace: EXAMPLE_NAMESPACE.to_string(),
+        // `data` is base64 on the wire (binary-safe); encode the raw message bytes.
+        data: base64::encode(b"Hello from native provider example"),
     };
     println!("===> request SendBackendMessage api...");
     let resp = provider

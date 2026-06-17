@@ -173,6 +173,13 @@ fn step_frame(
     match frame {
         Frame::Open { session, service } => {
             let key = SessionKey::new(from, namespace, session);
+            // Reject a duplicate/retried Open for a session this peer already holds open:
+            // re-emitting Connect would spawn a second relay task for the same key, and the
+            // engine would replace the live handle (risking the old task's later teardown
+            // closing the new session). Leave the existing session untouched.
+            if state.sessions.contains(&key) {
+                return Transition::pure(state.clone());
+            }
             match state.services.get(service.as_str()) {
                 Some(addr) => {
                     let addr = *addr;
@@ -350,6 +357,10 @@ mod wt_relay {
         match frame {
             Frame::Open { session, service } => {
                 let key = SessionKey::new(from, namespace, session);
+                // Reject a duplicate/retried Open (see the native relay for the rationale).
+                if state.sessions.contains(&key) {
+                    return Transition::pure(state.clone());
+                }
                 match state.services.get(service.as_str()) {
                     Some(url) => {
                         let url = url.clone();
@@ -473,6 +484,39 @@ mod tests {
             other => panic!("expected a single Connect, got {other:?}"),
         }
         assert!(transition.state.sessions.contains(&expected));
+    }
+
+    #[test]
+    fn duplicate_open_for_a_live_session_is_rejected() {
+        let relay = web_relay();
+        let opened = step(
+            &relay,
+            &relay.init(),
+            &frame_event(peer_a(), &Frame::Open {
+                session: SessionId(7),
+                service: "web".to_string(),
+            }),
+        );
+        let key = SessionKey::new(peer_a(), super::TCP, SessionId(7));
+        assert!(opened.state.sessions.contains(&key));
+
+        // A second Open for the same (peer, namespace, session) must not emit another
+        // Connect (which would spawn a duplicate relay task) and must leave the session
+        // set unchanged.
+        let again = step(
+            &relay,
+            &opened.state,
+            &frame_event(peer_a(), &Frame::Open {
+                session: SessionId(7),
+                service: "web".to_string(),
+            }),
+        );
+        assert!(
+            again.effects.is_empty(),
+            "duplicate Open must emit no effect"
+        );
+        assert!(again.state.sessions.contains(&key));
+        assert_eq!(again.state.sessions.len(), 1);
     }
 
     #[test]

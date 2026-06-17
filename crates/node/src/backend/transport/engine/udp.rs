@@ -47,9 +47,13 @@ impl TransportSessions {
                 match socket.recv_from(buf.as_mut_slice()).await {
                     Ok((n, src)) => {
                         let bytes = Bytes::copy_from_slice(buf.get(..n).unwrap_or_default());
+                        // Reuse the flow only if its key is still live: a peer `Close` or
+                        // relay teardown removes the key from the engine table but cannot
+                        // reach this listener-local `flows` map, so a stale mapping would
+                        // otherwise route new datagrams to a dead (un-deliverable) session.
                         let key = match flows.get(&src) {
-                            Some(key) => key.clone(),
-                            None => {
+                            Some(key) if self.is_live(key) => key.clone(),
+                            _ => {
                                 let key =
                                     SessionKey::new(peer, namespace.clone(), self.next_session());
                                 // Register + start the local sender *before* opening, so a
@@ -61,8 +65,10 @@ impl TransportSessions {
                                     .is_err()
                                 {
                                     self.close(&key);
+                                    flows.remove(&src);
                                     continue;
                                 }
+                                // Overwrites any stale mapping for this source.
                                 flows.insert(src, key.clone());
                                 key
                             }

@@ -209,9 +209,23 @@ impl TransportSessions {
             .and_then(|map| map.get(key).map(|handle| handle.outbound.clone()))
     }
 
+    /// Whether a session is currently live (registered in the table). Used by the UDP
+    /// listener to detect a flow whose key has since been closed.
+    fn is_live(&self, key: &SessionKey) -> bool {
+        self.map
+            .lock()
+            .map(|map| map.contains_key(key))
+            .unwrap_or(false)
+    }
+
     fn insert(&self, key: SessionKey, handle: SessionHandle) {
         if let Ok(mut map) = self.map.lock() {
-            map.insert(key, handle);
+            // Defensive: if a handle already exists for this key (a duplicate Open that
+            // slipped past the pure reject, or a key reuse), cancel the old relay task
+            // before replacing it, so it cannot keep running or later tear down the new one.
+            if let Some(old) = map.insert(key, handle) {
+                old.cancel.cancel();
+            }
         }
     }
 }

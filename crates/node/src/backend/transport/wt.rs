@@ -130,7 +130,12 @@ impl WtSessions {
 
     fn insert(&self, key: SessionKey, handle: SessionHandle) {
         if let Ok(mut map) = self.map.lock() {
-            map.insert(key, handle);
+            // Defensive: if a session already exists for this key (a duplicate Open that
+            // slipped past the pure reject, or a key reuse), close the old WebTransport
+            // before replacing it, so it cannot keep running or later tear down the new one.
+            if let Some(old) = map.insert(key, handle) {
+                old.transport.close();
+            }
         }
     }
 

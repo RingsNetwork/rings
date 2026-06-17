@@ -4273,6 +4273,7 @@ name = "rings-native-example"
 version = "0.8.0"
 dependencies = [
  "async-trait",
+ "base64 0.13.1",
  "rings-core",
  "rings-node",
  "rings-rpc",
