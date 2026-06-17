@@ -2,6 +2,7 @@
 //! This module provide basic mechanism.
 
 pub mod ext;
+pub mod protocols;
 #[cfg(feature = "snark")]
 pub mod snark;
 pub mod types;
@@ -46,10 +47,12 @@ pub struct Backend {
 impl Backend {
     /// Create a new backend instance with Provider and Handler functions
     pub fn new(provider: Arc<Provider>, handler: Box<HandlerTrait>) -> Self {
+        let mut extensions = Extensions::new();
+        extensions.register(crate::backend::protocols::plaintext::PlainText::new());
         Self {
             provider,
             handler,
-            extensions: Extensions::new(),
+            extensions,
         }
     }
 
