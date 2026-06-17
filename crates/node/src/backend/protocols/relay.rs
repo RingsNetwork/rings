@@ -213,7 +213,6 @@ mod wt_relay {
     use std::collections::HashSet;
     use std::sync::Arc;
 
-    use bytes::Bytes;
     use rings_core::dht::Did;
     use serde::Deserialize;
     use serde::Serialize;

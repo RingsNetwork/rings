@@ -17,7 +17,6 @@ use rings_core::storage::idb::IdbStorage;
 use rings_core::utils::js_utils;
 use rings_core::utils::js_value;
 use rings_derive::wasm_export;
-use rings_rpc::method::Method;
 use rings_rpc::protos::rings_node::*;
 use wasm_bindgen;
 use wasm_bindgen::prelude::*;

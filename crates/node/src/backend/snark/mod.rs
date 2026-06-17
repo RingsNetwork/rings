@@ -148,8 +148,8 @@ enum ComputeJob {
         task_id: TaskId,
         /// DID to send the resulting verify task back to.
         reply_to: Did,
-        /// Proof task to fold/prove.
-        task: SNARKProofTask,
+        /// Proof task to fold/prove (boxed: far larger than the other variant).
+        task: Box<SNARKProofTask>,
     },
     /// Verify `verify_task` against the locally-stored proof task (verifier side).
     Verify {
@@ -189,7 +189,7 @@ fn snark_compute(manager: Arc<SNARKTaskManager>, input: Bytes) -> Result<Bytes> 
             reply_to,
             task,
         } => {
-            let verify_task = SNARKBehaviour::handle_snark_proof_task(&task)?;
+            let verify_task = SNARKBehaviour::handle_snark_proof_task(task.as_ref())?;
             ComputeResult::Proved {
                 task_id,
                 reply_to,
@@ -274,7 +274,7 @@ impl Protocol for SnarkProtocol {
             SNARKTask::SNARKProof(task) => ComputeJob::Prove {
                 task_id: msg.task_id,
                 reply_to: event.from,
-                task: *task,
+                task,
             },
             SNARKTask::SNARKVerify(verify_task) => ComputeJob::Verify {
                 task_id: msg.task_id,

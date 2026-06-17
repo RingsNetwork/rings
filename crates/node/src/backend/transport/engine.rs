@@ -112,43 +112,18 @@ impl TransportSessions {
         addr: SocketAddr,
         kind: TransportKind,
     ) {
-        let (outbound_rx, cancel) = self.register(session);
-        let this = self.clone();
+        let task = RelayTask::register(self.clone(), processor, session, peer, namespace);
         tokio::spawn(async move {
             match kind {
                 TransportKind::Tcp => {
                     match timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await {
-                        Ok(Ok(stream)) => {
-                            relay_tcp(
-                                this,
-                                processor,
-                                session,
-                                peer,
-                                namespace,
-                                stream,
-                                outbound_rx,
-                                cancel,
-                            )
-                            .await
-                        }
-                        _ => this.refuse(processor, session, peer, namespace).await,
+                        Ok(Ok(stream)) => relay_tcp(task, stream).await,
+                        _ => task.refuse().await,
                     }
                 }
                 TransportKind::Udp => match bind_connected_udp(addr).await {
-                    Some(socket) => {
-                        relay_udp_connected(
-                            this,
-                            processor,
-                            session,
-                            peer,
-                            namespace,
-                            socket,
-                            outbound_rx,
-                            cancel,
-                        )
-                        .await
-                    }
-                    None => this.refuse(processor, session, peer, namespace).await,
+                    Some(socket) => relay_udp_connected(task, socket).await,
+                    None => task.refuse().await,
                 },
             }
         });
@@ -234,23 +209,14 @@ impl TransportSessions {
                         {
                             continue;
                         }
-                        let (outbound_rx, cancel) = self.register(session);
-                        let this = self.clone();
-                        let processor = processor.clone();
-                        let namespace = namespace.clone();
-                        tokio::spawn(async move {
-                            relay_tcp(
-                                this,
-                                processor,
-                                session,
-                                peer,
-                                namespace,
-                                stream,
-                                outbound_rx,
-                                cancel,
-                            )
-                            .await
-                        });
+                        let task = RelayTask::register(
+                            self.clone(),
+                            processor.clone(),
+                            session,
+                            peer,
+                            namespace.clone(),
+                        );
+                        tokio::spawn(async move { relay_tcp(task, stream).await });
                     }
                     Err(e) => {
                         tracing::error!("transport accept on {local_addr} failed: {e:?}");
@@ -346,34 +312,68 @@ impl TransportSessions {
             map.insert(session, handle);
         }
     }
-
-    /// Connect failed: remove the pre-registered session and tell the peer.
-    async fn refuse(
-        &self,
-        processor: Arc<Processor>,
-        session: SessionId,
-        peer: Did,
-        namespace: String,
-    ) {
-        self.close(session);
-        let _ = send_frame(processor.as_ref(), peer, namespace.as_str(), Frame::Close {
-            session,
-        })
-        .await;
-    }
 }
 
-/// Bidirectional TCP relay with true half-close and abrupt-close handling.
-async fn relay_tcp(
+/// Everything a per-session relay task needs: the engine handle, the session's routing
+/// identity, and its peer→local channel + cancel token. Bundling these keeps the relay
+/// task signatures to `(task, socket)`.
+struct RelayTask {
     sessions: Arc<TransportSessions>,
     processor: Arc<Processor>,
     session: SessionId,
     peer: Did,
     namespace: String,
-    stream: TcpStream,
-    mut outbound_rx: mpsc::Receiver<Outbound>,
+    outbound_rx: mpsc::Receiver<Outbound>,
     cancel: CancellationToken,
-) {
+}
+
+impl RelayTask {
+    /// Register a fresh session channel on the engine and capture the routing identity.
+    fn register(
+        sessions: Arc<TransportSessions>,
+        processor: Arc<Processor>,
+        session: SessionId,
+        peer: Did,
+        namespace: String,
+    ) -> Self {
+        let (outbound_rx, cancel) = sessions.register(session);
+        Self {
+            sessions,
+            processor,
+            session,
+            peer,
+            namespace,
+            outbound_rx,
+            cancel,
+        }
+    }
+
+    /// Connect failed: drop the pre-registered session and tell the peer.
+    async fn refuse(self) {
+        self.sessions.close(self.session);
+        let _ = send_frame(
+            self.processor.as_ref(),
+            self.peer,
+            self.namespace.as_str(),
+            Frame::Close {
+                session: self.session,
+            },
+        )
+        .await;
+    }
+}
+
+/// Bidirectional TCP relay with true half-close and abrupt-close handling.
+async fn relay_tcp(task: RelayTask, stream: TcpStream) {
+    let RelayTask {
+        sessions,
+        processor,
+        session,
+        peer,
+        namespace,
+        mut outbound_rx,
+        cancel,
+    } = task;
     let (mut local_read, mut local_write) = stream.into_split();
 
     // local → peer; clean EOF sends FIN, errors abort the whole session.
@@ -452,16 +452,16 @@ async fn relay_tcp(
 }
 
 /// Server-side UDP flow: a per-flow socket connected to the backend.
-async fn relay_udp_connected(
-    sessions: Arc<TransportSessions>,
-    processor: Arc<Processor>,
-    session: SessionId,
-    peer: Did,
-    namespace: String,
-    socket: UdpSocket,
-    mut outbound_rx: mpsc::Receiver<Outbound>,
-    cancel: CancellationToken,
-) {
+async fn relay_udp_connected(task: RelayTask, socket: UdpSocket) {
+    let RelayTask {
+        sessions,
+        processor,
+        session,
+        peer,
+        namespace,
+        mut outbound_rx,
+        cancel,
+    } = task;
     let mut buf = vec![0u8; UDP_BUF];
     loop {
         tokio::select! {
