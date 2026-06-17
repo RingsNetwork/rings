@@ -97,6 +97,9 @@ impl BackendBehaviour {
                     cb(self.clone(), provider.clone(), ctx, m).await?;
                 }
             }
+            // Routed by the extension registry in `Backend::on_backend_message`
+            // before reaching this handler.
+            BackendMessage::Envelope(_) => {}
         }
         if let Some(ext) = &self.extend_handler.clone().into_inner() {
             ext.handle_message(provider.into(), payload, msg)

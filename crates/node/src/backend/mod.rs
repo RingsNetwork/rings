@@ -12,9 +12,12 @@ use async_trait::async_trait;
 use rings_core::message::CustomMessage;
 use rings_core::message::Message;
 use rings_core::message::MessagePayload;
+use rings_core::message::MessageVerificationExt;
 use rings_core::swarm::callback::SwarmCallback;
 use rings_derive::wasm_export;
 
+use crate::backend::ext::DynExtension;
+use crate::backend::ext::Extensions;
 use crate::backend::types::BackendMessage;
 use crate::backend::types::MessageHandler;
 use crate::provider::Provider;
@@ -37,12 +40,23 @@ type HandlerTrait = dyn MessageHandler<BackendMessage>;
 pub struct Backend {
     provider: Arc<Provider>,
     handler: Box<HandlerTrait>,
+    extensions: Extensions,
 }
 
 impl Backend {
     /// Create a new backend instance with Provider and Handler functions
     pub fn new(provider: Arc<Provider>, handler: Box<HandlerTrait>) -> Self {
-        Self { provider, handler }
+        Self {
+            provider,
+            handler,
+            extensions: Extensions::new(),
+        }
+    }
+
+    /// Register a protocol [`Extension`](crate::backend::ext::Extension) under its
+    /// declared namespace.
+    pub fn register_extension(&mut self, ext: Arc<DynExtension>) {
+        self.extensions.register(ext);
     }
 
     async fn on_backend_message(
@@ -50,6 +64,16 @@ impl Backend {
         payload: &MessagePayload,
         msg: &BackendMessage,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // New namespaced path: route envelopes to the extension registry.
+        if let BackendMessage::Envelope(envelope) = msg {
+            let from = payload.transaction.signer();
+            self.extensions
+                .dispatch(&self.provider.ctx(), from, envelope.clone())
+                .await?;
+            return Ok(());
+        }
+
+        // Legacy path (built-in variants), removed once all are ported.
         let provider = self.provider.clone();
         self.handler.handle_message(provider, payload, msg).await
     }

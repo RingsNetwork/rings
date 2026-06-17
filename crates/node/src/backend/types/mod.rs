@@ -32,6 +32,11 @@ pub enum BackendMessage {
     /// SNARK with curve pallas and vesta
     #[cfg(feature = "snark")]
     SNARKTaskMessage(snark::SNARKTaskMessage),
+    /// Namespaced extension envelope, routed by the [`Extensions`] registry.
+    /// Transitional: built-in variants above migrate to this and are then removed.
+    ///
+    /// [`Extensions`]: crate::backend::ext::Extensions
+    Envelope(crate::backend::ext::Envelope),
 }
 
 /// ServiceMessage
