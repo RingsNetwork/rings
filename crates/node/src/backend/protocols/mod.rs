@@ -6,3 +6,10 @@
 //! `BackendMessage` variant.
 
 pub mod plaintext;
+
+use crate::backend::ext::Extensions;
+
+/// Register the built-in protocol extensions into a registry.
+pub fn register_builtins(extensions: &Extensions) {
+    extensions.register(plaintext::PlainText::new());
+}

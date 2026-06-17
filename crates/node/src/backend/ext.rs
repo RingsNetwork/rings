@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::RwLock;
 
 use bytes::Bytes;
 use rings_core::dht::Did;
@@ -97,9 +98,16 @@ pub trait Extension {
 }
 
 /// Registry that routes inbound envelopes to extensions by namespace.
+/// Registry that routes inbound envelopes to extensions by namespace.
+///
+/// Cheaply cloneable and shared (interior mutability): the [`Provider`] owns one and
+/// hands clones to the inbound callback, so registration and dispatch see the same
+/// table.
+///
+/// [`Provider`]: crate::provider::Provider
 #[derive(Default, Clone)]
 pub struct Extensions {
-    handlers: HashMap<String, Arc<DynExtension>>,
+    handlers: Arc<RwLock<HashMap<String, Arc<DynExtension>>>>,
 }
 
 impl Extensions {
@@ -109,13 +117,24 @@ impl Extensions {
     }
 
     /// Register an extension under its declared namespace.
-    pub fn register(&mut self, ext: Arc<DynExtension>) {
-        self.handlers.insert(ext.namespace().to_string(), ext);
+    pub fn register(&self, ext: Arc<DynExtension>) {
+        if let Ok(mut handlers) = self.handlers.write() {
+            handlers.insert(ext.namespace().to_string(), ext);
+        }
     }
 
     /// Whether a namespace has a registered extension.
     pub fn contains(&self, namespace: &str) -> bool {
-        self.handlers.contains_key(namespace)
+        self.handlers
+            .read()
+            .map(|h| h.contains_key(namespace))
+            .unwrap_or(false)
+    }
+
+    /// Look up an extension by namespace (clones the `Arc` out so the lock is not
+    /// held across the async handler).
+    fn get(&self, namespace: &str) -> Option<Arc<DynExtension>> {
+        self.handlers.read().ok()?.get(namespace).cloned()
     }
 
     /// Route a decoded envelope to its namespace's extension.
@@ -123,7 +142,7 @@ impl Extensions {
     /// Unknown namespaces are logged and dropped (non-fatal): a peer speaking a
     /// protocol this node does not have is expected.
     pub async fn dispatch(&self, ctx: &Ctx, from: Did, envelope: Envelope) -> Result<()> {
-        match self.handlers.get(&envelope.namespace) {
+        match self.get(&envelope.namespace) {
             Some(ext) => ext.on_message(ctx, from, envelope.payload).await,
             None => {
                 tracing::debug!(

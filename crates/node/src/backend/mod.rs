@@ -45,10 +45,12 @@ pub struct Backend {
 }
 
 impl Backend {
-    /// Create a new backend instance with Provider and Handler functions
+    /// Create a new backend instance with Provider and Handler functions.
+    ///
+    /// The extension registry is shared with the provider, so protocols
+    /// registered via the provider are visible to inbound dispatch here.
     pub fn new(provider: Arc<Provider>, handler: Box<HandlerTrait>) -> Self {
-        let mut extensions = Extensions::new();
-        extensions.register(crate::backend::protocols::plaintext::PlainText::new());
+        let extensions = provider.extensions();
         Self {
             provider,
             handler,
@@ -58,7 +60,7 @@ impl Backend {
 
     /// Register a protocol [`Extension`](crate::backend::ext::Extension) under its
     /// declared namespace.
-    pub fn register_extension(&mut self, ext: Arc<DynExtension>) {
+    pub fn register_extension(&self, ext: Arc<DynExtension>) {
         self.extensions.register(ext);
     }
 

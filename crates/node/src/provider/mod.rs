@@ -38,6 +38,7 @@ pub mod ffi;
 pub struct Provider {
     processor: Arc<Processor>,
     handler: InternalRpcHandler,
+    extensions: crate::backend::ext::Extensions,
 }
 
 /// Async signer, without Send required
@@ -61,9 +62,12 @@ pub enum Signer {
 impl Provider {
     /// Create provider from processor directly
     pub fn from_processor(processor: Arc<Processor>) -> Self {
+        let extensions = crate::backend::ext::Extensions::new();
+        crate::backend::protocols::register_builtins(&extensions);
         Self {
             processor,
             handler: InternalRpcHandler,
+            extensions,
         }
     }
 
@@ -71,6 +75,29 @@ impl Provider {
     /// provider's processor.
     pub fn ctx(&self) -> crate::backend::ext::Ctx {
         crate::backend::ext::Ctx::new(self.processor.clone())
+    }
+
+    /// The shared extension registry. The inbound callback clones this so
+    /// registration (via the provider) and dispatch see the same table.
+    pub fn extensions(&self) -> crate::backend::ext::Extensions {
+        self.extensions.clone()
+    }
+
+    /// Register a protocol [`Extension`](crate::backend::ext::Extension).
+    pub fn register_extension(&self, ext: Arc<crate::backend::ext::DynExtension>) {
+        self.extensions.register(ext);
+    }
+
+    /// Send a namespaced payload to a peer. This is the uniform upper-layer send;
+    /// the transport/extension plumbing underneath is identical on native and
+    /// browser.
+    pub async fn send(
+        &self,
+        to: rings_core::dht::Did,
+        namespace: &str,
+        payload: bytes::Bytes,
+    ) -> Result<()> {
+        self.ctx().send(to, namespace, payload).await
     }
     /// Create a provider instance with storage name
     pub(crate) async fn new_provider_with_storage_internal(
@@ -89,9 +116,13 @@ impl Provider {
 
         let processor = Arc::new(processor_builder.build()?);
 
+        let extensions = crate::backend::ext::Extensions::new();
+        crate::backend::protocols::register_builtins(&extensions);
+
         Ok(Provider {
             processor,
             handler: InternalRpcHandler,
+            extensions,
         })
     }
 
