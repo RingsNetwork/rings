@@ -28,8 +28,6 @@ use rings_rpc::jsonrpc::Client as RpcClient;
 use rings_rpc::protos::rings_node::*;
 
 use crate::backend::types::BackendMessage;
-use crate::backend::types::HttpRequest;
-use crate::backend::types::ServiceMessage;
 use crate::seed::Seed;
 use crate::util::loader::ResourceLoader;
 
@@ -146,40 +144,6 @@ impl Client {
             })
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
-        ClientOutput::ok("Done.".into(), ())
-    }
-
-    /// Sends an HTTP request message to the specified peer.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn send_http_request_message(
-        &self,
-        did: &str,
-        service: &str,
-        method: http::Method,
-        path: &str,
-        headers: Vec<(String, String)>,
-        body: Option<Vec<u8>>,
-        rid: Option<String>,
-    ) -> Output<()> {
-        let req = HttpRequest {
-            service: service.to_string(),
-            method: method.to_string(),
-            path: path.to_string(),
-            headers,
-            body,
-            rid,
-        };
-
-        let backend_msg = BackendMessage::from(ServiceMessage::HttpRequest(req));
-        let rpc_req = backend_msg
-            .into_send_backend_message_request(did)
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-
-        self.client
-            .send_backend_message(&rpc_req)
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-
         ClientOutput::ok("Done.".into(), ())
     }
 

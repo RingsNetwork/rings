@@ -26,9 +26,6 @@ use crate::provider::Provider;
 #[cfg(feature = "browser")]
 pub mod browser;
 
-#[cfg(feature = "node")]
-pub mod native;
-
 #[cfg(feature = "ffi")]
 pub mod ffi;
 
@@ -77,6 +74,24 @@ impl Backend {
         // Legacy path (built-in variants), removed once all are ported.
         let provider = self.provider.clone();
         self.handler.handle_message(provider, payload, msg).await
+    }
+}
+
+/// A backend handler that ignores every legacy [`BackendMessage`]; only the
+/// namespaced [`Extensions`] path in [`Backend::on_backend_message`] runs.
+/// Transitional: removed once `BackendMessage` and the legacy handler are gone.
+pub struct NoopBackendHandler;
+
+#[cfg_attr(feature = "browser", async_trait(?Send))]
+#[cfg_attr(not(feature = "browser"), async_trait)]
+impl MessageHandler<BackendMessage> for NoopBackendHandler {
+    async fn handle_message(
+        &self,
+        _provider: Arc<Provider>,
+        _ctx: &MessagePayload,
+        _msg: &BackendMessage,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        Ok(())
     }
 }
 

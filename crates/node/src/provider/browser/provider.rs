@@ -27,8 +27,6 @@ use wasm_bindgen_futures::JsFuture;
 
 use crate::backend::browser::BackendBehaviour;
 use crate::backend::types::BackendMessage;
-use crate::backend::types::HttpRequest;
-use crate::backend::types::ServiceMessage;
 use crate::backend::Backend;
 use crate::processor::ProcessorConfig;
 use crate::provider::AsyncSigner;
@@ -358,78 +356,6 @@ impl Provider {
             let vnode_info = vnode::VirtualNode::try_from(data).map_err(JsError::from)?;
             p.storage_store(vnode_info).await.map_err(JsError::from)?;
             Ok(JsValue::null())
-        })
-    }
-
-    /// send http request message to remote
-    /// - destination: did
-    /// - service: service name
-    /// - method: http method
-    /// - path: http path like `/ipfs/abc1234` `/ipns/abc`
-    /// - headers: headers of request
-    /// - body: body of request
-    #[allow(clippy::too_many_arguments)]
-    pub fn send_http_request(
-        &self,
-        destination: String,
-        service: String,
-        method: String,
-        path: String,
-        headers: JsValue,
-        body: Option<js_sys::Uint8Array>,
-        rid: Option<String>,
-    ) -> js_sys::Promise {
-        let p = self.processor.clone();
-
-        future_to_promise(async move {
-            let destination = get_did(destination.as_str(), AddressType::DEFAULT)?;
-
-            let method = http::Method::from_str(method.as_str())
-                .map_err(JsError::from)?
-                .to_string();
-
-            let headers: Vec<(String, String)> = if headers.is_null() {
-                Vec::new()
-            } else if headers.is_object() {
-                let mut header_vec: Vec<(String, String)> = Vec::new();
-                let obj = js_sys::Object::from(headers);
-                let entries = js_sys::Object::entries(&obj);
-                for e in entries.iter() {
-                    if js_sys::Array::is_array(&e) {
-                        let arr = js_sys::Array::from(&e);
-                        if arr.length() != 2 {
-                            continue;
-                        }
-                        let k = arr.get(0).as_string().unwrap();
-                        let v = arr.get(1);
-                        if v.is_string() {
-                            let v = v.as_string().unwrap();
-                            header_vec.push((k, v))
-                        }
-                    }
-                }
-                header_vec
-            } else {
-                Vec::new()
-            };
-
-            let body = body.map(|item| item.to_vec());
-
-            let req = HttpRequest {
-                service,
-                method,
-                path,
-                headers,
-                body,
-                rid,
-            };
-
-            let tx_id = p
-                .send_backend_message(destination, ServiceMessage::HttpRequest(req).into())
-                .await
-                .map_err(JsError::from)?;
-
-            Ok(JsValue::from_str(tx_id.to_string().as_str()))
         })
     }
 

@@ -33,26 +33,6 @@ pub struct FFIBackendBehaviour {
             ) -> (),
         >,
     >,
-    service_message_handler: Option<
-        Box<
-            extern "C" fn(
-                *const FFIBackendBehaviourWithRuntime,
-                *const ProviderPtr,
-                *const c_char,
-                *const c_char,
-            ) -> (),
-        >,
-    >,
-    extension_message_handler: Option<
-        Box<
-            extern "C" fn(
-                *const FFIBackendBehaviourWithRuntime,
-                *const ProviderPtr,
-                *const c_char,
-                *const c_char,
-            ) -> (),
-        >,
-    >,
 }
 
 /// A wrapper for FFIbackendbehaviour, we needs runtime to make async request work
@@ -104,12 +84,6 @@ impl FFIBackendBehaviourWithRuntime {
             BackendMessage::PlainText(m) => {
                 handle_backend_message!(self, provider, paintext_message_handler, payload, m)
             }
-            BackendMessage::Extension(m) => {
-                handle_backend_message!(self, provider, extension_message_handler, payload, m)
-            }
-            BackendMessage::ServiceMessage(m) => {
-                handle_backend_message!(self, provider, service_message_handler, payload, m)
-            }
             _ => (),
         }
         Ok(())
@@ -127,27 +101,9 @@ pub extern "C" fn new_ffi_backend_behaviour(
             *const c_char,
         ) -> (),
     >,
-    service_message_handler: Option<
-        extern "C" fn(
-            *const FFIBackendBehaviourWithRuntime,
-            *const ProviderPtr,
-            *const c_char,
-            *const c_char,
-        ) -> (),
-    >,
-    extension_message_handler: Option<
-        extern "C" fn(
-            *const FFIBackendBehaviourWithRuntime,
-            *const ProviderPtr,
-            *const c_char,
-            *const c_char,
-        ) -> (),
-    >,
 ) -> FFIBackendBehaviour {
     FFIBackendBehaviour {
         paintext_message_handler: paintext_message_handler.map(Box::new),
-        service_message_handler: service_message_handler.map(Box::new),
-        extension_message_handler: extension_message_handler.map(Box::new),
     }
 }
 

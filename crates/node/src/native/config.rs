@@ -6,9 +6,6 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::backend::native::extension::ExtensionConfig;
-use crate::backend::native::service::ServiceConfig;
-use crate::backend::native::BackendConfig;
 use crate::error::Error;
 use crate::error::Result;
 use crate::prelude::rings_core::ecc::SecretKey;
@@ -62,16 +59,8 @@ pub struct Config {
     pub stabilize_interval: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_ip: Option<String>,
-    /// When there is no configuration in the YAML file,
-    /// its deserialization is equivalent to `vec![]` in Rust.
-    #[serde(default)]
-    pub services: Vec<ServiceConfig>,
     pub data_storage: StorageConfig,
     pub measure_storage: StorageConfig,
-    /// When there is no configuration in the YAML file,
-    /// its deserialization is equivalent to `ExtensionConfig(vec![])` in Rust.
-    #[serde(default)]
-    pub extension: ExtensionConfig,
 }
 
 impl TryFrom<Config> for ProcessorConfigSerialized {
@@ -120,15 +109,6 @@ impl TryFrom<Config> for ProcessorConfig {
     }
 }
 
-impl From<Config> for BackendConfig {
-    fn from(config: Config) -> Self {
-        Self {
-            services: config.services,
-            extensions: config.extension,
-        }
-    }
-}
-
 impl Config {
     pub fn new<P>(session_sk: P) -> Self
     where P: AsRef<std::path::Path> {
@@ -144,10 +124,8 @@ impl Config {
             ice_servers: DEFAULT_ICE_SERVERS.to_string(),
             stabilize_interval: DEFAULT_STABILIZE_INTERVAL,
             external_ip: None,
-            services: vec![],
             data_storage: DEFAULT_DATA_STORAGE_CONFIG.clone(),
             measure_storage: DEFAULT_MEASURE_STORAGE_CONFIG.clone(),
-            extension: ExtensionConfig::default(),
         }
     }
 
@@ -210,7 +188,6 @@ measure_storage:
   capacity: 200000000
 "#;
         let cfg: Config = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(cfg.extension, ExtensionConfig::default());
-        assert_eq!(cfg.services, vec![]);
+        assert_eq!(cfg.network_id, 1);
     }
 }

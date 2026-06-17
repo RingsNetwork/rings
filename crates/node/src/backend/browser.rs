@@ -68,20 +68,6 @@ impl BackendBehaviour {
         let ctx = js_value::serialize(&payload)?;
 
         match msg {
-            BackendMessage::ServiceMessage(m) => {
-                if let Some(func) = &self.get_handler("ServiceMessage") {
-                    let m = js_value::serialize(m)?;
-                    let cb = js_func::of4::<BackendBehaviour, Provider, JsValue, JsValue>(func);
-                    cb(self.clone(), provider.clone(), ctx, m).await?;
-                }
-            }
-            BackendMessage::Extension(m) => {
-                if let Some(func) = &self.get_handler("Extension") {
-                    let m = js_value::serialize(m)?;
-                    let cb = js_func::of4::<BackendBehaviour, Provider, JsValue, JsValue>(func);
-                    cb(self.clone(), provider.clone(), ctx, m).await?;
-                }
-            }
             BackendMessage::PlainText(m) => {
                 if let Some(func) = &self.get_handler("PlainText") {
                     let m = js_value::serialize(m)?;

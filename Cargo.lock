@@ -4326,6 +4326,7 @@ dependencies = [
  "wasm-bindgen-test",
  "wasmer",
  "wasmer-types 3.3.0",
+ "web-sys",
 ]
 
 [[package]]

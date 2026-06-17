@@ -1,19 +1,11 @@
 use std::path::Path;
-use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
 
-use clap::ArgAction;
 use clap::Args;
 use clap::Parser;
 use clap::Subcommand;
-use futures::future::FutureExt;
 use futures::pin_mut;
-use futures::select;
 use futures::StreamExt;
-use futures_timer::Delay;
-use rings_node::backend::native::BackendBehaviour;
-use rings_node::backend::native::BackendConfig;
 use rings_node::backend::Backend;
 use rings_node::logging::init_logging;
 use rings_node::logging::LogLevel;
@@ -26,7 +18,6 @@ use rings_node::prelude::rings_core::dht::Did;
 use rings_node::prelude::rings_core::ecc::SecretKey;
 use rings_node::prelude::rings_core::storage::sled::SledStorage;
 use rings_node::prelude::SessionSkBuilder;
-use rings_node::processor::Processor;
 use rings_node::processor::ProcessorBuilder;
 use rings_node::processor::ProcessorConfig;
 use rings_node::provider::Provider;
@@ -304,40 +295,10 @@ struct PeerDisconnectCommand {
 #[derive(Subcommand, Debug)]
 #[command(rename_all = "kebab-case")]
 enum SendCommand {
-    #[command(about = "Sends an HTTP request message.")]
-    Http(SendHttpCommand),
     #[command(about = "Sends a simple text message.")]
     PlainText(SendPlainTextCommand),
     #[command(about = "Sends a custom message.")]
     Custom(SendCustomMessageCommand),
-}
-
-#[derive(Args, Debug)]
-struct SendHttpCommand {
-    #[command(flatten)]
-    client_args: ClientArgs,
-
-    to_did: String,
-
-    service: String,
-
-    #[arg(default_value = "GET", long, short = 'X', help = "request method")]
-    method: String,
-
-    #[arg(default_value = "/")]
-    path: String,
-
-    #[arg(long = "header", short = 'H', action = ArgAction::Append, help = "headers append to the request")]
-    headers: Vec<String>,
-
-    #[arg(long, short = 'b', help = "set content of http body")]
-    body: Option<String>,
-
-    #[arg(long, default_value = "30000")]
-    timeout: u64,
-
-    #[arg(long = "request_id", short = 'i', help = "set request id")]
-    rid: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -414,7 +375,6 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     }
 
     let pc = ProcessorConfig::try_from(c.clone())?;
-    let bc = BackendConfig::from(c.clone());
 
     let (data_storage, measure_storage) = if let Some(storage_path) = args.storage_path {
         let storage_path = Path::new(&storage_path);
@@ -447,17 +407,26 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
             .build()?,
     );
     println!("Did: {}", processor.swarm.did());
-    let backend_behaviour = BackendBehaviour::new(bc).await?;
-    let backend_service_names = backend_behaviour.service_names();
     let provider = Arc::new(Provider::from_processor(processor.clone()));
-    let backend = Arc::new(Backend::new(provider, Box::new(backend_behaviour)));
+    // Legacy built-in message handler (transitional). The namespaced extension
+    // registry handles everything else; SNARK is still on the legacy path until
+    // it is ported to a protocol.
+    #[cfg(feature = "snark")]
+    let backend = Arc::new(Backend::new(
+        provider,
+        Box::new(rings_node::backend::snark::SNARKBehaviour::default()),
+    ));
+    #[cfg(not(feature = "snark"))]
+    let backend = Arc::new(Backend::new(
+        provider,
+        Box::new(rings_node::backend::NoopBackendHandler),
+    ));
     processor.swarm.set_callback(backend).unwrap();
 
     let processor_clone1 = processor.clone();
     let processor_clone2 = processor.clone();
     let _ = futures::join!(
         processor.listen(),
-        service_loop_register(&processor, backend_service_names),
         run_internal_api(c.internal_api_port, processor_clone2),
         run_external_api(c.external_api_addr, processor_clone1),
     );
@@ -541,36 +510,6 @@ async fn main() -> anyhow::Result<()> {
                 .display();
             Ok(())
         }
-        Command::Send(SendCommand::Http(args)) => {
-            args.client_args
-                .new_client()
-                .await?
-                .send_http_request_message(
-                    args.to_did.as_str(),
-                    args.service.as_str(),
-                    http::Method::from_str(args.method.to_uppercase().as_str())?,
-                    args.path.as_str(),
-                    args.headers
-                        .iter()
-                        .map(|x| x.split(':').collect::<Vec<&str>>())
-                        .map(|b| {
-                            (
-                                b[0].trim_start_matches(' ')
-                                    .trim_end_matches(' ')
-                                    .to_string(),
-                                b[1].trim_start_matches(' ')
-                                    .trim_end_matches(' ')
-                                    .to_string(),
-                            )
-                        })
-                        .collect::<Vec<(_, _)>>(),
-                    args.body.map(|x| x.as_bytes().to_vec()),
-                    args.rid,
-                )
-                .await?
-                .display();
-            Ok(())
-        }
         Command::Send(SendCommand::PlainText(args)) => {
             args.client_args
                 .new_client()
@@ -626,29 +565,6 @@ async fn main() -> anyhow::Result<()> {
                 .await?
                 .display();
             Ok(())
-        }
-    }
-}
-
-async fn register_services(processor: &Processor, names: Vec<String>) -> anyhow::Result<()> {
-    let jobs = names.iter().map(|n| processor.register_service(n));
-    let results = futures::future::join_all(jobs).await;
-
-    for r in results {
-        if let Err(e) = r {
-            tracing::error!("register service error: {}", e);
-        }
-    }
-
-    Ok(())
-}
-
-async fn service_loop_register(processor: &Processor, names: Vec<String>) {
-    loop {
-        let timeout = Delay::new(Duration::from_secs(30)).fuse();
-        pin_mut!(timeout);
-        select! {
-            _ = timeout => register_services(processor, names.clone()).await.unwrap_or_else(|e| eprintln!("Error: {e}")),
         }
     }
 }

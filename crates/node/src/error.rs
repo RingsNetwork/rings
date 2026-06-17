@@ -1,5 +1,4 @@
 //! A bunch of wrap errors.
-use crate::backend::types::TunnelDefeat;
 use crate::prelude::rings_core;
 
 /// A wrap `Result` contains custom errors.
@@ -118,10 +117,6 @@ pub enum Error {
     FFINulPtrError = 1205,
     #[error("Failed to convert bytes to String: {0}")]
     FFIFromUtf8Error(#[from] std::string::FromUtf8Error) = 1206,
-    #[error("Tunnel not found")]
-    TunnelNotFound = 1303,
-    #[error("Tunnel error: {0:?}")]
-    TunnelError(TunnelDefeat) = 1304,
     #[cfg(feature = "snark")]
     #[error("Snark error: {0}")]
     RingsSNARKError(#[from] rings_snark::error::Error) = 1400,
