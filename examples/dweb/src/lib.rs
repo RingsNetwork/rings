@@ -50,8 +50,9 @@ enum DwebMsg {
 /// The site this node hosts: `path -> html`.
 type Site = Rc<RefCell<HashMap<String, String>>>;
 
-/// Build an in-browser node (IndexedDB), install the backend, start the message loop.
-async fn build_node() -> Arc<Provider> {
+/// Build an in-browser node (IndexedDB under `storage_name`), install the backend, start
+/// the message loop. Distinct `storage_name`s let two nodes coexist (e.g. in a test).
+async fn build_node(storage_name: &str) -> Arc<Provider> {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).expect("session sk");
     let config = ProcessorConfig::new(
@@ -61,7 +62,7 @@ async fn build_node() -> Arc<Provider> {
         200,
     );
     let storage = Box::new(
-        IdbStorage::new_with_cap_and_name(50_000, "rings-dweb")
+        IdbStorage::new_with_cap_and_name(50_000, storage_name)
             .await
             .expect("idb storage"),
     );
@@ -167,7 +168,7 @@ fn app() -> Html {
         let page = page.clone();
         use_effect_with((), move |_| {
             spawn_local(async move {
-                let p = build_node().await;
+                let p = build_node("rings-dweb").await;
                 let my_did = p.address();
                 did.set(my_did.clone());
 
@@ -355,5 +356,77 @@ mod tests {
         );
         assert_eq!(effects(&result).length(), 0, "a response triggers no Send");
         assert_eq!(*got.borrow(), Some(("/".to_string(), "PAGE".to_string())));
+    }
+
+    // ── End-to-end: two real nodes, one fetches a page hosted by the other ──────────
+
+    /// A JS object of `{key: value}` string fields, for `provider.request` params.
+    fn obj(pairs: &[(&str, &str)]) -> JsValue {
+        let o = Object::new();
+        for (k, v) in pairs {
+            Reflect::set(&o, &(*k).into(), &JsValue::from_str(v)).unwrap();
+        }
+        o.into()
+    }
+
+    fn get_str(value: &JsValue, key: &str) -> String {
+        Reflect::get(value, &key.into())
+            .ok()
+            .and_then(|v| v.as_string())
+            .unwrap_or_else(|| panic!("missing string field {key:?}"))
+    }
+
+    async fn rpc(provider: &Arc<Provider>, method: &str, params: JsValue) -> JsValue {
+        JsFuture::from(provider.request(method.to_string(), params))
+            .await
+            .unwrap_or_else(|e| panic!("rpc {method} failed: {e:?}"))
+    }
+
+    /// Link two in-page providers with the offer/answer handshake (no signaling server).
+    async fn connect(a: &Arc<Provider>, b: &Arc<Provider>) {
+        let offer = get_str(&rpc(a, "createOffer", obj(&[("did", &b.address())])).await, "offer");
+        let answer = get_str(&rpc(b, "answerOffer", obj(&[("offer", &offer)])).await, "answer");
+        let _ = rpc(a, "acceptAnswer", obj(&[("answer", &answer)])).await;
+    }
+
+    /// Two nodes: B hosts `/`, A connects and fetches it over rings, expecting B's page.
+    #[wasm_bindgen_test]
+    async fn two_nodes_fetch_a_hosted_page() {
+        use rings_node::prelude::rings_core::utils::js_utils::window_sleep;
+
+        // B hosts a page.
+        let b = build_node("rings-dweb-test-b").await;
+        register_dweb(
+            &b,
+            Rc::new(RefCell::new(HashMap::from([(
+                "/".to_string(),
+                "<h1>from B</h1>".to_string(),
+            )]))),
+            Callback::from(|_| {}),
+        );
+
+        // A is the fetcher; it records the page it receives.
+        let got: Rc<RefCell<Option<(String, String)>>> = Rc::new(RefCell::new(None));
+        let a = build_node("rings-dweb-test-a").await;
+        register_dweb(&a, Rc::new(RefCell::new(HashMap::new())), {
+            let got = got.clone();
+            Callback::from(move |r| *got.borrow_mut() = Some(r))
+        });
+
+        connect(&a, &b).await;
+
+        // Retry the request until the overlay link is up and B's response arrives.
+        let b_did = b.address();
+        for _ in 0..60 {
+            let _ = fetch_path(a.clone(), b_did.clone(), "/".to_string()).await;
+            window_sleep(500).await.ok();
+            if got.borrow().is_some() {
+                break;
+            }
+        }
+
+        let page = got.borrow().clone().expect("no response received from B");
+        assert_eq!(page.0, "/");
+        assert_eq!(page.1, "<h1>from B</h1>");
     }
 }
