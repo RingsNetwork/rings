@@ -295,8 +295,6 @@ struct PeerDisconnectCommand {
 #[derive(Subcommand, Debug)]
 #[command(rename_all = "kebab-case")]
 enum SendCommand {
-    #[command(about = "Sends a simple text message.")]
-    PlainText(SendPlainTextCommand),
     #[command(about = "Sends a custom message.")]
     Custom(SendCustomMessageCommand),
 }
@@ -306,14 +304,6 @@ struct PubsubCommand {
     #[command(flatten)]
     client_args: ClientArgs,
     topic: String,
-}
-
-#[derive(Args, Debug)]
-struct SendPlainTextCommand {
-    #[command(flatten)]
-    client_args: ClientArgs,
-    to_did: String,
-    text: String,
 }
 
 #[derive(Args, Debug)]
@@ -411,13 +401,9 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     // SNARK is a namespaced protocol now; register it so the daemon can prove/verify.
     #[cfg(feature = "snark")]
     rings_node::backend::snark::SNARKBehaviour::default().register(provider.as_ref())?;
-    // The legacy `BackendMessage` path has no remaining built-ins; the namespaced
-    // extension registry handles inbound. Install a no-op legacy handler (transitional
-    // until `BackendMessage` is removed entirely).
-    let backend = Arc::new(Backend::new(
-        provider,
-        Box::new(rings_node::backend::NoopBackendHandler),
-    ));
+    // The Backend decodes inbound custom messages as namespaced envelopes and routes
+    // them to the protocol registry.
+    let backend = Arc::new(Backend::new(provider));
     processor.swarm.set_callback(backend).unwrap();
 
     let processor_clone1 = processor.clone();
@@ -503,15 +489,6 @@ async fn main() -> anyhow::Result<()> {
                 .new_client()
                 .await?
                 .disconnect(args.address.as_str())
-                .await?
-                .display();
-            Ok(())
-        }
-        Command::Send(SendCommand::PlainText(args)) => {
-            args.client_args
-                .new_client()
-                .await?
-                .send_plain_text_message(args.to_did.as_str(), args.text.as_str())
                 .await?
                 .display();
             Ok(())

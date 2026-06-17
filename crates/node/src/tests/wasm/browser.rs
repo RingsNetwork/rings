@@ -1,11 +1,10 @@
+use rings_rpc::protos::rings_node::SendBackendMessageRequest;
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::*;
 
 use super::create_connection;
 use super::get_peers;
 use super::new_provider;
-use crate::backend::browser::BackendBehaviour;
-use crate::backend::types::BackendMessage;
 use crate::prelude::rings_core::utils;
 use crate::prelude::rings_core::utils::js_value;
 use crate::provider::browser;
@@ -61,10 +60,11 @@ async fn test_send_backend_message() {
     console_log!("wait for register");
     utils::js_utils::window_sleep(1000).await.unwrap();
 
-    let msg = BackendMessage::PlainText("test".to_string());
-    let req = msg
-        .into_send_backend_message_request(provider2.address())
-        .unwrap();
+    let req = SendBackendMessageRequest {
+        destination_did: provider2.address(),
+        namespace: "text".to_string(),
+        data: "test".to_string(),
+    };
 
     JsFuture::from(provider1.request(
         "sendBackendMessage".to_string(),
@@ -78,26 +78,20 @@ async fn test_send_backend_message() {
 async fn test_handle_backend_message() {
     let provider1 = new_provider().await;
     let provider2 = new_provider().await;
-    let behaviour = BackendBehaviour::new();
 
-    let js_code_args = "ins, provider, ctx, msg";
-    // write local msg to global window
+    // Register a `text` protocol on provider2 via the unified JsProtocol path: a pure
+    // `(ctx, event) -> { state, effects }` handler that records the received payload.
+    let js_code_args = "ctx, event";
     let js_code_body = r#"
-try {
-    return new Promise((resolve, reject) => {
-        console.log("js closure: get message", msg)
-        window.recentMsg = msg
-        resolve(undefined)
-    })
-} catch(e) {
-    return e
-}
+    const text = new TextDecoder().decode(event.payload);
+    console.log("js protocol: got message", text);
+    window.recentMsg = text;
+    return { state: ctx.state, effects: [] };
 "#;
     let func = js_sys::Function::new_with_args(js_code_args, js_code_body);
-    behaviour.on("PlainText".to_string(), func);
-    // provider 1 send backend message to provider 2
-    // provider 2 set it to local variable
-    provider2.set_backend_callback(behaviour).unwrap();
+    provider2
+        .on("text".to_string(), wasm_bindgen::JsValue::NULL, func)
+        .unwrap();
 
     let _lis1 = provider1.listen();
     let _lis2 = provider2.listen();
@@ -111,17 +105,10 @@ try {
     assert!(peers.len() == 1, "peers len should be 1");
     let _peer2 = peers.first().unwrap();
 
-    let msg = BackendMessage::PlainText("hello world".to_string());
-    let req = msg
-        .into_send_backend_message_request(provider2.address())
+    let payload = js_sys::Uint8Array::from("hello world".as_bytes());
+    JsFuture::from(provider1.send_message(provider2.address(), "text".to_string(), payload))
+        .await
         .unwrap();
-
-    JsFuture::from(provider1.request(
-        "sendBackendMessage".to_string(),
-        js_value::serialize(&req).unwrap(),
-    ))
-    .await
-    .unwrap();
     console_log!("send backend hello world done");
     utils::js_utils::window_sleep(3000).await.unwrap();
     let global = rings_core::utils::js_utils::global().unwrap();

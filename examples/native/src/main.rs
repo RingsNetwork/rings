@@ -1,14 +1,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use rings_core::dht::Did;
 use rings_core::ecc::SecretKey;
-use rings_core::message::MessagePayload;
 use rings_core::session::SessionSkBuilder;
 use rings_core::storage::MemStorage;
-use rings_node::backend::types::BackendMessage;
-use rings_node::backend::types::MessageHandler;
 use rings_node::logging::init_logging;
 use rings_node::logging::LogLevel;
 use rings_node::processor::ProcessorBuilder;
@@ -16,21 +12,6 @@ use rings_node::processor::ProcessorConfig;
 use rings_node::provider::Provider;
 use rings_rpc::method::Method;
 use rings_rpc::protos::rings_node::*;
-
-struct BackendBehaviour;
-
-#[async_trait]
-impl MessageHandler<BackendMessage> for BackendBehaviour {
-    async fn handle_message(
-        &self,
-        _provider: Arc<Provider>,
-        _ctx: &MessagePayload,
-        msg: &BackendMessage,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        println!("Received message: {:?}", msg);
-        Ok(())
-    }
-}
 
 #[tokio::main]
 async fn main() {
@@ -67,8 +48,9 @@ async fn main() {
     // Wrap api with provider
     let provider = Arc::new(Provider::from_processor(processor));
 
-    // Setup your callback handler.
-    provider.set_backend_callback(BackendBehaviour).unwrap();
+    // Install the extension backend so inbound namespaced messages are dispatched to
+    // registered protocols (register yours with `provider.register_protocol(..)`).
+    provider.set_backend().unwrap();
 
     // Listen messages from peers.
     let listening_provider = provider.clone();
@@ -123,10 +105,11 @@ async fn main() {
         panic!("Failed to connect to remote peer");
     }
 
-    let msg = BackendMessage::PlainText("Hello from native provider example".to_string());
-    let rpc_req = msg
-        .into_send_backend_message_request(destination_did)
-        .unwrap();
+    let rpc_req = SendBackendMessageRequest {
+        destination_did,
+        namespace: "example".to_string(),
+        data: "Hello from native provider example".to_string(),
+    };
     println!("===> request SendBackendMessage api...");
     let resp = provider
         .request(Method::SendBackendMessage, rpc_req)

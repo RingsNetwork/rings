@@ -218,9 +218,11 @@ impl HandleRpc<SendBackendMessageRequest, SendBackendMessageResponse> for Proces
         req: SendBackendMessageRequest,
     ) -> Result<SendBackendMessageResponse> {
         let destination = s2d(&req.destination_did)?;
-        let data = serde_json::from_str(&req.data)
-            .map_err(|_| Error::invalid_params("Serialize data as json failed"))?;
-        self.send_backend_message(destination, data).await?;
+        let envelope = crate::backend::ext::Envelope::new(
+            req.namespace,
+            bytes::Bytes::from(req.data.into_bytes()),
+        );
+        self.send_envelope(destination, &envelope).await?;
         Ok(SendBackendMessageResponse {})
     }
 }

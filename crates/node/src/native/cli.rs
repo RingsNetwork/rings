@@ -27,7 +27,6 @@ use futures_timer::Delay;
 use rings_rpc::jsonrpc::Client as RpcClient;
 use rings_rpc::protos::rings_node::*;
 
-use crate::backend::types::BackendMessage;
 use crate::seed::Seed;
 use crate::util::loader::ResourceLoader;
 
@@ -144,21 +143,6 @@ impl Client {
             })
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
-        ClientOutput::ok("Done.".into(), ())
-    }
-
-    /// Sends a plain text message to the specified peer.
-    pub async fn send_plain_text_message(&self, did: &str, text: &str) -> Output<()> {
-        let backend_msg = BackendMessage::PlainText(text.to_string());
-        let rpc_req = backend_msg
-            .into_send_backend_message_request(did)
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-
-        self.client
-            .send_backend_message(&rpc_req)
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-
         ClientOutput::ok("Done.".into(), ())
     }
 

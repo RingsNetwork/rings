@@ -102,6 +102,9 @@ pub struct SendCustomMessageResponse {}
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct SendBackendMessageRequest {
     pub destination_did: String,
+    /// Protocol namespace the payload is routed to (the extension `Envelope` namespace).
+    pub namespace: String,
+    /// Payload bytes carried as a UTF-8 string.
     pub data: String,
 }
 

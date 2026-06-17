@@ -11,8 +11,6 @@ use rings_core::storage::MemStorage;
 use rings_core::swarm::callback::SharedSwarmCallback;
 use rings_rpc::protos::rings_node_handler::InternalRpcHandler;
 
-use crate::backend::types::BackendMessage;
-use crate::backend::types::MessageHandler;
 use crate::backend::Backend;
 use crate::error::Error;
 use crate::error::Result;
@@ -309,22 +307,11 @@ impl Provider {
         Self::new_provider_with_storage_internal(config, vnode_storage, measure_storage).await
     }
 
-    /// Set callback for swarm, it can be T, or (T0, T1, T2)
-    #[cfg(not(feature = "browser"))]
-    pub fn set_backend_callback<T>(&self, callback: T) -> Result<()>
-    where T: MessageHandler<BackendMessage> + Send + Sync + Sized + 'static {
-        let backend = Backend::new(Arc::new(self.clone()), Box::new(callback));
-        self.processor
-            .swarm
-            .set_callback(Arc::new(backend))
-            .map_err(Error::InternalError)
-    }
-
-    /// Set callback for swarm, it can be T, or (T0, T1, T2)
-    #[cfg(feature = "browser")]
-    pub fn set_backend_callback<T>(&self, callback: T) -> Result<()>
-    where T: MessageHandler<BackendMessage> + Sized + 'static {
-        let backend = Backend::new(Arc::new(self.clone()), Box::new(callback));
+    /// Install the extension [`Backend`] as the swarm's inbound callback, so inbound
+    /// custom messages are decoded as [`Envelope`](crate::backend::ext::Envelope)s and
+    /// routed to their namespace's protocol. Call once after registering protocols.
+    pub fn set_backend(&self) -> Result<()> {
+        let backend = Backend::new(Arc::new(self.clone()));
         self.processor
             .swarm
             .set_callback(Arc::new(backend))
@@ -333,7 +320,7 @@ impl Provider {
 
     /// Set callback for swarm.
     #[deprecated(
-        note = "set_swarm_callback will be removed in next version, plz use set_backend_callback instead"
+        note = "set_swarm_callback will be removed in next version, plz use set_backend instead"
     )]
     pub fn set_swarm_callback(&self, callback: SharedSwarmCallback) -> Result<()> {
         self.processor

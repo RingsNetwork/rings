@@ -56,7 +56,6 @@ use crate::backend::ext::Envelope;
 use crate::backend::transport::Frame;
 use crate::backend::transport::SessionId;
 use crate::backend::transport::TransportKind;
-use crate::backend::types::BackendMessage;
 use crate::error::Error;
 use crate::error::Result;
 use crate::processor::Processor;
@@ -548,15 +547,11 @@ async fn open(
     .await
 }
 
-/// Send a [`Frame`] to `peer` under `namespace` over the overlay.
-///
-/// Transitional: wrapped in `BackendMessage::Envelope` so the current receiver (which
-/// decodes `BackendMessage` first) can route it.
+/// Send a [`Frame`] to `peer` under `namespace` over the overlay (as a bare
+/// [`Envelope`]).
 async fn send_frame(processor: &Processor, peer: Did, namespace: &str, frame: Frame) -> Result<()> {
     let payload = bincode::serialize(&frame).map_err(|_| Error::EncodeError)?;
     let envelope = Envelope::new(namespace.to_string(), Bytes::from(payload));
-    processor
-        .send_backend_message(peer, BackendMessage::Envelope(envelope))
-        .await?;
+    processor.send_envelope(peer, &envelope).await?;
     Ok(())
 }

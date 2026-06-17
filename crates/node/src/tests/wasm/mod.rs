@@ -50,7 +50,9 @@ pub async fn prepare_processor() -> Processor {
 
 pub async fn new_provider() -> Provider {
     let processor = prepare_processor().await;
-    Provider::from_processor(Arc::new(processor))
+    let provider = Provider::from_processor(Arc::new(processor));
+    provider.set_backend().unwrap();
+    provider
 }
 
 pub async fn get_peers(provider: &Provider) -> Vec<PeerInfo> {

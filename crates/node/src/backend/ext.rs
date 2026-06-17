@@ -46,7 +46,6 @@ use serde::Serialize;
 
 use crate::backend::transport::SessionId;
 use crate::backend::transport::TransportKind;
-use crate::backend::types::BackendMessage;
 use crate::error::Error;
 use crate::error::Result;
 use crate::processor::Processor;
@@ -407,12 +406,8 @@ impl Interpreter {
                     namespace,
                     payload,
                 } => {
-                    // Transitional: wrap in `BackendMessage::Envelope` so the current
-                    // receiver (which decodes `BackendMessage` first) can route it.
-                    // Becomes a bare `Envelope` on the wire once `BackendMessage` is
-                    // removed.
-                    let message = BackendMessage::Envelope(Envelope::new(namespace, payload));
-                    self.processor.send_backend_message(to, message).await?;
+                    let envelope = Envelope::new(namespace, payload);
+                    self.processor.send_envelope(to, &envelope).await?;
                 }
                 Effect::Connect {
                     session,

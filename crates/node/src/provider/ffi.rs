@@ -46,8 +46,6 @@ use tokio::runtime::Runtime;
 
 use super::Provider;
 use super::Signer;
-use crate::backend::ffi::FFIBackendBehaviour;
-use crate::backend::ffi::FFIBackendBehaviourWithRuntime;
 use crate::backend::Backend;
 use crate::error::Error;
 use crate::error::Result;
@@ -215,7 +213,13 @@ pub extern "C" fn request(
     }
 }
 
-/// Craft a new Provider with signer and callback ptr
+/// Craft a new Provider with signer.
+///
+/// Installs the extension [`Backend`] so inbound custom messages are decoded as
+/// namespaced envelopes and routed to the protocol registry. (The old per-variant C
+/// message callback is gone with `BackendMessage`; an FFI protocol-registration path
+/// would replace it.)
+///
 /// # Safety
 ///
 /// * This function cast CStr into Str
@@ -227,7 +231,6 @@ pub unsafe extern "C" fn new_provider_with_callback(
     account: *const c_char,
     account_type: *const c_char,
     signer: extern "C" fn(*const c_char, *mut c_char) -> (),
-    callback_ptr: *const FFIBackendBehaviour,
 ) -> ProviderPtr {
     fn wrapped_signer(
         signer: extern "C" fn(*const c_char, *mut c_char) -> (),
@@ -272,9 +275,7 @@ pub unsafe extern "C" fn new_provider_with_callback(
     };
     let runtime = Arc::new(Runtime::new().expect("Failed to create runtime"));
     let provider = Arc::new(provider.clone());
-    let callback: &FFIBackendBehaviour = unsafe { &*callback_ptr };
-    let callback_with_rt = FFIBackendBehaviourWithRuntime::new(callback.clone(), runtime.clone());
-    let backend = Backend::new(provider.clone(), Box::new(callback_with_rt.clone()));
+    let backend = Backend::new(provider.clone());
 
     provider
         .set_swarm_callback_internal(Arc::new(backend))

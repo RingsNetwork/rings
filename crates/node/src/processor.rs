@@ -20,7 +20,6 @@ use rings_rpc::protos::rings_node::*;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::backend::types::BackendMessage;
 use crate::consts::DATA_REDUNDANT;
 use crate::error::Error;
 use crate::error::Result;
@@ -304,13 +303,14 @@ impl Processor {
             .map_err(Error::SendMessage)
     }
 
-    /// Send custom message to a did.
-    pub async fn send_backend_message(
+    /// Send a namespaced [`Envelope`] to a did over the P2P transport (the wire codec
+    /// of the extension layer). `send_envelope : (Did, Envelope) → IO TxId`.
+    pub async fn send_envelope(
         &self,
         destination: Did,
-        backend_msg: BackendMessage,
+        envelope: &crate::backend::ext::Envelope,
     ) -> Result<uuid::Uuid> {
-        let msg_bytes = bincode::serialize(&backend_msg).map_err(|_| Error::EncodeError)?;
+        let msg_bytes = envelope.encode()?;
         self.send_message(destination, &msg_bytes).await
     }
 
