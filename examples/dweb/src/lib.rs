@@ -86,7 +86,12 @@ async fn build_node(storage_name: &str) -> Arc<Provider> {
 /// The pure-shaped `dweb` handler `(ctx, event) -> { state, effects }`: a `req` is
 /// answered with one `Send` effect carrying the hosted page; a `res` is pushed to the
 /// UI. This is application code (the protocol engine stays untouched).
-fn dweb_handle(ctx: &JsValue, event: &JsValue, site: &Site, on_response: &Callback<(String, String)>) -> JsValue {
+fn dweb_handle(
+    ctx: &JsValue,
+    event: &JsValue,
+    site: &Site,
+    on_response: &Callback<(String, String)>,
+) -> JsValue {
     let result = Object::new();
     let state = Reflect::get(ctx, &"state".into()).unwrap_or(JsValue::NULL);
     let _ = Reflect::set(&result, &"state".into(), &state);
@@ -142,10 +147,14 @@ fn register_dweb(provider: &Arc<Provider>, site: Site, on_response: Callback<(St
 /// Send a `req` for `path` to `peer` over the `dweb` namespace.
 async fn fetch_path(provider: Arc<Provider>, peer: String, path: String) -> Result<(), String> {
     let bytes = serde_json::to_vec(&DwebMsg::Req { path }).map_err(|e| e.to_string())?;
-    JsFuture::from(provider.send_message(peer, "dweb".to_string(), Uint8Array::from(bytes.as_slice())))
-        .await
-        .map(|_| ())
-        .map_err(|e| format!("send failed: {e:?}"))
+    JsFuture::from(provider.send_message(
+        peer,
+        "dweb".to_string(),
+        Uint8Array::from(bytes.as_slice()),
+    ))
+    .await
+    .map(|_| ())
+    .map_err(|e| format!("send failed: {e:?}"))
 }
 
 fn input_value(e: &InputEvent) -> String {
@@ -175,7 +184,9 @@ fn app() -> Html {
                 let mut site = HashMap::new();
                 site.insert(
                     "/".to_string(),
-                    format!("<h1>Hello from {my_did}</h1><p>Served peer-to-peer over rings dweb.</p>"),
+                    format!(
+                        "<h1>Hello from {my_did}</h1><p>Served peer-to-peer over rings dweb.</p>"
+                    ),
                 );
                 let site: Site = Rc::new(RefCell::new(site));
 
@@ -228,8 +239,6 @@ fn app() -> Html {
         })
     };
 
-    let page_html = Html::from_html_unchecked(AttrValue::from((*page).clone()));
-
     html! {
         <main style="font-family: system-ui; max-width: 720px; margin: 2rem auto;">
             <h1>{ "Rings dweb" }</h1>
@@ -243,7 +252,16 @@ fn app() -> Html {
             </fieldset>
             <p><b>{ "status: " }</b>{ (*status).clone() }</p>
             <hr/>
-            <div>{ page_html }</div>
+            // Peer-controlled HTML is rendered inside a maximally-constrained iframe:
+            // `srcdoc` carries the body and the empty `sandbox` attribute applies all
+            // restrictions (scripts disabled, opaque origin, no forms/popups), so a hostile
+            // page cannot run JS or reach the app's DOM/origin. This is the security model.
+            <iframe
+                title="peer page"
+                srcdoc={(*page).clone()}
+                sandbox=""
+                style="width: 100%; min-height: 320px; border: 1px solid #ccc;"
+            />
         </main>
     }
 }
@@ -277,7 +295,12 @@ mod tests {
         let event = Object::new();
         Reflect::set(&event, &"from".into(), &JsValue::from_str(from)).unwrap();
         let bytes = serde_json::to_vec(msg).unwrap();
-        Reflect::set(&event, &"payload".into(), &Uint8Array::from(bytes.as_slice())).unwrap();
+        Reflect::set(
+            &event,
+            &"payload".into(),
+            &Uint8Array::from(bytes.as_slice()),
+        )
+        .unwrap();
         event.into()
     }
 
@@ -306,11 +329,17 @@ mod tests {
         assert_eq!(effects.length(), 1, "a request yields exactly one Send");
         let effect = effects.get(0);
         assert_eq!(
-            Reflect::get(&effect, &"to".into()).unwrap().as_string().unwrap(),
+            Reflect::get(&effect, &"to".into())
+                .unwrap()
+                .as_string()
+                .unwrap(),
             "0xabc"
         );
         assert_eq!(
-            Reflect::get(&effect, &"namespace".into()).unwrap().as_string().unwrap(),
+            Reflect::get(&effect, &"namespace".into())
+                .unwrap()
+                .as_string()
+                .unwrap(),
             "dweb"
         );
         match effect_response(&effect) {
@@ -327,7 +356,9 @@ mod tests {
         let site: Site = Rc::new(RefCell::new(HashMap::new()));
         let result = dweb_handle(
             &ctx_null(),
-            &event("0xabc", &DwebMsg::Req { path: "/missing".into() }),
+            &event("0xabc", &DwebMsg::Req {
+                path: "/missing".into(),
+            }),
             &site,
             &Callback::from(|_| {}),
         );
@@ -384,8 +415,14 @@ mod tests {
 
     /// Link two in-page providers with the offer/answer handshake (no signaling server).
     async fn connect(a: &Arc<Provider>, b: &Arc<Provider>) {
-        let offer = get_str(&rpc(a, "createOffer", obj(&[("did", &b.address())])).await, "offer");
-        let answer = get_str(&rpc(b, "answerOffer", obj(&[("offer", &offer)])).await, "answer");
+        let offer = get_str(
+            &rpc(a, "createOffer", obj(&[("did", &b.address())])).await,
+            "offer",
+        );
+        let answer = get_str(
+            &rpc(b, "answerOffer", obj(&[("offer", &offer)])).await,
+            "answer",
+        );
         let _ = rpc(a, "acceptAnswer", obj(&[("answer", &answer)])).await;
     }
 

@@ -584,9 +584,10 @@ curl -X POST \
 ```
 
 
-### sendCustomMessage
+### sendBackendMessage
 
-Send custom message to a peer
+Send a message to a peer, routed to the peer's protocol registered under `namespace`
+(the extension `Envelope` model). This replaces the removed `sendCustomMessage`.
 
 #### REQUEST
 
@@ -597,23 +598,30 @@ Send custom message to a peer
 `Content-Type: application/json`
 `X-SIGNATURE: YOUR-SIGNATURE`
 
+#### PARAMS
+
+* `destination_did` - did of the remote peer
+* `namespace` - protocol namespace the payload is routed to (the `Envelope` namespace)
+* `data` - payload bytes, **base64-encoded** (the payload is binary, so base64 keeps it
+  binary-safe over the JSON wire)
+
 #### EXAMPLE
 
 ```
 ## Replace YOUR-SIGNATURE with your signature
 ## Replace REMOTE-PEER-DID with did of remote peer
-## Replace MESSAGE-TYPE with type of your message
-## Replace DATA with message payload after base64
+## Replace NAMESPACE with the target protocol namespace
+## Replace DATA with the base64-encoded payload
 curl -X POST \
 -H "Content-Type: application/json" \
 -H "X-SIGNATURE: YOUR-SIGNATURE" \
---data '{"jsonrpc": "2.0", "id": 1, "method": "sendCustomMessage", "params": ["REMOTE-PEER-DID", "MESSAGE-TYPE", "DATA"]}' \
+--data '{"jsonrpc": "2.0", "id": 1, "method": "sendBackendMessage", "params": {"destination_did": "REMOTE-PEER-DID", "namespace": "NAMESPACE", "data": "DATA"}}' \
 "http://127.0.0.1:50000"
 ```
 
 #### RESPONSE
 
-* `tx_id` - transaction id
+Empty result on success.
 
 #### EXAMPLE
 
@@ -621,9 +629,7 @@ curl -X POST \
 {
     "jsonrpc": "2.0",
     "id": 1,
-    "result": {
-         "tx_id": "abcd1234"
-    }
+    "result": {}
 }
 ```
 
@@ -788,51 +794,5 @@ curl -X POST \
         "did1",
         "did2",
     ]
-}
-```
-
-
-### pollMessage
-
-Use this method, you can pull messages received by this node, to provide your custom service,
-But we suggest use `websocket` endpoint realtime get messages.
-
-#### REQUEST
-
-`POST http://127.0.0.1:50000`
-
-#### HEADERS
-
-`Content-Type: application/json`
-`X-SIGNATURE: YOUR-SIGNATURE`
-
-#### EXAMPLE
-
-```
-## Replace YOUR-SIGNATURE with your signature
-## Replace WAIT with a bool value, true will block the request, until new message receive.
-curl -X POST \
--H "Content-Type: application/json" \
--H "X-SIGNATURE: YOUR-SIGNATURE" \
---data '{"jsonrpc": "2.0", "id": 1, "method": "pollMessage", "params": ["WAIT"]}' \
-"http://127.0.0.1:50000"
-```
-
-#### RESPONSE
-
-* message - custom message received
-
-#### EXAMPLE
-
-```json
-{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "result": {
-      "message": {
-          message_type: 1,
-          data: "base64 text"
-      }
-    }
 }
 ```

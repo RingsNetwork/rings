@@ -95,7 +95,9 @@ pub struct SendBackendMessageRequest {
     pub destination_did: String,
     /// Protocol namespace the payload is routed to (the extension `Envelope` namespace).
     pub namespace: String,
-    /// Payload bytes carried as a UTF-8 string.
+    /// Payload bytes, **base64-encoded** (standard alphabet). The `Envelope` payload is
+    /// binary (`Bytes`), so the RPC boundary base64-encodes it to stay binary-safe over the
+    /// JSON wire — do not pass raw UTF-8 here.
     pub data: String,
 }
 

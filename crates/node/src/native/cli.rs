@@ -141,7 +141,8 @@ impl Client {
             .send_backend_message(&SendBackendMessageRequest {
                 destination_did: did.to_string(),
                 namespace: namespace.to_string(),
-                data: data.to_string(),
+                // The wire field is base64 (binary-safe); encode the raw input bytes.
+                data: base64::encode(data.as_bytes()),
             })
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;

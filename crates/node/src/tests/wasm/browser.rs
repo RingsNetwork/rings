@@ -63,7 +63,8 @@ async fn test_send_backend_message() {
     let req = SendBackendMessageRequest {
         destination_did: provider2.address(),
         namespace: "text".to_string(),
-        data: "test".to_string(),
+        // `data` is base64-encoded on the wire (binary-safe).
+        data: base64::encode(b"test"),
     };
 
     JsFuture::from(provider1.request(

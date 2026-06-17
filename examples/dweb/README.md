@@ -19,6 +19,14 @@ and a *browser*, exchanging pages peer-to-peer over rings with no central server
 The rings wiring lives in `src/lib.rs` (`build_node`, `dweb_handle`, `register_dweb`,
 `fetch_path`); `src/main.rs` just mounts the Yew app.
 
+## Security model
+
+A fetched page is **peer-controlled, untrusted HTML**. It is never injected into the app's
+DOM; instead it is rendered inside an `<iframe srcdoc=… sandbox="">`. The empty `sandbox`
+attribute applies *all* restrictions — scripts are disabled, the frame has an opaque origin,
+and forms/popups/top-navigation are blocked — so a hostile page cannot run JavaScript, read
+cookies/storage, or reach the host app's origin or DOM.
+
 ## Run
 
 ```sh
@@ -34,7 +42,7 @@ Runs in a real **headless browser** via the wasm-bindgen-test toolkit; `webdrive
 supplies the Chrome launch flags:
 
 ```sh
-wasm-pack test --headless --chrome   # 3 tests
+wasm-pack test --headless --chrome   # 4 tests
 ```
 
 Requires a `chromedriver` whose version matches your installed Chrome (a mismatch makes
