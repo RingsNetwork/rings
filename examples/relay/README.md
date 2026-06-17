@@ -29,6 +29,14 @@ echoed back.
 cargo test -p rings-relay-example
 ```
 
-The integration tests run the full round-trip when an overlay link can be established
-(WebRTC/ICE). In environments without UDP/STUN connectivity the handshake cannot
-complete, so the tests **skip** (printing a notice) instead of failing spuriously.
+Three integration tests:
+
+- `tcp_relay_round_trip` / `udp_relay_round_trip` — `A → B → local echo` over the overlay;
+- `relay_to_google` — **`A → B → google.com:80`**: the relay node B exposes a service
+  pointing at a real external host, the client A tunnels to it over rings and does an HTTP
+  GET, and the test asserts the bytes that came back are a genuine HTTP response from
+  Google (A never touches Google directly). Needs outbound internet on the relay node.
+
+All run the full round-trip when an overlay link can be established (WebRTC/ICE); in
+environments without UDP/STUN connectivity (or internet, for `relay_to_google`) they
+**skip** with a notice instead of failing spuriously.

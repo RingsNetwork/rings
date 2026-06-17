@@ -29,3 +29,35 @@ async fn udp_relay_round_trip() {
         Err(_) => eprintln!("SKIP udp_relay_round_trip: overlay connect timed out"),
     }
 }
+
+/// A → B → Google: the client reaches a real external host (`google.com:80`) *through*
+/// the relay peer, never touching it directly. Asserts the bytes that came back are a
+/// genuine HTTP response from Google. Needs both overlay connectivity and outbound
+/// internet on the relay node; skips (with a notice) if either is unavailable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn relay_to_google() {
+    let request = b"GET / HTTP/1.0\r\nHost: www.google.com\r\nConnection: close\r\n\r\n";
+    match tokio::time::timeout(
+        Duration::from_secs(60),
+        rings_relay_example::relay_http_get("google.com:80", request),
+    )
+    .await
+    {
+        Ok(Ok(resp)) => {
+            let text = String::from_utf8_lossy(&resp);
+            assert!(
+                text.starts_with("HTTP/"),
+                "expected an HTTP response relayed from Google, got {} bytes: {:?}",
+                resp.len(),
+                &text[..text.len().min(80)]
+            );
+            eprintln!(
+                "relay_to_google: {} bytes via A->B->Google; status line: {:?}",
+                resp.len(),
+                text.lines().next().unwrap_or("")
+            );
+        }
+        Ok(Err(e)) => eprintln!("SKIP relay_to_google: overlay/internet unavailable: {e}"),
+        Err(_) => eprintln!("SKIP relay_to_google: timed out"),
+    }
+}

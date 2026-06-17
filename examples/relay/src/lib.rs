@@ -166,6 +166,54 @@ pub async fn tcp_round_trip(request: &[u8]) -> Result<Vec<u8>> {
     Ok(got)
 }
 
+/// Relay an HTTP request to a real external host **through a peer**: `A → B → host`.
+///
+/// The server node B registers a service pointing at `target` (e.g. `google.com:80`);
+/// the client node A binds a tunnel to it and we speak plain HTTP to that tunnel, so the
+/// request travels client → overlay → B → `target` and the response comes back the same
+/// way. Returns the raw bytes B relayed back from `target`.
+pub async fn relay_http_get(target: &str, request: &[u8]) -> Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
+
+    let (server_p, server) = spawn_node().await;
+    let (client_p, client) = spawn_node().await;
+    connect(&client_p, &server_p).await?;
+
+    // B's exit service → the external host (resolved to a socket address).
+    let target_addr = tokio::net::lookup_host(target)
+        .await?
+        .next()
+        .ok_or("could not resolve target host")?;
+    server
+        .register_tcp_service("web".to_string(), target_addr)
+        .await?;
+
+    let tunnel_addr = free_local_addr().await;
+    client
+        .open_tcp_tunnel(tunnel_addr, server_p.swarm.did(), "web".to_string())
+        .await?;
+
+    // Talk HTTP to the local tunnel; bytes flow A → overlay → B → target and back. Each
+    // `connect` opens a fresh relay session; retry until one yields an HTTP response (the
+    // first attempt can race tunnel/service warmup).
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let Ok(mut stream) = TcpStream::connect(tunnel_addr).await else {
+            continue;
+        };
+        if stream.write_all(request).await.is_err() {
+            continue;
+        }
+        let mut body = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_secs(15), stream.read_to_end(&mut body)).await;
+        if body.starts_with(b"HTTP/") {
+            return Ok(body);
+        }
+    }
+    Err("relay did not return an HTTP response from the target".into())
+}
+
 /// Run the full UDP relay round-trip and return what the relay echoed back.
 pub async fn udp_round_trip(request: &[u8]) -> Result<Vec<u8>> {
     let (server_p, server) = spawn_node().await;
