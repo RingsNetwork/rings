@@ -181,6 +181,9 @@ fn step_frame(
         Frame::Data { session, bytes } => {
             Transition::with(state.clone(), vec![Effect::Write { session, bytes }])
         }
+        Frame::Shutdown { session } => {
+            Transition::with(state.clone(), vec![Effect::Shutdown { session }])
+        }
         Frame::Close { session } => {
             let mut next = state.clone();
             next.sessions.remove(&session);

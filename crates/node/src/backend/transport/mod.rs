@@ -105,7 +105,14 @@ pub enum Frame {
         /// Payload bytes.
         bytes: Bytes,
     },
-    /// Close a session/flow.
+    /// Half-close: the sender has no more `Data` this direction (a TCP FIN). The
+    /// receiver shuts down its local write side but keeps the reverse direction open.
+    /// Ignored by UDP (datagram flows have no half-close).
+    Shutdown {
+        /// Session being half-closed.
+        session: SessionId,
+    },
+    /// Close a session/flow (full teardown, both directions).
     Close {
         /// Session to close.
         session: SessionId,

@@ -141,7 +141,13 @@ pub enum Effect {
         /// Bytes to write locally.
         bytes: Bytes,
     },
-    /// Close a relay session.
+    /// Half-close a relay session: shut down its local write side (the peer sent a
+    /// FIN), keeping the reverse direction open. No-op for UDP.
+    Shutdown {
+        /// Session to half-close.
+        session: SessionId,
+    },
+    /// Close a relay session (full teardown).
     Close {
         /// Session to close.
         session: SessionId,
@@ -307,6 +313,7 @@ impl Interpreter {
                 } => {
                     #[cfg(feature = "node")]
                     self.transport
+                        .clone()
                         .connect(self.processor.clone(), session, peer, namespace, addr, kind)
                         .await;
                     #[cfg(feature = "browser")]
@@ -322,6 +329,15 @@ impl Interpreter {
                     {
                         let _ = (session, bytes);
                         tracing::warn!("transport Write is unsupported on browser");
+                    }
+                }
+                Effect::Shutdown { session } => {
+                    #[cfg(feature = "node")]
+                    self.transport.shutdown(session).await;
+                    #[cfg(feature = "browser")]
+                    {
+                        let _ = session;
+                        tracing::warn!("transport Shutdown is unsupported on browser");
                     }
                 }
                 Effect::Close { session } => {

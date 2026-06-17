@@ -2,27 +2,36 @@
 //! Native transport-relay engine — the imperative shell that owns live sockets.
 //!
 //! The pure half of the relay is each transport's `Protocol::step`; this is the
-//! side-effecting half. It keys live OS resources by [`SessionId`] in a shared table
-//! and is driven only through the transport [`Effect`](crate::backend::ext::Effect)s
-//! (`Connect` / `Write` / `Close` / `Listen`). Local reads are sent back to the peer as
-//! [`Frame`]s over the overlay — the event trace flowing outward.
+//! side-effecting half. It keys live OS resources by [`SessionId`] and is driven only
+//! through the transport [`Effect`](crate::backend::ext::Effect)s
+//! (`Connect`/`Listen`/`Write`/`Shutdown`/`Close`). Local reads flow back to the peer
+//! as [`Frame`]s (the event trace flowing outward).
 //!
-//! One [`SessionHandle`] abstraction (an mpsc write side + a cancel token) serves both
-//! [`TransportKind`]s and both relay directions; only how the local socket is obtained
-//! and read/written differs:
+//! ## Lifecycle, half-close and abrupt close
+//!
+//! A TCP session is full-duplex; each direction ends independently:
 //!
 //! ```text
-//!   kind  direction  open                         local→peer        peer→local
-//!   TCP   Connect    dial TcpStream               read  → Data      Write → write
-//!   TCP   Listen     accept TcpStream             read  → Data      Write → write
-//!   UDP   Connect    bind+connect UdpSocket       recv  → Data      Write → send
-//!   UDP   Listen     bind UdpSocket, demux by src recvfrom→Data     Write → send_to(src)
+//!   local read = Ok(0)   (clean EOF)  ─▶ Frame::Shutdown (FIN); reverse stays open
+//!   peer Frame::Shutdown               ─▶ shutdown local write; forward stays open
+//!   both directions done               ─▶ Frame::Close; drop session
+//!
+//!   local read/write error, or overlay send failure (abrupt)
+//!                                      ─▶ cancel the whole session ─▶ Frame::Close;
+//!                                         drop session  (RST-like)
+//!   peer Frame::Close                  ─▶ cancel + drop session
 //! ```
 //!
-//! Limits (v1): a relayed datagram must fit one overlay message ([`UDP_BUF`]); larger
-//! datagrams are truncated. UDP flows are not yet idle-GC'd. Tunnelling UDP over the
-//! reliable overlay yields "reliable-tunnelled UDP" — it does not preserve native
-//! loss/reorder semantics (unsuitable for e.g. QUIC).
+//! So a half-closing peer (request fully sent, awaiting response) does not deadlock,
+//! and an abrupt drop (RST / dead overlay) tears the whole session down on both ends
+//! rather than leaking it. UDP flows have no half-close; `Shutdown` is ignored and
+//! errors close the flow.
+//!
+//! ## v1 limits
+//!
+//! A relayed datagram must fit one overlay message ([`UDP_BUF`]; larger is truncated);
+//! UDP flows are not yet idle-GC'd; reliable-tunnelled UDP does not preserve native
+//! loss/reorder semantics.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -59,15 +68,21 @@ const TCP_BUF: usize = 30_000;
 /// Local UDP datagram buffer (one datagram per frame; larger is truncated, v1).
 const UDP_BUF: usize = 65_536;
 
-/// A live relayed session: the write side of the local socket plus a cancel token.
+/// Something to deliver to a session's local socket (peer → local direction).
+enum Outbound {
+    /// Bytes to write/send locally.
+    Data(Bytes),
+    /// The peer half-closed (FIN): shut the local write side.
+    Shutdown,
+}
+
+/// A live relayed session: the peer→local channel plus a cancel token.
 struct SessionHandle {
-    write_tx: mpsc::Sender<Bytes>,
+    outbound: mpsc::Sender<Outbound>,
     cancel: CancellationToken,
 }
 
-/// Shared table of live sessions plus the session-id allocator. Held by the provider
-/// and shared into each interpreter, so `Connect`/`Listen` (which open sessions) and a
-/// later `Write`/`Close` (which address them) see the same resources.
+/// Shared table of live sessions plus the session-id allocator.
 #[derive(Default)]
 pub struct TransportSessions {
     map: Mutex<HashMap<SessionId, SessionHandle>>,
@@ -85,11 +100,12 @@ impl TransportSessions {
         SessionId(self.counter.fetch_add(1, Ordering::Relaxed))
     }
 
-    /// Server side. Open a local backend for `session` (dial TCP, or bind+connect a
-    /// UDP socket) and relay to `peer` under `namespace`. On failure a `Frame::Close`
-    /// is sent.
+    /// Server side. Open a local backend for `session` and relay to `peer` under
+    /// `namespace`. The session handle is registered *before* the (async) dial, so
+    /// `Data` arriving during connect is buffered rather than dropped. On failure a
+    /// `Frame::Close` is sent and the session removed.
     pub async fn connect(
-        &self,
+        self: Arc<Self>,
         processor: Arc<Processor>,
         session: SessionId,
         peer: Did,
@@ -97,29 +113,50 @@ impl TransportSessions {
         addr: SocketAddr,
         kind: TransportKind,
     ) {
-        match kind {
-            TransportKind::Tcp => match timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await {
-                Ok(Ok(stream)) => self.spawn_tcp(processor, session, peer, namespace, stream),
-                _ => {
-                    self.refuse(processor.as_ref(), session, peer, namespace.as_str())
+        let (outbound_rx, cancel) = self.register(session);
+        let this = self.clone();
+        tokio::spawn(async move {
+            match kind {
+                TransportKind::Tcp => {
+                    match timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await {
+                        Ok(Ok(stream)) => {
+                            relay_tcp(
+                                this,
+                                processor,
+                                session,
+                                peer,
+                                namespace,
+                                stream,
+                                outbound_rx,
+                                cancel,
+                            )
+                            .await
+                        }
+                        _ => this.refuse(processor, session, peer, namespace).await,
+                    }
+                }
+                TransportKind::Udp => match bind_connected_udp(addr).await {
+                    Some(socket) => {
+                        relay_udp_connected(
+                            this,
+                            processor,
+                            session,
+                            peer,
+                            namespace,
+                            socket,
+                            outbound_rx,
+                            cancel,
+                        )
                         .await
-                }
-            },
-            TransportKind::Udp => match bind_connected_udp(addr).await {
-                Some(socket) => {
-                    self.spawn_udp_connected(processor, session, peer, namespace, socket)
-                }
-                None => {
-                    self.refuse(processor.as_ref(), session, peer, namespace.as_str())
-                        .await
-                }
-            },
-        }
+                    }
+                    None => this.refuse(processor, session, peer, namespace).await,
+                },
+            }
+        });
     }
 
-    /// Client side. Bind a local listener; for each accepted TCP connection / new UDP
-    /// source assign a session, send `Frame::Open{session, service}` to `peer`, and
-    /// relay it under `namespace`.
+    /// Client side. Bind a local listener; per accepted TCP connection / new UDP
+    /// source assign a session, send `Frame::Open{session, service}`, and relay it.
     pub async fn listen(
         self: Arc<Self>,
         processor: Arc<Processor>,
@@ -141,20 +178,21 @@ impl TransportSessions {
         }
     }
 
-    /// Write peer-originated bytes to a session's local socket. Unknown sessions are
-    /// dropped silently (the session may have already closed).
+    /// Deliver peer bytes to a session's local socket. Unknown sessions are dropped.
     pub async fn write(&self, session: SessionId, bytes: Bytes) {
-        let tx = self
-            .map
-            .lock()
-            .ok()
-            .and_then(|map| map.get(&session).map(|handle| handle.write_tx.clone()));
-        if let Some(tx) = tx {
-            let _ = tx.send(bytes).await;
+        if let Some(tx) = self.sender(session) {
+            let _ = tx.send(Outbound::Data(bytes)).await;
         }
     }
 
-    /// Close and drop a session.
+    /// Half-close a session's local write side (peer sent FIN).
+    pub async fn shutdown(&self, session: SessionId) {
+        if let Some(tx) = self.sender(session) {
+            let _ = tx.send(Outbound::Shutdown).await;
+        }
+    }
+
+    /// Fully close and drop a session.
     pub fn close(&self, session: SessionId) {
         if let Ok(mut map) = self.map.lock() {
             if let Some(handle) = map.remove(&session) {
@@ -163,7 +201,7 @@ impl TransportSessions {
         }
     }
 
-    // ── TCP ────────────────────────────────────────────────────────────────────
+    // ── TCP listen ─────────────────────────────────────────────────────────────
 
     async fn listen_tcp(
         self: Arc<Self>,
@@ -185,20 +223,35 @@ impl TransportSessions {
                 match listener.accept().await {
                     Ok((stream, _)) => {
                         let session = self.next_session();
-                        if self
-                            .open(
-                                processor.as_ref(),
-                                session,
-                                peer,
-                                namespace.as_str(),
-                                service.as_str(),
-                            )
-                            .await
-                            .is_err()
+                        if open(
+                            processor.as_ref(),
+                            session,
+                            peer,
+                            namespace.as_str(),
+                            service.as_str(),
+                        )
+                        .await
+                        .is_err()
                         {
                             continue;
                         }
-                        self.spawn_tcp(processor.clone(), session, peer, namespace.clone(), stream);
+                        let (outbound_rx, cancel) = self.register(session);
+                        let this = self.clone();
+                        let processor = processor.clone();
+                        let namespace = namespace.clone();
+                        tokio::spawn(async move {
+                            relay_tcp(
+                                this,
+                                processor,
+                                session,
+                                peer,
+                                namespace,
+                                stream,
+                                outbound_rx,
+                                cancel,
+                            )
+                            .await
+                        });
                     }
                     Err(e) => {
                         tracing::error!("transport accept on {local_addr} failed: {e:?}");
@@ -209,57 +262,7 @@ impl TransportSessions {
         });
     }
 
-    /// Register a local TCP `stream` as `session` and spawn its bidirectional relay.
-    fn spawn_tcp(
-        &self,
-        processor: Arc<Processor>,
-        session: SessionId,
-        peer: Did,
-        namespace: String,
-        stream: TcpStream,
-    ) {
-        let (mut write_rx, _tx, cancel) = self.register(session);
-        tokio::spawn(async move {
-            let (mut local_read, mut local_write) = stream.into_split();
-
-            let read_to_peer = async {
-                let mut buf = vec![0u8; TCP_BUF];
-                loop {
-                    match local_read.read(buf.as_mut_slice()).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            let bytes = Bytes::copy_from_slice(buf.get(..n).unwrap_or_default());
-                            let frame = Frame::Data { session, bytes };
-                            if send_frame(processor.as_ref(), peer, namespace.as_str(), frame)
-                                .await
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
-                    }
-                }
-            };
-            let peer_to_local = async {
-                while let Some(bytes) = write_rx.recv().await {
-                    if local_write.write_all(bytes.as_ref()).await.is_err() {
-                        break;
-                    }
-                }
-            };
-            tokio::select! {
-                _ = read_to_peer => {}
-                _ = peer_to_local => {}
-                _ = cancel.cancelled() => {}
-            }
-            let _ = send_frame(processor.as_ref(), peer, namespace.as_str(), Frame::Close {
-                session,
-            })
-            .await;
-        });
-    }
-
-    // ── UDP ────────────────────────────────────────────────────────────────────
+    // ── UDP listen ─────────────────────────────────────────────────────────────
 
     async fn listen_udp(
         self: Arc<Self>,
@@ -287,21 +290,21 @@ impl TransportSessions {
                             Some(session) => *session,
                             None => {
                                 let session = self.next_session();
-                                flows.insert(src, session);
-                                if self
-                                    .open(
-                                        processor.as_ref(),
-                                        session,
-                                        peer,
-                                        namespace.as_str(),
-                                        service.as_str(),
-                                    )
-                                    .await
-                                    .is_err()
+                                if open(
+                                    processor.as_ref(),
+                                    session,
+                                    peer,
+                                    namespace.as_str(),
+                                    service.as_str(),
+                                )
+                                .await
+                                .is_err()
                                 {
                                     continue;
                                 }
-                                self.spawn_udp_sendto(session, socket.clone(), src);
+                                flows.insert(src, session);
+                                let (outbound_rx, cancel) = self.register(session);
+                                spawn_udp_sendto(socket.clone(), src, outbound_rx, cancel);
                                 session
                             }
                         };
@@ -318,90 +321,25 @@ impl TransportSessions {
         });
     }
 
-    /// Server side UDP: a per-flow socket connected to the backend. Local recv → Data;
-    /// peer Write → send.
-    fn spawn_udp_connected(
-        &self,
-        processor: Arc<Processor>,
-        session: SessionId,
-        peer: Did,
-        namespace: String,
-        socket: UdpSocket,
-    ) {
-        let (mut write_rx, _tx, cancel) = self.register(session);
-        tokio::spawn(async move {
-            let mut buf = vec![0u8; UDP_BUF];
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => break,
-                    received = socket.recv(buf.as_mut_slice()) => match received {
-                        Ok(n) => {
-                            let bytes = Bytes::copy_from_slice(buf.get(..n).unwrap_or_default());
-                            let frame = Frame::Data { session, bytes };
-                            if send_frame(processor.as_ref(), peer, namespace.as_str(), frame)
-                                .await
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
-                        Err(_) => break,
-                    },
-                    outbound = write_rx.recv() => match outbound {
-                        Some(bytes) => {
-                            let _ = socket.send(bytes.as_ref()).await;
-                        }
-                        None => break,
-                    },
-                }
-            }
-            let _ = send_frame(processor.as_ref(), peer, namespace.as_str(), Frame::Close {
-                session,
-            })
-            .await;
-        });
-    }
-
-    /// Client side UDP: route peer Write for `session` back to the originating local
-    /// client `dest` on the shared bound `socket`.
-    fn spawn_udp_sendto(&self, session: SessionId, socket: Arc<UdpSocket>, dest: SocketAddr) {
-        let (mut write_rx, _tx, cancel) = self.register(session);
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => break,
-                    outbound = write_rx.recv() => match outbound {
-                        Some(bytes) => {
-                            let _ = socket.send_to(bytes.as_ref(), dest).await;
-                        }
-                        None => break,
-                    },
-                }
-            }
-        });
-    }
-
     // ── shared ───────────────────────────────────────────────────────────────────
 
     /// Create a session's channel + cancel token and record its handle, returning the
     /// receiver and cancel for the relay task.
-    fn register(
-        &self,
-        session: SessionId,
-    ) -> (
-        mpsc::Receiver<Bytes>,
-        mpsc::Sender<Bytes>,
-        CancellationToken,
-    ) {
-        let (write_tx, write_rx) = mpsc::channel::<Bytes>(1024);
+    fn register(&self, session: SessionId) -> (mpsc::Receiver<Outbound>, CancellationToken) {
+        let (outbound, outbound_rx) = mpsc::channel::<Outbound>(1024);
         let cancel = CancellationToken::new();
         self.insert(session, SessionHandle {
-            write_tx: write_tx.clone(),
+            outbound,
             cancel: cancel.clone(),
         });
-        (write_rx, write_tx, cancel)
+        (outbound_rx, cancel)
+    }
+
+    fn sender(&self, session: SessionId) -> Option<mpsc::Sender<Outbound>> {
+        self.map
+            .lock()
+            .ok()
+            .and_then(|map| map.get(&session).map(|handle| handle.outbound.clone()))
     }
 
     fn insert(&self, session: SessionId, handle: SessionHandle) {
@@ -410,30 +348,180 @@ impl TransportSessions {
         }
     }
 
-    /// Send `Frame::Open` to `peer` (client side, on a new local connection/flow).
-    async fn open(
+    /// Connect failed: remove the pre-registered session and tell the peer.
+    async fn refuse(
         &self,
-        processor: &Processor,
+        processor: Arc<Processor>,
         session: SessionId,
         peer: Did,
-        namespace: &str,
-        service: &str,
-    ) -> Result<()> {
-        send_frame(processor, peer, namespace, Frame::Open {
+        namespace: String,
+    ) {
+        self.close(session);
+        let _ = send_frame(processor.as_ref(), peer, namespace.as_str(), Frame::Close {
             session,
-            service: service.to_string(),
         })
-        .await
-    }
-
-    /// Send `Frame::Close` to `peer` (server side, on connect failure).
-    async fn refuse(&self, processor: &Processor, session: SessionId, peer: Did, namespace: &str) {
-        let _ = send_frame(processor, peer, namespace, Frame::Close { session }).await;
+        .await;
     }
 }
 
-/// Bind an ephemeral UDP socket and connect it to `addr` so `send`/`recv` target the
-/// backend.
+/// Bidirectional TCP relay with true half-close and abrupt-close handling.
+async fn relay_tcp(
+    sessions: Arc<TransportSessions>,
+    processor: Arc<Processor>,
+    session: SessionId,
+    peer: Did,
+    namespace: String,
+    stream: TcpStream,
+    mut outbound_rx: mpsc::Receiver<Outbound>,
+    cancel: CancellationToken,
+) {
+    let (mut local_read, mut local_write) = stream.into_split();
+
+    // local → peer; clean EOF sends FIN, errors abort the whole session.
+    let local_to_peer = {
+        let processor = processor.clone();
+        let namespace = namespace.clone();
+        let cancel = cancel.clone();
+        async move {
+            let mut buf = vec![0u8; TCP_BUF];
+            loop {
+                match local_read.read(buf.as_mut_slice()).await {
+                    Ok(0) => {
+                        let _ = send_frame(
+                            processor.as_ref(),
+                            peer,
+                            namespace.as_str(),
+                            Frame::Shutdown { session },
+                        )
+                        .await;
+                        break;
+                    }
+                    Ok(n) => {
+                        let bytes = Bytes::copy_from_slice(buf.get(..n).unwrap_or_default());
+                        if send_frame(processor.as_ref(), peer, namespace.as_str(), Frame::Data {
+                            session,
+                            bytes,
+                        })
+                        .await
+                        .is_err()
+                        {
+                            cancel.cancel(); // overlay unreachable → abrupt
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        cancel.cancel(); // local read error → abrupt
+                        break;
+                    }
+                }
+            }
+        }
+    };
+
+    // peer → local; FIN shuts the write side, write errors abort.
+    let peer_to_local = {
+        let cancel = cancel.clone();
+        async move {
+            while let Some(outbound) = outbound_rx.recv().await {
+                match outbound {
+                    Outbound::Data(bytes) => {
+                        if local_write.write_all(bytes.as_ref()).await.is_err() {
+                            cancel.cancel();
+                            break;
+                        }
+                    }
+                    Outbound::Shutdown => {
+                        let _ = local_write.shutdown().await;
+                        break;
+                    }
+                }
+            }
+        }
+    };
+
+    tokio::select! {
+        _ = cancel.cancelled() => {}
+        _ = async { tokio::join!(local_to_peer, peer_to_local); } => {}
+    }
+
+    // Teardown: drop the session and tell the peer (idempotent on its side).
+    sessions.close(session);
+    let _ = send_frame(processor.as_ref(), peer, namespace.as_str(), Frame::Close {
+        session,
+    })
+    .await;
+}
+
+/// Server-side UDP flow: a per-flow socket connected to the backend.
+async fn relay_udp_connected(
+    sessions: Arc<TransportSessions>,
+    processor: Arc<Processor>,
+    session: SessionId,
+    peer: Did,
+    namespace: String,
+    socket: UdpSocket,
+    mut outbound_rx: mpsc::Receiver<Outbound>,
+    cancel: CancellationToken,
+) {
+    let mut buf = vec![0u8; UDP_BUF];
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            received = socket.recv(buf.as_mut_slice()) => match received {
+                Ok(n) => {
+                    let bytes = Bytes::copy_from_slice(buf.get(..n).unwrap_or_default());
+                    if send_frame(processor.as_ref(), peer, namespace.as_str(), Frame::Data {
+                        session,
+                        bytes,
+                    })
+                    .await
+                    .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            },
+            outbound = outbound_rx.recv() => match outbound {
+                Some(Outbound::Data(bytes)) => {
+                    let _ = socket.send(bytes.as_ref()).await;
+                }
+                Some(Outbound::Shutdown) | None => break,
+            },
+        }
+    }
+    sessions.close(session);
+    let _ = send_frame(processor.as_ref(), peer, namespace.as_str(), Frame::Close {
+        session,
+    })
+    .await;
+}
+
+/// Client-side UDP flow: route peer bytes back to the originating local client `dest`.
+fn spawn_udp_sendto(
+    socket: Arc<UdpSocket>,
+    dest: SocketAddr,
+    mut outbound_rx: mpsc::Receiver<Outbound>,
+    cancel: CancellationToken,
+) {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => break,
+                outbound = outbound_rx.recv() => match outbound {
+                    Some(Outbound::Data(bytes)) => {
+                        let _ = socket.send_to(bytes.as_ref(), dest).await;
+                    }
+                    Some(Outbound::Shutdown) | None => break,
+                },
+            }
+        }
+    });
+}
+
+/// Bind an ephemeral UDP socket and connect it to `addr`.
 async fn bind_connected_udp(addr: SocketAddr) -> Option<UdpSocket> {
     let bind: SocketAddr = if addr.is_ipv4() {
         "0.0.0.0:0".parse().ok()?
@@ -445,11 +533,25 @@ async fn bind_connected_udp(addr: SocketAddr) -> Option<UdpSocket> {
     Some(socket)
 }
 
+/// Send `Frame::Open` to `peer` (client side, on a new local connection/flow).
+async fn open(
+    processor: &Processor,
+    session: SessionId,
+    peer: Did,
+    namespace: &str,
+    service: &str,
+) -> Result<()> {
+    send_frame(processor, peer, namespace, Frame::Open {
+        session,
+        service: service.to_string(),
+    })
+    .await
+}
+
 /// Send a [`Frame`] to `peer` under `namespace` over the overlay.
-/// `send_frame : (Did, Namespace, Frame) → IO ()`.
 ///
-/// Transitional: the envelope is wrapped in `BackendMessage::Envelope` so the current
-/// receiver (which decodes `BackendMessage` first) can route it.
+/// Transitional: wrapped in `BackendMessage::Envelope` so the current receiver (which
+/// decodes `BackendMessage` first) can route it.
 async fn send_frame(processor: &Processor, peer: Did, namespace: &str, frame: Frame) -> Result<()> {
     let payload = bincode::serialize(&frame).map_err(|_| Error::EncodeError)?;
     let envelope = Envelope::new(namespace.to_string(), Bytes::from(payload));
