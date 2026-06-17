@@ -303,7 +303,8 @@ impl Processor {
             .map_err(Error::SendMessage)
     }
 
-    /// Send a namespaced [`Envelope`] to a did over the P2P transport (the wire codec
+    /// Send a namespaced [`Envelope`](crate::backend::ext::Envelope) to a did over the
+    /// P2P transport (the wire codec
     /// of the extension layer). `send_envelope : (Did, Envelope) → IO TxId`.
     pub async fn send_envelope(
         &self,

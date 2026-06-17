@@ -277,7 +277,7 @@ impl Provider {
     }
 
     /// Create a new provider instanice with everything in detail
-    /// Ice_servers should obey forrmat: "[turn|strun]://<Address>:<Port>;..."
+    /// Ice_servers should obey forrmat: `"[turn|strun]://<Address>:<Port>;..."`
     /// Account is hex string
     /// Account should format as same as account_type declared
     /// Account_type is lowercase string, possible input are: `eip191`, `ed25519`, `bip137`, for more information,

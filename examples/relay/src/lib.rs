@@ -3,7 +3,7 @@
 //! A relay turns a Rings overlay link into a transparent byte pipe: a **server** node
 //! exposes a local socket address under a service name, and a **client** node binds a
 //! local listener that forwards every connection/flow to that service across the
-//! overlay. The same code path drives TCP and UDP — only the [`TransportKind`] differs.
+//! overlay. The same code path drives TCP and UDP — only the `TransportKind` differs.
 //!
 //! These helpers are shared by the runnable examples (`tcp.rs`, `udp.rs`) and the
 //! integration test, so the demo and the test exercise exactly the same flow.

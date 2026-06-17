@@ -29,7 +29,7 @@
 //!
 //! ## v1 limits
 //!
-//! A relayed datagram must fit one overlay message ([`UDP_BUF`]; larger is truncated);
+//! A relayed datagram must fit one overlay message (`UDP_BUF`; larger is truncated);
 //! UDP flows are not yet idle-GC'd; reliable-tunnelled UDP does not preserve native
 //! loss/reorder semantics.
 

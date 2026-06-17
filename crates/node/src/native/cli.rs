@@ -30,7 +30,7 @@ use rings_rpc::protos::rings_node::*;
 use crate::seed::Seed;
 use crate::util::loader::ResourceLoader;
 
-/// Alias about Result<ClientOutput<T>, E>.
+/// Alias about `Result<ClientOutput<T>, E>`.
 type Output<T> = anyhow::Result<ClientOutput<T>>;
 
 /// Wrap json_client send request between nodes or browsers.

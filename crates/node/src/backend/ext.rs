@@ -261,7 +261,7 @@ impl<S> Transition<S> {
 ///
 /// Purity is a *trusted contract*, not enforced by the type system: an implementor
 /// could hide interior mutability in `self` or call out to impure code, and a
-/// [`JsProtocol`](crate::backend::protocols::js) bridges an unrestricted JS function.
+/// `JsProtocol` (browser) bridges an unrestricted JS function.
 /// Authors are expected to keep `step` pure — no IO, no clocks, no globals — and to
 /// describe all side effects via the returned [`Effect`]s, which the runtime
 /// ([`Interpreter`]) performs.
@@ -324,7 +324,7 @@ impl ComputeServices {
 /// It holds the platform transport engine that owns live relay endpoints: OS sockets
 /// natively ([`engine::TransportSessions`](crate::backend::transport::engine)), or
 /// WebTransport sessions in the browser
-/// ([`wt::WtSessions`](crate::backend::transport::wt)). `Write`/`Shutdown`/`Close`
+/// (`wt::WtSessions`, browser). `Write`/`Shutdown`/`Close`
 /// dispatch to it on both targets; only the *open* effect differs (`Connect`/`Listen`
 /// natively, `WtConnect` in the browser).
 #[derive(Clone)]
@@ -496,7 +496,7 @@ pub type DynHandler = dyn Handler + Send + Sync;
 #[cfg(feature = "browser")]
 pub type DynHandler = dyn Handler;
 
-/// Erased, runtime-facing handler. Implemented once, generically, by [`Runner`].
+/// Erased, runtime-facing handler. Implemented once, generically, by `Runner`.
 #[cfg_attr(feature = "browser", async_trait::async_trait(?Send))]
 #[cfg_attr(not(feature = "browser"), async_trait::async_trait)]
 pub trait Handler {
@@ -579,7 +579,7 @@ impl Extensions {
         self.compute.register(namespace, job)
     }
 
-    /// Register a pure [`Protocol`] under its namespace (wrapped in a [`Runner`]).
+    /// Register a pure [`Protocol`] under its namespace (wrapped in a `Runner`).
     /// Fails if the registry lock is poisoned.
     pub fn register<P>(&self, protocol: P) -> Result<()>
     where
@@ -610,7 +610,7 @@ impl Extensions {
     /// Starting from the inbound message, repeatedly: route to the namespace's
     /// protocol, run its `step` (pure) and effects (via the interpreter), and
     /// re-enqueue any [`Inbound`]s the effects produced — until the queue drains or
-    /// [`MAX_FIXPOINT_STEPS`] is hit. This is the bounded least fixpoint of
+    /// `MAX_FIXPOINT_STEPS` is hit. This is the bounded least fixpoint of
     /// `events ↦ ⋃ run(step(event))`.
     ///
     /// Unknown namespaces are logged and dropped (non-fatal): a peer speaking a

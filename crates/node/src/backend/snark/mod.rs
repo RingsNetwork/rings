@@ -224,9 +224,9 @@ fn snark_compute(manager: Arc<SNARKTaskManager>, input: Bytes) -> Result<Bytes> 
 /// ```
 ///
 /// Provenance splits the two payload codecs purely: `from = self` is a re-injected
-/// [`ComputeResult`]; any other `from` is a network [`SNARKTaskMessage`]. The heavy
+/// `ComputeResult`; any other `from` is a network [`SNARKTaskMessage`]. The heavy
 /// proving/verification is described as [`Effect::Compute`] and performed by
-/// [`snark_compute`] in the shell, so `step` stays pure.
+/// `snark_compute` in the shell, so `step` stays pure.
 #[derive(Clone)]
 pub struct SnarkProtocol;
 
