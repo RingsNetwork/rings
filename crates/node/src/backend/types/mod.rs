@@ -20,9 +20,6 @@ pub mod snark;
 pub enum BackendMessage {
     /// Plain text
     PlainText(String),
-    /// SNARK with curve pallas and vesta
-    #[cfg(feature = "snark")]
-    SNARKTaskMessage(snark::SNARKTaskMessage),
     /// Namespaced extension envelope, routed by the [`Extensions`] registry.
     /// Transitional: built-in variants above migrate to this and are then removed.
     ///

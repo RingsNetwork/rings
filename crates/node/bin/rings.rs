@@ -408,15 +408,12 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     );
     println!("Did: {}", processor.swarm.did());
     let provider = Arc::new(Provider::from_processor(processor.clone()));
-    // Legacy built-in message handler (transitional). The namespaced extension
-    // registry handles everything else; SNARK is still on the legacy path until
-    // it is ported to a protocol.
+    // SNARK is a namespaced protocol now; register it so the daemon can prove/verify.
     #[cfg(feature = "snark")]
-    let backend = Arc::new(Backend::new(
-        provider,
-        Box::new(rings_node::backend::snark::SNARKBehaviour::default()),
-    ));
-    #[cfg(not(feature = "snark"))]
+    rings_node::backend::snark::SNARKBehaviour::default().register(provider.as_ref())?;
+    // The legacy `BackendMessage` path has no remaining built-ins; the namespaced
+    // extension registry handles inbound. Install a no-op legacy handler (transitional
+    // until `BackendMessage` is removed entirely).
     let backend = Arc::new(Backend::new(
         provider,
         Box::new(rings_node::backend::NoopBackendHandler),

@@ -93,14 +93,11 @@ impl Provider {
     /// The effect interpreter — the single side-effecting boundary used to run a
     /// protocol's described [`Effect`](crate::backend::ext::Effect)s.
     pub(crate) fn interpreter(&self) -> crate::backend::ext::Interpreter {
-        #[cfg(feature = "node")]
-        {
-            crate::backend::ext::Interpreter::new(self.processor.clone(), self.transport.clone())
-        }
-        #[cfg(feature = "browser")]
-        {
-            crate::backend::ext::Interpreter::new(self.processor.clone(), self.transport.clone())
-        }
+        crate::backend::ext::Interpreter::new(
+            self.processor.clone(),
+            self.transport.clone(),
+            self.extensions.computes(),
+        )
     }
 
     /// Register a pure [`Protocol`](crate::backend::ext::Protocol) under its namespace.
@@ -110,6 +107,17 @@ impl Provider {
         P::State: crate::backend::ext::MaybeSend + 'static,
     {
         self.extensions.register(protocol)
+    }
+
+    /// Register an impure compute job for `namespace`, run when a protocol emits an
+    /// [`Effect::Compute`](crate::backend::ext::Effect::Compute). The escape hatch for
+    /// effectful protocols (e.g. SNARK) whose `step` stays pure.
+    pub fn register_compute(
+        &self,
+        namespace: impl Into<String>,
+        job: crate::backend::ext::ComputeFn,
+    ) -> Result<()> {
+        self.extensions.register_compute(namespace, job)
     }
 
     /// Register (at runtime) a local service the TCP relay may dial.

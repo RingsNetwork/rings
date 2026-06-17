@@ -36,6 +36,10 @@ use std::sync::Mutex;
 use std::sync::RwLock;
 
 use bytes::Bytes;
+#[cfg(not(feature = "browser"))]
+use futures::future::BoxFuture;
+#[cfg(feature = "browser")]
+use futures::future::LocalBoxFuture;
 use rings_core::dht::Did;
 use serde::Deserialize;
 use serde::Serialize;
@@ -118,6 +122,20 @@ pub enum Effect {
         namespace: String,
         /// Payload bytes.
         payload: Bytes,
+    },
+    /// Run the impure compute job registered for `namespace` on `input`, then
+    /// re-inject its serialized result as a *self*-event (`from = this node`) under
+    /// `namespace`. The pure `step` then decides what to do with the result (e.g.
+    /// [`Send`](Effect::Send) it). This is the escape hatch for inherently effectful
+    /// protocols — e.g. SNARK proving/verification: the heavy, non-pure crypto runs in
+    /// the shell ([`Interpreter`]), while `step` stays pure, exactly as transport IO
+    /// lives in the engine rather than in pure state.
+    /// `Compute : (Namespace, Bytes) → IO [Inbound]`.
+    Compute {
+        /// Namespace whose registered compute job runs (and receives the result).
+        namespace: String,
+        /// Opaque input bytes; the job's codec is the protocol's own business.
+        input: Bytes,
     },
     /// Open a transport-relay session to `addr`, streaming it to `peer` under
     /// `namespace` (see [`transport`](crate::backend::transport)). Interpreted
@@ -262,6 +280,44 @@ pub trait Protocol {
     fn step(&self, ctx: Ctx<'_, Self::State>, event: &Event) -> Transition<Self::State>;
 }
 
+// ── Compute services: registered impure jobs (the effectful escape hatch) ──────
+
+/// An impure compute job for a namespace: `input ↦ IO output`. Runs in the shell
+/// when an [`Effect::Compute`] is interpreted; its `output` is re-injected as a
+/// self-event. Used by protocols whose work is genuinely non-pure (e.g. SNARK
+/// proving), keeping their `step` pure. `Send + Sync` natively, neither in browser.
+#[cfg(not(feature = "browser"))]
+pub type ComputeFn = Arc<dyn Fn(Bytes) -> BoxFuture<'static, Result<Bytes>> + Send + Sync>;
+/// An impure compute job for a namespace: `input ↦ IO output`.
+#[cfg(feature = "browser")]
+pub type ComputeFn = Arc<dyn Fn(Bytes) -> LocalBoxFuture<'static, Result<Bytes>>>;
+
+/// Registry of [`ComputeFn`]s keyed by namespace. Shared (interior mutability) so a
+/// protocol registered on the [`Provider`](crate::provider::Provider) and the
+/// [`Interpreter`] that runs its effects see the same jobs.
+#[derive(Default, Clone)]
+pub struct ComputeServices {
+    jobs: Arc<RwLock<HashMap<String, ComputeFn>>>,
+}
+
+impl ComputeServices {
+    /// Empty registry.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register the compute job for `namespace`. Fails if the lock is poisoned.
+    pub fn register(&self, namespace: impl Into<String>, job: ComputeFn) -> Result<()> {
+        let mut jobs = self.jobs.write().map_err(|_| Error::Lock)?;
+        jobs.insert(namespace.into(), job);
+        Ok(())
+    }
+
+    fn get(&self, namespace: &str) -> Option<ComputeFn> {
+        self.jobs.read().ok()?.get(namespace).map(Arc::clone)
+    }
+}
+
 // ── Imperative shell: the only IO boundary ─────────────────────────────────────
 
 /// Executes [`Effect`]s. The single side-effecting boundary of the extension layer.
@@ -275,6 +331,7 @@ pub trait Protocol {
 #[derive(Clone)]
 pub struct Interpreter {
     processor: Arc<Processor>,
+    compute: ComputeServices,
     #[cfg(feature = "node")]
     transport: Arc<crate::backend::transport::engine::TransportSessions>,
     #[cfg(feature = "browser")]
@@ -287,9 +344,11 @@ impl Interpreter {
     pub fn new(
         processor: Arc<Processor>,
         transport: Arc<crate::backend::transport::engine::TransportSessions>,
+        compute: ComputeServices,
     ) -> Self {
         Self {
             processor,
+            compute,
             transport,
         }
     }
@@ -299,9 +358,11 @@ impl Interpreter {
     pub fn new(
         processor: Arc<Processor>,
         transport: Arc<crate::backend::transport::wt::WtSessions>,
+        compute: ComputeServices,
     ) -> Self {
         Self {
             processor,
+            compute,
             transport,
         }
     }
@@ -318,9 +379,29 @@ impl Interpreter {
     /// drive native sockets (no-ops on browser). Local reads re-enter the router from
     /// the engine's own tasks rather than via this return value.
     pub async fn run(&self, effects: Vec<Effect>) -> Result<Vec<Inbound>> {
-        let reinjected = Vec::new();
+        let mut reinjected = Vec::new();
         for effect in effects {
             match effect {
+                Effect::Compute { namespace, input } => {
+                    // Impure region: run the namespace's registered job, then feed its
+                    // result back as a self-event so the pure `step` can act on it.
+                    match self.compute.get(namespace.as_str()) {
+                        Some(job) => {
+                            let output = job(input).await?;
+                            reinjected.push(Inbound {
+                                namespace: namespace.clone(),
+                                event: Event {
+                                    from: self.did(),
+                                    payload: output,
+                                },
+                            });
+                        }
+                        None => tracing::warn!(
+                            "no compute service registered for namespace {:?}, dropping",
+                            namespace
+                        ),
+                    }
+                }
                 Effect::Send {
                     to,
                     namespace,
@@ -483,12 +564,24 @@ where
 #[derive(Default, Clone)]
 pub struct Extensions {
     handlers: Arc<RwLock<HashMap<String, Arc<DynHandler>>>>,
+    compute: ComputeServices,
 }
 
 impl Extensions {
     /// Empty registry.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The shared [`ComputeServices`], handed to each [`Interpreter`] so the jobs a
+    /// protocol registers are visible when its [`Effect::Compute`]s run.
+    pub fn computes(&self) -> ComputeServices {
+        self.compute.clone()
+    }
+
+    /// Register an impure [`ComputeFn`] for `namespace` (see [`Effect::Compute`]).
+    pub fn register_compute(&self, namespace: impl Into<String>, job: ComputeFn) -> Result<()> {
+        self.compute.register(namespace, job)
     }
 
     /// Register a pure [`Protocol`] under its namespace (wrapped in a [`Runner`]).

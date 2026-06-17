@@ -75,14 +75,6 @@ impl BackendBehaviour {
                     cb(self.clone(), provider.clone(), ctx, m).await?;
                 }
             }
-            #[cfg(feature = "snark")]
-            BackendMessage::SNARKTaskMessage(m) => {
-                if let Some(func) = &self.get_handler("SNARKTaskMessage") {
-                    let m = js_value::serialize(m)?;
-                    let cb = js_func::of4::<BackendBehaviour, Provider, JsValue, JsValue>(func);
-                    cb(self.clone(), provider.clone(), ctx, m).await?;
-                }
-            }
             // Routed by the extension registry in `Backend::on_backend_message`
             // before reaching this handler.
             BackendMessage::Envelope(_) => {}

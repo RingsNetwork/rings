@@ -3,11 +3,10 @@
 
 use std::sync::Arc;
 
+use bytes::Bytes;
 use dashmap::DashMap;
 use rings_core::dht::Did;
-use rings_core::message::MessagePayload;
 use rings_derive::wasm_export;
-use rings_rpc::method::Method;
 use rings_snark::circuit;
 use rings_snark::prelude::nova::provider;
 use rings_snark::prelude::nova::provider::hyperkzg;
@@ -28,13 +27,19 @@ use super::types::snark::SNARKProofTask;
 use super::types::snark::SNARKTask;
 use super::types::snark::SNARKTaskMessage;
 use super::types::snark::SNARKVerifyTask;
-use crate::backend::types::BackendMessage;
-use crate::backend::types::MessageHandler;
+use crate::backend::ext::Ctx;
+use crate::backend::ext::Effect;
+use crate::backend::ext::Event;
+use crate::backend::ext::Protocol;
+use crate::backend::ext::Transition;
 use crate::error::Error;
 use crate::error::Result;
 use crate::provider::Provider;
 
 type TaskId = uuid::Uuid;
+
+/// Namespace under which SNARK proof/verify tasks travel.
+pub const NAMESPACE: &str = "snark";
 
 #[cfg(feature = "browser")]
 pub mod browser;
@@ -92,6 +97,10 @@ impl SNARKBehaviour {
     }
 
     /// send proof task to did
+    ///
+    /// Sends a [`SNARKTaskMessage`] under the [`NAMESPACE`] envelope and records the
+    /// task locally so the matching verify reply can be checked. Same code path on
+    /// native and browser ([`Provider::send`]).
     pub async fn send_proof_task(
         &self,
         provider: Arc<Provider>,
@@ -100,25 +109,185 @@ impl SNARKBehaviour {
     ) -> Result<String> {
         let task_id = uuid::Uuid::new_v4();
         let task = task_ref.as_ref();
-        let msg: BackendMessage = SNARKTaskMessage {
+        let msg = SNARKTaskMessage {
             task_id,
             task: SNARKTask::SNARKProof(Box::new(task.clone())),
-        }
-        .into();
-        let params = msg.into_send_backend_message_request(did)?;
-        #[cfg(not(target_arch = "wasm32"))]
-        provider.request(Method::SendBackendMessage, params).await?;
-        #[cfg(target_arch = "wasm32")]
-        {
-            let req = rings_core::utils::js_value::serialize(&params)?;
-            let promise = provider.request(Method::SendBackendMessage.to_string(), req);
-            wasm_bindgen_futures::JsFuture::from(promise)
-                .await
-                .map_err(|e| Error::JsError(format!("Failed to send backend messate: {e:?}")))?;
-        }
+        };
+        let payload = bincode::serialize(&msg).map_err(|_| Error::EncodeError)?;
+        provider.send(did, NAMESPACE, Bytes::from(payload)).await?;
         self.task.insert(task_id, task.clone());
         tracing::info!("sent proof request");
         Ok(task_id.to_string())
+    }
+
+    /// Register the SNARK protocol and its compute job on a provider.
+    ///
+    /// Installs a pure [`SnarkProtocol`] (routing) plus an impure compute job (the
+    /// proving/verification crypto) sharing this behaviour's task store. After this,
+    /// inbound `snark` envelopes are dispatched automatically; results are readable via
+    /// [`SNARKBehaviour::get_task_result`].
+    pub fn register(&self, provider: &Provider) -> Result<()> {
+        provider.register_protocol(SnarkProtocol)?;
+        let manager = self.inner.clone();
+        let job: crate::backend::ext::ComputeFn = Arc::new(move |input: Bytes| {
+            let manager = manager.clone();
+            Box::pin(async move { snark_compute(manager, input) })
+        });
+        provider.register_compute(NAMESPACE, job)?;
+        Ok(())
+    }
+}
+
+/// A SNARK compute request, handed to the shell via [`Effect::Compute`]. Carries the
+/// task plus enough context to route the result. Never on the wire (local only).
+#[derive(Serialize, Deserialize)]
+enum ComputeJob {
+    /// Prove `task` (prover side), then reply to `reply_to`.
+    Prove {
+        /// Task id.
+        task_id: TaskId,
+        /// DID to send the resulting verify task back to.
+        reply_to: Did,
+        /// Proof task to fold/prove.
+        task: SNARKProofTask,
+    },
+    /// Verify `verify_task` against the locally-stored proof task (verifier side).
+    Verify {
+        /// Task id (used to look up the stored proof task).
+        task_id: TaskId,
+        /// Verify task received from the prover.
+        verify_task: SNARKVerifyTask,
+    },
+}
+
+/// The result of a [`ComputeJob`], re-injected as a self-event for the pure `step`.
+#[derive(Serialize, Deserialize)]
+enum ComputeResult {
+    /// A proof was produced; `step` sends the verify task back to `reply_to`.
+    Proved {
+        /// Task id.
+        task_id: TaskId,
+        /// DID to reply to.
+        reply_to: Did,
+        /// The produced verify task.
+        verify_task: SNARKVerifyTask,
+    },
+    /// Verification finished; the boolean is already stored in the task manager.
+    Verified {
+        /// Task id.
+        task_id: TaskId,
+    },
+}
+
+/// The impure SNARK compute job (the shell side). Runs the heavy crypto and, for
+/// verification, reads the stored proof task and records the boolean result.
+fn snark_compute(manager: Arc<SNARKTaskManager>, input: Bytes) -> Result<Bytes> {
+    let job: ComputeJob = bincode::deserialize(input.as_ref()).map_err(|_| Error::DecodeError)?;
+    let result = match job {
+        ComputeJob::Prove {
+            task_id,
+            reply_to,
+            task,
+        } => {
+            let verify_task = SNARKBehaviour::handle_snark_proof_task(&task)?;
+            ComputeResult::Proved {
+                task_id,
+                reply_to,
+                verify_task,
+            }
+        }
+        ComputeJob::Verify {
+            task_id,
+            verify_task,
+        } => {
+            if let Some(task) = manager.task.get(&task_id) {
+                let verified =
+                    SNARKBehaviour::handle_snark_verify_task(&verify_task, task.value())?;
+                manager.verified.insert(task_id, verified);
+            }
+            ComputeResult::Verified { task_id }
+        }
+    };
+    bincode::serialize(&result)
+        .map(Bytes::from)
+        .map_err(|_| Error::EncodeError)
+}
+
+/// SNARK relay protocol: a pure router over the `snark` namespace.
+///
+/// ```text
+///   step (Ctx (), Event{from, p}) =
+///     | from = self  ∧ p = Proved(id, to, vt)  ↦ ((), [Send to (Verify id vt)])
+///     | from = self  ∧ p = Verified(id)        ↦ ((), ε)
+///     | p = SNARKProof(t)                       ↦ ((), [Compute (Prove id from t)])
+///     | p = SNARKVerify(vt)                     ↦ ((), [Compute (Verify id vt)])
+/// ```
+///
+/// Provenance splits the two payload codecs purely: `from = self` is a re-injected
+/// [`ComputeResult`]; any other `from` is a network [`SNARKTaskMessage`]. The heavy
+/// proving/verification is described as [`Effect::Compute`] and performed by
+/// [`snark_compute`] in the shell, so `step` stays pure.
+#[derive(Clone)]
+pub struct SnarkProtocol;
+
+impl Protocol for SnarkProtocol {
+    type State = ();
+
+    fn namespace(&self) -> &str {
+        NAMESPACE
+    }
+
+    fn init(&self) {}
+
+    fn step(&self, ctx: Ctx<'_, ()>, event: &Event) -> Transition<()> {
+        if event.from == ctx.did {
+            let Ok(result) = bincode::deserialize::<ComputeResult>(event.payload.as_ref()) else {
+                return Transition::pure(());
+            };
+            return match result {
+                ComputeResult::Proved {
+                    task_id,
+                    reply_to,
+                    verify_task,
+                } => {
+                    let msg = SNARKTaskMessage {
+                        task_id,
+                        task: SNARKTask::SNARKVerify(verify_task),
+                    };
+                    match bincode::serialize(&msg) {
+                        Ok(payload) => Transition::with((), vec![Effect::Send {
+                            to: reply_to,
+                            namespace: NAMESPACE.to_string(),
+                            payload: Bytes::from(payload),
+                        }]),
+                        Err(_) => Transition::pure(()),
+                    }
+                }
+                ComputeResult::Verified { .. } => Transition::pure(()),
+            };
+        }
+
+        let Ok(msg) = bincode::deserialize::<SNARKTaskMessage>(event.payload.as_ref()) else {
+            return Transition::pure(());
+        };
+        let job = match msg.task {
+            SNARKTask::SNARKProof(task) => ComputeJob::Prove {
+                task_id: msg.task_id,
+                reply_to: event.from,
+                task: *task,
+            },
+            SNARKTask::SNARKVerify(verify_task) => ComputeJob::Verify {
+                task_id: msg.task_id,
+                verify_task,
+            },
+        };
+        match bincode::serialize(&job) {
+            Ok(input) => Transition::with((), vec![Effect::Compute {
+                namespace: NAMESPACE.to_string(),
+                input: Bytes::from(input),
+            }]),
+            Err(_) => Transition::pure(()),
+        }
     }
 }
 
@@ -911,60 +1080,5 @@ impl From<SNARKGenerator<provider::VestaEngine, provider::PallasEngine>> for SNA
 impl From<SNARKGenerator<provider::Bn256EngineKZG, provider::GrumpkinEngine>> for SNARKProofTask {
     fn from(snark: SNARKGenerator<provider::Bn256EngineKZG, provider::GrumpkinEngine>) -> Self {
         Self::Bn256KZGGrumpkin(snark)
-    }
-}
-
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-impl MessageHandler<SNARKTaskMessage> for SNARKBehaviour {
-    async fn handle_message(
-        &self,
-        provider: Arc<Provider>,
-        ctx: &MessagePayload,
-        msg: &SNARKTaskMessage,
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let verifier = ctx.relay.origin_sender();
-        match &msg.task {
-            SNARKTask::SNARKProof(t) => {
-                let proof = Self::handle_snark_proof_task(t)?;
-                let resp: BackendMessage = SNARKTaskMessage {
-                    task_id: msg.task_id,
-                    task: SNARKTask::SNARKVerify(proof),
-                }
-                .into();
-                let params = resp.into_send_backend_message_request(verifier)?;
-                provider
-                    .request_internal(
-                        Method::SendBackendMessage.to_string(),
-                        serde_json::to_value(params)?,
-                    )
-                    .await?;
-                Ok(())
-            }
-            SNARKTask::SNARKVerify(t) => {
-                if let Some(task) = self.task.get(&msg.task_id) {
-                    let verified = Self::handle_snark_verify_task(t, task.value())?;
-                    self.verified.insert(msg.task_id, verified);
-                }
-                Ok(())
-            }
-        }
-    }
-}
-
-#[cfg_attr(target_family = "wasm", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
-impl MessageHandler<BackendMessage> for SNARKBehaviour {
-    async fn handle_message(
-        &self,
-        provider: Arc<Provider>,
-        ctx: &MessagePayload,
-        msg: &BackendMessage,
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-        if let BackendMessage::SNARKTaskMessage(msg) = msg {
-            Ok(self.handle_message(provider.clone(), ctx, msg).await?)
-        } else {
-            Ok(())
-        }
     }
 }

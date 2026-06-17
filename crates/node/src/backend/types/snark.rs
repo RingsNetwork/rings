@@ -8,7 +8,6 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::backend::snark::SNARKGenerator;
-use crate::backend::BackendMessage;
 
 /// Message for snark task
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -22,6 +21,9 @@ pub struct SNARKTaskMessage {
     )]
     pub task: SNARKTask,
 }
+
+// `SNARKTaskMessage` now travels as a `snark` namespace [`Envelope`] payload (see
+// [`crate::backend::snark::SnarkProtocol`]); it no longer wraps into `BackendMessage`.
 
 #[cfg(feature = "snark")]
 /// Message types for snark task, including proof and verify
@@ -53,10 +55,4 @@ pub enum SNARKVerifyTask {
     VastaPallas(String),
     /// SNARK with curve bn256 with KZG multi linear commitment and grumpkin
     Bn256KZGGrumpkin(String),
-}
-
-impl From<SNARKTaskMessage> for BackendMessage {
-    fn from(val: SNARKTaskMessage) -> Self {
-        BackendMessage::SNARKTaskMessage(val)
-    }
 }

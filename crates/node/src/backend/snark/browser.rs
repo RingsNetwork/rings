@@ -11,8 +11,6 @@ use wasm_bindgen_futures::future_to_promise;
 use super::*;
 use crate::backend::types::snark::SNARKProofTask;
 use crate::backend::types::snark::SNARKVerifyTask;
-use crate::backend::BackendMessageHandlerDynObj;
-use crate::prelude::rings_core::utils::js_value;
 use crate::provider::browser::ProviderRef;
 
 /// We need this ref to pass Task ref to js_sys
@@ -124,27 +122,11 @@ impl SNARKProofTaskRef {
 
 #[wasm_bindgen]
 impl SNARKBehaviour {
-    /// Get behaviour as dyn obj ref
-    pub fn as_dyn_obj(self) -> BackendMessageHandlerDynObj {
-        BackendMessageHandlerDynObj::new(self.into())
-    }
-
-    /// Handle js native message
-    pub fn handle_snark_task_message(
-        self,
-        provider: ProviderRef,
-        ctx: JsValue,
-        msg: JsValue,
-    ) -> js_sys::Promise {
-        let ins = self.clone();
-        future_to_promise(async move {
-            let ctx = js_value::deserialize::<MessagePayload>(ctx)?;
-            let msg = js_value::deserialize::<SNARKTaskMessage>(msg)?;
-            ins.handle_message(provider.inner(), &ctx, &msg)
-                .await
-                .map_err(|e| Error::BackendError(e.to_string()))?;
-            Ok(JsValue::NULL)
-        })
+    /// Register the SNARK protocol + compute job on a provider, so inbound `snark`
+    /// envelopes are dispatched automatically. Call once after constructing the
+    /// provider. See [`SNARKBehaviour::register`].
+    pub fn register_to(&self, provider: ProviderRef) -> Result<()> {
+        self.register(provider.inner().as_ref())
     }
 
     /// gen proof task with circuits, this function is use for solo proof
