@@ -1,0 +1,250 @@
+//! Rings proof-demo (Yew) — distributed SNARK over the rings overlay.
+//!
+//! A Rust/Yew rewrite of the (deprecated, TypeScript) `rings-proof-demo`. This node is
+//! the **verifier**: it builds a recursive SNARK proof task from a circuit, offloads the
+//! heavy proving to a **prover** peer over rings, and verifies the returned proof — all
+//! through the same `SnarkProtocol` the daemon uses (`gen_and_send_proof_task` →
+//! `Effect::Compute` on the prover → reply → `get_task_result`).
+//!
+//! The rings wiring is kept in `rings`-prefixed helpers; the rest is a thin Yew UI.
+
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Duration;
+
+use gloo_timers::future::sleep;
+use rings_node::backend::snark::Field;
+use rings_node::backend::snark::Input;
+use rings_node::backend::snark::SNARKBehaviour;
+use rings_node::backend::snark::SNARKTaskBuilder;
+use rings_node::backend::snark::SupportedPrimeField;
+use rings_node::prelude::rings_core::dht::Did;
+use rings_node::prelude::rings_core::ecc::SecretKey;
+use rings_node::prelude::rings_core::session::SessionSk;
+use rings_node::prelude::rings_core::storage::idb::IdbStorage;
+use rings_node::processor::ProcessorBuilder;
+use rings_node::processor::ProcessorConfig;
+use rings_node::provider::Provider;
+use wasm_bindgen_futures::spawn_local;
+use wasm_bindgen_futures::JsFuture;
+use web_sys::HtmlInputElement;
+use yew::prelude::*;
+
+/// A ready node: the provider plus the SNARK behaviour sharing its task store.
+#[derive(Clone)]
+struct Node {
+    provider: Arc<Provider>,
+    snark: SNARKBehaviour,
+}
+
+/// Build an in-browser node (IndexedDB storage), install the extension backend, register
+/// the SNARK protocol, and start the message loop. Mirrors how the daemon is wired.
+async fn build_node() -> Node {
+    let key = SecretKey::random();
+    let session_sk = SessionSk::new_with_seckey(&key).expect("session sk");
+    let config = ProcessorConfig::new(
+        0,
+        "stun://stun.l.google.com:19302".to_string(),
+        session_sk,
+        200,
+    );
+    let storage = Box::new(
+        IdbStorage::new_with_cap_and_name(50_000, "rings-proof-demo")
+            .await
+            .expect("idb storage"),
+    );
+    let processor = Arc::new(
+        ProcessorBuilder::from_config(&config)
+            .expect("processor builder")
+            .storage(storage)
+            .build()
+            .expect("build processor"),
+    );
+    let provider = Arc::new(Provider::from_processor(processor));
+    provider.set_backend().expect("install backend");
+    let snark = SNARKBehaviour::default();
+    snark.register(&provider).expect("register snark");
+
+    let listening = provider.clone();
+    spawn_local(async move {
+        let _ = JsFuture::from(listening.listen()).await;
+    });
+
+    Node { provider, snark }
+}
+
+/// Join the overlay via a seed node's HTTP endpoint.
+async fn connect_seed(provider: &Arc<Provider>, seed_url: String) -> Result<(), String> {
+    JsFuture::from(provider.connect_peer_via_http(seed_url))
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("connect failed: {e:?}"))
+}
+
+/// Offload a proof to `prover` and wait for the verified result.
+///
+/// Loads the circuit from `r1cs_url`/`wasm_url`, generates a small recursive proof task
+/// (sample input `step_in = [4, 2]`, 5 rounds, Vesta), sends it to the prover, and polls
+/// the local task store until the returned proof verifies (or times out).
+async fn run_proof(
+    node: Node,
+    prover: Did,
+    r1cs_url: String,
+    wasm_url: String,
+) -> Result<bool, String> {
+    let builder = SNARKTaskBuilder::from_remote(r1cs_url, wasm_url, SupportedPrimeField::Vesta)
+        .await
+        .map_err(|e| format!("load circuit failed: {e}"))?;
+
+    let input: Input = vec![("step_in".to_string(), vec![
+        Field::from_u64(4, SupportedPrimeField::Vesta),
+        Field::from_u64(2, SupportedPrimeField::Vesta),
+    ])]
+    .into();
+    let circuits = builder
+        .gen_circuits(input, vec![], 5)
+        .map_err(|e| format!("gen circuits failed: {e}"))?;
+
+    let task_id = node
+        .snark
+        .gen_and_send_proof_task(node.provider.clone(), circuits, prover)
+        .await
+        .map_err(|e| format!("send proof task failed: {e}"))?;
+
+    for _ in 0..60 {
+        sleep(Duration::from_secs(1)).await;
+        if node
+            .snark
+            .get_task_result(task_id.clone())
+            .map_err(|e| format!("read result failed: {e}"))?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Read the current value of an `<input>` from an input event.
+fn input_value(e: &InputEvent) -> String {
+    e.target_unchecked_into::<HtmlInputElement>().value()
+}
+
+#[function_component(App)]
+fn app() -> Html {
+    let node: Rc<RefCell<Option<Node>>> = use_mut_ref(|| None);
+    let did = use_state(String::new);
+    let status = use_state(|| "starting node…".to_string());
+    let seed_url = use_state(|| "http://127.0.0.1:50000".to_string());
+    let prover_did = use_state(String::new);
+    let r1cs_url = use_state(|| "http://127.0.0.1:8080/simple_bn256.r1cs".to_string());
+    let wasm_url = use_state(|| "http://127.0.0.1:8080/simple_bn256.wasm".to_string());
+
+    {
+        let node = node.clone();
+        let did = did.clone();
+        let status = status.clone();
+        use_effect_with((), move |_| {
+            spawn_local(async move {
+                let built = build_node().await;
+                did.set(built.provider.address());
+                *node.borrow_mut() = Some(built);
+                status.set("ready — connect to a seed, then send a proof".to_string());
+            });
+            || ()
+        });
+    }
+
+    let on_seed = {
+        let seed_url = seed_url.clone();
+        Callback::from(move |e: InputEvent| seed_url.set(input_value(&e)))
+    };
+    let on_prover = {
+        let prover_did = prover_did.clone();
+        Callback::from(move |e: InputEvent| prover_did.set(input_value(&e)))
+    };
+    let on_r1cs = {
+        let r1cs_url = r1cs_url.clone();
+        Callback::from(move |e: InputEvent| r1cs_url.set(input_value(&e)))
+    };
+    let on_wasm = {
+        let wasm_url = wasm_url.clone();
+        Callback::from(move |e: InputEvent| wasm_url.set(input_value(&e)))
+    };
+
+    let on_connect = {
+        let node = node.clone();
+        let status = status.clone();
+        let seed_url = seed_url.clone();
+        Callback::from(move |_| {
+            let Some(n) = node.borrow().clone() else {
+                return;
+            };
+            let status = status.clone();
+            let url = (*seed_url).clone();
+            status.set(format!("connecting to {url}…"));
+            spawn_local(async move {
+                match connect_seed(&n.provider, url).await {
+                    Ok(()) => status.set("connected to seed".to_string()),
+                    Err(e) => status.set(e),
+                }
+            });
+        })
+    };
+
+    let on_prove = {
+        let node = node.clone();
+        let status = status.clone();
+        let prover_did = prover_did.clone();
+        let r1cs_url = r1cs_url.clone();
+        let wasm_url = wasm_url.clone();
+        Callback::from(move |_| {
+            let Some(n) = node.borrow().clone() else {
+                return;
+            };
+            let prover = match Did::from_str(prover_did.trim()) {
+                Ok(did) => did,
+                Err(_) => {
+                    status.set("invalid prover DID".to_string());
+                    return;
+                }
+            };
+            let status = status.clone();
+            let (r1cs, wasm) = ((*r1cs_url).clone(), (*wasm_url).clone());
+            status.set("offloading proof to prover…".to_string());
+            spawn_local(async move {
+                match run_proof(n, prover, r1cs, wasm).await {
+                    Ok(true) => status.set("✅ proof verified".to_string()),
+                    Ok(false) => status.set("⌛ timed out waiting for proof".to_string()),
+                    Err(e) => status.set(format!("❌ {e}")),
+                }
+            });
+        })
+    };
+
+    html! {
+        <main style="font-family: system-ui; max-width: 640px; margin: 2rem auto;">
+            <h1>{ "Rings proof-demo — distributed SNARK" }</h1>
+            <p><b>{ "this node (verifier): " }</b><code>{ (*did).clone() }</code></p>
+            <fieldset>
+                <legend>{ "1. join the overlay" }</legend>
+                <input value={(*seed_url).clone()} oninput={on_seed} size="48" />
+                <button onclick={on_connect}>{ "connect to seed" }</button>
+            </fieldset>
+            <fieldset>
+                <legend>{ "2. offload a proof to a prover peer" }</legend>
+                <p><input placeholder="prover DID (0x…)" value={(*prover_did).clone()} oninput={on_prover} size="48" /></p>
+                <p><input value={(*r1cs_url).clone()} oninput={on_r1cs} size="48" /></p>
+                <p><input value={(*wasm_url).clone()} oninput={on_wasm} size="48" /></p>
+                <button onclick={on_prove}>{ "generate & send proof" }</button>
+            </fieldset>
+            <p><b>{ "status: " }</b>{ (*status).clone() }</p>
+        </main>
+    }
+}
+
+/// Mount the Yew app.
+pub fn run() {
+    yew::Renderer::<App>::new().render();
+}
