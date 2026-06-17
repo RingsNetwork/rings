@@ -1,0 +1,22 @@
+[package]
+name = "rings-dweb"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0"
+publish = false
+
+# Standalone wasm/Yew app (build with Trunk). Excluded from the root workspace (own
+# `[workspace]`) to avoid feature-unification dragging `rings-node`'s native (`node`)
+# features into the wasm build; a committed `Cargo.lock` pins deps to wasm-buildable
+# versions. dweb does not need SNARK, so it uses the lighter `browser` feature.
+[workspace]
+
+[dependencies]
+yew = { version = "0.21", features = ["csr"] }
+rings-node = { path = "../../crates/node", default-features = false, features = ["browser"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["HtmlInputElement"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
