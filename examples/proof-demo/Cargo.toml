@@ -13,12 +13,12 @@ publish = false
 [workspace]
 
 [dependencies]
-yew = { version = "0.21", features = ["csr"] }
+gloo-timers = { version = "0.3", features = ["futures"] }
 rings-node = { path = "../../crates/node", default-features = false, features = ["browser_default"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
-gloo-timers = { version = "0.3", features = ["futures"] }
 web-sys = { version = "0.3", features = ["HtmlInputElement"] }
+yew = { version = "0.21", features = ["csr"] }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
