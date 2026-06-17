@@ -53,6 +53,9 @@
 //! ops with an ω session; HTTP adds "one request → one response → close" session logic
 //! (expressible purely in `step`); UDP uses only the datagram ops with no session.
 
+#[cfg(feature = "node")]
+pub mod engine;
+
 use bytes::Bytes;
 use serde::Deserialize;
 use serde::Serialize;

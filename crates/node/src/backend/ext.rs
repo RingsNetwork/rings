@@ -29,6 +29,7 @@
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::net::SocketAddr;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -39,6 +40,8 @@ use rings_core::dht::Did;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::backend::transport::SessionId;
+use crate::backend::types::BackendMessage;
 use crate::error::Error;
 use crate::error::Result;
 use crate::processor::Processor;
@@ -105,7 +108,8 @@ pub struct Event {
 /// there. The free algebra of node operations; run by [`Interpreter::run`].
 #[derive(Clone, Debug)]
 pub enum Effect {
-    /// Send `payload` to `to` under `namespace`.
+    /// Send `payload` to `to` under `namespace` over the overlay. Terminal (re-injects
+    /// nothing). `Send : (Did, Namespace, Bytes) → IO ε`.
     Send {
         /// Destination DID.
         to: Did,
@@ -113,6 +117,31 @@ pub enum Effect {
         namespace: String,
         /// Payload bytes.
         payload: Bytes,
+    },
+    /// Open a transport-relay session to `addr`, streaming it to `peer` under
+    /// `namespace` (see [`transport`](crate::backend::transport)). Interpreted
+    /// natively; a no-op on browser.
+    Connect {
+        /// Session id (assigned by the dialing side).
+        session: SessionId,
+        /// Peer the session relays to/from.
+        peer: Did,
+        /// Transport namespace the session's frames travel under.
+        namespace: String,
+        /// Local address to dial.
+        addr: SocketAddr,
+    },
+    /// Write peer-originated bytes to a relay session's local stream.
+    Write {
+        /// Target session.
+        session: SessionId,
+        /// Bytes to write locally.
+        bytes: Bytes,
+    },
+    /// Close a relay session.
+    Close {
+        /// Session to close.
+        session: SessionId,
     },
 }
 
@@ -166,15 +195,20 @@ impl<S> Transition<S> {
 
 // ── Pure transition (what protocol authors write) ─────────────────────────────
 
-/// A protocol: a `namespace`, an initial state, and a **pure** state transition.
+/// A protocol: a `namespace`, an initial state, and a state transition that is pure
+/// **by contract**.
 ///
 /// ```text
 ///   init :        → S
 ///   step : (Ctx S, Event) → Transition S
 /// ```
 ///
-/// `step` MUST be pure (no IO, no clocks, no globals). Describe all side effects via
-/// the returned [`Effect`]s; the runtime ([`Interpreter`]) performs them.
+/// Purity is a *trusted contract*, not enforced by the type system: an implementor
+/// could hide interior mutability in `self` or call out to impure code, and a
+/// [`JsProtocol`](crate::backend::protocols::js) bridges an unrestricted JS function.
+/// Authors are expected to keep `step` pure — no IO, no clocks, no globals — and to
+/// describe all side effects via the returned [`Effect`]s, which the runtime
+/// ([`Interpreter`]) performs.
 pub trait Protocol {
     /// Protocol-private state, owned by the runtime and threaded through `step`.
     type State;
@@ -195,10 +229,26 @@ pub trait Protocol {
 #[derive(Clone)]
 pub struct Interpreter {
     processor: Arc<Processor>,
+    /// Live transport-relay sessions (native only; browser has no raw sockets).
+    #[cfg(feature = "node")]
+    transport: Arc<crate::backend::transport::engine::TransportSessions>,
 }
 
 impl Interpreter {
+    /// Build an interpreter over a processor and the shared transport session table.
+    #[cfg(feature = "node")]
+    pub fn new(
+        processor: Arc<Processor>,
+        transport: Arc<crate::backend::transport::engine::TransportSessions>,
+    ) -> Self {
+        Self {
+            processor,
+            transport,
+        }
+    }
+
     /// Build an interpreter over a processor.
+    #[cfg(feature = "browser")]
     pub fn new(processor: Arc<Processor>) -> Self {
         Self { processor }
     }
@@ -211,8 +261,9 @@ impl Interpreter {
     /// Run effects in order, returning any locally re-injected messages (the event
     /// trace fed back into the router). `run : [Effect] → IO [Inbound]`.
     ///
-    /// `Send` is terminal (goes to a peer) and re-injects nothing; effects that
-    /// perform local IO may return [`Inbound`]s that re-enter `step`.
+    /// `Send` is terminal (goes to a peer) and re-injects nothing; transport effects
+    /// drive native sockets (no-ops on browser). Local reads re-enter the router from
+    /// the engine's own tasks rather than via this return value.
     pub async fn run(&self, effects: Vec<Effect>) -> Result<Vec<Inbound>> {
         let reinjected = Vec::new();
         for effect in effects {
@@ -222,8 +273,46 @@ impl Interpreter {
                     namespace,
                     payload,
                 } => {
-                    let bytes = Envelope::new(namespace, payload).encode()?;
-                    self.processor.send_message(to, bytes.as_slice()).await?;
+                    // Transitional: wrap in `BackendMessage::Envelope` so the current
+                    // receiver (which decodes `BackendMessage` first) can route it.
+                    // Becomes a bare `Envelope` on the wire once `BackendMessage` is
+                    // removed.
+                    let message = BackendMessage::Envelope(Envelope::new(namespace, payload));
+                    self.processor.send_backend_message(to, message).await?;
+                }
+                Effect::Connect {
+                    session,
+                    peer,
+                    namespace,
+                    addr,
+                } => {
+                    #[cfg(feature = "node")]
+                    self.transport
+                        .connect(self.processor.clone(), session, peer, namespace, addr)
+                        .await;
+                    #[cfg(feature = "browser")]
+                    {
+                        let _ = (session, peer, namespace, addr);
+                        tracing::warn!("transport Connect is unsupported on browser");
+                    }
+                }
+                Effect::Write { session, bytes } => {
+                    #[cfg(feature = "node")]
+                    self.transport.write(session, bytes).await;
+                    #[cfg(feature = "browser")]
+                    {
+                        let _ = (session, bytes);
+                        tracing::warn!("transport Write is unsupported on browser");
+                    }
+                }
+                Effect::Close { session } => {
+                    #[cfg(feature = "node")]
+                    self.transport.close(session);
+                    #[cfg(feature = "browser")]
+                    {
+                        let _ = session;
+                        tracing::warn!("transport Close is unsupported on browser");
+                    }
                 }
             }
         }
@@ -312,15 +401,16 @@ impl Extensions {
     }
 
     /// Register a pure [`Protocol`] under its namespace (wrapped in a [`Runner`]).
-    pub fn register<P>(&self, protocol: P)
+    /// Fails if the registry lock is poisoned.
+    pub fn register<P>(&self, protocol: P) -> Result<()>
     where
         P: Protocol + MaybeSend + 'static,
         P::State: MaybeSend + 'static,
     {
         let runner: Arc<DynHandler> = Arc::new(Runner::new(protocol));
-        if let Ok(mut handlers) = self.handlers.write() {
-            handlers.insert(runner.namespace().to_string(), runner);
-        }
+        let mut handlers = self.handlers.write().map_err(|_| Error::Lock)?;
+        handlers.insert(runner.namespace().to_string(), runner);
+        Ok(())
     }
 
     /// Whether a namespace is registered.
@@ -364,8 +454,9 @@ impl Extensions {
         let mut budget = MAX_FIXPOINT_STEPS;
         while let Some(Inbound { namespace, event }) = queue.pop_front() {
             if budget == 0 {
-                tracing::warn!("extension fixpoint budget exhausted at {:?}", namespace);
-                break;
+                return Err(Error::ExtensionError(format!(
+                    "fixpoint budget ({MAX_FIXPOINT_STEPS}) exhausted; last namespace {namespace:?}"
+                )));
             }
             budget -= 1;
 

@@ -39,6 +39,9 @@ pub struct Provider {
     processor: Arc<Processor>,
     handler: InternalRpcHandler,
     extensions: crate::backend::ext::Extensions,
+    /// Live transport-relay sessions, shared into each interpreter (native only).
+    #[cfg(feature = "node")]
+    transport: Arc<crate::backend::transport::engine::TransportSessions>,
 }
 
 /// Async signer, without Send required
@@ -63,11 +66,16 @@ impl Provider {
     /// Create provider from processor directly
     pub fn from_processor(processor: Arc<Processor>) -> Self {
         let extensions = crate::backend::ext::Extensions::new();
-        crate::backend::protocols::register_builtins(&extensions);
+        crate::backend::protocols::register_builtins(&extensions)
+            .expect("register builtins on a fresh registry");
+        #[cfg(feature = "node")]
+        let transport = Arc::new(crate::backend::transport::engine::TransportSessions::new());
         Self {
             processor,
             handler: InternalRpcHandler,
             extensions,
+            #[cfg(feature = "node")]
+            transport,
         }
     }
 
@@ -80,16 +88,23 @@ impl Provider {
     /// The effect interpreter — the single side-effecting boundary used to run a
     /// protocol's described [`Effect`](crate::backend::ext::Effect)s.
     pub(crate) fn interpreter(&self) -> crate::backend::ext::Interpreter {
-        crate::backend::ext::Interpreter::new(self.processor.clone())
+        #[cfg(feature = "node")]
+        {
+            crate::backend::ext::Interpreter::new(self.processor.clone(), self.transport.clone())
+        }
+        #[cfg(feature = "browser")]
+        {
+            crate::backend::ext::Interpreter::new(self.processor.clone())
+        }
     }
 
     /// Register a pure [`Protocol`](crate::backend::ext::Protocol) under its namespace.
-    pub fn register_protocol<P>(&self, protocol: P)
+    pub fn register_protocol<P>(&self, protocol: P) -> Result<()>
     where
         P: crate::backend::ext::Protocol + crate::backend::ext::MaybeSend + 'static,
         P::State: crate::backend::ext::MaybeSend + 'static,
     {
-        self.extensions.register(protocol);
+        self.extensions.register(protocol)
     }
 
     /// Send a namespaced payload to a peer. This is the uniform upper-layer send;
@@ -128,12 +143,16 @@ impl Provider {
         let processor = Arc::new(processor_builder.build()?);
 
         let extensions = crate::backend::ext::Extensions::new();
-        crate::backend::protocols::register_builtins(&extensions);
+        crate::backend::protocols::register_builtins(&extensions)?;
+        #[cfg(feature = "node")]
+        let transport = Arc::new(crate::backend::transport::engine::TransportSessions::new());
 
         Ok(Provider {
             processor,
             handler: InternalRpcHandler,
             extensions,
+            #[cfg(feature = "node")]
+            transport,
         })
     }
 

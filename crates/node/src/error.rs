@@ -141,6 +141,8 @@ pub enum Error {
     FailedToLoadFF() = 1406,
     #[error("Extend Backend Error {0}")]
     BackendError(String) = 1501,
+    #[error("Extension error: {0}")]
+    ExtensionError(String) = 1502,
 }
 
 impl Error {
