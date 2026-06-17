@@ -6,9 +6,9 @@ use wasm_bindgen_test::wasm_bindgen_test;
 use wasm_bindgen_test::*;
 
 use super::setup_log;
-use crate::backend::snark::browser::bigint2ff;
-use crate::backend::snark::Input;
-use crate::backend::snark::SupportedPrimeField;
+use crate::extension::snark::browser::bigint2ff;
+use crate::extension::snark::Input;
+use crate::extension::snark::SupportedPrimeField;
 use crate::prelude::rings_core::utils::js_utils;
 wasm_bindgen_test_configure!(run_in_browser);
 
@@ -35,15 +35,15 @@ async fn test_send_snark_backend_message() {
     let wasm = "https://raw.githubusercontent.com/RingsNetwork/rings/master/crates/snark/src/tests/native/circoms/simple_bn256.wasm";
     let r1cs = "https://raw.githubusercontent.com/RingsNetwork/rings/master/crates/snark/src/tests/native/circoms/simple_bn256.r1cs";
 
-    let snark_behaviour = crate::backend::snark::SNARKBehaviour::new_instance();
-    let snark_task_builder = crate::backend::snark::SNARKTaskBuilder::from_remote(
+    let snark_behaviour = crate::extension::snark::SNARKBehaviour::new_instance();
+    let snark_task_builder = crate::extension::snark::SNARKTaskBuilder::from_remote(
         r1cs.to_string(),
         wasm.to_string(),
-        crate::backend::snark::SupportedPrimeField::Vesta,
+        crate::extension::snark::SupportedPrimeField::Vesta,
     )
     .await
     .unwrap();
-    type F = crate::backend::snark::Field;
+    type F = crate::extension::snark::Field;
     let input: Input = vec![("step_in".to_string(), vec![
         F::from_u64(4u64, SupportedPrimeField::Vesta),
         F::from_u64(2u64, SupportedPrimeField::Vesta),

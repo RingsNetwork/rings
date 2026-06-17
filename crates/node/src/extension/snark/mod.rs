@@ -133,7 +133,7 @@ impl SNARKBehaviour {
     pub fn register(&self, provider: &Provider) -> Result<()> {
         provider.register_protocol(SnarkProtocol)?;
         let manager = self.inner.clone();
-        let job: crate::backend::ext::ComputeFn = Arc::new(move |input: Bytes| {
+        let job: crate::extension::ext::ComputeFn = Arc::new(move |input: Bytes| {
             let manager = manager.clone();
             Box::pin(async move { protocol::snark_compute(manager, input) })
         });

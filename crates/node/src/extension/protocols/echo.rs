@@ -9,11 +9,11 @@
 //!   step (Ctx n, Event{from, p}) = Transition (n+1) [Send{to=from, ns="echo", p}]
 //! ```
 
-use crate::backend::ext::Ctx;
-use crate::backend::ext::Effect;
-use crate::backend::ext::Event;
-use crate::backend::ext::Protocol;
-use crate::backend::ext::Transition;
+use crate::extension::ext::Ctx;
+use crate::extension::ext::Effect;
+use crate::extension::ext::Event;
+use crate::extension::ext::Protocol;
+use crate::extension::ext::Transition;
 
 /// Namespace for the echo protocol.
 pub const NAMESPACE: &str = "echo";

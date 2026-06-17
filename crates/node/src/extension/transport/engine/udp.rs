@@ -18,8 +18,8 @@ use super::Outbound;
 use super::RelayTask;
 use super::TransportSessions;
 use super::UDP_BUF;
-use crate::backend::transport::Frame;
-use crate::backend::transport::SessionKey;
+use crate::extension::transport::Frame;
+use crate::extension::transport::SessionKey;
 use crate::processor::Processor;
 
 impl TransportSessions {

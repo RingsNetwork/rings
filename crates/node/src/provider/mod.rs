@@ -11,9 +11,9 @@ use rings_core::storage::MemStorage;
 use rings_core::swarm::callback::SharedSwarmCallback;
 use rings_rpc::protos::rings_node_handler::InternalRpcHandler;
 
-use crate::backend::Backend;
 use crate::error::Error;
 use crate::error::Result;
+use crate::extension::Backend;
 use crate::measure::MeasureStorage;
 use crate::measure::PeriodicMeasure;
 use crate::prelude::wasm_export;
@@ -36,13 +36,13 @@ pub mod ffi;
 pub struct Provider {
     processor: Arc<Processor>,
     handler: InternalRpcHandler,
-    extensions: crate::backend::ext::Extensions,
+    extensions: crate::extension::ext::Extensions,
     /// Live relay endpoints, shared into each interpreter: OS sockets natively,
     /// WebTransport sessions in the browser.
     #[cfg(feature = "node")]
-    transport: Arc<crate::backend::transport::engine::TransportSessions>,
+    transport: Arc<crate::extension::transport::engine::TransportSessions>,
     #[cfg(feature = "browser")]
-    transport: Arc<crate::backend::transport::wt::WtSessions>,
+    transport: Arc<crate::extension::transport::wt::WtSessions>,
 }
 
 /// Async signer, without Send required
@@ -66,13 +66,13 @@ pub enum Signer {
 impl Provider {
     /// Create provider from processor directly
     pub fn from_processor(processor: Arc<Processor>) -> Self {
-        let extensions = crate::backend::ext::Extensions::new();
-        crate::backend::protocols::register_builtins(&extensions)
+        let extensions = crate::extension::ext::Extensions::new();
+        crate::extension::protocols::register_builtins(&extensions)
             .expect("register builtins on a fresh registry");
         #[cfg(feature = "node")]
-        let transport = Arc::new(crate::backend::transport::engine::TransportSessions::new());
+        let transport = Arc::new(crate::extension::transport::engine::TransportSessions::new());
         #[cfg(feature = "browser")]
-        let transport = Arc::new(crate::backend::transport::wt::WtSessions::new());
+        let transport = Arc::new(crate::extension::transport::wt::WtSessions::new());
         Self {
             processor,
             handler: InternalRpcHandler,
@@ -84,36 +84,36 @@ impl Provider {
 
     /// The shared protocol registry. The inbound callback clones this so
     /// registration (via the provider) and dispatch see the same table.
-    pub fn extensions(&self) -> crate::backend::ext::Extensions {
+    pub fn extensions(&self) -> crate::extension::ext::Extensions {
         self.extensions.clone()
     }
 
     /// The effect interpreter — the single side-effecting boundary used to run a
-    /// protocol's described [`Effect`](crate::backend::ext::Effect)s.
-    pub(crate) fn interpreter(&self) -> crate::backend::ext::Interpreter {
-        crate::backend::ext::Interpreter::new(
+    /// protocol's described [`Effect`](crate::extension::ext::Effect)s.
+    pub(crate) fn interpreter(&self) -> crate::extension::ext::Interpreter {
+        crate::extension::ext::Interpreter::new(
             self.processor.clone(),
             self.transport.clone(),
             self.extensions.computes(),
         )
     }
 
-    /// Register a pure [`Protocol`](crate::backend::ext::Protocol) under its namespace.
+    /// Register a pure [`Protocol`](crate::extension::ext::Protocol) under its namespace.
     pub fn register_protocol<P>(&self, protocol: P) -> Result<()>
     where
-        P: crate::backend::ext::Protocol + crate::backend::ext::MaybeSend + 'static,
-        P::State: crate::backend::ext::MaybeSend + 'static,
+        P: crate::extension::ext::Protocol + crate::extension::ext::MaybeSend + 'static,
+        P::State: crate::extension::ext::MaybeSend + 'static,
     {
         self.extensions.register(protocol)
     }
 
     /// Register an impure compute job for `namespace`, run when a protocol emits an
-    /// [`Effect::Compute`](crate::backend::ext::Effect::Compute). The escape hatch for
+    /// [`Effect::Compute`](crate::extension::ext::Effect::Compute). The escape hatch for
     /// effectful protocols (e.g. SNARK) whose `step` stays pure.
     pub fn register_compute(
         &self,
         namespace: impl Into<String>,
-        job: crate::backend::ext::ComputeFn,
+        job: crate::extension::ext::ComputeFn,
     ) -> Result<()> {
         self.extensions.register_compute(namespace, job)
     }
@@ -124,7 +124,7 @@ impl Provider {
         name: String,
         addr: std::net::SocketAddr,
     ) -> Result<()> {
-        self.register_relay_service(crate::backend::protocols::relay::TCP, name, addr)
+        self.register_relay_service(crate::extension::protocols::relay::TCP, name, addr)
             .await
     }
 
@@ -134,7 +134,7 @@ impl Provider {
         name: String,
         addr: std::net::SocketAddr,
     ) -> Result<()> {
-        self.register_relay_service(crate::backend::protocols::relay::UDP, name, addr)
+        self.register_relay_service(crate::extension::protocols::relay::UDP, name, addr)
             .await
     }
 
@@ -142,7 +142,7 @@ impl Provider {
     /// mapping `name` → WebTransport `url` (under the `tcp` namespace).
     #[cfg(feature = "browser")]
     pub async fn register_wt_service(&self, name: String, url: String) -> Result<()> {
-        self.register_wt(crate::backend::protocols::relay::TCP, name, url)
+        self.register_wt(crate::extension::protocols::relay::TCP, name, url)
             .await
     }
 
@@ -150,7 +150,7 @@ impl Provider {
     /// (datagrams), mapping `name` → WebTransport `url` (under the `udp` namespace).
     #[cfg(feature = "browser")]
     pub async fn register_wt_udp_service(&self, name: String, url: String) -> Result<()> {
-        self.register_wt(crate::backend::protocols::relay::UDP, name, url)
+        self.register_wt(crate::extension::protocols::relay::UDP, name, url)
             .await
     }
 
@@ -159,9 +159,9 @@ impl Provider {
     /// self) into the relay protocol's pure `step`.
     #[cfg(feature = "browser")]
     async fn register_wt(&self, namespace: &str, name: String, url: String) -> Result<()> {
-        let command = crate::backend::protocols::relay::WtCommand::RegisterService { name, url };
+        let command = crate::extension::protocols::relay::WtCommand::RegisterService { name, url };
         let payload = bincode::serialize(&command).map_err(|_| Error::EncodeError)?;
-        let envelope = crate::backend::ext::Envelope::new(namespace, bytes::Bytes::from(payload));
+        let envelope = crate::extension::ext::Envelope::new(namespace, bytes::Bytes::from(payload));
         self.extensions
             .dispatch(&self.interpreter(), self.processor.did(), envelope)
             .await
@@ -175,9 +175,9 @@ impl Provider {
         name: String,
         addr: std::net::SocketAddr,
     ) -> Result<()> {
-        let command = crate::backend::protocols::relay::Command::RegisterService { name, addr };
+        let command = crate::extension::protocols::relay::Command::RegisterService { name, addr };
         let payload = bincode::serialize(&command).map_err(|_| Error::EncodeError)?;
-        let envelope = crate::backend::ext::Envelope::new(namespace, bytes::Bytes::from(payload));
+        let envelope = crate::extension::ext::Envelope::new(namespace, bytes::Bytes::from(payload));
         self.extensions
             .dispatch(&self.interpreter(), self.processor.did(), envelope)
             .await
@@ -195,8 +195,8 @@ impl Provider {
             local_addr,
             peer,
             service,
-            crate::backend::protocols::relay::TCP,
-            crate::backend::transport::TransportKind::Tcp,
+            crate::extension::protocols::relay::TCP,
+            crate::extension::transport::TransportKind::Tcp,
         )
         .await
     }
@@ -213,8 +213,8 @@ impl Provider {
             local_addr,
             peer,
             service,
-            crate::backend::protocols::relay::UDP,
-            crate::backend::transport::TransportKind::Udp,
+            crate::extension::protocols::relay::UDP,
+            crate::extension::transport::TransportKind::Udp,
         )
         .await
     }
@@ -225,10 +225,10 @@ impl Provider {
         peer: rings_core::dht::Did,
         service: String,
         namespace: &str,
-        kind: crate::backend::transport::TransportKind,
+        kind: crate::extension::transport::TransportKind,
     ) -> Result<()> {
         self.interpreter()
-            .run(vec![crate::backend::ext::Effect::Listen {
+            .run(vec![crate::extension::ext::Effect::Listen {
                 local_addr,
                 peer,
                 service,
@@ -249,7 +249,7 @@ impl Provider {
         payload: bytes::Bytes,
     ) -> Result<()> {
         self.interpreter()
-            .run(vec![crate::backend::ext::Effect::Send {
+            .run(vec![crate::extension::ext::Effect::Send {
                 to,
                 namespace: namespace.to_string(),
                 payload,
@@ -274,12 +274,12 @@ impl Provider {
 
         let processor = Arc::new(processor_builder.build()?);
 
-        let extensions = crate::backend::ext::Extensions::new();
-        crate::backend::protocols::register_builtins(&extensions)?;
+        let extensions = crate::extension::ext::Extensions::new();
+        crate::extension::protocols::register_builtins(&extensions)?;
         #[cfg(feature = "node")]
-        let transport = Arc::new(crate::backend::transport::engine::TransportSessions::new());
+        let transport = Arc::new(crate::extension::transport::engine::TransportSessions::new());
         #[cfg(feature = "browser")]
-        let transport = Arc::new(crate::backend::transport::wt::WtSessions::new());
+        let transport = Arc::new(crate::extension::transport::wt::WtSessions::new());
 
         Ok(Provider {
             processor,
@@ -322,7 +322,7 @@ impl Provider {
     }
 
     /// Install the extension [`Backend`] as the swarm's inbound callback, so inbound
-    /// custom messages are decoded as [`Envelope`](crate::backend::ext::Envelope)s and
+    /// custom messages are decoded as [`Envelope`](crate::extension::ext::Envelope)s and
     /// routed to their namespace's protocol. Call once after registering protocols.
     pub fn set_backend(&self) -> Result<()> {
         let backend = Backend::new(Arc::new(self.clone()));

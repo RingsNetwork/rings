@@ -17,7 +17,7 @@ use crate::processor::Processor;
 /// Executes [`Effect`]s. The single side-effecting boundary of the extension layer.
 ///
 /// It holds the platform transport engine that owns live relay endpoints: OS sockets
-/// natively ([`engine::TransportSessions`](crate::backend::transport::engine)), or
+/// natively ([`engine::TransportSessions`](crate::extension::transport::engine)), or
 /// WebTransport sessions in the browser
 /// (`wt::WtSessions`, browser). `Write`/`Shutdown`/`Close`
 /// dispatch to it on both targets; only the *open* effect differs (`Connect`/`Listen`
@@ -27,9 +27,9 @@ pub struct Interpreter {
     processor: Arc<Processor>,
     compute: ComputeServices,
     #[cfg(feature = "node")]
-    transport: Arc<crate::backend::transport::engine::TransportSessions>,
+    transport: Arc<crate::extension::transport::engine::TransportSessions>,
     #[cfg(feature = "browser")]
-    transport: Arc<crate::backend::transport::wt::WtSessions>,
+    transport: Arc<crate::extension::transport::wt::WtSessions>,
 }
 
 impl Interpreter {
@@ -37,7 +37,7 @@ impl Interpreter {
     #[cfg(feature = "node")]
     pub fn new(
         processor: Arc<Processor>,
-        transport: Arc<crate::backend::transport::engine::TransportSessions>,
+        transport: Arc<crate::extension::transport::engine::TransportSessions>,
         compute: ComputeServices,
     ) -> Self {
         Self {
@@ -51,7 +51,7 @@ impl Interpreter {
     #[cfg(feature = "browser")]
     pub fn new(
         processor: Arc<Processor>,
-        transport: Arc<crate::backend::transport::wt::WtSessions>,
+        transport: Arc<crate::extension::transport::wt::WtSessions>,
         compute: ComputeServices,
     ) -> Self {
         Self {

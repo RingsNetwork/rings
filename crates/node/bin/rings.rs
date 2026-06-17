@@ -6,7 +6,7 @@ use clap::Parser;
 use clap::Subcommand;
 use futures::pin_mut;
 use futures::StreamExt;
-use rings_node::backend::Backend;
+use rings_node::extension::Backend;
 use rings_node::logging::init_logging;
 use rings_node::logging::LogLevel;
 use rings_node::measure::PeriodicMeasure;
@@ -400,7 +400,7 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     let provider = Arc::new(Provider::from_processor(processor.clone()));
     // SNARK is a namespaced protocol now; register it so the daemon can prove/verify.
     #[cfg(feature = "snark")]
-    rings_node::backend::snark::SNARKBehaviour::default().register(provider.as_ref())?;
+    rings_node::extension::snark::SNARKBehaviour::default().register(provider.as_ref())?;
     // The Backend decodes inbound custom messages as namespaced envelopes and routes
     // them to the protocol registry.
     let backend = Arc::new(Backend::new(provider));

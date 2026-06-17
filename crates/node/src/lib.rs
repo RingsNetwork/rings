@@ -1,8 +1,8 @@
 #![doc = include_str!("../README.md")]
 #![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
-pub mod backend;
 pub mod consts;
 pub mod error;
+pub mod extension;
 pub mod logging;
 pub mod measure;
 #[cfg(feature = "node")]

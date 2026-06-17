@@ -3,7 +3,7 @@
 //! extracted from a frontend.
 //!
 //! The point this example makes: **the browser uses the exact same model as native.**
-//! A protocol is a pure [`Protocol`](rings_node::backend::ext::Protocol); here we
+//! A protocol is a pure [`Protocol`](rings_node::extension::ext::Protocol); here we
 //! register the built-in Rust [`Echo`] protocol on a *browser* [`Provider`] — no
 //! JavaScript handler, the same code that runs on a daemon. (For a JS-defined protocol
 //! use `provider.on(namespace, initialState, handler)` instead.)
@@ -16,7 +16,7 @@
 //! UI (Yew components, routing, DOM) is intentionally omitted; these functions are what
 //! the components call. Build with `wasm-pack build examples/browser`.
 
-use rings_node::backend::protocols::echo::Echo;
+use rings_node::extension::protocols::echo::Echo;
 use rings_node::provider::Provider;
 use wasm_bindgen::prelude::*;
 

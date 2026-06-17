@@ -7,7 +7,7 @@ use rings_snark::prelude::nova::provider::VestaEngine;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::backend::snark::SNARKGenerator;
+use crate::extension::snark::SNARKGenerator;
 
 /// Message for snark task
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -23,7 +23,7 @@ pub struct SNARKTaskMessage {
 }
 
 // `SNARKTaskMessage` now travels as a `snark` namespace [`Envelope`] payload (see
-// [`crate::backend::snark::SnarkProtocol`]); it no longer wraps into `BackendMessage`.
+// [`crate::extension::snark::SnarkProtocol`]); it no longer wraps into `BackendMessage`.
 
 #[cfg(feature = "snark")]
 /// Message types for snark task, including proof and verify

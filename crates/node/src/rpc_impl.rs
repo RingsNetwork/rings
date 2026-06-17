@@ -209,7 +209,7 @@ impl HandleRpc<SendBackendMessageRequest, SendBackendMessageResponse> for Proces
         let payload = base64::decode(req.data.as_str())
             .map_err(|e| Error::invalid_params(format!("data is not valid base64: {e:?}")))?;
         let envelope =
-            crate::backend::ext::Envelope::new(req.namespace, bytes::Bytes::from(payload));
+            crate::extension::ext::Envelope::new(req.namespace, bytes::Bytes::from(payload));
         self.send_envelope(destination, &envelope).await?;
         Ok(SendBackendMessageResponse {})
     }

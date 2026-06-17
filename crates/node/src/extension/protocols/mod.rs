@@ -1,7 +1,7 @@
 #![warn(missing_docs)]
 //! Built-in protocol extensions.
 //!
-//! Each built-in protocol implements [`Protocol`](crate::backend::ext::Protocol) and is
+//! Each built-in protocol implements [`Protocol`](crate::extension::ext::Protocol) and is
 //! registered under its namespace, replacing the corresponding `BackendMessage`
 //! variant.
 
@@ -12,8 +12,8 @@ pub mod relay;
 
 use std::collections::HashMap;
 
-use crate::backend::ext::Extensions;
 use crate::error::Result;
+use crate::extension::ext::Extensions;
 
 /// Register the built-in protocol extensions into a registry.
 ///

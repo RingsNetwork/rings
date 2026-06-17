@@ -28,11 +28,11 @@ use js_sys::Uint8Array;
 use rings_core::dht::Did;
 use wasm_bindgen::JsValue;
 
-use crate::backend::ext::Ctx;
-use crate::backend::ext::Effect;
-use crate::backend::ext::Event;
-use crate::backend::ext::Protocol;
-use crate::backend::ext::Transition;
+use crate::extension::ext::Ctx;
+use crate::extension::ext::Effect;
+use crate::extension::ext::Event;
+use crate::extension::ext::Protocol;
+use crate::extension::ext::Transition;
 
 /// A protocol whose pure transition is a JS function. State is an opaque [`JsValue`].
 pub struct JsProtocol {

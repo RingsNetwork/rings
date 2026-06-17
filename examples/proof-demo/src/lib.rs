@@ -15,12 +15,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gloo_timers::future::sleep;
-use rings_node::backend::snark::Field;
-use rings_node::backend::snark::Input;
-use rings_node::backend::snark::ProofResult;
-use rings_node::backend::snark::SNARKBehaviour;
-use rings_node::backend::snark::SNARKTaskBuilder;
-use rings_node::backend::snark::SupportedPrimeField;
+use rings_node::extension::snark::Field;
+use rings_node::extension::snark::Input;
+use rings_node::extension::snark::ProofResult;
+use rings_node::extension::snark::SNARKBehaviour;
+use rings_node::extension::snark::SNARKTaskBuilder;
+use rings_node::extension::snark::SupportedPrimeField;
 use rings_node::prelude::rings_core::dht::Did;
 use rings_node::prelude::rings_core::ecc::SecretKey;
 use rings_node::prelude::rings_core::session::SessionSk;

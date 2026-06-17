@@ -2,7 +2,7 @@
 //!
 //! Same shape as the TCP demo, but the service and tunnel carry UDP datagrams (each
 //! source address is demultiplexed into its own overlay flow). It is the *same* pure
-//! relay protocol — only the [`TransportKind`](rings_node::backend::transport) differs.
+//! relay protocol — only the [`TransportKind`](rings_node::extension::transport) differs.
 //!
 //! Run with: `cargo run -p rings-relay-example --example rings-udp-relay-example`
 

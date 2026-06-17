@@ -39,15 +39,15 @@ use rings_core::dht::Did;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::backend::ext::Ctx;
-use crate::backend::ext::Effect;
-use crate::backend::ext::Event;
-use crate::backend::ext::Protocol;
-use crate::backend::ext::Transition;
-use crate::backend::transport::Frame;
-use crate::backend::transport::SessionId;
-use crate::backend::transport::SessionKey;
-use crate::backend::transport::TransportKind;
+use crate::extension::ext::Ctx;
+use crate::extension::ext::Effect;
+use crate::extension::ext::Event;
+use crate::extension::ext::Protocol;
+use crate::extension::ext::Transition;
+use crate::extension::transport::Frame;
+use crate::extension::transport::SessionId;
+use crate::extension::transport::SessionKey;
+use crate::extension::transport::TransportKind;
 
 /// Namespace for the TCP relay.
 pub const TCP: &str = "tcp";
@@ -220,7 +220,7 @@ fn close_frame(session: SessionId) -> Bytes {
 /// Browser relay: same pure `step` as [`Relay`], but a service resolves to a
 /// WebTransport **URL** (the browser endpoint) and `Open` emits
 /// [`Effect::WtConnect`] instead of `Connect`. See
-/// [`wt`](crate::backend::transport::wt).
+/// [`wt`](crate::extension::transport::wt).
 #[cfg(feature = "browser")]
 pub use wt_relay::Command as WtCommand;
 #[cfg(feature = "browser")]
@@ -238,14 +238,14 @@ mod wt_relay {
 
     use super::TCP;
     use super::UDP;
-    use crate::backend::ext::Ctx;
-    use crate::backend::ext::Effect;
-    use crate::backend::ext::Event;
-    use crate::backend::ext::Protocol;
-    use crate::backend::ext::Transition;
-    use crate::backend::transport::Frame;
-    use crate::backend::transport::SessionKey;
-    use crate::backend::transport::TransportKind;
+    use crate::extension::ext::Ctx;
+    use crate::extension::ext::Effect;
+    use crate::extension::ext::Event;
+    use crate::extension::ext::Protocol;
+    use crate::extension::ext::Transition;
+    use crate::extension::transport::Frame;
+    use crate::extension::transport::SessionKey;
+    use crate::extension::transport::TransportKind;
 
     /// Local control command for the browser relay (service name → WebTransport URL).
     #[derive(Clone, Debug, Serialize, Deserialize)]

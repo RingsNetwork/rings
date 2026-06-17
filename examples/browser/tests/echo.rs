@@ -9,11 +9,11 @@
 use bytes::Bytes;
 use rings_core::dht::Did;
 use rings_core::ecc::SecretKey;
-use rings_node::backend::ext::Ctx;
-use rings_node::backend::ext::Effect;
-use rings_node::backend::ext::Event;
-use rings_node::backend::ext::Protocol;
-use rings_node::backend::protocols::echo::Echo;
+use rings_node::extension::ext::Ctx;
+use rings_node::extension::ext::Effect;
+use rings_node::extension::ext::Event;
+use rings_node::extension::ext::Protocol;
+use rings_node::extension::protocols::echo::Echo;
 use wasm_bindgen_test::wasm_bindgen_test;
 
 #[wasm_bindgen_test]

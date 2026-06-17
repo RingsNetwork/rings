@@ -303,13 +303,13 @@ impl Processor {
             .map_err(Error::SendMessage)
     }
 
-    /// Send a namespaced [`Envelope`](crate::backend::ext::Envelope) to a did over the
+    /// Send a namespaced [`Envelope`](crate::extension::ext::Envelope) to a did over the
     /// P2P transport (the wire codec
     /// of the extension layer). `send_envelope : (Did, Envelope) → IO TxId`.
     pub async fn send_envelope(
         &self,
         destination: Did,
-        envelope: &crate::backend::ext::Envelope,
+        envelope: &crate::extension::ext::Envelope,
     ) -> Result<uuid::Uuid> {
         let msg_bytes = envelope.encode()?;
         self.send_message(destination, &msg_bytes).await

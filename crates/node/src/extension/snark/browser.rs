@@ -9,8 +9,8 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::future_to_promise;
 
 use super::*;
-use crate::backend::types::snark::SNARKProofTask;
-use crate::backend::types::snark::SNARKVerifyTask;
+use crate::extension::types::snark::SNARKProofTask;
+use crate::extension::types::snark::SNARKVerifyTask;
 use crate::provider::browser::ProviderRef;
 
 /// We need this ref to pass Task ref to js_sys

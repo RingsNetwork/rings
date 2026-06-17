@@ -46,9 +46,9 @@ use tokio::runtime::Runtime;
 
 use super::Provider;
 use super::Signer;
-use crate::backend::Backend;
 use crate::error::Error;
 use crate::error::Result;
+use crate::extension::Backend;
 
 /// A structure to represent the Provider in a C-compatible format.
 /// This is necessary as using Arc directly in FFI can be unsafe.

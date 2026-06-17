@@ -17,8 +17,8 @@ use rings_core::message::MessagePayload;
 use rings_core::message::MessageVerificationExt;
 use rings_core::swarm::callback::SwarmCallback;
 
-use crate::backend::ext::Envelope;
-use crate::backend::ext::Extensions;
+use crate::extension::ext::Envelope;
+use crate::extension::ext::Extensions;
 use crate::provider::Provider;
 
 /// Backend handles inbound custom messages from the Swarm, routing each decoded

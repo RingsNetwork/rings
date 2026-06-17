@@ -200,7 +200,7 @@ impl Provider {
         handler: js_sys::Function,
     ) -> Result<(), JsError> {
         let protocol =
-            crate::backend::protocols::js::JsProtocol::new(namespace, initial_state, handler);
+            crate::extension::protocols::js::JsProtocol::new(namespace, initial_state, handler);
         self.register_protocol(protocol).map_err(JsError::from)
     }
 
@@ -295,7 +295,7 @@ impl Provider {
         let p = self.processor.clone();
         future_to_promise(async move {
             let did = get_did(destination.as_str(), AddressType::DEFAULT)?;
-            let envelope = crate::backend::ext::Envelope::new(namespace, payload.to_vec().into());
+            let envelope = crate::extension::ext::Envelope::new(namespace, payload.to_vec().into());
             let tx_id = p
                 .send_envelope(did, &envelope)
                 .await

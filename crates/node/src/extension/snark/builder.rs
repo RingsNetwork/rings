@@ -20,8 +20,8 @@ use super::FieldEnum;
 use super::Input;
 use super::SNARKGenerator;
 use super::SupportedPrimeField;
-use crate::backend::types::snark::SNARKProofTask;
 use crate::error::Result;
+use crate::extension::types::snark::SNARKProofTask;
 
 /// Snark builder
 #[wasm_export]

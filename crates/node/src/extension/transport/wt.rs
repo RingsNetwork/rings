@@ -3,9 +3,9 @@
 //!
 //! Browsers have no raw sockets, so the relay's local backend here is a *WebTransport*
 //! server (a URL). This is the browser counterpart of the native socket engine
-//! ([`engine`](crate::backend::transport::engine)); it presents the same
+//! ([`engine`](crate::extension::transport::engine)); it presents the same
 //! `write`/`shutdown`/`close` surface so the interpreter dispatches uniformly, and
-//! opens sessions via [`Effect::WtConnect`](crate::backend::ext::Effect::WtConnect).
+//! opens sessions via [`Effect::WtConnect`](crate::extension::ext::Effect::WtConnect).
 //!
 //! Mapping: `TransportKind::Tcp` → a WebTransport **bidirectional stream**;
 //! `TransportKind::Udp` → WebTransport **datagrams**. Reads from the local side become
@@ -34,12 +34,12 @@ use web_sys::WebTransport;
 use web_sys::WritableStream;
 use web_sys::WritableStreamDefaultWriter;
 
-use crate::backend::ext::Envelope;
-use crate::backend::transport::Frame;
-use crate::backend::transport::SessionKey;
-use crate::backend::transport::TransportKind;
 use crate::error::Error;
 use crate::error::Result;
+use crate::extension::ext::Envelope;
+use crate::extension::transport::Frame;
+use crate::extension::transport::SessionKey;
+use crate::extension::transport::TransportKind;
 use crate::processor::Processor;
 
 /// A live WebTransport-backed session.

@@ -3,7 +3,7 @@
 //!
 //! The pure half of the relay is each transport's `Protocol::step`; this is the
 //! side-effecting half. It keys live OS resources by [`SessionId`] and is driven only
-//! through the transport [`Effect`](crate::backend::ext::Effect)s
+//! through the transport [`Effect`](crate::extension::ext::Effect)s
 //! (`Connect`/`Listen`/`Write`/`Shutdown`/`Close`). Local reads flow back to the peer
 //! as [`Frame`]s (the event trace flowing outward).
 //!
@@ -60,13 +60,13 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
-use crate::backend::ext::Envelope;
-use crate::backend::transport::Frame;
-use crate::backend::transport::SessionId;
-use crate::backend::transport::SessionKey;
-use crate::backend::transport::TransportKind;
 use crate::error::Error;
 use crate::error::Result;
+use crate::extension::ext::Envelope;
+use crate::extension::transport::Frame;
+use crate::extension::transport::SessionId;
+use crate::extension::transport::SessionKey;
+use crate::extension::transport::TransportKind;
 use crate::processor::Processor;
 
 /// Connect timeout for a local service dial.

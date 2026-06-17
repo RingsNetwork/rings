@@ -1,4 +1,4 @@
-use crate::backend::snark::*;
+use crate::extension::snark::*;
 
 #[tokio::test]
 pub async fn test_gen_proof_and_verify() {
@@ -7,11 +7,11 @@ pub async fn test_gen_proof_and_verify() {
     let snark_task_builder = SNARKTaskBuilder::from_local(
         r1cs.to_string(),
         wasm.to_string(),
-        crate::backend::snark::SupportedPrimeField::Vesta,
+        crate::extension::snark::SupportedPrimeField::Vesta,
     )
     .await
     .unwrap();
-    type F = crate::backend::snark::Field;
+    type F = crate::extension::snark::Field;
     let input: Input = vec![("step_in".to_string(), vec![
         F::from_u64(4u64, SupportedPrimeField::Vesta),
         F::from_u64(2u64, SupportedPrimeField::Vesta),

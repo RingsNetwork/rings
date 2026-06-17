@@ -7,8 +7,8 @@ use std::net::SocketAddr;
 use bytes::Bytes;
 use rings_core::dht::Did;
 
-use crate::backend::transport::SessionKey;
-use crate::backend::transport::TransportKind;
+use crate::extension::transport::SessionKey;
+use crate::extension::transport::TransportKind;
 
 // ── Pure data: input, output, state carrier ───────────────────────────────────
 
@@ -51,7 +51,7 @@ pub enum Effect {
         input: Bytes,
     },
     /// Open a transport-relay session (keyed by [`SessionKey`], which scopes it to the
-    /// authenticated `peer`) to `addr` (see [`transport`](crate::backend::transport)).
+    /// authenticated `peer`) to `addr` (see [`transport`](crate::extension::transport)).
     /// Interpreted natively; a no-op on browser.
     Connect {
         /// Full session identity `(peer, namespace, session)`.

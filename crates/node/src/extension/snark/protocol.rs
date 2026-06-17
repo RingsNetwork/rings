@@ -13,17 +13,17 @@ use super::SNARKBehaviour;
 use super::SNARKTaskManager;
 use super::TaskId;
 use super::NAMESPACE;
-use crate::backend::ext::Ctx;
-use crate::backend::ext::Effect;
-use crate::backend::ext::Event;
-use crate::backend::ext::Protocol;
-use crate::backend::ext::Transition;
-use crate::backend::types::snark::SNARKProofTask;
-use crate::backend::types::snark::SNARKTask;
-use crate::backend::types::snark::SNARKTaskMessage;
-use crate::backend::types::snark::SNARKVerifyTask;
 use crate::error::Error;
 use crate::error::Result;
+use crate::extension::ext::Ctx;
+use crate::extension::ext::Effect;
+use crate::extension::ext::Event;
+use crate::extension::ext::Protocol;
+use crate::extension::ext::Transition;
+use crate::extension::types::snark::SNARKProofTask;
+use crate::extension::types::snark::SNARKTask;
+use crate::extension::types::snark::SNARKTaskMessage;
+use crate::extension::types::snark::SNARKVerifyTask;
 
 /// A SNARK compute request, handed to the shell via [`Effect::Compute`]. Carries the
 /// task plus enough context to route the result. Never on the wire (local only).
