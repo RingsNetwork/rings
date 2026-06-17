@@ -1,0 +1,22 @@
+[package]
+name = "rings-relay-example"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+rings-core = { workspace = true }
+rings-node = { workspace = true }
+tokio = { version = "1.13.0", features = ["full"] }
+
+[[example]]
+name = "rings-tcp-relay-example"
+path = "tcp.rs"
+bench = false
+
+[[example]]
+name = "rings-udp-relay-example"
+path = "udp.rs"
+bench = false

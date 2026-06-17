@@ -4178,6 +4178,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rings-browser-example"
+version = "0.7.1"
+dependencies = [
+ "bytes",
+ "js-sys",
+ "rings-core",
+ "rings-node",
+ "wasm-bindgen",
+ "wasm-bindgen-test",
+]
+
+[[package]]
 name = "rings-core"
 version = "0.7.1"
 dependencies = [
@@ -4327,6 +4339,15 @@ dependencies = [
  "wasmer",
  "wasmer-types 3.3.0",
  "web-sys",
+]
+
+[[package]]
+name = "rings-relay-example"
+version = "0.7.1"
+dependencies = [
+ "rings-core",
+ "rings-node",
+ "tokio",
 ]
 
 [[package]]
