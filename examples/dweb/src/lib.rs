@@ -251,3 +251,106 @@ fn app() -> Html {
 pub fn run() {
     yew::Renderer::<App>::new().render();
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::*;
+
+    // These exercise only the pure `dweb_handle` logic (no DOM / storage / network), so
+    // they run under the node runner — no browser driver needed.
+
+    fn ctx_null() -> JsValue {
+        let ctx = Object::new();
+        Reflect::set(&ctx, &"state".into(), &JsValue::NULL).unwrap();
+        ctx.into()
+    }
+
+    fn event(from: &str, msg: &DwebMsg) -> JsValue {
+        let event = Object::new();
+        Reflect::set(&event, &"from".into(), &JsValue::from_str(from)).unwrap();
+        let bytes = serde_json::to_vec(msg).unwrap();
+        Reflect::set(&event, &"payload".into(), &Uint8Array::from(bytes.as_slice())).unwrap();
+        event.into()
+    }
+
+    fn effects(result: &JsValue) -> Array {
+        Array::from(&Reflect::get(result, &"effects".into()).unwrap())
+    }
+
+    fn effect_response(effect: &JsValue) -> DwebMsg {
+        let payload = Reflect::get(effect, &"payload".into()).unwrap();
+        serde_json::from_slice(&Uint8Array::new(&payload).to_vec()).unwrap()
+    }
+
+    #[wasm_bindgen_test]
+    fn serves_a_hosted_page_back_to_the_requester() {
+        let site: Site = Rc::new(RefCell::new(HashMap::from([(
+            "/".to_string(),
+            "<h1>hi</h1>".to_string(),
+        )])));
+        let result = dweb_handle(
+            &ctx_null(),
+            &event("0xabc", &DwebMsg::Req { path: "/".into() }),
+            &site,
+            &Callback::from(|_| {}),
+        );
+        let effects = effects(&result);
+        assert_eq!(effects.length(), 1, "a request yields exactly one Send");
+        let effect = effects.get(0);
+        assert_eq!(
+            Reflect::get(&effect, &"to".into()).unwrap().as_string().unwrap(),
+            "0xabc"
+        );
+        assert_eq!(
+            Reflect::get(&effect, &"namespace".into()).unwrap().as_string().unwrap(),
+            "dweb"
+        );
+        match effect_response(&effect) {
+            DwebMsg::Res { path, body } => {
+                assert_eq!(path, "/");
+                assert_eq!(body, "<h1>hi</h1>");
+            }
+            _ => panic!("expected a Res"),
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn unknown_path_yields_404() {
+        let site: Site = Rc::new(RefCell::new(HashMap::new()));
+        let result = dweb_handle(
+            &ctx_null(),
+            &event("0xabc", &DwebMsg::Req { path: "/missing".into() }),
+            &site,
+            &Callback::from(|_| {}),
+        );
+        match effect_response(&effects(&result).get(0)) {
+            DwebMsg::Res { body, .. } => assert!(body.contains("404")),
+            _ => panic!("expected a Res"),
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn a_response_is_surfaced_and_sends_nothing() {
+        let site: Site = Rc::new(RefCell::new(HashMap::new()));
+        let got: Rc<RefCell<Option<(String, String)>>> = Rc::new(RefCell::new(None));
+        let cb = {
+            let got = got.clone();
+            Callback::from(move |r| *got.borrow_mut() = Some(r))
+        };
+        let result = dweb_handle(
+            &ctx_null(),
+            &event("0xabc", &DwebMsg::Res {
+                path: "/".into(),
+                body: "PAGE".into(),
+            }),
+            &site,
+            &cb,
+        );
+        assert_eq!(effects(&result).length(), 0, "a response triggers no Send");
+        assert_eq!(*got.borrow(), Some(("/".to_string(), "PAGE".to_string())));
+    }
+}

@@ -1,27 +1,44 @@
 # Rings proof-demo (Yew)
 
 A Rust/[Yew](https://yew.rs) rewrite of the (deprecated, TypeScript) `rings-proof-demo`.
-It demonstrates **distributed SNARK** over rings: this browser node is the *verifier* —
-it builds a recursive proof task from a circuit, offloads the heavy proving to a *prover*
-peer over the overlay, and verifies the returned proof. It drives the same
-`SnarkProtocol` the daemon uses (`gen_and_send_proof_task` → `Effect::Compute` on the
-prover → reply → `get_task_result`); no JS glue.
 
-The rings wiring lives in the `rings`-prefixed helpers in `src/main.rs`; the rest is a
-thin Yew UI.
+## Functionality
+
+**Distributed SNARK** over rings: this browser node is the *verifier*. It builds a
+recursive proof task from a circuit, offloads the heavy proving to a *prover* peer over
+the overlay, and verifies the returned proof — driving the same `SnarkProtocol` the
+daemon uses, with no JS glue:
+
+1. builds an in-browser node (IndexedDB) and registers the SNARK protocol;
+2. joins the overlay via a seed node's HTTP endpoint;
+3. loads a circuit (`r1cs`/`wasm` URLs), generates a recursive proof task with the sample
+   input `step_in = [4, 2]` (Vesta, 5 rounds), and `gen_and_send_proof_task` to the prover
+   — on the prover this runs as an `Effect::Compute`, whose result is sent back;
+4. polls `get_task_result` until the returned proof verifies.
+
+The rings wiring lives in `src/lib.rs` (`build_node`, `sample_input`, `run_proof`);
+`src/main.rs` mounts the Yew app.
 
 ## Run
 
 ```sh
 cargo install trunk          # one-time
-trunk serve                  # in this directory → http://localhost:8080
+trunk serve                  # → http://localhost:8080
 ```
 
-You also need:
-- a **prover peer** reachable on the overlay (e.g. a `rings` daemon, or another browser
-  tab) — paste its DID into the form;
-- a **seed** node's HTTP endpoint to join the overlay (default `http://127.0.0.1:50000`);
-- the circuit files served over HTTP (`simple_bn256.r1cs` / `.wasm` from
-  `examples/snark/circoms`), e.g. `python3 -m http.server 8080` in that directory.
+Needs a prover peer on the overlay (its DID), a seed node's HTTP endpoint, and the circuit
+files served over HTTP (`simple_bn256.r1cs`/`.wasm` from `examples/snark/circoms`, e.g.
+`python3 -m http.server 8080` there).
 
-This crate is standalone (excluded from the cargo workspace) and only builds for wasm.
+## Test
+
+The SNARK-input builder is browser-free, so the test runs under the wasm **node** runner:
+
+```sh
+wasm-pack test --node        # 1 test
+```
+
+The browser-only paths (the IndexedDB provider, the WebRTC round-trip) are covered by the
+node crate's `crates/node/src/tests/wasm` browser suite. To run *this* crate's tests in a
+real headless browser instead, `webdriver.json` already passes the needed Chrome flags:
+`wasm-pack test --headless --chrome` (requires a chromedriver matching your Chrome).

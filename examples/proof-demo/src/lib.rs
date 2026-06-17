@@ -83,6 +83,15 @@ async fn connect_seed(provider: &Arc<Provider>, seed_url: String) -> Result<(), 
         .map_err(|e| format!("connect failed: {e:?}"))
 }
 
+/// The public input for the bundled `simple_bn256` circuit: `step_in = [4, 2]` (Vesta).
+fn sample_input() -> Input {
+    vec![("step_in".to_string(), vec![
+        Field::from_u64(4, SupportedPrimeField::Vesta),
+        Field::from_u64(2, SupportedPrimeField::Vesta),
+    ])]
+    .into()
+}
+
 /// Offload a proof to `prover` and wait for the verified result.
 ///
 /// Loads the circuit from `r1cs_url`/`wasm_url`, generates a small recursive proof task
@@ -98,13 +107,8 @@ async fn run_proof(
         .await
         .map_err(|e| format!("load circuit failed: {e}"))?;
 
-    let input: Input = vec![("step_in".to_string(), vec![
-        Field::from_u64(4, SupportedPrimeField::Vesta),
-        Field::from_u64(2, SupportedPrimeField::Vesta),
-    ])]
-    .into();
     let circuits = builder
-        .gen_circuits(input, vec![], 5)
+        .gen_circuits(sample_input(), vec![], 5)
         .map_err(|e| format!("gen circuits failed: {e}"))?;
 
     let task_id = node
@@ -247,4 +251,30 @@ fn app() -> Html {
 /// Mount the Yew app.
 pub fn run() {
     yew::Renderer::<App>::new().render();
+}
+
+#[cfg(test)]
+mod tests {
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::*;
+
+    // Exercises the pure SNARK-input builder (no DOM / storage / network), so it runs
+    // under the wasm node runner — no browser driver needed. The browser-only paths
+    // (IndexedDB provider, the WebRTC round-trip) are covered by the node crate's
+    // `tests/wasm` browser suite and by compilation.
+
+    #[wasm_bindgen_test]
+    fn sample_input_is_a_well_formed_vesta_input() {
+        let input = sample_input();
+        // `step_in` with two field elements, and it round-trips through JSON.
+        assert_eq!(input.len(), 1);
+        let (name, fields) = &input[0];
+        assert_eq!(name, "step_in");
+        assert_eq!(fields.len(), 2);
+
+        let json = input.to_json().expect("to_json");
+        let back = Input::from_json(json).expect("from_json");
+        assert_eq!(back.len(), 1);
+    }
 }
