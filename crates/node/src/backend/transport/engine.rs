@@ -197,6 +197,15 @@ impl TransportSessions {
                 match listener.accept().await {
                     Ok((stream, _)) => {
                         let session = self.next_session();
+                        // Register the local handle *before* telling the peer to open, so
+                        // an early `Data`/`Close` from the peer is buffered, not dropped.
+                        let task = RelayTask::register(
+                            self.clone(),
+                            processor.clone(),
+                            session,
+                            peer,
+                            namespace.clone(),
+                        );
                         if open(
                             processor.as_ref(),
                             session,
@@ -207,15 +216,9 @@ impl TransportSessions {
                         .await
                         .is_err()
                         {
+                            task.refuse().await;
                             continue;
                         }
-                        let task = RelayTask::register(
-                            self.clone(),
-                            processor.clone(),
-                            session,
-                            peer,
-                            namespace.clone(),
-                        );
                         tokio::spawn(async move { relay_tcp(task, stream).await });
                     }
                     Err(e) => {
@@ -255,6 +258,10 @@ impl TransportSessions {
                             Some(session) => *session,
                             None => {
                                 let session = self.next_session();
+                                // Register + start the local sender *before* opening, so a
+                                // fast reply from the peer is not dropped.
+                                let (outbound_rx, cancel) = self.register(session);
+                                spawn_udp_sendto(socket.clone(), src, outbound_rx, cancel);
                                 if open(
                                     processor.as_ref(),
                                     session,
@@ -265,11 +272,10 @@ impl TransportSessions {
                                 .await
                                 .is_err()
                                 {
+                                    self.close(session);
                                     continue;
                                 }
                                 flows.insert(src, session);
-                                let (outbound_rx, cancel) = self.register(session);
-                                spawn_udp_sendto(socket.clone(), src, outbound_rx, cancel);
                                 session
                             }
                         };

@@ -91,15 +91,6 @@ pub struct DisconnectRequest {
 pub struct DisconnectResponse {}
 
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
-pub struct SendCustomMessageRequest {
-    pub destination_did: String,
-    pub data: String,
-}
-
-#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
-pub struct SendCustomMessageResponse {}
-
-#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct SendBackendMessageRequest {
     pub destination_did: String,
     /// Protocol namespace the payload is routed to (the extension `Envelope` namespace).

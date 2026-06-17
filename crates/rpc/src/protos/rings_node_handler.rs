@@ -41,7 +41,6 @@ impl InternalRpcHandler {
             + HandleRpc<AnswerOfferRequest, AnswerOfferResponse>
             + HandleRpc<AcceptAnswerRequest, AcceptAnswerResponse>
             + HandleRpc<DisconnectRequest, DisconnectResponse>
-            + HandleRpc<SendCustomMessageRequest, SendCustomMessageResponse>
             + HandleRpc<SendBackendMessageRequest, SendBackendMessageResponse>
             + HandleRpc<PublishMessageToTopicRequest, PublishMessageToTopicResponse>
             + HandleRpc<FetchTopicMessagesRequest, FetchTopicMessagesResponse>
@@ -101,12 +100,6 @@ impl InternalRpcHandler {
             }
             Method::Disconnect => {
                 let req = serde_json::from_value::<DisconnectRequest>(params)
-                    .map_err(|e| Error::invalid_params(e.to_string()))?;
-                let resp = processor.handle_rpc(req).await?;
-                serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))
-            }
-            Method::SendCustomMessage => {
-                let req = serde_json::from_value::<SendCustomMessageRequest>(params)
                     .map_err(|e| Error::invalid_params(e.to_string()))?;
                 let resp = processor.handle_rpc(req).await?;
                 serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))

@@ -295,8 +295,8 @@ struct PeerDisconnectCommand {
 #[derive(Subcommand, Debug)]
 #[command(rename_all = "kebab-case")]
 enum SendCommand {
-    #[command(about = "Sends a custom message.")]
-    Custom(SendCustomMessageCommand),
+    #[command(about = "Sends a namespaced message to a peer.")]
+    Message(SendMessageCommand),
 }
 
 #[derive(Args, Debug)]
@@ -307,11 +307,11 @@ struct PubsubCommand {
 }
 
 #[derive(Args, Debug)]
-struct SendCustomMessageCommand {
+struct SendMessageCommand {
     #[command(flatten)]
     client_args: ClientArgs,
     to_did: String,
-    message_type: u16,
+    namespace: String,
     data: String,
 }
 
@@ -493,11 +493,15 @@ async fn main() -> anyhow::Result<()> {
                 .display();
             Ok(())
         }
-        Command::Send(SendCommand::Custom(args)) => {
+        Command::Send(SendCommand::Message(args)) => {
             args.client_args
                 .new_client()
                 .await?
-                .send_custom_message(args.to_did.as_str(), args.data.as_str())
+                .send_message(
+                    args.to_did.as_str(),
+                    args.namespace.as_str(),
+                    args.data.as_str(),
+                )
                 .await?
                 .display();
             Ok(())

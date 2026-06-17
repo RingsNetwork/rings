@@ -157,14 +157,6 @@ impl Client {
         self.call_method(Method::Disconnect, req).await
     }
 
-    /// Sends a custom message to the specified peer.
-    pub async fn send_custom_message(
-        &self,
-        req: &SendCustomMessageRequest,
-    ) -> Result<SendCustomMessageResponse> {
-        self.call_method(Method::SendCustomMessage, req).await
-    }
-
     pub async fn send_backend_message(
         &self,
         req: &SendBackendMessageRequest,

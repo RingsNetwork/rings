@@ -24,8 +24,6 @@ pub enum Method {
     AcceptAnswer,
     /// Disconnect a peer
     Disconnect,
-    /// SendCustomMessage,
-    SendCustomMessage,
     /// SendBackendMessage
     SendBackendMessage,
     /// Append data to topic
@@ -54,7 +52,6 @@ impl Method {
             Method::AnswerOffer => "answerOffer",
             Method::Disconnect => "disconnect",
             Method::AcceptAnswer => "acceptAnswer",
-            Method::SendCustomMessage => "sendCustomMessage",
             Method::SendBackendMessage => "sendBackendMessage",
             Method::PublishMessageToTopic => "publishMessageToTopic",
             Method::FetchTopicMessages => "fetchTopicMessages",
@@ -87,7 +84,6 @@ impl TryFrom<&str> for Method {
             "disconnect" => Self::Disconnect,
             "acceptAnswer" => Self::AcceptAnswer,
             "sendBackendMessage" => Self::SendBackendMessage,
-            "sendCustomMessage" => Self::SendCustomMessage,
             "publishMessageToTopic" => Method::PublishMessageToTopic,
             "fetchTopicMessages" => Method::FetchTopicMessages,
             "registerService" => Method::RegisterService,

@@ -142,12 +142,26 @@ impl Provider {
     /// mapping `name` → WebTransport `url` (under the `tcp` namespace).
     #[cfg(feature = "browser")]
     pub async fn register_wt_service(&self, name: String, url: String) -> Result<()> {
+        self.register_wt(crate::backend::protocols::relay::TCP, name, url)
+            .await
+    }
+
+    /// Register (at runtime) a WebTransport-backed service for the browser **UDP** relay
+    /// (datagrams), mapping `name` → WebTransport `url` (under the `udp` namespace).
+    #[cfg(feature = "browser")]
+    pub async fn register_wt_udp_service(&self, name: String, url: String) -> Result<()> {
+        self.register_wt(crate::backend::protocols::relay::UDP, name, url)
+            .await
+    }
+
+    /// Map a service `name` → WebTransport `url` in a browser relay's registry, under the
+    /// given `namespace` (`tcp` or `udp`), by re-injecting a local command (provenance =
+    /// self) into the relay protocol's pure `step`.
+    #[cfg(feature = "browser")]
+    async fn register_wt(&self, namespace: &str, name: String, url: String) -> Result<()> {
         let command = crate::backend::protocols::relay::WtCommand::RegisterService { name, url };
         let payload = bincode::serialize(&command).map_err(|_| Error::EncodeError)?;
-        let envelope = crate::backend::ext::Envelope::new(
-            crate::backend::protocols::relay::TCP,
-            bytes::Bytes::from(payload),
-        );
+        let envelope = crate::backend::ext::Envelope::new(namespace, bytes::Bytes::from(payload));
         self.extensions
             .dispatch(&self.interpreter(), self.processor.did(), envelope)
             .await

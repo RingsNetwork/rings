@@ -200,18 +200,6 @@ impl HandleRpc<DisconnectRequest, DisconnectResponse> for Processor {
 
 #[cfg_attr(feature = "browser", async_trait(?Send))]
 #[cfg_attr(not(feature = "browser"), async_trait)]
-impl HandleRpc<SendCustomMessageRequest, SendCustomMessageResponse> for Processor {
-    async fn handle_rpc(&self, req: SendCustomMessageRequest) -> Result<SendCustomMessageResponse> {
-        let destination = s2d(&req.destination_did)?;
-        let data = base64::decode(req.data)
-            .map_err(|_| Error::invalid_params("Base64 decode data failed"))?;
-        self.send_message(destination, &data).await?;
-        Ok(SendCustomMessageResponse {})
-    }
-}
-
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait)]
 impl HandleRpc<SendBackendMessageRequest, SendBackendMessageResponse> for Processor {
     async fn handle_rpc(
         &self,

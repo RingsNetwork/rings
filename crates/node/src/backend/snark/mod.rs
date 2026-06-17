@@ -114,8 +114,13 @@ impl SNARKBehaviour {
             task: SNARKTask::SNARKProof(Box::new(task.clone())),
         };
         let payload = bincode::serialize(&msg).map_err(|_| Error::EncodeError)?;
-        provider.send(did, NAMESPACE, Bytes::from(payload)).await?;
+        // Record the task *before* sending, so a fast verify reply cannot arrive before
+        // the verifier has the proof task to check against. Roll back if the send fails.
         self.task.insert(task_id, task.clone());
+        if let Err(e) = provider.send(did, NAMESPACE, Bytes::from(payload)).await {
+            self.task.remove(&task_id);
+            return Err(e);
+        }
         tracing::info!("sent proof request");
         Ok(task_id.to_string())
     }
@@ -200,11 +205,13 @@ fn snark_compute(manager: Arc<SNARKTaskManager>, input: Bytes) -> Result<Bytes> 
             task_id,
             verify_task,
         } => {
-            if let Some(task) = manager.task.get(&task_id) {
-                let verified =
-                    SNARKBehaviour::handle_snark_verify_task(&verify_task, task.value())?;
-                manager.verified.insert(task_id, verified);
-            }
+            let Some(task) = manager.task.get(&task_id) else {
+                return Err(Error::ExtensionError(format!(
+                    "no pending SNARK proof task for {task_id}; cannot verify"
+                )));
+            };
+            let verified = SNARKBehaviour::handle_snark_verify_task(&verify_task, task.value())?;
+            manager.verified.insert(task_id, verified);
             ComputeResult::Verified { task_id }
         }
     };

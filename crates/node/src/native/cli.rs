@@ -134,11 +134,13 @@ impl Client {
         ClientOutput::ok("Done.".into(), ())
     }
 
-    /// Sends a custom message to the specified peer.
-    pub async fn send_custom_message(&self, did: &str, data: &str) -> Output<()> {
+    /// Sends a namespaced message to the specified peer, routed to the peer's protocol
+    /// registered under `namespace` (the extension `Envelope` model).
+    pub async fn send_message(&self, did: &str, namespace: &str, data: &str) -> Output<()> {
         self.client
-            .send_custom_message(&SendCustomMessageRequest {
+            .send_backend_message(&SendBackendMessageRequest {
                 destination_did: did.to_string(),
+                namespace: namespace.to_string(),
                 data: data.to_string(),
             })
             .await
