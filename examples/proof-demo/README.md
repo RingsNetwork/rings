@@ -14,7 +14,9 @@ daemon uses, with no JS glue:
 3. loads a circuit (`r1cs`/`wasm` URLs), generates a recursive proof task with the sample
    input `step_in = [4, 2]` (Vesta, 5 rounds), and `gen_and_send_proof_task` to the prover
    — on the prover this runs as an `Effect::Compute`, whose result is sent back;
-4. polls `get_task_result` until the returned proof verifies.
+4. polls `get_task_result`, which returns an explicit `ProofResult`
+   (`Pending | Verified | Invalid`) so a timeout (still pending) is reported distinctly
+   from a proof that returned but failed verification.
 
 The rings wiring lives in `src/lib.rs` (`build_node`, `sample_input`, `run_proof`);
 `src/main.rs` mounts the Yew app.

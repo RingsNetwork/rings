@@ -298,16 +298,34 @@ impl Protocol for SnarkProtocol {
     }
 }
 
+/// The state of a submitted proof task, from the requester's side.
+///
+/// A bare `bool` collapses two distinct outcomes into `false` — "no result yet" and "a
+/// proof came back but failed verification" — so a pending task is indistinguishable from
+/// an invalid one. This makes the distinction explicit.
+#[wasm_export]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ProofResult {
+    /// No result has returned yet (still proving / in flight).
+    Pending,
+    /// A proof returned and **verified**.
+    Verified,
+    /// A proof returned but **failed verification**.
+    Invalid,
+}
+
 #[wasm_export]
 impl SNARKBehaviour {
-    /// Get task result
-    pub fn get_task_result(&self, task_id: String) -> Result<bool> {
+    /// Current state of a submitted proof task: [`ProofResult::Pending`] until a result
+    /// returns, then [`ProofResult::Verified`] / [`ProofResult::Invalid`]. Unlike a bare
+    /// bool, this separates "not yet" from "verification failed".
+    pub fn get_task_result(&self, task_id: String) -> Result<ProofResult> {
         let task_id = uuid::Uuid::parse_str(&task_id)?;
-        if let Some(v) = self.inner.verified.get(&task_id) {
-            Ok(*v.value())
-        } else {
-            Ok(false)
-        }
+        Ok(match self.inner.verified.get(&task_id) {
+            Some(v) if *v.value() => ProofResult::Verified,
+            Some(_) => ProofResult::Invalid,
+            None => ProofResult::Pending,
+        })
     }
 }
 

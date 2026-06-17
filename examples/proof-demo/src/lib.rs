@@ -17,6 +17,7 @@ use std::time::Duration;
 use gloo_timers::future::sleep;
 use rings_node::backend::snark::Field;
 use rings_node::backend::snark::Input;
+use rings_node::backend::snark::ProofResult;
 use rings_node::backend::snark::SNARKBehaviour;
 use rings_node::backend::snark::SNARKTaskBuilder;
 use rings_node::backend::snark::SupportedPrimeField;
@@ -92,17 +93,20 @@ fn sample_input() -> Input {
     .into()
 }
 
-/// Offload a proof to `prover` and wait for the verified result.
+/// Offload a proof to `prover` and wait for its result.
 ///
 /// Loads the circuit from `r1cs_url`/`wasm_url`, generates a small recursive proof task
 /// (sample input `step_in = [4, 2]`, 5 rounds, Vesta), sends it to the prover, and polls
-/// the local task store until the returned proof verifies (or times out).
+/// the local task store. Returns as soon as a result arrives ([`ProofResult::Verified`] or
+/// [`ProofResult::Invalid`]); if none arrives within the window it returns
+/// [`ProofResult::Pending`] (a timeout), which the caller reports distinctly from an
+/// invalid proof.
 async fn run_proof(
     node: Node,
     prover: Did,
     r1cs_url: String,
     wasm_url: String,
-) -> Result<bool, String> {
+) -> Result<ProofResult, String> {
     let builder = SNARKTaskBuilder::from_remote(r1cs_url, wasm_url, SupportedPrimeField::Vesta)
         .await
         .map_err(|e| format!("load circuit failed: {e}"))?;
@@ -119,15 +123,15 @@ async fn run_proof(
 
     for _ in 0..60 {
         sleep(Duration::from_secs(1)).await;
-        if node
+        let result = node
             .snark
             .get_task_result(task_id.clone())
-            .map_err(|e| format!("read result failed: {e}"))?
-        {
-            return Ok(true);
+            .map_err(|e| format!("read result failed: {e}"))?;
+        if result != ProofResult::Pending {
+            return Ok(result);
         }
     }
-    Ok(false)
+    Ok(ProofResult::Pending)
 }
 
 /// Read the current value of an `<input>` from an input event.
@@ -219,8 +223,13 @@ fn app() -> Html {
             status.set("offloading proof to prover…".to_string());
             spawn_local(async move {
                 match run_proof(n, prover, r1cs, wasm).await {
-                    Ok(true) => status.set("✅ proof verified".to_string()),
-                    Ok(false) => status.set("⌛ timed out waiting for proof".to_string()),
+                    Ok(ProofResult::Verified) => status.set("✅ proof verified".to_string()),
+                    Ok(ProofResult::Invalid) => {
+                        status.set("❌ proof returned but failed verification".to_string())
+                    }
+                    Ok(ProofResult::Pending) => {
+                        status.set("⌛ timed out waiting for proof".to_string())
+                    }
                     Err(e) => status.set(format!("❌ {e}")),
                 }
             });
