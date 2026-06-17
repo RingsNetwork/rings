@@ -107,6 +107,25 @@ impl Provider {
         self.extensions.register(protocol)
     }
 
+    /// Register (at runtime) a local service the TCP relay may dial, mapping
+    /// `name` → `addr`. Re-injected as a local command into the `tcp` protocol's pure
+    /// `step`, so it composes with fixed config rather than mutating external state.
+    pub async fn register_tcp_service(
+        &self,
+        name: String,
+        addr: std::net::SocketAddr,
+    ) -> Result<()> {
+        let command = crate::backend::protocols::tcp::Command::RegisterService { name, addr };
+        let payload = bincode::serialize(&command).map_err(|_| Error::EncodeError)?;
+        let envelope = crate::backend::ext::Envelope::new(
+            crate::backend::protocols::tcp::NAMESPACE,
+            bytes::Bytes::from(payload),
+        );
+        self.extensions
+            .dispatch(&self.interpreter(), self.processor.did(), envelope)
+            .await
+    }
+
     /// Send a namespaced payload to a peer. This is the uniform upper-layer send;
     /// the transport/extension plumbing underneath is identical on native and
     /// browser.
