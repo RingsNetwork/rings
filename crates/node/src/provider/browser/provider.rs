@@ -206,6 +206,17 @@ impl Provider {
         })
     }
 
+    /// Register a protocol handler, jQuery-style: `provider.on(ctx, event, fn)`.
+    ///
+    /// `ctx` is the protocol's initial state, `event` is the namespace, and `fn` is a
+    /// pure handler `(ctx, event) -> { state, effects }`. The handler is bridged into
+    /// the same pure model native uses; effects are run by the interpreter. The lower
+    /// layer (JS vs native) is invisible — callers only ever see the provider.
+    pub fn on(&self, ctx: JsValue, event: String, handler: js_sys::Function) {
+        let protocol = crate::backend::protocols::js::JsProtocol::new(event, ctx, handler);
+        self.register_protocol(protocol);
+    }
+
     /// Request local rpc interface
     pub fn request(&self, method: String, params: JsValue) -> js_sys::Promise {
         let ins = self.clone();

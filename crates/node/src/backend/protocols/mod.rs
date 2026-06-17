@@ -6,6 +6,8 @@
 //! `BackendMessage` variant.
 
 pub mod echo;
+#[cfg(feature = "browser")]
+pub mod js;
 
 use crate::backend::ext::Extensions;
 
