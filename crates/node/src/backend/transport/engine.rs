@@ -35,6 +35,7 @@ use tokio_util::sync::CancellationToken;
 use crate::backend::ext::Envelope;
 use crate::backend::transport::Frame;
 use crate::backend::transport::SessionId;
+use crate::backend::types::BackendMessage;
 use crate::error::Error;
 use crate::error::Result;
 use crate::processor::Processor;
@@ -177,11 +178,14 @@ impl TransportSessions {
 
 /// Send a [`Frame`] to `peer` under `namespace` over the overlay.
 /// `send_frame : (Did, Namespace, Frame) → IO ()`.
+///
+/// Transitional: the envelope is wrapped in `BackendMessage::Envelope` so the current
+/// receiver (which decodes `BackendMessage` first) can route it.
 async fn send_frame(processor: &Processor, peer: Did, namespace: &str, frame: Frame) -> Result<()> {
     let payload = bincode::serialize(&frame).map_err(|_| Error::EncodeError)?;
     let envelope = Envelope::new(namespace.to_string(), Bytes::from(payload));
     processor
-        .send_message(peer, envelope.encode()?.as_slice())
+        .send_backend_message(peer, BackendMessage::Envelope(envelope))
         .await?;
     Ok(())
 }
