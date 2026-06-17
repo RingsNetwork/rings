@@ -39,9 +39,12 @@ pub struct Provider {
     processor: Arc<Processor>,
     handler: InternalRpcHandler,
     extensions: crate::backend::ext::Extensions,
-    /// Live transport-relay sessions, shared into each interpreter (native only).
+    /// Live relay endpoints, shared into each interpreter: OS sockets natively,
+    /// WebTransport sessions in the browser.
     #[cfg(feature = "node")]
     transport: Arc<crate::backend::transport::engine::TransportSessions>,
+    #[cfg(feature = "browser")]
+    transport: Arc<crate::backend::transport::wt::WtSessions>,
 }
 
 /// Async signer, without Send required
@@ -70,11 +73,13 @@ impl Provider {
             .expect("register builtins on a fresh registry");
         #[cfg(feature = "node")]
         let transport = Arc::new(crate::backend::transport::engine::TransportSessions::new());
+        #[cfg(feature = "browser")]
+        let transport = Arc::new(crate::backend::transport::wt::WtSessions::new());
         Self {
             processor,
             handler: InternalRpcHandler,
             extensions,
-            #[cfg(feature = "node")]
+            #[cfg(any(feature = "node", feature = "browser"))]
             transport,
         }
     }
@@ -94,7 +99,7 @@ impl Provider {
         }
         #[cfg(feature = "browser")]
         {
-            crate::backend::ext::Interpreter::new(self.processor.clone())
+            crate::backend::ext::Interpreter::new(self.processor.clone(), self.transport.clone())
         }
     }
 
@@ -124,6 +129,21 @@ impl Provider {
         addr: std::net::SocketAddr,
     ) -> Result<()> {
         self.register_relay_service(crate::backend::protocols::relay::UDP, name, addr)
+            .await
+    }
+
+    /// Register (at runtime) a WebTransport-backed service for the browser relay,
+    /// mapping `name` → WebTransport `url` (under the `tcp` namespace).
+    #[cfg(feature = "browser")]
+    pub async fn register_wt_service(&self, name: String, url: String) -> Result<()> {
+        let command = crate::backend::protocols::relay::WtCommand::RegisterService { name, url };
+        let payload = bincode::serialize(&command).map_err(|_| Error::EncodeError)?;
+        let envelope = crate::backend::ext::Envelope::new(
+            crate::backend::protocols::relay::TCP,
+            bytes::Bytes::from(payload),
+        );
+        self.extensions
+            .dispatch(&self.interpreter(), self.processor.did(), envelope)
             .await
     }
 
@@ -238,12 +258,14 @@ impl Provider {
         crate::backend::protocols::register_builtins(&extensions)?;
         #[cfg(feature = "node")]
         let transport = Arc::new(crate::backend::transport::engine::TransportSessions::new());
+        #[cfg(feature = "browser")]
+        let transport = Arc::new(crate::backend::transport::wt::WtSessions::new());
 
         Ok(Provider {
             processor,
             handler: InternalRpcHandler,
             extensions,
-            #[cfg(feature = "node")]
+            #[cfg(any(feature = "node", feature = "browser"))]
             transport,
         })
     }

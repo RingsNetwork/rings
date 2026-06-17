@@ -22,7 +22,17 @@ use crate::error::Result;
 /// registration. [`echo`] is a reference/test protocol and is intentionally **not**
 /// registered by default (it replies to every message → would ping-pong between nodes).
 pub fn register_builtins(extensions: &Extensions) -> Result<()> {
-    extensions.register(relay::Relay::tcp(HashMap::new()))?;
-    extensions.register(relay::Relay::udp(HashMap::new()))?;
+    // Native nodes back the relay with OS sockets; browsers with WebTransport. Same
+    // namespaces and `Frame` vocabulary, platform-appropriate endpoint.
+    #[cfg(not(feature = "browser"))]
+    {
+        extensions.register(relay::Relay::tcp(HashMap::new()))?;
+        extensions.register(relay::Relay::udp(HashMap::new()))?;
+    }
+    #[cfg(feature = "browser")]
+    {
+        extensions.register(relay::WtRelay::tcp(HashMap::new()))?;
+        extensions.register(relay::WtRelay::udp(HashMap::new()))?;
+    }
     Ok(())
 }

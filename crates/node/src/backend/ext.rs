@@ -134,6 +134,21 @@ pub enum Effect {
         /// Stream (TCP) or datagram (UDP) backend.
         kind: TransportKind,
     },
+    /// Open a relay session whose local backend is a WebTransport server (`url`),
+    /// the browser endpoint counterpart of [`Connect`](Effect::Connect). Interpreted
+    /// in the browser; a no-op natively.
+    WtConnect {
+        /// Session id.
+        session: SessionId,
+        /// Peer the session relays to/from.
+        peer: Did,
+        /// Transport namespace the session's frames travel under.
+        namespace: String,
+        /// WebTransport server URL to open.
+        url: String,
+        /// Bidirectional stream (TCP) or datagram (UDP).
+        kind: TransportKind,
+    },
     /// Write peer-originated bytes to a relay session's local stream.
     Write {
         /// Target session.
@@ -250,16 +265,24 @@ pub trait Protocol {
 // ── Imperative shell: the only IO boundary ─────────────────────────────────────
 
 /// Executes [`Effect`]s. The single side-effecting boundary of the extension layer.
+///
+/// It holds the platform transport engine that owns live relay endpoints: OS sockets
+/// natively ([`engine::TransportSessions`](crate::backend::transport::engine)), or
+/// WebTransport sessions in the browser
+/// ([`wt::WtSessions`](crate::backend::transport::wt)). `Write`/`Shutdown`/`Close`
+/// dispatch to it on both targets; only the *open* effect differs (`Connect`/`Listen`
+/// natively, `WtConnect` in the browser).
 #[derive(Clone)]
 pub struct Interpreter {
     processor: Arc<Processor>,
-    /// Live transport-relay sessions (native only; browser has no raw sockets).
     #[cfg(feature = "node")]
     transport: Arc<crate::backend::transport::engine::TransportSessions>,
+    #[cfg(feature = "browser")]
+    transport: Arc<crate::backend::transport::wt::WtSessions>,
 }
 
 impl Interpreter {
-    /// Build an interpreter over a processor and the shared transport session table.
+    /// Build an interpreter over a processor and the shared native transport engine.
     #[cfg(feature = "node")]
     pub fn new(
         processor: Arc<Processor>,
@@ -271,10 +294,16 @@ impl Interpreter {
         }
     }
 
-    /// Build an interpreter over a processor.
+    /// Build an interpreter over a processor and the shared browser WebTransport engine.
     #[cfg(feature = "browser")]
-    pub fn new(processor: Arc<Processor>) -> Self {
-        Self { processor }
+    pub fn new(
+        processor: Arc<Processor>,
+        transport: Arc<crate::backend::transport::wt::WtSessions>,
+    ) -> Self {
+        Self {
+            processor,
+            transport,
+        }
     }
 
     /// This node's DID (read-only fact handed to `step` via [`Ctx`]).
@@ -319,35 +348,37 @@ impl Interpreter {
                     #[cfg(feature = "browser")]
                     {
                         let _ = (session, peer, namespace, addr, kind);
-                        tracing::warn!("transport Connect is unsupported on browser");
+                        tracing::warn!("transport Connect (socket) is unsupported on browser");
                     }
                 }
-                Effect::Write { session, bytes } => {
-                    #[cfg(feature = "node")]
-                    self.transport.write(session, bytes).await;
+                Effect::WtConnect {
+                    session,
+                    peer,
+                    namespace,
+                    url,
+                    kind,
+                } => {
                     #[cfg(feature = "browser")]
+                    self.transport
+                        .clone()
+                        .connect(self.processor.clone(), session, peer, namespace, url, kind)
+                        .await;
+                    #[cfg(not(feature = "browser"))]
                     {
-                        let _ = (session, bytes);
-                        tracing::warn!("transport Write is unsupported on browser");
+                        let _ = (session, peer, namespace, url, kind);
+                        tracing::warn!("WtConnect (WebTransport) is only supported on browser");
                     }
+                }
+                // Write/Shutdown/Close address an existing session; the platform engine
+                // (socket or WebTransport) handles them identically on both targets.
+                Effect::Write { session, bytes } => {
+                    self.transport.write(session, bytes).await;
                 }
                 Effect::Shutdown { session } => {
-                    #[cfg(feature = "node")]
                     self.transport.shutdown(session).await;
-                    #[cfg(feature = "browser")]
-                    {
-                        let _ = session;
-                        tracing::warn!("transport Shutdown is unsupported on browser");
-                    }
                 }
                 Effect::Close { session } => {
-                    #[cfg(feature = "node")]
                     self.transport.close(session);
-                    #[cfg(feature = "browser")]
-                    {
-                        let _ = session;
-                        tracing::warn!("transport Close is unsupported on browser");
-                    }
                 }
                 Effect::Listen {
                     local_addr,

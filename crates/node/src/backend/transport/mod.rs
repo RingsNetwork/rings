@@ -55,6 +55,8 @@
 
 #[cfg(feature = "node")]
 pub mod engine;
+#[cfg(feature = "browser")]
+pub mod wt;
 
 use bytes::Bytes;
 use serde::Deserialize;

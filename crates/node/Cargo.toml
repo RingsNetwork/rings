@@ -65,6 +65,7 @@ browser = [
     "wasm-bindgen",
     "wasm-bindgen-futures",
     "js-sys",
+    "web-sys",
 ]
 # run unittest with snark
 browser_chrome_test = ["browser_default"]
@@ -125,6 +126,19 @@ serde-wasm-bindgen = { workspace = true, optional = true }
 tracing-wasm = { version = "0.2.1", optional = true }
 wasm-bindgen = { workspace = true, features = ["serde-serialize"], optional = true }
 wasm-bindgen-futures = { workspace = true, optional = true }
+web-sys = { version = "0.3.64", optional = true, features = [
+    "WebTransport",
+    "WebTransportOptions",
+    "WebTransportBidirectionalStream",
+    "WebTransportReceiveStream",
+    "WebTransportSendStream",
+    "WebTransportDatagramDuplexStream",
+    "ReadableStream",
+    "ReadableStreamDefaultReader",
+    "ReadableStreamReadResult",
+    "WritableStream",
+    "WritableStreamDefaultWriter",
+] }
 [dev-dependencies]
 fluvio-wasm-timer = "0.2.5"
 wasm-bindgen-test = { workspace = true }

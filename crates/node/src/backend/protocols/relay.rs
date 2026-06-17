@@ -197,3 +197,175 @@ fn close_frame(session: SessionId) -> Bytes {
     let frame = Frame::Close { session };
     Bytes::from(bincode::serialize(&frame).unwrap_or_default())
 }
+
+/// Browser relay: same pure `step` as [`Relay`], but a service resolves to a
+/// WebTransport **URL** (the browser endpoint) and `Open` emits
+/// [`Effect::WtConnect`] instead of `Connect`. See
+/// [`wt`](crate::backend::transport::wt).
+#[cfg(feature = "browser")]
+pub use wt_relay::Command as WtCommand;
+#[cfg(feature = "browser")]
+pub use wt_relay::WtRelay;
+
+#[cfg(feature = "browser")]
+mod wt_relay {
+    use std::collections::HashMap;
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    use bytes::Bytes;
+    use rings_core::dht::Did;
+    use serde::Deserialize;
+    use serde::Serialize;
+
+    use super::TCP;
+    use super::UDP;
+    use crate::backend::ext::Ctx;
+    use crate::backend::ext::Effect;
+    use crate::backend::ext::Event;
+    use crate::backend::ext::Protocol;
+    use crate::backend::ext::Transition;
+    use crate::backend::transport::Frame;
+    use crate::backend::transport::SessionId;
+    use crate::backend::transport::TransportKind;
+
+    /// Local control command for the browser relay (service name → WebTransport URL).
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub enum Command {
+        /// Map a service name to a WebTransport URL that `Open` may dial.
+        RegisterService {
+            /// Service name.
+            name: String,
+            /// WebTransport URL.
+            url: String,
+        },
+        /// Remove a service mapping.
+        UnregisterService {
+            /// Service name to remove.
+            name: String,
+        },
+    }
+
+    /// Browser relay state: service → WebTransport URL, plus open sessions.
+    #[derive(Clone, Default)]
+    pub struct State {
+        services: Arc<HashMap<String, String>>,
+        sessions: HashSet<SessionId>,
+    }
+
+    /// Browser relay protocol (WebTransport endpoint), parameterized by kind + namespace.
+    #[derive(Clone)]
+    pub struct WtRelay {
+        namespace: String,
+        kind: TransportKind,
+        config: HashMap<String, String>,
+    }
+
+    impl WtRelay {
+        /// A browser TCP relay (WebTransport bidi streams).
+        pub fn tcp(config: HashMap<String, String>) -> Self {
+            Self {
+                namespace: TCP.to_string(),
+                kind: TransportKind::Tcp,
+                config,
+            }
+        }
+
+        /// A browser UDP relay (WebTransport datagrams).
+        pub fn udp(config: HashMap<String, String>) -> Self {
+            Self {
+                namespace: UDP.to_string(),
+                kind: TransportKind::Udp,
+                config,
+            }
+        }
+    }
+
+    impl Protocol for WtRelay {
+        type State = State;
+
+        fn namespace(&self) -> &str {
+            self.namespace.as_str()
+        }
+
+        fn init(&self) -> State {
+            State {
+                services: Arc::new(self.config.clone()),
+                sessions: HashSet::new(),
+            }
+        }
+
+        fn step(&self, ctx: Ctx<'_, State>, event: &Event) -> Transition<State> {
+            if event.from == ctx.did {
+                return step_command(ctx.state, event.payload.as_ref());
+            }
+            step_frame(
+                self.kind,
+                self.namespace.as_str(),
+                ctx.state,
+                event.from,
+                event.payload.as_ref(),
+            )
+        }
+    }
+
+    fn step_command(state: &State, payload: &[u8]) -> Transition<State> {
+        let Ok(command) = bincode::deserialize::<Command>(payload) else {
+            return Transition::pure(state.clone());
+        };
+        let mut next = state.clone();
+        match command {
+            Command::RegisterService { name, url } => {
+                Arc::make_mut(&mut next.services).insert(name, url);
+            }
+            Command::UnregisterService { name } => {
+                Arc::make_mut(&mut next.services).remove(&name);
+            }
+        }
+        Transition::pure(next)
+    }
+
+    fn step_frame(
+        kind: TransportKind,
+        namespace: &str,
+        state: &State,
+        from: Did,
+        payload: &[u8],
+    ) -> Transition<State> {
+        let Ok(frame) = bincode::deserialize::<Frame>(payload) else {
+            return Transition::pure(state.clone());
+        };
+        match frame {
+            Frame::Open { session, service } => match state.services.get(service.as_str()) {
+                Some(url) => {
+                    let url = url.clone();
+                    let mut next = state.clone();
+                    next.sessions.insert(session);
+                    Transition::with(next, vec![Effect::WtConnect {
+                        session,
+                        peer: from,
+                        namespace: namespace.to_string(),
+                        url,
+                        kind,
+                    }])
+                }
+                None => Transition::with(state.clone(), vec![Effect::Send {
+                    to: from,
+                    namespace: namespace.to_string(),
+                    payload: super::close_frame(session),
+                }]),
+            },
+            Frame::Data { session, bytes } => {
+                Transition::with(state.clone(), vec![Effect::Write { session, bytes }])
+            }
+            Frame::Shutdown { session } => {
+                Transition::with(state.clone(), vec![Effect::Shutdown { session }])
+            }
+            Frame::Close { session } => {
+                let mut next = state.clone();
+                next.sessions.remove(&session);
+                Transition::with(next, vec![Effect::Close { session }])
+            }
+        }
+    }
+}
