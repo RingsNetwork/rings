@@ -8,19 +8,21 @@
 pub mod echo;
 #[cfg(feature = "browser")]
 pub mod js;
-pub mod tcp;
+pub mod relay;
+
+use std::collections::HashMap;
 
 use crate::backend::ext::Extensions;
 use crate::error::Result;
 
 /// Register the built-in protocol extensions into a registry.
 ///
-/// More built-ins are added here as they are ported (HTTP / UDP / SNARK). [`echo`] is
-/// a reference/test protocol and is intentionally **not** registered by default: it
-/// replies to every message, which would ping-pong endlessly between nodes. The TCP
-/// relay starts with an empty service registry (safe: an `Open` to an unknown service
-/// just closes); services are added via fixed config or runtime registration.
+/// The TCP and UDP relays start with empty service registries (safe: an `Open` to an
+/// unknown service just closes); services are added via fixed config or runtime
+/// registration. [`echo`] is a reference/test protocol and is intentionally **not**
+/// registered by default (it replies to every message → would ping-pong between nodes).
 pub fn register_builtins(extensions: &Extensions) -> Result<()> {
-    extensions.register(tcp::Tcp::default())?;
+    extensions.register(relay::Relay::tcp(HashMap::new()))?;
+    extensions.register(relay::Relay::udp(HashMap::new()))?;
     Ok(())
 }

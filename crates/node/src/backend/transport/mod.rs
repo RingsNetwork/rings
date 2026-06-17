@@ -60,47 +60,54 @@ use bytes::Bytes;
 use serde::Deserialize;
 use serde::Serialize;
 
-/// Identifier of a relayed session (a virtual circuit ↔ local socket pairing).
+/// Identifier of a relayed session/flow (a virtual circuit ↔ local socket pairing).
 ///
-/// Connection-oriented transports (TCP, HTTP) use it to address a specific
-/// connection; connectionless transports (UDP) ignore it.
+/// TCP uses it for a connection; UDP uses it for a *flow* (a NAT-like mapping that
+/// routes responses back to the right local client) — see [`TransportKind`].
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct SessionId(pub u64);
 
+/// Which local socket a relay session is backed by.
+///
+/// Both kinds share the same [`Frame`] vocabulary (`Open`/`Data`/`Close`); only the
+/// socket differs. UDP is *flow*-based rather than truly sessionless because a relayed
+/// datagram still needs a return path to the originating local client, so each flow
+/// carries a [`SessionId`] just like a TCP connection. `Data` preserves message
+/// boundaries (one datagram per frame) for UDP.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TransportKind {
+    /// Connection-oriented byte stream.
+    Tcp,
+    /// Datagram flow (per-flow socket; message boundaries preserved per `Data`).
+    Udp,
+}
+
 /// The relay's overlay wire message — the payload carried under a transport namespace.
 ///
-/// Unifies the stream and datagram shapes; a given transport uses the subset matching
-/// its session cardinality:
+/// One vocabulary for both kinds (TCP connections and UDP flows):
 ///
 /// ```text
-///   TCP  (ω): Open, Data, Close
-///   HTTP (1): Open, Data, Close   (with one-shot session logic in `step`)
-///   UDP  (0): Datagram
+///   Open(session, service) → Data(session, bytes)* → Close(session)
 /// ```
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Frame {
-    /// Open a connection-oriented session to a named local service.
+    /// Open a session/flow to a named local service.
     Open {
-        /// Session identifier (assigned by the dialing side).
+        /// Session identifier (assigned by the dialing/forwarding side).
         session: SessionId,
         /// Local service name to connect to.
         service: String,
     },
-    /// Bytes on an open session (stream framing).
+    /// Bytes on an open session (one datagram per frame for UDP).
     Data {
         /// Session the bytes belong to.
         session: SessionId,
         /// Payload bytes.
         bytes: Bytes,
     },
-    /// Close a session.
+    /// Close a session/flow.
     Close {
         /// Session to close.
         session: SessionId,
-    },
-    /// A connectionless datagram (no session).
-    Datagram {
-        /// Datagram bytes.
-        bytes: Bytes,
     },
 }

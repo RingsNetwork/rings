@@ -1,28 +1,26 @@
 #![warn(missing_docs)]
-//! TCP relay protocol — the server side (ω-session stream instance of the relay).
+//! Generic transport-relay protocol — the pure server side, shared by TCP and UDP.
 //!
-//! Pure `step` only: it turns inbound [`Frame`]s into transport
-//! [`Effect`](crate::backend::ext::Effect)s; the live sockets live in the engine
-//! (`transport::engine`). State is the service registry plus the open session set.
+//! One [`Protocol`] parameterized by [`TransportKind`] and a namespace; TCP and UDP
+//! are the same pure `step`, differing only in the `kind` carried in the emitted
+//! `Connect` effect (the engine then dials a stream or a datagram socket). This is the
+//! code realization of "TCP/UDP are one abstraction".
 //!
 //! ```text
 //!   S = (services : Name ⇀ SocketAddr,  sessions : ℘ SessionId)
 //!   step (Ctx S, Event{from, p}) =
 //!     | from = self  ∧  p = RegisterService(n,a)  ↦  (S[services ∪ {n↦a}], ε)
-//!     | p = Open(s, n)   ∧  n ∈ services          ↦  (S[sessions ∪ {s}], [Connect …])
+//!     | p = Open(s, n)   ∧  n ∈ services          ↦  (S[sessions ∪ {s}], [Connect s a kind])
 //!     | p = Open(s, n)   ∧  n ∉ services          ↦  (S,                  [Send Close s])
 //!     | p = Data(s, b)                            ↦  (S,                  [Write s b])
 //!     | p = Close(s)                              ↦  (S[sessions ∖ {s}],  [Close s])
 //! ```
 //!
-//! Provenance distinguishes the two payload codecs purely: a message with
-//! `from = self` is a locally re-injected [`Command`] (runtime registration); any
-//! other `from` is a network [`Frame`] (peers cannot forge `from`, it is the verified
-//! signer). So the service registry supports both fixed config (via [`init`]) and
-//! runtime registration (via [`Command::RegisterService`]) without leaving the pure
-//! model.
-//!
-//! [`init`]: crate::backend::ext::Protocol::init
+//! Provenance distinguishes the two payload codecs purely: `from = self` is a locally
+//! re-injected [`Command`] (runtime registration); any other `from` is a network
+//! [`Frame`] (peers cannot forge `from`, it is the verified signer). So the service
+//! registry supports both fixed config (via [`Relay::tcp`]/[`Relay::udp`]) and runtime
+//! registration without leaving the pure model.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -30,6 +28,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use rings_core::dht::Did;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -40,9 +39,12 @@ use crate::backend::ext::Protocol;
 use crate::backend::ext::Transition;
 use crate::backend::transport::Frame;
 use crate::backend::transport::SessionId;
+use crate::backend::transport::TransportKind;
 
-/// Namespace for the TCP relay protocol.
-pub const NAMESPACE: &str = "tcp";
+/// Namespace for the TCP relay.
+pub const TCP: &str = "tcp";
+/// Namespace for the UDP relay.
+pub const UDP: &str = "udp";
 
 /// A local control command, re-injected by the provider (never sent by peers).
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -61,7 +63,7 @@ pub enum Command {
     },
 }
 
-/// TCP relay state: the service registry and the set of open sessions.
+/// Relay state: the service registry and the set of open sessions.
 #[derive(Clone, Default)]
 pub struct State {
     /// Service name → local address. `Arc` so the hot data path clones cheaply.
@@ -70,25 +72,39 @@ pub struct State {
     sessions: HashSet<SessionId>,
 }
 
-/// TCP relay protocol (server side). Holds the fixed-config services used to seed
-/// [`State`] at init.
-#[derive(Clone, Default)]
-pub struct Tcp {
+/// Transport relay protocol (server side), parameterized by kind + namespace.
+#[derive(Clone)]
+pub struct Relay {
+    namespace: String,
+    kind: TransportKind,
     config: HashMap<String, SocketAddr>,
 }
 
-impl Tcp {
-    /// Build with a fixed service configuration.
-    pub fn with_services(config: HashMap<String, SocketAddr>) -> Self {
-        Self { config }
+impl Relay {
+    /// A TCP relay with a fixed service configuration.
+    pub fn tcp(config: HashMap<String, SocketAddr>) -> Self {
+        Self {
+            namespace: TCP.to_string(),
+            kind: TransportKind::Tcp,
+            config,
+        }
+    }
+
+    /// A UDP relay with a fixed service configuration.
+    pub fn udp(config: HashMap<String, SocketAddr>) -> Self {
+        Self {
+            namespace: UDP.to_string(),
+            kind: TransportKind::Udp,
+            config,
+        }
     }
 }
 
-impl Protocol for Tcp {
+impl Protocol for Relay {
     type State = State;
 
     fn namespace(&self) -> &str {
-        NAMESPACE
+        self.namespace.as_str()
     }
 
     fn init(&self) -> State {
@@ -104,7 +120,13 @@ impl Protocol for Tcp {
             return step_command(ctx.state, event.payload.as_ref());
         }
         // Otherwise a network frame from a peer.
-        step_frame(ctx.state, event.from, event.payload.as_ref())
+        step_frame(
+            self.kind,
+            self.namespace.as_str(),
+            ctx.state,
+            event.from,
+            event.payload.as_ref(),
+        )
     }
 }
 
@@ -125,8 +147,14 @@ fn step_command(state: &State, payload: &[u8]) -> Transition<State> {
     Transition::pure(next)
 }
 
-/// Apply a network [`Frame`] from `from`. Pure; emits transport effects.
-fn step_frame(state: &State, from: rings_core::dht::Did, payload: &[u8]) -> Transition<State> {
+/// Apply a network [`Frame`]. Pure; emits transport effects.
+fn step_frame(
+    kind: TransportKind,
+    namespace: &str,
+    state: &State,
+    from: Did,
+    payload: &[u8],
+) -> Transition<State> {
     let Ok(frame) = bincode::deserialize::<Frame>(payload) else {
         return Transition::pure(state.clone());
     };
@@ -139,13 +167,14 @@ fn step_frame(state: &State, from: rings_core::dht::Did, payload: &[u8]) -> Tran
                 Transition::with(next, vec![Effect::Connect {
                     session,
                     peer: from,
-                    namespace: NAMESPACE.to_string(),
+                    namespace: namespace.to_string(),
                     addr,
+                    kind,
                 }])
             }
             None => Transition::with(state.clone(), vec![Effect::Send {
                 to: from,
-                namespace: NAMESPACE.to_string(),
+                namespace: namespace.to_string(),
                 payload: close_frame(session),
             }]),
         },
@@ -157,8 +186,6 @@ fn step_frame(state: &State, from: rings_core::dht::Did, payload: &[u8]) -> Tran
             next.sessions.remove(&session);
             Transition::with(next, vec![Effect::Close { session }])
         }
-        // TCP is a stream transport; datagrams are not part of it.
-        Frame::Datagram { .. } => Transition::pure(state.clone()),
     }
 }
 

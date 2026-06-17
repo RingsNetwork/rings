@@ -41,6 +41,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::backend::transport::SessionId;
+use crate::backend::transport::TransportKind;
 use crate::backend::types::BackendMessage;
 use crate::error::Error;
 use crate::error::Result;
@@ -130,6 +131,8 @@ pub enum Effect {
         namespace: String,
         /// Local address to dial.
         addr: SocketAddr,
+        /// Stream (TCP) or datagram (UDP) backend.
+        kind: TransportKind,
     },
     /// Write peer-originated bytes to a relay session's local stream.
     Write {
@@ -155,6 +158,8 @@ pub enum Effect {
         service: String,
         /// Transport namespace the session's frames travel under.
         namespace: String,
+        /// Stream (TCP) or datagram (UDP) listener.
+        kind: TransportKind,
     },
 }
 
@@ -298,14 +303,15 @@ impl Interpreter {
                     peer,
                     namespace,
                     addr,
+                    kind,
                 } => {
                     #[cfg(feature = "node")]
                     self.transport
-                        .connect(self.processor.clone(), session, peer, namespace, addr)
+                        .connect(self.processor.clone(), session, peer, namespace, addr, kind)
                         .await;
                     #[cfg(feature = "browser")]
                     {
-                        let _ = (session, peer, namespace, addr);
+                        let _ = (session, peer, namespace, addr, kind);
                         tracing::warn!("transport Connect is unsupported on browser");
                     }
                 }
@@ -332,15 +338,23 @@ impl Interpreter {
                     peer,
                     service,
                     namespace,
+                    kind,
                 } => {
                     #[cfg(feature = "node")]
                     self.transport
                         .clone()
-                        .listen(self.processor.clone(), local_addr, peer, service, namespace)
+                        .listen(
+                            self.processor.clone(),
+                            local_addr,
+                            peer,
+                            service,
+                            namespace,
+                            kind,
+                        )
                         .await;
                     #[cfg(feature = "browser")]
                     {
-                        let _ = (local_addr, peer, service, namespace);
+                        let _ = (local_addr, peer, service, namespace, kind);
                         tracing::warn!("transport Listen is unsupported on browser");
                     }
                 }

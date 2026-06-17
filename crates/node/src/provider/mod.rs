@@ -107,39 +107,93 @@ impl Provider {
         self.extensions.register(protocol)
     }
 
-    /// Register (at runtime) a local service the TCP relay may dial, mapping
-    /// `name` → `addr`. Re-injected as a local command into the `tcp` protocol's pure
-    /// `step`, so it composes with fixed config rather than mutating external state.
+    /// Register (at runtime) a local service the TCP relay may dial.
     pub async fn register_tcp_service(
         &self,
         name: String,
         addr: std::net::SocketAddr,
     ) -> Result<()> {
-        let command = crate::backend::protocols::tcp::Command::RegisterService { name, addr };
+        self.register_relay_service(crate::backend::protocols::relay::TCP, name, addr)
+            .await
+    }
+
+    /// Register (at runtime) a local service the UDP relay may dial.
+    pub async fn register_udp_service(
+        &self,
+        name: String,
+        addr: std::net::SocketAddr,
+    ) -> Result<()> {
+        self.register_relay_service(crate::backend::protocols::relay::UDP, name, addr)
+            .await
+    }
+
+    /// Map a service `name` → `addr` in a relay's registry, by re-injecting a local
+    /// command into the relay protocol's pure `step` (provenance = self).
+    async fn register_relay_service(
+        &self,
+        namespace: &str,
+        name: String,
+        addr: std::net::SocketAddr,
+    ) -> Result<()> {
+        let command = crate::backend::protocols::relay::Command::RegisterService { name, addr };
         let payload = bincode::serialize(&command).map_err(|_| Error::EncodeError)?;
-        let envelope = crate::backend::ext::Envelope::new(
-            crate::backend::protocols::tcp::NAMESPACE,
-            bytes::Bytes::from(payload),
-        );
+        let envelope = crate::backend::ext::Envelope::new(namespace, bytes::Bytes::from(payload));
         self.extensions
             .dispatch(&self.interpreter(), self.processor.did(), envelope)
             .await
     }
 
-    /// Open a local TCP tunnel: bind `local_addr` and relay each accepted connection
-    /// to `peer`'s `service` over the `tcp` relay (client side).
+    /// Open a local TCP tunnel: bind `local_addr` and relay each accepted connection to
+    /// `peer`'s `service` (client side, forward proxy).
     pub async fn open_tcp_tunnel(
         &self,
         local_addr: std::net::SocketAddr,
         peer: rings_core::dht::Did,
         service: String,
     ) -> Result<()> {
+        self.open_tunnel(
+            local_addr,
+            peer,
+            service,
+            crate::backend::protocols::relay::TCP,
+            crate::backend::transport::TransportKind::Tcp,
+        )
+        .await
+    }
+
+    /// Open a local UDP tunnel: bind `local_addr` and relay each datagram flow to
+    /// `peer`'s `service` (client side, forward proxy).
+    pub async fn open_udp_tunnel(
+        &self,
+        local_addr: std::net::SocketAddr,
+        peer: rings_core::dht::Did,
+        service: String,
+    ) -> Result<()> {
+        self.open_tunnel(
+            local_addr,
+            peer,
+            service,
+            crate::backend::protocols::relay::UDP,
+            crate::backend::transport::TransportKind::Udp,
+        )
+        .await
+    }
+
+    async fn open_tunnel(
+        &self,
+        local_addr: std::net::SocketAddr,
+        peer: rings_core::dht::Did,
+        service: String,
+        namespace: &str,
+        kind: crate::backend::transport::TransportKind,
+    ) -> Result<()> {
         self.interpreter()
             .run(vec![crate::backend::ext::Effect::Listen {
                 local_addr,
                 peer,
                 service,
-                namespace: crate::backend::protocols::tcp::NAMESPACE.to_string(),
+                namespace: namespace.to_string(),
+                kind,
             }])
             .await?;
         Ok(())
