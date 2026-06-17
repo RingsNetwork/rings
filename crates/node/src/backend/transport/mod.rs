@@ -59,6 +59,7 @@ pub mod engine;
 pub mod wt;
 
 use bytes::Bytes;
+use rings_core::dht::Did;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -68,6 +69,38 @@ use serde::Serialize;
 /// routes responses back to the right local client) — see [`TransportKind`].
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct SessionId(pub u64);
+
+/// A relay session's full identity — the unit used to key live sessions and to address
+/// transport effects.
+///
+/// A bare [`SessionId`] is **not** a valid address: the id on the wire is assigned by the
+/// opener, so two different peers (or the same peer under two namespaces) can both pick
+/// `SessionId(0)`. The key therefore scopes a session by `(peer, namespace, session)`,
+/// where `peer` is the **authenticated** other end (`event.from`, the verified message
+/// signer). Because a peer cannot forge `event.from`, it can only ever address sessions
+/// whose `peer` is itself — so a frame can never write to or close another peer's session
+/// (the engine's keyed lookup simply misses for a mismatched peer). This is the relay's
+/// capability/owner-rejection model.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct SessionKey {
+    /// The authenticated remote end of the session (`event.from` for inbound frames).
+    pub peer: Did,
+    /// The transport namespace the session lives under (e.g. `tcp`, `udp`).
+    pub namespace: String,
+    /// The opener-assigned session id, unique only within `(peer, namespace)`.
+    pub session: SessionId,
+}
+
+impl SessionKey {
+    /// Build a session key from its parts.
+    pub fn new(peer: Did, namespace: impl Into<String>, session: SessionId) -> Self {
+        Self {
+            peer,
+            namespace: namespace.into(),
+            session,
+        }
+    }
+}
 
 /// Which local socket a relay session is backed by.
 ///

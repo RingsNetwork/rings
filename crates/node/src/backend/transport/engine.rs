@@ -55,6 +55,7 @@ use tokio_util::sync::CancellationToken;
 use crate::backend::ext::Envelope;
 use crate::backend::transport::Frame;
 use crate::backend::transport::SessionId;
+use crate::backend::transport::SessionKey;
 use crate::backend::transport::TransportKind;
 use crate::error::Error;
 use crate::error::Result;
@@ -82,9 +83,14 @@ struct SessionHandle {
 }
 
 /// Shared table of live sessions plus the session-id allocator.
+///
+/// Sessions are keyed by [`SessionKey`] (`peer, namespace, session`), not by the bare
+/// opener-assigned [`SessionId`]: the id is only unique within one `(peer, namespace)`, and
+/// keying by the authenticated `peer` is what makes a frame unable to address another peer's
+/// session (a mismatched key simply misses the lookup).
 #[derive(Default)]
 pub struct TransportSessions {
-    map: Mutex<HashMap<SessionId, SessionHandle>>,
+    map: Mutex<HashMap<SessionKey, SessionHandle>>,
     counter: AtomicU64,
 }
 
@@ -106,13 +112,11 @@ impl TransportSessions {
     pub async fn connect(
         self: Arc<Self>,
         processor: Arc<Processor>,
-        session: SessionId,
-        peer: Did,
-        namespace: String,
+        key: SessionKey,
         addr: SocketAddr,
         kind: TransportKind,
     ) {
-        let task = RelayTask::register(self.clone(), processor, session, peer, namespace);
+        let task = RelayTask::register(self.clone(), processor, key);
         tokio::spawn(async move {
             match kind {
                 TransportKind::Tcp => {
@@ -152,24 +156,25 @@ impl TransportSessions {
         }
     }
 
-    /// Deliver peer bytes to a session's local socket. Unknown sessions are dropped.
-    pub async fn write(&self, session: SessionId, bytes: Bytes) {
-        if let Some(tx) = self.sender(session) {
+    /// Deliver peer bytes to a session's local socket. Unknown sessions are dropped — and a
+    /// non-owner peer's key never resolves, so it cannot write to a session it does not own.
+    pub async fn write(&self, key: &SessionKey, bytes: Bytes) {
+        if let Some(tx) = self.sender(key) {
             let _ = tx.send(Outbound::Data(bytes)).await;
         }
     }
 
     /// Half-close a session's local write side (peer sent FIN).
-    pub async fn shutdown(&self, session: SessionId) {
-        if let Some(tx) = self.sender(session) {
+    pub async fn shutdown(&self, key: &SessionKey) {
+        if let Some(tx) = self.sender(key) {
             let _ = tx.send(Outbound::Shutdown).await;
         }
     }
 
     /// Fully close and drop a session.
-    pub fn close(&self, session: SessionId) {
+    pub fn close(&self, key: &SessionKey) {
         if let Ok(mut map) = self.map.lock() {
-            if let Some(handle) = map.remove(&session) {
+            if let Some(handle) = map.remove(key) {
                 handle.cancel.cancel();
             }
         }
@@ -196,25 +201,14 @@ impl TransportSessions {
             loop {
                 match listener.accept().await {
                     Ok((stream, _)) => {
-                        let session = self.next_session();
+                        let key = SessionKey::new(peer, namespace.clone(), self.next_session());
                         // Register the local handle *before* telling the peer to open, so
                         // an early `Data`/`Close` from the peer is buffered, not dropped.
-                        let task = RelayTask::register(
-                            self.clone(),
-                            processor.clone(),
-                            session,
-                            peer,
-                            namespace.clone(),
-                        );
-                        if open(
-                            processor.as_ref(),
-                            session,
-                            peer,
-                            namespace.as_str(),
-                            service.as_str(),
-                        )
-                        .await
-                        .is_err()
+                        let task =
+                            RelayTask::register(self.clone(), processor.clone(), key.clone());
+                        if open(processor.as_ref(), &key, service.as_str())
+                            .await
+                            .is_err()
                         {
                             task.refuse().await;
                             continue;
@@ -248,40 +242,39 @@ impl TransportSessions {
             }
         };
         tokio::spawn(async move {
-            let mut flows: HashMap<SocketAddr, SessionId> = HashMap::new();
+            let mut flows: HashMap<SocketAddr, SessionKey> = HashMap::new();
             let mut buf = vec![0u8; UDP_BUF];
             loop {
                 match socket.recv_from(buf.as_mut_slice()).await {
                     Ok((n, src)) => {
                         let bytes = Bytes::copy_from_slice(buf.get(..n).unwrap_or_default());
-                        let session = match flows.get(&src) {
-                            Some(session) => *session,
+                        let key = match flows.get(&src) {
+                            Some(key) => key.clone(),
                             None => {
-                                let session = self.next_session();
+                                let key =
+                                    SessionKey::new(peer, namespace.clone(), self.next_session());
                                 // Register + start the local sender *before* opening, so a
                                 // fast reply from the peer is not dropped.
-                                let (outbound_rx, cancel) = self.register(session);
+                                let (outbound_rx, cancel) = self.register(key.clone());
                                 spawn_udp_sendto(socket.clone(), src, outbound_rx, cancel);
-                                if open(
-                                    processor.as_ref(),
-                                    session,
-                                    peer,
-                                    namespace.as_str(),
-                                    service.as_str(),
-                                )
-                                .await
-                                .is_err()
+                                if open(processor.as_ref(), &key, service.as_str())
+                                    .await
+                                    .is_err()
                                 {
-                                    self.close(session);
+                                    self.close(&key);
                                     continue;
                                 }
-                                flows.insert(src, session);
-                                session
+                                flows.insert(src, key.clone());
+                                key
                             }
                         };
-                        let frame = Frame::Data { session, bytes };
+                        let frame = Frame::Data {
+                            session: key.session,
+                            bytes,
+                        };
                         let _ =
-                            send_frame(processor.as_ref(), peer, namespace.as_str(), frame).await;
+                            send_frame(processor.as_ref(), key.peer, key.namespace.as_str(), frame)
+                                .await;
                     }
                     Err(e) => {
                         tracing::error!("transport udp recv on {local_addr} failed: {e:?}");
@@ -296,26 +289,26 @@ impl TransportSessions {
 
     /// Create a session's channel + cancel token and record its handle, returning the
     /// receiver and cancel for the relay task.
-    fn register(&self, session: SessionId) -> (mpsc::Receiver<Outbound>, CancellationToken) {
+    fn register(&self, key: SessionKey) -> (mpsc::Receiver<Outbound>, CancellationToken) {
         let (outbound, outbound_rx) = mpsc::channel::<Outbound>(1024);
         let cancel = CancellationToken::new();
-        self.insert(session, SessionHandle {
+        self.insert(key, SessionHandle {
             outbound,
             cancel: cancel.clone(),
         });
         (outbound_rx, cancel)
     }
 
-    fn sender(&self, session: SessionId) -> Option<mpsc::Sender<Outbound>> {
+    fn sender(&self, key: &SessionKey) -> Option<mpsc::Sender<Outbound>> {
         self.map
             .lock()
             .ok()
-            .and_then(|map| map.get(&session).map(|handle| handle.outbound.clone()))
+            .and_then(|map| map.get(key).map(|handle| handle.outbound.clone()))
     }
 
-    fn insert(&self, session: SessionId, handle: SessionHandle) {
+    fn insert(&self, key: SessionKey, handle: SessionHandle) {
         if let Ok(mut map) = self.map.lock() {
-            map.insert(session, handle);
+            map.insert(key, handle);
         }
     }
 }
@@ -326,9 +319,7 @@ impl TransportSessions {
 struct RelayTask {
     sessions: Arc<TransportSessions>,
     processor: Arc<Processor>,
-    session: SessionId,
-    peer: Did,
-    namespace: String,
+    key: SessionKey,
     outbound_rx: mpsc::Receiver<Outbound>,
     cancel: CancellationToken,
 }
@@ -338,17 +329,13 @@ impl RelayTask {
     fn register(
         sessions: Arc<TransportSessions>,
         processor: Arc<Processor>,
-        session: SessionId,
-        peer: Did,
-        namespace: String,
+        key: SessionKey,
     ) -> Self {
-        let (outbound_rx, cancel) = sessions.register(session);
+        let (outbound_rx, cancel) = sessions.register(key.clone());
         Self {
             sessions,
             processor,
-            session,
-            peer,
-            namespace,
+            key,
             outbound_rx,
             cancel,
         }
@@ -356,13 +343,13 @@ impl RelayTask {
 
     /// Connect failed: drop the pre-registered session and tell the peer.
     async fn refuse(self) {
-        self.sessions.close(self.session);
+        self.sessions.close(&self.key);
         let _ = send_frame(
             self.processor.as_ref(),
-            self.peer,
-            self.namespace.as_str(),
+            self.key.peer,
+            self.key.namespace.as_str(),
             Frame::Close {
-                session: self.session,
+                session: self.key.session,
             },
         )
         .await;
@@ -374,12 +361,13 @@ async fn relay_tcp(task: RelayTask, stream: TcpStream) {
     let RelayTask {
         sessions,
         processor,
-        session,
-        peer,
-        namespace,
+        key,
         mut outbound_rx,
         cancel,
     } = task;
+    let peer = key.peer;
+    let session = key.session;
+    let namespace = key.namespace.clone();
     let (mut local_read, mut local_write) = stream.into_split();
 
     // local → peer; clean EOF sends FIN, errors abort the whole session.
@@ -450,7 +438,7 @@ async fn relay_tcp(task: RelayTask, stream: TcpStream) {
     }
 
     // Teardown: drop the session and tell the peer (idempotent on its side).
-    sessions.close(session);
+    sessions.close(&key);
     let _ = send_frame(processor.as_ref(), peer, namespace.as_str(), Frame::Close {
         session,
     })
@@ -462,12 +450,13 @@ async fn relay_udp_connected(task: RelayTask, socket: UdpSocket) {
     let RelayTask {
         sessions,
         processor,
-        session,
-        peer,
-        namespace,
+        key,
         mut outbound_rx,
         cancel,
     } = task;
+    let peer = key.peer;
+    let session = key.session;
+    let namespace = key.namespace.clone();
     let mut buf = vec![0u8; UDP_BUF];
     loop {
         tokio::select! {
@@ -496,7 +485,7 @@ async fn relay_udp_connected(task: RelayTask, socket: UdpSocket) {
             },
         }
     }
-    sessions.close(session);
+    sessions.close(&key);
     let _ = send_frame(processor.as_ref(), peer, namespace.as_str(), Frame::Close {
         session,
     })
@@ -538,16 +527,10 @@ async fn bind_connected_udp(addr: SocketAddr) -> Option<UdpSocket> {
     Some(socket)
 }
 
-/// Send `Frame::Open` to `peer` (client side, on a new local connection/flow).
-async fn open(
-    processor: &Processor,
-    session: SessionId,
-    peer: Did,
-    namespace: &str,
-    service: &str,
-) -> Result<()> {
-    send_frame(processor, peer, namespace, Frame::Open {
-        session,
+/// Send `Frame::Open` to the session's peer (client side, on a new local connection/flow).
+async fn open(processor: &Processor, key: &SessionKey, service: &str) -> Result<()> {
+    send_frame(processor, key.peer, key.namespace.as_str(), Frame::Open {
+        session: key.session,
         service: service.to_string(),
     })
     .await

@@ -44,7 +44,7 @@ use rings_core::dht::Did;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::backend::transport::SessionId;
+use crate::backend::transport::SessionKey;
 use crate::backend::transport::TransportKind;
 use crate::error::Error;
 use crate::error::Result;
@@ -136,40 +136,33 @@ pub enum Effect {
         /// Opaque input bytes; the job's codec is the protocol's own business.
         input: Bytes,
     },
-    /// Open a transport-relay session to `addr`, streaming it to `peer` under
-    /// `namespace` (see [`transport`](crate::backend::transport)). Interpreted
-    /// natively; a no-op on browser.
+    /// Open a transport-relay session (keyed by [`SessionKey`], which scopes it to the
+    /// authenticated `peer`) to `addr` (see [`transport`](crate::backend::transport)).
+    /// Interpreted natively; a no-op on browser.
     Connect {
-        /// Session id (assigned by the dialing side).
-        session: SessionId,
-        /// Peer the session relays to/from.
-        peer: Did,
-        /// Transport namespace the session's frames travel under.
-        namespace: String,
+        /// Full session identity `(peer, namespace, session)`.
+        key: SessionKey,
         /// Local address to dial.
         addr: SocketAddr,
         /// Stream (TCP) or datagram (UDP) backend.
         kind: TransportKind,
     },
-    /// Open a relay session whose local backend is a WebTransport server (`url`),
-    /// the browser endpoint counterpart of [`Connect`](Effect::Connect). Interpreted
-    /// in the browser; a no-op natively.
+    /// Open a relay session whose local backend is a WebTransport server (`url`), the
+    /// browser endpoint counterpart of [`Connect`](Effect::Connect). Interpreted in the
+    /// browser; a no-op natively.
     WtConnect {
-        /// Session id.
-        session: SessionId,
-        /// Peer the session relays to/from.
-        peer: Did,
-        /// Transport namespace the session's frames travel under.
-        namespace: String,
+        /// Full session identity `(peer, namespace, session)`.
+        key: SessionKey,
         /// WebTransport server URL to open.
         url: String,
         /// Bidirectional stream (TCP) or datagram (UDP).
         kind: TransportKind,
     },
-    /// Write peer-originated bytes to a relay session's local stream.
+    /// Write peer-originated bytes to a relay session's local stream. Addressed by the
+    /// full [`SessionKey`]; a key whose `peer` did not open the session simply misses.
     Write {
-        /// Target session.
-        session: SessionId,
+        /// Target session identity.
+        key: SessionKey,
         /// Bytes to write locally.
         bytes: Bytes,
     },
@@ -177,12 +170,12 @@ pub enum Effect {
     /// FIN), keeping the reverse direction open. No-op for UDP.
     Shutdown {
         /// Session to half-close.
-        session: SessionId,
+        key: SessionKey,
     },
     /// Close a relay session (full teardown).
     Close {
         /// Session to close.
-        session: SessionId,
+        key: SessionKey,
     },
     /// Bind a local listener; each accepted connection opens a relay session to `peer`
     /// for `service` under `namespace` (client side). Interpreted natively; a no-op on
@@ -409,52 +402,41 @@ impl Interpreter {
                     let envelope = Envelope::new(namespace, payload);
                     self.processor.send_envelope(to, &envelope).await?;
                 }
-                Effect::Connect {
-                    session,
-                    peer,
-                    namespace,
-                    addr,
-                    kind,
-                } => {
+                Effect::Connect { key, addr, kind } => {
                     #[cfg(feature = "node")]
                     self.transport
                         .clone()
-                        .connect(self.processor.clone(), session, peer, namespace, addr, kind)
+                        .connect(self.processor.clone(), key, addr, kind)
                         .await;
                     #[cfg(feature = "browser")]
                     {
-                        let _ = (session, peer, namespace, addr, kind);
+                        let _ = (key, addr, kind);
                         tracing::warn!("transport Connect (socket) is unsupported on browser");
                     }
                 }
-                Effect::WtConnect {
-                    session,
-                    peer,
-                    namespace,
-                    url,
-                    kind,
-                } => {
+                Effect::WtConnect { key, url, kind } => {
                     #[cfg(feature = "browser")]
                     self.transport
                         .clone()
-                        .connect(self.processor.clone(), session, peer, namespace, url, kind)
+                        .connect(self.processor.clone(), key, url, kind)
                         .await;
                     #[cfg(not(feature = "browser"))]
                     {
-                        let _ = (session, peer, namespace, url, kind);
+                        let _ = (key, url, kind);
                         tracing::warn!("WtConnect (WebTransport) is only supported on browser");
                     }
                 }
-                // Write/Shutdown/Close address an existing session; the platform engine
-                // (socket or WebTransport) handles them identically on both targets.
-                Effect::Write { session, bytes } => {
-                    self.transport.write(session, bytes).await;
+                // Write/Shutdown/Close address an existing session by its full key; the
+                // platform engine handles them identically on both targets, and a key
+                // whose `peer` did not open the session simply misses (owner rejection).
+                Effect::Write { key, bytes } => {
+                    self.transport.write(&key, bytes).await;
                 }
-                Effect::Shutdown { session } => {
-                    self.transport.shutdown(session).await;
+                Effect::Shutdown { key } => {
+                    self.transport.shutdown(&key).await;
                 }
-                Effect::Close { session } => {
-                    self.transport.close(session);
+                Effect::Close { key } => {
+                    self.transport.close(&key);
                 }
                 Effect::Listen {
                     local_addr,

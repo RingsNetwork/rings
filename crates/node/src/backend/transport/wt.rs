@@ -36,7 +36,7 @@ use web_sys::WritableStreamDefaultWriter;
 
 use crate::backend::ext::Envelope;
 use crate::backend::transport::Frame;
-use crate::backend::transport::SessionId;
+use crate::backend::transport::SessionKey;
 use crate::backend::transport::TransportKind;
 use crate::error::Error;
 use crate::error::Result;
@@ -50,10 +50,14 @@ struct SessionHandle {
     transport: WebTransport,
 }
 
-/// Browser relay engine: WebTransport sessions keyed by [`SessionId`].
+/// Browser relay engine: WebTransport sessions keyed by [`SessionKey`].
+///
+/// Like the native engine, sessions are keyed by the full `(peer, namespace, session)`
+/// rather than the bare opener-assigned id, so a frame from a peer can only ever address
+/// its own sessions (owner rejection by keyed-lookup miss).
 #[derive(Default)]
 pub struct WtSessions {
-    map: Mutex<HashMap<SessionId, SessionHandle>>,
+    map: Mutex<HashMap<SessionKey, SessionHandle>>,
 }
 
 impl WtSessions {
@@ -62,35 +66,39 @@ impl WtSessions {
         Self::default()
     }
 
-    /// Open a WebTransport session to `url` and relay it to `peer` under `namespace`.
+    /// Open a WebTransport session to `url` for the session identified by `key`.
     /// On any failure a `Frame::Close` is sent.
     pub async fn connect(
         self: Arc<Self>,
         processor: Arc<Processor>,
-        session: SessionId,
-        peer: Did,
-        namespace: String,
+        key: SessionKey,
         url: String,
         kind: TransportKind,
     ) {
         match open(url.as_str(), kind).await {
             Ok((transport, readable, writer)) => {
-                self.insert(session, SessionHandle { writer, transport });
-                self.spawn_read_loop(processor, session, peer, namespace, readable);
+                self.insert(key.clone(), SessionHandle { writer, transport });
+                self.spawn_read_loop(processor, key, readable);
             }
             Err(e) => {
                 tracing::error!("WebTransport connect to {url} failed: {e:?}");
-                let _ = send_frame(processor.as_ref(), peer, namespace.as_str(), Frame::Close {
-                    session,
-                })
+                let _ = send_frame(
+                    processor.as_ref(),
+                    key.peer,
+                    key.namespace.as_str(),
+                    Frame::Close {
+                        session: key.session,
+                    },
+                )
                 .await;
             }
         }
     }
 
-    /// Deliver peer bytes to a session's local stream. Unknown sessions are dropped.
-    pub async fn write(&self, session: SessionId, bytes: Bytes) {
-        let Some(writer) = self.writer(session) else {
+    /// Deliver peer bytes to a session's local stream. Unknown sessions are dropped — a
+    /// non-owner peer's key never resolves, so it cannot write to a session it does not own.
+    pub async fn write(&self, key: &SessionKey, bytes: Bytes) {
+        let Some(writer) = self.writer(key) else {
             return;
         };
         let chunk = Uint8Array::from(bytes.as_ref());
@@ -98,31 +106,31 @@ impl WtSessions {
     }
 
     /// Half-close a session's send side (peer sent FIN).
-    pub async fn shutdown(&self, session: SessionId) {
-        if let Some(writer) = self.writer(session) {
+    pub async fn shutdown(&self, key: &SessionKey) {
+        if let Some(writer) = self.writer(key) {
             let _ = JsFuture::from(writer.close()).await;
         }
     }
 
     /// Close and drop a session (closes the WebTransport).
-    pub fn close(&self, session: SessionId) {
+    pub fn close(&self, key: &SessionKey) {
         if let Ok(mut map) = self.map.lock() {
-            if let Some(handle) = map.remove(&session) {
+            if let Some(handle) = map.remove(key) {
                 handle.transport.close();
             }
         }
     }
 
-    fn writer(&self, session: SessionId) -> Option<WritableStreamDefaultWriter> {
+    fn writer(&self, key: &SessionKey) -> Option<WritableStreamDefaultWriter> {
         self.map
             .lock()
             .ok()
-            .and_then(|map| map.get(&session).map(|handle| handle.writer.clone()))
+            .and_then(|map| map.get(key).map(|handle| handle.writer.clone()))
     }
 
-    fn insert(&self, session: SessionId, handle: SessionHandle) {
+    fn insert(&self, key: SessionKey, handle: SessionHandle) {
         if let Ok(mut map) = self.map.lock() {
-            map.insert(session, handle);
+            map.insert(key, handle);
         }
     }
 
@@ -130,13 +138,14 @@ impl WtSessions {
     fn spawn_read_loop(
         self: &Arc<Self>,
         processor: Arc<Processor>,
-        session: SessionId,
-        peer: Did,
-        namespace: String,
+        key: SessionKey,
         readable: ReadableStream,
     ) {
         let sessions = self.clone();
         spawn_local(async move {
+            let peer = key.peer;
+            let namespace = key.namespace.clone();
+            let session = key.session;
             let reader: ReadableStreamDefaultReader = match readable.get_reader().dyn_into() {
                 Ok(reader) => reader,
                 Err(_) => return,
@@ -168,7 +177,7 @@ impl WtSessions {
                     break;
                 }
             }
-            sessions.close(session);
+            sessions.close(&key);
             let _ = send_frame(processor.as_ref(), peer, namespace.as_str(), Frame::Close {
                 session,
             })
