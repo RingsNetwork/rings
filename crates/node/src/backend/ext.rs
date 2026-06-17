@@ -143,6 +143,19 @@ pub enum Effect {
         /// Session to close.
         session: SessionId,
     },
+    /// Bind a local listener; each accepted connection opens a relay session to `peer`
+    /// for `service` under `namespace` (client side). Interpreted natively; a no-op on
+    /// browser.
+    Listen {
+        /// Local address to bind.
+        local_addr: SocketAddr,
+        /// Peer to relay accepted connections to.
+        peer: Did,
+        /// Remote service name to open.
+        service: String,
+        /// Transport namespace the session's frames travel under.
+        namespace: String,
+    },
 }
 
 /// Read-only state carrier passed *into* a step: the protocol's current state `S`
@@ -312,6 +325,23 @@ impl Interpreter {
                     {
                         let _ = session;
                         tracing::warn!("transport Close is unsupported on browser");
+                    }
+                }
+                Effect::Listen {
+                    local_addr,
+                    peer,
+                    service,
+                    namespace,
+                } => {
+                    #[cfg(feature = "node")]
+                    self.transport
+                        .clone()
+                        .listen(self.processor.clone(), local_addr, peer, service, namespace)
+                        .await;
+                    #[cfg(feature = "browser")]
+                    {
+                        let _ = (local_addr, peer, service, namespace);
+                        tracing::warn!("transport Listen is unsupported on browser");
                     }
                 }
             }

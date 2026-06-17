@@ -126,6 +126,25 @@ impl Provider {
             .await
     }
 
+    /// Open a local TCP tunnel: bind `local_addr` and relay each accepted connection
+    /// to `peer`'s `service` over the `tcp` relay (client side).
+    pub async fn open_tcp_tunnel(
+        &self,
+        local_addr: std::net::SocketAddr,
+        peer: rings_core::dht::Did,
+        service: String,
+    ) -> Result<()> {
+        self.interpreter()
+            .run(vec![crate::backend::ext::Effect::Listen {
+                local_addr,
+                peer,
+                service,
+                namespace: crate::backend::protocols::tcp::NAMESPACE.to_string(),
+            }])
+            .await?;
+        Ok(())
+    }
+
     /// Send a namespaced payload to a peer. This is the uniform upper-layer send;
     /// the transport/extension plumbing underneath is identical on native and
     /// browser.

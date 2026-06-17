@@ -4,21 +4,27 @@
 //! This is the side-effecting half of the relay (the pure half is each transport's
 //! `Protocol::step`). It keys live OS resources by [`SessionId`] in a shared table and
 //! is driven only through the transport [`Effect`](crate::backend::ext::Effect)s
-//! (`Connect` / `Write` / `Close`). Local reads are sent back to the peer as
+//! (`Connect` / `Write` / `Close` / `Listen`). Local reads are sent back to the peer as
 //! [`Frame`]s over the overlay — the event trace flowing outward.
 //!
-//! Session lifecycle (stream transports):
+//! Both relay directions share one bidirectional loop ([`spawn_relay`]); they differ
+//! only in how the local stream is obtained:
 //!
 //! ```text
-//!   Connect ─▶ [ local TcpStream ]
-//!      local read  n>0  ─▶ send Frame::Data{session, bytes} to peer
-//!      local read  0/err ─▶ send Frame::Close{session}; drop session
-//!      Write{session}    ─▶ write bytes to local stream
-//!      Close{session}    ─▶ cancel + drop session
+//!   server side  (Connect): dial  addr            ─▶ spawn_relay
+//!   client side  (Listen) : accept local conn     ─▶ assign session, send Open, spawn_relay
+//!
+//!   per session, spawn_relay runs:
+//!     local read  n>0  ─▶ send Frame::Data{session, bytes} to peer
+//!     local read  0/err ─▶ send Frame::Close{session}; drop session
+//!     Write{session}    ─▶ write bytes to local stream
+//!     Close{session}    ─▶ cancel + drop session
 //! ```
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -27,6 +33,7 @@ use bytes::Bytes;
 use rings_core::dht::Did;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
+use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
@@ -51,12 +58,13 @@ struct SessionHandle {
     cancel: CancellationToken,
 }
 
-/// Shared table of live sessions. Held by the provider and shared into each
-/// interpreter, so `Connect` (which opens a session) and a later `Write`/`Close`
-/// (which address it) see the same resources.
+/// Shared table of live sessions plus the session-id allocator. Held by the provider
+/// and shared into each interpreter, so `Connect`/`Listen` (which open sessions) and a
+/// later `Write`/`Close` (which address them) see the same resources.
 #[derive(Default)]
 pub struct TransportSessions {
     map: Mutex<HashMap<SessionId, SessionHandle>>,
+    counter: AtomicU64,
 }
 
 impl TransportSessions {
@@ -65,10 +73,13 @@ impl TransportSessions {
         Self::default()
     }
 
-    /// Open a local TCP connection to `addr` for `session`, relaying its byte stream
-    /// to `peer` under `namespace`. Local reads are sent as `Frame::Data`; peer writes
-    /// arrive via [`write`](Self::write). On connect failure or EOF a `Frame::Close`
-    /// is sent and the session is dropped.
+    /// Allocate a fresh session id (unique within this node).
+    fn next_session(&self) -> SessionId {
+        SessionId(self.counter.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// Server side. Dial `addr` for `session` and relay to `peer` under `namespace`.
+    /// On connect failure a `Frame::Close` is sent.
     pub async fn connect(
         &self,
         processor: Arc<Processor>,
@@ -77,73 +88,65 @@ impl TransportSessions {
         namespace: String,
         addr: SocketAddr,
     ) {
-        let stream = match timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await {
-            Ok(Ok(stream)) => stream,
+        match timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await {
+            Ok(Ok(stream)) => self.spawn_relay(processor, session, peer, namespace, stream),
             _ => {
                 let _ = send_frame(processor.as_ref(), peer, namespace.as_str(), Frame::Close {
                     session,
                 })
                 .await;
+            }
+        }
+    }
+
+    /// Client side. Bind a local listener; for each accepted connection assign a
+    /// session, send `Frame::Open{session, service}` to `peer`, and relay it under
+    /// `namespace`.
+    pub async fn listen(
+        self: Arc<Self>,
+        processor: Arc<Processor>,
+        local_addr: SocketAddr,
+        peer: Did,
+        service: String,
+        namespace: String,
+    ) {
+        let listener = match TcpListener::bind(local_addr).await {
+            Ok(listener) => listener,
+            Err(e) => {
+                tracing::error!("transport listen bind {local_addr} failed: {e:?}");
                 return;
             }
         };
 
-        let (write_tx, mut write_rx) = mpsc::channel::<Bytes>(1024);
-        let cancel = CancellationToken::new();
-        self.insert(session, SessionHandle {
-            write_tx,
-            cancel: cancel.clone(),
-        });
-
-        let sessions_namespace = namespace.clone();
         tokio::spawn(async move {
-            let (mut local_read, mut local_write) = stream.into_split();
-
-            let read_to_peer = async {
-                let mut buf = vec![0u8; READ_BUF];
-                loop {
-                    match local_read.read(buf.as_mut_slice()).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            let bytes = Bytes::copy_from_slice(buf.get(..n).unwrap_or_default());
-                            let frame = Frame::Data { session, bytes };
-                            if send_frame(
-                                processor.as_ref(),
-                                peer,
-                                sessions_namespace.as_str(),
-                                frame,
-                            )
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => {
+                        let session = self.next_session();
+                        let open = Frame::Open {
+                            session,
+                            service: service.clone(),
+                        };
+                        if send_frame(processor.as_ref(), peer, namespace.as_str(), open)
                             .await
                             .is_err()
-                            {
-                                break;
-                            }
+                        {
+                            continue;
                         }
+                        self.spawn_relay(
+                            processor.clone(),
+                            session,
+                            peer,
+                            namespace.clone(),
+                            stream,
+                        );
                     }
-                }
-            };
-
-            let peer_to_local = async {
-                while let Some(bytes) = write_rx.recv().await {
-                    if local_write.write_all(bytes.as_ref()).await.is_err() {
+                    Err(e) => {
+                        tracing::error!("transport accept on {local_addr} failed: {e:?}");
                         break;
                     }
                 }
-            };
-
-            tokio::select! {
-                _ = read_to_peer => {}
-                _ = peer_to_local => {}
-                _ = cancel.cancelled() => {}
             }
-
-            let _ = send_frame(
-                processor.as_ref(),
-                peer,
-                sessions_namespace.as_str(),
-                Frame::Close { session },
-            )
-            .await;
         });
     }
 
@@ -167,6 +170,66 @@ impl TransportSessions {
                 handle.cancel.cancel();
             }
         }
+    }
+
+    /// Register a local `stream` as `session` and spawn its bidirectional relay to
+    /// `peer` under `namespace`. Shared by both relay directions.
+    fn spawn_relay(
+        &self,
+        processor: Arc<Processor>,
+        session: SessionId,
+        peer: Did,
+        namespace: String,
+        stream: TcpStream,
+    ) {
+        let (write_tx, mut write_rx) = mpsc::channel::<Bytes>(1024);
+        let cancel = CancellationToken::new();
+        self.insert(session, SessionHandle {
+            write_tx,
+            cancel: cancel.clone(),
+        });
+
+        tokio::spawn(async move {
+            let (mut local_read, mut local_write) = stream.into_split();
+
+            let read_to_peer = async {
+                let mut buf = vec![0u8; READ_BUF];
+                loop {
+                    match local_read.read(buf.as_mut_slice()).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            let bytes = Bytes::copy_from_slice(buf.get(..n).unwrap_or_default());
+                            let frame = Frame::Data { session, bytes };
+                            if send_frame(processor.as_ref(), peer, namespace.as_str(), frame)
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    }
+                }
+            };
+
+            let peer_to_local = async {
+                while let Some(bytes) = write_rx.recv().await {
+                    if local_write.write_all(bytes.as_ref()).await.is_err() {
+                        break;
+                    }
+                }
+            };
+
+            tokio::select! {
+                _ = read_to_peer => {}
+                _ = peer_to_local => {}
+                _ = cancel.cancelled() => {}
+            }
+
+            let _ = send_frame(processor.as_ref(), peer, namespace.as_str(), Frame::Close {
+                session,
+            })
+            .await;
+        });
     }
 
     fn insert(&self, session: SessionId, handle: SessionHandle) {
