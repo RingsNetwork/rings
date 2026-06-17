@@ -71,21 +71,25 @@ impl Provider {
         }
     }
 
-    /// Build an extension capability [`Ctx`](crate::backend::ext::Ctx) over this
-    /// provider's processor.
-    pub fn ctx(&self) -> crate::backend::ext::Ctx {
-        crate::backend::ext::Ctx::new(self.processor.clone())
-    }
-
-    /// The shared extension registry. The inbound callback clones this so
+    /// The shared protocol registry. The inbound callback clones this so
     /// registration (via the provider) and dispatch see the same table.
     pub fn extensions(&self) -> crate::backend::ext::Extensions {
         self.extensions.clone()
     }
 
-    /// Register a protocol [`Extension`](crate::backend::ext::Extension).
-    pub fn register_extension(&self, ext: Arc<crate::backend::ext::DynExtension>) {
-        self.extensions.register(ext);
+    /// The effect interpreter — the single side-effecting boundary used to run a
+    /// protocol's described [`Effect`](crate::backend::ext::Effect)s.
+    pub(crate) fn interpreter(&self) -> crate::backend::ext::Interpreter {
+        crate::backend::ext::Interpreter::new(self.processor.clone())
+    }
+
+    /// Register a pure [`Protocol`](crate::backend::ext::Protocol) under its namespace.
+    pub fn register_protocol<P>(&self, protocol: P)
+    where
+        P: crate::backend::ext::Protocol + crate::backend::ext::MaybeSend + 'static,
+        P::State: crate::backend::ext::MaybeSend + 'static,
+    {
+        self.extensions.register(protocol);
     }
 
     /// Send a namespaced payload to a peer. This is the uniform upper-layer send;
@@ -97,7 +101,13 @@ impl Provider {
         namespace: &str,
         payload: bytes::Bytes,
     ) -> Result<()> {
-        self.ctx().send(to, namespace, payload).await
+        self.interpreter()
+            .run(vec![crate::backend::ext::Effect::Send {
+                to,
+                namespace: namespace.to_string(),
+                payload,
+            }])
+            .await
     }
     /// Create a provider instance with storage name
     pub(crate) async fn new_provider_with_storage_internal(

@@ -5,11 +5,11 @@
 //! and is registered under its namespace, replacing the corresponding
 //! `BackendMessage` variant.
 
-pub mod plaintext;
+pub mod echo;
 
 use crate::backend::ext::Extensions;
 
 /// Register the built-in protocol extensions into a registry.
 pub fn register_builtins(extensions: &Extensions) {
-    extensions.register(plaintext::PlainText::new());
+    extensions.register(echo::Echo);
 }

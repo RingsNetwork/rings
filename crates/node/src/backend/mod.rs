@@ -17,7 +17,6 @@ use rings_core::message::MessageVerificationExt;
 use rings_core::swarm::callback::SwarmCallback;
 use rings_derive::wasm_export;
 
-use crate::backend::ext::DynExtension;
 use crate::backend::ext::Extensions;
 use crate::backend::types::BackendMessage;
 use crate::backend::types::MessageHandler;
@@ -58,22 +57,18 @@ impl Backend {
         }
     }
 
-    /// Register a protocol [`Extension`](crate::backend::ext::Extension) under its
-    /// declared namespace.
-    pub fn register_extension(&self, ext: Arc<DynExtension>) {
-        self.extensions.register(ext);
-    }
-
     async fn on_backend_message(
         &self,
         payload: &MessagePayload,
         msg: &BackendMessage,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // New namespaced path: route envelopes to the extension registry.
+        // New namespaced path: route envelopes to the protocol registry. The
+        // interpreter is the only side-effecting boundary.
         if let BackendMessage::Envelope(envelope) = msg {
             let from = payload.transaction.signer();
+            let interpreter = self.provider.interpreter();
             self.extensions
-                .dispatch(&self.provider.ctx(), from, envelope.clone())
+                .dispatch(&interpreter, from, envelope.clone())
                 .await?;
             return Ok(());
         }
