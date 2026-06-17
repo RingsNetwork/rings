@@ -28,6 +28,7 @@
 //! pair.
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -125,6 +126,20 @@ pub struct Ctx<'a, S> {
     pub state: &'a S,
 }
 
+/// A locally re-injected message: an [`Effect`]'s output fed back into the router as
+/// a fresh inbound. This is the "event trace" of the Effect monad — running an effect
+/// may emit events that re-enter `step`. `Inbound ≅ (Namespace, Event)`.
+pub struct Inbound {
+    /// Target protocol namespace.
+    pub namespace: String,
+    /// The re-injected event.
+    pub event: Event,
+}
+
+/// Upper bound on re-injection iterations per inbound message, so a misbehaving
+/// protocol/effect cycle cannot diverge. The driver computes a bounded fixpoint.
+const MAX_FIXPOINT_STEPS: u32 = 1024;
+
 /// The output of a step: the next state and the effects to run.
 /// `Transition S ≅ (S, [Effect])` — the Writer-over-State pair.
 pub struct Transition<S> {
@@ -193,8 +208,13 @@ impl Interpreter {
         self.processor.did()
     }
 
-    /// Run effects in order. `run : [Effect] → IO ()`.
-    pub async fn run(&self, effects: Vec<Effect>) -> Result<()> {
+    /// Run effects in order, returning any locally re-injected messages (the event
+    /// trace fed back into the router). `run : [Effect] → IO [Inbound]`.
+    ///
+    /// `Send` is terminal (goes to a peer) and re-injects nothing; effects that
+    /// perform local IO may return [`Inbound`]s that re-enter `step`.
+    pub async fn run(&self, effects: Vec<Effect>) -> Result<Vec<Inbound>> {
+        let reinjected = Vec::new();
         for effect in effects {
             match effect {
                 Effect::Send {
@@ -207,7 +227,7 @@ impl Interpreter {
                 }
             }
         }
-        Ok(())
+        Ok(reinjected)
     }
 }
 
@@ -226,8 +246,9 @@ pub type DynHandler = dyn Handler;
 pub trait Handler {
     /// Routed namespace.
     fn namespace(&self) -> &str;
-    /// Load state, run the pure step, store the next state, then run its effects.
-    async fn handle(&self, interp: &Interpreter, event: Event) -> Result<()>;
+    /// Load state, run the pure step, store the next state, then run its effects,
+    /// returning any re-injected messages. `handle : Event → IO [Inbound]`.
+    async fn handle(&self, interp: &Interpreter, event: Event) -> Result<Vec<Inbound>>;
 }
 
 /// Adapter that owns a protocol's state and drives its pure `step`. This is the
@@ -256,7 +277,7 @@ where
         self.protocol.namespace()
     }
 
-    async fn handle(&self, interp: &Interpreter, event: Event) -> Result<()> {
+    async fn handle(&self, interp: &Interpreter, event: Event) -> Result<Vec<Inbound>> {
         // Pure region: load state, run `step`, store next state. No IO, no await.
         let effects = {
             let mut guard = self.state.lock().map_err(|_| Error::Lock)?;
@@ -268,7 +289,8 @@ where
             *guard = state;
             effects
         };
-        // Impure region: the lock is released; run the described effects.
+        // Impure region: the lock is released; run the described effects, returning
+        // any re-injected messages.
         interp.run(effects).await
     }
 }
@@ -313,29 +335,51 @@ impl Extensions {
         self.handlers.read().ok()?.get(namespace).map(Arc::clone)
     }
 
-    /// Route a decoded envelope. Unknown namespaces are logged and dropped
-    /// (non-fatal): a peer speaking a protocol this node lacks is expected.
+    /// Route a decoded envelope and drive the re-injection loop to a bounded
+    /// fixpoint.
+    ///
+    /// Starting from the inbound message, repeatedly: route to the namespace's
+    /// protocol, run its `step` (pure) and effects (via the interpreter), and
+    /// re-enqueue any [`Inbound`]s the effects produced — until the queue drains or
+    /// [`MAX_FIXPOINT_STEPS`] is hit. This is the bounded least fixpoint of
+    /// `events ↦ ⋃ run(step(event))`.
+    ///
+    /// Unknown namespaces are logged and dropped (non-fatal): a peer speaking a
+    /// protocol this node lacks is expected.
     pub async fn dispatch(
         &self,
         interp: &Interpreter,
         from: Did,
         envelope: Envelope,
     ) -> Result<()> {
-        match self.get(envelope.namespace.as_str()) {
-            Some(handler) => {
-                let event = Event {
-                    from,
-                    payload: envelope.payload,
-                };
-                handler.handle(interp, event).await
+        let mut queue: VecDeque<Inbound> = VecDeque::new();
+        queue.push_back(Inbound {
+            namespace: envelope.namespace,
+            event: Event {
+                from,
+                payload: envelope.payload,
+            },
+        });
+
+        let mut budget = MAX_FIXPOINT_STEPS;
+        while let Some(Inbound { namespace, event }) = queue.pop_front() {
+            if budget == 0 {
+                tracing::warn!("extension fixpoint budget exhausted at {:?}", namespace);
+                break;
             }
-            None => {
-                tracing::debug!(
+            budget -= 1;
+
+            match self.get(namespace.as_str()) {
+                Some(handler) => {
+                    let reinjected = handler.handle(interp, event).await?;
+                    queue.extend(reinjected);
+                }
+                None => tracing::debug!(
                     "no protocol registered for namespace {:?}, dropping",
-                    envelope.namespace
-                );
-                Ok(())
+                    namespace
+                ),
             }
         }
+        Ok(())
     }
 }

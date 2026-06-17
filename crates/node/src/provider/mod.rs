@@ -107,7 +107,8 @@ impl Provider {
                 namespace: namespace.to_string(),
                 payload,
             }])
-            .await
+            .await?;
+        Ok(())
     }
     /// Create a provider instance with storage name
     pub(crate) async fn new_provider_with_storage_internal(
