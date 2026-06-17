@@ -257,11 +257,14 @@ mod tests {
     use std::collections::HashMap;
 
     use wasm_bindgen_test::wasm_bindgen_test;
+    use wasm_bindgen_test::wasm_bindgen_test_configure;
 
     use super::*;
 
-    // These exercise only the pure `dweb_handle` logic (no DOM / storage / network), so
-    // they run under the node runner — no browser driver needed.
+    // Run in a real (headless) browser for parity with proof-demo:
+    // `wasm-pack test --headless --chrome` (needs a chromedriver matching your Chrome;
+    // `webdriver.json` supplies the launch flags). The logic itself is browser-free.
+    wasm_bindgen_test_configure!(run_in_browser);
 
     fn ctx_null() -> JsValue {
         let ctx = Object::new();

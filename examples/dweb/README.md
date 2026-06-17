@@ -30,9 +30,12 @@ Open two instances, paste one node's DID into the other's "peer DID" box, and fe
 
 ## Test
 
-The core protocol logic (`dweb_handle`) is browser-free, so the tests run under the wasm
-**node** runner — no browser/driver needed:
+Runs in a real **headless browser** via the wasm-bindgen-test toolkit; `webdriver.json`
+supplies the Chrome launch flags:
 
 ```sh
-wasm-pack test --node        # 3 tests
+wasm-pack test --headless --chrome   # 3 tests
 ```
+
+Requires a `chromedriver` whose version matches your installed Chrome (a mismatch makes
+Chrome exit on launch). Firefox works too via `--firefox` + a matching `geckodriver`.

@@ -32,13 +32,12 @@ files served over HTTP (`simple_bn256.r1cs`/`.wasm` from `examples/snark/circoms
 
 ## Test
 
-The SNARK-input builder is browser-free, so the test runs under the wasm **node** runner:
+Runs in a real **headless browser** (the `build_node` test needs IndexedDB + the browser
+WebRTC stack); `webdriver.json` supplies the Chrome launch flags:
 
 ```sh
-wasm-pack test --node        # 1 test
+wasm-pack test --headless --chrome   # 2 tests
 ```
 
-The browser-only paths (the IndexedDB provider, the WebRTC round-trip) are covered by the
-node crate's `crates/node/src/tests/wasm` browser suite. To run *this* crate's tests in a
-real headless browser instead, `webdriver.json` already passes the needed Chrome flags:
-`wasm-pack test --headless --chrome` (requires a chromedriver matching your Chrome).
+Requires a `chromedriver` whose version matches your installed Chrome (a mismatch makes
+Chrome exit on launch). Firefox works too via `--firefox` + a matching `geckodriver`.

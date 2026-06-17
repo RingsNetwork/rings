@@ -256,13 +256,23 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use wasm_bindgen_test::wasm_bindgen_test;
+    use wasm_bindgen_test::wasm_bindgen_test_configure;
 
     use super::*;
 
-    // Exercises the pure SNARK-input builder (no DOM / storage / network), so it runs
-    // under the wasm node runner — no browser driver needed. The browser-only paths
-    // (IndexedDB provider, the WebRTC round-trip) are covered by the node crate's
-    // `tests/wasm` browser suite and by compilation.
+    // Run in a real (headless) browser: `build_node` needs IndexedDB and the browser
+    // WebRTC stack. Use `wasm-pack test --headless --chrome`.
+    wasm_bindgen_test_configure!(run_in_browser);
+
+    // Builds the full node in-browser — IndexedDB storage, the extension backend, and the
+    // SNARK protocol registered — exercising the wasm wiring end to end (short of an
+    // actual peer to prove against).
+    #[wasm_bindgen_test]
+    async fn builds_a_node_with_a_did() {
+        let node = build_node().await;
+        let did = node.provider.address();
+        assert!(did.starts_with("0x"), "expected a DID, got {did:?}");
+    }
 
     #[wasm_bindgen_test]
     fn sample_input_is_a_well_formed_vesta_input() {
