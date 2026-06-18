@@ -2,7 +2,6 @@
 //! UDP instance of the relay: the listener (client side) and the per-flow datagram relay
 //! loops (server side, plus the client-side return path). UDP flows have no half-close.
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -12,20 +11,23 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use super::inject_track;
-use super::open;
+use super::inject_accepted;
 use super::send_frame;
 use super::Outbound;
+use super::Pending;
 use super::RelayTask;
 use super::TransportSessions;
 use super::UDP_BUF;
 use crate::extension::ext::Core;
 use crate::extension::transport::Frame;
-use crate::extension::transport::SessionKey;
 
 impl TransportSessions {
-    /// Bind a UDP socket; per new source address open a flow (`Track` + `Frame::Open`) and
-    /// relay its datagrams, routing replies back to the originating local client.
+    /// Bind a UDP socket; route each datagram. A datagram from a **known** source (in the
+    /// effect-populated `udp_flows` cache) is forwarded directly (fast path, no `step`). A
+    /// datagram from a **new** source stashes the first bytes and reports the accept to the
+    /// pure relay (`Accepted`); the core mints the session id and replies with `OpenAccepted`
+    /// → [`bind_accepted`](TransportSessions::bind_accepted), which opens the flow and
+    /// forwards that first datagram. The listener picks no identity.
     pub(super) async fn listen_udp(
         self: Arc<Self>,
         core: Core,
@@ -42,42 +44,41 @@ impl TransportSessions {
             }
         };
         tokio::spawn(async move {
-            let mut flows: HashMap<SocketAddr, SessionKey> = HashMap::new();
             let mut buf = vec![0u8; UDP_BUF];
             loop {
                 match socket.recv_from(buf.as_mut_slice()).await {
                     Ok((n, src)) => {
                         let bytes = Bytes::copy_from_slice(buf.get(..n).unwrap_or_default());
-                        // Reuse the flow only if its key is still live: a peer `Close` or
-                        // relay teardown removes the key from the engine table but cannot
-                        // reach this listener-local `flows` map, so a stale mapping would
-                        // otherwise route new datagrams to a dead (un-deliverable) session.
-                        let key = match flows.get(&src) {
-                            Some(key) if self.is_live(key) => key.clone(),
-                            _ => {
-                                let key =
-                                    SessionKey::new(peer, namespace.clone(), self.next_session());
-                                // Register + start the local sender *before* opening, so a
-                                // fast reply from the peer is not dropped.
-                                let (outbound_rx, cancel) = self.register(key.clone());
-                                spawn_udp_sendto(socket.clone(), src, outbound_rx, cancel);
-                                // Record the client-side flow in the pure relay state.
-                                inject_track(&core, peer, namespace.as_str(), key.session).await;
-                                if open(&core, &key, service.as_str()).await.is_err() {
-                                    self.close(&core, &key).await;
-                                    flows.remove(&src);
-                                    continue;
-                                }
-                                // Overwrites any stale mapping for this source.
-                                flows.insert(src, key.clone());
-                                key
+                        match self.udp_flow(&src) {
+                            Some(key) => {
+                                let _ = send_frame(
+                                    &core,
+                                    key.peer,
+                                    key.namespace.as_str(),
+                                    Frame::Data {
+                                        session: key.session,
+                                        bytes,
+                                    },
+                                )
+                                .await;
                             }
-                        };
-                        let frame = Frame::Data {
-                            session: key.session,
-                            bytes,
-                        };
-                        let _ = send_frame(&core, key.peer, key.namespace.as_str(), frame).await;
+                            None => {
+                                if let Some(token) = self.stash_pending(Pending::Udp {
+                                    socket: socket.clone(),
+                                    src,
+                                    first: bytes,
+                                }) {
+                                    inject_accepted(
+                                        &core,
+                                        token,
+                                        peer,
+                                        namespace.as_str(),
+                                        service.clone(),
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
                     }
                     Err(e) => {
                         tracing::error!("transport udp recv on {local_addr} failed: {e:?}");
@@ -134,7 +135,7 @@ pub(super) async fn relay_udp_connected(task: RelayTask, socket: UdpSocket) {
 }
 
 /// Client-side UDP flow: route peer bytes back to the originating local client `dest`.
-fn spawn_udp_sendto(
+pub(super) fn spawn_udp_sendto(
     socket: Arc<UdpSocket>,
     dest: SocketAddr,
     mut outbound_rx: mpsc::Receiver<Outbound>,

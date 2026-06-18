@@ -12,20 +12,21 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 
-use super::inject_track;
-use super::open;
+use super::inject_accepted;
 use super::send_frame;
 use super::Outbound;
+use super::Pending;
 use super::RelayTask;
 use super::TransportSessions;
 use super::TCP_BUF;
 use crate::extension::ext::Core;
 use crate::extension::transport::Frame;
-use crate::extension::transport::SessionKey;
 
 impl TransportSessions {
-    /// Bind a TCP listener; per accepted connection assign a session, feed it back to the
-    /// pure relay (`Track`), `Frame::Open` it to the peer, and relay the byte stream.
+    /// Bind a TCP listener; per accepted connection, stash the stream and report the accept
+    /// to the pure relay (`Accepted`). The core mints the session id and replies with
+    /// `OpenAccepted` → [`bind_accepted`](TransportSessions::bind_accepted), which opens the
+    /// peer session and starts the relay loop. The listener itself decides nothing.
     pub(super) async fn listen_tcp(
         self: Arc<Self>,
         core: Core,
@@ -45,18 +46,11 @@ impl TransportSessions {
             loop {
                 match listener.accept().await {
                     Ok((stream, _)) => {
-                        let key = SessionKey::new(peer, namespace.clone(), self.next_session());
-                        // Register the local handle *before* telling the peer to open, so an
-                        // early `Data`/`Close` from the peer is buffered, not dropped.
-                        let task = RelayTask::register(self.clone(), core.clone(), key.clone());
-                        // Feed the accept back to the pure relay so `State.sessions` records
-                        // this client-side session (full authority over live sessions).
-                        inject_track(&core, peer, namespace.as_str(), key.session).await;
-                        if open(&core, &key, service.as_str()).await.is_err() {
-                            task.refuse().await;
+                        let Some(token) = self.stash_pending(Pending::Tcp(stream)) else {
                             continue;
-                        }
-                        tokio::spawn(async move { relay_tcp(task, stream).await });
+                        };
+                        inject_accepted(&core, token, peer, namespace.as_str(), service.clone())
+                            .await;
                     }
                     Err(e) => {
                         tracing::error!("transport accept on {local_addr} failed: {e:?}");

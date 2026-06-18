@@ -69,14 +69,18 @@ pub enum RelayCommand<T> {
         /// Service name to remove.
         name: String,
     },
-    /// Engine→protocol feedback: a client-side session was accepted locally and opened to
-    /// `peer`. Recorded so `State.sessions` is the **full** authority over live sessions
-    /// (client tunnels included), not just remote-opened server sessions.
-    Track {
+    /// Engine→protocol feedback: a local connection/datagram-flow was accepted, pending
+    /// under engine-local `token`, destined for `peer`'s `service`. The pure `step` mints
+    /// the session id (so id allocation lives in the core, not the shell), records it, and
+    /// replies with [`RelayEffect::OpenAccepted`] to bind the pending resource. The engine
+    /// never mints or decides identity — it only reports the raw accept and executes effects.
+    Accepted {
+        /// Engine-local handle for the pending (not-yet-bound) connection/flow.
+        token: u64,
         /// The remote peer this session is tunnelled to.
         peer: Did,
-        /// The locally-assigned session id.
-        session: SessionId,
+        /// The remote service to open.
+        service: String,
     },
     /// Engine→protocol feedback: a session was torn down by the engine (any side); forget
     /// it. The single point through which every teardown reaches the pure state.
@@ -140,6 +144,17 @@ pub enum RelayEffect<T> {
         /// Session id to close.
         session: SessionId,
     },
+    /// Bind a pending accepted connection/flow (engine-local `token`) to the session `key`
+    /// the pure `step` just minted, then open it to the peer and start relaying. The reply
+    /// to [`RelayCommand::Accepted`] — this is how a step-minted id reaches the engine.
+    OpenAccepted {
+        /// Engine-local handle for the pending connection/flow.
+        token: u64,
+        /// The session key minted by the pure step.
+        key: SessionKey,
+        /// The remote service to open.
+        service: String,
+    },
 }
 
 /// Relay state: the service registry and the set of open (server-side, remote-opened)
@@ -149,6 +164,10 @@ pub enum RelayEffect<T> {
 pub struct RelayState<T> {
     services: Arc<HashMap<String, T>>,
     sessions: HashSet<SessionKey>,
+    /// Monotonic allocator for client-side session ids. Lives in the **pure** state so the
+    /// core (not the engine) mints session identities — `Event → step → Effect` is the sole
+    /// authority for both the session set and its ids.
+    next_session: u64,
 }
 
 impl<T> Default for RelayState<T> {
@@ -156,6 +175,7 @@ impl<T> Default for RelayState<T> {
         Self {
             services: Arc::new(HashMap::new()),
             sessions: HashSet::new(),
+            next_session: 0,
         }
     }
 }
@@ -203,6 +223,7 @@ where T: Clone + DeserializeOwned + Serialize + MaybeSend + 'static
         RelayState {
             services: Arc::new(self.config.clone()),
             sessions: HashSet::new(),
+            next_session: 0,
         }
     }
 
@@ -237,9 +258,10 @@ where T: Clone + DeserializeOwned + Serialize + MaybeSend + 'static
     }
 }
 
-/// Apply a local [`RelayCommand`]. Pure; mutates the registry / session set, emits no
-/// effects. `Track`/`Untrack` are the engine→protocol feedback that make `State.sessions`
-/// the full authority over live sessions (both client tunnels and server sessions).
+/// Apply a local [`RelayCommand`]. Pure. `Accepted`/`Untrack` are the engine→protocol
+/// feedback that make `step` the sole authority over the session set **and its ids**: the
+/// core mints the id on `Accepted` (the engine reported only a local token) and forgets the
+/// session on `Untrack`.
 fn step_command<T: Clone>(
     namespace: &str,
     state: &RelayState<T>,
@@ -249,20 +271,35 @@ fn step_command<T: Clone>(
     match command {
         RelayCommand::RegisterService { name, target } => {
             Arc::make_mut(&mut next.services).insert(name, target);
+            Transition::pure(next)
         }
         RelayCommand::UnregisterService { name } => {
             Arc::make_mut(&mut next.services).remove(&name);
+            Transition::pure(next)
         }
-        RelayCommand::Track { peer, session } => {
-            next.sessions
-                .insert(SessionKey::new(peer, namespace, session));
+        RelayCommand::Accepted {
+            token,
+            peer,
+            service,
+        } => {
+            // The core mints the session id (the engine reported only its local token), so
+            // id allocation is part of the pure state transition, not a shell decision.
+            let session = SessionId(next.next_session);
+            next.next_session += 1;
+            let key = SessionKey::new(peer, namespace, session);
+            next.sessions.insert(key.clone());
+            Transition::with(next, vec![RelayEffect::OpenAccepted {
+                token,
+                key,
+                service,
+            }])
         }
         RelayCommand::Untrack { peer, session } => {
             next.sessions
                 .remove(&SessionKey::new(peer, namespace, session));
+            Transition::pure(next)
         }
     }
-    Transition::pure(next)
 }
 
 /// Apply a network [`Frame`]. Pure; emits relay effects scoped to the authenticated `from`.
@@ -369,6 +406,16 @@ impl Interpret for NativeRelay {
                 core.send(to, namespace.as_str(), close_frame(session))
                     .await?;
             }
+            RelayEffect::OpenAccepted {
+                token,
+                key,
+                service,
+            } => {
+                self.engine
+                    .clone()
+                    .bind_accepted(core.clone(), token, key, service)
+                    .await;
+            }
         }
         Ok(Vec::new())
     }
@@ -423,6 +470,11 @@ impl Interpret for WtRelay {
             } => {
                 core.send(to, namespace.as_str(), close_frame(session))
                     .await?;
+            }
+            // The browser relay is server-side only (no local listener), so it never reports
+            // an `Accepted` and thus never receives `OpenAccepted`.
+            RelayEffect::OpenAccepted { .. } => {
+                tracing::warn!("browser relay received OpenAccepted; it has no local listener");
             }
         }
         Ok(Vec::new())
@@ -635,22 +687,35 @@ mod tests {
     }
 
     #[test]
-    fn track_and_untrack_make_state_the_authority_over_client_sessions() {
+    fn accepted_mints_in_the_core_then_untrack_removes() {
         let relay = web_relay();
-        // A client-side accept is fed back as `Track` (the engine→protocol feedback): the
-        // session is recorded in State even though no peer `Open` frame created it.
-        let tracked = step_command(&relay, &relay.init(), &RelayCommand::Track {
+        // A client-side accept is fed back as `Accepted{token}` (engine→protocol feedback).
+        // The core *mints* the session id (starting at 0 on fresh state) and replies with
+        // OpenAccepted carrying that minted key — the engine never picks the id.
+        let accepted = step_command(&relay, &relay.init(), &RelayCommand::Accepted {
+            token: 42,
             peer: peer_a(),
-            session: SessionId(9),
+            service: "web".to_string(),
         });
-        assert!(tracked.effects.is_empty(), "Track is a pure state update");
-        let key = SessionKey::new(peer_a(), super::TCP, SessionId(9));
-        assert!(tracked.state.sessions.contains(&key));
+        let key = SessionKey::new(peer_a(), super::TCP, SessionId(0));
+        match accepted.effects.as_slice() {
+            [RelayEffect::OpenAccepted {
+                token,
+                key: k,
+                service,
+            }] => {
+                assert_eq!(*token, 42);
+                assert_eq!(*k, key);
+                assert_eq!(service, "web");
+            }
+            other => panic!("expected one OpenAccepted, got {other:?}"),
+        }
+        assert!(accepted.state.sessions.contains(&key));
 
         // Teardown feeds back `Untrack`, removing it — so State stays the full authority.
-        let untracked = step_command(&relay, &tracked.state, &RelayCommand::Untrack {
+        let untracked = step_command(&relay, &accepted.state, &RelayCommand::Untrack {
             peer: peer_a(),
-            session: SessionId(9),
+            session: SessionId(0),
         });
         assert!(untracked.effects.is_empty());
         assert!(!untracked.state.sessions.contains(&key));
@@ -771,7 +836,7 @@ mod tests {
             let peer = peers[(r % 3) as usize];
             let session = SessionId((r >> 2) & 0x7); // 8 ids → frequent collisions
             let key = SessionKey::new(peer, super::TCP, session);
-            let transition = match (r >> 8) % 6 {
+            let transition = match (r >> 8) % 4 {
                 0 => {
                     let t = step_frame(&relay, &state, peer, &Frame::Open {
                         session,
@@ -814,18 +879,8 @@ mod tests {
                     }
                     t
                 }
-                3 => {
-                    let t = step_frame(&relay, &state, peer, &Frame::Close { session });
-                    model.remove(&key);
-                    t
-                }
-                4 => {
-                    let t = step_command(&relay, &state, &RelayCommand::Track { peer, session });
-                    model.insert(key.clone());
-                    t
-                }
                 _ => {
-                    let t = step_command(&relay, &state, &RelayCommand::Untrack { peer, session });
+                    let t = step_frame(&relay, &state, peer, &Frame::Close { session });
                     model.remove(&key);
                     t
                 }
