@@ -26,29 +26,27 @@ use crate::extension::ext::Extensions;
 /// Native nodes back the relay with OS sockets, browsers with WebTransport — same
 /// namespaces and [`Frame`](crate::extension::transport::Frame) vocabulary, platform
 /// interpreter. The relay's pure protocol and engine table both live inside this one
-/// extension, so the core never depends on transport internals.
+/// extension, so the core never depends on transport internals. The engine is created and
+/// owned here (shared into the interpreters); a client-side [`relay::RelayHandle`] over the
+/// same engine is returned for opening tunnels / registering services.
 #[cfg(not(feature = "browser"))]
-pub fn register_builtins(
-    extensions: &Extensions,
-    engine: Arc<crate::extension::transport::engine::TransportSessions>,
-) -> Result<()> {
+pub fn register_builtins(extensions: &Extensions) -> Result<relay::RelayHandle> {
+    let engine = Arc::new(crate::extension::transport::engine::TransportSessions::new());
     extensions.register(
         relay::Relay::tcp(HashMap::new()),
         relay::NativeRelay::new(engine.clone()),
     )?;
     extensions.register(
         relay::Relay::udp(HashMap::new()),
-        relay::NativeRelay::new(engine),
+        relay::NativeRelay::new(engine.clone()),
     )?;
-    Ok(())
+    Ok(relay::RelayHandle::new(engine, extensions.core()))
 }
 
 /// Register the built-in protocol extensions into a registry (browser / WebTransport).
 #[cfg(feature = "browser")]
-pub fn register_builtins(
-    extensions: &Extensions,
-    engine: Arc<crate::extension::transport::wt::WtSessions>,
-) -> Result<()> {
+pub fn register_builtins(extensions: &Extensions) -> Result<relay::RelayHandle> {
+    let engine = Arc::new(crate::extension::transport::wt::WtSessions::new());
     extensions.register(
         relay::Relay::tcp(HashMap::new()),
         relay::WtRelay::new(engine.clone()),
@@ -57,5 +55,5 @@ pub fn register_builtins(
         relay::Relay::udp(HashMap::new()),
         relay::WtRelay::new(engine),
     )?;
-    Ok(())
+    Ok(relay::RelayHandle::new(extensions.core()))
 }

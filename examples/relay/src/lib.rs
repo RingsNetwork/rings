@@ -148,11 +148,13 @@ pub async fn tcp_round_trip(request: &[u8]) -> Result<Vec<u8>> {
 
     let echo_addr = spawn_tcp_echo().await;
     server
+        .relay()
         .register_tcp_service("echo".to_string(), echo_addr)
         .await?;
 
     let tunnel_addr = free_local_addr().await;
     client
+        .relay()
         .open_tcp_tunnel(tunnel_addr, server_p.swarm.did(), "echo".to_string())
         .await?;
     // Give the tunnel listener a moment to bind.
@@ -186,11 +188,13 @@ pub async fn relay_http_get(target: &str, request: &[u8]) -> Result<Vec<u8>> {
         .next()
         .ok_or("could not resolve target host")?;
     server
+        .relay()
         .register_tcp_service("web".to_string(), target_addr)
         .await?;
 
     let tunnel_addr = free_local_addr().await;
     client
+        .relay()
         .open_tcp_tunnel(tunnel_addr, server_p.swarm.did(), "web".to_string())
         .await?;
 
@@ -222,11 +226,13 @@ pub async fn udp_round_trip(request: &[u8]) -> Result<Vec<u8>> {
 
     let echo_addr = spawn_udp_echo().await;
     server
+        .relay()
         .register_udp_service("echo".to_string(), echo_addr)
         .await?;
 
     let tunnel_addr = free_local_addr().await;
     client
+        .relay()
         .open_udp_tunnel(tunnel_addr, server_p.swarm.did(), "echo".to_string())
         .await?;
     tokio::time::sleep(Duration::from_millis(300)).await;

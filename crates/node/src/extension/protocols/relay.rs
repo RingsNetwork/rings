@@ -541,6 +541,157 @@ impl Interpret for WtRelay {
     }
 }
 
+// ── Client-side relay handle ──────────────────────────────────────────────────────────
+
+/// Client-facing handle to the relay extension's live engine: open local tunnels and register
+/// local services. This is the relay extension's *own* surface — the generic
+/// [`Provider`](crate::provider::Provider) merely hands one out (`Provider::relay`); it does
+/// not implement relaying. Cloneable; every clone drives the same shared engine and pure
+/// [`Relay`] state.
+#[cfg(feature = "node")]
+#[derive(Clone)]
+pub struct RelayHandle {
+    engine: Arc<crate::extension::transport::engine::TransportSessions>,
+    core: Core,
+}
+
+#[cfg(feature = "node")]
+impl RelayHandle {
+    /// Bind the handle over a shared engine and capability core.
+    pub fn new(
+        engine: Arc<crate::extension::transport::engine::TransportSessions>,
+        core: Core,
+    ) -> Self {
+        Self { engine, core }
+    }
+
+    /// Open a local **TCP** tunnel: bind `local_addr` and relay each accepted connection to
+    /// `peer`'s `service` (client side, forward proxy).
+    pub async fn open_tcp_tunnel(
+        &self,
+        local_addr: std::net::SocketAddr,
+        peer: Did,
+        service: String,
+    ) -> crate::error::Result<()> {
+        self.open_tunnel(local_addr, peer, service, TCP, TransportKind::Tcp)
+            .await
+    }
+
+    /// Open a local **UDP** tunnel: bind `local_addr` and relay each datagram flow to `peer`'s
+    /// `service` (client side, forward proxy).
+    pub async fn open_udp_tunnel(
+        &self,
+        local_addr: std::net::SocketAddr,
+        peer: Did,
+        service: String,
+    ) -> crate::error::Result<()> {
+        self.open_tunnel(local_addr, peer, service, UDP, TransportKind::Udp)
+            .await
+    }
+
+    async fn open_tunnel(
+        &self,
+        local_addr: std::net::SocketAddr,
+        peer: Did,
+        service: String,
+        namespace: &str,
+        kind: TransportKind,
+    ) -> crate::error::Result<()> {
+        // Bind a local listener on the relay engine. Each accepted connection is reported back
+        // through the pure relay (`Accepted`), so `RelayState.sessions` stays the sole authority.
+        self.engine
+            .clone()
+            .listen(
+                self.core.clone(),
+                local_addr,
+                peer,
+                service,
+                namespace.to_string(),
+                kind,
+            )
+            .await;
+        Ok(())
+    }
+
+    /// Register (at runtime) a local service the **TCP** relay may dial (`name` → `addr`).
+    pub async fn register_tcp_service(
+        &self,
+        name: String,
+        addr: std::net::SocketAddr,
+    ) -> crate::error::Result<()> {
+        self.register_service(TCP, name, addr).await
+    }
+
+    /// Register (at runtime) a local service the **UDP** relay may dial (`name` → `addr`).
+    pub async fn register_udp_service(
+        &self,
+        name: String,
+        addr: std::net::SocketAddr,
+    ) -> crate::error::Result<()> {
+        self.register_service(UDP, name, addr).await
+    }
+
+    /// Map a service `name` → `addr` in a relay registry by re-injecting a local
+    /// `RegisterService` command (provenance = self) into the relay's pure `step`.
+    async fn register_service(
+        &self,
+        namespace: &str,
+        name: String,
+        addr: std::net::SocketAddr,
+    ) -> crate::error::Result<()> {
+        let command = RelayCommand::RegisterService { name, target: addr };
+        let payload = bincode::serialize(&command).map_err(|_| crate::error::Error::EncodeError)?;
+        self.core.inject(namespace, Bytes::from(payload)).await
+    }
+}
+
+/// Client-facing handle to the browser relay extension's live WebTransport engine: register
+/// local WebTransport-backed services. The browser relay is server-side only (no local
+/// listener), so it has no tunnel-open surface. Cloneable. See the native [`RelayHandle`].
+#[cfg(feature = "browser")]
+#[derive(Clone)]
+pub struct RelayHandle {
+    core: Core,
+}
+
+#[cfg(feature = "browser")]
+impl RelayHandle {
+    /// Bind the handle over the capability core. (The browser relay reaches its WebTransport
+    /// engine only through registered effects, so the handle needs no direct engine reference.)
+    pub fn new(core: Core) -> Self {
+        Self { core }
+    }
+
+    /// Register a WebTransport-backed service for the browser **TCP** relay, mapping
+    /// `name` → WebTransport `url` (under the `tcp` namespace).
+    pub async fn register_wt_service(&self, name: String, url: String) -> crate::error::Result<()> {
+        self.register_wt(TCP, name, url).await
+    }
+
+    /// Register a WebTransport-backed service for the browser **UDP** relay (datagrams),
+    /// mapping `name` → WebTransport `url` (under the `udp` namespace).
+    pub async fn register_wt_udp_service(
+        &self,
+        name: String,
+        url: String,
+    ) -> crate::error::Result<()> {
+        self.register_wt(UDP, name, url).await
+    }
+
+    /// Map a service `name` → WebTransport `url` under `namespace` by re-injecting a local
+    /// `RegisterService` command (provenance = self) into the relay's pure `step`.
+    async fn register_wt(
+        &self,
+        namespace: &str,
+        name: String,
+        url: String,
+    ) -> crate::error::Result<()> {
+        let command = RelayCommand::RegisterService { name, target: url };
+        let payload = bincode::serialize(&command).map_err(|_| crate::error::Error::EncodeError)?;
+        self.core.inject(namespace, Bytes::from(payload)).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;

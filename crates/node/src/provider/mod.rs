@@ -37,12 +37,10 @@ pub struct Provider {
     processor: Arc<Processor>,
     handler: InternalRpcHandler,
     extensions: crate::extension::ext::Extensions,
-    /// Live relay endpoints, shared into each interpreter: OS sockets natively,
-    /// WebTransport sessions in the browser.
-    #[cfg(feature = "node")]
-    transport: Arc<crate::extension::transport::engine::TransportSessions>,
-    #[cfg(feature = "browser")]
-    transport: Arc<crate::extension::transport::wt::WtSessions>,
+    /// Client-side handle to the relay extension (open tunnels / register local services).
+    /// The relay owns its own engine; the provider only holds this handle to hand out.
+    #[cfg(any(feature = "node", feature = "browser"))]
+    relay: crate::extension::protocols::relay::RelayHandle,
 }
 
 /// Async signer, without Send required
@@ -66,20 +64,16 @@ pub enum Signer {
 impl Provider {
     /// Create provider from processor directly
     pub fn from_processor(processor: Arc<Processor>) -> Self {
-        #[cfg(feature = "node")]
-        let transport = Arc::new(crate::extension::transport::engine::TransportSessions::new());
-        #[cfg(feature = "browser")]
-        let transport = Arc::new(crate::extension::transport::wt::WtSessions::new());
         let extensions = crate::extension::ext::Extensions::new(processor.clone());
         #[cfg(any(feature = "node", feature = "browser"))]
-        crate::extension::protocols::register_builtins(&extensions, transport.clone())
+        let relay = crate::extension::protocols::register_builtins(&extensions)
             .expect("register builtins on a fresh registry");
         Self {
             processor,
             handler: InternalRpcHandler,
             extensions,
             #[cfg(any(feature = "node", feature = "browser"))]
-            transport,
+            relay,
         }
     }
 
@@ -109,140 +103,11 @@ impl Provider {
         self.extensions.register(protocol, interpret)
     }
 
-    /// Register (at runtime) a local service the TCP relay may dial.
-    #[cfg(feature = "node")]
-    pub async fn register_tcp_service(
-        &self,
-        name: String,
-        addr: std::net::SocketAddr,
-    ) -> Result<()> {
-        self.register_relay_service(crate::extension::protocols::relay::TCP, name, addr)
-            .await
-    }
-
-    /// Register (at runtime) a local service the UDP relay may dial.
-    #[cfg(feature = "node")]
-    pub async fn register_udp_service(
-        &self,
-        name: String,
-        addr: std::net::SocketAddr,
-    ) -> Result<()> {
-        self.register_relay_service(crate::extension::protocols::relay::UDP, name, addr)
-            .await
-    }
-
-    /// Register (at runtime) a WebTransport-backed service for the browser relay,
-    /// mapping `name` → WebTransport `url` (under the `tcp` namespace).
-    #[cfg(feature = "browser")]
-    pub async fn register_wt_service(&self, name: String, url: String) -> Result<()> {
-        self.register_wt(crate::extension::protocols::relay::TCP, name, url)
-            .await
-    }
-
-    /// Register (at runtime) a WebTransport-backed service for the browser **UDP** relay
-    /// (datagrams), mapping `name` → WebTransport `url` (under the `udp` namespace).
-    #[cfg(feature = "browser")]
-    pub async fn register_wt_udp_service(&self, name: String, url: String) -> Result<()> {
-        self.register_wt(crate::extension::protocols::relay::UDP, name, url)
-            .await
-    }
-
-    /// Map a service `name` → WebTransport `url` in a browser relay's registry, under the
-    /// given `namespace` (`tcp` or `udp`), by re-injecting a local command (provenance =
-    /// self) into the relay protocol's pure `step`.
-    #[cfg(feature = "browser")]
-    async fn register_wt(&self, namespace: &str, name: String, url: String) -> Result<()> {
-        let command =
-            crate::extension::protocols::relay::RelayCommand::RegisterService { name, target: url };
-        let payload = bincode::serialize(&command).map_err(|_| Error::EncodeError)?;
-        let envelope = crate::extension::ext::Envelope::new(namespace, bytes::Bytes::from(payload));
-        self.extensions
-            .dispatch(self.processor.did(), envelope)
-            .await
-    }
-
-    /// Map a service `name` → `addr` in a relay's registry, by re-injecting a local
-    /// command into the relay protocol's pure `step` (provenance = self).
-    #[cfg(feature = "node")]
-    async fn register_relay_service(
-        &self,
-        namespace: &str,
-        name: String,
-        addr: std::net::SocketAddr,
-    ) -> Result<()> {
-        let command = crate::extension::protocols::relay::RelayCommand::RegisterService {
-            name,
-            target: addr,
-        };
-        let payload = bincode::serialize(&command).map_err(|_| Error::EncodeError)?;
-        let envelope = crate::extension::ext::Envelope::new(namespace, bytes::Bytes::from(payload));
-        self.extensions
-            .dispatch(self.processor.did(), envelope)
-            .await
-    }
-
-    /// Open a local TCP tunnel: bind `local_addr` and relay each accepted connection to
-    /// `peer`'s `service` (client side, forward proxy).
-    #[cfg(feature = "node")]
-    pub async fn open_tcp_tunnel(
-        &self,
-        local_addr: std::net::SocketAddr,
-        peer: rings_core::dht::Did,
-        service: String,
-    ) -> Result<()> {
-        self.open_tunnel(
-            local_addr,
-            peer,
-            service,
-            crate::extension::protocols::relay::TCP,
-            crate::extension::transport::TransportKind::Tcp,
-        )
-        .await
-    }
-
-    /// Open a local UDP tunnel: bind `local_addr` and relay each datagram flow to
-    /// `peer`'s `service` (client side, forward proxy).
-    #[cfg(feature = "node")]
-    pub async fn open_udp_tunnel(
-        &self,
-        local_addr: std::net::SocketAddr,
-        peer: rings_core::dht::Did,
-        service: String,
-    ) -> Result<()> {
-        self.open_tunnel(
-            local_addr,
-            peer,
-            service,
-            crate::extension::protocols::relay::UDP,
-            crate::extension::transport::TransportKind::Udp,
-        )
-        .await
-    }
-
-    #[cfg(feature = "node")]
-    async fn open_tunnel(
-        &self,
-        local_addr: std::net::SocketAddr,
-        peer: rings_core::dht::Did,
-        service: String,
-        namespace: &str,
-        kind: crate::extension::transport::TransportKind,
-    ) -> Result<()> {
-        // Bind a local listener on the relay engine (the relay extension's resource). Each
-        // accepted connection is fed back through the pure relay (`Track`), so
-        // `RelayState.sessions` is the full authority over live sessions.
-        self.transport
-            .clone()
-            .listen(
-                self.core(),
-                local_addr,
-                peer,
-                service,
-                namespace.to_string(),
-                kind,
-            )
-            .await;
-        Ok(())
+    /// The relay extension's client handle — open tunnels and register local services. The
+    /// relay owns its engine and its own surface; the provider only hands the handle out.
+    #[cfg(any(feature = "node", feature = "browser"))]
+    pub fn relay(&self) -> crate::extension::protocols::relay::RelayHandle {
+        self.relay.clone()
     }
 
     /// Send a namespaced payload to a peer. This is the uniform upper-layer send — a core
@@ -272,20 +137,16 @@ impl Provider {
 
         let processor = Arc::new(processor_builder.build()?);
 
-        #[cfg(feature = "node")]
-        let transport = Arc::new(crate::extension::transport::engine::TransportSessions::new());
-        #[cfg(feature = "browser")]
-        let transport = Arc::new(crate::extension::transport::wt::WtSessions::new());
         let extensions = crate::extension::ext::Extensions::new(processor.clone());
         #[cfg(any(feature = "node", feature = "browser"))]
-        crate::extension::protocols::register_builtins(&extensions, transport.clone())?;
+        let relay = crate::extension::protocols::register_builtins(&extensions)?;
 
         Ok(Provider {
             processor,
             handler: InternalRpcHandler,
             extensions,
             #[cfg(any(feature = "node", feature = "browser"))]
-            transport,
+            relay,
         })
     }
 
