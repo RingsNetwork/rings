@@ -27,7 +27,7 @@ use wasm_bindgen::prelude::*;
 #[wasm_bindgen]
 pub fn register_echo(provider: &Provider) -> Result<(), JsError> {
     provider
-        .register_protocol(Echo::default(), EchoShell)
+        .register_protocol(Echo, EchoShell)
         .map_err(|e| JsError::new(&e.to_string()))
 }
 

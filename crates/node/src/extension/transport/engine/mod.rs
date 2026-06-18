@@ -453,6 +453,8 @@ async fn inject_accepted(core: &Core, token: u64, peer: Did, namespace: &str, se
 }
 
 /// Feed a teardown back to the pure relay so it removes the session from `State.sessions`.
+/// The engine has already dropped the live handle, so a failed inject means the reducer may
+/// still list a now-dead session — surface it rather than silently diverging.
 async fn inject_untrack(core: &Core, key: &SessionKey) {
     let command = RelayCommand::<SocketAddr>::Untrack {
         peer: key.peer,
@@ -460,8 +462,14 @@ async fn inject_untrack(core: &Core, key: &SessionKey) {
         initiator: key.initiator,
     };
     if let Ok(bytes) = bincode::serialize(&command) {
-        let _ = core
+        if let Err(e) = core
             .inject(key.namespace.as_str(), Bytes::from(bytes))
-            .await;
+            .await
+        {
+            tracing::warn!(
+                "relay Untrack inject failed for {key:?}: {e:?}; pure state may still list \
+                 this (now dropped) session"
+            );
+        }
     }
 }

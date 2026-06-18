@@ -18,7 +18,7 @@ use wasm_bindgen_test::wasm_bindgen_test;
 #[wasm_bindgen_test]
 fn echo_replies_and_counts() {
     let did = Did::from(SecretKey::random().address());
-    let echo = Echo::default();
+    let echo = Echo;
     let state = echo.init();
 
     let event = echo

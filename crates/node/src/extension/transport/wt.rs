@@ -275,8 +275,14 @@ async fn inject_untrack(core: &Core, key: &SessionKey) {
         initiator: key.initiator,
     };
     if let Ok(bytes) = bincode::serialize(&command) {
-        let _ = core
+        if let Err(e) = core
             .inject(key.namespace.as_str(), Bytes::from(bytes))
-            .await;
+            .await
+        {
+            tracing::warn!(
+                "relay Untrack inject failed for {key:?}: {e:?}; pure state may still list \
+                 this (now dropped) session"
+            );
+        }
     }
 }

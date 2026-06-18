@@ -41,12 +41,10 @@ async fn duplicate_namespace_registration_is_rejected() {
 
     let provider = Provider::from_processor(Arc::new(prepare_processor().await));
     provider
-        .register_protocol(Echo::default(), EchoShell)
+        .register_protocol(Echo, EchoShell)
         .expect("first registration on a fresh namespace succeeds");
     assert!(
-        provider
-            .register_protocol(Echo::default(), EchoShell)
-            .is_err(),
+        provider.register_protocol(Echo, EchoShell).is_err(),
         "a second registration on the same namespace must error, not silently overwrite"
     );
 }
