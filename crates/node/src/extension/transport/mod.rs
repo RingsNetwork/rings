@@ -70,34 +70,66 @@ use serde::Serialize;
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct SessionId(pub u64);
 
+/// Which end **opened** a relay session, from the perspective of the node holding the key.
+///
+/// Necessary because two nodes that simultaneously open a tunnel to each other both mint
+/// `SessionId(0)`: without an initiator, "the session I opened to peer B" and "the session B
+/// opened to me" would collide on `(peer=B, namespace, session=0)`, and a wire `Data(0)`
+/// would be ambiguous. The initiator splits the id space into two halves per `(peer,
+/// namespace)`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum Initiator {
+    /// This node opened the session (a client tunnel).
+    Local,
+    /// The peer opened the session (this node is the server).
+    Remote,
+}
+
+impl Initiator {
+    /// The other end's view of the same session.
+    pub fn flip(self) -> Self {
+        match self {
+            Initiator::Local => Initiator::Remote,
+            Initiator::Remote => Initiator::Local,
+        }
+    }
+}
+
 /// A relay session's full identity — the unit used to key live sessions and to address
 /// transport effects.
 ///
 /// A bare [`SessionId`] is **not** a valid address: the id on the wire is assigned by the
-/// opener, so two different peers (or the same peer under two namespaces) can both pick
-/// `SessionId(0)`. The key therefore scopes a session by `(peer, namespace, session)`,
-/// where `peer` is the **authenticated** other end (`event.from`, the verified message
-/// signer). Because a peer cannot forge `event.from`, it can only ever address sessions
-/// whose `peer` is itself — so a frame can never write to or close another peer's session
-/// (the engine's keyed lookup simply misses for a mismatched peer). This is the relay's
-/// capability/owner-rejection model.
+/// opener, so two ends can both pick `SessionId(0)`. The key scopes a session by `(peer,
+/// namespace, session, initiator)`, where `peer` is the **authenticated** other end
+/// (`event.from`, the verified signer) and `initiator` records which end opened it. Because a
+/// peer cannot forge `event.from`, it can only ever address sessions whose `peer` is itself
+/// (owner rejection); and `initiator` keeps a peer's session distinct from one of ours that
+/// happened to get the same id (bidirectional-open safety).
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct SessionKey {
     /// The authenticated remote end of the session (`event.from` for inbound frames).
     pub peer: Did,
     /// The transport namespace the session lives under (e.g. `tcp`, `udp`).
     pub namespace: String,
-    /// The opener-assigned session id, unique only within `(peer, namespace)`.
+    /// The opener-assigned session id, unique only within `(peer, namespace, initiator)`.
     pub session: SessionId,
+    /// Which end opened the session (disambiguates colliding ids on simultaneous open).
+    pub initiator: Initiator,
 }
 
 impl SessionKey {
     /// Build a session key from its parts.
-    pub fn new(peer: Did, namespace: impl Into<String>, session: SessionId) -> Self {
+    pub fn new(
+        peer: Did,
+        namespace: impl Into<String>,
+        session: SessionId,
+        initiator: Initiator,
+    ) -> Self {
         Self {
             peer,
             namespace: namespace.into(),
             session,
+            initiator,
         }
     }
 }
@@ -124,11 +156,16 @@ pub enum TransportKind {
 /// ```text
 ///   Open(session, service) → Data(session, bytes)* → Close(session)
 /// ```
+///
+/// `Open` is always sent by the session's opener. `Data`/`Shutdown`/`Close` flow in both
+/// directions over the *same* opener-assigned id, so they carry `from_opener` — whether the
+/// **sender** of this frame opened the session. The receiver flips it to recover its own
+/// [`Initiator`], so a peer's session never collides with one of ours sharing the same id.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Frame {
-    /// Open a session/flow to a named local service.
+    /// Open a session/flow to a named local service (always sent by the opener).
     Open {
-        /// Session identifier (assigned by the dialing/forwarding side).
+        /// Session identifier (assigned by the opener).
         session: SessionId,
         /// Local service name to connect to.
         service: String,
@@ -137,6 +174,8 @@ pub enum Frame {
     Data {
         /// Session the bytes belong to.
         session: SessionId,
+        /// Whether the sender of this frame opened the session.
+        from_opener: bool,
         /// Payload bytes.
         bytes: Bytes,
     },
@@ -146,10 +185,14 @@ pub enum Frame {
     Shutdown {
         /// Session being half-closed.
         session: SessionId,
+        /// Whether the sender of this frame opened the session.
+        from_opener: bool,
     },
     /// Close a session/flow (full teardown, both directions).
     Close {
         /// Session to close.
         session: SessionId,
+        /// Whether the sender of this frame opened the session.
+        from_opener: bool,
     },
 }

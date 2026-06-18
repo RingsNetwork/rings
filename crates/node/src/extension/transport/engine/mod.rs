@@ -65,6 +65,7 @@ use crate::error::Result;
 use crate::extension::ext::Core;
 use crate::extension::protocols::relay::RelayCommand;
 use crate::extension::transport::Frame;
+use crate::extension::transport::Initiator;
 use crate::extension::transport::SessionKey;
 use crate::extension::transport::TransportKind;
 
@@ -85,10 +86,14 @@ enum Outbound {
 
 /// A live relayed session: the peer→local channel plus a cancel token. `src` is the local
 /// UDP client address (for cleaning up the `udp_flows` cache on close); `None` for TCP.
+/// `generation` is a per-insert stamp: a relay task only tears down the handle whose
+/// generation matches its own, so a slow old task can never delete a newer reuse of the same
+/// key (ABA safety).
 struct SessionHandle {
     outbound: mpsc::Sender<Outbound>,
     cancel: CancellationToken,
     src: Option<SocketAddr>,
+    generation: u64,
 }
 
 /// A locally-accepted connection/flow that has been reported to the pure relay (`Accepted`)
@@ -120,6 +125,7 @@ enum Pending {
 pub struct TransportSessions {
     map: Mutex<HashMap<SessionKey, SessionHandle>>,
     tokens: AtomicU64,
+    generations: AtomicU64,
     pending: Mutex<HashMap<u64, Pending>>,
     udp_flows: Mutex<HashMap<SocketAddr, SessionKey>>,
 }
@@ -202,14 +208,31 @@ impl TransportSessions {
         }
     }
 
-    /// Fully close and drop a session, then feed the teardown back to the pure protocol as
-    /// an `Untrack` (so `State.sessions` is the full authority). Injects exactly once — only
-    /// when a live handle was actually removed.
+    /// Fully close and drop the **current** session for `key`, then feed the teardown back to
+    /// the pure protocol as an `Untrack`. Used for a peer `Close` (the reducer already removed
+    /// the key, so the current handle is the one to drop). Injects exactly once.
     pub async fn close(&self, core: &Core, key: &SessionKey) {
         let removed = self.map.lock().ok().and_then(|mut map| map.remove(key));
+        self.finish_close(core, key, removed).await;
+    }
+
+    /// Close a session **only if** its handle still has `generation` — so a slow old relay
+    /// task tearing down can never drop a newer reuse of the same key (ABA safety).
+    async fn close_if_current(&self, core: &Core, key: &SessionKey, generation: u64) {
+        let removed = self.map.lock().ok().and_then(|mut map| {
+            let current = map.get(key).map(|h| h.generation);
+            (current == Some(generation))
+                .then(|| map.remove(key))
+                .flatten()
+        });
+        self.finish_close(core, key, removed).await;
+    }
+
+    /// Shared teardown tail: cancel the task, drop the UDP cache entry, and `Untrack` — but
+    /// only if a handle was actually removed (exactly-once).
+    async fn finish_close(&self, core: &Core, key: &SessionKey, removed: Option<SessionHandle>) {
         if let Some(handle) = removed {
             handle.cancel.cancel();
-            // Drop the UDP fast-path cache entry for this session, if any.
             if let Some(src) = handle.src {
                 if let Ok(mut flows) = self.udp_flows.lock() {
                     flows.remove(&src);
@@ -243,18 +266,20 @@ impl TransportSessions {
                 tokio::spawn(async move { tcp::relay_tcp(task, stream).await });
             }
             Pending::Udp { socket, src, first } => {
-                let (outbound_rx, cancel) = self.register(key.clone(), Some(src));
+                let (outbound_rx, cancel, generation) = self.register(key.clone(), Some(src));
                 if let Ok(mut flows) = self.udp_flows.lock() {
                     flows.insert(src, key.clone());
                 }
                 udp::spawn_udp_sendto(socket, src, outbound_rx, cancel);
                 if open(&core, &key, service.as_str()).await.is_err() {
-                    self.close(&core, &key).await;
+                    self.close_if_current(&core, &key, generation).await;
                     return;
                 }
                 // Forward the first datagram that triggered this flow.
+                let from_opener = opened_by_us(&key);
                 let _ = send_frame(&core, key.peer, key.namespace.as_str(), Frame::Data {
                     session: key.session,
+                    from_opener,
                     bytes: first,
                 })
                 .await;
@@ -277,6 +302,15 @@ impl TransportSessions {
         Some(token)
     }
 
+    /// Drop a still-unbound pending accept (its socket/stream), so a dropped/failed
+    /// `Accepted` round-trip — unknown namespace, decode reject, dispatch error — can't leak
+    /// the resource. A no-op once `bind_accepted` has consumed the token.
+    fn evict_pending(&self, token: u64) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.remove(&token);
+        }
+    }
+
     // ── shared ───────────────────────────────────────────────────────────────────
 
     /// Create a session's channel + cancel token and record its handle, returning the
@@ -286,15 +320,17 @@ impl TransportSessions {
         &self,
         key: SessionKey,
         src: Option<SocketAddr>,
-    ) -> (mpsc::Receiver<Outbound>, CancellationToken) {
+    ) -> (mpsc::Receiver<Outbound>, CancellationToken, u64) {
         let (outbound, outbound_rx) = mpsc::channel::<Outbound>(1024);
         let cancel = CancellationToken::new();
+        let generation = self.generations.fetch_add(1, Ordering::Relaxed);
         self.insert(key, SessionHandle {
             outbound,
             cancel: cancel.clone(),
             src,
+            generation,
         });
-        (outbound_rx, cancel)
+        (outbound_rx, cancel, generation)
     }
 
     fn sender(&self, key: &SessionKey) -> Option<mpsc::Sender<Outbound>> {
@@ -334,34 +370,44 @@ struct RelayTask {
     key: SessionKey,
     outbound_rx: mpsc::Receiver<Outbound>,
     cancel: CancellationToken,
+    generation: u64,
 }
 
 impl RelayTask {
     /// Register a fresh session channel on the engine and capture the routing identity.
     fn register(sessions: Arc<TransportSessions>, core: Core, key: SessionKey) -> Self {
-        let (outbound_rx, cancel) = sessions.register(key.clone(), None);
+        let (outbound_rx, cancel, generation) = sessions.register(key.clone(), None);
         Self {
             sessions,
             core,
             key,
             outbound_rx,
             cancel,
+            generation,
         }
     }
 
     /// Connect failed: drop the pre-registered session (which `Untrack`s it) and tell the peer.
     async fn refuse(self) {
-        self.sessions.close(&self.core, &self.key).await;
+        self.sessions
+            .close_if_current(&self.core, &self.key, self.generation)
+            .await;
         let _ = send_frame(
             &self.core,
             self.key.peer,
             self.key.namespace.as_str(),
             Frame::Close {
                 session: self.key.session,
+                from_opener: opened_by_us(&self.key),
             },
         )
         .await;
     }
+}
+
+/// Whether *this node* opened the session (sets `Frame::from_opener` on outbound frames).
+fn opened_by_us(key: &SessionKey) -> bool {
+    matches!(key.initiator, Initiator::Local)
 }
 
 /// Send `Frame::Open` to the session's peer (client side, on a new local connection/flow).
@@ -397,6 +443,7 @@ async fn inject_untrack(core: &Core, key: &SessionKey) {
     let command = RelayCommand::<SocketAddr>::Untrack {
         peer: key.peer,
         session: key.session,
+        initiator: key.initiator,
     };
     if let Ok(bytes) = bincode::serialize(&command) {
         let _ = core

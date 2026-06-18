@@ -39,6 +39,7 @@ use crate::error::Result;
 use crate::extension::ext::Core;
 use crate::extension::protocols::relay::RelayCommand;
 use crate::extension::transport::Frame;
+use crate::extension::transport::Initiator;
 use crate::extension::transport::SessionKey;
 use crate::extension::transport::TransportKind;
 
@@ -87,6 +88,7 @@ impl WtSessions {
                 inject_untrack(&core, &key).await;
                 let _ = send_frame(&core, key.peer, key.namespace.as_str(), Frame::Close {
                     session: key.session,
+                    from_opener: matches!(key.initiator, Initiator::Local),
                 })
                 .await;
             }
@@ -150,6 +152,7 @@ impl WtSessions {
             let peer = key.peer;
             let namespace = key.namespace.clone();
             let session = key.session;
+            let from_opener = matches!(key.initiator, Initiator::Local);
             let reader: ReadableStreamDefaultReader = match readable.get_reader().dyn_into() {
                 Ok(reader) => reader,
                 Err(_) => return,
@@ -173,6 +176,7 @@ impl WtSessions {
                 let bytes = Bytes::from(Uint8Array::new(&value).to_vec());
                 if send_frame(&core, peer, namespace.as_str(), Frame::Data {
                     session,
+                    from_opener,
                     bytes,
                 })
                 .await
@@ -182,7 +186,11 @@ impl WtSessions {
                 }
             }
             sessions.close(&core, &key).await;
-            let _ = send_frame(&core, peer, namespace.as_str(), Frame::Close { session }).await;
+            let _ = send_frame(&core, peer, namespace.as_str(), Frame::Close {
+                session,
+                from_opener,
+            })
+            .await;
         });
     }
 }
@@ -224,6 +232,7 @@ async fn inject_untrack(core: &Core, key: &SessionKey) {
     let command = RelayCommand::<String>::Untrack {
         peer: key.peer,
         session: key.session,
+        initiator: key.initiator,
     };
     if let Ok(bytes) = bincode::serialize(&command) {
         let _ = core

@@ -57,6 +57,7 @@ impl TransportSessions {
                                     key.namespace.as_str(),
                                     Frame::Data {
                                         session: key.session,
+                                        from_opener: super::opened_by_us(&key),
                                         bytes,
                                     },
                                 )
@@ -76,6 +77,8 @@ impl TransportSessions {
                                         service.clone(),
                                     )
                                     .await;
+                                    // Drop the stashed flow if the round-trip didn't bind it.
+                                    self.evict_pending(token);
                                 }
                             }
                         }
@@ -98,10 +101,12 @@ pub(super) async fn relay_udp_connected(task: RelayTask, socket: UdpSocket) {
         key,
         mut outbound_rx,
         cancel,
+        generation,
     } = task;
     let peer = key.peer;
     let session = key.session;
     let namespace = key.namespace.clone();
+    let from_opener = super::opened_by_us(&key);
     let mut buf = vec![0u8; UDP_BUF];
     loop {
         tokio::select! {
@@ -112,6 +117,7 @@ pub(super) async fn relay_udp_connected(task: RelayTask, socket: UdpSocket) {
                     let bytes = Bytes::copy_from_slice(buf.get(..n).unwrap_or_default());
                     if send_frame(&core, peer, namespace.as_str(), Frame::Data {
                         session,
+                        from_opener,
                         bytes,
                     })
                     .await
@@ -130,8 +136,12 @@ pub(super) async fn relay_udp_connected(task: RelayTask, socket: UdpSocket) {
             },
         }
     }
-    sessions.close(&core, &key).await;
-    let _ = send_frame(&core, peer, namespace.as_str(), Frame::Close { session }).await;
+    sessions.close_if_current(&core, &key, generation).await;
+    let _ = send_frame(&core, peer, namespace.as_str(), Frame::Close {
+        session,
+        from_opener,
+    })
+    .await;
 }
 
 /// Client-side UDP flow: route peer bytes back to the originating local client `dest`.

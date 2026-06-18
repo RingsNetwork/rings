@@ -51,6 +51,9 @@ impl TransportSessions {
                         };
                         inject_accepted(&core, token, peer, namespace.as_str(), service.clone())
                             .await;
+                        // If the round-trip didn't bind it (unknown namespace / reject / error),
+                        // drop the stashed stream so it can't leak.
+                        self.evict_pending(token);
                     }
                     Err(e) => {
                         tracing::error!("transport accept on {local_addr} failed: {e:?}");
@@ -70,10 +73,12 @@ pub(super) async fn relay_tcp(task: RelayTask, stream: TcpStream) {
         key,
         mut outbound_rx,
         cancel,
+        generation,
     } = task;
     let peer = key.peer;
     let session = key.session;
     let namespace = key.namespace.clone();
+    let from_opener = super::opened_by_us(&key);
     let (mut local_read, mut local_write) = stream.into_split();
 
     // local → peer; clean EOF sends FIN, errors abort the whole session.
@@ -88,6 +93,7 @@ pub(super) async fn relay_tcp(task: RelayTask, stream: TcpStream) {
                     Ok(0) => {
                         let _ = send_frame(&core, peer, namespace.as_str(), Frame::Shutdown {
                             session,
+                            from_opener,
                         })
                         .await;
                         break;
@@ -96,6 +102,7 @@ pub(super) async fn relay_tcp(task: RelayTask, stream: TcpStream) {
                         let bytes = Bytes::copy_from_slice(buf.get(..n).unwrap_or_default());
                         if send_frame(&core, peer, namespace.as_str(), Frame::Data {
                             session,
+                            from_opener,
                             bytes,
                         })
                         .await
@@ -140,7 +147,12 @@ pub(super) async fn relay_tcp(task: RelayTask, stream: TcpStream) {
         _ = async { tokio::join!(local_to_peer, peer_to_local); } => {}
     }
 
-    // Teardown: drop the session (which `Untrack`s it from the pure state) and tell the peer.
-    sessions.close(&core, &key).await;
-    let _ = send_frame(&core, peer, namespace.as_str(), Frame::Close { session }).await;
+    // Teardown: drop *our* session instance (generation-checked, so we never delete a newer
+    // reuse of the key) — which `Untrack`s it from the pure state — and tell the peer.
+    sessions.close_if_current(&core, &key, generation).await;
+    let _ = send_frame(&core, peer, namespace.as_str(), Frame::Close {
+        session,
+        from_opener,
+    })
+    .await;
 }
