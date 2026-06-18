@@ -217,29 +217,39 @@ impl TransportSessions {
     }
 
     /// Close a session **only if** its handle still has `generation` — so a slow old relay
-    /// task tearing down can never drop a newer reuse of the same key (ABA safety).
-    async fn close_if_current(&self, core: &Core, key: &SessionKey, generation: u64) {
+    /// task tearing down can never drop a newer reuse of the same key (ABA safety). Returns
+    /// whether it was the current owner (and thus removed it); a stale task gets `false` and
+    /// must therefore *also* not send the peer a `Close` (which would tear down the peer's
+    /// reused session).
+    async fn close_if_current(&self, core: &Core, key: &SessionKey, generation: u64) -> bool {
         let removed = self.map.lock().ok().and_then(|mut map| {
             let current = map.get(key).map(|h| h.generation);
             (current == Some(generation))
                 .then(|| map.remove(key))
                 .flatten()
         });
-        self.finish_close(core, key, removed).await;
+        self.finish_close(core, key, removed).await
     }
 
     /// Shared teardown tail: cancel the task, drop the UDP cache entry, and `Untrack` — but
-    /// only if a handle was actually removed (exactly-once).
-    async fn finish_close(&self, core: &Core, key: &SessionKey, removed: Option<SessionHandle>) {
-        if let Some(handle) = removed {
-            handle.cancel.cancel();
-            if let Some(src) = handle.src {
-                if let Ok(mut flows) = self.udp_flows.lock() {
-                    flows.remove(&src);
-                }
+    /// only if a handle was actually removed (exactly-once). Returns whether it removed one.
+    async fn finish_close(
+        &self,
+        core: &Core,
+        key: &SessionKey,
+        removed: Option<SessionHandle>,
+    ) -> bool {
+        let Some(handle) = removed else {
+            return false;
+        };
+        handle.cancel.cancel();
+        if let Some(src) = handle.src {
+            if let Ok(mut flows) = self.udp_flows.lock() {
+                flows.remove(&src);
             }
-            inject_untrack(core, key).await;
         }
+        inject_untrack(core, key).await;
+        true
     }
 
     /// Bind a pending accepted connection/flow (engine-local `token`) to the session `key`
@@ -387,21 +397,25 @@ impl RelayTask {
         }
     }
 
-    /// Connect failed: drop the pre-registered session (which `Untrack`s it) and tell the peer.
+    /// Connect failed: drop the pre-registered session (which `Untrack`s it) and tell the peer
+    /// — but only if we were still the current owner (a stale task stays silent).
     async fn refuse(self) {
-        self.sessions
+        if self
+            .sessions
             .close_if_current(&self.core, &self.key, self.generation)
+            .await
+        {
+            let _ = send_frame(
+                &self.core,
+                self.key.peer,
+                self.key.namespace.as_str(),
+                Frame::Close {
+                    session: self.key.session,
+                    from_opener: opened_by_us(&self.key),
+                },
+            )
             .await;
-        let _ = send_frame(
-            &self.core,
-            self.key.peer,
-            self.key.namespace.as_str(),
-            Frame::Close {
-                session: self.key.session,
-                from_opener: opened_by_us(&self.key),
-            },
-        )
-        .await;
+        }
     }
 }
 

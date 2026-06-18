@@ -17,6 +17,8 @@
 //! checked only — not runtime-tested.** Requires `--cfg=web_sys_unstable_apis`.
 
 use std::collections::HashMap;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -43,22 +45,26 @@ use crate::extension::transport::Initiator;
 use crate::extension::transport::SessionKey;
 use crate::extension::transport::TransportKind;
 
-/// A live WebTransport-backed session.
+/// A live WebTransport-backed session. `generation` mirrors the native engine: a read loop
+/// only tears down the handle whose generation matches its own (ABA safety).
 struct SessionHandle {
     /// Peer→local writer.
     writer: WritableStreamDefaultWriter,
     /// The session's WebTransport (closed on teardown).
     transport: WebTransport,
+    /// Per-insert stamp (ABA-safe teardown).
+    generation: u64,
 }
 
 /// Browser relay engine: WebTransport sessions keyed by [`SessionKey`].
 ///
-/// Like the native engine, sessions are keyed by the full `(peer, namespace, session)`
-/// rather than the bare opener-assigned id, so a frame from a peer can only ever address
-/// its own sessions (owner rejection by keyed-lookup miss).
+/// Like the native engine, sessions are keyed by the full `(peer, namespace, session,
+/// initiator)` (owner rejection + bidirectional-open safety) and handles carry a generation
+/// so a stale read loop never drops — or peer-closes — a newer reuse of the same key.
 #[derive(Default)]
 pub struct WtSessions {
     map: Mutex<HashMap<SessionKey, SessionHandle>>,
+    generations: AtomicU64,
 }
 
 impl WtSessions {
@@ -78,8 +84,13 @@ impl WtSessions {
     ) {
         match open(url.as_str(), kind).await {
             Ok((transport, readable, writer)) => {
-                self.insert(key.clone(), SessionHandle { writer, transport });
-                self.spawn_read_loop(core, key, readable);
+                let generation = self.generations.fetch_add(1, Ordering::Relaxed);
+                self.insert(key.clone(), SessionHandle {
+                    writer,
+                    transport,
+                    generation,
+                });
+                self.spawn_read_loop(core, key, readable, generation);
             }
             Err(e) => {
                 tracing::error!("WebTransport connect to {url} failed: {e:?}");
@@ -112,19 +123,39 @@ impl WtSessions {
         }
     }
 
-    /// Close and drop a session (closes the WebTransport), then feed the teardown back to
-    /// the pure relay as an `Untrack`. Injects exactly once — only on actual removal.
+    /// Close and drop the **current** session for `key` (peer `Close` path: the reducer
+    /// already removed it). Injects `Untrack` exactly once — only on actual removal.
     pub async fn close(&self, core: &Core, key: &SessionKey) {
-        let removed = self
-            .map
-            .lock()
-            .ok()
-            .and_then(|mut map| map.remove(key))
-            .map(|handle| handle.transport.close())
-            .is_some();
-        if removed {
-            inject_untrack(core, key).await;
-        }
+        let removed = self.map.lock().ok().and_then(|mut map| map.remove(key));
+        self.finish_close(core, key, removed).await;
+    }
+
+    /// Close a session **only if** its handle still has `generation` (ABA safety). Returns
+    /// whether it removed it; a stale read loop gets `false` and must not peer-`Close` either.
+    async fn close_if_current(&self, core: &Core, key: &SessionKey, generation: u64) -> bool {
+        let removed = self.map.lock().ok().and_then(|mut map| {
+            let current = map.get(key).map(|h| h.generation);
+            (current == Some(generation))
+                .then(|| map.remove(key))
+                .flatten()
+        });
+        self.finish_close(core, key, removed).await
+    }
+
+    /// Shared teardown tail: close the WebTransport and `Untrack` — only if a handle was
+    /// removed. Returns whether it removed one.
+    async fn finish_close(
+        &self,
+        core: &Core,
+        key: &SessionKey,
+        removed: Option<SessionHandle>,
+    ) -> bool {
+        let Some(handle) = removed else {
+            return false;
+        };
+        handle.transport.close();
+        inject_untrack(core, key).await;
+        true
     }
 
     fn writer(&self, key: &SessionKey) -> Option<WritableStreamDefaultWriter> {
@@ -146,7 +177,13 @@ impl WtSessions {
     }
 
     /// Spawn the local→peer read loop for `readable`.
-    fn spawn_read_loop(self: &Arc<Self>, core: Core, key: SessionKey, readable: ReadableStream) {
+    fn spawn_read_loop(
+        self: &Arc<Self>,
+        core: Core,
+        key: SessionKey,
+        readable: ReadableStream,
+        generation: u64,
+    ) {
         let sessions = self.clone();
         spawn_local(async move {
             let peer = key.peer;
@@ -185,12 +222,15 @@ impl WtSessions {
                     break;
                 }
             }
-            sessions.close(&core, &key).await;
-            let _ = send_frame(&core, peer, namespace.as_str(), Frame::Close {
-                session,
-                from_opener,
-            })
-            .await;
+            // Generation-checked teardown: only Close the peer if we were still the current
+            // owner, so a stale read loop never tears down a reopened session.
+            if sessions.close_if_current(&core, &key, generation).await {
+                let _ = send_frame(&core, peer, namespace.as_str(), Frame::Close {
+                    session,
+                    from_opener,
+                })
+                .await;
+            }
         });
     }
 }

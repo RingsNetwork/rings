@@ -148,11 +148,13 @@ pub(super) async fn relay_tcp(task: RelayTask, stream: TcpStream) {
     }
 
     // Teardown: drop *our* session instance (generation-checked, so we never delete a newer
-    // reuse of the key) — which `Untrack`s it from the pure state — and tell the peer.
-    sessions.close_if_current(&core, &key, generation).await;
-    let _ = send_frame(&core, peer, namespace.as_str(), Frame::Close {
-        session,
-        from_opener,
-    })
-    .await;
+    // reuse of the key) — which `Untrack`s it from the pure state. Only tell the peer if we
+    // were still the current owner; a stale task must not Close the peer's reused session.
+    if sessions.close_if_current(&core, &key, generation).await {
+        let _ = send_frame(&core, peer, namespace.as_str(), Frame::Close {
+            session,
+            from_opener,
+        })
+        .await;
+    }
 }

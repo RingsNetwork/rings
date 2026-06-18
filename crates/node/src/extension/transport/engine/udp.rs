@@ -136,12 +136,14 @@ pub(super) async fn relay_udp_connected(task: RelayTask, socket: UdpSocket) {
             },
         }
     }
-    sessions.close_if_current(&core, &key, generation).await;
-    let _ = send_frame(&core, peer, namespace.as_str(), Frame::Close {
-        session,
-        from_opener,
-    })
-    .await;
+    // Only tell the peer if we were still the current owner (stale task stays silent).
+    if sessions.close_if_current(&core, &key, generation).await {
+        let _ = send_frame(&core, peer, namespace.as_str(), Frame::Close {
+            session,
+            from_opener,
+        })
+        .await;
+    }
 }
 
 /// Client-side UDP flow: route peer bytes back to the originating local client `dest`.

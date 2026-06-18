@@ -960,10 +960,11 @@ mod tests {
         }
     }
 
-    /// A faithful in-test model of the native engine's resource table: `key → generation`,
+    /// A faithful in-test model of a relay engine's resource table: `key → generation`,
     /// mirroring `register` (insert a fresh generation), `close` (drop the current handle) and
-    /// `close_if_current` (drop only if the generation matches). Lets the lifecycle tests
-    /// model the engine map + generation, not just the pure `HashSet`.
+    /// `close_if_current` (drop only if the generation matches, returning whether it did).
+    /// This logic is identical in the native [`TransportSessions`] and browser `WtSessions`
+    /// engines, so the model covers both — only the socket vs. WebTransport plumbing differs.
     struct EngineModel {
         map: HashMap<SessionKey, u64>,
         next_gen: u64,
@@ -985,9 +986,14 @@ mod tests {
         fn close(&mut self, key: &SessionKey) {
             self.map.remove(key);
         }
-        fn close_if_current(&mut self, key: &SessionKey, gen: u64) {
+        /// Returns whether it was the current owner (and removed it). A `false` here means the
+        /// caller is a stale task: it must send the peer **no** `Close` either.
+        fn close_if_current(&mut self, key: &SessionKey, gen: u64) -> bool {
             if self.map.get(key) == Some(&gen) {
                 self.map.remove(key);
+                true
+            } else {
+                false
             }
         }
     }
@@ -1039,8 +1045,13 @@ mod tests {
         let (_, gen_new) = apply_effects(&mut eng, &reopened.effects).expect("registered");
         assert_ne!(gen_old, gen_new);
 
-        // The slow OLD task finally tears down with its stale generation: a no-op.
-        eng.close_if_current(&key, gen_old);
+        // The slow OLD task finally tears down with its stale generation: it must neither
+        // remove the new handle nor (since this returns false) send the peer a `Close`.
+        let removed = eng.close_if_current(&key, gen_old);
+        assert!(
+            !removed,
+            "stale task must not remove — and so must send no peer Close"
+        );
         assert_eq!(
             eng.map.get(&key),
             Some(&gen_new),
@@ -1090,14 +1101,15 @@ mod tests {
                     state = t.state;
                 }
                 _ => {
-                    // A deferred task teardown fires: close_if_current + the resulting Untrack
-                    // feedback into the pure reducer (only if it actually removed a handle).
+                    // A deferred task teardown fires. `close_if_current` returns whether this
+                    // task was still current; ONLY then does it Untrack and (would) send the
+                    // peer a Close. A stale task must do neither — modelled by the `removed`
+                    // gate, so a reopened session is never torn down by an old task.
                     if !tasks.is_empty() {
                         let idx = (r >> 16) as usize % tasks.len();
                         let (tkey, tgen) = tasks.swap_remove(idx);
-                        let present_before = eng.map.get(&tkey) == Some(&tgen);
-                        eng.close_if_current(&tkey, tgen);
-                        if present_before {
+                        let removed = eng.close_if_current(&tkey, tgen);
+                        if removed {
                             let untrack = RelayCommand::Untrack {
                                 peer: tkey.peer,
                                 session: tkey.session,
