@@ -45,15 +45,44 @@ use crate::extension::transport::Initiator;
 use crate::extension::transport::SessionKey;
 use crate::extension::transport::TransportKind;
 
-/// A live WebTransport-backed session. `generation` mirrors the native engine: a read loop
-/// only tears down the handle whose generation matches its own (ABA safety).
-struct SessionHandle {
-    /// Peer→local writer.
-    writer: WritableStreamDefaultWriter,
-    /// The session's WebTransport (closed on teardown).
-    transport: WebTransport,
-    /// Per-insert stamp (ABA-safe teardown).
-    generation: u64,
+/// A peer→local op that arrived while the WebTransport was still opening (no writer yet), held
+/// until the handshake completes — the browser mirror of the native engine's buffered channel.
+enum Outbound {
+    /// Bytes to write to the local stream.
+    Data(Bytes),
+    /// The peer half-closed (FIN): close the send side.
+    Shutdown,
+}
+
+/// A WebTransport-backed session. It is born `Opening`: the slot exists *before* the `open()`
+/// handshake resolves — the browser counterpart of native's pre-dial `register` — so peer
+/// frames arriving mid-handshake are not lost. `Write`/`Shutdown` queue onto the slot and a
+/// peer `Close` drops it (aborting the promote); once the handshake succeeds the slot is
+/// [`promote`](WtSessions::promote)d to `Ready`. `generation` mirrors the native engine: a read
+/// loop only tears down the handle whose generation matches its own, and a promote only lands
+/// while its generation is still current (ABA safety).
+enum SessionHandle {
+    /// Connect in flight: peer→local ops queued until the writer exists.
+    Opening {
+        queue: Vec<Outbound>,
+        generation: u64,
+    },
+    /// Handshake done: the live peer→local writer and the session's WebTransport.
+    Ready {
+        writer: WritableStreamDefaultWriter,
+        transport: WebTransport,
+        generation: u64,
+    },
+}
+
+impl SessionHandle {
+    /// The per-insert stamp, regardless of phase (used by generation-checked teardown).
+    fn generation(&self) -> u64 {
+        match self {
+            SessionHandle::Opening { generation, .. } => *generation,
+            SessionHandle::Ready { generation, .. } => *generation,
+        }
+    }
 }
 
 /// Browser relay engine: WebTransport sessions keyed by [`SessionKey`].
@@ -73,8 +102,11 @@ impl WtSessions {
         Self::default()
     }
 
-    /// Open a WebTransport session to `url` for the session identified by `key`.
-    /// On any failure a `Frame::Close` is sent.
+    /// Open a WebTransport session to `url` for the session identified by `key`. The slot is
+    /// registered as `Opening` *before* the handshake, so peer frames arriving during it are
+    /// queued (`Write`/`Shutdown`) or abort it (`Close`). On open failure — or if a peer `Close`
+    /// superseded the slot mid-handshake — the just-opened transport is discarded; a `Frame::Close`
+    /// is sent only when we are still the slot's owner.
     pub async fn connect(
         self: Arc<Self>,
         core: Core,
@@ -82,43 +114,46 @@ impl WtSessions {
         url: String,
         kind: TransportKind,
     ) {
+        let generation = self.open_slot(key.clone());
         match open(url.as_str(), kind).await {
             Ok((transport, readable, writer)) => {
-                let generation = self.generations.fetch_add(1, Ordering::Relaxed);
-                self.insert(key.clone(), SessionHandle {
-                    writer,
-                    transport,
-                    generation,
-                });
-                self.spawn_read_loop(core, key, readable, generation);
+                // Promote to Ready iff still current; a peer Close during the handshake removed
+                // the slot, so a stale open must discard its transport and stay silent.
+                if self.promote(&key, generation, writer, transport.clone()) {
+                    self.spawn_read_loop(core, key, readable, generation);
+                } else {
+                    transport.close();
+                }
             }
             Err(e) => {
                 tracing::error!("WebTransport connect to {url} failed: {e:?}");
-                // Pre-registered nothing here, but tell the pure relay to forget it and the
-                // peer that it's closed.
-                inject_untrack(&core, &key).await;
-                let _ = send_frame(&core, key.peer, key.namespace.as_str(), Frame::Close {
-                    session: key.session,
-                    from_opener: matches!(key.initiator, Initiator::Local),
-                })
-                .await;
+                // Drop the opening slot and tell the peer — but only if we are still its owner
+                // (a peer Close during the handshake already tore it down and told the peer).
+                if self.close_if_current(&core, &key, generation).await {
+                    let _ = send_frame(&core, key.peer, key.namespace.as_str(), Frame::Close {
+                        session: key.session,
+                        from_opener: matches!(key.initiator, Initiator::Local),
+                    })
+                    .await;
+                }
             }
         }
     }
 
-    /// Deliver peer bytes to a session's local stream. Unknown sessions are dropped — a
-    /// non-owner peer's key never resolves, so it cannot write to a session it does not own.
+    /// Deliver peer bytes to a session's local stream. Queued if the session is still opening,
+    /// dropped if unknown — a non-owner peer's key never resolves, so it cannot write to a
+    /// session it does not own.
     pub async fn write(&self, key: &SessionKey, bytes: Bytes) {
-        let Some(writer) = self.writer(key) else {
+        let Some(writer) = self.ready_writer_or_queue(key, Outbound::Data(bytes.clone())) else {
             return;
         };
         let chunk = Uint8Array::from(bytes.as_ref());
         let _ = JsFuture::from(writer.write_with_chunk(chunk.as_ref())).await;
     }
 
-    /// Half-close a session's send side (peer sent FIN).
+    /// Half-close a session's send side (peer sent FIN). Queued if still opening.
     pub async fn shutdown(&self, key: &SessionKey) {
-        if let Some(writer) = self.writer(key) {
+        if let Some(writer) = self.ready_writer_or_queue(key, Outbound::Shutdown) {
             let _ = JsFuture::from(writer.close()).await;
         }
     }
@@ -134,7 +169,7 @@ impl WtSessions {
     /// whether it removed it; a stale read loop gets `false` and must not peer-`Close` either.
     async fn close_if_current(&self, core: &Core, key: &SessionKey, generation: u64) -> bool {
         let removed = self.map.lock().ok().and_then(|mut map| {
-            let current = map.get(key).map(|h| h.generation);
+            let current = map.get(key).map(|handle| handle.generation());
             (current == Some(generation))
                 .then(|| map.remove(key))
                 .flatten()
@@ -142,8 +177,8 @@ impl WtSessions {
         self.finish_close(core, key, removed).await
     }
 
-    /// Shared teardown tail: close the WebTransport and `Untrack` — only if a handle was
-    /// removed. Returns whether it removed one.
+    /// Shared teardown tail: close the WebTransport (only a `Ready` slot owns one) and
+    /// `Untrack` — only if a handle was removed. Returns whether it removed one.
     async fn finish_close(
         &self,
         core: &Core,
@@ -153,16 +188,86 @@ impl WtSessions {
         let Some(handle) = removed else {
             return false;
         };
-        handle.transport.close();
+        if let SessionHandle::Ready { transport, .. } = handle {
+            transport.close();
+        }
         inject_untrack(core, key).await;
         true
     }
 
-    fn writer(&self, key: &SessionKey) -> Option<WritableStreamDefaultWriter> {
-        self.map
-            .lock()
-            .ok()
-            .and_then(|map| map.get(key).map(|handle| handle.writer.clone()))
+    /// Register a fresh `Opening` slot for `key` before the handshake, returning its
+    /// generation. The mirror of native's pre-dial `register`.
+    fn open_slot(&self, key: SessionKey) -> u64 {
+        let generation = self.generations.fetch_add(1, Ordering::Relaxed);
+        self.insert(key, SessionHandle::Opening {
+            queue: Vec::new(),
+            generation,
+        });
+        generation
+    }
+
+    /// Promote the `Opening` slot for `key` to `Ready` with the just-opened `writer`/
+    /// `transport`, flushing peer ops queued during the handshake in arrival order. Returns
+    /// `false` (caller discards `transport`) if the slot is gone or its generation was
+    /// superseded — a peer `Close` or a newer open during the handshake. Performs no `await`,
+    /// so the take-drain-install sequence is atomic against inbound dispatch.
+    fn promote(
+        &self,
+        key: &SessionKey,
+        generation: u64,
+        writer: WritableStreamDefaultWriter,
+        transport: WebTransport,
+    ) -> bool {
+        let Ok(mut map) = self.map.lock() else {
+            return false;
+        };
+        let queue = match map.get(key) {
+            Some(SessionHandle::Opening {
+                generation: current,
+                ..
+            }) if *current == generation => match map.remove(key) {
+                Some(SessionHandle::Opening { queue, .. }) => queue,
+                _ => return false,
+            },
+            _ => return false,
+        };
+        // `write_with_chunk`/`close` enqueue onto the stream in call order (the returned
+        // backpressure promise is intentionally dropped); doing it before inserting `Ready`
+        // keeps the queued ops ahead of any later write.
+        for op in queue {
+            match op {
+                Outbound::Data(bytes) => {
+                    let chunk = Uint8Array::from(bytes.as_ref());
+                    let _ = writer.write_with_chunk(chunk.as_ref());
+                }
+                Outbound::Shutdown => {
+                    let _ = writer.close();
+                }
+            }
+        }
+        map.insert(key.clone(), SessionHandle::Ready {
+            writer,
+            transport,
+            generation,
+        });
+        true
+    }
+
+    /// If the session is `Ready`, return its writer (the caller applies the op). If it is still
+    /// `Opening`, push `op` onto its queue and return `None`. Unknown session → `None` (dropped).
+    fn ready_writer_or_queue(
+        &self,
+        key: &SessionKey,
+        op: Outbound,
+    ) -> Option<WritableStreamDefaultWriter> {
+        let mut map = self.map.lock().ok()?;
+        match map.get_mut(key)? {
+            SessionHandle::Ready { writer, .. } => Some(writer.clone()),
+            SessionHandle::Opening { queue, .. } => {
+                queue.push(op);
+                None
+            }
+        }
     }
 
     fn insert(&self, key: SessionKey, handle: SessionHandle) {
@@ -170,8 +275,9 @@ impl WtSessions {
             // Defensive: if a session already exists for this key (a duplicate Open that
             // slipped past the pure reject, or a key reuse), close the old WebTransport
             // before replacing it, so it cannot keep running or later tear down the new one.
-            if let Some(old) = map.insert(key, handle) {
-                old.transport.close();
+            // An `Opening` slot owns no transport yet — its in-flight open will fail to promote.
+            if let Some(SessionHandle::Ready { transport, .. }) = map.insert(key, handle) {
+                transport.close();
             }
         }
     }
