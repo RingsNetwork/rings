@@ -27,3 +27,26 @@ pub async fn prepare_processor() -> Processor {
 
     procssor_builder.build().unwrap()
 }
+
+/// Namespace collision: registering two protocols on the same namespace is rejected, so a
+/// later extension cannot silently shadow an earlier one (one of the reviewer-requested
+/// lifecycle guards).
+#[tokio::test]
+async fn duplicate_namespace_registration_is_rejected() {
+    use std::sync::Arc;
+
+    use crate::extension::protocols::echo::Echo;
+    use crate::extension::protocols::echo::EchoShell;
+    use crate::provider::Provider;
+
+    let provider = Provider::from_processor(Arc::new(prepare_processor().await));
+    provider
+        .register_protocol(Echo::default(), EchoShell)
+        .expect("first registration on a fresh namespace succeeds");
+    assert!(
+        provider
+            .register_protocol(Echo::default(), EchoShell)
+            .is_err(),
+        "a second registration on the same namespace must error, not silently overwrite"
+    );
+}

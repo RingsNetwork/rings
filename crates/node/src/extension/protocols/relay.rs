@@ -432,6 +432,7 @@ impl Interpret for WtRelay {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::collections::HashSet;
     use std::net::SocketAddr;
 
     use bytes::Bytes;
@@ -683,5 +684,157 @@ mod tests {
             other => panic!("expected one Close, got {other:?}"),
         }
         assert!(b_close.state.sessions.contains(&key_a));
+    }
+
+    // ── lifecycle property tests (reviewer-requested) ─────────────────────────────────
+
+    #[test]
+    fn open_then_close_then_data_does_not_resurrect_the_session() {
+        let relay = web_relay();
+        let key = SessionKey::new(peer_a(), super::TCP, SessionId(3));
+        let opened = step_frame(&relay, &relay.init(), peer_a(), &Frame::Open {
+            session: SessionId(3),
+            service: "web".to_string(),
+        });
+        assert!(opened.state.sessions.contains(&key));
+        let closed = step_frame(&relay, &opened.state, peer_a(), &Frame::Close {
+            session: SessionId(3),
+        });
+        assert!(!closed.state.sessions.contains(&key));
+        // A late Data for the now-closed session still *describes* a Write (the engine will
+        // miss the key at runtime → NoSuchSession), but it must not resurrect pure state.
+        let data = step_frame(&relay, &closed.state, peer_a(), &Frame::Data {
+            session: SessionId(3),
+            bytes: Bytes::from_static(b"late"),
+        });
+        assert!(matches!(data.effects.as_slice(), [
+            RelayEffect::Write { .. }
+        ]));
+        assert!(data.state.sessions.is_empty());
+    }
+
+    #[test]
+    fn close_after_close_is_idempotent() {
+        let relay = web_relay();
+        let opened = step_frame(&relay, &relay.init(), peer_a(), &Frame::Open {
+            session: SessionId(5),
+            service: "web".to_string(),
+        });
+        let c1 = step_frame(&relay, &opened.state, peer_a(), &Frame::Close {
+            session: SessionId(5),
+        });
+        let c2 = step_frame(&relay, &c1.state, peer_a(), &Frame::Close {
+            session: SessionId(5),
+        });
+        // The second close is harmless: it still emits a (peer-idempotent) Close effect and
+        // leaves empty pure state — no panic, no divergence.
+        assert!(matches!(c2.effects.as_slice(), [RelayEffect::Close { .. }]));
+        assert!(c2.state.sessions.is_empty());
+    }
+
+    #[test]
+    fn malformed_payload_is_rejected_at_the_boundary() {
+        let relay = web_relay();
+        // Bytes that don't decode as a `Frame` → explicit `Reject` at `decode`, not a silent
+        // pure no-op inside `step`.
+        let bad = [0xFFu8, 0xFF, 0xFF, 0xFF, 0xFF];
+        let result = relay.decode(Wire {
+            from: peer_a(),
+            me: this_node(),
+            payload: &bad,
+        });
+        assert!(result.is_err(), "a malformed frame must be rejected");
+    }
+
+    /// Property: across a long, deterministic, collision-prone interleaving of
+    /// Open/Data/Close (peer frames) and Track/Untrack (engine feedback) from several peers,
+    /// the pure `State.sessions` never diverges from an independently-maintained model. This
+    /// is the guard against open/open, close-after-close, stale entries and teardown races
+    /// the reviewer asked for.
+    #[test]
+    fn lifecycle_property_state_never_diverges_from_model() {
+        let relay = web_relay();
+        let peers = [peer_a(), peer_b(), Did::from(4u32)];
+        let mut state = relay.init();
+        let mut model: HashSet<SessionKey> = HashSet::new();
+        // xorshift64 with a fixed seed: pseudo-random but fully deterministic (no flakiness).
+        let mut rng: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+
+        for _ in 0..4000 {
+            let r = next();
+            let peer = peers[(r % 3) as usize];
+            let session = SessionId((r >> 2) & 0x7); // 8 ids → frequent collisions
+            let key = SessionKey::new(peer, super::TCP, session);
+            let transition = match (r >> 8) % 6 {
+                0 => {
+                    let t = step_frame(&relay, &state, peer, &Frame::Open {
+                        session,
+                        service: "web".to_string(),
+                    });
+                    if model.contains(&key) {
+                        assert!(t.effects.is_empty(), "duplicate Open must emit nothing");
+                    } else {
+                        assert!(matches!(t.effects.as_slice(), [
+                            RelayEffect::Connect { .. }
+                        ]));
+                        model.insert(key.clone());
+                    }
+                    t
+                }
+                1 => {
+                    // Unknown service: duplicate-Open rejection runs first, so an already-open
+                    // key emits nothing; otherwise it's a SendClose (and never opens a session).
+                    let t = step_frame(&relay, &state, peer, &Frame::Open {
+                        session,
+                        service: "nope".to_string(),
+                    });
+                    if model.contains(&key) {
+                        assert!(t.effects.is_empty());
+                    } else {
+                        assert!(matches!(t.effects.as_slice(), [
+                            RelayEffect::SendClose { .. }
+                        ]));
+                    }
+                    t
+                }
+                2 => {
+                    let t = step_frame(&relay, &state, peer, &Frame::Data {
+                        session,
+                        bytes: Bytes::from_static(b"x"),
+                    });
+                    match t.effects.as_slice() {
+                        [RelayEffect::Write { key: k, .. }] => assert_eq!(k.peer, peer),
+                        other => panic!("expected one Write, got {other:?}"),
+                    }
+                    t
+                }
+                3 => {
+                    let t = step_frame(&relay, &state, peer, &Frame::Close { session });
+                    model.remove(&key);
+                    t
+                }
+                4 => {
+                    let t = step_command(&relay, &state, &RelayCommand::Track { peer, session });
+                    model.insert(key.clone());
+                    t
+                }
+                _ => {
+                    let t = step_command(&relay, &state, &RelayCommand::Untrack { peer, session });
+                    model.remove(&key);
+                    t
+                }
+            };
+            state = transition.state;
+            assert_eq!(
+                state.sessions, model,
+                "State.sessions diverged from the model"
+            );
+        }
     }
 }
