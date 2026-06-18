@@ -12,22 +12,23 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 
+use super::inject_track;
 use super::open;
 use super::send_frame;
 use super::Outbound;
 use super::RelayTask;
 use super::TransportSessions;
 use super::TCP_BUF;
+use crate::extension::ext::Core;
 use crate::extension::transport::Frame;
 use crate::extension::transport::SessionKey;
-use crate::processor::Processor;
 
 impl TransportSessions {
-    /// Bind a TCP listener; per accepted connection assign a session, `Frame::Open` it to
-    /// the peer, and relay the byte stream.
+    /// Bind a TCP listener; per accepted connection assign a session, feed it back to the
+    /// pure relay (`Track`), `Frame::Open` it to the peer, and relay the byte stream.
     pub(super) async fn listen_tcp(
         self: Arc<Self>,
-        processor: Arc<Processor>,
+        core: Core,
         local_addr: SocketAddr,
         peer: Did,
         service: String,
@@ -45,14 +46,13 @@ impl TransportSessions {
                 match listener.accept().await {
                     Ok((stream, _)) => {
                         let key = SessionKey::new(peer, namespace.clone(), self.next_session());
-                        // Register the local handle *before* telling the peer to open, so
-                        // an early `Data`/`Close` from the peer is buffered, not dropped.
-                        let task =
-                            RelayTask::register(self.clone(), processor.clone(), key.clone());
-                        if open(processor.as_ref(), &key, service.as_str())
-                            .await
-                            .is_err()
-                        {
+                        // Register the local handle *before* telling the peer to open, so an
+                        // early `Data`/`Close` from the peer is buffered, not dropped.
+                        let task = RelayTask::register(self.clone(), core.clone(), key.clone());
+                        // Feed the accept back to the pure relay so `State.sessions` records
+                        // this client-side session (full authority over live sessions).
+                        inject_track(&core, peer, namespace.as_str(), key.session).await;
+                        if open(&core, &key, service.as_str()).await.is_err() {
                             task.refuse().await;
                             continue;
                         }
@@ -72,7 +72,7 @@ impl TransportSessions {
 pub(super) async fn relay_tcp(task: RelayTask, stream: TcpStream) {
     let RelayTask {
         sessions,
-        processor,
+        core,
         key,
         mut outbound_rx,
         cancel,
@@ -84,7 +84,7 @@ pub(super) async fn relay_tcp(task: RelayTask, stream: TcpStream) {
 
     // local → peer; clean EOF sends FIN, errors abort the whole session.
     let local_to_peer = {
-        let processor = processor.clone();
+        let core = core.clone();
         let namespace = namespace.clone();
         let cancel = cancel.clone();
         async move {
@@ -92,18 +92,15 @@ pub(super) async fn relay_tcp(task: RelayTask, stream: TcpStream) {
             loop {
                 match local_read.read(buf.as_mut_slice()).await {
                     Ok(0) => {
-                        let _ = send_frame(
-                            processor.as_ref(),
-                            peer,
-                            namespace.as_str(),
-                            Frame::Shutdown { session },
-                        )
+                        let _ = send_frame(&core, peer, namespace.as_str(), Frame::Shutdown {
+                            session,
+                        })
                         .await;
                         break;
                     }
                     Ok(n) => {
                         let bytes = Bytes::copy_from_slice(buf.get(..n).unwrap_or_default());
-                        if send_frame(processor.as_ref(), peer, namespace.as_str(), Frame::Data {
+                        if send_frame(&core, peer, namespace.as_str(), Frame::Data {
                             session,
                             bytes,
                         })
@@ -149,10 +146,7 @@ pub(super) async fn relay_tcp(task: RelayTask, stream: TcpStream) {
         _ = async { tokio::join!(local_to_peer, peer_to_local); } => {}
     }
 
-    // Teardown: drop the session and tell the peer (idempotent on its side).
-    sessions.close(&key);
-    let _ = send_frame(processor.as_ref(), peer, namespace.as_str(), Frame::Close {
-        session,
-    })
-    .await;
+    // Teardown: drop the session (which `Untrack`s it from the pure state) and tell the peer.
+    sessions.close(&core, &key).await;
+    let _ = send_frame(&core, peer, namespace.as_str(), Frame::Close { session }).await;
 }

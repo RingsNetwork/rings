@@ -69,6 +69,23 @@ pub enum RelayCommand<T> {
         /// Service name to remove.
         name: String,
     },
+    /// Engine→protocol feedback: a client-side session was accepted locally and opened to
+    /// `peer`. Recorded so `State.sessions` is the **full** authority over live sessions
+    /// (client tunnels included), not just remote-opened server sessions.
+    Track {
+        /// The remote peer this session is tunnelled to.
+        peer: Did,
+        /// The locally-assigned session id.
+        session: SessionId,
+    },
+    /// Engine→protocol feedback: a session was torn down by the engine (any side); forget
+    /// it. The single point through which every teardown reaches the pure state.
+    Untrack {
+        /// The remote peer of the session.
+        peer: Did,
+        /// The session id.
+        session: SessionId,
+    },
 }
 
 /// The relay's typed input: a self-injected [`RelayCommand`] or an authenticated peer
@@ -210,7 +227,9 @@ where T: Clone + DeserializeOwned + Serialize + MaybeSend + 'static
         event: RelayEvent<T>,
     ) -> Transition<RelayState<T>, RelayEffect<T>> {
         match event {
-            RelayEvent::Command(command) => step_command(ctx.state, command),
+            RelayEvent::Command(command) => {
+                step_command(self.namespace.as_str(), ctx.state, command)
+            }
             RelayEvent::Frame { from, frame } => {
                 step_frame(self.kind, self.namespace.as_str(), ctx.state, from, frame)
             }
@@ -218,8 +237,11 @@ where T: Clone + DeserializeOwned + Serialize + MaybeSend + 'static
     }
 }
 
-/// Apply a local [`RelayCommand`]. Pure; only mutates the registry, emits no effects.
+/// Apply a local [`RelayCommand`]. Pure; mutates the registry / session set, emits no
+/// effects. `Track`/`Untrack` are the engine→protocol feedback that make `State.sessions`
+/// the full authority over live sessions (both client tunnels and server sessions).
 fn step_command<T: Clone>(
+    namespace: &str,
     state: &RelayState<T>,
     command: RelayCommand<T>,
 ) -> Transition<RelayState<T>, RelayEffect<T>> {
@@ -230,6 +252,14 @@ fn step_command<T: Clone>(
         }
         RelayCommand::UnregisterService { name } => {
             Arc::make_mut(&mut next.services).remove(&name);
+        }
+        RelayCommand::Track { peer, session } => {
+            next.sessions
+                .insert(SessionKey::new(peer, namespace, session));
+        }
+        RelayCommand::Untrack { peer, session } => {
+            next.sessions
+                .remove(&SessionKey::new(peer, namespace, session));
         }
     }
     Transition::pure(next)
@@ -289,21 +319,19 @@ pub(crate) fn close_frame(session: SessionId) -> Bytes {
 
 // ── Native interpreter (OS sockets) ───────────────────────────────────────────────────
 
-/// Native relay interpreter: runs [`RelayEffect`]s over the OS-socket engine it owns.
+/// Native relay interpreter: runs [`RelayEffect`]s over the OS-socket engine it owns. The
+/// engine uses the [`Core`] capability for both overlay sends and lifecycle feedback
+/// (`Track`/`Untrack`), so the engine has no `Processor` of its own.
 #[cfg(feature = "node")]
 pub struct NativeRelay {
     engine: Arc<crate::extension::transport::engine::TransportSessions>,
-    processor: Arc<crate::processor::Processor>,
 }
 
 #[cfg(feature = "node")]
 impl NativeRelay {
-    /// Build over a shared engine and processor.
-    pub fn new(
-        engine: Arc<crate::extension::transport::engine::TransportSessions>,
-        processor: Arc<crate::processor::Processor>,
-    ) -> Self {
-        Self { engine, processor }
+    /// Build over a shared engine.
+    pub fn new(engine: Arc<crate::extension::transport::engine::TransportSessions>) -> Self {
+        Self { engine }
     }
 }
 
@@ -321,7 +349,7 @@ impl Interpret for NativeRelay {
             RelayEffect::Connect { key, target, kind } => {
                 self.engine
                     .clone()
-                    .connect(self.processor.clone(), key, target, kind)
+                    .connect(core.clone(), key, target, kind)
                     .await;
             }
             RelayEffect::Write { key, bytes } => {
@@ -331,7 +359,7 @@ impl Interpret for NativeRelay {
                 self.engine.shutdown(&key).await;
             }
             RelayEffect::Close { key } => {
-                self.engine.close(&key);
+                self.engine.close(core, &key).await;
             }
             RelayEffect::SendClose {
                 to,
@@ -352,17 +380,13 @@ impl Interpret for NativeRelay {
 #[cfg(feature = "browser")]
 pub struct WtRelay {
     engine: Arc<crate::extension::transport::wt::WtSessions>,
-    processor: Arc<crate::processor::Processor>,
 }
 
 #[cfg(feature = "browser")]
 impl WtRelay {
-    /// Build over a shared WebTransport engine and processor.
-    pub fn new(
-        engine: Arc<crate::extension::transport::wt::WtSessions>,
-        processor: Arc<crate::processor::Processor>,
-    ) -> Self {
-        Self { engine, processor }
+    /// Build over a shared WebTransport engine.
+    pub fn new(engine: Arc<crate::extension::transport::wt::WtSessions>) -> Self {
+        Self { engine }
     }
 }
 
@@ -380,7 +404,7 @@ impl Interpret for WtRelay {
             RelayEffect::Connect { key, target, kind } => {
                 self.engine
                     .clone()
-                    .connect(self.processor.clone(), key, target, kind)
+                    .connect(core.clone(), key, target, kind)
                     .await;
             }
             RelayEffect::Write { key, bytes } => {
@@ -390,7 +414,7 @@ impl Interpret for WtRelay {
                 self.engine.shutdown(&key).await;
             }
             RelayEffect::Close { key } => {
-                self.engine.close(&key);
+                self.engine.close(core, &key).await;
             }
             RelayEffect::SendClose {
                 to,
@@ -607,6 +631,28 @@ mod tests {
             [RelayEffect::Connect { target, .. }] => assert_eq!(*target, web_addr()),
             other => panic!("expected one Connect, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn track_and_untrack_make_state_the_authority_over_client_sessions() {
+        let relay = web_relay();
+        // A client-side accept is fed back as `Track` (the engine→protocol feedback): the
+        // session is recorded in State even though no peer `Open` frame created it.
+        let tracked = step_command(&relay, &relay.init(), &RelayCommand::Track {
+            peer: peer_a(),
+            session: SessionId(9),
+        });
+        assert!(tracked.effects.is_empty(), "Track is a pure state update");
+        let key = SessionKey::new(peer_a(), super::TCP, SessionId(9));
+        assert!(tracked.state.sessions.contains(&key));
+
+        // Teardown feeds back `Untrack`, removing it — so State stays the full authority.
+        let untracked = step_command(&relay, &tracked.state, &RelayCommand::Untrack {
+            peer: peer_a(),
+            session: SessionId(9),
+        });
+        assert!(untracked.effects.is_empty());
+        assert!(!untracked.state.sessions.contains(&key));
     }
 
     #[test]

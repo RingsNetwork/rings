@@ -36,11 +36,11 @@ use web_sys::WritableStreamDefaultWriter;
 
 use crate::error::Error;
 use crate::error::Result;
-use crate::extension::ext::Envelope;
+use crate::extension::ext::Core;
+use crate::extension::protocols::relay::RelayCommand;
 use crate::extension::transport::Frame;
 use crate::extension::transport::SessionKey;
 use crate::extension::transport::TransportKind;
-use crate::processor::Processor;
 
 /// A live WebTransport-backed session.
 struct SessionHandle {
@@ -70,7 +70,7 @@ impl WtSessions {
     /// On any failure a `Frame::Close` is sent.
     pub async fn connect(
         self: Arc<Self>,
-        processor: Arc<Processor>,
+        core: Core,
         key: SessionKey,
         url: String,
         kind: TransportKind,
@@ -78,18 +78,16 @@ impl WtSessions {
         match open(url.as_str(), kind).await {
             Ok((transport, readable, writer)) => {
                 self.insert(key.clone(), SessionHandle { writer, transport });
-                self.spawn_read_loop(processor, key, readable);
+                self.spawn_read_loop(core, key, readable);
             }
             Err(e) => {
                 tracing::error!("WebTransport connect to {url} failed: {e:?}");
-                let _ = send_frame(
-                    processor.as_ref(),
-                    key.peer,
-                    key.namespace.as_str(),
-                    Frame::Close {
-                        session: key.session,
-                    },
-                )
+                // Pre-registered nothing here, but tell the pure relay to forget it and the
+                // peer that it's closed.
+                inject_untrack(&core, &key).await;
+                let _ = send_frame(&core, key.peer, key.namespace.as_str(), Frame::Close {
+                    session: key.session,
+                })
                 .await;
             }
         }
@@ -112,12 +110,18 @@ impl WtSessions {
         }
     }
 
-    /// Close and drop a session (closes the WebTransport).
-    pub fn close(&self, key: &SessionKey) {
-        if let Ok(mut map) = self.map.lock() {
-            if let Some(handle) = map.remove(key) {
-                handle.transport.close();
-            }
+    /// Close and drop a session (closes the WebTransport), then feed the teardown back to
+    /// the pure relay as an `Untrack`. Injects exactly once — only on actual removal.
+    pub async fn close(&self, core: &Core, key: &SessionKey) {
+        let removed = self
+            .map
+            .lock()
+            .ok()
+            .and_then(|mut map| map.remove(key))
+            .map(|handle| handle.transport.close())
+            .is_some();
+        if removed {
+            inject_untrack(core, key).await;
         }
     }
 
@@ -140,12 +144,7 @@ impl WtSessions {
     }
 
     /// Spawn the local→peer read loop for `readable`.
-    fn spawn_read_loop(
-        self: &Arc<Self>,
-        processor: Arc<Processor>,
-        key: SessionKey,
-        readable: ReadableStream,
-    ) {
+    fn spawn_read_loop(self: &Arc<Self>, core: Core, key: SessionKey, readable: ReadableStream) {
         let sessions = self.clone();
         spawn_local(async move {
             let peer = key.peer;
@@ -172,7 +171,7 @@ impl WtSessions {
                     Err(_) => break,
                 };
                 let bytes = Bytes::from(Uint8Array::new(&value).to_vec());
-                if send_frame(processor.as_ref(), peer, namespace.as_str(), Frame::Data {
+                if send_frame(&core, peer, namespace.as_str(), Frame::Data {
                     session,
                     bytes,
                 })
@@ -182,11 +181,8 @@ impl WtSessions {
                     break;
                 }
             }
-            sessions.close(&key);
-            let _ = send_frame(processor.as_ref(), peer, namespace.as_str(), Frame::Close {
-                session,
-            })
-            .await;
+            sessions.close(&core, &key).await;
+            let _ = send_frame(&core, peer, namespace.as_str(), Frame::Close { session }).await;
         });
     }
 }
@@ -218,9 +214,20 @@ async fn open(
 }
 
 /// Send a [`Frame`] to `peer` under `namespace` over the overlay.
-async fn send_frame(processor: &Processor, peer: Did, namespace: &str, frame: Frame) -> Result<()> {
+async fn send_frame(core: &Core, peer: Did, namespace: &str, frame: Frame) -> Result<()> {
     let payload = bincode::serialize(&frame).map_err(|_| Error::EncodeError)?;
-    let envelope = Envelope::new(namespace.to_string(), Bytes::from(payload));
-    processor.send_envelope(peer, &envelope).await?;
-    Ok(())
+    core.send(peer, namespace, Bytes::from(payload)).await
+}
+
+/// Feed a teardown back to the pure relay so it removes the session from `State.sessions`.
+async fn inject_untrack(core: &Core, key: &SessionKey) {
+    let command = RelayCommand::<String>::Untrack {
+        peer: key.peer,
+        session: key.session,
+    };
+    if let Ok(bytes) = bincode::serialize(&command) {
+        let _ = core
+            .inject(key.namespace.as_str(), Bytes::from(bytes))
+            .await;
+    }
 }

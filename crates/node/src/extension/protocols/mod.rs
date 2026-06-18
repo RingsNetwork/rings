@@ -15,7 +15,6 @@ use std::sync::Arc;
 
 use crate::error::Result;
 use crate::extension::ext::Extensions;
-use crate::processor::Processor;
 
 /// Register the built-in protocol extensions into a registry.
 ///
@@ -32,15 +31,14 @@ use crate::processor::Processor;
 pub fn register_builtins(
     extensions: &Extensions,
     engine: Arc<crate::extension::transport::engine::TransportSessions>,
-    processor: Arc<Processor>,
 ) -> Result<()> {
     extensions.register(
         relay::Relay::tcp(HashMap::new()),
-        relay::NativeRelay::new(engine.clone(), processor.clone()),
+        relay::NativeRelay::new(engine.clone()),
     )?;
     extensions.register(
         relay::Relay::udp(HashMap::new()),
-        relay::NativeRelay::new(engine, processor),
+        relay::NativeRelay::new(engine),
     )?;
     Ok(())
 }
@@ -50,15 +48,14 @@ pub fn register_builtins(
 pub fn register_builtins(
     extensions: &Extensions,
     engine: Arc<crate::extension::transport::wt::WtSessions>,
-    processor: Arc<Processor>,
 ) -> Result<()> {
     extensions.register(
         relay::Relay::tcp(HashMap::new()),
-        relay::WtRelay::new(engine.clone(), processor.clone()),
+        relay::WtRelay::new(engine.clone()),
     )?;
     extensions.register(
         relay::Relay::udp(HashMap::new()),
-        relay::WtRelay::new(engine, processor),
+        relay::WtRelay::new(engine),
     )?;
     Ok(())
 }

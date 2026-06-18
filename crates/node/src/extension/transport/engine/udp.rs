@@ -12,22 +12,23 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use super::inject_track;
 use super::open;
 use super::send_frame;
 use super::Outbound;
 use super::RelayTask;
 use super::TransportSessions;
 use super::UDP_BUF;
+use crate::extension::ext::Core;
 use crate::extension::transport::Frame;
 use crate::extension::transport::SessionKey;
-use crate::processor::Processor;
 
 impl TransportSessions {
-    /// Bind a UDP socket; per new source address open a flow (`Frame::Open`) and relay its
-    /// datagrams, routing replies back to the originating local client.
+    /// Bind a UDP socket; per new source address open a flow (`Track` + `Frame::Open`) and
+    /// relay its datagrams, routing replies back to the originating local client.
     pub(super) async fn listen_udp(
         self: Arc<Self>,
-        processor: Arc<Processor>,
+        core: Core,
         local_addr: SocketAddr,
         peer: Did,
         service: String,
@@ -60,11 +61,10 @@ impl TransportSessions {
                                 // fast reply from the peer is not dropped.
                                 let (outbound_rx, cancel) = self.register(key.clone());
                                 spawn_udp_sendto(socket.clone(), src, outbound_rx, cancel);
-                                if open(processor.as_ref(), &key, service.as_str())
-                                    .await
-                                    .is_err()
-                                {
-                                    self.close(&key);
+                                // Record the client-side flow in the pure relay state.
+                                inject_track(&core, peer, namespace.as_str(), key.session).await;
+                                if open(&core, &key, service.as_str()).await.is_err() {
+                                    self.close(&core, &key).await;
                                     flows.remove(&src);
                                     continue;
                                 }
@@ -77,9 +77,7 @@ impl TransportSessions {
                             session: key.session,
                             bytes,
                         };
-                        let _ =
-                            send_frame(processor.as_ref(), key.peer, key.namespace.as_str(), frame)
-                                .await;
+                        let _ = send_frame(&core, key.peer, key.namespace.as_str(), frame).await;
                     }
                     Err(e) => {
                         tracing::error!("transport udp recv on {local_addr} failed: {e:?}");
@@ -95,7 +93,7 @@ impl TransportSessions {
 pub(super) async fn relay_udp_connected(task: RelayTask, socket: UdpSocket) {
     let RelayTask {
         sessions,
-        processor,
+        core,
         key,
         mut outbound_rx,
         cancel,
@@ -111,7 +109,7 @@ pub(super) async fn relay_udp_connected(task: RelayTask, socket: UdpSocket) {
             received = socket.recv(buf.as_mut_slice()) => match received {
                 Ok(n) => {
                     let bytes = Bytes::copy_from_slice(buf.get(..n).unwrap_or_default());
-                    if send_frame(processor.as_ref(), peer, namespace.as_str(), Frame::Data {
+                    if send_frame(&core, peer, namespace.as_str(), Frame::Data {
                         session,
                         bytes,
                     })
@@ -131,11 +129,8 @@ pub(super) async fn relay_udp_connected(task: RelayTask, socket: UdpSocket) {
             },
         }
     }
-    sessions.close(&key);
-    let _ = send_frame(processor.as_ref(), peer, namespace.as_str(), Frame::Close {
-        session,
-    })
-    .await;
+    sessions.close(&core, &key).await;
+    let _ = send_frame(&core, peer, namespace.as_str(), Frame::Close { session }).await;
 }
 
 /// Client-side UDP flow: route peer bytes back to the originating local client `dest`.

@@ -72,12 +72,8 @@ impl Provider {
         let transport = Arc::new(crate::extension::transport::wt::WtSessions::new());
         let extensions = crate::extension::ext::Extensions::new(processor.clone());
         #[cfg(any(feature = "node", feature = "browser"))]
-        crate::extension::protocols::register_builtins(
-            &extensions,
-            transport.clone(),
-            processor.clone(),
-        )
-        .expect("register builtins on a fresh registry");
+        crate::extension::protocols::register_builtins(&extensions, transport.clone())
+            .expect("register builtins on a fresh registry");
         Self {
             processor,
             handler: InternalRpcHandler,
@@ -232,13 +228,13 @@ impl Provider {
         namespace: &str,
         kind: crate::extension::transport::TransportKind,
     ) -> Result<()> {
-        // Bind a local listener on the relay engine (the relay extension's resource). The
-        // accepted-connection lifecycle is the engine's for now; routing each accept through
-        // the pure relay `step` is the follow-up "full authority" work.
+        // Bind a local listener on the relay engine (the relay extension's resource). Each
+        // accepted connection is fed back through the pure relay (`Track`), so
+        // `RelayState.sessions` is the full authority over live sessions.
         self.transport
             .clone()
             .listen(
-                self.processor.clone(),
+                self.core(),
                 local_addr,
                 peer,
                 service,
@@ -282,11 +278,7 @@ impl Provider {
         let transport = Arc::new(crate::extension::transport::wt::WtSessions::new());
         let extensions = crate::extension::ext::Extensions::new(processor.clone());
         #[cfg(any(feature = "node", feature = "browser"))]
-        crate::extension::protocols::register_builtins(
-            &extensions,
-            transport.clone(),
-            processor.clone(),
-        )?;
+        crate::extension::protocols::register_builtins(&extensions, transport.clone())?;
 
         Ok(Provider {
             processor,

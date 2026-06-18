@@ -61,12 +61,12 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::Error;
 use crate::error::Result;
-use crate::extension::ext::Envelope;
+use crate::extension::ext::Core;
+use crate::extension::protocols::relay::RelayCommand;
 use crate::extension::transport::Frame;
 use crate::extension::transport::SessionId;
 use crate::extension::transport::SessionKey;
 use crate::extension::transport::TransportKind;
-use crate::processor::Processor;
 
 /// Connect timeout for a local service dial.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -118,12 +118,12 @@ impl TransportSessions {
     /// `Frame::Close` is sent and the session removed.
     pub async fn connect(
         self: Arc<Self>,
-        processor: Arc<Processor>,
+        core: Core,
         key: SessionKey,
         addr: SocketAddr,
         kind: TransportKind,
     ) {
-        let task = RelayTask::register(self.clone(), processor, key);
+        let task = RelayTask::register(self.clone(), core, key);
         tokio::spawn(async move {
             match kind {
                 TransportKind::Tcp => {
@@ -144,7 +144,7 @@ impl TransportSessions {
     /// source assign a session, send `Frame::Open{session, service}`, and relay it.
     pub async fn listen(
         self: Arc<Self>,
-        processor: Arc<Processor>,
+        core: Core,
         local_addr: SocketAddr,
         peer: Did,
         service: String,
@@ -153,11 +153,11 @@ impl TransportSessions {
     ) {
         match kind {
             TransportKind::Tcp => {
-                self.listen_tcp(processor, local_addr, peer, service, namespace)
+                self.listen_tcp(core, local_addr, peer, service, namespace)
                     .await
             }
             TransportKind::Udp => {
-                self.listen_udp(processor, local_addr, peer, service, namespace)
+                self.listen_udp(core, local_addr, peer, service, namespace)
                     .await
             }
         }
@@ -178,12 +178,19 @@ impl TransportSessions {
         }
     }
 
-    /// Fully close and drop a session.
-    pub fn close(&self, key: &SessionKey) {
-        if let Ok(mut map) = self.map.lock() {
-            if let Some(handle) = map.remove(key) {
-                handle.cancel.cancel();
-            }
+    /// Fully close and drop a session, then feed the teardown back to the pure protocol as
+    /// an `Untrack` (so `State.sessions` is the full authority). Injects exactly once — only
+    /// when a live handle was actually removed.
+    pub async fn close(&self, core: &Core, key: &SessionKey) {
+        let removed = self
+            .map
+            .lock()
+            .ok()
+            .and_then(|mut map| map.remove(key))
+            .inspect(|handle| handle.cancel.cancel())
+            .is_some();
+        if removed {
+            inject_untrack(core, key).await;
         }
     }
 
@@ -234,7 +241,7 @@ impl TransportSessions {
 /// task signatures to `(task, socket)`.
 struct RelayTask {
     sessions: Arc<TransportSessions>,
-    processor: Arc<Processor>,
+    core: Core,
     key: SessionKey,
     outbound_rx: mpsc::Receiver<Outbound>,
     cancel: CancellationToken,
@@ -242,26 +249,22 @@ struct RelayTask {
 
 impl RelayTask {
     /// Register a fresh session channel on the engine and capture the routing identity.
-    fn register(
-        sessions: Arc<TransportSessions>,
-        processor: Arc<Processor>,
-        key: SessionKey,
-    ) -> Self {
+    fn register(sessions: Arc<TransportSessions>, core: Core, key: SessionKey) -> Self {
         let (outbound_rx, cancel) = sessions.register(key.clone());
         Self {
             sessions,
-            processor,
+            core,
             key,
             outbound_rx,
             cancel,
         }
     }
 
-    /// Connect failed: drop the pre-registered session and tell the peer.
+    /// Connect failed: drop the pre-registered session (which `Untrack`s it) and tell the peer.
     async fn refuse(self) {
-        self.sessions.close(&self.key);
+        self.sessions.close(&self.core, &self.key).await;
         let _ = send_frame(
-            self.processor.as_ref(),
+            &self.core,
             self.key.peer,
             self.key.namespace.as_str(),
             Frame::Close {
@@ -273,19 +276,37 @@ impl RelayTask {
 }
 
 /// Send `Frame::Open` to the session's peer (client side, on a new local connection/flow).
-async fn open(processor: &Processor, key: &SessionKey, service: &str) -> Result<()> {
-    send_frame(processor, key.peer, key.namespace.as_str(), Frame::Open {
+async fn open(core: &Core, key: &SessionKey, service: &str) -> Result<()> {
+    send_frame(core, key.peer, key.namespace.as_str(), Frame::Open {
         session: key.session,
         service: service.to_string(),
     })
     .await
 }
 
-/// Send a [`Frame`] to `peer` under `namespace` over the overlay (as a bare
-/// [`Envelope`]).
-async fn send_frame(processor: &Processor, peer: Did, namespace: &str, frame: Frame) -> Result<()> {
+/// Send a [`Frame`] to `peer` under `namespace` over the overlay.
+async fn send_frame(core: &Core, peer: Did, namespace: &str, frame: Frame) -> Result<()> {
     let payload = bincode::serialize(&frame).map_err(|_| Error::EncodeError)?;
-    let envelope = Envelope::new(namespace.to_string(), Bytes::from(payload));
-    processor.send_envelope(peer, &envelope).await?;
-    Ok(())
+    core.send(peer, namespace, Bytes::from(payload)).await
+}
+
+/// Feed a client-side accept back to the pure relay (`State.sessions` becomes authoritative).
+async fn inject_track(core: &Core, peer: Did, namespace: &str, session: SessionId) {
+    let command = RelayCommand::<SocketAddr>::Track { peer, session };
+    if let Ok(bytes) = bincode::serialize(&command) {
+        let _ = core.inject(namespace, Bytes::from(bytes)).await;
+    }
+}
+
+/// Feed a teardown back to the pure relay so it removes the session from `State.sessions`.
+async fn inject_untrack(core: &Core, key: &SessionKey) {
+    let command = RelayCommand::<SocketAddr>::Untrack {
+        peer: key.peer,
+        session: key.session,
+    };
+    if let Ok(bytes) = bincode::serialize(&command) {
+        let _ = core
+            .inject(key.namespace.as_str(), Bytes::from(bytes))
+            .await;
+    }
 }
