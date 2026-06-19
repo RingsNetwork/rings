@@ -6,9 +6,7 @@ use futures::lock::Mutex as FuturesMutex;
 use rings_transport::core::callback::TransportCallback;
 use rings_transport::core::transport::WebrtcConnectionState;
 
-use crate::chunk::ChunkList;
-use crate::chunk::ChunkManager;
-use crate::consts::TRANSPORT_MTU;
+use crate::chunk::ChunkReassembler;
 use crate::dht::Did;
 use crate::message::HandleMsg;
 use crate::message::Message;
@@ -66,7 +64,7 @@ pub struct InnerSwarmCallback {
     transport: Arc<SwarmTransport>,
     message_handler: MessageHandler,
     callback: SharedSwarmCallback,
-    chunk_list: FuturesMutex<ChunkList<TRANSPORT_MTU>>,
+    reassembler: FuturesMutex<ChunkReassembler>,
 }
 
 impl InnerSwarmCallback {
@@ -77,7 +75,7 @@ impl InnerSwarmCallback {
             transport,
             message_handler,
             callback,
-            chunk_list: Default::default(),
+            reassembler: Default::default(),
         }
     }
 
@@ -115,7 +113,7 @@ impl InnerSwarmCallback {
                 self.message_handler.handle(payload, msg).await
             }
             Message::Chunk(ref msg) => {
-                if let Some(data) = self.chunk_list.lock().await.handle(msg.clone()) {
+                if let Some(data) = self.reassembler.lock().await.handle(msg.clone()) {
                     return self.on_message(cid, &data).await;
                 }
                 Ok(())

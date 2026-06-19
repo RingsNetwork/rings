@@ -1,14 +1,32 @@
 #![warn(missing_docs)]
-//! A Framing and Message chucking implementation
-//! defined in RFC4917<https://www.rfc-editor.org/rfc/rfc4975#page-9>
-//! This chunking mechanism allows a sender to interrupt a chunk part of
-//! the way through sending it.  The ability to interrupt messages allows
-//! multiple sessions to share a TCP connection, and for large messages
-//! to be sent efficiently while not blocking other messages that share
-//! the same connection, or even the same MSRP session.
+//! Message framing / chunking, inspired by RFC 4975 (MSRP) chunking
+//! <https://www.rfc-editor.org/rfc/rfc4975#page-9>: a large message is split into
+//! MTU-sized [`Chunk`]s on the sender and reassembled on the receiver, so a big payload
+//! does not monopolise a connection.
+//!
+//! Two halves, deliberately separated:
+//!
+//! - **Send** — [`ChunkList`] splits a [`Bytes`] into ordered [`Chunk`]s
+//!   (`ChunkList::from(&bytes)`), which the caller iterates and puts on the wire.
+//! - **Receive** — [`ChunkReassembler`] collects incoming [`Chunk`]s keyed by message id and
+//!   yields the original payload once every position has arrived.
+//!
+//! The receiver is robust to the realities of a multi-hop / DHT overlay: out-of-order arrival,
+//! **duplicates / retransmits** (first write per position wins), and partial messages (evicted
+//! by TTL). It is also bounded — at most [`MAX_PENDING_MESSAGES`] incomplete messages are held,
+//! and only the positions actually received are buffered (no allocation proportional to a
+//! peer-supplied `total`).
+//!
+//! ```text
+//!   send    : Bytes ↦ [Chunk{ chunk=[i, n], data=dataᵢ, meta } | i ∈ 0..n]
+//!   receive : a message id is complete ⟺ {position | chunk received} = {0..total-1};
+//!             then payload = concat(dataᵢ for i ∈ 0..total)
+//! ```
+
+use std::collections::btree_map::BTreeMap;
+use std::collections::HashMap;
 
 use bytes::Bytes;
-use itertools::Itertools;
 use serde::Deserialize;
 use serde::Serialize;
 use uuid::Uuid;
@@ -20,24 +38,24 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::utils::get_epoch_ms;
 
-/// A data structure to presenting Chunks
+/// Upper bound on concurrently-reassembling (incomplete) messages held by a
+/// [`ChunkReassembler`]. Once reached, expired messages are reclaimed and any *new* message is
+/// dropped — so a lossy or malicious peer cannot grow the buffer without bound (DoS guard).
+pub const MAX_PENDING_MESSAGES: usize = 512;
+
+/// One chunk of a chunked message, as it travels on the wire.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Chunk {
-    /// chunk info, [position, total chunks]
+    /// `[position, total]` — this chunk's index and the number of chunks in the message.
     pub chunk: [usize; 2],
-    /// bytes
+    /// chunk payload bytes
     pub data: Bytes,
     /// meta data of chunk
     pub meta: ChunkMeta,
 }
 
 impl Chunk {
-    /// check two chunks is belongs to same tx
-    pub fn tx_eq(a: &Self, b: &Self) -> bool {
-        a.meta.id == b.meta.id && a.chunk[1] == b.chunk[1]
-    }
-
-    /// serelize chunk to bytes
+    /// serialize chunk to bytes
     pub fn to_bincode(&self) -> Result<Bytes> {
         bincode::serialize(self)
             .map(Bytes::from)
@@ -47,12 +65,6 @@ impl Chunk {
     /// deserialize bytes to chunk
     pub fn from_bincode(data: &[u8]) -> Result<Self> {
         bincode::deserialize(data).map_err(Error::BincodeDeserialize)
-    }
-}
-
-impl PartialEq for Chunk {
-    fn eq(&self, other: &Self) -> bool {
-        Self::tx_eq(self, other)
     }
 }
 
@@ -77,80 +89,21 @@ impl Default for ChunkMeta {
     }
 }
 
-/// A helper for manage chunks and chunk pool
-pub trait ChunkManager {
-    /// list completed Chunks;
-    fn list_completed(&self) -> Vec<Uuid>;
-    /// list pending Chunks;
-    fn list_pending(&self) -> Vec<Uuid>;
-    /// get sepc msg via uuid
-    /// if a msg is not completed, it will returns None
-    fn get(&self, id: Uuid) -> Option<Bytes>;
-    ///  remove all chunks of id
-    fn remove(&mut self, id: Uuid);
-    /// remove expired chunks by ttl
-    fn remove_expired(&mut self);
-    /// handle a chunk
-    fn handle(&mut self, chunk: Chunk) -> Option<Bytes>;
-}
-
-/// List of Chunk, simply wrapped `Vec<Chunk>`
+/// Sender side: an ordered list of [`Chunk`]s for one message. Build it from the payload with
+/// `ChunkList::from(&bytes)`, then iterate (or convert to `Vec<Chunk>`) to put each chunk on the
+/// wire. Reassembly is the receiver's job — see [`ChunkReassembler`].
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ChunkList<const MTU: usize>(Vec<Chunk>);
 
 impl<const MTU: usize> ChunkList<MTU> {
-    /// ChunkList to Vec
+    /// Clone out the chunks.
     pub fn to_vec(&self) -> Vec<Chunk> {
         self.0.clone()
     }
 
-    /// ChunkList to &Vec
+    /// Borrow the chunks.
     pub fn as_vec(&self) -> &Vec<Chunk> {
         &self.0
-    }
-
-    /// ChunkList to &mut Vec
-    pub fn as_vec_mut(&mut self) -> &mut Vec<Chunk> {
-        &mut self.0
-    }
-
-    /// dedup and sort elements in list
-    pub fn formalize(&self) -> Self {
-        let mut chunks = self.to_vec();
-        // dedup same chunk id
-        chunks.dedup_by_key(|c| c.chunk[0]);
-        chunks.sort_by_key(|a| a.chunk[0]);
-        Self::from(chunks)
-    }
-
-    /// search and formalize
-    pub fn search(&self, id: Uuid) -> Self {
-        let chunks: Vec<Chunk> = self
-            .to_vec()
-            .iter()
-            .filter(|e| e.meta.id == id)
-            .cloned()
-            .collect();
-        Self::from(chunks).formalize()
-    }
-
-    /// check list that is completed
-    pub fn is_completed(&self) -> bool {
-        let chunks = self.formalize().to_vec();
-        // sample first ele, and chunk size is equal to length of grouped vec
-        // we can call `unwrap` here because pre-condition is `lens() > 0 `
-        !chunks.is_empty() && chunks.len() == chunks.first().unwrap().chunk[1]
-    }
-
-    /// if list is completed, withdraw data, or return None
-    pub fn try_withdraw(&self) -> Option<Bytes> {
-        if !self.is_completed() {
-            None
-        } else {
-            let data = self.formalize().to_vec();
-            let ret = data.into_iter().flat_map(|c| c.data).collect();
-            Some(ret)
-        }
     }
 }
 
@@ -174,7 +127,7 @@ impl<const MTU: usize> IntoIterator for ChunkList<MTU> {
     type IntoIter = std::vec::IntoIter<Chunk>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.to_vec().into_iter()
+        self.0.into_iter()
     }
 }
 
@@ -199,7 +152,7 @@ impl<const MTU: usize> From<&Bytes> for ChunkList<MTU> {
 
 impl<const MTU: usize> From<ChunkList<MTU>> for Vec<Chunk> {
     fn from(l: ChunkList<MTU>) -> Self {
-        l.to_vec()
+        l.0
     }
 }
 
@@ -209,73 +162,130 @@ impl<const MTU: usize> From<Vec<Chunk>> for ChunkList<MTU> {
     }
 }
 
-impl<const MTU: usize> ChunkManager for ChunkList<MTU> {
-    fn list_completed(&self) -> Vec<Uuid> {
-        // group by msg uuid and chunk size
-        self.into_iter()
-            .group_by(|item| item.clone())
-            .into_iter()
-            .filter_map(|(c, g)| {
-                if ChunkList::<MTU>::from(g.collect_vec()).is_completed() {
-                    Some(c.meta.id)
-                } else {
-                    None
-                }
-            })
-            .collect_vec()
+/// One message being reassembled: the chunks seen so far, keyed by position.
+struct Pending {
+    /// total number of chunks the message claims (from `chunk[1]`).
+    total: usize,
+    /// received positions → bytes. A `BTreeMap` dedups by position (first write wins) and keeps
+    /// the data ordered, so assembly is a single in-order concat.
+    slots: BTreeMap<usize, Bytes>,
+    /// creation time / ttl of the first chunk seen, used for TTL eviction.
+    ts_ms: u128,
+    ttl_ms: u64,
+}
+
+impl Pending {
+    fn new(total: usize, ts_ms: u128, ttl_ms: u64) -> Self {
+        Self {
+            total,
+            slots: BTreeMap::new(),
+            ts_ms,
+            ttl_ms,
+        }
     }
 
-    fn list_pending(&self) -> Vec<Uuid> {
-        self.into_iter()
-            .group_by(|item| item.clone())
-            .into_iter()
-            .filter_map(|(c, g)| {
-                if !ChunkList::<MTU>::from(g.collect_vec()).is_completed() {
-                    Some(c.meta.id)
-                } else {
-                    None
-                }
-            })
-            .collect_vec()
+    /// Complete iff every position has arrived. Each inserted position is unique (map key) and in
+    /// `0..total`, so `slots.len() == total` ⟺ the present set is exactly `{0..total-1}`.
+    fn is_complete(&self) -> bool {
+        self.slots.len() == self.total
     }
 
-    fn get(&self, id: Uuid) -> Option<Bytes> {
-        self.search(id).try_withdraw()
+    fn assemble(self) -> Bytes {
+        self.slots.into_values().flatten().collect()
+    }
+}
+
+/// Receiver side: reassembles [`Chunk`]s into whole messages, keyed by message id.
+///
+/// Correct under duplicates / retransmits (first write per position wins), out-of-order arrival
+/// (positions are sorted), and partial delivery (TTL eviction). Bounded by
+/// [`MAX_PENDING_MESSAGES`], and it only buffers the positions actually received (a peer-supplied
+/// `total` never drives an allocation).
+#[derive(Default)]
+pub struct ChunkReassembler {
+    pending: HashMap<Uuid, Pending>,
+}
+
+impl ChunkReassembler {
+    /// Empty reassembler.
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    fn remove(&mut self, id: Uuid) {
-        self.as_vec_mut().retain(|e| e.meta.id != id)
+    /// Number of messages currently being reassembled (incomplete).
+    pub fn pending_count(&self) -> usize {
+        self.pending.len()
     }
 
-    fn remove_expired(&mut self) {
+    /// Drop messages whose TTL has elapsed.
+    pub fn remove_expired(&mut self) {
         let now = get_epoch_ms();
-        self.as_vec_mut()
-            .retain(|e| e.meta.ts_ms + e.meta.ttl_ms as u128 > now)
+        self.pending.retain(|_, p| p.ts_ms + p.ttl_ms as u128 > now);
     }
 
-    fn handle(&mut self, chunk: Chunk) -> Option<Bytes> {
+    /// Forget a message (e.g. after it has been delivered).
+    pub fn remove(&mut self, id: Uuid) {
+        self.pending.remove(&id);
+    }
+
+    /// Accept one chunk. Returns the fully reassembled payload when this chunk completes its
+    /// message (which is then forgotten), otherwise `None`. Malformed, too-old, or
+    /// over-the-cap chunks are dropped (`None`).
+    pub fn handle(&mut self, chunk: Chunk) -> Option<Bytes> {
+        // Reject an absurd ttl outright.
         if chunk.meta.ttl_ms > MAX_TTL_MS {
             return None;
         }
-
-        if chunk.meta.ts_ms - TS_OFFSET_TOLERANCE_MS > get_epoch_ms() {
+        // Reject a chunk stamped too far in the future. `saturating_sub` avoids the `u128`
+        // underflow a malformed/forged `ts_ms < TS_OFFSET_TOLERANCE_MS` would otherwise cause.
+        if chunk.meta.ts_ms.saturating_sub(TS_OFFSET_TOLERANCE_MS) > get_epoch_ms() {
             return None;
         }
 
-        self.as_vec_mut().push(chunk.clone());
+        let [position, total] = chunk.chunk;
+        // A real message has at least one chunk and every position is in `0..total`.
+        if total == 0 || position >= total {
+            return None;
+        }
+
         self.remove_expired();
 
         let id = chunk.meta.id;
-        let data = self.get(id)?;
+        // Bound concurrent messages: once at the cap (after reclaiming expired ones above), drop
+        // any *new* message rather than grow without limit.
+        if !self.pending.contains_key(&id) && self.pending.len() >= MAX_PENDING_MESSAGES {
+            return None;
+        }
 
-        self.remove(id);
-        Some(data)
+        let pending = self
+            .pending
+            .entry(id)
+            .or_insert_with(|| Pending::new(total, chunk.meta.ts_ms, chunk.meta.ttl_ms));
+
+        // A chunk whose `total` disagrees with the first one seen for this id is malformed; ignore
+        // it rather than corrupt the in-flight message.
+        if pending.total != total {
+            return None;
+        }
+
+        // First write per position wins — a duplicate/retransmitted position is a no-op.
+        pending.slots.entry(position).or_insert(chunk.data);
+
+        if pending.is_complete() {
+            // `remove` returns the owned `Pending`; assemble in position order.
+            return self.pending.remove(&id).map(Pending::assemble);
+        }
+        None
     }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
+
+    fn chunks_of<const MTU: usize>(data: &Bytes) -> Vec<Chunk> {
+        ChunkList::<MTU>::from(data).into()
+    }
 
     #[test]
     fn test_data_chunks() {
@@ -291,123 +301,200 @@ mod test {
     }
 
     #[test]
-    fn test_withdraw() {
-        let data = "helloworld".repeat(1024).into();
-        let ret: Vec<Chunk> = ChunkList::<32>::from(&data).into();
-        let incomp = ret[0..30].to_vec();
-        let cl = ChunkList::<32>::from(incomp);
-        assert!(!cl.is_completed());
-        let wd = ChunkList::<32>::from(ret).try_withdraw().unwrap();
-        assert_eq!(wd, data);
+    fn reassembles_in_order() {
+        let data: Bytes = "helloworld".repeat(1024).into();
+        let mut r = ChunkReassembler::new();
+        let chunks = chunks_of::<32>(&data);
+        let mut out = None;
+        for c in chunks {
+            out = r.handle(c).or(out);
+        }
+        assert_eq!(out.unwrap(), data);
+        assert_eq!(r.pending_count(), 0, "completed message is forgotten");
     }
 
     #[test]
-    fn test_query_complete() {
-        let data1 = "hello".repeat(1024).into();
-        let data2 = "world".repeat(256).into();
-        let chunks1: Vec<Chunk> = ChunkList::<32>::from(&data1).into();
-        let chunks2: Vec<Chunk> = ChunkList::<32>::from(&data2).into();
-
-        let mut part = chunks1[2..5].to_vec();
-        let mut fin = chunks2;
-        fin.append(&mut part);
-
-        let cl = ChunkList::<32>::from(fin);
-        let comp = cl.list_completed();
-        assert_eq!(comp.len(), 1);
-        let id = comp[0];
-        assert_eq!(cl.get(id).unwrap(), data2);
-        let pend = cl.list_pending();
-        assert_eq!(pend.len(), 1);
-        assert_eq!(cl.get(pend[0]), None)
+    fn reassembles_out_of_order() {
+        let data: Bytes = "helloworld".repeat(64).into();
+        let mut chunks = chunks_of::<32>(&data);
+        chunks.reverse();
+        let mut r = ChunkReassembler::new();
+        let mut out = None;
+        for c in chunks {
+            out = r.handle(c).or(out);
+        }
+        assert_eq!(out.unwrap(), data);
     }
 
     #[test]
-    fn test_handle_chunk_save_or_withdraw() {
-        let data1 = "hello".repeat(1024).into();
-        let data2 = "world".repeat(256).into();
-        let chunks1: Vec<Chunk> = ChunkList::<32>::from(&data1).into();
-        let chunks2: Vec<Chunk> = ChunkList::<32>::from(&data2).into();
+    fn duplicate_chunk_does_not_break_reassembly() {
+        // Regression: arrival order [0, 1, 0] used to dedup-before-sort and never complete.
+        let data: Bytes = "helloworld".repeat(8).into(); // > 32 bytes => 3 chunks
+        let chunks = chunks_of::<32>(&data);
+        assert!(chunks.len() >= 2);
+        let mut r = ChunkReassembler::new();
 
-        let mut part = chunks1[2..5].to_vec();
-        let mut fin = chunks2.clone();
-        fin.append(&mut part);
-
-        let mut cl = ChunkList::<32>::default();
-        for c in fin {
-            let ret = cl.handle(c);
-            if let Some(data) = ret {
-                assert_eq!(data, data2);
-                assert_eq!(cl.to_vec().len(), 0);
+        // Feed every chunk, re-feeding chunk 0 in the middle as a duplicate.
+        assert!(r.handle(chunks[0].clone()).is_none());
+        for c in &chunks[1..] {
+            let _ = r.handle(chunks[0].clone()); // duplicate of position 0, repeatedly
+            if let Some(out) = r.handle(c.clone()) {
+                assert_eq!(out, data);
+                assert_eq!(r.pending_count(), 0);
+                return;
             }
         }
-        assert_eq!(cl.to_vec().len(), 3);
-
-        let mut part = chunks1[2..5].to_vec();
-        let mut fin = chunks2;
-        part.append(&mut fin);
-
-        let mut cl = ChunkList::<32>::default();
-        for c in part {
-            let ret = cl.handle(c);
-            if let Some(data) = ret {
-                assert_eq!(data, data2);
-                assert_eq!(cl.to_vec().len(), 3);
-            }
-        }
-        assert_eq!(cl.to_vec().len(), 3);
+        panic!("message never completed despite all chunks arriving");
     }
 
     #[test]
-    fn test_handle_chunk_remove_expired_chunks() {
-        let mut cl = ChunkList::<32>::default();
-        assert_eq!(cl.as_vec().len(), 0);
+    fn interleaved_messages_are_isolated() {
+        let d1: Bytes = "hello".repeat(64).into();
+        let d2: Bytes = "world".repeat(64).into();
+        let c1 = chunks_of::<32>(&d1);
+        let c2 = chunks_of::<32>(&d2);
+        let mut r = ChunkReassembler::new();
 
+        // interleave the two messages
+        let (mut o1, mut o2) = (None, None);
+        for pair in c1.iter().zip(c2.iter()) {
+            o1 = r.handle(pair.0.clone()).or(o1);
+            o2 = r.handle(pair.1.clone()).or(o2);
+        }
+        // drain any tail (lengths may differ)
+        for c in c1.iter().chain(c2.iter()) {
+            let out = r.handle(c.clone());
+            o1 = out.clone().filter(|b| *b == d1).or(o1);
+            o2 = out.filter(|b| *b == d2).or(o2);
+        }
+        assert_eq!(o1.unwrap(), d1);
+        assert_eq!(o2.unwrap(), d2);
+    }
+
+    #[test]
+    fn incomplete_message_stays_pending() {
+        let data: Bytes = "helloworld".repeat(64).into();
+        let chunks = chunks_of::<32>(&data);
+        let mut r = ChunkReassembler::new();
+        for c in &chunks[..chunks.len() - 1] {
+            assert!(r.handle(c.clone()).is_none());
+        }
+        assert_eq!(r.pending_count(), 1);
+        let out = r.handle(chunks.last().unwrap().clone());
+        assert_eq!(out.unwrap(), data);
+    }
+
+    #[test]
+    fn malformed_chunks_are_dropped() {
+        let mut r = ChunkReassembler::new();
+        // total == 0
+        assert!(r
+            .handle(Chunk {
+                chunk: [0, 0],
+                data: Bytes::from_static(b"x"),
+                meta: ChunkMeta::default(),
+            })
+            .is_none());
+        // position >= total
+        assert!(r
+            .handle(Chunk {
+                chunk: [5, 3],
+                data: Bytes::from_static(b"x"),
+                meta: ChunkMeta::default(),
+            })
+            .is_none());
+        assert_eq!(r.pending_count(), 0);
+    }
+
+    #[test]
+    fn old_timestamp_does_not_panic() {
+        // ts_ms < TS_OFFSET_TOLERANCE_MS would underflow a plain `u128` subtraction.
+        let mut r = ChunkReassembler::new();
+        let out = r.handle(Chunk {
+            chunk: [0, 1],
+            data: Bytes::from_static(b"ok"),
+            meta: ChunkMeta {
+                id: Uuid::new_v4(),
+                ts_ms: 0,
+                ttl_ms: DEFAULT_TTL_MS,
+            },
+        });
+        assert_eq!(out.unwrap(), Bytes::from_static(b"ok"));
+    }
+
+    #[test]
+    fn future_timestamp_is_dropped() {
+        let mut r = ChunkReassembler::new();
+        let out = r.handle(Chunk {
+            chunk: [0, 1],
+            data: Bytes::from_static(b"x"),
+            meta: ChunkMeta {
+                id: Uuid::new_v4(),
+                ts_ms: get_epoch_ms() + 10 * TS_OFFSET_TOLERANCE_MS,
+                ttl_ms: DEFAULT_TTL_MS,
+            },
+        });
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn expired_partial_messages_are_evicted() {
+        let mut r = ChunkReassembler::new();
         let now = get_epoch_ms();
-        let regular = Chunk {
-            chunk: [0, 32],
-            data: Bytes::new(),
+        // a partial (1 of 2) message that is already expired
+        r.handle(Chunk {
+            chunk: [0, 2],
+            data: Bytes::from_static(b"x"),
+            meta: ChunkMeta {
+                id: Uuid::new_v4(),
+                ts_ms: now.saturating_sub(1000),
+                ttl_ms: 100,
+            },
+        });
+        // a fresh partial message triggers remove_expired, dropping the stale one
+        r.handle(Chunk {
+            chunk: [0, 2],
+            data: Bytes::from_static(b"y"),
             meta: ChunkMeta {
                 id: Uuid::new_v4(),
                 ts_ms: now,
                 ttl_ms: DEFAULT_TTL_MS,
             },
-        };
-        let expired = Chunk {
-            chunk: [0, 32],
-            data: Bytes::new(),
-            meta: ChunkMeta {
-                id: Uuid::new_v4(),
-                ts_ms: now - 1000,
-                ttl_ms: 100,
-            },
-        };
+        });
+        assert_eq!(r.pending_count(), 1, "only the fresh partial remains");
+    }
 
-        cl.handle(regular.clone());
-        assert_eq!(cl.as_vec().len(), 1);
+    #[test]
+    fn pending_messages_are_capped() {
+        let mut r = ChunkReassembler::new();
+        // each is the first of two chunks => stays pending
+        for _ in 0..(MAX_PENDING_MESSAGES + 10) {
+            r.handle(Chunk {
+                chunk: [0, 2],
+                data: Bytes::from_static(b"x"),
+                meta: ChunkMeta::default(), // fresh id, fresh ts each time
+            });
+        }
+        assert_eq!(r.pending_count(), MAX_PENDING_MESSAGES);
+    }
 
-        cl.handle(regular.clone());
-        assert_eq!(cl.as_vec().len(), 2);
+    #[test]
+    fn round_trip_reordered_with_duplicates() {
+        let data: Bytes = "abcdefghij".repeat(500).into();
+        let mut chunks = chunks_of::<64>(&data);
+        // reorder + inject duplicates mid-stream (not after the final chunk, which would just
+        // start a fresh, TTL-evicted pending entry — a late retransmit, not a reassembly bug).
+        chunks.reverse();
+        let dup = chunks[chunks.len() / 2].clone();
+        chunks.insert(1, dup.clone());
+        chunks.insert(chunks.len() / 3, dup);
 
-        cl.handle(expired.clone());
-        assert_eq!(cl.as_vec().len(), 2);
-
-        cl.handle(expired.clone());
-        assert_eq!(cl.as_vec().len(), 2);
-
-        cl.handle(regular.clone());
-        assert_eq!(cl.as_vec().len(), 3);
-
-        cl.handle(regular.clone());
-        assert_eq!(cl.as_vec().len(), 4);
-
-        cl.handle(expired);
-        assert_eq!(cl.as_vec().len(), 4);
-
-        cl.handle(regular.clone());
-        assert_eq!(cl.as_vec().len(), 5);
-
-        cl.handle(regular);
-        assert_eq!(cl.as_vec().len(), 6);
+        let mut r = ChunkReassembler::new();
+        let mut out = None;
+        for c in chunks {
+            out = r.handle(c).or(out);
+        }
+        assert_eq!(out.unwrap(), data);
+        assert_eq!(r.pending_count(), 0);
     }
 }
