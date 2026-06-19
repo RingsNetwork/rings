@@ -1,14 +1,16 @@
 name: Release Build
 
-# Reusable build matrix shared by `Auto Release` and `QACI`, so the PR path compiles the exact
-# same release targets and a release-only build failure (e.g. static-musl C++ linking) can't
-# pass PR CI.
+# Reusable build matrix shared by `Auto Release` and `QACI`, so the PR path builds the exact same
+# release targets and a release-only build failure (static-musl C++ linking, or the browser
+# `wasm-pack`/`tsc`/`npm pack` path) can't pass PR CI and then break Auto Release.
 #
-# Separation of concerns:
-#   - The `cargo build` of the release targets always runs (this is the part a PR must verify).
-#   - Packaging (zip / npm pack), version naming and artifact upload only run when
-#     `publish_artifacts` is true — i.e. from `Auto Release`. **PR CI never versions, packages,
-#     or publishes.** Versioning and the GitHub Release itself live entirely in `auto-release.yml`.
+# Separation of concerns — every release target is *built* on both paths; only versioned artifact
+# naming + upload are release-only (gated by `publish_artifacts`):
+#   - Native targets: `cargo build` always runs; the `zip` rename + upload are gated.
+#   - Browser target: `npm pack` always runs (it triggers the root `prepare`:
+#     `wasm-pack`/`dist`/`tsc`); only the versioned `mv` rename + upload are gated.
+# So PR CI builds everything but never versions or uploads release artifacts; versioning and the
+# GitHub Release itself live entirely in `auto-release.yml`.
 on:
   workflow_call:
     inputs:
@@ -18,7 +20,7 @@ on:
         type: string
         default: ci
       publish_artifacts:
-        description: Package and upload the built binaries as artifacts (release only).
+        description: Version-name and upload the built binaries as release artifacts (release only).
         required: false
         type: boolean
         default: false
