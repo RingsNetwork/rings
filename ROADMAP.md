@@ -48,8 +48,7 @@ The substrate both layers build on:
 - Connection resilience / optimistic send on the overlay.
 
 **Planned**
-- Server-less bootstrapping: decentralized peer discovery that reduces reliance on seed nodes
-  and external STUN.
+- Decentralized peer discovery / bootstrapping.
 - Richer routing primitives over the extension layer (pub/sub, service discovery as protocols).
 
 ---
