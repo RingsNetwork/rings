@@ -146,11 +146,10 @@ jobs:
           path: rings-${{ inputs.version }}-${{ steps.target.outputs.target }}.zip
           retention-days: 1
 
-  # The browser artifact is produced by `npm pack` (packaging, not a compile), and wasm
-  # compilation is already covered on PRs by QACI's `build_wasm` job — so this only runs when
-  # actually publishing a release.
+  # `npm pack` runs the root `prepare` script (`wasm-pack build … --features browser_default`,
+  # `dist` assembly, `tsc`) — a real release build path that QACI's cargo-wasm jobs do NOT
+  # exercise. So build it on PRs too; only the versioned rename + upload are release-only.
   build_browser:
-    if: ${{ inputs.publish_artifacts }}
     name: build browser version binary
     timeout-minutes: 60
     runs-on: "ubuntu-latest"
@@ -203,9 +202,14 @@ jobs:
       - name: Build
         run: |
           npm install && npm pack
+
+      - name: Package
+        if: ${{ inputs.publish_artifacts }}
+        run: |
           mv ringsnetwork-rings-node-*.tgz rings-${{ inputs.version }}-${{ steps.target.outputs.target }}.tgz
 
       - uses: actions/upload-artifact@v4
+        if: ${{ inputs.publish_artifacts }}
         name: Upload artifacts
         with:
           name: rings-${{ inputs.version }}-${{ steps.target.outputs.target }}
