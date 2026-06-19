@@ -398,6 +398,10 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     );
     println!("Did: {}", processor.swarm.did());
     let provider = Arc::new(Provider::from_processor(processor.clone()));
+    // The relay is an opt-in extension owning its own engine; install it so the daemon can
+    // serve TCP/UDP tunnels. The handle is unused server-side — the engine lives on inside the
+    // registered interpreters.
+    rings_node::extension::protocols::relay::RelayHandle::install(&provider.extensions())?;
     // SNARK is a namespaced protocol now; register it so the daemon can prove/verify.
     #[cfg(feature = "snark")]
     rings_node::extension::snark::SNARKBehaviour::default().register(provider.as_ref())?;

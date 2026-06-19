@@ -129,6 +129,8 @@ impl Provider {
             )
             .await?;
 
+            crate::extension::protocols::relay::RelayHandle::install(&provider.extensions())
+                .expect("install relay");
             provider
                 .set_backend()
                 .expect("Failed on set swarm callback");
@@ -179,6 +181,8 @@ impl Provider {
             )
             .await
             .map_err(JsError::from)?;
+            crate::extension::protocols::relay::RelayHandle::install(&provider.extensions())
+                .expect("install relay");
             provider
                 .set_backend()
                 .expect("Failed on set swarm callback");

@@ -17,6 +17,7 @@ use rings_core::dht::Did;
 use rings_core::ecc::SecretKey;
 use rings_core::session::SessionSk;
 use rings_core::storage::MemStorage;
+use rings_node::extension::protocols::relay::RelayHandle;
 use rings_node::processor::Processor;
 use rings_node::processor::ProcessorBuilder;
 use rings_node::processor::ProcessorConfig;
@@ -30,11 +31,12 @@ pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 /// Build a fresh in-memory node and start its message loop.
 ///
-/// `set_backend()` installs the extension backend so inbound overlay envelopes are
-/// dispatched to the protocol registry; the TCP/UDP relay protocols are registered by
-/// `Provider::from_processor`. Returns the processor (for the handshake) and the
-/// provider (the uniform relay facade).
-pub async fn spawn_node() -> (Arc<Processor>, Arc<Provider>) {
+/// The relay is an opt-in extension that owns its engine, so we install it explicitly
+/// (`RelayHandle::install`) rather than baking it into the provider; `set_backend()` then
+/// installs the extension backend so inbound overlay envelopes reach the protocol registry.
+/// Returns the processor (for the handshake), the provider (generic node capabilities), and
+/// the relay handle (open tunnels / register services).
+pub async fn spawn_node() -> (Arc<Processor>, Arc<Provider>, RelayHandle) {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).expect("session sk");
     let config = ProcessorConfig::new(
@@ -51,12 +53,13 @@ pub async fn spawn_node() -> (Arc<Processor>, Arc<Provider>) {
             .expect("build processor"),
     );
     let provider = Arc::new(Provider::from_processor(processor.clone()));
+    let relay = RelayHandle::install(&provider.extensions()).expect("install relay");
     provider.set_backend().expect("install backend");
 
     let listening = processor.clone();
     tokio::spawn(async move { listening.listen().await });
 
-    (processor, provider)
+    (processor, provider, relay)
 }
 
 /// Establish an overlay link between two nodes via the offer/answer handshake, then
@@ -142,19 +145,17 @@ pub async fn tcp_round_trip(request: &[u8]) -> Result<Vec<u8>> {
     use tokio::io::AsyncReadExt;
     use tokio::io::AsyncWriteExt;
 
-    let (server_p, server) = spawn_node().await;
-    let (client_p, client) = spawn_node().await;
+    let (server_p, _server, server_relay) = spawn_node().await;
+    let (client_p, _client, client_relay) = spawn_node().await;
     connect(&client_p, &server_p).await?;
 
     let echo_addr = spawn_tcp_echo().await;
-    server
-        .relay()
+    server_relay
         .register_tcp_service("echo".to_string(), echo_addr)
         .await?;
 
     let tunnel_addr = free_local_addr().await;
-    client
-        .relay()
+    client_relay
         .open_tcp_tunnel(tunnel_addr, server_p.swarm.did(), "echo".to_string())
         .await?;
     // Give the tunnel listener a moment to bind.
@@ -178,8 +179,8 @@ pub async fn relay_http_get(target: &str, request: &[u8]) -> Result<Vec<u8>> {
     use tokio::io::AsyncReadExt;
     use tokio::io::AsyncWriteExt;
 
-    let (server_p, server) = spawn_node().await;
-    let (client_p, client) = spawn_node().await;
+    let (server_p, _server, server_relay) = spawn_node().await;
+    let (client_p, _client, client_relay) = spawn_node().await;
     connect(&client_p, &server_p).await?;
 
     // B's exit service → the external host (resolved to a socket address).
@@ -187,14 +188,12 @@ pub async fn relay_http_get(target: &str, request: &[u8]) -> Result<Vec<u8>> {
         .await?
         .next()
         .ok_or("could not resolve target host")?;
-    server
-        .relay()
+    server_relay
         .register_tcp_service("web".to_string(), target_addr)
         .await?;
 
     let tunnel_addr = free_local_addr().await;
-    client
-        .relay()
+    client_relay
         .open_tcp_tunnel(tunnel_addr, server_p.swarm.did(), "web".to_string())
         .await?;
 
@@ -220,19 +219,17 @@ pub async fn relay_http_get(target: &str, request: &[u8]) -> Result<Vec<u8>> {
 
 /// Run the full UDP relay round-trip and return what the relay echoed back.
 pub async fn udp_round_trip(request: &[u8]) -> Result<Vec<u8>> {
-    let (server_p, server) = spawn_node().await;
-    let (client_p, client) = spawn_node().await;
+    let (server_p, _server, server_relay) = spawn_node().await;
+    let (client_p, _client, client_relay) = spawn_node().await;
     connect(&client_p, &server_p).await?;
 
     let echo_addr = spawn_udp_echo().await;
-    server
-        .relay()
+    server_relay
         .register_udp_service("echo".to_string(), echo_addr)
         .await?;
 
     let tunnel_addr = free_local_addr().await;
-    client
-        .relay()
+    client_relay
         .open_udp_tunnel(tunnel_addr, server_p.swarm.did(), "echo".to_string())
         .await?;
     tokio::time::sleep(Duration::from_millis(300)).await;

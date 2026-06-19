@@ -37,10 +37,6 @@ pub struct Provider {
     processor: Arc<Processor>,
     handler: InternalRpcHandler,
     extensions: crate::extension::ext::Extensions,
-    /// Client-side handle to the relay extension (open tunnels / register local services).
-    /// The relay owns its own engine; the provider only holds this handle to hand out.
-    #[cfg(any(feature = "node", feature = "browser"))]
-    relay: crate::extension::protocols::relay::RelayHandle,
 }
 
 /// Async signer, without Send required
@@ -65,15 +61,10 @@ impl Provider {
     /// Create provider from processor directly
     pub fn from_processor(processor: Arc<Processor>) -> Self {
         let extensions = crate::extension::ext::Extensions::new(processor.clone());
-        #[cfg(any(feature = "node", feature = "browser"))]
-        let relay = crate::extension::protocols::register_builtins(&extensions)
-            .expect("register builtins on a fresh registry");
         Self {
             processor,
             handler: InternalRpcHandler,
             extensions,
-            #[cfg(any(feature = "node", feature = "browser"))]
-            relay,
         }
     }
 
@@ -101,13 +92,6 @@ impl Provider {
             + 'static,
     {
         self.extensions.register(protocol, interpret)
-    }
-
-    /// The relay extension's client handle — open tunnels and register local services. The
-    /// relay owns its engine and its own surface; the provider only hands the handle out.
-    #[cfg(any(feature = "node", feature = "browser"))]
-    pub fn relay(&self) -> crate::extension::protocols::relay::RelayHandle {
-        self.relay.clone()
     }
 
     /// Send a namespaced payload to a peer. This is the uniform upper-layer send — a core
@@ -138,15 +122,11 @@ impl Provider {
         let processor = Arc::new(processor_builder.build()?);
 
         let extensions = crate::extension::ext::Extensions::new(processor.clone());
-        #[cfg(any(feature = "node", feature = "browser"))]
-        let relay = crate::extension::protocols::register_builtins(&extensions)?;
 
         Ok(Provider {
             processor,
             handler: InternalRpcHandler,
             extensions,
-            #[cfg(any(feature = "node", feature = "browser"))]
-            relay,
         })
     }
 

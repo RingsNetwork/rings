@@ -544,10 +544,10 @@ impl Interpret for WtRelay {
 // ── Client-side relay handle ──────────────────────────────────────────────────────────
 
 /// Client-facing handle to the relay extension's live engine: open local tunnels and register
-/// local services. This is the relay extension's *own* surface — the generic
-/// [`Provider`](crate::provider::Provider) merely hands one out (`Provider::relay`); it does
-/// not implement relaying. Cloneable; every clone drives the same shared engine and pure
-/// [`Relay`] state.
+/// local services. This is the relay extension's *own* surface — the relay owns its engine and
+/// installs itself ([`install`](RelayHandle::install)), so nothing about it leaks into the
+/// generic [`Provider`](crate::provider::Provider) (the same way SNARK registers itself).
+/// Cloneable; every clone drives the same shared engine and pure [`Relay`] state.
 #[cfg(feature = "node")]
 #[derive(Clone)]
 pub struct RelayHandle {
@@ -557,6 +557,17 @@ pub struct RelayHandle {
 
 #[cfg(feature = "node")]
 impl RelayHandle {
+    /// Install the relay into an extension registry: register the TCP and UDP interpreters
+    /// over a fresh, relay-owned OS-socket engine and return the client handle. Errors if the
+    /// `tcp`/`udp` namespaces are already taken. Call once per node, after constructing the
+    /// provider — the relay is opt-in, not a `Provider` invariant.
+    pub fn install(extensions: &crate::extension::ext::Extensions) -> crate::error::Result<Self> {
+        let engine = Arc::new(crate::extension::transport::engine::TransportSessions::new());
+        extensions.register(Relay::tcp(HashMap::new()), NativeRelay::new(engine.clone()))?;
+        extensions.register(Relay::udp(HashMap::new()), NativeRelay::new(engine.clone()))?;
+        Ok(Self::new(engine, extensions.core()))
+    }
+
     /// Bind the handle over a shared engine and capability core.
     pub fn new(
         engine: Arc<crate::extension::transport::engine::TransportSessions>,
@@ -656,6 +667,17 @@ pub struct RelayHandle {
 
 #[cfg(feature = "browser")]
 impl RelayHandle {
+    /// Install the browser relay into an extension registry: register the TCP and UDP
+    /// interpreters over a fresh, relay-owned WebTransport engine and return the client handle.
+    /// Errors if the `tcp`/`udp` namespaces are already taken. Call once per node, after
+    /// constructing the provider — the relay is opt-in, not a `Provider` invariant.
+    pub fn install(extensions: &crate::extension::ext::Extensions) -> crate::error::Result<Self> {
+        let engine = Arc::new(crate::extension::transport::wt::WtSessions::new());
+        extensions.register(Relay::tcp(HashMap::new()), WtRelay::new(engine.clone()))?;
+        extensions.register(Relay::udp(HashMap::new()), WtRelay::new(engine))?;
+        Ok(Self::new(extensions.core()))
+    }
+
     /// Bind the handle over the capability core. (The browser relay reaches its WebTransport
     /// engine only through registered effects, so the handle needs no direct engine reference.)
     pub fn new(core: Core) -> Self {
