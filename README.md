@@ -6,10 +6,10 @@
 Rings Network
 ===============
 
-[![rings-node](https://github.com/RingsNetwork/rings-node/actions/workflows/auto-release.yml/badge.svg)](https://github.com/RingsNetwork/rings-node/actions/workflows/auto-release.yml)
+[![rings-node](https://github.com/RingsNetwork/rings/actions/workflows/auto-release.yml/badge.svg)](https://github.com/RingsNetwork/rings/actions/workflows/auto-release.yml)
 [![cargo](https://img.shields.io/crates/v/rings-node.svg)](https://crates.io/crates/rings-node)
 [![docs](https://docs.rs/rings-node/badge.svg)](https://docs.rs/rings-node/latest/rings_node/)
-![GitHub](https://img.shields.io/github/license/RingsNetwork/rings-node)
+![GitHub](https://img.shields.io/github/license/RingsNetwork/rings)
 [![Sponsor](https://img.shields.io/badge/Sponsor-RingsNetwork-ea4aaa?logo=githubsponsors)](https://github.com/sponsors/RingsNetwork)
 
 The Rings Network aimed at creating a fully decentralized network. It is built upon technologies such as WebRTC, WASM (WebAssembly), and Chord DHT (Distributed Hash Table), enabling direct connections between browsers.
