@@ -47,6 +47,7 @@ pub use registry::Core;
 pub use registry::DynHandler;
 pub use registry::Extensions;
 pub use registry::Handler;
+pub use registry::Scope;
 
 /// Auto-trait bound that is `Send + Sync` on native and empty on browser.
 ///

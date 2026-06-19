@@ -62,7 +62,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::Error;
 use crate::error::Result;
-use crate::extension::ext::Core;
+use crate::extension::ext::Scope;
 use crate::extension::protocols::relay::RelayCommand;
 use crate::extension::transport::Frame;
 use crate::extension::transport::Initiator;
@@ -148,12 +148,12 @@ impl TransportSessions {
     /// `Frame::Close` is sent and the session removed.
     pub async fn connect(
         self: Arc<Self>,
-        core: Core,
+        scope: Scope,
         key: SessionKey,
         addr: SocketAddr,
         kind: TransportKind,
     ) {
-        let task = RelayTask::register(self.clone(), core, key);
+        let task = RelayTask::register(self.clone(), scope, key);
         tokio::spawn(async move {
             match kind {
                 TransportKind::Tcp => {
@@ -174,22 +174,15 @@ impl TransportSessions {
     /// source assign a session, send `Frame::Open{session, service}`, and relay it.
     pub async fn listen(
         self: Arc<Self>,
-        core: Core,
+        scope: Scope,
         local_addr: SocketAddr,
         peer: Did,
         service: String,
-        namespace: String,
         kind: TransportKind,
     ) {
         match kind {
-            TransportKind::Tcp => {
-                self.listen_tcp(core, local_addr, peer, service, namespace)
-                    .await
-            }
-            TransportKind::Udp => {
-                self.listen_udp(core, local_addr, peer, service, namespace)
-                    .await
-            }
+            TransportKind::Tcp => self.listen_tcp(scope, local_addr, peer, service).await,
+            TransportKind::Udp => self.listen_udp(scope, local_addr, peer, service).await,
         }
     }
 
@@ -211,9 +204,9 @@ impl TransportSessions {
     /// Fully close and drop the **current** session for `key`, then feed the teardown back to
     /// the pure protocol as an `Untrack`. Used for a peer `Close` (the reducer already removed
     /// the key, so the current handle is the one to drop). Injects exactly once.
-    pub async fn close(&self, core: &Core, key: &SessionKey) {
+    pub async fn close(&self, scope: &Scope, key: &SessionKey) {
         let removed = self.map.lock().ok().and_then(|mut map| map.remove(key));
-        self.finish_close(core, key, removed).await;
+        self.finish_close(scope, key, removed).await;
     }
 
     /// Close a session **only if** its handle still has `generation` — so a slow old relay
@@ -221,21 +214,21 @@ impl TransportSessions {
     /// whether it was the current owner (and thus removed it); a stale task gets `false` and
     /// must therefore *also* not send the peer a `Close` (which would tear down the peer's
     /// reused session).
-    async fn close_if_current(&self, core: &Core, key: &SessionKey, generation: u64) -> bool {
+    async fn close_if_current(&self, scope: &Scope, key: &SessionKey, generation: u64) -> bool {
         let removed = self.map.lock().ok().and_then(|mut map| {
             let current = map.get(key).map(|h| h.generation);
             (current == Some(generation))
                 .then(|| map.remove(key))
                 .flatten()
         });
-        self.finish_close(core, key, removed).await
+        self.finish_close(scope, key, removed).await
     }
 
     /// Shared teardown tail: cancel the task, drop the UDP cache entry, and `Untrack` — but
     /// only if a handle was actually removed (exactly-once). Returns whether it removed one.
     async fn finish_close(
         &self,
-        core: &Core,
+        scope: &Scope,
         key: &SessionKey,
         removed: Option<SessionHandle>,
     ) -> bool {
@@ -248,7 +241,7 @@ impl TransportSessions {
                 flows.remove(&src);
             }
         }
-        inject_untrack(core, key).await;
+        inject_untrack(scope, key).await;
         true
     }
 
@@ -258,7 +251,7 @@ impl TransportSessions {
     /// the raw accept and now executes the core's decision.
     pub async fn bind_accepted(
         self: Arc<Self>,
-        core: Core,
+        scope: Scope,
         token: u64,
         key: SessionKey,
         service: String,
@@ -268,8 +261,8 @@ impl TransportSessions {
         };
         match pending {
             Pending::Tcp(stream) => {
-                let task = RelayTask::register(self.clone(), core.clone(), key.clone());
-                if open(&core, &key, service.as_str()).await.is_err() {
+                let task = RelayTask::register(self.clone(), scope.clone(), key.clone());
+                if open(&scope, &key, service.as_str()).await.is_err() {
                     task.refuse().await;
                     return;
                 }
@@ -281,13 +274,13 @@ impl TransportSessions {
                     flows.insert(src, key.clone());
                 }
                 udp::spawn_udp_sendto(socket, src, outbound_rx, cancel);
-                if open(&core, &key, service.as_str()).await.is_err() {
-                    self.close_if_current(&core, &key, generation).await;
+                if open(&scope, &key, service.as_str()).await.is_err() {
+                    self.close_if_current(&scope, &key, generation).await;
                     return;
                 }
                 // Forward the first datagram that triggered this flow.
                 let from_opener = opened_by_us(&key);
-                let _ = send_frame(&core, key.peer, key.namespace.as_str(), Frame::Data {
+                let _ = send_frame(&scope, key.peer, Frame::Data {
                     session: key.session,
                     from_opener,
                     bytes: first,
@@ -376,7 +369,7 @@ impl TransportSessions {
 /// task signatures to `(task, socket)`.
 struct RelayTask {
     sessions: Arc<TransportSessions>,
-    core: Core,
+    scope: Scope,
     key: SessionKey,
     outbound_rx: mpsc::Receiver<Outbound>,
     cancel: CancellationToken,
@@ -385,11 +378,11 @@ struct RelayTask {
 
 impl RelayTask {
     /// Register a fresh session channel on the engine and capture the routing identity.
-    fn register(sessions: Arc<TransportSessions>, core: Core, key: SessionKey) -> Self {
+    fn register(sessions: Arc<TransportSessions>, scope: Scope, key: SessionKey) -> Self {
         let (outbound_rx, cancel, generation) = sessions.register(key.clone(), None);
         Self {
             sessions,
-            core,
+            scope,
             key,
             outbound_rx,
             cancel,
@@ -402,18 +395,13 @@ impl RelayTask {
     async fn refuse(self) {
         if self
             .sessions
-            .close_if_current(&self.core, &self.key, self.generation)
+            .close_if_current(&self.scope, &self.key, self.generation)
             .await
         {
-            let _ = send_frame(
-                &self.core,
-                self.key.peer,
-                self.key.namespace.as_str(),
-                Frame::Close {
-                    session: self.key.session,
-                    from_opener: opened_by_us(&self.key),
-                },
-            )
+            let _ = send_frame(&self.scope, self.key.peer, Frame::Close {
+                session: self.key.session,
+                from_opener: opened_by_us(&self.key),
+            })
             .await;
         }
     }
@@ -425,47 +413,44 @@ fn opened_by_us(key: &SessionKey) -> bool {
 }
 
 /// Send `Frame::Open` to the session's peer (client side, on a new local connection/flow).
-async fn open(core: &Core, key: &SessionKey, service: &str) -> Result<()> {
-    send_frame(core, key.peer, key.namespace.as_str(), Frame::Open {
+async fn open(scope: &Scope, key: &SessionKey, service: &str) -> Result<()> {
+    send_frame(scope, key.peer, Frame::Open {
         session: key.session,
         service: service.to_string(),
     })
     .await
 }
 
-/// Send a [`Frame`] to `peer` under `namespace` over the overlay.
-async fn send_frame(core: &Core, peer: Did, namespace: &str, frame: Frame) -> Result<()> {
+/// Send a [`Frame`] to `peer` over the overlay, under the scope's own namespace.
+async fn send_frame(scope: &Scope, peer: Did, frame: Frame) -> Result<()> {
     let payload = bincode::serialize(&frame).map_err(|_| Error::EncodeError)?;
-    core.send(peer, namespace, Bytes::from(payload)).await
+    scope.send(peer, Bytes::from(payload)).await
 }
 
 /// Report a client-side accept to the pure relay (which mints the session id and replies
 /// with `OpenAccepted`). The engine passes only its local `token` — it picks no identity.
-async fn inject_accepted(core: &Core, token: u64, peer: Did, namespace: &str, service: String) {
+async fn inject_accepted(scope: &Scope, token: u64, peer: Did, service: String) {
     let command = RelayCommand::<SocketAddr>::Accepted {
         token,
         peer,
         service,
     };
     if let Ok(bytes) = bincode::serialize(&command) {
-        let _ = core.inject(namespace, Bytes::from(bytes)).await;
+        let _ = scope.inject(Bytes::from(bytes)).await;
     }
 }
 
 /// Feed a teardown back to the pure relay so it removes the session from `State.sessions`.
 /// The engine has already dropped the live handle, so a failed inject means the reducer may
 /// still list a now-dead session — surface it rather than silently diverging.
-async fn inject_untrack(core: &Core, key: &SessionKey) {
+async fn inject_untrack(scope: &Scope, key: &SessionKey) {
     let command = RelayCommand::<SocketAddr>::Untrack {
         peer: key.peer,
         session: key.session,
         initiator: key.initiator,
     };
     if let Ok(bytes) = bincode::serialize(&command) {
-        if let Err(e) = core
-            .inject(key.namespace.as_str(), Bytes::from(bytes))
-            .await
-        {
+        if let Err(e) = scope.inject(Bytes::from(bytes)).await {
             tracing::warn!(
                 "relay Untrack inject failed for {key:?}: {e:?}; pure state may still list \
                  this (now dropped) session"

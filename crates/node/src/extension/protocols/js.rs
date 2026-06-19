@@ -10,8 +10,12 @@
 //!   handler : (Ctx, Event) → { state, effects }
 //!     Ctx    = { did: string, state: any }
 //!     Event  = { from: string, payload: Uint8Array }
-//!     effects: Array<{ to: string, namespace: string, payload: Uint8Array }>
+//!     effects: Array<{ to: string, payload: Uint8Array }>
 //! ```
+//!
+//! Effects are namespace-scoped: a handler's `send` always goes out under the protocol's own
+//! namespace (the one it was registered on via `provider.on(...)`), so a JS extension cannot
+//! address another namespace — there is no `namespace` field on an effect.
 
 use std::str::FromStr;
 
@@ -24,19 +28,18 @@ use js_sys::Uint8Array;
 use rings_core::dht::Did;
 use wasm_bindgen::JsValue;
 
-use crate::extension::ext::Core;
 use crate::extension::ext::Ctx;
-use crate::extension::ext::Inbound;
 use crate::extension::ext::Interpret;
 use crate::extension::ext::Protocol;
 use crate::extension::ext::Reject;
+use crate::extension::ext::Scope;
 use crate::extension::ext::Transition;
 use crate::extension::ext::Wire;
 
-/// A JS handler effect: send `payload` to `to` under `namespace` over the overlay.
+/// A JS handler effect: send `payload` to `to` over the overlay, under the protocol's own
+/// namespace (the scope decides the namespace — a handler cannot choose another).
 pub struct JsSend {
     to: Did,
-    namespace: String,
     payload: Bytes,
 }
 
@@ -97,9 +100,8 @@ pub struct JsShell;
 impl Interpret for JsShell {
     type Effect = JsSend;
 
-    async fn run(&self, core: &Core, effect: JsSend) -> crate::error::Result<Vec<Inbound>> {
-        core.send(effect.to, effect.namespace.as_str(), effect.payload)
-            .await?;
+    async fn run(&self, scope: &Scope, effect: JsSend) -> crate::error::Result<Vec<Bytes>> {
+        scope.send(effect.to, effect.payload).await?;
         Ok(Vec::new())
     }
 }
@@ -155,12 +157,10 @@ fn parse_effects(value: JsValue) -> Result<Vec<JsSend>, JsValue> {
         let to = string_field(item.as_ref(), "to")?;
         let to = Did::from_str(to.as_str())
             .map_err(|_| JsValue::from_str("effect.to is not a valid did"))?;
-        let namespace = string_field(item.as_ref(), "namespace")?;
         let payload_value = Reflect::get(item.as_ref(), JsValue::from_str("payload").as_ref())?;
         let payload = Uint8Array::new(payload_value.as_ref()).to_vec();
         effects.push(JsSend {
             to,
-            namespace,
             payload: Bytes::from(payload),
         });
     }

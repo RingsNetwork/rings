@@ -18,7 +18,7 @@ use super::Pending;
 use super::RelayTask;
 use super::TransportSessions;
 use super::UDP_BUF;
-use crate::extension::ext::Core;
+use crate::extension::ext::Scope;
 use crate::extension::transport::Frame;
 
 impl TransportSessions {
@@ -30,11 +30,10 @@ impl TransportSessions {
     /// forwards that first datagram. The listener picks no identity.
     pub(super) async fn listen_udp(
         self: Arc<Self>,
-        core: Core,
+        scope: Scope,
         local_addr: SocketAddr,
         peer: Did,
         service: String,
-        namespace: String,
     ) {
         let socket = match UdpSocket::bind(local_addr).await {
             Ok(socket) => Arc::new(socket),
@@ -51,16 +50,11 @@ impl TransportSessions {
                         let bytes = Bytes::copy_from_slice(buf.get(..n).unwrap_or_default());
                         match self.udp_flow(&src) {
                             Some(key) => {
-                                let _ = send_frame(
-                                    &core,
-                                    key.peer,
-                                    key.namespace.as_str(),
-                                    Frame::Data {
-                                        session: key.session,
-                                        from_opener: super::opened_by_us(&key),
-                                        bytes,
-                                    },
-                                )
+                                let _ = send_frame(&scope, key.peer, Frame::Data {
+                                    session: key.session,
+                                    from_opener: super::opened_by_us(&key),
+                                    bytes,
+                                })
                                 .await;
                             }
                             None => {
@@ -69,14 +63,7 @@ impl TransportSessions {
                                     src,
                                     first: bytes,
                                 }) {
-                                    inject_accepted(
-                                        &core,
-                                        token,
-                                        peer,
-                                        namespace.as_str(),
-                                        service.clone(),
-                                    )
-                                    .await;
+                                    inject_accepted(&scope, token, peer, service.clone()).await;
                                     // Drop the stashed flow if the round-trip didn't bind it.
                                     self.evict_pending(token);
                                 }
@@ -97,7 +84,7 @@ impl TransportSessions {
 pub(super) async fn relay_udp_connected(task: RelayTask, socket: UdpSocket) {
     let RelayTask {
         sessions,
-        core,
+        scope,
         key,
         mut outbound_rx,
         cancel,
@@ -105,7 +92,6 @@ pub(super) async fn relay_udp_connected(task: RelayTask, socket: UdpSocket) {
     } = task;
     let peer = key.peer;
     let session = key.session;
-    let namespace = key.namespace.clone();
     let from_opener = super::opened_by_us(&key);
     let mut buf = vec![0u8; UDP_BUF];
     loop {
@@ -115,7 +101,7 @@ pub(super) async fn relay_udp_connected(task: RelayTask, socket: UdpSocket) {
             received = socket.recv(buf.as_mut_slice()) => match received {
                 Ok(n) => {
                     let bytes = Bytes::copy_from_slice(buf.get(..n).unwrap_or_default());
-                    if send_frame(&core, peer, namespace.as_str(), Frame::Data {
+                    if send_frame(&scope, peer, Frame::Data {
                         session,
                         from_opener,
                         bytes,
@@ -137,8 +123,8 @@ pub(super) async fn relay_udp_connected(task: RelayTask, socket: UdpSocket) {
         }
     }
     // Only tell the peer if we were still the current owner (stale task stays silent).
-    if sessions.close_if_current(&core, &key, generation).await {
-        let _ = send_frame(&core, peer, namespace.as_str(), Frame::Close {
+    if sessions.close_if_current(&scope, &key, generation).await {
+        let _ = send_frame(&scope, peer, Frame::Close {
             session,
             from_opener,
         })

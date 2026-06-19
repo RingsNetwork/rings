@@ -1,16 +1,16 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use rings_core::dht::Did;
 use rings_core::ecc::SecretKey;
 use rings_core::session::SessionSkBuilder;
 use rings_core::storage::MemStorage;
-use rings_node::extension::ext::Core;
 use rings_node::extension::ext::Ctx;
-use rings_node::extension::ext::Inbound;
 use rings_node::extension::ext::Interpret;
 use rings_node::extension::ext::Protocol;
 use rings_node::extension::ext::Reject;
+use rings_node::extension::ext::Scope;
 use rings_node::extension::ext::Transition;
 use rings_node::extension::ext::Wire;
 use rings_node::logging::init_logging;
@@ -76,9 +76,9 @@ impl Interpret for ExampleShell {
 
     async fn run(
         &self,
-        _core: &Core,
+        _scope: &Scope,
         effect: ExampleEffect,
-    ) -> rings_node::error::Result<Vec<Inbound>> {
+    ) -> rings_node::error::Result<Vec<Bytes>> {
         match effect {
             ExampleEffect::Log(summary) => {
                 println!("<=== example protocol received {summary}");

@@ -19,7 +19,7 @@ use super::Pending;
 use super::RelayTask;
 use super::TransportSessions;
 use super::TCP_BUF;
-use crate::extension::ext::Core;
+use crate::extension::ext::Scope;
 use crate::extension::transport::Frame;
 
 impl TransportSessions {
@@ -29,11 +29,10 @@ impl TransportSessions {
     /// peer session and starts the relay loop. The listener itself decides nothing.
     pub(super) async fn listen_tcp(
         self: Arc<Self>,
-        core: Core,
+        scope: Scope,
         local_addr: SocketAddr,
         peer: Did,
         service: String,
-        namespace: String,
     ) {
         let listener = match TcpListener::bind(local_addr).await {
             Ok(listener) => listener,
@@ -49,8 +48,7 @@ impl TransportSessions {
                         let Some(token) = self.stash_pending(Pending::Tcp(stream)) else {
                             continue;
                         };
-                        inject_accepted(&core, token, peer, namespace.as_str(), service.clone())
-                            .await;
+                        inject_accepted(&scope, token, peer, service.clone()).await;
                         // If the round-trip didn't bind it (unknown namespace / reject / error),
                         // drop the stashed stream so it can't leak.
                         self.evict_pending(token);
@@ -69,7 +67,7 @@ impl TransportSessions {
 pub(super) async fn relay_tcp(task: RelayTask, stream: TcpStream) {
     let RelayTask {
         sessions,
-        core,
+        scope,
         key,
         mut outbound_rx,
         cancel,
@@ -77,21 +75,19 @@ pub(super) async fn relay_tcp(task: RelayTask, stream: TcpStream) {
     } = task;
     let peer = key.peer;
     let session = key.session;
-    let namespace = key.namespace.clone();
     let from_opener = super::opened_by_us(&key);
     let (mut local_read, mut local_write) = stream.into_split();
 
     // local → peer; clean EOF sends FIN, errors abort the whole session.
     let local_to_peer = {
-        let core = core.clone();
-        let namespace = namespace.clone();
+        let scope = scope.clone();
         let cancel = cancel.clone();
         async move {
             let mut buf = vec![0u8; TCP_BUF];
             loop {
                 match local_read.read(buf.as_mut_slice()).await {
                     Ok(0) => {
-                        let _ = send_frame(&core, peer, namespace.as_str(), Frame::Shutdown {
+                        let _ = send_frame(&scope, peer, Frame::Shutdown {
                             session,
                             from_opener,
                         })
@@ -100,7 +96,7 @@ pub(super) async fn relay_tcp(task: RelayTask, stream: TcpStream) {
                     }
                     Ok(n) => {
                         let bytes = Bytes::copy_from_slice(buf.get(..n).unwrap_or_default());
-                        if send_frame(&core, peer, namespace.as_str(), Frame::Data {
+                        if send_frame(&scope, peer, Frame::Data {
                             session,
                             from_opener,
                             bytes,
@@ -150,8 +146,8 @@ pub(super) async fn relay_tcp(task: RelayTask, stream: TcpStream) {
     // Teardown: drop *our* session instance (generation-checked, so we never delete a newer
     // reuse of the key) — which `Untrack`s it from the pure state. Only tell the peer if we
     // were still the current owner; a stale task must not Close the peer's reused session.
-    if sessions.close_if_current(&core, &key, generation).await {
-        let _ = send_frame(&core, peer, namespace.as_str(), Frame::Close {
+    if sessions.close_if_current(&scope, &key, generation).await {
+        let _ = send_frame(&scope, peer, Frame::Close {
             session,
             from_opener,
         })

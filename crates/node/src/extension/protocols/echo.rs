@@ -13,12 +13,11 @@
 use bytes::Bytes;
 use rings_core::dht::Did;
 
-use crate::extension::ext::Core;
 use crate::extension::ext::Ctx;
-use crate::extension::ext::Inbound;
 use crate::extension::ext::Interpret;
 use crate::extension::ext::Protocol;
 use crate::extension::ext::Reject;
+use crate::extension::ext::Scope;
 use crate::extension::ext::Transition;
 use crate::extension::ext::Wire;
 
@@ -89,10 +88,10 @@ pub struct EchoShell;
 impl Interpret for EchoShell {
     type Effect = EchoEffect;
 
-    async fn run(&self, core: &Core, effect: EchoEffect) -> crate::error::Result<Vec<Inbound>> {
+    async fn run(&self, scope: &Scope, effect: EchoEffect) -> crate::error::Result<Vec<Bytes>> {
         match effect {
             EchoEffect::Reply { to, payload } => {
-                core.send(to, NAMESPACE, payload).await?;
+                scope.send(to, payload).await?;
                 Ok(Vec::new())
             }
         }

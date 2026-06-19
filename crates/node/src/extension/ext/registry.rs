@@ -132,6 +132,47 @@ impl Core {
     }
 }
 
+/// A **namespace-scoped** capability handed to an [`Interpret`] shell — the effectful
+/// counterpart of the pure side's read-only [`Ctx`]. Every action is confined to the
+/// interpreter's own namespace: it may `send` to peers and self-`inject` only there, and it
+/// can neither reach another namespace nor forge a remote `from`. This is what keeps the
+/// capability honest: an extension shell cannot use the router as a generic
+/// inject-any-namespace bus (e.g. manufacture another extension's lifecycle events). Cloneable
+/// and `'static`, so a long-running engine task can keep a copy.
+#[derive(Clone)]
+pub struct Scope {
+    core: Core,
+    namespace: String,
+}
+
+impl Scope {
+    /// Confine `core` to `namespace`.
+    pub(crate) fn new(core: Core, namespace: String) -> Self {
+        Self { core, namespace }
+    }
+
+    /// This node's DID.
+    pub fn did(&self) -> Did {
+        self.core.did()
+    }
+
+    /// The namespace this scope is confined to.
+    pub fn namespace(&self) -> &str {
+        self.namespace.as_str()
+    }
+
+    /// Put a message on the overlay to `to`, under this interpreter's own namespace.
+    pub async fn send(&self, to: Did, payload: Bytes) -> Result<()> {
+        self.core.send(to, self.namespace.as_str(), payload).await
+    }
+
+    /// Self-inject `payload` back into this interpreter's **own** namespace (`from = this
+    /// node`) — the only re-entry an extension shell has into the router.
+    pub async fn inject(&self, payload: Bytes) -> Result<()> {
+        self.core.inject(self.namespace.as_str(), payload).await
+    }
+}
+
 /// Adapter binding a pure [`Protocol`] to its [`Interpret`] shell and owned state; erased to
 /// [`Handler`]. Protocol authors never write this.
 struct Runner<P: Protocol, I> {
@@ -186,10 +227,21 @@ where
             effects
         };
 
-        // Impure region (lock released): run the protocol's own effects via its interpreter.
+        // Impure region (lock released): run the protocol's own effects via its interpreter,
+        // handing it only a namespace-scoped capability. Each payload it returns is re-injected
+        // into *this* namespace with `from = this node` — the router fixes the provenance, so a
+        // shell cannot forge a target namespace or a remote `from`.
+        let namespace = self.protocol.namespace().to_string();
+        let scope = Scope::new(core.clone(), namespace.clone());
         let mut reinjected = Vec::new();
         for effect in effects {
-            reinjected.extend(self.interpret.run(core, effect).await?);
+            for payload in self.interpret.run(&scope, effect).await? {
+                reinjected.push(Inbound {
+                    namespace: namespace.clone(),
+                    from: core.did(),
+                    payload,
+                });
+            }
         }
         Ok(reinjected)
     }

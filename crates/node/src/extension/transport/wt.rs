@@ -38,7 +38,7 @@ use web_sys::WritableStreamDefaultWriter;
 
 use crate::error::Error;
 use crate::error::Result;
-use crate::extension::ext::Core;
+use crate::extension::ext::Scope;
 use crate::extension::protocols::relay::RelayCommand;
 use crate::extension::transport::Frame;
 use crate::extension::transport::Initiator;
@@ -109,7 +109,7 @@ impl WtSessions {
     /// is sent only when we are still the slot's owner.
     pub async fn connect(
         self: Arc<Self>,
-        core: Core,
+        scope: Scope,
         key: SessionKey,
         url: String,
         kind: TransportKind,
@@ -120,7 +120,7 @@ impl WtSessions {
                 // Promote to Ready iff still current; a peer Close during the handshake removed
                 // the slot, so a stale open must discard its transport and stay silent.
                 if self.promote(&key, generation, writer, transport.clone()) {
-                    self.spawn_read_loop(core, key, readable, generation);
+                    self.spawn_read_loop(scope, key, readable, generation);
                 } else {
                     transport.close();
                 }
@@ -129,8 +129,8 @@ impl WtSessions {
                 tracing::error!("WebTransport connect to {url} failed: {e:?}");
                 // Drop the opening slot and tell the peer — but only if we are still its owner
                 // (a peer Close during the handshake already tore it down and told the peer).
-                if self.close_if_current(&core, &key, generation).await {
-                    let _ = send_frame(&core, key.peer, key.namespace.as_str(), Frame::Close {
+                if self.close_if_current(&scope, &key, generation).await {
+                    let _ = send_frame(&scope, key.peer, Frame::Close {
                         session: key.session,
                         from_opener: matches!(key.initiator, Initiator::Local),
                     })
@@ -160,28 +160,28 @@ impl WtSessions {
 
     /// Close and drop the **current** session for `key` (peer `Close` path: the reducer
     /// already removed it). Injects `Untrack` exactly once — only on actual removal.
-    pub async fn close(&self, core: &Core, key: &SessionKey) {
+    pub async fn close(&self, scope: &Scope, key: &SessionKey) {
         let removed = self.map.lock().ok().and_then(|mut map| map.remove(key));
-        self.finish_close(core, key, removed).await;
+        self.finish_close(scope, key, removed).await;
     }
 
     /// Close a session **only if** its handle still has `generation` (ABA safety). Returns
     /// whether it removed it; a stale read loop gets `false` and must not peer-`Close` either.
-    async fn close_if_current(&self, core: &Core, key: &SessionKey, generation: u64) -> bool {
+    async fn close_if_current(&self, scope: &Scope, key: &SessionKey, generation: u64) -> bool {
         let removed = self.map.lock().ok().and_then(|mut map| {
             let current = map.get(key).map(|handle| handle.generation());
             (current == Some(generation))
                 .then(|| map.remove(key))
                 .flatten()
         });
-        self.finish_close(core, key, removed).await
+        self.finish_close(scope, key, removed).await
     }
 
     /// Shared teardown tail: close the WebTransport (only a `Ready` slot owns one) and
     /// `Untrack` — only if a handle was removed. Returns whether it removed one.
     async fn finish_close(
         &self,
-        core: &Core,
+        scope: &Scope,
         key: &SessionKey,
         removed: Option<SessionHandle>,
     ) -> bool {
@@ -191,7 +191,7 @@ impl WtSessions {
         if let SessionHandle::Ready { transport, .. } = handle {
             transport.close();
         }
-        inject_untrack(core, key).await;
+        inject_untrack(scope, key).await;
         true
     }
 
@@ -285,7 +285,7 @@ impl WtSessions {
     /// Spawn the local→peer read loop for `readable`.
     fn spawn_read_loop(
         self: &Arc<Self>,
-        core: Core,
+        scope: Scope,
         key: SessionKey,
         readable: ReadableStream,
         generation: u64,
@@ -293,7 +293,6 @@ impl WtSessions {
         let sessions = self.clone();
         spawn_local(async move {
             let peer = key.peer;
-            let namespace = key.namespace.clone();
             let session = key.session;
             let from_opener = matches!(key.initiator, Initiator::Local);
             let reader: ReadableStreamDefaultReader = match readable.get_reader().dyn_into() {
@@ -317,7 +316,7 @@ impl WtSessions {
                     Err(_) => break,
                 };
                 let bytes = Bytes::from(Uint8Array::new(&value).to_vec());
-                if send_frame(&core, peer, namespace.as_str(), Frame::Data {
+                if send_frame(&scope, peer, Frame::Data {
                     session,
                     from_opener,
                     bytes,
@@ -330,8 +329,8 @@ impl WtSessions {
             }
             // Generation-checked teardown: only Close the peer if we were still the current
             // owner, so a stale read loop never tears down a reopened session.
-            if sessions.close_if_current(&core, &key, generation).await {
-                let _ = send_frame(&core, peer, namespace.as_str(), Frame::Close {
+            if sessions.close_if_current(&scope, &key, generation).await {
+                let _ = send_frame(&scope, peer, Frame::Close {
                     session,
                     from_opener,
                 })
@@ -367,24 +366,21 @@ async fn open(
     Ok((transport, readable, writer))
 }
 
-/// Send a [`Frame`] to `peer` under `namespace` over the overlay.
-async fn send_frame(core: &Core, peer: Did, namespace: &str, frame: Frame) -> Result<()> {
+/// Send a [`Frame`] to `peer` over the overlay, under the scope's own namespace.
+async fn send_frame(scope: &Scope, peer: Did, frame: Frame) -> Result<()> {
     let payload = bincode::serialize(&frame).map_err(|_| Error::EncodeError)?;
-    core.send(peer, namespace, Bytes::from(payload)).await
+    scope.send(peer, Bytes::from(payload)).await
 }
 
 /// Feed a teardown back to the pure relay so it removes the session from `State.sessions`.
-async fn inject_untrack(core: &Core, key: &SessionKey) {
+async fn inject_untrack(scope: &Scope, key: &SessionKey) {
     let command = RelayCommand::<String>::Untrack {
         peer: key.peer,
         session: key.session,
         initiator: key.initiator,
     };
     if let Ok(bytes) = bincode::serialize(&command) {
-        if let Err(e) = core
-            .inject(key.namespace.as_str(), Bytes::from(bytes))
-            .await
-        {
+        if let Err(e) = scope.inject(Bytes::from(bytes)).await {
             tracing::warn!(
                 "relay Untrack inject failed for {key:?}: {e:?}; pure state may still list \
                  this (now dropped) session"

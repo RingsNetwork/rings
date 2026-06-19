@@ -49,14 +49,18 @@ pub struct Ctx<'a, S> {
 /// fresh inbound, re-decoded by the target namespace's protocol. `Inbound ≅ (Namespace,
 /// from, payload)` — the same shape the router takes from the wire, so re-injection and
 /// inbound delivery share one path.
+///
+/// The fields are `pub(crate)`: only the router constructs an `Inbound` (from an interpreter's
+/// scoped re-inject, with the namespace and `from` it controls), so an extension shell cannot
+/// fabricate one with an arbitrary namespace or a forged remote `from`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Inbound {
     /// Target protocol namespace.
-    pub namespace: String,
+    pub(crate) namespace: String,
     /// Sender to attribute the re-injected message to (`this node` for self-events).
-    pub from: Did,
+    pub(crate) from: Did,
     /// Payload bytes (re-decoded by the target protocol).
-    pub payload: Bytes,
+    pub(crate) payload: Bytes,
 }
 
 /// The output of a step: the next state and the protocol's own effects to run.

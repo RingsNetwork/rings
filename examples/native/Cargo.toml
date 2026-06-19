@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 async-trait = { workspace = true }
 base64 = "0.13"
+bytes = "1.2.1"
 rings-core = { workspace = true }
 rings-node = { workspace = true }
 rings-rpc = { workspace = true }

@@ -43,11 +43,11 @@ use serde::Serialize;
 
 use crate::extension::ext::Core;
 use crate::extension::ext::Ctx;
-use crate::extension::ext::Inbound;
 use crate::extension::ext::Interpret;
 use crate::extension::ext::MaybeSend;
 use crate::extension::ext::Protocol;
 use crate::extension::ext::Reject;
+use crate::extension::ext::Scope;
 use crate::extension::ext::Transition;
 use crate::extension::ext::Wire;
 use crate::extension::transport::Frame;
@@ -145,12 +145,12 @@ pub enum RelayEffect<T> {
         /// Target session.
         key: SessionKey,
     },
-    /// Reply a `Frame::Close` to a peer that opened an unknown service.
+    /// Reply a `Frame::Close` to a peer that opened an unknown service. The reply goes out under
+    /// the interpreter's own namespace (its [`Scope`]), so the effect carries no namespace of
+    /// its own.
     SendClose {
         /// Peer to reply to.
         to: Did,
-        /// Namespace to reply under.
-        namespace: String,
         /// Session id to close.
         session: SessionId,
         /// Whether *we* opened the session (false: the peer did).
@@ -344,7 +344,6 @@ fn step_frame<T: Clone>(
                 }
                 None => Transition::with(state.clone(), vec![RelayEffect::SendClose {
                     to: from,
-                    namespace: namespace.to_string(),
                     session,
                     // The peer opened it (unknown service); we did not.
                     from_opener: false,
@@ -437,14 +436,14 @@ impl Interpret for NativeRelay {
 
     async fn run(
         &self,
-        core: &Core,
+        scope: &Scope,
         effect: RelayEffect<std::net::SocketAddr>,
-    ) -> crate::error::Result<Vec<Inbound>> {
+    ) -> crate::error::Result<Vec<Bytes>> {
         match effect {
             RelayEffect::Connect { key, target, kind } => {
                 self.engine
                     .clone()
-                    .connect(core.clone(), key, target, kind)
+                    .connect(scope.clone(), key, target, kind)
                     .await;
             }
             RelayEffect::Write { key, bytes } => {
@@ -454,16 +453,14 @@ impl Interpret for NativeRelay {
                 self.engine.shutdown(&key).await;
             }
             RelayEffect::Close { key } => {
-                self.engine.close(core, &key).await;
+                self.engine.close(scope, &key).await;
             }
             RelayEffect::SendClose {
                 to,
-                namespace,
                 session,
                 from_opener,
             } => {
-                core.send(to, namespace.as_str(), close_frame(session, from_opener))
-                    .await?;
+                scope.send(to, close_frame(session, from_opener)).await?;
             }
             RelayEffect::OpenAccepted {
                 token,
@@ -472,7 +469,7 @@ impl Interpret for NativeRelay {
             } => {
                 self.engine
                     .clone()
-                    .bind_accepted(core.clone(), token, key, service)
+                    .bind_accepted(scope.clone(), token, key, service)
                     .await;
             }
         }
@@ -503,14 +500,14 @@ impl Interpret for WtRelay {
 
     async fn run(
         &self,
-        core: &Core,
+        scope: &Scope,
         effect: RelayEffect<String>,
-    ) -> crate::error::Result<Vec<Inbound>> {
+    ) -> crate::error::Result<Vec<Bytes>> {
         match effect {
             RelayEffect::Connect { key, target, kind } => {
                 self.engine
                     .clone()
-                    .connect(core.clone(), key, target, kind)
+                    .connect(scope.clone(), key, target, kind)
                     .await;
             }
             RelayEffect::Write { key, bytes } => {
@@ -520,16 +517,14 @@ impl Interpret for WtRelay {
                 self.engine.shutdown(&key).await;
             }
             RelayEffect::Close { key } => {
-                self.engine.close(core, &key).await;
+                self.engine.close(scope, &key).await;
             }
             RelayEffect::SendClose {
                 to,
-                namespace,
                 session,
                 from_opener,
             } => {
-                core.send(to, namespace.as_str(), close_frame(session, from_opener))
-                    .await?;
+                scope.send(to, close_frame(session, from_opener)).await?;
             }
             // The browser relay is server-side only (no local listener), so it never reports
             // an `Accepted` and thus never receives `OpenAccepted`.
@@ -611,18 +606,13 @@ impl RelayHandle {
         namespace: &str,
         kind: TransportKind,
     ) -> crate::error::Result<()> {
-        // Bind a local listener on the relay engine. Each accepted connection is reported back
-        // through the pure relay (`Accepted`), so `RelayState.sessions` stays the sole authority.
+        // Bind a local listener on the relay engine, scoped to this relay's namespace. Each
+        // accepted connection is reported back through the pure relay (`Accepted`), so
+        // `RelayState.sessions` stays the sole authority.
+        let scope = Scope::new(self.core.clone(), namespace.to_string());
         self.engine
             .clone()
-            .listen(
-                self.core.clone(),
-                local_addr,
-                peer,
-                service,
-                namespace.to_string(),
-                kind,
-            )
+            .listen(scope, local_addr, peer, service, kind)
             .await;
         Ok(())
     }
@@ -877,12 +867,10 @@ mod tests {
         match t.effects.as_slice() {
             [RelayEffect::SendClose {
                 to,
-                namespace,
                 session,
                 from_opener,
             }] => {
                 assert_eq!(*to, peer_a());
-                assert_eq!(namespace, super::TCP);
                 assert_eq!(*session, SessionId(7));
                 assert!(!from_opener, "we are not the opener of the peer's session");
             }

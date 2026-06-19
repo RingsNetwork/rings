@@ -18,12 +18,11 @@ use super::SNARKTaskManager;
 use super::TaskId;
 use super::NAMESPACE;
 use crate::error::Error;
-use crate::extension::ext::Core;
 use crate::extension::ext::Ctx;
-use crate::extension::ext::Inbound;
 use crate::extension::ext::Interpret;
 use crate::extension::ext::Protocol;
 use crate::extension::ext::Reject;
+use crate::extension::ext::Scope;
 use crate::extension::ext::Transition;
 use crate::extension::ext::Wire;
 use crate::extension::types::snark::SNARKProofTask;
@@ -172,14 +171,11 @@ impl SnarkShell {
         Self { manager }
     }
 
-    /// Re-inject a [`ComputeResult`] as a self-event for the pure `step`.
-    fn reinject(&self, core: &Core, result: &ComputeResult) -> crate::error::Result<Vec<Inbound>> {
+    /// Serialize a [`ComputeResult`] for re-injection as a self-event for the pure `step`. The
+    /// router re-delivers it to this same namespace with `from = this node`.
+    fn reinject(&self, result: &ComputeResult) -> crate::error::Result<Vec<Bytes>> {
         let payload = bincode::serialize(result).map_err(|_| Error::EncodeError)?;
-        Ok(vec![Inbound {
-            namespace: NAMESPACE.to_string(),
-            from: core.did(),
-            payload: Bytes::from(payload),
-        }])
+        Ok(vec![Bytes::from(payload)])
     }
 }
 
@@ -188,11 +184,11 @@ impl SnarkShell {
 impl Interpret for SnarkShell {
     type Effect = SnarkEffect;
 
-    async fn run(&self, core: &Core, effect: SnarkEffect) -> crate::error::Result<Vec<Inbound>> {
+    async fn run(&self, scope: &Scope, effect: SnarkEffect) -> crate::error::Result<Vec<Bytes>> {
         match effect {
             SnarkEffect::SendTask { to, msg } => {
                 let payload = bincode::serialize(&msg).map_err(|_| Error::EncodeError)?;
-                core.send(to, NAMESPACE, Bytes::from(payload)).await?;
+                scope.send(to, Bytes::from(payload)).await?;
                 Ok(Vec::new())
             }
             SnarkEffect::Prove {
@@ -201,7 +197,7 @@ impl Interpret for SnarkShell {
                 task,
             } => {
                 let verify_task = SNARKBehaviour::handle_snark_proof_task(task.as_ref())?;
-                self.reinject(core, &ComputeResult::Proved {
+                self.reinject(&ComputeResult::Proved {
                     task_id,
                     reply_to,
                     verify_task,
@@ -220,7 +216,7 @@ impl Interpret for SnarkShell {
                     SNARKBehaviour::handle_snark_verify_task(&verify_task, task.value())?;
                 drop(task);
                 self.manager.verified.insert(task_id, verified);
-                self.reinject(core, &ComputeResult::Verified { task_id })
+                self.reinject(&ComputeResult::Verified { task_id })
             }
         }
     }
