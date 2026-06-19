@@ -91,7 +91,7 @@ jobs:
 
       - name: Build
         run: |
-          cargo build --features node --no-default-features --release --target ${{ steps.target.outputs.target }}
+          cargo build -p rings-node --bin rings --features node --no-default-features --release --target ${{ steps.target.outputs.target }}
           zip -j rings-${{ needs.gen_version.outputs.version }}-${{ steps.target.outputs.target }}.zip ./target/${{ steps.target.outputs.target }}/release/rings
 
       - uses: actions/upload-artifact@v4
@@ -152,7 +152,7 @@ jobs:
 
       - name: Build
         run: |
-          cargo build --features node --no-default-features --release --target ${{ steps.target.outputs.target }}
+          cargo build -p rings-node --bin rings --features node --no-default-features --release --target ${{ steps.target.outputs.target }}
           zip -j rings-${{ needs.gen_version.outputs.version }}-${{ steps.target.outputs.target }}.zip ./target/${{ steps.target.outputs.target }}/release/rings
 
       - uses: actions/upload-artifact@v4
