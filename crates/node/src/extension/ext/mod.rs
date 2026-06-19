@@ -3,8 +3,8 @@
 //!
 //! Design: *functional core, imperative shell*. A protocol author writes only a **pure**
 //! state transition over its **own** typed events and effects; all IO is performed by the
-//! extension's own [`Interpret`] shell, which is handed the small core capability surface
-//! ([`Core`]).
+//! extension's own [`Interpret`] shell, which is handed a namespace-scoped capability
+//! ([`Scope`]) — `send`/`inject` confined to the interpreter's own namespace.
 //!
 //! Notation (used throughout the doc-comments here):
 //!
@@ -26,9 +26,10 @@
 //!
 //! - `envelope` — the wire [`Envelope`].
 //! - `protocol` — the pure core: [`Wire`]/[`Reject`] (decode boundary), [`Ctx`],
-//!   [`Inbound`], [`Transition`], and the [`Protocol`] trait.
+//!   `Inbound` (router-internal), [`Transition`], and the [`Protocol`] trait.
 //! - `interpret` — the per-extension imperative shell ([`Interpret`]).
-//! - `registry` — the capability [`Core`] + the namespace router ([`Extensions`], [`Handler`]).
+//! - `registry` — the scoped capability [`Scope`] handed to shells, plus the router-internal
+//!   `Core` / `Handler` and the namespace registry ([`Extensions`]).
 
 mod envelope;
 mod interpret;
@@ -38,15 +39,17 @@ mod registry;
 pub use envelope::Envelope;
 pub use interpret::Interpret;
 pub use protocol::Ctx;
-pub use protocol::Inbound;
+// Router internals — not part of the extension-author API (which is `Protocol` / `Interpret` /
+// `Scope` / `Transition` / …). Crate-visible only, so the old ambient `Core`/`Inbound` surface
+// cannot be used to bypass the scoped-capability boundary. `Handler`/`DynHandler` stay private
+// to `registry` (the erased router ABI; protocol authors never name them).
+pub(crate) use protocol::Inbound;
 pub use protocol::Protocol;
 pub use protocol::Reject;
 pub use protocol::Transition;
 pub use protocol::Wire;
-pub use registry::Core;
-pub use registry::DynHandler;
+pub(crate) use registry::Core;
 pub use registry::Extensions;
-pub use registry::Handler;
 pub use registry::Scope;
 
 /// Auto-trait bound that is `Send + Sync` on native and empty on browser.

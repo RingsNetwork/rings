@@ -416,14 +416,14 @@ pub(crate) fn close_frame(session: SessionId, from_opener: bool) -> Bytes {
 /// engine uses the namespace-scoped [`Scope`] capability for both overlay sends and lifecycle
 /// feedback (`Accepted`/`Untrack`), so the engine has no `Processor` of its own.
 #[cfg(feature = "node")]
-pub struct NativeRelay {
+pub(crate) struct NativeRelay {
     engine: Arc<crate::extension::transport::engine::TransportSessions>,
 }
 
 #[cfg(feature = "node")]
 impl NativeRelay {
     /// Build over a shared engine.
-    pub fn new(engine: Arc<crate::extension::transport::engine::TransportSessions>) -> Self {
+    pub(crate) fn new(engine: Arc<crate::extension::transport::engine::TransportSessions>) -> Self {
         Self { engine }
     }
 }
@@ -480,14 +480,14 @@ impl Interpret for NativeRelay {
 
 /// Browser relay interpreter: runs [`RelayEffect`]s over the WebTransport engine it owns.
 #[cfg(feature = "browser")]
-pub struct WtRelay {
+pub(crate) struct WtRelay {
     engine: Arc<crate::extension::transport::wt::WtSessions>,
 }
 
 #[cfg(feature = "browser")]
 impl WtRelay {
     /// Build over a shared WebTransport engine.
-    pub fn new(engine: Arc<crate::extension::transport::wt::WtSessions>) -> Self {
+    pub(crate) fn new(engine: Arc<crate::extension::transport::wt::WtSessions>) -> Self {
         Self { engine }
     }
 }

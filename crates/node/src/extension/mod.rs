@@ -24,8 +24,8 @@ use crate::provider::Provider;
 /// Backend handles inbound custom messages from the Swarm, routing each decoded
 /// [`Envelope`] to its namespace's protocol via the [`Extensions`] registry. The
 /// registry is shared with the [`Provider`], so protocols registered there are visible
-/// to inbound dispatch here. The capability [`Core`](ext::Core) is the only
-/// side-effecting boundary.
+/// to inbound dispatch here. Each protocol's interpreter does its IO through a
+/// namespace-scoped [`Scope`](ext::Scope); the underlying router capability is internal.
 pub struct Backend {
     extensions: Extensions,
 }

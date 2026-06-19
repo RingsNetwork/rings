@@ -122,7 +122,7 @@ enum Pending {
 ///   [`bind_accepted`](TransportSessions::bind_accepted) — a projection of the core's decision,
 ///   never an independent source of identity.
 #[derive(Default)]
-pub struct TransportSessions {
+pub(crate) struct TransportSessions {
     map: Mutex<HashMap<SessionKey, SessionHandle>>,
     tokens: AtomicU64,
     generations: AtomicU64,

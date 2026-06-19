@@ -53,10 +53,12 @@
 //! ops with an ω session; HTTP adds "one request → one response → close" session logic
 //! (expressible purely in `step`); UDP uses only the datagram ops with no session.
 
+// The relay's imperative resource tables are private to the relay interpreter — not a public
+// API. Reachable in-crate by the relay extension only.
 #[cfg(feature = "node")]
-pub mod engine;
+pub(crate) mod engine;
 #[cfg(feature = "browser")]
-pub mod wt;
+pub(crate) mod wt;
 
 use bytes::Bytes;
 use rings_core::dht::Did;

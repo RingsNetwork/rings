@@ -54,7 +54,7 @@ pub struct Ctx<'a, S> {
 /// scoped re-inject, with the namespace and `from` it controls), so an extension shell cannot
 /// fabricate one with an arbitrary namespace or a forged remote `from`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Inbound {
+pub(crate) struct Inbound {
     /// Target protocol namespace.
     pub(crate) namespace: String,
     /// Sender to attribute the re-injected message to (`this node` for self-events).

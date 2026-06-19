@@ -36,30 +36,28 @@ const MAX_FIXPOINT_STEPS: u32 = 1024;
 
 /// Type-erased handler stored in the registry: native is `Send + Sync`, browser not.
 #[cfg(not(feature = "browser"))]
-pub type DynHandler = dyn Handler + Send + Sync;
+pub(crate) type DynHandler = dyn Handler + Send + Sync;
 /// Type-erased handler stored in the registry.
 #[cfg(feature = "browser")]
-pub type DynHandler = dyn Handler;
+pub(crate) type DynHandler = dyn Handler;
 
 type HandlerMap = RwLock<HashMap<String, Arc<DynHandler>>>;
 
-/// Erased, runtime-facing handler. Implemented once, generically, by `Runner`.
+/// Erased, runtime-facing handler — the router-internal ABI. Implemented once, generically, by
+/// `Runner`; protocol authors never name it (they write `Protocol` + `Interpret`).
 #[cfg_attr(feature = "browser", async_trait::async_trait(?Send))]
 #[cfg_attr(not(feature = "browser"), async_trait::async_trait)]
-pub trait Handler {
-    /// Routed namespace.
-    fn namespace(&self) -> &str;
+pub(crate) trait Handler {
     /// Decode → step (pure, committed) → run the protocol's effects, returning re-injected
     /// messages. `handle : (from, payload) → IO [Inbound]`.
     async fn handle(&self, core: &Core, from: Did, payload: Bytes) -> Result<Vec<Inbound>>;
 }
 
-/// The small capability surface handed to every interpreter. Cloneable and `'static` so a
-/// long-running engine task (e.g. a relay listener) can keep a copy and feed events back via
-/// [`inject`](Core::inject). Deliberately tiny: a P2P node's only universal capability is to
-/// put a message on the overlay.
+/// The router-internal capability. Cloneable and `'static` so a long-running engine task can
+/// keep a copy and feed events back via [`inject`](Core::inject). Not handed to extension
+/// shells — they get a namespace-scoped [`Scope`] instead.
 #[derive(Clone)]
-pub struct Core {
+pub(crate) struct Core {
     processor: Arc<Processor>,
     handlers: Arc<HandlerMap>,
 }
@@ -198,10 +196,6 @@ where
     P::Effect: MaybeSend,
     I: Interpret<Effect = P::Effect> + MaybeSend + 'static,
 {
-    fn namespace(&self) -> &str {
-        self.protocol.namespace()
-    }
-
     async fn handle(&self, core: &Core, from: Did, payload: Bytes) -> Result<Vec<Inbound>> {
         // Boundary: decode raw bytes to a typed event. An undecodable/foreign message is an
         // explicit drop here, not a silent `Transition::pure` deep in `step`.
@@ -255,7 +249,7 @@ where
     }
 }
 
-/// Registry of `(Protocol, Interpret)` pairs by namespace, plus the capability [`Core`].
+/// Registry of `(Protocol, Interpret)` pairs by namespace, plus the router-internal `Core`.
 /// Cheaply cloneable and shared (interior mutability) so the
 /// [`Provider`](crate::provider::Provider) and the inbound callback see the same table.
 #[derive(Clone)]

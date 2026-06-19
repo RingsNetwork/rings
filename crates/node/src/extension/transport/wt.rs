@@ -91,7 +91,7 @@ impl SessionHandle {
 /// initiator)` (owner rejection + bidirectional-open safety) and handles carry a generation
 /// so a stale read loop never drops — or peer-closes — a newer reuse of the same key.
 #[derive(Default)]
-pub struct WtSessions {
+pub(crate) struct WtSessions {
     map: Mutex<HashMap<SessionKey, SessionHandle>>,
     generations: AtomicU64,
 }
