@@ -166,9 +166,17 @@ impl Scope {
         self.core.send(to, self.namespace.as_str(), payload).await
     }
 
-    /// Self-inject `payload` back into this interpreter's **own** namespace (`from = this
-    /// node`) — the only re-entry an extension shell has into the router.
-    pub async fn inject(&self, payload: Bytes) -> Result<()> {
+    /// Self-inject `payload` into this interpreter's **own** namespace (`from = this node`).
+    ///
+    /// `pub(crate)`: this is the **long-lived lifecycle sink** for an extension's own engine
+    /// (e.g. the relay's spawned socket tasks reporting `Accepted`/`Untrack` later), and it
+    /// starts a **fresh** [`dispatch`](Core::dispatch) fixpoint with its own
+    /// `MAX_FIXPOINT_STEPS` budget — it is *not* part of the bounded re-injection fixpoint that
+    /// drives a single inbound. The synchronous per-effect feedback path is the `Vec<Bytes>`
+    /// returned from [`Interpret::run`], which the router re-injects within the current budget.
+    /// A third-party shell therefore gets only that bounded return path, never this re-entrant
+    /// sink, so it cannot recurse `inject` to escape the budget.
+    pub(crate) async fn inject(&self, payload: Bytes) -> Result<()> {
         self.core.inject(self.namespace.as_str(), payload).await
     }
 }

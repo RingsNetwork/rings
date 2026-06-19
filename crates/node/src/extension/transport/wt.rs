@@ -114,6 +114,11 @@ impl WtSessions {
         url: String,
         kind: TransportKind,
     ) {
+        debug_assert_eq!(
+            scope.namespace(),
+            key.namespace.as_str(),
+            "relay engine acted with a scope outside the session's namespace"
+        );
         let generation = self.open_slot(key.clone());
         match open(url.as_str(), kind).await {
             Ok((transport, readable, writer)) => {

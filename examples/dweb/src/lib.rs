@@ -114,7 +114,8 @@ fn dweb_handle(
                         if let Ok(out) = serde_json::to_vec(&DwebMsg::Res { path, body }) {
                             let effect = Object::new();
                             let _ = Reflect::set(&effect, &"to".into(), &JsValue::from_str(&from));
-                            let _ = Reflect::set(&effect, &"namespace".into(), &"dweb".into());
+                            // Effects are namespace-scoped: the send goes out under this
+                            // protocol's own namespace, so an effect carries only `to`+`payload`.
                             let _ = Reflect::set(
                                 &effect,
                                 &"payload".into(),
@@ -334,13 +335,6 @@ mod tests {
                 .as_string()
                 .unwrap(),
             "0xabc"
-        );
-        assert_eq!(
-            Reflect::get(&effect, &"namespace".into())
-                .unwrap()
-                .as_string()
-                .unwrap(),
-            "dweb"
         );
         match effect_response(&effect) {
             DwebMsg::Res { path, body } => {

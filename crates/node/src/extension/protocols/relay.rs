@@ -41,7 +41,6 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::extension::ext::Core;
 use crate::extension::ext::Ctx;
 use crate::extension::ext::Interpret;
 use crate::extension::ext::MaybeSend;
@@ -414,8 +413,8 @@ pub(crate) fn close_frame(session: SessionId, from_opener: bool) -> Bytes {
 // ── Native interpreter (OS sockets) ───────────────────────────────────────────────────
 
 /// Native relay interpreter: runs [`RelayEffect`]s over the OS-socket engine it owns. The
-/// engine uses the [`Core`] capability for both overlay sends and lifecycle feedback
-/// (`Track`/`Untrack`), so the engine has no `Processor` of its own.
+/// engine uses the namespace-scoped [`Scope`] capability for both overlay sends and lifecycle
+/// feedback (`Accepted`/`Untrack`), so the engine has no `Processor` of its own.
 #[cfg(feature = "node")]
 pub struct NativeRelay {
     engine: Arc<crate::extension::transport::engine::TransportSessions>,
@@ -543,11 +542,14 @@ impl Interpret for WtRelay {
 /// installs itself ([`install`](RelayHandle::install)), so nothing about it leaks into the
 /// generic [`Provider`](crate::provider::Provider) (the same way SNARK registers itself).
 /// Cloneable; every clone drives the same shared engine and pure [`Relay`] state.
+/// Holds the two per-namespace scoped capabilities (`tcp` / `udp`); each method picks one and
+/// can only act within it, so the handle cannot address an arbitrary namespace even internally.
 #[cfg(feature = "node")]
 #[derive(Clone)]
 pub struct RelayHandle {
     engine: Arc<crate::extension::transport::engine::TransportSessions>,
-    core: Core,
+    tcp: Scope,
+    udp: Scope,
 }
 
 #[cfg(feature = "node")]
@@ -563,15 +565,12 @@ impl RelayHandle {
             (Relay::tcp(HashMap::new()), NativeRelay::new(engine.clone())),
             (Relay::udp(HashMap::new()), NativeRelay::new(engine.clone())),
         ])?;
-        Ok(Self::new(engine, extensions.core()))
-    }
-
-    /// Bind the handle over a shared engine and capability core.
-    pub fn new(
-        engine: Arc<crate::extension::transport::engine::TransportSessions>,
-        core: Core,
-    ) -> Self {
-        Self { engine, core }
+        let core = extensions.core();
+        Ok(Self {
+            engine,
+            tcp: Scope::new(core.clone(), TCP.to_string()),
+            udp: Scope::new(core, UDP.to_string()),
+        })
     }
 
     /// Open a local **TCP** tunnel: bind `local_addr` and relay each accepted connection to
@@ -582,7 +581,7 @@ impl RelayHandle {
         peer: Did,
         service: String,
     ) -> crate::error::Result<()> {
-        self.open_tunnel(local_addr, peer, service, TCP, TransportKind::Tcp)
+        self.open_tunnel(&self.tcp, local_addr, peer, service, TransportKind::Tcp)
             .await
     }
 
@@ -594,25 +593,24 @@ impl RelayHandle {
         peer: Did,
         service: String,
     ) -> crate::error::Result<()> {
-        self.open_tunnel(local_addr, peer, service, UDP, TransportKind::Udp)
+        self.open_tunnel(&self.udp, local_addr, peer, service, TransportKind::Udp)
             .await
     }
 
     async fn open_tunnel(
         &self,
+        scope: &Scope,
         local_addr: std::net::SocketAddr,
         peer: Did,
         service: String,
-        namespace: &str,
         kind: TransportKind,
     ) -> crate::error::Result<()> {
-        // Bind a local listener on the relay engine, scoped to this relay's namespace. Each
-        // accepted connection is reported back through the pure relay (`Accepted`), so
+        // Bind a local listener on the relay engine with this namespace's scope. Each accepted
+        // connection is reported back through the pure relay (`Accepted`), so
         // `RelayState.sessions` stays the sole authority.
-        let scope = Scope::new(self.core.clone(), namespace.to_string());
         self.engine
             .clone()
-            .listen(scope, local_addr, peer, service, kind)
+            .listen(scope.clone(), local_addr, peer, service, kind)
             .await;
         Ok(())
     }
@@ -623,7 +621,7 @@ impl RelayHandle {
         name: String,
         addr: std::net::SocketAddr,
     ) -> crate::error::Result<()> {
-        self.register_service(TCP, name, addr).await
+        register_service(&self.tcp, name, addr).await
     }
 
     /// Register (at runtime) a local service the **UDP** relay may dial (`name` → `addr`).
@@ -632,30 +630,31 @@ impl RelayHandle {
         name: String,
         addr: std::net::SocketAddr,
     ) -> crate::error::Result<()> {
-        self.register_service(UDP, name, addr).await
+        register_service(&self.udp, name, addr).await
     }
+}
 
-    /// Map a service `name` → `addr` in a relay registry by re-injecting a local
-    /// `RegisterService` command (provenance = self) into the relay's pure `step`.
-    async fn register_service(
-        &self,
-        namespace: &str,
-        name: String,
-        addr: std::net::SocketAddr,
-    ) -> crate::error::Result<()> {
-        let command = RelayCommand::RegisterService { name, target: addr };
-        let payload = bincode::serialize(&command).map_err(|_| crate::error::Error::EncodeError)?;
-        self.core.inject(namespace, Bytes::from(payload)).await
-    }
+/// Map a service `name` → `target` by self-injecting a `RegisterService` command into the
+/// scope's own namespace (provenance = self).
+#[cfg(any(feature = "node", feature = "browser"))]
+async fn register_service<T>(scope: &Scope, name: String, target: T) -> crate::error::Result<()>
+where T: Serialize {
+    let command = RelayCommand::RegisterService { name, target };
+    let payload = bincode::serialize(&command).map_err(|_| crate::error::Error::EncodeError)?;
+    scope.inject(Bytes::from(payload)).await
 }
 
 /// Client-facing handle to the browser relay extension's live WebTransport engine: register
 /// local WebTransport-backed services. The browser relay is server-side only (no local
 /// listener), so it has no tunnel-open surface. Cloneable. See the native [`RelayHandle`].
+/// Holds the two per-namespace scoped capabilities (`tcp` / `udp`). The browser relay is
+/// server-side only (no local listener), so this handle just registers services. See the
+/// native [`RelayHandle`].
 #[cfg(feature = "browser")]
 #[derive(Clone)]
 pub struct RelayHandle {
-    core: Core,
+    tcp: Scope,
+    udp: Scope,
 }
 
 #[cfg(feature = "browser")]
@@ -676,19 +675,17 @@ impl RelayHandle {
             (Relay::tcp(HashMap::new()), WtRelay::new(engine.clone())),
             (Relay::udp(HashMap::new()), WtRelay::new(engine)),
         ])?;
-        Ok(Self::new(extensions.core()))
-    }
-
-    /// Bind the handle over the capability core. (The browser relay reaches its WebTransport
-    /// engine only through registered effects, so the handle needs no direct engine reference.)
-    pub fn new(core: Core) -> Self {
-        Self { core }
+        let core = extensions.core();
+        Ok(Self {
+            tcp: Scope::new(core.clone(), TCP.to_string()),
+            udp: Scope::new(core, UDP.to_string()),
+        })
     }
 
     /// Register a WebTransport-backed service for the browser **TCP** relay, mapping
     /// `name` → WebTransport `url` (under the `tcp` namespace).
     pub async fn register_wt_service(&self, name: String, url: String) -> crate::error::Result<()> {
-        self.register_wt(TCP, name, url).await
+        register_service(&self.tcp, name, url).await
     }
 
     /// Register a WebTransport-backed service for the browser **UDP** relay (datagrams),
@@ -698,20 +695,7 @@ impl RelayHandle {
         name: String,
         url: String,
     ) -> crate::error::Result<()> {
-        self.register_wt(UDP, name, url).await
-    }
-
-    /// Map a service `name` → WebTransport `url` under `namespace` by re-injecting a local
-    /// `RegisterService` command (provenance = self) into the relay's pure `step`.
-    async fn register_wt(
-        &self,
-        namespace: &str,
-        name: String,
-        url: String,
-    ) -> crate::error::Result<()> {
-        let command = RelayCommand::RegisterService { name, target: url };
-        let payload = bincode::serialize(&command).map_err(|_| crate::error::Error::EncodeError)?;
-        self.core.inject(namespace, Bytes::from(payload)).await
+        register_service(&self.udp, name, url).await
     }
 }
 

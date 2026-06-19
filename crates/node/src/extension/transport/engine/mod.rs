@@ -153,6 +153,11 @@ impl TransportSessions {
         addr: SocketAddr,
         kind: TransportKind,
     ) {
+        debug_assert_eq!(
+            scope.namespace(),
+            key.namespace.as_str(),
+            "relay engine acted with a scope outside the session's namespace"
+        );
         let task = RelayTask::register(self.clone(), scope, key);
         tokio::spawn(async move {
             match kind {
@@ -256,6 +261,11 @@ impl TransportSessions {
         key: SessionKey,
         service: String,
     ) {
+        debug_assert_eq!(
+            scope.namespace(),
+            key.namespace.as_str(),
+            "relay engine bound a session under a foreign namespace scope"
+        );
         let Some(pending) = self.pending.lock().ok().and_then(|mut p| p.remove(&token)) else {
             return; // listener gone or token already consumed
         };
