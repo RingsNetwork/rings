@@ -671,6 +671,11 @@ impl RelayHandle {
     /// interpreters over a fresh, relay-owned WebTransport engine and return the client handle.
     /// Errors if the `tcp`/`udp` namespaces are already taken. Call once per node, after
     /// constructing the provider — the relay is opt-in, not a `Provider` invariant.
+    ///
+    /// This is a **Rust-wasm-facing** surface: there is no `wasm_bindgen` install/handle for JS
+    /// yet (unlike `provider.on(...)`), so browser relay is reachable only from Rust-wasm apps.
+    /// A JS-facing extension install API can be added when a JS consumer needs WebTransport
+    /// relay; it must not put these methods back on the generic `Provider`.
     pub fn install(extensions: &crate::extension::ext::Extensions) -> crate::error::Result<Self> {
         let engine = Arc::new(crate::extension::transport::wt::WtSessions::new());
         extensions.register(Relay::tcp(HashMap::new()), WtRelay::new(engine.clone()))?;

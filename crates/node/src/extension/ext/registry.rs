@@ -86,7 +86,15 @@ impl Core {
 
     /// Route an inbound [`Envelope`] to its protocol and drive the bounded re-injection
     /// fixpoint. Unknown namespaces are logged and dropped (non-fatal).
-    pub async fn dispatch(&self, from: Did, envelope: Envelope) -> Result<()> {
+    ///
+    /// This is the **authenticated ingress** capability: the caller chooses `from`, so a
+    /// protocol's `decode` will attribute the resulting event to that DID (for the relay, a
+    /// `from != me` envelope becomes a peer `Frame`). It is therefore `pub(crate)` — only the
+    /// router path may call it, and only [`Backend`](crate::extension::Backend) does, with
+    /// `from` taken from the message's verified signer. Extension code reaches the router only
+    /// through [`inject`](Core::inject) (self-addressed, `from = self.did()`); it can never
+    /// forge a remote `from`.
+    pub(crate) async fn dispatch(&self, from: Did, envelope: Envelope) -> Result<()> {
         let mut queue: VecDeque<Inbound> = VecDeque::new();
         queue.push_back(Inbound {
             namespace: envelope.namespace,
@@ -269,8 +277,12 @@ impl Extensions {
             .unwrap_or(false)
     }
 
-    /// Route a decoded envelope (inbound entry point). See [`Core::dispatch`].
-    pub async fn dispatch(&self, from: Did, envelope: Envelope) -> Result<()> {
+    /// Route a decoded envelope (inbound entry point). `pub(crate)`: the authenticated ingress
+    /// belongs to the router path ([`Backend`](crate::extension::Backend)), not to public
+    /// holders of an `Extensions` value (which get registration + a self-addressed
+    /// [`Core`](Core::inject), never the ability to forge a remote `from`). See
+    /// [`Core::dispatch`].
+    pub(crate) async fn dispatch(&self, from: Did, envelope: Envelope) -> Result<()> {
         self.core.dispatch(from, envelope).await
     }
 }
