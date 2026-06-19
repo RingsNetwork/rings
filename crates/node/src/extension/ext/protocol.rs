@@ -4,10 +4,10 @@
 //!
 //! An extension owns **its own** effect algebra (`Protocol::Effect`) — the core defines
 //! no global `Effect` enum. Effects are interpreted by the extension's own
-//! [`Interpret`](super::Interpret) shell, which is handed the small core capability
-//! surface ([`Core`](super::Core)). This is what keeps the effect set from becoming a
-//! global command bus: a new extension brings its own effects and its own interpreter
-//! without ever touching the core.
+//! [`Interpret`](super::Interpret) shell, which is handed a namespace-scoped capability
+//! ([`Scope`](super::Scope)) — `send`/`inject` confined to its own namespace. This is what
+//! keeps the effect set from becoming a global command bus: a new extension brings its own
+//! effects and its own interpreter without ever touching the core.
 
 use bytes::Bytes;
 use rings_core::dht::Did;

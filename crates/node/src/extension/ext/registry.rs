@@ -1,11 +1,13 @@
 #![warn(missing_docs)]
 //! Router + capability core.
 //!
-//! [`Extensions`] registers `(Protocol, Interpret)` pairs by namespace. [`Core`] is the
-//! small capability handle the runtime hands every interpreter — overlay `send`, `did`, and
-//! `inject` — and is also the entry point that routes an inbound [`Envelope`] to its
-//! protocol and drives the bounded re-injection fixpoint. The registry stays uniform
-//! (everything erased to [`Handler`]) while each extension's shell is its own.
+//! [`Extensions`] registers `(Protocol, Interpret)` pairs by namespace. Each interpreter is
+//! handed a namespace-scoped [`Scope`] (overlay `send` / `did` / self-`inject`, confined to its
+//! own namespace) — *not* the router-internal `Core`. `Core` is the crate-private capability
+//! that also routes an inbound [`Envelope`] to its protocol and drives the bounded re-injection
+//! fixpoint; the registry stays uniform (everything erased to the internal `Handler`) while each
+//! extension's shell is its own. Extension authors see only `Protocol` / `Interpret` / `Scope` /
+//! `Transition` / `Extensions`.
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
