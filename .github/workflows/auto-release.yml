@@ -58,6 +58,7 @@ jobs:
     uses: ./.github/workflows/release-build.yml
     with:
       version: ${{ needs.gen_version.outputs.version }}
+      publish_artifacts: true
     secrets: inherit
 
   release:

@@ -1,15 +1,27 @@
 name: Release Build
 
-# Reusable build matrix for the release artifacts. Called by both `Auto Release` (on master /
-# tags, to publish) and `QACI` (on every PR, with a throwaway version, so a PR exercises the
-# *same* build steps as a release — no more "PR green but release red").
+# Reusable build matrix shared by `Auto Release` and `QACI`, so the PR path compiles the exact
+# same release targets and a release-only build failure (e.g. static-musl C++ linking) can't
+# pass PR CI.
+#
+# Separation of concerns:
+#   - The `cargo build` of the release targets always runs (this is the part a PR must verify).
+#   - Packaging (zip / npm pack), version naming and artifact upload only run when
+#     `publish_artifacts` is true — i.e. from `Auto Release`. **PR CI never versions, packages,
+#     or publishes.** Versioning and the GitHub Release itself live entirely in `auto-release.yml`.
 on:
   workflow_call:
     inputs:
       version:
-        description: Version string used to name the build artifacts.
-        required: true
+        description: Version string for naming packaged artifacts (release only).
+        required: false
         type: string
+        default: ci
+      publish_artifacts:
+        description: Package and upload the built binaries as artifacts (release only).
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   build_macos:
@@ -51,9 +63,14 @@ jobs:
       - name: Build
         run: |
           cargo build -p rings-node --bin rings --features node --no-default-features --release --target ${{ steps.target.outputs.target }}
+
+      - name: Package
+        if: ${{ inputs.publish_artifacts }}
+        run: |
           zip -j rings-${{ inputs.version }}-${{ steps.target.outputs.target }}.zip ./target/${{ steps.target.outputs.target }}/release/rings
 
       - uses: actions/upload-artifact@v4
+        if: ${{ inputs.publish_artifacts }}
         name: Upload artifacts
         with:
           name: rings-${{ inputs.version }}-${{ steps.target.outputs.target }}
@@ -111,16 +128,25 @@ jobs:
       - name: Build
         run: |
           cargo build -p rings-node --bin rings --features node --no-default-features --release --target ${{ steps.target.outputs.target }}
+
+      - name: Package
+        if: ${{ inputs.publish_artifacts }}
+        run: |
           zip -j rings-${{ inputs.version }}-${{ steps.target.outputs.target }}.zip ./target/${{ steps.target.outputs.target }}/release/rings
 
       - uses: actions/upload-artifact@v4
+        if: ${{ inputs.publish_artifacts }}
         name: Upload artifacts
         with:
           name: rings-${{ inputs.version }}-${{ steps.target.outputs.target }}
           path: rings-${{ inputs.version }}-${{ steps.target.outputs.target }}.zip
           retention-days: 1
 
+  # The browser artifact is produced by `npm pack` (packaging, not a compile), and wasm
+  # compilation is already covered on PRs by QACI's `build_wasm` job — so this only runs when
+  # actually publishing a release.
   build_browser:
+    if: ${{ inputs.publish_artifacts }}
     name: build browser version binary
     timeout-minutes: 60
     runs-on: "ubuntu-latest"
