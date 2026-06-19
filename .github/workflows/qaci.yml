@@ -14,6 +14,16 @@ env:
   WASM_BINDGEN_TEST_TIMEOUT: 120
 
 jobs:
+  # Run the exact release build matrix (macOS, static-musl linux, wasm) on every PR via the
+  # shared reusable workflow, so a release-only build failure (e.g. static-musl C++ linking)
+  # can't pass PR CI and then break Auto Release. `version: ci` → throwaway artifacts, no publish.
+  release_build:
+    name: Release build (parity)
+    uses: ./.github/workflows/release-build.yml
+    with:
+      version: ci
+    secrets: inherit
+
   build_wasm:
     name: Build and test for wasm
     timeout-minutes: 10
