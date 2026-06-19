@@ -563,8 +563,11 @@ impl RelayHandle {
     /// provider — the relay is opt-in, not a `Provider` invariant.
     pub fn install(extensions: &crate::extension::ext::Extensions) -> crate::error::Result<Self> {
         let engine = Arc::new(crate::extension::transport::engine::TransportSessions::new());
-        extensions.register(Relay::tcp(HashMap::new()), NativeRelay::new(engine.clone()))?;
-        extensions.register(Relay::udp(HashMap::new()), NativeRelay::new(engine.clone()))?;
+        // Atomic: both namespaces register together, or neither (no half-installed relay).
+        extensions.register_many(vec![
+            (Relay::tcp(HashMap::new()), NativeRelay::new(engine.clone())),
+            (Relay::udp(HashMap::new()), NativeRelay::new(engine.clone())),
+        ])?;
         Ok(Self::new(engine, extensions.core()))
     }
 
@@ -678,8 +681,11 @@ impl RelayHandle {
     /// relay; it must not put these methods back on the generic `Provider`.
     pub fn install(extensions: &crate::extension::ext::Extensions) -> crate::error::Result<Self> {
         let engine = Arc::new(crate::extension::transport::wt::WtSessions::new());
-        extensions.register(Relay::tcp(HashMap::new()), WtRelay::new(engine.clone()))?;
-        extensions.register(Relay::udp(HashMap::new()), WtRelay::new(engine))?;
+        // Atomic: both namespaces register together, or neither (no half-installed relay).
+        extensions.register_many(vec![
+            (Relay::tcp(HashMap::new()), WtRelay::new(engine.clone())),
+            (Relay::udp(HashMap::new()), WtRelay::new(engine)),
+        ])?;
         Ok(Self::new(extensions.core()))
     }
 

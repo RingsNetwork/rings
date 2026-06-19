@@ -214,8 +214,13 @@ impl Extensions {
         }
     }
 
-    /// The capability handle, for code that needs to dispatch / inject / send directly.
-    pub fn core(&self) -> Core {
+    /// The capability handle (overlay `send` / `did` / self-addressed `inject`). `pub(crate)`:
+    /// public holders of an `Extensions` get **registration only** (`register` / `replace` /
+    /// `contains` / `register_many`), never a raw [`Core`]. An extension's local injection is
+    /// exposed through its own typed handle (e.g. `RelayHandle`), so application code cannot use
+    /// a generic inject-any-namespace bus to forge engine-lifecycle commands like the relay's
+    /// `Accepted` / `Untrack`.
+    pub(crate) fn core(&self) -> Core {
         self.core.clone()
     }
 
@@ -242,6 +247,50 @@ impl Extensions {
         I: Interpret<Effect = P::Effect> + MaybeSend + 'static,
     {
         self.insert(protocol, interpret, true)
+    }
+
+    /// Register several protocols **atomically**: build every runner, then under a single write
+    /// lock verify that none of their namespaces is taken (by an existing registration or by a
+    /// duplicate within the batch) and insert them all — or change nothing and return `Err`. The
+    /// pairs share the type `P`/`I` (e.g. the relay's TCP + UDP `Relay<T>` instances), so a
+    /// partial install can never leave one namespace claimed while the caller gets no handle.
+    pub fn register_many<P, I>(&self, items: Vec<(P, I)>) -> Result<()>
+    where
+        P: Protocol + MaybeSend + 'static,
+        P::State: MaybeSend + 'static,
+        P::Effect: MaybeSend,
+        I: Interpret<Effect = P::Effect> + MaybeSend + 'static,
+    {
+        // Build (namespace, runner) outside the lock.
+        let prepared: Vec<(String, Arc<DynHandler>)> = items
+            .into_iter()
+            .map(|(protocol, interpret)| {
+                let namespace = protocol.namespace().to_string();
+                let state = Mutex::new(protocol.init());
+                let runner: Arc<DynHandler> = Arc::new(Runner {
+                    protocol,
+                    interpret,
+                    state,
+                });
+                (namespace, runner)
+            })
+            .collect();
+
+        let mut handlers = self.core.handlers.write().map_err(|_| Error::Lock)?;
+        // Check-all (existing table + intra-batch duplicates) before mutating anything.
+        for (index, (namespace, _)) in prepared.iter().enumerate() {
+            let duplicate_in_batch = prepared[..index].iter().any(|(seen, _)| seen == namespace);
+            if duplicate_in_batch || handlers.contains_key(namespace) {
+                return Err(Error::ExtensionError(format!(
+                    "namespace {namespace:?} is already registered"
+                )));
+            }
+        }
+        // All free: insert the whole batch.
+        for (namespace, runner) in prepared {
+            handlers.insert(namespace, runner);
+        }
+        Ok(())
     }
 
     fn insert<P, I>(&self, protocol: P, interpret: I, replace: bool) -> Result<()>

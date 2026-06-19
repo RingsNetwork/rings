@@ -74,7 +74,8 @@ impl Provider {
         self.extensions.clone()
     }
 
-    /// The capability handle — overlay `send` / `did` / `inject` / `dispatch`.
+    /// The capability handle — overlay `send` / `did` / self-addressed `inject`. (Authenticated
+    /// `dispatch` is router-only; `pub(crate)` so it never reaches public callers.)
     pub(crate) fn core(&self) -> crate::extension::ext::Core {
         self.extensions.core()
     }
