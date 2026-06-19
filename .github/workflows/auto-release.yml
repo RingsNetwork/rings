@@ -59,7 +59,6 @@ jobs:
     with:
       version: ${{ needs.gen_version.outputs.version }}
       publish_artifacts: true
-    secrets: inherit
 
   release:
     needs: [gen_version, build]

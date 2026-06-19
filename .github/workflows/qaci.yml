@@ -18,10 +18,12 @@ jobs:
   # workflow, so a release-only build failure (e.g. static-musl C++ linking) can't pass PR CI and
   # then break Auto Release. `publish_artifacts` is left false: the PR path only *compiles* — it
   # never versions, packages, or publishes (that all lives in auto-release.yml).
+  # PR-only: on master pushes Auto Release already builds these targets, so don't double-build.
+  # No `secrets: inherit` — the reusable workflow uses the automatic `github.token`.
   build_release_targets:
     name: Build release targets
+    if: github.event_name == 'pull_request'
     uses: ./.github/workflows/release-build.yml
-    secrets: inherit
 
   build_wasm:
     name: Build and test for wasm
