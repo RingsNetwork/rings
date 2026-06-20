@@ -1,4 +1,5 @@
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,7 +13,6 @@ use webrtc::data_channel::data_channel_state::RTCDataChannelState;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice::mdns::MulticastDnsMode;
 use webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType;
-use webrtc::ice_transport::ice_credential_type::RTCIceCredentialType;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
@@ -26,14 +26,15 @@ use crate::core::pool::MessageSenderPool;
 use crate::core::pool::RoundRobin;
 use crate::core::pool::RoundRobinPool;
 use crate::core::pool::StatusPool;
+use crate::core::transport::effective_max_message_size;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::TransportInterface;
 use crate::core::transport::TransportMessage;
 use crate::core::transport::WebrtcConnectionState;
+use crate::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 use crate::delivery::DeliveryFuture;
 use crate::error::Error;
 use crate::error::Result;
-use crate::ice_server::IceCredentialType;
 use crate::ice_server::IceServer;
 use crate::notifier::Notifier;
 use crate::pool::Pool;
@@ -125,6 +126,9 @@ pub struct WebrtcConnection {
     webrtc_data_channel: Arc<RoundRobinPool<TrackedChannel>>,
     webrtc_data_channel_state_notifier: Notifier,
     cancel_token: CancellationToken,
+    /// Negotiated SCTP `max_message_size` (RFC 8841), parsed from the remote SDP at handshake.
+    /// `0` means not yet negotiated. webrtc-rs exposes no getter, so we track it ourselves.
+    remote_max_message_size: Arc<AtomicUsize>,
 }
 
 /// [WebrtcTransport] manages all the [WebrtcConnection] and
@@ -146,6 +150,7 @@ impl WebrtcConnection {
             webrtc_data_channel,
             webrtc_data_channel_state_notifier,
             cancel_token: CancellationToken::new(),
+            remote_max_message_size: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -211,6 +216,15 @@ impl ConnectionInterface for WebrtcConnection {
         self.webrtc_conn.connection_state().into()
     }
 
+    fn max_message_size(&self) -> usize {
+        // The value negotiated from the remote SDP at handshake; `0` = not yet negotiated, so
+        // fall back to the interop default.
+        match self.remote_max_message_size.load(Ordering::SeqCst) {
+            0 => MAX_DATA_CHANNEL_MESSAGE_SIZE,
+            n => n,
+        }
+    }
+
     async fn webrtc_create_offer(&self) -> Result<Self::Sdp> {
         let setting_offer = self.webrtc_conn.create_offer(None).await?;
         self.webrtc_conn
@@ -222,6 +236,8 @@ impl ConnectionInterface for WebrtcConnection {
 
     async fn webrtc_answer_offer(&self, offer: Self::Sdp) -> Result<Self::Sdp> {
         tracing::debug!("webrtc_answer_offer, offer: {offer:?}");
+        self.remote_max_message_size
+            .store(effective_max_message_size(&offer), Ordering::SeqCst);
         let offer = RTCSessionDescription::offer(offer)?;
         self.webrtc_conn.set_remote_description(offer).await?;
 
@@ -235,6 +251,8 @@ impl ConnectionInterface for WebrtcConnection {
 
     async fn webrtc_accept_answer(&self, answer: Self::Sdp) -> Result<()> {
         tracing::debug!("webrtc_accept_answer, answer: {answer:?}");
+        self.remote_max_message_size
+            .store(effective_max_message_size(&answer), Ordering::SeqCst);
         let answer = RTCSessionDescription::answer(answer)?;
         self.webrtc_conn
             .set_remote_description(answer)
@@ -443,22 +461,14 @@ impl TransportInterface for WebrtcTransport {
     }
 }
 
-impl From<IceCredentialType> for RTCIceCredentialType {
-    fn from(s: IceCredentialType) -> Self {
-        match s {
-            IceCredentialType::Password => Self::Password,
-            IceCredentialType::Oauth => Self::Oauth,
-        }
-    }
-}
-
 impl From<IceServer> for RTCIceServer {
     fn from(s: IceServer) -> Self {
+        // webrtc 0.17 dropped `credential_type` from `RTCIceServer` (only long-term credentials
+        // remain); `IceServer::credential_type` is ignored here.
         Self {
             urls: s.urls,
             username: s.username,
             credential: s.credential,
-            credential_type: s.credential_type.into(),
         }
     }
 }

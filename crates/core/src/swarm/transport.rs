@@ -23,8 +23,8 @@ use rings_transport::core::transport::WebrtcConnectionState;
 use rings_transport::delivery::DeliveryFuture;
 
 use crate::chunk::ChunkList;
+use crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD;
 use crate::consts::TRANSPORT_MAX_SIZE;
-use crate::consts::TRANSPORT_MTU;
 use crate::dht::Did;
 use crate::dht::LiveDid;
 use crate::dht::PeerRing;
@@ -297,6 +297,12 @@ impl SwarmConnection {
     pub fn webrtc_connection_state(&self) -> WebrtcConnectionState {
         self.connection.webrtc_connection_state()
     }
+
+    /// The largest single data-channel message this connection can carry — the negotiated
+    /// `max_message_size`. Used to size payload chunks so each wrapped chunk stays within the limit.
+    pub fn max_message_size(&self) -> usize {
+        self.connection.max_message_size()
+    }
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
@@ -340,8 +346,18 @@ impl PayloadSender for SwarmTransport {
         // than awaiting it, so the send itself stays fire-and-forget; a message
         // lost before flush (e.g. the connection died while buffered) is logged
         // here instead of propagating a delivery status up through every layer.
-        if data.len() > TRANSPORT_MTU {
-            let chunks = ChunkList::<TRANSPORT_MTU>::from(&data);
+        //
+        // Chunk size is derived from this connection's negotiated `max_message_size` rather than a
+        // fixed constant, so a channel that negotiated a smaller limit is respected. Each chunk is
+        // re-wrapped in its own `MessagePayload` envelope before sending, so we cut the data at
+        // `max_message_size - MAX_CHUNK_ENVELOPE_OVERHEAD` to leave room for that envelope and keep
+        // the wrapped message within the limit. We only chunk when the payload itself exceeds the
+        // limit; otherwise it goes out as-is.
+        if data.len() > conn.max_message_size() {
+            let chunk_size = conn
+                .max_message_size()
+                .saturating_sub(MAX_CHUNK_ENVELOPE_OVERHEAD);
+            let chunks = ChunkList::split(&data, chunk_size);
             for chunk in chunks {
                 let data =
                     MessagePayload::new_send(Message::Chunk(chunk), &self.session_sk, did, did)?

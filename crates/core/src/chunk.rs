@@ -7,7 +7,8 @@
 //! Two halves, deliberately separated:
 //!
 //! - **Send** — [`ChunkList`] splits a [`Bytes`] into ordered [`Chunk`]s
-//!   (`ChunkList::from(&bytes)`), which the caller iterates and puts on the wire.
+//!   (`ChunkList::split(&bytes, chunk_size)`, where `chunk_size` comes from the connection's
+//!   negotiated `max_message_size`), which the caller iterates and puts on the wire.
 //! - **Receive** — [`ChunkReassembler`] collects incoming [`Chunk`]s keyed by message id and
 //!   yields the original payload once every position has arrived.
 //!
@@ -90,50 +91,24 @@ impl Default for ChunkMeta {
 }
 
 /// Sender side: an ordered list of [`Chunk`]s for one message. Build it from the payload with
-/// `ChunkList::from(&bytes)`, then iterate (or convert to `Vec<Chunk>`) to put each chunk on the
-/// wire. Reassembly is the receiver's job — see [`ChunkReassembler`].
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ChunkList<const MTU: usize>(Vec<Chunk>);
+/// [`ChunkList::split`], passing the per-message data size to cut at (the connection's negotiated
+/// `max_message_size` minus the envelope reserve), then iterate (or convert to `Vec<Chunk>`) to put
+/// each chunk on the wire. The cut size is a runtime argument rather than a type parameter because
+/// it is decided per connection from the negotiated limit. Reassembly is the receiver's job — see
+/// [`ChunkReassembler`].
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ChunkList(Vec<Chunk>);
 
-impl<const MTU: usize> ChunkList<MTU> {
-    /// Clone out the chunks.
-    pub fn to_vec(&self) -> Vec<Chunk> {
-        self.0.clone()
-    }
-
-    /// Borrow the chunks.
-    pub fn as_vec(&self) -> &Vec<Chunk> {
-        &self.0
-    }
-}
-
-impl<const MTU: usize> Default for ChunkList<MTU> {
-    fn default() -> Self {
-        Self(vec![])
-    }
-}
-
-impl<const MTU: usize> IntoIterator for &ChunkList<MTU> {
-    type Item = Chunk;
-    type IntoIter = std::vec::IntoIter<Chunk>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.to_vec().into_iter()
-    }
-}
-
-impl<const MTU: usize> IntoIterator for ChunkList<MTU> {
-    type Item = Chunk;
-    type IntoIter = std::vec::IntoIter<Chunk>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
-    }
-}
-
-impl<const MTU: usize> From<&Bytes> for ChunkList<MTU> {
-    fn from(bytes: &Bytes) -> Self {
-        let chunks: Vec<Bytes> = bytes.chunks(MTU).map(|c| c.to_vec().into()).collect();
+impl ChunkList {
+    /// Split `bytes` into chunks of at most `chunk_size` data bytes each, tagged `[i, total]` so the
+    /// receiver can reassemble them in order. `chunk_size` is clamped to at least 1 so a degenerate
+    /// limit still terminates (one byte per chunk) rather than dividing by zero.
+    pub fn split(bytes: &Bytes, chunk_size: usize) -> Self {
+        let chunk_size = chunk_size.max(1);
+        let chunks: Vec<Bytes> = bytes
+            .chunks(chunk_size)
+            .map(|c| c.to_vec().into())
+            .collect();
         let chunks_len: usize = chunks.len();
         let meta = ChunkMeta::default();
         Self(
@@ -148,15 +123,43 @@ impl<const MTU: usize> From<&Bytes> for ChunkList<MTU> {
                 .collect::<Vec<Chunk>>(),
         )
     }
+
+    /// Clone out the chunks.
+    pub fn to_vec(&self) -> Vec<Chunk> {
+        self.0.clone()
+    }
+
+    /// Borrow the chunks.
+    pub fn as_vec(&self) -> &Vec<Chunk> {
+        &self.0
+    }
 }
 
-impl<const MTU: usize> From<ChunkList<MTU>> for Vec<Chunk> {
-    fn from(l: ChunkList<MTU>) -> Self {
+impl IntoIterator for &ChunkList {
+    type Item = Chunk;
+    type IntoIter = std::vec::IntoIter<Chunk>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.to_vec().into_iter()
+    }
+}
+
+impl IntoIterator for ChunkList {
+    type Item = Chunk;
+    type IntoIter = std::vec::IntoIter<Chunk>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl From<ChunkList> for Vec<Chunk> {
+    fn from(l: ChunkList) -> Self {
         l.0
     }
 }
 
-impl<const MTU: usize> From<Vec<Chunk>> for ChunkList<MTU> {
+impl From<Vec<Chunk>> for ChunkList {
     fn from(data: Vec<Chunk>) -> Self {
         Self(data)
     }
@@ -283,19 +286,19 @@ impl ChunkReassembler {
 mod test {
     use super::*;
 
-    fn chunks_of<const MTU: usize>(data: &Bytes) -> Vec<Chunk> {
-        ChunkList::<MTU>::from(data).into()
+    fn chunks_of(data: &Bytes, mtu: usize) -> Vec<Chunk> {
+        ChunkList::split(data, mtu).into()
     }
 
     #[test]
     fn test_data_chunks() {
         let data = "helloworld".repeat(2).into();
-        let ret: Vec<Chunk> = ChunkList::<32>::from(&data).into();
+        let ret: Vec<Chunk> = ChunkList::split(&data, 32).into();
         assert_eq!(ret.len(), 1);
         assert_eq!(ret[ret.len() - 1].chunk, [0, 1]);
 
         let data = "helloworld".repeat(1024).into();
-        let ret: Vec<Chunk> = ChunkList::<32>::from(&data).into();
+        let ret: Vec<Chunk> = ChunkList::split(&data, 32).into();
         assert_eq!(ret.len(), 10 * 1024 / 32);
         assert_eq!(ret[ret.len() - 1].chunk, [319, 320]);
     }
@@ -304,7 +307,7 @@ mod test {
     fn reassembles_in_order() {
         let data: Bytes = "helloworld".repeat(1024).into();
         let mut r = ChunkReassembler::new();
-        let chunks = chunks_of::<32>(&data);
+        let chunks = chunks_of(&data, 32);
         let mut out = None;
         for c in chunks {
             out = r.handle(c).or(out);
@@ -316,7 +319,7 @@ mod test {
     #[test]
     fn reassembles_out_of_order() {
         let data: Bytes = "helloworld".repeat(64).into();
-        let mut chunks = chunks_of::<32>(&data);
+        let mut chunks = chunks_of(&data, 32);
         chunks.reverse();
         let mut r = ChunkReassembler::new();
         let mut out = None;
@@ -330,7 +333,7 @@ mod test {
     fn duplicate_chunk_does_not_break_reassembly() {
         // Regression: arrival order [0, 1, 0] used to dedup-before-sort and never complete.
         let data: Bytes = "helloworld".repeat(8).into(); // > 32 bytes => 3 chunks
-        let chunks = chunks_of::<32>(&data);
+        let chunks = chunks_of(&data, 32);
         assert!(chunks.len() >= 2);
         let mut r = ChunkReassembler::new();
 
@@ -351,8 +354,8 @@ mod test {
     fn interleaved_messages_are_isolated() {
         let d1: Bytes = "hello".repeat(64).into();
         let d2: Bytes = "world".repeat(64).into();
-        let c1 = chunks_of::<32>(&d1);
-        let c2 = chunks_of::<32>(&d2);
+        let c1 = chunks_of(&d1, 32);
+        let c2 = chunks_of(&d2, 32);
         let mut r = ChunkReassembler::new();
 
         // interleave the two messages
@@ -374,7 +377,7 @@ mod test {
     #[test]
     fn incomplete_message_stays_pending() {
         let data: Bytes = "helloworld".repeat(64).into();
-        let chunks = chunks_of::<32>(&data);
+        let chunks = chunks_of(&data, 32);
         let mut r = ChunkReassembler::new();
         for c in &chunks[..chunks.len() - 1] {
             assert!(r.handle(c.clone()).is_none());
@@ -481,7 +484,7 @@ mod test {
     #[test]
     fn round_trip_reordered_with_duplicates() {
         let data: Bytes = "abcdefghij".repeat(500).into();
-        let mut chunks = chunks_of::<64>(&data);
+        let mut chunks = chunks_of(&data, 64);
         // reorder + inject duplicates mid-stream (not after the final chunk, which would just
         // start a fresh, TTL-evicted pending entry — a late retransmit, not a reassembly bug).
         chunks.reverse();

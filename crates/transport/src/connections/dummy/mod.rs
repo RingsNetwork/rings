@@ -20,6 +20,7 @@ use crate::core::transport::ConnectionInterface;
 use crate::core::transport::TransportInterface;
 use crate::core::transport::TransportMessage;
 use crate::core::transport::WebrtcConnectionState;
+use crate::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 use crate::delivery::DeliveryFuture;
 use crate::error::Error;
 use crate::error::Result;
@@ -257,6 +258,10 @@ impl ConnectionInterface for DummyConnection {
 
     fn webrtc_connection_state(&self) -> WebrtcConnectionState {
         *self.webrtc_connection_state.lock().unwrap()
+    }
+
+    fn max_message_size(&self) -> usize {
+        MAX_DATA_CHANNEL_MESSAGE_SIZE
     }
 
     async fn get_stats(&self) -> Vec<String> {

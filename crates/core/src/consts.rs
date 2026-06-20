@@ -9,4 +9,9 @@ pub const DEFAULT_SESSION_TTL_MS: u64 = 30 * 24 * 3600 * 1000;
 pub const TRANSPORT_MTU: usize = 60000;
 /// 60M
 pub const TRANSPORT_MAX_SIZE: usize = TRANSPORT_MTU * 1000;
+/// Bytes reserved, per chunk, for the `MessagePayload` envelope a chunk is re-wrapped in before
+/// sending (signature, DIDs, relay, bincode framing). The chunk *data* size is the connection's
+/// negotiated `max_message_size` minus this, so the wrapped on-wire message stays within the
+/// data-channel limit. Generous; bounded by the `chunk_envelope_fits_reserve` test.
+pub const MAX_CHUNK_ENVELOPE_OVERHEAD: usize = 4096;
 pub const VNODE_DATA_MAX_LEN: usize = 1024;

@@ -79,25 +79,36 @@ async fn test_handshake_on_both_sides(key1: SecretKey, key2: SecretKey, key3: Se
     _ = node1.swarm.connect(node2.did()).await;
     _ = node2.swarm.connect(node1.did()).await;
 
-    // The conn state of swarm1 -> swarm2 is new
-    assert_eq!(
-        node1
-            .swarm
-            .transport
-            .get_connection(node2.did())
-            .unwrap()
-            .webrtc_connection_state(),
-        WebrtcConnectionState::New,
+    // Both sides have just initiated an outbound connection (offer created) but no answer has
+    // been exchanged yet, so neither has reached `Connected`. The exact pre-connected sub-state —
+    // `New` vs `Connecting` — depends on whether the peer's offer has already arrived and started
+    // ICE, which is webrtc-version/timing dependent; the invariant we assert is only that the glare
+    // handshake is still in progress.
+    let node1_to_node2 = node1
+        .swarm
+        .transport
+        .get_connection(node2.did())
+        .unwrap()
+        .webrtc_connection_state();
+    assert!(
+        matches!(
+            node1_to_node2,
+            WebrtcConnectionState::New | WebrtcConnectionState::Connecting
+        ),
+        "swarm1 -> swarm2 should still be handshaking, got {node1_to_node2:?}",
     );
-    // The conn state of swarm2 -> swarm1 is new
-    assert_eq!(
-        node2
-            .swarm
-            .transport
-            .get_connection(node1.did())
-            .unwrap()
-            .webrtc_connection_state(),
-        WebrtcConnectionState::New,
+    let node2_to_node1 = node2
+        .swarm
+        .transport
+        .get_connection(node1.did())
+        .unwrap()
+        .webrtc_connection_state();
+    assert!(
+        matches!(
+            node2_to_node1,
+            WebrtcConnectionState::New | WebrtcConnectionState::Connecting
+        ),
+        "swarm2 -> swarm1 should still be handshaking, got {node2_to_node1:?}",
     );
 
     wait_for_msgs([&node1, &node2, &node3]).await;

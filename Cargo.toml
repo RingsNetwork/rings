@@ -24,7 +24,7 @@ wasm-bindgen = "0.2.100"
 wasm-bindgen-futures = "0.4.37"
 wasm-bindgen-macro-support = "0.2.100"
 wasm-bindgen-test = "0.3.50"
-webrtc = { version = "0.10.1" }
+webrtc = { version = "0.17.1" }
 
 [profile.release]
 opt-level = 3

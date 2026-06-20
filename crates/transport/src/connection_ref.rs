@@ -10,6 +10,7 @@ use serde::Serialize;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::TransportMessage;
 use crate::core::transport::WebrtcConnectionState;
+use crate::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 use crate::delivery::DeliveryFuture;
 use crate::error::Error;
 use crate::error::Result;
@@ -68,6 +69,12 @@ where
             .unwrap_or(WebrtcConnectionState::Closed)
     }
 
+    fn max_message_size(&self) -> usize {
+        self.upgrade()
+            .map(|c| c.max_message_size())
+            .unwrap_or(MAX_DATA_CHANNEL_MESSAGE_SIZE)
+    }
+
     async fn get_stats(&self) -> Vec<String> {
         let Ok(c) = self.upgrade() else {
             return Vec::new();
@@ -114,6 +121,12 @@ where
         self.upgrade()
             .map(|c| c.webrtc_connection_state())
             .unwrap_or(WebrtcConnectionState::Closed)
+    }
+
+    fn max_message_size(&self) -> usize {
+        self.upgrade()
+            .map(|c| c.max_message_size())
+            .unwrap_or(MAX_DATA_CHANNEL_MESSAGE_SIZE)
     }
 
     async fn get_stats(&self) -> Vec<String> {

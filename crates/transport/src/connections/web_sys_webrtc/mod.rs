@@ -1,4 +1,5 @@
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -30,10 +31,12 @@ use crate::core::pool::MessageSenderPool;
 use crate::core::pool::RoundRobin;
 use crate::core::pool::RoundRobinPool;
 use crate::core::pool::StatusPool;
+use crate::core::transport::effective_max_message_size;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::TransportInterface;
 use crate::core::transport::TransportMessage;
 use crate::core::transport::WebrtcConnectionState;
+use crate::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 use crate::delivery::DeliveryFuture;
 use crate::error::Error;
 use crate::error::Result;
@@ -121,6 +124,9 @@ pub struct WebSysWebrtcConnection {
     webrtc_conn: RtcPeerConnection,
     webrtc_data_channel: Arc<RoundRobinPool<TrackedChannel>>,
     webrtc_data_channel_state_notifier: Notifier,
+    /// Negotiated SCTP `max_message_size` (RFC 8841), parsed from the remote SDP at handshake.
+    /// `0` means not yet negotiated. Parsed identically to native for consistent behaviour.
+    remote_max_message_size: Arc<AtomicUsize>,
 }
 
 /// [WebSysWebrtcTransport] manages all the [WebSysWebrtcConnection] and
@@ -140,6 +146,7 @@ impl WebSysWebrtcConnection {
             webrtc_conn,
             webrtc_data_channel,
             webrtc_data_channel_state_notifier,
+            remote_max_message_size: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -203,6 +210,15 @@ impl ConnectionInterface for WebSysWebrtcConnection {
         self.webrtc_conn.connection_state().into()
     }
 
+    fn max_message_size(&self) -> usize {
+        // The value negotiated from the remote SDP at handshake; `0` = not yet negotiated, so
+        // fall back to the interop default. Same parsing as native (consistent behaviour).
+        match self.remote_max_message_size.load(Ordering::SeqCst) {
+            0 => MAX_DATA_CHANNEL_MESSAGE_SIZE,
+            n => n,
+        }
+    }
+
     async fn get_stats(&self) -> Vec<String> {
         let promise = self.webrtc_conn.get_stats();
         let Ok(value) = wasm_bindgen_futures::JsFuture::from(promise).await else {
@@ -235,6 +251,8 @@ impl ConnectionInterface for WebSysWebrtcConnection {
 
     async fn webrtc_answer_offer(&self, offer: Self::Sdp) -> Result<Self::Sdp> {
         tracing::debug!("webrtc_answer_offer, offer: {offer:?}");
+        self.remote_max_message_size
+            .store(effective_max_message_size(&offer), Ordering::SeqCst);
 
         let set_remote_init = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
         set_remote_init.set_sdp(&offer);
@@ -258,6 +276,8 @@ impl ConnectionInterface for WebSysWebrtcConnection {
 
     async fn webrtc_accept_answer(&self, answer: Self::Sdp) -> Result<()> {
         tracing::debug!("webrtc_accept_answer, answer: {answer:?}");
+        self.remote_max_message_size
+            .store(effective_max_message_size(&answer), Ordering::SeqCst);
 
         let set_remote_init = RtcSessionDescriptionInit::new(RtcSdpType::Answer);
         set_remote_init.set_sdp(&answer);

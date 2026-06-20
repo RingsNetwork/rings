@@ -59,6 +59,34 @@ pub enum WebrtcConnectionState {
     Closed,
 }
 
+/// Interop ceiling for a single data-channel message, in bytes. webrtc-rs (native) enforces this
+/// SCTP `max_message_size` on send, and it is the value a peer can be relied on to accept — so a
+/// sender must never exceed it regardless of what the remote advertises. A per-channel
+/// [`max_message_size`](ConnectionInterface::max_message_size) may resolve to *less* (a constrained
+/// peer) but never more.
+pub const MAX_DATA_CHANNEL_MESSAGE_SIZE: usize = 65536;
+
+/// Parse the SCTP `a=max-message-size` attribute (RFC 8841) out of an SDP. Returns `None` when the
+/// attribute is absent. This is the same source webrtc reads internally; we parse it ourselves so
+/// the negotiated limit is available identically on native and browser, without relying on a
+/// backend to expose it.
+pub fn parse_sdp_max_message_size(sdp: &str) -> Option<u32> {
+    sdp.lines()
+        .find_map(|line| line.trim().strip_prefix("a=max-message-size:"))
+        .and_then(|value| value.trim().parse::<u32>().ok())
+}
+
+/// The effective per-message send limit for a peer whose SDP is `remote_sdp`. Per RFC 8841 an
+/// absent attribute defaults to 65536 and a value of `0` means "no limit" (we still bound it by our
+/// own send cap); any explicit value is honoured but capped at [`MAX_DATA_CHANNEL_MESSAGE_SIZE`] for
+/// interop. Always returns a positive value.
+pub fn effective_max_message_size(remote_sdp: &str) -> usize {
+    match parse_sdp_max_message_size(remote_sdp) {
+        None | Some(0) => MAX_DATA_CHANNEL_MESSAGE_SIZE,
+        Some(n) => (n as usize).min(MAX_DATA_CHANNEL_MESSAGE_SIZE),
+    }
+}
+
 /// The [ConnectionInterface] trait defines how to
 /// make webrtc ice handshake with a remote peer and then send data channel message to it.
 #[cfg_attr(feature = "web-sys-webrtc", async_trait(?Send))]
@@ -81,6 +109,13 @@ pub trait ConnectionInterface {
 
     /// Get current webrtc connection state.
     fn webrtc_connection_state(&self) -> WebrtcConnectionState;
+
+    /// The maximum size, in bytes, of one message this connection can send — the channel's
+    /// negotiated SCTP / data-channel `max_message_size`, capped at
+    /// [`MAX_DATA_CHANNEL_MESSAGE_SIZE`] for cross-peer interop. A caller must keep every sent
+    /// message at or below this; larger payloads have to be chunked. Reported per-channel so a
+    /// constrained channel (which can negotiate a smaller limit) is respected.
+    fn max_message_size(&self) -> usize;
 
     /// This is a debug method to dump the stats of webrtc connection.
     async fn get_stats(&self) -> Vec<String>;

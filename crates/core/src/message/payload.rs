@@ -381,6 +381,37 @@ pub mod test {
         assert!(payload.verify());
     }
 
+    /// The sender cuts chunk data at `max_message_size - MAX_CHUNK_ENVELOPE_OVERHEAD` so that the
+    /// `MessagePayload` envelope each chunk is re-wrapped in still fits the data-channel limit. This
+    /// pins that the reserve is large enough: a full-size chunk, once wrapped and bincoded, stays at
+    /// or below `MAX_DATA_CHANNEL_MESSAGE_SIZE`. If the envelope ever grows past the reserve, this
+    /// fails instead of silently producing oversized messages the channel would reject.
+    #[test]
+    fn chunk_envelope_fits_reserve() {
+        use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
+
+        use crate::chunk::ChunkList;
+        use crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD;
+
+        let next_hop = SecretKey::random().address().into();
+        let chunk_size = MAX_DATA_CHANNEL_MESSAGE_SIZE - MAX_CHUNK_ENVELOPE_OVERHEAD;
+        let data: Bytes = vec![0xab; chunk_size].into();
+        let chunk = ChunkList::split(&data, chunk_size)
+            .to_vec()
+            .pop()
+            .expect("one chunk");
+
+        let payload = new_payload(Message::Chunk(chunk), next_hop);
+        let wire = payload.to_bincode().unwrap();
+
+        assert!(
+            wire.len() <= MAX_DATA_CHANNEL_MESSAGE_SIZE,
+            "wrapped chunk is {} bytes, exceeds limit {}; raise MAX_CHUNK_ENVELOPE_OVERHEAD",
+            wire.len(),
+            MAX_DATA_CHANNEL_MESSAGE_SIZE,
+        );
+    }
+
     #[test]
     fn test_message_payload_from_auto() {
         let next_hop = SecretKey::random().address().into();
