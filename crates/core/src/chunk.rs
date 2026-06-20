@@ -14,9 +14,10 @@
 //!
 //! The receiver is robust to the realities of a multi-hop / DHT overlay: out-of-order arrival,
 //! **duplicates / retransmits** (first write per position wins), and partial messages (evicted
-//! by TTL). It is also bounded — at most [`MAX_PENDING_MESSAGES`] incomplete messages are held,
-//! and only the positions actually received are buffered (no allocation proportional to a
-//! peer-supplied `total`).
+//! by TTL). It is also bounded against a hostile peer: per-chunk and per-message byte caps, a
+//! global buffered-cost ceiling (charging a per-slot overhead so tiny-chunk floods are bounded by
+//! count too), an id-count cap, and up-front rejection of already-expired chunks. No single id and
+//! no peer-supplied `total` can drive memory without limit. See [`ChunkReassembler`].
 //!
 //! ```text
 //!   send    : Bytes ↦ [Chunk{ chunk=[i, n], data=dataᵢ, meta } | i ∈ 0..n]
@@ -28,21 +29,43 @@ use std::collections::btree_map::BTreeMap;
 use std::collections::HashMap;
 
 use bytes::Bytes;
+use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 use serde::Deserialize;
 use serde::Serialize;
 use uuid::Uuid;
 
 use crate::consts::DEFAULT_TTL_MS;
 use crate::consts::MAX_TTL_MS;
+use crate::consts::TRANSPORT_MAX_SIZE;
 use crate::consts::TS_OFFSET_TOLERANCE_MS;
 use crate::error::Error;
 use crate::error::Result;
 use crate::utils::get_epoch_ms;
 
 /// Upper bound on concurrently-reassembling (incomplete) messages held by a
-/// [`ChunkReassembler`]. Once reached, expired messages are reclaimed and any *new* message is
-/// dropped — so a lossy or malicious peer cannot grow the buffer without bound (DoS guard).
+/// [`ChunkReassembler`]. A cheap first-line cap on the number of distinct message ids; the real
+/// memory guard is the byte accounting below.
 pub const MAX_PENDING_MESSAGES: usize = 512;
+
+/// Per-slot bookkeeping charge (the `BTreeMap` node and `Bytes` header) added on top of a chunk's
+/// data when accounting buffered memory, so a flood of *tiny* chunks is bounded by slot count, not
+/// only by summed data bytes.
+const SLOT_OVERHEAD: usize = 64;
+
+/// Largest `data` a single chunk may carry. A chunk crosses the wire as one data-channel message,
+/// which SCTP caps at [`MAX_DATA_CHANNEL_MESSAGE_SIZE`]; a chunk claiming more than that could not
+/// have arrived legitimately and is rejected.
+const MAX_CHUNK_DATA_LEN: usize = MAX_DATA_CHANNEL_MESSAGE_SIZE;
+
+/// Largest a single reassembled message may grow. The sender refuses to send more than
+/// [`TRANSPORT_MAX_SIZE`], so a `Pending` accumulating beyond this is forged — this is what stops
+/// the "one id, huge `total`, stream unique positions forever" attack.
+const MAX_MESSAGE_BYTES: usize = TRANSPORT_MAX_SIZE;
+
+/// Global ceiling on buffered cost (data bytes + per-slot overhead) summed across every in-flight
+/// message. Bounds total reassembly memory regardless of how the load is spread across ids or
+/// slots. Sized to admit several concurrent maximum-size transfers while staying hard-bounded.
+const MAX_TOTAL_BUFFERED_COST: usize = TRANSPORT_MAX_SIZE * 4;
 
 /// One chunk of a chunked message, as it travels on the wire.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -183,30 +206,42 @@ pub enum Framing {
 }
 
 /// Decide how to frame a `payload_len`-byte payload for a connection whose negotiated per-message
-/// limit is `max_message_size`, reserving `envelope_overhead` bytes per chunk for the envelope each
-/// chunk is re-wrapped in before sending.
+/// limit is `max_message_size`.
 ///
-/// A pure total function of three lengths:
+/// The decision is made against the *actual* bytes the data channel will carry, not the bare
+/// payload: the transport wraps every send, and a chunk is additionally re-wrapped in a
+/// `MessagePayload`. So two reserves are taken:
+///
+/// - `whole_overhead` — bytes the transport adds around the whole payload (the `Whole` send).
+/// - `chunk_overhead` — bytes added around each chunk's data (its `MessagePayload` envelope *plus*
+///   the transport wrapper).
+///
+/// A pure, partial function of four lengths:
 ///
 /// ```text
-///   plan : (len, limit, reserve) ↦ Whole                          if len ≤ limit
-///                                  Chunked{ max(1, limit − reserve) }  otherwise
+///   plan : (len, limit, wʰ, cʰ) ↦ Some(Whole)                 if len + wʰ ≤ limit
+///                                 Some(Chunked{ limit − cʰ })  if limit > cʰ
+///                                 None                          otherwise
 /// ```
 ///
-/// We chunk only when the payload itself exceeds the limit, and cut chunk data at
-/// `limit − reserve` so each wrapped chunk still fits the limit. The cut is floored at 1 so a
-/// degenerate `limit ≤ reserve` still makes progress (one data byte per chunk) instead of cutting
-/// at zero and never terminating.
+/// `None` means the peer's limit is too small to carry even one data byte after wrapping — a real
+/// failure the caller must surface, rather than emitting 1-byte chunks that the channel would
+/// reject anyway. When `Some(Chunked { chunk_size })` is returned, `chunk_size ≥ 1` by construction
+/// (the `limit > cʰ` guard), and `chunk_size + chunk_overhead ≤ limit`, so every wrapped chunk fits.
 pub fn plan_framing(
     payload_len: usize,
     max_message_size: usize,
-    envelope_overhead: usize,
-) -> Framing {
-    if payload_len <= max_message_size {
-        Framing::Whole
+    whole_overhead: usize,
+    chunk_overhead: usize,
+) -> Option<Framing> {
+    if payload_len + whole_overhead <= max_message_size {
+        Some(Framing::Whole)
+    } else if max_message_size > chunk_overhead {
+        Some(Framing::Chunked {
+            chunk_size: max_message_size - chunk_overhead,
+        })
     } else {
-        let chunk_size = max_message_size.saturating_sub(envelope_overhead).max(1);
-        Framing::Chunked { chunk_size }
+        None
     }
 }
 
@@ -217,6 +252,8 @@ struct Pending {
     /// received positions → bytes. A `BTreeMap` dedups by position (first write wins) and keeps
     /// the data ordered, so assembly is a single in-order concat.
     slots: BTreeMap<usize, Bytes>,
+    /// running sum of buffered data bytes, so the per-message cap is O(1) to check.
+    data_bytes: usize,
     /// creation time / ttl of the first chunk seen, used for TTL eviction.
     ts_ms: u128,
     ttl_ms: u64,
@@ -227,6 +264,7 @@ impl Pending {
         Self {
             total,
             slots: BTreeMap::new(),
+            data_bytes: 0,
             ts_ms,
             ttl_ms,
         }
@@ -238,6 +276,11 @@ impl Pending {
         self.slots.len() == self.total
     }
 
+    /// Buffered cost charged to the global budget: data bytes plus a fixed per-slot overhead.
+    fn cost(&self) -> usize {
+        self.data_bytes + self.slots.len() * SLOT_OVERHEAD
+    }
+
     fn assemble(self) -> Bytes {
         self.slots.into_values().flatten().collect()
     }
@@ -246,12 +289,22 @@ impl Pending {
 /// Receiver side: reassembles [`Chunk`]s into whole messages, keyed by message id.
 ///
 /// Correct under duplicates / retransmits (first write per position wins), out-of-order arrival
-/// (positions are sorted), and partial delivery (TTL eviction). Bounded by
-/// [`MAX_PENDING_MESSAGES`], and it only buffers the positions actually received (a peer-supplied
-/// `total` never drives an allocation).
+/// (positions are sorted), and partial delivery (TTL eviction).
+///
+/// **Bounded against a hostile peer.** Every accepted chunk is validated and charged to a budget,
+/// so reassembly memory cannot grow without limit no matter how the load is shaped:
+/// - per-chunk data is capped at `MAX_CHUNK_DATA_LEN`;
+/// - per-message buffered data is capped at `MAX_MESSAGE_BYTES` (defeats "one id, huge `total`,
+///   stream unique positions forever");
+/// - total buffered cost across all messages is capped at `MAX_TOTAL_BUFFERED_COST`, charging a
+///   per-slot overhead so a flood of tiny chunks is bounded by slot count too;
+/// - the number of distinct ids is capped at [`MAX_PENDING_MESSAGES`];
+/// - an already-expired chunk is rejected before it can be delivered or buffered.
 #[derive(Default)]
 pub struct ChunkReassembler {
     pending: HashMap<Uuid, Pending>,
+    /// Sum of `Pending::cost()` over `pending`, maintained incrementally for an O(1) global cap.
+    buffered_cost: usize,
 }
 
 impl ChunkReassembler {
@@ -265,34 +318,55 @@ impl ChunkReassembler {
         self.pending.len()
     }
 
-    /// Drop messages whose TTL has elapsed.
+    /// Drop messages whose TTL has elapsed, returning their cost to the budget.
     pub fn remove_expired(&mut self) {
         let now = get_epoch_ms();
-        self.pending.retain(|_, p| p.ts_ms + p.ttl_ms as u128 > now);
+        let buffered_cost = &mut self.buffered_cost;
+        self.pending.retain(|_, p| {
+            let alive = p.ts_ms + p.ttl_ms as u128 > now;
+            if !alive {
+                *buffered_cost -= p.cost();
+            }
+            alive
+        });
     }
 
-    /// Forget a message (e.g. after it has been delivered).
+    /// Forget a message (e.g. after it has been delivered), returning its cost to the budget.
     pub fn remove(&mut self, id: Uuid) {
-        self.pending.remove(&id);
+        if let Some(p) = self.pending.remove(&id) {
+            self.buffered_cost -= p.cost();
+        }
     }
 
     /// Accept one chunk. Returns the fully reassembled payload when this chunk completes its
-    /// message (which is then forgotten), otherwise `None`. Malformed, too-old, or
-    /// over-the-cap chunks are dropped (`None`).
+    /// message (which is then forgotten), otherwise `None`. Malformed, expired, or over-any-bound
+    /// chunks are dropped (`None`).
     pub fn handle(&mut self, chunk: Chunk) -> Option<Bytes> {
+        let now = get_epoch_ms();
+
         // Reject an absurd ttl outright.
         if chunk.meta.ttl_ms > MAX_TTL_MS {
             return None;
         }
         // Reject a chunk stamped too far in the future. `saturating_sub` avoids the `u128`
         // underflow a malformed/forged `ts_ms < TS_OFFSET_TOLERANCE_MS` would otherwise cause.
-        if chunk.meta.ts_ms.saturating_sub(TS_OFFSET_TOLERANCE_MS) > get_epoch_ms() {
+        if chunk.meta.ts_ms.saturating_sub(TS_OFFSET_TOLERANCE_MS) > now {
+            return None;
+        }
+        // Reject a chunk that is *itself* already expired, before it can be buffered or delivered —
+        // sweeping other pending entries is not enough (a stale `total == 1` would otherwise be
+        // delivered immediately). `saturating_add` avoids overflow on a forged ttl.
+        if chunk.meta.ts_ms.saturating_add(chunk.meta.ttl_ms as u128) <= now {
             return None;
         }
 
         let [position, total] = chunk.chunk;
         // A real message has at least one chunk and every position is in `0..total`.
         if total == 0 || position >= total {
+            return None;
+        }
+        // A single chunk cannot carry more than one data-channel message's worth of bytes.
+        if chunk.data.len() > MAX_CHUNK_DATA_LEN {
             return None;
         }
 
@@ -305,23 +379,42 @@ impl ChunkReassembler {
             return None;
         }
 
+        // Validate against the existing pending (if any) *before* mutating, so a rejected chunk
+        // leaves no trace and the accounting stays exact.
+        if let Some(p) = self.pending.get(&id) {
+            // A chunk whose `total` disagrees with the first one seen is malformed.
+            if p.total != total {
+                return None;
+            }
+            // First write per position wins — a duplicate/retransmitted position is a no-op.
+            if p.slots.contains_key(&position) {
+                return None;
+            }
+            // Per-message data cap: a single message cannot exceed the maximum send size.
+            if p.data_bytes + chunk.data.len() > MAX_MESSAGE_BYTES {
+                return None;
+            }
+        }
+
+        // Global buffer cap, charging this slot's data plus its fixed overhead.
+        let cost = chunk.data.len() + SLOT_OVERHEAD;
+        if self.buffered_cost + cost > MAX_TOTAL_BUFFERED_COST {
+            return None;
+        }
+
         let pending = self
             .pending
             .entry(id)
             .or_insert_with(|| Pending::new(total, chunk.meta.ts_ms, chunk.meta.ttl_ms));
-
-        // A chunk whose `total` disagrees with the first one seen for this id is malformed; ignore
-        // it rather than corrupt the in-flight message.
-        if pending.total != total {
-            return None;
-        }
-
-        // First write per position wins — a duplicate/retransmitted position is a no-op.
-        pending.slots.entry(position).or_insert(chunk.data);
+        pending.data_bytes += chunk.data.len();
+        pending.slots.insert(position, chunk.data);
+        self.buffered_cost += cost;
 
         if pending.is_complete() {
-            // `remove` returns the owned `Pending`; assemble in position order.
-            return self.pending.remove(&id).map(Pending::assemble);
+            // `remove` returns the cost to the budget and yields the owned `Pending`.
+            let done = self.pending.remove(&id)?;
+            self.buffered_cost -= done.cost();
+            return Some(done.assemble());
         }
         None
     }
@@ -420,39 +513,44 @@ mod test {
     }
 
     #[test]
-    fn plan_whole_within_limit_inclusive() {
-        assert_eq!(plan_framing(0, 100, 10), Framing::Whole);
-        assert_eq!(plan_framing(50, 100, 10), Framing::Whole);
-        // boundary: a payload exactly at the limit still goes whole.
-        assert_eq!(plan_framing(100, 100, 10), Framing::Whole);
+    fn plan_whole_includes_whole_overhead() {
+        // whole_overhead = 10: whole fits while payload + 10 <= limit.
+        assert_eq!(plan_framing(0, 100, 10, 20), Some(Framing::Whole));
+        assert_eq!(plan_framing(90, 100, 10, 20), Some(Framing::Whole));
+        // boundary: payload + whole_overhead exactly at the limit still goes whole.
+        assert_eq!(plan_framing(90, 100, 10, 20), Some(Framing::Whole));
+        // one past: payload + whole_overhead exceeds the limit, so it must chunk.
+        assert_eq!(
+            plan_framing(91, 100, 10, 20),
+            Some(Framing::Chunked { chunk_size: 80 })
+        );
     }
 
+    /// The chunk size reserves the chunk overhead, so `chunk_size + chunk_overhead ≤ limit`: a
+    /// wrapped chunk can never exceed the negotiated limit.
     #[test]
-    fn plan_chunks_just_over_limit() {
-        assert_eq!(plan_framing(101, 100, 10), Framing::Chunked {
-            chunk_size: 90
-        });
-    }
-
-    /// The chunk size reserves the envelope, so `chunk_size + envelope_overhead ≤ limit`: a wrapped
-    /// chunk can never exceed the negotiated limit.
-    #[test]
-    fn plan_chunk_size_reserves_envelope() {
-        let (limit, overhead) = (65536usize, 4096usize);
-        let Framing::Chunked { chunk_size } = plan_framing(limit * 2, limit, overhead) else {
+    fn plan_chunk_size_reserves_overhead() {
+        let (limit, chunk_overhead) = (65536usize, 4096usize);
+        let Some(Framing::Chunked { chunk_size }) =
+            plan_framing(limit * 2, limit, 16, chunk_overhead)
+        else {
             panic!("expected chunked");
         };
-        assert_eq!(chunk_size, limit - overhead);
-        assert!(chunk_size + overhead <= limit);
+        assert_eq!(chunk_size, limit - chunk_overhead);
+        assert!(chunk_size + chunk_overhead <= limit);
     }
 
     #[test]
-    fn plan_chunk_size_floored_at_one() {
-        // Degenerate: a limit at or below the envelope reserve still yields a positive cut.
-        assert_eq!(plan_framing(100, 5, 10), Framing::Chunked { chunk_size: 1 });
-        assert_eq!(plan_framing(100, 10, 10), Framing::Chunked {
-            chunk_size: 1
-        });
+    fn plan_none_when_limit_below_chunk_overhead() {
+        // A limit at or below the chunk overhead cannot carry even one data byte after wrapping:
+        // a real failure, not a bogus 1-byte chunk.
+        assert_eq!(plan_framing(100, 5, 4, 10), None);
+        assert_eq!(plan_framing(100, 10, 4, 10), None);
+        // just above the chunk overhead yields the smallest positive cut.
+        assert_eq!(
+            plan_framing(100, 11, 4, 10),
+            Some(Framing::Chunked { chunk_size: 1 })
+        );
     }
 
     #[test]
@@ -562,8 +660,10 @@ mod test {
     }
 
     #[test]
-    fn old_timestamp_does_not_panic() {
-        // ts_ms < TS_OFFSET_TOLERANCE_MS would underflow a plain `u128` subtraction.
+    fn old_timestamp_is_dropped_without_panic() {
+        // ts_ms < TS_OFFSET_TOLERANCE_MS would underflow a plain `u128` subtraction (no panic with
+        // saturating arithmetic), and a chunk stamped at the epoch is already long expired — it must
+        // be dropped, not delivered, even though it is a complete `total == 1` message.
         let mut r = ChunkReassembler::new();
         let out = r.handle(Chunk {
             chunk: [0, 1],
@@ -574,7 +674,88 @@ mod test {
                 ttl_ms: DEFAULT_TTL_MS,
             },
         });
-        assert_eq!(out.unwrap(), Bytes::from_static(b"ok"));
+        assert!(out.is_none());
+        assert_eq!(r.pending_count(), 0);
+    }
+
+    #[test]
+    fn expired_single_chunk_is_not_delivered() {
+        // Regression: sweeping *other* pending entries before insertion let an already-expired
+        // `total == 1` chunk be delivered immediately. It must be rejected up front.
+        let mut r = ChunkReassembler::new();
+        let now = get_epoch_ms();
+        let out = r.handle(Chunk {
+            chunk: [0, 1],
+            data: Bytes::from_static(b"x"),
+            meta: ChunkMeta {
+                id: Uuid::new_v4(),
+                ts_ms: now.saturating_sub(1000),
+                ttl_ms: 100, // expired 900ms ago
+            },
+        });
+        assert!(out.is_none());
+        assert_eq!(r.pending_count(), 0);
+    }
+
+    #[test]
+    fn oversize_chunk_data_is_rejected() {
+        let mut r = ChunkReassembler::new();
+        let data: Bytes = vec![0u8; MAX_CHUNK_DATA_LEN + 1].into();
+        let out = r.handle(Chunk {
+            chunk: [0, 1],
+            data,
+            meta: ChunkMeta::default(),
+        });
+        assert!(out.is_none());
+        assert_eq!(r.pending_count(), 0);
+        assert_eq!(r.buffered_cost, 0);
+    }
+
+    #[test]
+    fn buffered_cost_returns_to_zero_after_completion() {
+        let data: Bytes = "helloworld".repeat(100).into();
+        let mut r = ChunkReassembler::new();
+        for c in ChunkList::split(&data, 32) {
+            r.handle(c);
+        }
+        assert_eq!(r.pending_count(), 0);
+        assert_eq!(r.buffered_cost, 0, "completing a message frees its budget");
+    }
+
+    /// A single id advertising a huge `total` and streaming distinct positions cannot grow without
+    /// bound: the per-message byte cap stops it. (Cheap: `Bytes` clones share one backing buffer, so
+    /// the accounted bytes far exceed the actual allocation.)
+    #[test]
+    fn per_message_byte_cap_bounds_one_id() {
+        let meta = ChunkMeta::default();
+        let data: Bytes = vec![0u8; MAX_CHUNK_DATA_LEN].into();
+        let total = 100_000; // absurd, never completes
+        let mut r = ChunkReassembler::new();
+
+        let mut accepted = 0usize;
+        for position in 0..2000 {
+            let before = r.pending.get(&meta.id).map(|p| p.slots.len()).unwrap_or(0);
+            r.handle(Chunk {
+                meta,
+                chunk: [position, total],
+                data: data.clone(),
+            });
+            let after = r.pending.get(&meta.id).map(|p| p.slots.len()).unwrap_or(0);
+            if after > before {
+                accepted += 1;
+            }
+        }
+
+        let pending = r.pending.get(&meta.id).expect("still pending");
+        assert!(
+            pending.data_bytes <= MAX_MESSAGE_BYTES,
+            "per-message buffered data must stay within the cap"
+        );
+        assert!(
+            accepted < 2000,
+            "the cap must have rejected some chunks, got {accepted} accepted"
+        );
+        assert_eq!(r.buffered_cost, pending.cost(), "accounting stays exact");
     }
 
     #[test]

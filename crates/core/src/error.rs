@@ -356,6 +356,9 @@ pub enum Error {
     #[error("Message has {0} bytes which is too large")]
     MessageTooLarge(usize),
 
+    #[error("Peer's negotiated max_message_size {0} is too small to carry even one chunk")]
+    PeerMaxMessageSizeTooSmall(usize),
+
     #[cfg(feature = "wasm")]
     #[error("Cannot get property {0} from JsValue")]
     FailedOnGetProperty(String),

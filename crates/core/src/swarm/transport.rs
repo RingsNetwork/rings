@@ -26,6 +26,7 @@ use crate::chunk::plan_framing;
 use crate::chunk::ChunkList;
 use crate::chunk::Framing;
 use crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD;
+use crate::consts::TRANSPORT_CUSTOM_OVERHEAD;
 use crate::consts::TRANSPORT_MAX_SIZE;
 use crate::dht::Did;
 use crate::dht::LiveDid;
@@ -350,13 +351,19 @@ impl PayloadSender for SwarmTransport {
         //
         // The chunk-vs-whole decision is the pure `plan_framing`, derived from this connection's
         // negotiated `max_message_size` (so a channel with a smaller limit is respected); this
-        // block is only the effectful shell that carries it out. Each chunk is re-wrapped in its own
-        // `MessagePayload` envelope before sending.
-        match plan_framing(
+        // block is only the effectful shell that carries it out. The reserves account for the bytes
+        // each path adds on the wire: `send_data` wraps every send in `TransportMessage::Custom`
+        // (`TRANSPORT_CUSTOM_OVERHEAD`), and a chunk is additionally re-wrapped in a `MessagePayload`
+        // (`MAX_CHUNK_ENVELOPE_OVERHEAD`). `None` means the peer's limit is too small to carry even
+        // one chunk — a real failure we surface rather than send something it would reject.
+        let plan = plan_framing(
             data.len(),
             conn.max_message_size(),
-            MAX_CHUNK_ENVELOPE_OVERHEAD,
-        ) {
+            TRANSPORT_CUSTOM_OVERHEAD,
+            MAX_CHUNK_ENVELOPE_OVERHEAD + TRANSPORT_CUSTOM_OVERHEAD,
+        )
+        .ok_or(Error::PeerMaxMessageSizeTooSmall(conn.max_message_size()))?;
+        match plan {
             Framing::Whole => {
                 spawn_delivery(conn.send_data(data).await?, did);
             }
