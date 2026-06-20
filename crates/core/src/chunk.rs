@@ -165,6 +165,51 @@ impl From<Vec<Chunk>> for ChunkList {
     }
 }
 
+/// How one payload should be framed for a size-limited connection: sent whole, or split.
+///
+/// This is the *decision* only — a value, with no I/O — so the sender's effectful path
+/// (`do_send_payload`) is a thin shell that matches on it. Separating the rule from the act keeps
+/// the rule exhaustively testable in isolation (functional core / imperative shell).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Framing {
+    /// The payload is within the connection's limit; send it as a single message, unchanged.
+    Whole,
+    /// The payload exceeds the limit; split it into [`Chunk`]s of at most `chunk_size` data bytes
+    /// each (via [`ChunkList::split`]), each then re-wrapped in its own envelope.
+    Chunked {
+        /// Maximum data bytes per chunk.
+        chunk_size: usize,
+    },
+}
+
+/// Decide how to frame a `payload_len`-byte payload for a connection whose negotiated per-message
+/// limit is `max_message_size`, reserving `envelope_overhead` bytes per chunk for the envelope each
+/// chunk is re-wrapped in before sending.
+///
+/// A pure total function of three lengths:
+///
+/// ```text
+///   plan : (len, limit, reserve) ↦ Whole                          if len ≤ limit
+///                                  Chunked{ max(1, limit − reserve) }  otherwise
+/// ```
+///
+/// We chunk only when the payload itself exceeds the limit, and cut chunk data at
+/// `limit − reserve` so each wrapped chunk still fits the limit. The cut is floored at 1 so a
+/// degenerate `limit ≤ reserve` still makes progress (one data byte per chunk) instead of cutting
+/// at zero and never terminating.
+pub fn plan_framing(
+    payload_len: usize,
+    max_message_size: usize,
+    envelope_overhead: usize,
+) -> Framing {
+    if payload_len <= max_message_size {
+        Framing::Whole
+    } else {
+        let chunk_size = max_message_size.saturating_sub(envelope_overhead).max(1);
+        Framing::Chunked { chunk_size }
+    }
+}
+
 /// One message being reassembled: the chunks seen so far, keyed by position.
 struct Pending {
     /// total number of chunks the message claims (from `chunk[1]`).
@@ -301,6 +346,113 @@ mod test {
         let ret: Vec<Chunk> = ChunkList::split(&data, 32).into();
         assert_eq!(ret.len(), 10 * 1024 / 32);
         assert_eq!(ret[ret.len() - 1].chunk, [319, 320]);
+    }
+
+    #[test]
+    fn split_empty_yields_no_chunks() {
+        assert!(ChunkList::split(&Bytes::new(), 32).to_vec().is_empty());
+    }
+
+    #[test]
+    fn split_exact_multiple_all_full() {
+        let data: Bytes = vec![0u8; 64].into();
+        let chunks = ChunkList::split(&data, 32).to_vec();
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks.iter().all(|c| c.data.len() == 32));
+        assert_eq!(chunks[0].chunk, [0, 2]);
+        assert_eq!(chunks[1].chunk, [1, 2]);
+    }
+
+    #[test]
+    fn split_non_multiple_last_is_remainder() {
+        let data: Bytes = vec![0u8; 70].into();
+        let chunks = ChunkList::split(&data, 32).to_vec();
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].data.len(), 32);
+        assert_eq!(chunks[1].data.len(), 32);
+        assert_eq!(chunks[2].data.len(), 6);
+    }
+
+    #[test]
+    fn split_larger_than_data_is_single_chunk() {
+        let data: Bytes = vec![0u8; 10].into();
+        let chunks = ChunkList::split(&data, 1024).to_vec();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].chunk, [0, 1]);
+    }
+
+    #[test]
+    fn split_zero_size_is_clamped_to_one() {
+        let data: Bytes = vec![0u8; 4].into();
+        let chunks = ChunkList::split(&data, 0).to_vec();
+        assert_eq!(chunks.len(), 4);
+        assert!(chunks.iter().all(|c| c.data.len() == 1));
+    }
+
+    #[test]
+    fn split_chunks_share_one_message_id() {
+        let data: Bytes = vec![0u8; 100].into();
+        let chunks = ChunkList::split(&data, 32).to_vec();
+        let id = chunks[0].meta.id;
+        assert!(chunks.iter().all(|c| c.meta.id == id));
+    }
+
+    /// Cutting at any size and feeding the pieces back through the reassembler (in order) yields the
+    /// original bytes — across exact multiples, remainders, single-chunk, and one-byte cuts.
+    #[test]
+    fn split_then_reassemble_round_trips() {
+        for (len, size) in [
+            (1usize, 7usize),
+            (7, 7),
+            (8, 7),
+            (100, 7),
+            (1000, 64),
+            (5, 1),
+        ] {
+            let data: Bytes = (0..len).map(|i| i as u8).collect::<Vec<u8>>().into();
+            let mut r = ChunkReassembler::new();
+            let mut out = None;
+            for c in ChunkList::split(&data, size) {
+                out = r.handle(c).or(out);
+            }
+            assert_eq!(out.unwrap(), data, "len={len} size={size}");
+        }
+    }
+
+    #[test]
+    fn plan_whole_within_limit_inclusive() {
+        assert_eq!(plan_framing(0, 100, 10), Framing::Whole);
+        assert_eq!(plan_framing(50, 100, 10), Framing::Whole);
+        // boundary: a payload exactly at the limit still goes whole.
+        assert_eq!(plan_framing(100, 100, 10), Framing::Whole);
+    }
+
+    #[test]
+    fn plan_chunks_just_over_limit() {
+        assert_eq!(plan_framing(101, 100, 10), Framing::Chunked {
+            chunk_size: 90
+        });
+    }
+
+    /// The chunk size reserves the envelope, so `chunk_size + envelope_overhead ≤ limit`: a wrapped
+    /// chunk can never exceed the negotiated limit.
+    #[test]
+    fn plan_chunk_size_reserves_envelope() {
+        let (limit, overhead) = (65536usize, 4096usize);
+        let Framing::Chunked { chunk_size } = plan_framing(limit * 2, limit, overhead) else {
+            panic!("expected chunked");
+        };
+        assert_eq!(chunk_size, limit - overhead);
+        assert!(chunk_size + overhead <= limit);
+    }
+
+    #[test]
+    fn plan_chunk_size_floored_at_one() {
+        // Degenerate: a limit at or below the envelope reserve still yields a positive cut.
+        assert_eq!(plan_framing(100, 5, 10), Framing::Chunked { chunk_size: 1 });
+        assert_eq!(plan_framing(100, 10, 10), Framing::Chunked {
+            chunk_size: 1
+        });
     }
 
     #[test]

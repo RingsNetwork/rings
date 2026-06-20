@@ -22,7 +22,9 @@ use rings_transport::core::transport::TransportMessage;
 use rings_transport::core::transport::WebrtcConnectionState;
 use rings_transport::delivery::DeliveryFuture;
 
+use crate::chunk::plan_framing;
 use crate::chunk::ChunkList;
+use crate::chunk::Framing;
 use crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD;
 use crate::consts::TRANSPORT_MAX_SIZE;
 use crate::dht::Did;
@@ -341,31 +343,35 @@ impl PayloadSender for SwarmTransport {
             return Err(Error::MessageTooLarge(data.len()));
         }
 
-        // Each send returns a `DeliveryFuture` resolving to whether the bytes
-        // were actually flushed to the wire. We toss it to the runtime rather
-        // than awaiting it, so the send itself stays fire-and-forget; a message
-        // lost before flush (e.g. the connection died while buffered) is logged
-        // here instead of propagating a delivery status up through every layer.
+        // Each send returns a `DeliveryFuture` resolving to whether the bytes were actually flushed
+        // to the wire. We toss it to the runtime rather than awaiting it, so the send itself stays
+        // fire-and-forget; a message lost before flush (e.g. the connection died while buffered) is
+        // logged there instead of propagating a delivery status up through every layer.
         //
-        // Chunk size is derived from this connection's negotiated `max_message_size` rather than a
-        // fixed constant, so a channel that negotiated a smaller limit is respected. Each chunk is
-        // re-wrapped in its own `MessagePayload` envelope before sending, so we cut the data at
-        // `max_message_size - MAX_CHUNK_ENVELOPE_OVERHEAD` to leave room for that envelope and keep
-        // the wrapped message within the limit. We only chunk when the payload itself exceeds the
-        // limit; otherwise it goes out as-is.
-        if data.len() > conn.max_message_size() {
-            let chunk_size = conn
-                .max_message_size()
-                .saturating_sub(MAX_CHUNK_ENVELOPE_OVERHEAD);
-            let chunks = ChunkList::split(&data, chunk_size);
-            for chunk in chunks {
-                let data =
-                    MessagePayload::new_send(Message::Chunk(chunk), &self.session_sk, did, did)?
-                        .to_bincode()?;
+        // The chunk-vs-whole decision is the pure `plan_framing`, derived from this connection's
+        // negotiated `max_message_size` (so a channel with a smaller limit is respected); this
+        // block is only the effectful shell that carries it out. Each chunk is re-wrapped in its own
+        // `MessagePayload` envelope before sending.
+        match plan_framing(
+            data.len(),
+            conn.max_message_size(),
+            MAX_CHUNK_ENVELOPE_OVERHEAD,
+        ) {
+            Framing::Whole => {
                 spawn_delivery(conn.send_data(data).await?, did);
             }
-        } else {
-            spawn_delivery(conn.send_data(data).await?, did);
+            Framing::Chunked { chunk_size } => {
+                for chunk in ChunkList::split(&data, chunk_size) {
+                    let data = MessagePayload::new_send(
+                        Message::Chunk(chunk),
+                        &self.session_sk,
+                        did,
+                        did,
+                    )?
+                    .to_bincode()?;
+                    spawn_delivery(conn.send_data(data).await?, did);
+                }
+            }
         }
 
         tracing::debug!(

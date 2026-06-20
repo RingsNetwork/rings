@@ -11,6 +11,7 @@ use serde::Serialize;
 
 use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
+use crate::core::sdp::parse_sdp_max_message_size;
 use crate::delivery::DeliveryFuture;
 
 /// Wrapper for the data that is sent over the data channel.
@@ -66,20 +67,11 @@ pub enum WebrtcConnectionState {
 /// peer) but never more.
 pub const MAX_DATA_CHANNEL_MESSAGE_SIZE: usize = 65536;
 
-/// Parse the SCTP `a=max-message-size` attribute (RFC 8841) out of an SDP. Returns `None` when the
-/// attribute is absent. This is the same source webrtc reads internally; we parse it ourselves so
-/// the negotiated limit is available identically on native and browser, without relying on a
-/// backend to expose it.
-pub fn parse_sdp_max_message_size(sdp: &str) -> Option<u32> {
-    sdp.lines()
-        .find_map(|line| line.trim().strip_prefix("a=max-message-size:"))
-        .and_then(|value| value.trim().parse::<u32>().ok())
-}
-
-/// The effective per-message send limit for a peer whose SDP is `remote_sdp`. Per RFC 8841 an
-/// absent attribute defaults to 65536 and a value of `0` means "no limit" (we still bound it by our
-/// own send cap); any explicit value is honoured but capped at [`MAX_DATA_CHANNEL_MESSAGE_SIZE`] for
-/// interop. Always returns a positive value.
+/// The effective per-message send limit for a peer whose SDP is `remote_sdp`. The negotiated value
+/// is parsed from the SDP by [`crate::core::sdp`]; this function is the *policy* layered on top.
+/// Per RFC 8841 an absent attribute defaults to 65536 and a value of `0` means "no limit" (we still
+/// bound it by our own send cap); any explicit value is honoured but capped at
+/// [`MAX_DATA_CHANNEL_MESSAGE_SIZE`] for interop. Always returns a positive value.
 pub fn effective_max_message_size(remote_sdp: &str) -> usize {
     match parse_sdp_max_message_size(remote_sdp) {
         None | Some(0) => MAX_DATA_CHANNEL_MESSAGE_SIZE,
@@ -183,3 +175,51 @@ pub type BoxedTransport<C, E> =
 /// Used to store a boxed [TransportInterface] trait object.
 #[cfg(feature = "web-sys-webrtc")]
 pub type BoxedTransport<C, E> = Box<dyn TransportInterface<Connection = C, Error = E>>;
+
+#[cfg(test)]
+mod tests {
+    // SDP parsing itself is tested in `crate::core::sdp`; these cover the policy `effective_*`
+    // layers on top of it (default / no-limit / cap).
+    use super::effective_max_message_size;
+    use super::MAX_DATA_CHANNEL_MESSAGE_SIZE;
+
+    #[test]
+    fn effective_absent_defaults_to_cap() {
+        assert_eq!(
+            effective_max_message_size("v=0\r\n"),
+            MAX_DATA_CHANNEL_MESSAGE_SIZE
+        );
+    }
+
+    #[test]
+    fn effective_zero_means_no_limit_uses_cap() {
+        assert_eq!(
+            effective_max_message_size("a=max-message-size:0\r\n"),
+            MAX_DATA_CHANNEL_MESSAGE_SIZE
+        );
+    }
+
+    #[test]
+    fn effective_smaller_value_is_honoured() {
+        assert_eq!(
+            effective_max_message_size("a=max-message-size:16384\r\n"),
+            16384
+        );
+    }
+
+    #[test]
+    fn effective_larger_value_is_capped() {
+        assert_eq!(
+            effective_max_message_size("a=max-message-size:1048576\r\n"),
+            MAX_DATA_CHANNEL_MESSAGE_SIZE
+        );
+    }
+
+    #[test]
+    fn effective_exactly_cap_is_cap() {
+        assert_eq!(
+            effective_max_message_size("a=max-message-size:65536\r\n"),
+            MAX_DATA_CHANNEL_MESSAGE_SIZE
+        );
+    }
+}
