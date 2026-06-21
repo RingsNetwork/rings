@@ -3,6 +3,7 @@
 use bytes::Bytes;
 
 use crate::core::callback::BoxedTransportCallback;
+use crate::core::media::RtpPacket;
 use crate::core::transport::TransportMessage;
 use crate::core::transport::WebrtcConnectionState;
 use crate::notifier::Notifier;
@@ -53,6 +54,13 @@ impl InnerTransportCallback {
                 tracing::error!("Deserialize DataChannelMessage failed: {e:?}");
             }
         };
+    }
+
+    /// This method is invoked on an RTP packet arrival over a media track.
+    pub async fn on_rtp(&self, packet: RtpPacket) {
+        if let Err(e) = self.callback.on_rtp(&self.cid, packet).await {
+            tracing::error!("Callback on_rtp failed: {e:?}");
+        }
     }
 
     /// This method is invoked when the state of connection has changed.

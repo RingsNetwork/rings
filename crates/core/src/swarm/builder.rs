@@ -5,6 +5,8 @@
 use std::sync::Arc;
 use std::sync::RwLock;
 
+use rings_transport::core::media::ChannelConfig;
+
 use crate::dht::PeerRing;
 use crate::dht::VNodeStorage;
 use crate::measure::MeasureImpl;
@@ -28,6 +30,7 @@ pub struct SwarmBuilder {
     session_ttl: Option<usize>,
     measure: Option<MeasureImpl>,
     callback: Option<SharedSwarmCallback>,
+    channel_config: ChannelConfig,
 }
 
 impl SwarmBuilder {
@@ -48,7 +51,14 @@ impl SwarmBuilder {
             session_ttl: None,
             measure: None,
             callback: None,
+            channel_config: ChannelConfig::default(),
         }
+    }
+
+    /// Configure the channels (data and optional media track) negotiated on each connection.
+    pub fn channel_config(mut self, channel_config: ChannelConfig) -> Self {
+        self.channel_config = channel_config;
+        self
     }
 
     /// Sets up the maximum length of successors in the DHT.
@@ -104,6 +114,7 @@ impl SwarmBuilder {
             self.session_sk,
             dht.clone(),
             self.measure,
+            self.channel_config,
         ));
 
         Swarm {

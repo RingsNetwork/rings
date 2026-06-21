@@ -102,6 +102,20 @@ impl Swarm {
         self.transport.send_message(msg, destination).await
     }
 
+    /// Send one RTP packet on the media track of the connection to `peer`. Errors if there is no
+    /// connection, or it was not created with a media channel.
+    pub async fn send_media(
+        &self,
+        peer: Did,
+        packet: rings_transport::core::media::RtpPacket,
+    ) -> Result<()> {
+        let conn = self
+            .transport
+            .get_connection(peer)
+            .ok_or(Error::SwarmMissDidInTable(peer))?;
+        conn.send_media(packet).await
+    }
+
     /// List peers and their connection status.
     pub fn peers(&self) -> Vec<ConnectionInspect> {
         self.transport

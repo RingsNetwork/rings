@@ -1,13 +1,17 @@
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::lock::Mutex as FuturesMutex;
 use rings_transport::core::callback::TransportCallback;
+use rings_transport::core::media::RtpPacket;
 use rings_transport::core::transport::WebrtcConnectionState;
 
 use crate::chunk::MessageReassembler;
 use crate::dht::Did;
+use crate::media::MediaFrame;
+use crate::media::MediaReassembler;
 use crate::message::HandleMsg;
 use crate::message::Message;
 use crate::message::MessageHandler;
@@ -57,6 +61,12 @@ pub trait SwarmCallback {
     async fn on_event(&self, _event: &SwarmEvent) -> Result<(), CallbackError> {
         Ok(())
     }
+
+    /// This method is invoked when a media frame has been reassembled from a peer's RTP track.
+    /// Defaults to a no-op for nodes that do not consume media.
+    async fn on_media_frame(&self, _peer: Did, _frame: MediaFrame) -> Result<(), CallbackError> {
+        Ok(())
+    }
 }
 
 /// [InnerSwarmCallback] wraps [SharedSwarmCallback] with inner handling for a specific connection.
@@ -65,6 +75,8 @@ pub struct InnerSwarmCallback {
     message_handler: MessageHandler,
     callback: SharedSwarmCallback,
     reassembler: FuturesMutex<MessageReassembler>,
+    /// Per-connection media depacketizers, keyed by connection id (each track is its own stream).
+    media: FuturesMutex<HashMap<String, MediaReassembler>>,
 }
 
 impl InnerSwarmCallback {
@@ -76,6 +88,7 @@ impl InnerSwarmCallback {
             message_handler,
             callback,
             reassembler: Default::default(),
+            media: Default::default(),
         }
     }
 
@@ -113,8 +126,10 @@ impl InnerSwarmCallback {
                 self.message_handler.handle(payload, msg).await
             }
             Message::Chunk(ref msg) => {
-                if let Some(data) = self.reassembler.lock().await.handle(msg.clone()) {
-                    return self.on_message(cid, &data).await;
+                // A chunk completes at most one message, but `handle` returns the general
+                // transducer's `Vec` of outputs; deliver whatever it yields.
+                for data in self.reassembler.lock().await.handle(msg.clone()) {
+                    self.on_message(cid, &data).await?;
                 }
                 Ok(())
             }
@@ -142,6 +157,23 @@ impl TransportCallback for InnerSwarmCallback {
         }
         self.callback.on_validate(&payload).await?;
         self.handle_payload(cid, &payload).await
+    }
+
+    async fn on_rtp(&self, cid: &str, packet: RtpPacket) -> Result<(), CallbackError> {
+        let Ok(did) = Did::from_str(cid) else {
+            tracing::warn!("on_rtp parse did failed: {}", cid);
+            return Ok(());
+        };
+
+        let frames = {
+            let mut media = self.media.lock().await;
+            let depacketizer = media.entry(cid.to_string()).or_default();
+            depacketizer.handle(packet)
+        };
+        for frame in frames {
+            self.callback.on_media_frame(did, frame).await?;
+        }
+        Ok(())
     }
 
     async fn on_peer_connection_state_change(

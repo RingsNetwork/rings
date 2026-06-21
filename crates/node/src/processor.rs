@@ -17,6 +17,7 @@ use rings_core::storage::MemStorage;
 use rings_core::swarm::Swarm;
 use rings_core::swarm::SwarmBuilder;
 use rings_rpc::protos::rings_node::*;
+use rings_transport::core::media::ChannelConfig;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -46,6 +47,8 @@ pub struct ProcessorConfig {
     session_sk: SessionSk,
     /// Stabilization interval.
     stabilize_interval: Duration,
+    /// Channel configuration (data and optional media track) negotiated on each connection.
+    channel: ChannelConfig,
 }
 
 #[wasm_export]
@@ -63,12 +66,26 @@ impl ProcessorConfig {
             external_address: None,
             session_sk,
             stabilize_interval: Duration::from_secs(stabilize_interval),
+            channel: ChannelConfig::default(),
         }
     }
 
     /// Return associated [SessionSk].
     pub fn session_sk(&self) -> SessionSk {
         self.session_sk.clone()
+    }
+}
+
+impl ProcessorConfig {
+    /// Set the channel configuration (e.g. to negotiate a media track). Builder-style.
+    pub fn with_channel(mut self, channel: ChannelConfig) -> Self {
+        self.channel = channel;
+        self
+    }
+
+    /// The channel configuration negotiated on each connection.
+    pub fn channel(&self) -> &ChannelConfig {
+        &self.channel
     }
 }
 
@@ -96,6 +113,9 @@ pub struct ProcessorConfigSerialized {
     session_sk: String,
     /// An unsigned integer representing the stabilization interval in seconds.
     stabilize_interval: u64,
+    /// Channel configuration (data and optional media track). Defaults to data-only.
+    #[serde(default)]
+    channel: ChannelConfig,
 }
 
 impl ProcessorConfigSerialized {
@@ -112,6 +132,7 @@ impl ProcessorConfigSerialized {
             external_address: None,
             session_sk,
             stabilize_interval,
+            channel: ChannelConfig::default(),
         }
     }
 
@@ -132,6 +153,7 @@ impl TryFrom<ProcessorConfig> for ProcessorConfigSerialized {
             external_address: ins.external_address.clone(),
             session_sk: ins.session_sk.dump()?,
             stabilize_interval: ins.stabilize_interval.as_secs(),
+            channel: ins.channel.clone(),
         })
     }
 }
@@ -145,6 +167,7 @@ impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
             external_address: ins.external_address.clone(),
             session_sk: SessionSk::from_str(&ins.session_sk)?,
             stabilize_interval: Duration::from_secs(ins.stabilize_interval),
+            channel: ins.channel.clone(),
         })
     }
 }
@@ -186,6 +209,7 @@ pub struct ProcessorBuilder {
     storage: Option<VNodeStorage>,
     measure: Option<MeasureImpl>,
     stabilize_interval: Duration,
+    channel_config: ChannelConfig,
 }
 
 /// Processor for rings-node rpc server
@@ -214,6 +238,7 @@ impl ProcessorBuilder {
             storage: None,
             measure: None,
             stabilize_interval: config.stabilize_interval,
+            channel_config: config.channel.clone(),
         })
     }
 
@@ -248,6 +273,7 @@ impl ProcessorBuilder {
         if let Some(measure) = self.measure {
             swarm_builder = swarm_builder.measure(measure);
         }
+        swarm_builder = swarm_builder.channel_config(self.channel_config);
         let swarm = Arc::new(swarm_builder.build());
 
         Ok(Processor {
@@ -299,6 +325,20 @@ impl Processor {
 
         self.swarm
             .send_message(msg, destination)
+            .await
+            .map_err(Error::SendMessage)
+    }
+
+    /// Send one RTP packet to a did over its media track. The connection must have been created with
+    /// a media [`ChannelConfig`]. Inbound frames are delivered through the swarm callback's
+    /// `on_media_frame`.
+    pub async fn send_media(
+        &self,
+        destination: Did,
+        packet: rings_transport::core::media::RtpPacket,
+    ) -> Result<()> {
+        self.swarm
+            .send_media(destination, packet)
             .await
             .map_err(Error::SendMessage)
     }

@@ -186,7 +186,11 @@ impl WebSysWebrtcConnection {
 
 impl WebSysWebrtcTransport {
     /// Create a new [WebSysWebrtcTransport] instance.
-    pub fn new(ice_servers: &str, _external_address: Option<String>) -> Self {
+    pub fn new(
+        ice_servers: &str,
+        _external_address: Option<String>,
+        _channel_config: crate::core::media::ChannelConfig,
+    ) -> Self {
         let ice_servers = IceServer::vec_from_str(ice_servers).unwrap();
 
         Self {

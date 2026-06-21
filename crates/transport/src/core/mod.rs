@@ -12,6 +12,7 @@
 //! coming data channel message and etc. See the [callback] module.
 
 pub mod callback;
+pub mod media;
 pub mod pool;
 pub mod sdp;
 pub mod transport;

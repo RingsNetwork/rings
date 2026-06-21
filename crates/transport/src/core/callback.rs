@@ -7,6 +7,7 @@
 
 use async_trait::async_trait;
 
+use crate::core::media::RtpPacket;
 use crate::core::transport::WebrtcConnectionState;
 
 type CallbackError = Box<dyn std::error::Error>;
@@ -30,6 +31,12 @@ pub trait TransportCallback {
 
     /// This method is invoked on a binary message arrival over the data channel of webrtc.
     async fn on_message(&self, _cid: &str, _msg: &[u8]) -> Result<(), CallbackError> {
+        Ok(())
+    }
+
+    /// This method is invoked on an RTP packet arrival over a media track. Defaults to a no-op for
+    /// data-only connections and backends without media support.
+    async fn on_rtp(&self, _cid: &str, _packet: RtpPacket) -> Result<(), CallbackError> {
         Ok(())
     }
 

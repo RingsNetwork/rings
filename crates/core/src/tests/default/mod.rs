@@ -30,6 +30,7 @@ mod dht_trace_replay;
 #[cfg(feature = "dummy")]
 mod dht_schedule;
 mod test_connection;
+mod test_media;
 mod test_message_handler;
 mod test_stabilization;
 

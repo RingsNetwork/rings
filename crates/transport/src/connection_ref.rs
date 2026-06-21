@@ -75,6 +75,16 @@ where
             .unwrap_or(MAX_DATA_CHANNEL_MESSAGE_SIZE)
     }
 
+    async fn send_rtp(
+        &self,
+        packet: crate::core::media::RtpPacket,
+    ) -> std::result::Result<(), crate::core::media::MediaError> {
+        self.upgrade()
+            .map_err(|_| crate::core::media::MediaError::Unsupported)?
+            .send_rtp(packet)
+            .await
+    }
+
     async fn get_stats(&self) -> Vec<String> {
         let Ok(c) = self.upgrade() else {
             return Vec::new();
@@ -127,6 +137,16 @@ where
         self.upgrade()
             .map(|c| c.max_message_size())
             .unwrap_or(MAX_DATA_CHANNEL_MESSAGE_SIZE)
+    }
+
+    async fn send_rtp(
+        &self,
+        packet: crate::core::media::RtpPacket,
+    ) -> std::result::Result<(), crate::core::media::MediaError> {
+        self.upgrade()
+            .map_err(|_| crate::core::media::MediaError::Unsupported)?
+            .send_rtp(packet)
+            .await
     }
 
     async fn get_stats(&self) -> Vec<String> {

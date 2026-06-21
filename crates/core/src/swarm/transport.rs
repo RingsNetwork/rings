@@ -16,6 +16,8 @@ pub use rings_transport::connections::WebSysWebrtcTransport as Transport;
 use rings_transport::connections::WebrtcConnection as ConnectionOwner;
 #[cfg(all(not(feature = "wasm"), not(feature = "dummy")))]
 use rings_transport::connections::WebrtcTransport as Transport;
+use rings_transport::core::media::ChannelConfig;
+use rings_transport::core::media::RtpPacket;
 use rings_transport::core::transport::ConnectionInterface;
 use rings_transport::core::transport::TransportInterface;
 use rings_transport::core::transport::TransportMessage;
@@ -89,10 +91,11 @@ impl SwarmTransport {
         session_sk: SessionSk,
         dht: Arc<PeerRing>,
         measure: Option<MeasureImpl>,
+        channel_config: ChannelConfig,
     ) -> Self {
         Self {
             network_id,
-            transport: Transport::new(ice_servers, external_address),
+            transport: Transport::new(ice_servers, external_address, channel_config),
             session_sk,
             dht,
             measure,
@@ -305,6 +308,15 @@ impl SwarmConnection {
     /// `max_message_size`. Used to size payload chunks so each wrapped chunk stays within the limit.
     pub fn max_message_size(&self) -> usize {
         self.connection.max_message_size()
+    }
+
+    /// Send one RTP packet on this connection's media track. Errors if the connection has no media
+    /// track (it was not created with a [`ChannelConfig`] media track).
+    pub async fn send_media(&self, packet: RtpPacket) -> Result<()> {
+        self.connection
+            .send_rtp(packet)
+            .await
+            .map_err(|e| Error::Media(e.to_string()))
     }
 }
 

@@ -222,7 +222,11 @@ impl DummyConnection {
 
 impl DummyTransport {
     /// Create a new [DummyTransport] instance.
-    pub fn new(ice_servers: &str, _external_address: Option<String>) -> Self {
+    pub fn new(
+        ice_servers: &str,
+        _external_address: Option<String>,
+        _channel_config: crate::core::media::ChannelConfig,
+    ) -> Self {
         let _ice_servers = IceServer::vec_from_str(ice_servers).unwrap();
 
         Self { pool: Pool::new() }
