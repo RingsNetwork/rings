@@ -9,7 +9,7 @@
 //! - **Send** — [`ChunkList`] splits a [`Bytes`] into ordered [`Chunk`]s
 //!   (`ChunkList::split(&bytes, chunk_size)`, where `chunk_size` comes from the connection's
 //!   negotiated `max_message_size`), which the caller iterates and puts on the wire.
-//! - **Receive** — [`ChunkReassembler`] collects incoming [`Chunk`]s keyed by message id and
+//! - **Receive** — [`MessageReassembler`] collects incoming [`Chunk`]s keyed by message id and
 //!   yields the original payload once every position has arrived.
 //!
 //! The receiver is robust to the realities of a multi-hop / DHT overlay: out-of-order arrival,
@@ -17,7 +17,7 @@
 //! by TTL). It is also bounded against a hostile peer: per-chunk and per-message byte caps, a
 //! global buffered-cost ceiling (charging a per-slot overhead so tiny-chunk floods are bounded by
 //! count too), an id-count cap, and up-front rejection of already-expired chunks. No single id and
-//! no peer-supplied `total` can drive memory without limit. See [`ChunkReassembler`].
+//! no peer-supplied `total` can drive memory without limit. See [`MessageReassembler`].
 //!
 //! ```text
 //!   send    : Bytes ↦ [Chunk{ chunk=[i, n], data=dataᵢ, meta } | i ∈ 0..n]
@@ -42,30 +42,49 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::utils::get_epoch_ms;
 
-/// Upper bound on concurrently-reassembling (incomplete) messages held by a
-/// [`ChunkReassembler`]. A cheap first-line cap on the number of distinct message ids; the real
-/// memory guard is the byte accounting below.
-pub const MAX_PENDING_MESSAGES: usize = 512;
+/// The limits a [`MessageReassembler`] enforces on incoming chunks, as an explicit value rather
+/// than module globals. This keeps the core admission rule independent of *where* the numbers come
+/// from: the shell supplies them (see [`ReassemblyLimits::production`]), the reassembler only
+/// enforces what it is given, and tests can use small limits instead of giant synthetic payloads.
+#[derive(Debug, Clone, Copy)]
+pub struct ReassemblyLimits {
+    /// Max number of distinct in-flight message ids (a cheap first-line cap; the byte budgets are
+    /// the real memory guard).
+    pub max_pending_messages: usize,
+    /// Max `data` bytes a single chunk may carry.
+    pub max_chunk_data_len: usize,
+    /// Max buffered data bytes for one in-flight message.
+    pub max_message_bytes: usize,
+    /// Max buffered cost (data bytes + per-slot overhead) summed across all in-flight messages.
+    pub max_total_buffered_cost: usize,
+    /// Bookkeeping charge per slot (the `BTreeMap` node and `Bytes` header), so a flood of *tiny*
+    /// chunks is bounded by slot count, not only by summed data bytes.
+    pub slot_overhead: usize,
+}
 
-/// Per-slot bookkeeping charge (the `BTreeMap` node and `Bytes` header) added on top of a chunk's
-/// data when accounting buffered memory, so a flood of *tiny* chunks is bounded by slot count, not
-/// only by summed data bytes.
-const SLOT_OVERHEAD: usize = 64;
+impl ReassemblyLimits {
+    /// The limits used in production, derived from the transport / message ceilings. This is the one
+    /// place that reaches for transport-specific constants; the reassembler itself does not.
+    pub fn production() -> Self {
+        Self {
+            max_pending_messages: 512,
+            // A chunk crosses the wire as one data-channel message, capped by SCTP.
+            max_chunk_data_len: MAX_DATA_CHANNEL_MESSAGE_SIZE,
+            // The sender refuses to send more than this, so a larger reassembled message is forged;
+            // this is what stops the "one id, huge `total`, stream unique positions" attack.
+            max_message_bytes: TRANSPORT_MAX_SIZE,
+            // Admits several concurrent maximum-size transfers while staying hard-bounded.
+            max_total_buffered_cost: TRANSPORT_MAX_SIZE * 4,
+            slot_overhead: 64,
+        }
+    }
+}
 
-/// Largest `data` a single chunk may carry. A chunk crosses the wire as one data-channel message,
-/// which SCTP caps at [`MAX_DATA_CHANNEL_MESSAGE_SIZE`]; a chunk claiming more than that could not
-/// have arrived legitimately and is rejected.
-const MAX_CHUNK_DATA_LEN: usize = MAX_DATA_CHANNEL_MESSAGE_SIZE;
-
-/// Largest a single reassembled message may grow. The sender refuses to send more than
-/// [`TRANSPORT_MAX_SIZE`], so a `Pending` accumulating beyond this is forged — this is what stops
-/// the "one id, huge `total`, stream unique positions forever" attack.
-const MAX_MESSAGE_BYTES: usize = TRANSPORT_MAX_SIZE;
-
-/// Global ceiling on buffered cost (data bytes + per-slot overhead) summed across every in-flight
-/// message. Bounds total reassembly memory regardless of how the load is spread across ids or
-/// slots. Sized to admit several concurrent maximum-size transfers while staying hard-bounded.
-const MAX_TOTAL_BUFFERED_COST: usize = TRANSPORT_MAX_SIZE * 4;
+impl Default for ReassemblyLimits {
+    fn default() -> Self {
+        Self::production()
+    }
+}
 
 /// One chunk of a chunked message, as it travels on the wire.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -118,7 +137,7 @@ impl Default for ChunkMeta {
 /// `max_message_size` minus the envelope reserve), then iterate (or convert to `Vec<Chunk>`) to put
 /// each chunk on the wire. The cut size is a runtime argument rather than a type parameter because
 /// it is decided per connection from the negotiated limit. Reassembly is the receiver's job — see
-/// [`ChunkReassembler`].
+/// [`MessageReassembler`].
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct ChunkList(Vec<Chunk>);
 
@@ -228,13 +247,20 @@ pub enum Framing {
 /// failure the caller must surface, rather than emitting 1-byte chunks that the channel would
 /// reject anyway. When `Some(Chunked { chunk_size })` is returned, `chunk_size ≥ 1` by construction
 /// (the `limit > cʰ` guard), and `chunk_size + chunk_overhead ≤ limit`, so every wrapped chunk fits.
+///
+/// Total over all `usize` inputs: the whole-fit test uses `checked_add`, so an oversized
+/// `len + wʰ` does not overflow — it is simply not a whole fit and falls through to the
+/// chunked/`None` path.
 pub fn plan_framing(
     payload_len: usize,
     max_message_size: usize,
     whole_overhead: usize,
     chunk_overhead: usize,
 ) -> Option<Framing> {
-    if payload_len + whole_overhead <= max_message_size {
+    let whole_fits = payload_len
+        .checked_add(whole_overhead)
+        .is_some_and(|wire_len| wire_len <= max_message_size);
+    if whole_fits {
         Some(Framing::Whole)
     } else if max_message_size > chunk_overhead {
         Some(Framing::Chunked {
@@ -276,9 +302,9 @@ impl Pending {
         self.slots.len() == self.total
     }
 
-    /// Buffered cost charged to the global budget: data bytes plus a fixed per-slot overhead.
-    fn cost(&self) -> usize {
-        self.data_bytes + self.slots.len() * SLOT_OVERHEAD
+    /// Buffered cost charged to the global budget: data bytes plus `slot_overhead` per slot.
+    fn cost(&self, slot_overhead: usize) -> usize {
+        self.data_bytes + self.slots.len() * slot_overhead
     }
 
     fn assemble(self) -> Bytes {
@@ -286,31 +312,50 @@ impl Pending {
     }
 }
 
-/// Receiver side: reassembles [`Chunk`]s into whole messages, keyed by message id.
+/// Receiver side: reassembles [`Chunk`]s into whole data messages, keyed by message id.
+///
+/// This is **whole-message** reassembly for reliable data-channel `MessagePayload` fragments: it
+/// buffers a message's chunks and yields the complete [`Bytes`] once, via [`Self::handle`]. It is
+/// deliberately *not* a streaming/media abstraction — a future WebRTC voice/video path (RTP frame
+/// timing, jitter, partial delivery) belongs in its own API, not behind this `Option<Bytes>`.
 ///
 /// Correct under duplicates / retransmits (first write per position wins), out-of-order arrival
 /// (positions are sorted), and partial delivery (TTL eviction).
 ///
-/// **Bounded against a hostile peer.** Every accepted chunk is validated and charged to a budget,
-/// so reassembly memory cannot grow without limit no matter how the load is shaped:
-/// - per-chunk data is capped at `MAX_CHUNK_DATA_LEN`;
-/// - per-message buffered data is capped at `MAX_MESSAGE_BYTES` (defeats "one id, huge `total`,
-///   stream unique positions forever");
-/// - total buffered cost across all messages is capped at `MAX_TOTAL_BUFFERED_COST`, charging a
-///   per-slot overhead so a flood of tiny chunks is bounded by slot count too;
-/// - the number of distinct ids is capped at [`MAX_PENDING_MESSAGES`];
-/// - an already-expired chunk is rejected before it can be delivered or buffered.
-#[derive(Default)]
-pub struct ChunkReassembler {
+/// **Bounded against a hostile peer** by the [`ReassemblyLimits`] it is built with: every accepted
+/// chunk is validated and charged to a budget, so reassembly memory cannot grow without limit no
+/// matter how the load is shaped — per-chunk data, per-message data, a global buffered-cost ceiling
+/// (charging a per-slot overhead so a tiny-chunk flood is bounded by slot count too), and the
+/// id count are all capped, and an already-expired chunk is rejected before it can be delivered or
+/// buffered.
+pub struct MessageReassembler {
     pending: HashMap<Uuid, Pending>,
-    /// Sum of `Pending::cost()` over `pending`, maintained incrementally for an O(1) global cap.
+    /// Sum of `Pending::cost(..)` over `pending`, maintained incrementally for an O(1) global cap.
     buffered_cost: usize,
+    /// The bounds enforced on every incoming chunk.
+    limits: ReassemblyLimits,
 }
 
-impl ChunkReassembler {
-    /// Empty reassembler.
+impl Default for MessageReassembler {
+    fn default() -> Self {
+        Self::with_limits(ReassemblyLimits::production())
+    }
+}
+
+impl MessageReassembler {
+    /// Empty reassembler with [`ReassemblyLimits::production`] bounds.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Empty reassembler enforcing the given `limits`. Tests use this with small limits to exercise
+    /// the admission rule without giant synthetic payloads.
+    pub fn with_limits(limits: ReassemblyLimits) -> Self {
+        Self {
+            pending: HashMap::new(),
+            buffered_cost: 0,
+            limits,
+        }
     }
 
     /// Number of messages currently being reassembled (incomplete).
@@ -322,10 +367,11 @@ impl ChunkReassembler {
     pub fn remove_expired(&mut self) {
         let now = get_epoch_ms();
         let buffered_cost = &mut self.buffered_cost;
+        let slot_overhead = self.limits.slot_overhead;
         self.pending.retain(|_, p| {
             let alive = p.ts_ms + p.ttl_ms as u128 > now;
             if !alive {
-                *buffered_cost -= p.cost();
+                *buffered_cost -= p.cost(slot_overhead);
             }
             alive
         });
@@ -334,7 +380,7 @@ impl ChunkReassembler {
     /// Forget a message (e.g. after it has been delivered), returning its cost to the budget.
     pub fn remove(&mut self, id: Uuid) {
         if let Some(p) = self.pending.remove(&id) {
-            self.buffered_cost -= p.cost();
+            self.buffered_cost -= p.cost(self.limits.slot_overhead);
         }
     }
 
@@ -366,7 +412,7 @@ impl ChunkReassembler {
             return None;
         }
         // A single chunk cannot carry more than one data-channel message's worth of bytes.
-        if chunk.data.len() > MAX_CHUNK_DATA_LEN {
+        if chunk.data.len() > self.limits.max_chunk_data_len {
             return None;
         }
 
@@ -375,7 +421,8 @@ impl ChunkReassembler {
         let id = chunk.meta.id;
         // Bound concurrent messages: once at the cap (after reclaiming expired ones above), drop
         // any *new* message rather than grow without limit.
-        if !self.pending.contains_key(&id) && self.pending.len() >= MAX_PENDING_MESSAGES {
+        if !self.pending.contains_key(&id) && self.pending.len() >= self.limits.max_pending_messages
+        {
             return None;
         }
 
@@ -391,14 +438,14 @@ impl ChunkReassembler {
                 return None;
             }
             // Per-message data cap: a single message cannot exceed the maximum send size.
-            if p.data_bytes + chunk.data.len() > MAX_MESSAGE_BYTES {
+            if p.data_bytes + chunk.data.len() > self.limits.max_message_bytes {
                 return None;
             }
         }
 
         // Global buffer cap, charging this slot's data plus its fixed overhead.
-        let cost = chunk.data.len() + SLOT_OVERHEAD;
-        if self.buffered_cost + cost > MAX_TOTAL_BUFFERED_COST {
+        let cost = chunk.data.len() + self.limits.slot_overhead;
+        if self.buffered_cost + cost > self.limits.max_total_buffered_cost {
             return None;
         }
 
@@ -413,7 +460,7 @@ impl ChunkReassembler {
         if pending.is_complete() {
             // `remove` returns the cost to the budget and yields the owned `Pending`.
             let done = self.pending.remove(&id)?;
-            self.buffered_cost -= done.cost();
+            self.buffered_cost -= done.cost(self.limits.slot_overhead);
             return Some(done.assemble());
         }
         None
@@ -426,6 +473,17 @@ mod test {
 
     fn chunks_of(data: &Bytes, mtu: usize) -> Vec<Chunk> {
         ChunkList::split(data, mtu).into()
+    }
+
+    /// Tiny limits so the admission rule can be exercised without giant synthetic payloads.
+    fn small_limits() -> ReassemblyLimits {
+        ReassemblyLimits {
+            max_pending_messages: 4,
+            max_chunk_data_len: 16,
+            max_message_bytes: 100,
+            max_total_buffered_cost: 256,
+            slot_overhead: 8,
+        }
     }
 
     #[test]
@@ -503,7 +561,7 @@ mod test {
             (5, 1),
         ] {
             let data: Bytes = (0..len).map(|i| i as u8).collect::<Vec<u8>>().into();
-            let mut r = ChunkReassembler::new();
+            let mut r = MessageReassembler::new();
             let mut out = None;
             for c in ChunkList::split(&data, size) {
                 out = r.handle(c).or(out);
@@ -554,9 +612,21 @@ mod test {
     }
 
     #[test]
+    fn plan_is_total_on_overflow() {
+        // `payload_len + whole_overhead` overflows usize; must not panic, and (not a whole fit)
+        // falls through to the chunked decision rather than wrapping around.
+        assert_eq!(
+            plan_framing(usize::MAX, 100, 10, 20),
+            Some(Framing::Chunked { chunk_size: 80 })
+        );
+        // overflow with a too-small limit still yields None, not a panic.
+        assert_eq!(plan_framing(usize::MAX, 10, 10, 20), None);
+    }
+
+    #[test]
     fn reassembles_in_order() {
         let data: Bytes = "helloworld".repeat(1024).into();
-        let mut r = ChunkReassembler::new();
+        let mut r = MessageReassembler::new();
         let chunks = chunks_of(&data, 32);
         let mut out = None;
         for c in chunks {
@@ -571,7 +641,7 @@ mod test {
         let data: Bytes = "helloworld".repeat(64).into();
         let mut chunks = chunks_of(&data, 32);
         chunks.reverse();
-        let mut r = ChunkReassembler::new();
+        let mut r = MessageReassembler::new();
         let mut out = None;
         for c in chunks {
             out = r.handle(c).or(out);
@@ -585,7 +655,7 @@ mod test {
         let data: Bytes = "helloworld".repeat(8).into(); // > 32 bytes => 3 chunks
         let chunks = chunks_of(&data, 32);
         assert!(chunks.len() >= 2);
-        let mut r = ChunkReassembler::new();
+        let mut r = MessageReassembler::new();
 
         // Feed every chunk, re-feeding chunk 0 in the middle as a duplicate.
         assert!(r.handle(chunks[0].clone()).is_none());
@@ -606,7 +676,7 @@ mod test {
         let d2: Bytes = "world".repeat(64).into();
         let c1 = chunks_of(&d1, 32);
         let c2 = chunks_of(&d2, 32);
-        let mut r = ChunkReassembler::new();
+        let mut r = MessageReassembler::new();
 
         // interleave the two messages
         let (mut o1, mut o2) = (None, None);
@@ -628,7 +698,7 @@ mod test {
     fn incomplete_message_stays_pending() {
         let data: Bytes = "helloworld".repeat(64).into();
         let chunks = chunks_of(&data, 32);
-        let mut r = ChunkReassembler::new();
+        let mut r = MessageReassembler::new();
         for c in &chunks[..chunks.len() - 1] {
             assert!(r.handle(c.clone()).is_none());
         }
@@ -639,7 +709,7 @@ mod test {
 
     #[test]
     fn malformed_chunks_are_dropped() {
-        let mut r = ChunkReassembler::new();
+        let mut r = MessageReassembler::new();
         // total == 0
         assert!(r
             .handle(Chunk {
@@ -664,7 +734,7 @@ mod test {
         // ts_ms < TS_OFFSET_TOLERANCE_MS would underflow a plain `u128` subtraction (no panic with
         // saturating arithmetic), and a chunk stamped at the epoch is already long expired — it must
         // be dropped, not delivered, even though it is a complete `total == 1` message.
-        let mut r = ChunkReassembler::new();
+        let mut r = MessageReassembler::new();
         let out = r.handle(Chunk {
             chunk: [0, 1],
             data: Bytes::from_static(b"ok"),
@@ -682,7 +752,7 @@ mod test {
     fn expired_single_chunk_is_not_delivered() {
         // Regression: sweeping *other* pending entries before insertion let an already-expired
         // `total == 1` chunk be delivered immediately. It must be rejected up front.
-        let mut r = ChunkReassembler::new();
+        let mut r = MessageReassembler::new();
         let now = get_epoch_ms();
         let out = r.handle(Chunk {
             chunk: [0, 1],
@@ -699,8 +769,9 @@ mod test {
 
     #[test]
     fn oversize_chunk_data_is_rejected() {
-        let mut r = ChunkReassembler::new();
-        let data: Bytes = vec![0u8; MAX_CHUNK_DATA_LEN + 1].into();
+        let limits = small_limits();
+        let mut r = MessageReassembler::with_limits(limits);
+        let data: Bytes = vec![0u8; limits.max_chunk_data_len + 1].into();
         let out = r.handle(Chunk {
             chunk: [0, 1],
             data,
@@ -714,7 +785,7 @@ mod test {
     #[test]
     fn buffered_cost_returns_to_zero_after_completion() {
         let data: Bytes = "helloworld".repeat(100).into();
-        let mut r = ChunkReassembler::new();
+        let mut r = MessageReassembler::new();
         for c in ChunkList::split(&data, 32) {
             r.handle(c);
         }
@@ -723,17 +794,17 @@ mod test {
     }
 
     /// A single id advertising a huge `total` and streaming distinct positions cannot grow without
-    /// bound: the per-message byte cap stops it. (Cheap: `Bytes` clones share one backing buffer, so
-    /// the accounted bytes far exceed the actual allocation.)
+    /// bound: the per-message byte cap stops it.
     #[test]
     fn per_message_byte_cap_bounds_one_id() {
+        let limits = small_limits();
+        let mut r = MessageReassembler::with_limits(limits);
         let meta = ChunkMeta::default();
-        let data: Bytes = vec![0u8; MAX_CHUNK_DATA_LEN].into();
-        let total = 100_000; // absurd, never completes
-        let mut r = ChunkReassembler::new();
+        let data: Bytes = vec![0u8; limits.max_chunk_data_len].into();
+        let total = 1000; // absurd, never completes
 
         let mut accepted = 0usize;
-        for position in 0..2000 {
+        for position in 0..50 {
             let before = r.pending.get(&meta.id).map(|p| p.slots.len()).unwrap_or(0);
             r.handle(Chunk {
                 meta,
@@ -748,19 +819,45 @@ mod test {
 
         let pending = r.pending.get(&meta.id).expect("still pending");
         assert!(
-            pending.data_bytes <= MAX_MESSAGE_BYTES,
+            pending.data_bytes <= limits.max_message_bytes,
             "per-message buffered data must stay within the cap"
         );
         assert!(
-            accepted < 2000,
-            "the cap must have rejected some chunks, got {accepted} accepted"
+            accepted < 50,
+            "the cap must reject some chunks, got {accepted}"
         );
-        assert_eq!(r.buffered_cost, pending.cost(), "accounting stays exact");
+        assert_eq!(
+            r.buffered_cost,
+            pending.cost(limits.slot_overhead),
+            "accounting stays exact"
+        );
+    }
+
+    /// Spreading the flood across many ids is bounded too: the global buffered-cost ceiling caps
+    /// total memory regardless of how many ids are used.
+    #[test]
+    fn global_cost_cap_bounds_total() {
+        let limits = small_limits();
+        let mut r = MessageReassembler::with_limits(limits);
+        // Each id contributes one slot of `max_chunk_data_len` data; keep them all pending.
+        for _ in 0..(limits.max_pending_messages * 4) {
+            r.handle(Chunk {
+                chunk: [0, 2],
+                data: vec![0u8; limits.max_chunk_data_len].into(),
+                meta: ChunkMeta::default(),
+            });
+        }
+        assert!(
+            r.buffered_cost <= limits.max_total_buffered_cost,
+            "global buffered cost {} exceeded cap {}",
+            r.buffered_cost,
+            limits.max_total_buffered_cost
+        );
     }
 
     #[test]
     fn future_timestamp_is_dropped() {
-        let mut r = ChunkReassembler::new();
+        let mut r = MessageReassembler::new();
         let out = r.handle(Chunk {
             chunk: [0, 1],
             data: Bytes::from_static(b"x"),
@@ -775,7 +872,7 @@ mod test {
 
     #[test]
     fn expired_partial_messages_are_evicted() {
-        let mut r = ChunkReassembler::new();
+        let mut r = MessageReassembler::new();
         let now = get_epoch_ms();
         // a partial (1 of 2) message that is already expired
         r.handle(Chunk {
@@ -802,16 +899,17 @@ mod test {
 
     #[test]
     fn pending_messages_are_capped() {
-        let mut r = ChunkReassembler::new();
+        let limits = small_limits();
+        let mut r = MessageReassembler::with_limits(limits);
         // each is the first of two chunks => stays pending
-        for _ in 0..(MAX_PENDING_MESSAGES + 10) {
+        for _ in 0..(limits.max_pending_messages + 10) {
             r.handle(Chunk {
                 chunk: [0, 2],
                 data: Bytes::from_static(b"x"),
                 meta: ChunkMeta::default(), // fresh id, fresh ts each time
             });
         }
-        assert_eq!(r.pending_count(), MAX_PENDING_MESSAGES);
+        assert_eq!(r.pending_count(), limits.max_pending_messages);
     }
 
     #[test]
@@ -825,7 +923,7 @@ mod test {
         chunks.insert(1, dup.clone());
         chunks.insert(chunks.len() / 3, dup);
 
-        let mut r = ChunkReassembler::new();
+        let mut r = MessageReassembler::new();
         let mut out = None;
         for c in chunks {
             out = r.handle(c).or(out);

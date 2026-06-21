@@ -6,7 +6,7 @@ use futures::lock::Mutex as FuturesMutex;
 use rings_transport::core::callback::TransportCallback;
 use rings_transport::core::transport::WebrtcConnectionState;
 
-use crate::chunk::ChunkReassembler;
+use crate::chunk::MessageReassembler;
 use crate::dht::Did;
 use crate::message::HandleMsg;
 use crate::message::Message;
@@ -64,7 +64,7 @@ pub struct InnerSwarmCallback {
     transport: Arc<SwarmTransport>,
     message_handler: MessageHandler,
     callback: SharedSwarmCallback,
-    reassembler: FuturesMutex<ChunkReassembler>,
+    reassembler: FuturesMutex<MessageReassembler>,
 }
 
 impl InnerSwarmCallback {

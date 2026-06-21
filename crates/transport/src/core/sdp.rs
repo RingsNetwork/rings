@@ -1,20 +1,25 @@
-//! A small, pure parser for the bits of SDP (RFC 4566) we read off a peer's session description.
+//! A small, pure parser for the bits of SDP (RFC 4566 / RFC 8841) we read off a peer's session
+//! description.
 //!
-//! It is deliberately structured as three composable, allocation-free (borrowing) passes — the
-//! shape of a Haskell parser: lex into tokens, parse the tokens into an AST (a sum type over line
-//! kinds), then fold the AST to the value we want. None of it does I/O; it is a total function of
-//! the input text.
+//! It is structured as three composable passes — the shape of a Haskell parser: lex into line
+//! tokens, parse those into an AST that preserves SDP's session/media structure, then fold the AST
+//! to the value we want. None of it does I/O; it is a total function of the input text. The tokens
+//! and attribute fields borrow from the input (no copying of values); only the per-section vectors
+//! are allocated.
 //!
 //! ```text
-//!   lex   : &str        ↦ [Line]                  -- text  → tokens
-//!   parse : [Line]      ↦ SessionDescription      -- tokens → AST
-//!   fold  : SessionDescription ↦ Option<u32>      -- AST    → value
+//!   lex   : &str               ↦ [Line]               -- text   → tokens
+//!   parse : &str               ↦ SessionDescription   -- tokens → AST (session + media sections)
+//!   fold  : SessionDescription ↦ Option<u32>          -- AST    → value
 //! ```
 //!
 //! SDP is line-oriented: every line is `<type>=<value>` where `<type>` is a single character
-//! (RFC 4566 §5). We model attribute lines (`a=`) precisely, since they carry the value we need
-//! (`a=max-message-size`, RFC 8841 §6), and keep every other line kind verbatim so the AST stays a
-//! faithful, total representation of the input rather than a lossy filter.
+//! (RFC 4566 §5). It is also *sectioned*: attributes before the first `m=` line are session-level,
+//! and each `m=` line opens a media section whose attributes are media-level. This matters here:
+//! `a=max-message-size` is a **media-level** attribute of the SCTP association (RFC 8841 §6), so it
+//! must be read from the `m=application … DTLS/SCTP … webrtc-datachannel` section we actually send
+//! on — not from session level or some other media section. The AST keeps that structure so the
+//! fold can ask the right section.
 
 /// A lexed SDP line: a one-character type and its raw value, with surrounding whitespace and the
 /// line ending stripped. The smallest meaningful token of an SDP document.
@@ -41,26 +46,23 @@ pub enum Attribute<'a> {
     },
 }
 
-/// One node of the AST: a sum type over SDP line kinds. Attribute lines are parsed into
-/// [`Attribute`]; every other kind is preserved as a raw [`SdpItem::Field`].
+/// One media section: the `m=` line's value and the attributes that follow it (up to the next
+/// `m=`).
 #[derive(Debug, PartialEq, Eq)]
-pub enum SdpItem<'a> {
-    /// An `a=` line.
-    Attribute(Attribute<'a>),
-    /// Any other `<type>=<value>` line, kept verbatim.
-    Field {
-        /// The line type character.
-        kind: char,
-        /// The raw, trimmed value.
-        value: &'a str,
-    },
+pub struct MediaDescription<'a> {
+    /// The `m=` line value, e.g. `application 9 UDP/DTLS/SCTP webrtc-datachannel`.
+    pub media: &'a str,
+    /// Media-level attributes declared under this `m=` line.
+    pub attrs: Vec<Attribute<'a>>,
 }
 
-/// The AST: an SDP session description as the ordered sequence of its lines.
+/// The AST: session-level attributes followed by the ordered media sections.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SessionDescription<'a> {
-    /// Lines in document order.
-    pub items: Vec<SdpItem<'a>>,
+    /// Attributes appearing before the first `m=` line.
+    pub session_attrs: Vec<Attribute<'a>>,
+    /// Media sections in document order.
+    pub media: Vec<MediaDescription<'a>>,
 }
 
 /// Lex: split the document into [`Line`] tokens. Lines that are not `<single-char>=<value>` (blank
@@ -81,61 +83,103 @@ pub fn lex(sdp: &str) -> impl Iterator<Item = Line<'_>> {
     })
 }
 
-/// Parse one token into an AST node. An `a=` line becomes an [`Attribute`] (a `Pair` if it contains
-/// `:`, else a `Flag`); anything else is kept as a [`SdpItem::Field`].
-pub fn parse_item<'a>(line: Line<'a>) -> SdpItem<'a> {
-    if line.kind != 'a' {
-        return SdpItem::Field {
-            kind: line.kind,
-            value: line.value,
-        };
-    }
-    match line.value.split_once(':') {
-        Some((key, value)) => SdpItem::Attribute(Attribute::Pair {
+/// Parse the value of an `a=` line into an [`Attribute`] — a `Pair` if it contains `:`, else a
+/// `Flag`.
+pub fn parse_attribute(value: &str) -> Attribute<'_> {
+    match value.split_once(':') {
+        Some((key, value)) => Attribute::Pair {
             key: key.trim(),
             value: value.trim(),
-        }),
-        None => SdpItem::Attribute(Attribute::Flag(line.value)),
+        },
+        None => Attribute::Flag(value),
     }
 }
 
-/// Parse: tokens ↦ AST.
+/// Parse: tokens ↦ AST. Routes each `a=` line into the current section (session-level until the
+/// first `m=`, media-level after), and opens a new media section on each `m=`. Other line kinds are
+/// not needed by this policy and are ignored.
 pub fn parse(sdp: &str) -> SessionDescription<'_> {
-    SessionDescription {
-        items: lex(sdp).map(parse_item).collect(),
+    let mut description = SessionDescription::default();
+    for line in lex(sdp) {
+        match line.kind {
+            'm' => description.media.push(MediaDescription {
+                media: line.value,
+                attrs: Vec::new(),
+            }),
+            'a' => {
+                let attr = parse_attribute(line.value);
+                match description.media.last_mut() {
+                    Some(section) => section.attrs.push(attr),
+                    None => description.session_attrs.push(attr),
+                }
+            }
+            _ => {}
+        }
     }
+    description
 }
 
-impl SessionDescription<'_> {
-    /// Fold the AST to the first `max-message-size` attribute value (RFC 8841 §6), if any. A linear
-    /// fold over the items selecting the one typed value we care about.
-    pub fn max_message_size(&self) -> Option<u32> {
-        self.items.iter().find_map(|item| match item {
-            SdpItem::Attribute(Attribute::Pair { key, value }) if *key == "max-message-size" => {
-                value.parse().ok()
-            }
+/// Does this `m=` value describe a WebRTC SCTP data channel? (`m=application … DTLS/SCTP …
+/// webrtc-datachannel`, RFC 8841 §5 — the proto may be `UDP/DTLS/SCTP` or `TCP/DTLS/SCTP`.)
+fn is_webrtc_datachannel(media: &str) -> bool {
+    media.split_whitespace().next() == Some("application")
+        && media.contains("SCTP")
+        && media.contains("webrtc-datachannel")
+}
+
+impl MediaDescription<'_> {
+    /// `a=max-message-size` declared in this section, if any.
+    fn max_message_size(&self) -> Option<u32> {
+        self.attrs.iter().find_map(|attr| match attr {
+            Attribute::Pair { key, value } if *key == "max-message-size" => value.parse().ok(),
             _ => None,
         })
     }
 }
 
-/// Parse the SCTP `a=max-message-size` attribute (RFC 8841) out of an SDP, composing the full
-/// lex → parse → fold pipeline. Returns `None` when the attribute is absent or malformed. This is
-/// the same source webrtc reads internally; we parse it ourselves so the negotiated limit is
-/// available identically on native and browser, without relying on a backend to expose it.
+impl SessionDescription<'_> {
+    /// The WebRTC SCTP data-channel media section, if the description has one.
+    pub fn data_channel(&self) -> Option<&MediaDescription<'_>> {
+        self.media
+            .iter()
+            .find(|section| is_webrtc_datachannel(section.media))
+    }
+
+    /// The SCTP `a=max-message-size` (RFC 8841 §6) for the data channel — read from the
+    /// data-channel media section only, never session level or an unrelated media section.
+    pub fn data_channel_max_message_size(&self) -> Option<u32> {
+        self.data_channel()?.max_message_size()
+    }
+}
+
+/// Parse the data channel's `a=max-message-size` (RFC 8841) out of an SDP, composing the full
+/// lex → parse → fold pipeline. Returns `None` when there is no data-channel section or it carries
+/// no (valid) `max-message-size`. This is the same source webrtc reads internally; we parse it
+/// ourselves so the negotiated limit is available identically on native and browser, without
+/// relying on a backend to expose it.
 pub fn parse_sdp_max_message_size(sdp: &str) -> Option<u32> {
-    parse(sdp).max_message_size()
+    parse(sdp).data_channel_max_message_size()
 }
 
 #[cfg(test)]
 mod tests {
     use super::lex;
     use super::parse;
-    use super::parse_item;
+    use super::parse_attribute;
     use super::parse_sdp_max_message_size;
     use super::Attribute;
     use super::Line;
-    use super::SdpItem;
+
+    /// A minimal but realistic data-channel SDP, with a `body` of media-section attribute lines.
+    fn data_channel_sdp(body: &str) -> String {
+        format!(
+            "v=0\r\n\
+             o=- 0 0 IN IP4 0.0.0.0\r\n\
+             m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
+             a=setup:actpass\r\n\
+             {body}"
+        )
+    }
 
     #[test]
     fn lex_splits_type_and_value_and_drops_junk() {
@@ -159,107 +203,104 @@ mod tests {
     }
 
     #[test]
-    fn parse_item_flag_vs_pair() {
+    fn parse_attribute_flag_vs_pair() {
+        assert_eq!(parse_attribute("sendrecv"), Attribute::Flag("sendrecv"));
         assert_eq!(
-            parse_item(Line {
-                kind: 'a',
-                value: "sendrecv"
-            }),
-            SdpItem::Attribute(Attribute::Flag("sendrecv")),
-        );
-        assert_eq!(
-            parse_item(Line {
-                kind: 'a',
-                value: "max-message-size:262144"
-            }),
-            SdpItem::Attribute(Attribute::Pair {
+            parse_attribute("max-message-size:262144"),
+            Attribute::Pair {
                 key: "max-message-size",
                 value: "262144"
-            }),
+            }
         );
     }
 
     #[test]
-    fn parse_item_non_attribute_is_field() {
+    fn parse_routes_attributes_by_section() {
+        let sdp = "a=group:BUNDLE 0\r\n\
+                   m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
+                   a=max-message-size:65536\r\n";
+        let ast = parse(sdp);
+        // the pre-`m=` attribute is session-level (and `group:…` parses as a key:value pair)
+        assert_eq!(ast.session_attrs, vec![Attribute::Pair {
+            key: "group",
+            value: "BUNDLE 0"
+        }]);
+        // the post-`m=` attribute is media-level under the data-channel section
+        assert_eq!(ast.media.len(), 1);
         assert_eq!(
-            parse_item(Line {
-                kind: 'm',
-                value: "application 9 UDP/DTLS/SCTP webrtc-datachannel"
-            }),
-            SdpItem::Field {
-                kind: 'm',
-                value: "application 9 UDP/DTLS/SCTP webrtc-datachannel"
-            },
+            ast.media[0].media,
+            "application 9 UDP/DTLS/SCTP webrtc-datachannel"
         );
+        assert_eq!(ast.media[0].attrs, vec![Attribute::Pair {
+            key: "max-message-size",
+            value: "65536"
+        }]);
     }
 
     #[test]
-    fn parse_builds_ordered_ast() {
-        let ast = parse("v=0\r\na=max-message-size:65536\r\n");
-        assert_eq!(ast.items, vec![
-            SdpItem::Field {
-                kind: 'v',
-                value: "0"
-            },
-            SdpItem::Attribute(Attribute::Pair {
-                key: "max-message-size",
-                value: "65536"
-            }),
-        ]);
+    fn data_channel_section_value_is_selected() {
+        let sdp = data_channel_sdp("a=max-message-size:65536\r\n");
+        assert_eq!(parse_sdp_max_message_size(&sdp), Some(65536));
     }
 
     #[test]
-    fn fold_absent_attribute_is_none() {
-        let sdp = "v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=sctp-port:5000\r\n";
+    fn session_level_value_is_ignored() {
+        // `max-message-size` before the first `m=` is session-level and must not be used.
+        let sdp = "a=max-message-size:1234\r\n\
+                   m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
+                   a=sctp-port:5000\r\n";
         assert_eq!(parse_sdp_max_message_size(sdp), None);
     }
 
     #[test]
-    fn fold_explicit_value() {
-        let sdp = "a=sctp-port:5000\r\na=max-message-size:262144\r\n";
-        assert_eq!(parse_sdp_max_message_size(sdp), Some(262144));
-    }
-
-    #[test]
-    fn fold_zero_is_preserved() {
-        assert_eq!(
-            parse_sdp_max_message_size("a=max-message-size:0\r\n"),
-            Some(0)
-        );
-    }
-
-    #[test]
-    fn fold_tolerates_surrounding_whitespace() {
-        assert_eq!(
-            parse_sdp_max_message_size("   a=max-message-size: 1200 \r\n"),
-            Some(1200)
-        );
-    }
-
-    #[test]
-    fn fold_malformed_value_is_none() {
-        assert_eq!(
-            parse_sdp_max_message_size("a=max-message-size:notanumber\r\n"),
-            None
-        );
-        assert_eq!(parse_sdp_max_message_size("a=max-message-size:\r\n"), None);
-    }
-
-    #[test]
-    fn fold_finds_attribute_among_many_lines() {
-        let sdp = concat!(
-            "v=0\r\n",
-            "o=- 0 0 IN IP4 0.0.0.0\r\n",
-            "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n",
-            "a=max-message-size:65536\r\n",
-            "a=setup:actpass\r\n",
-        );
+    fn other_media_section_value_is_ignored() {
+        // a value on an audio section must not leak into the data-channel limit.
+        let sdp = "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+                   a=max-message-size:99999\r\n\
+                   m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
+                   a=max-message-size:65536\r\n";
         assert_eq!(parse_sdp_max_message_size(sdp), Some(65536));
     }
 
     #[test]
-    fn fold_takes_first_when_repeated() {
-        let sdp = "a=max-message-size:1024\r\na=max-message-size:2048\r\n";
-        assert_eq!(parse_sdp_max_message_size(sdp), Some(1024));
+    fn no_data_channel_section_is_none() {
+        let sdp = "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=max-message-size:99999\r\n";
+        assert_eq!(parse_sdp_max_message_size(sdp), None);
+    }
+
+    #[test]
+    fn absent_attribute_is_none() {
+        let sdp = data_channel_sdp("a=sctp-port:5000\r\n");
+        assert_eq!(parse_sdp_max_message_size(&sdp), None);
+    }
+
+    #[test]
+    fn zero_is_preserved() {
+        let sdp = data_channel_sdp("a=max-message-size:0\r\n");
+        assert_eq!(parse_sdp_max_message_size(&sdp), Some(0));
+    }
+
+    #[test]
+    fn tolerates_surrounding_whitespace() {
+        let sdp = data_channel_sdp("   a=max-message-size: 1200 \r\n");
+        assert_eq!(parse_sdp_max_message_size(&sdp), Some(1200));
+    }
+
+    #[test]
+    fn malformed_value_is_none() {
+        assert_eq!(
+            parse_sdp_max_message_size(&data_channel_sdp("a=max-message-size:notanumber\r\n")),
+            None
+        );
+        assert_eq!(
+            parse_sdp_max_message_size(&data_channel_sdp("a=max-message-size:\r\n")),
+            None
+        );
+    }
+
+    #[test]
+    fn first_within_section_wins_when_repeated() {
+        let sdp = data_channel_sdp("a=max-message-size:1024\r\na=max-message-size:2048\r\n");
+        assert_eq!(parse_sdp_max_message_size(&sdp), Some(1024));
     }
 }
