@@ -11,8 +11,8 @@ use serde::Serialize;
 
 use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
+use crate::core::media::BoxedMediaTrack;
 use crate::core::media::MediaError;
-use crate::core::media::RtpPacket;
 use crate::core::sdp::parse_sdp_max_message_size;
 use crate::delivery::DeliveryFuture;
 
@@ -111,12 +111,13 @@ pub trait ConnectionInterface {
     /// constrained channel (which can negotiate a smaller limit) is respected.
     fn max_message_size(&self) -> usize;
 
-    /// Send one RTP packet on this connection's media track.
+    /// Attach a local media track to this connection, to be sent to the peer.
     ///
     /// Defaults to [`MediaError::Unsupported`]: a connection only carries media when it was created
-    /// with a [`media`](crate::core::media::ChannelConfig) track, and only the backends that support
-    /// media override this. The transport moves opaque RTP — encoding/capture is the caller's job.
-    async fn send_rtp(&self, _packet: RtpPacket) -> Result<(), MediaError> {
+    /// with a [`media`](crate::core::media::ChannelConfig) channel, and only the backends that
+    /// support media override this. Acquiring the track's source is platform-specific (see the
+    /// concrete [`MediaTrack`](crate::core::media::MediaTrack) types).
+    async fn add_media_track(&self, _track: BoxedMediaTrack) -> Result<(), MediaError> {
         Err(MediaError::Unsupported)
     }
 

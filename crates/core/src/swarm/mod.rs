@@ -102,18 +102,18 @@ impl Swarm {
         self.transport.send_message(msg, destination).await
     }
 
-    /// Send one RTP packet on the media track of the connection to `peer`. Errors if there is no
-    /// connection, or it was not created with a media channel.
-    pub async fn send_media(
+    /// Attach a local media track to the connection to `peer`, to be sent to it. Errors if there is
+    /// no connection, or it was not created with a media channel.
+    pub async fn add_media_track(
         &self,
         peer: Did,
-        packet: rings_transport::core::media::RtpPacket,
+        track: rings_transport::core::media::BoxedMediaTrack,
     ) -> Result<()> {
         let conn = self
             .transport
             .get_connection(peer)
             .ok_or(Error::SwarmMissDidInTable(peer))?;
-        conn.send_media(packet).await
+        conn.add_media_track(track).await
     }
 
     /// List peers and their connection status.

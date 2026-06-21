@@ -3,7 +3,7 @@
 use bytes::Bytes;
 
 use crate::core::callback::BoxedTransportCallback;
-use crate::core::media::RtpPacket;
+use crate::core::media::BoxedMediaTrack;
 use crate::core::transport::TransportMessage;
 use crate::core::transport::WebrtcConnectionState;
 use crate::notifier::Notifier;
@@ -56,10 +56,10 @@ impl InnerTransportCallback {
         };
     }
 
-    /// This method is invoked on an RTP packet arrival over a media track.
-    pub async fn on_rtp(&self, packet: RtpPacket) {
-        if let Err(e) = self.callback.on_rtp(&self.cid, packet).await {
-            tracing::error!("Callback on_rtp failed: {e:?}");
+    /// This method is invoked when a remote media track is received.
+    pub async fn on_media_track(&self, track: BoxedMediaTrack) {
+        if let Err(e) = self.callback.on_media_track(&self.cid, track).await {
+            tracing::error!("Callback on_media_track failed: {e:?}");
         }
     }
 

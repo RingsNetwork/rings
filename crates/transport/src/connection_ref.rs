@@ -75,13 +75,13 @@ where
             .unwrap_or(MAX_DATA_CHANNEL_MESSAGE_SIZE)
     }
 
-    async fn send_rtp(
+    async fn add_media_track(
         &self,
-        packet: crate::core::media::RtpPacket,
+        track: crate::core::media::BoxedMediaTrack,
     ) -> std::result::Result<(), crate::core::media::MediaError> {
         self.upgrade()
             .map_err(|_| crate::core::media::MediaError::Unsupported)?
-            .send_rtp(packet)
+            .add_media_track(track)
             .await
     }
 
@@ -139,13 +139,13 @@ where
             .unwrap_or(MAX_DATA_CHANNEL_MESSAGE_SIZE)
     }
 
-    async fn send_rtp(
+    async fn add_media_track(
         &self,
-        packet: crate::core::media::RtpPacket,
+        track: crate::core::media::BoxedMediaTrack,
     ) -> std::result::Result<(), crate::core::media::MediaError> {
         self.upgrade()
             .map_err(|_| crate::core::media::MediaError::Unsupported)?
-            .send_rtp(packet)
+            .add_media_track(track)
             .await
     }
 

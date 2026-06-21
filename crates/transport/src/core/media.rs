@@ -1,15 +1,20 @@
 //! Media-channel types shared across backends.
 //!
 //! Where [`crate::core::transport`] carries reliable, message-oriented data-channel traffic, this
-//! module describes the *media* side: opt-in RTP tracks negotiated on a connection. The transport
-//! moves opaque RTP packets — it does not encode, decode, or capture; framing/jitter handling is a
-//! receiver concern layered above (see `rings_core::media`).
+//! module models the *media* side as **media tracks**, the one shape both native (webrtc-rs) and
+//! browser (web-sys `MediaStreamTrack`) expose identically. The upper layers (swarm / node) only
+//! ever touch the [`MediaTrack`] trait, so media behaves the same on both platforms.
+//!
+//! What is uniform: negotiating, attaching, receiving, enabling and stopping a track. What is
+//! inherently platform-specific (and so lives behind each backend's concrete track type, not here):
+//! *acquiring* a local source (browser `getUserMedia`/canvas vs a native sample writer) and
+//! *consuming* a remote track's media (browser `<video>` vs reading RTP). This mirrors WebRTC
+//! itself, where `addTrack`/`ontrack` are uniform but `getUserMedia` is not.
 
-use bytes::Bytes;
 use serde::Deserialize;
 use serde::Serialize;
 
-/// Which kind of media an RTP track carries. Selects the `m=audio` / `m=video` SDP section.
+/// Which kind of media a track carries. Selects the `m=audio` / `m=video` SDP section.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MediaKind {
     /// An audio track.
@@ -18,18 +23,32 @@ pub enum MediaKind {
     Video,
 }
 
-/// One RTP packet reduced to the fields a depacketizer needs (RFC 3550 header + payload).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RtpPacket {
-    /// RTP sequence number (wraps at 16 bits).
-    pub sequence: u16,
-    /// RTP timestamp — the sampling instant; packets of one frame share it.
-    pub timestamp: u32,
-    /// Marker bit — set on the last packet of a frame (RFC 3550 §5.1).
-    pub marker: bool,
-    /// Opaque RTP payload bytes.
-    pub payload: Bytes,
+/// A platform-agnostic handle to one media track on a connection. Each backend supplies a concrete
+/// type implementing this; everything above the transport deals only with the trait, so the media
+/// API is identical on native and browser.
+pub trait MediaTrack {
+    /// The track's id (stable per track).
+    fn id(&self) -> String;
+    /// Whether this is an audio or video track.
+    fn kind(&self) -> MediaKind;
+    /// Whether the track is currently enabled (delivering media).
+    fn enabled(&self) -> bool;
+    /// Enable or mute the track without removing it.
+    fn set_enabled(&self, enabled: bool);
+    /// Downcast hook: a backend recovers its own concrete track from a [`BoxedMediaTrack`] handed to
+    /// [`add_media_track`](crate::core::transport::ConnectionInterface::add_media_track). Implement
+    /// as `fn as_any(&self) -> &dyn std::any::Any { self }`.
+    fn as_any(&self) -> &dyn std::any::Any;
 }
+
+/// Boxed [`MediaTrack`] passed across the connection/callback boundary. `Send + Sync` off the
+/// browser; single-threaded on it (same split as [`BoxedTransportCallback`](crate::core::callback)).
+#[cfg(not(feature = "web-sys-webrtc"))]
+pub type BoxedMediaTrack = Box<dyn MediaTrack + Send + Sync>;
+
+/// Boxed [`MediaTrack`] passed across the connection/callback boundary.
+#[cfg(feature = "web-sys-webrtc")]
+pub type BoxedMediaTrack = Box<dyn MediaTrack>;
 
 /// Configuration of one media track to negotiate on a connection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,14 +69,14 @@ pub struct ChannelConfig {
     pub media: Option<MediaChannelConfig>,
 }
 
-/// Errors from the media send path. Kept separate from a connection's `Error` so the trait's media
+/// Errors from the media track path. Kept separate from a connection's `Error` so the trait's media
 /// methods can carry a meaningful default ("unsupported") without every backend implementing them.
 #[derive(Debug, thiserror::Error)]
 pub enum MediaError {
-    /// This connection/backend has no media track (data-only, or a backend without media support).
+    /// This connection/backend has no media support (data-only, or a backend without media).
     #[error("media is not available on this connection")]
     Unsupported,
-    /// The underlying track rejected the packet.
-    #[error("media send failed: {0}")]
-    Send(String),
+    /// The underlying peer connection rejected the track.
+    #[error("failed to add media track: {0}")]
+    AddTrack(String),
 }

@@ -16,8 +16,8 @@ pub use rings_transport::connections::WebSysWebrtcTransport as Transport;
 use rings_transport::connections::WebrtcConnection as ConnectionOwner;
 #[cfg(all(not(feature = "wasm"), not(feature = "dummy")))]
 use rings_transport::connections::WebrtcTransport as Transport;
+use rings_transport::core::media::BoxedMediaTrack;
 use rings_transport::core::media::ChannelConfig;
-use rings_transport::core::media::RtpPacket;
 use rings_transport::core::transport::ConnectionInterface;
 use rings_transport::core::transport::TransportInterface;
 use rings_transport::core::transport::TransportMessage;
@@ -310,11 +310,12 @@ impl SwarmConnection {
         self.connection.max_message_size()
     }
 
-    /// Send one RTP packet on this connection's media track. Errors if the connection has no media
-    /// track (it was not created with a [`ChannelConfig`] media track).
-    pub async fn send_media(&self, packet: RtpPacket) -> Result<()> {
+    /// Attach a local media track to this connection, to be sent to the peer. The connection must
+    /// have been created with a media [`ChannelConfig`]. The track is built per platform
+    /// (`NativeMediaTrack` / `BrowserMediaTrack`).
+    pub async fn add_media_track(&self, track: BoxedMediaTrack) -> Result<()> {
         self.connection
-            .send_rtp(packet)
+            .add_media_track(track)
             .await
             .map_err(|e| Error::Media(e.to_string()))
     }

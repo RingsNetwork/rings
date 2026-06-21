@@ -1,3 +1,4 @@
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -17,6 +18,7 @@ use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice::mdns::MulticastDnsMode;
 use webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType;
 use webrtc::ice_transport::ice_server::RTCIceServer;
+use webrtc::media::Sample;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
@@ -24,19 +26,19 @@ use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
 use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecParameters;
 use webrtc::rtp_transceiver::rtp_codec::RTPCodecType;
-use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
+use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 use webrtc::track::track_local::TrackLocal;
-use webrtc::track::track_local::TrackLocalWriter;
 use webrtc::track::track_remote::TrackRemote;
 
 use crate::callback::InnerTransportCallback;
 use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
+use crate::core::media::BoxedMediaTrack;
 use crate::core::media::ChannelConfig;
 use crate::core::media::MediaChannelConfig;
 use crate::core::media::MediaError;
 use crate::core::media::MediaKind;
-use crate::core::media::RtpPacket;
+use crate::core::media::MediaTrack;
 use crate::core::pool::MessageSenderPool;
 use crate::core::pool::RoundRobin;
 use crate::core::pool::RoundRobinPool;
@@ -154,6 +156,118 @@ fn media_codec(cfg: &MediaChannelConfig) -> (RTCRtpCodecCapability, RTPCodecType
     )
 }
 
+/// A local, sendable media track (native side of [`MediaTrack`]). Built by the application via
+/// [`NativeMediaTrack::new`], handed to a connection with `add_media_track`, then fed encoded media
+/// with [`NativeMediaTrack::write_sample`] — the native analogue of attaching a browser
+/// `MediaStreamTrack` and letting it source frames.
+#[derive(Clone)]
+pub struct NativeMediaTrack {
+    track: Arc<TrackLocalStaticSample>,
+    kind: MediaKind,
+    enabled: Arc<AtomicBool>,
+}
+
+impl NativeMediaTrack {
+    /// Create a local track for the given media configuration.
+    pub fn new(config: &MediaChannelConfig) -> Self {
+        let (capability, _) = media_codec(config);
+        let track = Arc::new(TrackLocalStaticSample::new(
+            capability,
+            "rings-media".to_string(),
+            "rings-stream".to_string(),
+        ));
+        Self {
+            track,
+            kind: config.kind,
+            enabled: Arc::new(AtomicBool::new(true)),
+        }
+    }
+
+    /// Write one encoded media sample (`data` + its `duration`) to be sent to the peer; no-op while
+    /// disabled. Takes plain bytes rather than a webrtc `Sample` so callers need not depend on
+    /// webrtc-rs directly.
+    pub async fn write_sample(
+        &self,
+        data: Bytes,
+        duration: std::time::Duration,
+    ) -> std::result::Result<(), MediaError> {
+        if !self.enabled.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let sample = Sample {
+            data,
+            duration,
+            ..Default::default()
+        };
+        self.track
+            .write_sample(&sample)
+            .await
+            .map_err(|e| MediaError::AddTrack(e.to_string()))
+    }
+}
+
+impl MediaTrack for NativeMediaTrack {
+    fn id(&self) -> String {
+        self.track.id().to_string()
+    }
+
+    fn kind(&self) -> MediaKind {
+        self.kind
+    }
+
+    fn enabled(&self) -> bool {
+        self.enabled.load(Ordering::SeqCst)
+    }
+
+    fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::SeqCst);
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// A remote, inbound media track delivered to `on_media_track`. Read its RTP with
+/// [`NativeRemoteTrack::read_rtp`] (the native analogue of attaching a browser remote
+/// `MediaStreamTrack` to a sink).
+#[derive(Clone)]
+pub struct NativeRemoteTrack {
+    track: Arc<TrackRemote>,
+    kind: MediaKind,
+}
+
+impl NativeRemoteTrack {
+    /// Read the next RTP packet from the remote track. Errors once the track ends.
+    pub async fn read_rtp(&self) -> std::result::Result<webrtc::rtp::packet::Packet, MediaError> {
+        self.track
+            .read_rtp()
+            .await
+            .map(|(packet, _)| packet)
+            .map_err(|e| MediaError::AddTrack(e.to_string()))
+    }
+}
+
+impl MediaTrack for NativeRemoteTrack {
+    fn id(&self) -> String {
+        self.track.id()
+    }
+
+    fn kind(&self) -> MediaKind {
+        self.kind
+    }
+
+    fn enabled(&self) -> bool {
+        true
+    }
+
+    fn set_enabled(&self, _enabled: bool) {}
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 /// A connection that implemented by webrtc-rs library.
 /// Used for native environment.
 pub struct WebrtcConnection {
@@ -164,9 +278,6 @@ pub struct WebrtcConnection {
     /// Negotiated SCTP `max_message_size` (RFC 8841), parsed from the remote SDP at handshake.
     /// `0` means not yet negotiated. webrtc-rs exposes no getter, so we track it ourselves.
     remote_max_message_size: Arc<AtomicUsize>,
-    /// The outbound media track, when this connection was created with a media channel. `None` for
-    /// data-only connections; [`send_rtp`](ConnectionInterface::send_rtp) then reports unsupported.
-    local_track: Option<Arc<TrackLocalStaticRTP>>,
 }
 
 /// [WebrtcTransport] manages all the [WebrtcConnection] and
@@ -183,7 +294,6 @@ impl WebrtcConnection {
         webrtc_conn: RTCPeerConnection,
         webrtc_data_channel: Arc<RoundRobinPool<TrackedChannel>>,
         webrtc_data_channel_state_notifier: Notifier,
-        local_track: Option<Arc<TrackLocalStaticRTP>>,
     ) -> Self {
         Self {
             webrtc_conn,
@@ -191,7 +301,6 @@ impl WebrtcConnection {
             webrtc_data_channel_state_notifier,
             cancel_token: CancellationToken::new(),
             remote_max_message_size: Arc::new(AtomicUsize::new(0)),
-            local_track,
         }
     }
 
@@ -272,27 +381,22 @@ impl ConnectionInterface for WebrtcConnection {
         }
     }
 
-    async fn send_rtp(&self, packet: RtpPacket) -> std::result::Result<(), MediaError> {
-        let Some(track) = self.local_track.as_ref() else {
-            return Err(MediaError::Unsupported);
-        };
-        // `write_rtp` rewrites ssrc / payload_type to the negotiated values per binding, so we only
-        // set the fields the caller controls.
-        let pkt = webrtc::rtp::packet::Packet {
-            header: webrtc::rtp::header::Header {
-                version: 2,
-                marker: packet.marker,
-                sequence_number: packet.sequence,
-                timestamp: packet.timestamp,
-                ..Default::default()
-            },
-            payload: packet.payload,
-        };
-        track
-            .write_rtp(&pkt)
+    async fn add_media_track(&self, track: BoxedMediaTrack) -> std::result::Result<(), MediaError> {
+        let native = track
+            .as_any()
+            .downcast_ref::<NativeMediaTrack>()
+            .ok_or(MediaError::Unsupported)?;
+        let sender = self
+            .webrtc_conn
+            .add_track(native.track.clone() as Arc<dyn TrackLocal + Send + Sync>)
             .await
-            .map(|_| ())
-            .map_err(|e| MediaError::Send(e.to_string()))
+            .map_err(|e| MediaError::AddTrack(e.to_string()))?;
+        // Drain the sender's RTCP so the interceptor buffer does not fill.
+        tokio::spawn(async move {
+            let mut rtcp_buf = vec![0u8; 1500];
+            while sender.read(&mut rtcp_buf).await.is_ok() {}
+        });
+        Ok(())
     }
 
     async fn webrtc_create_offer(&self) -> Result<Self::Sdp> {
@@ -474,53 +578,24 @@ impl TransportInterface for WebrtcTransport {
         }));
 
         //
-        // Inbound media: drain each remote track's RTP into the callback as `RtpPacket`s. The loop
-        // ends when the track does (`read_rtp` errors on close). No-op for data-only peers, which
-        // never fire `on_track`.
+        // Inbound media: deliver each remote track to the callback as a `MediaTrack`. The
+        // application reads media off it (`NativeRemoteTrack::read_rtp`). No-op for data-only peers,
+        // which never fire `on_track`. Outbound tracks are added by the app via `add_media_track`.
         //
         let on_track_inner_cb = inner_cb.clone();
         webrtc_conn.on_track(Box::new(
             move |track: Arc<TrackRemote>, _receiver, _transceiver| {
                 let inner_cb = on_track_inner_cb.clone();
+                let kind = match track.kind() {
+                    RTPCodecType::Audio => MediaKind::Audio,
+                    _ => MediaKind::Video,
+                };
                 Box::pin(async move {
-                    tokio::spawn(async move {
-                        while let Ok((pkt, _)) = track.read_rtp().await {
-                            inner_cb
-                                .on_rtp(RtpPacket {
-                                    sequence: pkt.header.sequence_number,
-                                    timestamp: pkt.header.timestamp,
-                                    marker: pkt.header.marker,
-                                    payload: pkt.payload,
-                                })
-                                .await;
-                        }
-                    });
+                    let remote = NativeRemoteTrack { track, kind };
+                    inner_cb.on_media_track(Box::new(remote)).await;
                 })
             },
         ));
-
-        //
-        // Outbound media: add the local track (so an `m=` section is offered) and drain its sender's
-        // RTCP so the interceptor buffer does not fill. `None` for data-only connections.
-        //
-        let local_track = if let Some(media) = self.channel_config.media.as_ref() {
-            let (capability, _) = media_codec(media);
-            let track = Arc::new(TrackLocalStaticRTP::new(
-                capability,
-                "rings-media".to_string(),
-                "rings-stream".to_string(),
-            ));
-            let sender = webrtc_conn
-                .add_track(track.clone() as Arc<dyn TrackLocal + Send + Sync>)
-                .await?;
-            tokio::spawn(async move {
-                let mut rtcp_buf = vec![0u8; 1500];
-                while sender.read(&mut rtcp_buf).await.is_ok() {}
-            });
-            Some(track)
-        } else {
-            None
-        };
 
         //
         // Create data channel
@@ -571,7 +646,6 @@ impl TransportInterface for WebrtcTransport {
             webrtc_conn,
             channel_pool,
             webrtc_data_channel_state_notifier,
-            local_track,
         );
 
         self.pool.safely_insert(cid, conn)?;

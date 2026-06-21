@@ -9,6 +9,8 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::spawn_local;
 use wasm_bindgen_futures::JsFuture;
+use web_sys::MediaStream;
+use web_sys::MediaStreamTrack;
 use web_sys::MessageEvent;
 use web_sys::RtcConfiguration;
 use web_sys::RtcDataChannel;
@@ -23,10 +25,15 @@ use web_sys::RtcSdpType;
 use web_sys::RtcSessionDescription;
 use web_sys::RtcSessionDescriptionInit;
 use web_sys::RtcStatsReport;
+use web_sys::RtcTrackEvent;
 
 use crate::callback::InnerTransportCallback;
 use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
+use crate::core::media::BoxedMediaTrack;
+use crate::core::media::MediaError;
+use crate::core::media::MediaKind;
+use crate::core::media::MediaTrack;
 use crate::core::pool::MessageSenderPool;
 use crate::core::pool::RoundRobin;
 use crate::core::pool::RoundRobinPool;
@@ -200,6 +207,46 @@ impl WebSysWebrtcTransport {
     }
 }
 
+/// A browser media track (the web-sys side of [`MediaTrack`]), wrapping a `MediaStreamTrack`. The
+/// application obtains the local one from `getUserMedia`/canvas and attaches the remote one to a
+/// `<video>`; this is the browser analogue of [`NativeMediaTrack`](crate::connections::NativeMediaTrack).
+pub struct BrowserMediaTrack {
+    track: MediaStreamTrack,
+}
+
+impl BrowserMediaTrack {
+    /// Wrap a `MediaStreamTrack`.
+    pub fn new(track: MediaStreamTrack) -> Self {
+        Self { track }
+    }
+}
+
+impl MediaTrack for BrowserMediaTrack {
+    fn id(&self) -> String {
+        self.track.id()
+    }
+
+    fn kind(&self) -> MediaKind {
+        if self.track.kind() == "audio" {
+            MediaKind::Audio
+        } else {
+            MediaKind::Video
+        }
+    }
+
+    fn enabled(&self) -> bool {
+        self.track.enabled()
+    }
+
+    fn set_enabled(&self, enabled: bool) {
+        self.track.set_enabled(enabled);
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 #[async_trait(?Send)]
 impl ConnectionInterface for WebSysWebrtcConnection {
     type Sdp = String;
@@ -221,6 +268,17 @@ impl ConnectionInterface for WebSysWebrtcConnection {
             0 => MAX_DATA_CHANNEL_MESSAGE_SIZE,
             n => n,
         }
+    }
+
+    async fn add_media_track(&self, track: BoxedMediaTrack) -> std::result::Result<(), MediaError> {
+        let browser = track
+            .as_any()
+            .downcast_ref::<BrowserMediaTrack>()
+            .ok_or(MediaError::Unsupported)?;
+        let stream = MediaStream::new().map_err(|e| MediaError::AddTrack(format!("{e:?}")))?;
+        self.webrtc_conn
+            .add_track(&browser.track, &stream, &js_sys::Array::new());
+        Ok(())
     }
 
     async fn get_stats(&self) -> Vec<String> {
@@ -441,6 +499,22 @@ impl TransportInterface for WebSysWebrtcTransport {
 
         let c = Closure::wrap(on_peer_connection_state_change as Box<dyn FnMut(web_sys::Event)>);
         webrtc_conn.set_onconnectionstatechange(Some(c.as_ref().unchecked_ref()));
+        c.forget();
+
+        // Inbound media: deliver each remote track to the callback as a `MediaTrack` (the app
+        // attaches it to a sink). Outbound tracks are added by the app via `add_media_track`.
+        let on_track_inner_cb = inner_cb.clone();
+        let on_track = Box::new(move |ev: RtcTrackEvent| {
+            let track = ev.track();
+            let inner_cb = on_track_inner_cb.clone();
+            spawn_local(async move {
+                inner_cb
+                    .on_media_track(Box::new(BrowserMediaTrack::new(track)))
+                    .await;
+            });
+        });
+        let c = Closure::wrap(on_track as Box<dyn FnMut(RtcTrackEvent)>);
+        webrtc_conn.set_ontrack(Some(c.as_ref().unchecked_ref()));
         c.forget();
 
         //

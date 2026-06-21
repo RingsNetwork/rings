@@ -329,16 +329,17 @@ impl Processor {
             .map_err(Error::SendMessage)
     }
 
-    /// Send one RTP packet to a did over its media track. The connection must have been created with
-    /// a media [`ChannelConfig`]. Inbound frames are delivered through the swarm callback's
-    /// `on_media_frame`.
-    pub async fn send_media(
+    /// Attach a local media track to the connection to `destination`. The connection must have been
+    /// created with a media [`ChannelConfig`]. Inbound remote tracks are delivered through the swarm
+    /// callback's `on_media_track`. The track is built per platform
+    /// (`NativeMediaTrack` / `BrowserMediaTrack`), so the call site is identical across platforms.
+    pub async fn add_media_track(
         &self,
         destination: Did,
-        packet: rings_transport::core::media::RtpPacket,
+        track: rings_transport::core::media::BoxedMediaTrack,
     ) -> Result<()> {
         self.swarm
-            .send_media(destination, packet)
+            .add_media_track(destination, track)
             .await
             .map_err(Error::SendMessage)
     }
