@@ -13,6 +13,8 @@ use crate::message::types::FindSuccessorSend;
 use crate::message::types::Message;
 use crate::message::types::QueryForTopoInfoReport;
 use crate::message::types::QueryForTopoInfoSend;
+use crate::message::types::RenegotiateReport;
+use crate::message::types::RenegotiateSend;
 use crate::message::types::Then;
 use crate::message::FindSuccessorReportHandler;
 use crate::message::FindSuccessorThen;
@@ -87,6 +89,45 @@ impl HandleMsg<ConnectNodeReport> for MessageHandler {
         } else {
             self.transport
                 .accept_remote_connection(ctx.relay.origin_sender(), msg)
+                .await
+        }
+    }
+}
+
+/// Renegotiation offer on an existing connection: answer it on that same connection and report
+/// back. Mirrors [`ConnectNodeSend`] but does not create a connection.
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl HandleMsg<RenegotiateSend> for MessageHandler {
+    async fn handle(&self, ctx: &MessagePayload, msg: &RenegotiateSend) -> Result<()> {
+        if msg.network_id != self.transport.network_id {
+            return Ok(());
+        }
+
+        if self.dht.did != ctx.relay.destination {
+            self.transport.forward_payload(ctx, None).await
+        } else {
+            let answer = self
+                .transport
+                .answer_renegotiation_offer(ctx.relay.origin_sender(), msg)
+                .await?;
+            self.transport
+                .send_report_message(ctx, Message::RenegotiateReport(answer))
+                .await
+        }
+    }
+}
+
+/// Response to a renegotiation offer: accept the answer on the existing connection.
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl HandleMsg<RenegotiateReport> for MessageHandler {
+    async fn handle(&self, ctx: &MessagePayload, msg: &RenegotiateReport) -> Result<()> {
+        if self.dht.did != ctx.relay.destination {
+            self.transport.forward_payload(ctx, None).await
+        } else {
+            self.transport
+                .accept_renegotiation_answer(ctx.relay.origin_sender(), msg)
                 .await
         }
     }

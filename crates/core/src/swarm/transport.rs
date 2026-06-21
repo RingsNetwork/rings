@@ -41,6 +41,8 @@ use crate::message::ConnectNodeSend;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
+use crate::message::RenegotiateReport;
+use crate::message::RenegotiateSend;
 use crate::session::SessionSk;
 use crate::swarm::callback::InnerSwarmCallback;
 
@@ -288,6 +290,60 @@ impl SwarmTransport {
             .await
             .map_err(Error::Transport)?;
 
+        Ok(())
+    }
+
+    /// Create a renegotiation offer on the *existing* connection to `peer` (after its set of tracks
+    /// changed, e.g. a media track was added). Unlike [`prepare_connection_offer`] this does not
+    /// create a connection — it regenerates the offer on the live one.
+    ///
+    /// [`prepare_connection_offer`]: Self::prepare_connection_offer
+    pub async fn prepare_renegotiation_offer(&self, peer: Did) -> Result<RenegotiateSend> {
+        let conn = self
+            .transport
+            .connection(&peer.to_string())
+            .map_err(Error::Transport)?;
+        let offer = conn.webrtc_create_offer().await.map_err(Error::Transport)?;
+        let offer_str = serde_json::to_string(&offer).map_err(|_| Error::SerializeToString)?;
+        Ok(RenegotiateSend {
+            sdp: offer_str,
+            network_id: self.network_id,
+        })
+    }
+
+    /// Answer a renegotiation offer on the *existing* connection to `peer` (no new connection).
+    pub async fn answer_renegotiation_offer(
+        &self,
+        peer: Did,
+        offer_msg: &RenegotiateSend,
+    ) -> Result<RenegotiateReport> {
+        let offer = serde_json::from_str(&offer_msg.sdp).map_err(Error::Deserialize)?;
+        let conn = self
+            .transport
+            .connection(&peer.to_string())
+            .map_err(Error::Transport)?;
+        let answer = conn
+            .webrtc_answer_offer(offer)
+            .await
+            .map_err(Error::Transport)?;
+        let answer_str = serde_json::to_string(&answer).map_err(|_| Error::SerializeToString)?;
+        Ok(RenegotiateReport { sdp: answer_str })
+    }
+
+    /// Accept a renegotiation answer on the existing connection to `peer`.
+    pub async fn accept_renegotiation_answer(
+        &self,
+        peer: Did,
+        answer_msg: &RenegotiateReport,
+    ) -> Result<()> {
+        let answer = serde_json::from_str(&answer_msg.sdp).map_err(Error::Deserialize)?;
+        let conn = self
+            .transport
+            .connection(&peer.to_string())
+            .map_err(Error::Transport)?;
+        conn.webrtc_accept_answer(answer)
+            .await
+            .map_err(Error::Transport)?;
         Ok(())
     }
 }

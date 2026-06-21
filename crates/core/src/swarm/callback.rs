@@ -101,6 +101,8 @@ impl InnerSwarmCallback {
         match &message {
             Message::ConnectNodeSend(ref msg) => self.message_handler.handle(payload, msg).await,
             Message::ConnectNodeReport(ref msg) => self.message_handler.handle(payload, msg).await,
+            Message::RenegotiateSend(ref msg) => self.message_handler.handle(payload, msg).await,
+            Message::RenegotiateReport(ref msg) => self.message_handler.handle(payload, msg).await,
             Message::FindSuccessorSend(ref msg) => self.message_handler.handle(payload, msg).await,
             Message::FindSuccessorReport(ref msg) => {
                 self.message_handler.handle(payload, msg).await

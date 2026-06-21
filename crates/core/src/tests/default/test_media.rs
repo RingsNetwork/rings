@@ -10,18 +10,17 @@ use rings_transport::connections::NativeRemoteTrack;
 use rings_transport::core::media::ChannelConfig;
 use rings_transport::core::media::MediaChannelConfig;
 use rings_transport::core::media::MediaKind;
-use rings_transport::core::transport::ConnectionInterface;
-use rings_transport::core::transport::WebrtcConnectionState;
 use tokio::time::sleep;
 
 use crate::dht::Did;
 use crate::ecc::SecretKey;
 use crate::session::SessionSk;
 use crate::storage::MemStorage;
-use crate::swarm::callback::InnerSwarmCallback;
+use crate::swarm::callback::SharedSwarmCallback;
 use crate::swarm::callback::SwarmCallback;
 use crate::swarm::Swarm;
 use crate::swarm::SwarmBuilder;
+use crate::tests::manually_establish_connection;
 
 /// Counts RTP packets arriving on remote media tracks delivered to `on_media_track`.
 #[derive(Default)]
@@ -50,80 +49,56 @@ impl SwarmCallback for MediaRecorder {
     }
 }
 
-fn media_config() -> ChannelConfig {
-    ChannelConfig {
-        media: Some(MediaChannelConfig {
-            kind: MediaKind::Video,
-            payload_type: 96,
-            clock_rate: 90000,
-        }),
+fn media_channel() -> MediaChannelConfig {
+    MediaChannelConfig {
+        kind: MediaKind::Video,
+        payload_type: 96,
+        clock_rate: 90000,
     }
 }
 
-fn media_swarm(key: SecretKey) -> Arc<Swarm> {
+fn media_swarm(key: SecretKey, callback: SharedSwarmCallback) -> Arc<Swarm> {
     let stun = "stun://stun.l.google.com:19302";
     let session_sk = SessionSk::new_with_seckey(&key).unwrap();
     Arc::new(
         SwarmBuilder::new(0, stun, Box::new(MemStorage::new()), session_sk)
-            .channel_config(media_config())
+            .channel_config(ChannelConfig {
+                media: Some(media_channel()),
+            })
+            .callback(callback)
             .build(),
     )
 }
 
-async fn wait_connected(conn: &impl ConnectionInterface) {
-    for _ in 0..200 {
-        if conn.webrtc_connection_state() == WebrtcConnectionState::Connected {
-            return;
-        }
-        sleep(Duration::from_millis(100)).await;
-    }
-    panic!("connection did not reach Connected");
-}
-
-/// Real native media: two media-enabled nodes negotiate, one attaches a local track and writes
-/// samples, the other receives the track via `on_media_track` and reads its RTP — proving the
-/// platform-consistent track API carries media end to end (real webrtc).
+/// End-to-end media with **renegotiation**: two nodes connect data-only, then one attaches a media
+/// track *after* the connection is live. `add_media_track` renegotiates over the message layer
+/// (RenegotiateSend → RenegotiateReport), the peer learns of the new track via `on_media_track`,
+/// and media flows. Real webrtc, drives the full `Swarm` API.
 #[tokio::test]
-async fn media_track_flows_over_native() {
+async fn media_track_added_after_connect_via_renegotiation() {
     let key1 = SecretKey::random();
     let key2 = SecretKey::random();
-    let swarm1 = media_swarm(key1);
-    let swarm2 = media_swarm(key2);
-    let (did1, did2) = (swarm1.did(), swarm2.did());
 
     let recorder2 = Arc::new(MediaRecorder::default());
     let received2 = recorder2.received.clone();
 
-    // Wire each connection's callback (sender's is a throwaway recorder).
-    let cb1 = InnerSwarmCallback::new(swarm1.transport.clone(), Arc::new(MediaRecorder::default()));
-    let cb2 = InnerSwarmCallback::new(swarm2.transport.clone(), recorder2);
-    swarm1.transport.new_connection(did2, cb1).await.unwrap();
-    swarm2.transport.new_connection(did1, cb2).await.unwrap();
+    let swarm1 = media_swarm(key1, Arc::new(MediaRecorder::default()));
+    let swarm2 = media_swarm(key2, recorder2);
+    let did2 = swarm2.did();
 
-    let conn1 = swarm1.transport.get_connection(did2).unwrap();
-    let conn2 = swarm2.transport.get_connection(did1).unwrap();
+    // Connect data-only first (no media track yet).
+    manually_establish_connection(&swarm1, &swarm2).await;
 
-    // Attach the local media track *before* the offer so the m= section is negotiated; keep a clone
-    // to write samples into the same underlying track.
-    let local = NativeMediaTrack::new(&MediaChannelConfig {
-        kind: MediaKind::Video,
-        payload_type: 96,
-        clock_rate: 90000,
-    });
-    conn1
-        .add_media_track(Box::new(local.clone()))
+    // Attach a media track to the live connection — this triggers renegotiation.
+    let local = NativeMediaTrack::new(&media_channel());
+    swarm1
+        .add_media_track(did2, Box::new(local.clone()))
         .await
         .unwrap();
 
-    // Manual offer / answer / accept (the raw SDP exchange swarm.create_offer wraps).
-    let offer = conn1.connection.webrtc_create_offer().await.unwrap();
-    let answer = conn2.connection.webrtc_answer_offer(offer).await.unwrap();
-    conn1.connection.webrtc_accept_answer(answer).await.unwrap();
-
-    wait_connected(&conn1.connection).await;
-
-    // Stream samples until the receiver has seen RTP (in-process loopback is reliable once up).
-    for _ in 0..100 {
+    // Renegotiation completes asynchronously over the message layer; writes before the track binds
+    // are no-ops, so stream until the receiver has seen RTP.
+    for _ in 0..200 {
         local
             .write_sample(
                 Bytes::from_static(b"a media frame payload"),
@@ -139,6 +114,6 @@ async fn media_track_flows_over_native() {
 
     assert!(
         received2.load(Ordering::SeqCst) > 0,
-        "receiver should have read RTP from the remote media track"
+        "receiver should have read RTP from the renegotiated media track"
     );
 }

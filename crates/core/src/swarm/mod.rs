@@ -104,6 +104,11 @@ impl Swarm {
 
     /// Attach a local media track to the connection to `peer`, to be sent to it. Errors if there is
     /// no connection, or it was not created with a media channel.
+    ///
+    /// Adding a track to a live connection changes the SDP, so this then **renegotiates**: it
+    /// regenerates the offer and runs a fresh offer/answer round-trip over the message layer
+    /// (`RenegotiateSend` → `RenegotiateReport`), so the peer learns of the new media section and
+    /// starts receiving it.
     pub async fn add_media_track(
         &self,
         peer: Did,
@@ -113,7 +118,15 @@ impl Swarm {
             .transport
             .get_connection(peer)
             .ok_or(Error::SwarmMissDidInTable(peer))?;
-        conn.add_media_track(track).await
+        conn.add_media_track(track).await?;
+
+        // Renegotiation is point-to-point with the directly-connected peer, so send straight to it
+        // rather than routing through the DHT.
+        let offer = self.transport.prepare_renegotiation_offer(peer).await?;
+        self.transport
+            .send_direct_message(Message::RenegotiateSend(offer), peer)
+            .await?;
+        Ok(())
     }
 
     /// List peers and their connection status.
