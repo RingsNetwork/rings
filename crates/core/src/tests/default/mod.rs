@@ -5,6 +5,7 @@ use dashmap::DashMap;
 use futures::lock::Mutex;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
+use rings_transport::core::transport::WebrtcConnectionState;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tokio::time::Duration;
@@ -59,6 +60,22 @@ impl Node {
 
     pub async fn listen_once(&self) -> Option<MessagePayload> {
         self.message_rx.lock().await.recv().await
+    }
+
+    /// Non-blocking variant: pop a buffered message if one is immediately available, else `None`.
+    pub async fn try_listen_once(&self) -> Option<MessagePayload> {
+        self.message_rx.lock().await.try_recv().ok()
+    }
+
+    /// Whether any connection is still mid-handshake (`New`/`Connecting`) — i.e. its offer/answer
+    /// SDP exchange has not finished. Used to detect true quiescence without a wall clock.
+    pub fn has_handshaking_connection(&self) -> bool {
+        self.swarm.transport.get_connections().iter().any(|(_, c)| {
+            matches!(
+                c.webrtc_connection_state(),
+                WebrtcConnectionState::New | WebrtcConnectionState::Connecting
+            )
+        })
     }
 
     pub fn did(&self) -> Did {
@@ -169,32 +186,83 @@ pub async fn assert_no_more_msg(nodes: impl IntoIterator<Item = &Node>) {
     }
 }
 
+/// Wait until the nodes are quiescent, **state-driven, not on a wall clock**: every connection has
+/// finished its handshake (none left in `New`/`Connecting`) and no buffered messages remain.
+///
+/// The old version returned after a fixed 3-second silence gap, which could fire *mid-handshake* —
+/// e.g. while a stabilization-triggered connection's answer SDP (`ConnectNodeReport`) was still
+/// being gathered against STUN — and `assert_no_more_msg` would then catch that late message. Here a
+/// connection a node initiates is created synchronously while its trigger message is handled, so it
+/// is observable as `New`/`Connecting` and is waited on. The timeout is only a failure ceiling.
 pub async fn wait_for_msgs(nodes: impl IntoIterator<Item = &Node>) {
+    let nodes: Vec<&Node> = nodes.into_iter().collect();
     let did_names: DashMap<Did, String> = DashMap::new();
-    let mut listeners = vec![];
-
-    for (i, node) in nodes.into_iter().enumerate() {
-        let name = format!("node{}", i + 1);
-        did_names.insert(node.did(), name);
-
-        listeners.push(async {
-            loop {
-                tokio::select! {
-                    Some(payload) = node.listen_once() => {
-                        println!(
-                            "Msg {} -> {} [{} => {}] : {:?}",
-                            *did_names.get(&payload.signer()).unwrap(),
-                            *did_names.get(&node.did()).unwrap(),
-                            *did_names.get(&payload.transaction.signer()).unwrap(),
-                            *did_names.get(&payload.transaction.destination).unwrap(),
-                            payload.transaction.data::<Message>().unwrap()
-                        )
-                    }
-                    _ = sleep(Duration::from_secs(3)) => break
-                }
-            }
-        });
+    for (i, node) in nodes.iter().enumerate() {
+        did_names.insert(node.did(), format!("node{}", i + 1));
     }
 
-    futures::future::join_all(listeners).await;
+    // Drain everything immediately queued across all nodes; returns whether anything was drained.
+    let drain = || async {
+        let mut drained = false;
+        for node in &nodes {
+            while let Some(payload) = node.try_listen_once().await {
+                drained = true;
+                println!(
+                    "Msg {} -> {} [{} => {}] : {:?}",
+                    did_names
+                        .get(&payload.signer())
+                        .map(|n| n.clone())
+                        .unwrap_or_default(),
+                    did_names
+                        .get(&node.did())
+                        .map(|n| n.clone())
+                        .unwrap_or_default(),
+                    did_names
+                        .get(&payload.transaction.signer())
+                        .map(|n| n.clone())
+                        .unwrap_or_default(),
+                    did_names
+                        .get(&payload.transaction.destination)
+                        .map(|n| n.clone())
+                        .unwrap_or_default(),
+                    payload.transaction.data::<Message>().unwrap()
+                );
+            }
+        }
+        drained
+    };
+    let handshaking = || nodes.iter().any(|n| n.has_handshaking_connection());
+    // A snapshot of every node's DHT. Reaching `Connected` fires `on_data_channel_open -> join_dht`,
+    // which mutates the DHT and emits more messages *after* the handshake finished — so true
+    // quiescence also requires the DHT to have stopped changing, not just the handshakes to be done.
+    let snapshot = || {
+        nodes
+            .iter()
+            .map(|n| crate::inspect::DHTInspect::inspect(&n.dht()))
+            .collect::<Vec<_>>()
+    };
+
+    let ceiling = sleep(Duration::from_secs(30));
+    tokio::pin!(ceiling);
+    loop {
+        let drained = drain().await;
+        let before = snapshot();
+        if !drained && !handshaking() {
+            // Quiescent candidate: settle briefly, then require that across the gap nothing changed
+            // — no message handed off, no handshake started, and no DHT mutation (join_dht /
+            // stabilize chains). Any change means activity is still in flight; keep waiting.
+            tokio::select! {
+                _ = sleep(Duration::from_millis(500)) => {}
+                _ = &mut ceiling => return,
+            }
+            if !drain().await && !handshaking() && snapshot() == before {
+                return;
+            }
+        } else {
+            tokio::select! {
+                _ = sleep(Duration::from_millis(50)) => {}
+                _ = &mut ceiling => return,
+            }
+        }
+    }
 }
