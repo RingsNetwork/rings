@@ -30,10 +30,11 @@ use web_sys::RtcTrackEvent;
 use crate::callback::InnerTransportCallback;
 use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
-use crate::core::media::BoxedMediaTrack;
+use crate::core::media::ChannelConfig;
 use crate::core::media::MediaError;
 use crate::core::media::MediaKind;
 use crate::core::media::MediaTrack;
+use crate::core::media::RemoteMediaTrack;
 use crate::core::pool::MessageSenderPool;
 use crate::core::pool::RoundRobin;
 use crate::core::pool::RoundRobinPool;
@@ -134,12 +135,17 @@ pub struct WebSysWebrtcConnection {
     /// Negotiated SCTP `max_message_size` (RFC 8841), parsed from the remote SDP at handshake.
     /// `0` means not yet negotiated. Parsed identically to native for consistent behaviour.
     remote_max_message_size: Arc<AtomicUsize>,
+    /// The channel contract this connection was created with. `add_media_track` enforces it (data-
+    /// only connections reject media; a track's kind must match) so the policy is identical to the
+    /// native backend — the same `ChannelConfig` means the same thing on both platforms.
+    channel_config: ChannelConfig,
 }
 
 /// [WebSysWebrtcTransport] manages all the [WebSysWebrtcConnection] and
 /// provides methods to create, get and close connections.
 pub struct WebSysWebrtcTransport {
     ice_servers: Vec<IceServer>,
+    channel_config: ChannelConfig,
     pool: Pool<WebSysWebrtcConnection>,
 }
 
@@ -148,12 +154,14 @@ impl WebSysWebrtcConnection {
         webrtc_conn: RtcPeerConnection,
         webrtc_data_channel: Arc<RoundRobinPool<TrackedChannel>>,
         webrtc_data_channel_state_notifier: Notifier,
+        channel_config: ChannelConfig,
     ) -> Self {
         Self {
             webrtc_conn,
             webrtc_data_channel,
             webrtc_data_channel_state_notifier,
             remote_max_message_size: Arc::new(AtomicUsize::new(0)),
+            channel_config,
         }
     }
 
@@ -196,12 +204,13 @@ impl WebSysWebrtcTransport {
     pub fn new(
         ice_servers: &str,
         _external_address: Option<String>,
-        _channel_config: crate::core::media::ChannelConfig,
+        channel_config: ChannelConfig,
     ) -> Self {
         let ice_servers = IceServer::vec_from_str(ice_servers).unwrap();
 
         Self {
             ice_servers,
+            channel_config,
             pool: Pool::new(),
         }
     }
@@ -241,7 +250,9 @@ impl MediaTrack for BrowserMediaTrack {
     fn set_enabled(&self, enabled: bool) {
         self.track.set_enabled(enabled);
     }
+}
 
+impl RemoteMediaTrack for BrowserMediaTrack {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -251,6 +262,7 @@ impl MediaTrack for BrowserMediaTrack {
 impl ConnectionInterface for WebSysWebrtcConnection {
     type Sdp = String;
     type Error = Error;
+    type LocalMediaTrack = BrowserMediaTrack;
 
     async fn send_message(&self, msg: TransportMessage) -> Result<DeliveryFuture> {
         self.webrtc_wait_for_data_channel_open().await?;
@@ -270,14 +282,16 @@ impl ConnectionInterface for WebSysWebrtcConnection {
         }
     }
 
-    async fn add_media_track(&self, track: BoxedMediaTrack) -> std::result::Result<(), MediaError> {
-        let browser = track
-            .as_any()
-            .downcast_ref::<BrowserMediaTrack>()
-            .ok_or(MediaError::Unsupported)?;
+    async fn add_media_track(
+        &self,
+        track: BrowserMediaTrack,
+    ) -> std::result::Result<(), MediaError> {
+        // Same contract as native: reject media on a data-only connection and require the track's
+        // kind to match the negotiated one, so `ChannelConfig` is enforced identically here.
+        self.channel_config.admit_local_track(track.kind())?;
         let stream = MediaStream::new().map_err(|e| MediaError::AddTrack(format!("{e:?}")))?;
         self.webrtc_conn
-            .add_track(&browser.track, &stream, &js_sys::Array::new());
+            .add_track(&track.track, &stream, &js_sys::Array::new());
         Ok(())
     }
 
@@ -570,6 +584,7 @@ impl TransportInterface for WebSysWebrtcTransport {
             webrtc_conn,
             channel_pool,
             webrtc_data_channel_state_notifier,
+            self.channel_config.clone(),
         );
 
         self.pool.safely_insert(cid, conn)?;

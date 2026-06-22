@@ -33,9 +33,10 @@ impl SwarmCallback for MediaRecorder {
     async fn on_media_track(
         &self,
         _peer: Did,
-        track: rings_transport::core::media::BoxedMediaTrack,
+        track: rings_transport::core::media::BoxedRemoteMediaTrack,
     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-        // Consume the remote track per platform: here (native) drain its RTP and count packets.
+        // Consume the remote track per platform: here (native) drain its RTP and count packets. The
+        // platform-specific downcast lives only on the inbound `RemoteMediaTrack` boundary.
         if let Some(remote) = track.as_any().downcast_ref::<NativeRemoteTrack>() {
             let remote = remote.clone();
             let received = self.received.clone();
@@ -70,10 +71,44 @@ fn media_swarm(key: SecretKey, callback: SharedSwarmCallback) -> Arc<Swarm> {
     )
 }
 
-/// End-to-end media with **renegotiation**: two nodes connect data-only, then one attaches a media
-/// track *after* the connection is live. `add_media_track` renegotiates over the message layer
-/// (RenegotiateSend → RenegotiateReport), the peer learns of the new track via `on_media_track`,
-/// and media flows. Real webrtc, drives the full `Swarm` API.
+/// A swarm whose channel negotiates an *audio* track — used to exercise the kind-mismatch rejection.
+fn audio_swarm(key: SecretKey) -> Arc<Swarm> {
+    let stun = "stun://stun.l.google.com:19302";
+    let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+    Arc::new(
+        SwarmBuilder::new(0, stun, Box::new(MemStorage::new()), session_sk)
+            .channel_config(ChannelConfig {
+                media: Some(MediaChannelConfig {
+                    kind: MediaKind::Audio,
+                    payload_type: 111,
+                    clock_rate: 48000,
+                }),
+            })
+            .build(),
+    )
+}
+
+/// A data-only swarm (`ChannelConfig::default()`), used to assert `add_media_track` is rejected on a
+/// connection that negotiated no media channel.
+fn data_only_swarm(key: SecretKey) -> Arc<Swarm> {
+    let stun = "stun://stun.l.google.com:19302";
+    let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+    Arc::new(
+        SwarmBuilder::new(0, stun, Box::new(MemStorage::new()), session_sk)
+            .channel_config(ChannelConfig::default())
+            .build(),
+    )
+}
+
+/// End-to-end media with **renegotiation**: the connection is created *media-configured* (the video
+/// codec is registered at handshake, so the SDP can carry it), but no track is attached yet. After
+/// the connection is live one side calls `add_media_track`, which renegotiates over the message
+/// layer (RenegotiateSend → RenegotiateReport); the peer then learns of the new track via
+/// `on_media_track` and media flows. Real webrtc, drives the full `Swarm` API.
+///
+/// (A connection cannot be upgraded from truly data-only to media: the codec must be registered when
+/// the peer connection is built. The negotiated piece here is the *track*, added after connect — see
+/// `add_media_track_rejected_on_data_only_connection` for the data-only contract.)
 #[tokio::test]
 async fn media_track_added_after_connect_via_renegotiation() {
     let key1 = SecretKey::random();
@@ -86,15 +121,12 @@ async fn media_track_added_after_connect_via_renegotiation() {
     let swarm2 = media_swarm(key2, recorder2);
     let did2 = swarm2.did();
 
-    // Connect data-only first (no media track yet).
+    // Connect with the media codec negotiated, but no track attached yet.
     manually_establish_connection(&swarm1, &swarm2).await;
 
     // Attach a media track to the live connection — this triggers renegotiation.
     let local = NativeMediaTrack::new(&media_channel());
-    swarm1
-        .add_media_track(did2, Box::new(local.clone()))
-        .await
-        .unwrap();
+    swarm1.add_media_track(did2, local.clone()).await.unwrap();
 
     // Renegotiation completes asynchronously over the message layer; writes before the track binds
     // are no-ops, so stream until the receiver has seen RTP.
@@ -115,5 +147,50 @@ async fn media_track_added_after_connect_via_renegotiation() {
     assert!(
         received2.load(Ordering::SeqCst) > 0,
         "receiver should have read RTP from the renegotiated media track"
+    );
+}
+
+/// A data-only connection (`ChannelConfig::default()`) must reject `add_media_track`: the contract is
+/// enforced identically on both backends, so the same `ChannelConfig` means the same thing
+/// everywhere. This is the negative counterpart to the renegotiation test above.
+#[tokio::test]
+async fn add_media_track_rejected_on_data_only_connection() {
+    let swarm1 = data_only_swarm(SecretKey::random());
+    let swarm2 = data_only_swarm(SecretKey::random());
+    let did2 = swarm2.did();
+
+    manually_establish_connection(&swarm1, &swarm2).await;
+
+    let track = NativeMediaTrack::new(&media_channel());
+    let err = swarm1
+        .add_media_track(did2, track)
+        .await
+        .expect_err("add_media_track must fail on a data-only connection");
+    // `add_media_track` maps the backend `MediaError::Unsupported` into `Error::Media`.
+    assert!(
+        matches!(err, crate::error::Error::Media(_)),
+        "expected Error::Media, got {err:?}"
+    );
+}
+
+/// A media-configured connection must still reject a track whose kind differs from the negotiated
+/// one (here: an audio-configured channel, a video track).
+#[tokio::test]
+async fn add_media_track_rejected_on_kind_mismatch() {
+    let swarm1 = audio_swarm(SecretKey::random());
+    let swarm2 = audio_swarm(SecretKey::random());
+    let did2 = swarm2.did();
+
+    manually_establish_connection(&swarm1, &swarm2).await;
+
+    // `media_channel()` is a *video* track; the channel negotiated *audio*.
+    let track = NativeMediaTrack::new(&media_channel());
+    let err = swarm1
+        .add_media_track(did2, track)
+        .await
+        .expect_err("add_media_track must fail when the track kind does not match the channel");
+    assert!(
+        matches!(err, crate::error::Error::Media(_)),
+        "expected Error::Media, got {err:?}"
     );
 }

@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use dashmap::DashMap;
+use futures::lock::Mutex as FuturesMutex;
 use rings_transport::connection_ref::ConnectionRef;
 #[cfg(feature = "dummy")]
 pub use rings_transport::connections::DummyConnection as ConnectionOwner;
@@ -16,7 +18,6 @@ pub use rings_transport::connections::WebSysWebrtcTransport as Transport;
 use rings_transport::connections::WebrtcConnection as ConnectionOwner;
 #[cfg(all(not(feature = "wasm"), not(feature = "dummy")))]
 use rings_transport::connections::WebrtcTransport as Transport;
-use rings_transport::core::media::BoxedMediaTrack;
 use rings_transport::core::media::ChannelConfig;
 use rings_transport::core::transport::ConnectionInterface;
 use rings_transport::core::transport::TransportInterface;
@@ -45,6 +46,15 @@ use crate::message::RenegotiateReport;
 use crate::message::RenegotiateSend;
 use crate::session::SessionSk;
 use crate::swarm::callback::InnerSwarmCallback;
+use crate::swarm::negotiation::NegotiationEffect;
+use crate::swarm::negotiation::NegotiationEvent;
+use crate::swarm::negotiation::Negotiator;
+
+/// The active backend's local media-track type (`NativeMediaTrack` natively, `BrowserMediaTrack` on
+/// wasm, `()` under the dummy backend). Named once here so the swarm/node media API can refer to it
+/// without committing call sites to a particular backend, and so the outbound media path stays typed
+/// (no trait-object downcast).
+pub type LocalMediaTrack = <ConnectionOwner as ConnectionInterface>::LocalMediaTrack;
 
 pub struct SwarmTransport {
     pub(crate) network_id: u32,
@@ -53,6 +63,9 @@ pub struct SwarmTransport {
     pub(crate) dht: Arc<PeerRing>,
     #[allow(dead_code)]
     measure: Option<MeasureImpl>,
+    /// One [`Negotiator`] per peer, guarding renegotiation signaling so only one local offer is ever
+    /// outstanding on a connection and stale answers are dropped. See [`crate::swarm::negotiation`].
+    negotiations: DashMap<Did, Arc<FuturesMutex<Negotiator>>>,
 }
 
 #[derive(Clone)]
@@ -101,7 +114,14 @@ impl SwarmTransport {
             session_sk,
             dht,
             measure,
+            negotiations: DashMap::new(),
         }
+    }
+
+    /// The [`Negotiator`] for `peer`, creating an idle one on first use. Callers lock it for the
+    /// duration of one signaling step so renegotiations with a peer are serialized.
+    pub(crate) fn negotiator(&self, peer: Did) -> Arc<FuturesMutex<Negotiator>> {
+        self.negotiations.entry(peer).or_default().clone()
     }
 
     /// Create new connection that will be handled by swarm.
@@ -293,12 +313,90 @@ impl SwarmTransport {
         Ok(())
     }
 
+    /// Drive a locally-initiated renegotiation with `peer` through its [`Negotiator`]: if the state
+    /// machine grants the offer (no other local offer outstanding) regenerate the SDP offer on the
+    /// live connection — stamped with the granted generation — and send it as `RenegotiateSend`.
+    ///
+    /// The negotiator lock is held across offer creation so the generation matches the SDP that
+    /// carries it, and released before the network send. A second concurrent call while an offer is
+    /// pending returns [`Error::RenegotiationInProgress`] rather than putting a second offer on the
+    /// wire.
+    pub async fn initiate_renegotiation(&self, peer: Did) -> Result<()> {
+        let negotiator = self.negotiator(peer);
+        let mut state = negotiator.lock().await;
+        match state.step(NegotiationEvent::LocalRenegotiate) {
+            NegotiationEffect::SendOffer { generation } => {
+                let offer = self.prepare_renegotiation_offer(peer, generation).await?;
+                drop(state);
+                // Renegotiation is point-to-point with the directly-connected peer, so send straight
+                // to it rather than routing through the DHT.
+                self.send_direct_message(Message::RenegotiateSend(offer), peer)
+                    .await?;
+                Ok(())
+            }
+            NegotiationEffect::Busy => Err(Error::RenegotiationInProgress(peer)),
+            // No other effect is reachable for a `LocalRenegotiate` event.
+            _ => Ok(()),
+        }
+    }
+
+    /// Apply a remote renegotiation offer through `peer`'s [`Negotiator`] and, if accepted, answer it
+    /// on the live connection. Under glare the impolite side returns `Ok(None)` (it holds its own
+    /// offer and ignores this one); otherwise it returns the answer to send back as
+    /// `RenegotiateReport`.
+    pub async fn handle_renegotiation_offer(
+        &self,
+        peer: Did,
+        offer_msg: &RenegotiateSend,
+    ) -> Result<Option<RenegotiateReport>> {
+        let negotiator = self.negotiator(peer);
+        let mut state = negotiator.lock().await;
+        let polite = Negotiator::polite(self.dht.did, peer);
+        match state.step(NegotiationEvent::RemoteOffer {
+            generation: offer_msg.generation,
+            polite,
+        }) {
+            NegotiationEffect::SendAnswer { .. } => {
+                let answer = self.answer_renegotiation_offer(peer, offer_msg).await?;
+                Ok(Some(answer))
+            }
+            // `Ignore`: impolite side under glare keeps its own offer and drops this one.
+            _ => Ok(None),
+        }
+    }
+
+    /// Apply a remote renegotiation answer through `peer`'s [`Negotiator`]. A stale answer (wrong
+    /// generation, or none outstanding) is dropped without touching the connection.
+    pub async fn handle_renegotiation_answer(
+        &self,
+        peer: Did,
+        answer_msg: &RenegotiateReport,
+    ) -> Result<()> {
+        let negotiator = self.negotiator(peer);
+        let mut state = negotiator.lock().await;
+        match state.step(NegotiationEvent::RemoteAnswer {
+            generation: answer_msg.generation,
+        }) {
+            NegotiationEffect::AcceptAnswer => {
+                drop(state);
+                self.accept_renegotiation_answer(peer, answer_msg).await
+            }
+            // `Ignore`: stale answer.
+            _ => Ok(()),
+        }
+    }
+
     /// Create a renegotiation offer on the *existing* connection to `peer` (after its set of tracks
     /// changed, e.g. a media track was added). Unlike [`prepare_connection_offer`] this does not
-    /// create a connection — it regenerates the offer on the live one.
+    /// create a connection — it regenerates the offer on the live one. `generation` is the id the
+    /// [`Negotiator`] assigned, carried so the answer can be matched back.
     ///
     /// [`prepare_connection_offer`]: Self::prepare_connection_offer
-    pub async fn prepare_renegotiation_offer(&self, peer: Did) -> Result<RenegotiateSend> {
+    pub async fn prepare_renegotiation_offer(
+        &self,
+        peer: Did,
+        generation: u64,
+    ) -> Result<RenegotiateSend> {
         let conn = self
             .transport
             .connection(&peer.to_string())
@@ -308,10 +406,12 @@ impl SwarmTransport {
         Ok(RenegotiateSend {
             sdp: offer_str,
             network_id: self.network_id,
+            generation,
         })
     }
 
-    /// Answer a renegotiation offer on the *existing* connection to `peer` (no new connection).
+    /// Answer a renegotiation offer on the *existing* connection to `peer` (no new connection). The
+    /// offer's `generation` is echoed back on the answer so the offerer can match it.
     pub async fn answer_renegotiation_offer(
         &self,
         peer: Did,
@@ -327,7 +427,10 @@ impl SwarmTransport {
             .await
             .map_err(Error::Transport)?;
         let answer_str = serde_json::to_string(&answer).map_err(|_| Error::SerializeToString)?;
-        Ok(RenegotiateReport { sdp: answer_str })
+        Ok(RenegotiateReport {
+            sdp: answer_str,
+            generation: offer_msg.generation,
+        })
     }
 
     /// Accept a renegotiation answer on the existing connection to `peer`.
@@ -367,9 +470,9 @@ impl SwarmConnection {
     }
 
     /// Attach a local media track to this connection, to be sent to the peer. The connection must
-    /// have been created with a media [`ChannelConfig`]. The track is built per platform
-    /// (`NativeMediaTrack` / `BrowserMediaTrack`).
-    pub async fn add_media_track(&self, track: BoxedMediaTrack) -> Result<()> {
+    /// have been created with a media [`ChannelConfig`]. The track is the backend's concrete
+    /// [`LocalMediaTrack`] (`NativeMediaTrack` / `BrowserMediaTrack`), so no downcast is involved.
+    pub async fn add_media_track(&self, track: LocalMediaTrack) -> Result<()> {
         self.connection
             .add_media_track(track)
             .await

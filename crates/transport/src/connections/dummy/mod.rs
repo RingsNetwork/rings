@@ -237,6 +237,8 @@ impl DummyTransport {
 impl ConnectionInterface for DummyConnection {
     type Sdp = String;
     type Error = Error;
+    // The dummy backend has no media; it uses the trait's default `add_media_track` (`Unsupported`).
+    type LocalMediaTrack = ();
 
     async fn send_message(&self, msg: TransportMessage) -> Result<DeliveryFuture> {
         self.webrtc_wait_for_data_channel_open().await?;

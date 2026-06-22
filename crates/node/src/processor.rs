@@ -336,7 +336,7 @@ impl Processor {
     pub async fn add_media_track(
         &self,
         destination: Did,
-        track: rings_transport::core::media::BoxedMediaTrack,
+        track: rings_core::swarm::LocalMediaTrack,
     ) -> Result<()> {
         self.swarm
             .add_media_track(destination, track)

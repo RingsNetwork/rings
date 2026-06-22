@@ -11,7 +11,6 @@ use serde::Serialize;
 
 use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
-use crate::core::media::BoxedMediaTrack;
 use crate::core::media::MediaError;
 use crate::core::sdp::parse_sdp_max_message_size;
 use crate::delivery::DeliveryFuture;
@@ -90,6 +89,20 @@ pub trait ConnectionInterface {
     type Sdp: Serialize + DeserializeOwned;
     /// The error type that is returned by connection.
     type Error: std::error::Error;
+    /// The backend's own local-track type accepted by [`add_media_track`](Self::add_media_track).
+    /// Typing it per backend keeps the outbound media path free of trait-object downcasts: a native
+    /// connection takes a `NativeMediaTrack`, a browser one a `BrowserMediaTrack`, and a backend
+    /// without media support sets this to `()`. The construction of a local track is platform-
+    /// specific by nature (see the concrete [`MediaTrack`](crate::core::media::MediaTrack) types).
+    ///
+    /// Off the browser the default `add_media_track` future must be `Send`, so the track is too;
+    /// browser tracks (`MediaStreamTrack`) are not `Send`, matching that backend's single-threaded
+    /// `async_trait(?Send)`.
+    #[cfg(not(feature = "web-sys-webrtc"))]
+    type LocalMediaTrack: Send;
+    /// The backend's own local-track type accepted by [`add_media_track`](Self::add_media_track).
+    #[cfg(feature = "web-sys-webrtc")]
+    type LocalMediaTrack;
 
     /// Send a [TransportMessage] to the remote peer.
     ///
@@ -115,9 +128,9 @@ pub trait ConnectionInterface {
     ///
     /// Defaults to [`MediaError::Unsupported`]: a connection only carries media when it was created
     /// with a [`media`](crate::core::media::ChannelConfig) channel, and only the backends that
-    /// support media override this. Acquiring the track's source is platform-specific (see the
-    /// concrete [`MediaTrack`](crate::core::media::MediaTrack) types).
-    async fn add_media_track(&self, _track: BoxedMediaTrack) -> Result<(), MediaError> {
+    /// support media override this. The parameter is the backend's own
+    /// [`LocalMediaTrack`](Self::LocalMediaTrack) type, so there is no downcast on this path.
+    async fn add_media_track(&self, _track: Self::LocalMediaTrack) -> Result<(), MediaError> {
         Err(MediaError::Unsupported)
     }
 

@@ -45,6 +45,9 @@ pub struct RenegotiateSend {
     pub sdp: String,
     /// The network_id is used to distinguish different networks.
     pub network_id: u32,
+    /// Monotonic generation id of this offer (per sending peer), so the answering side can echo it
+    /// and the offerer can reject a stale answer. See [`crate::swarm::negotiation`].
+    pub generation: u64,
 }
 
 /// Response of [`RenegotiateSend`].
@@ -52,6 +55,9 @@ pub struct RenegotiateSend {
 pub struct RenegotiateReport {
     /// sdp answer of webrtc
     pub sdp: String,
+    /// The `generation` of the [`RenegotiateSend`] this answers, echoed back so the offerer can
+    /// match it against its outstanding offer and drop a stale one.
+    pub generation: u64,
 }
 
 /// MessageType use to find successor in a chord ring.

@@ -119,12 +119,31 @@ pub fn parse(sdp: &str) -> SessionDescription<'_> {
     description
 }
 
-/// Does this `m=` value describe a WebRTC SCTP data channel? (`m=application … DTLS/SCTP …
-/// webrtc-datachannel`, RFC 8841 §5 — the proto may be `UDP/DTLS/SCTP` or `TCP/DTLS/SCTP`.)
+/// Does this `m=` value describe a WebRTC SCTP data channel?
+///
+/// An `m=` line is `<media> <port> <proto> <fmt> …` (RFC 4566 §5.14). We require it field by field
+/// rather than by substring search so a value that merely *mentions* these tokens elsewhere (e.g. a
+/// codec name or a different media type) cannot be mistaken for the data channel:
+///
+/// - `<media>` is exactly `application`,
+/// - `<proto>` is a `/`-separated profile that includes `SCTP` (`UDP/DTLS/SCTP` or `TCP/DTLS/SCTP`,
+///   RFC 8841 §5), and
+/// - one of the `<fmt>` tokens is exactly `webrtc-datachannel`.
 fn is_webrtc_datachannel(media: &str) -> bool {
-    media.split_whitespace().next() == Some("application")
-        && media.contains("SCTP")
-        && media.contains("webrtc-datachannel")
+    let mut fields = media.split_whitespace();
+    let Some("application") = fields.next() else {
+        return false;
+    };
+    // skip <port>
+    if fields.next().is_none() {
+        return false;
+    }
+    let Some(proto) = fields.next() else {
+        return false;
+    };
+    let is_sctp = proto.split('/').any(|token| token == "SCTP");
+    let has_datachannel_fmt = fields.any(|fmt| fmt == "webrtc-datachannel");
+    is_sctp && has_datachannel_fmt
 }
 
 impl MediaDescription<'_> {
@@ -302,5 +321,38 @@ mod tests {
     fn first_within_section_wins_when_repeated() {
         let sdp = data_channel_sdp("a=max-message-size:1024\r\na=max-message-size:2048\r\n");
         assert_eq!(parse_sdp_max_message_size(&sdp), Some(1024));
+    }
+
+    #[test]
+    fn tcp_dtls_sctp_proto_is_accepted() {
+        let sdp = "m=application 9 TCP/DTLS/SCTP webrtc-datachannel\r\n\
+                   a=max-message-size:65536\r\n";
+        assert_eq!(parse_sdp_max_message_size(sdp), Some(65536));
+    }
+
+    #[test]
+    fn substring_only_proto_is_rejected() {
+        // `SCTPX` contains the substring "SCTP" but is not the `SCTP` proto token; a substring
+        // match would wrongly accept this section.
+        let sdp = "m=application 9 UDP/DTLS/SCTPX webrtc-datachannel\r\n\
+                   a=max-message-size:65536\r\n";
+        assert_eq!(parse_sdp_max_message_size(sdp), None);
+    }
+
+    #[test]
+    fn substring_only_fmt_is_rejected() {
+        // `webrtc-datachannel-x` contains the substring but is not the `webrtc-datachannel` fmt.
+        let sdp = "m=application 9 UDP/DTLS/SCTP webrtc-datachannel-x\r\n\
+                   a=max-message-size:65536\r\n";
+        assert_eq!(parse_sdp_max_message_size(sdp), None);
+    }
+
+    #[test]
+    fn non_application_media_with_datachannel_token_is_rejected() {
+        // an `m=` line that merely names `webrtc-datachannel` as a format on a non-application media
+        // must not be treated as the data channel.
+        let sdp = "m=audio 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
+                   a=max-message-size:65536\r\n";
+        assert_eq!(parse_sdp_max_message_size(sdp), None);
     }
 }

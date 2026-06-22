@@ -5,12 +5,15 @@
 mod builder;
 /// Callback interface for swarm
 pub mod callback;
+/// Per-peer renegotiation signaling state machine.
+pub mod negotiation;
 pub(crate) mod transport;
 
 use std::sync::Arc;
 use std::sync::RwLock;
 
 pub use builder::SwarmBuilder;
+pub use transport::LocalMediaTrack;
 
 use self::callback::InnerSwarmCallback;
 use crate::dht::Did;
@@ -105,28 +108,23 @@ impl Swarm {
     /// Attach a local media track to the connection to `peer`, to be sent to it. Errors if there is
     /// no connection, or it was not created with a media channel.
     ///
-    /// Adding a track to a live connection changes the SDP, so this then **renegotiates**: it
-    /// regenerates the offer and runs a fresh offer/answer round-trip over the message layer
-    /// (`RenegotiateSend` → `RenegotiateReport`), so the peer learns of the new media section and
-    /// starts receiving it.
+    /// Adding a track to a live connection changes the SDP, so this then **renegotiates**: it drives
+    /// the per-peer [`negotiation`](crate::swarm::negotiation) state machine, which (when no other
+    /// local offer is outstanding) regenerates the offer and runs a fresh offer/answer round-trip
+    /// over the message layer (`RenegotiateSend` → `RenegotiateReport`), so the peer learns of the
+    /// new media section and starts receiving it. A concurrent renegotiation returns
+    /// [`Error::RenegotiationInProgress`].
     pub async fn add_media_track(
         &self,
         peer: Did,
-        track: rings_transport::core::media::BoxedMediaTrack,
+        track: crate::swarm::transport::LocalMediaTrack,
     ) -> Result<()> {
         let conn = self
             .transport
             .get_connection(peer)
             .ok_or(Error::SwarmMissDidInTable(peer))?;
         conn.add_media_track(track).await?;
-
-        // Renegotiation is point-to-point with the directly-connected peer, so send straight to it
-        // rather than routing through the DHT.
-        let offer = self.transport.prepare_renegotiation_offer(peer).await?;
-        self.transport
-            .send_direct_message(Message::RenegotiateSend(offer), peer)
-            .await?;
-        Ok(())
+        self.transport.initiate_renegotiation(peer).await
     }
 
     /// List peers and their connection status.

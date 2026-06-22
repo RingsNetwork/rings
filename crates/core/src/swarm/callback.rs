@@ -4,7 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::lock::Mutex as FuturesMutex;
 use rings_transport::core::callback::TransportCallback;
-use rings_transport::core::media::BoxedMediaTrack;
+use rings_transport::core::media::BoxedRemoteMediaTrack;
 use rings_transport::core::transport::WebrtcConnectionState;
 
 use crate::chunk::MessageReassembler;
@@ -65,7 +65,7 @@ pub trait SwarmCallback {
     async fn on_media_track(
         &self,
         _peer: Did,
-        _track: BoxedMediaTrack,
+        _track: BoxedRemoteMediaTrack,
     ) -> Result<(), CallbackError> {
         Ok(())
     }
@@ -98,7 +98,7 @@ impl InnerSwarmCallback {
     ) -> Result<(), CallbackError> {
         let message: Message = payload.transaction.data()?;
 
-        match &message {
+        let result = match &message {
             Message::ConnectNodeSend(ref msg) => self.message_handler.handle(payload, msg).await,
             Message::ConnectNodeReport(ref msg) => self.message_handler.handle(payload, msg).await,
             Message::RenegotiateSend(ref msg) => self.message_handler.handle(payload, msg).await,
@@ -127,17 +127,25 @@ impl InnerSwarmCallback {
                 self.message_handler.handle(payload, msg).await
             }
             Message::Chunk(ref msg) => {
-                // A chunk completes at most one message, but `handle` returns the general
-                // transducer's `Vec` of outputs; deliver whatever it yields.
-                for data in self.reassembler.lock().await.handle(msg.clone()) {
-                    self.on_message(cid, &data).await?;
+                if let Some(data) = self.reassembler.lock().await.handle(msg.clone()) {
+                    return self.on_message(cid, &data).await;
                 }
                 Ok(())
             }
+        };
+
+        match &message {
+            // Renegotiation failures must stay visible protocol outcomes: a failed
+            // `setRemoteDescription`/`setLocalDescription` inside the handler would otherwise be
+            // logged and swallowed, leaving local WebRTC state diverged from the control plane while
+            // `on_inbound` still ran as if renegotiation had succeeded. Propagate, and do not run
+            // `on_inbound` for a renegotiation that did not actually apply.
+            Message::RenegotiateSend(_) | Message::RenegotiateReport(_) => result?,
+            // Other handlers keep the historical log-and-continue behaviour.
+            _ => result.unwrap_or_else(|e| {
+                tracing::error!("Failed to handle_payload: {:?}", e);
+            }),
         }
-        .unwrap_or_else(|e| {
-            tracing::error!("Failed to handle_payload: {:?}", e);
-        });
 
         if payload.transaction.destination == self.transport.dht.did {
             self.callback.on_inbound(payload).await?;
@@ -160,7 +168,11 @@ impl TransportCallback for InnerSwarmCallback {
         self.handle_payload(cid, &payload).await
     }
 
-    async fn on_media_track(&self, cid: &str, track: BoxedMediaTrack) -> Result<(), CallbackError> {
+    async fn on_media_track(
+        &self,
+        cid: &str,
+        track: BoxedRemoteMediaTrack,
+    ) -> Result<(), CallbackError> {
         let Ok(did) = Did::from_str(cid) else {
             tracing::warn!("on_media_track parse did failed: {}", cid);
             return Ok(());

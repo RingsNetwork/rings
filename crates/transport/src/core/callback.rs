@@ -7,7 +7,7 @@
 
 use async_trait::async_trait;
 
-use crate::core::media::BoxedMediaTrack;
+use crate::core::media::BoxedRemoteMediaTrack;
 use crate::core::transport::WebrtcConnectionState;
 
 type CallbackError = Box<dyn std::error::Error>;
@@ -39,7 +39,7 @@ pub trait TransportCallback {
     async fn on_media_track(
         &self,
         _cid: &str,
-        _track: BoxedMediaTrack,
+        _track: BoxedRemoteMediaTrack,
     ) -> Result<(), CallbackError> {
         Ok(())
     }

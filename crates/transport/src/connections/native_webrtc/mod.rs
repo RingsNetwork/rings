@@ -33,12 +33,12 @@ use webrtc::track::track_remote::TrackRemote;
 use crate::callback::InnerTransportCallback;
 use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
-use crate::core::media::BoxedMediaTrack;
 use crate::core::media::ChannelConfig;
 use crate::core::media::MediaChannelConfig;
 use crate::core::media::MediaError;
 use crate::core::media::MediaKind;
 use crate::core::media::MediaTrack;
+use crate::core::media::RemoteMediaTrack;
 use crate::core::pool::MessageSenderPool;
 use crate::core::pool::RoundRobin;
 use crate::core::pool::RoundRobinPool;
@@ -222,10 +222,6 @@ impl MediaTrack for NativeMediaTrack {
     fn set_enabled(&self, enabled: bool) {
         self.enabled.store(enabled, Ordering::SeqCst);
     }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
 }
 
 /// A remote, inbound media track delivered to `on_media_track`. Read its RTP with
@@ -262,7 +258,9 @@ impl MediaTrack for NativeRemoteTrack {
     }
 
     fn set_enabled(&self, _enabled: bool) {}
+}
 
+impl RemoteMediaTrack for NativeRemoteTrack {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -278,6 +276,10 @@ pub struct WebrtcConnection {
     /// Negotiated SCTP `max_message_size` (RFC 8841), parsed from the remote SDP at handshake.
     /// `0` means not yet negotiated. webrtc-rs exposes no getter, so we track it ourselves.
     remote_max_message_size: Arc<AtomicUsize>,
+    /// The channel contract this connection was created with. `add_media_track` enforces it (data-
+    /// only connections reject media; a track's kind must match) so the policy is identical to the
+    /// browser backend.
+    channel_config: ChannelConfig,
 }
 
 /// [WebrtcTransport] manages all the [WebrtcConnection] and
@@ -294,6 +296,7 @@ impl WebrtcConnection {
         webrtc_conn: RTCPeerConnection,
         webrtc_data_channel: Arc<RoundRobinPool<TrackedChannel>>,
         webrtc_data_channel_state_notifier: Notifier,
+        channel_config: ChannelConfig,
     ) -> Self {
         Self {
             webrtc_conn,
@@ -301,6 +304,7 @@ impl WebrtcConnection {
             webrtc_data_channel_state_notifier,
             cancel_token: CancellationToken::new(),
             remote_max_message_size: Arc::new(AtomicUsize::new(0)),
+            channel_config,
         }
     }
 
@@ -352,6 +356,7 @@ impl WebrtcTransport {
 impl ConnectionInterface for WebrtcConnection {
     type Sdp = String;
     type Error = Error;
+    type LocalMediaTrack = NativeMediaTrack;
 
     async fn send_message(&self, msg: TransportMessage) -> Result<DeliveryFuture> {
         self.webrtc_wait_for_data_channel_open().await?;
@@ -381,14 +386,16 @@ impl ConnectionInterface for WebrtcConnection {
         }
     }
 
-    async fn add_media_track(&self, track: BoxedMediaTrack) -> std::result::Result<(), MediaError> {
-        let native = track
-            .as_any()
-            .downcast_ref::<NativeMediaTrack>()
-            .ok_or(MediaError::Unsupported)?;
+    async fn add_media_track(
+        &self,
+        track: NativeMediaTrack,
+    ) -> std::result::Result<(), MediaError> {
+        // Same contract as the browser backend: reject media on a data-only connection and require
+        // the track's kind to match the negotiated one.
+        self.channel_config.admit_local_track(track.kind())?;
         let sender = self
             .webrtc_conn
-            .add_track(native.track.clone() as Arc<dyn TrackLocal + Send + Sync>)
+            .add_track(track.track.clone() as Arc<dyn TrackLocal + Send + Sync>)
             .await
             .map_err(|e| MediaError::AddTrack(e.to_string()))?;
         // Drain the sender's RTCP so the interceptor buffer does not fill.
@@ -646,6 +653,7 @@ impl TransportInterface for WebrtcTransport {
             webrtc_conn,
             channel_pool,
             webrtc_data_channel_state_notifier,
+            self.channel_config.clone(),
         );
 
         self.pool.safely_insert(cid, conn)?;

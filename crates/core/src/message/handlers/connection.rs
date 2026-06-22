@@ -94,8 +94,10 @@ impl HandleMsg<ConnectNodeReport> for MessageHandler {
     }
 }
 
-/// Renegotiation offer on an existing connection: answer it on that same connection and report
-/// back. Mirrors [`ConnectNodeSend`] but does not create a connection.
+/// Renegotiation offer on an existing connection: run it through the per-peer negotiation state
+/// machine and, if accepted, answer on that same connection and report back. Mirrors
+/// [`ConnectNodeSend`] but does not create a connection. Under glare the impolite side answers
+/// nothing (it holds its own pending offer); see [`crate::swarm::negotiation`].
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<RenegotiateSend> for MessageHandler {
@@ -106,19 +108,23 @@ impl HandleMsg<RenegotiateSend> for MessageHandler {
 
         if self.dht.did != ctx.relay.destination {
             self.transport.forward_payload(ctx, None).await
-        } else {
-            let answer = self
-                .transport
-                .answer_renegotiation_offer(ctx.relay.origin_sender(), msg)
-                .await?;
+        } else if let Some(answer) = self
+            .transport
+            .handle_renegotiation_offer(ctx.relay.origin_sender(), msg)
+            .await?
+        {
             self.transport
                 .send_report_message(ctx, Message::RenegotiateReport(answer))
                 .await
+        } else {
+            Ok(())
         }
     }
 }
 
-/// Response to a renegotiation offer: accept the answer on the existing connection.
+/// Response to a renegotiation offer: run it through the per-peer negotiation state machine, which
+/// accepts the answer on the existing connection only if it matches the outstanding offer's
+/// generation and drops a stale one otherwise.
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<RenegotiateReport> for MessageHandler {
@@ -127,7 +133,7 @@ impl HandleMsg<RenegotiateReport> for MessageHandler {
             self.transport.forward_payload(ctx, None).await
         } else {
             self.transport
-                .accept_renegotiation_answer(ctx.relay.origin_sender(), msg)
+                .handle_renegotiation_answer(ctx.relay.origin_sender(), msg)
                 .await
         }
     }

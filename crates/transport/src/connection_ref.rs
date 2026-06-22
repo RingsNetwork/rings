@@ -58,6 +58,7 @@ where
 {
     type Sdp = C::Sdp;
     type Error = C::Error;
+    type LocalMediaTrack = C::LocalMediaTrack;
 
     async fn send_message(&self, msg: TransportMessage) -> Result<DeliveryFuture> {
         self.upgrade()?.send_message(msg).await
@@ -77,7 +78,7 @@ where
 
     async fn add_media_track(
         &self,
-        track: crate::core::media::BoxedMediaTrack,
+        track: C::LocalMediaTrack,
     ) -> std::result::Result<(), crate::core::media::MediaError> {
         self.upgrade()
             .map_err(|_| crate::core::media::MediaError::Unsupported)?
@@ -122,6 +123,7 @@ where
 {
     type Sdp = C::Sdp;
     type Error = C::Error;
+    type LocalMediaTrack = C::LocalMediaTrack;
 
     async fn send_message(&self, msg: TransportMessage) -> Result<DeliveryFuture> {
         self.upgrade()?.send_message(msg).await
@@ -141,7 +143,7 @@ where
 
     async fn add_media_track(
         &self,
-        track: crate::core::media::BoxedMediaTrack,
+        track: C::LocalMediaTrack,
     ) -> std::result::Result<(), crate::core::media::MediaError> {
         self.upgrade()
             .map_err(|_| crate::core::media::MediaError::Unsupported)?

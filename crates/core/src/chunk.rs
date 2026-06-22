@@ -271,61 +271,6 @@ pub fn plan_framing(
     }
 }
 
-/// The law-bearing core of a reassembler: how one channel kind admits an incoming `Piece` and
-/// decides what (if anything) to emit. This is the *algebra* — data and media share the transducer
-/// interface below but differ entirely here (a reliable, order-free, complete-message fold vs. a
-/// time-ordered, lossy, deadline-driven one), and that difference is exactly what must not be
-/// shared. `step` returns `0..n` outputs (a late piece may flush several buffered outputs at once);
-/// `gc` reclaims state that timed out / missed its deadline.
-pub trait ReassemblyStrategy {
-    /// One incoming unit (a data [`Chunk`], or an RTP packet for media).
-    type Piece;
-    /// One emitted unit (a complete message, or a media frame).
-    type Output;
-
-    /// Admit one piece, returning any outputs it completes.
-    fn step(&mut self, piece: Self::Piece) -> Vec<Self::Output>;
-
-    /// Reclaim expired / undeliverable partial state.
-    fn gc(&mut self);
-}
-
-/// The shared driver over a [`ReassemblyStrategy`] — the coalgebra `S → (Piece → (S, [Output]))`
-/// (a Mealy transducer). Both the reliable data path and the media path are instances of this same
-/// functor; only the strategy `S` they carry differs. The driver itself is trivial on purpose: all
-/// the content lives in `S`.
-pub struct Transducer<S> {
-    strategy: S,
-}
-
-impl<S: ReassemblyStrategy> Transducer<S> {
-    /// Wrap a strategy.
-    pub fn from_strategy(strategy: S) -> Self {
-        Self { strategy }
-    }
-
-    /// Feed one piece; yields any outputs it completes.
-    pub fn handle(&mut self, piece: S::Piece) -> Vec<S::Output> {
-        self.strategy.step(piece)
-    }
-
-    /// Reclaim expired / undeliverable partial state.
-    pub fn gc(&mut self) {
-        self.strategy.gc()
-    }
-
-    /// Borrow the underlying strategy (its accumulated state).
-    pub fn strategy(&self) -> &S {
-        &self.strategy
-    }
-}
-
-impl<S: ReassemblyStrategy + Default> Default for Transducer<S> {
-    fn default() -> Self {
-        Self::from_strategy(S::default())
-    }
-}
-
 /// One message being reassembled: the chunks seen so far, keyed by position.
 struct Pending {
     /// total number of chunks the message claims (from `chunk[1]`).
@@ -367,10 +312,9 @@ impl Pending {
     }
 }
 
-/// Strategy: **whole-message** reassembly for reliable data-channel `MessagePayload` fragments. It
-/// buffers a message's chunks and yields the complete [`Bytes`] once. It is deliberately *not* a
-/// streaming/media abstraction — the media path is a different [`ReassemblyStrategy`] (see
-/// `rings_core::media`) with its own timing/loss laws.
+/// Receiver side: **whole-message** reassembly for reliable data-channel `MessagePayload`
+/// fragments. Buffers a message's chunks keyed by id and yields the complete [`Bytes`] once every
+/// position has arrived (then forgets it).
 ///
 /// Correct under duplicates / retransmits (first write per position wins), out-of-order arrival
 /// (positions are sorted), and partial delivery (TTL eviction).
@@ -381,7 +325,7 @@ impl Pending {
 /// (charging a per-slot overhead so a tiny-chunk flood is bounded by slot count too), and the
 /// id count are all capped, and an already-expired chunk is rejected before it can be delivered or
 /// buffered.
-pub struct ReliableMessage {
+pub struct MessageReassembler {
     pending: HashMap<Uuid, Pending>,
     /// Sum of `Pending::cost(..)` over `pending`, maintained incrementally for an O(1) global cap.
     buffered_cost: usize,
@@ -389,55 +333,20 @@ pub struct ReliableMessage {
     limits: ReassemblyLimits,
 }
 
-/// Whole-message reassembler: the [`ReliableMessage`] strategy driven by the shared [`Transducer`].
-pub type MessageReassembler = Transducer<ReliableMessage>;
-
-impl Transducer<ReliableMessage> {
-    /// Empty reassembler with [`ReassemblyLimits::production`] bounds.
-    pub fn new() -> Self {
-        Self::from_strategy(ReliableMessage::default())
-    }
-
-    /// Empty reassembler enforcing the given `limits`. Tests use this with small limits to exercise
-    /// the admission rule without giant synthetic payloads.
-    pub fn with_limits(limits: ReassemblyLimits) -> Self {
-        Self::from_strategy(ReliableMessage::with_limits(limits))
-    }
-
-    /// Number of messages currently being reassembled (incomplete).
-    pub fn pending_count(&self) -> usize {
-        self.strategy().pending_count()
-    }
-
-    /// Convenience for the data path: a chunk completes at most one message, so callers that want
-    /// `Option` rather than the general transducer's `Vec` can use this.
-    pub fn handle_one(&mut self, chunk: Chunk) -> Option<Bytes> {
-        self.handle(chunk).into_iter().next()
-    }
-}
-
-impl Default for ReliableMessage {
+impl Default for MessageReassembler {
     fn default() -> Self {
         Self::with_limits(ReassemblyLimits::production())
     }
 }
 
-impl ReassemblyStrategy for ReliableMessage {
-    type Piece = Chunk;
-    type Output = Bytes;
-
-    /// At most one message completes per chunk, so the output is `[]` or a single payload.
-    fn step(&mut self, chunk: Chunk) -> Vec<Bytes> {
-        self.admit(chunk).into_iter().collect()
+impl MessageReassembler {
+    /// Empty reassembler with [`ReassemblyLimits::production`] bounds.
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    fn gc(&mut self) {
-        self.remove_expired();
-    }
-}
-
-impl ReliableMessage {
-    /// Empty reassembler enforcing the given `limits`.
+    /// Empty reassembler enforcing the given `limits`. Tests use this with small limits to exercise
+    /// the admission rule without giant synthetic payloads.
     pub fn with_limits(limits: ReassemblyLimits) -> Self {
         Self {
             pending: HashMap::new(),
@@ -475,7 +384,7 @@ impl ReliableMessage {
     /// Accept one chunk. Returns the fully reassembled payload when this chunk completes its
     /// message (which is then forgotten), otherwise `None`. Malformed, expired, or over-any-bound
     /// chunks are dropped (`None`).
-    fn admit(&mut self, chunk: Chunk) -> Option<Bytes> {
+    pub fn handle(&mut self, chunk: Chunk) -> Option<Bytes> {
         let now = get_epoch_ms();
 
         // Reject an absurd ttl outright.
@@ -652,7 +561,7 @@ mod test {
             let mut r = MessageReassembler::new();
             let mut out = None;
             for c in ChunkList::split(&data, size) {
-                out = r.handle_one(c).or(out);
+                out = r.handle(c).or(out);
             }
             assert_eq!(out.unwrap(), data, "len={len} size={size}");
         }
@@ -718,7 +627,7 @@ mod test {
         let chunks = chunks_of(&data, 32);
         let mut out = None;
         for c in chunks {
-            out = r.handle_one(c).or(out);
+            out = r.handle(c).or(out);
         }
         assert_eq!(out.unwrap(), data);
         assert_eq!(r.pending_count(), 0, "completed message is forgotten");
@@ -732,7 +641,7 @@ mod test {
         let mut r = MessageReassembler::new();
         let mut out = None;
         for c in chunks {
-            out = r.handle_one(c).or(out);
+            out = r.handle(c).or(out);
         }
         assert_eq!(out.unwrap(), data);
     }
@@ -746,10 +655,10 @@ mod test {
         let mut r = MessageReassembler::new();
 
         // Feed every chunk, re-feeding chunk 0 in the middle as a duplicate.
-        assert!(r.handle_one(chunks[0].clone()).is_none());
+        assert!(r.handle(chunks[0].clone()).is_none());
         for c in &chunks[1..] {
-            let _ = r.handle_one(chunks[0].clone()); // duplicate of position 0, repeatedly
-            if let Some(out) = r.handle_one(c.clone()) {
+            let _ = r.handle(chunks[0].clone()); // duplicate of position 0, repeatedly
+            if let Some(out) = r.handle(c.clone()) {
                 assert_eq!(out, data);
                 assert_eq!(r.pending_count(), 0);
                 return;
@@ -769,12 +678,12 @@ mod test {
         // interleave the two messages
         let (mut o1, mut o2) = (None, None);
         for pair in c1.iter().zip(c2.iter()) {
-            o1 = r.handle_one(pair.0.clone()).or(o1);
-            o2 = r.handle_one(pair.1.clone()).or(o2);
+            o1 = r.handle(pair.0.clone()).or(o1);
+            o2 = r.handle(pair.1.clone()).or(o2);
         }
         // drain any tail (lengths may differ)
         for c in c1.iter().chain(c2.iter()) {
-            let out = r.handle_one(c.clone());
+            let out = r.handle(c.clone());
             o1 = out.clone().filter(|b| *b == d1).or(o1);
             o2 = out.filter(|b| *b == d2).or(o2);
         }
@@ -788,10 +697,10 @@ mod test {
         let chunks = chunks_of(&data, 32);
         let mut r = MessageReassembler::new();
         for c in &chunks[..chunks.len() - 1] {
-            assert!(r.handle_one(c.clone()).is_none());
+            assert!(r.handle(c.clone()).is_none());
         }
         assert_eq!(r.pending_count(), 1);
-        let out = r.handle_one(chunks.last().unwrap().clone());
+        let out = r.handle(chunks.last().unwrap().clone());
         assert_eq!(out.unwrap(), data);
     }
 
@@ -800,7 +709,7 @@ mod test {
         let mut r = MessageReassembler::new();
         // total == 0
         assert!(r
-            .handle_one(Chunk {
+            .handle(Chunk {
                 chunk: [0, 0],
                 data: Bytes::from_static(b"x"),
                 meta: ChunkMeta::default(),
@@ -808,7 +717,7 @@ mod test {
             .is_none());
         // position >= total
         assert!(r
-            .handle_one(Chunk {
+            .handle(Chunk {
                 chunk: [5, 3],
                 data: Bytes::from_static(b"x"),
                 meta: ChunkMeta::default(),
@@ -823,7 +732,7 @@ mod test {
         // saturating arithmetic), and a chunk stamped at the epoch is already long expired — it must
         // be dropped, not delivered, even though it is a complete `total == 1` message.
         let mut r = MessageReassembler::new();
-        let out = r.handle_one(Chunk {
+        let out = r.handle(Chunk {
             chunk: [0, 1],
             data: Bytes::from_static(b"ok"),
             meta: ChunkMeta {
@@ -842,7 +751,7 @@ mod test {
         // `total == 1` chunk be delivered immediately. It must be rejected up front.
         let mut r = MessageReassembler::new();
         let now = get_epoch_ms();
-        let out = r.handle_one(Chunk {
+        let out = r.handle(Chunk {
             chunk: [0, 1],
             data: Bytes::from_static(b"x"),
             meta: ChunkMeta {
@@ -860,14 +769,14 @@ mod test {
         let limits = small_limits();
         let mut r = MessageReassembler::with_limits(limits);
         let data: Bytes = vec![0u8; limits.max_chunk_data_len + 1].into();
-        let out = r.handle_one(Chunk {
+        let out = r.handle(Chunk {
             chunk: [0, 1],
             data,
             meta: ChunkMeta::default(),
         });
         assert!(out.is_none());
         assert_eq!(r.pending_count(), 0);
-        assert_eq!(r.strategy().buffered_cost, 0);
+        assert_eq!(r.buffered_cost, 0);
     }
 
     #[test]
@@ -875,14 +784,10 @@ mod test {
         let data: Bytes = "helloworld".repeat(100).into();
         let mut r = MessageReassembler::new();
         for c in ChunkList::split(&data, 32) {
-            r.handle_one(c);
+            r.handle(c);
         }
         assert_eq!(r.pending_count(), 0);
-        assert_eq!(
-            r.strategy().buffered_cost,
-            0,
-            "completing a message frees its budget"
-        );
+        assert_eq!(r.buffered_cost, 0, "completing a message frees its budget");
     }
 
     /// A single id advertising a huge `total` and streaming distinct positions cannot grow without
@@ -897,29 +802,19 @@ mod test {
 
         let mut accepted = 0usize;
         for position in 0..50 {
-            let before = r
-                .strategy()
-                .pending
-                .get(&meta.id)
-                .map(|p| p.slots.len())
-                .unwrap_or(0);
-            r.handle_one(Chunk {
+            let before = r.pending.get(&meta.id).map(|p| p.slots.len()).unwrap_or(0);
+            r.handle(Chunk {
                 meta,
                 chunk: [position, total],
                 data: data.clone(),
             });
-            let after = r
-                .strategy()
-                .pending
-                .get(&meta.id)
-                .map(|p| p.slots.len())
-                .unwrap_or(0);
+            let after = r.pending.get(&meta.id).map(|p| p.slots.len()).unwrap_or(0);
             if after > before {
                 accepted += 1;
             }
         }
 
-        let pending = r.strategy().pending.get(&meta.id).expect("still pending");
+        let pending = r.pending.get(&meta.id).expect("still pending");
         assert!(
             pending.data_bytes <= limits.max_message_bytes,
             "per-message buffered data must stay within the cap"
@@ -929,7 +824,7 @@ mod test {
             "the cap must reject some chunks, got {accepted}"
         );
         assert_eq!(
-            r.strategy().buffered_cost,
+            r.buffered_cost,
             pending.cost(limits.slot_overhead),
             "accounting stays exact"
         );
@@ -943,16 +838,16 @@ mod test {
         let mut r = MessageReassembler::with_limits(limits);
         // Each id contributes one slot of `max_chunk_data_len` data; keep them all pending.
         for _ in 0..(limits.max_pending_messages * 4) {
-            r.handle_one(Chunk {
+            r.handle(Chunk {
                 chunk: [0, 2],
                 data: vec![0u8; limits.max_chunk_data_len].into(),
                 meta: ChunkMeta::default(),
             });
         }
         assert!(
-            r.strategy().buffered_cost <= limits.max_total_buffered_cost,
+            r.buffered_cost <= limits.max_total_buffered_cost,
             "global buffered cost {} exceeded cap {}",
-            r.strategy().buffered_cost,
+            r.buffered_cost,
             limits.max_total_buffered_cost
         );
     }
@@ -960,7 +855,7 @@ mod test {
     #[test]
     fn future_timestamp_is_dropped() {
         let mut r = MessageReassembler::new();
-        let out = r.handle_one(Chunk {
+        let out = r.handle(Chunk {
             chunk: [0, 1],
             data: Bytes::from_static(b"x"),
             meta: ChunkMeta {
@@ -977,7 +872,7 @@ mod test {
         let mut r = MessageReassembler::new();
         let now = get_epoch_ms();
         // a partial (1 of 2) message that is already expired
-        r.handle_one(Chunk {
+        r.handle(Chunk {
             chunk: [0, 2],
             data: Bytes::from_static(b"x"),
             meta: ChunkMeta {
@@ -987,7 +882,7 @@ mod test {
             },
         });
         // a fresh partial message triggers remove_expired, dropping the stale one
-        r.handle_one(Chunk {
+        r.handle(Chunk {
             chunk: [0, 2],
             data: Bytes::from_static(b"y"),
             meta: ChunkMeta {
@@ -1005,7 +900,7 @@ mod test {
         let mut r = MessageReassembler::with_limits(limits);
         // each is the first of two chunks => stays pending
         for _ in 0..(limits.max_pending_messages + 10) {
-            r.handle_one(Chunk {
+            r.handle(Chunk {
                 chunk: [0, 2],
                 data: Bytes::from_static(b"x"),
                 meta: ChunkMeta::default(), // fresh id, fresh ts each time
@@ -1028,7 +923,7 @@ mod test {
         let mut r = MessageReassembler::new();
         let mut out = None;
         for c in chunks {
-            out = r.handle_one(c).or(out);
+            out = r.handle(c).or(out);
         }
         assert_eq!(out.unwrap(), data);
         assert_eq!(r.pending_count(), 0);

@@ -362,6 +362,9 @@ pub enum Error {
     #[error("Media send failed: {0}")]
     Media(String),
 
+    #[error("A renegotiation with {0} is already in progress")]
+    RenegotiationInProgress(crate::dht::Did),
+
     #[cfg(feature = "wasm")]
     #[error("Cannot get property {0} from JsValue")]
     FailedOnGetProperty(String),
