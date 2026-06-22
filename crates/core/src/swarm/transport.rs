@@ -433,9 +433,15 @@ impl SwarmTransport {
         }
     }
 
-    /// Offer effect for a granted local renegotiation: create the offer (sets the local description —
-    /// hence every failure is [`PostEffect`](RenegotiationError::PostEffect)) and send it
-    /// point-to-point. The connection was already located by the caller, so there is no preflight.
+    /// Offer effect for a granted local renegotiation: create the offer and send it point-to-point.
+    /// The connection was already located by the caller, so there is no connection-lookup preflight.
+    ///
+    /// The backend declares the boundary inside `webrtc_create_offer` (`createOffer` is pre-apply;
+    /// `setLocalDescription` onward is post-apply), so classify the create-offer failure by what it
+    /// reports rather than hardcoding it. A pre-apply create-offer failure leaves the connection's
+    /// signaling state untouched (the track this offer would carry stays attached but un-negotiated,
+    /// which a later renegotiation would pick up); only `setLocalDescription`/gather/send failures —
+    /// post-apply — reset the connection.
     async fn send_local_offer_effect(
         &self,
         conn: &SwarmConnection,
@@ -446,7 +452,7 @@ impl SwarmTransport {
             .connection
             .webrtc_create_offer()
             .await
-            .map_err(|e| RenegotiationError::PostEffect(Error::Transport(e)))?;
+            .map_err(Self::classify_signaling)?;
         let sdp = serde_json::to_string(&offer)
             .map_err(|_| RenegotiationError::PostEffect(Error::SerializeToString))?;
         let offer_msg = RenegotiateSend {

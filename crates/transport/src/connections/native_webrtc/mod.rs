@@ -407,7 +407,13 @@ impl ConnectionInterface for WebrtcConnection {
     }
 
     async fn webrtc_create_offer(&self) -> Result<Self::Sdp> {
-        let setting_offer = self.webrtc_conn.create_offer(None).await?;
+        // `create_offer` is pre-apply: a failure here has not touched signaling state.
+        let setting_offer = self
+            .webrtc_conn
+            .create_offer(None)
+            .await
+            .map_err(|e| Error::WebrtcSignalingPreApply(e.to_string()))?;
+        // `set_local_description` and everything after it mutate signaling state (post-apply).
         self.webrtc_conn
             .set_local_description(setting_offer.clone())
             .await?;
@@ -417,12 +423,16 @@ impl ConnectionInterface for WebrtcConnection {
 
     async fn webrtc_answer_offer(&self, offer: Self::Sdp) -> Result<Self::Sdp> {
         tracing::debug!("webrtc_answer_offer, offer: {offer:?}");
-        self.remote_max_message_size
-            .store(effective_max_message_size(&offer), Ordering::SeqCst);
-        // Parse is pre-apply: a malformed offer is rejected here without mutating signaling state.
+        // Compute the negotiated limit (a pure read of the SDP text) but do not record it yet — that
+        // store is itself an observable mutation and must not happen on a rejected/un-applied offer.
+        let negotiated_max_message_size = effective_max_message_size(&offer);
+        // Parse is pre-apply: a malformed offer is rejected here without mutating any state.
         let offer = RTCSessionDescription::offer(offer)
-            .map_err(|e| Error::RemoteSdpRejected(e.to_string()))?;
+            .map_err(|e| Error::WebrtcSignalingPreApply(e.to_string()))?;
         self.webrtc_conn.set_remote_description(offer).await?;
+        // Applied: now it is correct to record the negotiated limit.
+        self.remote_max_message_size
+            .store(negotiated_max_message_size, Ordering::SeqCst);
 
         let answer = self.webrtc_conn.create_answer(None).await?;
         self.webrtc_conn
@@ -434,15 +444,15 @@ impl ConnectionInterface for WebrtcConnection {
 
     async fn webrtc_accept_answer(&self, answer: Self::Sdp) -> Result<()> {
         tracing::debug!("webrtc_accept_answer, answer: {answer:?}");
-        self.remote_max_message_size
-            .store(effective_max_message_size(&answer), Ordering::SeqCst);
-        // Parse is pre-apply: a malformed answer is rejected here without mutating signaling state.
+        let negotiated_max_message_size = effective_max_message_size(&answer);
+        // Parse is pre-apply: a malformed answer is rejected here without mutating any state.
         let answer = RTCSessionDescription::answer(answer)
-            .map_err(|e| Error::RemoteSdpRejected(e.to_string()))?;
-        self.webrtc_conn
-            .set_remote_description(answer)
-            .await
-            .map_err(|e| e.into())
+            .map_err(|e| Error::WebrtcSignalingPreApply(e.to_string()))?;
+        self.webrtc_conn.set_remote_description(answer).await?;
+        // Applied: now it is correct to record the negotiated limit.
+        self.remote_max_message_size
+            .store(negotiated_max_message_size, Ordering::SeqCst);
+        Ok(())
     }
 
     async fn webrtc_wait_for_data_channel_open(&self) -> Result<()> {

@@ -42,8 +42,8 @@ pub enum Error {
     #[error("WebRTC local SDP generation error: {0}")]
     WebrtcLocalSdpGenerationError(String),
 
-    #[error("remote SDP rejected before apply: {0}")]
-    RemoteSdpRejected(String),
+    #[error("WebRTC signaling step failed before mutating the connection: {0}")]
+    WebrtcSignalingPreApply(String),
 
     #[error("Connection {0} already exists")]
     ConnectionAlreadyExists(String),
@@ -62,15 +62,16 @@ pub enum Error {
 }
 
 impl Error {
-    /// Whether an offer/answer call (`webrtc_answer_offer` / `webrtc_accept_answer` /
-    /// `webrtc_create_offer`) failed *before* it mutated the `PeerConnection`'s signaling state —
-    /// i.e. the remote SDP was rejected at parse/validation, never reaching `setRemoteDescription`/
-    /// `setLocalDescription`. The connection is still consistent in that case, so a caller doing
-    /// renegotiation can leave it intact rather than resetting it. The boundary is reported here, by
-    /// the backend that actually knows where its `set*Description` call sits, instead of being guessed
-    /// by an upper layer. Only meaningful for errors returned by those three methods.
+    /// Whether an offer/answer call (`webrtc_create_offer` / `webrtc_answer_offer` /
+    /// `webrtc_accept_answer`) failed *before* it mutated the `PeerConnection`'s signaling state —
+    /// i.e. `createOffer`/`createAnswer` or a remote-SDP parse failed, never reaching
+    /// `setLocalDescription`/`setRemoteDescription`, and the method also did no other observable
+    /// mutation. The connection is still consistent in that case, so a caller doing renegotiation can
+    /// leave it intact rather than resetting it. The boundary is reported here by the backend that
+    /// actually knows where its `set*Description` calls sit, instead of being guessed by an upper
+    /// layer. Only meaningful for errors returned by those three methods.
     pub fn is_signaling_pre_apply(&self) -> bool {
-        matches!(self, Error::RemoteSdpRejected(_))
+        matches!(self, Error::WebrtcSignalingPreApply(_))
     }
 }
 

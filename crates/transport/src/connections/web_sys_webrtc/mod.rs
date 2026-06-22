@@ -311,11 +311,15 @@ impl ConnectionInterface for WebSysWebrtcConnection {
     }
 
     async fn webrtc_create_offer(&self) -> Result<Self::Sdp> {
+        // `createOffer` is pre-apply: a failure here has not touched signaling state.
         let promise = self.webrtc_conn.create_offer();
-        let offer_js_value = JsFuture::from(promise).await.map_err(Error::WebSysWebrtc)?;
+        let offer_js_value = JsFuture::from(promise)
+            .await
+            .map_err(|e| Error::WebrtcSignalingPreApply(format!("{e:?}")))?;
         let offer = RtcSessionDescription::from(offer_js_value);
         let sdp = offer.sdp();
 
+        // `setLocalDescription` and everything after it mutate signaling state (post-apply).
         let set_local_init = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
         set_local_init.set_sdp(&sdp);
 
@@ -327,14 +331,19 @@ impl ConnectionInterface for WebSysWebrtcConnection {
 
     async fn webrtc_answer_offer(&self, offer: Self::Sdp) -> Result<Self::Sdp> {
         tracing::debug!("webrtc_answer_offer, offer: {offer:?}");
-        self.remote_max_message_size
-            .store(effective_max_message_size(&offer), Ordering::SeqCst);
+        // Compute the negotiated limit but do not record it until the offer is actually applied — the
+        // store is an observable mutation that must not survive a rejected/un-applied offer. (web-sys
+        // has no separate pre-apply parse; `setRemoteDescription` is both the first fallible step and
+        // the apply, so its failure is post-apply.)
+        let negotiated_max_message_size = effective_max_message_size(&offer);
 
         let set_remote_init = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
         set_remote_init.set_sdp(&offer);
 
         let promise = self.webrtc_conn.set_remote_description(&set_remote_init);
         JsFuture::from(promise).await.map_err(Error::WebSysWebrtc)?;
+        self.remote_max_message_size
+            .store(negotiated_max_message_size, Ordering::SeqCst);
 
         let promise = self.webrtc_conn.create_answer();
         let answer_js_value = JsFuture::from(promise).await.map_err(Error::WebSysWebrtc)?;
@@ -352,14 +361,16 @@ impl ConnectionInterface for WebSysWebrtcConnection {
 
     async fn webrtc_accept_answer(&self, answer: Self::Sdp) -> Result<()> {
         tracing::debug!("webrtc_accept_answer, answer: {answer:?}");
-        self.remote_max_message_size
-            .store(effective_max_message_size(&answer), Ordering::SeqCst);
+        let negotiated_max_message_size = effective_max_message_size(&answer);
 
         let set_remote_init = RtcSessionDescriptionInit::new(RtcSdpType::Answer);
         set_remote_init.set_sdp(&answer);
 
         let promise = self.webrtc_conn.set_remote_description(&set_remote_init);
         JsFuture::from(promise).await.map_err(Error::WebSysWebrtc)?;
+        // Applied: now it is correct to record the negotiated limit.
+        self.remote_max_message_size
+            .store(negotiated_max_message_size, Ordering::SeqCst);
 
         Ok(())
     }
