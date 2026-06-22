@@ -8,25 +8,33 @@
 //! stale answer from the current one. A late answer would then be applied to whatever signaling
 //! state the connection happens to be in.
 //!
-//! This module is the **functional core** that prevents that. [`Negotiator::step`] is a pure
-//! function `(state, event) ↦ (state', effect)` — it performs no I/O and touches no WebRTC. The
-//! effectful shell ([`crate::swarm::transport`] / [`crate::swarm`]) holds one [`Negotiator`] per
-//! peer behind a lock, feeds it events, and carries out the [`NegotiationEffect`] it returns
-//! (create/accept SDP, send a message). Because each step is serialized by the per-peer lock, only
-//! one local renegotiation is ever outstanding, every offer carries a monotonic
-//! [`generation`](NegotiationEffect::SendOffer) id, and an answer whose generation does not match
-//! the outstanding offer is dropped.
+//! This module is the **functional core** that prevents that, as a genuine pure transition with an
+//! explicit commit point — not a mutate-then-undo:
+//!
+//! - [`Negotiator::decide`] is `(state, event) ↦ Decision`. It borrows `&self`, mutates nothing, and
+//!   does no I/O; it answers *what should happen* using only the event (an offer/answer generation,
+//!   a politeness bit) and the current state.
+//! - [`Negotiator::commit`] is the **only** mutation. The shell calls it *after* the effect a
+//!   [`Decision`] authorized has actually succeeded. If the effect fails, `commit` is never called,
+//!   so the state never has to be rolled back — a failed `create_offer`/`setRemoteDescription`/send
+//!   simply leaves the negotiator where it was.
+//!
+//! The shell ([`crate::swarm::transport`]) holds one [`Negotiator`] per peer behind a lock, so the
+//! `decide → run effect → commit` sequence is serialized: only one local renegotiation is ever
+//! outstanding, every offer carries a monotonic generation, and an answer whose generation does not
+//! match the outstanding offer is dropped.
 //!
 //! ```text
-//!   step : Negotiation × Event ↦ Negotiation × Effect
+//!   decide : Negotiation × Event ↦ Decision         -- pure, no mutation
+//!   commit : Negotiation × Decision ↦ Negotiation   -- applied only after the effect succeeds
 //!
-//!   Idle            , LocalRenegotiate        ↦ AwaitingAnswer(g) , SendOffer(g)     -- g fresh
-//!   AwaitingAnswer  , LocalRenegotiate        ↦ AwaitingAnswer    , Busy             -- serialize
-//!   Idle            , RemoteOffer(g, _)       ↦ Idle              , SendAnswer(g)
-//!   AwaitingAnswer  , RemoteOffer(g, polite)  ↦ Idle              , SendAnswer(g)     -- glare, yield
-//!   AwaitingAnswer  , RemoteOffer(_, impolite)↦ AwaitingAnswer    , Ignore           -- glare, hold
-//!   AwaitingAnswer(g), RemoteAnswer(g)        ↦ Idle              , AcceptAnswer
-//!   *               , RemoteAnswer(_)         ↦ *                 , Ignore           -- stale
+//!   Idle             , LocalRenegotiate         ↦ SendOffer(g)     then commit AwaitingAnswer(g)
+//!   AwaitingAnswer   , LocalRenegotiate         ↦ Busy             -- serialize; nothing to commit
+//!   Idle             , RemoteOffer(g, _)        ↦ SendAnswer(g)    then commit Idle
+//!   AwaitingAnswer   , RemoteOffer(g, polite)   ↦ SendAnswer(g)    then commit Idle  -- glare, yield
+//!   AwaitingAnswer   , RemoteOffer(_, impolite) ↦ Ignore           -- glare, hold; nothing to commit
+//!   AwaitingAnswer(g), RemoteAnswer(g)          ↦ AcceptAnswer     then commit Idle
+//!   *                , RemoteAnswer(_)          ↦ Ignore           -- stale; nothing to commit
 //! ```
 
 /// Per-peer renegotiation signaling state. A connection is either quiescent ([`Idle`]) or has one
@@ -47,7 +55,7 @@ pub enum Negotiation {
     },
 }
 
-/// An input to [`Negotiator::step`]. The `polite` flag on [`RemoteOffer`](NegotiationEvent::RemoteOffer)
+/// An input to [`Negotiator::decide`]. The `polite` flag on [`RemoteOffer`](NegotiationEvent::RemoteOffer)
 /// is decided by the shell from the two peers' dids (see [`Negotiator::polite`]); it resolves glare
 /// deterministically — exactly one side yields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,30 +76,35 @@ pub enum NegotiationEvent {
     },
 }
 
-/// The action the shell must carry out after a [`step`](Negotiator::step). Everything that touches
-/// WebRTC or the network lives here, never in the state machine itself.
+/// What [`Negotiator::decide`] resolved an event to. The acting variants name the effect the shell
+/// must run; [`Negotiator::commit`] interprets the same value to advance the state once that effect
+/// succeeds. The non-acting variants ([`Ignore`](Decision::Ignore), [`Busy`](Decision::Busy)) carry
+/// no effect and are never committed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NegotiationEffect {
-    /// Create a local offer tagged with `generation` and send it as `RenegotiateSend`.
+pub enum Decision {
+    /// Do nothing — a stale/duplicate answer, or a remote offer this (impolite) side holds through
+    /// glare. The connection is not touched.
+    Ignore,
+    /// A local renegotiation is already outstanding; the caller must not start another.
+    Busy,
+    /// Create a local offer tagged with `generation` and send it; on success commit
+    /// [`AwaitingAnswer`](Negotiation::AwaitingAnswer).
     SendOffer {
         /// Generation id to stamp on the offer.
         generation: u64,
     },
-    /// Answer the remote offer of `generation` and send it back as `RenegotiateReport`.
+    /// Answer the remote offer of `generation` and send it back; on success commit
+    /// [`Idle`](Negotiation::Idle).
     SendAnswer {
         /// Generation id to echo on the answer (the offer's generation).
         generation: u64,
     },
-    /// Apply the remote answer to the outstanding offer.
+    /// Apply the remote answer to the outstanding offer; on success commit [`Idle`](Negotiation::Idle).
     AcceptAnswer,
-    /// Do nothing — a stale answer, or a remote offer this (impolite) side holds through glare.
-    Ignore,
-    /// A local renegotiation is already outstanding; the caller must not start another.
-    Busy,
 }
 
 /// One peer's [`Negotiation`] state plus the monotonic counter that stamps each local offer. Held
-/// behind a per-peer lock by the shell so that [`step`](Self::step) calls are serialized.
+/// behind a per-peer lock by the shell so that the `decide → effect → commit` sequence is serialized.
 #[derive(Debug)]
 pub struct Negotiator {
     state: Negotiation,
@@ -118,23 +131,6 @@ impl Negotiator {
         self.state
     }
 
-    /// Undo a committed transition when the shell rejected the operation *before any WebRTC signaling
-    /// effect ran* — e.g. a media-track attach failed (data-only connection / kind mismatch) after
-    /// `LocalRenegotiate` was admitted but before any offer was created. Restoring the prior state
-    /// frees the slot so the next renegotiation is not stuck `Busy`.
-    ///
-    /// This is **not** used to paper over a *failed WebRTC effect*: once `create_offer` /
-    /// `answer_offer` has run, `setLocalDescription` / `setRemoteDescription` has already mutated the
-    /// `PeerConnection`, and rolling back only this pure state would make it lie about the real
-    /// signaling state. The shell resets the connection in that case instead (see
-    /// `SwarmTransport::reset_failed_renegotiation`).
-    ///
-    /// The monotonic generation counter is intentionally *not* rewound: a spent generation is simply
-    /// skipped, which keeps ids unique (gaps are harmless).
-    pub fn rollback(&mut self, to: Negotiation) {
-        self.state = to;
-    }
-
     /// Which of two peers is the *polite* one — the side that yields its own offer to accept the
     /// other's under glare. We pick the numerically larger did, matching the initial-connection
     /// glare rule in [`crate::swarm::transport::SwarmTransport::answer_remote_connection`] (the
@@ -143,72 +139,96 @@ impl Negotiator {
         local > remote
     }
 
-    /// The pure transition. Returns the effect the shell must perform; `self` is advanced to the
-    /// next state. See the module docs for the full table.
-    pub fn step(&mut self, event: NegotiationEvent) -> NegotiationEffect {
+    /// The pure decision: resolve `event` against the current state to a [`Decision`], **without**
+    /// mutating anything. See the module docs for the full table.
+    pub fn decide(&self, event: NegotiationEvent) -> Decision {
         match (self.state, event) {
-            // Start a local renegotiation: allocate a fresh generation and await its answer.
-            (Negotiation::Idle, NegotiationEvent::LocalRenegotiate) => {
-                let generation = self.next_generation;
-                self.next_generation += 1;
-                self.state = Negotiation::AwaitingAnswer { generation };
-                NegotiationEffect::SendOffer { generation }
-            }
-            // One local offer is already outstanding; refuse to start a second.
+            // Start a local renegotiation (only one may be outstanding at a time).
+            (Negotiation::Idle, NegotiationEvent::LocalRenegotiate) => Decision::SendOffer {
+                generation: self.next_generation,
+            },
             (Negotiation::AwaitingAnswer { .. }, NegotiationEvent::LocalRenegotiate) => {
-                NegotiationEffect::Busy
+                Decision::Busy
             }
             // No local offer in flight: just answer the remote offer.
             (Negotiation::Idle, NegotiationEvent::RemoteOffer { generation, .. }) => {
-                NegotiationEffect::SendAnswer { generation }
+                Decision::SendAnswer { generation }
             }
-            // Glare: both sides offered. The polite side drops its own pending offer and answers the
-            // remote one; its own (now abandoned) answer will arrive later and be ignored as stale.
+            // Glare: both offered. The polite side yields its own offer and answers the remote one;
+            // the impolite side holds its offer and ignores the remote one.
             (
                 Negotiation::AwaitingAnswer { .. },
                 NegotiationEvent::RemoteOffer {
                     generation,
                     polite: true,
                 },
-            ) => {
-                self.state = Negotiation::Idle;
-                NegotiationEffect::SendAnswer { generation }
-            }
-            // Glare: the impolite side holds its offer and ignores the remote one; the polite peer
-            // will answer ours.
+            ) => Decision::SendAnswer { generation },
             (
                 Negotiation::AwaitingAnswer { .. },
                 NegotiationEvent::RemoteOffer { polite: false, .. },
-            ) => NegotiationEffect::Ignore,
-            // The awaited answer for the current generation: apply it and go quiescent.
+            ) => Decision::Ignore,
+            // The awaited answer for the current generation.
             (
                 Negotiation::AwaitingAnswer { generation },
                 NegotiationEvent::RemoteAnswer {
                     generation: answer_generation,
                 },
-            ) if answer_generation == generation => {
-                self.state = Negotiation::Idle;
-                NegotiationEffect::AcceptAnswer
-            }
+            ) if answer_generation == generation => Decision::AcceptAnswer,
             // Any other answer (wrong generation, or none outstanding) is stale.
-            (_, NegotiationEvent::RemoteAnswer { .. }) => NegotiationEffect::Ignore,
+            (_, NegotiationEvent::RemoteAnswer { .. }) => Decision::Ignore,
+        }
+    }
+
+    /// Apply a [`Decision`] whose effect has **succeeded**, advancing the state. The shell calls this
+    /// only on the success path, so there is no rollback: a failed effect simply never commits.
+    ///
+    /// [`Ignore`](Decision::Ignore) / [`Busy`](Decision::Busy) carry no effect and must not be
+    /// committed; committing one is a caller bug and is a no-op here.
+    pub fn commit(&mut self, decision: Decision) {
+        match decision {
+            Decision::SendOffer { generation } => {
+                self.state = Negotiation::AwaitingAnswer { generation };
+                // Spend the generation so the next offer gets a fresh, larger id.
+                self.next_generation = generation + 1;
+            }
+            // Answering a remote offer (incl. the glare yield) and accepting an answer both leave the
+            // connection with no local offer outstanding.
+            Decision::SendAnswer { .. } | Decision::AcceptAnswer => {
+                self.state = Negotiation::Idle;
+            }
+            Decision::Ignore | Decision::Busy => {}
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::Decision;
     use super::Negotiation;
-    use super::NegotiationEffect;
     use super::NegotiationEvent;
     use super::Negotiator;
 
+    /// Decide, assert the decision, then commit it — the shell's success-path sequence.
+    fn decide_commit(n: &mut Negotiator, event: NegotiationEvent) -> Decision {
+        let decision = n.decide(event);
+        n.commit(decision);
+        decision
+    }
+
     #[test]
-    fn local_renegotiate_from_idle_sends_offer_and_awaits() {
+    fn decide_does_not_mutate() {
+        let n = Negotiator::new();
+        let _ = n.decide(NegotiationEvent::LocalRenegotiate);
+        // No commit, so the state is unchanged — `decide` is pure.
+        assert_eq!(n.state(), Negotiation::Idle);
+    }
+
+    #[test]
+    fn local_renegotiate_from_idle_sends_offer_then_commits_awaiting() {
         let mut n = Negotiator::new();
         assert_eq!(
-            n.step(NegotiationEvent::LocalRenegotiate),
-            NegotiationEffect::SendOffer { generation: 0 }
+            decide_commit(&mut n, NegotiationEvent::LocalRenegotiate),
+            Decision::SendOffer { generation: 0 }
         );
         assert_eq!(n.state(), Negotiation::AwaitingAnswer { generation: 0 });
     }
@@ -216,22 +236,34 @@ mod tests {
     #[test]
     fn second_local_renegotiate_is_busy() {
         let mut n = Negotiator::new();
-        n.step(NegotiationEvent::LocalRenegotiate);
-        assert_eq!(
-            n.step(NegotiationEvent::LocalRenegotiate),
-            NegotiationEffect::Busy
-        );
-        // state is unchanged: still awaiting the first offer's answer
+        decide_commit(&mut n, NegotiationEvent::LocalRenegotiate);
+        assert_eq!(n.decide(NegotiationEvent::LocalRenegotiate), Decision::Busy);
         assert_eq!(n.state(), Negotiation::AwaitingAnswer { generation: 0 });
+    }
+
+    #[test]
+    fn failed_offer_is_never_committed_so_no_rollback_is_needed() {
+        let n = Negotiator::new();
+        // Decide an offer but do NOT commit (simulating a failed create_offer/send).
+        assert_eq!(
+            n.decide(NegotiationEvent::LocalRenegotiate),
+            Decision::SendOffer { generation: 0 }
+        );
+        assert_eq!(n.state(), Negotiation::Idle);
+        // The generation was not spent: the next attempt reuses it.
+        assert_eq!(
+            n.decide(NegotiationEvent::LocalRenegotiate),
+            Decision::SendOffer { generation: 0 }
+        );
     }
 
     #[test]
     fn matching_answer_is_accepted_and_returns_to_idle() {
         let mut n = Negotiator::new();
-        n.step(NegotiationEvent::LocalRenegotiate);
+        decide_commit(&mut n, NegotiationEvent::LocalRenegotiate);
         assert_eq!(
-            n.step(NegotiationEvent::RemoteAnswer { generation: 0 }),
-            NegotiationEffect::AcceptAnswer
+            decide_commit(&mut n, NegotiationEvent::RemoteAnswer { generation: 0 }),
+            Decision::AcceptAnswer
         );
         assert_eq!(n.state(), Negotiation::Idle);
     }
@@ -239,34 +271,32 @@ mod tests {
     #[test]
     fn stale_answer_wrong_generation_is_ignored() {
         let mut n = Negotiator::new();
-        n.step(NegotiationEvent::LocalRenegotiate); // generation 0 outstanding
+        decide_commit(&mut n, NegotiationEvent::LocalRenegotiate); // generation 0 outstanding
         assert_eq!(
-            n.step(NegotiationEvent::RemoteAnswer { generation: 7 }),
-            NegotiationEffect::Ignore
+            n.decide(NegotiationEvent::RemoteAnswer { generation: 7 }),
+            Decision::Ignore
         );
-        // still awaiting the real answer
         assert_eq!(n.state(), Negotiation::AwaitingAnswer { generation: 0 });
     }
 
     #[test]
     fn answer_with_no_outstanding_offer_is_ignored() {
-        let mut n = Negotiator::new();
+        let n = Negotiator::new();
         assert_eq!(
-            n.step(NegotiationEvent::RemoteAnswer { generation: 0 }),
-            NegotiationEffect::Ignore
+            n.decide(NegotiationEvent::RemoteAnswer { generation: 0 }),
+            Decision::Ignore
         );
-        assert_eq!(n.state(), Negotiation::Idle);
     }
 
     #[test]
     fn remote_offer_while_idle_is_answered() {
         let mut n = Negotiator::new();
         assert_eq!(
-            n.step(NegotiationEvent::RemoteOffer {
+            decide_commit(&mut n, NegotiationEvent::RemoteOffer {
                 generation: 3,
                 polite: false
             }),
-            NegotiationEffect::SendAnswer { generation: 3 }
+            Decision::SendAnswer { generation: 3 }
         );
         assert_eq!(n.state(), Negotiation::Idle);
     }
@@ -274,63 +304,58 @@ mod tests {
     #[test]
     fn glare_polite_side_yields_and_answers() {
         let mut n = Negotiator::new();
-        n.step(NegotiationEvent::LocalRenegotiate); // we offered, generation 0
+        decide_commit(&mut n, NegotiationEvent::LocalRenegotiate); // we offered, generation 0
         assert_eq!(
-            n.step(NegotiationEvent::RemoteOffer {
+            decide_commit(&mut n, NegotiationEvent::RemoteOffer {
                 generation: 5,
                 polite: true
             }),
-            NegotiationEffect::SendAnswer { generation: 5 }
+            Decision::SendAnswer { generation: 5 }
         );
         // we abandoned our own offer
         assert_eq!(n.state(), Negotiation::Idle);
         // the late answer to our abandoned offer is now stale
         assert_eq!(
-            n.step(NegotiationEvent::RemoteAnswer { generation: 0 }),
-            NegotiationEffect::Ignore
+            n.decide(NegotiationEvent::RemoteAnswer { generation: 0 }),
+            Decision::Ignore
         );
     }
 
     #[test]
     fn glare_impolite_side_holds_its_offer() {
         let mut n = Negotiator::new();
-        n.step(NegotiationEvent::LocalRenegotiate); // generation 0
+        decide_commit(&mut n, NegotiationEvent::LocalRenegotiate); // generation 0
         assert_eq!(
-            n.step(NegotiationEvent::RemoteOffer {
+            n.decide(NegotiationEvent::RemoteOffer {
                 generation: 5,
                 polite: false
             }),
-            NegotiationEffect::Ignore
+            Decision::Ignore
         );
-        // we keep waiting for the peer to answer our offer
         assert_eq!(n.state(), Negotiation::AwaitingAnswer { generation: 0 });
         assert_eq!(
-            n.step(NegotiationEvent::RemoteAnswer { generation: 0 }),
-            NegotiationEffect::AcceptAnswer
+            decide_commit(&mut n, NegotiationEvent::RemoteAnswer { generation: 0 }),
+            Decision::AcceptAnswer
         );
         assert_eq!(n.state(), Negotiation::Idle);
     }
 
     #[test]
-    fn generations_are_monotonic_across_renegotiations() {
+    fn generations_are_monotonic_across_committed_renegotiations() {
         let mut n = Negotiator::new();
-        n.step(NegotiationEvent::LocalRenegotiate);
-        n.step(NegotiationEvent::RemoteAnswer { generation: 0 });
+        decide_commit(&mut n, NegotiationEvent::LocalRenegotiate);
+        decide_commit(&mut n, NegotiationEvent::RemoteAnswer { generation: 0 });
         assert_eq!(
-            n.step(NegotiationEvent::LocalRenegotiate),
-            NegotiationEffect::SendOffer { generation: 1 }
+            n.decide(NegotiationEvent::LocalRenegotiate),
+            Decision::SendOffer { generation: 1 }
         );
     }
 
     #[test]
     fn polite_is_the_larger_did() {
-        let small = crate::dht::Did::from(crate::ecc::SecretKey::random().address());
-        let large = crate::dht::Did::from(crate::ecc::SecretKey::random().address());
-        let (small, large) = if small < large {
-            (small, large)
-        } else {
-            (large, small)
-        };
+        let a = crate::dht::Did::from(crate::ecc::SecretKey::random().address());
+        let b = crate::dht::Did::from(crate::ecc::SecretKey::random().address());
+        let (small, large) = if a < b { (a, b) } else { (b, a) };
         assert!(Negotiator::polite(large, small));
         assert!(!Negotiator::polite(small, large));
     }

@@ -419,7 +419,9 @@ impl ConnectionInterface for WebrtcConnection {
         tracing::debug!("webrtc_answer_offer, offer: {offer:?}");
         self.remote_max_message_size
             .store(effective_max_message_size(&offer), Ordering::SeqCst);
-        let offer = RTCSessionDescription::offer(offer)?;
+        // Parse is pre-apply: a malformed offer is rejected here without mutating signaling state.
+        let offer = RTCSessionDescription::offer(offer)
+            .map_err(|e| Error::RemoteSdpRejected(e.to_string()))?;
         self.webrtc_conn.set_remote_description(offer).await?;
 
         let answer = self.webrtc_conn.create_answer(None).await?;
@@ -434,7 +436,9 @@ impl ConnectionInterface for WebrtcConnection {
         tracing::debug!("webrtc_accept_answer, answer: {answer:?}");
         self.remote_max_message_size
             .store(effective_max_message_size(&answer), Ordering::SeqCst);
-        let answer = RTCSessionDescription::answer(answer)?;
+        // Parse is pre-apply: a malformed answer is rejected here without mutating signaling state.
+        let answer = RTCSessionDescription::answer(answer)
+            .map_err(|e| Error::RemoteSdpRejected(e.to_string()))?;
         self.webrtc_conn
             .set_remote_description(answer)
             .await

@@ -46,8 +46,7 @@ use crate::message::RenegotiateReport;
 use crate::message::RenegotiateSend;
 use crate::session::SessionSk;
 use crate::swarm::callback::InnerSwarmCallback;
-use crate::swarm::negotiation::Negotiation;
-use crate::swarm::negotiation::NegotiationEffect;
+use crate::swarm::negotiation::Decision;
 use crate::swarm::negotiation::NegotiationEvent;
 use crate::swarm::negotiation::Negotiator;
 
@@ -340,10 +339,10 @@ impl SwarmTransport {
 
     /// Attach a local media track to `peer`'s connection and renegotiate.
     ///
-    /// The pure [`Negotiator`] decides first: `step(LocalRenegotiate)` admits the renegotiation or
+    /// The pure [`Negotiator`] decides first: `decide(LocalRenegotiate)` admits the renegotiation or
     /// answers `Busy` ([`Error::RenegotiationInProgress`]) without touching the connection. On the
-    /// granted path the track is staged — a clean attach failure (data-only / kind mismatch) changes
-    /// no signaling state, so the decision is rolled back and the connection kept — and then the offer
+    /// granted path the track is staged — a clean attach failure (data-only / kind mismatch) is just
+    /// returned, and since nothing was committed the negotiator stays as it was — and then the offer
     /// is created and sent. Creating the offer calls `setLocalDescription`, so once that begins a
     /// failure leaves the `PeerConnection` half-negotiated and the connection is reset (see
     /// [`reconcile_renegotiation`]); recovery is reconnection through the DHT, not in-place retry.
@@ -355,35 +354,35 @@ impl SwarmTransport {
             .ok_or(Error::SwarmMissDidInTable(peer))?;
 
         let negotiator = self.negotiator(peer);
-        let mut state = negotiator.lock().await;
-        let before = state.state();
+        let state = negotiator.lock().await;
 
-        let generation = match state.step(NegotiationEvent::LocalRenegotiate) {
-            NegotiationEffect::SendOffer { generation } => generation,
+        let decision = state.decide(NegotiationEvent::LocalRenegotiate);
+        let generation = match decision {
+            Decision::SendOffer { generation } => generation,
             // A renegotiation is already in flight; do not attach the track or offer a second time.
-            NegotiationEffect::Busy => return Err(Error::RenegotiationInProgress(peer)),
-            // No other effect is reachable for a `LocalRenegotiate` event.
+            Decision::Busy => return Err(Error::RenegotiationInProgress(peer)),
+            // No other decision is reachable for a `LocalRenegotiate` event.
             _ => return Ok(()),
         };
 
-        // Stage the track (pre-effect: a clean attach failure mutates no signaling state).
+        // Stage the track (pre-effect): nothing is committed yet, so a clean attach failure leaves the
+        // negotiator untouched.
         if let Err(e) = conn.add_media_track(track).await {
-            state.rollback(before);
             return Err(e);
         }
 
         let outcome = self.send_local_offer_effect(&conn, peer, generation).await;
-        self.reconcile_renegotiation(peer, state, before, outcome)
+        self.reconcile_renegotiation(peer, state, decision, outcome)
             .await
     }
 
     /// Apply a remote renegotiation offer and, if the [`Negotiator`] accepts, answer it on the live
     /// connection **and send the answer** — one transaction. `ctx` routes the `RenegotiateReport`.
     ///
-    /// The pure decision runs first (`step`, using only the offer's generation and politeness), so an
-    /// `Ignore` — the impolite side under glare — returns without parsing the SDP or touching the
-    /// connection. Only the `SendAnswer` path parses the offer, then runs the WebRTC effect; failures
-    /// are reconciled by [`reconcile_renegotiation`](Self::reconcile_renegotiation).
+    /// The pure decision runs first (`decide`, using only the offer's generation and politeness), so
+    /// an `Ignore` — the impolite side under glare — returns without parsing the SDP or touching the
+    /// connection. Only the `SendAnswer` path parses the offer, then runs the WebRTC effect; the
+    /// result is reconciled by [`reconcile_renegotiation`](Self::reconcile_renegotiation).
     pub async fn handle_renegotiation_offer(
         &self,
         peer: Did,
@@ -391,16 +390,16 @@ impl SwarmTransport {
         offer_msg: &RenegotiateSend,
     ) -> Result<()> {
         let negotiator = self.negotiator(peer);
-        let mut state = negotiator.lock().await;
-        let before = state.state();
+        let state = negotiator.lock().await;
         let polite = Negotiator::polite(self.dht.did, peer);
-        match state.step(NegotiationEvent::RemoteOffer {
+        let decision = state.decide(NegotiationEvent::RemoteOffer {
             generation: offer_msg.generation,
             polite,
-        }) {
-            NegotiationEffect::SendAnswer { .. } => {
+        });
+        match decision {
+            Decision::SendAnswer { .. } => {
                 let outcome = self.answer_offer_effect(peer, ctx, offer_msg).await;
-                self.reconcile_renegotiation(peer, state, before, outcome)
+                self.reconcile_renegotiation(peer, state, decision, outcome)
                     .await
             }
             // `Ignore`: impolite side under glare keeps its own offer and drops this one — no parse,
@@ -412,21 +411,21 @@ impl SwarmTransport {
     /// Apply a remote renegotiation answer. The pure decision runs first: a stale answer (wrong
     /// generation, or none outstanding) is `Ignore`d here without parsing the SDP or touching the
     /// connection. Only the `AcceptAnswer` path parses the answer and runs `setRemoteDescription`;
-    /// failures are reconciled by [`reconcile_renegotiation`](Self::reconcile_renegotiation).
+    /// the result is reconciled by [`reconcile_renegotiation`](Self::reconcile_renegotiation).
     pub async fn handle_renegotiation_answer(
         &self,
         peer: Did,
         answer_msg: &RenegotiateReport,
     ) -> Result<()> {
         let negotiator = self.negotiator(peer);
-        let mut state = negotiator.lock().await;
-        let before = state.state();
-        match state.step(NegotiationEvent::RemoteAnswer {
+        let state = negotiator.lock().await;
+        let decision = state.decide(NegotiationEvent::RemoteAnswer {
             generation: answer_msg.generation,
-        }) {
-            NegotiationEffect::AcceptAnswer => {
+        });
+        match decision {
+            Decision::AcceptAnswer => {
                 let outcome = self.accept_answer_effect(peer, answer_msg).await;
-                self.reconcile_renegotiation(peer, state, before, outcome)
+                self.reconcile_renegotiation(peer, state, decision, outcome)
                     .await
             }
             // `Ignore`: stale answer — no parse, no lookup.
@@ -478,10 +477,12 @@ impl SwarmTransport {
             .connection(&peer.to_string())
             .map_err(|e| RenegotiationError::PreEffect(Error::Transport(e)))?;
 
+        // The backend declares the pre/post-apply boundary (the malformed-SDP rejection happens
+        // before `setRemoteDescription`), so classify by what it reports rather than by guessing.
         let answer = conn
             .webrtc_answer_offer(offer)
             .await
-            .map_err(|e| RenegotiationError::PostEffect(Error::Transport(e)))?;
+            .map_err(Self::classify_signaling)?;
         let sdp = serde_json::to_string(&answer)
             .map_err(|_| RenegotiationError::PostEffect(Error::SerializeToString))?;
         let report = RenegotiateReport {
@@ -510,14 +511,26 @@ impl SwarmTransport {
 
         conn.webrtc_accept_answer(answer)
             .await
-            .map_err(|e| RenegotiationError::PostEffect(Error::Transport(e)))
+            .map_err(Self::classify_signaling)
     }
 
-    /// Reconcile the negotiator with the outcome of a renegotiation effect, consuming the lock guard
-    /// so the reset path can release it first:
-    /// - `Ok`: the effect committed; keep the state the `step` produced.
-    /// - [`PreEffect`](RenegotiationError::PreEffect): no WebRTC state changed, so roll the pure
-    ///   decision back to `before` and surface the error — the connection stays up.
+    /// Classify a failure from an offer/answer/accept backend call into the
+    /// [`RenegotiationError`] phase, trusting the backend's own report of whether it mutated
+    /// signaling state ([`is_signaling_pre_apply`](rings_transport::error::Error::is_signaling_pre_apply)).
+    fn classify_signaling(error: rings_transport::error::Error) -> RenegotiationError {
+        if error.is_signaling_pre_apply() {
+            RenegotiationError::PreEffect(Error::Transport(error))
+        } else {
+            RenegotiationError::PostEffect(Error::Transport(error))
+        }
+    }
+
+    /// Reconcile the negotiator with the outcome of the effect a [`Decision`] authorized, consuming
+    /// the lock guard so the reset path can release it first:
+    /// - `Ok`: the effect succeeded, so **now** commit the decision (the only state mutation).
+    /// - [`PreEffect`](RenegotiationError::PreEffect): the effect failed before any WebRTC state
+    ///   changed; nothing was committed, so the negotiator is already correct — just surface the
+    ///   error and leave the connection up.
     /// - [`PostEffect`](RenegotiationError::PostEffect): a WebRTC signaling effect ran and the
     ///   round-trip could not complete, so the connection is half-negotiated; reset it (which also
     ///   clears the negotiator), then surface the error.
@@ -525,15 +538,15 @@ impl SwarmTransport {
         &self,
         peer: Did,
         mut state: futures::lock::MutexGuard<'_, Negotiator>,
-        before: Negotiation,
+        decision: Decision,
         outcome: std::result::Result<(), RenegotiationError>,
     ) -> Result<()> {
         match outcome {
-            Ok(()) => Ok(()),
-            Err(RenegotiationError::PreEffect(e)) => {
-                state.rollback(before);
-                Err(e)
+            Ok(()) => {
+                state.commit(decision);
+                Ok(())
             }
+            Err(RenegotiationError::PreEffect(e)) => Err(e),
             Err(RenegotiationError::PostEffect(e)) => {
                 drop(state);
                 self.reset_failed_renegotiation(peer).await;
