@@ -242,8 +242,10 @@ pub async fn wait_for_msgs(nodes: impl IntoIterator<Item = &Node>) {
             .collect::<Vec<_>>()
     };
 
-    let ceiling = sleep(Duration::from_secs(30));
-    tokio::pin!(ceiling);
+    // Diagnostics + hard failure if quiescence is never reached — never silently proceed, or later
+    // assertions would run against unresolved async state (the bug this helper exists to catch).
+    let ceiling = Duration::from_secs(30);
+    let started = std::time::Instant::now();
     loop {
         let drained = drain().await;
         let before = snapshot();
@@ -251,18 +253,29 @@ pub async fn wait_for_msgs(nodes: impl IntoIterator<Item = &Node>) {
             // Quiescent candidate: settle briefly, then require that across the gap nothing changed
             // — no message handed off, no handshake started, and no DHT mutation (join_dht /
             // stabilize chains). Any change means activity is still in flight; keep waiting.
-            tokio::select! {
-                _ = sleep(Duration::from_millis(500)) => {}
-                _ = &mut ceiling => return,
-            }
+            sleep(Duration::from_millis(500)).await;
             if !drain().await && !handshaking() && snapshot() == before {
                 return;
             }
         } else {
-            tokio::select! {
-                _ = sleep(Duration::from_millis(50)) => {}
-                _ = &mut ceiling => return,
-            }
+            sleep(Duration::from_millis(50)).await;
+        }
+
+        if started.elapsed() > ceiling {
+            let handshaking_nodes: Vec<String> = nodes
+                .iter()
+                .filter(|n| n.has_handshaking_connection())
+                .map(|n| {
+                    did_names
+                        .get(&n.did())
+                        .map(|s| s.clone())
+                        .unwrap_or_default()
+                })
+                .collect();
+            panic!(
+                "wait_for_msgs did not reach quiescence within {ceiling:?}: still-handshaking \
+                 nodes={handshaking_nodes:?}, last-loop drained={drained}"
+            );
         }
     }
 }
