@@ -337,15 +337,17 @@ impl SwarmTransport {
         Ok(())
     }
 
-    /// Attach a local media track to `peer`'s connection and renegotiate.
+    /// Attach a local media track to `peer`'s connection and renegotiate, as one transaction: on any
+    /// error the connection is left exactly as it was before the call (no half-attached track).
     ///
     /// The pure [`Negotiator`] decides first: `decide(LocalRenegotiate)` admits the renegotiation or
     /// answers `Busy` ([`Error::RenegotiationInProgress`]) without touching the connection. On the
-    /// granted path the track is staged — a clean attach failure (data-only / kind mismatch) is just
-    /// returned, and since nothing was committed the negotiator stays as it was — and then the offer
-    /// is created and sent. Creating the offer calls `setLocalDescription`, so once that begins a
-    /// failure leaves the `PeerConnection` half-negotiated and the connection is reset (see
-    /// [`reconcile_renegotiation`]); recovery is reconnection through the DHT, not in-place retry.
+    /// granted path the track is staged — a clean attach failure (data-only / kind mismatch) mutates
+    /// nothing — and then the offer is created and sent. If that fails **before** mutating signaling
+    /// state (pre-apply), the staged track is detached so the connection returns to its prior state;
+    /// if it fails **after** (`setLocalDescription` ran), the connection is reset (which discards the
+    /// track too — see [`reconcile_renegotiation`]). The negotiator is committed only on success, so
+    /// pure state and connection state move together.
     ///
     /// [`reconcile_renegotiation`]: Self::reconcile_renegotiation
     pub async fn add_media_track(&self, peer: Did, track: LocalMediaTrack) -> Result<()> {
@@ -365,13 +367,22 @@ impl SwarmTransport {
             _ => return Ok(()),
         };
 
-        // Stage the track (pre-effect): nothing is committed yet, so a clean attach failure leaves the
-        // negotiator untouched.
-        if let Err(e) = conn.add_media_track(track).await {
-            return Err(e);
-        }
+        // Stage the track. A clean attach failure mutates nothing, so the negotiator is left as-is.
+        let track_id = match conn.add_media_track(track).await {
+            Ok(track_id) => track_id,
+            Err(e) => return Err(e),
+        };
 
         let outcome = self.send_local_offer_effect(&conn, peer, generation).await;
+        // Keep the whole "attach + renegotiate" a transaction: if the offer failed *before* mutating
+        // signaling state (pre-apply), the track was attached but never negotiated, so detach it to
+        // return the connection to exactly its prior state — leaving no half-attached track. (A
+        // post-apply failure resets the whole connection, which discards the track anyway.)
+        if matches!(outcome, Err(RenegotiationError::PreEffect(_))) {
+            if let Err(e) = conn.remove_media_track(&track_id).await {
+                tracing::warn!("failed to detach staged track {track_id} after a pre-apply offer failure: {e:?}");
+            }
+        }
         self.reconcile_renegotiation(peer, state, decision, outcome)
             .await
     }
@@ -439,9 +450,8 @@ impl SwarmTransport {
     /// The backend declares the boundary inside `webrtc_create_offer` (`createOffer` is pre-apply;
     /// `setLocalDescription` onward is post-apply), so classify the create-offer failure by what it
     /// reports rather than hardcoding it. A pre-apply create-offer failure leaves the connection's
-    /// signaling state untouched (the track this offer would carry stays attached but un-negotiated,
-    /// which a later renegotiation would pick up); only `setLocalDescription`/gather/send failures —
-    /// post-apply — reset the connection.
+    /// signaling state untouched, so the caller can detach the staged track and keep the connection;
+    /// only `setLocalDescription`/gather/send failures — post-apply — reset the connection.
     async fn send_local_offer_effect(
         &self,
         conn: &SwarmConnection,
@@ -593,9 +603,19 @@ impl SwarmConnection {
     /// Attach a local media track to this connection, to be sent to the peer. The connection must
     /// have been created with a media [`ChannelConfig`]. The track is the backend's concrete
     /// [`LocalMediaTrack`] (`NativeMediaTrack` / `BrowserMediaTrack`), so no downcast is involved.
-    pub async fn add_media_track(&self, track: LocalMediaTrack) -> Result<()> {
+    /// Returns the attached track's id, so the caller can [`remove_media_track`](Self::remove_media_track)
+    /// it again to roll back a renegotiation that could not complete.
+    pub async fn add_media_track(&self, track: LocalMediaTrack) -> Result<String> {
         self.connection
             .add_media_track(track)
+            .await
+            .map_err(|e| Error::Media(e.to_string()))
+    }
+
+    /// Detach a track previously attached with [`add_media_track`](Self::add_media_track), by id.
+    pub async fn remove_media_track(&self, track_id: &str) -> Result<()> {
+        self.connection
+            .remove_media_track(track_id)
             .await
             .map_err(|e| Error::Media(e.to_string()))
     }

@@ -21,6 +21,7 @@ use web_sys::RtcIceGatheringState;
 use web_sys::RtcIceServer;
 use web_sys::RtcPeerConnection;
 use web_sys::RtcPeerConnectionState;
+use web_sys::RtcRtpSender;
 use web_sys::RtcSdpType;
 use web_sys::RtcSessionDescription;
 use web_sys::RtcSessionDescriptionInit;
@@ -285,13 +286,27 @@ impl ConnectionInterface for WebSysWebrtcConnection {
     async fn add_media_track(
         &self,
         track: BrowserMediaTrack,
-    ) -> std::result::Result<(), MediaError> {
+    ) -> std::result::Result<String, MediaError> {
         // Same contract as native: reject media on a data-only connection and require the track's
         // kind to match the negotiated one, so `ChannelConfig` is enforced identically here.
         self.channel_config.admit_local_track(track.kind())?;
+        let track_id = track.id();
         let stream = MediaStream::new().map_err(|e| MediaError::AddTrack(format!("{e:?}")))?;
         self.webrtc_conn
             .add_track(&track.track, &stream, &js_sys::Array::new());
+        Ok(track_id)
+    }
+
+    async fn remove_media_track(&self, track_id: &str) -> std::result::Result<(), MediaError> {
+        // Find the sender carrying this track and detach it, undoing `add_media_track`. Removing an
+        // unknown id is a no-op.
+        for sender in self.webrtc_conn.get_senders().iter() {
+            let sender: RtcRtpSender = sender.into();
+            let matches = sender.track().map(|t| t.id() == track_id).unwrap_or(false);
+            if matches {
+                self.webrtc_conn.remove_track(&sender);
+            }
+        }
         Ok(())
     }
 

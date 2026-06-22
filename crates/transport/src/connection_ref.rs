@@ -79,11 +79,22 @@ where
     async fn add_media_track(
         &self,
         track: C::LocalMediaTrack,
-    ) -> std::result::Result<(), crate::core::media::MediaError> {
+    ) -> std::result::Result<String, crate::core::media::MediaError> {
         self.upgrade()
             .map_err(|_| crate::core::media::MediaError::Unsupported)?
             .add_media_track(track)
             .await
+    }
+
+    async fn remove_media_track(
+        &self,
+        track_id: &str,
+    ) -> std::result::Result<(), crate::core::media::MediaError> {
+        // A released connection has no track to remove; treat as a successful no-op.
+        let Ok(conn) = self.upgrade() else {
+            return Ok(());
+        };
+        conn.remove_media_track(track_id).await
     }
 
     async fn get_stats(&self) -> Vec<String> {
@@ -144,11 +155,22 @@ where
     async fn add_media_track(
         &self,
         track: C::LocalMediaTrack,
-    ) -> std::result::Result<(), crate::core::media::MediaError> {
+    ) -> std::result::Result<String, crate::core::media::MediaError> {
         self.upgrade()
             .map_err(|_| crate::core::media::MediaError::Unsupported)?
             .add_media_track(track)
             .await
+    }
+
+    async fn remove_media_track(
+        &self,
+        track_id: &str,
+    ) -> std::result::Result<(), crate::core::media::MediaError> {
+        // A released connection has no track to remove; treat as a successful no-op.
+        let Ok(conn) = self.upgrade() else {
+            return Ok(());
+        };
+        conn.remove_media_track(track_id).await
     }
 
     async fn get_stats(&self) -> Vec<String> {

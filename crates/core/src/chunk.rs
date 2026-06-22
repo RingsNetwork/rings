@@ -60,6 +60,10 @@ pub struct ReassemblyLimits {
     /// Bookkeeping charge per slot (the `BTreeMap` node and `Bytes` header), so a flood of *tiny*
     /// chunks is bounded by slot count, not only by summed data bytes.
     pub slot_overhead: usize,
+    /// Max number of recently-completed message ids remembered as tombstones, to suppress a
+    /// re-delivery if a message is fully retransmitted after it already completed (within its TTL
+    /// window). Bounds the tombstone memory; past this many, the oldest tombstone is dropped.
+    pub max_completed_ids: usize,
 }
 
 impl ReassemblyLimits {
@@ -76,6 +80,7 @@ impl ReassemblyLimits {
             // Admits several concurrent maximum-size transfers while staying hard-bounded.
             max_total_buffered_cost: TRANSPORT_MAX_SIZE * 4,
             slot_overhead: 64,
+            max_completed_ids: 1024,
         }
     }
 }
@@ -316,19 +321,28 @@ impl Pending {
 /// fragments. Buffers a message's chunks keyed by id and yields the complete [`Bytes`] once every
 /// position has arrived (then forgets it).
 ///
-/// Correct under duplicates / retransmits (first write per position wins), out-of-order arrival
-/// (positions are sorted), and partial delivery (TTL eviction).
+/// Correct under duplicates / retransmits (first write per position wins *during* assembly,
+/// out-of-order arrival sorted), partial delivery (TTL eviction), and a message **fully
+/// retransmitted after it already completed**: a completed id is kept as a tombstone until it would
+/// expire, so a late re-send within the TTL window is dropped rather than re-assembled and delivered
+/// twice.
 ///
 /// **Bounded against a hostile peer** by the [`ReassemblyLimits`] it is built with: every accepted
 /// chunk is validated and charged to a budget, so reassembly memory cannot grow without limit no
 /// matter how the load is shaped — per-chunk data, per-message data, a global buffered-cost ceiling
-/// (charging a per-slot overhead so a tiny-chunk flood is bounded by slot count too), and the
-/// id count are all capped, and an already-expired chunk is rejected before it can be delivered or
-/// buffered.
+/// (charging a per-slot overhead so a tiny-chunk flood is bounded by slot count too), the id count,
+/// and the completed-id tombstone set are all capped, and an already-expired chunk is rejected
+/// before it can be delivered or buffered.
 pub struct MessageReassembler {
     pending: HashMap<Uuid, Pending>,
     /// Sum of `Pending::cost(..)` over `pending`, maintained incrementally for an O(1) global cap.
     buffered_cost: usize,
+    /// Tombstones for ids that have already been delivered, each paired with its expiry
+    /// (`ts_ms + ttl_ms`). A chunk for one of these is dropped, so a post-completion retransmit of a
+    /// whole message is not re-assembled and delivered again. `VecDeque` for FIFO/TTL eviction, the
+    /// `HashSet` for an O(1) membership check; the two are kept in lockstep.
+    completed: std::collections::VecDeque<(Uuid, u128)>,
+    completed_ids: std::collections::HashSet<Uuid>,
     /// The bounds enforced on every incoming chunk.
     limits: ReassemblyLimits,
 }
@@ -351,7 +365,23 @@ impl MessageReassembler {
         Self {
             pending: HashMap::new(),
             buffered_cost: 0,
+            completed: std::collections::VecDeque::new(),
+            completed_ids: std::collections::HashSet::new(),
             limits,
+        }
+    }
+
+    /// Record `id` as delivered so a later full retransmit (within the TTL window) is suppressed,
+    /// dropping the oldest tombstone if the cap is reached. `expiry` is the message's `ts_ms + ttl_ms`
+    /// — after it, a retransmit is rejected by the expiry check anyway, so the tombstone can go.
+    fn mark_completed(&mut self, id: Uuid, expiry: u128) {
+        if self.completed_ids.insert(id) {
+            self.completed.push_back((id, expiry));
+        }
+        while self.completed.len() > self.limits.max_completed_ids {
+            if let Some((old, _)) = self.completed.pop_front() {
+                self.completed_ids.remove(&old);
+            }
         }
     }
 
@@ -360,7 +390,8 @@ impl MessageReassembler {
         self.pending.len()
     }
 
-    /// Drop messages whose TTL has elapsed, returning their cost to the budget.
+    /// Drop messages whose TTL has elapsed, returning their cost to the budget, and evict completed-id
+    /// tombstones that have likewise expired (a retransmit past its expiry is rejected anyway).
     pub fn remove_expired(&mut self) {
         let now = get_epoch_ms();
         let buffered_cost = &mut self.buffered_cost;
@@ -372,6 +403,14 @@ impl MessageReassembler {
             }
             alive
         });
+        while let Some(&(id, expiry)) = self.completed.front() {
+            if expiry <= now {
+                self.completed.pop_front();
+                self.completed_ids.remove(&id);
+            } else {
+                break;
+            }
+        }
     }
 
     /// Forget a message (e.g. after it has been delivered), returning its cost to the budget.
@@ -416,6 +455,11 @@ impl MessageReassembler {
         self.remove_expired();
 
         let id = chunk.meta.id;
+        // Already delivered: drop a post-completion retransmit instead of re-assembling it into a
+        // second delivery of the same payload.
+        if self.completed_ids.contains(&id) {
+            return None;
+        }
         // Bound concurrent messages: once at the cap (after reclaiming expired ones above), drop
         // any *new* message rather than grow without limit.
         if !self.pending.contains_key(&id) && self.pending.len() >= self.limits.max_pending_messages
@@ -458,6 +502,9 @@ impl MessageReassembler {
             // `remove` returns the cost to the budget and yields the owned `Pending`.
             let done = self.pending.remove(&id)?;
             self.buffered_cost -= done.cost(self.limits.slot_overhead);
+            // Tombstone the id (until it would expire) so a later full retransmit is suppressed.
+            let expiry = done.ts_ms.saturating_add(done.ttl_ms as u128);
+            self.mark_completed(id, expiry);
             return Some(done.assemble());
         }
         None
@@ -480,6 +527,7 @@ mod test {
             max_message_bytes: 100,
             max_total_buffered_cost: 256,
             slot_overhead: 8,
+            max_completed_ids: 8,
         }
     }
 
@@ -644,6 +692,36 @@ mod test {
             out = r.handle(c).or(out);
         }
         assert_eq!(out.unwrap(), data);
+    }
+
+    #[test]
+    fn full_retransmit_after_completion_is_not_redelivered() {
+        // A message that completes, then is *fully* retransmitted within its TTL window, must not be
+        // delivered a second time — the completed id is tombstoned.
+        let data: Bytes = "helloworld".repeat(64).into();
+        let chunks = chunks_of(&data, 32);
+        assert!(chunks.len() > 1, "need a multi-chunk message for this test");
+
+        let mut r = MessageReassembler::new();
+        let mut first = None;
+        for c in chunks.clone() {
+            first = r.handle(c).or(first);
+        }
+        assert_eq!(first.unwrap(), data, "first assembly delivers once");
+        assert_eq!(r.pending_count(), 0);
+
+        // Replay every chunk of the same message; none should re-open a pending entry or re-deliver.
+        for c in chunks {
+            assert!(
+                r.handle(c).is_none(),
+                "a retransmit of an already-completed message must be dropped"
+            );
+        }
+        assert_eq!(
+            r.pending_count(),
+            0,
+            "no pending re-opened by the retransmit"
+        );
     }
 
     #[test]

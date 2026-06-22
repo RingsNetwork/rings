@@ -124,14 +124,25 @@ pub trait ConnectionInterface {
     /// constrained channel (which can negotiate a smaller limit) is respected.
     fn max_message_size(&self) -> usize;
 
-    /// Attach a local media track to this connection, to be sent to the peer.
+    /// Attach a local media track to this connection, to be sent to the peer. Returns the attached
+    /// track's id, so the caller can [`remove_media_track`](Self::remove_media_track) it again if a
+    /// later step of the same operation (e.g. the renegotiation offer) fails — keeping "add a track
+    /// and renegotiate" a transaction that leaves no half-attached track behind.
     ///
     /// Defaults to [`MediaError::Unsupported`]: a connection only carries media when it was created
     /// with a [`media`](crate::core::media::ChannelConfig) channel, and only the backends that
     /// support media override this. The parameter is the backend's own
     /// [`LocalMediaTrack`](Self::LocalMediaTrack) type, so there is no downcast on this path.
-    async fn add_media_track(&self, _track: Self::LocalMediaTrack) -> Result<(), MediaError> {
+    async fn add_media_track(&self, _track: Self::LocalMediaTrack) -> Result<String, MediaError> {
         Err(MediaError::Unsupported)
+    }
+
+    /// Detach a previously [`add_media_track`](Self::add_media_track)ed track by its id, undoing the
+    /// `PeerConnection` sender/track mutation. Used to roll back a renegotiation that attached the
+    /// track but could not complete (so the connection returns to exactly its prior state). Defaults
+    /// to a no-op for backends without media; removing an unknown id is also a no-op.
+    async fn remove_media_track(&self, _track_id: &str) -> Result<(), MediaError> {
+        Ok(())
     }
 
     /// This is a debug method to dump the stats of webrtc connection.
