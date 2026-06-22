@@ -333,6 +333,13 @@ impl Processor {
     /// created with a media [`ChannelConfig`]. Inbound remote tracks are delivered through the swarm
     /// callback's `on_media_track`. The track is built per platform
     /// (`NativeMediaTrack` / `BrowserMediaTrack`), so the call site is identical across platforms.
+    ///
+    /// Attachment and renegotiation are one transaction (see
+    /// [`Swarm::add_media_track`](rings_core::swarm::Swarm::add_media_track)). Error semantics: a
+    /// clean rejection (no connection, data-only connection, or kind mismatch) leaves the connection
+    /// untouched; a failure *after* the renegotiation offer is created resets the connection to
+    /// `destination` rather than leave it half-negotiated, so recovery is to re-establish the
+    /// connection and call this again — there is no in-place retry to expose.
     pub async fn add_media_track(
         &self,
         destination: Did,

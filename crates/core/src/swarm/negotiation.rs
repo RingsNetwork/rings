@@ -118,14 +118,19 @@ impl Negotiator {
         self.state
     }
 
-    /// Undo a committed transition after the fallible shell effect it authorized failed, restoring
-    /// the state observed before the [`step`](Self::step). This gives the shell a two-phase shape —
-    /// snapshot, step, run effect, then either keep the new state (success) or `rollback` to the
-    /// snapshot (failure) — so a failed `create_offer` / `setRemoteDescription` / network send never
-    /// leaves the peer wedged in `AwaitingAnswer` (stuck `Busy`) or prematurely back in `Idle`.
+    /// Undo a committed transition when the shell rejected the operation *before any WebRTC signaling
+    /// effect ran* — e.g. a media-track attach failed (data-only connection / kind mismatch) after
+    /// `LocalRenegotiate` was admitted but before any offer was created. Restoring the prior state
+    /// frees the slot so the next renegotiation is not stuck `Busy`.
     ///
-    /// The monotonic generation counter is intentionally *not* rewound: a generation spent on a
-    /// failed offer is simply skipped, which keeps ids unique across retries (gaps are harmless).
+    /// This is **not** used to paper over a *failed WebRTC effect*: once `create_offer` /
+    /// `answer_offer` has run, `setLocalDescription` / `setRemoteDescription` has already mutated the
+    /// `PeerConnection`, and rolling back only this pure state would make it lie about the real
+    /// signaling state. The shell resets the connection in that case instead (see
+    /// `SwarmTransport::reset_failed_renegotiation`).
+    ///
+    /// The monotonic generation counter is intentionally *not* rewound: a spent generation is simply
+    /// skipped, which keeps ids unique (gaps are harmless).
     pub fn rollback(&mut self, to: Negotiation) {
         self.state = to;
     }

@@ -329,17 +329,19 @@ impl SwarmTransport {
     /// 1. **Admit.** `step(LocalRenegotiate)` under the lock. If another renegotiation is already
     ///    outstanding the machine answers `Busy` and we return [`Error::RenegotiationInProgress`]
     ///    *before touching the connection* — the track is not attached.
-    /// 2. **Stage.** On the granted path, attach the track. If the attach itself fails, nothing was
-    ///    staged and the negotiator is rolled back to [`Negotiation::Idle`].
-    /// 3. **Offer.** Regenerate the offer (now carrying the track, stamped with the granted
-    ///    generation) and send it ([`drive_local_offer`](Self::drive_local_offer)).
+    /// 2. **Stage.** On the granted path, attach the track. A *clean* attach failure (e.g. data-only
+    ///    connection / kind mismatch) changes no signaling state, so we just roll the negotiator back
+    ///    to [`Negotiation::Idle`] and keep the connection.
+    /// 3. **Offer.** Regenerate the offer (now carrying the track) and send it.
     ///
-    /// **Staging is intentionally not rolled back if the offer/send fails.** WebRTC has no clean
-    /// "un-add" of a sender mid-handshake, and a half-removed track is worse than a staged one. The
-    /// negotiator is reset to `Idle` and the track stays attached, so the operation is *retryable*:
-    /// [`renegotiate`](Self::renegotiate) re-offers the staged track without adding another. This is
-    /// the explicit attach-then-retryable-renegotiate split — the contract a caller can rely on after
-    /// an `Err` is "the track may be staged; call `renegotiate` to retry", not "nothing happened".
+    /// Once step 3 begins, `prepare_renegotiation_offer` has called `setLocalDescription(offer)`, so
+    /// the `PeerConnection` is in `have-local-offer`. If creating or sending the offer then fails the
+    /// signaling state is no longer clean and cannot be made consistent by resetting the pure
+    /// negotiator alone, so we **reset the connection** ([`reset_failed_renegotiation`]). The peer is
+    /// re-established cleanly through the DHT; on `Err` from this point the contract is "the
+    /// connection to `peer` may have been reset", not "the track is staged and waiting".
+    ///
+    /// [`reset_failed_renegotiation`]: Self::reset_failed_renegotiation
     pub async fn add_media_track(&self, peer: Did, track: LocalMediaTrack) -> Result<()> {
         let conn = self
             .get_connection(peer)
@@ -356,47 +358,19 @@ impl SwarmTransport {
             _ => return Ok(()),
         };
 
-        // Stage the track only after admission. A failed attach stages nothing.
+        // Stage the track only after admission. A clean attach failure changed no signaling state.
         if let Err(e) = conn.add_media_track(track).await {
             state.rollback(Negotiation::Idle);
             return Err(e);
         }
-        // Offer the staged track. On failure the track stays staged and `renegotiate` retries.
-        self.drive_local_offer(peer, generation, &mut state).await
-    }
 
-    /// Renegotiate the connection's *current* track set with `peer` — no new track. This is the
-    /// public retry path for [`add_media_track`](Self::add_media_track) when its offer/send failed
-    /// after the track was already staged: it re-offers the staged track without adding another.
-    /// Guarded by the per-peer [`Negotiator`]; returns [`Error::RenegotiationInProgress`] if one is
-    /// already outstanding.
-    pub async fn renegotiate(&self, peer: Did) -> Result<()> {
-        let negotiator = self.negotiator(peer);
-        let mut state = negotiator.lock().await;
-        match state.step(NegotiationEvent::LocalRenegotiate) {
-            NegotiationEffect::SendOffer { generation } => {
-                self.drive_local_offer(peer, generation, &mut state).await
-            }
-            NegotiationEffect::Busy => Err(Error::RenegotiationInProgress(peer)),
-            _ => Ok(()),
-        }
-    }
-
-    /// The offer half of a granted local renegotiation: regenerate the SDP offer (stamped with the
-    /// granted `generation`) and send it point-to-point to `peer`. On any failure roll the negotiator
-    /// back to [`Negotiation::Idle`] so the slot is freed for a retry. Assumes the caller obtained
-    /// `generation` from a granted `LocalRenegotiate` step and still holds the negotiator lock
-    /// (`state`), so the `AwaitingAnswer` commit stands only once the offer is actually on the wire.
-    async fn drive_local_offer(
-        &self,
-        peer: Did,
-        generation: u64,
-        state: &mut Negotiator,
-    ) -> Result<()> {
+        // From here `create_offer` sets the local description; a failure leaves the connection in an
+        // inconsistent signaling state, so reset it rather than let WebRTC and the negotiator diverge.
         let offer = match self.prepare_renegotiation_offer(peer, generation).await {
             Ok(offer) => offer,
             Err(e) => {
-                state.rollback(Negotiation::Idle);
+                drop(state);
+                self.reset_failed_renegotiation(peer).await;
                 return Err(e);
             }
         };
@@ -406,21 +380,36 @@ impl SwarmTransport {
             .send_direct_message(Message::RenegotiateSend(offer), peer)
             .await
         {
-            state.rollback(Negotiation::Idle);
+            drop(state);
+            self.reset_failed_renegotiation(peer).await;
             return Err(e);
         }
         Ok(())
+    }
+
+    /// Reset the connection to `peer` after a renegotiation left it in an inconsistent signaling
+    /// state (a local/remote description was set but the offer/answer round-trip could not complete).
+    ///
+    /// WebRTC offers no reliable mid-handshake rollback in either backend, and resetting only the
+    /// pure [`Negotiator`] would make it lie about the real `PeerConnection` state. So we tear the
+    /// connection down ([`disconnect`](Self::disconnect), which also clears the negotiator); the peer
+    /// reconnects cleanly through the DHT. Best-effort: the teardown error is logged, and the caller
+    /// returns the original cause.
+    async fn reset_failed_renegotiation(&self, peer: Did) {
+        if let Err(e) = self.disconnect(peer).await {
+            tracing::warn!("failed to reset {peer} after a failed renegotiation: {e:?}");
+        }
     }
 
     /// Apply a remote renegotiation offer through `peer`'s [`Negotiator`] and, if accepted, answer it
     /// on the live connection **and send the answer**, all under one guarded transaction. `ctx` is the
     /// inbound `RenegotiateSend` payload, used to route the `RenegotiateReport` back along the relay.
     ///
-    /// Sending the answer is part of the same effect: setting the remote offer, creating/setting the
-    /// local answer, and putting it on the wire either all complete or the negotiator is rolled back
-    /// to the state observed before the step. If the send fails the peer never receives the answer,
-    /// so committing the local WebRTC/negotiator state would wedge it awaiting an answer — hence the
-    /// rollback and propagated error. Under glare the impolite side does nothing (`Ignore`).
+    /// Applying the offer (`setRemoteDescription`), creating/setting the local answer, and sending it
+    /// are one effect. If any of them fails the `PeerConnection` has already partly applied the
+    /// offer/answer, so the signaling state cannot be made consistent by resetting the negotiator
+    /// alone — we **reset the connection** instead. Under glare the impolite side does nothing
+    /// (`Ignore`).
     pub async fn handle_renegotiation_offer(
         &self,
         peer: Did,
@@ -429,7 +418,6 @@ impl SwarmTransport {
     ) -> Result<()> {
         let negotiator = self.negotiator(peer);
         let mut state = negotiator.lock().await;
-        let before = state.state();
         let polite = Negotiator::polite(self.dht.did, peer);
         match state.step(NegotiationEvent::RemoteOffer {
             generation: offer_msg.generation,
@@ -439,7 +427,8 @@ impl SwarmTransport {
                 let answer = match self.answer_renegotiation_offer(peer, offer_msg).await {
                     Ok(answer) => answer,
                     Err(e) => {
-                        state.rollback(before);
+                        drop(state);
+                        self.reset_failed_renegotiation(peer).await;
                         return Err(e);
                     }
                 };
@@ -447,7 +436,8 @@ impl SwarmTransport {
                     .send_report_message(ctx, Message::RenegotiateReport(answer))
                     .await
                 {
-                    state.rollback(before);
+                    drop(state);
+                    self.reset_failed_renegotiation(peer).await;
                     return Err(e);
                 }
                 Ok(())
@@ -460,9 +450,9 @@ impl SwarmTransport {
     /// Apply a remote renegotiation answer through `peer`'s [`Negotiator`]. A stale answer (wrong
     /// generation, or none outstanding) is dropped without touching the connection.
     ///
-    /// Two-phase: the negotiator returns to `Idle` only after `setRemoteDescription(answer)`
-    /// succeeds; if it fails the state is rolled back to `AwaitingAnswer`, so a retried answer can
-    /// still be applied rather than being rejected as stale.
+    /// If applying the answer (`setRemoteDescription(answer)`) fails the `PeerConnection` is stuck in
+    /// `have-local-offer` with no valid answer, so we **reset the connection** rather than leave the
+    /// negotiator claiming `Idle` over a half-negotiated link.
     pub async fn handle_renegotiation_answer(
         &self,
         peer: Did,
@@ -470,13 +460,13 @@ impl SwarmTransport {
     ) -> Result<()> {
         let negotiator = self.negotiator(peer);
         let mut state = negotiator.lock().await;
-        let before = state.state();
         match state.step(NegotiationEvent::RemoteAnswer {
             generation: answer_msg.generation,
         }) {
             NegotiationEffect::AcceptAnswer => {
                 if let Err(e) = self.accept_renegotiation_answer(peer, answer_msg).await {
-                    state.rollback(before);
+                    drop(state);
+                    self.reset_failed_renegotiation(peer).await;
                     return Err(e);
                 }
                 Ok(())
