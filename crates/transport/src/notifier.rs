@@ -88,12 +88,12 @@ impl Notifier {
                     wake.as_ref().unchecked_ref(),
                     millis,
                 ),
-            js_utils::Global::WorkerGlobal(window) => window
+            js_utils::Global::Worker(window) => window
                 .set_timeout_with_callback_and_timeout_and_arguments_0(
                     wake.as_ref().unchecked_ref(),
                     millis,
                 ),
-            js_utils::Global::ServiceWorkerGlobal(window) => window
+            js_utils::Global::ServiceWorker(window) => window
                 .set_timeout_with_callback_and_timeout_and_arguments_0(
                     wake.as_ref().unchecked_ref(),
                     millis,
@@ -125,8 +125,8 @@ mod js_utils {
 
     pub enum Global {
         Window(web_sys::Window),
-        WorkerGlobal(web_sys::WorkerGlobalScope),
-        ServiceWorkerGlobal(web_sys::ServiceWorkerGlobalScope),
+        Worker(web_sys::WorkerGlobalScope),
+        ServiceWorker(web_sys::ServiceWorkerGlobalScope),
     }
 
     pub fn global() -> Option<Global> {
@@ -135,10 +135,10 @@ mod js_utils {
             return Some(Global::Window(web_sys::Window::from(obj)));
         }
         if obj.has_type::<web_sys::WorkerGlobalScope>() {
-            return Some(Global::WorkerGlobal(web_sys::WorkerGlobalScope::from(obj)));
+            return Some(Global::Worker(web_sys::WorkerGlobalScope::from(obj)));
         }
         if obj.has_type::<web_sys::ServiceWorkerGlobalScope>() {
-            return Some(Global::ServiceWorkerGlobal(
+            return Some(Global::ServiceWorker(
                 web_sys::ServiceWorkerGlobalScope::from(obj),
             ));
         }

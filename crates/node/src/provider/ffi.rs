@@ -134,8 +134,8 @@ impl From<&ProviderPtr> for ProviderWithRuntime {
     /// Unsafe due to the conversion from raw pointers to Arcs.
     fn from(ptr: &ProviderPtr) -> ProviderWithRuntime {
         tracing::debug!("FFI: Provider from Ptr!");
-        let provider = unsafe { Arc::<Provider>::from_raw(ptr.provider as *const Provider) };
-        let runtime = unsafe { Arc::<Runtime>::from_raw(ptr.runtime as *const Runtime) };
+        let provider = unsafe { Arc::<Provider>::from_raw(ptr.provider) };
+        let runtime = unsafe { Arc::<Runtime>::from_raw(ptr.runtime) };
 
         Self { provider, runtime }
     }
@@ -190,7 +190,7 @@ pub extern "C" fn request(
         let method = c_char_to_string(method)?;
         let params = c_char_to_string(params)?;
         let params = serde_json::from_str(&params)
-            .unwrap_or_else(|_| panic!("Failed on covering data {:?} to JSON", params));
+            .unwrap_or_else(|_| panic!("Failed on covering data {params:?} to JSON"));
 
         let handle = std::thread::spawn(move || {
             provider.runtime.block_on(async {
@@ -208,7 +208,7 @@ pub extern "C" fn request(
         Ok(r) => r,
         Err(e) => {
             tracing::error!("FFI Request failed, cause by: {:?}", e);
-            panic!("FFI: Failed on request {:#}", e)
+            panic!("FFI: Failed on request {e:#}")
         }
     }
 }
@@ -270,7 +270,7 @@ pub unsafe extern "C" fn new_provider_with_callback(
     })() {
         Ok(r) => r,
         Err(e) => {
-            panic!("Failed on create new provider {:#}", e)
+            panic!("Failed on create new provider {e:#}")
         }
     };
     let runtime = Arc::new(Runtime::new().expect("Failed to create runtime"));

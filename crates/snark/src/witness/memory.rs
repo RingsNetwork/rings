@@ -140,7 +140,10 @@ impl SafeMemory {
     }
 
     fn write_short(&mut self, store: &impl AsStoreRef, ptr: usize, fr: U256) -> Result<()> {
-        let num = fr.to_words()[0] as u32;
+        // Low 32 bits, little-endian. Read from the byte encoding rather than `to_words()[0]`, whose
+        // limb type (and so whether a `as u32` truncates) is target-dependent (u64 native, u32 wasm).
+        let bytes: [u8; 32] = fr.to_le_bytes();
+        let num = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
         self.write_u32(store, ptr, num);
         self.write_u32(store, ptr + 4, 0);
         Ok(())

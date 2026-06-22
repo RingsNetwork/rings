@@ -51,7 +51,7 @@ thread_local! {
     static CONTROLLED: Cell<bool> = const { Cell::new(false) };
     /// Test-only controlled delivery queue: `(target connection rand_id, event)`,
     /// populated instead of auto-dispatching while `CONTROLLED` is on.
-    static DELIVERY: RefCell<VecDeque<(String, Event)>> = RefCell::new(VecDeque::new());
+    static DELIVERY: RefCell<VecDeque<(String, Event)>> = const { RefCell::new(VecDeque::new()) };
 }
 
 /// Test-only controlled delivery scheduler. When enabled (per thread), dummy
@@ -167,9 +167,7 @@ impl DummyConnection {
     }
 
     fn remote_conn(&self) -> Option<Arc<DummyConnection>> {
-        let Some(cid) = { self.remote_rand_id.lock().unwrap() }.clone() else {
-            return None;
-        };
+        let cid = { self.remote_rand_id.lock().unwrap() }.clone()?;
         // The remote may already have been closed and removed from the global
         // map (e.g. during a disconnect). Return None instead of panicking, so
         // callers treat it like a closed connection.
