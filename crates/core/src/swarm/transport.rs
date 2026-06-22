@@ -374,15 +374,23 @@ impl SwarmTransport {
         };
 
         let outcome = self.send_local_offer_effect(&conn, peer, generation).await;
-        // Keep the whole "attach + renegotiate" a transaction: if the offer failed *before* mutating
-        // signaling state (pre-apply), the track was attached but never negotiated, so detach it to
-        // return the connection to exactly its prior state — leaving no half-attached track. (A
-        // post-apply failure resets the whole connection, which discards the track anyway.)
-        if matches!(outcome, Err(RenegotiationError::PreEffect(_))) {
-            if let Err(e) = conn.remove_media_track(&track_id).await {
-                tracing::warn!("failed to detach staged track {track_id} after a pre-apply offer failure: {e:?}");
-            }
-        }
+        // Keep the whole "attach + renegotiate" a transaction. A pre-apply offer failure left the
+        // track attached but never negotiated, so detach it to return the connection to exactly its
+        // prior state — leaving no half-attached track. Detach is itself fallible: if it fails the
+        // staged sender is still on the connection, so the prior-state contract no longer holds; that
+        // must escalate to a reset (post-effect) rather than keeping a dirty connection alive behind
+        // uncommitted pure state. (A post-apply failure already resets, discarding the track anyway.)
+        let outcome = match outcome {
+            Err(RenegotiationError::PreEffect(e)) => match conn.remove_media_track(&track_id).await
+            {
+                Ok(()) => Err(RenegotiationError::PreEffect(e)),
+                Err(detach_err) => {
+                    tracing::warn!("failed to detach staged track {track_id} after a pre-apply offer failure: {detach_err:?}; resetting the connection");
+                    Err(RenegotiationError::PostEffect(e))
+                }
+            },
+            other => other,
+        };
         self.reconcile_renegotiation(peer, state, decision, outcome)
             .await
     }

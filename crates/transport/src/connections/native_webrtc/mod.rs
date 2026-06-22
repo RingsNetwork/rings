@@ -167,13 +167,20 @@ pub struct NativeMediaTrack {
     enabled: Arc<AtomicBool>,
 }
 
+/// Monotonic source of per-track ids. Every `NativeMediaTrack` must carry a distinct id: rollback
+/// of a failed renegotiation detaches the staged sender *by* track id (`remove_media_track`), so a
+/// shared id would let that rollback also detach an already-negotiated track of the same kind.
+static NEXT_LOCAL_TRACK_SEQ: AtomicU64 = AtomicU64::new(0);
+
 impl NativeMediaTrack {
     /// Create a local track for the given media configuration.
     pub fn new(config: &MediaChannelConfig) -> Self {
         let (capability, _) = media_codec(config);
+        // A unique id per local track, so the sender added for it can be detached on its own.
+        let seq = NEXT_LOCAL_TRACK_SEQ.fetch_add(1, Ordering::Relaxed);
         let track = Arc::new(TrackLocalStaticSample::new(
             capability,
-            "rings-media".to_string(),
+            format!("rings-media-{seq}"),
             "rings-stream".to_string(),
         ));
         Self {
@@ -408,8 +415,8 @@ impl ConnectionInterface for WebrtcConnection {
     }
 
     async fn remove_media_track(&self, track_id: &str) -> std::result::Result<(), MediaError> {
-        // Find the sender carrying this track and detach it, undoing `add_media_track`. Removing an
-        // unknown id is a no-op.
+        // Detach exactly the one sender carrying this (unique) track id, undoing `add_media_track`.
+        // Removing an unknown id is a no-op.
         for sender in self.webrtc_conn.get_senders().await {
             let matches = sender
                 .track()
@@ -421,6 +428,7 @@ impl ConnectionInterface for WebrtcConnection {
                     .remove_track(&sender)
                     .await
                     .map_err(|e| MediaError::AddTrack(e.to_string()))?;
+                break;
             }
         }
         Ok(())
@@ -734,5 +742,98 @@ impl From<RTCPeerConnectionState> for WebrtcConnectionState {
             RTCPeerConnectionState::Failed => Self::Failed,
             RTCPeerConnectionState::Closed => Self::Closed,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::callback::TransportCallback;
+    use crate::core::media::MediaChannelConfig;
+    use crate::core::media::MediaKind;
+
+    struct NoopCallback;
+
+    #[async_trait]
+    impl TransportCallback for NoopCallback {}
+
+    fn video_config() -> MediaChannelConfig {
+        MediaChannelConfig {
+            kind: MediaKind::Video,
+            payload_type: 96,
+            clock_rate: 90000,
+        }
+    }
+
+    async fn media_connection() -> (WebrtcTransport, ConnectionRef<WebrtcConnection>) {
+        let transport =
+            WebrtcTransport::new("stun://stun.l.google.com:19302", None, ChannelConfig {
+                media: Some(video_config()),
+            });
+        let cid = "rollback-test";
+        transport
+            .new_connection(cid, Box::new(NoopCallback))
+            .await
+            .unwrap();
+        let conn = transport.connection(cid).unwrap();
+        (transport, conn)
+    }
+
+    /// Each local track must carry a distinct id. Rollback of a failed renegotiation detaches the
+    /// staged sender *by* track id, so a shared id would make one track indistinguishable from another.
+    #[test]
+    fn local_tracks_have_unique_ids() {
+        let a = NativeMediaTrack::new(&video_config());
+        let b = NativeMediaTrack::new(&video_config());
+        assert_ne!(
+            a.id(),
+            b.id(),
+            "two local tracks of the same kind must not share an id"
+        );
+    }
+
+    /// Regression: with one track already attached and negotiated, rolling back a *second* failed add
+    /// must detach only the second sender — never the first. Before track ids were unique,
+    /// `remove_media_track` matched every sender of the same kind and would have torn down the
+    /// already-negotiated track too.
+    #[tokio::test]
+    async fn rollback_detaches_only_the_staged_sender() {
+        let (_transport, conn) = media_connection().await;
+
+        let first_id = conn
+            .add_media_track(NativeMediaTrack::new(&video_config()))
+            .await
+            .unwrap();
+        let second_id = conn
+            .add_media_track(NativeMediaTrack::new(&video_config()))
+            .await
+            .unwrap();
+        assert_ne!(first_id, second_id);
+
+        let raw = conn.upgrade().unwrap();
+        assert_eq!(
+            raw.webrtc_conn.get_senders().await.len(),
+            2,
+            "both tracks should be attached before rollback"
+        );
+
+        // Roll back only the second add, as the shell does on a pre-effect offer failure.
+        conn.remove_media_track(&second_id).await.unwrap();
+
+        // `remove_track` clears the sender's track; collect the track ids that survive.
+        let mut surviving = vec![];
+        for sender in raw.webrtc_conn.get_senders().await {
+            if let Some(track) = sender.track().await {
+                surviving.push(track.id().to_string());
+            }
+        }
+        assert!(
+            surviving.contains(&first_id),
+            "the first, already-attached track must survive the rollback"
+        );
+        assert!(
+            !surviving.contains(&second_id),
+            "the rolled-back track must be detached"
+        );
     }
 }

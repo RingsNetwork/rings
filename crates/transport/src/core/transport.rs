@@ -125,9 +125,11 @@ pub trait ConnectionInterface {
     fn max_message_size(&self) -> usize;
 
     /// Attach a local media track to this connection, to be sent to the peer. Returns the attached
-    /// track's id, so the caller can [`remove_media_track`](Self::remove_media_track) it again if a
-    /// later step of the same operation (e.g. the renegotiation offer) fails — keeping "add a track
-    /// and renegotiate" a transaction that leaves no half-attached track behind.
+    /// track's id, which **uniquely** identifies the sender just added (every local track carries a
+    /// distinct id), so the caller can [`remove_media_track`](Self::remove_media_track) exactly that
+    /// sender — and only that one — if a later step of the same operation (e.g. the renegotiation
+    /// offer) fails. That keeps "add a track and renegotiate" a transaction that leaves no
+    /// half-attached track behind and never detaches an already-negotiated track of the same kind.
     ///
     /// Defaults to [`MediaError::Unsupported`]: a connection only carries media when it was created
     /// with a [`media`](crate::core::media::ChannelConfig) channel, and only the backends that

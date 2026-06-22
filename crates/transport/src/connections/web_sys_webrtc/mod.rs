@@ -298,13 +298,14 @@ impl ConnectionInterface for WebSysWebrtcConnection {
     }
 
     async fn remove_media_track(&self, track_id: &str) -> std::result::Result<(), MediaError> {
-        // Find the sender carrying this track and detach it, undoing `add_media_track`. Removing an
-        // unknown id is a no-op.
+        // Detach exactly the one sender carrying this (unique) track id, undoing `add_media_track`.
+        // Removing an unknown id is a no-op. `MediaStreamTrack` ids are browser-generated and unique.
         for sender in self.webrtc_conn.get_senders().iter() {
             let sender: RtcRtpSender = sender.into();
             let matches = sender.track().map(|t| t.id() == track_id).unwrap_or(false);
             if matches {
                 self.webrtc_conn.remove_track(&sender);
+                break;
             }
         }
         Ok(())
