@@ -5,7 +5,6 @@
 mod builder;
 /// Callback interface for swarm
 pub mod callback;
-/// Per-peer renegotiation signaling state machine.
 pub mod negotiation;
 pub(crate) mod transport;
 
@@ -110,7 +109,7 @@ impl Swarm {
     /// Adding a track to a live connection changes the SDP, so this then **renegotiates**. The whole
     /// operation — admission, track attachment, and the fresh offer/answer round-trip over the
     /// message layer (`RenegotiateSend` → `RenegotiateReport`) — is one transaction guarded by the
-    /// per-peer [`negotiation`](crate::swarm::negotiation) state machine: the track is attached only
+    /// per-peer [`negotiation`] state machine: the track is attached only
     /// after the machine admits the renegotiation, and a concurrent one returns
     /// [`Error::RenegotiationInProgress`] without touching the connection.
     ///
@@ -118,8 +117,7 @@ impl Swarm {
     /// rejection (data-only connection / kind mismatch) leaves the connection untouched; any failure
     /// *after* the offer SDP is created resets the connection to `peer` (it cannot be left in a
     /// half-negotiated signaling state), so the recovery is to re-establish the connection — not an
-    /// in-place retry. See
-    /// [`SwarmTransport::add_media_track`](crate::swarm::transport::SwarmTransport::add_media_track).
+    /// in-place retry. See `SwarmTransport::add_media_track`.
     pub async fn add_media_track(
         &self,
         peer: Did,

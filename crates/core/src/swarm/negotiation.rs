@@ -19,7 +19,7 @@
 //!   so the state never has to be rolled back — a failed `create_offer`/`setRemoteDescription`/send
 //!   simply leaves the negotiator where it was.
 //!
-//! The shell ([`crate::swarm::transport`]) holds one [`Negotiator`] per peer behind a lock, so the
+//! The shell (`crate::swarm::transport`) holds one [`Negotiator`] per peer behind a lock, so the
 //! `decide → run effect → commit` sequence is serialized: only one local renegotiation is ever
 //! outstanding, every offer carries a monotonic generation, and an answer whose generation does not
 //! match the outstanding offer is dropped.
@@ -133,7 +133,7 @@ impl Negotiator {
 
     /// Which of two peers is the *polite* one — the side that yields its own offer to accept the
     /// other's under glare. We pick the numerically larger did, matching the initial-connection
-    /// glare rule in [`crate::swarm::transport::SwarmTransport::answer_remote_connection`] (the
+    /// glare rule in `SwarmTransport::answer_remote_connection` (the
     /// larger did abandons its own offer), so the two negotiation paths break ties the same way.
     pub fn polite(local: crate::dht::Did, remote: crate::dht::Did) -> bool {
         local > remote
