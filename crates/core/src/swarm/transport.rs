@@ -26,6 +26,7 @@ use crate::chunk::plan_framing;
 use crate::chunk::ChunkList;
 use crate::chunk::Framing;
 use crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD;
+use crate::consts::MIN_CHUNK_DATA;
 use crate::consts::TRANSPORT_CUSTOM_OVERHEAD;
 use crate::consts::TRANSPORT_MAX_SIZE;
 use crate::dht::Did;
@@ -355,12 +356,14 @@ impl PayloadSender for SwarmTransport {
         // each path adds on the wire: `send_data` wraps every send in `TransportMessage::Custom`
         // (`TRANSPORT_CUSTOM_OVERHEAD`), and a chunk is additionally re-wrapped in a `MessagePayload`
         // (`MAX_CHUNK_ENVELOPE_OVERHEAD`). `None` means the peer's limit is too small to carry even
-        // one chunk — a real failure we surface rather than send something it would reject.
+        // one `MIN_CHUNK_DATA`-byte chunk — a real failure we surface rather than fragmenting into a
+        // flood of near-empty chunks.
         let plan = plan_framing(
             data.len(),
             conn.max_message_size(),
             TRANSPORT_CUSTOM_OVERHEAD,
             MAX_CHUNK_ENVELOPE_OVERHEAD + TRANSPORT_CUSTOM_OVERHEAD,
+            MIN_CHUNK_DATA,
         )
         .ok_or(Error::PeerMaxMessageSizeTooSmall(conn.max_message_size()))?;
         match plan {
@@ -368,15 +371,21 @@ impl PayloadSender for SwarmTransport {
                 spawn_delivery(conn.send_data(data).await?, did);
             }
             Framing::Chunked { chunk_size } => {
-                for chunk in ChunkList::split(&data, chunk_size) {
-                    let data = MessagePayload::new_send(
+                // Stream chunks lazily (each is a zero-copy slice of `data`) and **await each
+                // chunk's delivery before sending the next**. This is backpressure: one large
+                // message holds only one chunk's wrapped bytes in flight at a time and spawns no
+                // per-chunk tasks, so it cannot blow up memory or the runtime task count or fill the
+                // send buffer. A failed send aborts the rest; the receiver TTL-expires the partial
+                // message (chunks carry the message ttl), so no abort marker is needed.
+                for chunk in ChunkList::stream(data, chunk_size) {
+                    let chunk_bytes = MessagePayload::new_send(
                         Message::Chunk(chunk),
                         &self.session_sk,
                         did,
                         did,
                     )?
                     .to_bincode()?;
-                    spawn_delivery(conn.send_data(data).await?, did);
+                    conn.send_data(chunk_bytes).await?.await?;
                 }
             }
         }

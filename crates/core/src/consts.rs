@@ -20,4 +20,10 @@ pub const TRANSPORT_CUSTOM_OVERHEAD: usize = 64;
 /// connection's negotiated `max_message_size` minus both reserves, so the wrapped on-wire message
 /// stays within the data-channel limit. Generous; bounded by the `chunk_envelope_fits_reserve` test.
 pub const MAX_CHUNK_ENVELOPE_OVERHEAD: usize = 4096;
+/// Smallest per-chunk *data* payload we are willing to produce. A peer that advertises a
+/// `max_message_size` so small that, after the envelope reserves, fewer than this many data bytes
+/// fit per chunk is rejected outright (`plan_framing` returns `None`) rather than fragmenting a
+/// message into a huge number of near-empty chunks. This bounds the chunk count for any payload:
+/// at most `TRANSPORT_MAX_SIZE / MIN_CHUNK_DATA` chunks.
+pub const MIN_CHUNK_DATA: usize = 1024;
 pub const VNODE_DATA_MAX_LEN: usize = 1024;
