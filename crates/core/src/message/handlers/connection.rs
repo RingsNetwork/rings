@@ -95,9 +95,11 @@ impl HandleMsg<ConnectNodeReport> for MessageHandler {
 }
 
 /// Renegotiation offer on an existing connection: run it through the per-peer negotiation state
-/// machine and, if accepted, answer on that same connection and report back. Mirrors
-/// [`ConnectNodeSend`] but does not create a connection. Under glare the impolite side answers
-/// nothing (it holds its own pending offer); see [`crate::swarm::negotiation`].
+/// machine, which (if accepted) answers on that same connection *and sends the report* as one
+/// guarded transaction — answer creation and answer send cannot be split, or a failed send would
+/// leave the peer awaiting an answer. Mirrors [`ConnectNodeSend`] but does not create a connection.
+/// Under glare the impolite side answers nothing (it holds its own pending offer); see
+/// [`crate::swarm::negotiation`].
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<RenegotiateSend> for MessageHandler {
@@ -108,16 +110,10 @@ impl HandleMsg<RenegotiateSend> for MessageHandler {
 
         if self.dht.did != ctx.relay.destination {
             self.transport.forward_payload(ctx, None).await
-        } else if let Some(answer) = self
-            .transport
-            .handle_renegotiation_offer(ctx.relay.origin_sender(), msg)
-            .await?
-        {
-            self.transport
-                .send_report_message(ctx, Message::RenegotiateReport(answer))
-                .await
         } else {
-            Ok(())
+            self.transport
+                .handle_renegotiation_offer(ctx.relay.origin_sender(), ctx, msg)
+                .await
         }
     }
 }

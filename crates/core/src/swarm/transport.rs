@@ -323,22 +323,23 @@ impl SwarmTransport {
         Ok(())
     }
 
-    /// Attach a local media track to `peer`'s connection and renegotiate, as one transaction guarded
-    /// by the per-peer [`Negotiator`].
+    /// Attach a local media track to `peer`'s connection and renegotiate.
     ///
-    /// Two-phase, so the connection is never mutated ahead of the protocol:
-    /// 1. **Admit.** Hold the negotiator lock and `step(LocalRenegotiate)`. If another renegotiation
-    ///    is already outstanding the machine answers `Busy` and we return
-    ///    [`Error::RenegotiationInProgress`] *before touching the connection* — the track is not
-    ///    attached.
-    /// 2. **Apply.** Only on the granted offer path attach the track, regenerate the offer (now
-    ///    carrying it, stamped with the granted generation) and send it. If any of these fail we
-    ///    `rollback` the negotiator to [`Negotiation::Idle`]; the connection is left such that a
-    ///    later renegotiation re-offers the (already-attached) track, so there is no wedged
-    ///    `AwaitingAnswer` and no offer silently lost.
+    /// Guarded by the per-peer [`Negotiator`], in order:
+    /// 1. **Admit.** `step(LocalRenegotiate)` under the lock. If another renegotiation is already
+    ///    outstanding the machine answers `Busy` and we return [`Error::RenegotiationInProgress`]
+    ///    *before touching the connection* — the track is not attached.
+    /// 2. **Stage.** On the granted path, attach the track. If the attach itself fails, nothing was
+    ///    staged and the negotiator is rolled back to [`Negotiation::Idle`].
+    /// 3. **Offer.** Regenerate the offer (now carrying the track, stamped with the granted
+    ///    generation) and send it ([`drive_local_offer`](Self::drive_local_offer)).
     ///
-    /// The lock is held across the whole apply phase, so the commit (staying in `AwaitingAnswer`)
-    /// happens only after the offer is actually on the wire.
+    /// **Staging is intentionally not rolled back if the offer/send fails.** WebRTC has no clean
+    /// "un-add" of a sender mid-handshake, and a half-removed track is worse than a staged one. The
+    /// negotiator is reset to `Idle` and the track stays attached, so the operation is *retryable*:
+    /// [`renegotiate`](Self::renegotiate) re-offers the staged track without adding another. This is
+    /// the explicit attach-then-retryable-renegotiate split — the contract a caller can rely on after
+    /// an `Err` is "the track may be staged; call `renegotiate` to retry", not "nothing happened".
     pub async fn add_media_track(&self, peer: Did, track: LocalMediaTrack) -> Result<()> {
         let conn = self
             .get_connection(peer)
@@ -355,11 +356,43 @@ impl SwarmTransport {
             _ => return Ok(()),
         };
 
-        // Apply phase: any failure rolls the negotiator back to `Idle`.
+        // Stage the track only after admission. A failed attach stages nothing.
         if let Err(e) = conn.add_media_track(track).await {
             state.rollback(Negotiation::Idle);
             return Err(e);
         }
+        // Offer the staged track. On failure the track stays staged and `renegotiate` retries.
+        self.drive_local_offer(peer, generation, &mut state).await
+    }
+
+    /// Renegotiate the connection's *current* track set with `peer` — no new track. This is the
+    /// public retry path for [`add_media_track`](Self::add_media_track) when its offer/send failed
+    /// after the track was already staged: it re-offers the staged track without adding another.
+    /// Guarded by the per-peer [`Negotiator`]; returns [`Error::RenegotiationInProgress`] if one is
+    /// already outstanding.
+    pub async fn renegotiate(&self, peer: Did) -> Result<()> {
+        let negotiator = self.negotiator(peer);
+        let mut state = negotiator.lock().await;
+        match state.step(NegotiationEvent::LocalRenegotiate) {
+            NegotiationEffect::SendOffer { generation } => {
+                self.drive_local_offer(peer, generation, &mut state).await
+            }
+            NegotiationEffect::Busy => Err(Error::RenegotiationInProgress(peer)),
+            _ => Ok(()),
+        }
+    }
+
+    /// The offer half of a granted local renegotiation: regenerate the SDP offer (stamped with the
+    /// granted `generation`) and send it point-to-point to `peer`. On any failure roll the negotiator
+    /// back to [`Negotiation::Idle`] so the slot is freed for a retry. Assumes the caller obtained
+    /// `generation` from a granted `LocalRenegotiate` step and still holds the negotiator lock
+    /// (`state`), so the `AwaitingAnswer` commit stands only once the offer is actually on the wire.
+    async fn drive_local_offer(
+        &self,
+        peer: Did,
+        generation: u64,
+        state: &mut Negotiator,
+    ) -> Result<()> {
         let offer = match self.prepare_renegotiation_offer(peer, generation).await {
             Ok(offer) => offer,
             Err(e) => {
@@ -376,23 +409,24 @@ impl SwarmTransport {
             state.rollback(Negotiation::Idle);
             return Err(e);
         }
-        // Commit: the offer is on the wire, so the `AwaitingAnswer` state stands.
         Ok(())
     }
 
     /// Apply a remote renegotiation offer through `peer`'s [`Negotiator`] and, if accepted, answer it
-    /// on the live connection. Under glare the impolite side returns `Ok(None)` (it holds its own
-    /// offer and ignores this one); otherwise it returns the answer to send back as
-    /// `RenegotiateReport`.
+    /// on the live connection **and send the answer**, all under one guarded transaction. `ctx` is the
+    /// inbound `RenegotiateSend` payload, used to route the `RenegotiateReport` back along the relay.
     ///
-    /// Two-phase: if creating the answer (`setRemoteDescription` / `createAnswer`) fails, the
-    /// negotiator is rolled back to the state observed before the step — so a polite side that yielded
-    /// its own offer does not lose it when the answer never actually applied.
+    /// Sending the answer is part of the same effect: setting the remote offer, creating/setting the
+    /// local answer, and putting it on the wire either all complete or the negotiator is rolled back
+    /// to the state observed before the step. If the send fails the peer never receives the answer,
+    /// so committing the local WebRTC/negotiator state would wedge it awaiting an answer — hence the
+    /// rollback and propagated error. Under glare the impolite side does nothing (`Ignore`).
     pub async fn handle_renegotiation_offer(
         &self,
         peer: Did,
+        ctx: &MessagePayload,
         offer_msg: &RenegotiateSend,
-    ) -> Result<Option<RenegotiateReport>> {
+    ) -> Result<()> {
         let negotiator = self.negotiator(peer);
         let mut state = negotiator.lock().await;
         let before = state.state();
@@ -402,16 +436,24 @@ impl SwarmTransport {
             polite,
         }) {
             NegotiationEffect::SendAnswer { .. } => {
-                match self.answer_renegotiation_offer(peer, offer_msg).await {
-                    Ok(answer) => Ok(Some(answer)),
+                let answer = match self.answer_renegotiation_offer(peer, offer_msg).await {
+                    Ok(answer) => answer,
                     Err(e) => {
                         state.rollback(before);
-                        Err(e)
+                        return Err(e);
                     }
+                };
+                if let Err(e) = self
+                    .send_report_message(ctx, Message::RenegotiateReport(answer))
+                    .await
+                {
+                    state.rollback(before);
+                    return Err(e);
                 }
+                Ok(())
             }
             // `Ignore`: impolite side under glare keeps its own offer and drops this one.
-            _ => Ok(None),
+            _ => Ok(()),
         }
     }
 

@@ -123,6 +123,14 @@ impl Swarm {
         self.transport.add_media_track(peer, track).await
     }
 
+    /// Renegotiate the connection to `peer` with its current track set (no new track). This is the
+    /// retry path for [`add_media_track`](Self::add_media_track): if that returned an error after the
+    /// track was staged on the connection, `renegotiate` re-offers the staged track without adding
+    /// another. Returns [`Error::RenegotiationInProgress`] if one is already outstanding.
+    pub async fn renegotiate(&self, peer: Did) -> Result<()> {
+        self.transport.renegotiate(peer).await
+    }
+
     /// List peers and their connection status.
     pub fn peers(&self) -> Vec<ConnectionInspect> {
         self.transport
