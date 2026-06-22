@@ -334,8 +334,8 @@ impl SwarmTransport {
     ///    to [`Negotiation::Idle`] and keep the connection.
     /// 3. **Offer.** Regenerate the offer (now carrying the track) and send it.
     ///
-    /// Once step 3 begins, `prepare_renegotiation_offer` has called `setLocalDescription(offer)`, so
-    /// the `PeerConnection` is in `have-local-offer`. If creating or sending the offer then fails the
+    /// Once step 3 begins, `webrtc_create_offer` has called `setLocalDescription(offer)`, so the
+    /// `PeerConnection` is in `have-local-offer`. If creating or sending the offer then fails the
     /// signaling state is no longer clean and cannot be made consistent by resetting the pure
     /// negotiator alone, so we **reset the connection** ([`reset_failed_renegotiation`]). The peer is
     /// re-established cleanly through the DHT; on `Err` from this point the contract is "the
@@ -364,20 +364,35 @@ impl SwarmTransport {
             return Err(e);
         }
 
-        // From here `create_offer` sets the local description; a failure leaves the connection in an
-        // inconsistent signaling state, so reset it rather than let WebRTC and the negotiator diverge.
-        let offer = match self.prepare_renegotiation_offer(peer, generation).await {
+        // Effect — `webrtc_create_offer` sets the local description. From here a failure leaves the
+        // connection in an inconsistent signaling state, so reset it rather than let WebRTC and the
+        // negotiator diverge. (The connection was already located above, so there is no pre-effect
+        // lookup that could reset a healthy connection.)
+        let offer = match conn.connection.webrtc_create_offer().await {
             Ok(offer) => offer,
             Err(e) => {
                 drop(state);
                 self.reset_failed_renegotiation(peer).await;
-                return Err(e);
+                return Err(Error::Transport(e));
             }
+        };
+        let sdp = match serde_json::to_string(&offer) {
+            Ok(sdp) => sdp,
+            Err(_) => {
+                drop(state);
+                self.reset_failed_renegotiation(peer).await;
+                return Err(Error::SerializeToString);
+            }
+        };
+        let offer_msg = RenegotiateSend {
+            sdp,
+            network_id: self.network_id,
+            generation,
         };
         // Renegotiation is point-to-point with the directly-connected peer, so send straight to it
         // rather than routing through the DHT.
         if let Err(e) = self
-            .send_direct_message(Message::RenegotiateSend(offer), peer)
+            .send_direct_message(Message::RenegotiateSend(offer_msg), peer)
             .await
         {
             drop(state);
@@ -405,17 +420,27 @@ impl SwarmTransport {
     /// on the live connection **and send the answer**, all under one guarded transaction. `ctx` is the
     /// inbound `RenegotiateSend` payload, used to route the `RenegotiateReport` back along the relay.
     ///
-    /// Applying the offer (`setRemoteDescription`), creating/setting the local answer, and sending it
-    /// are one effect. If any of them fails the `PeerConnection` has already partly applied the
-    /// offer/answer, so the signaling state cannot be made consistent by resetting the negotiator
-    /// alone — we **reset the connection** instead. Under glare the impolite side does nothing
-    /// (`Ignore`).
+    /// Split into preflight and effect so a bad message never tears down a healthy connection:
+    /// - **Preflight** (no WebRTC state touched): parse the offer SDP and locate the connection. A
+    ///   failure here — malformed SDP, connection gone — returns `Err` *without* resetting.
+    /// - **Effect**: `webrtc_answer_offer` (`setRemoteDescription` + `createAnswer` +
+    ///   `setLocalDescription`) and the answer send. Once this begins the signaling state is dirtied,
+    ///   so a failure **resets the connection** rather than leave WebRTC and the negotiator diverged.
+    ///
+    /// Under glare the impolite side does nothing (`Ignore`).
     pub async fn handle_renegotiation_offer(
         &self,
         peer: Did,
         ctx: &MessagePayload,
         offer_msg: &RenegotiateSend,
     ) -> Result<()> {
+        // Preflight — no WebRTC state mutated yet.
+        let offer = serde_json::from_str(&offer_msg.sdp).map_err(Error::Deserialize)?;
+        let conn = self
+            .transport
+            .connection(&peer.to_string())
+            .map_err(Error::Transport)?;
+
         let negotiator = self.negotiator(peer);
         let mut state = negotiator.lock().await;
         let polite = Negotiator::polite(self.dht.did, peer);
@@ -424,16 +449,29 @@ impl SwarmTransport {
             polite,
         }) {
             NegotiationEffect::SendAnswer { .. } => {
-                let answer = match self.answer_renegotiation_offer(peer, offer_msg).await {
+                // Effect — from here a failure has dirtied signaling state, so reset on any error.
+                let answer = match conn.webrtc_answer_offer(offer).await {
                     Ok(answer) => answer,
                     Err(e) => {
                         drop(state);
                         self.reset_failed_renegotiation(peer).await;
-                        return Err(e);
+                        return Err(Error::Transport(e));
                     }
                 };
+                let sdp = match serde_json::to_string(&answer) {
+                    Ok(sdp) => sdp,
+                    Err(_) => {
+                        drop(state);
+                        self.reset_failed_renegotiation(peer).await;
+                        return Err(Error::SerializeToString);
+                    }
+                };
+                let report = RenegotiateReport {
+                    sdp,
+                    generation: offer_msg.generation,
+                };
                 if let Err(e) = self
-                    .send_report_message(ctx, Message::RenegotiateReport(answer))
+                    .send_report_message(ctx, Message::RenegotiateReport(report))
                     .await
                 {
                     drop(state);
@@ -450,94 +488,40 @@ impl SwarmTransport {
     /// Apply a remote renegotiation answer through `peer`'s [`Negotiator`]. A stale answer (wrong
     /// generation, or none outstanding) is dropped without touching the connection.
     ///
-    /// If applying the answer (`setRemoteDescription(answer)`) fails the `PeerConnection` is stuck in
-    /// `have-local-offer` with no valid answer, so we **reset the connection** rather than leave the
-    /// negotiator claiming `Idle` over a half-negotiated link.
+    /// Split into preflight and effect, like [`handle_renegotiation_offer`](Self::handle_renegotiation_offer):
+    /// parsing the answer SDP and locating the connection happen first and a failure there returns
+    /// `Err` *without* resetting (no WebRTC state was touched, so an invalid/late message must not
+    /// tear down a healthy connection). Only if `setRemoteDescription(answer)` itself fails — leaving
+    /// the `PeerConnection` stuck in `have-local-offer` — do we **reset the connection**.
     pub async fn handle_renegotiation_answer(
         &self,
         peer: Did,
         answer_msg: &RenegotiateReport,
     ) -> Result<()> {
+        // Preflight — no WebRTC state mutated yet.
+        let answer = serde_json::from_str(&answer_msg.sdp).map_err(Error::Deserialize)?;
+        let conn = self
+            .transport
+            .connection(&peer.to_string())
+            .map_err(Error::Transport)?;
+
         let negotiator = self.negotiator(peer);
         let mut state = negotiator.lock().await;
         match state.step(NegotiationEvent::RemoteAnswer {
             generation: answer_msg.generation,
         }) {
             NegotiationEffect::AcceptAnswer => {
-                if let Err(e) = self.accept_renegotiation_answer(peer, answer_msg).await {
+                // Effect — `setRemoteDescription(answer)`.
+                if let Err(e) = conn.webrtc_accept_answer(answer).await {
                     drop(state);
                     self.reset_failed_renegotiation(peer).await;
-                    return Err(e);
+                    return Err(Error::Transport(e));
                 }
                 Ok(())
             }
             // `Ignore`: stale answer.
             _ => Ok(()),
         }
-    }
-
-    /// Create a renegotiation offer on the *existing* connection to `peer` (after its set of tracks
-    /// changed, e.g. a media track was added). Unlike [`prepare_connection_offer`] this does not
-    /// create a connection — it regenerates the offer on the live one. `generation` is the id the
-    /// [`Negotiator`] assigned, carried so the answer can be matched back.
-    ///
-    /// [`prepare_connection_offer`]: Self::prepare_connection_offer
-    pub async fn prepare_renegotiation_offer(
-        &self,
-        peer: Did,
-        generation: u64,
-    ) -> Result<RenegotiateSend> {
-        let conn = self
-            .transport
-            .connection(&peer.to_string())
-            .map_err(Error::Transport)?;
-        let offer = conn.webrtc_create_offer().await.map_err(Error::Transport)?;
-        let offer_str = serde_json::to_string(&offer).map_err(|_| Error::SerializeToString)?;
-        Ok(RenegotiateSend {
-            sdp: offer_str,
-            network_id: self.network_id,
-            generation,
-        })
-    }
-
-    /// Answer a renegotiation offer on the *existing* connection to `peer` (no new connection). The
-    /// offer's `generation` is echoed back on the answer so the offerer can match it.
-    pub async fn answer_renegotiation_offer(
-        &self,
-        peer: Did,
-        offer_msg: &RenegotiateSend,
-    ) -> Result<RenegotiateReport> {
-        let offer = serde_json::from_str(&offer_msg.sdp).map_err(Error::Deserialize)?;
-        let conn = self
-            .transport
-            .connection(&peer.to_string())
-            .map_err(Error::Transport)?;
-        let answer = conn
-            .webrtc_answer_offer(offer)
-            .await
-            .map_err(Error::Transport)?;
-        let answer_str = serde_json::to_string(&answer).map_err(|_| Error::SerializeToString)?;
-        Ok(RenegotiateReport {
-            sdp: answer_str,
-            generation: offer_msg.generation,
-        })
-    }
-
-    /// Accept a renegotiation answer on the existing connection to `peer`.
-    pub async fn accept_renegotiation_answer(
-        &self,
-        peer: Did,
-        answer_msg: &RenegotiateReport,
-    ) -> Result<()> {
-        let answer = serde_json::from_str(&answer_msg.sdp).map_err(Error::Deserialize)?;
-        let conn = self
-            .transport
-            .connection(&peer.to_string())
-            .map_err(Error::Transport)?;
-        conn.webrtc_accept_answer(answer)
-            .await
-            .map_err(Error::Transport)?;
-        Ok(())
     }
 }
 
