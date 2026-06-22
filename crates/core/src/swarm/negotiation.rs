@@ -118,6 +118,18 @@ impl Negotiator {
         self.state
     }
 
+    /// Undo a committed transition after the fallible shell effect it authorized failed, restoring
+    /// the state observed before the [`step`](Self::step). This gives the shell a two-phase shape —
+    /// snapshot, step, run effect, then either keep the new state (success) or `rollback` to the
+    /// snapshot (failure) — so a failed `create_offer` / `setRemoteDescription` / network send never
+    /// leaves the peer wedged in `AwaitingAnswer` (stuck `Busy`) or prematurely back in `Idle`.
+    ///
+    /// The monotonic generation counter is intentionally *not* rewound: a generation spent on a
+    /// failed offer is simply skipped, which keeps ids unique across retries (gaps are harmless).
+    pub fn rollback(&mut self, to: Negotiation) {
+        self.state = to;
+    }
+
     /// Which of two peers is the *polite* one — the side that yields its own offer to accept the
     /// other's under glare. We pick the numerically larger did, matching the initial-connection
     /// glare rule in [`crate::swarm::transport::SwarmTransport::answer_remote_connection`] (the

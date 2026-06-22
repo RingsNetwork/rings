@@ -96,7 +96,10 @@ impl MessageHandler {
             .await
             .is_none()
         {
-            self.dht.remove(peer)?
+            self.dht.remove(peer)?;
+            // The connection is gone (terminal state / closed); drop any renegotiation state so a
+            // reconnect to the same did does not inherit a stale `AwaitingAnswer`.
+            self.transport.clear_negotiation(peer);
         };
         Ok(())
     }

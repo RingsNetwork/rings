@@ -46,6 +46,7 @@ use crate::message::RenegotiateReport;
 use crate::message::RenegotiateSend;
 use crate::session::SessionSk;
 use crate::swarm::callback::InnerSwarmCallback;
+use crate::swarm::negotiation::Negotiation;
 use crate::swarm::negotiation::NegotiationEffect;
 use crate::swarm::negotiation::NegotiationEvent;
 use crate::swarm::negotiation::Negotiator;
@@ -124,6 +125,13 @@ impl SwarmTransport {
         self.negotiations.entry(peer).or_default().clone()
     }
 
+    /// Forget any renegotiation state for `peer`. Called whenever the peer's connection is removed or
+    /// replaced, so a later reconnect to the same did starts from a fresh [`Negotiator`] rather than
+    /// inheriting stale `AwaitingAnswer`/generation state from the previous connection.
+    pub(crate) fn clear_negotiation(&self, peer: Did) {
+        self.negotiations.remove(&peer);
+    }
+
     /// Create new connection that will be handled by swarm.
     pub async fn new_connection(&self, peer: Did, callback: InnerSwarmCallback) -> Result<()> {
         if peer == self.dht.did {
@@ -180,6 +188,8 @@ impl SwarmTransport {
     pub async fn disconnect(&self, peer: Did) -> Result<()> {
         tracing::info!("removing {peer} from DHT");
         self.dht.remove(peer)?;
+        // The connection is going away; drop any renegotiation state so a reconnect starts fresh.
+        self.clear_negotiation(peer);
         self.transport
             .close_connection(&peer.to_string())
             .await
@@ -313,37 +323,71 @@ impl SwarmTransport {
         Ok(())
     }
 
-    /// Drive a locally-initiated renegotiation with `peer` through its [`Negotiator`]: if the state
-    /// machine grants the offer (no other local offer outstanding) regenerate the SDP offer on the
-    /// live connection — stamped with the granted generation — and send it as `RenegotiateSend`.
+    /// Attach a local media track to `peer`'s connection and renegotiate, as one transaction guarded
+    /// by the per-peer [`Negotiator`].
     ///
-    /// The negotiator lock is held across offer creation so the generation matches the SDP that
-    /// carries it, and released before the network send. A second concurrent call while an offer is
-    /// pending returns [`Error::RenegotiationInProgress`] rather than putting a second offer on the
-    /// wire.
-    pub async fn initiate_renegotiation(&self, peer: Did) -> Result<()> {
+    /// Two-phase, so the connection is never mutated ahead of the protocol:
+    /// 1. **Admit.** Hold the negotiator lock and `step(LocalRenegotiate)`. If another renegotiation
+    ///    is already outstanding the machine answers `Busy` and we return
+    ///    [`Error::RenegotiationInProgress`] *before touching the connection* — the track is not
+    ///    attached.
+    /// 2. **Apply.** Only on the granted offer path attach the track, regenerate the offer (now
+    ///    carrying it, stamped with the granted generation) and send it. If any of these fail we
+    ///    `rollback` the negotiator to [`Negotiation::Idle`]; the connection is left such that a
+    ///    later renegotiation re-offers the (already-attached) track, so there is no wedged
+    ///    `AwaitingAnswer` and no offer silently lost.
+    ///
+    /// The lock is held across the whole apply phase, so the commit (staying in `AwaitingAnswer`)
+    /// happens only after the offer is actually on the wire.
+    pub async fn add_media_track(&self, peer: Did, track: LocalMediaTrack) -> Result<()> {
+        let conn = self
+            .get_connection(peer)
+            .ok_or(Error::SwarmMissDidInTable(peer))?;
+
         let negotiator = self.negotiator(peer);
         let mut state = negotiator.lock().await;
-        match state.step(NegotiationEvent::LocalRenegotiate) {
-            NegotiationEffect::SendOffer { generation } => {
-                let offer = self.prepare_renegotiation_offer(peer, generation).await?;
-                drop(state);
-                // Renegotiation is point-to-point with the directly-connected peer, so send straight
-                // to it rather than routing through the DHT.
-                self.send_direct_message(Message::RenegotiateSend(offer), peer)
-                    .await?;
-                Ok(())
-            }
-            NegotiationEffect::Busy => Err(Error::RenegotiationInProgress(peer)),
+
+        let generation = match state.step(NegotiationEvent::LocalRenegotiate) {
+            NegotiationEffect::SendOffer { generation } => generation,
+            // A renegotiation is already in flight; do not attach the track or offer a second time.
+            NegotiationEffect::Busy => return Err(Error::RenegotiationInProgress(peer)),
             // No other effect is reachable for a `LocalRenegotiate` event.
-            _ => Ok(()),
+            _ => return Ok(()),
+        };
+
+        // Apply phase: any failure rolls the negotiator back to `Idle`.
+        if let Err(e) = conn.add_media_track(track).await {
+            state.rollback(Negotiation::Idle);
+            return Err(e);
         }
+        let offer = match self.prepare_renegotiation_offer(peer, generation).await {
+            Ok(offer) => offer,
+            Err(e) => {
+                state.rollback(Negotiation::Idle);
+                return Err(e);
+            }
+        };
+        // Renegotiation is point-to-point with the directly-connected peer, so send straight to it
+        // rather than routing through the DHT.
+        if let Err(e) = self
+            .send_direct_message(Message::RenegotiateSend(offer), peer)
+            .await
+        {
+            state.rollback(Negotiation::Idle);
+            return Err(e);
+        }
+        // Commit: the offer is on the wire, so the `AwaitingAnswer` state stands.
+        Ok(())
     }
 
     /// Apply a remote renegotiation offer through `peer`'s [`Negotiator`] and, if accepted, answer it
     /// on the live connection. Under glare the impolite side returns `Ok(None)` (it holds its own
     /// offer and ignores this one); otherwise it returns the answer to send back as
     /// `RenegotiateReport`.
+    ///
+    /// Two-phase: if creating the answer (`setRemoteDescription` / `createAnswer`) fails, the
+    /// negotiator is rolled back to the state observed before the step — so a polite side that yielded
+    /// its own offer does not lose it when the answer never actually applied.
     pub async fn handle_renegotiation_offer(
         &self,
         peer: Did,
@@ -351,14 +395,20 @@ impl SwarmTransport {
     ) -> Result<Option<RenegotiateReport>> {
         let negotiator = self.negotiator(peer);
         let mut state = negotiator.lock().await;
+        let before = state.state();
         let polite = Negotiator::polite(self.dht.did, peer);
         match state.step(NegotiationEvent::RemoteOffer {
             generation: offer_msg.generation,
             polite,
         }) {
             NegotiationEffect::SendAnswer { .. } => {
-                let answer = self.answer_renegotiation_offer(peer, offer_msg).await?;
-                Ok(Some(answer))
+                match self.answer_renegotiation_offer(peer, offer_msg).await {
+                    Ok(answer) => Ok(Some(answer)),
+                    Err(e) => {
+                        state.rollback(before);
+                        Err(e)
+                    }
+                }
             }
             // `Ignore`: impolite side under glare keeps its own offer and drops this one.
             _ => Ok(None),
@@ -367,6 +417,10 @@ impl SwarmTransport {
 
     /// Apply a remote renegotiation answer through `peer`'s [`Negotiator`]. A stale answer (wrong
     /// generation, or none outstanding) is dropped without touching the connection.
+    ///
+    /// Two-phase: the negotiator returns to `Idle` only after `setRemoteDescription(answer)`
+    /// succeeds; if it fails the state is rolled back to `AwaitingAnswer`, so a retried answer can
+    /// still be applied rather than being rejected as stale.
     pub async fn handle_renegotiation_answer(
         &self,
         peer: Did,
@@ -374,12 +428,16 @@ impl SwarmTransport {
     ) -> Result<()> {
         let negotiator = self.negotiator(peer);
         let mut state = negotiator.lock().await;
+        let before = state.state();
         match state.step(NegotiationEvent::RemoteAnswer {
             generation: answer_msg.generation,
         }) {
             NegotiationEffect::AcceptAnswer => {
-                drop(state);
-                self.accept_renegotiation_answer(peer, answer_msg).await
+                if let Err(e) = self.accept_renegotiation_answer(peer, answer_msg).await {
+                    state.rollback(before);
+                    return Err(e);
+                }
+                Ok(())
             }
             // `Ignore`: stale answer.
             _ => Ok(()),

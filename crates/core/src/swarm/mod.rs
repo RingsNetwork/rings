@@ -108,23 +108,19 @@ impl Swarm {
     /// Attach a local media track to the connection to `peer`, to be sent to it. Errors if there is
     /// no connection, or it was not created with a media channel.
     ///
-    /// Adding a track to a live connection changes the SDP, so this then **renegotiates**: it drives
-    /// the per-peer [`negotiation`](crate::swarm::negotiation) state machine, which (when no other
-    /// local offer is outstanding) regenerates the offer and runs a fresh offer/answer round-trip
-    /// over the message layer (`RenegotiateSend` → `RenegotiateReport`), so the peer learns of the
-    /// new media section and starts receiving it. A concurrent renegotiation returns
-    /// [`Error::RenegotiationInProgress`].
+    /// Adding a track to a live connection changes the SDP, so this then **renegotiates**. The whole
+    /// operation — admission, track attachment, and the fresh offer/answer round-trip over the
+    /// message layer (`RenegotiateSend` → `RenegotiateReport`) — is one transaction guarded by the
+    /// per-peer [`negotiation`](crate::swarm::negotiation) state machine: the track is attached only
+    /// after the machine admits the renegotiation, and a concurrent one returns
+    /// [`Error::RenegotiationInProgress`] without touching the connection. See
+    /// [`SwarmTransport::add_media_track`](crate::swarm::transport::SwarmTransport::add_media_track).
     pub async fn add_media_track(
         &self,
         peer: Did,
         track: crate::swarm::transport::LocalMediaTrack,
     ) -> Result<()> {
-        let conn = self
-            .transport
-            .get_connection(peer)
-            .ok_or(Error::SwarmMissDidInTable(peer))?;
-        conn.add_media_track(track).await?;
-        self.transport.initiate_renegotiation(peer).await
+        self.transport.add_media_track(peer, track).await
     }
 
     /// List peers and their connection status.
