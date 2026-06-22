@@ -5,14 +5,12 @@
 mod builder;
 /// Callback interface for swarm
 pub mod callback;
-pub mod negotiation;
 pub(crate) mod transport;
 
 use std::sync::Arc;
 use std::sync::RwLock;
 
 pub use builder::SwarmBuilder;
-pub use transport::LocalMediaTrack;
 
 use self::callback::InnerSwarmCallback;
 use crate::dht::Did;
@@ -102,28 +100,6 @@ impl Swarm {
     /// Send [Message] to peer.
     pub async fn send_message(&self, msg: Message, destination: Did) -> Result<uuid::Uuid> {
         self.transport.send_message(msg, destination).await
-    }
-
-    /// Attach a local media track to the connection to `peer`, to be sent to it.
-    ///
-    /// Adding a track to a live connection changes the SDP, so this then **renegotiates**. The whole
-    /// operation — admission, track attachment, and the fresh offer/answer round-trip over the
-    /// message layer (`RenegotiateSend` → `RenegotiateReport`) — is one transaction guarded by the
-    /// per-peer [`negotiation`] state machine: the track is attached only
-    /// after the machine admits the renegotiation, and a concurrent one returns
-    /// [`Error::RenegotiationInProgress`] without touching the connection.
-    ///
-    /// Error semantics: `Err(SwarmMissDidInTable)` if there is no connection; `Err` from a clean
-    /// rejection (data-only connection / kind mismatch) leaves the connection untouched; any failure
-    /// *after* the offer SDP is created resets the connection to `peer` (it cannot be left in a
-    /// half-negotiated signaling state), so the recovery is to re-establish the connection — not an
-    /// in-place retry. See `SwarmTransport::add_media_track`.
-    pub async fn add_media_track(
-        &self,
-        peer: Did,
-        track: crate::swarm::transport::LocalMediaTrack,
-    ) -> Result<()> {
-        self.transport.add_media_track(peer, track).await
     }
 
     /// List peers and their connection status.

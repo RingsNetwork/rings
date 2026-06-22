@@ -36,30 +36,6 @@ pub struct ConnectNodeReport {
     pub sdp: String,
 }
 
-/// Renegotiation offer for an *already established* connection (e.g. after a media track is added).
-/// Distinct from [`ConnectNodeSend`] so it is routed to the existing connection rather than
-/// creating a new one.
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct RenegotiateSend {
-    /// sdp offer of webrtc, regenerated with the updated set of tracks
-    pub sdp: String,
-    /// The network_id is used to distinguish different networks.
-    pub network_id: u32,
-    /// Monotonic generation id of this offer (per sending peer), so the answering side can echo it
-    /// and the offerer can reject a stale answer. See [`crate::swarm::negotiation`].
-    pub generation: u64,
-}
-
-/// Response of [`RenegotiateSend`].
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct RenegotiateReport {
-    /// sdp answer of webrtc
-    pub sdp: String,
-    /// The `generation` of the [`RenegotiateSend`] this answers, echoed back so the offerer can
-    /// match it against its outstanding offer and drop a stale one.
-    pub generation: u64,
-}
-
 /// MessageType use to find successor in a chord ring.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct FindSuccessorSend {
@@ -213,10 +189,6 @@ pub enum Message {
     ConnectNodeSend(ConnectNodeSend),
     /// Response of ConnectNodeSend
     ConnectNodeReport(ConnectNodeReport),
-    /// Renegotiation offer on an existing connection (e.g. after adding a media track).
-    RenegotiateSend(RenegotiateSend),
-    /// Response of RenegotiateSend.
-    RenegotiateReport(RenegotiateReport),
     /// Remote message of find successor
     FindSuccessorSend(FindSuccessorSend),
     /// Response of FindSuccessorSend

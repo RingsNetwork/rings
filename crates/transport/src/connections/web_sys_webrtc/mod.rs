@@ -10,8 +10,6 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::spawn_local;
 use wasm_bindgen_futures::JsFuture;
-use web_sys::MediaStream;
-use web_sys::MediaStreamTrack;
 use web_sys::MessageEvent;
 use web_sys::RtcConfiguration;
 use web_sys::RtcDataChannel;
@@ -22,21 +20,14 @@ use web_sys::RtcIceGatheringState;
 use web_sys::RtcIceServer;
 use web_sys::RtcPeerConnection;
 use web_sys::RtcPeerConnectionState;
-use web_sys::RtcRtpSender;
 use web_sys::RtcSdpType;
 use web_sys::RtcSessionDescription;
 use web_sys::RtcSessionDescriptionInit;
 use web_sys::RtcStatsReport;
-use web_sys::RtcTrackEvent;
 
 use crate::callback::InnerTransportCallback;
 use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
-use crate::core::media::ChannelConfig;
-use crate::core::media::MediaError;
-use crate::core::media::MediaKind;
-use crate::core::media::MediaTrack;
-use crate::core::media::RemoteMediaTrack;
 use crate::core::pool::MessageSenderPool;
 use crate::core::pool::RoundRobin;
 use crate::core::pool::RoundRobinPool;
@@ -139,17 +130,12 @@ pub struct WebSysWebrtcConnection {
     /// Negotiated SCTP `max_message_size` (RFC 8841), parsed from the remote SDP at handshake.
     /// `0` means not yet negotiated. Parsed identically to native for consistent behaviour.
     remote_max_message_size: Arc<AtomicUsize>,
-    /// The channel contract this connection was created with. `add_media_track` enforces it (data-
-    /// only connections reject media; a track's kind must match) so the policy is identical to the
-    /// native backend — the same `ChannelConfig` means the same thing on both platforms.
-    channel_config: ChannelConfig,
 }
 
 /// [WebSysWebrtcTransport] manages all the [WebSysWebrtcConnection] and
 /// provides methods to create, get and close connections.
 pub struct WebSysWebrtcTransport {
     ice_servers: Vec<IceServer>,
-    channel_config: ChannelConfig,
     pool: Pool<WebSysWebrtcConnection>,
 }
 
@@ -158,14 +144,12 @@ impl WebSysWebrtcConnection {
         webrtc_conn: RtcPeerConnection,
         webrtc_data_channel: Rc<RoundRobinPool<TrackedChannel>>,
         webrtc_data_channel_state_notifier: Notifier,
-        channel_config: ChannelConfig,
     ) -> Self {
         Self {
             webrtc_conn,
             webrtc_data_channel,
             webrtc_data_channel_state_notifier,
             remote_max_message_size: Arc::new(AtomicUsize::new(0)),
-            channel_config,
         }
     }
 
@@ -205,60 +189,13 @@ impl WebSysWebrtcConnection {
 
 impl WebSysWebrtcTransport {
     /// Create a new [WebSysWebrtcTransport] instance.
-    pub fn new(
-        ice_servers: &str,
-        _external_address: Option<String>,
-        channel_config: ChannelConfig,
-    ) -> Self {
+    pub fn new(ice_servers: &str, _external_address: Option<String>) -> Self {
         let ice_servers = IceServer::vec_from_str(ice_servers).unwrap();
 
         Self {
             ice_servers,
-            channel_config,
             pool: Pool::new(),
         }
-    }
-}
-
-/// A browser media track (the web-sys side of [`MediaTrack`]), wrapping a `MediaStreamTrack`. The
-/// application obtains the local one from `getUserMedia`/canvas and attaches the remote one to a
-/// `<video>`; this is the browser analogue of [`NativeMediaTrack`](crate::connections::NativeMediaTrack).
-pub struct BrowserMediaTrack {
-    track: MediaStreamTrack,
-}
-
-impl BrowserMediaTrack {
-    /// Wrap a `MediaStreamTrack`.
-    pub fn new(track: MediaStreamTrack) -> Self {
-        Self { track }
-    }
-}
-
-impl MediaTrack for BrowserMediaTrack {
-    fn id(&self) -> String {
-        self.track.id()
-    }
-
-    fn kind(&self) -> MediaKind {
-        if self.track.kind() == "audio" {
-            MediaKind::Audio
-        } else {
-            MediaKind::Video
-        }
-    }
-
-    fn enabled(&self) -> bool {
-        self.track.enabled()
-    }
-
-    fn set_enabled(&self, enabled: bool) {
-        self.track.set_enabled(enabled);
-    }
-}
-
-impl RemoteMediaTrack for BrowserMediaTrack {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
     }
 }
 
@@ -266,7 +203,6 @@ impl RemoteMediaTrack for BrowserMediaTrack {
 impl ConnectionInterface for WebSysWebrtcConnection {
     type Sdp = String;
     type Error = Error;
-    type LocalMediaTrack = BrowserMediaTrack;
 
     async fn send_message(&self, msg: TransportMessage) -> Result<DeliveryFuture> {
         self.webrtc_wait_for_data_channel_open().await?;
@@ -286,34 +222,6 @@ impl ConnectionInterface for WebSysWebrtcConnection {
         }
     }
 
-    async fn add_media_track(
-        &self,
-        track: BrowserMediaTrack,
-    ) -> std::result::Result<String, MediaError> {
-        // Same contract as native: reject media on a data-only connection and require the track's
-        // kind to match the negotiated one, so `ChannelConfig` is enforced identically here.
-        self.channel_config.admit_local_track(track.kind())?;
-        let track_id = track.id();
-        let stream = MediaStream::new().map_err(|e| MediaError::AddTrack(format!("{e:?}")))?;
-        self.webrtc_conn
-            .add_track(&track.track, &stream, &js_sys::Array::new());
-        Ok(track_id)
-    }
-
-    async fn remove_media_track(&self, track_id: &str) -> std::result::Result<(), MediaError> {
-        // Detach exactly the one sender carrying this (unique) track id, undoing `add_media_track`.
-        // Removing an unknown id is a no-op. `MediaStreamTrack` ids are browser-generated and unique.
-        for sender in self.webrtc_conn.get_senders().iter() {
-            let sender: RtcRtpSender = sender.into();
-            let matches = sender.track().map(|t| t.id() == track_id).unwrap_or(false);
-            if matches {
-                self.webrtc_conn.remove_track(&sender);
-                break;
-            }
-        }
-        Ok(())
-    }
-
     async fn get_stats(&self) -> Vec<String> {
         let promise = self.webrtc_conn.get_stats();
         let Ok(value) = wasm_bindgen_futures::JsFuture::from(promise).await else {
@@ -330,15 +238,11 @@ impl ConnectionInterface for WebSysWebrtcConnection {
     }
 
     async fn webrtc_create_offer(&self) -> Result<Self::Sdp> {
-        // `createOffer` is pre-apply: a failure here has not touched signaling state.
         let promise = self.webrtc_conn.create_offer();
-        let offer_js_value = JsFuture::from(promise)
-            .await
-            .map_err(|e| Error::WebrtcSignalingPreApply(format!("{e:?}")))?;
+        let offer_js_value = JsFuture::from(promise).await.map_err(Error::WebSysWebrtc)?;
         let offer = RtcSessionDescription::from(offer_js_value);
         let sdp = offer.sdp();
 
-        // `setLocalDescription` and everything after it mutate signaling state (post-apply).
         let set_local_init = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
         set_local_init.set_sdp(&sdp);
 
@@ -545,22 +449,6 @@ impl TransportInterface for WebSysWebrtcTransport {
         webrtc_conn.set_onconnectionstatechange(Some(c.as_ref().unchecked_ref()));
         c.forget();
 
-        // Inbound media: deliver each remote track to the callback as a `MediaTrack` (the app
-        // attaches it to a sink). Outbound tracks are added by the app via `add_media_track`.
-        let on_track_inner_cb = inner_cb.clone();
-        let on_track = Box::new(move |ev: RtcTrackEvent| {
-            let track = ev.track();
-            let inner_cb = on_track_inner_cb.clone();
-            spawn_local(async move {
-                inner_cb
-                    .on_media_track(Box::new(BrowserMediaTrack::new(track)))
-                    .await;
-            });
-        });
-        let c = Closure::wrap(on_track as Box<dyn FnMut(RtcTrackEvent)>);
-        webrtc_conn.set_ontrack(Some(c.as_ref().unchecked_ref()));
-        c.forget();
-
         //
         // Create data channel
         //
@@ -614,7 +502,6 @@ impl TransportInterface for WebSysWebrtcTransport {
             webrtc_conn,
             channel_pool,
             webrtc_data_channel_state_notifier,
-            self.channel_config.clone(),
         );
 
         self.pool.safely_insert(cid, conn)?;

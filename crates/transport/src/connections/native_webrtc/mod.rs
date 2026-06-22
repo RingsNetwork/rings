@@ -1,4 +1,3 @@
-use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -9,36 +8,20 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
-use webrtc::api::media_engine::MediaEngine;
-use webrtc::api::media_engine::MIME_TYPE_OPUS;
-use webrtc::api::media_engine::MIME_TYPE_VP8;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::data_channel_state::RTCDataChannelState;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice::mdns::MulticastDnsMode;
 use webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType;
 use webrtc::ice_transport::ice_server::RTCIceServer;
-use webrtc::media::Sample;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
-use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
-use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecParameters;
-use webrtc::rtp_transceiver::rtp_codec::RTPCodecType;
-use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
-use webrtc::track::track_local::TrackLocal;
-use webrtc::track::track_remote::TrackRemote;
 
 use crate::callback::InnerTransportCallback;
 use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
-use crate::core::media::ChannelConfig;
-use crate::core::media::MediaChannelConfig;
-use crate::core::media::MediaError;
-use crate::core::media::MediaKind;
-use crate::core::media::MediaTrack;
-use crate::core::media::RemoteMediaTrack;
 use crate::core::pool::MessageSenderPool;
 use crate::core::pool::RoundRobin;
 use crate::core::pool::RoundRobinPool;
@@ -136,143 +119,6 @@ impl StatusPool<TrackedChannel> for RoundRobinPool<TrackedChannel> {
     }
 }
 
-/// Build the codec capability + RTP codec type for a media track configuration. The MIME type is
-/// derived from the kind (we move opaque RTP, so the codec is nominal — only the audio/video split
-/// and the clock rate / payload type matter for negotiation).
-fn media_codec(cfg: &MediaChannelConfig) -> (RTCRtpCodecCapability, RTPCodecType) {
-    let (mime_type, channels, codec_type) = match cfg.kind {
-        MediaKind::Audio => (MIME_TYPE_OPUS.to_owned(), 2, RTPCodecType::Audio),
-        MediaKind::Video => (MIME_TYPE_VP8.to_owned(), 0, RTPCodecType::Video),
-    };
-    (
-        RTCRtpCodecCapability {
-            mime_type,
-            clock_rate: cfg.clock_rate,
-            channels,
-            sdp_fmtp_line: String::new(),
-            rtcp_feedback: vec![],
-        },
-        codec_type,
-    )
-}
-
-/// A local, sendable media track (native side of [`MediaTrack`]). Built by the application via
-/// [`NativeMediaTrack::new`], handed to a connection with `add_media_track`, then fed encoded media
-/// with [`NativeMediaTrack::write_sample`] — the native analogue of attaching a browser
-/// `MediaStreamTrack` and letting it source frames.
-#[derive(Clone)]
-pub struct NativeMediaTrack {
-    track: Arc<TrackLocalStaticSample>,
-    kind: MediaKind,
-    enabled: Arc<AtomicBool>,
-}
-
-/// Monotonic source of per-track ids. Every `NativeMediaTrack` must carry a distinct id: rollback
-/// of a failed renegotiation detaches the staged sender *by* track id (`remove_media_track`), so a
-/// shared id would let that rollback also detach an already-negotiated track of the same kind.
-static NEXT_LOCAL_TRACK_SEQ: AtomicU64 = AtomicU64::new(0);
-
-impl NativeMediaTrack {
-    /// Create a local track for the given media configuration.
-    pub fn new(config: &MediaChannelConfig) -> Self {
-        let (capability, _) = media_codec(config);
-        // A unique id per local track, so the sender added for it can be detached on its own.
-        let seq = NEXT_LOCAL_TRACK_SEQ.fetch_add(1, Ordering::Relaxed);
-        let track = Arc::new(TrackLocalStaticSample::new(
-            capability,
-            format!("rings-media-{seq}"),
-            "rings-stream".to_string(),
-        ));
-        Self {
-            track,
-            kind: config.kind,
-            enabled: Arc::new(AtomicBool::new(true)),
-        }
-    }
-
-    /// Write one encoded media sample (`data` + its `duration`) to be sent to the peer; no-op while
-    /// disabled. Takes plain bytes rather than a webrtc `Sample` so callers need not depend on
-    /// webrtc-rs directly.
-    pub async fn write_sample(
-        &self,
-        data: Bytes,
-        duration: std::time::Duration,
-    ) -> std::result::Result<(), MediaError> {
-        if !self.enabled.load(Ordering::SeqCst) {
-            return Ok(());
-        }
-        let sample = Sample {
-            data,
-            duration,
-            ..Default::default()
-        };
-        self.track
-            .write_sample(&sample)
-            .await
-            .map_err(|e| MediaError::AddTrack(e.to_string()))
-    }
-}
-
-impl MediaTrack for NativeMediaTrack {
-    fn id(&self) -> String {
-        self.track.id().to_string()
-    }
-
-    fn kind(&self) -> MediaKind {
-        self.kind
-    }
-
-    fn enabled(&self) -> bool {
-        self.enabled.load(Ordering::SeqCst)
-    }
-
-    fn set_enabled(&self, enabled: bool) {
-        self.enabled.store(enabled, Ordering::SeqCst);
-    }
-}
-
-/// A remote, inbound media track delivered to `on_media_track`. Read its RTP with
-/// [`NativeRemoteTrack::read_rtp`] (the native analogue of attaching a browser remote
-/// `MediaStreamTrack` to a sink).
-#[derive(Clone)]
-pub struct NativeRemoteTrack {
-    track: Arc<TrackRemote>,
-    kind: MediaKind,
-}
-
-impl NativeRemoteTrack {
-    /// Read the next RTP packet from the remote track. Errors once the track ends.
-    pub async fn read_rtp(&self) -> std::result::Result<webrtc::rtp::packet::Packet, MediaError> {
-        self.track
-            .read_rtp()
-            .await
-            .map(|(packet, _)| packet)
-            .map_err(|e| MediaError::AddTrack(e.to_string()))
-    }
-}
-
-impl MediaTrack for NativeRemoteTrack {
-    fn id(&self) -> String {
-        self.track.id()
-    }
-
-    fn kind(&self) -> MediaKind {
-        self.kind
-    }
-
-    fn enabled(&self) -> bool {
-        true
-    }
-
-    fn set_enabled(&self, _enabled: bool) {}
-}
-
-impl RemoteMediaTrack for NativeRemoteTrack {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
-
 /// A connection that implemented by webrtc-rs library.
 /// Used for native environment.
 pub struct WebrtcConnection {
@@ -283,10 +129,6 @@ pub struct WebrtcConnection {
     /// Negotiated SCTP `max_message_size` (RFC 8841), parsed from the remote SDP at handshake.
     /// `0` means not yet negotiated. webrtc-rs exposes no getter, so we track it ourselves.
     remote_max_message_size: Arc<AtomicUsize>,
-    /// The channel contract this connection was created with. `add_media_track` enforces it (data-
-    /// only connections reject media; a track's kind must match) so the policy is identical to the
-    /// browser backend.
-    channel_config: ChannelConfig,
 }
 
 /// [WebrtcTransport] manages all the [WebrtcConnection] and
@@ -294,7 +136,6 @@ pub struct WebrtcConnection {
 pub struct WebrtcTransport {
     ice_servers: Vec<IceServer>,
     external_address: Option<String>,
-    channel_config: ChannelConfig,
     pool: Pool<WebrtcConnection>,
 }
 
@@ -303,7 +144,6 @@ impl WebrtcConnection {
         webrtc_conn: RTCPeerConnection,
         webrtc_data_channel: Arc<RoundRobinPool<TrackedChannel>>,
         webrtc_data_channel_state_notifier: Notifier,
-        channel_config: ChannelConfig,
     ) -> Self {
         Self {
             webrtc_conn,
@@ -311,7 +151,6 @@ impl WebrtcConnection {
             webrtc_data_channel_state_notifier,
             cancel_token: CancellationToken::new(),
             remote_max_message_size: Arc::new(AtomicUsize::new(0)),
-            channel_config,
         }
     }
 
@@ -341,19 +180,13 @@ impl WebrtcConnection {
 }
 
 impl WebrtcTransport {
-    /// Create a new [WebrtcTransport] instance. `channel_config` selects whether connections also
-    /// negotiate a media track (data-only by default).
-    pub fn new(
-        ice_servers: &str,
-        external_address: Option<String>,
-        channel_config: ChannelConfig,
-    ) -> Self {
+    /// Create a new [WebrtcTransport] instance.
+    pub fn new(ice_servers: &str, external_address: Option<String>) -> Self {
         let ice_servers = IceServer::vec_from_str(ice_servers).unwrap();
 
         Self {
             ice_servers,
             external_address,
-            channel_config,
             pool: Pool::new(),
         }
     }
@@ -363,7 +196,6 @@ impl WebrtcTransport {
 impl ConnectionInterface for WebrtcConnection {
     type Sdp = String;
     type Error = Error;
-    type LocalMediaTrack = NativeMediaTrack;
 
     async fn send_message(&self, msg: TransportMessage) -> Result<DeliveryFuture> {
         self.webrtc_wait_for_data_channel_open().await?;
@@ -393,55 +225,8 @@ impl ConnectionInterface for WebrtcConnection {
         }
     }
 
-    async fn add_media_track(
-        &self,
-        track: NativeMediaTrack,
-    ) -> std::result::Result<String, MediaError> {
-        // Same contract as the browser backend: reject media on a data-only connection and require
-        // the track's kind to match the negotiated one.
-        self.channel_config.admit_local_track(track.kind())?;
-        let track_id = track.id();
-        let sender = self
-            .webrtc_conn
-            .add_track(track.track.clone() as Arc<dyn TrackLocal + Send + Sync>)
-            .await
-            .map_err(|e| MediaError::AddTrack(e.to_string()))?;
-        // Drain the sender's RTCP so the interceptor buffer does not fill.
-        tokio::spawn(async move {
-            let mut rtcp_buf = vec![0u8; 1500];
-            while sender.read(&mut rtcp_buf).await.is_ok() {}
-        });
-        Ok(track_id)
-    }
-
-    async fn remove_media_track(&self, track_id: &str) -> std::result::Result<(), MediaError> {
-        // Detach exactly the one sender carrying this (unique) track id, undoing `add_media_track`.
-        // Removing an unknown id is a no-op.
-        for sender in self.webrtc_conn.get_senders().await {
-            let matches = sender
-                .track()
-                .await
-                .map(|t| t.id() == track_id)
-                .unwrap_or(false);
-            if matches {
-                self.webrtc_conn
-                    .remove_track(&sender)
-                    .await
-                    .map_err(|e| MediaError::AddTrack(e.to_string()))?;
-                break;
-            }
-        }
-        Ok(())
-    }
-
     async fn webrtc_create_offer(&self) -> Result<Self::Sdp> {
-        // `create_offer` is pre-apply: a failure here has not touched signaling state.
-        let setting_offer = self
-            .webrtc_conn
-            .create_offer(None)
-            .await
-            .map_err(|e| Error::WebrtcSignalingPreApply(e.to_string()))?;
-        // `set_local_description` and everything after it mutate signaling state (post-apply).
+        let setting_offer = self.webrtc_conn.create_offer(None).await?;
         self.webrtc_conn
             .set_local_description(setting_offer.clone())
             .await?;
@@ -451,14 +236,10 @@ impl ConnectionInterface for WebrtcConnection {
 
     async fn webrtc_answer_offer(&self, offer: Self::Sdp) -> Result<Self::Sdp> {
         tracing::debug!("webrtc_answer_offer, offer: {offer:?}");
-        // Compute the negotiated limit (a pure read of the SDP text) but do not record it yet — that
-        // store is itself an observable mutation and must not happen on a rejected/un-applied offer.
+        // Read the negotiated limit from the SDP text, then record it once the description applies.
         let negotiated_max_message_size = effective_max_message_size(&offer);
-        // Parse is pre-apply: a malformed offer is rejected here without mutating any state.
-        let offer = RTCSessionDescription::offer(offer)
-            .map_err(|e| Error::WebrtcSignalingPreApply(e.to_string()))?;
+        let offer = RTCSessionDescription::offer(offer)?;
         self.webrtc_conn.set_remote_description(offer).await?;
-        // Applied: now it is correct to record the negotiated limit.
         self.remote_max_message_size
             .store(negotiated_max_message_size, Ordering::SeqCst);
 
@@ -473,11 +254,8 @@ impl ConnectionInterface for WebrtcConnection {
     async fn webrtc_accept_answer(&self, answer: Self::Sdp) -> Result<()> {
         tracing::debug!("webrtc_accept_answer, answer: {answer:?}");
         let negotiated_max_message_size = effective_max_message_size(&answer);
-        // Parse is pre-apply: a malformed answer is rejected here without mutating any state.
-        let answer = RTCSessionDescription::answer(answer)
-            .map_err(|e| Error::WebrtcSignalingPreApply(e.to_string()))?;
+        let answer = RTCSessionDescription::answer(answer)?;
         self.webrtc_conn.set_remote_description(answer).await?;
-        // Applied: now it is correct to record the negotiated limit.
         self.remote_max_message_size
             .store(negotiated_max_message_size, Ordering::SeqCst);
         Ok(())
@@ -554,23 +332,9 @@ impl TransportInterface for WebrtcTransport {
             setting.set_ice_multicast_dns_mode(MulticastDnsMode::Disabled);
         }
 
-        // A media track needs its codec registered in the media engine so the SDP can negotiate it;
-        // the data-only path keeps the default (empty) engine, unchanged.
-        let mut api_builder = webrtc::api::APIBuilder::new().with_setting_engine(setting);
-        if let Some(media) = self.channel_config.media.as_ref() {
-            let (capability, codec_type) = media_codec(media);
-            let mut media_engine = MediaEngine::default();
-            media_engine.register_codec(
-                RTCRtpCodecParameters {
-                    capability,
-                    payload_type: media.payload_type,
-                    stats_id: String::new(),
-                },
-                codec_type,
-            )?;
-            api_builder = api_builder.with_media_engine(media_engine);
-        }
-        let webrtc_api = api_builder.build();
+        let webrtc_api = webrtc::api::APIBuilder::new()
+            .with_setting_engine(setting)
+            .build();
 
         //
         // Create webrtc connection
@@ -627,26 +391,6 @@ impl TransportInterface for WebrtcTransport {
         }));
 
         //
-        // Inbound media: deliver each remote track to the callback as a `MediaTrack`. The
-        // application reads media off it (`NativeRemoteTrack::read_rtp`). No-op for data-only peers,
-        // which never fire `on_track`. Outbound tracks are added by the app via `add_media_track`.
-        //
-        let on_track_inner_cb = inner_cb.clone();
-        webrtc_conn.on_track(Box::new(
-            move |track: Arc<TrackRemote>, _receiver, _transceiver| {
-                let inner_cb = on_track_inner_cb.clone();
-                let kind = match track.kind() {
-                    RTPCodecType::Audio => MediaKind::Audio,
-                    _ => MediaKind::Video,
-                };
-                Box::pin(async move {
-                    let remote = NativeRemoteTrack { track, kind };
-                    inner_cb.on_media_track(Box::new(remote)).await;
-                })
-            },
-        ));
-
-        //
         // Create data channel
         //
         // Wire open/close on the channels *this* side creates (the pool), not
@@ -695,7 +439,6 @@ impl TransportInterface for WebrtcTransport {
             webrtc_conn,
             channel_pool,
             webrtc_data_channel_state_notifier,
-            self.channel_config.clone(),
         );
 
         self.pool.safely_insert(cid, conn)?;
@@ -742,98 +485,5 @@ impl From<RTCPeerConnectionState> for WebrtcConnectionState {
             RTCPeerConnectionState::Failed => Self::Failed,
             RTCPeerConnectionState::Closed => Self::Closed,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::core::callback::TransportCallback;
-    use crate::core::media::MediaChannelConfig;
-    use crate::core::media::MediaKind;
-
-    struct NoopCallback;
-
-    #[async_trait]
-    impl TransportCallback for NoopCallback {}
-
-    fn video_config() -> MediaChannelConfig {
-        MediaChannelConfig {
-            kind: MediaKind::Video,
-            payload_type: 96,
-            clock_rate: 90000,
-        }
-    }
-
-    async fn media_connection() -> (WebrtcTransport, ConnectionRef<WebrtcConnection>) {
-        let transport =
-            WebrtcTransport::new("stun://stun.l.google.com:19302", None, ChannelConfig {
-                media: Some(video_config()),
-            });
-        let cid = "rollback-test";
-        transport
-            .new_connection(cid, Box::new(NoopCallback))
-            .await
-            .unwrap();
-        let conn = transport.connection(cid).unwrap();
-        (transport, conn)
-    }
-
-    /// Each local track must carry a distinct id. Rollback of a failed renegotiation detaches the
-    /// staged sender *by* track id, so a shared id would make one track indistinguishable from another.
-    #[test]
-    fn local_tracks_have_unique_ids() {
-        let a = NativeMediaTrack::new(&video_config());
-        let b = NativeMediaTrack::new(&video_config());
-        assert_ne!(
-            a.id(),
-            b.id(),
-            "two local tracks of the same kind must not share an id"
-        );
-    }
-
-    /// Regression: with one track already attached and negotiated, rolling back a *second* failed add
-    /// must detach only the second sender — never the first. Before track ids were unique,
-    /// `remove_media_track` matched every sender of the same kind and would have torn down the
-    /// already-negotiated track too.
-    #[tokio::test]
-    async fn rollback_detaches_only_the_staged_sender() {
-        let (_transport, conn) = media_connection().await;
-
-        let first_id = conn
-            .add_media_track(NativeMediaTrack::new(&video_config()))
-            .await
-            .unwrap();
-        let second_id = conn
-            .add_media_track(NativeMediaTrack::new(&video_config()))
-            .await
-            .unwrap();
-        assert_ne!(first_id, second_id);
-
-        let raw = conn.upgrade().unwrap();
-        assert_eq!(
-            raw.webrtc_conn.get_senders().await.len(),
-            2,
-            "both tracks should be attached before rollback"
-        );
-
-        // Roll back only the second add, as the shell does on a pre-effect offer failure.
-        conn.remove_media_track(&second_id).await.unwrap();
-
-        // `remove_track` clears the sender's track; collect the track ids that survive.
-        let mut surviving = vec![];
-        for sender in raw.webrtc_conn.get_senders().await {
-            if let Some(track) = sender.track().await {
-                surviving.push(track.id().to_string());
-            }
-        }
-        assert!(
-            surviving.contains(&first_id),
-            "the first, already-attached track must survive the rollback"
-        );
-        assert!(
-            !surviving.contains(&second_id),
-            "the rolled-back track must be detached"
-        );
     }
 }

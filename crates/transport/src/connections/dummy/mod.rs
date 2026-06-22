@@ -220,11 +220,7 @@ impl DummyConnection {
 
 impl DummyTransport {
     /// Create a new [DummyTransport] instance.
-    pub fn new(
-        ice_servers: &str,
-        _external_address: Option<String>,
-        _channel_config: crate::core::media::ChannelConfig,
-    ) -> Self {
+    pub fn new(ice_servers: &str, _external_address: Option<String>) -> Self {
         let _ice_servers = IceServer::vec_from_str(ice_servers).unwrap();
 
         Self { pool: Pool::new() }
@@ -235,8 +231,6 @@ impl DummyTransport {
 impl ConnectionInterface for DummyConnection {
     type Sdp = String;
     type Error = Error;
-    // The dummy backend has no media; it uses the trait's default `add_media_track` (`Unsupported`).
-    type LocalMediaTrack = ();
 
     async fn send_message(&self, msg: TransportMessage) -> Result<DeliveryFuture> {
         self.webrtc_wait_for_data_channel_open().await?;

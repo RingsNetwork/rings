@@ -359,12 +359,6 @@ pub enum Error {
     #[error("Peer's negotiated max_message_size {0} is too small to carry even one chunk")]
     PeerMaxMessageSizeTooSmall(usize),
 
-    #[error("Media send failed: {0}")]
-    Media(String),
-
-    #[error("A renegotiation with {0} is already in progress")]
-    RenegotiationInProgress(crate::dht::Did),
-
     #[cfg(feature = "wasm")]
     #[error("Cannot get property {0} from JsValue")]
     FailedOnGetProperty(String),

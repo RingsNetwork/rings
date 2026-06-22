@@ -31,10 +31,6 @@ mod dht_trace_replay;
 #[cfg(feature = "dummy")]
 mod dht_schedule;
 mod test_connection;
-// Media tracks require real webrtc (the dummy transport has no media support), so this is
-// native-webrtc only.
-#[cfg(not(feature = "dummy"))]
-mod test_media;
 mod test_message_handler;
 mod test_stabilization;
 

@@ -16,15 +16,9 @@ pub use crate::connections::dummy::DummyConnection;
 #[cfg(feature = "dummy")]
 pub use crate::connections::dummy::DummyTransport;
 #[cfg(feature = "native-webrtc")]
-pub use crate::connections::native_webrtc::NativeMediaTrack;
-#[cfg(feature = "native-webrtc")]
-pub use crate::connections::native_webrtc::NativeRemoteTrack;
-#[cfg(feature = "native-webrtc")]
 pub use crate::connections::native_webrtc::WebrtcConnection;
 #[cfg(feature = "native-webrtc")]
 pub use crate::connections::native_webrtc::WebrtcTransport;
-#[cfg(feature = "web-sys-webrtc")]
-pub use crate::connections::web_sys_webrtc::BrowserMediaTrack;
 #[cfg(feature = "web-sys-webrtc")]
 pub use crate::connections::web_sys_webrtc::WebSysWebrtcConnection;
 #[cfg(feature = "web-sys-webrtc")]

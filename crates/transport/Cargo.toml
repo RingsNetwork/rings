@@ -32,8 +32,6 @@ wasm-bindgen = { workspace = true, optional = true }
 wasm-bindgen-futures = { workspace = true, optional = true }
 web-sys = { version = "0.3.64", optional = true, features = [
     "Blob",
-    "MediaStream",
-    "MediaStreamTrack",
     "MessageEvent",
     "RtcConfiguration",
     "RtcDataChannel",
@@ -44,12 +42,10 @@ web-sys = { version = "0.3.64", optional = true, features = [
     "RtcIceServer",
     "RtcPeerConnection",
     "RtcPeerConnectionState",
-    "RtcRtpSender",
     "RtcSdpType",
     "RtcSessionDescription",
     "RtcSessionDescriptionInit",
     "RtcStatsReport",
-    "RtcTrackEvent",
     "Window",
     "WorkerGlobalScope",
     "ServiceWorkerGlobalScope",

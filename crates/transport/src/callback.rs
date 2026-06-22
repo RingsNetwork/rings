@@ -3,7 +3,6 @@
 use bytes::Bytes;
 
 use crate::core::callback::BoxedTransportCallback;
-use crate::core::media::BoxedRemoteMediaTrack;
 use crate::core::transport::TransportMessage;
 use crate::core::transport::WebrtcConnectionState;
 use crate::notifier::Notifier;
@@ -54,13 +53,6 @@ impl InnerTransportCallback {
                 tracing::error!("Deserialize DataChannelMessage failed: {e:?}");
             }
         };
-    }
-
-    /// This method is invoked when a remote media track is received.
-    pub async fn on_media_track(&self, track: BoxedRemoteMediaTrack) {
-        if let Err(e) = self.callback.on_media_track(&self.cid, track).await {
-            tracing::error!("Callback on_media_track failed: {e:?}");
-        }
     }
 
     /// This method is invoked when the state of connection has changed.

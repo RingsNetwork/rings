@@ -13,8 +13,6 @@ use crate::message::types::FindSuccessorSend;
 use crate::message::types::Message;
 use crate::message::types::QueryForTopoInfoReport;
 use crate::message::types::QueryForTopoInfoSend;
-use crate::message::types::RenegotiateReport;
-use crate::message::types::RenegotiateSend;
 use crate::message::types::Then;
 use crate::message::FindSuccessorReportHandler;
 use crate::message::FindSuccessorThen;
@@ -89,47 +87,6 @@ impl HandleMsg<ConnectNodeReport> for MessageHandler {
         } else {
             self.transport
                 .accept_remote_connection(ctx.relay.origin_sender(), msg)
-                .await
-        }
-    }
-}
-
-/// Renegotiation offer on an existing connection: run it through the per-peer negotiation state
-/// machine, which (if accepted) answers on that same connection *and sends the report* as one
-/// guarded transaction — answer creation and answer send cannot be split, or a failed send would
-/// leave the peer awaiting an answer. Mirrors [`ConnectNodeSend`] but does not create a connection.
-/// Under glare the impolite side answers nothing (it holds its own pending offer); see
-/// [`crate::swarm::negotiation`].
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
-impl HandleMsg<RenegotiateSend> for MessageHandler {
-    async fn handle(&self, ctx: &MessagePayload, msg: &RenegotiateSend) -> Result<()> {
-        if msg.network_id != self.transport.network_id {
-            return Ok(());
-        }
-
-        if self.dht.did != ctx.relay.destination {
-            self.transport.forward_payload(ctx, None).await
-        } else {
-            self.transport
-                .handle_renegotiation_offer(ctx.relay.origin_sender(), ctx, msg)
-                .await
-        }
-    }
-}
-
-/// Response to a renegotiation offer: run it through the per-peer negotiation state machine, which
-/// accepts the answer on the existing connection only if it matches the outstanding offer's
-/// generation and drops a stale one otherwise.
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
-impl HandleMsg<RenegotiateReport> for MessageHandler {
-    async fn handle(&self, ctx: &MessagePayload, msg: &RenegotiateReport) -> Result<()> {
-        if self.dht.did != ctx.relay.destination {
-            self.transport.forward_payload(ctx, None).await
-        } else {
-            self.transport
-                .handle_renegotiation_answer(ctx.relay.origin_sender(), msg)
                 .await
         }
     }

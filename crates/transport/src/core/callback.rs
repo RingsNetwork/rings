@@ -7,7 +7,6 @@
 
 use async_trait::async_trait;
 
-use crate::core::media::BoxedRemoteMediaTrack;
 use crate::core::transport::WebrtcConnectionState;
 
 type CallbackError = Box<dyn std::error::Error>;
@@ -31,16 +30,6 @@ pub trait TransportCallback {
 
     /// This method is invoked on a binary message arrival over the data channel of webrtc.
     async fn on_message(&self, _cid: &str, _msg: &[u8]) -> Result<(), CallbackError> {
-        Ok(())
-    }
-
-    /// This method is invoked when a remote media track is received. Defaults to a no-op for
-    /// data-only connections and backends without media support.
-    async fn on_media_track(
-        &self,
-        _cid: &str,
-        _track: BoxedRemoteMediaTrack,
-    ) -> Result<(), CallbackError> {
         Ok(())
     }
 
