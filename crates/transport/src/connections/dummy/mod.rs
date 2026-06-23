@@ -52,6 +52,11 @@ thread_local! {
     /// Test-only controlled delivery queue: `(target connection rand_id, event)`,
     /// populated instead of auto-dispatching while `CONTROLLED` is on.
     static DELIVERY: RefCell<VecDeque<(String, Event)>> = const { RefCell::new(VecDeque::new()) };
+    /// Test-only per-thread override for the negotiated `max_message_size` the dummy backend
+    /// reports. `0` = report the default; a smaller value lets a test force the chunked send path
+    /// through `do_send_payload` and exercise real reassembly. Thread-local for the same isolation
+    /// reason as the controlled queue.
+    static MAX_MESSAGE_SIZE: Cell<usize> = const { Cell::new(0) };
 }
 
 /// Test-only controlled delivery scheduler. When enabled (per thread), dummy
@@ -63,6 +68,7 @@ pub mod controlled {
     use super::CONNS;
     use super::CONTROLLED;
     use super::DELIVERY;
+    use super::MAX_MESSAGE_SIZE;
 
     /// Turn the controlled scheduler on/off for the current thread. Turning it
     /// off clears this thread's queue.
@@ -71,6 +77,12 @@ pub mod controlled {
         if !on {
             DELIVERY.with(|q| q.borrow_mut().clear());
         }
+    }
+
+    /// Test hook: override the `max_message_size` the dummy backend reports on this thread (`0`
+    /// restores the default). Lets a test drive the chunked send path and reassembly end to end.
+    pub fn set_max_message_size(n: usize) {
+        MAX_MESSAGE_SIZE.with(|m| m.set(n));
     }
 
     /// Number of events currently queued on the current thread.
@@ -259,7 +271,10 @@ impl ConnectionInterface for DummyConnection {
     }
 
     fn max_message_size(&self) -> usize {
-        MAX_DATA_CHANNEL_MESSAGE_SIZE
+        match MAX_MESSAGE_SIZE.with(|m| m.get()) {
+            0 => MAX_DATA_CHANNEL_MESSAGE_SIZE,
+            n => n,
+        }
     }
 
     async fn get_stats(&self) -> Vec<String> {

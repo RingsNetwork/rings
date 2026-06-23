@@ -35,6 +35,7 @@ use crate::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 use crate::delivery::DeliveryFuture;
 use crate::error::Error;
 use crate::error::Result;
+use crate::ice_server::IceCredentialType;
 use crate::ice_server::IceServer;
 use crate::notifier::Notifier;
 use crate::pool::Pool;
@@ -236,19 +237,22 @@ impl ConnectionInterface for WebrtcConnection {
 
     async fn webrtc_answer_offer(&self, offer: Self::Sdp) -> Result<Self::Sdp> {
         tracing::debug!("webrtc_answer_offer, offer: {offer:?}");
-        // Read the negotiated limit from the SDP text, then record it once the description applies.
+        // Read the negotiated limit from the SDP text, but record it only after the *whole* answer
+        // path (create_answer + set_local_description + gather) has succeeded, so a failure midway
+        // does not leave a partially-updated connection carrying a stale negotiated size.
         let negotiated_max_message_size = effective_max_message_size(&offer);
         let offer = RTCSessionDescription::offer(offer)?;
         self.webrtc_conn.set_remote_description(offer).await?;
-        self.remote_max_message_size
-            .store(negotiated_max_message_size, Ordering::SeqCst);
 
         let answer = self.webrtc_conn.create_answer(None).await?;
         self.webrtc_conn
             .set_local_description(answer.clone())
             .await?;
+        let local_sdp = self.webrtc_gather().await?;
 
-        self.webrtc_gather().await
+        self.remote_max_message_size
+            .store(negotiated_max_message_size, Ordering::SeqCst);
+        Ok(local_sdp)
     }
 
     async fn webrtc_accept_answer(&self, answer: Self::Sdp) -> Result<()> {
@@ -464,8 +468,16 @@ impl TransportInterface for WebrtcTransport {
 
 impl From<IceServer> for RTCIceServer {
     fn from(s: IceServer) -> Self {
-        // webrtc 0.17 dropped `credential_type` from `RTCIceServer` (only long-term credentials
-        // remain); `IceServer::credential_type` is ignored here.
+        // webrtc 0.17 dropped `credential_type` from `RTCIceServer` (only long-term/password
+        // credentials remain). Password creds are carried as-is; an OAuth credential cannot be
+        // expressed, so warn rather than silently degrade an explicitly-configured one.
+        if s.credential_type == IceCredentialType::Oauth {
+            tracing::warn!(
+                "ICE server {:?} configured with OAuth credentials, which webrtc 0.17 does not \
+                 support; falling back to long-term credential fields",
+                s.urls
+            );
+        }
         Self {
             urls: s.urls,
             username: s.username,

@@ -31,6 +31,9 @@ mod dht_trace_replay;
 #[cfg(feature = "dummy")]
 mod dht_schedule;
 mod test_connection;
+// End-to-end chunking uses the dummy backend's `max_message_size` test hook.
+#[cfg(feature = "dummy")]
+mod test_chunk_e2e;
 mod test_message_handler;
 mod test_stabilization;
 

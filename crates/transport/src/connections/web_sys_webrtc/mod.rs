@@ -254,10 +254,9 @@ impl ConnectionInterface for WebSysWebrtcConnection {
 
     async fn webrtc_answer_offer(&self, offer: Self::Sdp) -> Result<Self::Sdp> {
         tracing::debug!("webrtc_answer_offer, offer: {offer:?}");
-        // Compute the negotiated limit but do not record it until the offer is actually applied — the
-        // store is an observable mutation that must not survive a rejected/un-applied offer. (web-sys
-        // has no separate pre-apply parse; `setRemoteDescription` is both the first fallible step and
-        // the apply, so its failure is post-apply.)
+        // Read the negotiated limit, but record it only after the *whole* answer path
+        // (setRemoteDescription + createAnswer + setLocalDescription + gather) has succeeded, so a
+        // failure midway does not leave a partially-updated connection carrying a stale size.
         let negotiated_max_message_size = effective_max_message_size(&offer);
 
         let set_remote_init = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
@@ -265,8 +264,6 @@ impl ConnectionInterface for WebSysWebrtcConnection {
 
         let promise = self.webrtc_conn.set_remote_description(&set_remote_init);
         JsFuture::from(promise).await.map_err(Error::WebSysWebrtc)?;
-        self.remote_max_message_size
-            .store(negotiated_max_message_size, Ordering::SeqCst);
 
         let promise = self.webrtc_conn.create_answer();
         let answer_js_value = JsFuture::from(promise).await.map_err(Error::WebSysWebrtc)?;
@@ -279,7 +276,10 @@ impl ConnectionInterface for WebSysWebrtcConnection {
         let promise = self.webrtc_conn.set_local_description(&set_local_init);
         JsFuture::from(promise).await.map_err(Error::WebSysWebrtc)?;
 
-        self.webrtc_gather().await
+        let local_sdp = self.webrtc_gather().await?;
+        self.remote_max_message_size
+            .store(negotiated_max_message_size, Ordering::SeqCst);
+        Ok(local_sdp)
     }
 
     async fn webrtc_accept_answer(&self, answer: Self::Sdp) -> Result<()> {

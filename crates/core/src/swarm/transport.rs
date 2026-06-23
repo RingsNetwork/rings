@@ -22,12 +22,9 @@ use rings_transport::core::transport::TransportMessage;
 use rings_transport::core::transport::WebrtcConnectionState;
 use rings_transport::delivery::DeliveryFuture;
 
-use crate::chunk::plan_framing;
 use crate::chunk::ChunkList;
 use crate::chunk::Framing;
-use crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD;
-use crate::consts::MIN_CHUNK_DATA;
-use crate::consts::TRANSPORT_CUSTOM_OVERHEAD;
+use crate::chunk::WireReserves;
 use crate::consts::TRANSPORT_MAX_SIZE;
 use crate::dht::Did;
 use crate::dht::LiveDid;
@@ -350,22 +347,13 @@ impl PayloadSender for SwarmTransport {
         // fire-and-forget; a message lost before flush (e.g. the connection died while buffered) is
         // logged there instead of propagating a delivery status up through every layer.
         //
-        // The chunk-vs-whole decision is the pure `plan_framing`, derived from this connection's
-        // negotiated `max_message_size` (so a channel with a smaller limit is respected); this
-        // block is only the effectful shell that carries it out. The reserves account for the bytes
-        // each path adds on the wire: `send_data` wraps every send in `TransportMessage::Custom`
-        // (`TRANSPORT_CUSTOM_OVERHEAD`), and a chunk is additionally re-wrapped in a `MessagePayload`
-        // (`MAX_CHUNK_ENVELOPE_OVERHEAD`). `None` means the peer's limit is too small to carry even
-        // one `MIN_CHUNK_DATA`-byte chunk — a real failure we surface rather than fragmenting into a
-        // flood of near-empty chunks.
-        let plan = plan_framing(
-            data.len(),
-            conn.max_message_size(),
-            TRANSPORT_CUSTOM_OVERHEAD,
-            MAX_CHUNK_ENVELOPE_OVERHEAD + TRANSPORT_CUSTOM_OVERHEAD,
-            MIN_CHUNK_DATA,
-        )
-        .ok_or(Error::PeerMaxMessageSizeTooSmall(conn.max_message_size()))?;
+        // The chunk-vs-whole decision is the pure `WireReserves::plan`, against this connection's
+        // negotiated `max_message_size`; this block is only the effectful shell carrying it out.
+        // `None` means the peer's limit is too small to carry even one useful chunk — a real failure
+        // we surface rather than fragmenting into a flood of near-empty chunks.
+        let plan = WireReserves::PRODUCTION
+            .plan(data.len(), conn.max_message_size())
+            .ok_or(Error::PeerMaxMessageSizeTooSmall(conn.max_message_size()))?;
         match plan {
             Framing::Whole => {
                 spawn_delivery(conn.send_data(data).await?, did);

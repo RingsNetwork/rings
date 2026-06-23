@@ -419,6 +419,38 @@ pub mod test {
         );
     }
 
+    /// The other framing boundary: a payload [`WireReserves::plan`] keeps `Whole`, once wrapped in
+    /// the outer `TransportMessage::Custom` frame, stays within the limit — pinning that
+    /// `WireReserves::PRODUCTION.whole` is enough for the whole-message path (not just the chunk
+    /// path), and that one byte past the boundary switches to chunked.
+    #[test]
+    fn whole_message_boundary_fits_custom_wrapper() {
+        use rings_transport::core::transport::TransportMessage;
+        use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
+
+        use crate::chunk::Framing;
+        use crate::chunk::WireReserves;
+
+        let reserves = WireReserves::PRODUCTION;
+        let limit = MAX_DATA_CHANNEL_MESSAGE_SIZE;
+        // Largest payload that should still be sent whole.
+        let payload_len = limit - reserves.whole;
+        assert_eq!(reserves.plan(payload_len, limit), Some(Framing::Whole));
+
+        let wire = bincode::serialize(&TransportMessage::Custom(vec![0u8; payload_len])).unwrap();
+        assert!(
+            wire.len() <= limit,
+            "whole wire {} exceeds limit {}",
+            wire.len(),
+            limit
+        );
+        // One byte past the boundary must switch to chunked.
+        assert!(matches!(
+            reserves.plan(payload_len + 1, limit),
+            Some(Framing::Chunked { .. })
+        ));
+    }
+
     #[test]
     fn test_message_payload_from_auto() {
         let next_hop = SecretKey::random().address().into();

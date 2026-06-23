@@ -60,11 +60,13 @@ pub enum WebrtcConnectionState {
     Closed,
 }
 
-/// Interop ceiling for a single data-channel message, in bytes. webrtc-rs (native) enforces this
-/// SCTP `max_message_size` on send, and it is the value a peer can be relied on to accept — so a
-/// sender must never exceed it regardless of what the remote advertises. A per-channel
+/// Interop ceiling for a single data-channel message, in bytes — RFC 8841's default
+/// `max-message-size` (65536), the value a spec-compliant peer accepts when it advertises nothing
+/// else. We treat it as a hard send ceiling: a sender never exceeds it regardless of what the
+/// remote advertises, and a per-channel
 /// [`max_message_size`](ConnectionInterface::max_message_size) may resolve to *less* (a constrained
-/// peer) but never more.
+/// peer) but never more. NOTE: this is the protocol default, not an independently verified property
+/// of every backend's SCTP stack — a peer advertising a *larger* limit is still clamped to this.
 pub const MAX_DATA_CHANNEL_MESSAGE_SIZE: usize = 65536;
 
 /// The effective per-message send limit for a peer whose SDP is `remote_sdp`. The negotiated value

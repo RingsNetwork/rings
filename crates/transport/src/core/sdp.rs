@@ -119,49 +119,78 @@ pub fn parse(sdp: &str) -> SessionDescription<'_> {
     description
 }
 
-/// Does this `m=` value describe a WebRTC SCTP data channel?
-///
-/// An `m=` line is `<media> <port> <proto> <fmt> …` (RFC 4566 §5.14). We require it field by field
-/// rather than by substring search so a value that merely *mentions* these tokens elsewhere (e.g. a
-/// codec name or a different media type) cannot be mistaken for the data channel:
-///
-/// - `<media>` is exactly `application`,
-/// - `<proto>` is a `/`-separated profile that includes `SCTP` (`UDP/DTLS/SCTP` or `TCP/DTLS/SCTP`,
-///   RFC 8841 §5), and
-/// - one of the `<fmt>` tokens is exactly `webrtc-datachannel`.
-fn is_webrtc_datachannel(media: &str) -> bool {
-    let mut fields = media.split_whitespace();
-    let Some("application") = fields.next() else {
-        return false;
-    };
-    // skip <port>
-    if fields.next().is_none() {
-        return false;
-    }
-    let Some(proto) = fields.next() else {
-        return false;
-    };
-    let is_sctp = proto.split('/').any(|token| token == "SCTP");
-    let has_datachannel_fmt = fields.any(|fmt| fmt == "webrtc-datachannel");
-    is_sctp && has_datachannel_fmt
-}
-
 impl MediaDescription<'_> {
-    /// `a=max-message-size` declared in this section, if any.
+    /// Whether this section is a **live** (non-rejected) WebRTC SCTP data channel.
+    ///
+    /// An `m=` line is `<media> <port> <proto> <fmt> …` (RFC 4566 §5.14); we require it field by
+    /// field (not by substring) so a value that merely *mentions* these tokens elsewhere cannot be
+    /// mistaken for the data channel:
+    ///
+    /// - `<media>` is `application` (case-insensitive),
+    /// - `<port>` is not `0` — a `0` port marks a **rejected** section (RFC 4566 / RFC 3264 §5.1),
+    ///   which must be skipped so a rejected data-channel section before the active one is not
+    ///   selected,
+    /// - `<proto>` is a `/`-separated profile that includes `SCTP` (case-insensitive), and
+    /// - it is recognisable as a data channel by **either** the modern `webrtc-datachannel` `<fmt>`
+    ///   token (RFC 8841) **or** a legacy `a=sctp-port` / `a=sctpmap` attribute (the pre-standard
+    ///   numeric-`<fmt>` form some older stacks still emit). Matching is case-insensitive.
+    fn is_data_channel(&self) -> bool {
+        let mut fields = self.media.split_whitespace();
+        if !fields
+            .next()
+            .is_some_and(|m| m.eq_ignore_ascii_case("application"))
+        {
+            return false;
+        }
+        match fields.next() {
+            Some("0") | None => return false, // rejected (port 0) or truncated
+            _ => {}
+        }
+        let Some(proto) = fields.next() else {
+            return false;
+        };
+        if !proto.split('/').any(|t| t.eq_ignore_ascii_case("SCTP")) {
+            return false;
+        }
+        let has_datachannel_fmt = fields.any(|fmt| fmt.eq_ignore_ascii_case("webrtc-datachannel"));
+        let has_sctp_attr = self.attrs.iter().any(|attr| {
+            let key = match attr {
+                Attribute::Flag(f) => *f,
+                Attribute::Pair { key, .. } => *key,
+            };
+            key.eq_ignore_ascii_case("sctp-port") || key.eq_ignore_ascii_case("sctpmap")
+        });
+        has_datachannel_fmt || has_sctp_attr
+    }
+
+    /// `a=max-message-size` declared in this section, if any. Matched case-insensitively. The first
+    /// occurrence wins (a well-formed SDP carries at most one; on a duplicate we take the first
+    /// deterministically). A *present but unparseable* value is a malformed advertisement: it is
+    /// logged and treated as absent — there is no smaller value we could safely assume instead.
     fn max_message_size(&self) -> Option<u32> {
-        self.attrs.iter().find_map(|attr| match attr {
-            Attribute::Pair { key, value } if *key == "max-message-size" => value.parse().ok(),
-            _ => None,
-        })
+        for attr in &self.attrs {
+            if let Attribute::Pair { key, value } = attr {
+                if key.eq_ignore_ascii_case("max-message-size") {
+                    return value.parse::<u32>().map_or_else(
+                        |_| {
+                            tracing::warn!(
+                                "SDP: malformed a=max-message-size {value:?}; ignoring (using default)"
+                            );
+                            None
+                        },
+                        Some,
+                    );
+                }
+            }
+        }
+        None
     }
 }
 
 impl SessionDescription<'_> {
-    /// The WebRTC SCTP data-channel media section, if the description has one.
+    /// The live WebRTC SCTP data-channel media section, if the description has one.
     pub fn data_channel(&self) -> Option<&MediaDescription<'_>> {
-        self.media
-            .iter()
-            .find(|section| is_webrtc_datachannel(section.media))
+        self.media.iter().find(|section| section.is_data_channel())
     }
 
     /// The SCTP `a=max-message-size` (RFC 8841 §6) for the data channel — read from the
@@ -354,5 +383,38 @@ mod tests {
         let sdp = "m=audio 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
                    a=max-message-size:65536\r\n";
         assert_eq!(parse_sdp_max_message_size(sdp), None);
+    }
+
+    #[test]
+    fn legacy_numeric_fmt_with_sctpmap_is_detected() {
+        // Pre-RFC-8841 form: numeric `<fmt>` (5000) and an `a=sctpmap`/`a=sctp-port` instead of the
+        // `webrtc-datachannel` token. We must still recognise it and read its limit.
+        let sdp = "m=application 9 DTLS/SCTP 5000\r\n\
+                   a=sctpmap:5000 webrtc-datachannel 1024\r\n\
+                   a=max-message-size:16384\r\n";
+        assert_eq!(parse_sdp_max_message_size(sdp), Some(16384));
+
+        let sdp2 = "m=application 9 UDP/DTLS/SCTP 5000\r\n\
+                    a=sctp-port:5000\r\n\
+                    a=max-message-size:16384\r\n";
+        assert_eq!(parse_sdp_max_message_size(sdp2), Some(16384));
+    }
+
+    #[test]
+    fn rejected_data_channel_section_is_skipped() {
+        // A rejected (`port 0`) data-channel section before the active one must not be selected.
+        let sdp = "m=application 0 UDP/DTLS/SCTP webrtc-datachannel\r\n\
+                   a=max-message-size:111\r\n\
+                   m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
+                   a=max-message-size:65536\r\n";
+        assert_eq!(parse_sdp_max_message_size(sdp), Some(65536));
+    }
+
+    #[test]
+    fn matching_is_case_insensitive() {
+        // Lowercase proto token, mixed-case media, and mixed-case attribute key.
+        let sdp = "m=Application 9 udp/dtls/sctp webrtc-datachannel\r\n\
+                   a=Max-Message-Size:262144\r\n";
+        assert_eq!(parse_sdp_max_message_size(sdp), Some(262144));
     }
 }
