@@ -79,6 +79,71 @@ fn spawn_delivery(fut: DeliveryFuture, did: Did) {
     });
 }
 
+/// Stream the chunks of `data` to `did` over `conn`, **awaiting each chunk's flush before sending
+/// the next**. The await is backpressure *internal* to this task — one chunk's wrapped bytes are in
+/// flight at a time, and no per-chunk task is spawned — while the task as a whole is driven off the
+/// caller's path by [`spawn_chunked_send`], so a chunked send has the same fire-and-forget contract
+/// as a whole send (`send_message` returns once the bytes are accepted, not once every chunk
+/// flushes). A frame or send failure aborts the remaining chunks; the receiver TTL-expires the
+/// partial message (chunks carry the message ttl), so no abort marker is needed.
+async fn run_chunked_send(
+    conn: SwarmConnection,
+    data: Bytes,
+    chunk_size: usize,
+    session_sk: SessionSk,
+    did: Did,
+) {
+    for chunk in ChunkList::stream(data, chunk_size) {
+        let wrapped = MessagePayload::new_send(Message::Chunk(chunk), &session_sk, did, did)
+            .and_then(|payload| payload.to_bincode());
+        let wrapped = match wrapped {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::warn!("Chunked send to {did} aborted while framing a chunk: {e}");
+                return;
+            }
+        };
+        match conn.send_data(wrapped).await {
+            Ok(delivery) => {
+                if let Err(e) = delivery.await {
+                    tracing::warn!("Chunked send to {did} stopped before flush: {e}");
+                    return;
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Chunked send to {did} stopped: {e}");
+                return;
+            }
+        }
+    }
+}
+
+/// Drive a chunked send on the runtime (one bounded task per large message), keeping the caller's
+/// send fire-and-forget. See [`run_chunked_send`].
+#[cfg(feature = "wasm")]
+fn spawn_chunked_send(
+    conn: SwarmConnection,
+    data: Bytes,
+    chunk_size: usize,
+    session_sk: SessionSk,
+    did: Did,
+) {
+    wasm_bindgen_futures::spawn_local(run_chunked_send(conn, data, chunk_size, session_sk, did));
+}
+
+/// Drive a chunked send on the runtime (one bounded task per large message), keeping the caller's
+/// send fire-and-forget. See [`run_chunked_send`].
+#[cfg(not(feature = "wasm"))]
+fn spawn_chunked_send(
+    conn: SwarmConnection,
+    data: Bytes,
+    chunk_size: usize,
+    session_sk: SessionSk,
+    did: Did,
+) {
+    tokio::spawn(run_chunked_send(conn, data, chunk_size, session_sk, did));
+}
+
 impl SwarmTransport {
     pub fn new(
         network_id: u32,
@@ -342,39 +407,22 @@ impl PayloadSender for SwarmTransport {
             return Err(Error::MessageTooLarge(data.len()));
         }
 
-        // Each send returns a `DeliveryFuture` resolving to whether the bytes were actually flushed
-        // to the wire. We toss it to the runtime rather than awaiting it, so the send itself stays
-        // fire-and-forget; a message lost before flush (e.g. the connection died while buffered) is
-        // logged there instead of propagating a delivery status up through every layer.
-        //
         // The chunk-vs-whole decision is the pure `WireReserves::plan`, against this connection's
         // negotiated `max_message_size`; this block is only the effectful shell carrying it out.
         // `None` means the peer's limit is too small to carry even one useful chunk — a real failure
-        // we surface rather than fragmenting into a flood of near-empty chunks.
+        // we surface (before sending anything) rather than fragmenting into a flood of near-empty
+        // chunks. Both arms are **fire-and-forget**: `send_message` returns once the bytes are
+        // accepted into the send buffer, not once they flush — a whole message hands its
+        // `DeliveryFuture` to the runtime, and a chunked message is driven by one bounded background
+        // task (one chunk in flight; see `run_chunked_send`), so a large payload never blocks the
+        // caller's path while keeping memory and the runtime task count bounded.
         let plan = WireReserves::PRODUCTION
             .plan(data.len(), conn.max_message_size())
             .ok_or(Error::PeerMaxMessageSizeTooSmall(conn.max_message_size()))?;
         match plan {
-            Framing::Whole => {
-                spawn_delivery(conn.send_data(data).await?, did);
-            }
+            Framing::Whole => spawn_delivery(conn.send_data(data).await?, did),
             Framing::Chunked { chunk_size } => {
-                // Stream chunks lazily (each is a zero-copy slice of `data`) and **await each
-                // chunk's delivery before sending the next**. This is backpressure: one large
-                // message holds only one chunk's wrapped bytes in flight at a time and spawns no
-                // per-chunk tasks, so it cannot blow up memory or the runtime task count or fill the
-                // send buffer. A failed send aborts the rest; the receiver TTL-expires the partial
-                // message (chunks carry the message ttl), so no abort marker is needed.
-                for chunk in ChunkList::stream(data, chunk_size) {
-                    let chunk_bytes = MessagePayload::new_send(
-                        Message::Chunk(chunk),
-                        &self.session_sk,
-                        did,
-                        did,
-                    )?
-                    .to_bincode()?;
-                    conn.send_data(chunk_bytes).await?.await?;
-                }
+                spawn_chunked_send(conn, data, chunk_size, self.session_sk.clone(), did)
             }
         }
 

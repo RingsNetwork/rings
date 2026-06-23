@@ -52,6 +52,10 @@ thread_local! {
     /// Test-only controlled delivery queue: `(target connection rand_id, event)`,
     /// populated instead of auto-dispatching while `CONTROLLED` is on.
     static DELIVERY: RefCell<VecDeque<(String, Event)>> = const { RefCell::new(VecDeque::new()) };
+    /// Test-only per-thread counter of data-channel messages dispatched by `send_message`, so a
+    /// test can prove an expected send happened (or, after an error, did *not* happen). Thread-local
+    /// for the same isolation reason as the controlled queue.
+    static SENT_COUNT: Cell<usize> = const { Cell::new(0) };
     /// Test-only per-thread override for the negotiated `max_message_size` the dummy backend
     /// reports. `0` = report the default; a smaller value lets a test force the chunked send path
     /// through `do_send_payload` and exercise real reassembly. Thread-local for the same isolation
@@ -83,6 +87,17 @@ pub mod controlled {
     /// restores the default). Lets a test drive the chunked send path and reassembly end to end.
     pub fn set_max_message_size(n: usize) {
         MAX_MESSAGE_SIZE.with(|m| m.set(n));
+    }
+
+    /// Test hook: number of data-channel messages `send_message` has dispatched on this thread.
+    /// Paired with [`reset_sent_count`] to assert that a failed send enqueued nothing.
+    pub fn sent_count() -> usize {
+        super::SENT_COUNT.with(|c| c.get())
+    }
+
+    /// Test hook: reset the [`sent_count`] counter for this thread.
+    pub fn reset_sent_count() {
+        super::SENT_COUNT.with(|c| c.set(0));
     }
 
     /// Number of events currently queued on the current thread.
@@ -246,6 +261,7 @@ impl ConnectionInterface for DummyConnection {
 
     async fn send_message(&self, msg: TransportMessage) -> Result<DeliveryFuture> {
         self.webrtc_wait_for_data_channel_open().await?;
+        SENT_COUNT.with(|c| c.set(c.get() + 1));
 
         let data = bincode::serialize(&msg).map(Bytes::from)?;
         // The remote connection may have been torn down between the data

@@ -66,6 +66,8 @@ async fn negotiated_size_too_small_errors_without_partial_send() {
     dummy_controlled::set_max_message_size(5000);
 
     let big: Vec<u8> = vec![0xab; 10_000];
+    // Count data-channel sends from here, to prove the failed send enqueues nothing.
+    dummy_controlled::reset_sent_count();
     let err = node1
         .swarm
         .send_message(Message::custom(&big).unwrap(), node2.did())
@@ -75,8 +77,11 @@ async fn negotiated_size_too_small_errors_without_partial_send() {
         matches!(err, crate::error::Error::PeerMaxMessageSizeTooSmall(_)),
         "expected PeerMaxMessageSizeTooSmall, got {err:?}"
     );
-    // No partial chunks are enqueued by construction: `WireReserves::plan` returns `None` *before*
-    // the chunk send loop in `do_send_payload`, so the failure happens with nothing put on the wire.
+    assert_eq!(
+        dummy_controlled::sent_count(),
+        0,
+        "no chunk (partial or otherwise) must be dispatched when framing rejects the size"
+    );
 
     dummy_controlled::set_max_message_size(0);
 }

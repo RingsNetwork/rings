@@ -69,6 +69,13 @@ where
             .unwrap_or(WebrtcConnectionState::Closed)
     }
 
+    // On a released reference this reports the interop default rather than an error, by deliberate
+    // design: `ConnectionInterface::max_message_size` returns `usize` (it feeds the framing
+    // planner), and threading a `Result` through it and every backend for this one edge would add
+    // churn out of proportion to the case. It is harmless because a send on a released ref fails
+    // anyway (`send_message` upgrades the same `Weak` and returns `ConnectionReleased`), so the
+    // framing plan computed against the default is never actually transmitted. See the
+    // `released_ref_*` tests.
     fn max_message_size(&self) -> usize {
         self.upgrade()
             .map(|c| c.max_message_size())
@@ -123,6 +130,13 @@ where
             .unwrap_or(WebrtcConnectionState::Closed)
     }
 
+    // On a released reference this reports the interop default rather than an error, by deliberate
+    // design: `ConnectionInterface::max_message_size` returns `usize` (it feeds the framing
+    // planner), and threading a `Result` through it and every backend for this one edge would add
+    // churn out of proportion to the case. It is harmless because a send on a released ref fails
+    // anyway (`send_message` upgrades the same `Weak` and returns `ConnectionReleased`), so the
+    // framing plan computed against the default is never actually transmitted. See the
+    // `released_ref_*` tests.
     fn max_message_size(&self) -> usize {
         self.upgrade()
             .map(|c| c.max_message_size())
@@ -154,5 +168,83 @@ where
 
     async fn close(&self) -> Result<()> {
         self.upgrade()?.close().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal `ConnectionInterface` whose only meaningful method is `max_message_size` (a sentinel
+    /// distinct from the interop default). The released-ref path never dispatches to the others, so
+    /// they assert that invariant by panicking if ever reached.
+    #[derive(Debug)]
+    struct Mock;
+
+    #[cfg_attr(feature = "web-sys-webrtc", async_trait(?Send))]
+    #[cfg_attr(not(feature = "web-sys-webrtc"), async_trait)]
+    impl ConnectionInterface for Mock {
+        type Sdp = String;
+        type Error = Error;
+
+        fn max_message_size(&self) -> usize {
+            4242
+        }
+
+        async fn send_message(&self, _: TransportMessage) -> Result<DeliveryFuture> {
+            unreachable!("a released ref must fail before reaching the inner connection")
+        }
+        fn webrtc_connection_state(&self) -> WebrtcConnectionState {
+            unreachable!()
+        }
+        async fn get_stats(&self) -> Vec<String> {
+            unreachable!()
+        }
+        async fn webrtc_create_offer(&self) -> Result<Self::Sdp> {
+            unreachable!()
+        }
+        async fn webrtc_answer_offer(&self, _: Self::Sdp) -> Result<Self::Sdp> {
+            unreachable!()
+        }
+        async fn webrtc_accept_answer(&self, _: Self::Sdp) -> Result<()> {
+            unreachable!()
+        }
+        async fn webrtc_wait_for_data_channel_open(&self) -> Result<()> {
+            unreachable!()
+        }
+        async fn close(&self) -> Result<()> {
+            unreachable!()
+        }
+    }
+
+    /// A live ref forwards to the inner connection; a released one reports the interop default
+    /// rather than erroring (see the deliberate-design note on `max_message_size`).
+    #[test]
+    fn released_ref_max_message_size_falls_back_to_default() {
+        let conn = Arc::new(Mock);
+        let reference = ConnectionRef::new("cid", &conn);
+        assert_eq!(reference.max_message_size(), 4242, "live ref forwards");
+
+        drop(conn);
+        assert_eq!(
+            reference.max_message_size(),
+            MAX_DATA_CHANNEL_MESSAGE_SIZE,
+            "released ref reports the interop default"
+        );
+    }
+
+    /// A released ref surfaces the release as an error on the data path (so the default reported
+    /// above is never actually transmitted against).
+    #[test]
+    fn released_ref_upgrade_errors() {
+        let conn = Arc::new(Mock);
+        let reference = ConnectionRef::new("cid", &conn);
+        assert!(reference.upgrade().is_ok(), "live ref upgrades");
+
+        drop(conn);
+        match reference.upgrade() {
+            Err(Error::ConnectionReleased(cid)) => assert_eq!(cid, "cid"),
+            other => panic!("released ref must report ConnectionReleased, got {other:?}"),
+        }
     }
 }

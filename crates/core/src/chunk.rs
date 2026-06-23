@@ -214,10 +214,10 @@ impl ChunkList {
     /// chunks are yielded lazily, so a sender can frame and flush one chunk at a time with bounded
     /// memory (rather than allocating every chunk up front). All chunks share one `[i, total]`
     /// numbering and one [`ChunkMeta`]. `chunk_size` is clamped to ≥ 1 so a degenerate value still
-    /// terminates.
+    /// terminates; empty input yields **no** chunks, agreeing with [`split`](Self::split).
     pub fn stream(bytes: Bytes, chunk_size: usize) -> impl Iterator<Item = Chunk> {
         let chunk_size = chunk_size.max(1);
-        let total = bytes.len().div_ceil(chunk_size).max(1);
+        let total = bytes.len().div_ceil(chunk_size);
         let meta = ChunkMeta::default();
         (0..total).map(move |i| {
             let start = i * chunk_size;
@@ -463,7 +463,12 @@ impl MessageReassembler {
     /// Drop messages whose TTL has elapsed, returning their cost to the budget, and evict completed-id
     /// tombstones that have likewise expired (a retransmit past its expiry is rejected anyway).
     pub fn remove_expired(&mut self) {
-        let now = get_epoch_ms();
+        self.remove_expired_at(get_epoch_ms());
+    }
+
+    /// [`remove_expired`](Self::remove_expired) with the clock injected (tests pass a controlled
+    /// `now` to drive the real eviction logic).
+    fn remove_expired_at(&mut self, now: u128) {
         let buffered_cost = &mut self.buffered_cost;
         let slot_overhead = self.limits.slot_overhead;
         self.pending.retain(|_, p| {
@@ -500,11 +505,16 @@ impl MessageReassembler {
     /// admission verdict, and apply it. The only mutation of the buffer is in `admit`; a rejected
     /// chunk leaves no trace and is logged once with its typed `Rejected` reason.
     pub fn handle(&mut self, chunk: Chunk) -> Option<Bytes> {
-        let now = get_epoch_ms();
+        self.handle_at(chunk, get_epoch_ms())
+    }
+
+    /// [`handle`](Self::handle) with the clock injected, so tests drive expiry/admission against a
+    /// controlled `now` through the real production path instead of poking internal state.
+    fn handle_at(&mut self, chunk: Chunk, now: u128) -> Option<Bytes> {
         // Reclaim expired pending entries and tombstones FIRST — before classify reads them — so
         // invalid traffic still frees memory and an expired tombstone cannot suppress a fresh
         // message that reuses its id after the TTL window.
-        self.remove_expired();
+        self.remove_expired_at(now);
         match self.classify(&chunk, now) {
             Ok(cost) => self.admit(chunk, cost),
             Err(reason) => {
@@ -553,12 +563,16 @@ impl MessageReassembler {
             return Err(Rejected::AlreadyCompleted);
         }
 
-        match self.pending.get(&meta.id) {
+        // Bytes already buffered for this id (`0` for a new message). Used for the per-message cap
+        // below, which must hold for the *first* chunk too — not only once a pending entry exists —
+        // or a caller-supplied `max_chunk_data_len > max_message_bytes` could admit an oversized
+        // lone chunk.
+        let buffered_for_id = match self.pending.get(&meta.id) {
             // A new id: admit only if there is room for another concurrent message.
             None if self.pending.len() >= self.limits.max_pending_messages => {
                 return Err(Rejected::PendingFull);
             }
-            None => {}
+            None => 0,
             Some(p) => {
                 // A chunk of an in-flight message must agree on its shape and provenance.
                 if p.total != total {
@@ -573,10 +587,12 @@ impl MessageReassembler {
                 if p.slots.contains_key(&position) {
                     return Err(Rejected::DuplicatePosition);
                 }
-                if p.data_bytes.saturating_add(chunk.data.len()) > self.limits.max_message_bytes {
-                    return Err(Rejected::PerMessageBytes);
-                }
+                p.data_bytes
             }
+        };
+        // Per-message data cap, enforced uniformly across the first and subsequent chunks.
+        if buffered_for_id.saturating_add(chunk.data.len()) > self.limits.max_message_bytes {
+            return Err(Rejected::PerMessageBytes);
         }
 
         // Cost charged to the global budget: this slot's data + its fixed overhead. Saturating, so a
@@ -1207,60 +1223,46 @@ mod test {
         assert_eq!(p.slots.len(), 1, "the mismatched chunk left no trace");
     }
 
-    /// Once a completed message's TTL elapses, its tombstone is evicted and a fresh message that
-    /// reuses the same id is accepted (not suppressed by a stale tombstone).
+    /// Once a completed message's TTL elapses, its tombstone is evicted by the real
+    /// `remove_expired_at` path (driven here by an injected clock, not by poking internal state),
+    /// and a fresh message reusing the same id is then accepted rather than suppressed.
     #[test]
     fn tombstone_expires_then_id_is_reusable() {
         let mut r = MessageReassembler::new();
         let id = Uuid::new_v4();
-        let now = get_epoch_ms();
-        // Complete a 1-chunk message with a short ttl so its tombstone expires quickly.
-        let first = r.handle(Chunk {
+        // A fixed base well above the future-skew tolerance, so timestamps are unambiguous.
+        let base = 1_000_000u128;
+        let ttl = 100u64;
+        let one_chunk = |label: &'static [u8], ts_ms: u128, ttl_ms: u64| Chunk {
             chunk: [0, 1],
-            data: Bytes::from_static(b"first"),
-            meta: ChunkMeta {
-                id,
-                ts_ms: now,
-                ttl_ms: TS_OFFSET_TOLERANCE_MS as u64 + 1,
-            },
-        });
+            data: Bytes::from_static(label),
+            meta: ChunkMeta { id, ts_ms, ttl_ms },
+        };
+
+        // Complete a 1-chunk message at t = base; its tombstone expires at base + ttl.
+        let first = r.handle_at(one_chunk(b"first", base, ttl), base);
         assert_eq!(first.as_deref(), Some(&b"first"[..]));
         assert!(r.completed_ids.contains(&id), "tombstoned after completion");
 
-        // A retransmit *within* the TTL window is suppressed.
-        let dup = r.handle(Chunk {
-            chunk: [0, 1],
-            data: Bytes::from_static(b"first"),
-            meta: ChunkMeta {
-                id,
-                ts_ms: now,
-                ttl_ms: TS_OFFSET_TOLERANCE_MS as u64 + 1,
-            },
-        });
+        // A full retransmit *within* the TTL window (t = base + ttl/2) is suppressed.
+        let dup = r.handle_at(one_chunk(b"first", base, ttl), base + (ttl as u128) / 2);
         assert!(
             dup.is_none(),
             "post-completion retransmit suppressed within TTL"
         );
+        assert!(
+            r.completed_ids.contains(&id),
+            "tombstone still live within TTL"
+        );
 
-        // After the tombstone's expiry, a brand-new message reusing the id is delivered. (Stamp it
-        // `now` so it is not itself expired; remove_expired runs at the top of `handle` and evicts
-        // the old tombstone because its expiry is in the past relative to a later `get_epoch_ms`.)
-        // Simulate elapsed time by directly evicting via remove_expired against a future-dated entry:
-        r.completed.clear();
-        r.completed_ids.clear();
-        let reused = r.handle(Chunk {
-            chunk: [0, 1],
-            data: Bytes::from_static(b"second"),
-            meta: ChunkMeta {
-                id,
-                ts_ms: now,
-                ttl_ms: DEFAULT_TTL_MS,
-            },
-        });
+        // Past the tombstone's expiry (t = base + ttl + 1), a brand-new message reusing the id is
+        // delivered: `remove_expired_at` evicts the now-expired tombstone before classify runs.
+        let later = base + ttl as u128 + 1;
+        let reused = r.handle_at(one_chunk(b"second", later, ttl), later);
         assert_eq!(
             reused.as_deref(),
             Some(&b"second"[..]),
-            "id reusable after tombstone gone"
+            "id reusable after its tombstone expired via remove_expired_at"
         );
     }
 }
