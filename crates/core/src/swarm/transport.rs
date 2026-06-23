@@ -22,6 +22,7 @@ use rings_transport::core::transport::TransportMessage;
 use rings_transport::core::transport::WebrtcConnectionState;
 use rings_transport::delivery::DeliveryFuture;
 
+use crate::chunk::Chunk;
 use crate::chunk::ChunkList;
 use crate::chunk::Framing;
 use crate::chunk::WireReserves;
@@ -79,31 +80,46 @@ fn spawn_delivery(fut: DeliveryFuture, did: Did) {
     });
 }
 
-/// Stream the chunks of `data` to `did` over `conn`, **awaiting each chunk's flush before sending
-/// the next**. The await is backpressure *internal* to this task — one chunk's wrapped bytes are in
-/// flight at a time, and no per-chunk task is spawned — while the task as a whole is driven off the
-/// caller's path by [`spawn_chunked_send`], so a chunked send has the same fire-and-forget contract
-/// as a whole send (`send_message` returns once the bytes are accepted, not once every chunk
-/// flushes). A frame or send failure aborts the remaining chunks; the receiver TTL-expires the
-/// partial message (chunks carry the message ttl), so no abort marker is needed.
+/// Frame one chunk into the bytes a data-channel send carries: wrap it in a `MessagePayload`
+/// addressed to `did` and serialize it. Pure (the only failure is serialization).
+fn frame_chunk(session_sk: &SessionSk, did: Did, chunk: Chunk) -> Result<Bytes> {
+    MessagePayload::new_send(Message::Chunk(chunk), session_sk, did, did)?.to_bincode()
+}
+
+/// The *tail* of a chunked message — every chunk after the first — yielded lazily. Boxed so the
+/// background task owns a concrete, nameable type (`Send` off the browser, where spawned tasks must
+/// be `Send`; single-threaded on it).
+#[cfg(not(feature = "wasm"))]
+type ChunkTail = Box<dyn Iterator<Item = Chunk> + Send>;
+#[cfg(feature = "wasm")]
+type ChunkTail = Box<dyn Iterator<Item = Chunk>>;
+
+/// Drive the *tail* of a chunked send: the first chunk has already been accepted by the caller
+/// (`do_send_payload`), so wait for it to flush (backpressure), then frame, send, and await each
+/// remaining chunk in turn. One chunk is in flight at a time and no per-chunk task is spawned. A
+/// later frame/send failure aborts the rest; the receiver TTL-expires the partial message (chunks
+/// carry the message ttl), so no abort marker is needed. Fire-and-forget — the caller already
+/// learned whether the *first* chunk was accepted, matching the whole-message contract.
 async fn run_chunked_send(
     conn: SwarmConnection,
-    data: Bytes,
-    chunk_size: usize,
+    tail: ChunkTail,
+    first_delivery: DeliveryFuture,
     session_sk: SessionSk,
     did: Did,
 ) {
-    for chunk in ChunkList::stream(data, chunk_size) {
-        let wrapped = MessagePayload::new_send(Message::Chunk(chunk), &session_sk, did, did)
-            .and_then(|payload| payload.to_bincode());
-        let wrapped = match wrapped {
+    if let Err(e) = first_delivery.await {
+        tracing::warn!("Chunked send to {did} stopped before the first chunk flushed: {e}");
+        return;
+    }
+    for chunk in tail {
+        let bytes = match frame_chunk(&session_sk, did, chunk) {
             Ok(bytes) => bytes,
             Err(e) => {
                 tracing::warn!("Chunked send to {did} aborted while framing a chunk: {e}");
                 return;
             }
         };
-        match conn.send_data(wrapped).await {
+        match conn.send_data(bytes).await {
             Ok(delivery) => {
                 if let Err(e) = delivery.await {
                     tracing::warn!("Chunked send to {did} stopped before flush: {e}");
@@ -118,30 +134,42 @@ async fn run_chunked_send(
     }
 }
 
-/// Drive a chunked send on the runtime (one bounded task per large message), keeping the caller's
-/// send fire-and-forget. See [`run_chunked_send`].
+/// Drive the tail of a chunked send on the runtime (one bounded task per large message). See
+/// [`run_chunked_send`].
 #[cfg(feature = "wasm")]
 fn spawn_chunked_send(
     conn: SwarmConnection,
-    data: Bytes,
-    chunk_size: usize,
+    tail: ChunkTail,
+    first_delivery: DeliveryFuture,
     session_sk: SessionSk,
     did: Did,
 ) {
-    wasm_bindgen_futures::spawn_local(run_chunked_send(conn, data, chunk_size, session_sk, did));
+    wasm_bindgen_futures::spawn_local(run_chunked_send(
+        conn,
+        tail,
+        first_delivery,
+        session_sk,
+        did,
+    ));
 }
 
-/// Drive a chunked send on the runtime (one bounded task per large message), keeping the caller's
-/// send fire-and-forget. See [`run_chunked_send`].
+/// Drive the tail of a chunked send on the runtime (one bounded task per large message). See
+/// [`run_chunked_send`].
 #[cfg(not(feature = "wasm"))]
 fn spawn_chunked_send(
     conn: SwarmConnection,
-    data: Bytes,
-    chunk_size: usize,
+    tail: ChunkTail,
+    first_delivery: DeliveryFuture,
     session_sk: SessionSk,
     did: Did,
 ) {
-    tokio::spawn(run_chunked_send(conn, data, chunk_size, session_sk, did));
+    tokio::spawn(run_chunked_send(
+        conn,
+        tail,
+        first_delivery,
+        session_sk,
+        did,
+    ));
 }
 
 impl SwarmTransport {
@@ -422,7 +450,23 @@ impl PayloadSender for SwarmTransport {
         match plan {
             Framing::Whole => spawn_delivery(conn.send_data(data).await?, did),
             Framing::Chunked { chunk_size } => {
-                spawn_chunked_send(conn, data, chunk_size, self.session_sk.clone(), did)
+                // Frame and accept the FIRST chunk on the caller's path, so an immediate send
+                // failure (the buffer rejecting the bytes) surfaces here exactly as it does for a
+                // whole message — `await send_message` callers learn the send was admitted. The
+                // first chunk's flush and every remaining chunk are then driven by one bounded
+                // background task (`run_chunked_send`), preserving fire-and-forget for the rest.
+                let mut chunks = ChunkList::stream(data, chunk_size);
+                if let Some(first) = chunks.next() {
+                    let first = frame_chunk(&self.session_sk, did, first)?;
+                    let first_delivery = conn.send_data(first).await?;
+                    spawn_chunked_send(
+                        conn,
+                        Box::new(chunks),
+                        first_delivery,
+                        self.session_sk.clone(),
+                        did,
+                    );
+                }
             }
         }
 
