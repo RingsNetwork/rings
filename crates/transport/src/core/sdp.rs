@@ -165,7 +165,7 @@ impl MediaDescription<'_> {
 
     /// `a=max-message-size` declared in this section, if any. Matched case-insensitively. The first
     /// occurrence wins (a well-formed SDP carries at most one; on a duplicate we take the first
-    /// deterministically). A *present but unparseable* value is a malformed advertisement: it is
+    /// deterministically). A *present but unparsable* value is a malformed advertisement: it is
     /// logged and treated as absent — there is no smaller value we could safely assume instead.
     fn max_message_size(&self) -> Option<u32> {
         for attr in &self.attrs {
