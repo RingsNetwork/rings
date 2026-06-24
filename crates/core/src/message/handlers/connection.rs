@@ -358,7 +358,7 @@ pub mod tests {
         // node1's successor should be node2 now
         assert_eq!(node1.dht().successors().max()?, node2.did());
 
-        node1.swarm.connect(node3.did()).await.unwrap();
+        node1.swarm.connect(node3.did()).await?;
         wait_for_msgs([&node1, &node2, &node3]).await;
         assert_no_more_msg([&node1, &node2, &node3]).await;
 
@@ -431,7 +431,7 @@ pub mod tests {
         // node1's successor should be node2 now
         assert_eq!(node1.dht().successors().max()?, node2.did());
 
-        node1.swarm.connect(node3.did()).await.unwrap();
+        node1.swarm.connect(node3.did()).await?;
         wait_for_msgs([&node1, &node2, &node3]).await;
         assert_no_more_msg([&node1, &node2, &node3]).await;
 
@@ -479,14 +479,15 @@ pub mod tests {
         // release-LTO CI run with native WebRTC, 6s is not always enough and the
         // assertions below would flake. The expected final state is unchanged.
         wait_until("node4 joined: DHT successors converged", || {
-            node1.dht().successors().list().ok()
-                == Some(vec![node2.did(), node3.did(), node4.did()])
-                && node2.dht().successors().list().ok()
-                    == Some(vec![node3.did(), node4.did(), node1.did()])
-                && node3.dht().successors().list().ok() == Some(vec![node1.did(), node2.did()])
-                && node4.dht().successors().list().ok() == Some(vec![node1.did(), node2.did()])
+            Ok(
+                node1.dht().successors().list()? == vec![node2.did(), node3.did(), node4.did()]
+                    && node2.dht().successors().list()?
+                        == vec![node3.did(), node4.did(), node1.did()]
+                    && node3.dht().successors().list()? == vec![node1.did(), node2.did()]
+                    && node4.dht().successors().list()? == vec![node1.did(), node2.did()],
+            )
         })
-        .await;
+        .await?;
 
         println!("=== Check state before connect via DHT ===");
         node1.assert_transports(vec![node2.did(), node3.did(), node4.did()]);
@@ -494,21 +495,21 @@ pub mod tests {
         node3.assert_transports(vec![node1.did(), node2.did()]);
         // node4 will connect node1 after connecting node2, because node2 notified node4 that node1 is its predecessor.
         node4.assert_transports(vec![node1.did(), node2.did()]);
-        assert_eq!(node1.dht().successors().list().unwrap(), vec![
+        assert_eq!(node1.dht().successors().list()?, vec![
             node2.did(),
             node3.did(),
             node4.did(),
         ]);
-        assert_eq!(node2.dht().successors().list().unwrap(), vec![
+        assert_eq!(node2.dht().successors().list()?, vec![
             node3.did(),
             node4.did(),
             node1.did(),
         ]);
-        assert_eq!(node3.dht().successors().list().unwrap(), vec![
+        assert_eq!(node3.dht().successors().list()?, vec![
             node1.did(),
             node2.did(),
         ]);
-        assert_eq!(node4.dht().successors().list().unwrap(), vec![
+        assert_eq!(node4.dht().successors().list()?, vec![
             node1.did(),
             node2.did(),
         ]);
@@ -525,42 +526,43 @@ pub mod tests {
         );
         println!("==================================================");
 
-        node4.swarm.connect(node3.did()).await.unwrap();
+        node4.swarm.connect(node3.did()).await?;
         // Same as above: poll for the post-connect converged state instead of a
         // fixed 6s sleep so the test is robust under CI contention.
         wait_until("node4 connected node3: DHT successors converged", || {
-            node1.dht().successors().list().ok()
-                == Some(vec![node2.did(), node3.did(), node4.did()])
-                && node2.dht().successors().list().ok()
-                    == Some(vec![node3.did(), node4.did(), node1.did()])
-                && node3.dht().successors().list().ok()
-                    == Some(vec![node4.did(), node1.did(), node2.did()])
-                && node4.dht().successors().list().ok()
-                    == Some(vec![node1.did(), node2.did(), node3.did()])
+            Ok(
+                node1.dht().successors().list()? == vec![node2.did(), node3.did(), node4.did()]
+                    && node2.dht().successors().list()?
+                        == vec![node3.did(), node4.did(), node1.did()]
+                    && node3.dht().successors().list()?
+                        == vec![node4.did(), node1.did(), node2.did()]
+                    && node4.dht().successors().list()?
+                        == vec![node1.did(), node2.did(), node3.did()],
+            )
         })
-        .await;
+        .await?;
 
         println!("=== Check state after connect via DHT ===");
         node1.assert_transports(vec![node2.did(), node3.did(), node4.did()]);
         node2.assert_transports(vec![node3.did(), node4.did(), node1.did()]);
         node3.assert_transports(vec![node4.did(), node1.did(), node2.did()]);
         node4.assert_transports(vec![node1.did(), node2.did(), node3.did()]);
-        assert_eq!(node1.dht().successors().list().unwrap(), vec![
+        assert_eq!(node1.dht().successors().list()?, vec![
             node2.did(),
             node3.did(),
             node4.did()
         ]);
-        assert_eq!(node2.dht().successors().list().unwrap(), vec![
+        assert_eq!(node2.dht().successors().list()?, vec![
             node3.did(),
             node4.did(),
             node1.did(),
         ]);
-        assert_eq!(node3.dht().successors().list().unwrap(), vec![
+        assert_eq!(node3.dht().successors().list()?, vec![
             node4.did(),
             node1.did(),
             node2.did(),
         ]);
-        assert_eq!(node4.dht().successors().list().unwrap(), vec![
+        assert_eq!(node4.dht().successors().list()?, vec![
             node1.did(),
             node2.did(),
             node3.did(),
@@ -569,21 +571,21 @@ pub mod tests {
         Ok(())
     }
 
-    /// Poll `cond` every 200ms until it returns true, panicking after ~60s.
+    /// Poll `cond` every 200ms until it returns true, failing after ~60s.
     /// Used instead of fixed sleeps so the test is deterministic regardless of
     /// how long the WebRTC handshake/teardown takes on a given machine.
     ///
     /// The window is generous on purpose: ICE paces connectivity checks at
     /// ~200ms each, so on a host with many network interfaces (lots of
     /// candidate pairs) establishing the connection can legitimately take ~20s.
-    async fn wait_until(msg: &str, mut cond: impl FnMut() -> bool) {
+    async fn wait_until(msg: &str, mut cond: impl FnMut() -> Result<bool>) -> Result<()> {
         for _ in 0..300 {
-            if cond() {
-                return;
+            if cond()? {
+                return Ok(());
             }
             sleep(Duration::from_millis(200)).await;
         }
-        panic!("timeout waiting for: {msg}");
+        Err(Error::InvalidMessage(format!("timeout waiting for: {msg}")))
     }
 
     #[tokio::test]
@@ -605,12 +607,12 @@ pub mod tests {
         // asynchronously, so poll until both sides have joined each other rather
         // than asserting after a fixed wait.
         wait_until("node1 and node2 to join each other's DHT", || {
-            let finger1 = node1.dht().lock_finger().unwrap().clone().clone_finger();
-            let finger2 = node2.dht().lock_finger().unwrap().clone().clone_finger();
-            finger1.into_iter().any(|x| x == Some(node2.did()))
-                && finger2.into_iter().any(|x| x == Some(node1.did()))
+            let finger1 = node1.dht().lock_finger()?.clone().clone_finger();
+            let finger2 = node2.dht().lock_finger()?.clone().clone_finger();
+            Ok(finger1.into_iter().any(|x| x == Some(node2.did()))
+                && finger2.into_iter().any(|x| x == Some(node1.did())))
         })
-        .await;
+        .await?;
 
         node1.assert_transports(vec![node2.did()]);
         node2.assert_transports(vec![node1.did()]);
@@ -624,10 +626,10 @@ pub mod tests {
         // tears its side down promptly (without waiting for the ICE `Failed`
         // timeout). Poll until both sides have removed the connection.
         wait_until("both sides to drop the connection", || {
-            node1.swarm.transport.get_connection(node2.did()).is_none()
-                && node2.swarm.transport.get_connection(node1.did()).is_none()
+            Ok(node1.swarm.transport.get_connection(node2.did()).is_none()
+                && node2.swarm.transport.get_connection(node1.did()).is_none())
         })
-        .await;
+        .await?;
 
         node1.assert_transports(vec![]);
         node2.assert_transports(vec![]);
