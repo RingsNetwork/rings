@@ -14,7 +14,7 @@ use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
 use crate::error::Error;
 use crate::error::Result;
-use crate::message::effects::CoreEffect;
+use crate::message::effects::CoreEffectF;
 use crate::message::types::FoundVNode;
 use crate::message::types::Message;
 use crate::message::types::SearchVNode;
@@ -121,7 +121,7 @@ async fn handle_storage_store_handler_act(
         PeerRingAction::None => Ok(()),
         PeerRingAction::RemoteAction(target, PeerRingRemoteAction::FindVNodeForOperate(op)) => {
             handler
-                .run_effects([CoreEffect::send_message(Message::OperateVNode(op), target)])
+                .run_effects([CoreEffectF::send_message(Message::OperateVNode(op), target)])
                 .await
         }
         PeerRingAction::MultiActions(acts) => {
@@ -146,7 +146,7 @@ async fn handle_storage_search_act(
         PeerRingAction::None => Ok(()),
         PeerRingAction::SomeVNode(v) => {
             handler
-                .run_effects([CoreEffect::send_report_message(
+                .run_effects([CoreEffectF::send_report_message(
                     ctx,
                     Message::FoundVNode(FoundVNode { data: vec![v] }),
                 )])
@@ -154,7 +154,7 @@ async fn handle_storage_search_act(
         }
         PeerRingAction::RemoteAction(next, _) => {
             handler
-                .run_effects([CoreEffect::reset_destination(ctx, next)])
+                .run_effects([CoreEffectF::reset_destination(ctx, next)])
                 .await
         }
         PeerRingAction::MultiActions(acts) => {
@@ -187,7 +187,7 @@ async fn handle_storage_operate_act(
         PeerRingAction::None => Ok(()),
         PeerRingAction::RemoteAction(next, _) => {
             handler
-                .run_effects([CoreEffect::reset_destination(ctx, *next)])
+                .run_effects([CoreEffectF::reset_destination(ctx, *next)])
                 .await
         }
         PeerRingAction::MultiActions(acts) => {
@@ -274,7 +274,7 @@ impl HandleMsg<FoundVNode> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, msg: &FoundVNode) -> Result<()> {
         if self.dht.did != ctx.relay.destination {
             return self
-                .run_effects([CoreEffect::forward_payload(ctx, None)])
+                .run_effects([CoreEffectF::forward_payload(ctx, None)])
                 .await;
         }
         for data in msg.data.iter().cloned() {

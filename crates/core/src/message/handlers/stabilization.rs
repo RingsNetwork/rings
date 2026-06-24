@@ -5,7 +5,7 @@ use crate::dht::ChordStorageSync;
 use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
 use crate::error::Result;
-use crate::message::effects::CoreEffect;
+use crate::message::effects::CoreEffectF;
 use crate::message::types::Message;
 use crate::message::types::NotifyPredecessorReport;
 use crate::message::types::NotifyPredecessorSend;
@@ -22,7 +22,7 @@ impl HandleMsg<NotifyPredecessorSend> for MessageHandler {
 
         if predecessor != ctx.relay.origin_sender() {
             return self
-                .run_effects([CoreEffect::send_report_message(
+                .run_effects([CoreEffectF::send_report_message(
                     ctx,
                     Message::NotifyPredecessorReport(NotifyPredecessorReport { did: predecessor }),
                 )])
@@ -37,7 +37,7 @@ impl HandleMsg<NotifyPredecessorSend> for MessageHandler {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
     async fn handle(&self, _ctx: &MessagePayload, msg: &NotifyPredecessorReport) -> Result<()> {
-        self.run_effects([CoreEffect::connect_dht_peer(msg.did)])
+        self.run_effects([CoreEffectF::connect_dht_peer(msg.did)])
             .await?;
 
         if let Ok(PeerRingAction::RemoteAction(
@@ -45,7 +45,7 @@ impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
             PeerRingRemoteAction::SyncVNodeWithSuccessor(data),
         )) = self.dht.sync_vnode_with_successor(msg.did).await
         {
-            self.run_effects([CoreEffect::send_message(
+            self.run_effects([CoreEffectF::send_message(
                 Message::SyncVNodeWithSuccessor(SyncVNodeWithSuccessor { data }),
                 next,
             )])
