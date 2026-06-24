@@ -85,7 +85,7 @@ impl FingerTable {
 
     /// setter for fix_finger_index
     pub fn set_fix(&mut self, did: Did) {
-        let index = self.fix_finger_index as usize;
+        let index = self.fix_finger_index;
         self.set(index, did)
     }
 
