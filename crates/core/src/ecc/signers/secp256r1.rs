@@ -104,21 +104,19 @@ pub fn verify(
     }
     let ct_pk: CtOption<Result<ecdsa::VerifyingKey<p256::NistP256>>> =
         (*pubkey).ct_try_into_secp256r1_pubkey();
-    let msg_hash = hash(msg);
-    if ct_pk.is_some().into() {
-        let res: Result<()> = ct_pk.unwrap().and_then(|pk| {
-            pk.verify_prehash(
-                &msg_hash,
-                &ecdsa::Signature::<p256::NistP256>::from_slice(sig.as_ref())
-                    .map_err(Error::ECDSAError)?,
-            )
-            .map_err(Error::ECDSAError)
-        });
-        if res.is_err() {
-            return false;
-        }
+    if !bool::from(ct_pk.is_some()) {
+        return false;
     }
-    true
+    let msg_hash = hash(msg);
+    let res: Result<()> = ct_pk.unwrap().and_then(|pk| {
+        pk.verify_prehash(
+            &msg_hash,
+            &ecdsa::Signature::<p256::NistP256>::from_slice(sig.as_ref())
+                .map_err(Error::ECDSAError)?,
+        )
+        .map_err(Error::ECDSAError)
+    });
+    res.is_ok()
 }
 
 #[cfg(test)]
@@ -205,5 +203,13 @@ mod test {
         assert_eq!(hashed, hash_msg, "hash ret not equal");
 
         assert!(verify(msg.as_bytes(), &pk.address(), sig, &pk));
+    }
+
+    #[test]
+    fn invalid_public_key_does_not_verify() {
+        let pk = PublicKey([0u8; 33]);
+        let sig = [0u8; 64];
+
+        assert!(!verify(b"msg", &pk.address(), sig, &pk));
     }
 }

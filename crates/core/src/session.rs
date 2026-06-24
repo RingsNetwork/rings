@@ -80,6 +80,10 @@ use serde::Serialize;
 use crate::consts::DEFAULT_SESSION_TTL_MS;
 use crate::dht::Did;
 use crate::ecc::keccak256;
+use crate::ecc::keys::AccountVerifier;
+use crate::ecc::keys::DidSubject;
+use crate::ecc::keys::SignatureAlgorithm;
+use crate::ecc::keys::VerificationPublicKey;
 use crate::ecc::signers;
 use crate::ecc::PublicKey;
 use crate::ecc::SecretKey;
@@ -150,7 +154,7 @@ pub struct Session {
 }
 
 /// We will support as many protocols/algorithms as possible.
-/// Currently, it comprises Secp256k1, EIP191, BIP137, and Ed25519.
+/// Currently, it comprises Secp256k1, EIP191, BIP137, Ed25519, and BLS12-381.
 /// We welcome any issues and PRs for additional implementations.
 #[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone)]
 pub enum Account {
@@ -164,21 +168,61 @@ pub enum Account {
     BIP137(Did),
     /// ed25519
     Ed25519(PublicKey<33>),
+    /// bls12-381
+    Bls12381(PublicKey<48>),
 }
 
 impl TryFrom<(String, String)> for Account {
     type Error = Error;
 
     fn try_from((account_entity, account_type): (String, String)) -> Result<Self> {
-        match account_type.as_str() {
-            "secp256k1" => Ok(Account::Secp256k1(Did::from_str(&account_entity)?)),
-            "secp256r1" => Ok(Account::Secp256r1(PublicKey::from_hex_string(
-                &account_entity,
-            )?)),
-            "eip191" => Ok(Account::EIP191(Did::from_str(&account_entity)?)),
-            "bip137" => Ok(Account::BIP137(Did::from_str(&account_entity)?)),
-            "ed25519" => Ok(Account::Ed25519(PublicKey::try_from_b58t(&account_entity)?)),
+        match AccountVerifier::from_account_parts(&account_entity, &account_type)? {
+            AccountVerifier::Recoverable {
+                algorithm: SignatureAlgorithm::Secp256k1,
+                did,
+            } => Ok(Account::Secp256k1(did)),
+            AccountVerifier::Recoverable {
+                algorithm: SignatureAlgorithm::Eip191,
+                did,
+            } => Ok(Account::EIP191(did)),
+            AccountVerifier::Recoverable {
+                algorithm: SignatureAlgorithm::Bip137,
+                did,
+            } => Ok(Account::BIP137(did)),
+            AccountVerifier::PublicKey(VerificationPublicKey::Secp256r1(pk)) => {
+                Ok(Account::Secp256r1(pk))
+            }
+            AccountVerifier::PublicKey(VerificationPublicKey::Ed25519(pk)) => {
+                Ok(Account::Ed25519(pk))
+            }
+            AccountVerifier::PublicKey(VerificationPublicKey::Bls12381(pk)) => {
+                Ok(Account::Bls12381(pk))
+            }
             _ => Err(Error::UnknownAccount),
+        }
+    }
+}
+
+impl Account {
+    fn account_verifier(&self) -> AccountVerifier {
+        match self {
+            Self::Secp256k1(did) => AccountVerifier::Recoverable {
+                algorithm: SignatureAlgorithm::Secp256k1,
+                did: *did,
+            },
+            Self::EIP191(did) => AccountVerifier::Recoverable {
+                algorithm: SignatureAlgorithm::Eip191,
+                did: *did,
+            },
+            Self::BIP137(did) => AccountVerifier::Recoverable {
+                algorithm: SignatureAlgorithm::Bip137,
+                did: *did,
+            },
+            Self::Secp256r1(pk) => {
+                AccountVerifier::PublicKey(VerificationPublicKey::Secp256r1(*pk))
+            }
+            Self::Ed25519(pk) => AccountVerifier::PublicKey(VerificationPublicKey::Ed25519(*pk)),
+            Self::Bls12381(pk) => AccountVerifier::PublicKey(VerificationPublicKey::Bls12381(*pk)),
         }
     }
 }
@@ -281,19 +325,11 @@ impl Session {
 
         let auth_bytes = self.pack();
 
-        if !(match self.account {
-            Account::Secp256k1(did) => {
-                signers::secp256k1::verify(&auth_bytes, &did.into(), &self.sig)
-            }
-            Account::EIP191(did) => signers::eip191::verify(&auth_bytes, &did.into(), &self.sig),
-            Account::BIP137(did) => signers::bip137::verify(&auth_bytes, &did.into(), &self.sig),
-            Account::Ed25519(ref pk) => {
-                signers::ed25519::verify(&auth_bytes, &pk.address(), &self.sig, pk)
-            }
-            Account::Secp256r1(ref pk) => {
-                signers::secp256r1::verify(&auth_bytes, &pk.address(), &self.sig, pk)
-            }
-        }) {
+        if !self
+            .account
+            .account_verifier()
+            .verify(&auth_bytes, &self.sig)
+        {
             return Err(Error::VerifySignatureFailed);
         }
 
@@ -309,27 +345,35 @@ impl Session {
         Ok(())
     }
 
-    /// Get public key from session for encryption.
+    /// Get legacy secp256k1-compatible account public key.
+    ///
+    /// Use `account_verification_pubkey` for typed account verification keys.
     pub fn account_pubkey(&self) -> Result<PublicKey<33>> {
-        let auth_bytes = self.pack();
-        match self.account {
-            Account::Secp256k1(_) => signers::secp256k1::recover(&auth_bytes, &self.sig),
-            Account::BIP137(_) => signers::bip137::recover(&auth_bytes, &self.sig),
-            Account::EIP191(_) => signers::eip191::recover(&auth_bytes, &self.sig),
-            Account::Ed25519(ref pk) => Ok(*pk),
-            Account::Secp256r1(ref pk) => Ok(*pk),
+        match self.account_verification_pubkey()? {
+            VerificationPublicKey::Secp256k1(pk)
+            | VerificationPublicKey::Eip191(pk)
+            | VerificationPublicKey::Bip137(pk) => Ok(pk),
+            VerificationPublicKey::Secp256r1(_)
+            | VerificationPublicKey::Ed25519(_)
+            | VerificationPublicKey::Bls12381(_) => Err(Error::UnknownAccount),
         }
+    }
+
+    /// Get typed account verification public key from session proof.
+    pub fn account_verification_pubkey(&self) -> Result<VerificationPublicKey> {
+        self.account
+            .account_verifier()
+            .verification_key_from_signature(&self.pack(), &self.sig)
+    }
+
+    /// Get typed account verifier.
+    pub fn account_verifier(&self) -> AccountVerifier {
+        self.account.account_verifier()
     }
 
     /// Get account did.
     pub fn account_did(&self) -> Did {
-        match self.account {
-            Account::Secp256k1(did) => did,
-            Account::BIP137(did) => did,
-            Account::EIP191(did) => did,
-            Account::Ed25519(ref pk) => pk.address().into(),
-            Account::Secp256r1(ref pk) => pk.address().into(),
-        }
+        self.account.account_verifier().did()
     }
 }
 
@@ -365,6 +409,11 @@ impl SessionSk {
         self.session.account_did()
     }
 
+    /// Get typed account verifier from session.
+    pub fn account_verifier(&self) -> AccountVerifier {
+        self.session.account_verifier()
+    }
+
     /// Dump session_sk to string, allowing user to save it in a config file.
     /// It can be restored using `SessionSk::from_str`.
     pub fn dump(&self) -> Result<String> {
@@ -376,6 +425,8 @@ impl SessionSk {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::ecc::keys::SecretKeyMaterial;
+    use crate::ecc::keys::SigningSecretKey;
 
     #[test]
     pub fn test_session_verify() {
@@ -392,6 +443,95 @@ mod test {
         let session = sm.session();
         let pubkey = session.account_pubkey().unwrap();
         assert_eq!(key.pubkey(), pubkey);
+    }
+
+    #[test]
+    pub fn test_session_verify_secp256r1_account_key() {
+        let account_entity = "17a6afd392fcbe4ac9270a599a9c5732c4f838ce35ea2234d389d8f0c367f3f5dcab906352e27289002c7f2c96039ddce7c1b5aad8b87ba94984d4c8b4f95702";
+        let account_key = VerificationPublicKey::Secp256r1(
+            PublicKey::<33>::from_hex_string(account_entity).unwrap(),
+        );
+        let signing_key =
+            SecretKey::try_from("2544acda37415a476d42312969926dc48e529867036cec71922d4177ea9c1038")
+                .unwrap();
+        let mut builder =
+            SessionSkBuilder::new(account_entity.to_string(), "secp256r1".to_string());
+        let proof = builder.unsigned_proof();
+        let sig =
+            signers::secp256r1::sign(signing_key, &signers::secp256r1::hash(proof.as_bytes()));
+        builder = builder.set_session_sig(sig.to_vec());
+
+        let session = builder.build().unwrap().session();
+        assert_eq!(session.account_verification_pubkey().unwrap(), account_key);
+        assert_eq!(session.account_did(), account_key.did());
+        assert!(session.verify_self().is_ok());
+        assert!(session.account_pubkey().is_err());
+    }
+
+    #[test]
+    pub fn test_session_rejects_invalid_secp256r1_account_key() {
+        let mut invalid_key = None;
+        for i in 0u8..=u8::MAX {
+            let mut key = [0u8; 33];
+            key[0] = 2;
+            key[32] = i;
+            let public_key = PublicKey(key);
+            let verifying_key = public_key.ct_try_into_secp256r1_pubkey();
+            if !bool::from(verifying_key.is_some()) || verifying_key.unwrap().is_err() {
+                invalid_key = Some(key);
+                break;
+            }
+        }
+        let account_entity = hex::encode(invalid_key.expect("at least one invalid P-256 x"));
+        let builder = SessionSkBuilder::new(account_entity, "secp256r1".to_string())
+            .set_session_sig(vec![0u8; 64]);
+
+        assert!(!builder.validate_account());
+        assert!(builder.build().is_err());
+    }
+
+    #[test]
+    pub fn test_session_verify_bls12381_account_key() {
+        let signing_key = SigningSecretKey::random_bls12381().unwrap();
+        let account_key = signing_key.public_key().unwrap();
+        let VerificationPublicKey::Bls12381(raw_account_key) = account_key else {
+            unreachable!("random_bls12381 returns a BLS verification key");
+        };
+        let account_entity = base58_monero::encode_check(&raw_account_key.0).unwrap();
+        let mut builder = SessionSkBuilder::new(account_entity, "bls12-381".to_string());
+        let proof = builder.unsigned_proof();
+        builder = builder.set_session_sig(signing_key.sign_raw(proof.as_bytes()).unwrap());
+
+        let session = builder.build().unwrap().session();
+        assert_eq!(
+            session.account_verification_pubkey().unwrap(),
+            VerificationPublicKey::Bls12381(raw_account_key)
+        );
+        assert_eq!(session.account_did(), account_key.did());
+        assert!(session.verify_self().is_ok());
+        assert!(session.account_pubkey().is_err());
+    }
+
+    #[test]
+    pub fn test_session_verify_ed25519_account_key() {
+        let signing_key = SigningSecretKey::random_ed25519();
+        let account_key = signing_key.public_key().unwrap();
+        let VerificationPublicKey::Ed25519(raw_account_key) = account_key else {
+            unreachable!("random_ed25519 returns an Ed25519 verification key");
+        };
+        let account_entity = raw_account_key.to_base58_string().unwrap();
+        let mut builder = SessionSkBuilder::new(account_entity, "ed25519".to_string());
+        let proof = builder.unsigned_proof();
+        builder = builder.set_session_sig(signing_key.sign_raw(proof.as_bytes()).unwrap());
+
+        let session = builder.build().unwrap().session();
+        assert_eq!(
+            session.account_verification_pubkey().unwrap(),
+            VerificationPublicKey::Ed25519(raw_account_key)
+        );
+        assert_eq!(session.account_did(), account_key.did());
+        assert!(session.verify_self().is_ok());
+        assert!(session.account_pubkey().is_err());
     }
 
     #[test]

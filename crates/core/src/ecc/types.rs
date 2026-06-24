@@ -14,7 +14,9 @@ struct PublicKeyVisitor<const SIZE: usize>;
 // /// twist from https://docs.rs/libsecp256k1/latest/src/libsecp256k1/lib.rs.html#335-344
 impl<const SIZE: usize> Serialize for PublicKey<SIZE> {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where S: serde::ser::Serializer {
+    where
+        S: serde::ser::Serializer,
+    {
         serializer.serialize_str(
             &base58_monero::encode_check(&self.0[..]).map_err(serde::ser::Error::custom)?,
         )
@@ -85,21 +87,40 @@ impl PublicKey<33> {
     }
 }
 
-impl<'de> serde::de::Visitor<'de> for PublicKeyVisitor<33> {
-    type Value = PublicKey<33>;
-
-    fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
-        formatter.write_str("a bytestring of in length 33")
-    }
-    fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
-    where E: serde::de::Error {
-        PublicKey::try_from_b58m(value).map_err(|e| E::custom(e))
+impl<const SIZE: usize> PublicKey<SIZE> {
+    /// Build a public key from exactly `SIZE` bytes.
+    pub fn from_exact_u8(value: &[u8]) -> Result<PublicKey<SIZE>> {
+        let data: [u8; SIZE] = value.try_into().map_err(|_| Error::PublicKeyBadFormat)?;
+        Ok(PublicKey(data))
     }
 }
 
-impl<'de> Deserialize<'de> for PublicKey<33> {
+impl<'de, const SIZE: usize> serde::de::Visitor<'de> for PublicKeyVisitor<SIZE> {
+    type Value = PublicKey<SIZE>;
+
+    fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
+        write!(formatter, "a base58-check public key with length {SIZE}")
+    }
+
+    fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        let value =
+            base58_monero::decode_check(value).map_err(|_| E::custom(Error::PublicKeyBadFormat))?;
+        if SIZE == 33 {
+            let key = PublicKey::<33>::from_u8(&value).map_err(E::custom)?;
+            return PublicKey::from_exact_u8(&key.0).map_err(E::custom);
+        }
+        PublicKey::from_exact_u8(&value).map_err(E::custom)
+    }
+}
+
+impl<'de, const SIZE: usize> Deserialize<'de> for PublicKey<SIZE> {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where D: serde::de::Deserializer<'de> {
+    where
+        D: serde::de::Deserializer<'de>,
+    {
         deserializer.deserialize_str(PublicKeyVisitor)
     }
 }
