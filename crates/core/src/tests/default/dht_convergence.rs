@@ -37,12 +37,15 @@
 //!
 //! \* Rank of x among Others(n) by increasing clockwise distance (0-based).
 //! Rank(n, x) == Cardinality({ y \in Others(n) : dist(n,y) < dist(n,x) })
+//! SeqSet(s) == { s[i] : i \in 1..Len(s) }
+//! RankIn(S, n, x) == Cardinality({ y \in S \ {n} : dist(n,y) < dist(n,x) })
 //!
 //! \* Successors(n): the K nearest forward nodes, ordered by distance. Mirrors
 //! \* SuccessorSeq::update (keep the K smallest dist, sorted).
-//! Successors(n) ==
-//!   [ i \in 1..Min(K, Cardinality(Others(n))) |->
-//!       CHOOSE x \in Others(n) : Rank(n, x) = i - 1 ]
+//! SuccessorsOver(S, n) ==
+//!   [ i \in 1..Min(K, Cardinality(S \ {n})) |->
+//!       CHOOSE x \in S \ {n} : RankIn(S, n, x) = i - 1 ]
+//! Successors(n) == SuccessorsOver(Node, n)
 //!
 //! \* Predecessor(n): nearest node behind = farthest forward. Mirrors
 //! \* chord.rs `notify`: pred := d iff bias(pred) < bias(d).
@@ -64,6 +67,25 @@
 //!   LET C == { x \in Others(n) : dist(n,x) >= 2^k } IN
 //!   IF C = {} THEN none
 //!   ELSE CHOOSE x \in C : \A y \in C : dist(n,x) <= dist(n,y)
+//!
+//! \* CorrectChord stabilize operation (HMCC/Zave path). This is the default
+//! \* production path: `Stabilizer::stabilize` calls `correct_stabilize`, and
+//! \* message handling applies `PeerRing::stabilize` to the successor's TopoInfo.
+//! ButLast(s) == IF Len(s) = 0 THEN <<>> ELSE SubSeq(s, 1, Len(s)-1)
+//! InsertKnown(n, cur, candidates) ==
+//!   LET Known == {n} \cup SeqSet(cur) \cup candidates IN
+//!     SuccessorsOver(Known, n)
+//! Improved(n, cur, p) ==
+//!   /\ p # none
+//!   /\ p # n
+//!   /\ (Len(cur) = 0 \/ dist(n, p) < dist(n, Head(cur)))
+//! CorrectStabilize(n, cur, topoSucc, topoPred) ==
+//!   LET predSet == IF topoPred = none THEN {} ELSE {topoPred}
+//!       cand == SeqSet(ButLast(topoSucc)) \cup predSet
+//!       next == InsertKnown(n, cur, cand) IN
+//!   /\ succ'[n] = next
+//!   /\ query'  = IF Improved(n, cur, topoPred) THEN <<topoPred>> ELSE <<>>
+//!   /\ notify' = IF Len(next) = 0 THEN <<>> ELSE <<Head(next)>>
 //!
 //! \* Converged(n): the materialised local state equals the operators above.
 //! Converged(n) ==
@@ -92,9 +114,14 @@ use std::str::FromStr;
 use num_bigint::BigUint;
 
 use crate::dht::successor::SuccessorReader;
+use crate::dht::successor::SuccessorWriter;
 use crate::dht::Chord;
+use crate::dht::CorrectChord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
+use crate::dht::PeerRingAction;
+use crate::dht::PeerRingRemoteAction;
+use crate::dht::TopoInfo;
 use crate::storage::MemStorage;
 
 /// Successor-list capacity; matches `SwarmBuilder::dht_succ_max` (production).
@@ -146,6 +173,60 @@ pub(super) mod spec {
     /// The full per-node finger table the spec predicts (one slot per ring bit).
     pub fn finger_table(all: &[Did], n: Did) -> Vec<Option<Did>> {
         (0..BITS).map(|bit| finger(all, n, bit)).collect()
+    }
+
+    fn push_unique(xs: &mut Vec<Did>, x: Did) {
+        if !xs.contains(&x) {
+            xs.push(x);
+        }
+    }
+
+    /// `CorrectStabilize` successor update: merge current successors with the
+    /// successor's predecessor and all but the last entry of the successor's
+    /// successor list, then keep the K nearest forward nodes.
+    pub fn correct_stabilize_successors(
+        me: Did,
+        current: &[Did],
+        topo_successors: &[Did],
+        topo_predecessor: Option<Did>,
+    ) -> Vec<Did> {
+        let mut known = vec![me];
+        for &did in current {
+            push_unique(&mut known, did);
+        }
+        if let Some(pred) = topo_predecessor {
+            push_unique(&mut known, pred);
+        }
+        for &did in topo_successors
+            .iter()
+            .take(topo_successors.len().saturating_sub(1))
+        {
+            push_unique(&mut known, did);
+        }
+        successors(&known, me)
+    }
+
+    /// `CorrectStabilize` query side effect: ask the successor's predecessor for
+    /// its successor list only when that predecessor is a strict improvement over
+    /// the old head of the local successor list.
+    pub fn correct_stabilize_query(
+        me: Did,
+        current: &[Did],
+        topo_predecessor: Option<Did>,
+    ) -> Option<Did> {
+        let pred = topo_predecessor?;
+        if pred == me {
+            return None;
+        }
+        match current.first() {
+            Some(&head) if dist(me, pred) >= dist(me, head) => None,
+            _ => Some(pred),
+        }
+    }
+
+    /// `CorrectStabilize` notify side effect: notify the new successor, if any.
+    pub fn correct_stabilize_notify(me: Did, next_successors: &[Did]) -> Option<Did> {
+        next_successors.first().copied().filter(|&did| did != me)
     }
 }
 
@@ -254,6 +335,59 @@ fn assert_converged_matches_spec(layout: &Layout) {
     }
 }
 
+fn dht_with_successors(me: Did, successors: &[Did]) -> PeerRing {
+    let dht = PeerRing::new_with_storage(me, K as u8, Box::new(MemStorage::new()));
+    for &successor in successors {
+        dht.successors().update(successor).unwrap();
+    }
+    dht
+}
+
+fn assert_correct_stabilize_matches_spec(
+    me: Did,
+    current_successors: &[Did],
+    topo_successors: &[Did],
+    topo_predecessor: Option<Did>,
+) {
+    let dht = dht_with_successors(me, current_successors);
+    let action = dht
+        .stabilize(TopoInfo {
+            successors: topo_successors.to_vec(),
+            predecessor: topo_predecessor,
+        })
+        .unwrap();
+    let expected_successors = spec::correct_stabilize_successors(
+        me,
+        current_successors,
+        topo_successors,
+        topo_predecessor,
+    );
+    let mut expected_actions = vec![];
+    if let Some(query) = spec::correct_stabilize_query(me, current_successors, topo_predecessor) {
+        expected_actions.push(PeerRingAction::RemoteAction(
+            query,
+            PeerRingRemoteAction::QueryForSuccessorList,
+        ));
+    }
+    if let Some(notify) = spec::correct_stabilize_notify(me, &expected_successors) {
+        expected_actions.push(PeerRingAction::RemoteAction(
+            notify,
+            PeerRingRemoteAction::Notify(me),
+        ));
+    }
+
+    assert_eq!(
+        dht.successors().list().unwrap(),
+        expected_successors,
+        "CorrectStabilize successor list mismatch"
+    );
+    assert_eq!(
+        action,
+        PeerRingAction::MultiActions(expected_actions),
+        "CorrectStabilize action mismatch"
+    );
+}
+
 /// Base case P(2): a single forward neighbour — the wrap-around case, where each
 /// node's only successor and its predecessor are the same peer.
 #[test]
@@ -299,4 +433,42 @@ fn convergence_clustered_n6() {
 #[test]
 fn convergence_dyadic_boundary() {
     assert_converged_matches_spec(&Layout::DyadicBoundary);
+}
+
+/// Operation conformance for the HMCC/Zave `CorrectStabilize` operator:
+/// a successor's predecessor that is closer than the old head is adopted,
+/// queried for its successor list, then notified as the new successor.
+#[test]
+fn correct_stabilize_improved_predecessor_matches_spec() {
+    let dids = Layout::Even(5).dids();
+    assert_correct_stabilize_matches_spec(
+        dids[0],
+        &[dids[2]],
+        &[dids[3], dids[4], dids[0]],
+        Some(dids[1]),
+    );
+}
+
+/// Even when the successor has no predecessor yet, `CorrectStabilize` still
+/// notifies the current successor; the predecessor absence only suppresses the
+/// improved-successor query.
+#[test]
+fn correct_stabilize_without_predecessor_still_notifies_successor() {
+    let dids = Layout::Even(4).dids();
+    assert_correct_stabilize_matches_spec(dids[0], &[dids[1]], &[dids[2], dids[3]], None);
+}
+
+/// A successor reporting this node as its predecessor is not an improved
+/// successor and must not trigger a self-query.
+#[test]
+fn correct_stabilize_self_predecessor_does_not_query_self() {
+    let dids = Layout::Even(3).dids();
+    assert_correct_stabilize_matches_spec(dids[0], &[dids[1]], &[dids[2]], Some(dids[0]));
+}
+
+/// Empty TopoInfo is a no-op when the node has no successor to notify.
+#[test]
+fn correct_stabilize_empty_topo_without_successor_is_noop() {
+    let dids = Layout::Even(2).dids();
+    assert_correct_stabilize_matches_spec(dids[0], &[], &[], None);
 }

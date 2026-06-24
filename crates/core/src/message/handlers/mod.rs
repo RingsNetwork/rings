@@ -7,7 +7,6 @@ use async_recursion::async_recursion;
 use async_trait::async_trait;
 
 use super::MessagePayload;
-use crate::dht::Chord;
 use crate::dht::CorrectChord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
@@ -69,24 +68,14 @@ impl MessageHandler {
     }
 
     pub(crate) async fn join_dht(&self, peer: Did) -> Result<()> {
-        if cfg!(feature = "experimental") {
-            let conn = self
-                .transport
-                .get_connection(peer)
-                .ok_or(Error::SwarmMissDidInTable(peer))?;
-            let dht_ev = self.dht.join_then_sync(conn).await?;
-            self.handle_dht_events(&dht_ev).await
-        } else {
-            let dht_ev = self.dht.join(peer)?;
-            // `dht.join` already updated the local routing table synchronously;
-            // `handle_dht_events` only fires best-effort convergence messages.
-            // A send here can legitimately fail if the peer churned away, so log
-            // and continue instead of panicking.
-            if let Err(e) = self.handle_dht_events(&dht_ev).await {
-                tracing::warn!("Failed to handle dht events while joining {peer}: {e:?}");
-            }
-            Ok(())
-        }
+        // Default HMCC/Zave join path: maps to the JoinThenSync operation in
+        // the CorrectChord spec (see tests/default/dht_convergence.rs).
+        let conn = self
+            .transport
+            .get_connection(peer)
+            .ok_or(Error::SwarmMissDidInTable(peer))?;
+        let dht_ev = self.dht.join_then_sync(conn).await?;
+        self.handle_dht_events(&dht_ev).await
     }
 
     pub(crate) async fn leave_dht(&self, peer: Did) -> Result<()> {
@@ -146,14 +135,16 @@ impl MessageHandler {
                 self.transport.connect(*did, self.inner_callback()).await?;
                 Ok(())
             }
-            PeerRingAction::RemoteAction(did, PeerRingRemoteAction::Notify(target_id)) => {
-                if did == target_id {
-                    tracing::warn!("Did is equal to target_id, may implement wrong.");
+            PeerRingAction::RemoteAction(did, PeerRingRemoteAction::Notify(predecessor)) => {
+                if did == predecessor {
+                    tracing::warn!("Notify target is equal to predecessor, may implement wrong.");
                     return Ok(());
                 }
+                // `RemoteAction(target, Notify(pred))` means "send pred to target"
+                // and maps to CorrectStabilize.notify' in the TLA+ spec mirror.
                 let msg =
-                    Message::NotifyPredecessorSend(NotifyPredecessorSend { did: self.dht.did });
-                self.transport.send_message(msg, *target_id).await?;
+                    Message::NotifyPredecessorSend(NotifyPredecessorSend { did: *predecessor });
+                self.transport.send_message(msg, *did).await?;
                 Ok(())
             }
             PeerRingAction::MultiActions(acts) => {

@@ -598,25 +598,33 @@ impl CorrectChord<PeerRingAction> for PeerRing {
     fn stabilize(&self, info: TopoInfo) -> Result<PeerRingAction> {
         let mut ret = vec![];
         let successors = self.successors();
+        let old_head = if successors.is_empty()? {
+            None
+        } else {
+            Some(successors.min()?)
+        };
         let succ_len = info.successors.len();
-        let but_last = &info.successors[..succ_len - 1].to_vec();
+        let but_last = &info.successors[..succ_len.saturating_sub(1)].to_vec();
+        let improved_successor = info.predecessor.filter(|new_succ| {
+            *new_succ != self.did
+                && old_head.is_none_or(|head| self.bias(*new_succ) < self.bias(head))
+        });
         if let Some(new_succ) = info.predecessor {
             successors.update(new_succ)?;
         }
         successors.extend(but_last)?;
-        // Check if the new successor is between  new_succ and head(successors).
-        if let Some(new_succ) = info.predecessor {
-            if self.bias(new_succ) < self.bias(successors.min()?) {
-                // If new_succ is between self.did and the head of the successor list,
-                // query newSucc for its successor list.
-                ret.push(PeerRingAction::RemoteAction(
-                    new_succ,
-                    RemoteAction::QueryForSuccessorList,
-                ));
-            }
-            // Notify the node's minimum successor of its existence.
+        // Check if new_succ was between self.did and the old head of successors.
+        if let Some(new_succ) = improved_successor {
             ret.push(PeerRingAction::RemoteAction(
-                successors.min()?,
+                new_succ,
+                RemoteAction::QueryForSuccessorList,
+            ));
+        }
+        // Notify the node's minimum successor of its existence.
+        let head = successors.min()?;
+        if head != self.did {
+            ret.push(PeerRingAction::RemoteAction(
+                head,
                 RemoteAction::Notify(self.did),
             ));
         }
@@ -867,6 +875,22 @@ mod tests {
         assert!(
             node2.lock_finger()?.contains(Some(did1)),
             "did2:{did2:?} dont contains did1:{did1:?}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_correct_chord_stabilize_handles_empty_successor_info() -> Result<()> {
+        let did = Did::from_str("0x051cf4f8d020cb910474bef3e17f153fface2b5f").unwrap();
+        let node = PeerRing::new_with_storage(did, 3, Box::new(MemStorage::new()));
+
+        assert_eq!(
+            node.stabilize(TopoInfo {
+                successors: vec![],
+                predecessor: None,
+            })?,
+            PeerRingAction::MultiActions(vec![])
         );
 
         Ok(())

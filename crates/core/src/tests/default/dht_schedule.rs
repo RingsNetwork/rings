@@ -47,8 +47,8 @@
 //! That is reproducible evidence that convergence is insensitive to delivery
 //! order for this regime (not a proof over all orders). It replaces the old
 //! wall-clock-bounded flaky `test_stabilization_final_dht`, whose 90s deadline
-//! asserted bounded-time convergence — unsound without `correct_stabilize`
-//! (experimental/off). A schedule that did NOT converge would be a reproducible
+//! asserted bounded-time convergence — unsound without `correct_stabilize`.
+//! A schedule that did NOT converge would be a reproducible
 //! bug, pinned to its exact delivery sequence.
 //! ====================================================================
 

@@ -11,9 +11,8 @@ authors.workspace = true
 repository.workspace = true
 
 [features]
-# Feature "experimental" is used to mark an implementation as experimental, which means that:
-# It may not have been thoroughly tested.
-# The corresponding API may be deprecated or adjusted in the future.
+# Deprecated compatibility alias. The formerly experimental correct-chord path
+# now runs by default.
 experimental = ["std"]
 default = ["std"]
 redundant = ["default"]

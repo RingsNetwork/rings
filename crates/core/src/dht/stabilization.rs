@@ -55,14 +55,13 @@ impl Stabilizer {
             );
         }
         tracing::debug!("STABILIZATION clean_unavailable_connections end");
-        #[cfg(feature = "experimental")]
-        {
-            tracing::debug!("STABILIZATION correct_stabilize start");
-            if let Err(e) = self.correct_stabilize().await {
-                tracing::error!("[stabilize] Failed on call correct stabilize {:?}", e);
-            }
-            tracing::debug!("STABILIZATION correct_stabilize end");
+        // Default HMCC/Zave stabilization path. The pure operation is specified
+        // as `CorrectStabilize` in tests/default/dht_convergence.rs.
+        tracing::debug!("STABILIZATION correct_stabilize start");
+        if let Err(e) = self.correct_stabilize().await {
+            tracing::error!("[stabilize] Failed on call correct stabilize {:?}", e);
         }
+        tracing::debug!("STABILIZATION correct_stabilize end");
         Ok(())
     }
 
