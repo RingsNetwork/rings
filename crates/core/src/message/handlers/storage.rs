@@ -53,6 +53,30 @@ pub trait ChordStorageInterfaceCacheChecker {
     async fn storage_check_cache(&self, vid: Did) -> Option<VirtualNode>;
 }
 
+fn finish_storage_action(act: PeerRingAction) -> Result<()> {
+    match act {
+        PeerRingAction::None => Ok(()),
+        act => Err(Error::PeerRingUnexpectedAction(act)),
+    }
+}
+
+fn finish_storage_action_ref(act: &PeerRingAction) -> Result<()> {
+    match act {
+        PeerRingAction::None => Ok(()),
+        act => Err(Error::PeerRingUnexpectedAction(act.clone())),
+    }
+}
+
+async fn reset_storage_relay_destination(
+    handler: &MessageHandler,
+    ctx: &MessagePayload,
+    next: Did,
+) -> Result<()> {
+    handler
+        .run_effects([PayloadRelayFunctor::reset_destination(ctx, next).into()])
+        .await
+}
+
 /// Execute storage fetch actions for the Swarm-facing storage API.
 #[cfg_attr(feature = "wasm", async_recursion(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_recursion)]
@@ -61,7 +85,6 @@ async fn handle_storage_fetch_act(
     act: PeerRingAction,
 ) -> Result<()> {
     match act {
-        PeerRingAction::None => (),
         PeerRingAction::SomeVNode(v) => {
             transport.dht.local_cache_put(v).await?;
         }
@@ -82,7 +105,7 @@ async fn handle_storage_fetch_act(
                 handle_storage_fetch_act(transport.clone(), act).await?;
             }
         }
-        act => return Err(Error::PeerRingUnexpectedAction(act)),
+        act => finish_storage_action(act)?,
     }
     Ok(())
 }
@@ -95,7 +118,6 @@ pub(super) async fn handle_storage_store_act(
     act: PeerRingAction,
 ) -> Result<()> {
     match act {
-        PeerRingAction::None => (),
         PeerRingAction::RemoteAction(target, PeerRingRemoteAction::FindVNodeForOperate(op)) => {
             transport
                 .send_message(Message::OperateVNode(op), target)
@@ -106,7 +128,7 @@ pub(super) async fn handle_storage_store_act(
                 handle_storage_store_act(transport.clone(), act).await?;
             }
         }
-        act => return Err(Error::PeerRingUnexpectedAction(act)),
+        act => finish_storage_action(act)?,
     }
     Ok(())
 }
@@ -119,7 +141,6 @@ async fn handle_storage_store_handler_act(
     act: PeerRingAction,
 ) -> Result<()> {
     match act {
-        PeerRingAction::None => Ok(()),
         PeerRingAction::RemoteAction(target, PeerRingRemoteAction::FindVNodeForOperate(op)) => {
             handler
                 .run_effects([
@@ -133,7 +154,7 @@ async fn handle_storage_store_handler_act(
             }
             Ok(())
         }
-        act => Err(Error::PeerRingUnexpectedAction(act)),
+        act => finish_storage_action(act),
     }
 }
 
@@ -146,7 +167,6 @@ async fn handle_storage_search_act(
     act: PeerRingAction,
 ) -> Result<()> {
     match act {
-        PeerRingAction::None => Ok(()),
         PeerRingAction::SomeVNode(v) => {
             handler
                 .run_effects([PayloadRelayFunctor::send_report_message(
@@ -157,9 +177,7 @@ async fn handle_storage_search_act(
                 .await
         }
         PeerRingAction::RemoteAction(next, _) => {
-            handler
-                .run_effects([PayloadRelayFunctor::reset_destination(ctx, next).into()])
-                .await
+            reset_storage_relay_destination(handler, ctx, next).await
         }
         PeerRingAction::MultiActions(acts) => {
             let jobs = acts
@@ -174,7 +192,7 @@ async fn handle_storage_search_act(
 
             Ok(())
         }
-        act => Err(Error::PeerRingUnexpectedAction(act.clone())),
+        act => finish_storage_action(act),
     }
 }
 
@@ -187,11 +205,8 @@ async fn handle_storage_operate_act(
     act: &PeerRingAction,
 ) -> Result<()> {
     match act {
-        PeerRingAction::None => Ok(()),
         PeerRingAction::RemoteAction(next, _) => {
-            handler
-                .run_effects([PayloadRelayFunctor::reset_destination(ctx, *next).into()])
-                .await
+            reset_storage_relay_destination(handler, ctx, *next).await
         }
         PeerRingAction::MultiActions(acts) => {
             let jobs = acts
@@ -206,7 +221,7 @@ async fn handle_storage_operate_act(
 
             Ok(())
         }
-        act => Err(Error::PeerRingUnexpectedAction(act.clone())),
+        act => finish_storage_action_ref(act),
     }
 }
 
@@ -318,6 +333,7 @@ impl HandleMsg<SyncVNodeWithSuccessor> for MessageHandler {
 mod test {
     use super::*;
     use crate::ecc::tests::gen_ordered_keys;
+    use crate::ecc::SecretKey;
     use crate::message::Encoder;
     use crate::prelude::vnode::VNodeType;
     use crate::tests::default::assert_no_more_msg;
@@ -330,6 +346,27 @@ mod test {
         node.listen_once()
             .await
             .ok_or_else(|| Error::InvalidMessage("expected message payload".to_string()))
+    }
+
+    #[test]
+    fn finish_storage_action_accepts_empty_action() -> Result<()> {
+        finish_storage_action(PeerRingAction::None)?;
+        finish_storage_action_ref(&PeerRingAction::None)?;
+        Ok(())
+    }
+
+    #[test]
+    fn finish_storage_action_rejects_unhandled_action() -> Result<()> {
+        let did = SecretKey::random().address().into();
+        match finish_storage_action(PeerRingAction::Some(did)) {
+            Err(Error::PeerRingUnexpectedAction(PeerRingAction::Some(actual))) => {
+                assert_eq!(actual, did);
+                Ok(())
+            }
+            res => Err(Error::InvalidMessage(format!(
+                "expected unexpected storage action, got {res:?}"
+            ))),
+        }
     }
 
     #[tokio::test]
