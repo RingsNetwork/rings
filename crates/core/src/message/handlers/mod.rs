@@ -6,8 +6,8 @@ use std::sync::Arc;
 use async_recursion::async_recursion;
 use async_trait::async_trait;
 
-use super::effects::lower_dht_action_f;
-use super::effects::CoreEffectF;
+use super::effects::lower_dht_action;
+use super::effects::CoreEffect;
 use super::effects::CoreEffectInterpreter;
 use super::MessagePayload;
 use crate::dht::CorrectChord;
@@ -64,7 +64,7 @@ impl MessageHandler {
 
     pub(crate) async fn run_effects(
         &self,
-        effects: impl IntoIterator<Item = CoreEffectF>,
+        effects: impl IntoIterator<Item = CoreEffect>,
     ) -> Result<()> {
         CoreEffectInterpreter::new(self.transport.clone(), self.swarm_callback.clone())
             .run_all(effects)
@@ -77,8 +77,7 @@ impl MessageHandler {
     /// as success so concurrent DHT actions racing through `MultiActions` do not
     /// fail the whole handler.
     pub(crate) async fn connect_dht_peer(&self, peer: Did) -> Result<()> {
-        self.run_effects([CoreEffectF::connect_dht_peer(peer)])
-            .await
+        self.run_effects([CoreEffect::connect_dht_peer(peer)]).await
     }
 
     pub(crate) async fn join_dht(&self, peer: Did) -> Result<()> {
@@ -129,7 +128,7 @@ impl MessageHandler {
             }
             act => {
                 let effects =
-                    lower_dht_action_f(act, |did| self.transport.get_connection(did).is_some())?;
+                    lower_dht_action(act, |did| self.transport.get_connection(did).is_some())?;
                 self.run_effects(effects).await
             }
         }

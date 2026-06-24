@@ -2,17 +2,17 @@ use async_trait::async_trait;
 
 use crate::dht::Did;
 use crate::error::Result;
-use crate::message::effects::CoreEffectF;
+use crate::message::effects::CoreEffect;
 #[cfg(test)]
-use crate::message::effects::PayloadRelayF;
+use crate::message::effects::PayloadRelayFunctor;
 use crate::message::types::CustomMessage;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 
-pub(crate) fn custom_message_effects(local: Did, ctx: &MessagePayload) -> Vec<CoreEffectF> {
+pub(crate) fn custom_message_effects(local: Did, ctx: &MessagePayload) -> Vec<CoreEffect> {
     if local != ctx.relay.destination {
-        vec![CoreEffectF::forward_payload(ctx, None)]
+        vec![CoreEffect::forward_payload(ctx, None)]
     } else {
         Vec::new()
     }
@@ -63,7 +63,7 @@ mod tests {
 
         assert_eq!(effects.len(), 1);
         match &effects[0] {
-            CoreEffectF::Payload(PayloadRelayF::ForwardPayload {
+            CoreEffect::Payload(PayloadRelayFunctor::ForwardPayload {
                 payload: forwarded,
                 next_hop,
             }) => {
