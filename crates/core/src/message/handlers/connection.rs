@@ -6,7 +6,8 @@ use crate::dht::PeerRingAction;
 use crate::dht::TopoInfo;
 use crate::error::Error;
 use crate::error::Result;
-use crate::message::effects::CoreEffect;
+use crate::message::effects::MessageSendFunctor;
+use crate::message::effects::PayloadRelayFunctor;
 use crate::message::types::ConnectNodeReport;
 use crate::message::types::ConnectNodeSend;
 use crate::message::types::FindSuccessorReport;
@@ -28,11 +29,12 @@ impl HandleMsg<QueryForTopoInfoSend> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, msg: &QueryForTopoInfoSend) -> Result<()> {
         let info: TopoInfo = TopoInfo::try_from(self.dht.as_ref())?;
         if msg.did == self.dht.did {
-            self.run_effects([CoreEffect::send_report_message(
+            self.run_effects([PayloadRelayFunctor::send_report_message(
                 ctx,
                 Message::QueryForTopoInfoReport(msg.resp(info)),
-            )])
-            .await?
+            )
+            .into()])
+                .await?
         }
         Ok(())
     }
@@ -77,18 +79,19 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
         }
 
         if self.dht.did != ctx.relay.destination {
-            self.run_effects([CoreEffect::forward_payload(ctx, None)])
+            self.run_effects([PayloadRelayFunctor::forward_payload(ctx, None).into()])
                 .await
         } else {
             let answer = self
                 .transport
                 .answer_remote_connection(ctx.relay.origin_sender(), self.inner_callback(), msg)
                 .await?;
-            self.run_effects([CoreEffect::send_report_message(
+            self.run_effects([PayloadRelayFunctor::send_report_message(
                 ctx,
                 Message::ConnectNodeReport(answer),
-            )])
-            .await
+            )
+            .into()])
+                .await
         }
     }
 }
@@ -98,7 +101,7 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
 impl HandleMsg<ConnectNodeReport> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, msg: &ConnectNodeReport) -> Result<()> {
         if self.dht.did != ctx.relay.destination {
-            self.run_effects([CoreEffect::forward_payload(ctx, None)])
+            self.run_effects([PayloadRelayFunctor::forward_payload(ctx, None).into()])
                 .await
         } else {
             self.transport
@@ -117,23 +120,24 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
                 if !msg.strict || self.dht.did == msg.did {
                     match &msg.then {
                         FindSuccessorThen::Report(handler) => {
-                            self.run_effects([CoreEffect::send_report_message(
+                            self.run_effects([PayloadRelayFunctor::send_report_message(
                                 ctx,
                                 Message::FindSuccessorReport(FindSuccessorReport {
                                     did,
                                     handler: handler.clone(),
                                 }),
-                            )])
-                            .await
+                            )
+                            .into()])
+                                .await
                         }
                     }
                 } else {
-                    self.run_effects([CoreEffect::forward_payload(ctx, Some(did))])
+                    self.run_effects([PayloadRelayFunctor::forward_payload(ctx, Some(did)).into()])
                         .await
                 }
             }
             PeerRingAction::RemoteAction(next, _) => {
-                self.run_effects([CoreEffect::reset_destination(ctx, next)])
+                self.run_effects([PayloadRelayFunctor::reset_destination(ctx, next).into()])
                     .await
             }
             act => Err(Error::PeerRingUnexpectedAction(act)),
@@ -147,7 +151,7 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, msg: &FindSuccessorReport) -> Result<()> {
         if self.dht.did != ctx.relay.destination {
             return self
-                .run_effects([CoreEffect::forward_payload(ctx, None)])
+                .run_effects([PayloadRelayFunctor::forward_payload(ctx, None).into()])
                 .await;
         }
 
@@ -158,11 +162,12 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
                         .transport
                         .prepare_connection_offer(msg.did, self.inner_callback())
                         .await?;
-                    self.run_effects([CoreEffect::send_message(
+                    self.run_effects([MessageSendFunctor::send_message(
                         Message::ConnectNodeSend(offer_msg),
                         msg.did,
-                    )])
-                    .await?;
+                    )
+                    .into()])
+                        .await?;
                 }
             }
             _ => {}

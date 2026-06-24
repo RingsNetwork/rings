@@ -7,6 +7,7 @@ use async_recursion::async_recursion;
 use async_trait::async_trait;
 
 use super::effects::lower_dht_action;
+use super::effects::ConnectionFunctor;
 use super::effects::CoreEffect;
 use super::effects::CoreEffectInterpreter;
 use super::MessagePayload;
@@ -31,7 +32,10 @@ pub mod storage;
 /// Operator and Handler for Subring
 pub mod subring;
 
-/// MessageHandler will manage resources.
+/// Shared message-handler handle.
+///
+/// Clone law: cloning duplicates `Arc` handles to the same transport, DHT
+/// state, and callback. It never forks protocol state or transfers ownership.
 #[derive(Clone)]
 pub struct MessageHandler {
     transport: Arc<SwarmTransport>,
@@ -66,7 +70,7 @@ impl MessageHandler {
         &self,
         effects: impl IntoIterator<Item = CoreEffect<'payload>>,
     ) -> Result<()> {
-        CoreEffectInterpreter::new(self.transport.clone(), self.swarm_callback.clone())
+        CoreEffectInterpreter::new(&self.transport, &self.swarm_callback)
             .run_all(effects)
             .await
     }
@@ -77,7 +81,8 @@ impl MessageHandler {
     /// as success so concurrent DHT actions racing through `MultiActions` do not
     /// fail the whole handler.
     pub(crate) async fn connect_dht_peer(&self, peer: Did) -> Result<()> {
-        self.run_effects([CoreEffect::connect_dht_peer(peer)]).await
+        self.run_effects([ConnectionFunctor::connect_dht_peer(peer).into()])
+            .await
     }
 
     pub(crate) async fn join_dht(&self, peer: Did) -> Result<()> {

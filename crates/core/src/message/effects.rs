@@ -156,41 +156,6 @@ impl<'payload> From<ConnectionFunctor> for CoreEffect<'payload> {
     }
 }
 
-impl<'payload> CoreEffect<'payload> {
-    /// Create a payload-forwarding effect.
-    pub(crate) fn forward_payload(
-        payload: &'payload MessagePayload,
-        next_hop: Option<Did>,
-    ) -> Self {
-        PayloadRelayFunctor::forward_payload(payload, next_hop).into()
-    }
-
-    /// Create a normally-routed send effect.
-    pub(crate) fn send_message(msg: Message, destination: Did) -> Self {
-        MessageSendFunctor::send_message(msg, destination).into()
-    }
-
-    /// Create a direct send effect.
-    pub(crate) fn send_direct_message(msg: Message, destination: Did) -> Self {
-        MessageSendFunctor::send_direct_message(msg, destination).into()
-    }
-
-    /// Create a report-message effect.
-    pub(crate) fn send_report_message(payload: &'payload MessagePayload, msg: Message) -> Self {
-        PayloadRelayFunctor::send_report_message(payload, msg).into()
-    }
-
-    /// Create a destination-reset effect.
-    pub(crate) fn reset_destination(payload: &'payload MessagePayload, next_hop: Did) -> Self {
-        PayloadRelayFunctor::reset_destination(payload, next_hop).into()
-    }
-
-    /// Create a DHT connection effect.
-    pub(crate) fn connect_dht_peer(peer: Did) -> Self {
-        ConnectionFunctor::connect_dht_peer(peer).into()
-    }
-}
-
 /// DHT action base functor consumed by the message layer.
 ///
 /// This is intentionally isomorphic to the leaf `PeerRingAction` cases handled
@@ -282,52 +247,64 @@ impl DhtActionFunctor {
     pub(crate) fn lower<'payload>(
         self,
         is_connected: impl Fn(Did) -> bool,
-    ) -> Vec<CoreEffect<'payload>> {
+    ) -> Option<CoreEffect<'payload>> {
         match self {
-            Self::None => Vec::new(),
+            Self::None => None,
             Self::FindSuccessorForConnect { next, did } => {
                 if next == did {
-                    Vec::new()
+                    None
                 } else {
-                    vec![CoreEffect::send_direct_message(
-                        Message::FindSuccessorSend(FindSuccessorSend {
-                            did,
-                            strict: false,
-                            then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect),
-                        }),
-                        next,
-                    )]
+                    Some(
+                        MessageSendFunctor::send_direct_message(
+                            Message::FindSuccessorSend(FindSuccessorSend {
+                                did,
+                                strict: false,
+                                then: FindSuccessorThen::Report(
+                                    FindSuccessorReportHandler::Connect,
+                                ),
+                            }),
+                            next,
+                        )
+                        .into(),
+                    )
                 }
             }
             Self::QueryForSuccessorList { successor } => {
                 if is_connected(successor) {
-                    vec![CoreEffect::send_direct_message(
-                        Message::QueryForTopoInfoSend(QueryForTopoInfoSend::new_for_sync(
+                    Some(
+                        MessageSendFunctor::send_direct_message(
+                            Message::QueryForTopoInfoSend(QueryForTopoInfoSend::new_for_sync(
+                                successor,
+                            )),
                             successor,
-                        )),
-                        successor,
-                    )]
+                        )
+                        .into(),
+                    )
                 } else {
-                    vec![CoreEffect::connect_dht_peer(successor)]
+                    Some(ConnectionFunctor::connect_dht_peer(successor).into())
                 }
             }
-            Self::TryConnect { peer } => vec![CoreEffect::connect_dht_peer(peer)],
+            Self::TryConnect { peer } => Some(ConnectionFunctor::connect_dht_peer(peer).into()),
             Self::Notify {
                 target,
                 predecessor,
             } => {
                 if target == predecessor {
-                    tracing::warn!("Notify target is equal to predecessor, may implement wrong.");
-                    Vec::new()
+                    None
                 } else if is_connected(target) {
                     // `RemoteAction(target, Notify(pred))` means "send pred to target"
                     // and maps to CorrectStabilize.notify' in the TLA+ spec mirror.
-                    vec![CoreEffect::send_message(
-                        Message::NotifyPredecessorSend(NotifyPredecessorSend { did: predecessor }),
-                        target,
-                    )]
+                    Some(
+                        MessageSendFunctor::send_message(
+                            Message::NotifyPredecessorSend(NotifyPredecessorSend {
+                                did: predecessor,
+                            }),
+                            target,
+                        )
+                        .into(),
+                    )
                 } else {
-                    vec![CoreEffect::connect_dht_peer(target)]
+                    Some(ConnectionFunctor::connect_dht_peer(target).into())
                 }
             }
         }
@@ -342,20 +319,22 @@ impl DhtActionFunctor {
 pub(crate) fn lower_dht_action<'payload>(
     act: &PeerRingAction,
     is_connected: impl Fn(Did) -> bool,
-) -> Result<Vec<CoreEffect<'payload>>> {
+) -> Result<Option<CoreEffect<'payload>>> {
     DhtActionFunctor::try_from(act).map(|functor| functor.lower(is_connected))
 }
 
 /// Interpreter from `CoreEffect` into the current transport implementation.
-#[derive(Clone)]
-pub(crate) struct CoreEffectInterpreter {
-    transport: Arc<SwarmTransport>,
-    swarm_callback: SharedSwarmCallback,
+pub(crate) struct CoreEffectInterpreter<'handler> {
+    transport: &'handler Arc<SwarmTransport>,
+    swarm_callback: &'handler SharedSwarmCallback,
 }
 
-impl CoreEffectInterpreter {
+impl<'handler> CoreEffectInterpreter<'handler> {
     /// Create an interpreter over the current swarm transport.
-    pub(crate) fn new(transport: Arc<SwarmTransport>, swarm_callback: SharedSwarmCallback) -> Self {
+    pub(crate) fn new(
+        transport: &'handler Arc<SwarmTransport>,
+        swarm_callback: &'handler SharedSwarmCallback,
+    ) -> Self {
         Self {
             transport,
             swarm_callback,
@@ -393,8 +372,10 @@ impl CoreEffectInterpreter {
                     return Ok(());
                 }
 
-                let callback =
-                    InnerSwarmCallback::new(self.transport.clone(), self.swarm_callback.clone());
+                let callback = InnerSwarmCallback::new(
+                    Arc::clone(self.transport),
+                    Arc::clone(self.swarm_callback),
+                );
                 match self.transport.connect(peer, callback).await {
                     Ok(()) | Err(Error::AlreadyConnected) => Ok(()),
                     Err(e) => Err(e),
@@ -438,14 +419,9 @@ mod tests {
     }
 
     fn single_effect<'payload>(
-        effects: Result<Vec<CoreEffect<'payload>>>,
+        effect: Result<Option<CoreEffect<'payload>>>,
     ) -> Result<CoreEffect<'payload>> {
-        let effects = effects?;
-        assert_eq!(effects.len(), 1);
-        effects
-            .into_iter()
-            .next()
-            .ok_or_else(|| Error::InvalidMessage("expected one effect".to_string()))
+        effect?.ok_or_else(|| Error::InvalidMessage("expected one effect".to_string()))
     }
 
     fn assert_dht_action_functor_section(functor: DhtActionFunctor) -> Result<()> {
@@ -504,12 +480,13 @@ mod tests {
     fn send_report_message_effect_borrows_payload_and_owns_message() -> Result<()> {
         let destination = did();
         let payload = payload(destination)?;
-        let effect = CoreEffect::send_report_message(
+        let effect: CoreEffect<'_> = PayloadRelayFunctor::send_report_message(
             &payload,
             Message::NotifyPredecessorReport(crate::message::NotifyPredecessorReport {
                 did: destination,
             }),
-        );
+        )
+        .into();
 
         match effect {
             CoreEffect::Payload(PayloadRelayFunctor::SendReportMessage {
@@ -540,7 +517,8 @@ mod tests {
         let destination = did();
         let next_hop = did();
         let payload = payload(destination)?;
-        let effect = CoreEffect::reset_destination(&payload, next_hop);
+        let effect: CoreEffect<'_> =
+            PayloadRelayFunctor::reset_destination(&payload, next_hop).into();
 
         match effect {
             CoreEffect::Payload(PayloadRelayFunctor::ResetDestination {
@@ -581,13 +559,25 @@ mod tests {
                         assert!(!msg.strict);
                         match msg.then {
                             FindSuccessorThen::Report(FindSuccessorReportHandler::Connect) => {}
-                            handler => panic!("expected connect report handler, got {handler:?}"),
+                            handler => {
+                                return Err(Error::InvalidMessage(format!(
+                                    "expected connect report handler, got {handler:?}"
+                                )))
+                            }
                         }
                     }
-                    msg => panic!("expected FindSuccessorSend, got {msg:?}"),
+                    msg => {
+                        return Err(Error::InvalidMessage(format!(
+                            "expected FindSuccessorSend, got {msg:?}"
+                        )))
+                    }
                 }
             }
-            effect => panic!("expected SendDirectMessage FindSuccessorSend, got {effect:?}"),
+            effect => {
+                return Err(Error::InvalidMessage(format!(
+                    "expected SendDirectMessage FindSuccessorSend, got {effect:?}"
+                )))
+            }
         }
         Ok(())
     }
@@ -603,7 +593,7 @@ mod tests {
             ),
             |_| true,
         )?
-        .is_empty());
+        .is_none());
         Ok(())
     }
 
@@ -620,7 +610,11 @@ mod tests {
             CoreEffect::Connection(ConnectionFunctor::ConnectDhtPeer { peer }) => {
                 assert_eq!(peer, target)
             }
-            effect => panic!("expected ConnectDhtPeer, got {effect:?}"),
+            effect => {
+                return Err(Error::InvalidMessage(format!(
+                    "expected ConnectDhtPeer, got {effect:?}"
+                )))
+            }
         }
         Ok(())
     }
@@ -642,13 +636,25 @@ mod tests {
                         assert_eq!(msg.did, target);
                         match msg.then {
                             QueryFor::SyncSuccessor => {}
-                            then => panic!("expected SyncSuccessor query, got {then:?}"),
+                            then => {
+                                return Err(Error::InvalidMessage(format!(
+                                    "expected SyncSuccessor query, got {then:?}"
+                                )))
+                            }
                         }
                     }
-                    msg => panic!("expected QueryForTopoInfoSend, got {msg:?}"),
+                    msg => {
+                        return Err(Error::InvalidMessage(format!(
+                            "expected QueryForTopoInfoSend, got {msg:?}"
+                        )))
+                    }
                 }
             }
-            effect => panic!("expected SendDirectMessage QueryForTopoInfoSend, got {effect:?}"),
+            effect => {
+                return Err(Error::InvalidMessage(format!(
+                    "expected SendDirectMessage QueryForTopoInfoSend, got {effect:?}"
+                )))
+            }
         }
         Ok(())
     }
@@ -670,9 +676,17 @@ mod tests {
                     assert_eq!(destination, target);
                     assert_eq!(msg.did, predecessor);
                 }
-                msg => panic!("expected NotifyPredecessorSend, got {msg:?}"),
+                msg => {
+                    return Err(Error::InvalidMessage(format!(
+                        "expected NotifyPredecessorSend, got {msg:?}"
+                    )))
+                }
             },
-            effect => panic!("expected SendMessage NotifyPredecessorSend, got {effect:?}"),
+            effect => {
+                return Err(Error::InvalidMessage(format!(
+                    "expected SendMessage NotifyPredecessorSend, got {effect:?}"
+                )))
+            }
         }
         Ok(())
     }
@@ -691,7 +705,11 @@ mod tests {
             CoreEffect::Connection(ConnectionFunctor::ConnectDhtPeer { peer }) => {
                 assert_eq!(peer, target)
             }
-            effect => panic!("expected ConnectDhtPeer, got {effect:?}"),
+            effect => {
+                return Err(Error::InvalidMessage(format!(
+                    "expected ConnectDhtPeer, got {effect:?}"
+                )))
+            }
         }
         Ok(())
     }
@@ -704,7 +722,7 @@ mod tests {
             &PeerRingAction::RemoteAction(target, PeerRingRemoteAction::Notify(target)),
             |_| true,
         )?
-        .is_empty());
+        .is_none());
         Ok(())
     }
 }

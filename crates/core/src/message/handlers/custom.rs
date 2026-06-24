@@ -3,7 +3,6 @@ use async_trait::async_trait;
 use crate::dht::Did;
 use crate::error::Result;
 use crate::message::effects::CoreEffect;
-#[cfg(test)]
 use crate::message::effects::PayloadRelayFunctor;
 use crate::message::types::CustomMessage;
 use crate::message::HandleMsg;
@@ -13,11 +12,11 @@ use crate::message::MessagePayload;
 pub(crate) fn custom_message_effects<'payload>(
     local: Did,
     ctx: &'payload MessagePayload,
-) -> Vec<CoreEffect<'payload>> {
+) -> Option<CoreEffect<'payload>> {
     if local != ctx.relay.destination {
-        vec![CoreEffect::forward_payload(ctx, None)]
+        Some(PayloadRelayFunctor::forward_payload(ctx, None).into())
     } else {
-        Vec::new()
+        None
     }
 }
 
@@ -54,7 +53,7 @@ mod tests {
         let local = SecretKey::random().address().into();
         let payload = custom_payload(local)?;
 
-        assert!(custom_message_effects(local, &payload).is_empty());
+        assert!(custom_message_effects(local, &payload).is_none());
         Ok(())
     }
 
@@ -63,25 +62,20 @@ mod tests {
         let local = SecretKey::random().address().into();
         let remote = SecretKey::random().address().into();
         let payload = custom_payload(remote)?;
-        let effects = custom_message_effects(local, &payload);
+        let effect = custom_message_effects(local, &payload)
+            .ok_or_else(|| Error::InvalidMessage("expected ForwardPayload effect".to_string()))?;
 
-        match effects.as_slice() {
-            [CoreEffect::Payload(PayloadRelayFunctor::ForwardPayload {
+        match effect {
+            CoreEffect::Payload(PayloadRelayFunctor::ForwardPayload {
                 payload: forwarded,
                 next_hop,
-            })] => {
-                assert!(std::ptr::eq(*forwarded, &payload));
-                assert_eq!(*next_hop, None);
+            }) => {
+                assert!(std::ptr::eq(forwarded, &payload));
+                assert_eq!(next_hop, None);
             }
-            [effect] => {
+            effect => {
                 return Err(Error::InvalidMessage(format!(
                     "expected ForwardPayload, got {effect:?}"
-                )))
-            }
-            effects => {
-                return Err(Error::InvalidMessage(format!(
-                    "expected one ForwardPayload effect, got {}",
-                    effects.len()
                 )))
             }
         }
